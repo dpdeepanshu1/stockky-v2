@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { api, getApiUrl, setApiUrl, Decision, ScanResult, wakeService } from "./api";
 import Pipeline from "./components/Pipeline";
-import DecisionCard, { HorizonStrip } from "./components/DecisionCard";
+import DecisionCard from "./components/DecisionCard";
 import ScanPanel, { MultiHorizonScanLists } from "./components/ScanPanel";
 import WatchlistManager from "./components/WatchlistManager";
 import NotificationsPanel from "./components/NotificationsPanel";
@@ -1077,19 +1077,12 @@ export default function App() {
               )}
 
               {view.mode === "stock" && (
-                <>
-                  <div className="mb-3 flex items-center gap-3">
-                    <button type="button" onClick={() => setView({ mode: "idle" })} className="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-200 text-sm border border-slate-600 hover:bg-slate-700">← Back</button>
-                    <span className="text-slate-400 text-sm">Analysis</span>
-                  </div>
-                  <HorizonStrip data={(view as any).data} />
-                  <DecisionCard
-                    data={view.data}
-                    onBack={() => setView({ mode: "idle" })}
-                    onSearchRelated={handleSearch}
-                    onAddToWatchlist={handleAddToWatchlist}
-                  />
-                </>
+                <DecisionCard
+                  data={view.data}
+                  onBack={() => setView({ mode: "idle" })}
+                  onSearchRelated={handleSearch}
+                  onAddToWatchlist={handleAddToWatchlist}
+                />
               )}
 
               {view.mode === "scan" && (

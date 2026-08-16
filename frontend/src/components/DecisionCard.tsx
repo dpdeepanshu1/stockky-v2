@@ -108,6 +108,25 @@ interface Props {
   onAddToWatchlist: (symbol: string) => void;
 }
 
+function formatWhen(iso?: string | null): string {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+    return d.toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    }) + " IST";
+  } catch {
+    return String(iso);
+  }
+}
+
 export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWatchlist }: Props) {
   const style = decisionStyle[data.decision] ?? decisionStyle["DO NOT BUY"];
   const isBullish = data.decision === "BUY NOW" || data.decision === "PREPARE TO BUY";
@@ -290,69 +309,70 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
         </p>
       )}
 
-      {/* Decision header */}
-      <div className={`rounded-2xl border ${style.border} ${style.bg} p-8`}>
-        <div className="flex items-start justify-between gap-6 flex-wrap">
-          <div>
-            <div className="mb-3 flex items-center gap-3 flex-wrap">
-              <span className="font-display text-3xl sm:text-4xl font-extrabold tracking-wide text-white drop-shadow-sm">
-                {data.symbol}
-              </span>
-              <HorizonStrip data={data} />
+      {/* Decision header — terminal layout */}
+      <div className={`dc-hero rounded-2xl border ${style.border} ${style.bg} p-5 sm:p-7`}>
+        <div className="dc-hero-top">
+          <div className="dc-hero-left">
+            <span className="font-display text-2xl sm:text-3xl font-extrabold tracking-wide text-white">
+              {data.symbol}
+            </span>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-1">
               {data.sector && (
-                <span className="font-mono text-xs text-mist/80 uppercase tracking-wider">
-                  · {data.sector}
-                </span>
+                <span className="font-mono text-[10px] text-mist/80 uppercase tracking-wider">{data.sector}</span>
               )}
               {data.valuation && (
-                <span className="font-mono text-xs text-mist/60">· {data.valuation}</span>
+                <span className="font-mono text-[10px] text-mist/55">· {data.valuation}</span>
               )}
             </div>
-            <h2 className={`font-display text-4xl sm:text-5xl leading-none ${style.color} mb-2 tracking-tight animate-fadeIn`}>
-              {data.decision}
-            </h2>
-            <p className="text-mist text-sm">{style.verb} · {data.confidence} confidence</p>
-            {data.data_quality && (
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <span
-                  className={`font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border ${
-                    data.data_quality.level === "high"
-                      ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/10"
-                      : data.data_quality.level === "low"
-                      ? "border-amber-500/40 text-amber-200 bg-amber-500/10"
-                      : "border-slate-400/40 text-mist bg-slate/20"
-                  }`}
-                >
-                  Data quality: {data.data_quality.level || "unknown"}
-                </span>
-                {data.data_quality.note && (
-                  <span className="font-mono text-[10px] text-mist/70">{data.data_quality.note}</span>
-                )}
-              </div>
-            )}
-            {data.data_quality?.flags && data.data_quality.flags.length > 0 && (
-              <ul className="mt-1 font-mono text-[10px] text-mist/60 list-disc list-inside">
-                {data.data_quality.flags.slice(0, 4).map((f, i) => (
-                  <li key={i}>{f}</li>
-                ))}
-              </ul>
-            )}
           </div>
-
-          <div className="text-right font-mono">
-            <div className="text-4xl text-paper">
+          <div className="dc-hero-right font-mono text-right">
+            <div className="text-3xl sm:text-4xl text-paper tabular-nums">
               {displayClose != null ? `₹${displayClose.toLocaleString("en-IN")}` : data.data_insufficient ? "Awaiting Data" : "N/A"}
             </div>
-            <div className="text-xs text-mist/60 mt-1 flex items-center justify-end gap-2">
+            <div className="text-[11px] text-mist/65 mt-1 flex items-center justify-end gap-2 flex-wrap">
               <span>Combined {data.combined_score}/100</span>
               {data.market_sentiment_adjustment !== undefined && data.market_sentiment_adjustment !== 0 && (
-                <span className={`text-xs font-medium ${data.market_sentiment_adjustment > 0 ? 'text-signal-buy' : 'text-signal-sell'}`}>
+                <span className={`font-medium ${data.market_sentiment_adjustment > 0 ? "text-signal-buy" : "text-signal-sell"}`}>
                   ({formatAdjustment(data.market_sentiment_adjustment)})
                 </span>
               )}
             </div>
           </div>
         </div>
+
+        <div className="dc-hero-center">
+          <h2 className={`font-display text-3xl sm:text-5xl leading-none ${style.color} tracking-tight`}>
+            {data.decision}
+          </h2>
+          <p className="text-mist text-sm mt-1.5">{style.verb} · {data.confidence} confidence</p>
+          {data.data_quality && (
+            <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
+              <span
+                className={`font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border ${
+                  data.data_quality.level === "high"
+                    ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/10"
+                    : data.data_quality.level === "low"
+                    ? "border-amber-500/40 text-amber-200 bg-amber-500/10"
+                    : "border-slate-400/40 text-mist bg-slate/20"
+                }`}
+              >
+                Data quality: {data.data_quality.level || "unknown"}
+              </span>
+              {data.data_quality.note && (
+                <span className="font-mono text-[10px] text-mist/70">{data.data_quality.note}</span>
+              )}
+            </div>
+          )}
+          {data.data_quality?.flags && data.data_quality.flags.length > 0 && (
+            <ul className="mt-1 font-mono text-[10px] text-mist/60 list-disc list-inside max-w-xl mx-auto">
+              {data.data_quality.flags.slice(0, 4).map((f, i) => (
+                <li key={i}>{f}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <HorizonStrip data={data} />
 
         {data.event_risk && (
           <div className="mt-6 rounded-lg border border-signal-hold/40 bg-signal-hold/10 px-4 py-3 text-sm text-signal-hold font-mono flex items-start gap-2">
@@ -682,6 +702,11 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
                   ) : (
                     <span>{title.length > 110 ? title.slice(0, 109) + "…" : title}</span>
                   )}
+                  {formatWhen(typeof h === "object" ? (h.published || h.published_at || h.date || h.datetime) : undefined) && (
+                    <span className="block text-[10px] text-mist/45 mt-0.5">
+                      {formatWhen(typeof h === "object" ? (h.published || h.published_at || h.date || h.datetime) : undefined)}
+                    </span>
+                  )}
                 </li>
               );
             })}
@@ -707,7 +732,9 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
                 ) : (
                   item.title
                 )}
-                {item.publisher && <span className="text-mist/50"> · {item.publisher}</span>}
+                <span className="block text-[10px] text-mist/45 mt-0.5">
+                  {[item.publisher, formatWhen((item as any).published || (item as any).published_at)].filter(Boolean).join(" · ")}
+                </span>
               </li>
             ))}
           </ul>
@@ -808,7 +835,14 @@ function EventSection({ symbol, compact }: { symbol: string; compact?: boolean }
             {events.upcoming.map((e, i) => (
               <li key={i} className="text-sm text-mist/80 flex gap-2">
                 <span className="text-slate mt-1 shrink-0">–</span>
-                <span>{e.description}</span>
+                <span>
+                  {e.description}
+                  {(e.date || (e as any).datetime) && (
+                    <span className="block font-mono text-[10px] text-mist/45 mt-0.5">
+                      {formatWhen(e.date || (e as any).datetime)}
+                    </span>
+                  )}
+                </span>
               </li>
             ))}
           </ul>
@@ -822,8 +856,14 @@ function EventSection({ symbol, compact }: { symbol: string; compact?: boolean }
             {events.recent.slice(0, 5).map((e, i) => (
               <li key={i} className="text-sm text-mist/70 flex gap-2">
                 <span className="text-slate mt-1 shrink-0">–</span>
-                <span>{e.description}</span>
-                {e.date && <span className="text-mist/30 text-xs ml-auto shrink-0">{e.date}</span>}
+                <span>
+                  {e.description}
+                  {(e.date || (e as any).datetime) && (
+                    <span className="block font-mono text-[10px] text-mist/45 mt-0.5">
+                      {formatWhen(e.date || (e as any).datetime)}
+                    </span>
+                  )}
+                </span>
               </li>
             ))}
           </ul>
@@ -1319,28 +1359,31 @@ function MetricItem({ label, value }: { label: string; value: string }) {
 }
 
 // ── HorizonStrip (v2) ──
+
 export function HorizonStrip({ data }: { data: any }) {
   const hz = data?.horizons || {};
   const order = ["short", "mid", "long"] as const;
   const fv = data?.final_verdict;
+  const hasCards = order.some((k) => hz[k]);
+  if (!fv && !hasCards) return null;
   return (
-    <div className="mt-4 space-y-3">
+    <div className="hz-strip">
       {fv && (
-        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
-          <div className="font-semibold text-amber-300">Final Verdict (Short preferred)</div>
-          <div className="text-slate-200 mt-1">{fv.summary || fv.headline}</div>
+        <div className="hz-verdict">
+          <div className="hz-verdict-title">Final verdict · short preferred</div>
+          <div className="hz-verdict-body">{fv.summary || fv.headline}</div>
         </div>
       )}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div className="hz-cards">
         {order.map((k) => {
           const h = hz[k];
           if (!h) return null;
           return (
-            <div key={k} className="rounded-xl border border-slate-700 bg-slate-900/60 p-3">
-              <div className="text-xs uppercase tracking-wide text-slate-400">{h.label || k}</div>
-              <div className="text-lg font-bold text-white mt-1">{h.decision}</div>
-              <div className="text-sm text-emerald-400">Score {h.score}</div>
-              <div className="text-xs text-slate-400 mt-1">{h.holding_period}</div>
+            <div key={k} className="hz-card">
+              <div className="hz-card-label">{h.label || k}</div>
+              <div className="hz-card-decision">{h.decision}</div>
+              <div className="hz-card-score">Score {h.score}</div>
+              <div className="hz-card-period">{h.holding_period}</div>
             </div>
           );
         })}

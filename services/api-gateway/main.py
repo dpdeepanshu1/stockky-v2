@@ -1732,6 +1732,56 @@ async def ops_refresh_static_params(limit: int = 60):
 
 
 
+
+@app.get("/market/history/{symbol}")
+async def market_history(symbol: str, period: str = "1mo"):
+    """Chart candles — market-data first, training history fallback."""
+    sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "")
+    md_period = {"1d": "1mo", "5d": "1mo", "1mo": "1mo", "1y": "1y", "5y": "5y", "3mo": "3mo", "6mo": "6mo"}.get(period, "1mo")
+    last_err = None
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        try:
+            try:
+                await client.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"})
+            except Exception:
+                pass
+            r = await client.get(f"{MARKET_DATA_URL}/history/{sym}", params={"period": md_period, "interval": "1d"})
+            if r.status_code == 200:
+                data = r.json()
+                candles = data.get("candles") or []
+                points = []
+                for c in candles:
+                    if c.get("close") is None:
+                        continue
+                    points.append({
+                        "date": c.get("date"),
+                        "open": c.get("open"),
+                        "high": c.get("high"),
+                        "low": c.get("low"),
+                        "close": c.get("close"),
+                        "volume": c.get("volume") or 0,
+                    })
+                if points:
+                    first = points[0]["close"] or 0
+                    last = points[-1]["close"] or 0
+                    chg = round((last - first) / first * 100, 2) if first else None
+                    return {"symbol": sym, "period": period, "points": points, "change_pct": chg, "source": "market-data"}
+            last_err = f"market-data HTTP {r.status_code}"
+        except Exception as e:
+            last_err = str(e)
+        # training service history
+        try:
+            r2 = await client.get(f"{TRAINING_URL}/api/stock/history/{sym}", params={"period": period if period in ("1d","5d","1mo","1y","5y") else "1mo"})
+            if r2.status_code == 200:
+                data = r2.json()
+                data["source"] = data.get("source") or "training"
+                return data
+            last_err = f"{last_err}; training HTTP {r2.status_code}"
+        except Exception as e:
+            last_err = f"{last_err}; training {e}"
+    raise HTTPException(status_code=503, detail=f"Chart unavailable for {sym}: {last_err}")
+
+
 @app.get("/ops/db-status")
 async def ops_db_status():
     """Frontend banner: is Supabase/Postgres connected on decision-prediction/training?"""
@@ -1982,9 +2032,28 @@ def get_stock_decision(symbol: str, already_owned: bool = False):
                 result["close"] = price
                 result["data_insufficient"] = False
                 if result.get("support") is None:
-                    result["support"] = round(price * 0.95, 2)
+                    result["support"] = round(price * 0.97, 2)
                 if result.get("resistance") is None:
-                    result["resistance"] = round(price * 1.05, 2)
+                    result["resistance"] = round(price * 1.03, 2)
+
+        # If still missing S/R, soft-fill from close so Price levels UI is usable
+        if result.get("close") is not None:
+            result["data_insufficient"] = False
+            c = float(result["close"])
+            if result.get("support") is None:
+                result["support"] = round(c * 0.97, 2)
+            if result.get("resistance") is None:
+                result["resistance"] = round(c * 1.03, 2)
+            # Soften technical reason when we recovered price
+            reasons = result.get("reasons") or {}
+            tech_r = reasons.get("technical") if isinstance(reasons, dict) else None
+            if isinstance(tech_r, list) and tech_r:
+                joined = " ".join(str(x) for x in tech_r).lower()
+                if "temporarily unavailable" in joined or "newly listed" in joined:
+                    reasons["technical"] = [
+                        f"Price ₹{c:,.2f} recovered via quote; full indicator set may refresh on retry."
+                    ]
+                    result["reasons"] = reasons
 
         _merge_fundamentals(result, symbol_to_use)
 

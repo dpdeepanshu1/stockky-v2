@@ -28,6 +28,7 @@ logger = logging.getLogger("decision-engine-service")
 _AI = os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com")
 _DP = os.getenv("DECISION_PREDICTION_URL", "https://decision-prediction-service.onrender.com")
 TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_AI.rstrip('/')}/technical")
+MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
 FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_AI.rstrip('/')}/fundamental")
 NEWS_URL = os.getenv("NEWS_URL", f"{_AI.rstrip('/')}/news")
 EVENT_URL = os.getenv("EVENT_URL", f"{_AI.rstrip('/')}/event")
@@ -619,6 +620,74 @@ def _apply_data_quality_gate(decision: Decision, quality: dict, already_owned: b
     return Decision.DO_NOT_BUY
 
 
+
+async def _fallback_technical_from_market_data(symbol: str) -> dict:
+    """When technical microservice is cold, build minimal technicals from market-data quote/history."""
+    out = {
+        "technical_score": 50,
+        "trend_strength": "unknown",
+        "volume_surge": False,
+        "close": None,
+        "support": None,
+        "resistance": None,
+        "reasons": ["Technical built from market-data fallback"],
+        "data_insufficient": False,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=40) as client:
+            try:
+                await client.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"})
+            except Exception:
+                pass
+            close = None
+            try:
+                qr = await client.get(f"{MARKET_DATA_URL}/quote/{symbol}")
+                if qr.status_code == 200:
+                    close = (qr.json() or {}).get("price")
+            except Exception:
+                pass
+            candles = []
+            try:
+                hr = await client.get(f"{MARKET_DATA_URL}/history/{symbol}", params={"period": "6mo", "interval": "1d"})
+                if hr.status_code == 200:
+                    candles = (hr.json() or {}).get("candles") or []
+            except Exception:
+                pass
+            closes = [c.get("close") for c in candles if c.get("close") is not None]
+            highs = [c.get("high") for c in candles if c.get("high") is not None]
+            lows = [c.get("low") for c in candles if c.get("low") is not None]
+            if close is None and closes:
+                close = closes[-1]
+            out["close"] = float(close) if close is not None else None
+            if lows:
+                out["support"] = round(float(min(lows[-20:])), 2)
+            elif close:
+                out["support"] = round(float(close) * 0.97, 2)
+            if highs:
+                out["resistance"] = round(float(max(highs[-20:])), 2)
+            elif close:
+                out["resistance"] = round(float(close) * 1.03, 2)
+            # Simple trend score from last ~20 vs prior
+            if len(closes) >= 25:
+                recent = sum(closes[-10:]) / 10
+                prior = sum(closes[-25:-15]) / 10
+                chg = (recent / prior - 1) * 100 if prior else 0
+                score = max(20, min(80, int(50 + chg * 3)))
+                out["technical_score"] = score
+                out["trend_strength"] = "strong" if chg > 3 else "weak" if chg < -3 else "neutral"
+                out["reasons"] = [f"Fallback technical from market history ({len(closes)} bars); trend {out['trend_strength']}"]
+            elif out["close"]:
+                out["reasons"] = [f"Fallback quote ₹{out['close']}; full technicals retry recommended"]
+                out["data_insufficient"] = len(closes) < 5
+            else:
+                out["data_insufficient"] = True
+                out["reasons"] = ["Market-data fallback could not obtain price"]
+    except Exception as e:
+        out["reasons"] = [f"Market-data fallback failed: {e}"]
+        out["data_insufficient"] = True
+    return out
+
+
 # ── Main route ────────────────────────────────────────────────────
 @app.get("/decide/{symbol}")
 async def decide(symbol: str, already_owned: bool = False, background_tasks: BackgroundTasks = None, force: bool = False):
@@ -647,15 +716,27 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
         data_insufficient = False
 
         if not technical or not isinstance(technical, dict):
-            technical = {
-                "technical_score": 50,
-                "trend_strength": "unknown",
-                "volume_surge": False,
-                "close": None,
-                "support": None,
-                "resistance": None,
-                "reasons": ["Technical service temporarily unavailable"],
-            }
+            technical = await _fallback_technical_from_market_data(symbol)
+            if not technical.get("close"):
+                technical = {
+                    "technical_score": 50,
+                    "trend_strength": "unknown",
+                    "volume_surge": False,
+                    "close": None,
+                    "support": None,
+                    "resistance": None,
+                    "reasons": ["Technical service temporarily unavailable — market-data fallback also empty"],
+                    "data_insufficient": True,
+                }
+        elif technical.get("close") is None:
+            fb = await _fallback_technical_from_market_data(symbol)
+            if fb.get("close") is not None:
+                technical = {**technical, **{k: fb[k] for k in ("close", "support", "resistance") if fb.get(k) is not None}}
+                if technical.get("reasons") == ["Technical service temporarily unavailable"] or not technical.get("reasons"):
+                    technical["reasons"] = fb.get("reasons") or technical.get("reasons")
+                if fb.get("technical_score") and technical.get("technical_score", 50) == 50:
+                    technical["technical_score"] = fb["technical_score"]
+                    technical["trend_strength"] = fb.get("trend_strength", technical.get("trend_strength"))
         if technical.get("close") is None:
             data_insufficient = True
 

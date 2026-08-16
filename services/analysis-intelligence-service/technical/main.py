@@ -110,34 +110,80 @@ def _fetch_quote_price(symbol: str) -> float | None:
         pass
     return None
 
-def _fetch_history(symbol: str):
-    try:
-        resp = httpx.get(
-            f"{MARKET_DATA_URL}/history/{symbol}",
-            params={"period": "1y"},
-            timeout=25,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Market data service unreachable: {e}")
-
-    candles = data.get("candles", [])
-    if len(candles) < 5:
+def _candles_to_df(candles):
+    if not candles or len(candles) < 5:
         return None
-
     df = pd.DataFrame(candles)
     df["date"] = pd.to_datetime(df["date"])
     df.set_index("date", inplace=True)
-    rename = {}
-    for col in df.columns:
-        rename[col] = col.capitalize()
+    rename = {col: col.capitalize() for col in df.columns}
     df.rename(columns=rename, inplace=True)
     for col in ["Open", "High", "Low", "Close", "Volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     df.dropna(subset=["Close"], inplace=True)
-    return df
+    return df if len(df) >= 5 else None
+
+
+def _fetch_history_yfinance(symbol: str):
+    """Direct Yahoo fallback when market-data-service is cold/rate-limited."""
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker(f"{symbol}.NS")
+        hist = ticker.history(period="1y", interval="1d", auto_adjust=True)
+        if hist is None or hist.empty:
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period="1y", interval="1d", auto_adjust=True)
+        if hist is None or hist.empty:
+            return None
+        candles = []
+        for idx, row in hist.iterrows():
+            try:
+                candles.append({
+                    "date": idx.isoformat(),
+                    "open": float(row["Open"]),
+                    "high": float(row["High"]),
+                    "low": float(row["Low"]),
+                    "close": float(row["Close"]),
+                    "volume": int(row["Volume"]) if row["Volume"] == row["Volume"] else 0,
+                })
+            except Exception:
+                continue
+        return _candles_to_df(candles)
+    except Exception as e:
+        logger.warning("yfinance history fallback failed for %s: %s", symbol, e)
+        return None
+
+
+def _fetch_history(symbol: str):
+    # 1) market-data-service (preferred, shared cache)
+    try:
+        # wake cold free-tier dyno
+        try:
+            httpx.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=8)
+        except Exception:
+            pass
+        resp = httpx.get(
+            f"{MARKET_DATA_URL}/history/{symbol}",
+            params={"period": "1y"},
+            timeout=35,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            df = _candles_to_df(data.get("candles", []))
+            if df is not None:
+                return df
+        else:
+            logger.warning("market-data history HTTP %s for %s", resp.status_code, symbol)
+    except httpx.HTTPError as e:
+        logger.warning("Market data service unreachable for %s: %s — trying yfinance", symbol, e)
+
+    # 2) direct yfinance (free-tier resilience)
+    df = _fetch_history_yfinance(symbol)
+    if df is not None:
+        logger.info("Using yfinance history for %s (%s bars)", symbol, len(df))
+        return df
+    return None
 
 # ── Indicator calculations ─────────────────────────────────────────────────────
 def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -223,8 +269,7 @@ def analyze(symbol: str):
                 "resistance": None,
                 "data_insufficient": True,
                 "reasons": [
-                    f"Insufficient price history for {sym} (newly listed stock). "
-                    f"Current price: ₹{price:.2f}. Please check back in 2-3 days."
+                    f"Limited history for {sym}; using last quote ₹{price:.2f}. Retry for full technicals."
                 ],
             }
         else:
@@ -238,8 +283,7 @@ def analyze(symbol: str):
                 "resistance": None,
                 "data_insufficient": True,
                 "reasons": [
-                    f"Insufficient price data for {sym} (newly listed stock). "
-                    "Please check back in 2-3 days."
+                    f"Price history unavailable for {sym} right now (upstream busy). Retry shortly."
                 ],
             }
         _cache_set(cache_key, result)

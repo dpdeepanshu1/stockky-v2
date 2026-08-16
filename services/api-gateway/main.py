@@ -1377,6 +1377,10 @@ class NotificationChannelUpdate(BaseModel):
     slack_webhook_url: str | None = None
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
+    callmebot_user: str | None = None
+    callmebot_phone: str | None = None
+    callmebot_apikey: str | None = None
+    callmebot_users: str | None = None
     enabled: dict | None = None
 
 # ── Routes ──────────────────────────────────────────────────────────────────
@@ -2345,10 +2349,16 @@ def get_notification_config():
 @app.post("/notifications/config")
 def set_notification_config(update: NotificationChannelUpdate):
     try:
+        payload = update.model_dump(exclude_none=True)
+        # Wake notification service (free-tier cold start)
+        try:
+            httpx.get(f"{NOTIFICATION_URL}/health", timeout=8)
+        except Exception:
+            pass
         resp = httpx.post(
             f"{NOTIFICATION_URL}/config",
-            json=update.model_dump(exclude_none=True),
-            timeout=10,
+            json=payload,
+            timeout=20,
         )
         resp.raise_for_status()
         return resp.json()

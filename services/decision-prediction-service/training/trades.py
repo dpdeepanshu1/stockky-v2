@@ -45,7 +45,14 @@ WEEKLY_TAKE_PROFIT_PCT = 5.0
 
 # ---------- Database engine and session factory ----------
 DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///./training.db')
-engine = create_engine(DATABASE_URL, echo=False)
+try:
+    from models import get_engine
+    engine = get_engine(DATABASE_URL)
+except Exception:
+    _url = DATABASE_URL
+    if _url.startswith("postgres://"):
+        _url = "postgresql://" + _url[len("postgres://"):]
+    engine = create_engine(_url, echo=False, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 
 

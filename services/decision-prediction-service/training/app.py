@@ -63,10 +63,21 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SERVICE_URL = os.environ.get('SERVICE_URL', "https://decision-prediction-service.onrender.com/training")
+SERVICE_URL = os.environ.get(
+    "SERVICE_URL",
+    os.environ.get("TRAINING_URL", f"{os.environ.get('DECISION_PREDICTION_URL', 'https://decision-prediction-service.onrender.com').rstrip('/')}/training"),
+)
 DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///./training.db')
 MODEL_STORE_PATH = os.environ.get('MODEL_STORE_PATH', './model-store')
-engine = create_engine(DATABASE_URL, echo=False)
+# Neon/Supabase-friendly engine (pool_pre_ping, ssl, postgres:// fix)
+try:
+    from models import get_engine
+    engine = get_engine(DATABASE_URL)
+except Exception:
+    _url = DATABASE_URL
+    if _url.startswith("postgres://"):
+        _url = "postgresql://" + _url[len("postgres://"):]
+    engine = create_engine(_url, echo=False, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 
 LOCK_FILE = 'training.lock'
@@ -623,7 +634,9 @@ async def api_metrics_weekly(weeks: int = 12):
 class ActionableCommitRequest(BaseModel):
     picks: List[PredictionSnapshotCreate]
     capital_per_trade: float = 10000.0
-    open_trades: bool = True
+    # Default False so "Add to Training" does not open trades.
+    # Frontend passes open_trades=true explicitly for "to Trade" actions.
+    open_trades: bool = False
 
 @app.post("/api/actionable/commit")
 async def commit_actionable_picks(req: ActionableCommitRequest, background_tasks: BackgroundTasks):

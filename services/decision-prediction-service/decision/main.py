@@ -23,14 +23,16 @@ from horizons import multi_horizon_decide
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("decision-engine-service")
 
-# ---- Service URLs ----
-TECHNICAL_URL = os.getenv("TECHNICAL_URL", "https://analysis-intelligence-service.onrender.com/technical")
-FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", "https://analysis-intelligence-service.onrender.com/fundamental")
-NEWS_URL = os.getenv("NEWS_URL", "https://analysis-intelligence-service.onrender.com/news")
-EVENT_URL = os.getenv("EVENT_URL", "https://analysis-intelligence-service.onrender.com/event")
-PREDICTION_URL = os.getenv("PREDICTION_URL", "https://decision-prediction-service.onrender.com/prediction")
+# ---- Service URLs (env-driven; aligned with config/service_urls.py) ----
+_AI = os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com")
+_DP = os.getenv("DECISION_PREDICTION_URL", "https://decision-prediction-service.onrender.com")
+TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_AI.rstrip('/')}/technical")
+FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_AI.rstrip('/')}/fundamental")
+NEWS_URL = os.getenv("NEWS_URL", f"{_AI.rstrip('/')}/news")
+EVENT_URL = os.getenv("EVENT_URL", f"{_AI.rstrip('/')}/event")
+PREDICTION_URL = os.getenv("PREDICTION_URL", f"{_DP.rstrip('/')}/prediction")
 API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "https://api-gateway-puwd.onrender.com")
-TRAINING_SERVICE_URL = os.getenv("TRAINING_SERVICE_URL", "https://decision-prediction-service.onrender.com/training")
+TRAINING_SERVICE_URL = os.getenv("TRAINING_SERVICE_URL", f"{_DP.rstrip('/')}/training")
 
 EARNINGS_RISK_DAYS = 3
 EARNINGS_BOOST_DAYS = 7

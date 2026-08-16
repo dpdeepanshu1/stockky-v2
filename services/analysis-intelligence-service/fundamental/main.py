@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("fundamental-analysis-service")
 
 # MUST point to your market-data-service
-MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
+MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
 
 # ── Sector-relative valuation (from first version) ───────────────────
 # A P/E of 35 is expensive for a bank, ordinary for FMCG, and cheap for a

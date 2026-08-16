@@ -36,7 +36,7 @@ jobs:
           if [ -n "$API_GATEWAY_URL" ]; then
             curl -s -o /dev/null -w "%{http_code}" "$API_GATEWAY_URL/health" || true
           else
-            echo "API_GATEWAY_URL secret not set – skipping wake-up"
+            echo "API_GATEWAY_URL secret not set – skipping"
           fi
           if [ -n "$MARKET_DATA_URL" ]; then
             curl -s -o /dev/null -w "%{http_code}" "$MARKET_DATA_URL/health" || true
@@ -46,25 +46,15 @@ jobs:
       - name: Retrain model
         working-directory: services/decision-prediction-service/prediction
         run: |
-          # Try normal name first, then possible renamed version
-          if [ -f train.py ]; then
-            python train.py
-          elif [ -f pred_train.py ]; then
-            python pred_train.py
-          else
-            echo "ERROR: Neither train.py nor pred_train.py found"
-            ls -la
-            exit 1
-          fi
-
+          python pred_train.py
           mkdir -p ../../../data/prediction-model
-          cp model.pkl ../../../data/prediction-model/model.pkl || cp *.pkl ../../../data/prediction-model/ || true
+          cp model.pkl ../../../data/prediction-model/model.pkl
 
       - name: Commit and push updated model
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add data/prediction-model/ || true
+          git add data/prediction-model/model.pkl || true
           if git diff --staged --quiet; then
             echo "No changes to model"
           else

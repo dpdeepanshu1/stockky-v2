@@ -523,8 +523,22 @@ def ensure_schema(engine):
                     print(f"Added column {col_name} to {table_name}")
 
 # ---------- Database setup helpers ----------
-def get_engine(database_url="sqlite:///./training.db"):
-    return create_engine(database_url, echo=False)
+def get_engine(database_url=None):
+    """Create SQLAlchemy engine. Supports SQLite and Neon/Supabase Postgres."""
+    import os
+    url = database_url or os.environ.get("DATABASE_URL", "sqlite:///./training.db")
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    kwargs = {"echo": False}
+    if url.startswith("sqlite"):
+        kwargs["connect_args"] = {"check_same_thread": False}
+    else:
+        kwargs["pool_pre_ping"] = True
+        kwargs["pool_recycle"] = 300
+        if "sslmode" not in url and ("neon.tech" in url or "supabase" in url):
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}sslmode=require"
+    return create_engine(url, **kwargs)
 
 def create_tables(engine):
     Base.metadata.create_all(engine)

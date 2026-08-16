@@ -637,13 +637,27 @@ export const api = {
   triggerEvaluation: (period: "t1" | "t5") =>
     request<{ status: string }>(`/training/api/evaluate/${period}`, { method: "POST" }, 1, 30000),
 
-  commitActionablePicks: (picks: ActionablePick[], capitalPerTrade = 10000, openTrades = true) =>
+  /** Record picks for training/T+1/T+5 tracking. Does NOT open trades by default. */
+  commitActionablePicks: (picks: ActionablePick[], capitalPerTrade = 10000, openTrades = false) =>
     request<{ results: ActionableCommitResult[] }>(
       "/training/api/actionable/commit",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ picks, capital_per_trade: capitalPerTrade, open_trades: openTrades }),
+      },
+      1,
+      60000
+    ),
+
+  /** Record picks AND open paper trades. Use for "to Trade" actions. */
+  commitActionableToTrade: (picks: ActionablePick[], capitalPerTrade = 10000) =>
+    request<{ results: ActionableCommitResult[] }>(
+      "/training/api/actionable/commit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ picks, capital_per_trade: capitalPerTrade, open_trades: true }),
       },
       1,
       60000

@@ -172,9 +172,31 @@ export default function Training() {
       try {
         const p = await api.getTrainingProgress();
         setTrainProgress(p);
+        // Detect early exit: insufficient labeled data or no DB
+        if (p?.stage === "idle" && p?.detail && (p.detail as any).reason) {
+          const reason = String((p.detail as any).reason);
+          setTraining(false);
+          if (timerIntervalRef.current) {
+            clearInterval(timerIntervalRef.current);
+            timerIntervalRef.current = null;
+          }
+          if (reason.includes("insufficient") || reason.includes("no_") || reason.includes("min_")) {
+            setToast({
+              type: "info",
+              message:
+                "Training stopped early: not enough labeled data yet. Add actionable picks from Market Scan (All Actionable for Training), wait for T+1/T+5 evaluation, then retrain.",
+            });
+            setTimeout(() => setToast(null), 8000);
+          } else {
+            setToast({ type: "info", message: `Training idle: ${reason}` });
+            setTimeout(() => setToast(null), 6000);
+          }
+        }
+        if (p?.stage === "done") {
+          // Let status poll finalize success
+        }
       } catch {
-        // Progress endpoint may not be routed through the gateway yet —
-        // fail quietly, the rest of the training UI still works without it.
+        // Progress endpoint may fail during cold start — fail quietly
       }
     };
     poll();

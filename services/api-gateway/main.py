@@ -30,19 +30,23 @@ logger = logging.getLogger("api-gateway")
 # ---- IST timezone ----
 IST = ZoneInfo("Asia/Kolkata")
 
-# ---- Live Render URLs ----
-DECISION_URL = os.getenv("DECISION_URL", "https://decision-prediction-service.onrender.com/decision")
-NOTIFICATION_URL = os.getenv("NOTIFICATION_URL", "https://notification-scheduler-service-x8vc.onrender.com/notification/notification")
-NEWS_URL = os.getenv("NEWS_URL", "https://analysis-intelligence-service.onrender.com/news")
+# ---- Service URLs (env-driven; defaults match config/service_urls.py) ----
+_DP = os.getenv("DECISION_PREDICTION_URL", "https://decision-prediction-service.onrender.com")
+_AI = os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com")
+_NS = os.getenv("NOTIFICATION_SCHEDULER_URL", "https://notification-scheduler-service-x8vc.onrender.com/notification")
+
+DECISION_URL = os.getenv("DECISION_URL", f"{_DP.rstrip('/')}/decision")
+NOTIFICATION_URL = os.getenv("NOTIFICATION_URL", _NS if _NS.rstrip('/').endswith('notification') else f"{_NS.rstrip('/')}/notification")
+NEWS_URL = os.getenv("NEWS_URL", f"{_AI.rstrip('/')}/news")
 MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
-TECHNICAL_URL = os.getenv("TECHNICAL_URL", "https://analysis-intelligence-service.onrender.com/technical")
-FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", "https://analysis-intelligence-service.onrender.com/fundamental")
-EVENT_URL = os.getenv("EVENT_URL", "https://analysis-intelligence-service.onrender.com/event")
-PREDICTION_URL = os.getenv("PREDICTION_URL", "https://decision-prediction-service.onrender.com/prediction")
+TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_AI.rstrip('/')}/technical")
+FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_AI.rstrip('/')}/fundamental")
+EVENT_URL = os.getenv("EVENT_URL", f"{_AI.rstrip('/')}/event")
+PREDICTION_URL = os.getenv("PREDICTION_URL", f"{_DP.rstrip('/')}/prediction")
 
 # ---- Market Sentiment & Training ----
-MARKET_SENTIMENT_URL = os.getenv("MARKET_SENTIMENT_URL", "https://analysis-intelligence-service.onrender.com/sentiment")
-TRAINING_URL = os.getenv("TRAINING_URL", "https://decision-prediction-service.onrender.com/training")
+MARKET_SENTIMENT_URL = os.getenv("MARKET_SENTIMENT_URL", f"{_AI.rstrip('/')}/sentiment")
+TRAINING_URL = os.getenv("TRAINING_URL", f"{_DP.rstrip('/')}/training")
 
 # Service definitions for system health
 SYSTEM_SERVICES = {
@@ -2458,8 +2462,11 @@ async def training_status():
 @app.post("/training/train")
 async def trigger_training():
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(f"{TRAINING_URL}/train")
+        # Prefer /api/train (label_source aware); fall back to /train alias
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(f"{TRAINING_URL}/api/train")
+            if resp.status_code == 404:
+                resp = await client.post(f"{TRAINING_URL}/train")
             resp.raise_for_status()
             return resp.json()
     except Exception as e:
@@ -2477,11 +2484,14 @@ async def get_training_score(symbol: str):
 
 @app.api_route("/training/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def training_other_proxy(path: str, request: Request):
+    """Proxy all remaining /training/* calls. Longer timeout for commit/train/evaluate."""
+    heavy = any(x in path for x in ("actionable/commit", "train", "evaluate", "mark-to-market", "walk"))
+    timeout = 120.0 if heavy else 30.0
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             target_url = f"{TRAINING_URL}/{path}"
             body = await request.body()
-            headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "connection")}
+            headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "connection", "content-length")}
             response = await client.request(
                 method=request.method,
                 url=target_url,
@@ -2489,10 +2499,16 @@ async def training_other_proxy(path: str, request: Request):
                 content=body,
                 params=request.query_params,
             )
+            # Strip hop-by-hop headers that break CORS/proxy
+            out_headers = {
+                k: v for k, v in response.headers.items()
+                if k.lower() not in ("transfer-encoding", "content-encoding", "content-length", "connection")
+            }
             return Response(
                 content=response.content,
                 status_code=response.status_code,
-                headers=dict(response.headers),
+                headers=out_headers,
+                media_type=response.headers.get("content-type"),
             )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Training service unreachable: {str(e)}")

@@ -90,8 +90,14 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   // Local loading states for animations
   const [isSendingTelegram, setIsSendingTelegram] = useState<"top5" | "all" | null>(null);
   const [addingWatchlist, setAddingWatchlist] = useState<string | null>(null);
-  const [committingTraining, setCommittingTraining] = useState(false);
+  const [committing, setCommitting] = useState<"training" | "trade_top5" | "trade_all" | null>(null);
   const [commitMessage, setCommitMessage] = useState<string | null>(null);
+  const [balanceLow, setBalanceLow] = useState<{ needed: number; available: number } | null>(null);
+
+  const top5Actionable = useMemo(
+    () => valueAdjustedTopPicks.map((x) => x.decision),
+    [valueAdjustedTopPicks]
+  );
 
   const handleSendTopPicks = async () => {
     setIsSendingTelegram("top5");
@@ -120,28 +126,94 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
     }
   };
 
+  /** Training only — records for T+1/T+5 tracking, does NOT open trades. */
   const handleAddActionableToTraining = async () => {
     if (allActionable.length === 0) {
       setCommitMessage("No BUY NOW / PREPARE TO BUY picks in this scan.");
       setTimeout(() => setCommitMessage(null), 4000);
       return;
     }
-    setCommittingTraining(true);
+    setCommitting("training");
     setCommitMessage(null);
     try {
-      const { results } = await api.commitActionablePicks(allActionable.map(toActionablePick));
+      const { results } = await api.commitActionablePicks(
+        allActionable.map(toActionablePick),
+        10000,
+        false
+      );
       const stored = results.filter((r) => r.record_status === "stored").length;
       const already = results.filter((r) => r.record_status === "already_recorded").length;
-      const tradesOpened = results.filter((r) => r.trade_status === "opened").length;
       setCommitMessage(
-        `${stored} new, ${already} already recorded · ${tradesOpened} trades opened`
+        `🎓 Training: ${stored} new, ${already} already recorded (no trades opened)`
       );
     } catch (err) {
       console.error(err);
       setCommitMessage(`Failed: ${(err as Error).message || "unknown error"}`);
     } finally {
-      setCommittingTraining(false);
+      setCommitting(null);
       setTimeout(() => setCommitMessage(null), 6000);
+    }
+  };
+
+  const summarizeTradeResults = (results: { record_status: string; trade_status: string | null }[]) => {
+    const stored = results.filter((r) => r.record_status === "stored").length;
+    const already = results.filter((r) => r.record_status === "already_recorded").length;
+    const opened = results.filter((r) => r.trade_status === "opened").length;
+    const failed = results.filter((r) => r.trade_status && r.trade_status.startsWith("failed"));
+    let msg = `📈 ${opened} trades opened · ${stored} new records · ${already} already recorded`;
+    if (failed.length > 0) {
+      const balanceFails = failed.filter((r) => (r.trade_status || "").toLowerCase().includes("balance") || (r.trade_status || "").toLowerCase().includes("not enough"));
+      if (balanceFails.length > 0) {
+        msg += ` · ${balanceFails.length} skipped (low balance)`;
+        setBalanceLow({ needed: 10000 * balanceFails.length, available: 0 });
+      } else {
+        msg += ` · ${failed.length} failed`;
+      }
+    }
+    return msg;
+  };
+
+  /** Top 5 value-adjusted actionable → open paper trades + record for T+1/T+5 */
+  const handleTop5ToTrade = async () => {
+    if (top5Actionable.length === 0) {
+      setCommitMessage("No top picks eligible for trade.");
+      setTimeout(() => setCommitMessage(null), 4000);
+      return;
+    }
+    setCommitting("trade_top5");
+    setCommitMessage(null);
+    setBalanceLow(null);
+    try {
+      const { results } = await api.commitActionableToTrade(top5Actionable.map(toActionablePick));
+      setCommitMessage(summarizeTradeResults(results));
+    } catch (err) {
+      console.error(err);
+      setCommitMessage(`Failed: ${(err as Error).message || "unknown error"}`);
+    } finally {
+      setCommitting(null);
+      setTimeout(() => setCommitMessage(null), 8000);
+    }
+  };
+
+  /** All actionable → open paper trades + record for T+1/T+5 */
+  const handleAllActionableToTrade = async () => {
+    if (allActionable.length === 0) {
+      setCommitMessage("No BUY NOW / PREPARE TO BUY picks in this scan.");
+      setTimeout(() => setCommitMessage(null), 4000);
+      return;
+    }
+    setCommitting("trade_all");
+    setCommitMessage(null);
+    setBalanceLow(null);
+    try {
+      const { results } = await api.commitActionableToTrade(allActionable.map(toActionablePick));
+      setCommitMessage(summarizeTradeResults(results));
+    } catch (err) {
+      console.error(err);
+      setCommitMessage(`Failed: ${(err as Error).message || "unknown error"}`);
+    } finally {
+      setCommitting(null);
+      setTimeout(() => setCommitMessage(null), 8000);
     }
   };
 
@@ -195,17 +267,45 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
           )}
         </button>
         <button
+          onClick={handleTop5ToTrade}
+          disabled={!!committing || top5Actionable.length === 0}
+          className="font-mono text-xs bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 rounded-lg px-4 py-2 transition hover:bg-emerald-500/30 disabled:opacity-50 flex items-center gap-2"
+        >
+          {committing === "trade_top5" ? (
+            <>
+              <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-emerald-400 animate-spin"></span>
+              Opening trades...
+            </>
+          ) : (
+            `📈 Top 5 to Trade (${top5Actionable.length})`
+          )}
+        </button>
+        <button
+          onClick={handleAllActionableToTrade}
+          disabled={!!committing || allActionable.length === 0}
+          className="font-mono text-xs bg-emerald-600/20 border border-emerald-600/40 text-emerald-200 rounded-lg px-4 py-2 transition hover:bg-emerald-600/30 disabled:opacity-50 flex items-center gap-2"
+        >
+          {committing === "trade_all" ? (
+            <>
+              <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-emerald-400 animate-spin"></span>
+              Opening trades...
+            </>
+          ) : (
+            `📈 All Actionable to Trade (${allActionable.length})`
+          )}
+        </button>
+        <button
           onClick={handleAddActionableToTraining}
-          disabled={committingTraining}
+          disabled={!!committing || allActionable.length === 0}
           className="font-mono text-xs bg-mint/20 border border-mint/40 rounded-lg px-4 py-2 transition hover:bg-mint/30 disabled:opacity-50 flex items-center gap-2"
         >
-          {committingTraining ? (
+          {committing === "training" ? (
             <>
               <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-mint animate-spin"></span>
               Adding...
             </>
           ) : (
-            `🎓 Add All Actionable to Training (${allActionable.length})`
+            `🎓 All Actionable for Training (${allActionable.length})`
           )}
         </button>
         <button
@@ -227,6 +327,22 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
       </div>
       {commitMessage && (
         <div className="font-mono text-xs text-mist/70 -mt-3">{commitMessage}</div>
+      )}
+      {balanceLow && (
+        <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-4 flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="flex-1">
+            <div className="font-display text-sm text-amber-300">Balance Low</div>
+            <p className="font-mono text-xs text-mist/80 mt-1">
+              Some trades could not be opened due to insufficient cash. Deposit more funds on the Trade page to continue.
+            </p>
+          </div>
+          <button
+            onClick={() => setBalanceLow(null)}
+            className="font-mono text-xs px-3 py-1.5 rounded-lg border border-amber-500/40 text-amber-200 hover:bg-amber-500/20"
+          >
+            Dismiss
+          </button>
+        </div>
       )}
 
       {/* Verdict banner */}

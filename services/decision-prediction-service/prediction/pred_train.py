@@ -46,16 +46,13 @@ from sklearn.calibration import CalibratedClassifierCV
 import joblib
 
 # --- New imports for enhancements ---
-from targets import TargetGenerator
-from walk_forward import WalkForwardSplitter
-from preprocessing import TimeAwareScaler
-from metrics import compute_all_metrics
-from trading import TradingSimulator
-# -----------------------------------
-
+from pred_targets import TargetGenerator
+from pred_walk_forward import WalkForwardSplitter
+from pred_preprocessing import TimeAwareScaler
+from pred_metrics import compute_all_metrics
+from pred_trading import TradingSimulator
 from pred_features import compute_feature_frame, FEATURE_COLUMNS
 
-# ----------------------------------------------------------------------
 # Logging setup
 # ----------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)

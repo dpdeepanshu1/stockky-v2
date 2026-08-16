@@ -125,7 +125,7 @@ DECIDE_CACHE_TTL_OPEN = int(os.getenv("DECIDE_CACHE_TTL_OPEN", "300"))   # 5 min
 DECIDE_CACHE_TTL_CLOSED = int(os.getenv("DECIDE_CACHE_TTL_CLOSED", "21600"))  # 6 h closed
 SCAN_LITE_DEFAULT = os.getenv("SCAN_LITE_DEFAULT", "false").lower() in ("1", "true", "yes")
 WAKE_BEFORE_SCAN = os.getenv("WAKE_BEFORE_SCAN", "true").lower() in ("1", "true", "yes")
-WAKE_WAIT_SECONDS = float(os.getenv("WAKE_WAIT_SECONDS", "8"))
+WAKE_WAIT_SECONDS = float(os.getenv("WAKE_WAIT_SECONDS", "12"))
 
 # ── Symbol Aliases ──────────────────────────────────────────────────────────
 SYMBOL_ALIASES: Dict[str, Union[str, List[str]]] = {
@@ -918,17 +918,32 @@ def _prioritize_universe(universe: List[str]) -> List[str]:
     return priority + rest
 
 async def _wake_required_services(client: httpx.AsyncClient = None) -> dict:
-    """Ping /health on all SYSTEM_SERVICES so Render free-tier cold starts finish before scan work."""
+    """Wake free-tier services before scan. Market-data gets a warm yfinance touch + double ping."""
     own_client = client is None
     if own_client:
-        client = httpx.AsyncClient(timeout=8)
+        client = httpx.AsyncClient(timeout=20)
     results = {}
     try:
         async def ping(name: str, url: str):
             if not url:
                 return name, {"ok": False, "error": "no url"}
+            base = url.rstrip("/")
             try:
-                r = await client.get(f"{url.rstrip('/')}/health")
+                # market-data: prefer /wake (warms Yahoo) then /health?warm=1
+                if name == "market-data":
+                    try:
+                        r = await client.get(f"{base}/wake", timeout=25)
+                        if r.status_code == 200:
+                            return name, {"ok": True, "status": r.status_code, "warmed": True}
+                    except Exception:
+                        pass
+                    r = await client.get(f"{base}/health", params={"warm": "true"}, timeout=25)
+                    # second ping after short pause so dyno is fully up
+                    await asyncio.sleep(1.5)
+                    r2 = await client.get(f"{base}/health", timeout=10)
+                    ok = r.status_code == 200 or r2.status_code == 200
+                    return name, {"ok": ok, "status": r2.status_code if r2 else r.status_code, "warmed": True}
+                r = await client.get(f"{base}/health", timeout=12)
                 return name, {"ok": r.status_code == 200, "status": r.status_code}
             except Exception as e:
                 return name, {"ok": False, "error": str(e)[:120]}
@@ -1120,7 +1135,11 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
             try:
                 wake_results = await _wake_required_services(client)
                 logger.info("Pre-scan wake: %s", {k: v.get("ok") for k, v in wake_results.items()})
-                await asyncio.sleep(min(WAKE_WAIT_SECONDS, 15.0))
+                # Extra wait when market-data was cold so first history calls succeed
+                wait = max(WAKE_WAIT_SECONDS, 10.0)
+                if not (wake_results.get("market-data") or {}).get("ok"):
+                    wait = max(wait, 18.0)
+                await asyncio.sleep(min(wait, 25.0))
             except Exception as e:
                 logger.warning("Pre-scan wake failed (continuing): %s", e)
 

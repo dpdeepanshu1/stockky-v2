@@ -77,9 +77,9 @@ def _compute_growth(current, previous):
 # Caps concurrent Yahoo calls across quote + history + fundamentals so a
 # parallel market scan does not stampede Yahoo and get empty responses.
 import threading
-_YFINANCE_MAX_CONCURRENT = int(os.getenv("YFINANCE_MAX_CONCURRENT", "6"))
+_YFINANCE_MAX_CONCURRENT = int(os.getenv("YFINANCE_MAX_CONCURRENT", "4"))
 _yf_semaphore = threading.Semaphore(_YFINANCE_MAX_CONCURRENT)
-_YF_MIN_INTERVAL = float(os.getenv("YFINANCE_MIN_INTERVAL_SEC", "0.08"))
+_YF_MIN_INTERVAL = float(os.getenv("YFINANCE_MIN_INTERVAL_SEC", "0.12"))
 _yf_last_call = 0.0
 _yf_lock = threading.Lock()
 
@@ -95,17 +95,21 @@ def _yf_rate_limited(func):
             _yf_last_call = time.time()
         return func()
 
-def _with_retry(func, max_retries=2, base_delay=0.5):
-    """Retry with exponential backoff – reduced retries for speed."""
+def _with_retry(func, max_retries=3, base_delay=0.8):
+    """Retry with exponential backoff (Yahoo rate limits / free-tier)."""
+    last_err = None
     for attempt in range(max_retries):
         try:
             return _yf_rate_limited(func)
         except Exception as e:
+            last_err = e
             if attempt == max_retries - 1:
                 raise
-            wait = random.uniform(0, base_delay * (2 ** attempt))
-            logging.warning(f"Retry {attempt+1}/{max_retries} after {wait:.1f}s: {e}")
+            wait = base_delay * (2 ** attempt) + random.uniform(0, 0.4)
+            logging.warning("Retry %s/%s after %.1fs: %s", attempt + 1, max_retries, wait, e)
             time.sleep(wait)
+    if last_err:
+        raise last_err
 
 def is_market_open() -> bool:
     """Return True if current time is within NSE trading hours (Mon-Fri, 09:15-15:30 IST)."""
@@ -218,9 +222,23 @@ async def root():
     }
 
 @app.get("/health")
-def health():
-    # Lightweight – returns instantly
+def health(warm: bool = Query(False, description="If true, touch yfinance once to reduce cold latency")):
+    # Lightweight – returns quickly; optional warm for free-tier wake
+    if warm:
+        try:
+            def _touch():
+                t = yf.Ticker("^NSEI")
+                t.history(period="5d", interval="1d")
+            _with_retry(_touch, max_retries=2, base_delay=0.5)
+            return {"status": "ok", "service": "market-data-service", "cache": bool(cache), "warmed": True}
+        except Exception as e:
+            return {"status": "ok", "service": "market-data-service", "cache": bool(cache), "warmed": False, "warm_error": str(e)[:120]}
     return {"status": "ok", "service": "market-data-service", "cache": bool(cache)}
+
+@app.get("/wake")
+def wake():
+    """Explicit cold-start wake used by api-gateway before scans."""
+    return health(warm=True)
 
 # ── NSE India Official API (Primary) ─────────────────────────────────────────
 _nse_headers = {
@@ -441,40 +459,51 @@ def get_history(
 
     try:
         ticker = yf.Ticker(sym)
-        ticker._tz = "Asia/Kolkata"
+        try:
+            ticker._tz = "Asia/Kolkata"
+        except Exception:
+            pass
+        # More retries for scan stampedes / Yahoo throttling
         df = _with_retry(
             lambda: ticker.history(period=period, interval=interval, auto_adjust=True),
-            max_retries=2,
-            base_delay=0.5,
+            max_retries=4,
+            base_delay=1.0,
         )
-        if df.empty:
+        if df is None or df.empty:
             raise HTTPException(status_code=404, detail=f"No history found for {sym}")
 
         candles = []
         for idx, row in df.iterrows():
             if _safe(row["Close"]) is None:
                 continue
+            try:
+                vol = int(row["Volume"]) if math.isfinite(float(row["Volume"])) else 0
+            except Exception:
+                vol = 0
             candles.append({
                 "date": idx.strftime("%Y-%m-%d %H:%M"),
                 "open": _safe(row["Open"]),
                 "high": _safe(row["High"]),
                 "low": _safe(row["Low"]),
                 "close": _safe(row["Close"]),
-                "volume": int(row["Volume"]) if math.isfinite(float(row["Volume"])) else 0,
+                "volume": vol,
             })
 
         if not candles:
             raise HTTPException(status_code=404, detail=f"No valid candles for {sym}")
 
         result = {"symbol": sym, "period": period, "interval": interval, "candles": candles}
-        _cache_set(cache_key, result, ttl=900)  # history can be cached a bit longer (15 min)
+        # Longer cache when market closed (history doesn't change)
+        hist_ttl = 900 if is_market_open() else 21600
+        _cache_set(cache_key, result, ttl=hist_ttl)
         return result
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Failed to fetch history for %s", sym)
-        raise HTTPException(status_code=502, detail=f"Could not fetch history for {sym}: {e}")
+        logger.warning("Failed to fetch history for %s: %s", sym, e)
+        # 503 = transient overload / Yahoo; clients should retry
+        raise HTTPException(status_code=503, detail=f"Temporary history unavailable for {sym}: {e}")
 
 @app.get("/fundamentals/{symbol}")
 def get_fundamentals_raw(symbol: str):

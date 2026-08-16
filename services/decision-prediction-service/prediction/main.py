@@ -97,16 +97,47 @@ def health():
 
 
 def _fetch_history(symbol: str) -> pd.DataFrame:
-    try:
-        # 45s, not 15s: market-data-service now retries against Yahoo's
-        # rate limiter with real patience — a short timeout here would cut
-        # that off before it has a chance to help, which matters most for
-        # a symbol being fetched for the very first time (nothing cached).
-        resp = httpx.get(f"{MARKET_DATA_URL}/history/{symbol}", params={"period": "1y"}, timeout=45)
-        resp.raise_for_status()
-        data = resp.json()
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Market data unreachable: {e}")
+    """Fetch OHLCV from market-data with retries for free-tier 502/503 cold starts."""
+    import time as _time
+    url = f"{MARKET_DATA_URL}/history/{symbol}"
+    last_err = None
+    data = None
+    for attempt in range(4):
+        try:
+            if attempt == 0:
+                # Best-effort wake (ignore failures)
+                try:
+                    httpx.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=8)
+                except Exception:
+                    pass
+            resp = httpx.get(url, params={"period": "1y"}, timeout=60)
+            if resp.status_code in (502, 503, 504):
+                last_err = httpx.HTTPStatusError(
+                    f"HTTP {resp.status_code}", request=resp.request, response=resp
+                )
+                wait = 1.5 * (2 ** attempt)
+                logger.warning(
+                    "market-data %s for %s (attempt %s/4), retry in %.1fs",
+                    resp.status_code, symbol, attempt + 1, wait,
+                )
+                _time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except httpx.HTTPError as e:
+            last_err = e
+            wait = 1.5 * (2 ** attempt)
+            logger.warning(
+                "market-data error for %s (attempt %s/4): %s — retry in %.1fs",
+                symbol, attempt + 1, str(e)[:120], wait,
+            )
+            _time.sleep(wait)
+    if data is None:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Market data unreachable after retries: {last_err}",
+        )
 
     candles = data.get("candles", [])
     if len(candles) < 210:

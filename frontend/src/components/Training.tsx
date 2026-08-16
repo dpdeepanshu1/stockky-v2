@@ -131,14 +131,30 @@ export default function Training() {
     const setRunning = period === "t1" ? setRunningT1 : setRunningT5;
     setRunning(true);
     try {
-      await api.triggerEvaluation(period);
-      showToast("info", `${period.toUpperCase()} evaluation sweep started.`);
+      const res = await api.triggerEvaluation(period);
+      const label = period === "t1" ? "T+1" : "T+5";
+      showToast(
+        "info",
+        `${label} evaluation started in the background. If most symbols show "not enough data", wait 1–5 trading days after recording picks — yfinance needs future price bars.`
+      );
       setTimeout(() => {
         fetchPredictionHistory();
         fetchPeriodRollup(periodView);
-      }, 5000);
-    } catch {
-      showToast("error", `Failed to trigger ${period.toUpperCase()} evaluation.`);
+        fetchStatus();
+      }, 4000);
+      // Second refresh after sweep has had time to run
+      setTimeout(() => {
+        fetchPredictionHistory();
+        fetchPeriodRollup(periodView);
+        showToast("info", `${label} sweep finished requesting. Check history below — empty outcomes usually mean prices not available yet for the horizon.`);
+      }, 20000);
+    } catch (err: any) {
+      const msg = err?.message || String(err || "");
+      if (msg.includes("502") || msg.includes("unreachable") || msg.includes("timeout")) {
+        showToast("error", `Could not reach training service for ${period.toUpperCase()} (cold start / timeout). Wait ~30s and try again.`);
+      } else {
+        showToast("error", `Failed to trigger ${period.toUpperCase()} evaluation: ${msg.slice(0, 180)}`);
+      }
     } finally {
       setRunning(false);
     }
@@ -241,12 +257,14 @@ export default function Training() {
     }
     if (success) {
       showToast("success", "✅ Training completed successfully! Model is deployed.");
-      fetchStatus(); // refresh to get latest metrics
-    } else {
-      // Only show error if we were actually training and it failed
-      if (training) {
-        showToast("error", "❌ Training stopped or interrupted.");
-      }
+      fetchStatus();
+    } else if (training) {
+      // Often ends quickly due to insufficient labeled T+1 outcomes
+      showToast(
+        "info",
+        "Training finished without a new model. Usually means not enough labeled outcomes yet — record picks (All Actionable for Training), wait for T+1/T+5, then retrain."
+      );
+      fetchStatus();
     }
   };
 
@@ -271,11 +289,14 @@ export default function Training() {
         showToast("error", `⚠️ Training failed: ${response.status}`);
       }
     } catch (err: any) {
-      if (err?.status === 409 || err?.message?.includes("409")) {
+      const msg = err?.message || String(err || "");
+      if (err?.status === 409 || msg.includes("409") || msg.toLowerCase().includes("already")) {
         showToast("info", "⏳ Training already in progress. Resuming monitoring...");
         startTraining();
+      } else if (msg.includes("502") || msg.includes("timeout") || msg.includes("unreachable")) {
+        showToast("error", "❌ Training service unreachable (cold start). Wait 20–40s and try again.");
       } else {
-        showToast("error", "❌ Failed to trigger training. Please try again.");
+        showToast("error", `❌ Failed to trigger training: ${msg.slice(0, 160)}`);
       }
     }
   };

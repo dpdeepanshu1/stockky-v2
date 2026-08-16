@@ -482,6 +482,25 @@ def list_trade_backups():
     return {"backups": files}
 
 
+def get_trade_backup(filename: str):
+    """Load one backup JSON file by basename (no path traversal)."""
+    import json
+    import os
+    safe = os.path.basename(filename or "")
+    if not safe or not safe.endswith(".json") or ".." in safe:
+        return None, "Invalid backup name"
+    path = os.path.join(BACKUP_DIR, safe)
+    if not os.path.isfile(path):
+        return None, "Backup not found"
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return data, None
+    except Exception as e:
+        return None, str(e)
+
+
+
 def add_quantity_to_trade(db_session, trade_id: str, quantity: float, price=None):
     """Add more shares to an open paper trade (Groww-style average-up)."""
     try:

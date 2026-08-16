@@ -924,7 +924,19 @@ def api_list_trade_backups():
         from trades import list_trade_backups
         return list_trade_backups()
     except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        return JSONResponse(content={"ok": False, "error": str(e)}, status_code=500)
+
+@app.get("/api/trades/backups/{filename}")
+def api_get_trade_backup(filename: str):
+    """Return parsed backup JSON for the modal viewer."""
+    try:
+        from trades import get_trade_backup
+        data, err = get_trade_backup(filename)
+        if err:
+            return JSONResponse(content={"ok": False, "error": err}, status_code=404 if "not found" in err.lower() else 400)
+        return JSONResponse(content={"ok": True, "filename": filename, "backup": data})
+    except Exception as e:
+        return JSONResponse(content={"ok": False, "error": str(e)}, status_code=500)
 
 @app.post("/api/trades/{trade_id}/add")
 async def api_add_to_trade(trade_id: str, request: Request):

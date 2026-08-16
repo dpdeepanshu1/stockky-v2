@@ -723,7 +723,15 @@ export const api = {
     request<any>("/training/api/trades/clear-backup", { method: "POST" }, 1, 30000),
 
   listTradeBackups: () =>
-    request<any>("/training/api/trades/backups", undefined, 1, 15000),
+    request<{ backups: string[] }>("/training/api/trades/backups", undefined, 1, 15000),
+
+  getTradeBackup: (filename: string) =>
+    request<{ ok: boolean; filename?: string; backup?: any; error?: string }>(
+      `/training/api/trades/backups/${encodeURIComponent(filename)}`,
+      undefined,
+      1,
+      30000
+    ),
 
   addToTrade: (tradeId: string, qty: number, price?: number) =>
     request<any>(`/training/api/trades/${tradeId}/add`, {

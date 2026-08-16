@@ -285,14 +285,20 @@ def predict(symbol: str):
             "note": llm_note,
         }
     except Exception as e:
-        # Log the error, but always return a 200 with a fallback note
-        logger.error(f"Prediction failed for {symbol}: {e}", exc_info=True)
+        # Always 200 with neutral fallback so a single cold-start 502 does not break the scan.
+        msg = str(e)
+        if "502" in msg or "unreachable" in msg.lower() or "timeout" in msg.lower():
+            logger.warning("Prediction skipped for %s (market-data cold/unavailable): %s", symbol, msg[:160])
+        elif "422" in msg or "need at least" in msg.lower():
+            logger.info("Prediction skipped for %s (insufficient history): %s", symbol, msg[:120])
+        else:
+            logger.error("Prediction failed for %s: %s", symbol, msg, exc_info=True)
         return {
             "symbol": symbol.upper(),
-            "model_loaded": True,
+            "model_loaded": _model is not None,
             "probability": None,
-            "prediction_score": None,
-            "note": "AI prediction temporarily unavailable due to data or model issue. Please try again later.",
+            "prediction_score": 50,
+            "note": "AI prediction temporarily unavailable (data service busy or insufficient history). Neutral score used.",
         }
 
 

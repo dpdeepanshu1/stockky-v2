@@ -43,6 +43,8 @@ export default function Trades() {
   const [clearing, setClearing] = useState(false);
   const [backups, setBackups] = useState<string[]>([]);
   const [showBackups, setShowBackups] = useState(false);
+  const [backupDetail, setBackupDetail] = useState<{ filename: string; data: any } | null>(null);
+  const [loadingBackup, setLoadingBackup] = useState(false);
 
   const showToast = (type: Toast["type"], message: string) => {
     setToast({ type, message });
@@ -67,11 +69,28 @@ export default function Trades() {
 
   const loadBackups = async () => {
     try {
-      const list = await (api as any).listTradeBackups?.();
+      const list = await api.listTradeBackups();
       setBackups(list?.backups || []);
       setShowBackups(true);
     } catch (err) {
-      showToast("error", "Could not load backups");
+      showToast("error", `Could not load backups: ${(err as Error).message || "unknown"}`);
+    }
+  };
+
+  const openBackupDetail = async (filename: string) => {
+    setLoadingBackup(true);
+    setBackupDetail(null);
+    try {
+      const res = await api.getTradeBackup(filename);
+      if (!res.ok || !res.backup) {
+        showToast("error", res.error || "Could not open backup");
+        return;
+      }
+      setBackupDetail({ filename, data: res.backup });
+    } catch (err) {
+      showToast("error", `Backup open failed: ${(err as Error).message || "unknown"}`);
+    } finally {
+      setLoadingBackup(false);
     }
   };
 
@@ -250,12 +269,82 @@ export default function Trades() {
           {backups.length === 0 ? (
             <p className="text-sm text-mist/60">No backups yet.</p>
           ) : (
-            <ul className="space-y-1 max-h-40 overflow-auto">
+            <ul className="space-y-1 max-h-48 overflow-auto">
               {backups.map((b) => (
-                <li key={b} className="font-mono text-xs text-slate-300 border-b border-slate/30 py-1">{b}</li>
+                <li key={b} className="border-b border-slate/30 py-1.5">
+                  <button
+                    type="button"
+                    onClick={() => openBackupDetail(b)}
+                    className="font-mono text-xs text-sky-400 hover:text-sky-300 underline underline-offset-2 text-left"
+                  >
+                    {b}
+                  </button>
+                </li>
               ))}
             </ul>
           )}
+          {loadingBackup && (
+            <p className="text-xs text-mist/60 mt-2 font-mono">Loading backup…</p>
+          )}
+        </div>
+      )}
+
+      {backupDetail && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/80 backdrop-blur-sm p-4">
+          <div className="bg-graphite border border-slate/60 rounded-2xl p-5 w-full max-w-lg max-h-[80vh] flex flex-col shadow-xl">
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div>
+                <h3 className="font-mono text-xs text-mist uppercase tracking-widest">Backup detail</h3>
+                <p className="font-mono text-sm text-paper mt-1 break-all">{backupDetail.filename}</p>
+              </div>
+              <button
+                onClick={() => setBackupDetail(null)}
+                className="text-xs font-mono text-mist hover:text-paper border border-slate/40 rounded-lg px-2 py-1"
+              >
+                Close
+              </button>
+            </div>
+            <div className="text-xs font-mono text-mist/80 space-y-2 mb-3">
+              {backupDetail.data?.created_at && (
+                <p>Created: <span className="text-paper">{String(backupDetail.data.created_at)}</span></p>
+              )}
+              {backupDetail.data?.note && (
+                <p>Note: <span className="text-paper">{String(backupDetail.data.note)}</span></p>
+              )}
+              <p>
+                Trades in backup:{" "}
+                <span className="text-paper">
+                  {Array.isArray(backupDetail.data?.trades) ? backupDetail.data.trades.length : 0}
+                </span>
+              </p>
+            </div>
+            <div className="flex-1 overflow-auto rounded-lg bg-ink/50 border border-slate/40 p-3">
+              {Array.isArray(backupDetail.data?.trades) && backupDetail.data.trades.length > 0 ? (
+                <ul className="space-y-2">
+                  {backupDetail.data.trades.map((t: any, i: number) => (
+                    <li key={t.trade_id || i} className="font-mono text-[11px] border-b border-slate/30 pb-2 text-slate-300">
+                      <span className="text-white font-bold">{t.symbol || "—"}</span>
+                      {" · "}
+                      {t.status || "—"}
+                      {" · qty "}
+                      {t.quantity ?? "—"}
+                      {" @ ₹"}
+                      {t.entry_price ?? "—"}
+                      {t.pnl_pct != null && (
+                        <span className={Number(t.pnl_pct) >= 0 ? " text-emerald-400" : " text-red-400"}>
+                          {" · PnL "}{Number(t.pnl_pct)}%
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <pre className="font-mono text-[10px] text-mist/80 whitespace-pre-wrap break-all">
+                  {JSON.stringify(backupDetail.data, null, 2)}
+                </pre>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

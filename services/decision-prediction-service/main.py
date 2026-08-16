@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 
-# Add all subfolders to path
+sys.path.insert(0, BASE)
 sys.path.insert(0, os.path.join(BASE, "decision"))
 sys.path.insert(0, os.path.join(BASE, "prediction"))
 sys.path.insert(0, os.path.join(BASE, "training"))
@@ -20,58 +20,66 @@ logger = logging.getLogger("decision-prediction-service")
 
 app = FastAPI(
     title="Stockky Decision Prediction Service",
-    version="1.0.0",
-    description="Merged decision engine, prediction, and training"
+    version="1.0.2",
+    description="Merged decision + prediction + training"
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ---------- Mount Decision ----------
+# ---------- 1. Mount Decision ----------
 try:
     from decision.main import app as dec_app
     app.mount("/decision", dec_app)
-    logger.info("✅ Mounted decision engine")
+    logger.info("✅ Mounted /decision")
 except Exception as e:
-    logger.error(f"❌ Could not mount decision: {e}")
+    logger.error(f"❌ Decision mount failed: {e}")
 
-# ---------- Mount Prediction (fixed) ----------
-try:
-    # Change working directory temporarily so relative imports work
-    old_cwd = os.getcwd()
-    os.chdir(os.path.join(BASE, "prediction"))
-    from main import app as pred_app
-    os.chdir(old_cwd)
-    app.mount("/prediction", pred_app)
-    logger.info("✅ Mounted prediction")
-except Exception as e:
-    logger.error(f"❌ Could not mount prediction: {e}")
-    # Fallback - try alternative import
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "prediction_main",
-            os.path.join(BASE, "prediction", "main.py")
-        )
-        pred_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(pred_module)
-        app.mount("/prediction", pred_module.app)
-        logger.info("✅ Mounted prediction (fallback method)")
-    except Exception as e2:
-        logger.error(f"❌ Prediction fallback also failed: {e2}")
-
-# ---------- Mount Training ----------
+# ---------- 2. Mount Training ----------
 try:
     from training.app import app as train_app
     app.mount("/training", train_app)
-    logger.info("✅ Mounted training")
+    logger.info("✅ Mounted /training")
 except Exception as e:
-    logger.error(f"❌ Could not mount training: {e}")
+    logger.error(f"❌ Training mount failed: {e}")
+
+# ---------- 3. Manually include Prediction routes (most reliable) ----------
+try:
+    # Import the prediction app and its key functions
+    import prediction.main as pred_module
+
+    # Mount the whole prediction app under /prediction
+    app.mount("/prediction", pred_module.app)
+    logger.info("✅ Mounted /prediction successfully")
+
+except Exception as e:
+    logger.error(f"❌ Prediction mount failed: {e}")
+
+    # Fallback: register the critical endpoint manually
+    try:
+        from prediction.main import predict as prediction_predict_func
+        from prediction.main import health as prediction_health_func
+
+        @app.get("/prediction/predict/{symbol}")
+        def prediction_predict(symbol: str):
+            return prediction_predict_func(symbol)
+
+        @app.get("/prediction/health")
+        def prediction_health():
+            return {"status": "ok", "service": "prediction-service (fallback)"}
+
+        @app.get("/prediction/")
+        def prediction_root():
+            return {"service": "prediction-service", "status": "running (fallback)"}
+
+        logger.info("✅ Prediction endpoints registered via fallback")
+    except Exception as e2:
+        logger.error(f"❌ Prediction fallback also failed: {e2}")
 
 
 @app.get("/")
 def root():
     return {
         "service": "Stockky Decision Prediction Service",
-        "version": "1.0.1",
+        "version": "1.0.2",
         "status": "running",
         "modules": ["decision", "prediction", "training"]
     }
@@ -79,7 +87,3 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "decision-prediction-service"}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8004)))

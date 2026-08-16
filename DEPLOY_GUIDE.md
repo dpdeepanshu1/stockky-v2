@@ -9,7 +9,7 @@ After deployment, perform a global search-and-replace of the placeholder URLs wi
 - https://market-data-service-r6d7.onrender.com
 - https://analysis-intelligence-service.onrender.com
 - https://decision-prediction-service.onrender.com
-- https://notification-scheduler-service-x8vc.onrender.com
+- https://notification-scheduler-service-x8vc.onrender.com/notification/
 
 ## Prerequisites
 - 5 free Render accounts (or paid if preferred)

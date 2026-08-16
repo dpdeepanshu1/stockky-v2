@@ -17,7 +17,7 @@ Placeholder URLs for easy replace:
 - https://market-data-service-r6d7.onrender.com
 - https://analysis-intelligence-service.onrender.com
 - https://decision-prediction-service.onrender.com
-- https://notification-scheduler-service-x8vc.onrender.com
+- https://notification-scheduler-service-x8vc.onrender.com/notification/
 
 ## Key Features (all original + upgrades preserved)
 - Full multi-horizon scoring (Short/Mid/Long)

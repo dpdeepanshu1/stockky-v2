@@ -126,18 +126,34 @@ class PredictionSnapshotCreate(BaseModel):
 
 # ---------- Numpy conversion helper ----------
 def convert_numpy(obj):
+    """Make values JSON-safe (no NaN/Inf — those break JSON.parse)."""
     if isinstance(obj, np.integer):
         return int(obj)
     if isinstance(obj, np.floating):
-        return float(obj)
+        v = float(obj)
+        if v != v or v in (float("inf"), float("-inf")):  # NaN / Inf
+            return None
+        return v
+    if isinstance(obj, float):
+        if obj != obj or obj in (float("inf"), float("-inf")):
+            return None
+        return obj
     if isinstance(obj, np.ndarray):
-        return obj.tolist()
+        return [convert_numpy(x) for x in obj.tolist()]
     if isinstance(obj, dict):
         return {k: convert_numpy(v) for k, v in obj.items()}
-    if isinstance(obj, list):
+    if isinstance(obj, (list, tuple)):
         return [convert_numpy(v) for v in obj]
     if isinstance(obj, (np.bool_, bool)):
         return bool(obj)
+    if obj is None:
+        return None
+    # datetime etc.
+    if hasattr(obj, "isoformat"):
+        try:
+            return obj.isoformat()
+        except Exception:
+            return str(obj)
     return obj
 
 # ---------- Startup ----------
@@ -895,10 +911,12 @@ if __name__ == "__main__":
 def api_clear_trades_backup():
     try:
         from trades import clear_all_with_backup
-        # db session optional
-        return clear_all_with_backup(None)
+        result = clear_all_with_backup()
+        status = 200 if result.get("ok") else 500
+        return JSONResponse(content=result, status_code=status)
     except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        logger.exception("clear-backup failed")
+        return JSONResponse(content={"ok": False, "error": str(e)}, status_code=500)
 
 @app.get("/api/trades/backups")
 def api_list_trade_backups():

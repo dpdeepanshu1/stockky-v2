@@ -2452,8 +2452,11 @@ def send_picks_to_telegram(payload: dict):
 @app.get("/training/status")
 async def training_status():
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{TRAINING_URL}/model-status")
+        async with httpx.AsyncClient(timeout=45) as client:
+            resp = await client.get(f"{TRAINING_URL.rstrip('/')}/model-status")
+            # Also try /api/status if model-status 404s
+            if resp.status_code == 404:
+                resp = await client.get(f"{TRAINING_URL.rstrip('/')}/api/status")
             resp.raise_for_status()
             return resp.json()
     except Exception as e:
@@ -2462,13 +2465,21 @@ async def training_status():
 @app.post("/training/train")
 async def trigger_training():
     try:
-        # Prefer /api/train (label_source aware); fall back to /train alias
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{TRAINING_URL}/api/train")
+        async with httpx.AsyncClient(timeout=60) as client:
+            base = TRAINING_URL.rstrip("/")
+            resp = await client.post(f"{base}/api/train")
             if resp.status_code == 404:
-                resp = await client.post(f"{TRAINING_URL}/train")
-            resp.raise_for_status()
+                resp = await client.post(f"{base}/train")
+            if resp.status_code >= 400:
+                detail = resp.text[:300]
+                try:
+                    detail = resp.json()
+                except Exception:
+                    pass
+                raise HTTPException(status_code=resp.status_code, detail=detail)
             return resp.json()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Training service unreachable: {str(e)}")
 
@@ -2482,36 +2493,72 @@ async def get_training_score(symbol: str):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Training service unreachable: {str(e)}")
 
-@app.api_route("/training/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+@app.api_route("/training/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def training_other_proxy(path: str, request: Request):
-    """Proxy all remaining /training/* calls. Longer timeout for commit/train/evaluate."""
-    heavy = any(x in path for x in ("actionable/commit", "train", "evaluate", "mark-to-market", "walk"))
-    timeout = 120.0 if heavy else 30.0
+    """Proxy /training/* to the training sub-app.
+
+    Never forward Accept-Encoding. Always return decoded JSON via JSONResponse
+    so the browser never sees gzip/br binary (which causes
+    "Unexpected token ... is not valid JSON").
+    """
+    heavy = any(
+        x in path
+        for x in (
+            "actionable/commit",
+            "train",
+            "evaluate",
+            "mark-to-market",
+            "walk",
+            "history",
+            "clear-backup",
+        )
+    )
+    timeout = 180.0 if heavy else 60.0
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            target_url = f"{TRAINING_URL}/{path}"
-            body = await request.body()
-            headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "connection", "content-length")}
+        body = await request.body()
+        fwd_headers = {"Accept": "application/json"}
+        ct = request.headers.get("content-type")
+        if ct:
+            fwd_headers["Content-Type"] = ct
+
+        target_url = f"{TRAINING_URL.rstrip('/')}/{path.lstrip('/')}"
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            # httpx decompresses; do not ask upstream for identity only — default is fine
+        ) as client:
             response = await client.request(
                 method=request.method,
                 url=target_url,
-                headers=headers,
-                content=body,
+                headers=fwd_headers,
+                content=body if body else None,
                 params=request.query_params,
             )
-            # Strip hop-by-hop headers that break CORS/proxy
-            out_headers = {
-                k: v for k, v in response.headers.items()
-                if k.lower() not in ("transfer-encoding", "content-encoding", "content-length", "connection")
-            }
-            return Response(
-                content=response.content,
-                status_code=response.status_code,
-                headers=out_headers,
-                media_type=response.headers.get("content-type"),
-            )
+
+        # Always try JSON first — portfolio/deposit/trades all return JSON
+        try:
+            data = response.json()
+            return JSONResponse(content=data, status_code=response.status_code)
+        except Exception:
+            pass
+
+        # Non-JSON upstream (HTML error page, empty, etc.)
+        text_body = response.text or ""
+        # Strip control chars that break JSON.parse on the client
+        safe = "".join(ch for ch in text_body[:800] if ch == "\n" or ch == "\t" or ord(ch) >= 32)
+        return JSONResponse(
+            content={"detail": safe or f"Upstream HTTP {response.status_code}"},
+            status_code=response.status_code if response.status_code >= 400 else 502,
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail=f"Training service timeout for /{path}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Training service unreachable: {e}")
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Training service unreachable: {str(e)}")
+        logger.exception("training proxy error for path=%s", path)
+        raise HTTPException(status_code=502, detail=f"Training proxy error: {e}")
+
+
 
 # ── Startup cache pre-population ──────────────────────────────────────────
 @app.on_event("startup")

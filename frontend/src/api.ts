@@ -444,12 +444,31 @@ async function request<T>(path: string, init?: RequestInit, retries = 2, timeout
     });
     clearTimeout(timeoutId);
 
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(`${response.status} ${response.statusText}${body ? `: ${body.slice(0, 240)}` : ""}`);
+    const raw = await response.text();
+    let data: any = null;
+    if (raw && raw.trim()) {
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        // Binary/HTML/garbage from a broken proxy — surface a clear message
+        const preview = raw.slice(0, 120).replace(/[^\x20-\x7E\n\t]/g, "?");
+        throw new Error(
+          response.ok
+            ? `Invalid JSON from ${path}: ${preview}`
+            : `${response.status} ${response.statusText}: ${preview}`
+        );
+      }
     }
 
-    return response.json();
+    if (!response.ok) {
+      const detail =
+        (data && (data.detail || data.message || data.error)) ||
+        (typeof data === "string" ? data : "") ||
+        response.statusText;
+      throw new Error(`${response.status}: ${typeof detail === "string" ? detail.slice(0, 300) : JSON.stringify(detail).slice(0, 300)}`);
+    }
+
+    return data as T;
   } catch (error) {
     clearTimeout(timeoutId);
 

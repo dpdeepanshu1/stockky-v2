@@ -20,7 +20,7 @@ yfinance for price data, explicit commit/rollback/close).
 import os
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import yfinance as yf
@@ -430,32 +430,51 @@ from datetime import datetime, timezone
 
 BACKUP_DIR = os.getenv("TRADE_BACKUP_DIR", "/app/data/trade_backups")
 
-def clear_all_with_backup(db_session, account_id=None):
-    """Reset current paper tracking after writing a JSON backup. Returns backup meta."""
-    os.makedirs(BACKUP_DIR, exist_ok=True)
+def clear_all_with_backup(db_session=None, account_id=None):
+    """Reset paper trades after writing a JSON backup. Always returns plain dict (JSON-safe)."""
+    import json
+    own_session = False
+    if db_session is None:
+        db_session = SessionLocal()
+        own_session = True
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+    except Exception:
+        pass
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = os.path.join(BACKUP_DIR, f"backup_{ts}.json")
     payload = {"created_at": ts, "trades": [], "note": "Stockky clear-all backup"}
     try:
-        # Best-effort dump of open/closed trades if models available
+        rows = db_session.query(db_models.PaperTrade).all()
+        payload["trades"] = []
+        for r in rows:
+            row = {}
+            for c in r.__table__.columns:
+                v = getattr(r, c.name, None)
+                if hasattr(v, "isoformat"):
+                    v = v.isoformat()
+                row[c.name] = v
+            payload["trades"].append(row)
+            db_session.delete(r)
+        db_session.commit()
         try:
-            from models import PaperTrade
-            rows = db_session.query(PaperTrade).all() if db_session is not None else []
-            payload["trades"] = [
-                {c.name: getattr(r, c.name, None) for c in r.__table__.columns}
-                for r in rows
-            ]
-            for r in rows:
-                db_session.delete(r)
-            if db_session is not None:
-                db_session.commit()
-        except Exception as inner:
-            payload["dump_error"] = str(inner)
-        with open(path, "w") as f:
-            json.dump(payload, f, default=str)
+            with open(path, "w") as f:
+                json.dump(payload, f, default=str)
+        except Exception as fe:
+            payload["file_error"] = str(fe)
         return {"ok": True, "backup_path": path, "count": len(payload.get("trades") or [])}
     except Exception as e:
+        try:
+            db_session.rollback()
+        except Exception:
+            pass
         return {"ok": False, "error": str(e)}
+    finally:
+        if own_session:
+            try:
+                db_session.close()
+            except Exception:
+                pass
 
 def list_trade_backups():
     os.makedirs(BACKUP_DIR, exist_ok=True)

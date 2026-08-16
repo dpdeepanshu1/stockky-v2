@@ -249,11 +249,19 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
       <div className={`rounded-2xl border ${style.border} ${style.bg} p-8`}>
         <div className="flex items-start justify-between gap-6 flex-wrap">
           <div>
-            <div className="font-mono text-xs text-mist tracking-widest uppercase mb-3 flex items-center gap-2 flex-wrap">
-              <span>{data.symbol}</span>
+            <div className="mb-3 flex items-center gap-3 flex-wrap">
+              <span className="font-display text-3xl sm:text-4xl font-extrabold tracking-wide text-white drop-shadow-sm">
+                {data.symbol}
+              </span>
               <HorizonStrip data={data} />
-              {data.sector && <><span className="text-slate">·</span><span>{data.sector}</span></>}
-              {data.valuation && <><span className="text-slate">·</span><span className="text-mist/60">{data.valuation}</span></>}
+              {data.sector && (
+                <span className="font-mono text-xs text-mist/80 uppercase tracking-wider">
+                  · {data.sector}
+                </span>
+              )}
+              {data.valuation && (
+                <span className="font-mono text-xs text-mist/60">· {data.valuation}</span>
+              )}
             </div>
             <h2 className={`font-display text-5xl leading-none ${style.color} mb-2`}>
               {data.decision}

@@ -61,7 +61,7 @@ export default function StockChart({ symbol, compact = false }: Props) {
     <div className={compact ? "" : "rounded-xl border border-slate bg-graphite p-5"}>
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-baseline gap-2">
-          {!compact && <span className="font-mono text-[10px] text-mist uppercase tracking-widest">{symbol}</span>}
+          {!compact && <span className="font-display text-sm sm:text-base font-bold text-white tracking-wide uppercase">{symbol}</span>}
           {data && (
             <span className={`font-mono text-xs ${isUp ? "text-signal-buy" : "text-signal-sell"}`}>
               {isUp ? "▲" : "▼"} {data.change_pct != null ? `${Math.abs(data.change_pct)}%` : "—"}

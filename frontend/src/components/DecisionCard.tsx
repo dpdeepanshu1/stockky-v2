@@ -200,7 +200,8 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
 
   const metrics = data.fundamental_metrics;
   const hasMetrics = metrics && Object.values(metrics).some(v => v != null);
-  const hasPrice = data.close != null;
+  const hasPrice = data.close != null || liveQuote?.price != null;
+  const displayClose = liveQuote?.price ?? data.close ?? null;
 
   const hasNews = data.reasons.news && data.reasons.news.length > 0 &&
     !(data.event_data && (data.event_data.news || data.event_data.recent_news));
@@ -382,7 +383,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
 
           <div className="text-right font-mono">
             <div className="text-4xl text-paper">
-              {hasPrice ? `₹${data.close!.toLocaleString("en-IN")}` : data.data_insufficient ? "Awaiting Data" : "N/A"}
+              {displayClose != null ? `₹${displayClose.toLocaleString("en-IN")}` : data.data_insufficient ? "Awaiting Data" : "N/A"}
             </div>
             <div className="text-xs text-mist/60 mt-1 flex items-center justify-end gap-2">
               <span>Combined {data.combined_score}/100</span>
@@ -549,15 +550,15 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
           <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-mist/40 animate-spin" />
           Checking model recommendation...
         </div>
-      ) : trainingScore ? (
+      ) : trainingScore && (trainingScore as any).available !== false ? (
         <div className="rounded-xl border border-signal-prepare/30 bg-graphite p-5">
           <h3 className="font-mono text-[10px] text-mist uppercase tracking-widest mb-3">
             🤖 Model Recommendation
           </h3>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
-            <MetricItem label="Training Score" value={`${trainingScore.training_score}`} />
-            <MetricItem label="T+1 Success" value={`${trainingScore.t1_success_probability}%`} />
-            <MetricItem label="T+5 Success" value={`${trainingScore.t5_success_probability}%`} />
+            <MetricItem label="Training Score" value={trainingScore.training_score != null ? `${trainingScore.training_score}` : "—"} />
+            <MetricItem label="T+1 Success" value={trainingScore.t1_success_probability != null ? `${trainingScore.t1_success_probability}%` : "—"} />
+            <MetricItem label="T+5 Success" value={trainingScore.t5_success_probability != null ? `${trainingScore.t5_success_probability}%` : "—"} />
             <MetricItem
               label="Model Confidence"
               value={trainingScore.model_success_probability == null ? "—" : `${trainingScore.model_success_probability}%`}
@@ -575,12 +576,12 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
       <div className="grid grid-cols-2 gap-4">
         <div className="rounded-xl border border-slate bg-graphite p-5">
           <div className="font-mono text-[10px] text-mist uppercase tracking-widest mb-3">Price levels</div>
-          {hasPrice && data.support != null && data.resistance != null ? (
-            <PriceLevelBar close={data.close!} support={data.support} resistance={data.resistance} />
+          {displayClose != null && data.support != null && data.resistance != null ? (
+            <PriceLevelBar close={displayClose} support={data.support} resistance={data.resistance} />
           ) : (
             <p className="text-sm text-mist/60 italic">
-              {data.data_insufficient 
-                ? `Insufficient price data for ${data.symbol} (newly listed stock). Please check back in 2-3 days after Yahoo Finance updates its database.` 
+              {displayClose == null && data.data_insufficient
+                ? `Price feed temporarily unavailable for ${data.symbol}. Chart may still load from market-data; retry Analyse shortly.` 
                 : "Insufficient data for price levels"}
             </p>
           )}

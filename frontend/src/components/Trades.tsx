@@ -376,8 +376,9 @@ export default function Trades() {
             <h3 className="font-mono text-xs text-mist uppercase tracking-widest">Backup history</h3>
             <button onClick={() => setShowBackups(false)} className="text-xs text-mist hover:text-paper">Close</button>
           </div>
+          <p className="text-[10px] font-mono text-mist/50 mb-2">Kept for 14 days (DB when DATABASE_URL set).</p>
           {backups.length === 0 ? (
-            <p className="text-sm text-mist/60">No backups yet.</p>
+            <p className="text-sm text-mist/60">No backups yet. Use Clear All + Backup to create one.</p>
           ) : (
             <ul className="space-y-1 max-h-48 overflow-auto">
               {backups.map((b) => (

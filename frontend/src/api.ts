@@ -231,12 +231,14 @@ export interface TrainingModelStatus {
 
 export interface TrainingScore {
   symbol: string;
-  training_score: number;
-  t1_success_probability: number;
-  t5_success_probability: number;
-  model_success_probability: number | null;
-  historical_similarity: number;
-  similar_setups: Array<{
+  training_score?: number | null;
+  t1_success_probability?: number | null;
+  t5_success_probability?: number | null;
+  model_success_probability?: number | null;
+  historical_similarity?: number | null;
+  available?: boolean;
+  message?: string;
+  similar_setups?: Array<{
     symbol: string;
     similarity: number;
     outcome: string;

@@ -848,3 +848,61 @@ input:focus, textarea:focus, select:focus {
 .market-clock {
   margin-top: 0.15rem;
 }
+
+
+/* ── Paper trading / manual open form ───────────────────────── */
+.manual-trade-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.1rem;
+  margin-bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.manual-trade-panel .ai-warning {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--amber);
+  background: rgba(245, 166, 35, 0.08);
+  border: 1px solid rgba(245, 166, 35, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 0.55rem 0.7rem;
+}
+.manual-trade-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.65rem;
+}
+.manual-trade-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.manual-trade-grid input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--panel-2) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm);
+  color: var(--fg) !important;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  padding: 0.5rem 0.6rem;
+}
+.manual-trade-grid input:focus {
+  border-color: rgba(245, 166, 35, 0.55) !important;
+  box-shadow: 0 0 0 3px rgba(245, 166, 35, 0.08);
+  outline: none;
+}
+.manual-trade-grid input::placeholder {
+  color: var(--muted-2);
+}

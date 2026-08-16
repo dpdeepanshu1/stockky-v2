@@ -40,12 +40,14 @@ export type ConvictionData = {
   valuation?: string | null;
   data_quality?: {
     quality?: string;
+    level?: string;
     pillars?: Record<string, boolean | string>;
     missing?: string[];
     note?: string;
+    flags?: string[];
   } | string | null;
   data_insufficient?: boolean;
-  news_data?: { summary?: string } | null;
+  news_data?: { summary?: string; headline_count?: number } | null;
   event_data?: { summary?: string; next_earnings_date?: string } | null;
   circuit_open?: string | null;
   live_price?: number | null;
@@ -81,39 +83,30 @@ function collectReasons(data: ConvictionData): string[] {
   return out.slice(0, 6);
 }
 
+function shortText(s: string, max = 140) {
+  const t = (s || "").replace(/\s+/g, " ").trim();
+  if (t.length <= max) return t;
+  return t.slice(0, max - 1) + "…";
+}
 
 function QualityGate({ data }: { data: ConvictionData }) {
   const dq = data.data_quality;
   let quality = "";
-  let missing: string[] = [];
   let note = "";
   if (typeof dq === "string") quality = dq;
   else if (dq && typeof dq === "object") {
-    quality = String(dq.quality || "");
-    missing = Array.isArray(dq.missing) ? dq.missing.map(String) : [];
+    quality = String(dq.level || dq.quality || "");
     note = dq.note ? String(dq.note) : "";
+    if (!note && Array.isArray(dq.flags) && dq.flags.length) note = dq.flags[0];
   }
   if (data.data_insufficient && !quality) quality = "low";
-  if (data.circuit_open) {
-    quality = quality || "low";
-    note = note || `Circuit open: ${data.circuit_open}`;
-  }
-  if (!quality && !note && !missing.length) return null;
+  if (!quality && !note) return null;
   const q = quality.toLowerCase();
-  const cls =
-    q === "high" ? "qg-high" : q === "medium" || q === "med" ? "qg-med" : "qg-low";
+  const cls = q === "high" ? "qg-high" : q === "medium" || q === "med" ? "qg-med" : "qg-low";
   return (
-    <div className={`quality-gate ${cls}`}>
-      <span className="mono">DATA {quality ? quality.toUpperCase() : "CHECK"}</span>
-      {missing.length > 0 && (
-        <span className="qg-miss">Missing: {missing.slice(0, 4).join(", ")}</span>
-      )}
-      {note && <span className="qg-note">{note}</span>}
-      {(data.news_data?.summary || data.event_data?.summary) && (
-        <span className="qg-sum">
-          {[data.news_data?.summary, data.event_data?.summary].filter(Boolean).slice(0, 1).join(" · ")}
-        </span>
-      )}
+    <div className={`cc-quality ${cls}`}>
+      <span className="cc-quality-badge">DATA {quality ? quality.toUpperCase() : "CHECK"}</span>
+      {note && <span className="cc-quality-note">{shortText(note, 80)}</span>}
     </div>
   );
 }
@@ -124,21 +117,21 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
   const score = data.combined_score ?? data.score ?? null;
   const entryLow = data.entry_range?.low ?? data.entry_range_low ?? null;
   const entryHigh = data.entry_range?.high ?? data.entry_range_high ?? null;
-  const up = upsidePct(data.close, data.target);
-  const horizon =
-    data.holding_period_estimate?.label ||
-    data.holding_period ||
-    "—";
-  const reasoning =
-    data.natural_language_summary ||
-    data.summary ||
-    collectReasons(data).slice(0, 2).join(" · ") ||
-    "No AI narrative available for this pick.";
+  const up = upsidePct(data.close ?? data.live_price, data.target);
+  const horizon = data.holding_period_estimate?.label || data.holding_period || "—";
   const reasons = collectReasons(data);
+  const blurb =
+    shortText(
+      data.natural_language_summary ||
+        data.summary ||
+        reasons.slice(0, 2).join(" · ") ||
+        "",
+      compact ? 120 : 160
+    ) || null;
 
   return (
     <article
-      className={`conviction-card ${compact ? "conviction-card-compact" : ""}`}
+      className={`cc-card ${compact ? "cc-compact" : ""}`}
       onClick={() => onSelect?.(data.symbol)}
       role={onSelect ? "button" : undefined}
       tabIndex={onSelect ? 0 : undefined}
@@ -146,59 +139,64 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
         if (onSelect && (e.key === "Enter" || e.key === " ")) onSelect(data.symbol);
       }}
     >
-      <header className="conviction-head">
-        <div className="conviction-sym-row">
-          {rank != null && <span className="conviction-rank mono">#{rank}</span>}
-          <span className="conviction-symbol mono">{data.symbol}</span>
-          {data.sector && <span className="conviction-sector">{data.sector}</span>}
+      <div className="cc-top">
+        <div className="cc-sym-block">
+          {rank != null && <span className="cc-rank">#{rank}</span>}
+          <span className="cc-symbol">{data.symbol}</span>
+          {data.sector && <span className="cc-sector">{data.sector}</span>}
         </div>
-        <span className={`decision-badge ${style.color} ${style.bg} ${style.border}`}>
-          {style.glyph} {decision}
-        </span>
-      </header>
+        <span className={`cc-decision ${style.color}`}>{decision}</span>
+      </div>
 
       <QualityGate data={data} />
 
-      <div className="conviction-score-row mono">
-        <span>
-          Score <strong>{score != null ? Math.round(Number(score)) : "—"}</strong>
-          <span className="conviction-muted">/100</span>
-        </span>
+      <div className="cc-metrics">
+        <div className="cc-metric">
+          <span className="cc-label">Score</span>
+          <span className="cc-value">
+            {score != null ? Math.round(Number(score)) : "—"}
+            <span className="cc-muted">/100</span>
+          </span>
+        </div>
+        <div className="cc-metric">
+          <span className="cc-label">Price</span>
+          <span className="cc-value">₹{fmt(data.live_price ?? data.close)}</span>
+        </div>
         {data.confidence && (
-          <span className="conviction-muted">{data.confidence} confidence</span>
-        )}
-        {(data.live_price ?? data.close) != null && (
-          <span className="conviction-muted">₹{fmt(data.live_price ?? data.close)}</span>
+          <div className="cc-metric">
+            <span className="cc-label">Conf</span>
+            <span className="cc-value cc-muted">{data.confidence}</span>
+          </div>
         )}
       </div>
 
-      <div className="conviction-levels mono">
+      <div className="cc-levels">
         <div>
-          <span className="conviction-muted">Entry</span>
-          <strong>
-            {entryLow != null || entryHigh != null
-              ? `₹${fmt(entryLow)}–${fmt(entryHigh)}`
-              : "—"}
-          </strong>
+          <span className="cc-label">Entry</span>
+          <span className="cc-value">
+            {entryLow != null || entryHigh != null ? `₹${fmt(entryLow)}–${fmt(entryHigh)}` : "—"}
+          </span>
         </div>
         <div>
-          <span className="conviction-muted">Target</span>
-          <strong className="text-signal-buy">₹{fmt(data.target)}</strong>
-          {up != null && <span className="conviction-up">+{up.toFixed(1)}%</span>}
+          <span className="cc-label">Target</span>
+          <span className="cc-value text-signal-buy">
+            ₹{fmt(data.target)}
+            {up != null && <span className="cc-up"> +{up.toFixed(1)}%</span>}
+          </span>
         </div>
         <div>
-          <span className="conviction-muted">Stop</span>
-          <strong className="text-signal-sell">₹{fmt(data.stop_loss)}</strong>
+          <span className="cc-label">Stop</span>
+          <span className="cc-value text-signal-sell">₹{fmt(data.stop_loss)}</span>
         </div>
         <div>
-          <span className="conviction-muted">Horizon</span>
-          <strong>{horizon}</strong>
+          <span className="cc-label">Horizon</span>
+          <span className="cc-value">{horizon}</span>
         </div>
       </div>
 
       {!compact && (
         <>
-          <div className="conviction-breakdown mono">
+          <div className="cc-breakdown">
             {[
               ["Tech", data.technical_score],
               ["Fund", data.fundamental_score],
@@ -207,25 +205,24 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
               ["Mkt", data.market_score],
               ["Train", data.training_score],
             ].map(([label, val]) => (
-              <span key={String(label)}>
-                {label} <strong>{val != null ? Math.round(Number(val)) : "—"}</strong>
+              <span key={String(label)} className="cc-chip">
+                <span className="cc-label">{label}</span>{" "}
+                <strong>{val != null ? Math.round(Number(val)) : "—"}</strong>
               </span>
             ))}
           </div>
-
-          <p className="conviction-reasoning">{reasoning}</p>
-
+          {blurb && <p className="cc-blurb">{blurb}</p>}
           {reasons.length > 0 && (
-            <ul className="conviction-reasons">
-              {reasons.slice(0, 4).map((r, i) => (
-                <li key={i}>{r}</li>
+            <ul className="cc-reasons">
+              {reasons.slice(0, 3).map((r, i) => (
+                <li key={i}>{shortText(r, 100)}</li>
               ))}
             </ul>
           )}
         </>
       )}
 
-      {footer}
+      {footer && <div className="cc-footer" onClick={(e) => e.stopPropagation()}>{footer}</div>}
     </article>
   );
 }

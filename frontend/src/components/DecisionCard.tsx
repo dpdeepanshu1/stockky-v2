@@ -2,7 +2,6 @@ import { useState, useEffect } from "react";
 import { Decision, api, TrainingScore, FundamentalMetrics, CategorizedEvents } from "../api";
 import { decisionStyle } from "../decisionStyle";
 import StockChart from "./StockChart";
-import ConvictionCard from "./ConvictionCard";
 import { useStockkyRealtime } from "../useRealtime";
 import { toActionablePick } from "./ScanPanel";
 
@@ -273,64 +272,23 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
     return '⚪ Neutral sentiment — no clear directional bias';
   }
 
+  const newsHeadlineCount = (data as any).news_data?.headline_count ?? newsItems.length;
+  const topHeadlines = ((data as any).news_data?.headlines || newsItems || []).slice(0, 3);
+
   return (
     <div className="space-y-4 stock-detail-terminal">
-      <div className="mb-4">
-        <ConvictionCard data={liveQuote?.price != null ? { ...data, close: liveQuote.price } : data} />
-        {liveQuote?.price != null && (
-          <p className="mono text-[10px] text-mist/60 mt-1">
-            Live quote ₹{liveQuote.price.toLocaleString("en-IN")} · {quoteWs ? "WS live" : "poll"} · {liveQuote.as_of ? new Date(liveQuote.as_of).toLocaleTimeString("en-IN") : ""}
-          </p>
-        )}
-      </div>
-
-      {/* First-class News & Event summaries */}
-      <div className="grid gap-3 sm:grid-cols-2 mb-2">
-        <section className="terminal-panel news-summary-panel">
-          <p className="dash-section-title">News summary</p>
-          <p className="text-sm text-paper/90 leading-relaxed mb-2">
-            {(data as any).news_data?.summary
-              || (data as any).news_summary
-              || (Array.isArray(data.reasons?.news) && data.reasons.news[0])
-              || "No curated news summary for this symbol yet."}
-          </p>
-          {((data as any).news_data?.headlines || []).slice(0, 3).map((h: any, i: number) => (
-            <div key={i} className="mono text-[11px] text-mist/80 border-t border-slate/30 pt-1.5 mt-1.5">
-              {h.url ? <a href={h.url} target="_blank" rel="noreferrer" className="hover:text-cyan-300">{h.title || h}</a> : (h.title || String(h))}
-            </div>
-          ))}
-          <div className="mono text-[10px] text-mist/50 mt-2">
-            Score {data.news_score ?? "—"} · {(data as any).news_data?.headline_count ?? newsItems.length} headlines
-          </div>
-        </section>
-        <section className="terminal-panel event-summary-panel">
-          <p className="dash-section-title">Event summary</p>
-          <p className="text-sm text-paper/90 leading-relaxed mb-2">
-            {(data as any).event_data?.summary
-              || (data as any).event_summary
-              || (Array.isArray(data.reasons?.event) && data.reasons.event[0])
-              || (data.event_risk ? "Elevated event risk near earnings or corporate action." : "No material classified events flagged.")}
-          </p>
-          {((data as any).event_data?.classified_events || []).slice(0, 4).map((ev: any, i: number) => (
-            <div key={i} className="mono text-[11px] text-mist/80 border-t border-slate/30 pt-1.5 mt-1.5">
-              <span className="text-cyan-400/80">{ev.type || ev.category || "event"}</span>
-              {" · "}
-              {ev.summary || ev.title || ev.description || JSON.stringify(ev).slice(0, 80)}
-            </div>
-          ))}
-          {(data as any).event_data?.next_earnings_date && (
-            <div className="mono text-[10px] text-amber-300/90 mt-2">
-              Next earnings: {(data as any).event_data.next_earnings_date}
-            </div>
-          )}
-        </section>
-      </div>
       <button
         onClick={onBack}
         className="font-mono text-xs text-mist hover:text-paper transition flex items-center gap-1"
       >
         ← Back
       </button>
+      {liveQuote?.price != null && (
+        <p className="mono text-[10px] text-mist/60">
+          Live quote ₹{liveQuote.price.toLocaleString("en-IN")} · {quoteWs ? "WS live" : "poll"} ·{" "}
+          {liveQuote.as_of ? new Date(liveQuote.as_of).toLocaleTimeString("en-IN") : ""}
+        </p>
+      )}
 
       {/* Decision header */}
       <div className={`rounded-2xl border ${style.border} ${style.bg} p-8`}>
@@ -692,102 +650,88 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
         </div>
       )}
 
-      {/* ── NEWS SECTION (v2) ── */}
-      {(() => {
-        if (recentNewsItems.length === 0) {
-          return (
-            <div className="rounded-xl border border-slate/60 bg-graphite/50 p-5">
-              <div className="flex items-center justify-between mb-3">
-                <h4 className="font-mono text-xs text-mist uppercase tracking-widest">
-                  📰 News
-                </h4>
-                <span className="text-xs text-mist/40">No recent news (last 7 days)</span>
-              </div>
-              <p className="text-sm text-mist/60 italic">
-                No news articles found for the last 7 days.
-              </p>
-            </div>
-          );
-        }
-
-        const sortedRecent = [...recentNewsItems].sort((a, b) => {
-          const da = a.published ? new Date(a.published).getTime() : 0;
-          const db = b.published ? new Date(b.published).getTime() : 0;
-          return db - da;
-        });
-
-        const recent = sortedRecent.slice(0, 1);
-        const previous = sortedRecent.slice(1);
-
-        return (
-          <div className="rounded-xl border border-slate/60 bg-graphite/50 p-5">
-            <div className="flex items-center justify-between mb-3">
-              <h4 className="font-mono text-xs text-mist uppercase tracking-widest">
-                📰 News
-              </h4>
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-[10px] text-mist/50">Score:</span>
-                <span className={`font-mono text-sm font-medium ${sentimentColor}`}>
-                  {computedNewsScore}
-                </span>
-                <span className={`text-[10px] font-medium ${sentimentColor}`}>
-                  ({sentimentLabel})
-                </span>
-              </div>
-            </div>
-
-            {recent.length > 0 && (
-              <div className="mb-4">
-                <h5 className="text-sm font-medium text-green-600 dark:text-green-400 mb-1.5">
-                  🔹 Recent Event
-                </h5>
-                <NewsItemWithFundamentals
-                  item={recent[0]}
-                  isExpanded={expandedNewsIndex === 0}
-                  onToggle={() => setExpandedNewsIndex(expandedNewsIndex === 0 ? null : 0)}
-                  fundamentalMetrics={data.fundamental_metrics}
-                  fundamentalScore={data.fundamental_score}
-                  impact={getNewsImpact(recent[0].title)}
-                  impactDescription={getImpactDescription(recent[0].title)}
-                />
-              </div>
-            )}
-
-            {previous.length > 0 && (
-              <div>
-                <h5 className="text-sm font-medium text-blue-600 dark:text-blue-400 mb-1.5">
-                  📄 Previous News (last 7 days)
-                </h5>
-                {previous.map((item, idx) => (
-                  <NewsItemWithFundamentals
-                    key={idx}
-                    item={item}
-                    isExpanded={expandedNewsIndex === idx + 1}
-                    onToggle={() => setExpandedNewsIndex(expandedNewsIndex === idx + 1 ? null : idx + 1)}
-                    fundamentalMetrics={data.fundamental_metrics}
-                    fundamentalScore={data.fundamental_score}
-                    impact={getNewsImpact(item.title)}
-                    impactDescription={getImpactDescription(item.title)}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })()}
-
-      {/* ── EVENT DATA VIEW (from event_data, v2) ── */}
-      {data.event_data && Object.keys(data.event_data).length > 0 && (
-        <div className="rounded-xl border border-slate/60 bg-graphite/50 p-5">
-          <h4 className="font-mono text-xs text-mist uppercase tracking-widest mb-3">
-            📅 Event Update
-          </h4>
-          <EventDataView data={data.event_data} />
+      {/* ── Single News panel (to the point) ── */}
+      <section className="terminal-panel">
+        <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+          <p className="dash-section-title mb-0">News</p>
+          <span className={`font-mono text-[11px] ${sentimentColor}`}>
+            Score {computedNewsScore} · {sentimentLabel}
+            {newsHeadlineCount ? ` · ${newsHeadlineCount} items` : ""}
+          </span>
         </div>
-      )}
+        <p className="text-sm text-paper/90 leading-relaxed mb-2">
+          {(data as any).news_data?.summary
+            || (data as any).news_summary
+            || (Array.isArray(data.reasons?.news) && data.reasons.news[0])
+            || (recentNewsItems[0]?.title
+              ? `Latest: ${recentNewsItems[0].title}`
+              : "No material news in the last 7 days.")}
+        </p>
+        {topHeadlines.length > 0 && (
+          <ul className="space-y-1.5 mb-2">
+            {topHeadlines.slice(0, 3).map((h: any, i: number) => {
+              const title = typeof h === "string" ? h : h.title || h.headline || "";
+              const url = typeof h === "object" ? h.url : undefined;
+              if (!title) return null;
+              return (
+                <li key={i} className="font-mono text-[11px] text-mist/85 leading-snug">
+                  {url ? (
+                    <a href={url} target="_blank" rel="noreferrer" className="text-sky-400 hover:text-sky-300 underline-offset-2 hover:underline">
+                      {title.length > 110 ? title.slice(0, 109) + "…" : title}
+                    </a>
+                  ) : (
+                    <span>{title.length > 110 ? title.slice(0, 109) + "…" : title}</span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {recentNewsItems.length > 3 && (
+          <button
+            type="button"
+            className="btn-terminal text-[10px]"
+            onClick={() => setExpandedNewsIndex(expandedNewsIndex === -1 ? null : -1)}
+          >
+            {expandedNewsIndex === -1 ? "Hide full news" : "Full news — click here"}
+          </button>
+        )}
+        {expandedNewsIndex === -1 && recentNewsItems.length > 3 && (
+          <ul className="mt-2 space-y-1.5 border-t border-slate/40 pt-2">
+            {recentNewsItems.slice(3, 12).map((item, idx) => (
+              <li key={idx} className="font-mono text-[11px] text-mist/80">
+                {item.url ? (
+                  <a href={item.url} target="_blank" rel="noreferrer" className="text-sky-400 hover:underline">
+                    {item.title}
+                  </a>
+                ) : (
+                  item.title
+                )}
+                {item.publisher && <span className="text-mist/50"> · {item.publisher}</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
 
-      {/* ── EVENT SECTION (fetched separately, v1) ── */}
-      <EventSection symbol={data.symbol} />
+      {/* ── Single Event panel ── */}
+      <section className="terminal-panel">
+        <p className="dash-section-title">Events</p>
+        <p className="text-sm text-paper/90 leading-relaxed mb-1">
+          {(data as any).event_data?.summary
+            || (data as any).event_summary
+            || (Array.isArray(data.reasons?.event) && data.reasons.event[0])
+            || (data.event_risk
+              ? "Elevated event risk near earnings or corporate action."
+              : "No major corporate events detected in the recent window.")}
+        </p>
+        {(data as any).event_data?.next_earnings_date && (
+          <p className="font-mono text-[11px] text-amber-300/90">
+            Next earnings: {(data as any).event_data.next_earnings_date}
+          </p>
+        )}
+        <EventSection symbol={data.symbol} compact />
+      </section>
 
       {/* Natural-language summary */}
       {data.natural_language_summary && (
@@ -805,7 +749,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
 }
 
 // ── EventSection (v1) ──
-function EventSection({ symbol }: { symbol: string }) {
+function EventSection({ symbol, compact }: { symbol: string; compact?: boolean }) {
   const [events, setEvents] = useState<CategorizedEvents | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -823,6 +767,7 @@ function EventSection({ symbol }: { symbol: string }) {
   }, [symbol]);
 
   if (loading) {
+    if (compact) return null;
     return (
       <div className="rounded-xl border border-slate/40 bg-graphite/30 p-4 text-xs text-mist/40 font-mono flex items-center gap-2">
         <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-mist/40 animate-spin" />
@@ -835,8 +780,10 @@ function EventSection({ symbol }: { symbol: string }) {
   if (!hasAnything) return null;
 
   return (
-    <div className="rounded-xl border border-slate/60 bg-graphite/50 p-5">
-      <h4 className="font-mono text-xs text-mist uppercase tracking-widest mb-3">📅 Event Update</h4>
+    <div className={compact ? "mt-2" : "rounded-xl border border-slate/60 bg-graphite/50 p-5"}>
+      {!compact && (
+        <h4 className="font-mono text-xs text-mist uppercase tracking-widest mb-3">📅 Event Update</h4>
+      )}
 
       {events.recent_changes.length > 0 && (
         <div className="mb-4 bg-signal-prepare/10 border border-signal-prepare/30 rounded-lg p-3">

@@ -95,46 +95,18 @@ function Section({
                 }}
                 compact
                 footer={
-                  <>
-                    {sum && <p className="hot-meta text-xs text-mist/80">{sum}</p>}
-                    {(item as any).signal_strength && (
-                      <p className="hot-meta mono text-[10px] text-mist/60">
-                        Signal: {(item as any).signal_strength}
-                        {(item as any).from_scan ? " · from last scan" : ""}
-                      </p>
-                    )}
-                    {item.next_earnings_date && (
-                      <p className="hot-meta mono">Next results: {item.next_earnings_date}</p>
-                    )}
-                    {item.earnings_surprise?.surprise_pct != null && (
-                      <p className="hot-meta mono">
-                        Surprise: {item.earnings_surprise.surprise_pct > 0 ? "+" : ""}
-                        {item.earnings_surprise.surprise_pct}%
-                      </p>
-                    )}
-                    {(item.headlines || []).slice(0, 2).map((h, i) => (
-                      <p key={i} className="hot-meta mono text-[10px] text-mist/60">
-                        {h.title}
-                      </p>
-                    ))}
-                    {live?.price != null && (
-                      <p className="hot-meta mono text-signal-buy text-[10px]">
-                        Live ₹{live.price.toLocaleString("en-IN")}
-                      </p>
-                    )}
-                    {onAnalyze && (
-                      <button
-                        type="button"
-                        className="mt-2 w-full font-mono text-[11px] px-2 py-1.5 rounded-lg border border-sky-500/40 text-sky-300 hover:bg-sky-500/15 transition"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onAnalyze(item.symbol);
-                        }}
-                      >
-                        🔍 Analyse {item.symbol}
-                      </button>
-                    )}
-                  </>
+                  onAnalyze ? (
+                    <button
+                      type="button"
+                      className="btn-terminal w-full text-[10px] mt-1"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onAnalyze(item.symbol);
+                      }}
+                    >
+                      Analyse {item.symbol}
+                    </button>
+                  ) : null
                 }
               />
             );

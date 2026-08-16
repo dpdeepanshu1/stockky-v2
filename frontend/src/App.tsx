@@ -47,14 +47,24 @@ export default function App() {
   const [view, setView] = useState<ViewState>({ mode: "idle" });
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [showWatchlist, setShowWatchlist] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showServiceManager, setShowServiceManager] = useState(false);
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
 
   // Watchlist overlay must not stick when navigating Dashboard / other tabs
   useEffect(() => {
     if (tab !== "watchlist") setShowWatchlist(false);
+    setMobileMoreOpen(false);
   }, [tab]);
-  const [showSettings, setShowSettings] = useState(false);
-  const [showServiceManager, setShowServiceManager] = useState(false);
-  const [cmdOpen, setCmdOpen] = useState(false);
+
+  // Lock body scroll while mobile more sheet is open
+  useEffect(() => {
+    if (!mobileMoreOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, [mobileMoreOpen]);
 
   // Cmd/Ctrl+K command palette
   useEffect(() => {
@@ -633,14 +643,95 @@ export default function App() {
 
       {/* Mobile top bar */}
       <header className="terminal-topbar md:hidden">
-        <span className="font-display text-base">Stockky</span>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <button
+            type="button"
+            className="mobile-menu-btn"
+            aria-label="Open menu"
+            aria-expanded={mobileMoreOpen}
+            onClick={() => setMobileMoreOpen(true)}
+          >
+            <span className="mobile-menu-icon" aria-hidden>☰</span>
+          </button>
+          <div className="min-w-0">
+            <span className="font-display text-base block leading-none">Stockky</span>
+            <span className={`mono text-[9px] ${wsLive ? "text-signal-buy" : "text-mist/50"}`}>
+              {wsLive ? "● LIVE" : "○ POLL"}
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
           <BackendStatusDot status={backendUp} onClick={() => setTab("settings")} />
           <button type="button" className="btn-terminal text-[10px]" onClick={() => setCmdOpen(true)}>
             ⌘K
           </button>
         </div>
       </header>
+
+      {/* Mobile slide-over menu (professional drawer) */}
+      {mobileMoreOpen && (
+        <div className="mobile-drawer-root md:hidden" role="dialog" aria-modal="true" aria-label="Menu">
+          <button
+            type="button"
+            className="mobile-drawer-backdrop"
+            aria-label="Close menu"
+            onClick={() => setMobileMoreOpen(false)}
+          />
+          <aside className="mobile-drawer-panel">
+            <div className="mobile-drawer-head">
+              <div>
+                <div className="font-display text-lg">Stockky</div>
+                <div className="mono text-[9px] text-mist tracking-widest uppercase">Terminal · NSE</div>
+              </div>
+              <button type="button" className="btn-terminal text-[10px]" onClick={() => setMobileMoreOpen(false)}>
+                Close
+              </button>
+            </div>
+            <nav className="mobile-drawer-nav">
+              {navItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`mobile-drawer-link ${tab === item.id ? "active" : ""}`}
+                  onClick={() => {
+                    setTab(item.id as Tab);
+                    if (item.id === "watchlist") setShowWatchlist(true);
+                    else setShowWatchlist(false);
+                    if (item.id !== "settings") setShowSettings(false);
+                    setMobileMoreOpen(false);
+                  }}
+                >
+                  <span className="opacity-70 w-5 text-center">{item.icon}</span>
+                  {item.label}
+                </button>
+              ))}
+            </nav>
+            <div className="mobile-drawer-foot">
+              <button
+                type="button"
+                className="mobile-drawer-link"
+                onClick={() => { setCmdOpen(true); setMobileMoreOpen(false); }}
+              >
+                <span className="kbd">⌘K</span> Command
+              </button>
+              <button
+                type="button"
+                className="mobile-drawer-link"
+                onClick={() => { setShowServiceManager(true); setMobileMoreOpen(false); }}
+              >
+                Services
+              </button>
+              <button
+                type="button"
+                className="mobile-drawer-link"
+                onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              >
+                {theme === "dark" ? "☀ Light mode" : "☾ Dark mode"}
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
 
       {/* Bloomberg-style status strip — clickable */}
       <div className="terminal-status-strip hidden md:flex">
@@ -1036,10 +1127,10 @@ export default function App() {
         ))}
         <button
           type="button"
-          className={tab === "settings" ? "active" : ""}
-          onClick={() => setTab("settings")}
+          className={mobileMoreOpen || tab === "settings" ? "active" : ""}
+          onClick={() => setMobileMoreOpen(true)}
         >
-          <span className="block text-[12px] mb-0.5">⚙</span>
+          <span className="block text-[12px] mb-0.5">☰</span>
           <span>More</span>
         </button>
       </nav>

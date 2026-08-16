@@ -57,6 +57,18 @@ export default function Trades() {
     setTimeout(() => setToast(null), 4000);
   };
 
+  // Open deposit panel when navigated from low-balance modal
+  useEffect(() => {
+    const onOpenDeposit = (ev: Event) => {
+      const detail = (ev as CustomEvent)?.detail || {};
+      const amt = Number(detail.suggestedAmount);
+      if (amt > 0) setDepositAmount(String(Math.ceil(amt / 1000) * 1000));
+      setShowDeposit(true);
+    };
+    window.addEventListener("stockky:open-deposit", onOpenDeposit as EventListener);
+    return () => window.removeEventListener("stockky:open-deposit", onOpenDeposit as EventListener);
+  }, []);
+
   const runClearWithBackup = async () => {
     if (!confirm("Clear all paper trades? A backup will be saved first.")) return;
     setClearing(true);
@@ -207,6 +219,11 @@ export default function Trades() {
       showToast("error", "Enter quantity or capital");
       return;
     }
+    // AI-parameter warning — still allow after explicit confirm
+    const ok = window.confirm(
+      `⚠️ AI warning\n\nManual trade for ${sym} bypasses Stockky decision scores, entry/target logic, and conviction filters.\n\nContinue anyway?`
+    );
+    if (!ok) return;
     setManualBusy(true);
     try {
       const res = await api.openManualTrade({

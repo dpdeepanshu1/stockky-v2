@@ -97,6 +97,12 @@ function Section({
                 footer={
                   <>
                     {sum && <p className="hot-meta text-xs text-mist/80">{sum}</p>}
+                    {(item as any).signal_strength && (
+                      <p className="hot-meta mono text-[10px] text-mist/60">
+                        Signal: {(item as any).signal_strength}
+                        {(item as any).from_scan ? " · from last scan" : ""}
+                      </p>
+                    )}
                     {item.next_earnings_date && (
                       <p className="hot-meta mono">Next results: {item.next_earnings_date}</p>
                     )}
@@ -178,7 +184,7 @@ export default function HotStocks(props: { onAnalyze?: (symbol: string) => void 
           <p className="dash-section-title">Hot Picks</p>
           <h2 className="hot-page-title">Stockky Hot Picks</h2>
           <p className="hot-page-sub text-xs text-mist/70">
-            Curated from recent news, results, and bulk/insider activity — real data only.
+            Ranked by scan BUY/PREPARE, bulk/insider, and results first — weak news-only names dropped.
             {quoteWs ? " · WS quotes on" : " · quotes connecting…"}
           </p>
         </div>
@@ -193,26 +199,29 @@ export default function HotStocks(props: { onAnalyze?: (symbol: string) => void 
       {data && (
         <>
           <div className="hot-meta-bar mono text-[10px] text-mist/50">
-            Universe {data.universe_size ?? "—"} · {data.cached ? "cached" : "fresh"} ·{" "}
-            {data.generated_at ? new Date(data.generated_at).toLocaleString("en-IN") : ""}
+            Universe {data.universe_size ?? "—"}
+            {" · "}scan seeds {(data as any).scan_seed_count ?? "—"}
+            {" · "}{data.cached ? "cached" : "fresh"}
+            {" · "}{data.generated_at ? new Date(data.generated_at).toLocaleString("en-IN") : ""}
+            {(data as any).quality_note ? ` · ${(data as any).quality_note}` : ""}
           </div>
           <Section
             title="News-driven"
-            subtitle="Elevated news score or material headlines"
+            subtitle="Strict filter: 2+ headlines and score ≥55; prefers scan/event signal"
             items={data.news_driven || []}
             liveQuotes={liveQuotes}
             onAnalyze={onAnalyze}
           />
           <Section
             title="Results / earnings"
-            subtitle="Upcoming or recent results catalysts"
+            subtitle="Results/earnings catalysts (preferred over thin news)"
             items={data.results_driven || []}
             liveQuotes={liveQuotes}
             onAnalyze={onAnalyze}
           />
           <Section
             title="Bulk / insider"
-            subtitle="Bulk deals and insider transaction activity"
+            subtitle="Bulk/block deals & insider — highest priority section"
             items={data.bulk_insider_driven || []}
             liveQuotes={liveQuotes}
             onAnalyze={onAnalyze}

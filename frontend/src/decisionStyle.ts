@@ -6,28 +6,28 @@ export const decisionStyle: Record<
     color: "text-signal-buy",
     bg: "bg-signal-buy/10",
     border: "border-signal-buy/40",
-    glyph: "●",
+    glyph: "▲",
     verb: "Act now",
   },
   "PREPARE TO BUY": {
     color: "text-signal-prepare",
     bg: "bg-signal-prepare/10",
     border: "border-signal-prepare/40",
-    glyph: "◐",
+    glyph: "◆",
     verb: "Get ready",
   },
   HOLD: {
     color: "text-signal-hold",
     bg: "bg-signal-hold/10",
     border: "border-signal-hold/40",
-    glyph: "◆",
+    glyph: "■",
     verb: "Stay in",
   },
-  "WAIT": { // <--- NEW: Added for newly listed stocks
+  WAIT: {
     color: "text-signal-hold",
     bg: "bg-signal-hold/10",
     border: "border-signal-hold/40",
-    glyph: "◐",
+    glyph: "●",
     verb: "Monitor",
   },
   "DO NOT BUY": {

@@ -26,6 +26,28 @@ export default function Training() {
   // NEW: manual intervention controls (for when scheduler-service isn't running)
   const [runningT1, setRunningT1] = useState(false);
   const [runningT5, setRunningT5] = useState(false);
+  const [evalStatus, setEvalStatus] = useState<{
+    t1?: {
+      pending: number;
+      evaluated: number;
+      due_now: number;
+      progress_pct: number;
+      eta_sweep_label: string;
+      success_rate_pct: number | null;
+      status: string;
+      next_unlock_hours: number | null;
+    };
+    t5?: {
+      pending: number;
+      evaluated: number;
+      due_now: number;
+      progress_pct: number;
+      eta_sweep_label: string;
+      success_rate_pct: number | null;
+      status: string;
+      next_unlock_hours: number | null;
+    };
+  } | null>(null);
 
   // NEW: animated live training progress
   const [trainProgress, setTrainProgress] = useState<TrainingProgress | null>(null);
@@ -121,6 +143,15 @@ export default function Training() {
     }
   };
 
+  const refreshEvaluateStatus = async () => {
+    try {
+      const st = await api.getEvaluateStatus();
+      setEvalStatus({ t1: st.t1, t5: st.t5 });
+    } catch {
+      /* optional endpoint */
+    }
+  };
+
   // Manual fallback for evaluate_t1/evaluate_t5, in case scheduler-service
   // isn't running. Sweeps every pending prediction, same endpoint the
   // backend would call on a cron.
@@ -128,32 +159,43 @@ export default function Training() {
     const setRunning = period === "t1" ? setRunningT1 : setRunningT5;
     setRunning(true);
     try {
-      const res = await api.triggerEvaluation(period);
+      await api.triggerEvaluation(period);
       const label = period === "t1" ? "T+1" : "T+5";
       showToast(
         "info",
-        `${label} evaluation started in the background. If most symbols show "not enough data", wait 1–5 trading days after recording picks — yfinance needs future price bars.`
+        `${label} evaluation started. Tracking progress (same style as Market Scan stages)...`
       );
+      await refreshEvaluateStatus();
+      // Poll evaluate status for ~25s while background sweep runs
+      let ticks = 0;
+      const poll = window.setInterval(async () => {
+        ticks += 1;
+        await refreshEvaluateStatus();
+        if (ticks >= 12) {
+          window.clearInterval(poll);
+          setRunning(false);
+          fetchPredictionHistory();
+          fetchPeriodRollup(periodView);
+          fetchStatus();
+          showToast(
+            "info",
+            `${label} sweep requested. Empty outcomes usually mean not enough calendar time / price bars yet.`
+          );
+        }
+      }, 2000);
       setTimeout(() => {
         fetchPredictionHistory();
         fetchPeriodRollup(periodView);
         fetchStatus();
       }, 4000);
-      // Second refresh after sweep has had time to run
-      setTimeout(() => {
-        fetchPredictionHistory();
-        fetchPeriodRollup(periodView);
-        showToast("info", `${label} sweep finished requesting. Check history below — empty outcomes usually mean prices not available yet for the horizon.`);
-      }, 20000);
     } catch (err: any) {
+      setRunning(false);
       const msg = err?.message || String(err || "");
       if (msg.includes("502") || msg.includes("unreachable") || msg.includes("timeout")) {
         showToast("error", `Could not reach training service for ${period.toUpperCase()} (cold start / timeout). Wait ~30s and try again.`);
       } else {
         showToast("error", `Failed to trigger ${period.toUpperCase()} evaluation: ${msg.slice(0, 180)}`);
       }
-    } finally {
-      setRunning(false);
     }
   };
 
@@ -163,6 +205,7 @@ export default function Training() {
     fetchPredictionHistory();
     fetchInsights();
     fetchSummaryMetrics();
+    refreshEvaluateStatus();
     fetchPeriodRollup("daily");
     return () => {
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
@@ -645,6 +688,39 @@ export default function Training() {
       {/* Manual intervention: for when scheduler-service isn't running these on
           its own cron. Each button hits the same endpoint the automation would. */}
       <div className="bg-graphite border border-slate/60 rounded-xl p-4">
+        <h3 className="font-mono text-xs text-mist uppercase tracking-widest mb-2">
+          🎓 How “Add to Training” works
+        </h3>
+        <p className="font-mono text-[11px] text-mist/80 leading-relaxed">
+          One snapshot per symbol + decision per <strong className="text-paper">IST calendar day</strong>.
+          If you see “already in today&apos;s training set”, those picks are already tracked for T+1 / T+5 —
+          not a failure. Scores refresh when price/score moves. Use <em>All Actionable for Training</em>
+          from Market Scan (does not open trades). Use <em>to Trade</em> only when you want paper positions.
+        </p>
+        {status && (
+          <div className="mt-2 font-mono text-[11px] text-mist/70 flex flex-wrap gap-3">
+            <span>DB: {(status as any).db_backend || "unknown"}</span>
+            {(status as any).live_win_rate != null && (
+              <span>
+                Live win-rate: {Math.round(Number((status as any).live_win_rate) * 1000) / 10}%
+                {(status as any).live_win_rate_n != null ? ` (n=${(status as any).live_win_rate_n})` : ""}
+              </span>
+            )}
+            {evalStatus?.t1 && (
+              <span>
+                T+1 pending {evalStatus.t1.pending} · due {evalStatus.t1.due_now}
+              </span>
+            )}
+            {evalStatus?.t5 && (
+              <span>
+                T+5 pending {evalStatus.t5.pending} · due {evalStatus.t5.due_now}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="bg-graphite border border-slate/60 rounded-xl p-4">
         <h3 className="font-mono text-xs text-mist uppercase tracking-widest mb-3">
           🛠️ Manual Controls (use if automation isn't running)
         </h3>
@@ -667,6 +743,41 @@ export default function Training() {
         <p className="text-mist/40 text-[11px] mt-2">
           Trade mark-to-market has its own manual trigger on the Trades tab.
         </p>
+        {evalStatus && (
+          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {(["t1", "t5"] as const).map((key) => {
+              const b = evalStatus[key];
+              if (!b) return null;
+              const label = key === "t1" ? "T+1" : "T+5";
+              const running = key === "t1" ? runningT1 : runningT5;
+              return (
+                <div key={key} className="rounded-lg border border-slate/50 bg-slate/20 p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-mono text-xs text-mist uppercase tracking-widest">{label} queue</span>
+                    <span className="font-mono text-[10px] text-signal-prepare">
+                      {running ? "sweeping…" : b.status}
+                    </span>
+                  </div>
+                  <div className="h-1.5 rounded bg-slate/60 overflow-hidden mb-2">
+                    <div
+                      className="h-full bg-signal-prepare/70 transition-all"
+                      style={{ width: `${Math.min(100, b.progress_pct || 0)}%` }}
+                    />
+                  </div>
+                  <div className="font-mono text-[11px] text-mist/80 space-y-0.5">
+                    <div>Evaluated {b.evaluated} · Pending {b.pending} · Due now {b.due_now}</div>
+                    <div>
+                      Success {b.success_rate_pct != null ? `${b.success_rate_pct}%` : "—"}
+                      {" · "}
+                      ETA {b.eta_sweep_label || "—"}
+                      {b.next_unlock_hours != null ? ` · next unlock ~${b.next_unlock_hours}h` : ""}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Training in progress: animated stage pipeline */}

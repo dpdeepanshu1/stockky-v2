@@ -182,16 +182,23 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         false
       );
       const stored = results.filter((r) => r.record_status === "stored").length;
+      const updated = results.filter((r) => r.record_status === "updated").length;
       const already = results.filter((r) => r.record_status === "already_recorded").length;
+      // One snapshot per symbol+decision per IST day — already = T+1/T+5 already tracking
+      const parts: string[] = [];
+      if (stored) parts.push(`${stored} new`);
+      if (updated) parts.push(`${updated} refreshed`);
+      if (already) parts.push(`${already} already in today's training set`);
+      if (!parts.length) parts.push("no changes");
       setCommitMessage(
-        `🎓 Training: ${stored} new, ${already} already recorded (no trades opened)`
+        `🎓 Training: ${parts.join(", ")} · T+1/T+5 tracking active · no trades opened`
       );
     } catch (err) {
       console.error(err);
       setCommitMessage(`Failed: ${(err as Error).message || "unknown error"}`);
     } finally {
       setCommitting(null);
-      setTimeout(() => setCommitMessage(null), 6000);
+      setTimeout(() => setCommitMessage(null), 8000);
     }
   };
 
@@ -223,6 +230,27 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
     return msg;
   };
 
+  /** Pre-check portfolio cash; show deposit popup if clearly short. */
+  const ensureCashForTrades = async (count: number): Promise<boolean> => {
+    const approxNeeded = Math.max(count, 1) * 10000;
+    try {
+      const s = await api.getPortfolioSummary();
+      const available = typeof s?.cash_balance === "number" ? s.cash_balance : 0;
+      // Need at least ~1x capital for first trade; warn if clearly insufficient
+      if (available < 1000 || available < Math.min(approxNeeded * 0.3, 10000)) {
+        setBalanceLow({ needed: approxNeeded, available });
+        setCommitMessage(
+          `Low balance: ₹${available.toLocaleString("en-IN")} available, ~₹${approxNeeded.toLocaleString("en-IN")} needed for ${count} trade(s).`
+        );
+        setTimeout(() => setCommitMessage(null), 8000);
+        return false;
+      }
+    } catch {
+      // If summary fails, still allow attempt — backend will enforce
+    }
+    return true;
+  };
+
   /** Top 5 value-adjusted actionable → open paper trades + record for T+1/T+5 */
   const handleTop5ToTrade = async () => {
     if (top5Actionable.length === 0) {
@@ -234,6 +262,11 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
     setCommitMessage(null);
     setBalanceLow(null);
     try {
+      const ok = await ensureCashForTrades(top5Actionable.length);
+      if (!ok) {
+        setCommitting(null);
+        return;
+      }
       const { results } = await api.commitActionableToTrade(top5Actionable.map(toActionablePick));
       setCommitMessage(summarizeTradeResults(results));
     } catch (err) {
@@ -256,6 +289,11 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
     setCommitMessage(null);
     setBalanceLow(null);
     try {
+      const ok = await ensureCashForTrades(allActionable.length);
+      if (!ok) {
+        setCommitting(null);
+        return;
+      }
       const { results } = await api.commitActionableToTrade(allActionable.map(toActionablePick));
       setCommitMessage(summarizeTradeResults(results));
     } catch (err) {
@@ -406,9 +444,13 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
                 type="button"
                 className="btn-terminal"
                 onClick={() => {
+                  const needed = Math.max(0, (balanceLow.needed ?? 0) - (balanceLow.available ?? 0));
                   setBalanceLow(null);
-                  // parent may not expose setTab; use hash navigation hint
-                  window.dispatchEvent(new CustomEvent("stockky:goto-trades"));
+                  window.dispatchEvent(
+                    new CustomEvent("stockky:goto-trades", {
+                      detail: { openDeposit: true, suggestedAmount: needed || 10000 },
+                    })
+                  );
                 }}
               >
                 Add Balance / Open Trades

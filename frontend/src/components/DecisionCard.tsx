@@ -353,6 +353,31 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
               {data.decision}
             </h2>
             <p className="text-mist text-sm">{style.verb} · {data.confidence} confidence</p>
+            {data.data_quality && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <span
+                  className={`font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border ${
+                    data.data_quality.level === "high"
+                      ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/10"
+                      : data.data_quality.level === "low"
+                      ? "border-amber-500/40 text-amber-200 bg-amber-500/10"
+                      : "border-slate-400/40 text-mist bg-slate/20"
+                  }`}
+                >
+                  Data quality: {data.data_quality.level || "unknown"}
+                </span>
+                {data.data_quality.note && (
+                  <span className="font-mono text-[10px] text-mist/70">{data.data_quality.note}</span>
+                )}
+              </div>
+            )}
+            {data.data_quality?.flags && data.data_quality.flags.length > 0 && (
+              <ul className="mt-1 font-mono text-[10px] text-mist/60 list-disc list-inside">
+                {data.data_quality.flags.slice(0, 4).map((f, i) => (
+                  <li key={i}>{f}</li>
+                ))}
+              </ul>
+            )}
           </div>
 
           <div className="text-right font-mono">

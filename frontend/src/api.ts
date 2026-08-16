@@ -65,6 +65,7 @@ export interface Decision {
   fundamental_metrics?: FundamentalMetrics;
   data_insufficient?: boolean;
   fundamental_fallback?: boolean;
+  data_quality?: { level?: string; flags?: string[]; note?: string; sources_used?: string[] };
   event_score_delta?: number;
   event_data?: Record<string, unknown> | null;
   holding_period_estimate?: {
@@ -374,7 +375,7 @@ export interface ActionablePick {
 export interface ActionableCommitResult {
   symbol: string;
   prediction_id: string;
-  record_status: "stored" | "already_recorded";
+  record_status: "stored" | "already_recorded" | "updated";
   trade_id: string | null;
   trade_status: string;
 }
@@ -728,6 +729,39 @@ export const api = {
 
   getTrainingProgress: () =>
     request<TrainingProgress>("/training/api/train/progress", undefined, 1, 10000),
+
+  /** T+1 / T+5 evaluation queue progress (pending, due, ETA). */
+  getEvaluateStatus: () =>
+    request<{
+      t1: {
+        period: string;
+        total: number;
+        pending: number;
+        evaluated: number;
+        due_now: number;
+        success: number;
+        success_rate_pct: number | null;
+        progress_pct: number;
+        eta_sweep_seconds: number;
+        eta_sweep_label: string;
+        next_unlock_hours: number | null;
+        status: string;
+      };
+      t5: {
+        period: string;
+        total: number;
+        pending: number;
+        evaluated: number;
+        due_now: number;
+        success: number;
+        success_rate_pct: number | null;
+        progress_pct: number;
+        eta_sweep_seconds: number;
+        eta_sweep_label: string;
+        next_unlock_hours: number | null;
+        status: string;
+      };
+    }>("/training/api/evaluate/status", undefined, 2, 20000),
 
   markTradesToMarket: () =>
     request<{ status: string }>("/training/api/trades/mark-to-market", { method: "POST" }, 1, 30000),

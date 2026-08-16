@@ -69,10 +69,60 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const goTrades = () => setTab("trades");
+    const goTrades = (ev?: Event) => {
+      setTab("trades");
+      // Optional: ask Trades tab to open deposit panel
+      try {
+        const detail = (ev as CustomEvent)?.detail;
+        if (detail?.openDeposit) {
+          window.setTimeout(() => {
+            window.dispatchEvent(new CustomEvent("stockky:open-deposit", { detail }));
+          }, 150);
+        }
+      } catch {}
+    };
     window.addEventListener("stockky:goto-trades", goTrades as EventListener);
     return () => window.removeEventListener("stockky:goto-trades", goTrades as EventListener);
   }, []);
+
+  // Idle-aware free-tier load control:
+  // - Track user activity
+  // - After 5 min idle during market hours → one light /ops/idle-tick
+  // - When user is active, prefer caches (no extra background work)
+  useEffect(() => {
+    let lastActive = Date.now();
+    let idleSent = false;
+    const mark = () => {
+      lastActive = Date.now();
+      idleSent = false;
+    };
+    const events = ["pointerdown", "keydown", "scroll", "touchstart", "visibilitychange"] as const;
+    events.forEach((e) => window.addEventListener(e, mark, { passive: true }));
+
+    const timer = window.setInterval(async () => {
+      try {
+        if (document.visibilityState === "hidden") return;
+        const idleMs = Date.now() - lastActive;
+        if (idleMs < 5 * 60 * 1000 || idleSent) return;
+        // Only during local IST market-ish window (browser local may differ; server still gates)
+        const res = await fetch(`${getApiUrl().replace(/\/$/, "")}/ops/idle-tick`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        });
+        idleSent = true;
+        // If off-market server returns ran:false — stay quiet
+        if (!res.ok) return;
+      } catch {
+        /* ignore */
+      }
+    }, 30000);
+
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, mark));
+      window.clearInterval(timer);
+    };
+  }, []);
+
 
   const [backendUp, setBackendUp] = useState<"checking" | "up" | "down">("checking");
   const [isWaking, setIsWaking] = useState(false);
@@ -224,12 +274,21 @@ export default function App() {
 
   async function handleSearch(symbol: string) {
     if (!symbol.trim()) return;
+    const sym = symbol.trim().toUpperCase();
+    try {
+      window.alert(
+        `Analysis started for ${sym}\n\nFetching quote, technicals, fundamentals, news & decision. This may take a few seconds.`
+      );
+    } catch {}
+    setStatusMessage(`🟢 Analysis started for ${sym}`);
+    setTimeout(() => setStatusMessage(null), 5000);
+
     setTab("dashboard");
     scanCancelledRef.current = true;
     clearScanActivity();
     lastRequestType.current = "stock";
     lastSymbol.current = symbol.trim();
-    setView({ mode: "loading", label: `Analysing ${symbol.toUpperCase()}...` });
+    setView({ mode: "loading", label: `Analysing ${sym}...` });
     setScanTaskId(null);
     setCancelRequested(false);
     try {
@@ -237,8 +296,12 @@ export default function App() {
       try { localStorage.setItem("stockky_last_analysis", JSON.stringify(data)); } catch {}
       setView({ mode: "stock", data });
       setQuery("");
+      setStatusMessage(`✅ Analysis ready for ${sym}`);
+      setTimeout(() => setStatusMessage(null), 4000);
     } catch (e) {
       setView({ mode: "error", message: (e as Error).message });
+      setStatusMessage(`❌ Analysis failed for ${sym}`);
+      setTimeout(() => setStatusMessage(null), 5000);
     }
   }
 
@@ -493,18 +556,18 @@ export default function App() {
     })),
   ];
 
-  const navItems: { id: Tab; label: string; short: string }[] = [
-    { id: "dashboard", label: "Dashboard", short: "Home" },
-    { id: "hot", label: "Hot Picks", short: "Picks" },
-    { id: "training", label: "Training", short: "Train" },
-    { id: "trades", label: "Trades", short: "Trade" },
-    { id: "notifications", label: "Alerts", short: "Alerts" },
-    { id: "watchlist", label: "Watchlist", short: "List" },
-    { id: "settings", label: "Settings", short: "Set" },
+  const navItems: { id: Tab; label: string; short: string; icon: string }[] = [
+    { id: "dashboard", label: "Dashboard", short: "Home", icon: "▣" },
+    { id: "hot", label: "Hot Picks", short: "Picks", icon: "⚡" },
+    { id: "training", label: "Training", short: "Train", icon: "◈" },
+    { id: "trades", label: "Trades", short: "Trade", icon: "⇄" },
+    { id: "notifications", label: "Alerts", short: "Alerts", icon: "◉" },
+    { id: "watchlist", label: "Watchlist", short: "List", icon: "☆" },
+    { id: "settings", label: "Settings", short: "Set", icon: "⚙" },
   ];
 
   return (
-    <div className="min-h-screen bg-ink text-paper relative terminal-shell">
+    <div className="min-h-screen bg-ink text-paper relative terminal-shell terminal-premium">
       <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} actions={cmdActions} />
       {statusMessage && (
         <div className="fixed top-4 right-4 z-50 bg-graphite border border-signal-buy/40 rounded-lg px-4 py-2.5 shadow-2xl animate-fadeIn flex items-center gap-2">
@@ -516,9 +579,9 @@ export default function App() {
       <aside className="terminal-sidebar hidden md:flex">
         <div className="sidebar-brand">
           <span className="font-display text-lg tracking-tight">Stockky</span>
-          <span className="mono text-[9px] text-mist tracking-widest uppercase">NSE · AI</span>
+          <span className="mono text-[9px] text-mist tracking-widest uppercase">Terminal · NSE</span>
           <span className={`mono text-[9px] ${wsLive ? "text-signal-buy" : "text-mist/50"}`}>
-            {wsLive ? "● LIVE" : "○ polling"}
+            {wsLive ? "● LIVE FEED" : "○ POLLING"}
           </span>
         </div>
         <nav className="sidebar-nav">
@@ -534,6 +597,7 @@ export default function App() {
                 if (item.id !== "settings") setShowSettings(false);
               }}
             >
+              <span className="mono text-[11px] opacity-70 w-4">{item.icon}</span>
               {item.label}
             </button>
           ))}
@@ -577,6 +641,17 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {/* Bloomberg-style status strip */}
+      <div className="terminal-status-strip hidden md:flex">
+        <span className="pill amber-txt">STOCKKY TERMINAL</span>
+        <span className={`pill ${wsLive ? "live" : ""}`}>{wsLive ? "LIVE" : "POLL"}</span>
+        <span className="pill">BACKEND {backendUp === "up" ? "UP" : backendUp === "down" ? "DOWN" : "…"}</span>
+        <span className="pill">TAB {tab.toUpperCase()}</span>
+        <span className="mono text-[10px] text-mist/60 ml-auto">
+          {new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: false })} IST
+        </span>
+      </div>
 
       {showServiceManager && (
         <ServiceManager onClose={() => setShowServiceManager(false)} />
@@ -913,24 +988,26 @@ export default function App() {
           <button
             key={item.id}
             type="button"
-            className={`bottom-nav-item ${tab === item.id ? "active" : ""}`}
+            className={tab === item.id ? "active" : ""}
             onClick={() => setTab(item.id)}
           >
+            <span className="block text-[12px] mb-0.5">{item.icon}</span>
             <span>{item.short}</span>
           </button>
         ))}
         <button
           type="button"
-          className={`bottom-nav-item ${tab === "settings" ? "active" : ""}`}
+          className={tab === "settings" ? "active" : ""}
           onClick={() => setTab("settings")}
         >
+          <span className="block text-[12px] mb-0.5">⚙</span>
           <span>More</span>
         </button>
       </nav>
 
-<footer className="max-w-6xl mx-auto px-4 sm:px-6 py-6 border-t border-slate/40 mt-12">
-        <p className="text-[11px] text-mist/40 font-mono">
-          For informational use only -- not investment advice. Always verify before trading.
+      <footer className="md:ml-[200px] px-4 sm:px-6 py-5 border-t border-slate/40 mt-8 pb-20 md:pb-5">
+        <p className="text-[10px] text-mist/40 font-mono tracking-wide uppercase">
+          Stockky Terminal · Informational only — not investment advice · Verify before trading
         </p>
       </footer>
     </div>

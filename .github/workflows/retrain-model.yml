@@ -1,10 +1,8 @@
 name: Retrain Prediction Model
 
 on:
-  # Run daily at 00:00 UTC
   schedule:
     - cron: '0 0 * * *'
-  # Allow manual trigger from the Actions tab
   workflow_dispatch:
 
 jobs:
@@ -12,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write  # Needed to push the model file back to the repo
+      contents: write
 
     steps:
       - name: Checkout code
@@ -24,7 +22,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        working-directory: services/prediction-service
+        working-directory: services/decision-prediction-service/prediction
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -37,31 +35,27 @@ jobs:
           FUNDAMENTAL_URL: ${{ secrets.FUNDAMENTAL_URL }}
           DECISION_URL: ${{ secrets.DECISION_URL }}
         run: |
-          echo "Waking up backend services (to avoid cold-start timeouts)..."
+          echo "Waking up backend services..."
           curl -I $API_GATEWAY_URL/health || true
           curl -I $MARKET_DATA_URL/health || true
           curl -I $TECHNICAL_URL/health || true
           curl -I $FUNDAMENTAL_URL/health || true
           curl -I $DECISION_URL/health || true
-          echo "Waiting 60 seconds for services to fully spin up..."
+          echo "Waiting 60 seconds..."
           sleep 60
 
       - name: Retrain model
-        working-directory: services/prediction-service
+        working-directory: services/decision-prediction-service/prediction
         run: |
           python train.py
-          # Ensure the output directory for the volume mount exists
-          mkdir -p ../../data/prediction-model
-          # Copy the trained model to the mounted volume location
-          cp model.pkl ../../data/prediction-model/model.pkl
+          mkdir -p ../../../data/prediction-model
+          cp model.pkl ../../../data/prediction-model/model.pkl
 
       - name: Commit and push updated model
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          # Add the model from the volume-mapped path
           git add data/prediction-model/model.pkl
-          # Only commit if there are changes
           if git diff --staged --quiet; then
             echo "No changes to model.pkl"
           else

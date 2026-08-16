@@ -32,7 +32,7 @@ IST = ZoneInfo("Asia/Kolkata")
 
 # ---- Live Render URLs ----
 DECISION_URL = os.getenv("DECISION_URL", "https://decision-prediction-service.onrender.com/decision")
-NOTIFICATION_URL = os.getenv("NOTIFICATION_URL", "https://notification-scheduler-service-x8vc.onrender.com/notification//notification")
+NOTIFICATION_URL = os.getenv("NOTIFICATION_URL", "https://notification-scheduler-service-x8vc.onrender.com/notification/notification")
 NEWS_URL = os.getenv("NEWS_URL", "https://analysis-intelligence-service.onrender.com/news")
 MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
 TECHNICAL_URL = os.getenv("TECHNICAL_URL", "https://analysis-intelligence-service.onrender.com/technical")

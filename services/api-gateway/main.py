@@ -121,6 +121,9 @@ INDICES_LAST_KNOWN  = "stockky:indices_last_known"
 
 FUNDAMENTAL_CACHE_PREFIX = "stockky:fundamental:"
 EVENT_CACHE_PREFIX = "stockky:event:"
+NEWS_CACHE_PREFIX = "stockky:news:"
+# Slow-changing layers: 24h. Nightly cron refreshes them after midnight IST.
+STATIC_PARAM_TTL = int(os.getenv("STATIC_PARAM_TTL", "86400"))  # 24 hours
 LAST_FULL_SCAN_KEY = "stockky:last_full_scan"
 LAST_FULL_SCAN_TTL = int(os.getenv("LAST_FULL_SCAN_TTL", "900"))  # 15 min default
 DECIDE_CACHE_PREFIX = "stockky:decide_cache:"
@@ -648,7 +651,7 @@ async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> t
             data = resp.json()
             metrics = data.get("metrics")
             fallback_used = data.get("fallback_used", False)
-            _redis_set(cache_key, {"metrics": metrics, "fallback": fallback_used}, ttl=21600)
+            _redis_set(cache_key, {"metrics": metrics, "fallback": fallback_used}, ttl=STATIC_PARAM_TTL)
             return metrics, fallback_used
     except Exception as e:
         logger.warning(f"Fundamental fetch failed for {symbol}: {e}")
@@ -665,18 +668,26 @@ async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Option
         if resp.status_code == 200:
             data = resp.json()
             if data and isinstance(data, dict):
-                _redis_set(cache_key, data, ttl=21600)
+                _redis_set(cache_key, data, ttl=STATIC_PARAM_TTL)
                 return data
     except Exception as e:
         logger.warning(f"Events fetch failed for {symbol}: {e}")
     return None
 
 async def _fetch_news_cached(symbol: str, client: httpx.AsyncClient) -> Optional[dict]:
+    cache_key = f"{NEWS_CACHE_PREFIX}{symbol}"
+    cached = _redis_get(cache_key)
+    if cached and isinstance(cached, dict):
+        return cached
+
     try:
         resp = await _cb_get(client, "news", f"{NEWS_URL}/analyze/{symbol}", timeout=20)
         if resp.status_code == 200:
             data = resp.json()
             if data and isinstance(data, dict):
+                # News moves faster than fund/events; still cache aggressively off-hours
+                ttl = 3600 if _is_market_open_ist() else STATIC_PARAM_TTL
+                _redis_set(cache_key, data, ttl=ttl)
                 return data
     except Exception as e:
         logger.warning(f"News fetch failed for {symbol}: {e}")
@@ -1666,6 +1677,100 @@ async def ops_check_alert():
     }
 
 
+@app.post("/ops/refresh-static-params")
+async def ops_refresh_static_params(limit: int = 60):
+    """Nightly job: re-fetch fundamentals / events / news for scan universe into Redis (24h TTL).
+
+    Live quotes & decisions still refresh during market hours; this only warms
+    slow-changing layers so daytime traffic hits cache and stays under rate limits.
+    """
+    universe = _build_scan_universe()[: max(10, min(limit, 80))]
+    refreshed = {"fundamental": 0, "event": 0, "news": 0, "errors": 0}
+    async with httpx.AsyncClient(timeout=40.0) as client:
+        for sym in universe:
+            base = (sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
+            if not base:
+                continue
+            try:
+                # Force refresh: clear cache keys then re-fetch into 24h TTL
+                try:
+                    if _redis:
+                        _redis.delete(f"{FUNDAMENTAL_CACHE_PREFIX}{base}")
+                        _redis.delete(f"{EVENT_CACHE_PREFIX}{base}")
+                        _redis.delete(f"{NEWS_CACHE_PREFIX}{base}")
+                except Exception:
+                    pass
+                metrics_data, _fb = await _fetch_fundamental_cached(base, client)
+                if metrics_data is not None:
+                    refreshed["fundamental"] += 1
+                ev = await _fetch_events_cached(base, client)
+                if ev is not None:
+                    refreshed["event"] += 1
+                news = await _fetch_news_cached(base, client)
+                if news is not None:
+                    refreshed["news"] += 1
+            except Exception as e:
+                refreshed["errors"] += 1
+                logger.warning("refresh-static-params %s: %s", base, e)
+            await asyncio.sleep(0.25)
+
+    # Also refresh hot-stocks cache so next UI load is cheap
+    try:
+        if _redis:
+            _redis.delete(HOT_STOCKS_CACHE_KEY)
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "universe_size": len(universe),
+        "refreshed": refreshed,
+        "ttl_seconds": STATIC_PARAM_TTL,
+        "at": datetime.now(IST).isoformat(),
+    }
+
+
+
+@app.post("/ops/idle-tick")
+async def ops_idle_tick():
+    """Called by frontend after ~5 min idle during market hours only.
+
+    Light background work: refresh indices cache if stale, optionally warm
+    hot-stocks if cache missing. Never runs heavy scans. Off-hours: no-op.
+    """
+    phase = _market_session_phase_ist()
+    if phase not in ("preopen", "open", "post"):
+        return {
+            "ran": False,
+            "reason": "off_market",
+            "phase": phase,
+            "note": "Background idle work only during market window; use manual Wake otherwise.",
+        }
+    did = []
+    try:
+        # Indices: cheap, 5 min cache already
+        get_market_indices(force_refresh=False)
+        did.append("indices")
+    except Exception as e:
+        logger.debug("idle-tick indices: %s", e)
+    try:
+        cached = _redis_get(HOT_STOCKS_CACHE_KEY)
+        if not cached:
+            # Only rebuild if empty — respects short market TTL
+            await stockky_hot_stocks(force=False)
+            did.append("hot_stocks_miss")
+        else:
+            did.append("hot_stocks_cached")
+    except Exception as e:
+        logger.debug("idle-tick hot: %s", e)
+    return {
+        "ran": True,
+        "phase": phase,
+        "actions": did,
+        "at": datetime.now(IST).isoformat(),
+    }
+
+
 @app.get("/wake-all")
 @app.post("/wake-all")
 async def wake_all_services():
@@ -1881,6 +1986,33 @@ def get_stock_decision(symbol: str, already_owned: bool = False):
             result["symbol"] = symbol_to_use
 
         result["natural_language_summary"] = _generate_summary(result)
+
+        # Soft data-quality flags for UI (free-tier honesty)
+        flags = []
+        level = "high"
+        if result.get("fundamental_fallback") or result.get("data_insufficient"):
+            flags.append("Fundamentals partial/fallback")
+            level = "medium"
+        if result.get("news_score") is None:
+            flags.append("News unavailable")
+            level = "low" if level != "high" else "medium"
+        if result.get("prediction_score") is None:
+            flags.append("Model score missing")
+        tech_reasons = (result.get("reasons") or {}).get("technical") or []
+        if any("delivery" in str(r).lower() and "unavailable" in str(r).lower() for r in tech_reasons):
+            flags.append("Delivery % not official")
+            level = "medium"
+        if result.get("training_score") in (None, 0, 50):
+            flags.append("Training signal thin")
+        result["data_quality"] = {
+            "level": level if flags else "high",
+            "flags": flags,
+            "note": (
+                "Scores may be soft — limited free data"
+                if flags
+                else "Core inputs present"
+            ),
+        }
         return result
 
     except httpx.HTTPStatusError as e:
@@ -1911,18 +2043,24 @@ def _merge_fundamentals(normalized: dict, symbol: str):
             data = resp.json()
             metrics = data.get("metrics")
             fallback_used = data.get("fallback_used", False)
-            _redis_set(cache_key, {"metrics": metrics, "fallback": fallback_used}, ttl=21600)
+            _redis_set(cache_key, {"metrics": metrics, "fallback": fallback_used}, ttl=STATIC_PARAM_TTL)
             normalized["fundamental_metrics"] = metrics if metrics else {}
             normalized["fundamental_fallback"] = fallback_used
     except Exception as e:
         logger.warning(f"Fundamental fetch failed for {symbol}: {e}")
 
 def _fetch_news(symbol: str) -> Optional[dict]:
+    cache_key = f"{NEWS_CACHE_PREFIX}{symbol}"
+    cached = _redis_get(cache_key)
+    if cached and isinstance(cached, dict):
+        return cached
     try:
         resp = httpx.get(f"{NEWS_URL}/analyze/{symbol}", timeout=30)
         if resp.status_code == 200:
             data = resp.json()
             if data and isinstance(data, dict):
+                ttl = 3600 if _is_market_open_ist() else STATIC_PARAM_TTL
+                _redis_set(cache_key, data, ttl=ttl)
                 return data
     except Exception as e:
         logger.warning(f"News fetch failed for {symbol}: {e}")
@@ -1938,7 +2076,7 @@ def _fetch_events(symbol: str) -> Optional[dict]:
         if resp.status_code == 200:
             data = resp.json()
             if data and isinstance(data, dict):
-                _redis_set(cache_key, data, ttl=21600)
+                _redis_set(cache_key, data, ttl=STATIC_PARAM_TTL)
                 return data
     except Exception as e:
         logger.warning(f"Events fetch failed for {symbol}: {e}")
@@ -2413,6 +2551,22 @@ def scan_watchlist():
     return result
 
 # ── Market routes ────────────────────────────────────────────────────────────
+@app.get("/market/session")
+def market_session():
+    """Current NSE session phase for UI / keep-warm / quote policy."""
+    now = datetime.now(IST)
+    phase = _market_session_phase_ist()
+    return {
+        "phase": phase,
+        "is_open": phase == "open",
+        "is_market_day": phase not in ("closed", "holiday") or (now.weekday() < 5 and not is_nse_holiday(now.date())),
+        "is_holiday": phase == "holiday",
+        "now_ist": now.isoformat(),
+        "session_window": "09:15–15:30 IST Mon–Fri (ex holidays)",
+        "quote_polling": phase in ("preopen", "open", "post"),
+    }
+
+
 @app.get("/market/top-gainers")
 def market_top_gainers():
     data = _get_nifty50_data()
@@ -2830,8 +2984,17 @@ async def get_training_score(symbol: str):
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(f"{TRAINING_URL}/training-score/{symbol}")
+            if resp.status_code == 404:
+                return {
+                    "symbol": symbol.upper(),
+                    "score": None,
+                    "available": False,
+                    "message": "No training score for this symbol yet",
+                }
             resp.raise_for_status()
             return resp.json()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Training service unreachable: {str(e)}")
 
@@ -2905,30 +3068,108 @@ async def training_other_proxy(path: str, request: Request):
 
 # ── Stockky 🔥 Stocks – curated news / results / bulk / insider driven list ──
 HOT_STOCKS_CACHE_KEY = "stockky:hot_stocks"
-HOT_STOCKS_TTL = 1800  # 30 min
+# Market hours: short cache (2–5 min) so UI stays light but not spammy.
+# Off-hours: until next market open (see _hot_stocks_ttl).
+HOT_STOCKS_TTL_OPEN_MIN = int(os.getenv("HOT_STOCKS_TTL_OPEN_MIN", "120"))    # 2 min
+HOT_STOCKS_TTL_OPEN_MAX = int(os.getenv("HOT_STOCKS_TTL_OPEN_MAX", "300"))    # 5 min
+HOT_STOCKS_TTL_OPEN_DEFAULT = int(os.getenv("HOT_STOCKS_TTL_OPEN", "180"))    # 3 min default when open
+
+
+def _seconds_until_next_market_open() -> int:
+    """Seconds from now (IST) until next NSE open 09:15 on a trading day."""
+    now = datetime.now(IST)
+    # Start candidate: today 09:15
+    candidate = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    if now >= candidate:
+        candidate = candidate + timedelta(days=1)
+    # Skip weekends + holidays (max 14 day look-ahead)
+    for _ in range(14):
+        if candidate.weekday() < 5 and not is_nse_holiday(candidate.date()):
+            break
+        candidate = candidate + timedelta(days=1)
+    delta = int((candidate - now).total_seconds())
+    return max(delta, 3600)  # at least 1h
+
+
+def _hot_stocks_ttl() -> int:
+    """Market hours: 1–6h (default 2h). Off-hours: until next market open."""
+    phase = _market_session_phase_ist()
+    if phase in ("preopen", "open", "post"):
+        ttl = HOT_STOCKS_TTL_OPEN_DEFAULT
+        return max(HOT_STOCKS_TTL_OPEN_MIN, min(HOT_STOCKS_TTL_OPEN_MAX, ttl))
+    return _seconds_until_next_market_open()
+
+
+def _hot_payload_fingerprint(payload: dict) -> str:
+    """Stable fingerprint so we can keep cache until content actually changes."""
+    try:
+        parts = []
+        for section in ("news_driven", "results_driven", "bulk_insider_driven"):
+            for item in payload.get(section) or []:
+                parts.append(
+                    f"{item.get('symbol')}:{item.get('decision')}:{item.get('score')}:"
+                    f"{item.get('headline_count')}:{item.get('next_earnings_date')}"
+                )
+        return "|".join(parts)[:800]
+    except Exception:
+        return ""
 
 
 @app.get("/stockky-hot")
 async def stockky_hot_stocks(force: bool = False):
     """Curated list for the Stockky 🔥 Stocks tab.
 
-    Sections:
-      - news_driven: recent relevant news + actionable decision
-      - results_driven: upcoming/recent results/earnings
-      - bulk_insider_driven: bulk/block deals or insider/promoter buying
-    Each item includes decision: BUY NOW | PREPARE TO BUY | DO NOT BUY
-    Uses real scan/cache data when available; never fabricates prices or scores.
+    Quality-first free-tier ranking:
+      1) Prefer bulk/insider + results over weak news-only names
+      2) Drop low-signal news (need enough headlines + score)
+      3) Seed universe from last full-scan BUY/PREPARE picks aggressively
+    Cache: market hours 2–5 min; off-hours until next open.
     """
     if not force:
         cached = _redis_get(HOT_STOCKS_CACHE_KEY)
         if cached:
             return {**cached, "cached": True}
 
-    watch = _load_watchlist()
-    universe = list(dict.fromkeys((watch or []) + _get_news_mentioned_symbols()[:30] + _get_event_symbols()[:20]))
+    # --- Seed universe: last scan actionable first, then watch/events/news ---
+    scan_syms: list = []
+    try:
+        last_scan = _redis_get(LAST_FULL_SCAN_KEY)
+        if isinstance(last_scan, dict):
+            for key in ("recommendations", "recommendations_short", "all_results", "results"):
+                for r in last_scan.get(key) or []:
+                    if not isinstance(r, dict):
+                        continue
+                    dec = (r.get("decision") or "").upper()
+                    if dec in ("BUY NOW", "PREPARE TO BUY"):
+                        s = (r.get("symbol") or "").replace(".NS", "").replace(".BO", "").upper()
+                        if s:
+                            scan_syms.append(s)
+                            # Persist decision cache for ranking
+                            try:
+                                _redis_set(
+                                    f"stockky:last_decision:{s}",
+                                    {
+                                        "decision": r.get("decision"),
+                                        "score": r.get("combined_score") or r.get("score"),
+                                        "reasons": r.get("reasons") or [],
+                                    },
+                                    ttl=86400,
+                                )
+                            except Exception:
+                                pass
+    except Exception as e:
+        logger.debug("hot seed from scan: %s", e)
+
+    watch = _load_watchlist() or []
+    universe = list(dict.fromkeys(
+        scan_syms
+        + list(watch)
+        + (_get_event_symbols()[:25] if True else [])
+        + (_get_news_mentioned_symbols()[:20] if True else [])
+    ))
     if not universe:
         universe = list(_load_searched() or [])[:25]
-    universe = universe[:40]
+    universe = universe[:45]
 
     news_driven: list = []
     results_driven: list = []
@@ -2942,15 +3183,11 @@ async def stockky_hot_stocks(force: bool = False):
                 event_data = None
                 decision_data = None
                 try:
-                    r = await client.get(f"{NEWS_URL}/analyze/{base}")
-                    if r.status_code == 200:
-                        news_data = r.json()
+                    news_data = await _fetch_news_cached(base, client)
                 except Exception:
                     pass
                 try:
-                    r = await client.get(f"{EVENT_URL}/events/{base}")
-                    if r.status_code == 200:
-                        event_data = r.json()
+                    event_data = await _fetch_events_cached(base, client)
                 except Exception:
                     pass
                 try:
@@ -2961,22 +3198,25 @@ async def stockky_hot_stocks(force: bool = False):
                 decision = (decision_data or {}).get("decision") or "DO NOT BUY"
                 score = (decision_data or {}).get("score")
                 reasons = (decision_data or {}).get("reasons") or []
+                if isinstance(reasons, dict):
+                    flat = []
+                    for v in reasons.values():
+                        if isinstance(v, list):
+                            flat.extend(v[:2])
+                        elif v:
+                            flat.append(str(v))
+                    reasons = flat
 
-                hc = (news_data or {}).get("headline_count") or 0
+                hc = int((news_data or {}).get("headline_count") or 0)
                 nscore = (news_data or {}).get("news_score")
-                if hc >= 1 and (nscore is None or nscore >= 45):
-                    news_driven.append({
-                        "symbol": base,
-                        "decision": decision,
-                        "score": score,
-                        "news_score": nscore,
-                        "headline_count": hc,
-                        "summary": (news_data or {}).get("summary") or "",
-                        "reasons": reasons[:4],
-                        "headlines": (news_data or {}).get("headlines") or [],
-                        "section": "news_driven",
-                    })
+                news_summary = (news_data or {}).get("summary") or ""
+                headlines = (news_data or {}).get("headlines") or []
 
+                # Signal strength helpers
+                has_results = False
+                has_bulk_insider = False
+                ins = []
+                bulk = []
                 if event_data:
                     has_results = bool(
                         event_data.get("next_earnings_date")
@@ -2986,18 +3226,6 @@ async def stockky_hot_stocks(force: bool = False):
                             for c in (event_data.get("classified_events") or [])
                         )
                     )
-                    if has_results:
-                        results_driven.append({
-                            "symbol": base,
-                            "decision": decision,
-                            "score": score,
-                            "next_earnings_date": event_data.get("next_earnings_date"),
-                            "earnings_surprise": event_data.get("earnings_surprise"),
-                            "summary": event_data.get("summary") or "",
-                            "reasons": reasons[:4],
-                            "section": "results_driven",
-                        })
-
                     ins = event_data.get("recent_insider_transactions") or []
                     bulk = event_data.get("bulk_deals") or []
                     insider_buy = any(
@@ -3005,42 +3233,109 @@ async def stockky_hot_stocks(force: bool = False):
                         or "purchase" in (i.get("transaction") or "").lower()
                         for i in ins
                     )
-                    if bulk or insider_buy or any(
-                        c.get("event_type") in ("bulk_block", "insider")
-                        for c in (event_data.get("classified_events") or [])
-                    ):
-                        bulk_insider_driven.append({
-                            "symbol": base,
-                            "decision": decision,
-                            "score": score,
-                            "insider_transactions": ins[:3],
-                            "bulk_deals": bulk[:3],
-                            "summary": event_data.get("summary") or "",
-                            "reasons": reasons[:4],
-                            "section": "bulk_insider_driven",
-                        })
+                    has_bulk_insider = bool(
+                        bulk
+                        or insider_buy
+                        or any(
+                            c.get("event_type") in ("bulk_block", "insider")
+                            for c in (event_data.get("classified_events") or [])
+                        )
+                    )
+
+                from_scan = base in set(scan_syms)
+                actionable = decision in ("BUY NOW", "PREPARE TO BUY")
+
+                # NEWS section: stricter — need real headlines + score; drop weak noise
+                # Prefer names that also have scan actionability or event signal
+                news_ok = hc >= 2 and nscore is not None and float(nscore) >= 55
+                if news_ok and (actionable or has_results or has_bulk_insider or from_scan or hc >= 4):
+                    news_driven.append({
+                        "symbol": base,
+                        "decision": decision,
+                        "score": score,
+                        "news_score": nscore,
+                        "headline_count": hc,
+                        "summary": news_summary,
+                        "reasons": reasons[:4],
+                        "headlines": headlines[:5],
+                        "section": "news_driven",
+                        "signal_strength": "high" if (actionable and hc >= 3) else "medium",
+                        "from_scan": from_scan,
+                    })
+
+                if event_data and has_results:
+                    results_driven.append({
+                        "symbol": base,
+                        "decision": decision,
+                        "score": score,
+                        "next_earnings_date": event_data.get("next_earnings_date"),
+                        "earnings_surprise": event_data.get("earnings_surprise"),
+                        "summary": event_data.get("summary") or "",
+                        "reasons": reasons[:4],
+                        "section": "results_driven",
+                        "signal_strength": "high" if actionable else "medium",
+                        "from_scan": from_scan,
+                    })
+
+                if event_data and has_bulk_insider:
+                    bulk_insider_driven.append({
+                        "symbol": base,
+                        "decision": decision,
+                        "score": score,
+                        "insider_transactions": ins[:3],
+                        "bulk_deals": bulk[:3],
+                        "summary": event_data.get("summary") or "",
+                        "reasons": reasons[:4],
+                        "section": "bulk_insider_driven",
+                        "signal_strength": "high" if actionable else "medium",
+                        "from_scan": from_scan,
+                    })
             except Exception as e:
                 logger.warning("stockky-hot skip %s: %s", sym, e)
 
     def _rank(items: list) -> list:
         order = {"BUY NOW": 0, "PREPARE TO BUY": 1, "DO NOT BUY": 2, "SELL": 3}
+        strength = {"high": 0, "medium": 1, "low": 2}
         return sorted(
             items,
-            key=lambda x: (order.get(x.get("decision") or "", 9), -(x.get("score") or 0)),
+            key=lambda x: (
+                0 if x.get("from_scan") else 1,
+                strength.get(x.get("signal_strength") or "low", 9),
+                order.get(x.get("decision") or "", 9),
+                -(x.get("score") or 0),
+                -(x.get("headline_count") or 0),
+            ),
         )
 
+    # Prefer bulk/results; keep news thinner
     payload = {
-        "news_driven": _rank(news_driven)[:15],
-        "results_driven": _rank(results_driven)[:15],
-        "bulk_insider_driven": _rank(bulk_insider_driven)[:15],
+        "news_driven": _rank(news_driven)[:10],
+        "results_driven": _rank(results_driven)[:12],
+        "bulk_insider_driven": _rank(bulk_insider_driven)[:12],
         "generated_at": datetime.now(IST).isoformat(),
         "universe_size": len(universe),
+        "scan_seed_count": len(set(scan_syms)),
         "cached": False,
+        "cache_ttl_seconds": _hot_stocks_ttl(),
+        "market_phase": _market_session_phase_ist(),
+        "fingerprint": "",
+        "quality_note": (
+            "Ranked by scan BUY/PREPARE, bulk/insider, results first; weak news-only names dropped."
+        ),
     }
-    _redis_set(HOT_STOCKS_CACHE_KEY, payload, ttl=HOT_STOCKS_TTL)
+    payload["fingerprint"] = _hot_payload_fingerprint(payload)
+    ttl = int(payload["cache_ttl_seconds"])
+    _redis_set(HOT_STOCKS_CACHE_KEY, payload, ttl=ttl)
+    logger.info(
+        "stockky-hot refreshed: news=%s results=%s bulk=%s scan_seed=%s ttl=%ss phase=%s",
+        len(payload["news_driven"]),
+        len(payload["results_driven"]),
+        len(payload["bulk_insider_driven"]),
+        payload["scan_seed_count"],
+        ttl,
+        payload["market_phase"],
+    )
     return payload
-
-
 
 
 # ── WebSocket real-time hub (scan progress + market ticks + training) ─────────
@@ -3156,27 +3451,41 @@ def _resolve_quote_price(sym: str):
 
 
 async def _quote_broadcast_loop():
-    """Push quotes for all WS-watched symbols every few seconds (free-tier safe)."""
+    """Push quotes for WS-watched symbols.
+    During market hours: ~every 8s for up to 40 symbols.
+    Off-hours / weekend / holiday: idle sleep (no upstream quote spam).
+    """
     while True:
         try:
+            phase = _market_session_phase_ist()
+            # Only hammer market-data while session is live (preopen/open/post)
+            if phase not in ("preopen", "open", "post"):
+                await asyncio.sleep(60)
+                continue
+
             symbols = ws_manager.all_watched_symbols()
-            if symbols:
-                # Cap concurrent watched symbols to protect Yahoo/NSE
-                for sym in symbols[:40]:
-                    q = await asyncio.to_thread(_resolve_quote_price, sym)
-                    if q:
-                        await ws_manager.broadcast(f"quote:{sym}", {
-                            "type": "quote",
-                            **q,
-                        })
-                        try:
-                            metrics.inc("stockky_ws_quote_push_total")
-                        except Exception:
-                            pass
-                    await asyncio.sleep(0.15)
+            if not symbols:
+                await asyncio.sleep(15)
+                continue
+
+            # Cap concurrent watched symbols to protect Yahoo/NSE / free-tier
+            for sym in symbols[:25]:
+                q = await asyncio.to_thread(_resolve_quote_price, sym)
+                if q:
+                    await ws_manager.broadcast(f"quote:{sym}", {
+                        "type": "quote",
+                        **q,
+                    })
+                    try:
+                        metrics.inc("stockky_ws_quote_push_total")
+                    except Exception:
+                        pass
+                await asyncio.sleep(0.2)
         except Exception as e:
             logger.debug("quote loop: %s", e)
-        await asyncio.sleep(8)
+        # Open: 8s; preopen/post: slower
+        phase = _market_session_phase_ist()
+        await asyncio.sleep(8 if phase == "open" else 20)
 
 
 def _ensure_quote_loop():

@@ -80,15 +80,55 @@ NAME_HINTS = {
 
 # Extra aliases used only for relevance filtering (not for query)
 ALIASES: Dict[str, List[str]] = {
-    "PWL": ["physics wallah", "physicswallah", "physics-wallah", "pwl", "pw limited", "pw edtech"],
+    "PWL": ["physics wallah", "physicswallah", "physics-wallah", "pwl", "pw limited", "pw edtech", "pw skills"],
     "RELIANCE": ["reliance industries", "ril", "reliance"],
-    "TCS": ["tata consultancy", "tcs"],
+    "TCS": ["tata consultancy", "tata consultancy services", "tcs"],
     "INFY": ["infosys", "infy"],
     "HDFCBANK": ["hdfc bank", "hdfcbank"],
     "ICICIBANK": ["icici bank", "icicibank"],
-    "SBIN": ["state bank of india", "sbi", "sbin"],
+    "SBIN": ["state bank of india", "sbi ", " sbi", "sbin"],
     "ZOMATO": ["zomato", "eternal limited"],
     "DMART": ["dmart", "avenue supermarts"],
+    "BHARTIARTL": ["bharti airtel", "airtel"],
+    "LT": ["larsen & toubro", "larsen and toubro", "l&t"],
+    "LTM": ["l&t finance", "larsen toubro finance"],
+    "BAJFINANCE": ["bajaj finance"],
+    "BAJAJFINSV": ["bajaj finserv"],
+    "ADANIENT": ["adani enterprises"],
+    "ADANIPORTS": ["adani ports"],
+    "DIXON": ["dixon technologies"],
+    "KPITTECH": ["kpit technologies", "kpit"],
+    "CUPID": ["cupid limited", "cupid ltd"],
+    "YESBANK": ["yes bank"],
+    "INDIGO": ["interglobe aviation", "indigo airlines", "goindigo"],
+    "IRFC": ["indian railway finance"],
+    "HUDCO": ["housing and urban development"],
+    "PERSISTENT": ["persistent systems"],
+    "COFORGE": ["coforge"],
+    "MPHASIS": ["mphasis"],
+    "LTTS": ["l&t technology", "ltts"],
+    "TECHM": ["tech mahindra"],
+    "HCLTECH": ["hcl technologies", "hcl tech"],
+    "VEDL": ["vedanta"],
+    "TATASTEEL": ["tata steel"],
+    "JSWSTEEL": ["jsw steel"],
+    "HINDALCO": ["hindalco"],
+    "ASIANPAINT": ["asian paints"],
+    "TITAN": ["titan company", "titan"],
+    "NESTLEIND": ["nestle india", "nestlé"],
+    "BRITANNIA": ["britannia"],
+    "GODREJCP": ["godrej consumer"],
+    "DABUR": ["dabur"],
+    "MARICO": ["marico"],
+    "PAGEIND": ["page industries"],
+    "AUBANK": ["au small finance"],
+    "FEDERALBNK": ["federal bank"],
+    "BANDHANBNK": ["bandhan bank"],
+    "IDFCFIRSTB": ["idfc first bank"],
+    "PNB": ["punjab national bank"],
+    "CANBK": ["canara bank"],
+    "BANKBARODA": ["bank of baroda"],
+    "UNIONBANK": ["union bank of india"],
 }
 
 
@@ -102,26 +142,49 @@ def _company_query(symbol: str) -> str:
 
 
 def _match_keywords(symbol: str) -> List[str]:
-    """All lowercased keywords that indicate relevance for this symbol."""
+    """All lowercased keywords that indicate relevance for this symbol.
+
+    Short tokens (<=2 chars) are excluded to avoid false positives
+    (e.g. "pw" matching every headline). Prefer multi-word aliases for
+    names like Physics Wallah / PWL.
+    """
     base = _base_symbol(symbol)
     keys = set()
-    keys.add(base.lower())
+    if len(base) >= 3:
+        keys.add(base.lower())
     name = NAME_HINTS.get(base, base)
     keys.add(name.lower())
-    # Split multi-word names
-    for part in name.lower().replace("&", " ").split():
+    # Split multi-word names — keep parts with length > 2 only
+    for part in name.lower().replace("&", " ").replace("-", " ").split():
         if len(part) > 2:
             keys.add(part)
     for a in ALIASES.get(base, []):
-        keys.add(a.lower())
+        a_l = a.lower().strip()
+        if len(a_l) >= 3:
+            keys.add(a_l)
     # Compact form without spaces
-    keys.add(name.lower().replace(" ", ""))
+    compact = name.lower().replace(" ", "").replace("&", "")
+    if len(compact) >= 3:
+        keys.add(compact)
     return list(keys)
 
 
 def _is_relevant(title: str, description: str, keywords: List[str]) -> bool:
+    """Relevance filter: prefer multi-word / longer keywords; avoid tiny token noise."""
+    import re
     text = f"{title or ''} {description or ''}".lower()
-    return any(k in text for k in keywords if len(k) >= 2)
+    if not text.strip():
+        return False
+    # Prefer any multi-word alias or keyword length >= 5 as strong match
+    strong = [k for k in keywords if len(k) >= 5 or " " in k]
+    weak = [k for k in keywords if 3 <= len(k) < 5 and " " not in k]
+    if any(k in text for k in strong):
+        return True
+    # Weak (short tickers): require word-boundary match
+    for k in weak:
+        if re.search(rf"\b{re.escape(k)}\b", text):
+            return True
+    return False
 
 
 def _parse_feed_items(parsed, publisher: str, keywords: List[str], max_items: int, days: int = 10) -> List[Dict[str, Any]]:
@@ -334,15 +397,29 @@ def _summarize_headlines(headlines: List[dict], symbol: str) -> str:
     if not headlines:
         return f"No recent relevant news found for {_company_query(symbol)}."
     name = _company_query(symbol)
-    top = headlines[:5]
+    top = headlines[:4]
+    # Theme tags from titles
+    themes = []
+    blob = " ".join((h.get("title") or "").lower() for h in top)
+    for label, kws in (
+        ("Results/earnings", ["result", "earnings", "profit", "revenue", "q1", "q2", "q3", "q4"]),
+        ("Deal/order", ["order", "deal", "contract", "wins", "bagged"]),
+        ("Management/stake", ["promoter", "stake", "buyback", "insider", "bulk", "block"]),
+        ("Guidance/outlook", ["guidance", "outlook", "raises", "cuts", "forecast"]),
+    ):
+        if any(k in blob for k in kws):
+            themes.append(label)
+    theme_line = ("Themes: " + ", ".join(themes) + ". ") if themes else ""
     bullets = []
     for h in top:
         pub = h.get("publisher") or "Source"
         title = (h.get("title") or "").strip()
         if title:
+            if len(title) > 110:
+                title = title[:107] + "…"
             bullets.append(f"• [{pub}] {title}")
     joined = "\n".join(bullets)
-    return f"Key news for {name} ({len(headlines)} relevant items):\n{joined}"
+    return f"{name}: {theme_line}{len(headlines)} relevant item(s).\n{joined}"
 
 
 def _score_headline(title: str) -> float:
@@ -433,6 +510,23 @@ def analyze(symbol: str):
         "symbol": symbol.upper().replace(".NS", "").replace(".BO", ""),
         "news_score": news_score,
         "headline_count": len(headlines),
+        "data_quality": {
+            "level": (
+                "high" if len(headlines) >= 4
+                else "medium" if len(headlines) >= 2
+                else "low" if len(headlines) >= 1
+                else "none"
+            ),
+            "sources_used": list({(h.get("publisher") or "unknown") for h in headlines}),
+            "hf_sentiment": bool(HF_API_KEY),
+            "note": (
+                "Multiple corroborating headlines"
+                if len(headlines) >= 4
+                else "Limited free-source coverage — treat score as soft"
+                if len(headlines) < 2
+                else "Adequate free-source coverage"
+            ),
+        },
         "reasons": reasons,
         "summary": summary,
         "headlines": [h for _, h in scored[:8]],

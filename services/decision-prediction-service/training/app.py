@@ -217,7 +217,10 @@ def get_training_status():
         'metrics': {},
         'fold_details': [],
         'model_version': None,
-        'training_in_progress': is_training_running()
+        'training_in_progress': is_training_running(),
+        'db_backend': _db_backend,
+        'live_win_rate': None,
+        'win_rate': None,
     }
 
     db = SessionLocal()
@@ -234,6 +237,27 @@ def get_training_status():
                 json.loads(latest_run.fold_details) if latest_run.fold_details else []
             )
             status['model_version'] = latest_run.model_version
+        # Live win-rate from evaluated prediction snapshots (closed-loop feedback)
+        try:
+            snaps = db.query(PredictionSnapshot).order_by(PredictionSnapshot.timestamp.desc()).limit(500).all()
+            evaluated = 0
+            wins = 0
+            for s in snaps:
+                # Prefer T+5, fall back to T+1
+                val = getattr(s, "t5_success", 0) or 0
+                if val not in (1, 2):
+                    val = getattr(s, "t1_success", 0) or 0
+                if val in (1, 2):
+                    evaluated += 1
+                    if val == 1:
+                        wins += 1
+            if evaluated >= 5:
+                wr = round(wins / evaluated, 4)
+                status['live_win_rate'] = wr
+                status['win_rate'] = wr
+                status['live_win_rate_n'] = evaluated
+        except Exception as e:
+            logger.debug("live win-rate compute skipped: %s", e)
     except Exception as e:
         logger.error(f"Error reading latest training run from DB: {e}")
     finally:
@@ -733,13 +757,20 @@ class ActionableCommitRequest(BaseModel):
     # Default False so "Add to Training" does not open trades.
     # Frontend passes open_trades=true explicitly for "to Trade" actions.
     open_trades: bool = False
+    # When True, refresh today's snapshot scores instead of skipping as already_recorded
+    force_refresh: bool = False
 
 @app.post("/api/actionable/commit")
 async def commit_actionable_picks(req: ActionableCommitRequest, background_tasks: BackgroundTasks):
     """Backs the 'Add all actionable stocks to training' button: for each
     BUY NOW / PREPARE TO BUY pick from a finished scan, records it
     (idempotent via the same dedup guard as store_prediction) and, if
-    open_trades, opens a paper trade against it."""
+    open_trades, opens a paper trade against it.
+
+    Same symbol+decision on the same IST calendar day → already_recorded
+    (or updated when force_refresh / scores moved). Training tracking stays
+    one row per symbol/decision/day so T+1/T+5 is not duplicated.
+    """
     db = SessionLocal()
     results = []
     try:
@@ -753,7 +784,33 @@ async def commit_actionable_picks(req: ActionableCommitRequest, background_tasks
 
             if existing:
                 pred_id = existing.prediction_id
-                record_status = "already_recorded"
+                # Refresh live fields so re-click isn't a no-op for the user
+                score_moved = False
+                try:
+                    if pick.price and existing.price and abs(float(pick.price) - float(existing.price)) / max(float(existing.price), 1e-6) > 0.005:
+                        score_moved = True
+                    if pick.combined_score is not None and existing.combined_score is not None:
+                        if abs(float(pick.combined_score) - float(existing.combined_score)) >= 2:
+                            score_moved = True
+                except Exception:
+                    score_moved = bool(req.force_refresh)
+
+                if req.force_refresh or score_moved:
+                    for field in (
+                        "price", "confidence", "combined_score", "technical_score", "fundamental_score",
+                        "news_score", "prediction_score", "market_score", "training_score",
+                        "entry_range_low", "entry_range_high", "target", "stop_loss",
+                        "rsi", "macd", "ema", "volume_ratio",
+                    ):
+                        val = getattr(pick, field, None)
+                        if val is not None:
+                            setattr(existing, field, val)
+                    if pick.market_sentiment_adjustment is not None:
+                        existing.market_sentiment_adjustment = pick.market_sentiment_adjustment
+                    db.commit()
+                    record_status = "updated"
+                else:
+                    record_status = "already_recorded"
             else:
                 pred_id = f"STK-{datetime.now(IST).strftime('%Y%m%d')}-{uuid.uuid4().hex[:4].upper()}"
                 snapshot = PredictionSnapshot(
@@ -1033,11 +1090,30 @@ async def model_status():
 
 @app.get("/training-score/{symbol}")
 async def training_score(symbol: str):
+    """Per-symbol training intelligence + global live win-rate for closed-loop thresholds."""
     from scanner import TrainingScanner
     scanner = TrainingScanner(SessionLocal, MODEL_STORE_PATH)
     score = scanner.score_symbol(symbol)
+    # Global live win-rate from status (used by decision engine threshold shift)
+    live_wr = None
+    try:
+        st = get_training_status()
+        live_wr = st.get("live_win_rate") or st.get("win_rate") or st.get("overall_win_rate")
+    except Exception:
+        pass
     if not score:
-        raise HTTPException(status_code=404, detail="Symbol not found or insufficient data")
+        return {
+            "symbol": (symbol or "").upper(),
+            "score": None,
+            "available": False,
+            "live_win_rate": live_wr,
+            "message": "No training score for this symbol yet",
+        }
+    if isinstance(score, dict):
+        score = dict(score)
+        score.setdefault("available", True)
+        if live_wr is not None and score.get("live_win_rate") is None:
+            score["live_win_rate"] = live_wr
     return score
 
 @app.post("/train")

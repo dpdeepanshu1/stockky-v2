@@ -249,6 +249,9 @@ _EVENT_TYPE_KEYWORDS = {
         "result", "results", "earnings", "q1", "q2", "q3", "q4", "quarterly",
         "profit", "pat ", "revenue", "net profit", "sales growth", "eps ",
         "financial results", "quarterly numbers", "earnings release",
+        "posts profit", "reports profit", "profit jumps", "profit falls",
+        "top-line", "bottom-line", "yoy growth", "qoq growth", "consolidated results",
+        "standalone results", "ebitda", "operating profit",
     ],
     "board_meeting": [
         "board meeting", "board meet", "board of directors", "agm", "egm",
@@ -257,11 +260,15 @@ _EVENT_TYPE_KEYWORDS = {
     "bulk_block": [
         "bulk deal", "block deal", "bulk buys", "block trade", "large deal",
         "institutional buy", "institutional sell", "big ticket",
+        "bulk purchase", "block purchase", "fii bought", "dii bought",
+        "picked up shares", "offloaded shares in bulk",
     ],
     "insider": [
         "insider", "promoter buying", "promoter selling", "promoter stake",
         "insider trading", "management buy", "key personnel", "stake increase",
-        "stake decrease", "shareholding pattern",
+        "stake decrease", "shareholding pattern", "promoters hike",
+        "promoters reduce", "insider buy", "insider sell", "sast disclosure",
+        "open market purchase", "promoter group",
     ],
     "dividend": [
         "dividend", "interim dividend", "final dividend", "dividend payout",
@@ -307,34 +314,54 @@ def _summarize_events(events: dict) -> str:
     parts = []
     sym = (events.get("symbol") or "").replace(".NS", "").replace(".BO", "")
     if events.get("next_earnings_date"):
-        parts.append(f"Next earnings/results date: {events['next_earnings_date']}")
+        parts.append(f"📅 Next results/earnings: {events['next_earnings_date']}")
     es = events.get("earnings_surprise")
     if es and es.get("surprise_pct") is not None:
         direction = "beat" if es["surprise_pct"] > 0 else "missed"
-        parts.append(f"Latest earnings {direction} estimates by {abs(es['surprise_pct']):.1f}%")
+        parts.append(f"📊 Latest earnings {direction} estimates by {abs(es['surprise_pct']):.1f}%")
     ins = events.get("recent_insider_transactions") or []
     if ins:
         buys = [i for i in ins if "buy" in (i.get("transaction") or "").lower() or "purchase" in (i.get("transaction") or "").lower()]
         sells = [i for i in ins if "sell" in (i.get("transaction") or "").lower() or "sale" in (i.get("transaction") or "").lower()]
         if buys:
-            parts.append(f"Recent insider/promoter buying detected ({len(buys)} txns)")
+            parts.append(f"🟢 Insider/promoter buying ({len(buys)} txn(s))")
         if sells:
-            parts.append(f"Recent insider/promoter selling detected ({len(sells)} txns)")
+            parts.append(f"🔴 Insider/promoter selling ({len(sells)} txn(s))")
     bulk = events.get("bulk_deals") or []
     if bulk:
-        parts.append(f"{len(bulk)} bulk/block deal(s) noted")
+        sample = ""
+        try:
+            first = bulk[0] if isinstance(bulk[0], dict) else {}
+            side = first.get("transaction") or first.get("side") or ""
+            sample = f" — {side}" if side else ""
+        except Exception:
+            pass
+        parts.append(f"📦 Bulk/block deal(s): {len(bulk)}{sample}")
     if events.get("last_dividend"):
         d = events["last_dividend"]
-        parts.append(f"Last dividend: {d.get('amount')} on {d.get('date')}")
+        parts.append(f"💰 Last dividend: {d.get('amount')} on {d.get('date')}")
     news = events.get("recent_news") or []
     classified = {}
     for n in news:
         cat = _classify_event_title(n.get("title") or "")
         if cat:
             classified.setdefault(cat, []).append(n.get("title"))
-    for cat, titles in classified.items():
-        label = cat.replace("_", " ").title()
-        parts.append(f"{label}: {titles[0][:90]}")
+    # Prefer important categories first
+    priority = ["results", "bulk_block", "insider", "board_meeting", "dividend", "corporate_action", "guidance"]
+    for cat in priority:
+        titles = classified.get(cat) or []
+        if not titles:
+            continue
+        label = {
+            "results": "Results",
+            "bulk_block": "Bulk/Block",
+            "insider": "Insider",
+            "board_meeting": "Board",
+            "dividend": "Dividend",
+            "corporate_action": "Corporate action",
+            "guidance": "Guidance/Orders",
+        }.get(cat, cat.replace("_", " ").title())
+        parts.append(f"{label}: {titles[0][:100]}")
     if not parts:
         return f"No major corporate events detected for {sym} in the recent window."
     return " | ".join(parts)

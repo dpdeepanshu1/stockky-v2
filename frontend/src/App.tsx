@@ -642,13 +642,42 @@ export default function App() {
         </div>
       </header>
 
-      {/* Bloomberg-style status strip */}
+      {/* Bloomberg-style status strip — clickable */}
       <div className="terminal-status-strip hidden md:flex">
-        <span className="pill amber-txt">STOCKKY TERMINAL</span>
-        <span className={`pill ${wsLive ? "live" : ""}`}>{wsLive ? "LIVE" : "POLL"}</span>
-        <span className="pill">BACKEND {backendUp === "up" ? "UP" : backendUp === "down" ? "DOWN" : "…"}</span>
-        <span className="pill">TAB {tab.toUpperCase()}</span>
-        <span className="mono text-[10px] text-mist/60 ml-auto">
+        <button type="button" className="pill amber-txt" onClick={() => setTab("dashboard")} title="Go to Dashboard">
+          STOCKKY TERMINAL
+        </button>
+        <button
+          type="button"
+          className={`pill ${wsLive ? "live" : ""}`}
+          onClick={() => setCmdOpen(true)}
+          title="Command palette"
+        >
+          {wsLive ? "LIVE" : "POLL"}
+        </button>
+        <button
+          type="button"
+          className={`pill ${backendUp === "down" ? "pill-danger" : backendUp === "up" ? "live" : ""}`}
+          onClick={() => {
+            if (backendUp === "down") handleWakeBackend();
+            else setTab("settings");
+          }}
+          title={backendUp === "down" ? "Wake backend" : "Settings"}
+        >
+          BACKEND {backendUp === "up" ? "UP" : backendUp === "down" ? "DOWN" : "…"}
+        </button>
+        <button type="button" className="pill" onClick={() => setCmdOpen(true)} title="Jump anywhere">
+          TAB {tab.toUpperCase()}
+        </button>
+        <button
+          type="button"
+          className="pill"
+          onClick={() => setShowServiceManager(true)}
+          title="Service manager"
+        >
+          SERVICES
+        </button>
+        <span className="mono text-[10px] text-mist/60 ml-auto status-clock">
           {new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: false })} IST
         </span>
       </div>
@@ -754,55 +783,65 @@ export default function App() {
         ) : (
           <>
             {/* Dashboard content — terminal-style */}
-            <section className="mb-8 sm:mb-10 dash-terminal">
-              <div className="dash-hero">
-              <p className="dash-section-title">Market terminal</p>
-              <MarketClock />
-              <h1>
-                Know your next move. <span>In one call.</span>
-              </h1>
-              <p>
-                Technical, fundamental, news and AI signals — combined into a single decision.
-                Press <span className="kbd">Ctrl</span>+<span className="kbd">K</span> to jump anywhere.
-              </p>
+            <section className="mb-6 sm:mb-8 dash-terminal">
+              <div className="dash-hero terminal-panel">
+                <div className="dash-hero-top">
+                  <div>
+                    <p className="dash-section-title">Market terminal</p>
+                    <MarketClock />
+                  </div>
+                  <button type="button" className="btn-terminal" onClick={() => setCmdOpen(true)}>
+                    Ctrl+K
+                  </button>
+                </div>
+                <h1 className="dash-hero-title">
+                  Know your next move. <span className="num-amber">In one call.</span>
+                </h1>
+                <p className="dash-hero-sub">
+                  Technical, fundamental, news and AI signals — one decision.
+                  Press <span className="kbd">Ctrl</span>+<span className="kbd">K</span> to jump.
+                </p>
 
-              <div className="dash-search-row">
-                <div className="dash-search">
-                  <span className="font-mono text-mist text-xs select-none">NSE:</span>
-                  <input
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value.toUpperCase())}
-                    onKeyDown={(e) => e.key === "Enter" && handleSearch(query)}
-                    placeholder="TCS, INFY, RELIANCE..."
-                    autoComplete="off"
-                    spellCheck={false}
-                  />
-                  {query && (
+                <div className="dash-search-row">
+                  <div className="dash-search">
+                    <span className="dash-search-prefix">NSE</span>
+                    <input
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value.toUpperCase())}
+                      onKeyDown={(e) => e.key === "Enter" && handleSearch(query)}
+                      placeholder="TCS, INFY, RELIANCE…"
+                      autoComplete="off"
+                      spellCheck={false}
+                      aria-label="Symbol search"
+                    />
                     <button
+                      type="button"
                       onClick={() => handleSearch(query)}
-                      className="btn-terminal shrink-0"
+                      className="btn-primary-term shrink-0"
+                      disabled={!query.trim()}
                     >
                       Analyse
                     </button>
-                  )}
+                  </div>
+                  <div className="dash-search-actions">
+                    <label className="dash-lite-toggle">
+                      <input
+                        type="checkbox"
+                        checked={liteScan}
+                        onChange={(e) => setLiteScan(e.target.checked)}
+                      />
+                      <span>Lite</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleScan}
+                      className="btn-terminal whitespace-nowrap"
+                      title={liteScan ? "Lite scan: faster, less enrichment" : "Full scan: all pillars + summaries"}
+                    >
+                      {liteScan ? "Run lite scan" : "Run full scan"}
+                    </button>
+                  </div>
                 </div>
-                <label className="mono text-[10px] text-mist/70 flex items-center gap-1.5 cursor-pointer whitespace-nowrap">
-                  <input
-                    type="checkbox"
-                    checked={liteScan}
-                    onChange={(e) => setLiteScan(e.target.checked)}
-                    className="rounded border-slate"
-                  />
-                  Lite
-                </label>
-                <button
-                  onClick={handleScan}
-                  className="btn-terminal whitespace-nowrap"
-                  title={liteScan ? "Lite scan: faster, less enrichment" : "Full scan: all pillars + summaries"}
-                >
-                  {liteScan ? "Run lite scan" : "Run full scan"}
-                </button>
-              </div>
               </div>
 
               {/* ── NEW: Market Sentiment Header placed above Market Movers ── */}

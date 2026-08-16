@@ -695,3 +695,156 @@ input:focus, textarea:focus, select:focus {
 .num-up { color: var(--buy) !important; }
 .num-down { color: var(--sell) !important; }
 .num-amber { color: var(--amber) !important; }
+
+
+/* ── Dashboard hero / search (fixed layout) ─────────────────── */
+.dash-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+.dash-hero-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.dash-hero-title {
+  font-size: clamp(1.25rem, 2.5vw, 1.65rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  margin: 0;
+  line-height: 1.25;
+  max-width: 36rem;
+}
+.dash-hero-sub {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+  max-width: 40rem;
+  line-height: 1.45;
+}
+.dash-hero-sub .kbd {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  padding: 0.1rem 0.35rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--muted);
+  background: var(--panel-2);
+}
+
+.dash-search-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.35rem;
+}
+.dash-search {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex: 1 1 280px;
+  min-width: 0;
+  max-width: 520px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.dash-search:focus-within {
+  border-color: rgba(245, 166, 35, 0.55);
+  box-shadow: 0 0 0 3px rgba(245, 166, 35, 0.08);
+}
+.dash-search-prefix {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--amber);
+  padding: 0 0.65rem;
+  border-right: 1px solid var(--border);
+  background: rgba(245, 166, 35, 0.06);
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+}
+.dash-search input {
+  flex: 1;
+  min-width: 0;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  outline: none !important;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  padding: 0.55rem 0.65rem;
+}
+.dash-search input::placeholder {
+  color: var(--muted-2);
+}
+.dash-search .btn-primary-term,
+.dash-search .btn-terminal {
+  border-radius: 0;
+  border: none;
+  border-left: 1px solid var(--border);
+  height: 100%;
+  padding: 0.55rem 0.85rem;
+}
+.dash-search-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.dash-lite-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+.dash-lite-toggle input {
+  accent-color: var(--amber);
+  width: 0.85rem;
+  height: 0.85rem;
+  cursor: pointer;
+}
+
+/* Status strip: buttons as pills */
+.terminal-status-strip .pill {
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: inherit;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.terminal-status-strip button.pill:hover {
+  background: rgba(245, 166, 35, 0.1);
+  border-color: rgba(245, 166, 35, 0.4);
+  color: var(--amber);
+}
+.terminal-status-strip .pill-danger {
+  color: var(--sell);
+  border-color: rgba(246, 70, 93, 0.4);
+}
+.terminal-status-strip .status-clock {
+  pointer-events: none;
+}
+
+.market-clock {
+  margin-top: 0.15rem;
+}

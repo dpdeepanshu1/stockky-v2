@@ -51,6 +51,27 @@ export default function Trades() {
   const [showBackups, setShowBackups] = useState(false);
   const [backupDetail, setBackupDetail] = useState<{ filename: string; data: any } | null>(null);
   const [loadingBackup, setLoadingBackup] = useState(false);
+  const [dbStatus, setDbStatus] = useState<{
+    db_connected?: boolean;
+    db_durable?: boolean;
+    db_backend?: string;
+    db_provider?: string | null;
+    db_message?: string | null;
+    db_error?: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    let c = false;
+    (async () => {
+      try {
+        const s = await api.getDbStatus();
+        if (!c) setDbStatus(s);
+      } catch (e: any) {
+        if (!c) setDbStatus({ db_connected: false, db_error: e?.message || "unreachable", db_message: e?.message });
+      }
+    })();
+    return () => { c = true; };
+  }, []);
 
   const showToast = (type: Toast["type"], message: string) => {
     setToast({ type, message });
@@ -74,7 +95,17 @@ export default function Trades() {
     setClearing(true);
     try {
       const res = await (api as any).clearTradesBackup?.() ?? await fetch("/api/trades/clear-backup", { method: "POST" }).then(r => r.json());
-      showToast("success", res?.ok ? `Cleared. Backup: ${res.backup_path || "saved"}` : `Clear failed: ${res?.error || "unknown"}`);
+      if (res?.ok) {
+        const durable = dbStatus?.db_durable || dbStatus?.db_backend === "postgres";
+        showToast(
+          "success",
+          durable
+            ? `Cleared. Backup saved to Postgres (${res.filename || res.backup_path || "ok"}) · kept ${res.retained_days || 14} days`
+            : `Cleared. Backup: ${res.filename || res.backup_path || "saved"} (disk only — set Postgres for durability)`
+        );
+      } else {
+        showToast("error", `Clear failed: ${res?.error || "unknown"}`);
+      }
       fetchAll();
       const list = await (api as any).listTradeBackups?.();
       if (list?.backups) setBackups(list.backups);
@@ -292,6 +323,7 @@ export default function Trades() {
         </div>
       )}
 
+      <DbStatusStrip status={dbStatus} />
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h2 className="font-mono text-sm text-paper uppercase tracking-widest">Paper Trading</h2>
@@ -775,6 +807,36 @@ function StatCard({ label, value, highlight }: { label: string; value: string | 
     <div className="bg-ink/40 border border-slate/40 rounded-xl px-4 py-3">
       <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">{label}</div>
       <div className={`font-mono text-lg mt-1 ${color}`}>{value}</div>
+    </div>
+  );
+}
+
+function DbStatusStrip({ status }: { status: any }) {
+  if (!status) {
+    return (
+      <div className="font-mono text-[11px] text-mist/60 border border-slate/40 rounded-lg px-3 py-2">
+        Checking database connection…
+      </div>
+    );
+  }
+  const bad = status.db_connected === false;
+  const warn = !bad && (status.db_backend === "sqlite" || status.db_durable === false);
+  const cls = bad
+    ? "border-red-500/40 bg-red-500/10 text-red-300"
+    : warn
+    ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+    : "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
+  const title = bad
+    ? "Database not connected"
+    : warn
+    ? "SQLite only — data may reset on redeploy"
+    : `Postgres connected (${status.db_provider || "supabase/neon"})`;
+  return (
+    <div className={`font-mono text-[11px] rounded-lg px-3 py-2 border ${cls}`}>
+      <span className="font-semibold uppercase tracking-wide text-[10px]">{title}</span>
+      {(status.db_error || status.db_message) && (
+        <span className="opacity-90"> — {status.db_error || status.db_message}</span>
+      )}
     </div>
   );
 }

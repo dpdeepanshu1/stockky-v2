@@ -176,22 +176,25 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
     setCommitting("training");
     setCommitMessage(null);
     try {
-      const { results } = await api.commitActionablePicks(
+      const res = await api.commitActionablePicks(
         allActionable.map(toActionablePick),
         10000,
         false
       );
-      const stored = results.filter((r) => r.record_status === "stored").length;
-      const updated = results.filter((r) => r.record_status === "updated").length;
-      const already = results.filter((r) => r.record_status === "already_recorded").length;
-      // One snapshot per symbol+decision per IST day — already = T+1/T+5 already tracking
+      const results = res.results || (res as any);
+      const list = Array.isArray(results) ? results : (res as any).results || [];
+      const stored = list.filter((r: any) => r.record_status === "stored").length;
+      const updated = list.filter((r: any) => r.record_status === "updated").length;
+      const already = list.filter((r: any) => r.record_status === "already_recorded").length;
       const parts: string[] = [];
       if (stored) parts.push(`${stored} new`);
       if (updated) parts.push(`${updated} refreshed`);
       if (already) parts.push(`${already} already in today's training set`);
       if (!parts.length) parts.push("no changes");
+      const dbNote = (res as any).db_message
+        || ((res as any).db_durable ? "saved to Postgres" : (res as any).db_backend === "sqlite" ? "SQLite (may reset on redeploy)" : "");
       setCommitMessage(
-        `🎓 Training: ${parts.join(", ")} · T+1/T+5 tracking active · no trades opened`
+        `🎓 Training: ${parts.join(", ")} · T+1/T+5 tracking · no trades${dbNote ? " · " + dbNote : ""}`
       );
     } catch (err) {
       console.error(err);
@@ -202,12 +205,13 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
     }
   };
 
-  const summarizeTradeResults = (results: { record_status: string; trade_status: string | null }[]) => {
-    const stored = results.filter((r) => r.record_status === "stored").length;
+  const summarizeTradeResults = (results: { record_status: string; trade_status: string | null }[], dbNote?: string) => {
+    const stored = results.filter((r) => r.record_status === "stored" || r.record_status === "updated").length;
     const already = results.filter((r) => r.record_status === "already_recorded").length;
     const opened = results.filter((r) => r.trade_status === "opened").length;
     const failed = results.filter((r) => r.trade_status && r.trade_status.startsWith("failed"));
     let msg = `📈 ${opened} trades opened · ${stored} new records · ${already} already recorded`;
+    if (dbNote) msg += ` · ${dbNote}`;
     if (failed.length > 0) {
       const balanceFails = failed.filter((r) => (r.trade_status || "").toLowerCase().includes("balance") || (r.trade_status || "").toLowerCase().includes("not enough"));
       if (balanceFails.length > 0) {
@@ -267,8 +271,8 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         setCommitting(null);
         return;
       }
-      const { results } = await api.commitActionableToTrade(top5Actionable.map(toActionablePick));
-      setCommitMessage(summarizeTradeResults(results));
+      const res = await api.commitActionableToTrade(top5Actionable.map(toActionablePick));
+      setCommitMessage(summarizeTradeResults(res.results, (res as any).db_message));
     } catch (err) {
       console.error(err);
       setCommitMessage(`Failed: ${(err as Error).message || "unknown error"}`);
@@ -294,8 +298,8 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         setCommitting(null);
         return;
       }
-      const { results } = await api.commitActionableToTrade(allActionable.map(toActionablePick));
-      setCommitMessage(summarizeTradeResults(results));
+      const res = await api.commitActionableToTrade(allActionable.map(toActionablePick));
+      setCommitMessage(summarizeTradeResults(res.results, (res as any).db_message));
     } catch (err) {
       console.error(err);
       setCommitMessage(`Failed: ${(err as Error).message || "unknown error"}`);

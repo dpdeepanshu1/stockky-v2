@@ -697,9 +697,9 @@ export default function Training() {
           not a failure. Scores refresh when price/score moves. Use <em>All Actionable for Training</em>
           from Market Scan (does not open trades). Use <em>to Trade</em> only when you want paper positions.
         </p>
+        <DbConnectionBanner status={status as any} />
         {status && (
           <div className="mt-2 font-mono text-[11px] text-mist/70 flex flex-wrap gap-3">
-            <span>DB: {(status as any).db_backend || "unknown"}</span>
             {(status as any).live_win_rate != null && (
               <span>
                 Live win-rate: {Math.round(Number((status as any).live_win_rate) * 1000) / 10}%
@@ -1095,3 +1095,48 @@ function StatCard({ label, value }: { label: string; value: string | number }) {
     </div>
   );
 }
+
+function DbConnectionBanner({ status }: { status?: any }) {
+  const [live, setLive] = useState<any>(null);
+  useEffect(() => {
+    let c = false;
+    (async () => {
+      try {
+        const s = await api.getDbStatus();
+        if (!c) setLive(s);
+      } catch (e: any) {
+        if (!c) setLive({ db_connected: false, db_error: e?.message || "DB status unreachable", db_message: e?.message });
+      }
+    })();
+    return () => { c = true; };
+  }, []);
+  const s = live || status;
+  if (!s) {
+    return (
+      <div className="mt-2 font-mono text-[11px] text-mist/60 border border-slate/40 rounded-lg px-3 py-2">
+        Checking database connection…
+      </div>
+    );
+  }
+  const ok = s.db_connected === true && s.db_durable !== false && (s.db_backend === "postgres" || s.db_durable === true);
+  const warn = s.db_backend === "sqlite" || s.db_durable === false;
+  const bad = s.db_connected === false;
+  const cls = bad
+    ? "border-red-500/40 bg-red-500/10 text-red-300"
+    : warn
+    ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+    : "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
+  const title = bad
+    ? "Database not connected"
+    : warn
+    ? "Database not durable (SQLite)"
+    : `Database connected (${(s.db_provider || s.db_backend || "postgres").toString()})`;
+  const msg = s.db_error || s.db_message || (ok ? "Trades & training will persist." : "");
+  return (
+    <div className={`mt-2 font-mono text-[11px] rounded-lg px-3 py-2 border ${cls}`}>
+      <div className="font-semibold tracking-wide uppercase text-[10px] mb-0.5">{title}</div>
+      <div className="opacity-90 leading-relaxed">{msg}</div>
+    </div>
+  );
+}
+

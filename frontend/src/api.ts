@@ -162,7 +162,26 @@ export interface SystemHealth {
 // Training Service types – updated to match actual responses
 // ───────────────────────────────────────────────
 
+export interface DbStatus {
+  ok?: boolean;
+  db_backend?: string;
+  db_durable?: boolean;
+  db_connected?: boolean;
+  db_provider?: string | null;
+  db_message?: string | null;
+  db_error?: string | null;
+  status?: string;
+  source?: string;
+}
+
 export interface TrainingStatusResponse {
+  db_backend?: string;
+  db_durable?: boolean;
+  db_connected?: boolean;
+  db_provider?: string | null;
+  db_message?: string | null;
+  db_error?: string | null;
+
   service_url: string;
   production_model_exists: boolean;
   production_model_version?: string | null;
@@ -644,6 +663,9 @@ export const api = {
 
   getTrainingStatus: () =>
     request<TrainingStatusResponse>("/training/status", undefined, 2, 30000),
+  getDbStatus: () =>
+    request<DbStatus>("/ops/db-status", undefined, 1, 12000),
+
 
   triggerTraining: (labelSource: "t1_outcome" | "trade_pnl" = "t1_outcome") =>
     request<TriggerTrainingResponse>(
@@ -675,7 +697,7 @@ export const api = {
 
   /** Record picks for training/T+1/T+5 tracking. Does NOT open trades by default. */
   commitActionablePicks: (picks: ActionablePick[], capitalPerTrade = 10000, openTrades = false) =>
-    request<{ results: ActionableCommitResult[] }>(
+    request<{ results: ActionableCommitResult[]; db_backend?: string; db_durable?: boolean; db_connected?: boolean; db_message?: string }>(
       "/training/api/actionable/commit",
       {
         method: "POST",
@@ -688,7 +710,7 @@ export const api = {
 
   /** Record picks AND open paper trades. Use for "to Trade" actions. */
   commitActionableToTrade: (picks: ActionablePick[], capitalPerTrade = 10000) =>
-    request<{ results: ActionableCommitResult[] }>(
+    request<{ results: ActionableCommitResult[]; db_backend?: string; db_durable?: boolean; db_connected?: boolean; db_message?: string }>(
       "/training/api/actionable/commit",
       {
         method: "POST",

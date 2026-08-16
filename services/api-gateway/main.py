@@ -2377,22 +2377,25 @@ def delete_notification_channel(channel: str):
 
 @app.api_route("/notifications/call/me", methods=["GET", "POST"])
 def notifications_call_me(request: Request, message: str = "Stockky test call alert"):
-    """Proxy CallMeBot test / manual call."""
+    """Proxy CallMeBot test / manual call. CallMeBot can be slow — use long timeout."""
     try:
-        # Prefer query message; allow JSON body override on POST
-        msg = message
+        msg = message or "Stockky test call alert"
         try:
-            # body may be empty
-            pass
+            httpx.get(f"{NOTIFICATION_URL}/health", timeout=10)
         except Exception:
             pass
         resp = httpx.post(
             f"{NOTIFICATION_URL}/call/me",
             params={"message": msg},
-            timeout=25,
+            timeout=70,
         )
         resp.raise_for_status()
         return resp.json()
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="CallMeBot timed out (slow network or free-tier cold start). Config may still be OK — try Test again in 20s.",
+        )
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"CallMeBot unreachable: {e}")
 

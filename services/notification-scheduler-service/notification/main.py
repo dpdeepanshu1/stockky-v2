@@ -432,28 +432,31 @@ def _send_callmebot(cfg: dict, title: str, message: str):
             # CallMeBot official patterns (username form):
             #   start.php?user=@name&text=...   (voice/call)
             #   text.php?user=@name&text=...    (chat message)
-            call_url = f"https://api.callmebot.com/start.php?user={uq}&text={q}"
+            # text.php is usually faster; start.php is voice/call (slower)
             text_url = f"https://api.callmebot.com/text.php?user={uq}&text={q}"
+            call_url = f"https://api.callmebot.com/start.php?user={uq}&text={q}"
             if apikey:
-                call_url += f"&apikey={urllib.parse.quote(apikey)}"
                 text_url += f"&apikey={urllib.parse.quote(apikey)}"
-            resp = httpx.get(call_url, timeout=25)
-            body = (resp.text or "")[:160]
-            ok = resp.status_code == 200 and "error" not in body.lower()
-            if not ok:
-                resp2 = httpx.get(text_url, timeout=25)
-                body2 = (resp2.text or "")[:160]
-                if resp2.status_code == 200 and "error" not in body2.lower():
-                    any_sent = True
-                    results.append(f"{user}:ok(text)")
-                elif resp.status_code == 200:
-                    any_sent = True
-                    results.append(f"{user}:ok ({body})")
-                else:
-                    results.append(f"{user}:HTTP {resp.status_code} {body}")
-            else:
-                any_sent = True
-                results.append(f"{user}:ok")
+                call_url += f"&apikey={urllib.parse.quote(apikey)}"
+            sent_this = False
+            last_body = ""
+            for kind, url in (("text", text_url), ("call", call_url)):
+                try:
+                    resp = httpx.get(url, timeout=40)
+                    last_body = (resp.text or "")[:160]
+                    if resp.status_code == 200 and "error" not in last_body.lower():
+                        any_sent = True
+                        sent_this = True
+                        results.append(f"{user}:ok({kind})")
+                        break
+                except httpx.TimeoutException:
+                    last_body = "timeout"
+                    results.append(f"{user}:{kind}-timeout")
+                except Exception as e:
+                    last_body = str(e)[:80]
+                    results.append(f"{user}:{kind}-err")
+            if not sent_this and not any(user in r for r in results):
+                results.append(f"{user}:fail {last_body}")
         except Exception as e:
             results.append(f"{user}: {e}")
     return "sent" if any_sent else ("failed: " + "; ".join(results))

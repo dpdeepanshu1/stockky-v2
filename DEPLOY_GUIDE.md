@@ -6,7 +6,7 @@ After deployment, perform a global search-and-replace of the placeholder URLs wi
 
 ## Placeholder URLs (use these exactly during initial config)
 - https://STOCKKY-API-GATEWAY.onrender.com
-- https://STOCKKY-MARKET-DATA.onrender.com
+- https://market-data-service-r6d7.onrender.com
 - https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com
 - https://STOCKKY-DECISION-PREDICTION.onrender.com
 - https://STOCKKY-NOTIFICATION-SCHEDULER.onrender.com
@@ -78,7 +78,7 @@ After all real URLs are known, in the repo:
 ```bash
 # Example
 find . -type f \( -name "*.py" -o -name "*.ts" -o -name "*.tsx" -o -name "*.yml" -o -name "*.md" -o -name ".env*" \) \
-  -exec sed -i 's|https://STOCKKY-MARKET-DATA.onrender.com|https://your-real-market-data.onrender.com|g' {} +
+  -exec sed -i 's|https://market-data-service-r6d7.onrender.com|https://your-real-market-data.onrender.com|g' {} +
 # Repeat for each of the 5
 ```
 Then redeploy or push.

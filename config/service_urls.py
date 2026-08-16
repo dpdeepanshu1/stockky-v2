@@ -6,7 +6,7 @@ import os
 
 # Placeholder URLs — easy global search & replace
 API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "https://STOCKKY-API-GATEWAY.onrender.com")
-MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://STOCKKY-MARKET-DATA.onrender.com")
+MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
 ANALYSIS_INTELLIGENCE_URL = os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com")
 DECISION_PREDICTION_URL = os.getenv("DECISION_PREDICTION_URL", "https://STOCKKY-DECISION-PREDICTION.onrender.com")
 NOTIFICATION_SCHEDULER_URL = os.getenv("NOTIFICATION_SCHEDULER_URL", "https://STOCKKY-NOTIFICATION-SCHEDULER.onrender.com")

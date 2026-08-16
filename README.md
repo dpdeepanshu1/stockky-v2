@@ -14,7 +14,7 @@ All service URLs centralized in `config/service_urls.py`.
 
 Placeholder URLs for easy replace:
 - https://STOCKKY-API-GATEWAY.onrender.com
-- https://STOCKKY-MARKET-DATA.onrender.com
+- https://market-data-service-r6d7.onrender.com
 - https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com
 - https://STOCKKY-DECISION-PREDICTION.onrender.com
 - https://STOCKKY-NOTIFICATION-SCHEDULER.onrender.com

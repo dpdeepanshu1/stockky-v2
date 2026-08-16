@@ -42,7 +42,7 @@ logger = logging.getLogger("prediction-service")
 # "/TCS", not "/history/TCS" — a 404 that looked like a routing bug because
 # it was one). Stripping it defensively means this can't happen regardless
 # of how the env var gets set on Render.
-MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://STOCKKY-MARKET-DATA.onrender.com").rstrip("/")
+MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
 MODEL_PATH = os.getenv("MODEL_PATH", "model.pkl")
 
 # llama-3.1-8b-instant was deprecated by Groq on 2026-06-17 with a shutdown

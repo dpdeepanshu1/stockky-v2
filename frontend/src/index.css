@@ -2,9 +2,26 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --bg: #0E1512;
+  --fg: #EDEFEC;
+  --muted: #8B9A92;
+  --card: #121A16;
+  --border: #1F2A26;
+}
+
+html.light {
+  --bg: #F4F7F5;
+  --fg: #0E1512;
+  --muted: #5A6B62;
+  --card: #FFFFFF;
+  --border: #D5DED8;
+}
+
 html, body {
-  background-color: #0E1512;
-  color: #EDEFEC;
+  background-color: var(--bg);
+  color: var(--fg);
+  transition: background-color 0.25s ease, color 0.25s ease;
 }
 
 ::selection {
@@ -14,20 +31,31 @@ html, body {
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: #1F2A26 #0E1512;
+  scrollbar-color: #1F2A26 var(--bg);
 }
 
-/* Custom animations */
+html.light * {
+  scrollbar-color: #C5D0C9 var(--bg);
+}
+
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(12px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
-.animate-fadeIn {
-  animation: fadeIn 0.6s ease-out forwards;
+@keyframes pulseSoft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
 }
 
-/* Glow shadow (for hover) */
+.animate-fadeIn {
+  animation: fadeIn 0.5s ease-out forwards;
+}
+
+.animate-pulseSoft {
+  animation: pulseSoft 2s ease-in-out infinite;
+}
+
 .shadow-glow-sm {
   box-shadow: 0 0 12px rgba(79, 184, 224, 0.15);
 }
@@ -35,3 +63,25 @@ html, body {
 .shadow-glow {
   box-shadow: 0 0 20px rgba(79, 184, 224, 0.25);
 }
+
+/* Light mode soft overrides for common dark utility classes */
+html.light .bg-ink { background-color: #F4F7F5 !important; }
+html.light .bg-ink\/90 { background-color: rgba(244, 247, 245, 0.92) !important; }
+html.light .bg-ink\/70 { background-color: rgba(244, 247, 245, 0.85) !important; }
+html.light .bg-ink\/60 { background-color: rgba(255, 255, 255, 0.85) !important; }
+html.light .bg-ink\/50 { background-color: rgba(255, 255, 255, 0.9) !important; }
+html.light .bg-ink\/40 { background-color: rgba(255, 255, 255, 0.75) !important; }
+html.light .bg-graphite { background-color: #FFFFFF !important; }
+html.light .bg-graphite\/50 { background-color: rgba(255, 255, 255, 0.7) !important; }
+html.light .text-paper { color: #0E1512 !important; }
+html.light .text-mist { color: #5A6B62 !important; }
+html.light .text-mist\/80 { color: rgba(90, 107, 98, 0.9) !important; }
+html.light .text-mist\/70 { color: rgba(90, 107, 98, 0.8) !important; }
+html.light .text-mist\/60 { color: rgba(90, 107, 98, 0.7) !important; }
+html.light .text-mist\/50 { color: rgba(90, 107, 98, 0.6) !important; }
+html.light .border-slate { border-color: #D5DED8 !important; }
+html.light .border-slate\/60 { border-color: rgba(213, 222, 216, 0.9) !important; }
+html.light .border-slate\/40 { border-color: rgba(213, 222, 216, 0.7) !important; }
+html.light .border-slate\/30 { border-color: rgba(213, 222, 216, 0.55) !important; }
+html.light .text-white { color: #0E1512 !important; }
+html.light .text-slate-300 { color: #3A4A42 !important; }

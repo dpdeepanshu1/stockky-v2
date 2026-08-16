@@ -36,7 +36,7 @@ export default function StockChart({ symbol, compact = false }: Props) {
       setData(result);
     } catch (err) {
       console.error(err);
-      setError("Chart data unavailable right now.");
+      setError("Chart temporarily unavailable (market data busy). Retry in a few seconds.");
     } finally {
       setLoading(false);
     }

@@ -113,6 +113,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
   const [isAddingWatchlist, setIsAddingWatchlist] = useState(false);
 
   const [showTradeModal, setShowTradeModal] = useState(false);
+  const [calling, setCalling] = useState(false);
   const [tradeCapital, setTradeCapital] = useState("10000");
   const [tradingInProgress, setTradingInProgress] = useState(false);
   const [tradeResult, setTradeResult] = useState<string | null>(null);
@@ -263,7 +264,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
                 <span className="font-mono text-xs text-mist/60">· {data.valuation}</span>
               )}
             </div>
-            <h2 className={`font-display text-5xl leading-none ${style.color} mb-2`}>
+            <h2 className={`font-display text-4xl sm:text-5xl leading-none ${style.color} mb-2 tracking-tight animate-fadeIn`}>
               {data.decision}
             </h2>
             <p className="text-mist text-sm">{style.verb} · {data.confidence} confidence</p>
@@ -329,9 +330,31 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
           {isBullish && (
             <button
               onClick={() => setShowTradeModal(true)}
-              className="text-[10px] font-mono transition border px-3 py-1 rounded flex items-center gap-1 bg-emerald-500/15 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/25"
+              className="text-[10px] font-mono transition border px-3 py-1.5 rounded-lg flex items-center gap-1 bg-emerald-500/15 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/25"
             >
               💰 Trade This
+            </button>
+          )}
+          {(data.decision === "BUY NOW" || data.decision === "PREPARE TO BUY") && (
+            <button
+              disabled={calling}
+              onClick={async () => {
+                setCalling(true);
+                try {
+                  const reason =
+                    data.natural_language_summary ||
+                    `${data.decision} score ${data.combined_score}. Entry ${data.entry_range?.low ?? "—"} target ${data.target ?? "—"}.`;
+                  const msg = `${data.symbol}: ${data.decision}. ${String(reason).slice(0, 140)}`;
+                  await api.testCallMeBot(msg);
+                } catch (e) {
+                  console.error(e);
+                } finally {
+                  setCalling(false);
+                }
+              }}
+              className="text-[10px] font-mono transition border px-3 py-1.5 rounded-lg flex items-center gap-1 bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25 disabled:opacity-50"
+            >
+              {calling ? "Calling…" : "📞 Call Alert"}
             </button>
           )}
           <button

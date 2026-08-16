@@ -138,6 +138,7 @@ export interface NotificationConfig {
   discord: NotificationChannelStatus;
   slack: NotificationChannelStatus;
   telegram: NotificationChannelStatus;
+  callmebot: NotificationChannelStatus & { phone?: string };
   persisted: boolean;
 }
 
@@ -587,7 +588,10 @@ export const api = {
     slack_webhook_url?: string;
     telegram_bot_token?: string;
     telegram_chat_id?: string;
-    enabled?: Partial<Record<"discord" | "slack" | "telegram", boolean>>;
+    callmebot_phone?: string;
+    callmebot_apikey?: string;
+    callmebot_users?: string;
+    enabled?: Partial<Record<"discord" | "slack" | "telegram" | "callmebot", boolean>>;
   }) =>
     request<NotificationConfig>(
       "/notifications/config",
@@ -600,7 +604,7 @@ export const api = {
       30000
     ),
 
-  clearNotificationChannel: (channel: "discord" | "slack" | "telegram") =>
+  clearNotificationChannel: (channel: "discord" | "slack" | "telegram" | "callmebot") =>
     request<NotificationConfig>(`/notifications/config/${channel}`, { method: "DELETE" }, 2, 30000),
 
   testNotifications: () =>
@@ -608,6 +612,14 @@ export const api = {
       "/notifications/test",
       { method: "POST" },
       2,
+      30000
+    ),
+
+  testCallMeBot: (message?: string) =>
+    request<{ ok: boolean; result?: string; error?: string }>(
+      `/notifications/call/me?message=${encodeURIComponent(message || "Stockky test call alert")}`,
+      { method: "POST" },
+      1,
       30000
     ),
 

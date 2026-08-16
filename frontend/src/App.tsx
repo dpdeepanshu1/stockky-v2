@@ -25,6 +25,18 @@ type ViewState =
 type Tab = "dashboard" | "notifications" | "training" | "trades";
 
 export default function App() {
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    try {
+      const t = localStorage.getItem("stockky_theme");
+      if (t === "light" || t === "dark") return t;
+    } catch {}
+    return "dark";
+  });
+  useEffect(() => {
+    document.documentElement.classList.toggle("light", theme === "light");
+    try { localStorage.setItem("stockky_theme", theme); } catch {}
+  }, [theme]);
+
   const [systemReady, setSystemReady] = useState(false);
   const [tab, setTab] = useState<Tab>("dashboard");
   const [query, setQuery] = useState("");
@@ -420,6 +432,13 @@ export default function App() {
               title="Service Manager"
             >
               ⚙️ Services
+            </button>
+            <button
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              className="text-xs font-mono text-mist hover:text-paper border border-slate rounded-lg px-3 py-2 hover:border-mist/60 transition"
+              title="Toggle dark / light mode"
+            >
+              {theme === "dark" ? "☀️ Light" : "🌙 Dark"}
             </button>
             <button
               onClick={() => setShowSettings(!showSettings)}

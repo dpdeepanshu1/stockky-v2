@@ -63,6 +63,7 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+MARKET_DATA_URL = os.environ.get("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
 SERVICE_URL = os.environ.get(
     "SERVICE_URL",
     os.environ.get("TRAINING_URL", f"{os.environ.get('DECISION_PREDICTION_URL', 'https://decision-prediction-service.onrender.com').rstrip('/')}/training"),
@@ -737,39 +738,107 @@ _CHART_PERIOD_MAP = {
 
 @app.get("/api/stock/history/{symbol}")
 async def stock_history(symbol: str, period: str = "1mo"):
+    """Chart data via market-data-service (avoids Yahoo rate-limit on this dyno)."""
     if period not in _CHART_PERIOD_MAP:
         raise HTTPException(status_code=400, detail=f"period must be one of {list(_CHART_PERIOD_MAP.keys())}")
-    yf_period, yf_interval = _CHART_PERIOD_MAP[period]
-    try:
-        import yfinance as yf
-        ticker = yf.Ticker(symbol.upper() + ".NS")
-        hist = ticker.history(period=yf_period, interval=yf_interval)
-        if hist.empty:
-            raise HTTPException(status_code=404, detail=f"No price history for {symbol}")
-        points = [
-            {
-                "date": idx.isoformat(),
-                "open": round(float(row["Open"]), 2),
-                "high": round(float(row["High"]), 2),
-                "low": round(float(row["Low"]), 2),
-                "close": round(float(row["Close"]), 2),
-                "volume": int(row["Volume"]),
-            }
-            for idx, row in hist.iterrows()
-        ]
-        first_close = points[0]["close"]
-        last_close = points[-1]["close"]
-        return JSONResponse(content={
-            "symbol": symbol.upper(),
-            "period": period,
-            "points": points,
-            "change_pct": round((last_close - first_close) / first_close * 100, 2) if first_close else None,
-        })
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching history for {symbol}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    # Map UI period → market-data period (daily candles are enough for chart)
+    md_period = {"1d": "1mo", "5d": "1mo", "1mo": "1mo", "1y": "1y", "5y": "5y"}.get(period, "1mo")
+    import httpx
+    last_err = None
+    data = None
+    for attempt in range(3):
+        try:
+            if attempt == 0:
+                try:
+                    httpx.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=8)
+                except Exception:
+                    pass
+            resp = httpx.get(
+                f"{MARKET_DATA_URL}/history/{symbol.upper()}",
+                params={"period": md_period, "interval": "1d"},
+                timeout=45,
+            )
+            if resp.status_code in (502, 503, 504):
+                last_err = f"HTTP {resp.status_code}"
+                import time as _t
+                _t.sleep(1.2 * (attempt + 1))
+                continue
+            if resp.status_code == 404:
+                raise HTTPException(status_code=404, detail=f"No price history for {symbol}")
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except HTTPException:
+            raise
+        except Exception as e:
+            last_err = str(e)
+            import time as _t
+            _t.sleep(1.2 * (attempt + 1))
+    if data is None:
+        # Fallback: direct yfinance once (best-effort)
+        try:
+            import yfinance as yf
+            yf_period, yf_interval = _CHART_PERIOD_MAP[period]
+            hist = yf.Ticker(symbol.upper() + ".NS").history(period=yf_period, interval=yf_interval)
+            if hist is None or hist.empty:
+                raise HTTPException(status_code=503, detail=f"Chart temporarily unavailable (rate limit). Try again shortly. ({last_err})")
+            points = []
+            for idx, row in hist.iterrows():
+                try:
+                    points.append({
+                        "date": idx.isoformat(),
+                        "open": round(float(row["Open"]), 2),
+                        "high": round(float(row["High"]), 2),
+                        "low": round(float(row["Low"]), 2),
+                        "close": round(float(row["Close"]), 2),
+                        "volume": int(row["Volume"]) if row["Volume"] == row["Volume"] else 0,
+                    })
+                except Exception:
+                    continue
+            if not points:
+                raise HTTPException(status_code=503, detail="Chart temporarily unavailable")
+            first_close = points[0]["close"]
+            last_close = points[-1]["close"]
+            return JSONResponse(content={
+                "symbol": symbol.upper(),
+                "period": period,
+                "points": points,
+                "change_pct": round((last_close - first_close) / first_close * 100, 2) if first_close else None,
+            })
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error("Error fetching history for %s: %s", symbol, e)
+            raise HTTPException(status_code=503, detail=f"Chart temporarily unavailable: {e}")
+
+    candles = data.get("candles") or []
+    points = []
+    for c in candles:
+        try:
+            points.append({
+                "date": c.get("date"),
+                "open": c.get("open"),
+                "high": c.get("high"),
+                "low": c.get("low"),
+                "close": c.get("close"),
+                "volume": c.get("volume") or 0,
+            })
+        except Exception:
+            continue
+    if not points:
+        raise HTTPException(status_code=404, detail=f"No price history for {symbol}")
+    first_close = points[0].get("close") or 0
+    last_close = points[-1].get("close") or 0
+    change = None
+    if first_close:
+        change = round((last_close - first_close) / first_close * 100, 2)
+    return JSONResponse(content={
+        "symbol": symbol.upper(),
+        "period": period,
+        "points": points,
+        "change_pct": change,
+    })
+
 
 # ----------------------------------------------------------------------
 # NEW: Shared portfolio account

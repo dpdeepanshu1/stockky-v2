@@ -56,10 +56,16 @@ ENV_DEFAULTS = {
     "slack_webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
     "telegram_bot_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),
     "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
+    # CallMeBot: phone like 9198XXXXXXX (country code, no +) + apikey from bot
+    "callmebot_phone": os.getenv("CALLMEBOT_PHONE", ""),
+    "callmebot_apikey": os.getenv("CALLMEBOT_APIKEY", ""),
+    # Optional multi-user: "phone1:key1,phone2:key2"
+    "callmebot_users": os.getenv("CALLMEBOT_USERS", ""),
     "enabled": {
         "discord": bool(os.getenv("DISCORD_WEBHOOK_URL")),
         "slack": bool(os.getenv("SLACK_WEBHOOK_URL")),
         "telegram": bool(os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID")),
+        "callmebot": bool(os.getenv("CALLMEBOT_PHONE") and os.getenv("CALLMEBOT_APIKEY")),
     },
 }
 
@@ -140,14 +146,17 @@ class ChannelUpdate(BaseModel):
     slack_webhook_url: Optional[str] = None
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
-    enabled: Optional[dict] = None  # e.g. {"discord": true, "telegram": false}
+    callmebot_phone: Optional[str] = None
+    callmebot_apikey: Optional[str] = None
+    callmebot_users: Optional[str] = None
+    enabled: Optional[dict] = None  # e.g. {"discord": true, "telegram": false, "callmebot": true}
 
 
 class NotifyRequest(BaseModel):
     title: str
     message: str
     urgency: str = "normal"  # "normal" | "high" — high could map to @here/@channel later
-    channel: str = "all"     # "all", "telegram", "discord", "slack"
+    channel: str = "all"     # "all", "telegram", "discord", "slack", "callmebot"
 
 
 def _public_config(cfg: dict) -> dict:
@@ -169,6 +178,15 @@ def _public_config(cfg: dict) -> dict:
             "masked": _mask(cfg.get("telegram_bot_token", "")),
             "chat_id": cfg.get("telegram_chat_id", ""),
         },
+        "callmebot": {
+            "configured": bool(
+                (cfg.get("callmebot_phone") and cfg.get("callmebot_apikey"))
+                or (cfg.get("callmebot_users") or "").strip()
+            ),
+            "enabled": bool(enabled.get("callmebot")),
+            "masked": _mask(cfg.get("callmebot_apikey", "")),
+            "phone": cfg.get("callmebot_phone", ""),
+        },
         "persisted": bool(_redis),
     }
 
@@ -184,6 +202,10 @@ def health():
             "discord": bool(cfg.get("discord_webhook_url")),
             "slack": bool(cfg.get("slack_webhook_url")),
             "telegram": bool(cfg.get("telegram_bot_token") and cfg.get("telegram_chat_id")),
+            "callmebot": bool(
+                (cfg.get("callmebot_phone") and cfg.get("callmebot_apikey"))
+                or (cfg.get("callmebot_users") or "").strip()
+            ),
         },
     }
 
@@ -205,11 +227,17 @@ def update_config(update: ChannelUpdate):
         cfg["telegram_bot_token"] = update.telegram_bot_token.strip()
     if update.telegram_chat_id is not None:
         cfg["telegram_chat_id"] = update.telegram_chat_id.strip()
+    if update.callmebot_phone is not None:
+        cfg["callmebot_phone"] = update.callmebot_phone.strip().lstrip("+")
+    if update.callmebot_apikey is not None:
+        cfg["callmebot_apikey"] = update.callmebot_apikey.strip()
+    if update.callmebot_users is not None:
+        cfg["callmebot_users"] = update.callmebot_users.strip()
 
     enabled = dict(cfg.get("enabled", {}))
     if update.enabled:
         for channel, val in update.enabled.items():
-            if channel in ("discord", "slack", "telegram"):
+            if channel in ("discord", "slack", "telegram", "callmebot"):
                 enabled[channel] = bool(val)
     cfg["enabled"] = enabled
 
@@ -219,13 +247,17 @@ def update_config(update: ChannelUpdate):
 
 @app.delete("/config/{channel}")
 def clear_channel(channel: str):
-    if channel not in ("discord", "slack", "telegram"):
+    if channel not in ("discord", "slack", "telegram", "callmebot"):
         raise HTTPException(status_code=404, detail="Unknown channel")
     cfg = _load_config()
     if channel == "discord":
         cfg["discord_webhook_url"] = ""
     elif channel == "slack":
         cfg["slack_webhook_url"] = ""
+    elif channel == "callmebot":
+        cfg["callmebot_phone"] = ""
+        cfg["callmebot_apikey"] = ""
+        cfg["callmebot_users"] = ""
     else:
         cfg["telegram_bot_token"] = ""
         cfg["telegram_chat_id"] = ""
@@ -293,10 +325,59 @@ def _send_telegram(cfg: dict, title: str, message: str):
         return f"failed: {e}"
 
 
+def _callmebot_recipients(cfg: dict):
+    """Build list of (phone, apikey) from saved config + env multi-user string."""
+    users = []
+    phone = (cfg.get("callmebot_phone") or "").strip().lstrip("+")
+    key = (cfg.get("callmebot_apikey") or "").strip()
+    if phone and key:
+        users.append((phone, key))
+    raw = (cfg.get("callmebot_users") or "").strip()
+    for part in raw.split(","):
+        part = part.strip()
+        if ":" in part:
+            ph, k = part.split(":", 1)
+            ph, k = ph.strip().lstrip("+"), k.strip()
+            if ph and k and (ph, k) not in users:
+                users.append((ph, k))
+    return users
+
+
+def _send_callmebot(cfg: dict, title: str, message: str):
+    """CallMeBot free alert (Telegram call / WhatsApp-style API)."""
+    import urllib.parse
+    if not cfg.get("enabled", {}).get("callmebot"):
+        return None
+    users = _callmebot_recipients(cfg)
+    if not users:
+        return "not configured"
+    text = f"{title}. {message}"
+    # Keep under ~200 chars for voice readability
+    if len(text) > 220:
+        text = text[:217] + "..."
+    results = []
+    any_sent = False
+    for phone, apikey in users:
+        try:
+            q = urllib.parse.quote(text)
+            url = (
+                f"https://api.callmebot.com/start.php?source=web"
+                f"&user={urllib.parse.quote(phone)}&text={q}&apikey={urllib.parse.quote(apikey)}"
+            )
+            resp = httpx.get(url, timeout=20)
+            if resp.status_code == 200:
+                any_sent = True
+                results.append(f"{phone}:ok")
+            else:
+                results.append(f"{phone}:HTTP {resp.status_code}")
+        except Exception as e:
+            results.append(f"{phone}: {e}")
+    return "sent" if any_sent else ("failed: " + "; ".join(results))
+
+
 def _dispatch(title: str, message: str, channel_filter: str):
     cfg = _load_config()
     results = {}
-    # Determine which channels to send to based on the filter
     channels_to_send = []
     if channel_filter == "all" or channel_filter == "telegram":
         channels_to_send.append("telegram")
@@ -304,9 +385,8 @@ def _dispatch(title: str, message: str, channel_filter: str):
         channels_to_send.append("discord")
     if channel_filter == "all" or channel_filter == "slack":
         channels_to_send.append("slack")
-
-    # If the filter is a specific channel, only send to that one (already covered above)
-    # Also ensure we don't send duplicates if "all" includes a specific channel
+    if channel_filter == "all" or channel_filter == "callmebot":
+        channels_to_send.append("callmebot")
 
     for ch in channels_to_send:
         if ch == "telegram":
@@ -321,6 +401,10 @@ def _dispatch(title: str, message: str, channel_filter: str):
             result = _send_slack(cfg, title, message)
             if result is not None:
                 results["slack"] = result
+        elif ch == "callmebot":
+            result = _send_callmebot(cfg, title, message)
+            if result is not None:
+                results["callmebot"] = result
 
     return results
 
@@ -398,18 +482,12 @@ def _callmebot_users():
 @app.post("/call/me")
 @app.get("/call/me")
 def call_me_now(message: str = "Stockky alert: action required on your picks"):
-    """Manual Call Me Now — free CallMeBot Telegram call/text."""
-    users = _callmebot_users()
-    if not users:
-        return {"ok": False, "error": "Configure CALLMEBOT_PHONE + CALLMEBOT_APIKEY (or CALLMEBOT_USERS)"}
-    results = []
-    for phone, apikey in users:
-        try:
-            text = urllib.parse.quote(message)
-            url = f"https://api.callmebot.com/start.php?source=auth&user={urllib.parse.quote(phone)}&text={text}&apikey={apikey}"
-            # voice-ish path also supported by some CallMeBot endpoints
-            r = httpx.get(url, timeout=20)
-            results.append({"phone": phone, "status": r.status_code, "body": r.text[:200]})
-        except Exception as e:
-            results.append({"phone": phone, "error": str(e)})
-    return {"ok": True, "results": results}
+    """Manual Call Me Now — uses saved CallMeBot config (or env fallback)."""
+    cfg = _load_config()
+    # Force-enable for explicit test/manual
+    cfg = dict(cfg)
+    enabled = dict(cfg.get("enabled") or {})
+    enabled["callmebot"] = True
+    cfg["enabled"] = enabled
+    result = _send_callmebot(cfg, "Stockky Call Alert", message)
+    return {"ok": result == "sent", "result": result}

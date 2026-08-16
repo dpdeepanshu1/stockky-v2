@@ -859,15 +859,34 @@ def _send_scan_notification(recommendations: list, verdict: str, scanned: int, u
 
     try:
         _wake_notification_service()
+        # Telegram/Discord/Slack (channel=all so enabled channels receive)
         resp = httpx.post(f"{NOTIFICATION_URL}/notify", json={
             "title": "Market Scan Complete",
             "message": message,
-            "channel": "telegram"
-        }, timeout=10)
+            "channel": "all",
+        }, timeout=15)
         if resp.status_code == 200:
-            logger.info("Scan recommendations sent to Telegram")
+            logger.info("Scan recommendations notified: %s", resp.text[:120])
         else:
-            logger.warning("Telegram notification failed with status %d", resp.status_code)
+            logger.warning("Scan notification failed with status %d", resp.status_code)
+        # Extra CallMeBot voice-style alert only for immediate BUY NOW
+        buy_now = [r for r in (recommendations or []) if r.get("decision") == "BUY NOW"]
+        if buy_now:
+            top = buy_now[0]
+            sym = top.get("symbol", "?")
+            score = top.get("combined_score", "")
+            reason = (top.get("natural_language_summary") or top.get("holding_period") or "Strong buy signal")
+            if isinstance(reason, str) and len(reason) > 100:
+                reason = reason[:97] + "..."
+            call_msg = f"{sym} is BUY NOW. Score {score}. {reason}"
+            try:
+                httpx.post(
+                    f"{NOTIFICATION_URL}/notify",
+                    json={"title": f"BUY NOW {sym}", "message": call_msg, "channel": "callmebot", "urgency": "high"},
+                    timeout=20,
+                )
+            except Exception as ce:
+                logger.warning("CallMeBot notify failed: %s", ce)
     except Exception as e:
         logger.warning("Failed to send scan notification: %s", e)
 
@@ -2344,6 +2363,28 @@ def delete_notification_channel(channel: str):
         return resp.json()
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
+
+
+@app.api_route("/notifications/call/me", methods=["GET", "POST"])
+def notifications_call_me(request: Request, message: str = "Stockky test call alert"):
+    """Proxy CallMeBot test / manual call."""
+    try:
+        # Prefer query message; allow JSON body override on POST
+        msg = message
+        try:
+            # body may be empty
+            pass
+        except Exception:
+            pass
+        resp = httpx.post(
+            f"{NOTIFICATION_URL}/call/me",
+            params={"message": msg},
+            timeout=25,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"CallMeBot unreachable: {e}")
 
 @app.post("/notifications/test")
 def test_notification_channels():

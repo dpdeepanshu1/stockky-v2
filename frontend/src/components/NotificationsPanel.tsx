@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, NotificationConfig } from "../api";
 
-type Channel = "telegram" | "discord" | "slack";
+type Channel = "telegram" | "discord" | "slack" | "callmebot";
 
 interface ChannelMeta {
   label: string;
@@ -29,6 +29,12 @@ const CHANNEL_META: Record<Channel, ChannelMeta> = {
     setupUrl: "https://api.slack.com/messaging/webhooks",
     setupLabel: "How to set up Slack webhooks ->",
   },
+  callmebot: {
+    label: "CallMeBot (Voice / Call alert)",
+    blurb: "Free CallMeBot API — phone call / voice-style alert when BUY NOW appears. Get API key from the CallMeBot bot on Telegram.",
+    setupUrl: "https://www.callmebot.com/blog/free-api-telegram-bot/",
+    setupLabel: "CallMeBot setup guide ->",
+  },
 };
 
 export default function NotificationsPanel() {
@@ -43,6 +49,9 @@ export default function NotificationsPanel() {
   const [telegramChatId, setTelegramChatId] = useState("");
   const [discordUrl, setDiscordUrl] = useState("");
   const [slackUrl, setSlackUrl] = useState("");
+  const [callPhone, setCallPhone] = useState("");
+  const [callKey, setCallKey] = useState("");
+  const [testingCall, setTestingCall] = useState(false);
 
   function load() {
     setLoading(true);
@@ -241,6 +250,55 @@ export default function NotificationsPanel() {
           onChange={setSlackUrl}
           type="password"
         />
+      </ChannelCard>
+
+      <ChannelCard
+        channel="callmebot"
+        connected={Boolean(config.callmebot?.configured)}
+        enabled={Boolean(config.callmebot?.enabled)}
+        masked={config.callmebot?.masked || ""}
+        onToggle={(v) => toggleChannel("callmebot", v)}
+        onDisconnect={() => disconnectChannel("callmebot")}
+        saving={saving === "callmebot"}
+        onSave={() => saveChannel("callmebot")}
+      >
+        <Field
+          label="Phone (country code, no +)"
+          placeholder={config.callmebot?.phone ? `Saved: ${config.callmebot.phone}` : "e.g. 9198XXXXXXXX"}
+          value={callPhone}
+          onChange={setCallPhone}
+        />
+        <Field
+          label="API key"
+          placeholder={config.callmebot?.configured ? `Saved: ${config.callmebot.masked}` : "From CallMeBot Telegram bot"}
+          value={callKey}
+          onChange={setCallKey}
+          type="password"
+        />
+        <button
+          type="button"
+          disabled={testingCall || !config.callmebot?.configured}
+          onClick={async () => {
+            setTestingCall(true);
+            setTestResult(null);
+            try {
+              const r = await api.testCallMeBot(
+                "Stockky test call. If you hear this, CallMeBot is connected."
+              );
+              setTestResult(r.ok ? "CallMeBot test sent — check your phone/Telegram." : `CallMeBot failed: ${r.result || r.error || "unknown"}`);
+            } catch (e) {
+              setTestResult((e as Error).message);
+            } finally {
+              setTestingCall(false);
+            }
+          }}
+          className="mt-2 font-mono text-xs px-3 py-2 rounded-lg border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/15 disabled:opacity-40"
+        >
+          {testingCall ? "Calling…" : "📞 Test CallMeBot"}
+        </button>
+        <p className="text-[10px] text-mist/60 mt-2 font-mono">
+          Auto-calls on scan when a stock is <span className="text-emerald-400">BUY NOW</span> (message includes symbol + reason).
+        </p>
       </ChannelCard>
     </div>
   );

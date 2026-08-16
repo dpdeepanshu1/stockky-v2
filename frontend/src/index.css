@@ -1,0 +1,37 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body {
+  background-color: #0E1512;
+  color: #EDEFEC;
+}
+
+::selection {
+  background-color: #3FD97F;
+  color: #0E1512;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #1F2A26 #0E1512;
+}
+
+/* Custom animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.6s ease-out forwards;
+}
+
+/* Glow shadow (for hover) */
+.shadow-glow-sm {
+  box-shadow: 0 0 12px rgba(79, 184, 224, 0.15);
+}
+
+.shadow-glow {
+  box-shadow: 0 0 20px rgba(79, 184, 224, 0.25);
+}

@@ -1,0 +1,88 @@
+version: "3.9"
+
+services:
+  market-data-service:
+    build: ./services/market-data-service
+    ports:
+      - "8001:8001"
+    environment:
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN}
+      YFINANCE_MAX_CONCURRENT: ${YFINANCE_MAX_CONCURRENT:-6}
+      YFINANCE_MIN_INTERVAL_SEC: ${YFINANCE_MIN_INTERVAL_SEC:-0.08}
+      PORT: 8001
+
+  analysis-intelligence-service:
+    build: ./services/analysis-intelligence-service
+    ports:
+      - "8002:8000"
+    environment:
+      MARKET_DATA_URL: http://market-data-service:8001
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN}
+      PORT: 8000
+    depends_on:
+      - market-data-service
+
+  decision-prediction-service:
+    build: ./services/decision-prediction-service
+    ports:
+      - "8004:8000"
+    environment:
+      MARKET_DATA_URL: http://market-data-service:8001
+      TECHNICAL_URL: http://analysis-intelligence-service:8000/technical
+      FUNDAMENTAL_URL: http://analysis-intelligence-service:8000/fundamental
+      NEWS_URL: http://analysis-intelligence-service:8000/news
+      EVENT_URL: http://analysis-intelligence-service:8000/event
+      PREDICTION_URL: http://decision-prediction-service:8000/prediction
+      TRAINING_SERVICE_URL: http://decision-prediction-service:8000/training
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN}
+      PORT: 8000
+    depends_on:
+      - market-data-service
+      - analysis-intelligence-service
+
+  notification-scheduler-service:
+    build: ./services/notification-scheduler-service
+    ports:
+      - "8008:8000"
+    environment:
+      API_GATEWAY_URL: http://api-gateway:8000
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN}
+      PORT: 8000
+    depends_on:
+      - api-gateway
+
+  api-gateway:
+    build: ./services/api-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      MARKET_DATA_URL: http://market-data-service:8001
+      TECHNICAL_URL: http://analysis-intelligence-service:8000/technical
+      FUNDAMENTAL_URL: http://analysis-intelligence-service:8000/fundamental
+      NEWS_URL: http://analysis-intelligence-service:8000/news
+      EVENT_URL: http://analysis-intelligence-service:8000/event
+      MARKET_SENTIMENT_URL: http://analysis-intelligence-service:8000/sentiment
+      DECISION_URL: http://decision-prediction-service:8000/decision
+      PREDICTION_URL: http://decision-prediction-service:8000/prediction
+      TRAINING_URL: http://decision-prediction-service:8000/training
+      NOTIFICATION_URL: http://notification-scheduler-service:8000/notification
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN}
+      PORT: 8000
+    depends_on:
+      - market-data-service
+      - analysis-intelligence-service
+      - decision-prediction-service
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:8000
+    depends_on:
+      - api-gateway

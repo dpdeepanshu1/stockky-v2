@@ -1,0 +1,75 @@
+name: Stockky Scheduler
+
+on:
+  schedule:
+    # Run at minute 50 past every hour from 02:50 to 09:50 UTC
+    # This translates to 08:20, 09:20, ... 15:20 IST – giving a 10‑minute buffer before each hour.
+    - cron: "50 2-9 * * 1-5"
+    # Extra keep-warm pings during market hours so Render free-tier services
+    # rarely sleep (every ~12 min, Mon–Fri 03:00–10:00 UTC ≈ 08:30–15:30 IST).
+    - cron: "0,12,24,36,48 3-9 * * 1-5"
+
+  # Manual trigger with a checkbox to force scan outside market hours
+  workflow_dispatch:
+    inputs:
+      force_scan:
+        description: "Force scan (bypass market hours)"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r services/scheduler-service/requirements.txt
+
+      - name: Wake up services
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+          MARKET_DATA_URL: ${{ secrets.MARKET_DATA_URL }}
+          TECHNICAL_URL: ${{ secrets.TECHNICAL_URL }}
+          FUNDAMENTAL_URL: ${{ secrets.FUNDAMENTAL_URL }}
+          DECISION_URL: ${{ secrets.DECISION_URL }}
+          NEWS_URL: ${{ secrets.NEWS_URL }}
+          EVENT_TRACKER_URL: ${{ secrets.EVENT_TRACKER_URL }}
+          PREDICTION_URL: ${{ secrets.PREDICTION_URL }}
+          NOTIFICATION_URL: ${{ secrets.NOTIFICATION_URL }}
+          MARKET_SENTIMENT_URL: ${{ secrets.MARKET_SENTIMENT_URL }}
+          TRAINING_URL: ${{ secrets.TRAINING_URL }}
+          SCHEDULER_URL: ${{ secrets.SCHEDULER_URL }}
+        run: |
+          echo "Pinging all services to wake them up..."
+          curl -I $API_GATEWAY_URL/health || true
+          curl -I $MARKET_DATA_URL/health || true
+          curl -I $TECHNICAL_URL/health || true
+          curl -I $FUNDAMENTAL_URL/health || true
+          curl -I $DECISION_URL/health || true
+          curl -I $NEWS_URL/health || true
+          curl -I $EVENT_TRACKER_URL/health || true
+          curl -I $PREDICTION_URL/health || true
+          curl -I $NOTIFICATION_URL/health || true
+          curl -I $MARKET_SENTIMENT_URL/health || true
+          curl -I $TRAINING_URL/health || true
+          curl -I $SCHEDULER_URL/health || true
+          curl -X POST $API_GATEWAY_URL/wake/all || true
+          echo "Waiting 60 seconds for services to spin up..."
+          sleep 60
+
+      - name: Run scheduler tick
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+          EVENT_TRACKER_URL: ${{ secrets.EVENT_TRACKER_URL }}
+          NOTIFICATION_URL: ${{ secrets.NOTIFICATION_URL }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          # FORCE_SCAN is set only when running manually with the checkbox ticked
+          FORCE_SCAN: ${{ github.event_name == 'workflow_dispatch' && inputs.force_scan == true && 'true' || 'false' }}
+        run: python services/scheduler-service/run_once.py# Updated for 5-service architecture. Set secrets for the 5 placeholder/real URLs.

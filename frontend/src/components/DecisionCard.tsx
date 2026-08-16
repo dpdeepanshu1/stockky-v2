@@ -309,70 +309,69 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
         </p>
       )}
 
-      {/* Decision header — terminal layout */}
-      <div className={`dc-hero rounded-2xl border ${style.border} ${style.bg} p-5 sm:p-7`}>
-        <div className="dc-hero-top">
-          <div className="dc-hero-left">
-            <span className="font-display text-2xl sm:text-3xl font-extrabold tracking-wide text-white">
-              {data.symbol}
-            </span>
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-1">
+      {/* Decision header — compact terminal */}
+      <div className={`dc-hero rounded-2xl border ${style.border} ${style.bg} p-4 sm:p-6`}>
+        <div className="dc-grid">
+          <div className="dc-col-main">
+            <div className="dc-sym-row">
+              <span className="font-display text-xl sm:text-2xl font-extrabold tracking-wide text-white">
+                {data.symbol}
+              </span>
               {data.sector && (
-                <span className="font-mono text-[10px] text-mist/80 uppercase tracking-wider">{data.sector}</span>
+                <span className="font-mono text-[10px] text-mist/70 uppercase tracking-wider">{data.sector}</span>
               )}
               {data.valuation && (
-                <span className="font-mono text-[10px] text-mist/55">· {data.valuation}</span>
+                <span className="font-mono text-[10px] text-mist/50">· {data.valuation}</span>
               )}
             </div>
-          </div>
-          <div className="dc-hero-right font-mono text-right">
-            <div className="text-3xl sm:text-4xl text-paper tabular-nums">
-              {displayClose != null ? `₹${displayClose.toLocaleString("en-IN")}` : data.data_insufficient ? "Awaiting Data" : "N/A"}
-            </div>
-            <div className="text-[11px] text-mist/65 mt-1 flex items-center justify-end gap-2 flex-wrap">
-              <span>Combined {data.combined_score}/100</span>
-              {data.market_sentiment_adjustment !== undefined && data.market_sentiment_adjustment !== 0 && (
-                <span className={`font-medium ${data.market_sentiment_adjustment > 0 ? "text-signal-buy" : "text-signal-sell"}`}>
-                  ({formatAdjustment(data.market_sentiment_adjustment)})
+            <h2 className={`font-display text-2xl sm:text-4xl leading-none ${style.color} mt-2 tracking-tight`}>
+              {data.decision}
+            </h2>
+            <p className="text-mist text-xs sm:text-sm mt-1.5">{style.verb} · {data.confidence} confidence</p>
+            {data.data_quality && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <span
+                  className={`font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border ${
+                    data.data_quality.level === "high"
+                      ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/10"
+                      : data.data_quality.level === "low"
+                      ? "border-amber-500/40 text-amber-200 bg-amber-500/10"
+                      : "border-slate-400/40 text-mist bg-slate/20"
+                  }`}
+                >
+                  Data quality: {data.data_quality.level || "unknown"}
                 </span>
-              )}
+                {data.data_quality.note && (
+                  <span className="font-mono text-[10px] text-mist/65">{data.data_quality.note}</span>
+                )}
+              </div>
+            )}
+            {data.data_quality?.flags && data.data_quality.flags.length > 0 && (
+              <ul className="mt-1 font-mono text-[10px] text-mist/55 list-disc list-inside">
+                {data.data_quality.flags.slice(0, 3).map((f, i) => (
+                  <li key={i}>{f}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="dc-col-side">
+            <div className="dc-price-block font-mono">
+              <div className="text-2xl sm:text-3xl text-paper tabular-nums">
+                {displayClose != null ? `₹${displayClose.toLocaleString("en-IN")}` : data.data_insufficient ? "Awaiting Data" : "N/A"}
+              </div>
+              <div className="text-[11px] text-mist/65 mt-0.5 flex items-center justify-end gap-2 flex-wrap">
+                <span>Combined {data.combined_score}/100</span>
+                {data.market_sentiment_adjustment !== undefined && data.market_sentiment_adjustment !== 0 && (
+                  <span className={`font-medium ${data.market_sentiment_adjustment > 0 ? "text-signal-buy" : "text-signal-sell"}`}>
+                    ({formatAdjustment(data.market_sentiment_adjustment)})
+                  </span>
+                )}
+              </div>
             </div>
+            <HorizonStrip data={data} />
           </div>
         </div>
-
-        <div className="dc-hero-center">
-          <h2 className={`font-display text-3xl sm:text-5xl leading-none ${style.color} tracking-tight`}>
-            {data.decision}
-          </h2>
-          <p className="text-mist text-sm mt-1.5">{style.verb} · {data.confidence} confidence</p>
-          {data.data_quality && (
-            <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
-              <span
-                className={`font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border ${
-                  data.data_quality.level === "high"
-                    ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/10"
-                    : data.data_quality.level === "low"
-                    ? "border-amber-500/40 text-amber-200 bg-amber-500/10"
-                    : "border-slate-400/40 text-mist bg-slate/20"
-                }`}
-              >
-                Data quality: {data.data_quality.level || "unknown"}
-              </span>
-              {data.data_quality.note && (
-                <span className="font-mono text-[10px] text-mist/70">{data.data_quality.note}</span>
-              )}
-            </div>
-          )}
-          {data.data_quality?.flags && data.data_quality.flags.length > 0 && (
-            <ul className="mt-1 font-mono text-[10px] text-mist/60 list-disc list-inside max-w-xl mx-auto">
-              {data.data_quality.flags.slice(0, 4).map((f, i) => (
-                <li key={i}>{f}</li>
-              ))}
-            </ul>
-          )}
-        </div>
-
-        <HorizonStrip data={data} />
 
         {data.event_risk && (
           <div className="mt-6 rounded-lg border border-signal-hold/40 bg-signal-hold/10 px-4 py-3 text-sm text-signal-hold font-mono flex items-start gap-2">
@@ -626,9 +625,31 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
       <div className="grid md:grid-cols-2 gap-4">
         <ReasonList title="Technical" items={data.reasons.technical} />
         <ReasonList title="Fundamental" items={fundamentalReasons} maxItems={4} />
-        {data.reasons.prediction && data.reasons.prediction.length > 0 && (
-          <ReasonList title="AI Prediction" items={data.reasons.prediction} maxItems={4} />
-        )}
+        {(() => {
+          const raw = (data.reasons?.prediction || []).map(String).filter(Boolean);
+          const cleaned = raw
+            .map((s) => s.replace(/^[-–•\s]+/, "").trim())
+            .filter((s) => s.length > 3 && !/^(price|n\/?a|null|undefined)$/i.test(s));
+          const score = data.prediction_score;
+          let line: string | null = cleaned[0] || null;
+          if (!line && score != null) {
+            if (score >= 60) {
+              line = `Model estimates about ${score}% odds of a meaningful upside move (~5%+) over the next ~10 trading sessions.`;
+            } else if (score >= 45) {
+              line = `Model sees mixed odds (~${score}%) of a ~5%+ move within ~10 sessions — no clear edge.`;
+            } else {
+              line = `Model assigns only ~${score}% probability of a ~5%+ move within ~10 sessions — weak short-term signal.`;
+            }
+          }
+          if (!line && (data as any).prediction_note) {
+            line = String((data as any).prediction_note);
+          }
+          if (!line) {
+            line = "AI prediction is limited right now; treat technical and fundamental pillars as primary.";
+          }
+          const items = cleaned.length > 0 ? [line, ...cleaned.slice(1, 3)] : [line];
+          return <ReasonList title="AI Prediction" items={items} maxItems={4} />;
+        })()}
         {hasEvent && <ReasonList title="Event Tracker" items={data.reasons.event!} />}
         {hasMarket && <ReasonList title="Market Sentiment" items={data.reasons.market!} />}
         {data.reasons.training && data.reasons.training.length > 0 && (
@@ -1360,6 +1381,7 @@ function MetricItem({ label, value }: { label: string; value: string }) {
 
 // ── HorizonStrip (v2) ──
 
+
 export function HorizonStrip({ data }: { data: any }) {
   const hz = data?.horizons || {};
   const order = ["short", "mid", "long"] as const;
@@ -1378,8 +1400,13 @@ export function HorizonStrip({ data }: { data: any }) {
         {order.map((k) => {
           const h = hz[k];
           if (!h) return null;
+          const dec = String(h.decision || "");
+          const tone =
+            /BUY NOW/i.test(dec) ? "buy" :
+            /PREPARE/i.test(dec) ? "prep" :
+            /HOLD|WAIT/i.test(dec) ? "hold" : "sell";
           return (
-            <div key={k} className="hz-card">
+            <div key={k} className={`hz-card hz-${tone}`}>
               <div className="hz-card-label">{h.label || k}</div>
               <div className="hz-card-decision">{h.decision}</div>
               <div className="hz-card-score">Score {h.score}</div>

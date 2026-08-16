@@ -1,9 +1,10 @@
 """
-Stockky Decision Prediction Service - Reliable version
+Stockky Decision Prediction Service - Final reliable version
 """
 import os
 import sys
 import logging
+import importlib.util
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -14,7 +15,7 @@ logger = logging.getLogger("decision-prediction-service")
 
 app = FastAPI(
     title="Stockky Decision Prediction Service",
-    version="1.0.4",
+    version="1.0.5",
     description="Merged decision + prediction + training"
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -30,7 +31,6 @@ except Exception as e:
 
 # ---------- Training ----------
 try:
-    sys.path = [p for p in sys.path if "decision" not in p]
     sys.path.insert(0, os.path.join(BASE, "training"))
     from training.app import app as train_app
     app.mount("/training", train_app)
@@ -38,22 +38,20 @@ try:
 except Exception as e:
     logger.error(f"❌ Training failed: {e}")
 
-# ---------- Prediction (direct registration - most reliable) ----------
+# ---------- Prediction (using importlib - no circular import) ----------
 try:
-    prediction_dir = os.path.join(BASE, "prediction")
-    sys.path.insert(0, prediction_dir)
-    os.chdir(prediction_dir)
+    prediction_path = os.path.join(BASE, "prediction", "main.py")
+    spec = importlib.util.spec_from_file_location("prediction_service", prediction_path)
+    pred_module = importlib.util.module_from_spec(spec)
 
-    # Import the actual predict function
-    from main import predict as pred_func
-    from main import health as pred_health
-    from main import root as pred_root
+    # Temporarily add prediction folder to path for its internal imports
+    sys.path.insert(0, os.path.join(BASE, "prediction"))
+    spec.loader.exec_module(pred_module)
 
-    os.chdir(BASE)
-
+    # Register the routes
     @app.get("/prediction/")
     def prediction_root():
-        return {"service": "prediction-service", "status": "running", "version": "direct"}
+        return {"service": "prediction-service", "status": "running", "method": "importlib"}
 
     @app.get("/prediction/health")
     def prediction_health():
@@ -61,11 +59,11 @@ try:
 
     @app.get("/prediction/predict/{symbol}")
     def prediction_predict(symbol: str):
-        return pred_func(symbol)
+        return pred_module.predict(symbol)
 
-    logger.info("✅ Prediction endpoints registered directly")
+    logger.info("✅ Prediction endpoints registered via importlib")
 except Exception as e:
-    logger.error(f"❌ Prediction registration failed: {e}")
+    logger.error(f"❌ Prediction failed: {e}")
     import traceback
     logger.error(traceback.format_exc())
 
@@ -74,7 +72,7 @@ except Exception as e:
 def root():
     return {
         "service": "Stockky Decision Prediction Service",
-        "version": "1.0.4",
+        "version": "1.0.5",
         "status": "running",
         "modules": ["decision", "prediction", "training"]
     }

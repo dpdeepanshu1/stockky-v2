@@ -125,7 +125,7 @@ def compute_pillar_scores(
     extras = extras or {}
     tech = _n(technical.get("technical_score"), 50)
     # Relative strength vs Nifty (0–100 style)
-    rs = _n(extras.get("rs_vs_nifty"), technical.get("rs_score"), 50)
+    rs = _n(extras.get("rs_vs_nifty") or technical.get("rs_score"), 50)
     vol = 55.0
     if technical.get("volume_surge"):
         vol = 75.0

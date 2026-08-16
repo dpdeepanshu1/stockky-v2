@@ -1,0 +1,56 @@
+# Nightly refresh of slow-changing analysis parameters (fundamentals, events, news).
+# Runs shortly after midnight IST so Redis holds fresh data for ~24h.
+# 00:05 IST = 18:35 UTC.
+#
+# Secrets: API_GATEWAY_URL (required)
+name: Stockky Nightly Static Params
+
+on:
+  schedule:
+    - cron: "35 18 * * *"
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: IST log
+        run: |
+          echo "IST now: $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M %Z')"
+          echo "UTC now: $(date -u '+%Y-%m-%d %H:%M %Z')"
+
+      - name: Refresh static params via gateway
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+        run: |
+          set +e
+          GW="${API_GATEWAY_URL:-}"
+          if [ -z "$GW" ]; then
+            echo "API_GATEWAY_URL secret is not set — skip"
+            exit 0
+          fi
+          GW="${GW%/}"
+
+          echo "Waking gateway..."
+          curl -fsS -m 45 -X POST "$GW/wake-all" || curl -fsS -m 45 "$GW/wake-all" || true
+          curl -fsS -m 25 "$GW/health?warm=true" || true
+          sleep 20
+
+          echo "Refreshing static params (fundamentals / events / news) for scan universe..."
+          CODE=$(curl -sS -o /tmp/refresh_out.json -w "%{http_code}" -m 600 \
+            -X POST "$GW/ops/refresh-static-params" \
+            -H "Content-Type: application/json" || echo "000")
+
+          if [ "$CODE" = "200" ] || [ "$CODE" = "202" ]; then
+            echo "refresh-static-params OK ($CODE)"
+            head -c 2000 /tmp/refresh_out.json || true
+            echo
+            exit 0
+          fi
+
+          echo "Dedicated endpoint returned $CODE — fallback warm"
+          curl -fsS -m 60 "$GW/scan/universe" || true
+          curl -fsS -m 30 "$GW/market/indices?force_refresh=true" || true
+          curl -fsS -m 30 "$GW/stockky-hot?force=true" || true
+          echo "Fallback warm done"

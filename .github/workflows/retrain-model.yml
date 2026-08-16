@@ -1,25 +1,30 @@
+# Retrain prediction model — after IST midnight (Asia/Kolkata).
+# 00:30 IST = 19:00 UTC previous calendar day.
 name: Retrain Prediction Model
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: "0 19 * * *"
   workflow_dispatch:
 
 jobs:
   retrain:
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
-
     steps:
+      - name: IST log
+        run: |
+          echo "IST now: $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M %Z')"
+          echo "UTC now: $(date -u '+%Y-%m-%d %H:%M %Z')"
+
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         working-directory: services/decision-prediction-service/prediction
@@ -32,11 +37,9 @@ jobs:
           API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
           MARKET_DATA_URL: ${{ secrets.MARKET_DATA_URL }}
         run: |
-          echo "Waking up services (if secrets are set)..."
+          set +e
           if [ -n "$API_GATEWAY_URL" ]; then
             curl -s -o /dev/null -w "%{http_code}" "$API_GATEWAY_URL/health" || true
-          else
-            echo "API_GATEWAY_URL secret not set – skipping"
           fi
           if [ -n "$MARKET_DATA_URL" ]; then
             curl -s -o /dev/null -w "%{http_code}" "$MARKET_DATA_URL/health" || true

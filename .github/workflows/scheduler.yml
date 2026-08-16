@@ -1,12 +1,15 @@
+# Stockky Scheduler — IST (Asia/Kolkata) market-aware only.
+# GitHub cron is UTC; times below map to NSE session windows.
+#
+# IST 09:15–15:30 ≈ UTC 03:45–10:00 (Mon–Fri)
 name: Stockky Scheduler
 
 on:
   schedule:
-    # Primary hourly-ish ticks IST morning–afternoon
-    - cron: "50 2-9 * * 1-5"
-    # Denser alert/scan during NSE hours (~every 10 min Mon–Fri)
-    - cron: "*/10 3-10 * * 1-5"
-
+    # Every 15 min during UTC hours covering IST market Mon–Fri
+    - cron: "0,15,30,45 4-9 * * 1-5"
+    - cron: "45 3 * * 1-5"
+    - cron: "0,15,30 10 * * 1-5"
   workflow_dispatch:
     inputs:
       force_scan:
@@ -25,52 +28,63 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: IST gate (Asia/Kolkata)
+        id: ist
         run: |
-          pip install -r services/notification-scheduler-service/scheduler/requirements.txt
-          # also install sibling package deps if present
-          if [ -f services/notification-scheduler-service/scheduler/requirements.txt ]; then
-            pip install -r services/notification-scheduler-service/scheduler/requirements.txt
+          set -e
+          DOW=$(TZ=Asia/Kolkata date +%u)
+          HM=$(TZ=Asia/Kolkata date +%H%M)
+          NOW=$(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M %Z')
+          echo "IST now: $NOW DOW=$DOW HM=$HM"
+          RUN=0
+          if [ "$DOW" -le 5 ] && [ "$HM" -ge 0900 ] && [ "$HM" -le 1545 ]; then
+            RUN=1
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_scan }}" = "true" ]; then
+            RUN=1
+          fi
+          echo "run=$RUN" >> "$GITHUB_OUTPUT"
+          if [ "$RUN" -eq 0 ]; then
+            echo "Outside IST market window — skip scheduler tick"
           fi
 
+      - name: Install dependencies
+        if: steps.ist.outputs.run == '1'
+        run: |
+          pip install -r services/notification-scheduler-service/scheduler/requirements.txt
+
       - name: Wake up services
+        if: steps.ist.outputs.run == '1'
         env:
           API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
           MARKET_DATA_URL: ${{ secrets.MARKET_DATA_URL }}
-          TECHNICAL_URL: ${{ secrets.TECHNICAL_URL }}
-          FUNDAMENTAL_URL: ${{ secrets.FUNDAMENTAL_URL }}
-          DECISION_URL: ${{ secrets.DECISION_URL }}
-          NEWS_URL: ${{ secrets.NEWS_URL }}
-          EVENT_TRACKER_URL: ${{ secrets.EVENT_TRACKER_URL }}
-          PREDICTION_URL: ${{ secrets.PREDICTION_URL }}
           NOTIFICATION_URL: ${{ secrets.NOTIFICATION_URL }}
-          MARKET_SENTIMENT_URL: ${{ secrets.MARKET_SENTIMENT_URL }}
-          TRAINING_URL: ${{ secrets.TRAINING_URL }}
-          SCHEDULER_URL: ${{ secrets.SCHEDULER_URL }}
         run: |
           set +e
           GW="${API_GATEWAY_URL%/}"
-          echo "Waking via $GW/wake-all ..."
+          if [ -z "$GW" ]; then
+            echo "API_GATEWAY_URL not set — skip wake"
+            exit 0
+          fi
+          echo "Waking via $GW/wake-all (IST market window only) ..."
           curl -fsS -m 60 -X POST "$GW/wake-all" || curl -fsS -m 60 "$GW/wake-all" || true
-          for U in "$API_GATEWAY_URL" "$MARKET_DATA_URL" "$TECHNICAL_URL" "$FUNDAMENTAL_URL"                    "$DECISION_URL" "$NEWS_URL" "$EVENT_TRACKER_URL" "$PREDICTION_URL"                    "$NOTIFICATION_URL" "$MARKET_SENTIMENT_URL" "$TRAINING_URL" "$SCHEDULER_URL"; do
+          for U in "$API_GATEWAY_URL" "$MARKET_DATA_URL" "$NOTIFICATION_URL"; do
             [ -z "$U" ] && continue
             curl -fsS -m 20 "${U%/}/health?warm=true" || curl -fsS -m 15 "${U%/}/health" || true
           done
-          # Drain alert outbox
           if [ -n "$NOTIFICATION_URL" ]; then
             curl -fsS -m 30 -X POST "${NOTIFICATION_URL%/}/outbox/process" || true
           fi
-          echo "Waiting 60 seconds for free-tier dynos..."
-          sleep 60
+          sleep 30
 
       - name: Run scheduler tick
+        if: steps.ist.outputs.run == '1'
         env:
           API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
           EVENT_TRACKER_URL: ${{ secrets.EVENT_TRACKER_URL }}
           NOTIFICATION_URL: ${{ secrets.NOTIFICATION_URL }}
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
-          # FORCE_SCAN is set only when running manually with the checkbox ticked
           FORCE_SCAN: ${{ github.event_name == 'workflow_dispatch' && inputs.force_scan == true && 'true' || 'false' }}
         run: |
           export USE_FULL_UNIVERSE=true
@@ -78,4 +92,3 @@ jobs:
           export BATCH_TIMEOUT=300
           export SCAN_TIMEOUT_TOTAL=5400
           python services/notification-scheduler-service/scheduler/run_once.py
-# Updated for 5-service architecture. Set secrets for the 5 placeholder/real URLs.

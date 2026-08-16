@@ -1,6 +1,9 @@
-# Keep free-tier Render services warm.
-# - Market days + market hours (IST Mon–Fri ~08:30–16:00): FULL warm (wake-all, warm health, outbox, ops alert)
-# - Other times: LIGHT wake only (simple /health on gateway)
+# Keep free-tier Render services warm — ONLY on NSE market days + market window (IST Asia/Kolkata).
+# Outside Mon–Fri 08:30–16:00 IST this workflow does NOTHING (manual Wake buttons cover the rest).
+#
+# GitHub cron is UTC:
+#   IST 08:30 ≈ UTC 03:00, IST 16:00 ≈ UTC 10:30
+# Job always re-checks TZ=Asia/Kolkata before any curl.
 #
 # Secrets: API_GATEWAY_URL (required). Optional: NOTIFICATION_URL, MARKET_DATA_URL,
 # ANALYSIS_INTELLIGENCE_URL, DECISION_PREDICTION_URL
@@ -8,7 +11,7 @@ name: Stockky Keep-Warm
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 3-10 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:
@@ -21,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Wake services (market-aware)
+      - name: Wake services (market-hours only, IST)
         env:
           API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
           NOTIFICATION_URL: ${{ secrets.NOTIFICATION_URL }}
@@ -38,10 +41,11 @@ jobs:
           fi
           GW="${GW%/}"
 
-          # IST market Mon–Fri 09:15–15:30; full-warm window 08:30–16:00 IST
           DOW=$(TZ=Asia/Kolkata date +%u)
           HM=$(TZ=Asia/Kolkata date +%H%M)
+          NOW=$(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M %Z')
           MODE="${FORCE_MODE:-auto}"
+          echo "IST now: $NOW DOW=$DOW HM=$HM MODE=$MODE"
 
           is_market_session=0
           if [ "$DOW" -le 5 ] && [ "$HM" -ge 0830 ] && [ "$HM" -le 1600 ]; then
@@ -54,34 +58,30 @@ jobs:
             is_market_session=0
           fi
 
-          if [ "$is_market_session" -eq 1 ]; then
-            echo "=== FULL warm (market day + market window IST) ==="
-            curl -fsS -m 45 -X POST "$GW/wake-all" || curl -fsS -m 45 "$GW/wake-all" || true
-            curl -fsS -m 25 "$GW/health?warm=true" || true
-
-            for U in "$MARKET_DATA_URL" "$ANALYSIS_URL" "$DECISION_URL" "$NOTIFICATION_URL"; do
-              if [ -n "$U" ]; then
-                BASE="${U%/}"
-                echo "Warm ping $BASE"
-                curl -fsS -m 20 "$BASE/health?warm=true" || curl -fsS -m 20 "$BASE/health" || true
-              fi
-            done
-
-            NOTIF="${NOTIFICATION_URL:-}"
-            if [ -n "$NOTIF" ]; then
-              N="${NOTIF%/}"
-              curl -fsS -m 30 -X POST "$N/outbox/process" || curl -fsS -m 30 -X POST "$N/notification/outbox/process" || true
-            else
-              curl -fsS -m 30 -X POST "$GW/notification/outbox/process" || true
-            fi
-
-            curl -fsS -m 25 -X POST "$GW/ops/check-alert" || true
-            echo "Full warm done"
-          else
-            echo "=== LIGHT wake (off-market / weekend) ==="
-            curl -fsS -m 20 "$GW/health" || true
-            if [ -n "${NOTIFICATION_URL:-}" ]; then
-              curl -fsS -m 15 "${NOTIFICATION_URL%/}/health" || true
-            fi
-            echo "Light wake done"
+          if [ "$is_market_session" -eq 0 ]; then
+            echo "=== SKIP keep-warm (outside IST market window / weekend) ==="
+            exit 0
           fi
+
+          echo "=== FULL warm (IST market window) ==="
+          curl -fsS -m 45 -X POST "$GW/wake-all" || curl -fsS -m 45 "$GW/wake-all" || true
+          curl -fsS -m 25 "$GW/health?warm=true" || true
+
+          for U in "$MARKET_DATA_URL" "$ANALYSIS_URL" "$DECISION_URL" "$NOTIFICATION_URL"; do
+            if [ -n "$U" ]; then
+              BASE="${U%/}"
+              echo "Warm ping $BASE"
+              curl -fsS -m 20 "$BASE/health?warm=true" || curl -fsS -m 20 "$BASE/health" || true
+            fi
+          done
+
+          NOTIF="${NOTIFICATION_URL:-}"
+          if [ -n "$NOTIF" ]; then
+            N="${NOTIF%/}"
+            curl -fsS -m 30 -X POST "$N/outbox/process" || curl -fsS -m 30 -X POST "$N/notification/outbox/process" || true
+          else
+            curl -fsS -m 30 -X POST "$GW/notification/outbox/process" || true
+          fi
+
+          curl -fsS -m 25 -X POST "$GW/ops/check-alert" || true
+          echo "Full warm done"

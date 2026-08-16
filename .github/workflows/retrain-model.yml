@@ -27,37 +27,46 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Wake up backend services
+      - name: Wake up backend services (optional)
         env:
           API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
           MARKET_DATA_URL: ${{ secrets.MARKET_DATA_URL }}
-          TECHNICAL_URL: ${{ secrets.TECHNICAL_URL }}
-          FUNDAMENTAL_URL: ${{ secrets.FUNDAMENTAL_URL }}
-          DECISION_URL: ${{ secrets.DECISION_URL }}
         run: |
-          echo "Waking up backend services..."
-          curl -I $API_GATEWAY_URL/health || true
-          curl -I $MARKET_DATA_URL/health || true
-          curl -I $TECHNICAL_URL/health || true
-          curl -I $FUNDAMENTAL_URL/health || true
-          curl -I $DECISION_URL/health || true
-          echo "Waiting 60 seconds..."
-          sleep 60
+          echo "Waking up services (if secrets are set)..."
+          if [ -n "$API_GATEWAY_URL" ]; then
+            curl -s -o /dev/null -w "%{http_code}" "$API_GATEWAY_URL/health" || true
+          else
+            echo "API_GATEWAY_URL secret not set – skipping wake-up"
+          fi
+          if [ -n "$MARKET_DATA_URL" ]; then
+            curl -s -o /dev/null -w "%{http_code}" "$MARKET_DATA_URL/health" || true
+          fi
+          sleep 10
 
       - name: Retrain model
         working-directory: services/decision-prediction-service/prediction
         run: |
-          python train.py
+          # Try normal name first, then possible renamed version
+          if [ -f train.py ]; then
+            python train.py
+          elif [ -f pred_train.py ]; then
+            python pred_train.py
+          else
+            echo "ERROR: Neither train.py nor pred_train.py found"
+            ls -la
+            exit 1
+          fi
+
           mkdir -p ../../../data/prediction-model
-          cp model.pkl ../../../data/prediction-model/model.pkl
+          cp model.pkl ../../../data/prediction-model/model.pkl || cp *.pkl ../../../data/prediction-model/ || true
 
       - name: Commit and push updated model
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add data/prediction-model/model.pkl
+          git add data/prediction-model/ || true
           if git diff --staged --quiet; then
-            echo "No changes to model.pkl"
+            echo "No changes to model"
           else
             git commit -m "Auto-retrain prediction model [skip ci]"
             git push

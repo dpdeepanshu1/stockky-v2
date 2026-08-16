@@ -29,7 +29,12 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r services/scheduler-service/requirements.txt
+        run: |
+          pip install -r services/scheduler-service/requirements.txt
+          # also install sibling package deps if present
+          if [ -f services/notification-scheduler-service/scheduler/requirements.txt ]; then
+            pip install -r services/notification-scheduler-service/scheduler/requirements.txt
+          fi
 
       - name: Wake up services
         env:
@@ -60,8 +65,8 @@ jobs:
           curl -I $TRAINING_URL/health || true
           curl -I $SCHEDULER_URL/health || true
           curl -X POST $API_GATEWAY_URL/wake/all || true
-          echo "Waiting 60 seconds for services to spin up..."
-          sleep 60
+          echo "Waiting 90 seconds for services to spin up..."
+          sleep 90
 
       - name: Run scheduler tick
         env:
@@ -72,4 +77,10 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
           # FORCE_SCAN is set only when running manually with the checkbox ticked
           FORCE_SCAN: ${{ github.event_name == 'workflow_dispatch' && inputs.force_scan == true && 'true' || 'false' }}
-        run: python services/scheduler-service/run_once.py# Updated for 5-service architecture. Set secrets for the 5 placeholder/real URLs.
+        run: |
+          export USE_FULL_UNIVERSE=true
+          export USE_GATEWAY_ASYNC_SCAN=true
+          export BATCH_TIMEOUT=300
+          export SCAN_TIMEOUT_TOTAL=5400
+          python services/scheduler-service/run_once.py
+# Updated for 5-service architecture. Set secrets for the 5 placeholder/real URLs.

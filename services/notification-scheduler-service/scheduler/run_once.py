@@ -85,10 +85,12 @@ def _select_top_picks(actionable: list, limit: int = 5) -> list:
     return eligible[:limit]
 
 SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "60"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "15"))          # max symbols per batch
-MAX_CONCURRENT_BATCHES = int(os.getenv("MAX_CONCURRENT_BATCHES", "3"))
-BATCH_TIMEOUT = int(os.getenv("BATCH_TIMEOUT", "120"))   # seconds per batch
-SCAN_TIMEOUT_TOTAL = int(os.getenv("SCAN_TIMEOUT_TOTAL", "3600"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "12"))          # max symbols per batch (gateway limit 15)
+MAX_CONCURRENT_BATCHES = int(os.getenv("MAX_CONCURRENT_BATCHES", "2"))
+BATCH_TIMEOUT = int(os.getenv("BATCH_TIMEOUT", "300"))   # seconds per batch (free-tier cold)
+SCAN_TIMEOUT_TOTAL = int(os.getenv("SCAN_TIMEOUT_TOTAL", "5400"))  # 90 min hard cap
+USE_FULL_UNIVERSE = os.getenv("USE_FULL_UNIVERSE", "true").lower() in ("1", "true", "yes")
+USE_GATEWAY_ASYNC_SCAN = os.getenv("USE_GATEWAY_ASYNC_SCAN", "true").lower() in ("1", "true", "yes")
 FORCE_SCAN = os.getenv("FORCE_SCAN", "false").lower() == "true"
 
 
@@ -108,7 +110,7 @@ def _wake_up_services():
             pass
 
 
-def _notify(title: str, message: str, channel: str = "telegram", retries: int = 3):
+def _notify(title: str, message: str, channel: str = "all", retries: int = 3):
     _wake_up_services()
     time.sleep(5)
     payload = {"title": title, "message": message, "channel": channel}
@@ -185,10 +187,15 @@ def run_event_check():
 def scan_batch(symbols: List[str], timeout: int = BATCH_TIMEOUT) -> List[Dict]:
     """Call /scan/batch for a list of symbols."""
     try:
+        # Pre-wake helps free-tier avoid first-request 502s
+        try:
+            httpx.get(f"{API_GATEWAY_URL}/health", timeout=15)
+        except Exception:
+            pass
         resp = httpx.post(
             f"{API_GATEWAY_URL}/scan/batch",
             json={"symbols": symbols},
-            timeout=timeout
+            timeout=timeout,
         )
         resp.raise_for_status()
         return resp.json().get("results", [])
@@ -198,19 +205,106 @@ def scan_batch(symbols: List[str], timeout: int = BATCH_TIMEOUT) -> List[Dict]:
         return [{"symbol": sym, "decision": "ERROR", "error": str(e)} for sym in symbols]
 
 
-def run_scan() -> Dict[str, Any]:
-    """Run batch scans in parallel, collect results, return summary."""
-    # Get watchlist
+def _fetch_scan_symbols() -> List[str]:
+    """Prefer full gateway scan universe; fall back to watchlist."""
+    symbols: List[str] = []
+    if USE_FULL_UNIVERSE:
+        try:
+            # Wake gateway first
+            try:
+                httpx.post(f"{API_GATEWAY_URL}/wake/all", timeout=30)
+            except Exception:
+                pass
+            resp = httpx.get(f"{API_GATEWAY_URL}/scan/universe", timeout=60)
+            if resp.status_code == 200:
+                data = resp.json()
+                symbols = data.get("symbols") or data.get("universe") or []
+                if isinstance(symbols, list) and symbols:
+                    logger.info("Loaded %s symbols from /scan/universe", len(symbols))
+                    return [str(s).upper().replace(".NS", "").replace(".BO", "") for s in symbols]
+        except Exception as e:
+            logger.warning("Full universe fetch failed (%s) — falling back to watchlist", e)
     try:
-        wl_resp = httpx.get(f"{API_GATEWAY_URL}/watchlist", timeout=15)
+        wl_resp = httpx.get(f"{API_GATEWAY_URL}/watchlist", timeout=30)
         wl_resp.raise_for_status()
         symbols = wl_resp.json().get("symbols", [])
+        logger.info("Loaded %s symbols from watchlist", len(symbols))
     except Exception as e:
-        logger.error(f"Failed to fetch watchlist: {e}")
+        logger.error("Failed to fetch watchlist: %s", e)
+        return []
+    return [str(s).upper().replace(".NS", "").replace(".BO", "") for s in symbols]
+
+
+def _run_gateway_async_scan() -> Dict[str, Any]:
+    """Prefer gateway's own full async scan (handles universe + notify)."""
+    try:
+        try:
+            httpx.post(f"{API_GATEWAY_URL}/wake/all", timeout=45)
+        except Exception:
+            pass
+        # force_refresh so market-hour ticks get a real scan
+        resp = httpx.post(
+            f"{API_GATEWAY_URL}/scan/start",
+            params={"force_refresh": "true", "lite": "true"},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        task_id = data.get("task_id")
+        if not task_id:
+            logger.warning("scan/start returned no task_id: %s", data)
+            return {}
+        logger.info("Started gateway async scan task_id=%s", task_id)
+        # Poll until done or overall timeout
+        start = datetime.now()
+        last_status = None
+        while (datetime.now() - start).total_seconds() < SCAN_TIMEOUT_TOTAL:
+            try:
+                st = httpx.get(f"{API_GATEWAY_URL}/scan/status/{task_id}", timeout=30)
+                st.raise_for_status()
+                body = st.json()
+                last_status = body.get("status")
+                processed = body.get("processed")
+                total = body.get("total")
+                logger.info("Scan progress: status=%s processed=%s/%s", last_status, processed, total)
+                if last_status in ("done", "error", "cancelled"):
+                    result = body.get("result") or body
+                    return result if isinstance(result, dict) else {"raw": body}
+            except Exception as e:
+                logger.warning("poll status failed: %s", e)
+            time.sleep(15)
+        logger.warning("Gateway async scan timed out after %ss", SCAN_TIMEOUT_TOTAL)
+        return {"status": "timeout", "task_id": task_id, "last": last_status}
+    except Exception as e:
+        logger.error("Gateway async scan failed: %s", e)
         return {}
 
+
+def run_scan() -> Dict[str, Any]:
+    """Run full-universe scan (prefer gateway async), else batched /scan/batch."""
+    if USE_GATEWAY_ASYNC_SCAN:
+        result = _run_gateway_async_scan()
+        ok = bool(result) and (
+            result.get("recommendations") is not None
+            or result.get("status") in ("done", "timeout")
+            or result.get("scanned") is not None
+            or result.get("results") is not None
+        )
+        if ok:
+            # Gateway already notifies on completion; still track decision changes
+            recs = result.get("recommendations") or result.get("results") or []
+            if isinstance(recs, list) and recs:
+                try:
+                    check_decision_changes(recs)
+                except Exception as e:
+                    logger.warning("check_decision_changes failed: %s", e)
+            if result.get("status") != "timeout":
+                return result
+        logger.warning("Gateway async scan empty/failed/timeout — falling back to batch mode")
+
+    symbols = _fetch_scan_symbols()
     if not symbols:
-        logger.warning("No symbols in watchlist")
+        logger.warning("No symbols to scan")
         return {}
 
     logger.info(f"Scanning {len(symbols)} symbols in batches of {BATCH_SIZE}")
@@ -440,7 +534,7 @@ def main():
         else:
             # Health check
             try:
-                health = httpx.get(f"{API_GATEWAY_URL}/health", timeout=5)
+                health = httpx.get(f"{API_GATEWAY_URL}/health", timeout=30)
                 if health.status_code != 200:
                     logger.error("Gateway not healthy.")
                     _notify("⚠️ Scan Aborted", "API Gateway is not healthy.")

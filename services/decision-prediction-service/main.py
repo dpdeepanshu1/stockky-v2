@@ -1,5 +1,5 @@
 """
-Stockky Decision Prediction Service - Final
+Stockky Decision Prediction Service
 """
 import os
 import sys
@@ -8,12 +8,17 @@ import importlib.util
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("decision-prediction-service")
 
-app = FastAPI(title="Stockky Decision Prediction Service", version="1.0.6")
+app = FastAPI(
+    title="Stockky Decision Prediction Service",
+    version="1.0.8",
+    description="Merged decision + prediction + training"
+)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ---------- Decision ----------
@@ -23,7 +28,7 @@ try:
     app.mount("/decision", dec_app)
     logger.info("✅ Mounted /decision")
 except Exception as e:
-    logger.error(f"❌ Decision: {e}")
+    logger.error(f"❌ Decision failed: {e}")
 
 # ---------- Training ----------
 try:
@@ -32,30 +37,36 @@ try:
     app.mount("/training", train_app)
     logger.info("✅ Mounted /training")
 except Exception as e:
-    logger.error(f"❌ Training: {e}")
+    logger.error(f"❌ Training failed: {e}")
 
 # ---------- Prediction (fully isolated) ----------
 try:
-    # Completely clean path for prediction
-    clean_path = [p for p in sys.path if "training" not in p and "decision" not in p]
     prediction_dir = os.path.join(BASE, "prediction")
-    clean_path.insert(0, prediction_dir)
-    sys.path = clean_path
 
-    # Load prediction/main.py by absolute path
+    # Keep only prediction folder at the front of sys.path
+    original_path = sys.path[:]
+    sys.path = [prediction_dir] + [p for p in original_path if "training" not in p and "decision" not in p]
+
     pred_file = os.path.join(prediction_dir, "main.py")
-    spec = importlib.util.spec_from_file_location("pred_mod", pred_file)
+    spec = importlib.util.spec_from_file_location("pred_service", pred_file)
     pred_mod = importlib.util.module_from_spec(spec)
 
-    # Execute with prediction folder as current directory
     old_cwd = os.getcwd()
     os.chdir(prediction_dir)
     spec.loader.exec_module(pred_mod)
     os.chdir(old_cwd)
 
+    # Restore original path
+    sys.path = original_path
+
     @app.get("/prediction/")
     def prediction_root():
-        return {"service": "prediction-service", "status": "running"}
+        model_loaded = getattr(pred_mod, "_model", None) is not None
+        return {
+            "service": "prediction-service",
+            "status": "running",
+            "model_loaded": model_loaded
+        }
 
     @app.get("/prediction/health")
     def prediction_health():
@@ -74,7 +85,12 @@ except Exception as e:
 
 @app.get("/")
 def root():
-    return {"service": "Stockky Decision Prediction Service", "version": "1.0.6", "status": "running"}
+    return {
+        "service": "Stockky Decision Prediction Service",
+        "version": "1.0.8",
+        "status": "running",
+        "modules": ["decision", "prediction", "training"]
+    }
 
 @app.get("/health")
 def health():

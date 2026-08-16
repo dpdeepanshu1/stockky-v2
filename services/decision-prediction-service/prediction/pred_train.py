@@ -53,7 +53,7 @@ from metrics import compute_all_metrics
 from trading import TradingSimulator
 # -----------------------------------
 
-from features import compute_feature_frame, FEATURE_COLUMNS
+from pred_features import compute_feature_frame, FEATURE_COLUMNS
 
 # ----------------------------------------------------------------------
 # Logging setup

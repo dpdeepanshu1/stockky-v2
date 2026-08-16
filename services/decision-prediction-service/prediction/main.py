@@ -29,8 +29,7 @@ import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-
-from features import latest_feature_vector, FEATURE_COLUMNS
+from pred_features import latest_feature_vector, FEATURE_COLUMNS
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("prediction-service")

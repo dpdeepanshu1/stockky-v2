@@ -45,6 +45,25 @@ SECTOR_TYPICAL_PE = {
 }
 DEFAULT_TYPICAL_PE = 22  # broad-market fallback when sector is unknown or not in the table
 
+def _normalize_debt_to_equity(val, sector: str | None = None):
+    """Yahoo often returns debtToEquity as percent (e.g. 95.4 = 0.954x)."""
+    if val is None:
+        return None
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return None
+    if v != v:
+        return None
+    sec = (sector or "").lower()
+    is_fin = any(x in sec for x in ("bank", "financial", "insurance"))
+    if v > 50 and not is_fin:
+        v = v / 100.0
+    elif v > 200 and is_fin:
+        v = v / 100.0
+    return round(v, 2)
+
+
 def _sector_relative_pe_score(pe_ratio, sector: str | None):
     """Returns (score_delta, reason). Compares P/E to the sector's typical
     range instead of one fixed threshold for every stock."""
@@ -183,7 +202,7 @@ def analyze(symbol: str):
     earnings_growth = f.get("earnings_growth")
     roe = f.get("roe")
     roce = f.get("roce")
-    debt_to_equity = f.get("debt_to_equity")
+    debt_to_equity = _normalize_debt_to_equity(f.get("debt_to_equity"), f.get("sector"))
     free_cashflow = f.get("free_cashflow")
     profit_margins = f.get("profit_margins")
     opm = f.get("opm")

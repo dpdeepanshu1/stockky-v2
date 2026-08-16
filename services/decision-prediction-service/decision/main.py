@@ -21,6 +21,26 @@ from fastapi.responses import JSONResponse
 from horizons import multi_horizon_decide
 from circuit_breaker import get_breaker, CircuitOpenError, all_snapshots
 
+def _safe_int(val, default=50):
+    try:
+        if val is None:
+            return default
+        return int(float(val))
+    except (TypeError, ValueError):
+        return default
+
+def _safe_float(val, default=None):
+    try:
+        if val is None:
+            return default
+        f = float(val)
+        if f != f:  # NaN
+            return default
+        return f
+    except (TypeError, ValueError):
+        return default
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("decision-engine-service")
 
@@ -750,32 +770,25 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
                 "fallback_used": True
             }
 
-        technical_score = int(technical.get("technical_score", 50))
-        fundamental_score = int(fundamental.get("fundamental_score", 50))
+        technical_score = _safe_int(technical.get("technical_score"), 50)
+        fundamental_score = _safe_int(fundamental.get("fundamental_score"), 50)
 
         news_score = None
-        if news and "news_score" in news:
-            val = news["news_score"]
-            if val is not None:
-                try:
-                    news_score = int(val)
-                except (ValueError, TypeError):
-                    logger.warning(f"Invalid news_score for {symbol}: {val}")
+        if news and isinstance(news, dict) and news.get("news_score") is not None:
+            news_score = _safe_int(news.get("news_score"), None)
 
         prediction_score = None
-        if prediction and prediction.get("model_loaded"):
-            val = prediction.get("prediction_score")
-            if val is not None:
-                try:
-                    prediction_score = int(val)
-                except (ValueError, TypeError):
-                    logger.warning(f"Invalid prediction_score for {symbol}: {val}")
+        if prediction and isinstance(prediction, dict) and prediction.get("model_loaded"):
+            if prediction.get("prediction_score") is not None:
+                prediction_score = _safe_int(prediction.get("prediction_score"), None)
 
         if technical.get("data_insufficient"):
             data_insufficient = True
 
-        market_score = sentiment.get("market_score", 50)
-        training_score = training.get("training_score", 50)
+        sentiment = sentiment if isinstance(sentiment, dict) else {"market_score": 50}
+        training = training if isinstance(training, dict) else {"training_score": 50}
+        market_score = _safe_int(sentiment.get("market_score"), 50)
+        training_score = _safe_int(training.get("training_score"), 50)
 
         logger.info(f"Market sentiment for {symbol}: {market_score}")
 
@@ -1062,11 +1075,20 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
 
     except Exception as e:
         logger.error(f"Decision failed for {symbol}: {e}", exc_info=True)
+        err = str(e)[:200]
+        close = support = resistance = None
+        try:
+            fb = await _fallback_technical_from_market_data(symbol)
+            close = fb.get("close")
+            support = fb.get("support")
+            resistance = fb.get("resistance")
+        except Exception:
+            pass
         return {
             "symbol": symbol.upper(),
             "decision": Decision.DO_NOT_BUY.value,
             "confidence": "Low",
-            "combined_score": 0,
+            "combined_score": 45,
             "technical_score": 50,
             "fundamental_score": 50,
             "news_score": None,
@@ -1080,18 +1102,19 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
             "target": None,
             "stop_loss": None,
             "holding_period": "N/A",
-            "close": None,
-            "support": None,
-            "resistance": None,
+            "close": close,
+            "support": support,
+            "resistance": resistance,
             "reasons": {
-                "technical": ["Error processing request"],
-                "fundamental": ["Error processing request"],
-                "market": ["Market sentiment unavailable"]
+                "technical": [f"Decision engine error: {err}"],
+                "fundamental": ["Partial response — retry Analyse"],
+                "market": ["Market sentiment may be incomplete"],
             },
             "valuation": "fair",
             "sector": None,
-            "data_insufficient": True,
+            "data_insufficient": close is None,
             "fundamental_fallback": True,
+            "error_detail": err,
         }
 
 # ── Bulk decide (optional speed path for scan / GitHub Actions) ─────────────

@@ -2026,6 +2026,15 @@ def get_stock_decision(symbol: str, already_owned: bool = False):
         raw = resp.json()
         result = _normalize_decision_response(raw, symbol_to_use)
 
+        reasons = result.get("reasons") if isinstance(result.get("reasons"), dict) else {}
+        for pillar in ("technical", "fundamental"):
+            lst = reasons.get(pillar)
+            if isinstance(lst, list) and lst and any("Error processing" in str(x) for x in lst):
+                reasons[pillar] = [x for x in lst if "Error processing" not in str(x)]
+                if not reasons[pillar]:
+                    reasons[pillar] = ["Recovering live data…"]
+                result["reasons"] = reasons
+
         if result.get("close") is None:
             price = _fetch_price_from_quote(symbol_to_use)
             if price is not None:

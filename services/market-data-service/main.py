@@ -54,6 +54,24 @@ except AttributeError:
     pass
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+def _normalize_de_ratio(val, sector=None):
+    if val is None:
+        return None
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return None
+    if v != v:
+        return None
+    sec = (str(sector or "")).lower()
+    is_fin = any(x in sec for x in ("bank", "financial", "insurance"))
+    if v > 50 and not is_fin:
+        v = v / 100.0
+    elif v > 200 and is_fin:
+        v = v / 100.0
+    return round(v, 2)
+
+
 def _safe(val, decimals=2):
     try:
         f = float(val)
@@ -596,7 +614,7 @@ def get_fundamentals_raw(symbol: str):
 
         debt_to_equity = None
         if "debtToEquity" in info:
-            debt_to_equity = _safe_info("debtToEquity")
+            debt_to_equity = _normalize_de_ratio(_safe_info("debtToEquity"), info.get("sector"))
         elif balance_available and "Total Debt" in balance.index and "Total Equity Gross Minority Interest" in balance.index:
             total_debt = balance.loc["Total Debt"].iloc[0]
             equity = balance.loc["Total Equity Gross Minority Interest"].iloc[0]

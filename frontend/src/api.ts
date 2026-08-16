@@ -744,8 +744,13 @@ export const api = {
   getWeeklyTradeReport: (weeks = 12) =>
     request<TradeReportBucket[]>(`/training/api/trades/report/weekly?weeks=${weeks}`, undefined, 2, 30000),
 
-  getStockHistory: (symbol: string, period: "1d" | "5d" | "1mo" | "1y" | "5y" = "1mo") =>
-    request<StockHistory>(`/training/api/stock/history/${symbol}?period=${period}`, undefined, 2, 30000),
+  getStockHistory: async (symbol: string, period: string = "1mo") => {
+    try {
+      return await request<StockHistory>(`/market/history/${symbol}?period=${period}`, undefined, 1, 45000);
+    } catch {
+      return request<StockHistory>(`/training/api/stock/history/${symbol}?period=${period}`, undefined, 2, 45000);
+    }
+  },
 
   // ─── Event endpoint (from first file) ───
   getSymbolEvents: (symbol: string) =>

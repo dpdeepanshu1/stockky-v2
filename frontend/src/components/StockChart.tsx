@@ -36,7 +36,7 @@ export default function StockChart({ symbol, compact = false }: Props) {
       setData(result);
     } catch (err) {
       console.error(err);
-      setError("Chart temporarily unavailable (market data busy). Retry in a few seconds.");
+      setError("Chart unavailable — market data busy or cold start. Tap a period tab or retry.");
     } finally {
       setLoading(false);
     }
@@ -89,7 +89,10 @@ export default function StockChart({ symbol, compact = false }: Props) {
         </div>
       ) : error || chartData.length === 0 ? (
         <div className={`flex items-center justify-center ${compact ? "h-20" : "h-52"} text-mist/40 text-xs font-mono`}>
-          {error || "No chart data"}
+          <span>{error || "No chart data"}</span>
+          <button type="button" className="btn-terminal mt-2 text-[10px]" onClick={() => fetchHistory()}>
+            Retry chart
+          </button>
         </div>
       ) : (
         <ResponsiveContainer width="100%" height={compact ? 80 : 220}>

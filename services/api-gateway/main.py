@@ -2017,35 +2017,27 @@ def get_stock_decision(symbol: str, already_owned: bool = False):
             pass
 
     try:
+        # Interactive Analyse always requests live decide (skip weak cache)
         resp = httpx.get(
             f"{DECISION_URL}/decide/{symbol_to_use}",
-            params={"already_owned": already_owned},
-            timeout=30,
+            params={"already_owned": already_owned, "force": "true"},
+            timeout=90,
         )
         resp.raise_for_status()
         raw = resp.json()
         result = _normalize_decision_response(raw, symbol_to_use)
 
         reasons = result.get("reasons") if isinstance(result.get("reasons"), dict) else {}
-        for pillar in ("technical", "fundamental"):
-            lst = reasons.get(pillar)
-            if isinstance(lst, list) and lst and any("Error processing" in str(x) for x in lst):
-                reasons[pillar] = [x for x in lst if "Error processing" not in str(x)]
-                if not reasons[pillar]:
-                    reasons[pillar] = ["Recovering live data…"]
-                result["reasons"] = reasons
+        if not isinstance(reasons, dict):
+            reasons = {}
+            result["reasons"] = reasons
 
-        if result.get("close") is None:
+        # Live quote + S/R always (works off-hours too)
+        price = result.get("close")
+        if price is None:
             price = _fetch_price_from_quote(symbol_to_use)
             if price is not None:
                 result["close"] = price
-                result["data_insufficient"] = False
-                if result.get("support") is None:
-                    result["support"] = round(price * 0.97, 2)
-                if result.get("resistance") is None:
-                    result["resistance"] = round(price * 1.03, 2)
-
-        # If still missing S/R, soft-fill from close so Price levels UI is usable
         if result.get("close") is not None:
             result["data_insufficient"] = False
             c = float(result["close"])
@@ -2053,18 +2045,69 @@ def get_stock_decision(symbol: str, already_owned: bool = False):
                 result["support"] = round(c * 0.97, 2)
             if result.get("resistance") is None:
                 result["resistance"] = round(c * 1.03, 2)
-            # Soften technical reason when we recovered price
-            reasons = result.get("reasons") or {}
-            tech_r = reasons.get("technical") if isinstance(reasons, dict) else None
-            if isinstance(tech_r, list) and tech_r:
-                joined = " ".join(str(x) for x in tech_r).lower()
-                if "temporarily unavailable" in joined or "newly listed" in joined:
-                    reasons["technical"] = [
-                        f"Price ₹{c:,.2f} recovered via quote; full indicator set may refresh on retry."
-                    ]
-                    result["reasons"] = reasons
+
+        # Live technical when decide said unavailable / default 50
+        tech_blob = " ".join(str(x) for x in (reasons.get("technical") or [])).lower()
+        need_tech = (
+            "temporarily unavailable" in tech_blob
+            or "error processing" in tech_blob
+            or "recovering" in tech_blob
+            or result.get("technical_score") in (None, 50)
+        )
+        if need_tech:
+            try:
+                tr = httpx.get(f"{TECHNICAL_URL}/analyze/{symbol_to_use}", timeout=45)
+                if tr.status_code == 200:
+                    td = tr.json() or {}
+                    if td.get("technical_score") is not None:
+                        result["technical_score"] = td.get("technical_score")
+                    if td.get("close") is not None:
+                        result["close"] = td.get("close")
+                        result["data_insufficient"] = False
+                    if td.get("support") is not None:
+                        result["support"] = td.get("support")
+                    if td.get("resistance") is not None:
+                        result["resistance"] = td.get("resistance")
+                    if td.get("reasons"):
+                        reasons["technical"] = td.get("reasons") if isinstance(td.get("reasons"), list) else [str(td.get("reasons"))]
+                        result["reasons"] = reasons
+                    elif td.get("close"):
+                        reasons["technical"] = [f"Live technical refreshed · close ₹{td.get('close')}"]
+                        result["reasons"] = reasons
+            except Exception as te:
+                logger.warning("live technical enrich %s: %s", symbol_to_use, te)
+
+        # Ensure S/R after technical enrich
+        if result.get("close") is not None:
+            c = float(result["close"])
+            if result.get("support") is None:
+                result["support"] = round(c * 0.97, 2)
+            if result.get("resistance") is None:
+                result["resistance"] = round(c * 1.03, 2)
 
         _merge_fundamentals(result, symbol_to_use)
+
+        # If fund still fallback / unavailable text, refresh reasons from live fundamental
+        fund_blob = " ".join(str(x) for x in (reasons.get("fundamental") or [])).lower()
+        if "unavailable" in fund_blob or "error processing" in fund_blob or result.get("fundamental_fallback"):
+            try:
+                fr = httpx.get(f"{FUNDAMENTAL_URL}/analyze/{symbol_to_use}", timeout=45)
+                if fr.status_code == 200:
+                    fd = fr.json() or {}
+                    if fd.get("fundamental_score") is not None:
+                        result["fundamental_score"] = fd.get("fundamental_score")
+                    if fd.get("metrics"):
+                        result["fundamental_metrics"] = fd.get("metrics")
+                    if fd.get("reasons"):
+                        reasons["fundamental"] = fd["reasons"] if isinstance(fd["reasons"], list) else [str(fd["reasons"])]
+                        result["reasons"] = reasons
+                    result["fundamental_fallback"] = bool(fd.get("fallback_used"))
+                    if fd.get("valuation"):
+                        result["valuation"] = fd.get("valuation")
+                    if fd.get("sector"):
+                        result["sector"] = fd.get("sector")
+            except Exception as fe:
+                logger.warning("live fundamental enrich %s: %s", symbol_to_use, fe)
 
         if result.get("news_score") is None:
             news = _fetch_news(symbol_to_use)

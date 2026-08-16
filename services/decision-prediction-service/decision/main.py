@@ -106,7 +106,28 @@ def _cache_get_decide(symbol: str):
             pass
     return None
 
+def _is_weak_decide_payload(payload: dict) -> bool:
+    if not isinstance(payload, dict):
+        return True
+    reasons = payload.get("reasons") or {}
+    blob = " ".join(
+        str(x)
+        for k in ("technical", "fundamental", "market")
+        for x in (reasons.get(k) or [])
+    ).lower()
+    if "error processing" in blob or "temporarily unavailable" in blob:
+        return True
+    if payload.get("combined_score") in (0, None) and payload.get("close") is None:
+        return True
+    if payload.get("data_insufficient") and payload.get("close") is None:
+        return True
+    return False
+
+
 def _cache_set_decide(symbol: str, payload: dict):
+    # Never cache failed/weak payloads — forces live API on next Analyse
+    if _is_weak_decide_payload(payload):
+        return
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     ttl = _cache_ttl()
     _decide_mem_cache[sym] = (time_module_time() + ttl, payload)
@@ -714,7 +735,7 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
     # Speed: serve from decide cache unless force=true
     if not force:
         cached = _cache_get_decide(symbol)
-        if cached and isinstance(cached, dict) and cached.get("decision"):
+        if cached and isinstance(cached, dict) and cached.get("decision") and not _is_weak_decide_payload(cached):
             cached = dict(cached)
             cached["from_cache"] = True
             return cached

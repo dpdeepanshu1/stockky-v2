@@ -758,6 +758,29 @@ export const api = {
     request<{ status: string; trade_id: string; exit_price: number; pnl_pct: number }>(
       `/training/api/trades/${tradeId}/close`, { method: "POST" }, 1, 30000
     ),
+
+  openManualTrade: (payload: {
+    symbol: string;
+    quantity?: number;
+    price?: number;
+    capital?: number;
+    note?: string;
+  }) =>
+    request<{
+      ok: boolean;
+      trade_id: string;
+      symbol: string;
+      quantity: number;
+      entry_price: number;
+      capital_allocated: number;
+      was_new: boolean;
+      ai_warning?: string;
+    }>("/training/api/trades/manual", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }, 1, 30000),
+
   getQuote: (symbol: string) =>
     request<{ symbol: string; price?: number; close?: number; as_of?: string; source?: string }>(
       `/quote/${encodeURIComponent(symbol)}`,

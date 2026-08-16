@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import httpx
+from circuit_breaker import get_breaker, all_snapshots
 
 # ── yfinance session patch ────────────────────────────────────────────────────
 session = requests.Session()
@@ -77,9 +78,9 @@ def _compute_growth(current, previous):
 # Caps concurrent Yahoo calls across quote + history + fundamentals so a
 # parallel market scan does not stampede Yahoo and get empty responses.
 import threading
-_YFINANCE_MAX_CONCURRENT = int(os.getenv("YFINANCE_MAX_CONCURRENT", "4"))
+_YFINANCE_MAX_CONCURRENT = int(os.getenv("YFINANCE_MAX_CONCURRENT", "3"))
 _yf_semaphore = threading.Semaphore(_YFINANCE_MAX_CONCURRENT)
-_YF_MIN_INTERVAL = float(os.getenv("YFINANCE_MIN_INTERVAL_SEC", "0.12"))
+_YF_MIN_INTERVAL = float(os.getenv("YFINANCE_MIN_INTERVAL_SEC", "0.18"))
 _yf_last_call = 0.0
 _yf_lock = threading.Lock()
 
@@ -95,21 +96,32 @@ def _yf_rate_limited(func):
             _yf_last_call = time.time()
         return func()
 
-def _with_retry(func, max_retries=3, base_delay=0.8):
-    """Retry with exponential backoff (Yahoo rate limits / free-tier)."""
+def _with_retry(func, max_retries=4, base_delay=1.0):
+    """Retry with exponential backoff (Yahoo rate limits / free-tier).
+
+    Circuit breaker opens after repeated Yahoo failures so the rest of the
+    scan fails fast instead of stacking 70s timeouts.
+    """
+    br = get_breaker("yfinance", failure_threshold=6, recovery_timeout=120)
+    if not br.allow():
+        raise RuntimeError(f"yfinance circuit open; retry in {br.retry_after():.0f}s")
     last_err = None
     for attempt in range(max_retries):
         try:
-            return _yf_rate_limited(func)
+            result = _yf_rate_limited(func)
+            br.record_success()
+            return result
         except Exception as e:
             last_err = e
             if attempt == max_retries - 1:
+                br.record_failure(str(e))
                 raise
-            wait = base_delay * (2 ** attempt) + random.uniform(0, 0.4)
-            logging.warning("Retry %s/%s after %.1fs: %s", attempt + 1, max_retries, wait, e)
+            wait = base_delay * (2 ** attempt)
             time.sleep(wait)
     if last_err:
+        br.record_failure(str(last_err))
         raise last_err
+
 
 def is_market_open() -> bool:
     """Return True if current time is within NSE trading hours (Mon-Fri, 09:15-15:30 IST)."""
@@ -230,10 +242,10 @@ def health(warm: bool = Query(False, description="If true, touch yfinance once t
                 t = yf.Ticker("^NSEI")
                 t.history(period="5d", interval="1d")
             _with_retry(_touch, max_retries=2, base_delay=0.5)
-            return {"status": "ok", "service": "market-data-service", "cache": bool(cache), "warmed": True}
+            return {"status": "ok", "service": "market-data-service", "cache": bool(cache), "warmed": True, "circuits": all_snapshots()}
         except Exception as e:
             return {"status": "ok", "service": "market-data-service", "cache": bool(cache), "warmed": False, "warm_error": str(e)[:120]}
-    return {"status": "ok", "service": "market-data-service", "cache": bool(cache)}
+    return {"status": "ok", "service": "market-data-service", "cache": bool(cache), "circuits": all_snapshots()}
 
 @app.get("/wake")
 def wake():

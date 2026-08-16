@@ -233,13 +233,111 @@ def _get_news(symbol: str):
         return None
 
 
-# ── Keyword variants (now using company name from yfinance) ──
+# Extra name aliases for better matching (e.g. PWL / Physics Wallah)
+_EVENT_ALIASES = {
+    "PWL": ["Physics Wallah", "PhysicsWallah", "Physics-Wallah", "PW Edtech"],
+    "RELIANCE": ["Reliance Industries", "RIL"],
+    "SBIN": ["State Bank of India", "SBI"],
+    "TCS": ["Tata Consultancy Services"],
+    "INFY": ["Infosys"],
+    "ZOMATO": ["Zomato", "Eternal"],
+}
+
+# Event-type keyword groups for classification & summarization
+_EVENT_TYPE_KEYWORDS = {
+    "results": [
+        "result", "results", "earnings", "q1", "q2", "q3", "q4", "quarterly",
+        "profit", "pat ", "revenue", "net profit", "sales growth", "eps ",
+        "financial results", "quarterly numbers", "earnings release",
+    ],
+    "board_meeting": [
+        "board meeting", "board meet", "board of directors", "agm", "egm",
+        "annual general meeting", "extraordinary general", "shareholder meeting",
+    ],
+    "bulk_block": [
+        "bulk deal", "block deal", "bulk buys", "block trade", "large deal",
+        "institutional buy", "institutional sell", "big ticket",
+    ],
+    "insider": [
+        "insider", "promoter buying", "promoter selling", "promoter stake",
+        "insider trading", "management buy", "key personnel", "stake increase",
+        "stake decrease", "shareholding pattern",
+    ],
+    "dividend": [
+        "dividend", "interim dividend", "final dividend", "dividend payout",
+        "record date", "ex-dividend",
+    ],
+    "corporate_action": [
+        "stock split", "bonus issue", "bonus share", "rights issue", "buyback",
+        "merger", "demerger", "acquisition", "takeover", "delisting",
+    ],
+    "guidance": [
+        "guidance", "outlook", "forecast", "raises guidance", "cuts guidance",
+        "order win", "order book", "contract win", "mou", "partnership",
+    ],
+}
+
+
 def _get_keywords(symbol: str) -> List[str]:
-    """Return a list of keywords to search in news feeds."""
+    """Return keywords to search in news feeds (company + aliases + base)."""
     company = _get_company_name(symbol)
     base = symbol.replace(".NS", "").replace(".BO", "").upper()
-    # Also add the raw symbol as lowercase and uppercase
-    return [company, base, base.lower(), company.lower()]
+    keys = {company, base, base.lower(), company.lower()}
+    for a in _EVENT_ALIASES.get(base, []):
+        keys.add(a)
+        keys.add(a.lower())
+    # Split multi-word company names
+    for part in company.replace("&", " ").split():
+        if len(part) > 2:
+            keys.add(part.lower())
+    return list(keys)
+
+
+def _classify_event_title(title: str) -> Optional[str]:
+    """Classify a news title into an event category using keyword groups."""
+    t = (title or "").lower()
+    for etype, kws in _EVENT_TYPE_KEYWORDS.items():
+        if any(k in t for k in kws):
+            return etype
+    return None
+
+
+def _summarize_events(events: dict) -> str:
+    """Clear human-readable summary for the Event section on the frontend."""
+    parts = []
+    sym = (events.get("symbol") or "").replace(".NS", "").replace(".BO", "")
+    if events.get("next_earnings_date"):
+        parts.append(f"Next earnings/results date: {events['next_earnings_date']}")
+    es = events.get("earnings_surprise")
+    if es and es.get("surprise_pct") is not None:
+        direction = "beat" if es["surprise_pct"] > 0 else "missed"
+        parts.append(f"Latest earnings {direction} estimates by {abs(es['surprise_pct']):.1f}%")
+    ins = events.get("recent_insider_transactions") or []
+    if ins:
+        buys = [i for i in ins if "buy" in (i.get("transaction") or "").lower() or "purchase" in (i.get("transaction") or "").lower()]
+        sells = [i for i in ins if "sell" in (i.get("transaction") or "").lower() or "sale" in (i.get("transaction") or "").lower()]
+        if buys:
+            parts.append(f"Recent insider/promoter buying detected ({len(buys)} txns)")
+        if sells:
+            parts.append(f"Recent insider/promoter selling detected ({len(sells)} txns)")
+    bulk = events.get("bulk_deals") or []
+    if bulk:
+        parts.append(f"{len(bulk)} bulk/block deal(s) noted")
+    if events.get("last_dividend"):
+        d = events["last_dividend"]
+        parts.append(f"Last dividend: {d.get('amount')} on {d.get('date')}")
+    news = events.get("recent_news") or []
+    classified = {}
+    for n in news:
+        cat = _classify_event_title(n.get("title") or "")
+        if cat:
+            classified.setdefault(cat, []).append(n.get("title"))
+    for cat, titles in classified.items():
+        label = cat.replace("_", " ").title()
+        parts.append(f"{label}: {titles[0][:90]}")
+    if not parts:
+        return f"No major corporate events detected for {sym} in the recent window."
+    return " | ".join(parts)
 
 
 # ── News sources ──
@@ -550,6 +648,20 @@ def _fetch_events(symbol: str, force: bool = False) -> dict:
     bulk_deals = []
     fii_dii_net_flow = None
 
+    classified_events = []
+    for n in recent_news:
+        cat = _classify_event_title(n.get("title") or "")
+        item = {**n, "event_type": cat or "general"}
+        if cat:
+            classified_events.append(item)
+        if cat == "bulk_block":
+            bulk_deals.append({
+                "title": n.get("title"),
+                "published": n.get("published"),
+                "url": n.get("url"),
+                "source": n.get("publisher"),
+            })
+
     result = {
         "symbol": sym,
         "next_earnings_date": next_earnings,
@@ -559,12 +671,14 @@ def _fetch_events(symbol: str, force: bool = False) -> dict:
         "recent_analyst_actions": recent_analyst,
         "institutional_holders": institutional_holders,
         "recent_news": recent_news,
+        "classified_events": classified_events,
         "earnings_surprise": earnings_surprise,
         "bulk_deals": bulk_deals,
         "fii_dii_net_flow": fii_dii_net_flow,
         "checked_at": datetime.utcnow().isoformat(),
         "cached": False,
     }
+    result["summary"] = _summarize_events(result)
 
     fallback_key = f"{EVENT_FALLBACK_PREFIX}{sym}"
     has_real_data = any([

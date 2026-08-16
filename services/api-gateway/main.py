@@ -11,18 +11,21 @@ import asyncio
 import logging
 import difflib
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 from typing import List, Optional, Set, Dict, Union
 
 import httpx
 import yfinance as yf
 import feedparser
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from upstash_redis import Redis
+from circuit_breaker import get_breaker, CircuitOpenError, all_snapshots
+from metrics import metrics
+from nse_holidays import is_nse_holiday
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api-gateway")
@@ -640,7 +643,7 @@ async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> t
         return cached.get("metrics"), cached.get("fallback", False)
 
     try:
-        resp = await client.get(f"{FUNDAMENTAL_URL}/analyze/{symbol}", timeout=60)
+        resp = await _cb_get(client, "fundamental", f"{FUNDAMENTAL_URL}/analyze/{symbol}", timeout=35)
         if resp.status_code == 200:
             data = resp.json()
             metrics = data.get("metrics")
@@ -658,7 +661,7 @@ async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Option
         return cached
 
     try:
-        resp = await client.get(f"{EVENT_URL}/events/{symbol}", timeout=60)
+        resp = await _cb_get(client, "event", f"{EVENT_URL}/events/{symbol}", timeout=25)
         if resp.status_code == 200:
             data = resp.json()
             if data and isinstance(data, dict):
@@ -670,7 +673,7 @@ async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Option
 
 async def _fetch_news_cached(symbol: str, client: httpx.AsyncClient) -> Optional[dict]:
     try:
-        resp = await client.get(f"{NEWS_URL}/analyze/{symbol}", timeout=30)
+        resp = await _cb_get(client, "news", f"{NEWS_URL}/analyze/{symbol}", timeout=20)
         if resp.status_code == 200:
             data = resp.json()
             if data and isinstance(data, dict):
@@ -681,7 +684,7 @@ async def _fetch_news_cached(symbol: str, client: httpx.AsyncClient) -> Optional
 
 async def _fetch_prediction_cached(symbol: str, client: httpx.AsyncClient) -> tuple[Optional[float], Optional[str]]:
     try:
-        resp = await client.get(f"{PREDICTION_URL}/predict/{symbol}", timeout=60)
+        resp = await _cb_get(client, "prediction", f"{PREDICTION_URL}/predict/{symbol}", timeout=25)
         if resp.status_code == 200:
             data = resp.json()
             if data.get("model_loaded"):
@@ -908,11 +911,51 @@ MAX_RETRIES = 1
 RETRY_BACKOFF = 1.0
 
 def _is_market_open_ist() -> bool:
+    """NSE continuous session 09:15–15:30 IST, Mon–Fri, excluding known holidays."""
     now = datetime.now(IST)
     if now.weekday() >= 5:
         return False
-    t = now.time()
-    return (t.hour > 9 or (t.hour == 9 and t.minute >= 15)) and (t.hour < 15 or (t.hour == 15 and t.minute <= 30))
+    if is_nse_holiday(now.date()):
+        return False
+    tt = now.time()
+    start = dtime(9, 15)
+    end = dtime(15, 30)
+    return start <= tt <= end
+
+
+def _market_session_phase_ist() -> str:
+    """preopen | open | post | closed | holiday — used for warm/cache policy."""
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return "closed"
+    if is_nse_holiday(now.date()):
+        return "holiday"
+    tt = now.time()
+    if dtime(8, 30) <= tt < dtime(9, 15):
+        return "preopen"
+    if dtime(9, 15) <= tt <= dtime(15, 30):
+        return "open"
+    if dtime(15, 30) < tt <= dtime(16, 0):
+        return "post"
+    return "closed"
+
+
+def _should_force_lite_scan() -> bool:
+    """Auto lite when circuits are open or dependency error rate is high (free-tier)."""
+    try:
+        snaps = all_snapshots()
+        if any(v.get("state") == "open" for v in snaps.values()):
+            return True
+        snap = metrics.snapshot()
+        counters = snap.get("counters") or {}
+        errors = sum(v for k, v in counters.items() if "dependency_errors" in k)
+        oks = sum(v for k, v in counters.items() if "dependency_ok" in k)
+        total = errors + oks
+        if total >= 15 and (errors / total) >= 0.35:
+            return True
+    except Exception:
+        pass
+    return False
 
 def _decide_cache_ttl() -> int:
     return DECIDE_CACHE_TTL_OPEN if _is_market_open_ist() else DECIDE_CACHE_TTL_CLOSED
@@ -935,6 +978,51 @@ def _prioritize_universe(universe: List[str]) -> List[str]:
             rest.append(su)
             seen.add(su)
     return priority + rest
+
+
+async def _cb_get(client: httpx.AsyncClient, name: str, url: str, timeout: float = 30.0, **kwargs):
+    """GET with circuit breaker — open circuit fails immediately."""
+    br = get_breaker(name)
+    if not br.allow():
+        metrics.inc("stockky_circuit_open_total", dependency=name)
+        raise CircuitOpenError(name, br.retry_after())
+    t0 = time.time()
+    try:
+        resp = await client.get(url, timeout=timeout, **kwargs)
+        metrics.observe_ms("stockky_dependency_latency", (time.time() - t0) * 1000, dependency=name)
+        if resp.status_code >= 500:
+            br.record_failure(f"HTTP {resp.status_code}")
+            metrics.inc("stockky_dependency_errors_total", dependency=name)
+        else:
+            br.record_success()
+            metrics.inc("stockky_dependency_ok_total", dependency=name)
+        return resp
+    except CircuitOpenError:
+        raise
+    except Exception as e:
+        metrics.observe_ms("stockky_dependency_latency", (time.time() - t0) * 1000, dependency=name)
+        metrics.inc("stockky_dependency_errors_total", dependency=name)
+        br.record_failure(str(e))
+        raise
+
+
+async def _cb_post(client: httpx.AsyncClient, name: str, url: str, timeout: float = 30.0, **kwargs):
+    br = get_breaker(name)
+    if not br.allow():
+        raise CircuitOpenError(name, br.retry_after())
+    try:
+        resp = await client.post(url, timeout=timeout, **kwargs)
+        if resp.status_code >= 500:
+            br.record_failure(f"HTTP {resp.status_code}")
+        else:
+            br.record_success()
+        return resp
+    except CircuitOpenError:
+        raise
+    except Exception as e:
+        br.record_failure(str(e))
+        raise
+
 
 async def _wake_required_services(client: httpx.AsyncClient = None) -> dict:
     """Wake free-tier services before scan. Market-data gets a warm yfinance touch + double ping."""
@@ -962,12 +1050,22 @@ async def _wake_required_services(client: httpx.AsyncClient = None) -> dict:
                     r2 = await client.get(f"{base}/health", timeout=10)
                     ok = r.status_code == 200 or r2.status_code == 200
                     return name, {"ok": ok, "status": r2.status_code if r2 else r.status_code, "warmed": True}
-                r = await client.get(f"{base}/health", timeout=12)
-                return name, {"ok": r.status_code == 200, "status": r.status_code}
+                # Prefer warm query so downstream services pre-touch deps
+                r = await client.get(f"{base}/health", params={"warm": "true"}, timeout=20)
+                if r.status_code != 200:
+                    await asyncio.sleep(2)
+                    r = await client.get(f"{base}/health", params={"warm": "true"}, timeout=20)
+                return name, {"ok": r.status_code == 200, "status": r.status_code, "warmed": True}
             except Exception as e:
                 return name, {"ok": False, "error": str(e)[:120]}
         pairs = await asyncio.gather(*(ping(n, cfg["url"]) for n, cfg in SYSTEM_SERVICES.items()))
         results = dict(pairs)
+        # Second pass for any failures (free-tier cold start)
+        failed = [n for n, v in results.items() if not v.get("ok")]
+        if failed:
+            await asyncio.sleep(3)
+            pairs2 = await asyncio.gather(*(ping(n, SYSTEM_SERVICES[n]["url"]) for n in failed if n in SYSTEM_SERVICES))
+            results.update(dict(pairs2))
     finally:
         if own_client:
             await client.aclose()
@@ -996,7 +1094,7 @@ async def _analyze_one_symbol_ultra(
                 if cached_decide and isinstance(cached_decide, dict) and cached_decide.get("decision"):
                     normalized = _normalize_decision_response(cached_decide, symbol)
                 else:
-                    decision_resp = await client.get(f"{DECISION_URL}/decide/{symbol}", timeout=90)
+                    decision_resp = await _cb_get(client, "decision", f"{DECISION_URL}/decide/{symbol}", timeout=45)
                     decision_resp.raise_for_status()
                     raw = decision_resp.json()
                     normalized = _normalize_decision_response(raw, symbol)
@@ -1099,6 +1197,22 @@ async def _analyze_one_symbol_ultra(
                             normalized["natural_language_summary"] = None
                 return normalized
 
+            except CircuitOpenError as e:
+                # Fail fast — no retry storm when dependency circuit is open
+                metrics.inc("stockky_scan_circuit_skip_total", dependency=e.name)
+                logger.warning("Scan skip %s: %s", symbol, e)
+                return {
+                    "symbol": symbol,
+                    "decision": "DO NOT BUY",
+                    "combined_score": 0,
+                    "confidence": "Low",
+                    "data_insufficient": True,
+                    "error": str(e),
+                    "circuit_open": e.name,
+                    "reasons": {
+                        "data_quality": [f"Circuit open for {e.name}; retry in {e.retry_after:.0f}s"]
+                    },
+                }
             except httpx.HTTPError as e:
                 error_type = type(e).__name__
                 error_msg = str(e) or f"{error_type} (empty message)"
@@ -1200,14 +1314,19 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
                     cancelled = True
 
             if processed % 5 == 0 or processed == total or cancelled:
-                _redis_set(SCAN_TASK_PREFIX + task_id, {
+                _scan_payload = {
                     "status": "running",
                     "total": total,
                     "processed": processed,
                     "elapsed": elapsed,
                     "result": None,
                     "error": None,
-                }, ttl=3600)
+                }
+                _redis_set(SCAN_TASK_PREFIX + task_id, _scan_payload, ttl=3600)
+                try:
+                    await _ws_push_scan(task_id, _scan_payload)
+                except Exception:
+                    pass
 
             if cancelled:
                 logger.info(f"Scan {task_id} cancelled after {processed}/{total} symbols — finalizing with partial results")
@@ -1313,14 +1432,25 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
     final_result["lite"] = lite
     final_result["scanned_at"] = datetime.now(IST).isoformat()
 
-    _redis_set(SCAN_TASK_PREFIX + task_id, {
+    _done_payload = {
         "status": "done",
         "total": total,
         "processed": processed,
         "elapsed": elapsed_final,
         "result": final_result,
         "error": None,
-    }, ttl=3600)
+    }
+    _redis_set(SCAN_TASK_PREFIX + task_id, _done_payload, ttl=3600)
+    try:
+        await _ws_push_scan(task_id, _done_payload)
+    except Exception:
+        pass
+    try:
+        metrics.inc("stockky_scan_complete_total")
+        metrics.set_gauge("stockky_last_scan_symbols", float(processed))
+        metrics.set_gauge("stockky_last_scan_elapsed_sec", float(elapsed_final))
+    except Exception:
+        pass
 
     # Cache full scan result so repeated "Run market scan" within TTL is instant
     if not cancelled and results:
@@ -1424,8 +1554,129 @@ def root():
         },
     }
 
+
+@app.get("/quote/{symbol}")
+def proxy_quote(symbol: str):
+    """Near-realtime quote proxy (market-data). Used by stock detail 30s refresh."""
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    try:
+        metrics.inc("stockky_quote_proxy_total")
+    except Exception:
+        pass
+    try:
+        resp = httpx.get(f"{MARKET_DATA_URL}/quote/{sym}", timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            price = data.get("price") or data.get("regularMarketPrice") or data.get("close") or data.get("last")
+            return {
+                "symbol": sym,
+                "price": price,
+                "close": data.get("close") or price,
+                "as_of": data.get("as_of") or datetime.now(IST).isoformat(),
+                "source": data.get("source") or "market-data",
+                "raw": {k: data.get(k) for k in ("volume", "delivery_pct", "change_pct") if k in data},
+            }
+    except Exception as e:
+        logger.warning("quote proxy %s: %s", sym, e)
+    # fallback yfinance light
+    try:
+        t = yf.Ticker(f"{sym}.NS")
+        info = t.fast_info if hasattr(t, "fast_info") else {}
+        price = None
+        try:
+            price = float(info.get("last_price") or info.get("lastPrice") or 0) or None
+        except Exception:
+            price = None
+        return {"symbol": sym, "price": price, "close": price, "as_of": datetime.now(IST).isoformat(), "source": "yfinance_fast"}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"quote unavailable: {e}")
+
+
+@app.get("/circuits")
+def circuits_status():
+    """Circuit breaker states for downstream dependencies."""
+    snaps = all_snapshots()
+    open_n = sum(1 for v in snaps.values() if v.get("state") == "open")
+    metrics.set_gauge("stockky_circuits_open", float(open_n))
+    return {"circuits": snaps}
+
+
+@app.get("/metrics")
+def metrics_endpoint(request: Request):
+    """JSON metrics by default; ?format=prom for Prometheus text."""
+    fmt = (request.query_params.get("format") or "json").lower()
+    if fmt in ("prom", "prometheus", "text"):
+        return Response(content=metrics.prometheus_text(), media_type="text/plain; version=0.0.4")
+    return metrics.snapshot()
+
+
+@app.post("/ops/check-alert")
+async def ops_check_alert():
+    """Evaluate simple thresholds and notify if unhealthy (for cron).
+
+    Alerts when any circuit is open or recent dependency error rate is high.
+    """
+    snaps = all_snapshots()
+    open_circuits = [k for k, v in snaps.items() if v.get("state") == "open"]
+    snap = metrics.snapshot()
+    counters = snap.get("counters") or {}
+    errors = sum(v for k, v in counters.items() if "dependency_errors" in k)
+    oks = sum(v for k, v in counters.items() if "dependency_ok" in k)
+    total = errors + oks
+    err_rate = (errors / total) if total else 0.0
+
+    problems = []
+    if open_circuits:
+        problems.append(f"Open circuits: {', '.join(open_circuits)}")
+    if total >= 20 and err_rate >= 0.4:
+        problems.append(f"Dependency error rate {err_rate:.0%} ({int(errors)}/{int(total)})")
+
+    if not problems:
+        return {"alerted": False, "ok": True, "open_circuits": [], "error_rate": err_rate}
+
+    title = "⚠️ Stockky ops alert"
+    message = " | ".join(problems)
+    delivered = False
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(
+                f"{NOTIFICATION_URL.rstrip('/')}/notify",
+                json={
+                    "title": title,
+                    "message": message[:1500],
+                    "channel": "all",
+                    "urgency": "high",
+                },
+            )
+            delivered = r.status_code == 200 and bool((r.json() or {}).get("delivered"))
+    except Exception as e:
+        logger.warning("ops alert notify failed: %s", e)
+    metrics.inc("stockky_ops_alerts_total")
+    return {
+        "alerted": True,
+        "delivered": delivered,
+        "problems": problems,
+        "open_circuits": open_circuits,
+        "error_rate": err_rate,
+    }
+
+
+@app.get("/wake-all")
+@app.post("/wake-all")
+async def wake_all_services():
+    """Hit health?warm=1 on all upstream services (free-tier anti-sleep)."""
+    results = await _wake_required_services()
+    ok = sum(1 for v in results.values() if v.get("ok"))
+    return {
+        "status": "ok" if ok else "degraded",
+        "warmed_ok": ok,
+        "total": len(results),
+        "services": results,
+    }
+
+
 @app.get("/health")
-def health():
+def health(warm: bool = False):
     return {
         "status": "ok",
         "service": "api-gateway",
@@ -1895,7 +2146,11 @@ def start_scan(
     If a recent full scan exists (LAST_FULL_SCAN_TTL) and force_refresh is false, returns cached task.
     """
     try:
-        use_lite = SCAN_LITE_DEFAULT if lite is None else bool(lite)
+        if lite is None:
+            use_lite = SCAN_LITE_DEFAULT or _should_force_lite_scan()
+        else:
+            use_lite = bool(lite)
+        # When circuits open, always prefer lite unless caller forced full (lite=False explicitly is respected)
 
         if force_refresh and _redis:
             try:
@@ -2631,6 +2886,431 @@ async def training_other_proxy(path: str, request: Request):
         logger.exception("training proxy error for path=%s", path)
         raise HTTPException(status_code=502, detail=f"Training proxy error: {e}")
 
+
+
+
+# ── Stockky 🔥 Stocks – curated news / results / bulk / insider driven list ──
+HOT_STOCKS_CACHE_KEY = "stockky:hot_stocks"
+HOT_STOCKS_TTL = 1800  # 30 min
+
+
+@app.get("/stockky-hot")
+async def stockky_hot_stocks(force: bool = False):
+    """Curated list for the Stockky 🔥 Stocks tab.
+
+    Sections:
+      - news_driven: recent relevant news + actionable decision
+      - results_driven: upcoming/recent results/earnings
+      - bulk_insider_driven: bulk/block deals or insider/promoter buying
+    Each item includes decision: BUY NOW | PREPARE TO BUY | DO NOT BUY
+    Uses real scan/cache data when available; never fabricates prices or scores.
+    """
+    if not force:
+        cached = _redis_get(HOT_STOCKS_CACHE_KEY)
+        if cached:
+            return {**cached, "cached": True}
+
+    watch = _load_watchlist()
+    universe = list(dict.fromkeys((watch or []) + _get_news_mentioned_symbols()[:30] + _get_event_symbols()[:20]))
+    if not universe:
+        universe = list(_load_searched() or [])[:25]
+    universe = universe[:40]
+
+    news_driven: list = []
+    results_driven: list = []
+    bulk_insider_driven: list = []
+
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        for sym in universe:
+            try:
+                base = sym.replace(".NS", "").replace(".BO", "").upper()
+                news_data = None
+                event_data = None
+                decision_data = None
+                try:
+                    r = await client.get(f"{NEWS_URL}/analyze/{base}")
+                    if r.status_code == 200:
+                        news_data = r.json()
+                except Exception:
+                    pass
+                try:
+                    r = await client.get(f"{EVENT_URL}/events/{base}")
+                    if r.status_code == 200:
+                        event_data = r.json()
+                except Exception:
+                    pass
+                try:
+                    decision_data = _redis_get(f"stockky:last_decision:{base}")
+                except Exception:
+                    decision_data = None
+
+                decision = (decision_data or {}).get("decision") or "DO NOT BUY"
+                score = (decision_data or {}).get("score")
+                reasons = (decision_data or {}).get("reasons") or []
+
+                hc = (news_data or {}).get("headline_count") or 0
+                nscore = (news_data or {}).get("news_score")
+                if hc >= 1 and (nscore is None or nscore >= 45):
+                    news_driven.append({
+                        "symbol": base,
+                        "decision": decision,
+                        "score": score,
+                        "news_score": nscore,
+                        "headline_count": hc,
+                        "summary": (news_data or {}).get("summary") or "",
+                        "reasons": reasons[:4],
+                        "headlines": (news_data or {}).get("headlines") or [],
+                        "section": "news_driven",
+                    })
+
+                if event_data:
+                    has_results = bool(
+                        event_data.get("next_earnings_date")
+                        or event_data.get("earnings_surprise")
+                        or any(
+                            (c.get("event_type") == "results")
+                            for c in (event_data.get("classified_events") or [])
+                        )
+                    )
+                    if has_results:
+                        results_driven.append({
+                            "symbol": base,
+                            "decision": decision,
+                            "score": score,
+                            "next_earnings_date": event_data.get("next_earnings_date"),
+                            "earnings_surprise": event_data.get("earnings_surprise"),
+                            "summary": event_data.get("summary") or "",
+                            "reasons": reasons[:4],
+                            "section": "results_driven",
+                        })
+
+                    ins = event_data.get("recent_insider_transactions") or []
+                    bulk = event_data.get("bulk_deals") or []
+                    insider_buy = any(
+                        "buy" in (i.get("transaction") or "").lower()
+                        or "purchase" in (i.get("transaction") or "").lower()
+                        for i in ins
+                    )
+                    if bulk or insider_buy or any(
+                        c.get("event_type") in ("bulk_block", "insider")
+                        for c in (event_data.get("classified_events") or [])
+                    ):
+                        bulk_insider_driven.append({
+                            "symbol": base,
+                            "decision": decision,
+                            "score": score,
+                            "insider_transactions": ins[:3],
+                            "bulk_deals": bulk[:3],
+                            "summary": event_data.get("summary") or "",
+                            "reasons": reasons[:4],
+                            "section": "bulk_insider_driven",
+                        })
+            except Exception as e:
+                logger.warning("stockky-hot skip %s: %s", sym, e)
+
+    def _rank(items: list) -> list:
+        order = {"BUY NOW": 0, "PREPARE TO BUY": 1, "DO NOT BUY": 2, "SELL": 3}
+        return sorted(
+            items,
+            key=lambda x: (order.get(x.get("decision") or "", 9), -(x.get("score") or 0)),
+        )
+
+    payload = {
+        "news_driven": _rank(news_driven)[:15],
+        "results_driven": _rank(results_driven)[:15],
+        "bulk_insider_driven": _rank(bulk_insider_driven)[:15],
+        "generated_at": datetime.now(IST).isoformat(),
+        "universe_size": len(universe),
+        "cached": False,
+    }
+    _redis_set(HOT_STOCKS_CACHE_KEY, payload, ttl=HOT_STOCKS_TTL)
+    return payload
+
+
+
+
+# ── WebSocket real-time hub (scan progress + market ticks + training) ─────────
+
+class ConnectionManager:
+    def __init__(self):
+        self.active: List[WebSocket] = []
+        self.subs: Dict[int, Set[str]] = {}  # id(ws) -> channels
+        self.quote_syms: Dict[int, Set[str]] = {}  # id(ws) -> symbols for live quotes
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active.append(websocket)
+        self.subs[id(websocket)] = set()
+        self.quote_syms[id(websocket)] = set()
+
+    def disconnect(self, websocket: WebSocket):
+        wid = id(websocket)
+        if websocket in self.active:
+            self.active.remove(websocket)
+        self.subs.pop(wid, None)
+        self.quote_syms.pop(wid, None)
+
+    def subscribe(self, websocket: WebSocket, channel: str):
+        self.subs.setdefault(id(websocket), set()).add(channel)
+
+    def unsubscribe(self, websocket: WebSocket, channel: str):
+        self.subs.setdefault(id(websocket), set()).discard(channel)
+
+    def watch_quotes(self, websocket: WebSocket, symbols: List[str]):
+        wid = id(websocket)
+        bucket = self.quote_syms.setdefault(wid, set())
+        for s in symbols:
+            sym = (s or "").upper().replace(".NS", "").replace(".BO", "").strip()
+            if sym:
+                bucket.add(sym)
+                self.subscribe(websocket, f"quote:{sym}")
+
+    def unwatch_quotes(self, websocket: WebSocket, symbols: List[str] = None):
+        wid = id(websocket)
+        bucket = self.quote_syms.setdefault(wid, set())
+        if symbols is None:
+            for sym in list(bucket):
+                self.unsubscribe(websocket, f"quote:{sym}")
+            bucket.clear()
+            return
+        for s in symbols:
+            sym = (s or "").upper().replace(".NS", "").replace(".BO", "").strip()
+            bucket.discard(sym)
+            self.unsubscribe(websocket, f"quote:{sym}")
+
+    def all_watched_symbols(self) -> List[str]:
+        out: Set[str] = set()
+        for syms in self.quote_syms.values():
+            out.update(syms)
+        return sorted(out)
+
+    async def broadcast(self, channel: str, payload: dict):
+        dead = []
+        msg = json.dumps({"channel": channel, **payload}, default=str)
+        for ws in list(self.active):
+            chans = self.subs.get(id(ws), set())
+            if channel in chans or "all" in chans:
+                try:
+                    await ws.send_text(msg)
+                except Exception:
+                    dead.append(ws)
+        for ws in dead:
+            self.disconnect(ws)
+
+
+ws_manager = ConnectionManager()
+_quote_loop_task = None
+
+
+def _resolve_quote_price(sym: str):
+    """Best-effort free-tier quote for WS push."""
+    try:
+        resp = httpx.get(f"{MARKET_DATA_URL}/quote/{sym}", timeout=6)
+        if resp.status_code == 200:
+            data = resp.json()
+            price = data.get("price") or data.get("regularMarketPrice") or data.get("close") or data.get("last")
+            if price is not None:
+                return {
+                    "symbol": sym,
+                    "price": float(price),
+                    "close": data.get("close") or float(price),
+                    "change_pct": data.get("change_pct"),
+                    "as_of": data.get("as_of") or datetime.now(IST).isoformat(),
+                    "source": data.get("source") or "market-data",
+                }
+    except Exception as e:
+        logger.debug("ws quote market-data %s: %s", sym, e)
+    try:
+        t = yf.Ticker(f"{sym}.NS")
+        info = getattr(t, "fast_info", None) or {}
+        price = None
+        try:
+            price = float(info.get("last_price") or info.get("lastPrice") or 0) or None
+        except Exception:
+            price = None
+        if price:
+            return {
+                "symbol": sym,
+                "price": price,
+                "close": price,
+                "as_of": datetime.now(IST).isoformat(),
+                "source": "yfinance_fast",
+            }
+    except Exception as e:
+        logger.debug("ws quote yf %s: %s", sym, e)
+    return None
+
+
+async def _quote_broadcast_loop():
+    """Push quotes for all WS-watched symbols every few seconds (free-tier safe)."""
+    while True:
+        try:
+            symbols = ws_manager.all_watched_symbols()
+            if symbols:
+                # Cap concurrent watched symbols to protect Yahoo/NSE
+                for sym in symbols[:40]:
+                    q = await asyncio.to_thread(_resolve_quote_price, sym)
+                    if q:
+                        await ws_manager.broadcast(f"quote:{sym}", {
+                            "type": "quote",
+                            **q,
+                        })
+                        try:
+                            metrics.inc("stockky_ws_quote_push_total")
+                        except Exception:
+                            pass
+                    await asyncio.sleep(0.15)
+        except Exception as e:
+            logger.debug("quote loop: %s", e)
+        await asyncio.sleep(8)
+
+
+def _ensure_quote_loop():
+    global _quote_loop_task
+    try:
+        loop = asyncio.get_event_loop()
+        if _quote_loop_task is None or _quote_loop_task.done():
+            _quote_loop_task = loop.create_task(_quote_broadcast_loop())
+    except Exception as e:
+        logger.debug("quote loop start: %s", e)
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """Realtime: scan progress, live quotes, market, training.
+
+    Client messages (JSON):
+      {"action":"subscribe","channel":"scan:<id>"|"quote:TCS"|"market"|"all"}
+      {"action":"subscribe_quotes","symbols":["TCS","INFY"]}
+      {"action":"unsubscribe_quotes","symbols":["TCS"]}  # or omit symbols to clear
+      {"action":"unsubscribe","channel":"..."}
+      {"action":"ping"}
+    Server:
+      {"channel":"quote:TCS","type":"quote","price":...,"as_of":...}
+      {"channel":"scan:...","type":"scan_status",...}
+    """
+    await ws_manager.connect(websocket)
+    _ensure_quote_loop()
+    try:
+        await websocket.send_text(json.dumps({
+            "channel": "system",
+            "type": "connected",
+            "ts": datetime.now(IST).isoformat(),
+            "features": ["scan", "quotes", "ping"],
+        }))
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw) if raw else {}
+            except Exception:
+                msg = {}
+            action = (msg.get("action") or "").lower()
+            channel = (msg.get("channel") or "").strip()
+
+            if action == "ping":
+                await websocket.send_text(json.dumps({"channel": "system", "type": "pong"}))
+
+            elif action == "subscribe_quotes":
+                syms = msg.get("symbols") or []
+                if isinstance(syms, str):
+                    syms = [syms]
+                ws_manager.watch_quotes(websocket, list(syms))
+                await websocket.send_text(json.dumps({
+                    "channel": "system",
+                    "type": "quotes_subscribed",
+                    "symbols": sorted(ws_manager.quote_syms.get(id(websocket), set())),
+                }, default=str))
+                # Immediate snapshot
+                for sym in list(ws_manager.quote_syms.get(id(websocket), set()))[:10]:
+                    q = await asyncio.to_thread(_resolve_quote_price, sym)
+                    if q:
+                        await websocket.send_text(json.dumps({
+                            "channel": f"quote:{sym}",
+                            "type": "quote",
+                            **q,
+                        }, default=str))
+
+            elif action == "unsubscribe_quotes":
+                syms = msg.get("symbols")
+                if syms is None:
+                    ws_manager.unwatch_quotes(websocket, None)
+                else:
+                    if isinstance(syms, str):
+                        syms = [syms]
+                    ws_manager.unwatch_quotes(websocket, list(syms))
+                await websocket.send_text(json.dumps({
+                    "channel": "system",
+                    "type": "quotes_unsubscribed",
+                }))
+
+            elif action == "subscribe" and channel:
+                ws_manager.subscribe(websocket, channel)
+                if channel.startswith("quote:"):
+                    sym = channel.split(":", 1)[1]
+                    ws_manager.watch_quotes(websocket, [sym])
+                await websocket.send_text(json.dumps({
+                    "channel": channel, "type": "subscribed"
+                }))
+                if channel.startswith("scan:"):
+                    task_id = channel.split(":", 1)[1]
+                    data = _redis_get(SCAN_TASK_PREFIX + task_id) or {}
+                    await websocket.send_text(json.dumps({
+                        "channel": channel,
+                        "type": "scan_status",
+                        "task_id": task_id,
+                        "status": data.get("status"),
+                        "processed": data.get("processed", 0),
+                        "total": data.get("total", 0),
+                        "elapsed": data.get("elapsed"),
+                        "result": data.get("result") if data.get("status") == "done" else None,
+                    }, default=str))
+                elif channel.startswith("quote:"):
+                    sym = channel.split(":", 1)[1]
+                    q = await asyncio.to_thread(_resolve_quote_price, sym)
+                    if q:
+                        await websocket.send_text(json.dumps({
+                            "channel": channel, "type": "quote", **q
+                        }, default=str))
+
+            elif action == "unsubscribe" and channel:
+                ws_manager.unsubscribe(websocket, channel)
+                if channel.startswith("quote:"):
+                    ws_manager.unwatch_quotes(websocket, [channel.split(":", 1)[1]])
+
+            elif action == "poll_scan" and msg.get("task_id"):
+                task_id = msg["task_id"]
+                data = _redis_get(SCAN_TASK_PREFIX + task_id) or {}
+                await websocket.send_text(json.dumps({
+                    "channel": f"scan:{task_id}",
+                    "type": "scan_status",
+                    "task_id": task_id,
+                    "status": data.get("status"),
+                    "processed": data.get("processed", 0),
+                    "total": data.get("total", 0),
+                    "elapsed": data.get("elapsed"),
+                    "result": data.get("result") if data.get("status") == "done" else None,
+                }, default=str))
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+    except Exception as e:
+        logger.warning("websocket closed: %s", e)
+        ws_manager.disconnect(websocket)
+
+
+async def _ws_push_scan(task_id: str, data: dict):
+    """Best-effort push when scan state changes (also polled by clients)."""
+    try:
+        await ws_manager.broadcast(f"scan:{task_id}", {
+            "type": "scan_status",
+            "task_id": task_id,
+            "status": data.get("status"),
+            "processed": data.get("processed", 0),
+            "total": data.get("total", 0),
+            "elapsed": data.get("elapsed"),
+            "result": data.get("result") if data.get("status") in ("done", "cancelled", "error") else None,
+        })
+    except Exception as e:
+        logger.debug("ws push scan failed: %s", e)
 
 
 # ── Startup cache pre-population ──────────────────────────────────────────

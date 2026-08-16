@@ -65,27 +65,66 @@ def _sector_relative_pe_score(pe_ratio, sector: str | None):
         return -8, f"P/E at {pe_ratio:.1f} is well above the {sector_label} typical range (~{typical}) — priced for a lot of growth"
 
 def _multi_quarter_consistency(earnings_list):
-    """Return (score 0-100, ok_flag) if 2-3 consecutive quarters show positive growth."""
+    """Score 0-100 from sequential quarter growth. Newest-first lists preferred.
+
+    Accepts numbers or dicts with eps/earnings/revenue keys. Uses up to 6 quarters.
+    """
     if not earnings_list or len(earnings_list) < 2:
         return 50.0, False
-    grows = []
-    for i in range(1, min(4, len(earnings_list))):
+
+    def _val(x):
+        if isinstance(x, (int, float)):
+            return float(x)
+        if isinstance(x, dict):
+            for k in ("eps", "earnings", "net_income", "revenue", "value", "profit"):
+                if x.get(k) is not None:
+                    try:
+                        return float(x[k])
+                    except Exception:
+                        pass
         try:
-            prev, cur = float(earnings_list[i]), float(earnings_list[i-1])
-            if prev == 0:
-                grows.append(0)
-            else:
-                grows.append(1 if cur > prev else -1)
+            return float(x)
         except Exception:
+            return None
+
+    vals = []
+    for item in earnings_list[:6]:
+        v = _val(item)
+        if v is not None:
+            vals.append(v)
+    if len(vals) < 2:
+        return 50.0, False
+
+    # vals[0] treated as latest quarter
+    grows = []
+    pcts = []
+    for i in range(len(vals) - 1):
+        latest, older = vals[i], vals[i + 1]
+        if older == 0:
             grows.append(0)
+            pcts.append(0.0)
+            continue
+        pct = (latest - older) / abs(older)
+        pcts.append(pct)
+        grows.append(1 if pct > 0.02 else (-1 if pct < -0.02 else 0))
+
     pos = sum(1 for g in grows if g > 0)
-    if pos >= 3:
-        return 85.0, True
-    if pos >= 2:
-        return 70.0, True
-    if pos == 1:
-        return 45.0, False
-    return 30.0, False
+    neg = sum(1 for g in grows if g < 0)
+    avg_pct = sum(pcts) / len(pcts) if pcts else 0.0
+    if pos >= 3 and neg == 0:
+        score, ok = 88.0, True
+    elif pos >= 2 and neg <= 1:
+        score, ok = 72.0, True
+    elif pos >= 2:
+        score, ok = 62.0, True
+    elif pos == 1 and neg <= 1:
+        score, ok = 48.0, False
+    else:
+        score, ok = 32.0, False
+    score = max(0.0, min(100.0, score + max(-12.0, min(12.0, avg_pct * 40))))
+    return round(score, 1), ok
+
+
 
 app = FastAPI(title="Stockky Fundamental Analysis Service", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -459,6 +498,11 @@ def analyze(symbol: str):
         "sector_normalized": sector_norm or sector,
         "multi_quarter_score": multi_q_score,
         "multi_quarter_ok": multi_q_ok,
+        "multi_quarter_detail": {
+            "score": multi_q_score,
+            "ok": multi_q_ok,
+            "quarters_used": len(quarterly_earnings) if isinstance(quarterly_earnings, list) else 0,
+        },
         "quality_score": quality_score,
         "industry": f.get("industry"),
         "reasons": reasons,

@@ -1,9 +1,11 @@
 """
 NSE Bhavcopy / delivery % helpers — free tier only.
+
 Sources (in order):
-1. NSE quote-equity securityWiseDP (live)
-2. NSE archives bhavcopy ZIP/CSV for a recent session date
-3. Neutral fallback with explicit source tag (never invents precision)
+1. NSE quote-equity securityWiseDP (live intraday / last session)
+2. NSE archives bhavcopy ZIP/CSV for a recent session date (multiple URL patterns)
+3. NSE sec_bhavdata_full daily CSV (delivery columns)
+4. Neutral fallback with explicit source tag (never invents precision)
 """
 from __future__ import annotations
 
@@ -33,9 +35,10 @@ NSE_HEADERS = {
 
 
 def _nse_client() -> httpx.Client:
-    c = httpx.Client(timeout=20, headers=NSE_HEADERS, follow_redirects=True)
+    c = httpx.Client(timeout=25, headers=NSE_HEADERS, follow_redirects=True)
     try:
         c.get("https://www.nseindia.com")
+        c.get("https://www.nseindia.com/market-data/securities-available-for-trading")
         c.get("https://www.nseindia.com/all-reports")
     except Exception:
         pass
@@ -43,7 +46,7 @@ def _nse_client() -> httpx.Client:
 
 
 def delivery_from_quote(symbol: str) -> Optional[Dict[str, Any]]:
-    """Live delivery % from NSE quote-equity."""
+    """Live delivery % from NSE quote-equity (securityWiseDP)."""
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     try:
         with _nse_client() as client:
@@ -77,10 +80,14 @@ def delivery_from_quote(symbol: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _candidate_session_dates(n: int = 8) -> List[datetime]:
+def _candidate_session_dates(n: int = 12) -> List:
     """Recent business-looking dates (skip pure weekends; holidays still tried)."""
     out = []
     d = datetime.now(IST).date()
+    # After ~18:30 IST, same-day bhav may exist; before that prefer prior sessions
+    now = datetime.now(IST)
+    if now.hour < 18:
+        d = d - timedelta(days=1)
     while len(out) < n:
         if d.weekday() < 5:
             out.append(d)
@@ -94,41 +101,64 @@ def _bhav_urls_for_date(d) -> List[str]:
     mon = d.strftime("%b").upper()
     yyyy = d.strftime("%Y")
     ddmmyyyy = d.strftime("%d%m%Y")
-    # Common historical patterns used by NSE / mirrors
+    mm = d.strftime("%m")
+    mon_cap = d.strftime("%b").capitalize()
     return [
         f"https://nsearchives.nseindia.com/content/historical/EQUITIES/{yyyy}/{mon}/cm{dd}{mon}{yyyy}bhav.csv.zip",
-        f"https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{ddmmyyyy}.csv",
         f"https://archives.nseindia.com/content/historical/EQUITIES/{yyyy}/{mon}/cm{dd}{mon}{yyyy}bhav.csv.zip",
+        f"https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{ddmmyyyy}.csv",
+        f"https://archives.nseindia.com/products/content/sec_bhavdata_full_{ddmmyyyy}.csv",
+        f"https://www.nseindia.com/content/historical/EQUITIES/{yyyy}/{mon}/cm{dd}{mon}{yyyy}bhav.csv.zip",
+        f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{yyyy}{mm}{dd}_F_0000.csv.zip",
+        f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{yyyy}{mm}{dd}_F_0000.csv",
+        f"https://nsearchives.nseindia.com/content/Equities/sec_bhavdata_full_{ddmmyyyy}.csv",
+        f"https://www1.nseindia.com/content/historical/EQUITIES/{yyyy}/{mon}/cm{dd}{mon}{yyyy}bhav.csv.zip",
+        f"https://www.nseindia.com/api/reports?archives=%5B%7B%22name%22%3A%22CM%20-%20Bhavcopy(csv)%22%2C%22type%22%3A%22archives%22%2C%22category%22%3A%22capital-market%22%2C%22section%22%3A%22equities%22%7D%5D&date={dd}-{mon_cap}-{yyyy}&type=equities&mode=single",
     ]
 
 
 def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    # Normalise possible BOM / whitespace
+    if text.startswith("\ufeff"):
+        text = text[1:]
     reader = csv.DictReader(io.StringIO(text))
     if not reader.fieldnames:
         return None
-    fields = {f.lower().strip(): f for f in reader.fieldnames}
+    fields = {f.lower().strip().replace(" ", "_"): f for f in reader.fieldnames}
 
     def col(*names):
         for n in names:
-            if n.lower() in fields:
-                return fields[n.lower()]
+            key = n.lower().strip().replace(" ", "_")
+            if key in fields:
+                return fields[key]
         return None
 
-    sym_col = col("SYMBOL", "symbol")
-    deliv_pct_col = col("DELIV_PER", "DELIVERY_PER", "DELIV_PERCENTAGE", "DELIV_PERC")
-    deliv_qty_col = col("DELIV_QTY", "DELIVERY_QTY", "DELIV_QUANTITY")
-    tq_col = col("TTL_TRD_QNTY", "TOTAL_TRADES", "TOTTRDQTY", "NO_OF_SHRS", "VOLUME")
+    sym_col = col("SYMBOL", "symbol", "TckrSymb", "SECURITY")
+    deliv_pct_col = col(
+        "DELIV_PER", "DELIVERY_PER", "DELIV_PERCENTAGE", "DELIV_PERC",
+        "DELIVERY_%", "DELIVERY_PERCENT", "DelivPer",
+    )
+    deliv_qty_col = col(
+        "DELIV_QTY", "DELIVERY_QTY", "DELIV_QUANTITY", "DELIVERY_QUANTITY", "DelivQty",
+    )
+    tq_col = col(
+        "TTL_TRD_QNTY", "TOTAL_TRADES", "TOTTRDQTY", "NO_OF_SHRS", "VOLUME",
+        "TtlTradgVol", "TOT_TRADED_QTY", "TRADED_QTY",
+    )
 
     if not sym_col:
         return None
     for row in reader:
-        if (row.get(sym_col) or "").strip().upper() != sym:
+        row_sym = (row.get(sym_col) or "").strip().upper()
+        if row_sym != sym:
             continue
         pct = None
         if deliv_pct_col and row.get(deliv_pct_col):
             try:
-                pct = float(str(row[deliv_pct_col]).replace(",", "").strip())
+                raw = str(row[deliv_pct_col]).replace(",", "").replace("%", "").strip()
+                if raw and raw.upper() not in ("-", "NA", "N/A"):
+                    pct = float(raw)
             except ValueError:
                 pct = None
         if pct is None and deliv_qty_col and tq_col:
@@ -152,11 +182,11 @@ def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
 
 
 def delivery_from_bhavcopy(symbol: str) -> Optional[Dict[str, Any]]:
-    """Download recent bhavcopy and extract delivery % for symbol."""
+    """Download recent official bhavcopy / sec_bhavdata and extract delivery %."""
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     try:
         with _nse_client() as client:
-            for d in _candidate_session_dates(10):
+            for d in _candidate_session_dates(12):
                 for url in _bhav_urls_for_date(d):
                     try:
                         r = client.get(url)
@@ -164,15 +194,28 @@ def delivery_from_bhavcopy(symbol: str) -> Optional[Dict[str, Any]]:
                             continue
                         content_type = (r.headers.get("content-type") or "").lower()
                         text = None
-                        if url.endswith(".zip") or "zip" in content_type or r.content[:2] == b"PK":
-                            with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-                                name = next((n for n in zf.namelist() if n.lower().endswith(".csv")), None)
-                                if not name:
-                                    continue
-                                text = zf.read(name).decode("utf-8", errors="ignore")
+                        body = r.content
+                        if url.endswith(".zip") or "zip" in content_type or body[:2] == b"PK":
+                            try:
+                                with zipfile.ZipFile(io.BytesIO(body)) as zf:
+                                    name = next(
+                                        (n for n in zf.namelist() if n.lower().endswith(".csv")),
+                                        None,
+                                    )
+                                    if not name:
+                                        continue
+                                    text = zf.read(name).decode("utf-8", errors="ignore")
+                            except zipfile.BadZipFile:
+                                continue
                         else:
+                            # JSON report wrappers sometimes return download links — skip non-CSV
+                            if "application/json" in content_type:
+                                continue
                             text = r.text
-                        if not text or "SYMBOL" not in text.upper()[:500]:
+                        if not text:
+                            continue
+                        head = text[:800].upper()
+                        if "SYMBOL" not in head and "TCKRSYMB" not in head and "SECURITY" not in head:
                             continue
                         parsed = _parse_bhav_csv(text, sym)
                         if parsed:
@@ -187,10 +230,46 @@ def delivery_from_bhavcopy(symbol: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def get_delivery(symbol: str) -> Dict[str, Any]:
-    """Public resolver: quote → bhavcopy → neutral fallback."""
+def delivery_from_nse_cm_series(symbol: str) -> Optional[Dict[str, Any]]:
+    """Try NSE equity master / series-wise snapshot if available via public API."""
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
-    for fn in (delivery_from_quote, delivery_from_bhavcopy):
+    try:
+        with _nse_client() as client:
+            # Historical data API used by NSE charts — may include delivery on some builds
+            r = client.get(
+                f"https://www.nseindia.com/api/historical/cm/equity"
+                f"?symbol={sym}&series=[%22EQ%22]&from="
+                f"{(datetime.now(IST).date() - timedelta(days=10)).strftime('%d-%m-%Y')}"
+                f"&to={datetime.now(IST).date().strftime('%d-%m-%Y')}"
+            )
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            rows = data.get("data") or data.get("historicalData") or []
+            if not rows:
+                return None
+            # Prefer newest row with delivery fields
+            for row in reversed(rows):
+                pct = row.get("CH_DELIVERY_PERC") or row.get("DELIV_PER") or row.get("deliveryToTradedQuantity")
+                if pct is None:
+                    continue
+                return {
+                    "symbol": sym,
+                    "delivery_pct": round(float(pct), 2),
+                    "traded_qty": row.get("CH_TOT_TRADED_QTY") or row.get("TTL_TRD_QNTY"),
+                    "delivery_qty": row.get("CH_DELIV_QTY"),
+                    "source": "nse_cm_historical",
+                    "session_date": row.get("CH_TIMESTAMP") or row.get("mTIMESTAMP"),
+                }
+    except Exception as e:
+        logger.debug("cm series delivery failed %s: %s", sym, e)
+    return None
+
+
+def get_delivery(symbol: str) -> Dict[str, Any]:
+    """Public resolver: quote → bhavcopy → cm historical → neutral fallback."""
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    for fn in (delivery_from_quote, delivery_from_bhavcopy, delivery_from_nse_cm_series):
         try:
             hit = fn(sym)
             if hit and hit.get("delivery_pct") is not None:

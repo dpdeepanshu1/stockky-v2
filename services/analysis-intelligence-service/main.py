@@ -80,8 +80,21 @@ def root():
     }
 
 @app.get("/health")
-def health():
-    return {"status": "ok", "service": "analysis-intelligence-service"}
+def health(warm: bool = False):
+    out = {"status": "ok", "service": "analysis-intelligence-service"}
+    if warm:
+        # Touch submodule health routes so nested workers stay warm on free tier
+        import httpx
+        base = f"http://127.0.0.1:{int(__import__('os').getenv('PORT', '8002'))}"
+        warmed = {}
+        for path in ("/technical/health", "/news/health", "/event/health", "/fundamental/health"):
+            try:
+                r = httpx.get(base + path, timeout=5)
+                warmed[path] = r.status_code == 200
+            except Exception:
+                warmed[path] = False
+        out["warmed"] = warmed
+    return out
 
 if __name__ == "__main__":
     import uvicorn

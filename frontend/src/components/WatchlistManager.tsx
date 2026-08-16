@@ -4,15 +4,18 @@ interface Props {
   symbols: string[];
   onChange: (symbols: string[]) => void;
   onAnalyse: (symbol: string) => void;
-  onScanWatchlist?: () => void; // NEW
+  onScanWatchlist?: () => void;
 }
 
 export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanWatchlist }: Props) {
   const [input, setInput] = useState("");
 
   function add() {
-    const sym = input.trim().toUpperCase();
-    if (!sym || symbols.includes(sym)) { setInput(""); return; }
+    const sym = input.trim().toUpperCase().replace(/\.NS$/i, "").replace(/\.BO$/i, "");
+    if (!sym || symbols.includes(sym)) {
+      setInput("");
+      return;
+    }
     onChange([...symbols, sym]);
     setInput("");
   }
@@ -22,71 +25,75 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
   }
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="font-mono text-xs text-mist uppercase tracking-widest">Watchlist</h2>
-        <span className="font-mono text-[10px] text-mist/40">{symbols.length} symbols · saved to cloud</span>
-      </div>
+    <div className="watchlist-terminal space-y-4">
+      <header className="terminal-panel">
+        <p className="dash-section-title">Watchlist</p>
+        <h2 className="font-display text-lg text-cyan-300/90 mb-1">Tracked symbols</h2>
+        <p className="text-xs text-mist/70 max-w-xl">
+          Priority universe for scans and alerts. Saved to cloud when backend is connected.
+        </p>
+        <div className="mono text-[10px] text-mist/50 mt-2">{symbols.length} symbols</div>
+      </header>
 
-      {/* Add input */}
-      <div className="flex gap-2 mb-5">
-        <div className="flex items-center gap-2 border border-slate rounded-lg px-3 py-2 bg-ink/60 focus-within:border-signal-prepare/60 transition flex-1">
-          <span className="font-mono text-mist text-xs">NSE:</span>
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value.toUpperCase())}
-            onKeyDown={(e) => e.key === "Enter" && add()}
-            placeholder="Add symbol…"
-            className="bg-transparent outline-none flex-1 font-mono text-xs placeholder:text-mist/30"
-            spellCheck={false}
-          />
-        </div>
-        <button
-          onClick={add}
-          className="border border-slate rounded-lg px-4 py-2 font-mono text-xs text-mist hover:text-paper hover:border-mist transition"
-        >
-          Add
-        </button>
-      </div>
-
-      {/* Action buttons */}
-      <div className="flex gap-2 mb-4">
-        {onScanWatchlist && (
-          <button
-            onClick={onScanWatchlist}
-            className="font-mono text-xs border border-slate rounded-lg px-4 py-1.5 hover:border-signal-prepare hover:text-paper transition"
-          >
-            🔍 Scan Watchlist
+      <div className="terminal-panel">
+        <div className="flex flex-col sm:flex-row gap-2 mb-4">
+          <div className="flex items-center gap-2 border border-slate/60 rounded-lg px-3 py-2 bg-ink/60 focus-within:border-cyan-500/40 transition flex-1">
+            <span className="font-mono text-mist text-xs">NSE:</span>
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value.toUpperCase())}
+              onKeyDown={(e) => e.key === "Enter" && add()}
+              placeholder="Add symbol…"
+              className="bg-transparent outline-none flex-1 font-mono text-xs placeholder:text-mist/30"
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </div>
+          <button type="button" onClick={add} className="btn-terminal">
+            Add
           </button>
+          {onScanWatchlist && (
+            <button
+              type="button"
+              onClick={onScanWatchlist}
+              className="btn-terminal"
+              disabled={symbols.length === 0}
+            >
+              Scan watchlist
+            </button>
+          )}
+        </div>
+
+        {symbols.length === 0 ? (
+          <p className="mono text-xs text-mist/50 py-6 text-center">
+            Empty — add NSE symbols to prioritize in market scans.
+          </p>
+        ) : (
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {symbols.map((s) => (
+              <div
+                key={s}
+                className="flex items-center justify-between gap-2 border border-slate/50 rounded-lg px-3 py-2 bg-ink/40 hover:border-cyan-500/30 transition"
+              >
+                <button
+                  type="button"
+                  onClick={() => onAnalyse(s)}
+                  className="font-mono text-sm text-paper hover:text-cyan-300 transition"
+                >
+                  {s}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => remove(s)}
+                  className="font-mono text-[10px] text-mist/50 hover:text-signal-sell uppercase"
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
         )}
       </div>
-
-      {/* Symbol grid */}
-      {symbols.length === 0 ? (
-        <p className="font-mono text-xs text-mist/40 text-center py-6">No symbols yet. Add one above.</p>
-      ) : (
-        <div className="flex flex-wrap gap-2">
-          {symbols.map((s) => (
-            <div
-              key={s}
-              className="flex items-center gap-1 border border-slate rounded-md bg-ink/40 pl-3 pr-1 py-1.5 group"
-            >
-              <button
-                onClick={() => onAnalyse(s)}
-                className="font-mono text-xs text-mist hover:text-paper transition"
-              >
-                {s}
-              </button>
-              <button
-                onClick={() => remove(s)}
-                className="ml-1 w-4 h-4 rounded flex items-center justify-center text-mist/30 hover:text-signal-sell hover:bg-signal-sell/10 transition font-mono text-[10px]"
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

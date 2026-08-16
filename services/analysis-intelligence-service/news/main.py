@@ -28,6 +28,7 @@ HF_API_KEY = os.getenv("HF_API_KEY")
 # Optional NewsAPI key (free tier)
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
 
+# Primary display name + common aliases for keyword matching
 NAME_HINTS = {
     "TCS": "Tata Consultancy Services",
     "INFY": "Infosys",
@@ -42,196 +43,257 @@ NAME_HINTS = {
     "HAL": "Hindustan Aeronautics",
     "TATAMOTORS": "Tata Motors",
     "SBIN": "State Bank of India",
-    "PWL": "PhysicsWallah",
+    "PWL": "Physics Wallah",
+    "PHYSICS WALLAH": "Physics Wallah",
+    "PHYSICSWALLAH": "Physics Wallah",
+    "PW": "Physics Wallah",
+    "WIPRO": "Wipro",
+    "LT": "Larsen & Toubro",
+    "ITC": "ITC",
+    "BHARTIARTL": "Bharti Airtel",
+    "AXISBANK": "Axis Bank",
+    "KOTAKBANK": "Kotak Mahindra Bank",
+    "BAJFINANCE": "Bajaj Finance",
+    "MARUTI": "Maruti Suzuki",
+    "TITAN": "Titan",
+    "ASIANPAINT": "Asian Paints",
+    "NESTLEIND": "Nestle India",
+    "ULTRACEMCO": "UltraTech Cement",
+    "SUNPHARMA": "Sun Pharma",
+    "DRREDDY": "Dr Reddy",
+    "CIPLA": "Cipla",
+    "POWERGRID": "Power Grid",
+    "NTPC": "NTPC",
+    "ONGC": "ONGC",
+    "COALINDIA": "Coal India",
+    "JSWSTEEL": "JSW Steel",
+    "TATASTEEL": "Tata Steel",
+    "HINDALCO": "Hindalco",
+    "ADANIENT": "Adani Enterprises",
+    "ADANIPORTS": "Adani Ports",
+    "DMART": "Avenue Supermarts",
+    "ZOMATO": "Zomato",
+    "NYKAA": "Nykaa",
+    "PAYTM": "Paytm",
+    "POLICYBZR": "Policybazaar",
+}
+
+# Extra aliases used only for relevance filtering (not for query)
+ALIASES: Dict[str, List[str]] = {
+    "PWL": ["physics wallah", "physicswallah", "physics-wallah", "pwl", "pw limited", "pw edtech"],
+    "RELIANCE": ["reliance industries", "ril", "reliance"],
+    "TCS": ["tata consultancy", "tcs"],
+    "INFY": ["infosys", "infy"],
+    "HDFCBANK": ["hdfc bank", "hdfcbank"],
+    "ICICIBANK": ["icici bank", "icicibank"],
+    "SBIN": ["state bank of india", "sbi", "sbin"],
+    "ZOMATO": ["zomato", "eternal limited"],
+    "DMART": ["dmart", "avenue supermarts"],
 }
 
 
+def _base_symbol(symbol: str) -> str:
+    return symbol.replace(".NS", "").replace(".BO", "").upper().strip()
+
+
 def _company_query(symbol: str) -> str:
-    base = symbol.replace(".NS", "").replace(".BO", "").upper()
+    base = _base_symbol(symbol)
     return NAME_HINTS.get(base, base)
 
 
-def _fetch_google_news(symbol: str, max_items: int = 15) -> List[Dict[str, Any]]:
-    """Fetch from Google News RSS."""
-    query = quote(_company_query(symbol) + " NSE stock")
-    feed_url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
-    try:
-        parsed = feedparser.parse(feed_url)
-        items = []
-        cutoff = datetime.utcnow() - timedelta(days=7)
-        for entry in parsed.entries[:max_items]:
-            published = None
-            if hasattr(entry, "published_parsed") and entry.published_parsed:
+def _match_keywords(symbol: str) -> List[str]:
+    """All lowercased keywords that indicate relevance for this symbol."""
+    base = _base_symbol(symbol)
+    keys = set()
+    keys.add(base.lower())
+    name = NAME_HINTS.get(base, base)
+    keys.add(name.lower())
+    # Split multi-word names
+    for part in name.lower().replace("&", " ").split():
+        if len(part) > 2:
+            keys.add(part)
+    for a in ALIASES.get(base, []):
+        keys.add(a.lower())
+    # Compact form without spaces
+    keys.add(name.lower().replace(" ", ""))
+    return list(keys)
+
+
+def _is_relevant(title: str, description: str, keywords: List[str]) -> bool:
+    text = f"{title or ''} {description or ''}".lower()
+    return any(k in text for k in keywords if len(k) >= 2)
+
+
+def _parse_feed_items(parsed, publisher: str, keywords: List[str], max_items: int, days: int = 10) -> List[Dict[str, Any]]:
+    items = []
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    for entry in getattr(parsed, "entries", [])[:50]:
+        title = getattr(entry, "title", "") or ""
+        desc = getattr(entry, "description", "") or getattr(entry, "summary", "") or ""
+        if not _is_relevant(title, desc, keywords):
+            continue
+        published = None
+        if hasattr(entry, "published_parsed") and entry.published_parsed:
+            try:
                 published = datetime(*entry.published_parsed[:6])
-            if published and published < cutoff:
-                continue
-            items.append({
-                "title": entry.title,
-                "publisher": getattr(entry.source, "title", "Google News") if hasattr(entry, "source") else "Google News",
-                "published": published.isoformat() if published else None,
-                "url": entry.link,
-            })
-        return items
-    except Exception as e:
-        logger.warning("Google News fetch failed: %s", e)
-        return []
+            except Exception:
+                pass
+        if published and published < cutoff:
+            continue
+        items.append({
+            "title": title,
+            "publisher": publisher,
+            "published": published.isoformat() if published else None,
+            "url": getattr(entry, "link", "") or "",
+            "snippet": (desc[:220] + "…") if len(desc) > 220 else desc,
+        })
+        if len(items) >= max_items:
+            break
+    return items
+
+
+def _fetch_google_news(symbol: str, max_items: int = 15) -> List[Dict[str, Any]]:
+    """Fetch from Google News RSS with company name + aliases."""
+    name = _company_query(symbol)
+    base = _base_symbol(symbol)
+    queries = [
+        f'"{name}" NSE OR BSE stock OR shares',
+        f"{base} NSE stock",
+    ]
+    # Extra query for known aliases (e.g. Physics Wallah / PWL)
+    for a in ALIASES.get(base, [])[:2]:
+        queries.append(f'"{a}" stock OR IPO OR results')
+    keywords = _match_keywords(symbol)
+    all_items = []
+    for q in queries[:3]:
+        feed_url = f"https://news.google.com/rss/search?q={quote(q)}&hl=en-IN&gl=IN&ceid=IN:en"
+        try:
+            parsed = feedparser.parse(feed_url)
+            all_items.extend(_parse_feed_items(parsed, "Google News", keywords, max_items, days=14))
+        except Exception as e:
+            logger.warning("Google News fetch failed for %s: %s", q, e)
+    return all_items[:max_items]
 
 
 def _fetch_moneycontrol(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
-    """Fetch from Moneycontrol RSS and filter by symbol/keyword."""
     feed_url = "https://www.moneycontrol.com/rss/latestnews.xml"
     try:
         parsed = feedparser.parse(feed_url)
-        keyword = _company_query(symbol).lower()
-        items = []
-        cutoff = datetime.utcnow() - timedelta(days=7)
-        for entry in parsed.entries[:30]:
-            if keyword in entry.title.lower() or keyword in entry.description.lower():
-                published = None
-                if hasattr(entry, "published_parsed") and entry.published_parsed:
-                    published = datetime(*entry.published_parsed[:6])
-                if published and published < cutoff:
-                    continue
-                items.append({
-                    "title": entry.title,
-                    "publisher": "Moneycontrol",
-                    "published": published.isoformat() if published else None,
-                    "url": entry.link,
-                })
-                if len(items) >= max_items:
-                    break
-        return items
+        return _parse_feed_items(parsed, "Moneycontrol", _match_keywords(symbol), max_items)
     except Exception as e:
         logger.warning("Moneycontrol fetch failed: %s", e)
         return []
 
 
 def _fetch_economic_times(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
-    """Fetch from Economic Times RSS (markets section) and filter."""
     feed_url = "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"
     try:
         parsed = feedparser.parse(feed_url)
-        keyword = _company_query(symbol).lower()
-        items = []
-        cutoff = datetime.utcnow() - timedelta(days=7)
-        for entry in parsed.entries[:30]:
-            if keyword in entry.title.lower() or keyword in entry.description.lower():
-                published = None
-                if hasattr(entry, "published_parsed") and entry.published_parsed:
-                    published = datetime(*entry.published_parsed[:6])
-                if published and published < cutoff:
-                    continue
-                items.append({
-                    "title": entry.title,
-                    "publisher": "Economic Times",
-                    "published": published.isoformat() if published else None,
-                    "url": entry.link,
-                })
-                if len(items) >= max_items:
-                    break
-        return items
+        return _parse_feed_items(parsed, "Economic Times", _match_keywords(symbol), max_items)
     except Exception as e:
         logger.warning("Economic Times fetch failed: %s", e)
         return []
 
 
 def _fetch_business_standard(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
-    """Fetch from Business Standard RSS (markets) and filter."""
     feed_url = "https://www.business-standard.com/rss/markets-106.rss"
     try:
         parsed = feedparser.parse(feed_url)
-        keyword = _company_query(symbol).lower()
-        items = []
-        cutoff = datetime.utcnow() - timedelta(days=7)
-        for entry in parsed.entries[:30]:
-            if keyword in entry.title.lower() or keyword in entry.description.lower():
-                published = None
-                if hasattr(entry, "published_parsed") and entry.published_parsed:
-                    published = datetime(*entry.published_parsed[:6])
-                if published and published < cutoff:
-                    continue
-                items.append({
-                    "title": entry.title,
-                    "publisher": "Business Standard",
-                    "published": published.isoformat() if published else None,
-                    "url": entry.link,
-                })
-                if len(items) >= max_items:
-                    break
-        return items
+        return _parse_feed_items(parsed, "Business Standard", _match_keywords(symbol), max_items)
     except Exception as e:
         logger.warning("Business Standard fetch failed: %s", e)
         return []
 
 
 def _fetch_ndtv_profit(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
-    """Fetch from NDTV Profit RSS (markets) and filter."""
     feed_url = "https://www.ndtv.com/business/rss"
     try:
         parsed = feedparser.parse(feed_url)
-        keyword = _company_query(symbol).lower()
-        items = []
-        cutoff = datetime.utcnow() - timedelta(days=7)
-        for entry in parsed.entries[:30]:
-            if keyword in entry.title.lower() or keyword in entry.description.lower():
-                published = None
-                if hasattr(entry, "published_parsed") and entry.published_parsed:
-                    published = datetime(*entry.published_parsed[:6])
-                if published and published < cutoff:
-                    continue
-                items.append({
-                    "title": entry.title,
-                    "publisher": "NDTV Profit",
-                    "published": published.isoformat() if published else None,
-                    "url": entry.link,
-                })
-                if len(items) >= max_items:
-                    break
-        return items
+        return _parse_feed_items(parsed, "NDTV Profit", _match_keywords(symbol), max_items)
     except Exception as e:
         logger.warning("NDTV Profit fetch failed: %s", e)
         return []
 
 
+def _fetch_livemint(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
+    feed_url = "https://www.livemint.com/rss/markets"
+    try:
+        parsed = feedparser.parse(feed_url)
+        return _parse_feed_items(parsed, "LiveMint", _match_keywords(symbol), max_items)
+    except Exception as e:
+        logger.warning("LiveMint fetch failed: %s", e)
+        return []
+
+
+def _fetch_financial_express(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
+    feed_url = "https://www.financialexpress.com/market/feed/"
+    try:
+        parsed = feedparser.parse(feed_url)
+        return _parse_feed_items(parsed, "Financial Express", _match_keywords(symbol), max_items)
+    except Exception as e:
+        logger.warning("Financial Express fetch failed: %s", e)
+        return []
+
+
+def _fetch_reuters_india(symbol: str, max_items: int = 8) -> List[Dict[str, Any]]:
+    """Google News restricted to Reuters for India stocks."""
+    name = _company_query(symbol)
+    q = quote(f"{name} site:reuters.com")
+    feed_url = f"https://news.google.com/rss/search?q={q}&hl=en-IN&gl=IN&ceid=IN:en"
+    try:
+        parsed = feedparser.parse(feed_url)
+        return _parse_feed_items(parsed, "Reuters", _match_keywords(symbol), max_items)
+    except Exception as e:
+        logger.warning("Reuters proxy fetch failed: %s", e)
+        return []
+
+
 def _fetch_newsapi(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
-    """Fetch from NewsAPI (requires NEWSAPI_KEY)."""
     if not NEWSAPI_KEY:
         return []
     query = _company_query(symbol)
-    url = f"https://newsapi.org/v2/everything?q={quote(query)}&language=en&sortBy=publishedAt&pageSize={max_items}&apiKey={NEWSAPI_KEY}"
+    url = (
+        f"https://newsapi.org/v2/everything?q={quote(query)}"
+        f"&language=en&sortBy=publishedAt&pageSize={max_items}&apiKey={NEWSAPI_KEY}"
+    )
+    keywords = _match_keywords(symbol)
     try:
         with httpx.Client(timeout=10) as client:
             resp = client.get(url)
-            if resp.status_code == 200:
-                data = resp.json()
-                items = []
-                cutoff = datetime.utcnow() - timedelta(days=7)
-                for article in data.get("articles", []):
-                    published = None
-                    if article.get("publishedAt"):
-                        try:
-                            published = datetime.fromisoformat(article["publishedAt"].replace("Z", "+00:00"))
-                        except:
-                            pass
-                    if published and published < cutoff:
-                        continue
-                    items.append({
-                        "title": article.get("title", ""),
-                        "publisher": article.get("source", {}).get("name", "NewsAPI"),
-                        "published": published.isoformat() if published else None,
-                        "url": article.get("url", ""),
-                    })
-                return items
-            else:
+            if resp.status_code != 200:
                 logger.warning("NewsAPI returned status %s", resp.status_code)
                 return []
+            data = resp.json()
+            items = []
+            cutoff = datetime.utcnow() - timedelta(days=10)
+            for article in data.get("articles", []):
+                title = article.get("title") or ""
+                desc = article.get("description") or ""
+                if not _is_relevant(title, desc, keywords):
+                    continue
+                published = None
+                if article.get("publishedAt"):
+                    try:
+                        published = datetime.fromisoformat(article["publishedAt"].replace("Z", "+00:00")).replace(tzinfo=None)
+                    except Exception:
+                        pass
+                if published and published < cutoff:
+                    continue
+                items.append({
+                    "title": title,
+                    "publisher": (article.get("source") or {}).get("name", "NewsAPI"),
+                    "published": published.isoformat() if published else None,
+                    "url": article.get("url", ""),
+                    "snippet": (desc[:220] + "…") if len(desc) > 220 else desc,
+                })
+            return items
     except Exception as e:
         logger.warning("NewsAPI fetch failed: %s", e)
         return []
 
 
 def _fetch_headlines(symbol: str, max_items: int = 15) -> List[dict]:
-    """Aggregate news from all sources, deduplicate by title, sort by date."""
+    """Aggregate from 5–10 free sources, filter by relevance, dedupe, sort."""
     all_news = []
     sources = [
         _fetch_google_news,
@@ -239,6 +301,9 @@ def _fetch_headlines(symbol: str, max_items: int = 15) -> List[dict]:
         _fetch_economic_times,
         _fetch_business_standard,
         _fetch_ndtv_profit,
+        _fetch_livemint,
+        _fetch_financial_express,
+        _fetch_reuters_india,
     ]
     if NEWSAPI_KEY:
         sources.append(_fetch_newsapi)
@@ -251,18 +316,33 @@ def _fetch_headlines(symbol: str, max_items: int = 15) -> List[dict]:
         except Exception as e:
             logger.warning("Source %s failed: %s", source_func.__name__, e)
 
-    # Deduplicate by title (case-insensitive)
     seen = set()
     unique = []
     for item in all_news:
-        title_lower = item["title"].lower()
-        if title_lower not in seen:
-            seen.add(title_lower)
-            unique.append(item)
+        title_lower = (item.get("title") or "").lower().strip()
+        if not title_lower or title_lower in seen:
+            continue
+        seen.add(title_lower)
+        unique.append(item)
 
-    # Sort by published date (newest first)
-    unique.sort(key=lambda x: x["published"] if x["published"] else "", reverse=True)
+    unique.sort(key=lambda x: x.get("published") or "", reverse=True)
     return unique[:max_items]
+
+
+def _summarize_headlines(headlines: List[dict], symbol: str) -> str:
+    """Produce a short, clear summary of important news for the frontend."""
+    if not headlines:
+        return f"No recent relevant news found for {_company_query(symbol)}."
+    name = _company_query(symbol)
+    top = headlines[:5]
+    bullets = []
+    for h in top:
+        pub = h.get("publisher") or "Source"
+        title = (h.get("title") or "").strip()
+        if title:
+            bullets.append(f"• [{pub}] {title}")
+    joined = "\n".join(bullets)
+    return f"Key news for {name} ({len(headlines)} relevant items):\n{joined}"
 
 
 def _score_headline(title: str) -> float:
@@ -301,10 +381,14 @@ def _score_headline(title: str) -> float:
 def root():
     return {
         "service": "Stockky News Intelligence Service",
-        "version": "0.5.0",
+        "version": "0.6.0",
         "status": "running",
-        "model": "Mistral-7B",
-        "sources": ["Google News", "Moneycontrol", "Economic Times", "Business Standard", "NDTV Profit", "NewsAPI (optional)"],
+        "model": "Mistral-7B + keyword relevance",
+        "sources": [
+            "Google News", "Moneycontrol", "Economic Times", "Business Standard",
+            "NDTV Profit", "LiveMint", "Financial Express", "Reuters (via Google News)",
+            "NewsAPI (optional)",
+        ],
     }
 
 
@@ -315,14 +399,16 @@ def health():
 
 @app.get("/analyze/{symbol}")
 def analyze(symbol: str):
-    headlines = _fetch_headlines(symbol)
+    headlines = _fetch_headlines(symbol, max_items=15)
+    summary = _summarize_headlines(headlines, symbol)
 
     if not headlines:
         return {
-            "symbol": symbol.upper(),
+            "symbol": symbol.upper().replace(".NS", "").replace(".BO", ""),
             "news_score": 50,
             "headline_count": 0,
-            "reasons": ["No recent news found — treating as neutral, not a signal either way"],
+            "reasons": ["No recent relevant news found — treating as neutral"],
+            "summary": summary,
             "headlines": [],
         }
 
@@ -337,17 +423,19 @@ def analyze(symbol: str):
     most_negative = min(scored, key=lambda x: x[0])
 
     if most_negative[0] < -0.3:
-        reasons.append(f"Notably negative headline: \"{most_negative[1]['title'][:90]}\"")
+        reasons.append(f"Notably negative: \"{most_negative[1]['title'][:90]}\"")
     if most_positive[0] > 0.3:
-        reasons.append(f"Notably positive headline: \"{most_positive[1]['title'][:90]}\"")
-    reasons.append(f"{len(headlines)} recent headlines, average sentiment {'positive' if avg_sentiment > 0.1 else 'negative' if avg_sentiment < -0.1 else 'neutral'}")
+        reasons.append(f"Notably positive: \"{most_positive[1]['title'][:90]}\"")
+    tone = "positive" if avg_sentiment > 0.1 else "negative" if avg_sentiment < -0.1 else "neutral"
+    reasons.append(f"{len(headlines)} relevant headlines, average sentiment {tone}")
 
     return {
-        "symbol": symbol.upper(),
+        "symbol": symbol.upper().replace(".NS", "").replace(".BO", ""),
         "news_score": news_score,
         "headline_count": len(headlines),
         "reasons": reasons,
-        "headlines": [h for _, h in scored[:6]],
+        "summary": summary,
+        "headlines": [h for _, h in scored[:8]],
     }
 
 

@@ -215,10 +215,19 @@ class TrainingScanner:
 
             neighbor_records.sort(key=lambda r: r["similarity_pct"], reverse=True)
             training_score = round(overall_hits / k * 100, 1)
+            live_win_rate = training_score / 100.0  # 0–1 for closed-loop consumers
+
+            # Global live edge across all evaluated snapshots (cold-start resilience)
+            global_success = sum(1 for r in historical if r.overall_success == 1)
+            global_n = len(historical)
+            global_live_win_rate = (global_success / global_n) if global_n else None
 
             return {
                 "symbol": symbol.upper(),
                 "training_score": training_score,
+                "live_win_rate": live_win_rate,
+                "win_rate": live_win_rate,
+                "global_live_win_rate": global_live_win_rate,
                 "t1_success_probability": round(t1_hits / k * 100, 1),
                 "t5_success_probability": round(t5_hits / k * 100, 1),
                 "model_success_probability": model_success_probability,

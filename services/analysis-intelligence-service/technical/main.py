@@ -377,6 +377,27 @@ def analyze(symbol: str):
     # computed here already but never included in the response.
     volume_ratio = round(vol_now / vol_avg20, 3) if vol_avg20 > 0 else None
 
+    # Official NSE delivery % via market-data-service (quote → bhavcopy → fallback)
+    delivery_pct = None
+    delivery_source = None
+    try:
+        with httpx.Client(timeout=8.0) as client:
+            dr = client.get(f"{MARKET_DATA_URL}/delivery/{sym.replace('.NS','').replace('.BO','')}")
+            if dr.status_code == 200:
+                djson = dr.json()
+                if djson.get("delivery_pct") is not None:
+                    delivery_pct = float(djson["delivery_pct"])
+                    delivery_source = djson.get("source")
+                    # Mild technical nudge: high delivery supports accumulation narrative
+                    if delivery_pct >= 60:
+                        score += 3
+                        reasons.append(f"High delivery {delivery_pct:.0f}% ({delivery_source or 'nse'})")
+                    elif delivery_pct <= 30:
+                        score -= 2
+                        reasons.append(f"Low delivery {delivery_pct:.0f}% ({delivery_source or 'nse'})")
+    except Exception as e:
+        logger.debug("delivery fetch skipped: %s", e)
+
     score = max(0, min(100, round(score)))
 
     result = {
@@ -396,6 +417,8 @@ def analyze(symbol: str):
         "bb_lower": round(bb_lo, 2),
         "volume_surge": bool(volume_surge),
         "volume_ratio": volume_ratio,
+        "delivery_pct": delivery_pct,
+        "delivery_source": delivery_source,
         "data_insufficient": data_length < 30,
         "reasons": reasons,
     }

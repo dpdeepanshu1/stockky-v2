@@ -514,10 +514,14 @@ def add_quantity_to_trade(db_session, trade_id: str, quantity: float, price=None
         if db_session is None:
             # best-effort without session: cannot mutate DB
             return {"ok": False, "error": "database session required on server"}
-        trade = db_session.query(PaperTrade).filter_by(id=trade_id).first()
+        trade = (
+            db_session.query(PaperTrade)
+            .filter(PaperTrade.trade_id == trade_id)
+            .first()
+        )
         if not trade:
             return {"ok": False, "error": "trade not found"}
-        if getattr(trade, "status", "open") not in ("open", "OPEN", None):
+        if str(getattr(trade, "status", "OPEN")).upper() not in ("OPEN",):
             return {"ok": False, "error": "trade is not open"}
         entry = float(getattr(trade, "entry_price", 0) or 0)
         old_qty = float(getattr(trade, "quantity", 0) or 0)
@@ -554,3 +558,115 @@ def add_quantity_to_trade(db_session, trade_id: str, quantity: float, price=None
         except Exception:
             pass
         return {"ok": False, "error": str(e)}
+
+
+def open_manual_trade(symbol: str, quantity: float, price: float = None, capital: float = None, note: str = None):
+    """Open a paper trade without an existing prediction snapshot (manual control).
+
+    Creates a lightweight PredictionSnapshot so trade FK/history still works,
+    then opens the position. Used by Trade page "Add stock" with AI warning.
+    """
+    import uuid as _uuid
+    from datetime import datetime as _dt
+
+    sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    if not sym:
+        return None, False, "symbol required"
+    qty = float(quantity or 0)
+    db = SessionLocal()
+    try:
+        # Resolve price
+        px = float(price) if price is not None else None
+        if px is None or px <= 0:
+            px = _fetch_latest_price(sym)
+        if not px or px <= 0:
+            return None, False, f"Could not resolve price for {sym}"
+
+        account = get_or_create_account(db)
+        if qty < 1:
+            # capital-based sizing
+            requested = float(capital) if capital and capital > 0 else _dynamic_trade_capital(account)
+            available = min(requested, float(account.cash_balance or 0))
+            qty = int(available // px)
+        if qty < 1:
+            return None, False, (
+                f"Not enough cash (Rs {account.cash_balance:.2f}) to buy 1 share of {sym} at Rs {px}"
+            )
+
+        cost = qty * px
+        if float(account.cash_balance or 0) < cost:
+            return None, False, (
+                f"Not enough cash balance (Rs {account.cash_balance:.2f}); need Rs {cost:.2f}"
+            )
+
+        pred_id = f"MAN-{_dt.now(IST).strftime('%Y%m%d')}-{_uuid.uuid4().hex[:6].upper()}"
+        snapshot = db_models.PredictionSnapshot(
+            prediction_id=pred_id,
+            symbol=sym,
+            timestamp=ist_now(),
+            price=px,
+            decision="BUY NOW",
+            confidence="Low",
+            combined_score=50,
+            technical_score=50,
+            fundamental_score=50,
+            news_score=None,
+            prediction_score=None,
+            market_score=50,
+            market_sentiment_adjustment=0.0,
+            training_score=50,
+            event_risk=False,
+            entry_range_low=px * 0.99,
+            entry_range_high=px * 1.01,
+            target=round(px * 1.08, 2),
+            stop_loss=round(px * 0.96, 2),
+            holding_period="manual",
+            support=None,
+            resistance=None,
+            sector=None,
+            valuation=None,
+            model_version=None,
+            created_at=ist_now(),
+            t1_success=0,
+            t5_success=0,
+            overall_success=0,
+        )
+        db.add(snapshot)
+        db.flush()
+
+        trade = db_models.PaperTrade(
+            trade_id=f"TRD-{_dt.now(IST).strftime('%Y%m%d')}-{_uuid.uuid4().hex[:6].upper()}",
+            prediction_id=pred_id,
+            symbol=sym,
+            capital_allocated=cost,
+            entry_price=px,
+            quantity=qty,
+            entry_date=ist_now(),
+            target=snapshot.target,
+            stop_loss=snapshot.stop_loss,
+            max_holding_days=MAX_HOLDING_DAYS,
+            weeks_held=0,
+            last_weekly_review_at=None,
+            status="OPEN",
+            current_price=px,
+            last_marked_at=ist_now(),
+            pnl_amount=0.0,
+            pnl_pct=0.0,
+            created_at=ist_now(),
+        )
+        db.add(trade)
+        account.cash_balance = float(account.cash_balance) - cost
+        account.updated_at = ist_now()
+        _log_transaction(
+            db, account, "trade_open", -cost, trade_id=trade.trade_id,
+            note=note or f"MANUAL {qty} x {sym} @ {px}",
+        )
+        db.commit()
+        db.refresh(trade)
+        return trade, True, None
+    except Exception as e:
+        logger.exception("open_manual_trade failed")
+        db.rollback()
+        return None, False, str(e)
+    finally:
+        db.close()

@@ -75,6 +75,29 @@ def regime_multipliers(market_score: float, classification: str = "") -> Dict[st
     return {"technical": 1.0, "volume_rs": 1.0, "fundamental": 1.0, "quality_peers": 1.0, "news_events": 1.0}
 
 
+def _threshold_offsets(live_win_rate) -> tuple:
+    """Closed-loop: shift BUY_NOW / PREPARE thresholds from live win-rate.
+
+    live_win_rate may be 0–1 or 0–100. High empirical edge → slightly lower
+    bars (system has been right). Low edge → raise bars (be more selective).
+    Caps keep behaviour stable on cold-start / sparse data.
+    """
+    if live_win_rate is None:
+        return 0.0, 0.0, "neutral"
+    try:
+        wr = float(live_win_rate)
+    except (TypeError, ValueError):
+        return 0.0, 0.0, "neutral"
+    if wr > 1.5:  # passed as percentage
+        wr = wr / 100.0
+    wr = max(0.0, min(1.0, wr))
+    # Map win-rate to threshold delta: wr=0.55 → 0, wr=0.70 → -4, wr=0.35 → +6
+    delta = (0.55 - wr) * 20.0  # positive delta = harder (higher bar)
+    delta = max(-6.0, min(8.0, delta))
+    label = "raise_bar" if delta > 1 else "ease_bar" if delta < -1 else "neutral"
+    return delta, -delta * 0.5, label  # (buy_now_offset, prepare_offset_extra, label)
+
+
 def score_to_decision(
     score: float,
     already_owned: bool,
@@ -83,8 +106,14 @@ def score_to_decision(
     thin_history: bool,
     low_liquidity: bool,
     horizon: str,
+    live_win_rate=None,
 ) -> str:
-    """Soft score-driven rules (not hard AND gates). Prefer short-term aggressiveness."""
+    """Soft score-driven rules (not hard AND gates). Prefer short-term aggressiveness.
+
+    Closed-loop: live_win_rate shifts BUY_NOW / PREPARE thresholds so the
+    engine becomes more selective when recent outcomes are weak and slightly
+    more aggressive when the live edge is strong.
+    """
     if thin_history or low_liquidity:
         return DO_NOT_BUY
     if already_owned:
@@ -97,16 +126,22 @@ def score_to_decision(
     adj = score - (6 if extended and horizon != "short" else (3 if extended else 0))
     if event_risk and horizon == "short":
         adj -= 4
-    # Short-term is primary focus: slightly lower bars so good setups surface
+
+    buy_off, prep_extra, _ = _threshold_offsets(live_win_rate)
+
     if horizon == "short":
-        if adj >= 66:
+        buy_bar = 66.0 + buy_off
+        prep_bar = 54.0 + buy_off * 0.7 + prep_extra
+        if adj >= buy_bar:
             return BUY_NOW
-        if adj >= 54:
+        if adj >= prep_bar:
             return PREPARE
     else:
-        if adj >= 70:
+        buy_bar = 70.0 + buy_off
+        prep_bar = 58.0 + buy_off * 0.7 + prep_extra
+        if adj >= buy_bar:
             return BUY_NOW
-        if adj >= 58:
+        if adj >= prep_bar:
             return PREPARE
     if adj >= 45:
         return HOLD if already_owned else DO_NOT_BUY
@@ -178,12 +213,17 @@ def score_horizon(
         total_w += ww
     score = _clamp(weighted / total_w if total_w else 50.0)
 
-    # Live win-rate feedback (closed-loop): mild adjustment ±5
+    # Closed-loop score nudge from live win-rate (±8 max)
     live_wr = flags.get("live_win_rate")
     if live_wr is not None:
-        # win rate 0–1 → adjust score toward empirical edge
-        edge = (float(live_wr) - 0.5) * 10.0
-        score = _clamp(score + edge)
+        try:
+            wr = float(live_wr)
+            if wr > 1.5:
+                wr = wr / 100.0
+            edge = (wr - 0.50) * 16.0  # wr 0.65 → +2.4, wr 0.35 → -2.4; capped below
+            score = _clamp(score + max(-8.0, min(8.0, edge)))
+        except (TypeError, ValueError):
+            pass
 
     decision = score_to_decision(
         score,
@@ -193,6 +233,7 @@ def score_horizon(
         thin_history=bool(flags.get("thin_history")),
         low_liquidity=bool(flags.get("low_liquidity")),
         horizon=horizon,
+        live_win_rate=live_wr,
     )
     conf = "High" if score >= 75 else "Medium" if score >= 55 else "Low"
     meta = HORIZON_META[horizon]

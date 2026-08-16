@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from horizons import multi_horizon_decide
+from circuit_breaker import get_breaker, CircuitOpenError, all_snapshots
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("decision-engine-service")
@@ -127,17 +128,50 @@ def root():
 
 
 @app.get("/health")
-def health():
-    return {"status": "ok", "service": "decision-engine-service"}
+def health(warm: bool = False):
+    """warm=true pings downstream URLs so free-tier dynos stay responsive."""
+    warmed = {}
+    if warm:
+        import httpx as _hx
+        for name, url in [
+            ("technical", f"{TECHNICAL_URL}/health"),
+            ("fundamental", f"{FUNDAMENTAL_URL}/health"),
+            ("news", f"{NEWS_URL}/health"),
+            ("event", f"{EVENT_URL}/health"),
+        ]:
+            try:
+                r = _hx.get(url, timeout=8)
+                warmed[name] = r.status_code == 200
+            except Exception as e:
+                warmed[name] = False
+    return {
+        "status": "ok",
+        "service": "decision-engine-service",
+        "warmed": warmed or None,
+        "circuits": all_snapshots(),
+    }
+
+
+@app.get("/circuits")
+def circuits_status():
+    return {"circuits": all_snapshots()}
 
 
 # ── Fetch helpers ──────────────────────────────────────────────────
 async def _fetch_optional(client: httpx.AsyncClient, url: str, label: str):
+    """Fetch optional pillar with circuit breaker (fail fast when dependency is down)."""
+    breaker = get_breaker(f"decision:{label.lower()}", failure_threshold=4, recovery_timeout=90)
+    if not breaker.allow():
+        logger.warning("%s circuit OPEN — skip (retry in %.0fs)", label, breaker.retry_after())
+        return None
     try:
-        resp = await client.get(url, timeout=70)
+        resp = await client.get(url, timeout=25)
         resp.raise_for_status()
-        return resp.json()
-    except httpx.HTTPError as e:
+        data = resp.json()
+        breaker.record_success()
+        return data
+    except Exception as e:
+        breaker.record_failure(str(e))
         logger.warning("%s unavailable: %s", label, e)
         return None
 
@@ -178,13 +212,18 @@ async def get_training_score(symbol: str) -> dict:
                 logger.warning(f"Training score for {symbol} returned {resp.status_code}")
     except Exception as e:
         logger.warning(f"Could not fetch training score for {symbol}: {e}")
+    # Cold-start resilience: neutral training signal, no invented edge
     return {
         "symbol": symbol,
         "training_score": 50,
-        "t1_success_probability": 0.5,
-        "t5_success_probability": 0.5,
-        "historical_similarity": 0.5,
-        "similar_setups": []
+        "live_win_rate": None,
+        "win_rate": None,
+        "t1_success_probability": None,
+        "t5_success_probability": None,
+        "historical_similarity": None,
+        "similar_setups": [],
+        "cold_start": True,
+        "note": "Insufficient evaluated history — thresholds stay at baseline until live outcomes accumulate.",
     }
 
 
@@ -339,6 +378,22 @@ def _combined_score(
 
 
 # ── Decision logic ──────────────────────────────────────────
+def _live_win_rate_threshold_shift(live_win_rate) -> float:
+    """Closed-loop: positive shift = harder BUY bars when live edge is weak."""
+    if live_win_rate is None:
+        return 0.0
+    try:
+        wr = float(live_win_rate)
+    except (TypeError, ValueError):
+        return 0.0
+    if wr > 1.5:
+        wr = wr / 100.0
+    wr = max(0.0, min(1.0, wr))
+    # Baseline expected edge ~55%. Below → raise bars; above → ease slightly.
+    delta = (0.55 - wr) * 20.0
+    return max(-6.0, min(8.0, delta))
+
+
 def _decide(
     technical_score: int,
     fundamental_score: int,
@@ -351,6 +406,7 @@ def _decide(
     already_owned: bool,
     combined: float,
     data_insufficient: bool = False,
+    live_win_rate=None,
 ) -> Decision:
     if data_insufficient:
         if news_score is not None and news_score >= 60:
@@ -363,8 +419,6 @@ def _decide(
         return Decision.HOLD
 
     # Soft safety signals (penalties / boosts) — NOT hard vetoes.
-    # Hard vetoes were wiping high-score names (e.g. score 67 with tech 78
-    # / fund 100) whenever price sat near resistance or model was quiet.
     news_penalty = 0
     if news_score is not None and news_score < 35:
         news_penalty = 8
@@ -373,16 +427,20 @@ def _decide(
         model_penalty = 5
     resistance_penalty = 0
     if dist_to_resistance_pct is not None and dist_to_resistance_pct <= 1:
-        resistance_penalty = 4  # near resistance — caution, not auto-reject
+        resistance_penalty = 4
 
     adj = combined - news_penalty - model_penalty - resistance_penalty
 
-    # Score-driven soft rules (short-term focused)
-    if adj >= 68 and technical_score >= 50 and fundamental_score >= 40:
+    # Closed-loop: live win-rate shifts decision thresholds
+    bar_shift = _live_win_rate_threshold_shift(live_win_rate)
+    buy_bar = 68.0 + bar_shift
+    prepare_bar = 54.0 + bar_shift * 0.7
+
+    if adj >= buy_bar and technical_score >= 50 and fundamental_score >= 40:
         return Decision.PREPARE_TO_BUY if event_risk else Decision.BUY_NOW
-    if adj >= 54 or (fundamental_score >= 55 and technical_score >= 50 and adj >= 50):
+    if adj >= prepare_bar or (fundamental_score >= 55 and technical_score >= 50 and adj >= 50 + bar_shift * 0.5):
         return Decision.PREPARE_TO_BUY
-    if adj >= 60 and technical_score >= 55:
+    if adj >= 60 + bar_shift * 0.5 and technical_score >= 55:
         return Decision.PREPARE_TO_BUY
 
     if already_owned and combined >= 60:
@@ -503,6 +561,62 @@ async def record_prediction_for_training(
                 logger.warning(f"Failed to record prediction: {response.status_code} - {response.text}")
     except Exception as e:
         logger.error(f"Error recording prediction for {symbol}: {e}")
+
+
+
+def _assess_data_quality(
+    technical: dict,
+    fundamental: dict,
+    news,
+    events,
+    prediction,
+    training,
+    data_insufficient: bool,
+) -> dict:
+    """Score how many decision pillars are live vs fallback/missing (free-tier honesty)."""
+    pillars = {
+        "price": bool(technical and technical.get("close") is not None),
+        "technical": bool(
+            technical
+            and not technical.get("data_insufficient")
+            and technical.get("technical_score") is not None
+        ),
+        "fundamental": bool(fundamental and not fundamental.get("fallback_used")),
+        "news": bool(news and isinstance(news, dict) and news.get("news_score") is not None),
+        "events": bool(events and isinstance(events, dict)),
+        "prediction": bool(
+            prediction and isinstance(prediction, dict) and prediction.get("model_loaded")
+        ),
+        "training": bool(
+            training and isinstance(training, dict) and training.get("training_score") is not None
+        ),
+    }
+    live = sum(1 for v in pillars.values() if v)
+    total = len(pillars)
+    core_ok = pillars["price"] and pillars["technical"]
+    actionable_ok = core_ok and live >= 3 and not data_insufficient
+    quality = "high" if live >= 5 and core_ok else "medium" if live >= 3 and core_ok else "low"
+    return {
+        "pillars": pillars,
+        "live_count": live,
+        "total_pillars": total,
+        "quality": quality,
+        "actionable_ok": actionable_ok,
+        "core_ok": core_ok,
+    }
+
+
+def _apply_data_quality_gate(decision: Decision, quality: dict, already_owned: bool) -> Decision:
+    """Force WAIT / DO NOT BUY when free-tier data is too thin for a confident buy."""
+    if already_owned:
+        return decision
+    if decision not in (Decision.BUY_NOW, Decision.PREPARE_TO_BUY):
+        return decision
+    if quality.get("actionable_ok"):
+        return decision
+    if decision == Decision.BUY_NOW and quality.get("core_ok") and quality.get("live_count", 0) >= 2:
+        return Decision.WAIT
+    return Decision.DO_NOT_BUY
 
 
 # ── Main route ────────────────────────────────────────────────────
@@ -637,6 +751,10 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
             market_adjustment,
         )
 
+        live_wr = (training or {}).get("live_win_rate") or (training or {}).get("win_rate")
+        # Prefer similarity-based success rate (0–100) when available
+        if live_wr is None and (training or {}).get("t1_success_probability") is not None:
+            live_wr = (training or {}).get("t1_success_probability")
         decision = _decide(
             technical_score,
             fundamental_score,
@@ -649,7 +767,24 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
             already_owned,
             combined,
             data_insufficient,
+            live_win_rate=live_wr,
         )
+
+        data_quality = _assess_data_quality(
+            technical if isinstance(technical, dict) else {},
+            fundamental if isinstance(fundamental, dict) else {},
+            news,
+            events,
+            prediction,
+            training,
+            data_insufficient,
+        )
+        gated = _apply_data_quality_gate(decision, data_quality, already_owned)
+        if gated != decision:
+            reasons_gate = f"Data quality gate: {data_quality.get('quality')} ({data_quality.get('live_count')}/{data_quality.get('total_pillars')} pillars live)"
+            decision = gated
+        else:
+            reasons_gate = None
 
         entry_low = entry_high = target = stop_loss = None
         if close:
@@ -726,13 +861,22 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
             "sector": fundamental.get("sector"),
             "data_insufficient": data_insufficient,
             "fundamental_fallback": fundamental.get("fallback_used", False),
+            "data_quality": data_quality,
         }
+
+
+        if reasons_gate:
+            response.setdefault("reasons", {})
+            dq = list(response["reasons"].get("data_quality") or [])
+            dq.append(reasons_gate)
+            response["reasons"]["data_quality"] = dq
 
         if news and isinstance(news, dict):
             response["news_data"] = {
                 "headline_count": news.get("headline_count", 0),
                 "headlines": news.get("headlines", []),
                 "reasons": news.get("reasons", []),
+                "summary": news.get("summary") or news.get("news_summary"),
             }
         if events and isinstance(events, dict):
             response["event_data"] = events
@@ -807,6 +951,22 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
                     response["combined_score"] = mh.get("combined_score", response.get("combined_score"))
                     response["confidence"] = mh.get("confidence", response.get("confidence"))
                     response["holding_period"] = mh.get("holding_period", response.get("holding_period"))
+                # Re-apply data-quality gate after multi-horizon may promote BUY
+                try:
+                    dq = response.get("data_quality") or data_quality
+                    d_enum = Decision(response.get("decision", Decision.DO_NOT_BUY.value))
+                    gated2 = _apply_data_quality_gate(d_enum, dq, already_owned)
+                    if gated2.value != response.get("decision"):
+                        response["decision"] = gated2.value
+                        response.setdefault("reasons", {})
+                        response["reasons"]["data_quality"] = [
+                            f"Data quality gate after horizons: {dq.get('quality')} "
+                            f"({dq.get('live_count')}/{dq.get('total_pillars')} live)"
+                        ]
+                        if gated2 in (Decision.WAIT, Decision.DO_NOT_BUY):
+                            response["confidence"] = "Low"
+                except Exception as _gq:
+                    logger.debug("post-horizon quality gate: %s", _gq)
         except Exception as _mh_err:
             logger.warning("multi-horizon attach failed: %s", _mh_err)
 

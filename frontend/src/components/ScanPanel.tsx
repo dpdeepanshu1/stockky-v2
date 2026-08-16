@@ -1,5 +1,6 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { ScanResult, Decision, api, ActionablePick } from "../api";
+import { useStockkyRealtime } from "../useRealtime";
 import { decisionStyle } from "../decisionStyle";
 
 interface Props {
@@ -67,17 +68,57 @@ export function toActionablePick(d: Decision): ActionablePick {
   };
 }
 
+function rowSummary(r: any): string {
+  return (
+    r?.news_data?.summary ||
+    r?.event_data?.summary ||
+    (Array.isArray(r?.reasons?.news) && r.reasons.news[0]) ||
+    (Array.isArray(r?.reasons?.event) && r.reasons.event[0]) ||
+    r?.natural_language_summary ||
+    ""
+  );
+}
+
+function qualityLabel(r: any): string {
+  const dq = r?.data_quality;
+  if (typeof dq === "string") return dq;
+  if (dq?.quality) return String(dq.quality);
+  if (r?.data_insufficient) return "low";
+  if (r?.circuit_open) return "low";
+  return "";
+}
+
 export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, onAddManyToWatchlist, onSendTopPicks, onSendAllActionable }: Props) {
-  const allSorted = [...result.all_results].sort((a, b) => b.combined_score - a.combined_score);
+  // Local loading states for animations
+  const [isSendingTelegram, setIsSendingTelegram] = useState<"top5" | "all" | null>(null);
+  const [addingWatchlist, setAddingWatchlist] = useState<string | null>(null);
+  const [committing, setCommitting] = useState<"training" | "trade_top5" | "trade_all" | null>(null);
+  const [commitMessage, setCommitMessage] = useState<string | null>(null);
+  const [filterChip, setFilterChip] = useState<"all" | "buy" | "prepare" | "avoid">("all");
+  const [balanceLow, setBalanceLow] = useState<{ needed: number; available: number } | null>(null);
+  const { connected: quoteWs, subscribeQuotes, quotes: liveQuotes } = useStockkyRealtime();
+
+  const filteredResults = useMemo(() => {
+    const rows = result.all_results || [];
+    if (filterChip === "buy") return rows.filter((d) => d.decision === "BUY NOW");
+    if (filterChip === "prepare") return rows.filter((d) => d.decision === "PREPARE TO BUY");
+    if (filterChip === "avoid") return rows.filter((d) => d.decision === "DO NOT BUY" || d.decision === "WAIT" || d.decision === "SELL");
+    return rows;
+  }, [result.all_results, filterChip]);
+
+  const allSorted = useMemo(
+    () => [...filteredResults].sort((a, b) => b.combined_score - a.combined_score),
+    [filteredResults]
+  );
 
   const valueAdjustedTopPicks = useMemo(() => {
-    return result.all_results
+    return filteredResults
       .filter((d) => d.decision === "BUY NOW" || d.decision === "PREPARE TO BUY")
       .map((d) => ({ decision: d, ...valueAdjustedScore(d) }))
       .filter((x) => x.eligible)
       .sort((a, b) => b.score - a.score)
       .slice(0, 5);
-  }, [result.all_results]);
+  }, [filteredResults]);
 
   const allActionable = useMemo(
     () =>
@@ -87,17 +128,16 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
     [result.all_results]
   );
 
-  // Local loading states for animations
-  const [isSendingTelegram, setIsSendingTelegram] = useState<"top5" | "all" | null>(null);
-  const [addingWatchlist, setAddingWatchlist] = useState<string | null>(null);
-  const [committing, setCommitting] = useState<"training" | "trade_top5" | "trade_all" | null>(null);
-  const [commitMessage, setCommitMessage] = useState<string | null>(null);
-  const [balanceLow, setBalanceLow] = useState<{ needed: number; available: number } | null>(null);
-
   const top5Actionable = useMemo(
     () => valueAdjustedTopPicks.map((x) => x.decision),
     [valueAdjustedTopPicks]
   );
+
+  useEffect(() => {
+    const rows = result.all_results || [];
+    const syms = rows.slice(0, 25).map((r) => r.symbol).filter(Boolean);
+    if (syms.length) subscribeQuotes(syms);
+  }, [result.all_results, subscribeQuotes]);
 
   const handleSendTopPicks = async () => {
     setIsSendingTelegram("top5");
@@ -165,7 +205,17 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
       const balanceFails = failed.filter((r) => (r.trade_status || "").toLowerCase().includes("balance") || (r.trade_status || "").toLowerCase().includes("not enough"));
       if (balanceFails.length > 0) {
         msg += ` · ${balanceFails.length} skipped (low balance)`;
-        setBalanceLow({ needed: 10000 * balanceFails.length, available: 0 });
+        const needed = 10000 * balanceFails.length;
+        setBalanceLow({ needed, available: 0 });
+        // Enrich with live cash balance
+        api.getPortfolioSummary()
+          .then((s) => {
+            setBalanceLow({
+              needed,
+              available: typeof s?.cash_balance === "number" ? s.cash_balance : 0,
+            });
+          })
+          .catch(() => {});
       } else {
         msg += ` · ${failed.length} failed`;
       }
@@ -329,27 +379,89 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         <div className="font-mono text-xs text-mist/70 -mt-3">{commitMessage}</div>
       )}
       {balanceLow && (
-        <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-4 flex flex-col sm:flex-row sm:items-center gap-3">
-          <div className="flex-1">
-            <div className="font-display text-sm text-amber-300">Balance Low</div>
-            <p className="font-mono text-xs text-mist/80 mt-1">
-              Some trades could not be opened due to insufficient cash. Deposit more funds on the Trade page to continue.
+        <div className="balance-modal-overlay" role="dialog" aria-modal="true">
+          <div className="balance-modal">
+            <h3 className="mono text-sm text-amber-300 uppercase tracking-widest mb-2">Insufficient cash</h3>
+            <p className="text-xs text-mist/90 mb-3">
+              Some paper trades could not be opened. Deposit funds to continue.
             </p>
+            <div className="balance-modal-grid mono text-xs mb-4">
+              <div>
+                <span className="text-mist">Available cash</span>
+                <strong>₹{(balanceLow.available ?? 0).toLocaleString("en-IN")}</strong>
+              </div>
+              <div>
+                <span className="text-mist">Approx. required</span>
+                <strong>₹{(balanceLow.needed ?? 0).toLocaleString("en-IN")}</strong>
+              </div>
+              <div>
+                <span className="text-mist">Shortfall</span>
+                <strong className="text-amber-300">
+                  ₹{Math.max(0, (balanceLow.needed ?? 0) - (balanceLow.available ?? 0)).toLocaleString("en-IN")}
+                </strong>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="btn-terminal"
+                onClick={() => {
+                  setBalanceLow(null);
+                  // parent may not expose setTab; use hash navigation hint
+                  window.dispatchEvent(new CustomEvent("stockky:goto-trades"));
+                }}
+              >
+                Add Balance / Open Trades
+              </button>
+              <button
+                type="button"
+                className="font-mono text-xs px-3 py-1.5 rounded-lg border border-amber-500/40 text-amber-200 hover:bg-amber-500/20"
+                onClick={() => setBalanceLow(null)}
+              >
+                Dismiss
+              </button>
+            </div>
           </div>
-          <button
-            onClick={() => setBalanceLow(null)}
-            className="font-mono text-xs px-3 py-1.5 rounded-lg border border-amber-500/40 text-amber-200 hover:bg-amber-500/20"
-          >
-            Dismiss
-          </button>
         </div>
       )}
 
-      {/* Verdict banner */}
+      
+      <div className="scanner-board signals-terminal mb-4">
+        <p className="dash-section-title">Signals · conviction board</p>
+        <div className="scanner-toolbar-row flex flex-wrap items-center gap-2 mb-2">
+          {(result as any).lite && (
+            <span className="mono text-[10px] text-amber-300/90 border border-amber-500/30 px-2 py-0.5 rounded">LITE SCAN</span>
+          )}
+          {quoteWs && <span className="mono text-[10px] text-signal-buy">WS quotes live</span>}
+        </div>
+        <div className="scanner-chips">
+          {([
+            ["all", "All"],
+            ["buy", "BUY NOW"],
+            ["prepare", "PREPARE"],
+            ["avoid", "Avoid / Wait"],
+          ] as const).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              className="scanner-chip"
+              data-active={filterChip === id ? "true" : "false"}
+              onClick={() => setFilterChip(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <p className="mono text-[11px] text-mist/60 mb-0">
+          Ranked by conviction · {allActionable.length} actionable · {result.recommendations?.length || 0} top picks
+        </p>
+      </div>
+
+{/* Verdict banner */}
       {result.recommendations.length === 0 ? (
-        <div className="rounded-2xl border border-slate bg-graphite/50 p-10 text-center">
-          <div className="font-display text-4xl text-signal-avoid mb-3">DO NOT BUY ANY STOCK TODAY</div>
-          <p className="text-mist text-sm max-w-md mx-auto">
+        <div className="no-conviction">
+          <h2>NO HIGH-CONVICTION OPPORTUNITY FOUND — WAIT</h2>
+          <p className="text-mist text-sm max-w-md mx-auto mb-0">
             {result.scanned} stocks scanned. None cleared the conviction bar today. Waiting is the decision.
           </p>
           {result.watchlist_candidates.length > 0 && (
@@ -374,14 +486,27 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
           <div className="font-mono text-xs text-mist/60 uppercase tracking-widest">{result.verdict}</div>
           <div className="grid md:grid-cols-3 gap-4">
             {result.recommendations.map((r, i) => (
-              <TopPick
-                key={r.symbol}
-                rank={i + 1}
-                data={r}
-                onSelect={onSelect}
-                onAddToWatchlist={handleAddToWatchlist}
-                addingWatchlist={addingWatchlist}
-              />
+              <div key={r.symbol} className="space-y-1">
+                <TopPick
+                  rank={i + 1}
+                  data={{
+                    ...r,
+                    close: liveQuotes[r.symbol]?.price ?? r.close,
+                  }}
+                  onSelect={onSelect}
+                  onAddToWatchlist={handleAddToWatchlist}
+                  addingWatchlist={addingWatchlist}
+                />
+                {(qualityLabel(r) || rowSummary(r)) && (
+                  <div className="quality-gate-inline mono text-[10px] px-1">
+                    {qualityLabel(r) && <span className={`qg-${qualityLabel(r).toLowerCase() === "high" ? "high" : qualityLabel(r).toLowerCase() === "medium" ? "med" : "low"}`}>DATA {qualityLabel(r).toUpperCase()}</span>}
+                    {rowSummary(r) && <span className="text-mist/70 ml-2">{rowSummary(r).slice(0, 120)}</span>}
+                    {liveQuotes[r.symbol]?.price != null && (
+                      <span className="text-signal-buy ml-2">₹{liveQuotes[r.symbol].price.toLocaleString("en-IN")}</span>
+                    )}
+                  </div>
+                )}
+              </div>
             ))}
           </div>
         </>

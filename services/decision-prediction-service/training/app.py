@@ -69,6 +69,8 @@ SERVICE_URL = os.environ.get(
     os.environ.get("TRAINING_URL", f"{os.environ.get('DECISION_PREDICTION_URL', 'https://decision-prediction-service.onrender.com').rstrip('/')}/training"),
 )
 DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///./training.db')
+_db_backend = 'postgres' if DATABASE_URL.startswith(('postgres://', 'postgresql://')) else 'sqlite'
+logging.getLogger('training-service').info('DB backend=%s (set DATABASE_URL for durable win-rate/T+1/T+5)', _db_backend)
 MODEL_STORE_PATH = os.environ.get('MODEL_STORE_PATH', './model-store')
 # Neon/Supabase-friendly engine (pool_pre_ping, ssl, postgres:// fix)
 try:
@@ -528,6 +530,83 @@ async def api_evaluate_t5(background_tasks: BackgroundTasks):
             logger.error(f"T+5 evaluation failed: {e}")
     background_tasks.add_task(run_eval)
     return JSONResponse(content={"status": "T+5 evaluation triggered"})
+
+
+@app.get("/api/evaluate/status")
+async def api_evaluate_status():
+    """Progress snapshot for T+1 and T+5 evaluation queues.
+
+    Returns pending/evaluated counts, how many are due (calendar time elapsed),
+    success rates, and a rough remaining-time estimate for a full sweep.
+    """
+    db = SessionLocal()
+    try:
+        now = ist_now()
+        snaps = db.query(PredictionSnapshot).order_by(PredictionSnapshot.timestamp.desc()).limit(2000).all()
+        total = len(snaps)
+
+        def _bucket(period: str, success_attr: str, min_days: int):
+            pending = 0
+            evaluated = 0
+            success = 0
+            due = 0  # pending AND enough calendar time has passed
+            earliest_due = None
+            for s in snaps:
+                val = getattr(s, success_attr, 0) or 0
+                # 0 = not evaluated, 1 = success, 2 = fail (scanner convention)
+                if val in (1, 2):
+                    evaluated += 1
+                    if val == 1:
+                        success += 1
+                else:
+                    pending += 1
+                    if s.timestamp:
+                        age_days = (now - s.timestamp).total_seconds() / 86400.0
+                        if age_days >= min_days:
+                            due += 1
+                        else:
+                            remain = min_days - age_days
+                            if earliest_due is None or remain < earliest_due:
+                                earliest_due = remain
+            # ~2.5s per symbol for yfinance fetch in a sweep (empirical free-tier)
+            eta_sweep_sec = int(due * 2.5) if due else 0
+            next_unlock_hours = round(earliest_due * 24, 1) if earliest_due is not None and due == 0 and pending > 0 else None
+            return {
+                "period": period,
+                "total": total,
+                "pending": pending,
+                "evaluated": evaluated,
+                "due_now": due,
+                "success": success,
+                "success_rate_pct": round(success / evaluated * 100, 1) if evaluated else None,
+                "progress_pct": round(evaluated / total * 100, 1) if total else 0.0,
+                "eta_sweep_seconds": eta_sweep_sec,
+                "eta_sweep_label": (
+                    f"~{eta_sweep_sec // 60}m {eta_sweep_sec % 60}s" if eta_sweep_sec >= 60
+                    else f"~{eta_sweep_sec}s" if eta_sweep_sec > 0
+                    else "—"
+                ),
+                "next_unlock_hours": next_unlock_hours,
+                "status": (
+                    "complete" if pending == 0 and total > 0
+                    else "ready" if due > 0
+                    else "waiting" if pending > 0
+                    else "empty"
+                ),
+            }
+
+        t1 = _bucket("T+1", "t1_success", 1)
+        t5 = _bucket("T+5", "t5_success", 5)
+        return JSONResponse(content={
+            "t1": t1,
+            "t5": t5,
+            "generated_at": now.isoformat(),
+        })
+    except Exception as e:
+        logger.exception("evaluate status failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
 
 @app.get("/api/predictions/history")
 async def prediction_history(limit: int = 50, offset: int = 0):
@@ -1006,6 +1085,50 @@ def api_get_trade_backup(filename: str):
         return JSONResponse(content={"ok": True, "filename": filename, "backup": data})
     except Exception as e:
         return JSONResponse(content={"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/trades/manual")
+async def api_open_manual_trade(request: Request):
+    """Manual paper trade from Trade page (symbol + qty/capital). Always logs AI warning client-side."""
+    try:
+        body = await request.json()
+        symbol = (body.get("symbol") or "").strip()
+        quantity = body.get("quantity")
+        price = body.get("price")
+        capital = body.get("capital")
+        note = body.get("note")
+        trade, was_new, err = trades_module.open_manual_trade(
+            symbol=symbol,
+            quantity=float(quantity or 0),
+            price=float(price) if price is not None else None,
+            capital=float(capital) if capital is not None else None,
+            note=note,
+        )
+        if trade is None:
+            detail = err or "failed"
+            status = 400
+            if "not enough cash" in detail.lower() or "not enough cash balance" in detail.lower():
+                status = 402
+            raise HTTPException(status_code=status, detail=detail)
+        return JSONResponse(content={
+            "ok": True,
+            "trade_id": trade.trade_id,
+            "symbol": trade.symbol,
+            "quantity": trade.quantity,
+            "entry_price": trade.entry_price,
+            "capital_allocated": trade.capital_allocated,
+            "was_new": was_new,
+            "ai_warning": (
+                "Manual trades bypass the AI decision engine. "
+                "Position size and timing are not validated by Stockky scores."
+            ),
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("manual trade failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/trades/{trade_id}/add")
 async def api_add_to_trade(trade_id: str, request: Request):

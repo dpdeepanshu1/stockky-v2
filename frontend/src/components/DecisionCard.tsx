@@ -2,6 +2,8 @@ import { useState, useEffect } from "react";
 import { Decision, api, TrainingScore, FundamentalMetrics, CategorizedEvents } from "../api";
 import { decisionStyle } from "../decisionStyle";
 import StockChart from "./StockChart";
+import ConvictionCard from "./ConvictionCard";
+import { useStockkyRealtime } from "../useRealtime";
 import { toActionablePick } from "./ScanPanel";
 
 // ── Types & helper for structured news (from v2) ──
@@ -114,6 +116,8 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
 
   const [showTradeModal, setShowTradeModal] = useState(false);
   const [calling, setCalling] = useState(false);
+  const [liveQuote, setLiveQuote] = useState<{ price?: number; as_of?: string } | null>(null);
+
   const [tradeCapital, setTradeCapital] = useState("10000");
   const [tradingInProgress, setTradingInProgress] = useState(false);
   const [tradeResult, setTradeResult] = useState<string | null>(null);
@@ -152,6 +156,37 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
       .finally(() => { if (!cancelled) setLoadingTrainingScore(false); });
     return () => { cancelled = true; };
   }, [data.symbol]);
+
+  // Live quotes via WebSocket (HTTP fallback every 45s)
+  const { connected: quoteWs, subscribeQuotes, unsubscribeQuotes, quotes: wsQuotes } = useStockkyRealtime();
+  useEffect(() => {
+    const sym = data.symbol.toUpperCase().replace(/\.NS$/i, "").replace(/\.BO$/i, "");
+    subscribeQuotes([sym]);
+    return () => unsubscribeQuotes([sym]);
+  }, [data.symbol, subscribeQuotes, unsubscribeQuotes]);
+  useEffect(() => {
+    const sym = data.symbol.toUpperCase().replace(/\.NS$/i, "").replace(/\.BO$/i, "");
+    const q = wsQuotes[sym];
+    if (q?.price != null) {
+      setLiveQuote({ price: q.price, as_of: q.as_of || new Date().toISOString() });
+    }
+  }, [wsQuotes, data.symbol]);
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      if (quoteWs) return; // WS live
+      try {
+        const q = await api.getQuote(data.symbol);
+        if (!cancelled && q && (q.price != null || q.close != null)) {
+          setLiveQuote({ price: q.price ?? q.close, as_of: q.as_of || new Date().toISOString() });
+        }
+      } catch { /* optional */ }
+    };
+    tick();
+    const id = window.setInterval(tick, 45000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [data.symbol, quoteWs]);
+
 
   // ── Scores breakdown (use computed news score) ──
   const scores = [
@@ -238,7 +273,57 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 stock-detail-terminal">
+      <div className="mb-4">
+        <ConvictionCard data={liveQuote?.price != null ? { ...data, close: liveQuote.price } : data} />
+        {liveQuote?.price != null && (
+          <p className="mono text-[10px] text-mist/60 mt-1">
+            Live quote ₹{liveQuote.price.toLocaleString("en-IN")} · {quoteWs ? "WS live" : "poll"} · {liveQuote.as_of ? new Date(liveQuote.as_of).toLocaleTimeString("en-IN") : ""}
+          </p>
+        )}
+      </div>
+
+      {/* First-class News & Event summaries */}
+      <div className="grid gap-3 sm:grid-cols-2 mb-2">
+        <section className="terminal-panel news-summary-panel">
+          <p className="dash-section-title">News summary</p>
+          <p className="text-sm text-paper/90 leading-relaxed mb-2">
+            {(data as any).news_data?.summary
+              || (data as any).news_summary
+              || (Array.isArray(data.reasons?.news) && data.reasons.news[0])
+              || "No curated news summary for this symbol yet."}
+          </p>
+          {((data as any).news_data?.headlines || []).slice(0, 3).map((h: any, i: number) => (
+            <div key={i} className="mono text-[11px] text-mist/80 border-t border-slate/30 pt-1.5 mt-1.5">
+              {h.url ? <a href={h.url} target="_blank" rel="noreferrer" className="hover:text-cyan-300">{h.title || h}</a> : (h.title || String(h))}
+            </div>
+          ))}
+          <div className="mono text-[10px] text-mist/50 mt-2">
+            Score {data.news_score ?? "—"} · {(data as any).news_data?.headline_count ?? newsItems.length} headlines
+          </div>
+        </section>
+        <section className="terminal-panel event-summary-panel">
+          <p className="dash-section-title">Event summary</p>
+          <p className="text-sm text-paper/90 leading-relaxed mb-2">
+            {(data as any).event_data?.summary
+              || (data as any).event_summary
+              || (Array.isArray(data.reasons?.event) && data.reasons.event[0])
+              || (data.event_risk ? "Elevated event risk near earnings or corporate action." : "No material classified events flagged.")}
+          </p>
+          {((data as any).event_data?.classified_events || []).slice(0, 4).map((ev: any, i: number) => (
+            <div key={i} className="mono text-[11px] text-mist/80 border-t border-slate/30 pt-1.5 mt-1.5">
+              <span className="text-cyan-400/80">{ev.type || ev.category || "event"}</span>
+              {" · "}
+              {ev.summary || ev.title || ev.description || JSON.stringify(ev).slice(0, 80)}
+            </div>
+          ))}
+          {(data as any).event_data?.next_earnings_date && (
+            <div className="mono text-[10px] text-amber-300/90 mt-2">
+              Next earnings: {(data as any).event_data.next_earnings_date}
+            </div>
+          )}
+        </section>
+      </div>
       <button
         onClick={onBack}
         className="font-mono text-xs text-mist hover:text-paper transition flex items-center gap-1"

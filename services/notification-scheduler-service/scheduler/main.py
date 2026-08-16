@@ -106,16 +106,45 @@ def is_holiday(today: datetime) -> bool:
 
 
 def _wake_up_services():
-    services = [API_GATEWAY_URL, NOTIFICATION_URL, EVENT_TRACKER_URL]
+    """Aggressive free-tier wake: warm params + gateway /wake-all + second pass."""
+    services = [API_GATEWAY_URL, NOTIFICATION_URL]
+    # Optional extra URLs if defined
+    for extra in ("EVENT_TRACKER_URL", "MARKET_DATA_URL", "DECISION_URL"):
+        val = globals().get(extra) or __import__("os").getenv(extra)
+        if val:
+            services.append(val)
     for url in services:
+        if not url:
+            continue
+        base = url.rstrip("/")
         try:
-            httpx.get(f"{url}/health", timeout=10)
+            httpx.get(f"{base}/health", params={"warm": "true"}, timeout=25)
+        except Exception:
+            pass
+    # Gateway coordinated wake of all deps
+    try:
+        httpx.post(f"{API_GATEWAY_URL.rstrip('/')}/wake-all", timeout=60)
+    except Exception:
+        try:
+            httpx.get(f"{API_GATEWAY_URL.rstrip('/')}/wake-all", timeout=60)
+        except Exception:
+            pass
+    time.sleep(4)
+    for url in services:
+        if not url:
+            continue
+        try:
+            httpx.get(f"{url.rstrip('/')}/health", timeout=15)
         except Exception:
             pass
 
 
 def _notify(title: str, message: str, channel: str = "telegram", retries: int = 3):
     _wake_up_services()
+    try:
+        httpx.post(f"{NOTIFICATION_URL.rstrip('/')}/outbox/process", timeout=30)
+    except Exception:
+        pass
     time.sleep(5)
     payload = {"title": title, "message": message, "channel": channel}
     for attempt in range(retries + 1):

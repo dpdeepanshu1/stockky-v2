@@ -524,20 +524,36 @@ def ensure_schema(engine):
 
 # ---------- Database setup helpers ----------
 def get_engine(database_url=None):
-    """Create SQLAlchemy engine. Supports SQLite and Neon/Supabase Postgres."""
+    """Create SQLAlchemy engine. Supports SQLite and Neon/Supabase Postgres.
+
+    Set DATABASE_URL on decision-prediction-service so win-rate, T+1/T+5,
+    and paper trades survive Render redeploys (sqlite is ephemeral).
+    """
     import os
+    import logging
+    _log = logging.getLogger("training-db")
     url = database_url or os.environ.get("DATABASE_URL", "sqlite:///./training.db")
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
     kwargs = {"echo": False}
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}
+        if not os.environ.get("DATABASE_URL"):
+            _log.warning(
+                "DATABASE_URL not set — using ephemeral sqlite. "
+                "Win-rate / T+1/T+5 / trades will reset on redeploy. "
+                "Set Neon or Supabase Postgres DATABASE_URL in production."
+            )
     else:
         kwargs["pool_pre_ping"] = True
-        kwargs["pool_recycle"] = 300
-        if "sslmode" not in url and ("neon.tech" in url or "supabase" in url):
+        kwargs["pool_recycle"] = int(os.environ.get("DB_POOL_RECYCLE", "280"))
+        kwargs["pool_size"] = int(os.environ.get("DB_POOL_SIZE", "3"))
+        kwargs["max_overflow"] = int(os.environ.get("DB_MAX_OVERFLOW", "2"))
+        # Free Neon/Supabase: always require SSL if not specified
+        if "sslmode" not in url:
             sep = "&" if "?" in url else "?"
             url = f"{url}{sep}sslmode=require"
+        _log.info("Using durable Postgres DATABASE_URL (pool_pre_ping on)")
     return create_engine(url, **kwargs)
 
 def create_tables(engine):

@@ -203,22 +203,26 @@ def _public_config(cfg: dict) -> dict:
 
 
 @app.get("/health")
-def health():
-    cfg = _load_config()
-    return {
-        "status": "ok",
-        "service": "notification-service",
-        "redis": bool(_redis),
-        "channels_configured": {
-            "discord": bool(cfg.get("discord_webhook_url")),
-            "slack": bool(cfg.get("slack_webhook_url")),
-            "telegram": bool(cfg.get("telegram_bot_token") and cfg.get("telegram_chat_id")),
-            "callmebot": bool(
-                (cfg.get("callmebot_phone") and cfg.get("callmebot_apikey"))
-                or (cfg.get("callmebot_users") or "").strip()
-            ),
-        },
-    }
+def health(warm: bool = False):
+    out = {"status": "ok", "service": "notification-service", "redis": bool(_redis)}
+    if warm:
+        if _redis:
+            try:
+                _redis.ping()
+                out["warmed"] = True
+                # Opportunistic outbox drain on keep-warm pings
+                try:
+                    out["outbox"] = process_outbox(max_items=10)
+                except Exception as e:
+                    out["outbox_error"] = str(e)[:80]
+            except Exception as e:
+                out["warmed"] = False
+                out["warm_error"] = str(e)[:80]
+        else:
+            out["warmed"] = False
+            out["redis"] = False
+            out["note"] = "Set UPSTASH_REDIS_REST_URL + TOKEN for outbox persistence"
+    return out
 
 
 @app.get("/config")
@@ -406,16 +410,20 @@ def _callmebot_recipients(cfg: dict):
     return users[:5]
 
 
-def _send_callmebot(cfg: dict, title: str, message: str):
+def _send_callmebot(cfg: dict, title: str, message: str, voice_first: bool = True):
     """Send CallMeBot alert to every configured user (primary + extras, max 5).
+
+    Priority for urgent alerts (voice_first=True, default):
+      1. Telegram Voice Call via start.php
+      2. Only if voice fails → text via text.php
 
     Each Telegram user must have activated CallMeBot themselves
     (https://www.callmebot.com/telegram-call-api/). You cannot call a
     username that never started the bot.
 
     Official URLs:
-      text.php?user=@name&text=...
-      start.php?user=@name&text=...
+      start.php?user=@name&text=...  → voice call
+      text.php?user=@name&text=...   → text message
     """
     import urllib.parse
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -438,15 +446,16 @@ def _send_callmebot(cfg: dict, title: str, message: str):
         if apikey:
             text_url += f"&apikey={urllib.parse.quote(apikey)}"
             call_url += f"&apikey={urllib.parse.quote(apikey)}"
+        # Voice call FIRST for urgent alerts; text only as fallback
+        order = (("call", call_url), ("text", text_url)) if voice_first else (("text", text_url), ("call", call_url))
         last = ""
-        for kind, url in (("text", text_url), ("call", call_url)):
+        for kind, url in order:
             try:
                 resp = httpx.get(url, timeout=35)
                 last = (resp.text or "")[:120]
                 if resp.status_code == 200 and "error" not in last.lower():
                     return f"{user}:ok({kind})"
                 if resp.status_code == 200:
-                    # CallMeBot sometimes returns 200 with instructional text
                     if "not authorized" in last.lower() or "start the bot" in last.lower():
                         return f"{user}:need_activate ({last})"
                     return f"{user}:ok({kind})"
@@ -458,7 +467,6 @@ def _send_callmebot(cfg: dict, title: str, message: str):
         return f"{user}:fail ({last})"
 
     results = []
-    # Parallel so secondary users are not starved by primary latency
     with ThreadPoolExecutor(max_workers=min(5, len(users))) as pool:
         futs = [pool.submit(_one, u, k) for u, k in users]
         for fut in as_completed(futs):
@@ -474,9 +482,140 @@ def _send_callmebot(cfg: dict, title: str, message: str):
     return "failed: " + summary
 
 
-def _dispatch(title: str, message: str, channel_filter: str):
+
+OUTBOX_KEY = "stockky:notify:outbox"
+OUTBOX_MAX_ATTEMPTS = 5
+OUTBOX_BACKOFF_SEC = [30, 60, 120, 300, 600]
+
+
+def _outbox_enqueue(title: str, message: str, channel: str, urgency: str, last_error: str = None):
+    """Persist failed alerts for retry (Redis list). Survives process restart."""
+    if not _redis:
+        return None
+    import time as _time
+    import uuid as _uuid
+    item = {
+        "id": _uuid.uuid4().hex[:12],
+        "title": title,
+        "message": message,
+        "channel": channel or "all",
+        "urgency": urgency or "normal",
+        "attempts": 0,
+        "created_at": _time.time(),
+        "next_attempt_at": _time.time(),
+        "last_error": last_error,
+    }
+    try:
+        _redis.lpush(OUTBOX_KEY, json.dumps(item))
+        _redis.ltrim(OUTBOX_KEY, 0, 199)  # keep last 200
+        logger.info("Outbox enqueued alert %s", item["id"])
+        return item["id"]
+    except Exception as e:
+        logger.warning("Outbox enqueue failed: %s", e)
+        return None
+
+
+def _outbox_list():
+    if not _redis:
+        return []
+    try:
+        raw = _redis.lrange(OUTBOX_KEY, 0, 199) or []
+        items = []
+        for r in raw:
+            try:
+                items.append(json.loads(r) if isinstance(r, str) else r)
+            except Exception:
+                continue
+        return items
+    except Exception:
+        return []
+
+
+def _outbox_save_all(items: list):
+    if not _redis:
+        return
+    try:
+        _redis.delete(OUTBOX_KEY)
+        for it in reversed(items):
+            _redis.lpush(OUTBOX_KEY, json.dumps(it))
+        _redis.ltrim(OUTBOX_KEY, 0, 199)
+    except Exception as e:
+        logger.warning("Outbox save failed: %s", e)
+
+
+def process_outbox(max_items: int = 20) -> dict:
+    """Retry due outbox items. Call from /outbox/process or external cron."""
+    import time as _time
+    items = _outbox_list()
+    if not items:
+        return {"processed": 0, "delivered": 0, "remaining": 0}
+    now = _time.time()
+    delivered = 0
+    processed = 0
+    remaining = []
+    for item in items:
+        if processed >= max_items:
+            remaining.append(item)
+            continue
+        if float(item.get("next_attempt_at") or 0) > now:
+            remaining.append(item)
+            continue
+        processed += 1
+        attempts = int(item.get("attempts") or 0)
+        results = _dispatch(
+            item.get("title") or "Stockky",
+            item.get("message") or "",
+            item.get("channel") or "all",
+            urgency=item.get("urgency") or "normal",
+        )
+        ok = any(isinstance(v, str) and str(v).startswith("sent") for v in (results or {}).values())
+        if ok:
+            delivered += 1
+            continue
+        attempts += 1
+        if attempts >= OUTBOX_MAX_ATTEMPTS:
+            logger.error("Outbox drop %s after %s attempts", item.get("id"), attempts)
+            continue
+        item["attempts"] = attempts
+        backoff = OUTBOX_BACKOFF_SEC[min(attempts - 1, len(OUTBOX_BACKOFF_SEC) - 1)]
+        item["next_attempt_at"] = now + backoff
+        item["last_error"] = str(results)
+        remaining.append(item)
+    _outbox_save_all(remaining)
+    return {"processed": processed, "delivered": delivered, "remaining": len(remaining)}
+
+
+def _dispatch(title: str, message: str, channel_filter: str, urgency: str = "normal"):
+    """Dispatch notifications.
+
+    For urgency=high / urgent:
+      1. Try CallMeBot Telegram Voice Call first.
+      2. Only if voice call fails, fall back to Telegram text / Discord / Slack / CallMeBot text.
+    For normal urgency: send to all matching enabled channels (CallMeBot still prefers voice).
+    """
     cfg = _load_config()
     results = {}
+    is_urgent = (urgency or "").lower() in ("high", "urgent", "critical")
+
+    if is_urgent and channel_filter in ("all", "callmebot"):
+        # Priority path: voice call first
+        call_cfg = dict(cfg)
+        enabled = dict(call_cfg.get("enabled") or {})
+        # Temporarily ensure callmebot is attempted for urgent path
+        if enabled.get("callmebot") or _callmebot_recipients(cfg):
+            enabled["callmebot"] = True
+            call_cfg["enabled"] = enabled
+            voice_result = _send_callmebot(call_cfg, title, message, voice_first=True)
+            if voice_result is not None:
+                results["callmebot"] = voice_result
+            voice_ok = isinstance(voice_result, str) and voice_result.startswith("sent")
+            if voice_ok:
+                # Voice succeeded — still optionally send text channels for audit trail
+                # but primary delivery is done. Continue to other channels only if filter is "all".
+                if channel_filter != "all":
+                    return results
+            # Voice failed or not configured → fall through to text channels
+
     channels_to_send = []
     if channel_filter == "all" or channel_filter == "telegram":
         channels_to_send.append("telegram")
@@ -484,7 +623,10 @@ def _dispatch(title: str, message: str, channel_filter: str):
         channels_to_send.append("discord")
     if channel_filter == "all" or channel_filter == "slack":
         channels_to_send.append("slack")
-    if channel_filter == "all" or channel_filter == "callmebot":
+    # For non-urgent, or urgent where voice already attempted, still try callmebot if requested
+    if not is_urgent and (channel_filter == "all" or channel_filter == "callmebot"):
+        channels_to_send.append("callmebot")
+    elif is_urgent and channel_filter == "callmebot" and "callmebot" not in results:
         channels_to_send.append("callmebot")
 
     for ch in channels_to_send:
@@ -501,7 +643,7 @@ def _dispatch(title: str, message: str, channel_filter: str):
             if result is not None:
                 results["slack"] = result
         elif ch == "callmebot":
-            result = _send_callmebot(cfg, title, message)
+            result = _send_callmebot(cfg, title, message, voice_first=True)
             if result is not None:
                 results["callmebot"] = result
 
@@ -510,23 +652,45 @@ def _dispatch(title: str, message: str, channel_filter: str):
 
 @app.post("/notify")
 def notify(req: NotifyRequest):
-    attempted = _dispatch(req.title, req.message, req.channel)
+    attempted = _dispatch(req.title, req.message, req.channel, urgency=req.urgency or "normal")
     if not attempted:
+        oid = _outbox_enqueue(req.title, req.message, req.channel, req.urgency or "normal", "no channel")
         return {
             "delivered": False,
+            "outbox_id": oid,
             "note": f"No notification channel matched filter '{req.channel}' and is enabled/configured.",
         }
-    # Check if any channel succeeded
     delivered = any(isinstance(v, str) and v.startswith("sent") for v in attempted.values())
-    # Build a note with the results
     note_parts = []
     for ch, result in attempted.items():
-        if result == "sent":
+        if isinstance(result, str) and result.startswith("sent"):
             note_parts.append(f"{ch}: ok")
         else:
             note_parts.append(f"{ch}: {result}")
     note = "; ".join(note_parts)
-    return {"delivered": delivered, "results": attempted, "note": note}
+    outbox_id = None
+    if not delivered:
+        outbox_id = _outbox_enqueue(
+            req.title, req.message, req.channel, req.urgency or "normal", note
+        )
+    return {
+        "delivered": delivered,
+        "results": attempted,
+        "note": note,
+        "urgency": req.urgency,
+        "outbox_id": outbox_id,
+    }
+
+
+@app.get("/outbox")
+def outbox_status():
+    items = _outbox_list()
+    return {"count": len(items), "items": items[:50], "redis": bool(_redis)}
+
+
+@app.post("/outbox/process")
+def outbox_process(max_items: int = 20):
+    return process_outbox(max_items=max_items)
 
 
 @app.post("/test")
@@ -581,12 +745,11 @@ def _callmebot_users():
 @app.post("/call/me")
 @app.get("/call/me")
 def call_me_now(message: str = "Stockky alert: action required on your picks"):
-    """Manual Call Me Now — uses saved CallMeBot config (or env fallback)."""
+    """Manual Call Me Now — always prefers Telegram Voice Call first, then text fallback."""
     cfg = _load_config()
-    # Force-enable for explicit test/manual
     cfg = dict(cfg)
     enabled = dict(cfg.get("enabled") or {})
     enabled["callmebot"] = True
     cfg["enabled"] = enabled
-    result = _send_callmebot(cfg, "Stockky Call Alert", message)
+    result = _send_callmebot(cfg, "Stockky Call Alert", message, voice_first=True)
     return {"ok": isinstance(result, str) and result.startswith("sent"), "result": result}

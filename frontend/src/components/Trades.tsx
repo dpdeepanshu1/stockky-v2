@@ -40,6 +40,12 @@ export default function Trades() {
   const [showDeposit, setShowDeposit] = useState(false);
   const [depositAmount, setDepositAmount] = useState("10000");
   const [depositing, setDepositing] = useState(false);
+  const [manualSymbol, setManualSymbol] = useState("");
+  const [manualQty, setManualQty] = useState("1");
+  const [manualPrice, setManualPrice] = useState("");
+  const [manualCapital, setManualCapital] = useState("10000");
+  const [manualBusy, setManualBusy] = useState(false);
+  const [showManual, setShowManual] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [backups, setBackups] = useState<string[]>([]);
   const [showBackups, setShowBackups] = useState(false);
@@ -187,6 +193,51 @@ export default function Trades() {
     }
   };
 
+
+  const submitManualTrade = async () => {
+    const sym = manualSymbol.trim().toUpperCase();
+    if (!sym) {
+      showToast("error", "Enter a symbol");
+      return;
+    }
+    const qty = parseFloat(manualQty);
+    const capital = parseFloat(manualCapital);
+    const price = manualPrice ? parseFloat(manualPrice) : undefined;
+    if ((!qty || qty <= 0) && (!capital || capital <= 0)) {
+      showToast("error", "Enter quantity or capital");
+      return;
+    }
+    setManualBusy(true);
+    try {
+      const res = await api.openManualTrade({
+        symbol: sym,
+        quantity: qty > 0 ? qty : undefined,
+        capital: capital > 0 ? capital : undefined,
+        price,
+        note: "manual_ui",
+      });
+      showToast(
+        "success",
+        `Opened ${res.symbol}: ${res.quantity} @ ₹${res.entry_price} (${res.trade_id})`
+      );
+      setShowManual(false);
+      setManualSymbol("");
+      setManualQty("1");
+      setManualPrice("");
+      fetchAll();
+    } catch (err) {
+      const msg = (err as Error).message || "unknown";
+      if (msg.toLowerCase().includes("not enough") || msg.toLowerCase().includes("cash")) {
+        showToast("error", `Low balance: ${msg}`);
+        setShowDeposit(true);
+      } else {
+        showToast("error", `Manual trade failed: ${msg}`);
+      }
+    } finally {
+      setManualBusy(false);
+    }
+  };
+
   const submitDeposit = async () => {
     const amount = parseFloat(depositAmount);
     if (!amount || amount <= 0) {
@@ -231,6 +282,12 @@ export default function Trades() {
         </div>
         <div className="flex gap-2 flex-wrap">
           <button
+            onClick={() => setShowManual((v) => !v)}
+            className="text-xs font-mono uppercase tracking-wider bg-cyan-500/10 border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/20 rounded-lg px-3 py-2 transition"
+          >
+            + Add Stock
+          </button>
+          <button
             onClick={() => setShowDeposit(true)}
             className="text-xs font-mono uppercase tracking-wider bg-emerald-500/15 border border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/25 rounded-lg px-3 py-2 transition"
           >
@@ -259,6 +316,42 @@ export default function Trades() {
           </button>
         </div>
       </div>
+
+      {showManual && (
+        <div className="manual-trade-panel">
+          <h3 className="font-mono text-xs text-paper uppercase tracking-widest mb-2">Manual open position</h3>
+          <div className="ai-warning">
+            AI warning: Manual trades bypass Stockky decision scores, entry/target logic, and conviction filters.
+            Size and timing are entirely your responsibility. Prefer scan → Trade buttons when possible.
+          </div>
+          <div className="manual-trade-grid">
+            <label>
+              Symbol
+              <input value={manualSymbol} onChange={(e) => setManualSymbol(e.target.value.toUpperCase())} placeholder="TCS" />
+            </label>
+            <label>
+              Quantity
+              <input type="number" min="0" step="1" value={manualQty} onChange={(e) => setManualQty(e.target.value)} />
+            </label>
+            <label>
+              Price (optional)
+              <input type="number" min="0" step="0.05" value={manualPrice} onChange={(e) => setManualPrice(e.target.value)} placeholder="Live" />
+            </label>
+            <label>
+              Capital if qty empty
+              <input type="number" min="0" step="100" value={manualCapital} onChange={(e) => setManualCapital(e.target.value)} />
+            </label>
+          </div>
+          <div className="flex gap-2">
+            <button type="button" className="btn-terminal" disabled={manualBusy} onClick={submitManualTrade}>
+              {manualBusy ? "Opening…" : "Open paper trade"}
+            </button>
+            <button type="button" className="text-xs font-mono text-mist border border-slate/40 rounded-lg px-3 py-2" onClick={() => setShowManual(false)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {showBackups && (
         <div className="bg-graphite border border-slate/60 rounded-xl p-4">

@@ -906,7 +906,7 @@ def _wake_notification_service() -> bool:
 
 # Free-tier friendly default: 18 workers (was 10). Override via env.
 # Pair with market-data yfinance semaphore to avoid Yahoo rate limits.
-MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "18"))
+MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "6"))  # free-tier: avoid decision circuit storms
 MAX_RETRIES = 1
 RETRY_BACKOFF = 1.0
 
@@ -1309,11 +1309,11 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
             # periodic progress write two lines down — that write used to
             # replace the entire stored dict (including cancel_requested)
             # with a fresh one that didn't have that key at all.
-            if processed % 3 == 0:
-                if _redis_get(cancel_key):
-                    cancelled = True
+            # Check cancel on every symbol so Stop is near-instant
+            if _redis_get(cancel_key):
+                cancelled = True
 
-            if processed % 5 == 0 or processed == total or cancelled:
+            if processed % 2 == 0 or processed == total or cancelled:
                 _scan_payload = {
                     "status": "running",
                     "total": total,
@@ -1333,6 +1333,11 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
                 for t in tasks:
                     if not t.done():
                         t.cancel()
+                # Drain quickly — don't wait on cancelled tasks
+                try:
+                    await asyncio.wait(tasks, timeout=2.0)
+                except Exception:
+                    pass
                 break
 
     results.sort(key=lambda r: r.get("combined_score", 0), reverse=True)
@@ -2210,18 +2215,27 @@ def get_scan_status(task_id: str):
 
 @app.post("/scan/cancel/{task_id}")
 def cancel_scan(task_id: str):
-    """Requests cancellation of a running scan. run_scan_parallel checks
-    a dedicated cancel key (not the shared progress dict, which gets
-    periodically overwritten and would silently wipe this flag) every
-    3rd completion, and once seen, stops collecting further results and
-    finalizes the task as 'done' with whatever was actually scored so far."""
+    """Request cancel — checked every completed symbol; pending tasks cancelled ASAP."""
     data = _redis_get(SCAN_TASK_PREFIX + task_id)
     if not data:
         raise HTTPException(status_code=404, detail="Task not found or expired")
     if data.get("status") != "running":
-        return {"status": "already_finished", "task_status": data.get("status")}
+        return {"status": "already_finished", "task_status": data.get("status"),
+                "processed_so_far": data.get("processed", 0), "total": data.get("total", 0)}
+    # Dedicated cancel key (progress writes must not wipe this)
     _redis_set(SCAN_TASK_PREFIX + task_id + ":cancel", True, ttl=3600)
-    return {"status": "cancel_requested", "processed_so_far": data.get("processed", 0), "total": data.get("total", 0)}
+    # Also mark progress payload so UI sees cancel immediately
+    try:
+        data = dict(data)
+        data["cancel_requested"] = True
+        _redis_set(SCAN_TASK_PREFIX + task_id, data, ttl=3600)
+    except Exception:
+        pass
+    return {
+        "status": "cancel_requested",
+        "processed_so_far": data.get("processed", 0),
+        "total": data.get("total", 0),
+    }
 
 # ── Watchlist-only scan ──────────────────────────────────────────────────
 @app.get("/scan/watchlist")

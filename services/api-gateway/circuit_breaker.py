@@ -17,10 +17,11 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger("circuit-breaker")
 
-# Defaults tuned for Render free tier: open quickly, recover in ~1–2 min
-DEFAULT_FAILURE_THRESHOLD = 4
-DEFAULT_RECOVERY_TIMEOUT = 90.0
-DEFAULT_HALF_OPEN_SUCCESS = 1
+# Defaults for Render free tier — tolerate cold-start storms, recover faster
+import os as _os
+DEFAULT_FAILURE_THRESHOLD = int(_os.getenv("CB_FAILURE_THRESHOLD", "12"))
+DEFAULT_RECOVERY_TIMEOUT = float(_os.getenv("CB_RECOVERY_TIMEOUT", "45"))
+DEFAULT_HALF_OPEN_SUCCESS = int(_os.getenv("CB_HALF_OPEN_SUCCESS", "2"))
 
 
 class CircuitOpenError(Exception):

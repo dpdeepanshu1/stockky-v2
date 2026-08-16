@@ -739,14 +739,32 @@ export default function App() {
                       <div className="w-full h-1 bg-slate rounded-full overflow-hidden">
                         <div
                           className="h-full bg-signal-prepare transition-all duration-500"
-                          style={{ width: `${(view.progress.processed / view.progress.total) * 100}%` }}
+                          style={{ width: `${Math.min(100, (view.progress.processed / Math.max(1, view.progress.total)) * 100)}%` }}
                         />
                       </div>
-                      {view.progress.estimatedRemaining !== undefined && view.progress.estimatedRemaining > 0 && (
-                        <p className="font-mono text-[10px] text-mist/40 text-right">
-                          Est. remaining: {formatTime(view.progress.estimatedRemaining)}
-                        </p>
-                      )}
+                      {(() => {
+                        const p = view.progress;
+                        let rem = p.estimatedRemaining;
+                        if ((rem === undefined || rem === null || rem <= 0) && p.processed > 0 && p.total > p.processed && p.elapsed > 0) {
+                          const avg = Math.max(p.elapsed / p.processed, 0.8);
+                          rem = (p.total - p.processed) * avg;
+                        }
+                        if (rem !== undefined && rem !== null && rem > 0) {
+                          return (
+                            <p className="font-mono text-[10px] text-mist/50 text-right">
+                              Est. remaining: {formatTime(rem)}
+                            </p>
+                          );
+                        }
+                        if (p.processed === 0) {
+                          return (
+                            <p className="font-mono text-[10px] text-mist/40 text-right">
+                              Est. remaining: calculating…
+                            </p>
+                          );
+                        }
+                        return null;
+                      })()}
                     </div>
                   )}
                   {scanTaskId && (

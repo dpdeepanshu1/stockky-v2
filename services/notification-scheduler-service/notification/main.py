@@ -429,20 +429,31 @@ def _send_callmebot(cfg: dict, title: str, message: str):
             q = urllib.parse.quote(text_body)
             uq = urllib.parse.quote(user)
             # Prefer voice/call endpoint; append apikey only if present
-            url = f"https://api.callmebot.com/start.php?user={uq}&text={q}"
+            # CallMeBot official patterns (username form):
+            #   start.php?user=@name&text=...   (voice/call)
+            #   text.php?user=@name&text=...    (chat message)
+            call_url = f"https://api.callmebot.com/start.php?user={uq}&text={q}"
+            text_url = f"https://api.callmebot.com/text.php?user={uq}&text={q}"
             if apikey:
-                url += f"&apikey={urllib.parse.quote(apikey)}"
-            resp = httpx.get(url, timeout=25)
-            body = (resp.text or "")[:120]
-            if resp.status_code == 200 and "error" not in body.lower():
+                call_url += f"&apikey={urllib.parse.quote(apikey)}"
+                text_url += f"&apikey={urllib.parse.quote(apikey)}"
+            resp = httpx.get(call_url, timeout=25)
+            body = (resp.text or "")[:160]
+            ok = resp.status_code == 200 and "error" not in body.lower()
+            if not ok:
+                resp2 = httpx.get(text_url, timeout=25)
+                body2 = (resp2.text or "")[:160]
+                if resp2.status_code == 200 and "error" not in body2.lower():
+                    any_sent = True
+                    results.append(f"{user}:ok(text)")
+                elif resp.status_code == 200:
+                    any_sent = True
+                    results.append(f"{user}:ok ({body})")
+                else:
+                    results.append(f"{user}:HTTP {resp.status_code} {body}")
+            else:
                 any_sent = True
                 results.append(f"{user}:ok")
-            elif resp.status_code == 200:
-                # Some accounts return 200 with hint text
-                any_sent = True
-                results.append(f"{user}:ok ({body})")
-            else:
-                results.append(f"{user}:HTTP {resp.status_code} {body}")
         except Exception as e:
             results.append(f"{user}: {e}")
     return "sent" if any_sent else ("failed: " + "; ".join(results))

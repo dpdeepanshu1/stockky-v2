@@ -82,16 +82,52 @@ export default function NotificationsPanel() {
         };
       } else if (channel === "discord") {
         update = { discord_webhook_url: discordUrl || undefined, enabled: { discord: true } };
+      } else if (channel === "callmebot") {
+        let user = (callUser || "").trim();
+        if (!user) {
+          setTestResult("Enter your CallMeBot Telegram user first (e.g. @dpdeep29).");
+          window.alert("Enter CallMeBot user like @dpdeep29 before Connect & start.");
+          return;
+        }
+        if (!user.startsWith("@") && !/^[0-9+]+$/.test(user)) {
+          user = "@" + user;
+        }
+        update = {
+          callmebot_user: user,
+          callmebot_apikey: callKey || undefined,
+          callmebot_users: callUsers || undefined,
+          enabled: { callmebot: true },
+        };
       } else {
         update = { slack_webhook_url: slackUrl || undefined, enabled: { slack: true } };
       }
       const cfg = await api.saveNotificationConfig(update);
       setConfig(cfg);
-      setTelegramToken("");
-      setDiscordUrl("");
-      setSlackUrl("");
+      if (channel === "telegram") setTelegramToken("");
+      if (channel === "discord") setDiscordUrl("");
+      if (channel === "slack") setSlackUrl("");
+      if (channel === "callmebot") {
+        setCallUser("");
+        setCallKey("");
+        // keep extra users text so user can edit later
+        setTestResult(
+          `CallMeBot saved & enabled for ${(cfg.callmebot as any)?.user || callUser || "user"}. Status: ${
+            cfg.callmebot?.configured ? "CONNECTED" : "not connected — check username"
+          }.`
+        );
+        window.alert(
+          cfg.callmebot?.configured
+            ? `CallMeBot connected successfully.\nUser: ${(cfg.callmebot as any)?.user || callUser}\nYou can press Test CallMeBot now.`
+            : "Saved, but backend still reports not connected. Check the username format (@dpdeep29) and that notification service is up."
+        );
+      } else {
+        setTestResult(`${channel} saved successfully.`);
+      }
     } catch (e) {
-      setLoadError((e as Error).message);
+      const msg = (e as Error).message || "Save failed";
+      setLoadError(msg);
+      setTestResult(`Save failed: ${msg}`);
+      window.alert(`Could not save ${channel}: ${msg}`);
     } finally {
       setSaving(null);
     }
@@ -288,17 +324,39 @@ export default function NotificationsPanel() {
         />
         <button
           type="button"
-          disabled={testingCall || !config.callmebot?.configured}
+          disabled={testingCall}
           onClick={async () => {
             setTestingCall(true);
             setTestResult(null);
             try {
+              // Save first if user typed credentials but not connected yet
+              if (!config.callmebot?.configured && (callUser || "").trim()) {
+                let user = callUser.trim();
+                if (!user.startsWith("@") && !/^[0-9+]+$/.test(user)) user = "@" + user;
+                const cfg = await api.saveNotificationConfig({
+                  callmebot_user: user,
+                  callmebot_apikey: callKey || undefined,
+                  callmebot_users: callUsers || undefined,
+                  enabled: { callmebot: true },
+                });
+                setConfig(cfg);
+              }
               const r = await api.testCallMeBot(
-                "Stockky test call. If you hear this, CallMeBot is connected."
+                "Stockky test call. If you hear or see this, CallMeBot is connected."
               );
-              setTestResult(r.ok ? "CallMeBot test sent — check your phone/Telegram." : `CallMeBot failed: ${r.result || r.error || "unknown"}`);
+              if (r.ok) {
+                const msg = "CallMeBot test sent — check Telegram for the call/message.";
+                setTestResult(msg);
+                window.alert(msg);
+              } else {
+                const msg = `CallMeBot failed: ${r.result || r.error || "unknown"}. URL uses user=@username like @dpdeep29`;
+                setTestResult(msg);
+                window.alert(msg);
+              }
             } catch (e) {
-              setTestResult((e as Error).message);
+              const msg = (e as Error).message || "Test failed";
+              setTestResult(msg);
+              window.alert(`CallMeBot test error: ${msg}`);
             } finally {
               setTestingCall(false);
             }

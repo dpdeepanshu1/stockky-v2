@@ -33,6 +33,7 @@ export default function Training() {
 
   const timerIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const trainingActiveRef = useRef(false);
 
   // ---------- API calls ----------
   const fetchStatus = async () => {
@@ -41,13 +42,9 @@ export default function Training() {
       const data = await api.getTrainingStatus();
       setStatus(data);
 
-      // If training is active in UI and backend says it's not running anymore
+      // If UI thinks training is running but backend lock is gone → finish
       if (training && !data.training_in_progress) {
-        // Training finished on server — stop local timer/UI
-        setTraining(false);
-        if (timerIntervalRef.current) { clearInterval(timerIntervalRef.current); timerIntervalRef.current = null; }
-        const succeeded = Boolean(data.production_model_exists && data.last_training);
-        stopTraining(succeeded);
+        stopTraining(true, data);
       }
     } catch (err) {
       showToast("error", "Failed to fetch training status.");
@@ -187,6 +184,18 @@ export default function Training() {
     const poll = async () => {
       try {
         const p = await api.getTrainingProgress();
+        // Normalize stage aliases
+         const stageMap: Record<string, TrainingProgress["stage"]> = {
+          loading: "loading_data",
+          loaded: "data_loaded",
+          fitting: "fitting_model",
+          saving: "saving_model",
+          complete: "done",
+          completed: "done",
+        };
+        if (p?.stage && stageMap[p.stage]) {
+          p.stage = stageMap[p.stage];
+        }
         setTrainProgress(p);
         // Detect early exit: insufficient labeled data or no DB
         if (p?.stage === "idle" && p?.detail && (p.detail as any).reason) {
@@ -209,7 +218,9 @@ export default function Training() {
           }
         }
         if (p?.stage === "done") {
-          // Let status poll finalize success
+          stopTraining(true);
+        } else if (p?.stage === "aborted") {
+          stopTraining(false);
         }
       } catch {
         // Progress endpoint may fail during cold start — fail quietly
@@ -229,24 +240,37 @@ export default function Training() {
   };
 
   const startTraining = () => {
+    trainingActiveRef.current = true;
     setTraining(true);
     setElapsedSeconds(0);
+    setTrainProgress({ stage: "loading_data", detail: {}, timestamp: new Date().toISOString() } as any);
 
     if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
     timerIntervalRef.current = setInterval(() => {
-      setElapsedSeconds((prev) => prev + 1);
+      setElapsedSeconds((prev) => {
+        const next = prev + 1;
+        // Safety: if backend never clears lock in UI after 20 min, stop local spinner
+        if (next >= 1200) {
+          stopTraining(false);
+        }
+        return next;
+      });
     }, 1000);
 
     if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     pollIntervalRef.current = setInterval(() => {
       fetchStatus();
-    }, 5000);
+    }, 3000);
   };
 
-  const stopTraining = (success: boolean) => {
+  const stopTraining = (success: boolean, data?: TrainingStatusResponse | null) => {
+    const wasTraining = trainingActiveRef.current || training;
+    trainingActiveRef.current = false;
     setTraining(false);
-    // Update status so the "running" card disappears
-    setStatus((prev) => prev ? { ...prev, training_in_progress: false } : prev);
+    setTrainProgress((prev) =>
+      prev ? { ...prev, stage: success ? "done" : "idle" } : prev
+    );
+    setStatus((prev) => (prev ? { ...prev, training_in_progress: false } : prev));
     if (timerIntervalRef.current) {
       clearInterval(timerIntervalRef.current);
       timerIntervalRef.current = null;
@@ -255,17 +279,27 @@ export default function Training() {
       clearInterval(pollIntervalRef.current);
       pollIntervalRef.current = null;
     }
+    if (progressPollRef.current) {
+      clearInterval(progressPollRef.current);
+      progressPollRef.current = null;
+    }
+    if (!wasTraining) return;
+
+    const last = data?.last_training || status?.last_training;
+    const ver = data?.production_model_version || data?.model_version || status?.production_model_version || status?.model_version;
     if (success) {
-      showToast("success", "✅ Training completed successfully! Model is deployed.");
-      fetchStatus();
-    } else if (training) {
-      // Often ends quickly due to insufficient labeled T+1 outcomes
+      showToast(
+        "success",
+        `✅ Training finished. Production model ${ver ? ver : "kept"}${last ? ` · last run logged` : ""}. Candidate may be saved without promotion if F1 did not improve.`
+      );
+    } else {
       showToast(
         "info",
-        "Training finished without a new model. Usually means not enough labeled outcomes yet — record picks (All Actionable for Training), wait for T+1/T+5, then retrain."
+        "Training stopped. If it ended very quickly with no improvement, record more picks and wait for T+1/T+5 labels before retraining."
       );
-      fetchStatus();
     }
+    // Refresh once without re-entering training loop
+    api.getTrainingStatus().then(setStatus).catch(() => {});
   };
 
   // ---------- Handlers ----------

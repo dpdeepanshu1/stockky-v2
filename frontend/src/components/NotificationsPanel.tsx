@@ -31,9 +31,9 @@ const CHANNEL_META: Record<Channel, ChannelMeta> = {
   },
   callmebot: {
     label: "CallMeBot (Voice / Call alert)",
-    blurb: "Free CallMeBot API — phone call / voice-style alert when BUY NOW appears. Get API key from the CallMeBot bot on Telegram.",
-    setupUrl: "https://www.callmebot.com/blog/free-api-telegram-bot/",
-    setupLabel: "CallMeBot setup guide ->",
+    blurb: "Uses your Telegram @username from CallMeBot (e.g. @dpdeep29). Optional API key only if CallMeBot gave you one. Supports up to 5 users.",
+    setupUrl: "https://www.callmebot.com/telegram-call-api/",
+    setupLabel: "CallMeBot call API guide ->",
   },
 };
 
@@ -49,8 +49,9 @@ export default function NotificationsPanel() {
   const [telegramChatId, setTelegramChatId] = useState("");
   const [discordUrl, setDiscordUrl] = useState("");
   const [slackUrl, setSlackUrl] = useState("");
-  const [callPhone, setCallPhone] = useState("");
+  const [callUser, setCallUser] = useState("");
   const [callKey, setCallKey] = useState("");
+  const [callUsers, setCallUsers] = useState("");
   const [testingCall, setTestingCall] = useState(false);
 
   function load() {
@@ -263,17 +264,27 @@ export default function NotificationsPanel() {
         onSave={() => saveChannel("callmebot")}
       >
         <Field
-          label="Phone (country code, no +)"
-          placeholder={config.callmebot?.phone ? `Saved: ${config.callmebot.phone}` : "e.g. 9198XXXXXXXX"}
-          value={callPhone}
-          onChange={setCallPhone}
+          label="Primary Telegram user"
+          placeholder={
+            (config.callmebot as any)?.user
+              ? `Saved: ${(config.callmebot as any).user}`
+              : "e.g. @dpdeep29"
+          }
+          value={callUser}
+          onChange={setCallUser}
         />
         <Field
-          label="API key"
-          placeholder={config.callmebot?.configured ? `Saved: ${config.callmebot.masked}` : "From CallMeBot Telegram bot"}
+          label="API key (optional — leave blank if CallMeBot only gave you @username)"
+          placeholder={config.callmebot?.configured && config.callmebot.masked !== "none" ? `Saved: ${config.callmebot.masked}` : "Usually not needed"}
           value={callKey}
           onChange={setCallKey}
           type="password"
+        />
+        <Field
+          label="Extra users (max 5 total, comma-separated)"
+          placeholder="@friend2,@friend3 or @user:optionalkey"
+          value={callUsers}
+          onChange={setCallUsers}
         />
         <button
           type="button"
@@ -296,8 +307,10 @@ export default function NotificationsPanel() {
         >
           {testingCall ? "Calling…" : "📞 Test CallMeBot"}
         </button>
-        <p className="text-[10px] text-mist/60 mt-2 font-mono">
-          Auto-calls on scan when a stock is <span className="text-emerald-400">BUY NOW</span> (message includes symbol + reason).
+        <p className="text-[10px] text-mist/60 mt-2 font-mono leading-relaxed">
+          From CallMeBot: use <span className="text-paper">@yourusername</span> (example{" "}
+          <span className="text-emerald-400">@dpdeep29</span>). API key optional.
+          Auto-calls on scan for <span className="text-emerald-400">BUY NOW</span> with stock name + short reason.
         </p>
       </ChannelCard>
     </div>

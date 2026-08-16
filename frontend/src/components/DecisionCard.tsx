@@ -343,11 +343,16 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
                 try {
                   const reason =
                     data.natural_language_summary ||
-                    `${data.decision} score ${data.combined_score}. Entry ${data.entry_range?.low ?? "—"} target ${data.target ?? "—"}.`;
-                  const msg = `${data.symbol}: ${data.decision}. ${String(reason).slice(0, 140)}`;
-                  await api.testCallMeBot(msg);
+                    `${data.decision}, score ${data.combined_score}. Entry ${data.entry_range?.low ?? "—"} to ${data.entry_range?.high ?? "—"}, target ${data.target ?? "—"}, stop ${data.stop_loss ?? "—"}.`;
+                  const msg = `${data.symbol} ${data.decision}. ${String(reason).replace(/\s+/g, " ").slice(0, 150)}`;
+                  const r = await api.testCallMeBot(msg);
+                  if (r.ok) {
+                    window.alert(`Call Alert sent for ${data.symbol}.\n\n${msg}`);
+                  } else {
+                    window.alert(`Call Alert failed: ${r.result || r.error || "Check CallMeBot settings in Notifications"}`);
+                  }
                 } catch (e) {
-                  console.error(e);
+                  window.alert(`Call Alert failed: ${(e as Error).message || "unknown error"}`);
                 } finally {
                   setCalling(false);
                 }

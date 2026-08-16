@@ -391,21 +391,21 @@ export default function App() {
         </div>
       )}
 
-      <header className="sticky top-0 z-40 border-b border-slate/60 backdrop-blur-sm bg-ink/90">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between gap-3 flex-wrap">
-          <div className="flex items-center gap-4">
-            <div>
-              <span className="font-display text-xl tracking-tight">Stockky</span>
-              <span className="font-mono text-[10px] text-mist tracking-widest uppercase ml-3 hidden sm:inline">
-                NSE - India
+      <header className="sticky top-0 z-40 border-b border-slate/50 backdrop-blur-md bg-ink/90">
+        <div className="max-w-6xl mx-auto px-3 sm:px-5 py-2.5 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+            <div className="shrink-0 flex items-baseline gap-2">
+              <span className="font-display text-lg sm:text-xl tracking-tight">Stockky</span>
+              <span className="font-mono text-[9px] text-mist tracking-widest uppercase hidden md:inline">
+                NSE
               </span>
             </div>
-            <nav className="flex items-center gap-1 ml-2">
+            <nav className="stockky-header-nav ml-1 sm:ml-2">
               <TabButton active={tab === "dashboard"} onClick={() => setTab("dashboard")}>
                 Dashboard
               </TabButton>
               <TabButton active={tab === "notifications"} onClick={() => setTab("notifications")}>
-                Notifications
+                Alerts
               </TabButton>
               <TabButton active={tab === "training"} onClick={() => setTab("training")}>
                 Training
@@ -415,34 +415,33 @@ export default function App() {
               </TabButton>
             </nav>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <BackendStatusDot status={backendUp} onClick={() => setShowSettings(true)} />
             {tab === "dashboard" && (
               <button
                 onClick={() => setShowWatchlist(!showWatchlist)}
-                className="flex items-center gap-2 text-xs font-mono text-mist hover:text-paper border border-slate rounded-lg px-3 py-2 hover:border-mist/60 transition"
+                className="hidden sm:flex items-center gap-1.5 text-[11px] font-mono text-mist hover:text-paper border border-slate/60 rounded-md px-2.5 py-1.5 hover:border-mist/50 transition"
               >
-                <span className="w-1.5 h-1.5 rounded-full bg-signal-prepare inline-block" />
                 Watchlist ({watchlist.length})
               </button>
             )}
             <button
               onClick={() => setShowServiceManager(!showServiceManager)}
-              className="text-xs font-mono text-mist hover:text-paper border border-slate rounded-lg px-3 py-2 hover:border-mist/60 transition"
+              className="text-[11px] font-mono text-mist hover:text-paper border border-slate/60 rounded-md px-2.5 py-1.5 hover:border-mist/50 transition"
               title="Service Manager"
             >
-              ⚙️ Services
+              Services
             </button>
             <button
               onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-              className="text-xs font-mono text-mist hover:text-paper border border-slate rounded-lg px-3 py-2 hover:border-mist/60 transition"
+              className="text-[11px] font-mono text-mist hover:text-paper border border-slate/60 rounded-md px-2.5 py-1.5 hover:border-mist/50 transition"
               title="Toggle dark / light mode"
             >
-              {theme === "dark" ? "☀️ Light" : "🌙 Dark"}
+              {theme === "dark" ? "Light" : "Dark"}
             </button>
             <button
               onClick={() => setShowSettings(!showSettings)}
-              className="text-xs font-mono text-mist hover:text-paper border border-slate rounded-lg px-3 py-2 hover:border-mist/60 transition"
+              className="text-[11px] font-mono text-mist hover:text-paper border border-slate/60 rounded-md px-2.5 py-1.5 hover:border-mist/50 transition"
               title="Backend settings"
             >
               Settings

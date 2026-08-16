@@ -138,7 +138,7 @@ export interface NotificationConfig {
   discord: NotificationChannelStatus;
   slack: NotificationChannelStatus;
   telegram: NotificationChannelStatus;
-  callmebot: NotificationChannelStatus & { phone?: string };
+  callmebot: NotificationChannelStatus & { phone?: string; user?: string; users_preview?: string };
   persisted: boolean;
 }
 
@@ -164,6 +164,7 @@ export interface SystemHealth {
 export interface TrainingStatusResponse {
   service_url: string;
   production_model_exists: boolean;
+  production_model_version?: string | null;
   last_training: string | null;
   dataset_size: number;
   num_symbols: number;
@@ -588,6 +589,7 @@ export const api = {
     slack_webhook_url?: string;
     telegram_bot_token?: string;
     telegram_chat_id?: string;
+    callmebot_user?: string;
     callmebot_phone?: string;
     callmebot_apikey?: string;
     callmebot_users?: string;

@@ -2,14 +2,11 @@ name: Stockky Scheduler
 
 on:
   schedule:
-    # Run at minute 50 past every hour from 02:50 to 09:50 UTC
-    # This translates to 08:20, 09:20, ... 15:20 IST – giving a 10‑minute buffer before each hour.
+    # Primary hourly-ish ticks IST morning–afternoon
     - cron: "50 2-9 * * 1-5"
-    # Extra keep-warm pings during market hours so Render free-tier services
-    # rarely sleep (every ~12 min, Mon–Fri 03:00–10:00 UTC ≈ 08:30–15:30 IST).
-    - cron: "0,12,24,36,48 3-9 * * 1-5"
+    # Denser alert/scan during NSE hours (~every 10 min Mon–Fri)
+    - cron: "*/10 3-10 * * 1-5"
 
-  # Manual trigger with a checkbox to force scan outside market hours
   workflow_dispatch:
     inputs:
       force_scan:
@@ -30,7 +27,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r services/scheduler-service/requirements.txt
+          pip install -r services/notification-scheduler-service/scheduler/requirements.txt
           # also install sibling package deps if present
           if [ -f services/notification-scheduler-service/scheduler/requirements.txt ]; then
             pip install -r services/notification-scheduler-service/scheduler/requirements.txt
@@ -51,22 +48,20 @@ jobs:
           TRAINING_URL: ${{ secrets.TRAINING_URL }}
           SCHEDULER_URL: ${{ secrets.SCHEDULER_URL }}
         run: |
-          echo "Pinging all services to wake them up..."
-          curl -I $API_GATEWAY_URL/health || true
-          curl -I $MARKET_DATA_URL/health || true
-          curl -I $TECHNICAL_URL/health || true
-          curl -I $FUNDAMENTAL_URL/health || true
-          curl -I $DECISION_URL/health || true
-          curl -I $NEWS_URL/health || true
-          curl -I $EVENT_TRACKER_URL/health || true
-          curl -I $PREDICTION_URL/health || true
-          curl -I $NOTIFICATION_URL/health || true
-          curl -I $MARKET_SENTIMENT_URL/health || true
-          curl -I $TRAINING_URL/health || true
-          curl -I $SCHEDULER_URL/health || true
-          curl -X POST $API_GATEWAY_URL/wake/all || true
-          echo "Waiting 90 seconds for services to spin up..."
-          sleep 90
+          set +e
+          GW="${API_GATEWAY_URL%/}"
+          echo "Waking via $GW/wake-all ..."
+          curl -fsS -m 60 -X POST "$GW/wake-all" || curl -fsS -m 60 "$GW/wake-all" || true
+          for U in "$API_GATEWAY_URL" "$MARKET_DATA_URL" "$TECHNICAL_URL" "$FUNDAMENTAL_URL"                    "$DECISION_URL" "$NEWS_URL" "$EVENT_TRACKER_URL" "$PREDICTION_URL"                    "$NOTIFICATION_URL" "$MARKET_SENTIMENT_URL" "$TRAINING_URL" "$SCHEDULER_URL"; do
+            [ -z "$U" ] && continue
+            curl -fsS -m 20 "${U%/}/health?warm=true" || curl -fsS -m 15 "${U%/}/health" || true
+          done
+          # Drain alert outbox
+          if [ -n "$NOTIFICATION_URL" ]; then
+            curl -fsS -m 30 -X POST "${NOTIFICATION_URL%/}/outbox/process" || true
+          fi
+          echo "Waiting 60 seconds for free-tier dynos..."
+          sleep 60
 
       - name: Run scheduler tick
         env:
@@ -82,5 +77,5 @@ jobs:
           export USE_GATEWAY_ASYNC_SCAN=true
           export BATCH_TIMEOUT=300
           export SCAN_TIMEOUT_TOTAL=5400
-          python services/scheduler-service/run_once.py
+          python services/notification-scheduler-service/scheduler/run_once.py
 # Updated for 5-service architecture. Set secrets for the 5 placeholder/real URLs.

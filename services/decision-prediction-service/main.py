@@ -1,5 +1,5 @@
 """
-Stockky Decision Prediction Service
+Stockky Decision Prediction Service - Reliable version
 """
 import os
 import sys
@@ -14,12 +14,12 @@ logger = logging.getLogger("decision-prediction-service")
 
 app = FastAPI(
     title="Stockky Decision Prediction Service",
-    version="1.0.3",
+    version="1.0.4",
     description="Merged decision + prediction + training"
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ---------- 1. Decision ----------
+# ---------- Decision ----------
 try:
     sys.path.insert(0, os.path.join(BASE, "decision"))
     from decision.main import app as dec_app
@@ -28,10 +28,9 @@ try:
 except Exception as e:
     logger.error(f"❌ Decision failed: {e}")
 
-# ---------- 2. Training ----------
+# ---------- Training ----------
 try:
-    # Clear previous path pollution
-    sys.path = [p for p in sys.path if "prediction" not in p and "decision" not in p]
+    sys.path = [p for p in sys.path if "decision" not in p]
     sys.path.insert(0, os.path.join(BASE, "training"))
     from training.app import app as train_app
     app.mount("/training", train_app)
@@ -39,31 +38,43 @@ try:
 except Exception as e:
     logger.error(f"❌ Training failed: {e}")
 
-# ---------- 3. Prediction (isolated) ----------
+# ---------- Prediction (direct registration - most reliable) ----------
 try:
-    # Completely isolate prediction path
-    sys.path = [p for p in sys.path if "training" not in p and "decision" not in p]
-    prediction_path = os.path.join(BASE, "prediction")
-    sys.path.insert(0, prediction_path)
+    prediction_dir = os.path.join(BASE, "prediction")
+    sys.path.insert(0, prediction_dir)
+    os.chdir(prediction_dir)
 
-    # Change directory so relative imports work correctly
-    old_cwd = os.getcwd()
-    os.chdir(prediction_path)
+    # Import the actual predict function
+    from main import predict as pred_func
+    from main import health as pred_health
+    from main import root as pred_root
 
-    import main as pred_main
-    app.mount("/prediction", pred_main.app)
+    os.chdir(BASE)
 
-    os.chdir(old_cwd)
-    logger.info("✅ Mounted /prediction")
+    @app.get("/prediction/")
+    def prediction_root():
+        return {"service": "prediction-service", "status": "running", "version": "direct"}
+
+    @app.get("/prediction/health")
+    def prediction_health():
+        return {"status": "ok", "service": "prediction-service"}
+
+    @app.get("/prediction/predict/{symbol}")
+    def prediction_predict(symbol: str):
+        return pred_func(symbol)
+
+    logger.info("✅ Prediction endpoints registered directly")
 except Exception as e:
-    logger.error(f"❌ Prediction mount failed: {e}")
+    logger.error(f"❌ Prediction registration failed: {e}")
+    import traceback
+    logger.error(traceback.format_exc())
 
 
 @app.get("/")
 def root():
     return {
         "service": "Stockky Decision Prediction Service",
-        "version": "1.0.3",
+        "version": "1.0.4",
         "status": "running",
         "modules": ["decision", "prediction", "training"]
     }

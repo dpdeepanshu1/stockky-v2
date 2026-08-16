@@ -963,7 +963,7 @@ function MarketClock() {
   );
 }
 
-function SettingsPagefunction SettingsPage({
+function SettingsPage({
   backendUp,
   onSaved,
   theme,

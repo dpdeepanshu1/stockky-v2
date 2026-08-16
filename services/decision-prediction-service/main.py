@@ -1,5 +1,5 @@
 """
-Stockky Decision Prediction Service - Final reliable version
+Stockky Decision Prediction Service - Final
 """
 import os
 import sys
@@ -13,11 +13,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("decision-prediction-service")
 
-app = FastAPI(
-    title="Stockky Decision Prediction Service",
-    version="1.0.5",
-    description="Merged decision + prediction + training"
-)
+app = FastAPI(title="Stockky Decision Prediction Service", version="1.0.6")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ---------- Decision ----------
@@ -27,7 +23,7 @@ try:
     app.mount("/decision", dec_app)
     logger.info("✅ Mounted /decision")
 except Exception as e:
-    logger.error(f"❌ Decision failed: {e}")
+    logger.error(f"❌ Decision: {e}")
 
 # ---------- Training ----------
 try:
@@ -36,22 +32,30 @@ try:
     app.mount("/training", train_app)
     logger.info("✅ Mounted /training")
 except Exception as e:
-    logger.error(f"❌ Training failed: {e}")
+    logger.error(f"❌ Training: {e}")
 
-# ---------- Prediction (using importlib - no circular import) ----------
+# ---------- Prediction (fully isolated) ----------
 try:
-    prediction_path = os.path.join(BASE, "prediction", "main.py")
-    spec = importlib.util.spec_from_file_location("prediction_service", prediction_path)
-    pred_module = importlib.util.module_from_spec(spec)
+    # Completely clean path for prediction
+    clean_path = [p for p in sys.path if "training" not in p and "decision" not in p]
+    prediction_dir = os.path.join(BASE, "prediction")
+    clean_path.insert(0, prediction_dir)
+    sys.path = clean_path
 
-    # Temporarily add prediction folder to path for its internal imports
-    sys.path.insert(0, os.path.join(BASE, "prediction"))
-    spec.loader.exec_module(pred_module)
+    # Load prediction/main.py by absolute path
+    pred_file = os.path.join(prediction_dir, "main.py")
+    spec = importlib.util.spec_from_file_location("pred_mod", pred_file)
+    pred_mod = importlib.util.module_from_spec(spec)
 
-    # Register the routes
+    # Execute with prediction folder as current directory
+    old_cwd = os.getcwd()
+    os.chdir(prediction_dir)
+    spec.loader.exec_module(pred_mod)
+    os.chdir(old_cwd)
+
     @app.get("/prediction/")
     def prediction_root():
-        return {"service": "prediction-service", "status": "running", "method": "importlib"}
+        return {"service": "prediction-service", "status": "running"}
 
     @app.get("/prediction/health")
     def prediction_health():
@@ -59,9 +63,9 @@ try:
 
     @app.get("/prediction/predict/{symbol}")
     def prediction_predict(symbol: str):
-        return pred_module.predict(symbol)
+        return pred_mod.predict(symbol)
 
-    logger.info("✅ Prediction endpoints registered via importlib")
+    logger.info("✅ Prediction endpoints ready")
 except Exception as e:
     logger.error(f"❌ Prediction failed: {e}")
     import traceback
@@ -70,12 +74,7 @@ except Exception as e:
 
 @app.get("/")
 def root():
-    return {
-        "service": "Stockky Decision Prediction Service",
-        "version": "1.0.5",
-        "status": "running",
-        "modules": ["decision", "prediction", "training"]
-    }
+    return {"service": "Stockky Decision Prediction Service", "version": "1.0.6", "status": "running"}
 
 @app.get("/health")
 def health():

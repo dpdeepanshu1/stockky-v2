@@ -129,11 +129,11 @@ def compute_pillar_scores(
     vol = 55.0
     if technical.get("volume_surge"):
         vol = 75.0
-    delivery = _n(extras.get("delivery_pct"), technical.get("delivery_pct"), 50)
+    delivery = _n(extras.get("delivery_pct") or technical.get("delivery_pct"), 50)
     volume_rs = _clamp(0.45 * rs + 0.35 * vol + 0.20 * (50 + (delivery - 50) * 0.5))
 
     fund = _n(fundamental.get("fundamental_score"), 50)
-    quality = _n(extras.get("quality_score"), fundamental.get("quality_score"), fund)
+    quality = _n(extras.get("quality_score") or fundamental.get("quality_score"), fund)
     peer = _n(extras.get("peer_relative_score"), 50)
     quality_peers = _clamp(0.55 * quality + 0.45 * peer)
 

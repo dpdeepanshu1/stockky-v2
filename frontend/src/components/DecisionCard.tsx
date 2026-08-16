@@ -618,7 +618,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
                 <MetricItem label="ROE" value={`${metrics.roe.toFixed(1)}%`} />
               )}
               {metrics.debt_to_equity != null && (
-                <MetricItem label="Debt/Equity" value={`${metrics.debt_to_equity.toFixed(1)}`} />
+                <MetricItem label="Debt/Equity" value={`${Number(metrics.debt_to_equity).toFixed(2)}x`} />
               )}
               {metrics.free_cashflow != null && (
                 <MetricItem label="Free Cash Flow" value={metrics.free_cashflow > 0 ? "Positive" : "Negative"} />
@@ -1251,7 +1251,7 @@ function NewsItemWithFundamentals({
               <div className="bg-ink/40 rounded px-2 py-1">
                 <div className="text-[9px] text-mist/50 uppercase">Debt/Equity</div>
                 <div className={`text-sm font-mono ${fundamentalMetrics.debt_to_equity < 1 ? 'text-green-400' : fundamentalMetrics.debt_to_equity < 2 ? 'text-yellow-400' : 'text-red-400'}`}>
-                  {fundamentalMetrics.debt_to_equity.toFixed(1)}
+                  {Number(fundamentalMetrics.debt_to_equity).toFixed(2)}x
                 </div>
               </div>
             )}

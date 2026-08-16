@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any   # <-- fixed: added Dict, Any
 import joblib
 import numpy as np
-from sqlalchemy import create_engine, func
+from sqlalchemy import create_engine, func, text
 from sqlalchemy.orm import sessionmaker
 
 from models import Base, ensure_schema, PredictionSnapshot, PredictionOutcome, TrainingRun, PaperTrade
@@ -207,6 +207,59 @@ def is_training_running():
 # ----------------------------------------------------------------------
 # Helper functions
 # ----------------------------------------------------------------------
+def _db_connection_info():
+    """Probe DB connectivity for UI (no secrets)."""
+    info = {
+        "db_backend": _db_backend,
+        "db_durable": _db_backend == "postgres",
+        "db_connected": False,
+        "db_provider": None,
+        "db_message": "",
+        "db_error": None,
+    }
+    url = DATABASE_URL or ""
+    low = url.lower()
+    if "supabase" in low:
+        info["db_provider"] = "supabase"
+    elif "neon.tech" in low or "neon" in low:
+        info["db_provider"] = "neon"
+    elif _db_backend == "postgres":
+        info["db_provider"] = "postgres"
+    else:
+        info["db_provider"] = "sqlite"
+    try:
+        db = SessionLocal()
+        try:
+            db.execute(text("SELECT 1"))
+            info["db_connected"] = True
+            if info["db_durable"]:
+                prov = (info["db_provider"] or "postgres").title()
+                info["db_message"] = f"Connected to {prov} Postgres — trades, training, and backups persist."
+            else:
+                info["db_message"] = (
+                    "Using local SQLite (ephemeral). Set DATABASE_URL to Supabase/Neon Postgres "
+                    "on decision-prediction-service so data survives restarts."
+                )
+        finally:
+            db.close()
+    except Exception as e:
+        info["db_connected"] = False
+        err = str(e)
+        # User-friendly common errors
+        if "password" in err.lower() or "authentication" in err.lower():
+            info["db_error"] = "Database authentication failed — check Supabase password in DATABASE_URL."
+        elif "timeout" in err.lower() or "could not connect" in err.lower() or "connection refused" in err.lower():
+            info["db_error"] = "Cannot reach database host — check Supabase URL, network, or SSL."
+        elif "ssl" in err.lower():
+            info["db_error"] = "SSL connection issue with Postgres — ensure sslmode=require in DATABASE_URL."
+        elif "does not exist" in err.lower():
+            info["db_error"] = "Database name not found — verify Supabase project database name."
+        else:
+            info["db_error"] = f"Database error: {err[:180]}"
+        info["db_message"] = info["db_error"]
+    return info
+
+
 def get_training_status():
     status = {
         'service_url': SERVICE_URL,
@@ -222,6 +275,7 @@ def get_training_status():
         'live_win_rate': None,
         'win_rate': None,
     }
+    status.update(_db_connection_info())
 
     db = SessionLocal()
     try:
@@ -340,7 +394,12 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return JSONResponse(content={"status": "ok"})
+    info = _db_connection_info()
+    ok = info.get("db_connected", False)
+    return JSONResponse(content={
+        "status": "ok" if ok else "degraded",
+        **info,
+    })
 
 @app.get("/lock-status")
 async def lock_status():
@@ -848,7 +907,14 @@ async def commit_actionable_picks(req: ActionableCommitRequest, background_tasks
                 "symbol": pick.symbol, "prediction_id": pred_id, "record_status": record_status,
                 "trade_id": trade_id, "trade_status": trade_status,
             })
-        return JSONResponse(content={"results": results})
+        dbinfo = _db_connection_info()
+        return JSONResponse(content={
+            "results": results,
+            "db_backend": dbinfo.get("db_backend"),
+            "db_durable": dbinfo.get("db_durable"),
+            "db_connected": dbinfo.get("db_connected"),
+            "db_message": dbinfo.get("db_message") or dbinfo.get("db_error"),
+        })
     except Exception as e:
         db.rollback()
         logger.error(f"Error committing actionable picks: {e}")

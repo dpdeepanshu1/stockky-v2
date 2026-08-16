@@ -1731,6 +1731,40 @@ async def ops_refresh_static_params(limit: int = 60):
 
 
 
+
+@app.get("/ops/db-status")
+async def ops_db_status():
+    """Frontend banner: is Supabase/Postgres connected on decision-prediction/training?"""
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            r = await client.get(f"{TRAINING_URL.rstrip('/')}/health")
+            if r.status_code == 200:
+                data = r.json()
+                return {
+                    "ok": True,
+                    "source": "training",
+                    **{k: data.get(k) for k in (
+                        "db_backend", "db_durable", "db_connected", "db_provider",
+                        "db_message", "db_error", "status",
+                    ) if k in data or True},
+                }
+            return {
+                "ok": False,
+                "db_connected": False,
+                "db_message": f"Training service health HTTP {r.status_code}",
+                "db_error": f"Training service health HTTP {r.status_code}",
+            }
+    except Exception as e:
+        return {
+            "ok": False,
+            "db_connected": False,
+            "db_backend": "unknown",
+            "db_durable": False,
+            "db_message": f"Cannot reach training service: {e}",
+            "db_error": str(e)[:200],
+        }
+
+
 @app.post("/ops/idle-tick")
 async def ops_idle_tick():
     """Called by frontend after ~5 min idle during market hours only.

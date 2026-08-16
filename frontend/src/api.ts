@@ -64,21 +64,6 @@ export interface Decision {
   natural_language_summary?: string;
   fundamental_metrics?: FundamentalMetrics;
   data_insufficient?: boolean;
-  data_quality?: {
-    quality?: string;
-    pillars?: Record<string, boolean | string>;
-    missing?: string[];
-    note?: string;
-  } | string | null;
-  news_data?: {
-    summary?: string;
-    headline_count?: number;
-    headlines?: Array<{ title?: string; url?: string } | string>;
-    reasons?: string[];
-  } | null;
-  event_summary?: string | null;
-  circuit_open?: string | null;
-
   fundamental_fallback?: boolean;
   event_score_delta?: number;
   event_data?: Record<string, unknown> | null;
@@ -118,7 +103,7 @@ export interface ScanResult {
 }
 
 export interface ScanStatus {
-  status: "running" | "done" | "error";
+  status: "running" | "done" | "error" | "cancelled";
   total: number;
   processed: number;
   elapsed: number;
@@ -527,9 +512,9 @@ export const api = {
 
   runScan: () => request<ScanResult>("/scan", undefined, 2, 120000),
 
-  scanStart: (forceRefresh = false, lite?: boolean | null) =>
-    request<{ task_id: string; from_cache?: boolean; message?: string; scanned_at?: string; lite?: boolean }>(
-      `/scan/start?force_refresh=${forceRefresh}${lite === true ? "&lite=true" : lite === false ? "&lite=false" : ""}`,
+  scanStart: (forceRefresh = false, lite: boolean | null = null) =>
+    request<{ task_id: string }>(
+      `/scan/start?force_refresh=${forceRefresh}${lite === null ? "" : `&lite=${lite ? "true" : "false"}`}`,
       { method: "POST" },
       2,
       120000
@@ -685,47 +670,6 @@ export const api = {
   triggerEvaluation: (period: "t1" | "t5") =>
     request<{ status: string }>(`/training/api/evaluate/${period}`, { method: "POST" }, 1, 30000),
 
-  getQuote: (symbol: string) =>
-    request<{ symbol: string; price?: number; close?: number; as_of?: string; source?: string }>(
-      `/quote/${encodeURIComponent(symbol)}`,
-      undefined,
-      1,
-      10000
-    ),
-
-  getEvaluationStatus: () =>
-    request<{
-      t1: {
-        period: string;
-        total: number;
-        pending: number;
-        evaluated: number;
-        due_now: number;
-        success: number;
-        success_rate_pct: number | null;
-        progress_pct: number;
-        eta_sweep_seconds: number;
-        eta_sweep_label: string;
-        next_unlock_hours: number | null;
-        status: string;
-      };
-      t5: {
-        period: string;
-        total: number;
-        pending: number;
-        evaluated: number;
-        due_now: number;
-        success: number;
-        success_rate_pct: number | null;
-        progress_pct: number;
-        eta_sweep_seconds: number;
-        eta_sweep_label: string;
-        next_unlock_hours: number | null;
-        status: string;
-      };
-      generated_at?: string;
-    }>("/training/api/evaluate/status", undefined, 1, 15000),
-
   /** Record picks for training/T+1/T+5 tracking. Does NOT open trades by default. */
   commitActionablePicks: (picks: ActionablePick[], capitalPerTrade = 10000, openTrades = false) =>
     request<{ results: ActionableCommitResult[] }>(
@@ -810,31 +754,16 @@ export const api = {
       body: JSON.stringify({ quantity: qty, price }),
     }, 1, 30000),
 
-  openManualTrade: (payload: {
-    symbol: string;
-    quantity?: number;
-    price?: number;
-    capital?: number;
-    note?: string;
-  }) =>
-    request<{
-      ok: boolean;
-      trade_id: string;
-      symbol: string;
-      quantity: number;
-      entry_price: number;
-      capital_allocated: number;
-      was_new: boolean;
-      ai_warning?: string;
-    }>("/training/api/trades/manual", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    }, 1, 30000),
-
   closeTrade: (tradeId: string) =>
     request<{ status: string; trade_id: string; exit_price: number; pnl_pct: number }>(
       `/training/api/trades/${tradeId}/close`, { method: "POST" }, 1, 30000
+    ),
+  getQuote: (symbol: string) =>
+    request<{ symbol: string; price?: number; close?: number; as_of?: string; source?: string }>(
+      `/quote/${encodeURIComponent(symbol)}`,
+      undefined,
+      1,
+      10000
     ),
 
   getStockkyHot: (force = false) =>

@@ -27,14 +27,6 @@ export default function Training() {
   const [runningT1, setRunningT1] = useState(false);
   const [runningT5, setRunningT5] = useState(false);
 
-  // T+1 / T+5 evaluation progress
-  const [evalStatus, setEvalStatus] = useState<{
-    t1: any;
-    t5: any;
-    generated_at?: string;
-  } | null>(null);
-  const [loadingEvalStatus, setLoadingEvalStatus] = useState(false);
-
   // NEW: animated live training progress
   const [trainProgress, setTrainProgress] = useState<TrainingProgress | null>(null);
   const progressPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -129,18 +121,6 @@ export default function Training() {
     }
   };
 
-  const fetchEvaluationStatus = async () => {
-    try {
-      setLoadingEvalStatus(true);
-      const data = await api.getEvaluationStatus();
-      setEvalStatus(data);
-    } catch (err) {
-      console.error("Failed to fetch evaluation status:", err);
-    } finally {
-      setLoadingEvalStatus(false);
-    }
-  };
-
   // Manual fallback for evaluate_t1/evaluate_t5, in case scheduler-service
   // isn't running. Sweeps every pending prediction, same endpoint the
   // backend would call on a cron.
@@ -148,7 +128,7 @@ export default function Training() {
     const setRunning = period === "t1" ? setRunningT1 : setRunningT5;
     setRunning(true);
     try {
-      await api.triggerEvaluation(period);
+      const res = await api.triggerEvaluation(period);
       const label = period === "t1" ? "T+1" : "T+5";
       showToast(
         "info",
@@ -158,13 +138,12 @@ export default function Training() {
         fetchPredictionHistory();
         fetchPeriodRollup(periodView);
         fetchStatus();
-        fetchEvaluationStatus();
       }, 4000);
+      // Second refresh after sweep has had time to run
       setTimeout(() => {
         fetchPredictionHistory();
         fetchPeriodRollup(periodView);
-        fetchEvaluationStatus();
-        showToast("info", `${label} sweep finished requesting. Check progress above — empty outcomes usually mean prices not available yet for the horizon.`);
+        showToast("info", `${label} sweep finished requesting. Check history below — empty outcomes usually mean prices not available yet for the horizon.`);
       }, 20000);
     } catch (err: any) {
       const msg = err?.message || String(err || "");
@@ -185,12 +164,7 @@ export default function Training() {
     fetchInsights();
     fetchSummaryMetrics();
     fetchPeriodRollup("daily");
-    fetchEvaluationStatus();
-    const evalPoll = setInterval(() => {
-      fetchEvaluationStatus();
-    }, 30000);
     return () => {
-      clearInterval(evalPoll);
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     };
@@ -211,7 +185,7 @@ export default function Training() {
       try {
         const p = await api.getTrainingProgress();
         // Normalize stage aliases
-         const stageMap: Record<string, TrainingProgress["stage"]> = {
+        const stageMap: Record<string, TrainingProgress["stage"]> = {
           loading: "loading_data",
           loaded: "data_loaded",
           fitting: "fitting_model",
@@ -265,7 +239,21 @@ export default function Training() {
     setTimeout(() => setToast(null), 5000);
   };
 
-  const startTraining = () => {
+
+  // Keep elapsed timer alive whenever backend reports training_in_progress
+  useEffect(() => {
+    if (status?.training_in_progress && !trainingActiveRef.current) {
+      trainingActiveRef.current = true;
+      setTraining(true);
+      if (!timerIntervalRef.current) {
+        timerIntervalRef.current = setInterval(() => {
+          setElapsedSeconds((prev) => prev + 1);
+        }, 1000);
+      }
+    }
+  }, [status?.training_in_progress]);
+
+    const startTraining = () => {
     trainingActiveRef.current = true;
     setTraining(true);
     setElapsedSeconds(0);
@@ -578,20 +566,7 @@ export default function Training() {
   };
 
   return (
-    <div className="space-y-6 research-terminal">
-      <header className="terminal-panel">
-        <p className="dash-section-title">Research terminal</p>
-        <h2 className="font-display text-lg text-cyan-300/90 mb-1">Training Lab</h2>
-        <p className="text-xs text-mist/70 max-w-2xl mb-2">
-          Accuracy history, T+1/T+5 evaluation, parameter evolution, and winning vs losing signals —
-          only real recorded predictions and outcomes.
-        </p>
-        <div className="flex flex-wrap gap-2 mono text-[10px] text-mist/60">
-          <span className="px-2 py-0.5 border border-slate/50 rounded">WIN-RATE LOOP</span>
-          <span className="px-2 py-0.5 border border-slate/50 rounded">T+1 / T+5</span>
-          <span className="px-2 py-0.5 border border-slate/50 rounded">PICK TRACKING</span>
-        </div>
-      </header>
+    <div className="space-y-6">
       {/* Toast Alert */}
       {toast && (
         <div
@@ -615,7 +590,14 @@ export default function Training() {
 
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <h2 className="font-display text-2xl text-paper">🧠 Training Intelligence</h2>
+        <h2 className="font-display text-2xl text-paper">🧠 Training Intelligence
+        {status?.service_url ? (
+          <span className="ml-2 font-mono text-[10px] text-signal-buy/80">· linked</span>
+        ) : status ? (
+          <span className="ml-2 font-mono text-[10px] text-mist/50">· status loaded</span>
+        ) : (
+          <span className="ml-2 font-mono text-[10px] text-amber-300/80">· connecting…</span>
+        )}</h2>
         <div className="flex flex-wrap gap-3">
           <button
             onClick={handleTriggerTraining}
@@ -660,79 +642,6 @@ export default function Training() {
         </div>
       </div>
 
-      {/* T+1 / T+5 evaluation progress */}
-      <div className="eval-progress-panel terminal-panel">
-        <div className="flex items-center justify-between gap-3 mb-3">
-          <h3 className="font-mono text-xs text-mist uppercase tracking-widest m-0">
-            T+1 / T+5 Evaluation Progress
-          </h3>
-          <button
-            type="button"
-            onClick={() => fetchEvaluationStatus()}
-            className="btn-terminal"
-            disabled={loadingEvalStatus}
-          >
-            {loadingEvalStatus ? "Refreshing…" : "Refresh"}
-          </button>
-        </div>
-        <div className="eval-grid">
-          {(["t1", "t5"] as const).map((key) => {
-            const b = evalStatus?.[key];
-            const label = key === "t1" ? "T+1" : "T+5";
-            const pct = b?.progress_pct ?? 0;
-            const status = b?.status || "empty";
-            return (
-              <div key={key} className="eval-card">
-                <div className="eval-card-top">
-                  <span className="mono eval-label">{label}</span>
-                  <span className={`eval-status eval-status-${status}`}>{status}</span>
-                </div>
-                <div className="eval-bar-track">
-                  <div className="eval-bar-fill" style={{ width: `${Math.min(100, pct)}%` }} />
-                </div>
-                <div className="eval-stats mono">
-                  <span>{b?.evaluated ?? 0} / {b?.total ?? 0} evaluated</span>
-                  <span>{Math.round(pct)}%</span>
-                </div>
-                <div className="eval-meta mono">
-                  <div>Pending: <strong>{b?.pending ?? 0}</strong></div>
-                  <div>Due now: <strong>{b?.due_now ?? 0}</strong></div>
-                  <div>
-                    Success:{" "}
-                    <strong>
-                      {b?.success_rate_pct != null ? `${b.success_rate_pct}%` : "—"}
-                    </strong>
-                  </div>
-                  <div>
-                    Sweep ETA: <strong>{b?.eta_sweep_label || "—"}</strong>
-                  </div>
-                  {b?.next_unlock_hours != null && b?.due_now === 0 && (b?.pending ?? 0) > 0 && (
-                    <div className="eval-wait">
-                      Next unlock in ~{b.next_unlock_hours}h (need more price bars)
-                    </div>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => runEvaluation(key)}
-                  disabled={key === "t1" ? runningT1 : runningT5}
-                  className="btn-terminal eval-run-btn"
-                >
-                  {(key === "t1" ? runningT1 : runningT5) ? (
-                    <><Spinner /> Running…</>
-                  ) : (
-                    `Run ${label} sweep`
-                  )}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-        <p className="text-mist/40 text-[11px] mt-2 mb-0">
-          Due = enough calendar time has passed for that horizon. Sweep ETA is for due items only (~2.5s/symbol).
-        </p>
-      </div>
-
       {/* Manual intervention: for when scheduler-service isn't running these on
           its own cron. Each button hits the same endpoint the automation would. */}
       <div className="bg-graphite border border-slate/60 rounded-xl p-4">
@@ -770,9 +679,9 @@ export default function Training() {
                 {training ? "Training in progress..." : "Training is running in background..."}
               </h3>
               <div className="flex flex-wrap gap-6 mt-1 text-sm">
-                <div>
+                <div className="rounded-md border border-signal-prepare/40 bg-signal-prepare/10 px-3 py-1">
                   <span className="text-mist/60">Elapsed: </span>
-                  <span className="font-mono text-paper">{formatTime(elapsedSeconds)}</span>
+                  <span className="font-mono text-lg text-signal-prepare font-semibold">{formatTime(elapsedSeconds || 0)}</span>
                 </div>
                 {(() => {
                   const eta = estimateTrainingRemaining(trainProgress?.stage, elapsedSeconds);

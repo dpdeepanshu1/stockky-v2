@@ -52,11 +52,13 @@ function Section({
   subtitle,
   items,
   liveQuotes,
+  onAnalyze,
 }: {
   title: string;
   subtitle: string;
   items: HotItem[];
   liveQuotes: Record<string, { price: number; as_of?: string }>;
+  onAnalyze?: (symbol: string) => void;
 }) {
   return (
     <section className="hot-section">
@@ -74,6 +76,7 @@ function Section({
             return (
               <ConvictionCard
                 key={`${item.section || title}-${item.symbol}`}
+                onSelect={onAnalyze}
                 data={{
                   symbol: item.symbol,
                   decision: item.decision,
@@ -113,6 +116,18 @@ function Section({
                         Live ₹{live.price.toLocaleString("en-IN")}
                       </p>
                     )}
+                    {onAnalyze && (
+                      <button
+                        type="button"
+                        className="mt-2 w-full font-mono text-[11px] px-2 py-1.5 rounded-lg border border-sky-500/40 text-sky-300 hover:bg-sky-500/15 transition"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onAnalyze(item.symbol);
+                        }}
+                      >
+                        🔍 Analyse {item.symbol}
+                      </button>
+                    )}
                   </>
                 }
               />
@@ -124,7 +139,8 @@ function Section({
   );
 }
 
-export default function HotStocks() {
+export default function HotStocks(props: { onAnalyze?: (symbol: string) => void } = {}) {
+  const { onAnalyze } = props;
   const { subscribeQuotes, quotes: liveQuotes, connected: quoteWs } = useStockkyRealtime();
   const [data, setData] = useState<HotPayload | null>(null);
   const [loading, setLoading] = useState(true);
@@ -185,18 +201,21 @@ export default function HotStocks() {
             subtitle="Elevated news score or material headlines"
             items={data.news_driven || []}
             liveQuotes={liveQuotes}
+            onAnalyze={onAnalyze}
           />
           <Section
             title="Results / earnings"
             subtitle="Upcoming or recent results catalysts"
             items={data.results_driven || []}
             liveQuotes={liveQuotes}
+            onAnalyze={onAnalyze}
           />
           <Section
             title="Bulk / insider"
             subtitle="Bulk deals and insider transaction activity"
             items={data.bulk_insider_driven || []}
             liveQuotes={liveQuotes}
+            onAnalyze={onAnalyze}
           />
         </>
       )}

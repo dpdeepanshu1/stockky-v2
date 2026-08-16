@@ -860,107 +860,259 @@ function EventSection({ symbol }: { symbol: string }) {
   );
 }
 
-// ── EventDataView (v2) ──
+// ── EventDataView (v2) — clean, readable event cards ──
 function EventDataView({ data }: { data: Record<string, unknown> }) {
-  const skipKeys = new Set(['news', 'recent_news', 'symbol']);
-  const entries = Object.entries(data).filter(([key]) => !skipKeys.has(key));
+  const skipKeys = new Set([
+    "news",
+    "recent_news",
+    "symbol",
+    "raw",
+    "raw_response",
+    "debug",
+  ]);
 
+  const formatVal = (v: unknown): string => {
+    if (v == null) return "";
+    if (typeof v === "boolean") return v ? "Yes" : "No";
+    if (typeof v === "number") return String(v);
+    if (typeof v === "string") {
+      const s = v.trim();
+      // ISO-ish timestamps
+      if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+        try {
+          return new Date(s).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+        } catch {
+          return s;
+        }
+      }
+      // Hide mega Google News redirect URLs in plain text dumps
+      if (s.length > 160 && (s.includes("http") || s.includes("news.google"))) {
+        return s.slice(0, 120) + "…";
+      }
+      return s;
+    }
+    if (Array.isArray(v)) return v.map(formatVal).filter(Boolean).join("; ");
+    if (typeof v === "object") {
+      const o = v as Record<string, unknown>;
+      const title = o.title || o.name || o.description || o.headline;
+      if (typeof title === "string" && title.trim()) return title.trim();
+      try {
+        return JSON.stringify(o);
+      } catch {
+        return String(v);
+      }
+    }
+    return String(v);
+  };
+
+  const shortUrl = (url: string) => {
+    try {
+      const u = new URL(url);
+      return u.hostname.replace(/^www\./, "");
+    } catch {
+      return "link";
+    }
+  };
+
+  const renderNewsish = (items: unknown[], key: string) => {
+    if (!items.length) return null;
+    return (
+      <div key={key} className="space-y-2">
+        <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">
+          {key.replace(/_/g, " ")}
+        </div>
+        <ul className="space-y-2">
+          {items.slice(0, 8).map((raw, idx) => {
+            if (typeof raw === "string") {
+              // Parse "Title - publisher · published: … · url: …"
+              let title = raw;
+              let meta = "";
+              const urlMatch = raw.match(/https?:\/\/\S+/);
+              const url = urlMatch ? urlMatch[0].replace(/[),.;]+$/, "") : "";
+              title = raw
+                .replace(/\s*[·•]\s*url:\s*https?:\/\/\S+/gi, "")
+                .replace(/\s*url:\s*https?:\/\/\S+/gi, "")
+                .replace(/\s*https?:\/\/\S+/g, "")
+                .trim();
+              const pubMatch = title.match(/\b(?:publisher|published):\s*([^·•]+)/i);
+              if (pubMatch) meta = pubMatch[1].trim();
+              title = title
+                .replace(/\bpublisher:\s*[^·•]+/gi, "")
+                .replace(/\bpublished:\s*[^·•]+/gi, "")
+                .replace(/\s*[·•]\s*/g, " · ")
+                .replace(/\s{2,}/g, " ")
+                .trim();
+              return (
+                <li
+                  key={idx}
+                  className="rounded-lg border border-slate/40 bg-ink/40 px-3 py-2 text-sm"
+                >
+                  <div className="text-paper leading-snug font-medium">{title || "Event"}</div>
+                  <div className="mt-1 flex flex-wrap gap-2 text-[10px] font-mono text-mist/50">
+                    {meta && <span>{meta}</span>}
+                    {url && (
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sky-400 hover:underline"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {shortUrl(url)} ↗
+                      </a>
+                    )}
+                  </div>
+                </li>
+              );
+            }
+            if (raw && typeof raw === "object") {
+              const o = raw as Record<string, any>;
+              const title = String(o.title || o.name || o.description || o.event || "Item");
+              const publisher = o.publisher || o.source || "";
+              const published = o.published || o.published_at || o.date || o.datetime || "";
+              const url = typeof o.url === "string" ? o.url : "";
+              let pubLabel = "";
+              if (published) {
+                try {
+                  pubLabel = new Date(String(published)).toLocaleString("en-IN", {
+                    dateStyle: "medium",
+                    timeStyle: "short",
+                  });
+                } catch {
+                  pubLabel = String(published);
+                }
+              }
+              return (
+                <li
+                  key={idx}
+                  className="rounded-lg border border-slate/40 bg-ink/40 px-3 py-2 text-sm"
+                >
+                  <div className="text-paper leading-snug font-medium">{title}</div>
+                  <div className="mt-1 flex flex-wrap gap-2 text-[10px] font-mono text-mist/50">
+                    {publisher && <span>{String(publisher)}</span>}
+                    {pubLabel && <span>{pubLabel}</span>}
+                    {url && (
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sky-400 hover:underline"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {shortUrl(url)} ↗
+                      </a>
+                    )}
+                  </div>
+                </li>
+              );
+            }
+            return null;
+          })}
+        </ul>
+      </div>
+    );
+  };
+
+  const entries = Object.entries(data).filter(([key]) => !skipKeys.has(key));
   if (entries.length === 0) {
     return <p className="text-sm text-mist/40 italic">No additional event data.</p>;
   }
 
+  // Prefer structured news-like arrays
+  const preferredOrder = [
+    "classified_events",
+    "events",
+    "results",
+    "upcoming",
+    "recent",
+    "recent_changes",
+    "summary",
+    "checked_at",
+    "cached",
+  ];
+  entries.sort((a, b) => {
+    const ia = preferredOrder.indexOf(a[0]);
+    const ib = preferredOrder.indexOf(b[0]);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+  });
+
   return (
     <div className="space-y-3">
       {entries.map(([key, value]) => {
-        const label = key.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase());
-        if (value == null) return null;
+        if (value == null || value === "") return null;
+        const label = key.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase());
 
         if (Array.isArray(value)) {
           if (value.length === 0) return null;
-          if (value.every(item => typeof item === 'string')) {
-            return (
-              <div key={key}>
-                <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider mb-1">{label}</div>
-                <ul className="space-y-1">
-                  {value.map((item, i) => (
-                    <li key={i} className="text-sm text-mist/80 flex gap-2 leading-relaxed">
-                      <span className="text-slate mt-1 shrink-0">–</span>
-                      <span>{item}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            );
-          }
-          if (value.every(item => typeof item === 'object' && item !== null)) {
-            return (
-              <div key={key}>
-                <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider mb-1">{label}</div>
-                <div className="space-y-2">
-                  {value.map((item, idx) => {
-                    const obj = item as Record<string, any>;
-                    const title = obj.title || obj.name || obj.description || obj.event || 'Item';
-                    const details = Object.entries(obj)
-                      .filter(([k]) => !['title', 'name', 'description', 'event'].includes(k))
-                      .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`)
-                      .join(' · ');
-                    return (
-                      <div key={idx} className="border-b border-slate/30 pb-2 last:border-0">
-                        <div className="text-sm text-paper font-medium">{title}</div>
-                        {details && (
-                          <div className="text-xs text-mist/60">{details}</div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            );
+          // News / event objects or messy strings
+          if (
+            value.every(
+              (item) =>
+                typeof item === "string" ||
+                (typeof item === "object" && item !== null)
+            )
+          ) {
+            return renderNewsish(value, label);
           }
           return (
             <div key={key}>
-              <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider mb-1">{label}</div>
-              <ul className="space-y-1">
-                {value.map((item, i) => (
-                  <li key={i} className="text-sm text-mist/80 flex gap-2 leading-relaxed">
-                    <span className="text-slate mt-1 shrink-0">–</span>
-                    <span>{String(item)}</span>
-                  </li>
-                ))}
-              </ul>
+              <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider mb-1">
+                {label}
+              </div>
+              <p className="text-sm text-mist/80">{formatVal(value)}</p>
             </div>
           );
         }
 
-        if (typeof value === 'object' && value !== null) {
-          const obj = value as Record<string, unknown>;
+        if (typeof value === "object") {
+          const o = value as Record<string, unknown>;
+          // Nested list inside object
+          for (const nestedKey of ["items", "events", "results", "news"]) {
+            if (Array.isArray(o[nestedKey])) {
+              return renderNewsish(o[nestedKey] as unknown[], label);
+            }
+          }
+          const title = formatVal(o.title || o.summary || o.description);
           return (
-            <div key={key}>
-              <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider mb-1">{label}</div>
-              <div className="bg-ink/30 rounded p-2 space-y-1">
-                {Object.entries(obj).map(([k, v]) => (
-                  <div key={k} className="flex justify-between text-sm">
-                    <span className="text-mist/60 capitalize">{k.replace(/_/g, ' ')}</span>
-                    <span className="text-paper">{String(v)}</span>
-                  </div>
-                ))}
+            <div key={key} className="rounded-lg border border-slate/40 bg-ink/40 px-3 py-2">
+              <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider mb-1">
+                {label}
               </div>
+              {title ? (
+                <p className="text-sm text-paper leading-snug">{title}</p>
+              ) : (
+                <p className="text-xs text-mist/60">{formatVal(value)}</p>
+              )}
             </div>
           );
         }
 
-        let displayValue = String(value);
-        if (typeof value === 'boolean') displayValue = value ? 'Yes' : 'No';
+        // Scalar: checked_at, cached, summary, etc.
+        const display = formatVal(value);
+        if (!display) return null;
+        const isMeta = ["checked_at", "cached", "event_type", "type"].includes(key);
         return (
-          <div key={key} className="flex justify-between text-sm">
-            <span className="text-mist/50 font-mono text-[10px] uppercase tracking-wider">{label}</span>
-            <span className="text-paper">{displayValue}</span>
+          <div
+            key={key}
+            className={
+              isMeta
+                ? "flex justify-between gap-4 font-mono text-[10px] text-mist/50"
+                : "rounded-lg border border-slate/40 bg-ink/40 px-3 py-2"
+            }
+          >
+            <span className={isMeta ? "uppercase tracking-wider" : "font-mono text-[10px] text-mist/50 uppercase tracking-wider block mb-1"}>
+              {label}
+            </span>
+            <span className={isMeta ? "text-right text-mist/70" : "text-sm text-paper leading-snug"}>
+              {display}
+            </span>
           </div>
         );
       })}
     </div>
   );
 }
+
 
 // ── NewsItemWithFundamentals (v2) ──
 function NewsItemWithFundamentals({

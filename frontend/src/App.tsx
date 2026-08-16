@@ -47,6 +47,11 @@ export default function App() {
   const [view, setView] = useState<ViewState>({ mode: "idle" });
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [showWatchlist, setShowWatchlist] = useState(false);
+
+  // Watchlist overlay must not stick when navigating Dashboard / other tabs
+  useEffect(() => {
+    if (tab !== "watchlist") setShowWatchlist(false);
+  }, [tab]);
   const [showSettings, setShowSettings] = useState(false);
   const [showServiceManager, setShowServiceManager] = useState(false);
   const [cmdOpen, setCmdOpen] = useState(false);
@@ -75,19 +80,34 @@ export default function App() {
   const [pollInterval, setPollInterval] = useState<number | null>(null);
   const [wsLive, setWsLive] = useState(false);
   const pollIntervalRefWs = useRef<number | null>(null);
+  const scanCancelledRef = useRef(false);
+
+  /** Stop all scan polling / session tracking on the client. */
+  function clearScanActivity() {
+    if (pollIntervalRefWs.current) {
+      window.clearInterval(pollIntervalRefWs.current);
+      pollIntervalRefWs.current = null;
+    }
+    setPollInterval((prev) => {
+      if (prev) window.clearInterval(prev);
+      return null;
+    });
+    try { sessionStorage.removeItem("stockky_scan_task_id"); } catch {}
+  }
 
   const handleRealtime = useCallback((msg: RealtimeMessage) => {
     if (msg.type !== "scan_status" || !msg.task_id) return;
-    if (msg.status === "done" && msg.result) {
+    if (scanCancelledRef.current) return;
+    if ((msg.status === "done" || msg.status === "cancelled") && msg.result) {
+      clearScanActivity();
       setView({ mode: "scan", data: msg.result as any });
       setScanTaskId(null);
-      if (pollIntervalRefWs.current) {
-        window.clearInterval(pollIntervalRefWs.current);
-        pollIntervalRefWs.current = null;
-      }
-      try { localStorage.removeItem("stockky_scan_task"); } catch {}
-      setStatusMessage("Scan complete (live)");
+      setStatusMessage(msg.status === "cancelled" ? "Scan stopped (live)" : "Scan complete (live)");
       setTimeout(() => setStatusMessage(null), 2500);
+    } else if (msg.status === "done" && !msg.result) {
+      clearScanActivity();
+      setScanTaskId(null);
+      setView({ mode: "idle" });
     } else if (msg.status === "running" || msg.processed != null) {
       setView({
         mode: "loading",
@@ -205,11 +225,13 @@ export default function App() {
   async function handleSearch(symbol: string) {
     if (!symbol.trim()) return;
     setTab("dashboard");
+    scanCancelledRef.current = true;
+    clearScanActivity();
     lastRequestType.current = "stock";
     lastSymbol.current = symbol.trim();
     setView({ mode: "loading", label: `Analysing ${symbol.toUpperCase()}...` });
-    if (pollInterval) clearInterval(pollInterval);
     setScanTaskId(null);
+    setCancelRequested(false);
     try {
       const data = await api.getStock(symbol.trim());
       try { localStorage.setItem("stockky_last_analysis", JSON.stringify(data)); } catch {}
@@ -221,28 +243,38 @@ export default function App() {
   }
 
   async function handleScan() {
-    setView({ mode: "loading", label: "Starting market scan..." });
+    const modeLabel = liteScan ? "Lite Market Run" : "Full Market Run";
+    try {
+      window.alert(`${modeLabel} started.\n\nScanning the market universe. You can press Stop Scan anytime.`);
+    } catch {}
+    setStatusMessage(liteScan ? "🟢 Lite Market Run started" : "🟢 Full Market Run started");
+    setTimeout(() => setStatusMessage(null), 5000);
+
+    scanCancelledRef.current = false;
     lastRequestType.current = "scan";
     setScanTaskId(null);
     setCancelRequested(false);
-    if (pollInterval) clearInterval(pollInterval);
+    clearScanActivity();
+    setView({ mode: "loading", label: `Starting ${modeLabel.toLowerCase()}...` });
     try {
       const { task_id } = await api.scanStart(false, liteScan);
+      if (scanCancelledRef.current) return;
       setScanTaskId(task_id);
       try { subscribeScan(task_id); } catch {}
       sessionStorage.setItem("stockky_scan_task_id", task_id);
-      const interval = window.setInterval(() => pollScanStatus(task_id), 1000);
+      const interval = window.setInterval(() => {
+        if (scanCancelledRef.current) {
+          window.clearInterval(interval);
+          return;
+        }
+        pollScanStatus(task_id);
+      }, 1000);
       setPollInterval(interval);
       pollIntervalRefWs.current = interval;
       await pollScanStatus(task_id);
     } catch (e) {
-      if (scanTaskId) {
-        const interval = window.setInterval(() => pollScanStatus(scanTaskId), 1000);
-        setPollInterval(interval);
-        pollScanStatus(scanTaskId);
-      } else {
-        setView({ mode: "error", message: (e as Error).message });
-      }
+      clearScanActivity();
+      setView({ mode: "error", message: (e as Error).message });
     }
   }
 
@@ -260,8 +292,10 @@ export default function App() {
   }
 
   async function pollScanStatus(taskId: string) {
+    if (scanCancelledRef.current) return;
     try {
       const status = await api.scanStatus(taskId);
+      if (scanCancelledRef.current) return;
       if (status.status === "running") {
         setView({
           mode: "loading",
@@ -301,23 +335,24 @@ export default function App() {
   const [stoppingScan, setStoppingScan] = useState(false);
   const [cancelRequested, setCancelRequested] = useState(false);
   async function handleStopScan() {
-    if (!scanTaskId) return;
-    setStoppingScan(true);
+    if (!scanTaskId && !cancelRequested) return;
+    const taskId = scanTaskId;
+    // ── Immediate UI clear (no waiting on backend) ──
+    scanCancelledRef.current = true;
     setCancelRequested(true);
-    try {
-      const result = await api.scanCancel(scanTaskId);
-      setStatusMessage(
-        `Stopping — finishing up (${result.processed_so_far ?? "?"}/${result.total ?? "?"} scanned so far)...`
-      );
-    } catch (e) {
-      console.warn("Cancel request failed", e);
-      setStatusMessage(`Could not stop the scan: ${(e as Error).message || "unknown error"} — it may finish on its own.`);
-      setCancelRequested(false);
-    } finally {
-      setStoppingScan(false);
+    setStoppingScan(true);
+    clearScanActivity();
+    setScanTaskId(null);
+    setView({ mode: "idle" });
+    setStatusMessage("⏹ Scan stopped — UI cleared. Backend cancel sent in background.");
+    setTimeout(() => setStatusMessage(null), 4000);
+    setStoppingScan(false);
+    setCancelRequested(false);
+    // Fire-and-forget backend cancel so free-tier work winds down
+    if (taskId) {
+      api.scanCancel(taskId).catch((e) => console.warn("Background cancel failed", e));
     }
   }
-
 
   const handleRetry = async () => {
     if (isRetrying) return;
@@ -493,8 +528,9 @@ export default function App() {
               type="button"
               className={`sidebar-link ${tab === item.id ? "active" : ""}`}
               onClick={() => {
-                setTab(item.id);
+                setTab(item.id as Tab);
                 if (item.id === "watchlist") setShowWatchlist(true);
+                else setShowWatchlist(false);
                 if (item.id !== "settings") setShowSettings(false);
               }}
             >
@@ -610,7 +646,12 @@ export default function App() {
             <Trades />
           </div>
         ) : tab === "hot" ? (
-          <HotStocks />
+          <HotStocks
+            onAnalyze={(s) => {
+              setTab("dashboard");
+              handleSearch(s);
+            }}
+          />
         ) : tab === "settings" ? (
           <SettingsPage
             backendUp={backendUp}
@@ -731,39 +772,57 @@ export default function App() {
                 <div className="rounded-xl border border-slate bg-graphite p-8 max-w-sm">
                   <p className="font-mono text-xs text-mist mb-2">{view.label}</p>
                   {view.progress && (
-                    <div className="mt-4 space-y-2">
-                      <div className="flex justify-between font-mono text-[11px] text-mist/60">
-                        <span>Processed: {view.progress.processed}/{view.progress.total}</span>
-                        <span>⏱️ {formatTime(view.progress.elapsed)}</span>
-                      </div>
-                      <div className="w-full h-1 bg-slate rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-signal-prepare transition-all duration-500"
-                          style={{ width: `${Math.min(100, (view.progress.processed / Math.max(1, view.progress.total)) * 100)}%` }}
-                        />
-                      </div>
+                    <div className="mt-4 space-y-3">
                       {(() => {
                         const p = view.progress;
+                        const pct = Math.min(100, Math.round((p.processed / Math.max(1, p.total)) * 100));
                         let rem = p.estimatedRemaining;
                         if ((rem === undefined || rem === null || rem <= 0) && p.processed > 0 && p.total > p.processed && p.elapsed > 0) {
                           const avg = Math.max(p.elapsed / p.processed, 0.8);
                           rem = (p.total - p.processed) * avg;
                         }
-                        if (rem !== undefined && rem !== null && rem > 0) {
-                          return (
-                            <p className="font-mono text-[10px] text-mist/50 text-right">
-                              Est. remaining: {formatTime(rem)}
-                            </p>
-                          );
-                        }
-                        if (p.processed === 0) {
-                          return (
-                            <p className="font-mono text-[10px] text-mist/40 text-right">
-                              Est. remaining: calculating…
-                            </p>
-                          );
-                        }
-                        return null;
+                        return (
+                          <>
+                            <div className="flex justify-between items-end font-mono text-[11px]">
+                              <div>
+                                <span className="text-mist/50">Processed </span>
+                                <span className="text-paper font-semibold">{p.processed}</span>
+                                <span className="text-mist/40"> / {p.total}</span>
+                              </div>
+                              <div className="text-right">
+                                <span className="text-signal-prepare text-sm font-semibold">{pct}%</span>
+                                <span className="text-mist/50 ml-2">⏱️ {formatTime(p.elapsed)}</span>
+                              </div>
+                            </div>
+                            <div className="relative w-full h-2.5 bg-ink/80 border border-slate/50 rounded-full overflow-hidden">
+                              <div
+                                className="h-full rounded-full bg-gradient-to-r from-signal-prepare/80 via-sky-400/70 to-signal-prepare transition-all duration-500 ease-out"
+                                style={{ width: `${pct}%` }}
+                              />
+                              <div
+                                className="absolute inset-0 opacity-30 pointer-events-none"
+                                style={{
+                                  background:
+                                    "linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent)",
+                                  backgroundSize: "200% 100%",
+                                  animation: pct < 100 ? "stockky-shimmer 1.6s linear infinite" : "none",
+                                }}
+                              />
+                            </div>
+                            <div className="flex justify-between font-mono text-[10px] text-mist/50">
+                              <span>{wsLive ? "● Live WS" : "○ HTTP poll"}</span>
+                              <span>
+                                {rem != null && rem > 0
+                                  ? `Est. remaining ${formatTime(rem)}`
+                                  : p.processed === 0
+                                    ? "Calculating…"
+                                    : p.processed >= p.total
+                                      ? "Finishing…"
+                                      : ""}
+                              </span>
+                            </div>
+                          </>
+                        );
                       })()}
                     </div>
                   )}

@@ -429,10 +429,29 @@ import json, os
 from datetime import datetime, timezone
 
 BACKUP_DIR = os.getenv("TRADE_BACKUP_DIR", "/app/data/trade_backups")
+BACKUP_RETENTION_DAYS = int(os.getenv("TRADE_BACKUP_RETENTION_DAYS", "14"))
+
+
+def _purge_expired_backups(db_session):
+    """Drop backups older than retention (default 14 days)."""
+    try:
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=BACKUP_RETENTION_DAYS)
+        q = db_session.query(db_models.TradeBackup).filter(db_models.TradeBackup.expires_at < cutoff)
+        n = q.delete(synchronize_session=False)
+        if n:
+            db_session.commit()
+    except Exception:
+        try:
+            db_session.rollback()
+        except Exception:
+            pass
+
 
 def clear_all_with_backup(db_session=None, account_id=None):
-    """Reset paper trades after writing a JSON backup. Always returns plain dict (JSON-safe)."""
+    """Reset paper trades after writing a JSON backup (DB + disk). Always returns plain dict."""
     import json
+    from datetime import timedelta
     own_session = False
     if db_session is None:
         db_session = SessionLocal()
@@ -442,8 +461,11 @@ def clear_all_with_backup(db_session=None, account_id=None):
     except Exception:
         pass
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = os.path.join(BACKUP_DIR, f"backup_{ts}.json")
-    payload = {"created_at": ts, "trades": [], "note": "Stockky clear-all backup"}
+    filename = f"backup_{ts}.json"
+    path = os.path.join(BACKUP_DIR, filename)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    expires = now + timedelta(days=BACKUP_RETENTION_DAYS)
+    payload = {"created_at": ts, "trades": [], "note": "Stockky clear-all backup", "expires_at": expires.isoformat()}
     try:
         rows = db_session.query(db_models.PaperTrade).all()
         payload["trades"] = []
@@ -457,12 +479,39 @@ def clear_all_with_backup(db_session=None, account_id=None):
             payload["trades"].append(row)
             db_session.delete(r)
         db_session.commit()
+
+        # Persist backup in Postgres (survives Render disk wipe) for 14 days
+        try:
+            db_session.add(db_models.TradeBackup(
+                filename=filename,
+                created_at=now,
+                expires_at=expires,
+                trade_count=len(payload["trades"]),
+                payload=payload,
+                note=payload.get("note"),
+            ))
+            db_session.commit()
+            _purge_expired_backups(db_session)
+        except Exception as dbe:
+            payload["db_backup_error"] = str(dbe)
+            try:
+                db_session.rollback()
+            except Exception:
+                pass
+
         try:
             with open(path, "w") as f:
                 json.dump(payload, f, default=str)
         except Exception as fe:
             payload["file_error"] = str(fe)
-        return {"ok": True, "backup_path": path, "count": len(payload.get("trades") or [])}
+
+        return {
+            "ok": True,
+            "backup_path": path,
+            "filename": filename,
+            "count": len(payload.get("trades") or []),
+            "retained_days": BACKUP_RETENTION_DAYS,
+        }
     except Exception as e:
         try:
             db_session.rollback()
@@ -476,19 +525,58 @@ def clear_all_with_backup(db_session=None, account_id=None):
             except Exception:
                 pass
 
+
 def list_trade_backups():
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-    files = sorted([p for p in os.listdir(BACKUP_DIR) if p.endswith(".json")], reverse=True)
-    return {"backups": files}
+    """List backups from DB first (14-day retention), fall back to disk files."""
+    names = []
+    db = None
+    try:
+        db = SessionLocal()
+        _purge_expired_backups(db)
+        rows = (
+            db.query(db_models.TradeBackup)
+            .order_by(db_models.TradeBackup.created_at.desc())
+            .limit(50)
+            .all()
+        )
+        names = [r.filename for r in rows]
+    except Exception:
+        pass
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+    if not names:
+        try:
+            os.makedirs(BACKUP_DIR, exist_ok=True)
+            names = sorted([p for p in os.listdir(BACKUP_DIR) if p.endswith(".json")], reverse=True)
+        except Exception:
+            names = []
+    return {"backups": names, "retention_days": BACKUP_RETENTION_DAYS}
 
 
 def get_trade_backup(filename: str):
-    """Load one backup JSON file by basename (no path traversal)."""
+    """Load one backup by basename from DB, then disk."""
     import json
-    import os
     safe = os.path.basename(filename or "")
     if not safe or not safe.endswith(".json") or ".." in safe:
         return None, "Invalid backup name"
+    db = None
+    try:
+        db = SessionLocal()
+        row = db.query(db_models.TradeBackup).filter(db_models.TradeBackup.filename == safe).first()
+        if row and row.payload is not None:
+            return row.payload, None
+    except Exception:
+        pass
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
     path = os.path.join(BACKUP_DIR, safe)
     if not os.path.isfile(path):
         return None, "Backup not found"
@@ -498,7 +586,6 @@ def get_trade_backup(filename: str):
         return data, None
     except Exception as e:
         return None, str(e)
-
 
 
 def add_quantity_to_trade(db_session, trade_id: str, quantity: float, price=None):

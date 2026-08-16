@@ -1946,6 +1946,7 @@ def get_stock_decision(symbol: str, already_owned: bool = False):
             price = _fetch_price_from_quote(symbol_to_use)
             if price is not None:
                 result["close"] = price
+                result["data_insufficient"] = False
                 if result.get("support") is None:
                     result["support"] = round(price * 0.95, 2)
                 if result.get("resistance") is None:

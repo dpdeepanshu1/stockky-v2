@@ -1094,7 +1094,6 @@ async def training_score(symbol: str):
     from scanner import TrainingScanner
     scanner = TrainingScanner(SessionLocal, MODEL_STORE_PATH)
     score = scanner.score_symbol(symbol)
-    # Global live win-rate from status (used by decision engine threshold shift)
     live_wr = None
     try:
         st = get_training_status()
@@ -1104,16 +1103,27 @@ async def training_score(symbol: str):
     if not score:
         return {
             "symbol": (symbol or "").upper(),
-            "score": None,
+            "training_score": None,
+            "t1_success_probability": None,
+            "t5_success_probability": None,
+            "model_success_probability": None,
             "available": False,
             "live_win_rate": live_wr,
-            "message": "No training score for this symbol yet",
+            "message": "No training score for this symbol yet — add to Training from a scan first",
         }
     if isinstance(score, dict):
         score = dict(score)
         score.setdefault("available", True)
+        # Normalize alternate keys from scanner
+        if score.get("training_score") is None and score.get("score") is not None:
+            score["training_score"] = score.get("score")
+        if score.get("t1_success_probability") is None:
+            score["t1_success_probability"] = score.get("t1_prob") or score.get("t1_success_rate")
+        if score.get("t5_success_probability") is None:
+            score["t5_success_probability"] = score.get("t5_prob") or score.get("t5_success_rate")
         if live_wr is not None and score.get("live_win_rate") is None:
             score["live_win_rate"] = live_wr
+        score.setdefault("symbol", (symbol or "").upper())
     return score
 
 @app.post("/train")

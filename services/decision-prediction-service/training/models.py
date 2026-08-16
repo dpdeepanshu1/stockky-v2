@@ -208,6 +208,19 @@ class PaperTrade(Base):
     created_at = Column(DateTime, default=ist_now)
 
 
+class TradeBackup(Base):
+    """JSON snapshot of paper trades — kept 14 days so free-tier disk wipes don't lose history."""
+    __tablename__ = "trade_backups"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    filename = Column(String(80), unique=True, nullable=False, index=True)
+    created_at = Column(DateTime, nullable=False, index=True, default=ist_now)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    trade_count = Column(Integer, default=0)
+    payload = Column(JSON, nullable=False)
+    note = Column(Text, nullable=True)
+
+
 class TrainingRun(Base):
     """Tracks each training pipeline run with configuration and performance."""
     __tablename__ = "training_runs"

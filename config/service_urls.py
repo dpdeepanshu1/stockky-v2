@@ -5,11 +5,11 @@ Replace the placeholder URLs after deploying to your 5 separate Render accounts.
 import os
 
 # Placeholder URLs — easy global search & replace
-API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "https://STOCKKY-API-GATEWAY.onrender.com")
+API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "https://api-gateway-puwd.onrender.com")
 MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
-ANALYSIS_INTELLIGENCE_URL = os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com")
-DECISION_PREDICTION_URL = os.getenv("DECISION_PREDICTION_URL", "https://STOCKKY-DECISION-PREDICTION.onrender.com")
-NOTIFICATION_SCHEDULER_URL = os.getenv("NOTIFICATION_SCHEDULER_URL", "https://STOCKKY-NOTIFICATION-SCHEDULER.onrender.com")
+ANALYSIS_INTELLIGENCE_URL = os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com")
+DECISION_PREDICTION_URL = os.getenv("DECISION_PREDICTION_URL", "https://decision-prediction-service.onrender.com")
+NOTIFICATION_SCHEDULER_URL = os.getenv("NOTIFICATION_SCHEDULER_URL", "https://notification-scheduler-service-x8vc.onrender.com")
 
 # Convenience aliases used by original code
 TECHNICAL_URL = ANALYSIS_INTELLIGENCE_URL

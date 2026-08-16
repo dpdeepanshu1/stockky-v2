@@ -31,18 +31,18 @@ logger = logging.getLogger("api-gateway")
 IST = ZoneInfo("Asia/Kolkata")
 
 # ---- Live Render URLs ----
-DECISION_URL = os.getenv("DECISION_URL", "https://STOCKKY-DECISION-PREDICTION.onrender.com/decision")
-NOTIFICATION_URL = os.getenv("NOTIFICATION_URL", "https://STOCKKY-NOTIFICATION-SCHEDULER.onrender.com/notification")
-NEWS_URL = os.getenv("NEWS_URL", "https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com/news")
+DECISION_URL = os.getenv("DECISION_URL", "https://decision-prediction-service.onrender.com/decision")
+NOTIFICATION_URL = os.getenv("NOTIFICATION_URL", "https://notification-scheduler-service-x8vc.onrender.com/notification")
+NEWS_URL = os.getenv("NEWS_URL", "https://analysis-intelligence-service.onrender.com/news")
 MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
-TECHNICAL_URL = os.getenv("TECHNICAL_URL", "https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com/technical")
-FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", "https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com/fundamental")
-EVENT_URL = os.getenv("EVENT_URL", "https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com/event")
-PREDICTION_URL = os.getenv("PREDICTION_URL", "https://STOCKKY-DECISION-PREDICTION.onrender.com/prediction")
+TECHNICAL_URL = os.getenv("TECHNICAL_URL", "https://analysis-intelligence-service.onrender.com/technical")
+FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", "https://analysis-intelligence-service.onrender.com/fundamental")
+EVENT_URL = os.getenv("EVENT_URL", "https://analysis-intelligence-service.onrender.com/event")
+PREDICTION_URL = os.getenv("PREDICTION_URL", "https://decision-prediction-service.onrender.com/prediction")
 
 # ---- Market Sentiment & Training ----
-MARKET_SENTIMENT_URL = os.getenv("MARKET_SENTIMENT_URL", "https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com/sentiment")
-TRAINING_URL = os.getenv("TRAINING_URL", "https://STOCKKY-DECISION-PREDICTION.onrender.com/training")
+MARKET_SENTIMENT_URL = os.getenv("MARKET_SENTIMENT_URL", "https://analysis-intelligence-service.onrender.com/sentiment")
+TRAINING_URL = os.getenv("TRAINING_URL", "https://decision-prediction-service.onrender.com/training")
 
 # Service definitions for system health
 SYSTEM_SERVICES = {

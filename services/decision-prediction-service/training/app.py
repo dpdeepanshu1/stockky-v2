@@ -63,7 +63,7 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SERVICE_URL = os.environ.get('SERVICE_URL', "https://STOCKKY-DECISION-PREDICTION.onrender.com/training")
+SERVICE_URL = os.environ.get('SERVICE_URL', "https://decision-prediction-service.onrender.com/training")
 DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///./training.db')
 MODEL_STORE_PATH = os.environ.get('MODEL_STORE_PATH', './model-store')
 engine = create_engine(DATABASE_URL, echo=False)

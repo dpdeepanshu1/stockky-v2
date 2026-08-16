@@ -753,7 +753,7 @@ function SettingsBanner({ onClose, onSaved }: { onClose: () => void; onSaved: ()
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && save()}
-                placeholder="https://STOCKKY-API-GATEWAY.onrender.com"
+                placeholder="https://api-gateway-puwd.onrender.com"
                 className="flex-1 bg-ink/60 border border-slate rounded-lg px-3 py-2 font-mono text-xs text-paper placeholder:text-mist/30 outline-none focus:border-signal-prepare/60 transition"
                 spellCheck={false}
                 autoComplete="off"

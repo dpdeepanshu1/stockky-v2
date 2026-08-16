@@ -24,13 +24,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("decision-engine-service")
 
 # ---- Service URLs ----
-TECHNICAL_URL = os.getenv("TECHNICAL_URL", "https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com/technical")
-FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", "https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com/fundamental")
-NEWS_URL = os.getenv("NEWS_URL", "https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com/news")
-EVENT_URL = os.getenv("EVENT_URL", "https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com/event")
-PREDICTION_URL = os.getenv("PREDICTION_URL", "https://STOCKKY-DECISION-PREDICTION.onrender.com/prediction")
-API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "https://STOCKKY-API-GATEWAY.onrender.com")
-TRAINING_SERVICE_URL = os.getenv("TRAINING_SERVICE_URL", "https://STOCKKY-DECISION-PREDICTION.onrender.com/training")
+TECHNICAL_URL = os.getenv("TECHNICAL_URL", "https://analysis-intelligence-service.onrender.com/technical")
+FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", "https://analysis-intelligence-service.onrender.com/fundamental")
+NEWS_URL = os.getenv("NEWS_URL", "https://analysis-intelligence-service.onrender.com/news")
+EVENT_URL = os.getenv("EVENT_URL", "https://analysis-intelligence-service.onrender.com/event")
+PREDICTION_URL = os.getenv("PREDICTION_URL", "https://decision-prediction-service.onrender.com/prediction")
+API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "https://api-gateway-puwd.onrender.com")
+TRAINING_SERVICE_URL = os.getenv("TRAINING_SERVICE_URL", "https://decision-prediction-service.onrender.com/training")
 
 EARNINGS_RISK_DAYS = 3
 EARNINGS_BOOST_DAYS = 7

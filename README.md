@@ -13,11 +13,11 @@ Completely restructured production-ready version of https://github.com/dpdeepans
 All service URLs centralized in `config/service_urls.py`.
 
 Placeholder URLs for easy replace:
-- https://STOCKKY-API-GATEWAY.onrender.com
+- https://api-gateway-puwd.onrender.com
 - https://market-data-service-r6d7.onrender.com
-- https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com
-- https://STOCKKY-DECISION-PREDICTION.onrender.com
-- https://STOCKKY-NOTIFICATION-SCHEDULER.onrender.com
+- https://analysis-intelligence-service.onrender.com
+- https://decision-prediction-service.onrender.com
+- https://notification-scheduler-service-x8vc.onrender.com
 
 ## Key Features (all original + upgrades preserved)
 - Full multi-horizon scoring (Short/Mid/Long)

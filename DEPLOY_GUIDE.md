@@ -5,11 +5,11 @@ Deploy each of the 5 services on **completely separate Render accounts** using t
 After deployment, perform a global search-and-replace of the placeholder URLs with your real Render URLs.
 
 ## Placeholder URLs (use these exactly during initial config)
-- https://STOCKKY-API-GATEWAY.onrender.com
+- https://api-gateway-puwd.onrender.com
 - https://market-data-service-r6d7.onrender.com
-- https://STOCKKY-ANALYSIS-INTELLIGENCE.onrender.com
-- https://STOCKKY-DECISION-PREDICTION.onrender.com
-- https://STOCKKY-NOTIFICATION-SCHEDULER.onrender.com
+- https://analysis-intelligence-service.onrender.com
+- https://decision-prediction-service.onrender.com
+- https://notification-scheduler-service-x8vc.onrender.com
 
 ## Prerequisites
 - 5 free Render accounts (or paid if preferred)

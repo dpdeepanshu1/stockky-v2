@@ -407,59 +407,71 @@ def _callmebot_recipients(cfg: dict):
 
 
 def _send_callmebot(cfg: dict, title: str, message: str):
-    """CallMeBot free Telegram call API (start.php) + text fallback.
+    """Send CallMeBot alert to every configured user (primary + extras, max 5).
 
-    Docs sample:
-      https://api.callmebot.com/start.php?user=@dpdeep29&text=This+is+a+test+call
-      https://api.callmebot.com/text.php?user=@dpdeep29&text=This+is+a+test+message
+    Each Telegram user must have activated CallMeBot themselves
+    (https://www.callmebot.com/telegram-call-api/). You cannot call a
+    username that never started the bot.
+
+    Official URLs:
+      text.php?user=@name&text=...
+      start.php?user=@name&text=...
     """
     import urllib.parse
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     if not cfg.get("enabled", {}).get("callmebot"):
         return None
     users = _callmebot_recipients(cfg)
     if not users:
         return "not configured — set CallMeBot user like @dpdeep29"
+
     text_body = f"{title}. {message}"
     if len(text_body) > 200:
         text_body = text_body[:197] + "..."
+
+    def _one(user: str, apikey: str) -> str:
+        q = urllib.parse.quote(text_body)
+        uq = urllib.parse.quote(user)
+        text_url = f"https://api.callmebot.com/text.php?user={uq}&text={q}"
+        call_url = f"https://api.callmebot.com/start.php?user={uq}&text={q}"
+        if apikey:
+            text_url += f"&apikey={urllib.parse.quote(apikey)}"
+            call_url += f"&apikey={urllib.parse.quote(apikey)}"
+        last = ""
+        for kind, url in (("text", text_url), ("call", call_url)):
+            try:
+                resp = httpx.get(url, timeout=35)
+                last = (resp.text or "")[:120]
+                if resp.status_code == 200 and "error" not in last.lower():
+                    return f"{user}:ok({kind})"
+                if resp.status_code == 200:
+                    # CallMeBot sometimes returns 200 with instructional text
+                    if "not authorized" in last.lower() or "start the bot" in last.lower():
+                        return f"{user}:need_activate ({last})"
+                    return f"{user}:ok({kind})"
+                last = f"HTTP {resp.status_code} {last}"
+            except httpx.TimeoutException:
+                last = f"{kind}-timeout"
+            except Exception as e:
+                last = str(e)[:80]
+        return f"{user}:fail ({last})"
+
     results = []
-    any_sent = False
-    for user, apikey in users:
-        try:
-            q = urllib.parse.quote(text_body)
-            uq = urllib.parse.quote(user)
-            # Prefer voice/call endpoint; append apikey only if present
-            # CallMeBot official patterns (username form):
-            #   start.php?user=@name&text=...   (voice/call)
-            #   text.php?user=@name&text=...    (chat message)
-            # text.php is usually faster; start.php is voice/call (slower)
-            text_url = f"https://api.callmebot.com/text.php?user={uq}&text={q}"
-            call_url = f"https://api.callmebot.com/start.php?user={uq}&text={q}"
-            if apikey:
-                text_url += f"&apikey={urllib.parse.quote(apikey)}"
-                call_url += f"&apikey={urllib.parse.quote(apikey)}"
-            sent_this = False
-            last_body = ""
-            for kind, url in (("text", text_url), ("call", call_url)):
-                try:
-                    resp = httpx.get(url, timeout=40)
-                    last_body = (resp.text or "")[:160]
-                    if resp.status_code == 200 and "error" not in last_body.lower():
-                        any_sent = True
-                        sent_this = True
-                        results.append(f"{user}:ok({kind})")
-                        break
-                except httpx.TimeoutException:
-                    last_body = "timeout"
-                    results.append(f"{user}:{kind}-timeout")
-                except Exception as e:
-                    last_body = str(e)[:80]
-                    results.append(f"{user}:{kind}-err")
-            if not sent_this and not any(user in r for r in results):
-                results.append(f"{user}:fail {last_body}")
-        except Exception as e:
-            results.append(f"{user}: {e}")
-    return "sent" if any_sent else ("failed: " + "; ".join(results))
+    # Parallel so secondary users are not starved by primary latency
+    with ThreadPoolExecutor(max_workers=min(5, len(users))) as pool:
+        futs = [pool.submit(_one, u, k) for u, k in users]
+        for fut in as_completed(futs):
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                results.append(f"error:{e}")
+
+    any_sent = any(":ok(" in r or r.endswith(":ok") for r in results)
+    summary = "; ".join(results)
+    if any_sent:
+        return "sent: " + summary
+    return "failed: " + summary
 
 
 def _dispatch(title: str, message: str, channel_filter: str):
@@ -505,7 +517,7 @@ def notify(req: NotifyRequest):
             "note": f"No notification channel matched filter '{req.channel}' and is enabled/configured.",
         }
     # Check if any channel succeeded
-    delivered = any(v == "sent" for v in attempted.values())
+    delivered = any(isinstance(v, str) and v.startswith("sent") for v in attempted.values())
     # Build a note with the results
     note_parts = []
     for ch, result in attempted.items():
@@ -530,7 +542,7 @@ def test_notifications():
             "delivered": False,
             "note": "No channel is both configured and enabled. Save credentials and turn the toggle on first.",
         }
-    delivered = any(v == "sent" for v in attempted.values())
+    delivered = any(isinstance(v, str) and v.startswith("sent") for v in attempted.values())
     note_parts = []
     for ch, result in attempted.items():
         if result == "sent":
@@ -577,4 +589,4 @@ def call_me_now(message: str = "Stockky alert: action required on your picks"):
     enabled["callmebot"] = True
     cfg["enabled"] = enabled
     result = _send_callmebot(cfg, "Stockky Call Alert", message)
-    return {"ok": result == "sent", "result": result}
+    return {"ok": isinstance(result, str) and result.startswith("sent"), "result": result}

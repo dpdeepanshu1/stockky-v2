@@ -92,10 +92,20 @@ export default function NotificationsPanel() {
         if (!user.startsWith("@") && !/^[0-9+]+$/.test(user)) {
           user = "@" + user;
         }
+        // Normalize extras: ensure @ prefix, max 5 including primary
+        let extras = (callUsers || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .map((s) => {
+            if (s.startsWith("@") || /^[0-9+]+$/.test(s) || s.includes(":")) return s;
+            return "@" + s;
+          })
+          .slice(0, 4); // primary + 4 extras = 5
         update = {
           callmebot_user: user,
           callmebot_apikey: callKey || undefined,
-          callmebot_users: callUsers || undefined,
+          callmebot_users: extras.length ? extras.join(",") : "",
           enabled: { callmebot: true },
         };
       } else {
@@ -345,11 +355,17 @@ export default function NotificationsPanel() {
                 "Stockky test call. If you hear or see this, CallMeBot is connected."
               );
               if (r.ok) {
-                const msg = "CallMeBot test sent — check Telegram for the call/message.";
-                setTestResult(msg);
+                const detail = r.result || "sent";
+                const msg =
+                  "CallMeBot test finished.\n\n" +
+                  detail +
+                  "\n\nEach extra user must activate CallMeBot once in Telegram (same bot you used). Only then will they receive alerts.";
+                setTestResult(detail);
                 window.alert(msg);
               } else {
-                const msg = `CallMeBot failed: ${r.result || r.error || "unknown"}. URL uses user=@username like @dpdeep29`;
+                const msg =
+                  `CallMeBot failed: ${r.result || r.error || "unknown"}\n\n` +
+                  "Primary and extras each need CallMeBot activated on their Telegram account.";
                 setTestResult(msg);
                 window.alert(msg);
               }
@@ -366,9 +382,8 @@ export default function NotificationsPanel() {
           {testingCall ? "Calling…" : "📞 Test CallMeBot"}
         </button>
         <p className="text-[10px] text-mist/60 mt-2 font-mono leading-relaxed">
-          From CallMeBot: use <span className="text-paper">@yourusername</span> (example{" "}
-          <span className="text-emerald-400">@dpdeep29</span>). API key optional.
-          Auto-calls on scan for <span className="text-emerald-400">BUY NOW</span> with stock name + short reason.
+          Primary example: <span className="text-emerald-400">@dpdeep29</span>. Extra users must each open CallMeBot in Telegram and start the bot once — otherwise only you get the call.
+          Auto-alerts on <span className="text-emerald-400">BUY NOW</span> go to all configured users.
         </p>
       </ChannelCard>
     </div>

@@ -4380,8 +4380,76 @@ def data_feed_meta():
 
 @app.get("/data-feed/status")
 def data_feed_status():
+    """Return job+meta. Auto-heal stale 'running' jobs (worker died after free-tier sleep)."""
     store = _feed_store()
-    return {"ok": True, **store.job(), "meta": store.meta()}
+    job = store.job()
+    meta = store.meta()
+    try:
+        if job.get("status") == "running":
+            stale_sec = int(os.getenv("DATA_FEED_STALE_SEC", "180"))  # 3 min no progress → stuck
+            updated = None
+            # Prefer checkpoint/elapsed; fall back to started_at
+            for key in ("updated_at", "resumed_at", "started_at"):
+                raw = job.get(key)
+                if not raw:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=IST)
+                    updated = ts
+                    break
+                except Exception:
+                    pass
+            # Also treat long elapsed without stop as ok only if stop_requested
+            elapsed = int(job.get("elapsed_sec") or 0)
+            stop_req = bool(job.get("stop_requested"))
+            age = None
+            if updated is not None:
+                age = int((datetime.now(IST) - updated).total_seconds())
+            # If stop was requested OR last activity is old, force-commit stopped
+            if stop_req or (age is not None and age > stale_sec) or (elapsed > 0 and age is None and stop_req):
+                # Force commit checkpoint as stopped so Resume can work
+                cp = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
+                cursor = int(cp.get("cursor") or job.get("processed") or 0)
+                total = int(job.get("total") or 0)
+                ok_n = int(job.get("ok_count") or meta.get("last_count") or 0)
+                err_n = int(job.get("error_count") or job.get("errors") or 0)
+                ts = datetime.now(IST).isoformat()
+                msg = (
+                    f"Auto-stopped (stale/sleep) at {cursor}/{total} — committed {ok_n} fed stocks at {ts}"
+                    if not stop_req
+                    else f"Stopped at {cursor}/{total} — committed {ok_n} fed stocks at {ts}"
+                )
+                store.set_meta(
+                    last_success_at=ts,
+                    last_count=ok_n,
+                    last_errors=err_n,
+                    last_message=msg,
+                    source="stop_or_stale",
+                    universe_size=total,
+                    partial=bool(total and cursor < total),
+                )
+                job = store.set_job(
+                    status="stopped",
+                    processed=cursor,
+                    total=total,
+                    message=msg,
+                    errors=err_n,
+                    ok_count=ok_n,
+                    error_count=err_n,
+                    finished_at=ts,
+                    stop_requested=False,
+                    checkpoint={
+                        "cursor": cursor,
+                        "done": list(cp.get("done") or []),
+                        "universe": cp.get("universe") or [],
+                    },
+                )
+                meta = store.meta()
+    except Exception as e:
+        logger.warning("data-feed status heal: %s", e)
+    return {"ok": True, **job, "meta": meta}
 
 
 @app.get("/data-feed/{symbol}")
@@ -4512,6 +4580,7 @@ async def data_feed_run(
                         errors=err_n,
                         ok_count=ok_n,
                         error_count=err_n,
+                        updated_at=datetime.now(IST).isoformat(),
                         checkpoint={"cursor": i + 1, "done": list(done_set), "universe": universe},
                     )
                     continue
@@ -4549,6 +4618,7 @@ async def data_feed_run(
                     errors=err_n,
                     ok_count=ok_n,
                     error_count=err_n,
+                    updated_at=datetime.now(IST).isoformat(),
                     checkpoint={"cursor": i + 1, "done": list(done_set), "universe": universe},
                 )
                 if (i + 1) % 5 == 0:
@@ -4595,19 +4665,69 @@ async def data_feed_run(
 
 
 @app.post("/data-feed/stop")
-async def data_feed_stop():
-    """Request cooperative stop; background loop commits checkpoint + meta."""
+async def data_feed_stop(force: bool = True):
+    """Stop data feed and commit checkpoint immediately.
+
+    Free-tier workers often die after sleep, so cooperative stop alone leaves
+    status=running forever. We always force-commit from the last checkpoint.
+    """
     store = _feed_store()
     job = store.job()
-    if job.get("status") != "running":
-        return {"ok": True, "stopped": False, "detail": f"Not running (status={job.get('status')})", **job}
-    store.set_job(stop_requested=True, message="Stop requested — committing checkpoint…")
-    return {"ok": True, "stopped": True, "message": "Stop requested; will commit after current symbol", **store.job()}
+    status = job.get("status")
+    if status not in ("running", "stopped") and not force:
+        return {"ok": True, "stopped": False, "detail": f"Not running (status={status})", **job}
+
+    cp = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
+    cursor = int(cp.get("cursor") or job.get("processed") or 0)
+    total = int(job.get("total") or 0)
+    ok_n = int(job.get("ok_count") or 0)
+    err_n = int(job.get("error_count") or job.get("errors") or 0)
+    # Prefer counting done list if present
+    done = list(cp.get("done") or [])
+    if done:
+        ok_n = max(ok_n, len(done))
+    ts = datetime.now(IST).isoformat()
+    msg = f"Stopped at {cursor}/{total} — committed {ok_n} fed stocks at {ts}"
+    store.set_meta(
+        last_success_at=ts,
+        last_count=ok_n,
+        last_errors=err_n,
+        last_message=msg,
+        source="stop",
+        universe_size=total,
+        partial=bool(total and cursor < total),
+    )
+    job = store.set_job(
+        status="stopped",
+        processed=cursor,
+        total=total,
+        message=msg,
+        errors=err_n,
+        ok_count=ok_n,
+        error_count=err_n,
+        finished_at=ts,
+        stop_requested=False,
+        checkpoint={
+            "cursor": cursor,
+            "done": done,
+            "universe": cp.get("universe") or [],
+        },
+    )
+    return {"ok": True, "stopped": True, "message": msg, **job}
 
 
 @app.post("/data-feed/resume")
 async def data_feed_resume(background_tasks: BackgroundTasks):
-    """Resume from last checkpoint (same as /data-feed/run?resume=true)."""
+    """Resume from last checkpoint.
+
+    If a previous run is stuck as 'running' (worker died), force-stop/commit first
+    so resume can start a new background task from the cursor.
+    """
+    store = _feed_store()
+    job = store.job()
+    if job.get("status") == "running":
+        # Force-commit current checkpoint so a new worker can continue
+        await data_feed_stop(force=True)
     return await data_feed_run(background_tasks, force=False, resume=True)
 
 

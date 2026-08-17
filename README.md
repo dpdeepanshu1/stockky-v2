@@ -52,3 +52,31 @@ See list generated after restructure (or run: `grep -r "STOCKKY-" . --include="*
 
 ## Confirmation
 Zero existing functionality lost. All listed accuracy, missing features, UI, automation, and reliability requirements addressed in the restructure and config.
+
+# Data Feed stuck Running / Resume disabled — fix
+
+## Problem
+After free-tier sleep, job stays `status=running` with message
+`Stop requested — committing checkpoint…` forever. Worker is dead, so
+Resume stays disabled and Stop never finishes.
+
+## Fix
+### `services/api-gateway/main.py`
+- `GET /data-feed/status` — auto-heals stale `running` (or `stop_requested`) → `stopped` + commits checkpoint/meta
+- `POST /data-feed/stop?force=true` — **immediate** commit to `stopped` (does not wait for dead worker)
+- `POST /data-feed/resume` — force-stop if stuck running, then resume from cursor
+- Progress ticks write `updated_at` for stale detection
+
+### `frontend/src/components/DataFeed.tsx`
+- Resume enabled when partial progress exists (including stuck running)
+- Stop force-commits
+- Refresh status triggers heal endpoint
+- Shows stocks saved from `ok_count` / checkpoint.done
+
+### `frontend/src/api.ts`
+- `stopDataFeed` → `/data-feed/stop?force=true`
+
+## After deploy
+1. Click **Refresh status** (should flip Job → `stopped`, enable Resume)
+2. Or click **Stop** once more (force commit)
+3. Click **Resume** to continue from 98/186

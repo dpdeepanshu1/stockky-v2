@@ -311,14 +311,37 @@ def _get_nifty_indices() -> List[str]:
     return all_symbols
 
 def _get_recent_ipos() -> List[str]:
-    data = _fetch_from_nse_api("ipo?type=listed", IPO_CACHE_KEY, ttl=86400)
+    """Recent/past IPOs via public-past-issues (last 12 months, dynamic dates)."""
+    to_d = datetime.now(IST)
+    from_d = to_d - timedelta(days=365)
+    endpoint = (
+        "public-past-issues"
+        f"?from_date={from_d.strftime('%d-%m-%Y')}"
+        f"&to_date={to_d.strftime('%d-%m-%Y')}"
+    )
+    data = _fetch_from_nse_api(endpoint, IPO_CACHE_KEY, ttl=86400)
     symbols = []
-    if data and isinstance(data, list):
-        for item in data:
+    # NSE may return a list or {data: [...]}
+    rows = data if isinstance(data, list) else (data.get("data") if isinstance(data, dict) else None)
+    if isinstance(rows, list):
+        for item in rows:
             if isinstance(item, dict):
-                sym = item.get("symbol") or item.get("secCode")
+                sym = item.get("symbol") or item.get("secCode") or item.get("htmSym")
                 if sym:
-                    symbols.append(sym.upper())
+                    symbols.append(str(sym).upper())
+    # Also merge currently open issues
+    try:
+        cur = _fetch_from_nse_api("ipo-current-issue", "nse:ipo_current", ttl=3600)
+        cur_rows = cur if isinstance(cur, list) else (cur.get("data") if isinstance(cur, dict) else [])
+        if isinstance(cur_rows, list):
+            for item in cur_rows:
+                if isinstance(item, dict):
+                    sym = item.get("symbol") or item.get("secCode")
+                    if sym:
+                        symbols.append(str(sym).upper())
+    except Exception:
+        pass
+    symbols = list(dict.fromkeys(symbols))  # dedupe preserve order
     if not symbols:
         symbols = ["JIOFIN", "BLUESTONE", "CUPID", "IREDA", "RVNL", "HUDCO", "RAILTEL", "IRFC", "MVELECTRO"]
     return symbols
@@ -3857,95 +3880,151 @@ async def stockky_hot_stocks(force: bool = False):
 
 
 
+@app.get("/catalysts/alert/status")
+def catalyst_alert_status():
+    st = _redis_get("stockky:catalyst_job") or {}
+    return {"ok": True, **(st if isinstance(st, dict) else {"status": "idle"})}
+
+
 @app.get("/catalysts/alert")
 @app.post("/catalysts/alert")
-async def catalyst_alert_scan(force: bool = True, notify: bool = True):
+async def catalyst_alert_scan(
+    background_tasks: BackgroundTasks,
+    force: bool = True,
+    notify: bool = True,
+    sync: bool = False,
+):
     """Pre-market / intraday catalyst sweep.
 
-    Builds a real-time universe from ≥5% movers, news, bulk/results events,
-    scores them via stockky-hot logic, promotes PREPARE TO BUY, and optionally
-    pushes a Telegram report. Call 1–2h before open and during market hours.
+    Default: start background job and return immediately (avoids GH Actions 180s timeout).
+    Pass sync=true only for local debugging (may take several minutes on free tier).
+    Poll GET /catalysts/alert/status until status=done|error.
     """
-    # Bust hot cache so we re-evaluate with latest news/events
-    try:
-        if force and _redis:
-            _redis.delete(HOT_STOCKS_CACHE_KEY)
-    except Exception:
-        pass
+    job_key = "stockky:catalyst_job"
 
-    hot = await stockky_hot_stocks(force=True)
-    picks = []
-    for section in ("bulk_insider_driven", "results_driven", "news_driven"):
-        for item in hot.get(section) or []:
-            dec = (item.get("decision") or "").upper()
-            if dec in ("BUY NOW", "PREPARE TO BUY") or item.get("signal_strength") == "high":
-                picks.append({**item, "section": section})
+    def _set_job(**kw):
+        cur = _redis_get(job_key) or {}
+        if not isinstance(cur, dict):
+            cur = {}
+        cur.update(kw)
+        cur["updated_at"] = datetime.now(IST).isoformat()
+        _redis_set(job_key, cur, ttl=86400)
+        return cur
 
-    # de-dupe by symbol, prefer bulk > results > news
-    rank_sec = {"bulk_insider_driven": 0, "results_driven": 1, "news_driven": 2}
-    picks.sort(key=lambda x: (rank_sec.get(x.get("section"), 9), -(x.get("score") or 0)))
-    seen = set()
-    unique = []
-    for p in picks:
-        s = (p.get("symbol") or "").upper()
-        if not s or s in seen:
-            continue
-        seen.add(s)
-        unique.append(p)
+    existing = _redis_get(job_key) or {}
+    if isinstance(existing, dict) and existing.get("status") == "running" and not force:
+        return {"ok": True, "already_running": True, **existing}
 
-    lines = [
-        "🔥 *Stockky Catalyst Alert*",
-        f"IST {datetime.now(IST).strftime('%Y-%m-%d %H:%M')}",
-        f"Universe screened: {hot.get('universe_size')} · Actionable: {len(unique)}",
-        "",
-    ]
-    if not unique:
-        lines.append("No strong catalyst names right now.")
-    else:
-        for i, p in enumerate(unique[:15], 1):
-            sym = p.get("symbol")
-            dec = p.get("decision")
-            sc = p.get("score")
-            sec = (p.get("section") or "").replace("_driven", "")
-            why = ""
-            rs = p.get("reasons") or []
-            if isinstance(rs, list) and rs:
-                why = str(rs[0])[:80]
-            elif p.get("summary"):
-                why = str(p.get("summary"))[:80]
-            lines.append(f"{i}. *{sym}* — {dec} (score {sc}) [{sec}]")
-            if why:
-                lines.append(f"   _{why}_")
+    _set_job(
+        status="running",
+        started_at=datetime.now(IST).isoformat(),
+        message="Catalyst sweep started",
+        force=force,
+        notify=notify,
+        actionable_count=0,
+        error=None,
+    )
 
-    message = "\n".join(lines)
-    notified = False
-    if notify and unique:
+    async def _work():
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                await client.post(
-                    f"{NOTIFICATION_URL.rstrip('/')}/notify",
-                    json={"title": "Catalyst Alert", "message": message, "channel": "telegram"},
-                )
-            notified = True
-        except Exception as e:
-            logger.warning("catalyst telegram failed: %s", e)
-            # Fallback helper if present
             try:
-                if "send_picks_to_telegram" in dir():
-                    send_picks_to_telegram({"recommendations": unique[:10]})
-                    notified = True
-            except Exception as e2:
-                logger.warning("catalyst telegram fallback: %s", e2)
+                if force and _redis:
+                    _redis.delete(HOT_STOCKS_CACHE_KEY)
+            except Exception:
+                pass
+            _set_job(message="Scoring hot/catalyst universe…")
+            hot = await stockky_hot_stocks(force=True)
+            picks = []
+            for section in ("bulk_insider_driven", "results_driven", "news_driven"):
+                for item in hot.get(section) or []:
+                    dec = (item.get("decision") or "").upper()
+                    if dec in ("BUY NOW", "PREPARE TO BUY") or item.get("signal_strength") == "high":
+                        picks.append({**item, "section": section})
 
+            rank_sec = {"bulk_insider_driven": 0, "results_driven": 1, "news_driven": 2}
+            picks.sort(key=lambda x: (rank_sec.get(x.get("section"), 9), -(x.get("score") or 0)))
+            seen = set()
+            unique = []
+            for p in picks:
+                s = (p.get("symbol") or "").upper()
+                if not s or s in seen:
+                    continue
+                seen.add(s)
+                unique.append(p)
+
+            lines = [
+                "🔥 *Stockky Catalyst Alert*",
+                f"IST {datetime.now(IST).strftime('%Y-%m-%d %H:%M')}",
+                f"Universe screened: {hot.get('universe_size')} · Actionable: {len(unique)}",
+                "",
+            ]
+            if not unique:
+                lines.append("No strong catalyst names right now.")
+            else:
+                for i, p in enumerate(unique[:15], 1):
+                    sym = p.get("symbol")
+                    dec = p.get("decision")
+                    sc = p.get("score")
+                    sec = (p.get("section") or "").replace("_driven", "")
+                    why = ""
+                    rs = p.get("reasons") or []
+                    if isinstance(rs, list) and rs:
+                        why = str(rs[0])[:80]
+                    elif p.get("summary"):
+                        why = str(p.get("summary"))[:80]
+                    lines.append(f"{i}. *{sym}* — {dec} (score {sc}) [{sec}]")
+                    if why:
+                        lines.append(f"   _{why}_")
+
+            message = "\n".join(lines)
+            notified = False
+            if notify and unique:
+                try:
+                    async with httpx.AsyncClient(timeout=20) as client:
+                        await client.post(
+                            f"{NOTIFICATION_URL.rstrip('/')}/notify",
+                            json={"title": "Catalyst Alert", "message": message, "channel": "telegram"},
+                        )
+                    notified = True
+                except Exception as e:
+                    logger.warning("catalyst telegram failed: %s", e)
+                    try:
+                        if "send_picks_to_telegram" in dir():
+                            send_picks_to_telegram({"recommendations": unique[:10]})
+                            notified = True
+                    except Exception as e2:
+                        logger.warning("catalyst telegram fallback: %s", e2)
+
+            result = {
+                "ok": True,
+                "status": "done",
+                "actionable_count": len(unique),
+                "picks": unique[:20],
+                "hot_universe_size": hot.get("universe_size"),
+                "notified": notified,
+                "message_preview": message[:500],
+                "generated_at": datetime.now(IST).isoformat(),
+                "message": f"Done — {len(unique)} actionable",
+            }
+            _set_job(**result)
+            return result
+        except Exception as e:
+            logger.exception("catalyst alert failed")
+            _set_job(status="error", error=str(e)[:300], message=f"Error: {e}")
+            return {"ok": False, "status": "error", "error": str(e)[:300]}
+
+    if sync:
+        return await _work()
+
+    background_tasks.add_task(_work)
     return {
         "ok": True,
-        "actionable_count": len(unique),
-        "picks": unique[:20],
-        "hot_universe_size": hot.get("universe_size"),
-        "notified": notified,
-        "message_preview": message[:500],
-        "generated_at": datetime.now(IST).isoformat(),
+        "status": "running",
+        "accepted": True,
+        "message": "Catalyst alert started in background — poll /catalysts/alert/status",
+        "poll": "/catalysts/alert/status",
     }
+
 
 
 # ── WebSocket real-time hub (scan progress + market ticks + training) ─────────
@@ -4314,36 +4393,129 @@ def data_feed_symbol(symbol: str):
 
 
 @app.post("/data-feed/run")
-async def data_feed_run(background_tasks: BackgroundTasks, force: bool = False):
-    """Feed slow fields for current scan universe. Manual button + midnight cron."""
+async def data_feed_run(
+    background_tasks: BackgroundTasks,
+    force: bool = False,
+    resume: bool = False,
+):
+    """Feed slow fields for scan universe.
+
+    - force=true  → full refresh from index 0 (Refresh button)
+    - resume=true → continue from checkpoint cursor (Resume button)
+    - default     → start fresh only if not running
+    """
     store = _feed_store()
     job = store.job()
-    if job.get("status") == "running" and not force:
+    if job.get("status") == "running" and not force and not resume:
         return {"ok": True, "already_running": True, **job}
 
     universe = _build_scan_universe()
     if not universe:
         universe = list(_get_nifty_indices() or [])[:150]
-    universe = universe[:250]
+    universe = [u.upper().replace(".NS", "").replace(".BO", "") for u in universe[:250]]
 
-    store.set_job(
-        status="running",
-        processed=0,
-        total=len(universe),
-        started_at=datetime.now(IST).isoformat(),
-        elapsed_sec=0,
-        estimated_remaining_sec=None,
-        message=f"Feeding {len(universe)} symbols…",
-        errors=0,
-    )
+    # Checkpoint: list of already-fed symbols + cursor
+    checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
+    done_set = set(checkpoint.get("done") or [])
+    start_idx = 0
+    ok_n = int(job.get("ok_count") or 0)
+    err_n = int(job.get("error_count") or 0)
 
-    async def _run():
+    if resume and not force:
+        # Prefer explicit cursor; else skip symbols already in done
+        start_idx = int(checkpoint.get("cursor") or job.get("processed") or 0)
+        start_idx = max(0, min(start_idx, len(universe)))
+        # If job was stopped mid-way, resume from there
+        if job.get("status") in ("stopped", "error", "idle", "done") and start_idx >= len(universe):
+            start_idx = 0
+            done_set = set()
+            ok_n = 0
+            err_n = 0
+        store.set_job(
+            status="running",
+            processed=start_idx,
+            total=len(universe),
+            started_at=job.get("started_at") or datetime.now(IST).isoformat(),
+            resumed_at=datetime.now(IST).isoformat(),
+            message=f"Resuming from {start_idx}/{len(universe)}…",
+            errors=err_n,
+            ok_count=ok_n,
+            error_count=err_n,
+            stop_requested=False,
+            checkpoint={"cursor": start_idx, "done": list(done_set), "universe": universe},
+        )
+        mode = "resume"
+    else:
+        # Full refresh / new run
+        done_set = set()
+        start_idx = 0
         ok_n = 0
         err_n = 0
+        store.set_job(
+            status="running",
+            processed=0,
+            total=len(universe),
+            started_at=datetime.now(IST).isoformat(),
+            elapsed_sec=0,
+            estimated_remaining_sec=None,
+            message=f"Feeding {len(universe)} symbols…",
+            errors=0,
+            ok_count=0,
+            error_count=0,
+            stop_requested=False,
+            checkpoint={"cursor": 0, "done": [], "universe": universe},
+        )
+        mode = "refresh" if force else "start"
+
+    async def _run(start_at: int, ok0: int, err0: int, done0: set):
+        ok_n = ok0
+        err_n = err0
+        done_set = set(done0)
         async with httpx.AsyncClient(timeout=40) as client:
-            for i, sym in enumerate(universe):
+            for i in range(start_at, len(universe)):
+                # Cooperative stop
+                jnow = store.job()
+                if jnow.get("stop_requested"):
+                    ts = datetime.now(IST).isoformat()
+                    msg = f"Stopped at {i}/{len(universe)} — committed {ok_n} fed stocks at {ts}"
+                    store.set_meta(
+                        last_success_at=ts,
+                        last_count=ok_n,
+                        last_errors=err_n,
+                        last_message=msg,
+                        source="stop",
+                        universe_size=len(universe),
+                        partial=True,
+                    )
+                    store.set_job(
+                        status="stopped",
+                        processed=i,
+                        total=len(universe),
+                        message=msg,
+                        errors=err_n,
+                        ok_count=ok_n,
+                        error_count=err_n,
+                        finished_at=ts,
+                        stop_requested=False,
+                        checkpoint={"cursor": i, "done": list(done_set), "universe": universe},
+                    )
+                    logger.info(msg)
+                    return
+
+                base = universe[i]
+                if base in done_set:
+                    store.set_job(
+                        status="running",
+                        processed=i + 1,
+                        total=len(universe),
+                        message=f"Skip cached {base} ({i+1}/{len(universe)})",
+                        errors=err_n,
+                        ok_count=ok_n,
+                        error_count=err_n,
+                        checkpoint={"cursor": i + 1, "done": list(done_set), "universe": universe},
+                    )
+                    continue
                 try:
-                    base = sym.upper().replace(".NS", "").replace(".BO", "")
                     fund = None
                     events = None
                     try:
@@ -4361,20 +4533,24 @@ async def data_feed_run(background_tasks: BackgroundTasks, force: bool = False):
                     if fund or events:
                         payload = extract_feed_payload(base, fund, events)
                         store.put_symbol(base, payload, ttl=DATA_FEED_TTL)
+                        done_set.add(base)
                         ok_n += 1
                     else:
                         err_n += 1
                 except Exception as e:
                     err_n += 1
-                    logger.debug("data-feed %s: %s", sym, e)
+                    logger.debug("data-feed %s: %s", base, e)
+
                 store.set_job(
                     status="running",
                     processed=i + 1,
                     total=len(universe),
                     message=f"Fed {ok_n}/{len(universe)} ({base})",
                     errors=err_n,
+                    ok_count=ok_n,
+                    error_count=err_n,
+                    checkpoint={"cursor": i + 1, "done": list(done_set), "universe": universe},
                 )
-                # gentle pacing for free tier
                 if (i + 1) % 5 == 0:
                     await asyncio.sleep(0.35)
 
@@ -4387,6 +4563,7 @@ async def data_feed_run(background_tasks: BackgroundTasks, force: bool = False):
             last_message=msg,
             source="manual_or_api_or_scheduler",
             universe_size=len(universe),
+            partial=False,
         )
         store.set_job(
             status="done",
@@ -4394,17 +4571,44 @@ async def data_feed_run(background_tasks: BackgroundTasks, force: bool = False):
             total=len(universe),
             message=msg,
             errors=err_n,
+            ok_count=ok_n,
+            error_count=err_n,
             finished_at=ts,
+            stop_requested=False,
+            checkpoint={"cursor": len(universe), "done": list(done_set), "universe": universe},
         )
         logger.info(msg)
 
-    background_tasks.add_task(_run)
+    background_tasks.add_task(_run, start_idx, ok_n, err_n, done_set)
     return {
         "ok": True,
         "started": True,
+        "mode": mode,
+        "resume_from": start_idx,
         "total": len(universe),
-        "message": f"Data feed started for {len(universe)} scan-universe stocks",
+        "message": (
+            f"Data feed resumed from {start_idx}/{len(universe)}"
+            if mode == "resume"
+            else f"Data feed started for {len(universe)} scan-universe stocks"
+        ),
     }
+
+
+@app.post("/data-feed/stop")
+async def data_feed_stop():
+    """Request cooperative stop; background loop commits checkpoint + meta."""
+    store = _feed_store()
+    job = store.job()
+    if job.get("status") != "running":
+        return {"ok": True, "stopped": False, "detail": f"Not running (status={job.get('status')})", **job}
+    store.set_job(stop_requested=True, message="Stop requested — committing checkpoint…")
+    return {"ok": True, "stopped": True, "message": "Stop requested; will commit after current symbol", **store.job()}
+
+
+@app.post("/data-feed/resume")
+async def data_feed_resume(background_tasks: BackgroundTasks):
+    """Resume from last checkpoint (same as /data-feed/run?resume=true)."""
+    return await data_feed_run(background_tasks, force=False, resume=True)
 
 
 # ── Hot Picks on-demand job (no auto-load spam) ─────────────────────────────

@@ -268,7 +268,13 @@ def _get_all_nse_securities() -> List[str]:
     return symbols
 
 def _get_nifty_indices() -> List[str]:
-    indices = ["NIFTY%2050", "NIFTY%20NEXT%2050", "NIFTY%20MIDCAP%20100"]
+    indices = [
+        "NIFTY%2050",
+        "NIFTY%20NEXT%2050",
+        "NIFTY%20MIDCAP%20100",
+        "NIFTY%20MIDCAP%20150",
+        "NIFTY%20SMALLCAP%20100",
+    ]
     all_symbols = []
     for idx in indices:
         data = _fetch_from_nse_api(f"equity-stockIndices?index={idx}", f"nse:index_{idx}")
@@ -305,53 +311,181 @@ def _get_recent_ipos() -> List[str]:
     return symbols
 
 def _get_momentum_movers() -> List[str]:
-    movers = []
+    """Real-time movers: NSE gainers/losers/most-active + ≥5% day/week moves."""
+    movers: set[str] = set()
+
+    # 1) NSE live boards (best free real-time source when reachable)
+    for endpoint, key in (
+        ("live-analysis-variations?index=gainers", "nse:gainers"),
+        ("live-analysis-variations?index=losers", "nse:losers"),
+        ("live-analysis-variations?index=volume-gainers", "nse:vol_gainers"),
+        ("equity-stockIndices?index=NIFTY%20500", "nse:nifty500_idx"),
+    ):
+        try:
+            data = _fetch_from_nse_api(endpoint, key, ttl=900)
+            rows = []
+            if isinstance(data, dict):
+                rows = data.get("data") or data.get("NIFTY") or []
+                if isinstance(rows, dict):
+                    rows = rows.get("data") or []
+            if isinstance(rows, list):
+                for item in rows:
+                    if not isinstance(item, dict):
+                        continue
+                    sym = (item.get("symbol") or item.get("symbolName") or "").upper()
+                    if not sym or sym in ("NIFTY", "NIFTY50", "-"):
+                        continue
+                    # Prefer names with meaningful move when field present
+                    chg = item.get("pChange") or item.get("perChange") or item.get("change_pct")
+                    try:
+                        chg_f = float(chg) if chg is not None else None
+                    except (TypeError, ValueError):
+                        chg_f = None
+                    if chg_f is None or abs(chg_f) >= 2.0:
+                        movers.add(sym.replace("&", "").replace("-", "") if False else sym)
+        except Exception as e:
+            logger.debug("NSE movers %s: %s", endpoint, e)
+
+    # 2) Market-data service (already warm on gateway)
     try:
-        nifty_symbols = _get_nifty_indices()[:50]
-        performances = []
-        for sym in nifty_symbols:
+        base = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
+        for path in ("/market/top-gainers", "/market/top-losers", "/market/most-active"):
             try:
-                ticker = yf.Ticker(f"{sym}.NS")
-                hist = ticker.history(period="5d", interval="1d")
-                if hist.empty or len(hist) < 2:
+                r = httpx.get(f"{base}{path}", timeout=8)
+                if r.status_code != 200:
                     continue
-                week_change = (hist["Close"].iloc[-1] - hist["Close"].iloc[0]) / hist["Close"].iloc[0] * 100
-                performances.append((sym, float(week_change)))
+                payload = r.json()
+                rows = payload if isinstance(payload, list) else payload.get("data") or payload.get("items") or []
+                for item in rows or []:
+                    if isinstance(item, dict):
+                        sym = (item.get("symbol") or item.get("ticker") or "").upper().replace(".NS", "")
+                        if sym:
+                            movers.add(sym)
+                    elif isinstance(item, str) and item.isalpha():
+                        movers.add(item.upper())
             except Exception:
                 continue
-        performances.sort(key=lambda x: x[1], reverse=True)
-        movers = [s for s, _ in performances[:10]] + [s for s, _ in performances[-10:]]
     except Exception as e:
-        logger.warning("Could not fetch momentum movers: %s", e)
-    return movers
+        logger.debug("market-data movers: %s", e)
+
+    # 3) Gateway's own /market endpoints (yfinance-backed) when available
+    try:
+        data = _get_nifty50_data() if "_get_nifty50_data" in dir() else []
+        for row in data or []:
+            if not isinstance(row, dict):
+                continue
+            sym = (row.get("symbol") or "").upper()
+            chg = row.get("change_pct") or row.get("pChange")
+            try:
+                if sym and chg is not None and abs(float(chg)) >= 3.0:
+                    movers.add(sym)
+            except (TypeError, ValueError):
+                if sym:
+                    movers.add(sym)
+    except Exception:
+        pass
+
+    # 4) Targeted yfinance 1d ≥5% on a liquid seed (limit calls for free tier)
+    if len(movers) < 40:
+        seed = list(dict.fromkeys(_get_nifty_indices() + _get_all_nse_securities()[:120]))[:80]
+        for sym in seed:
+            try:
+                hist = yf.Ticker(f"{sym}.NS").history(period="5d", interval="1d")
+                if hist is None or hist.empty or len(hist) < 2:
+                    continue
+                day_chg = (float(hist["Close"].iloc[-1]) - float(hist["Close"].iloc[-2])) / float(hist["Close"].iloc[-2]) * 100
+                week_chg = (float(hist["Close"].iloc[-1]) - float(hist["Close"].iloc[0])) / float(hist["Close"].iloc[0]) * 100
+                if abs(day_chg) >= 5.0 or abs(week_chg) >= 5.0:
+                    movers.add(sym)
+            except Exception:
+                continue
+
+    out = sorted(movers)
+    logger.info("Momentum movers collected: %s symbols", len(out))
+    return out
 
 def _get_news_mentioned_symbols() -> List[str]:
-    mentioned = []
+    """Symbols appearing in fresh market news (results, bulk deals, upgrades)."""
+    mentioned: list[str] = []
+    queries = [
+        "NSE+stock+results+earnings",
+        "NSE+bulk+deal+OR+block+deal",
+        "NSE+mutual+fund+stake+OR+FII+buying",
+        "BSE+stock+surge+OR+rally+OR+jumps",
+        "NSE+order+win+OR+contract+OR+acquisition",
+    ]
+    text_parts: list[str] = []
     try:
-        feed = feedparser.parse(
-            "https://news.google.com/rss/search?q=NSE+stock+bulk+deal+earnings+results&hl=en-IN&gl=IN&ceid=IN:en"
-        )
-        text = " ".join(e.title for e in feed.entries[:30]).upper()
-        all_symbols = _get_all_nse_securities()
-        for sym in all_symbols[:300]:
-            if sym in text:
+        for q in queries:
+            try:
+                feed = feedparser.parse(
+                    f"https://news.google.com/rss/search?q={q}&hl=en-IN&gl=IN&ceid=IN:en"
+                )
+                for e in (feed.entries or [])[:20]:
+                    text_parts.append(getattr(e, "title", "") or "")
+                    text_parts.append(getattr(e, "summary", "") or "")
+            except Exception:
+                continue
+        text = " ".join(text_parts).upper()
+        # Prefer longer tickers first to avoid short false positives (e.g. ITC inside words is ok as whole token)
+        candidates = sorted(set(_get_all_nse_securities()[:400] + _get_nifty_indices()), key=len, reverse=True)
+        for sym in candidates:
+            if len(sym) < 2:
+                continue
+            # word-ish match: symbol as standalone token
+            if f" {sym} " in f" {text} " or text.startswith(sym + " ") or text.endswith(" " + sym):
+                mentioned.append(sym)
+            elif sym in text and len(sym) >= 4:
                 mentioned.append(sym)
     except Exception as e:
         logger.warning("Could not parse news for symbols: %s", e)
-    return mentioned[:15]
+    # de-dupe preserve order
+    seen = set()
+    out = []
+    for s in mentioned:
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    logger.info("News-mentioned symbols: %s", len(out))
+    return out[:60]
 
 def _get_event_symbols() -> List[str]:
+    """Symbols with upcoming/recent corporate events, bulk deals, insider activity."""
+    symbols: list[str] = []
     try:
-        resp = httpx.get(f"{EVENT_URL}/symbols_with_events", timeout=10)
+        resp = httpx.get(f"{EVENT_URL}/symbols_with_events", timeout=12)
         if resp.status_code == 200:
             data = resp.json()
             if isinstance(data, dict):
-                return data.get("symbols", [])
+                symbols.extend(data.get("symbols") or [])
             elif isinstance(data, list):
-                return data
+                symbols.extend(data)
     except Exception as e:
         logger.warning(f"Could not fetch event symbols: {e}")
-    return []
+
+    # Extra: analysis-intelligence categorized bulk/insider from a seed set is too heavy;
+    # rely on event service + news. Also try market-data corporate actions if exposed.
+    try:
+        base = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
+        r = httpx.get(f"{base}/events/active-symbols", timeout=8)
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, dict):
+                symbols.extend(data.get("symbols") or [])
+            elif isinstance(data, list):
+                symbols.extend([str(x) for x in data])
+    except Exception:
+        pass
+
+    out = []
+    seen = set()
+    for s in symbols:
+        su = str(s).upper().replace(".NS", "").replace(".BO", "")
+        if su and su not in seen:
+            seen.add(su)
+            out.append(su)
+    logger.info("Event-driven symbols: %s", len(out))
+    return out[:80]
 
 # ── Build scan universe ──────────────────────────────────────────────────────
 def _build_scan_universe() -> List[str]:
@@ -428,9 +562,50 @@ def _build_scan_universe() -> List[str]:
     if pruned_count:
         logger.info(f"Universe pruning: excluded {pruned_count} chronically-unproductive symbols")
 
-    result = clean[:300]
-    _redis_set(SCAN_UNIVERSE_KEY, result, ttl=21600)
-    logger.info(f"Scan universe built: {len(result)} symbols")
+    # Prefer dynamic signal names first so movers/news/events always get scanned
+    dynamic_priority = []
+    try:
+        for src in (
+            _get_momentum_movers(),
+            _get_news_mentioned_symbols(),
+            _get_event_symbols(),
+            _get_recent_ipos(),
+        ):
+            for s in src:
+                su = str(s).upper().replace(".NS", "").replace(".BO", "")
+                if su and su in clean and su not in dynamic_priority:
+                    dynamic_priority.append(su)
+    except Exception as e:
+        logger.warning("dynamic priority merge failed: %s", e)
+
+    rest = [s for s in clean if s not in set(dynamic_priority)]
+    ordered = dynamic_priority + rest
+
+    # Target 200–300 names; if live sources thin, pad from liquid NSE list
+    if len(ordered) < 200:
+        pad = [s for s in _get_all_nse_securities() if s not in set(ordered)]
+        ordered.extend(pad[: max(0, 220 - len(ordered))])
+        logger.info("Universe padded to %s symbols (live sources were thin)", len(ordered))
+
+    result = ordered[:300]
+    # Shorter cache in market hours so movers refresh; longer off-hours
+    try:
+        from datetime import datetime, timezone, timedelta
+        ist = timezone(timedelta(hours=5, minutes=30))
+        now = datetime.now(ist)
+        is_weekday = now.weekday() < 5
+        mins = now.hour * 60 + now.minute
+        market_open = is_weekday and (9 * 60 + 15) <= mins <= (15 * 60 + 30)
+        ttl = 1800 if market_open else 21600  # 30m vs 6h
+    except Exception:
+        ttl = 3600
+    _redis_set(SCAN_UNIVERSE_KEY, result, ttl=ttl)
+    logger.info(
+        "Scan universe built: %s symbols (dynamic=%s, ttl=%ss)",
+        len(result),
+        len(dynamic_priority),
+        ttl,
+    )
     return result
 
 # ── Symbol resolution ──────────────────────────────────────────────────────

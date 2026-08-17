@@ -12,6 +12,7 @@ import MarketMovers from "./components/MarketMovers";
 import ServiceManager from "./components/ServiceManager";
 import Training from "./components/Training";
 import HotStocks from "./components/HotStocks";
+import DataFeed from "./components/DataFeed";
 import Trades from "./components/Trades";
 // ── NEW: import Market Sentiment Header ──
 import MarketSentimentHeader from "./components/MarketSentimentHeader";
@@ -25,7 +26,7 @@ type ViewState =
   | { mode: "scan"; data: ScanResult }
   | { mode: "error"; message: string };
 
-type Tab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "settings" | "watchlist";
+type Tab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "datafeed" | "settings" | "watchlist";
 
 export default function App() {
   const [theme, setTheme] = useState<"dark" | "light">(() => {
@@ -550,6 +551,7 @@ export default function App() {
 
   const cmdActions: CommandAction[] = [
     { id: "dash", label: "Dashboard", group: "Navigate", hint: "tab", run: () => setTab("dashboard") },
+    { id: "datafeed", label: "Data Feed", group: "Navigate", hint: "tab", run: () => setTab("datafeed") },
     { id: "hot", label: "Stockky Hot Picks", group: "Navigate", hint: "tab", run: () => setTab("hot") },
     { id: "train", label: "Training Lab", group: "Navigate", hint: "tab", run: () => setTab("training") },
     { id: "trades", label: "Trades", group: "Navigate", hint: "tab", run: () => setTab("trades") },
@@ -568,6 +570,7 @@ export default function App() {
 
   const navItems: { id: Tab; label: string; short: string; icon: string }[] = [
     { id: "dashboard", label: "Dashboard", short: "Home", icon: "▣" },
+    { id: "datafeed", label: "Data Feed", short: "Feed", icon: "🗄️" },
     { id: "hot", label: "Hot Picks", short: "Picks", icon: "⚡" },
     { id: "training", label: "Training", short: "Train", icon: "◈" },
     { id: "trades", label: "Trades", short: "Trade", icon: "⇄" },
@@ -840,13 +843,21 @@ export default function App() {
             <p className="dash-section-title">Paper Trades</p>
             <Trades />
           </div>
+        ) : tab === "datafeed" ? (
+          <div className="page-terminal">
+            <p className="dash-section-title">Data Feed</p>
+            <DataFeed />
+          </div>
         ) : tab === "hot" ? (
-          <HotStocks
-            onAnalyze={(s) => {
-              setTab("dashboard");
-              handleSearch(s);
-            }}
-          />
+          <div className="page-terminal">
+            <p className="dash-section-title">Hot Picks</p>
+            <HotStocks
+              onAnalyze={(s) => {
+                setTab("dashboard");
+                handleSearch(s);
+              }}
+            />
+          </div>
         ) : tab === "settings" ? (
           <SettingsPage
             backendUp={backendUp}

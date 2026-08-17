@@ -1,0 +1,32 @@
+name: Stockky Data Feed (Midnight IST)
+
+on:
+  schedule:
+    - cron: "45 18 * * 0-4"
+  workflow_dispatch:
+
+jobs:
+  feed:
+    runs-on: ubuntu-latest
+    steps:
+      - name: IST check
+        run: echo "IST $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M %Z')"
+
+      - name: Run data feed
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+        run: |
+          set -e
+          GW="${API_GATEWAY_URL%/}"
+          [ -n "$GW" ] || { echo "API_GATEWAY_URL missing"; exit 1; }
+          curl -fsS -m 45 "$GW/health?warm=true" || true
+          sleep 20
+          curl -fsS -m 30 -X POST "$GW/data-feed/run?force=true"
+          for i in $(seq 1 80); do
+            sleep 20
+            ST=$(curl -fsS -m 15 "$GW/data-feed/status" || echo '{}')
+            echo "$ST" | head -c 300; echo
+            echo "$ST" | grep -q '"status":"done"' && exit 0
+            echo "$ST" | grep -q '"status":"error"' && exit 1
+          done
+          exit 1

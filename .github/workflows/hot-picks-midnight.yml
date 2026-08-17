@@ -1,0 +1,32 @@
+name: Stockky Hot Picks (Midnight IST)
+
+on:
+  schedule:
+    - cron: "0 19 * * 0-4"
+  workflow_dispatch:
+
+jobs:
+  hot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: IST check
+        run: echo "IST $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M %Z')"
+
+      - name: Run Hot Picks
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+        run: |
+          set -e
+          GW="${API_GATEWAY_URL%/}"
+          [ -n "$GW" ] || { echo "API_GATEWAY_URL missing"; exit 1; }
+          curl -fsS -m 45 "$GW/health?warm=true" || true
+          sleep 15
+          curl -fsS -m 30 -X POST "$GW/stockky-hot/run?force=true"
+          for i in $(seq 1 60); do
+            sleep 15
+            ST=$(curl -fsS -m 15 "$GW/stockky-hot/status" || echo '{}')
+            echo "$ST" | head -c 300; echo
+            echo "$ST" | grep -q '"status":"done"' && exit 0
+            echo "$ST" | grep -q '"status":"error"' && exit 1
+          done
+          exit 1

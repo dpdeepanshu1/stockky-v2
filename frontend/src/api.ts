@@ -909,6 +909,23 @@ export const api = {
       1,
       120000
     ),
+
+  getDataFeedStatus: () =>
+    request<any>("/data-feed/status", undefined, 1, 15000),
+  getDataFeedMeta: () =>
+    request<any>("/data-feed/meta", undefined, 1, 15000),
+  runDataFeed: (force = false) =>
+    request<any>(`/data-feed/run?force=${force}`, { method: "POST" }, 1, 30000),
+  getDataFeedSymbol: (symbol: string) =>
+    request<any>(`/data-feed/${encodeURIComponent(symbol)}`, undefined, 1, 15000),
+
+  getStockkyHotStatus: () =>
+    request<any>("/stockky-hot/status", undefined, 1, 15000),
+  getStockkyHotResult: () =>
+    request<any>("/stockky-hot/result", undefined, 1, 30000),
+  runStockkyHot: (force = true) =>
+    request<any>(`/stockky-hot/run?force=${force}`, { method: "POST" }, 1, 30000),
+
   getStockkyHot: (force = false) =>
     request<{
       news_driven: any[];

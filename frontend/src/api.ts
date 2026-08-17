@@ -975,13 +975,17 @@ export const api = {
     ),
 
   getDataFeedStatus: () =>
-    request<any>("/data-feed/status", undefined, 1, 15000),
+    request<any>("/data-feed/status", undefined, 2, 30000),
   getDataFeedMeta: () =>
-    request<any>("/data-feed/meta", undefined, 1, 15000),
+    request<any>("/data-feed/meta", undefined, 2, 30000),
   runDataFeed: (force = false) =>
-    request<any>(`/data-feed/run?force=${force}`, { method: "POST" }, 1, 30000),
+    request<any>(`/data-feed/run?force=${force}`, { method: "POST" }, 2, 45000),
+  resumeDataFeed: () =>
+    request<any>("/data-feed/resume", { method: "POST" }, 2, 45000),
+  stopDataFeed: () =>
+    request<any>("/data-feed/stop", { method: "POST" }, 2, 30000),
   getDataFeedSymbol: (symbol: string) =>
-    request<any>(`/data-feed/${encodeURIComponent(symbol)}`, undefined, 1, 15000),
+    request<any>(`/data-feed/${encodeURIComponent(symbol)}`, undefined, 1, 20000),
 
   getStockkyHotStatus: () =>
     request<any>("/stockky-hot/status", undefined, 1, 15000),

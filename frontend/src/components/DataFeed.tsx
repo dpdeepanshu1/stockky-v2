@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import Pipeline from "./Pipeline";
 
@@ -9,6 +9,9 @@ type Job = {
   elapsed_sec?: number;
   estimated_remaining_sec?: number | null;
   message?: string;
+  ok_count?: number;
+  error_count?: number;
+  checkpoint?: { cursor?: number; done?: string[] };
 };
 
 type Meta = {
@@ -17,6 +20,7 @@ type Meta = {
   last_message?: string;
   source?: string;
   universe_size?: number;
+  partial?: boolean;
 };
 
 function fmtSec(s?: number | null) {
@@ -33,17 +37,17 @@ export default function DataFeed() {
   const [running, setRunning] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       const st = await api.getDataFeedStatus();
       setJob(st);
       setMeta(st.meta || null);
-      if (st.status === "running") setRunning(true);
-      if (st.status === "done" || st.status === "idle" || st.status === "error") {
-        if (st.status === "done" && st.message) setBanner(st.message);
-        setRunning(st.status === "running");
-      }
+      const isRun = st.status === "running";
+      setRunning(isRun);
+      if (st.status === "done" && st.message) setBanner(st.message);
+      if (st.status === "stopped" && st.message) setBanner(st.message);
     } catch (e: any) {
       setErr(e?.message || "Failed to load data feed status");
     }
@@ -59,26 +63,103 @@ export default function DataFeed() {
     return () => clearInterval(id);
   }, [running, refresh]);
 
-  const startFeed = async () => {
+  const total = job?.total ?? 0;
+  const processed = job?.processed ?? 0;
+  const complete = total > 0 && processed >= total && job?.status === "done";
+  const partial =
+    (job?.status === "stopped" || job?.status === "error" || meta?.partial) &&
+    processed > 0 &&
+    total > 0 &&
+    processed < total;
+  const canResume =
+    !running &&
+    (partial ||
+      (job?.status === "stopped" && processed < total) ||
+      (job?.checkpoint?.cursor != null &&
+        job.checkpoint.cursor > 0 &&
+        job.checkpoint.cursor < (job.total || 0)));
+  // Refresh active when not fully fed (or never run). Disabled only when fully complete.
+  const canRefresh = !running && !complete;
+  // When complete, still allow refresh to rebuild — user asked disable only when all fed
+  // "Refresh Button should active in that case otherwise if we have all data feed to all stocks so it should be disble"
+  // → Refresh enabled when NOT all stocks fed; disabled when complete.
+  // But they also said "again active when we start" — so when starting a new cycle after complete, enable via explicit full refresh.
+  // Interpretation: Refresh disabled only when status=done AND processed>=total. User can still force via... 
+  // Actually for complete universe they want refresh disabled. Provide "Full refresh" that becomes active when complete? 
+  // I'll: Refresh enabled when !running && !complete; when complete show "Full re-feed" as force refresh enabled.
+  const canFullRefeed = !running && complete;
+
+  const pct = useMemo(() => {
+    if (total > 0) return Math.min(100, Math.round((processed / total) * 100));
+    return running ? 5 : 0;
+  }, [processed, total, running]);
+
+  const startFresh = async () => {
     setErr(null);
     setBanner(null);
+    setBusy("start");
     try {
       setRunning(true);
-      const res = await api.runDataFeed(true);
+      const res = await api.runDataFeed(true); // force full
       setBanner(res.message || "Data feed started");
       await refresh();
     } catch (e: any) {
       setErr(e?.message || "Failed to start data feed");
       setRunning(false);
+    } finally {
+      setBusy(null);
     }
   };
 
-  const pct =
-    job?.total && job.total > 0
-      ? Math.min(100, Math.round(((job.processed || 0) / job.total) * 100))
-      : running
-      ? 5
-      : 0;
+  const onResume = async () => {
+    setErr(null);
+    setBanner(null);
+    setBusy("resume");
+    try {
+      setRunning(true);
+      const res = await api.resumeDataFeed();
+      setBanner(res.message || "Resumed from checkpoint");
+      await refresh();
+    } catch (e: any) {
+      setErr(e?.message || "Failed to resume data feed");
+      setRunning(false);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onStop = async () => {
+    setErr(null);
+    setBusy("stop");
+    try {
+      const res = await api.stopDataFeed();
+      setBanner(res.message || "Stop requested — committing progress…");
+      await refresh();
+    } catch (e: any) {
+      setErr(e?.message || "Failed to stop data feed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onRefreshPage = async () => {
+    // Soft UI refresh of status + if partial, does NOT wipe checkpoint
+    setErr(null);
+    setBusy("refresh-ui");
+    try {
+      await refresh();
+      setBanner("Status refreshed");
+    } catch (e: any) {
+      setErr(e?.message || "Refresh failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onFullRefresh = async () => {
+    // Full re-feed from 0 — only when not complete, or explicit full refeed when complete
+    await startFresh();
+  };
 
   return (
     <div className="space-y-4">
@@ -89,23 +170,63 @@ export default function DataFeed() {
             <p className="text-mist/70 text-xs mt-1 max-w-xl">
               Stores slow-changing fields (fundamentals, sector, peers, multi-quarter, bulk/insider
               snapshot) for scan-universe stocks. Real-time tasks reuse this cache for 12–24h to stay
-              inside free-tier rate limits. Price & intraday technicals stay live.
+              inside free-tier rate limits. Price &amp; intraday technicals stay live.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={startFeed}
-            disabled={running}
-            className="font-mono text-xs px-4 py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-200 hover:bg-amber-500/30 disabled:opacity-50"
-          >
-            {running ? "Feeding…" : "Data feed to All Scan Universe Stocks"}
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={onResume}
+              disabled={!canResume || busy != null}
+              title="Continue from last committed checkpoint"
+              className="font-mono text-xs px-3 py-2 rounded-lg bg-sky-500/20 border border-sky-500/40 text-sky-200 hover:bg-sky-500/30 disabled:opacity-40"
+            >
+              {busy === "resume" ? "Resuming…" : "Resume"}
+            </button>
+            <button
+              type="button"
+              onClick={onStop}
+              disabled={!running || busy != null}
+              title="Stop and commit what has been fed so far"
+              className="font-mono text-xs px-3 py-2 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-200 hover:bg-rose-500/30 disabled:opacity-40"
+            >
+              {busy === "stop" ? "Stopping…" : "Stop"}
+            </button>
+            <button
+              type="button"
+              onClick={onRefreshPage}
+              disabled={busy != null}
+              title="Refresh status from server (keeps checkpoint)"
+              className="font-mono text-xs px-3 py-2 rounded-lg bg-slate-500/20 border border-slate-400/40 text-paper hover:bg-slate-500/30 disabled:opacity-40"
+            >
+              {busy === "refresh-ui" ? "…" : "Refresh status"}
+            </button>
+            <button
+              type="button"
+              onClick={onFullRefresh}
+              disabled={running || (!canRefresh && !canFullRefeed) || busy != null}
+              title={
+                complete
+                  ? "All stocks already fed — full re-feed from start"
+                  : "Start / re-run feed for remaining or all symbols"
+              }
+              className="font-mono text-xs px-4 py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-200 hover:bg-amber-500/30 disabled:opacity-40"
+            >
+              {running
+                ? "Feeding…"
+                : complete
+                ? "Full re-feed"
+                : "Data feed to All Scan Universe Stocks"}
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5">
           <div className="rounded-xl border border-slate/40 bg-ink/40 p-3">
             <div className="font-mono text-[10px] text-mist uppercase tracking-wider">Stocks in feed</div>
-            <div className="font-mono text-lg text-paper mt-1">{meta?.last_count ?? "—"}</div>
+            <div className="font-mono text-lg text-paper mt-1">
+              {meta?.last_count ?? job?.ok_count ?? "—"}
+            </div>
           </div>
           <div className="rounded-xl border border-slate/40 bg-ink/40 p-3">
             <div className="font-mono text-[10px] text-mist uppercase tracking-wider">Last success</div>
@@ -122,12 +243,12 @@ export default function DataFeed() {
           <div className="rounded-xl border border-slate/40 bg-ink/40 p-3">
             <div className="font-mono text-[10px] text-mist uppercase tracking-wider">Progress</div>
             <div className="font-mono text-sm text-paper mt-1">
-              {job?.processed ?? 0}/{job?.total ?? 0} ({pct}%)
+              {processed}/{total} ({pct}%)
             </div>
           </div>
         </div>
 
-        {(running || (job?.status === "running")) && (
+        {(running || job?.status === "running" || job?.status === "stopped") && (
           <div className="mt-5 space-y-3">
             <div className="h-2 rounded-full bg-slate/40 overflow-hidden">
               <div
@@ -140,8 +261,15 @@ export default function DataFeed() {
               <span>Remaining ~{fmtSec(job?.estimated_remaining_sec)}</span>
               <span className="text-mist/80">{job?.message}</span>
             </div>
-            <Pipeline running={true} />
+            {running && <Pipeline running={true} />}
           </div>
+        )}
+
+        {canResume && (
+          <p className="mt-3 font-mono text-[11px] text-sky-300/80">
+            Checkpoint at {processed}/{total}. Press <b>Resume</b> after a sleep/timeout to continue
+            without re-feeding completed stocks.
+          </p>
         )}
 
         {banner && (

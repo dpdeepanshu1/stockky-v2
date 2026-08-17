@@ -32,3 +32,34 @@ cp -r path/to/stockky-fixes/scripts ./
 ```
 
 Redeploy **api-gateway** + rebuild **frontend**. Ensure GitHub secrets `API_GATEWAY_URL` (and optional service URLs) are set.
+
+# Stockky fixes v2 — IPO + Data Feed controls + Catalyst
+
+Copy files preserving paths into `stockky-v2`.
+
+## 1) IPO API
+`services/api-gateway/main.py` → `_get_recent_ipos()`
+- Old: `ipo?type=listed` (404)
+- New: `public-past-issues?from_date=DD-MM-YYYY&to_date=DD-MM-YYYY` (last 12 months, dynamic)
+- Also merges `ipo-current-issue`
+
+## 2) Data Feed Resume / Stop / Refresh
+Backend (`main.py`):
+- `POST /data-feed/run?force=true` — full from 0
+- `POST /data-feed/resume` — continue from checkpoint cursor
+- `POST /data-feed/stop` — cooperative stop, commit meta + checkpoint
+- Job stores `checkpoint: {cursor, done[], universe}`
+
+Frontend (`DataFeed.tsx` + `api.ts`):
+- **Resume** — enabled when stopped/partial
+- **Stop** — while running
+- **Refresh status** — reload job/meta without wiping checkpoint
+- **Full feed / Full re-feed** — start or rebuild
+
+## 3) Catalyst Alert timeout
+- `/catalysts/alert` returns immediately (background task)
+- Poll `/catalysts/alert/status`
+- Workflow updated to wake → start → poll (no more curl 180s hang)
+
+## Apply
+Redeploy **api-gateway**, rebuild **frontend**, commit workflow YAML.

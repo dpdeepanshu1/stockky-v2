@@ -1,17 +1,13 @@
 # Pre-market (07:30 & 08:15 IST) + intraday catalyst sweeps → Telegram
+# Uses async /catalysts/alert (returns immediately) + status poll to avoid 180s curl timeout.
 name: Stockky Catalyst Alert
 
 on:
   schedule:
-    # IST 07:30 = UTC 02:00
     - cron: "0 2 * * 1-5"
-    # IST 08:15 = UTC 02:45
     - cron: "45 2 * * 1-5"
-    # IST 10:30 = UTC 05:00
     - cron: "0 5 * * 1-5"
-    # IST 12:30 = UTC 07:00
     - cron: "0 7 * * 1-5"
-    # IST 14:30 = UTC 09:00
     - cron: "0 9 * * 1-5"
   workflow_dispatch:
     inputs:
@@ -24,6 +20,7 @@ on:
 jobs:
   catalyst:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: IST context
         run: |
@@ -34,7 +31,7 @@ jobs:
             exit 0
           fi
 
-      - name: Wake gateway + run catalyst alert
+      - name: Wake gateway + run catalyst alert (async + poll)
         env:
           API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
         run: |
@@ -44,13 +41,30 @@ jobs:
             echo "API_GATEWAY_URL secret not set"
             exit 1
           fi
-          # Wake
-          curl -fsS -m 45 "$GW/health?warm=true" || curl -fsS -m 30 "$GW/health" || true
-          sleep 15
+
+          # Aggressive warm for free-tier
+          curl -fsS -m 45 -X POST "$GW/wake-all" || curl -fsS -m 45 "$GW/wake-all" || true
+          curl -fsS -m 30 "$GW/health?warm=true" || curl -fsS -m 25 "$GW/health" || true
+          curl -fsS -m 15 "$GW/ops/keepalive" || true
+          sleep 20
+
           NOTIFY=true
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             NOTIFY="${{ inputs.notify }}"
           fi
-          echo "Calling $GW/catalysts/alert?force=true&notify=$NOTIFY"
-          curl -fsS -m 180 -X POST "$GW/catalysts/alert?force=true&notify=$NOTIFY" || \
-            curl -fsS -m 180 "$GW/catalysts/alert?force=true&notify=$NOTIFY"
+
+          echo "Starting async catalyst job…"
+          # Short timeout on start — endpoint returns immediately now
+          START=$(curl -fsS -m 45 -X POST "$GW/catalysts/alert?force=true&notify=$NOTIFY" || echo '{}')
+          echo "$START" | head -c 400; echo
+
+          # Poll up to ~18 minutes (hot scan can be long on free tier)
+          for i in $(seq 1 72); do
+            sleep 15
+            ST=$(curl -fsS -m 20 "$GW/catalysts/alert/status" || echo '{}')
+            echo "[$i] $ST" | head -c 280; echo
+            echo "$ST" | grep -q '"status":"done"' && { echo "Catalyst done"; exit 0; }
+            echo "$ST" | grep -q '"status":"error"' && { echo "Catalyst error"; exit 1; }
+          done
+          echo "Timed out waiting for catalyst job"
+          exit 1

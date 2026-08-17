@@ -53,6 +53,12 @@ def ist_now() -> datetime:
     return datetime.now(IST).replace(tzinfo=None)
 
 app = FastAPI(title="Training Intelligence", version="1.0")
+try:
+    from universe_routes import router as universe_router
+    app.include_router(universe_router)
+    logging.getLogger("training-service").info("Universe training routes mounted at /api/universe/*")
+except Exception as _ue:
+    logging.getLogger("training-service").warning("Universe routes not mounted: %s", _ue)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

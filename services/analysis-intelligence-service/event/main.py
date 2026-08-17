@@ -9,6 +9,10 @@ Merged with v0.3.1 features:
 - Shared _diff_events logic for /check and /events/{symbol}/categorized
 """
 import os
+try:
+    from event_depth import enrich_events
+except Exception:
+    enrich_events = None  # type: ignore
 import json
 import math
 import time
@@ -706,6 +710,12 @@ def _fetch_events(symbol: str, force: bool = False) -> dict:
         "cached": False,
     }
     result["summary"] = _summarize_events(result)
+    # INTEGRATION: event_depth — event_summary, recent_event_score, has_positive_catalyst
+    if enrich_events is not None:
+        try:
+            result = enrich_events(result, symbol=sym)
+        except Exception as e:
+            logger.warning("enrich_events failed for %s: %s", sym, e)
 
     fallback_key = f"{EVENT_FALLBACK_PREFIX}{sym}"
     has_real_data = any([
@@ -904,14 +914,28 @@ def get_events_categorized(symbol: str, force: bool = False):
     # Sort each section newest-first where a date is available
     recent.sort(key=lambda x: x.get("date") or "", reverse=True)
 
-    return {
+    out = {
         "symbol": symbol,
         "upcoming": upcoming,
         "recent": recent,
         "recent_changes": recent_changes,
         "institutional_holders": current.get("institutional_holders") or [],
         "checked_at": current.get("checked_at"),
+        "summary": current.get("summary") or current.get("event_summary"),
+        "event_summary": current.get("event_summary") or current.get("summary"),
+        "recent_event_score": current.get("recent_event_score"),
+        "has_positive_catalyst": current.get("has_positive_catalyst"),
     }
+    if enrich_events is not None:
+        try:
+            out = enrich_events({**current, **out}, symbol=symbol)
+            # keep categorized lists
+            out["upcoming"] = upcoming
+            out["recent"] = recent
+            out["recent_changes"] = recent_changes
+        except Exception as e:
+            logger.warning("categorized enrich_events failed: %s", e)
+    return out
 
 
 @app.post("/subscribe")

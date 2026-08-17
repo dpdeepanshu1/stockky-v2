@@ -1,4 +1,8 @@
 from peers import peers_for, normalize_sector, peer_relative_score, average_metrics, SYMBOL_SECTOR
+try:
+    from wire_peer_multi_quarter import apply_to_analyze_response
+except Exception:
+    apply_to_analyze_response = None  # type: ignore
 """
 Fundamental Analysis Service
 ------------------------------
@@ -506,7 +510,7 @@ def analyze(symbol: str):
     # Quality score = average of score and multi-quarter score (if available)
     quality_score = max(0, min(100, round((score + multi_q_score) / 2)))
 
-    return {
+    result = {
         "symbol": symbol.upper(),
         "fundamental_score": score,
         "valuation": valuation_note,
@@ -529,6 +533,17 @@ def analyze(symbol: str):
         "raw": f,
         "fallback_used": fallback_used,
     }
+    # INTEGRATION: peer ranking table + unified fields for prediction
+    if apply_to_analyze_response is not None:
+        try:
+            result = apply_to_analyze_response(
+                symbol=symbol,
+                analyze_payload=result,
+                market_data_url=MARKET_DATA_URL,
+            )
+        except Exception as e:
+            logger.warning("apply_to_analyze_response failed for %s: %s", symbol, e)
+    return result
 
 if __name__ == "__main__":
     import uvicorn

@@ -6,6 +6,10 @@ Multiple news sources: Google News, Moneycontrol, Economic Times, Business Stand
 v0.5.0 - Multi-source news aggregation.
 """
 import os
+try:
+    from news_quality import build_news_response
+except Exception:
+    build_news_response = None  # type: ignore
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
@@ -475,7 +479,16 @@ def health():
 
 
 @app.get("/analyze/{symbol}")
-def analyze(symbol: str):
+def analyze(symbol: str, company_name: str | None = None):
+    # INTEGRATION: news_quality multi-source + better summary (fallback to legacy below)
+    if build_news_response is not None:
+        try:
+            payload = build_news_response(symbol, company_name=company_name, llm_summarizer=None)
+            if isinstance(payload, dict) and (payload.get("headline_count") or payload.get("headlines")):
+                return payload
+        except Exception as e:
+            logger.warning("news_quality path failed, using legacy: %s", e)
+
     headlines = _fetch_headlines(symbol, max_items=15)
     summary = _summarize_headlines(headlines, symbol)
 

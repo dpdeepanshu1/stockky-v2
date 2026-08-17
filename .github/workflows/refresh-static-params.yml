@@ -2,6 +2,7 @@
 # Runs shortly after midnight IST so Redis holds fresh data for ~24h.
 # 00:05 IST = 18:35 UTC.
 #
+# Also kicks Data Feed so decide/scan paths can fall back to durable Redis entries.
 # Secrets: API_GATEWAY_URL (required)
 name: Stockky Nightly Static Params
 
@@ -13,14 +14,14 @@ on:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: IST log
         run: |
           echo "IST now: $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M %Z')"
           echo "UTC now: $(date -u '+%Y-%m-%d %H:%M %Z')"
 
-      - name: Refresh static params via gateway
+      - name: Refresh static params + data feed via gateway
         env:
           API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
         run: |
@@ -35,6 +36,7 @@ jobs:
           echo "Waking gateway..."
           curl -fsS -m 45 -X POST "$GW/wake-all" || curl -fsS -m 45 "$GW/wake-all" || true
           curl -fsS -m 25 "$GW/health?warm=true" || true
+          curl -fsS -m 15 "$GW/ops/keepalive" || true
           sleep 20
 
           echo "Refreshing static params (fundamentals / events / news) for scan universe..."
@@ -46,11 +48,21 @@ jobs:
             echo "refresh-static-params OK ($CODE)"
             head -c 2000 /tmp/refresh_out.json || true
             echo
-            exit 0
+          else
+            echo "Dedicated endpoint returned $CODE — fallback warm"
+            curl -fsS -m 60 "$GW/scan/universe" || true
+            curl -fsS -m 30 "$GW/market/indices?force_refresh=true" || true
+            curl -fsS -m 30 "$GW/stockky-hot?force=true" || true
           fi
 
-          echo "Dedicated endpoint returned $CODE — fallback warm"
-          curl -fsS -m 60 "$GW/scan/universe" || true
-          curl -fsS -m 30 "$GW/market/indices?force_refresh=true" || true
-          curl -fsS -m 30 "$GW/stockky-hot?force=true" || true
-          echo "Fallback warm done"
+          # Map Data Feed into nightly pipeline (background job on gateway)
+          echo "Kicking Data Feed (durable 12–24h store for decide/scan fallbacks)..."
+          curl -fsS -m 30 -X POST "$GW/data-feed/run?force=true" || true
+          for i in $(seq 1 15); do
+            sleep 15
+            ST=$(curl -fsS -m 12 "$GW/data-feed/status" || echo '{}')
+            echo "$ST" | head -c 200; echo
+            echo "$ST" | grep -q '"status":"done"' && break
+            echo "$ST" | grep -q '"status":"error"' && break
+          done
+          echo "Nightly static + data-feed pass done"

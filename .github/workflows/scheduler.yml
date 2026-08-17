@@ -59,6 +59,8 @@ jobs:
           API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
           MARKET_DATA_URL: ${{ secrets.MARKET_DATA_URL }}
           NOTIFICATION_URL: ${{ secrets.NOTIFICATION_URL }}
+          ANALYSIS_URL: ${{ secrets.ANALYSIS_INTELLIGENCE_URL }}
+          DECISION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
         run: |
           set +e
           GW="${API_GATEWAY_URL%/}"
@@ -68,14 +70,35 @@ jobs:
           fi
           echo "Waking via $GW/wake-all (IST market window only) ..."
           curl -fsS -m 60 -X POST "$GW/wake-all" || curl -fsS -m 60 "$GW/wake-all" || true
-          for U in "$API_GATEWAY_URL" "$MARKET_DATA_URL" "$NOTIFICATION_URL"; do
+          for U in "$API_GATEWAY_URL" "$MARKET_DATA_URL" "$NOTIFICATION_URL" "$ANALYSIS_URL" "$DECISION_URL"; do
             [ -z "$U" ] && continue
             curl -fsS -m 20 "${U%/}/health?warm=true" || curl -fsS -m 15 "${U%/}/health" || true
           done
+          # Lightweight keepalive (no deep fan-out)
+          curl -fsS -m 15 "$GW/ops/keepalive" || true
           if [ -n "$NOTIFICATION_URL" ]; then
             curl -fsS -m 30 -X POST "${NOTIFICATION_URL%/}/outbox/process" || true
           fi
-          sleep 30
+          sleep 20
+
+      - name: Ensure Data Feed is fresh enough (non-blocking)
+        if: steps.ist.outputs.run == '1'
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+        run: |
+          set +e
+          GW="${API_GATEWAY_URL%/}"
+          [ -n "$GW" ] || exit 0
+          # Check status — if never run or empty, kick a background feed (does not block scan)
+          ST=$(curl -fsS -m 20 "$GW/data-feed/status" || echo '{}')
+          echo "data-feed status: $ST" | head -c 400; echo
+          # Only start feed if idle/missing — force=false so we never double-run
+          echo "$ST" | grep -q '"status":"running"' && { echo "Data feed already running"; exit 0; }
+          # If meta missing or last_count is 0, start feed in background via API
+          if echo "$ST" | grep -Eq '"status":"(idle|done|error)"' || ! echo "$ST" | grep -q last_count; then
+            curl -fsS -m 25 -X POST "$GW/data-feed/run?force=false" || true
+            echo "Data feed kick issued (background)"
+          fi
 
       - name: Run scheduler tick
         if: steps.ist.outputs.run == '1'

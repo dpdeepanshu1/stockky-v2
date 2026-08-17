@@ -2,27 +2,40 @@ name: Stockky Data Feed (Midnight IST)
 
 on:
   schedule:
+    # ~00:15 IST = 18:45 UTC Sun–Thu (ready for next market day)
     - cron: "45 18 * * 0-4"
   workflow_dispatch:
 
 jobs:
   feed:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: IST check
         run: echo "IST $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M %Z')"
 
-      - name: Run data feed
+      - name: Wake services then run data feed
         env:
           API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+          MARKET_DATA_URL: ${{ secrets.MARKET_DATA_URL }}
+          ANALYSIS_URL: ${{ secrets.ANALYSIS_INTELLIGENCE_URL }}
+          DECISION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
         run: |
           set -e
           GW="${API_GATEWAY_URL%/}"
           [ -n "$GW" ] || { echo "API_GATEWAY_URL missing"; exit 1; }
-          curl -fsS -m 45 "$GW/health?warm=true" || true
-          sleep 20
+
+          # Full warm so fundamental/event upstreams are up for the feed
+          curl -fsS -m 60 -X POST "$GW/wake-all" || curl -fsS -m 60 "$GW/wake-all" || true
+          curl -fsS -m 30 "$GW/health?warm=true" || true
+          for U in "$MARKET_DATA_URL" "$ANALYSIS_URL" "$DECISION_URL"; do
+            [ -z "$U" ] && continue
+            curl -fsS -m 20 "${U%/}/health?warm=true" || curl -fsS -m 15 "${U%/}/health" || true
+          done
+          sleep 25
+
           curl -fsS -m 30 -X POST "$GW/data-feed/run?force=true"
-          for i in $(seq 1 80); do
+          for i in $(seq 1 90); do
             sleep 20
             ST=$(curl -fsS -m 15 "$GW/data-feed/status" || echo '{}')
             echo "$ST" | head -c 300; echo

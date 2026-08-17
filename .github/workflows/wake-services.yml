@@ -1,5 +1,5 @@
 # Keep free-tier Render services warm — ONLY on NSE market days + market window (IST Asia/Kolkata).
-# Outside Mon–Fri 08:30–16:00 IST this workflow does NOTHING (manual Wake buttons cover the rest).
+# Outside Mon–Fri 08:30–16:00 IST this workflow does NOTHING (manual Wake / UI session keepalive cover the rest).
 #
 # GitHub cron is UTC:
 #   IST 08:30 ≈ UTC 03:00, IST 16:00 ≈ UTC 10:30
@@ -11,6 +11,7 @@ name: Stockky Keep-Warm
 
 on:
   schedule:
+    # Every 5 min during UTC hours that cover IST market — gate still re-checks IST
     - cron: "*/5 3-10 * * 1-5"
   workflow_dispatch:
     inputs:
@@ -60,12 +61,17 @@ jobs:
 
           if [ "$is_market_session" -eq 0 ]; then
             echo "=== SKIP keep-warm (outside IST market window / weekend) ==="
+            # Ultra-light gateway ping only if force_light — still avoids deep fan-out
+            if [ "$MODE" = "force_light" ]; then
+              curl -fsS -m 15 "$GW/ops/keepalive" || curl -fsS -m 15 "$GW/health" || true
+            fi
             exit 0
           fi
 
           echo "=== FULL warm (IST market window) ==="
           curl -fsS -m 45 -X POST "$GW/wake-all" || curl -fsS -m 45 "$GW/wake-all" || true
           curl -fsS -m 25 "$GW/health?warm=true" || true
+          curl -fsS -m 15 "$GW/ops/keepalive" || true
 
           for U in "$MARKET_DATA_URL" "$ANALYSIS_URL" "$DECISION_URL" "$NOTIFICATION_URL"; do
             if [ -n "$U" ]; then

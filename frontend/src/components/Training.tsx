@@ -1,6 +1,7 @@
 // frontend/src/components/Training.tsx
 
 import { useEffect, useState, useRef } from "react";
+import TrainingProgressPanel from "./TrainingProgressPanel";
 import { api, TrainingStatusResponse, PeriodRollupItem, TrainingProgress } from "../api";
 
 export default function Training() {
@@ -807,6 +808,14 @@ export default function Training() {
             </div>
           </div>
 
+          <TrainingProgressPanel
+            stage={trainProgress?.stage}
+            detail={trainProgress?.detail}
+            elapsedSec={elapsedSeconds}
+            estimatedTotalSec={210}
+            active={training || !!status?.training_in_progress}
+            title="Training pipeline"
+          />
           <StageTracker stage={trainProgress?.stage} />
 
           {trainProgress?.detail && Object.keys(trainProgress.detail).length > 0 && (

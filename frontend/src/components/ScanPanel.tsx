@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { ScanResult, Decision, api, ActionablePick } from "../api";
+import { sendStockUniverseForTraining, buildUniversePayloadFromScan } from "../api_universe";
 import { useStockkyRealtime } from "../useRealtime";
 import { decisionStyle } from "../decisionStyle";
 
@@ -92,7 +93,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   // Local loading states for animations
   const [isSendingTelegram, setIsSendingTelegram] = useState<"top5" | "all" | null>(null);
   const [addingWatchlist, setAddingWatchlist] = useState<string | null>(null);
-  const [committing, setCommitting] = useState<"training" | "trade_top5" | "trade_all" | null>(null);
+  const [committing, setCommitting] = useState<"training" | "trade_top5" | "trade_all" | "universe" | null>(null);
   const [commitMessage, setCommitMessage] = useState<string | null>(null);
   const [filterChip, setFilterChip] = useState<"all" | "buy" | "prepare" | "avoid">("all");
   const [balanceLow, setBalanceLow] = useState<{ needed: number; available: number } | null>(null);
@@ -204,6 +205,41 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
       setTimeout(() => setCommitMessage(null), 8000);
     }
   };
+
+  /** Full scan universe → training (INTEGRATION ScanPanel_UniverseButton) */
+  const handleSendUniverseForTraining = async () => {
+    if (!result) {
+      setCommitMessage("Run a market scan first");
+      return;
+    }
+    try {
+      setCommitting("universe");
+      setCommitMessage("Sending full stock universe for training…");
+      const payload = buildUniversePayloadFromScan({
+        all_results: (result as any).all_results || result.recommendations,
+        recommendations: result.recommendations,
+        universe: (result as any).universe,
+      });
+      if (!payload.symbols.length) {
+        setCommitMessage("No symbols in scan universe");
+        return;
+      }
+      const res = await sendStockUniverseForTraining(payload);
+      if (res.ok) {
+        setCommitMessage(
+          `✅ ${res.ingested} symbols sent to training (kept ${res.retention_hours || 48}h)` +
+            (res.training_triggered ? " · training triggered" : "")
+        );
+      } else {
+        setCommitMessage(`❌ ${res.message || "Failed to send universe"}`);
+      }
+    } catch (e: any) {
+      setCommitMessage(`❌ ${e?.message || "Failed to send universe for training"}`);
+    } finally {
+      setCommitting(null);
+    }
+  };
+
 
   const summarizeTradeResults = (results: { record_status: string; trade_status: string | null }[], dbNote?: string) => {
     const stored = results.filter((r) => r.record_status === "stored" || r.record_status === "updated").length;
@@ -400,6 +436,15 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
             `🎓 All Actionable for Training (${allActionable.length})`
           )}
         </button>
+          <button
+            type="button"
+            className="text-xs px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-white font-medium disabled:opacity-50"
+            onClick={handleSendUniverseForTraining}
+            disabled={!!committing || !result}
+            title="Send the entire daily scan universe into training (more stocks = better model)"
+          >
+            {committing === "universe" ? "Sending universe…" : "Send the Stock Universe For Training"}
+          </button>
         <button
           onClick={() =>
             onAddManyToWatchlist(result.recommendations.map((r) => r.symbol), "Top Picks")

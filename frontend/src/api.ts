@@ -853,7 +853,7 @@ export const api = {
     ),
 
 
-  /** Full scan universe → training (v15) */
+  /** Full scan universe → training (v15 INTEGRATION) */
   trainFromUniverse: (body: {
     symbols: string[];
     decisions?: Record<string, string>;
@@ -909,7 +909,6 @@ export const api = {
       1,
       120000
     ),
-
   getStockkyHot: (force = false) =>
     request<{
       news_driven: any[];

@@ -236,7 +236,7 @@ def _fetch_from_nse_api(endpoint: str, cache_key: str, ttl: int = 21600):
     return None
 
 def _get_all_nse_securities() -> List[str]:
-    data = _fetch_from_nse_api("equity-stockIndices?index=SECURITIES%20IN%20NSE", "nse:all_securities")
+    data = _fetch_from_nse_api("equity-stock-indices?index=SECURITIES%20IN%20NSE", "nse:all_securities")
     symbols = []
     if data and "data" in data and isinstance(data["data"], list):
         for item in data["data"]:
@@ -290,7 +290,7 @@ def _get_nifty_indices() -> List[str]:
     ]
     all_symbols = []
     for idx in indices:
-        data = _fetch_from_nse_api(f"equity-stockIndices?index={idx}", f"nse:index_{idx}")
+        data = _fetch_from_nse_api(f"equity-stock-indices?index={idx}", f"nse:index_{idx}")
         if data and "data" in data and isinstance(data["data"], list):
             for item in data["data"]:
                 if isinstance(item, dict) and item.get("symbol"):
@@ -332,7 +332,7 @@ def _get_momentum_movers() -> List[str]:
         ("live-analysis-variations?index=gainers", "nse:gainers"),
         ("live-analysis-variations?index=losers", "nse:losers"),
         ("live-analysis-variations?index=volume-gainers", "nse:vol_gainers"),
-        ("equity-stockIndices?index=NIFTY%20500", "nse:nifty500_idx"),
+        ("equity-stock-indices?index=NIFTY%20500", "nse:nifty500_idx"),
     ):
         try:
             data = _fetch_from_nse_api(endpoint, key, ttl=900)

@@ -852,6 +852,64 @@ export const api = {
       10000
     ),
 
+
+  /** Full scan universe → training (v15) */
+  trainFromUniverse: (body: {
+    symbols: string[];
+    decisions?: Record<string, string>;
+    scores?: Record<string, number>;
+    feature_snapshots?: Record<string, Record<string, unknown>>;
+    source?: string;
+    retention_hours?: number;
+    trigger_training?: boolean;
+  }) =>
+    request<{
+      ok: boolean;
+      ingested: number;
+      message: string;
+      source?: string;
+      expires_at?: string;
+      retention_hours?: number;
+      training_triggered?: boolean;
+    }>(
+      "/training/api/universe/train-from-universe",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      1,
+      120000
+    ),
+
+  ingestUniverse: (body: {
+    symbols: string[];
+    decisions?: Record<string, string>;
+    scores?: Record<string, number>;
+    feature_snapshots?: Record<string, Record<string, unknown>>;
+    source?: string;
+    retention_hours?: number;
+    trigger_training?: boolean;
+  }) =>
+    request<{
+      ok: boolean;
+      ingested: number;
+      message: string;
+      source?: string;
+      expires_at?: string;
+      retention_hours?: number;
+      training_triggered?: boolean;
+    }>(
+      "/training/api/universe/ingest",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      1,
+      120000
+    ),
+
   getStockkyHot: (force = false) =>
     request<{
       news_driven: any[];

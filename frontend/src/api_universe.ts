@@ -25,6 +25,14 @@ export type UniverseIngestResult = {
   training_triggered?: boolean;
 };
 
+type ScanRow = {
+  symbol?: string;
+  decision?: string;
+  combined_score?: number;
+  score?: number;
+  feature_snapshot?: Record<string, unknown>;
+};
+
 /**
  * Send the full stock universe from a market scan into training storage.
  * Button label in UI: "Send the Stock Universe For Training"
@@ -42,17 +50,14 @@ export async function sendStockUniverseForTraining(
     trigger_training: payload.trigger_training ?? true,
   };
 
-  // Prefer dedicated universe endpoint; fall back to generic training path if needed
+  // Prefer dedicated universe endpoint; fall back to ingest path
   try {
-    const res = await api.post("/training/api/universe/train-from-universe", body);
-    return res.data as UniverseIngestResult;
+    return await api.trainFromUniverse(body);
   } catch (e1) {
     try {
-      const res = await api.post("/training/api/universe/ingest", body);
-      return res.data as UniverseIngestResult;
+      return await api.ingestUniverse(body);
     } catch (e2) {
-      // Last resort: older training record endpoint (best-effort)
-      console.warn("Universe endpoints unavailable, falling back", e2);
+      console.warn("Universe endpoints unavailable", e2);
       throw e2;
     }
   }
@@ -62,26 +67,15 @@ export async function sendStockUniverseForTraining(
  * Build payload from a full scan result (all symbols, not only BUY/PREPARE).
  */
 export function buildUniversePayloadFromScan(scanResult: {
-  recommendations?: Array<{
-    symbol?: string;
-    decision?: string;
-    combined_score?: number;
-    score?: number;
-    feature_snapshot?: Record<string, unknown>;
-  }>;
-  all_results?: Array<{
-    symbol?: string;
-    decision?: string;
-    combined_score?: number;
-    score?: number;
-    feature_snapshot?: Record<string, unknown>;
-  }>;
+  recommendations?: ScanRow[];
+  all_results?: ScanRow[];
   universe?: string[];
 }): UniverseIngestPayload {
-  const rows =
+  const fromUniverse: ScanRow[] = (scanResult.universe || []).map((s) => ({ symbol: s }));
+  const rows: ScanRow[] =
     scanResult.all_results ||
     scanResult.recommendations ||
-    (scanResult.universe || []).map((s) => ({ symbol: s }));
+    fromUniverse;
 
   const symbols: string[] = [];
   const decisions: Record<string, string> = {};

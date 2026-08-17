@@ -77,6 +77,7 @@ export default function NotificationsPanel() {
     setTestResult(null);
     try {
       let update: Parameters<typeof api.saveNotificationConfig>[0] = {};
+      let extras: string[] = [];
       if (channel === "telegram") {
         update = {
           telegram_bot_token: telegramToken || undefined,
@@ -99,7 +100,7 @@ export default function NotificationsPanel() {
           user = "@" + user;
         }
         // Normalize extras: ensure @ prefix, max 5 including primary
-        let extras = (callUsers || "")
+        extras = (callUsers || "")
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean)
@@ -356,8 +357,9 @@ export default function NotificationsPanel() {
                 const cfg = await api.saveNotificationConfig({
                   callmebot_user: user,
                   callmebot_apikey: callKey || undefined,
-                  callmebot_users: extrasSave.length ? extrasSave.join(",") : undefined,
-                  callmebot_users: callUsers || undefined,
+                  callmebot_users: extrasSave.length
+                    ? extrasSave.join(",")
+                    : callUsers || undefined,
                   enabled: { callmebot: true },
                 });
                 setConfig(cfg);

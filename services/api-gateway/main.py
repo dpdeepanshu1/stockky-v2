@@ -3461,7 +3461,10 @@ async def stockky_hot_stocks(force: bool = False):
         if cached:
             return {**cached, "cached": True}
 
-    # --- Seed universe: last scan actionable first, then watch/events/news ---
+    # --- Seed universe: CATALYST-FIRST (movers/news/bulk/results), then scan/watch ---
+    # Why names like PWL / EXPLEOSOL / MANORAMA were missed: universe was only
+    # prior BUY/PREPARE + 20 news + 25 events and capped at 45 — catalysts on
+    # mid/small caps never entered the evaluation set.
     scan_syms: list = []
     try:
         last_scan = _redis_get(LAST_FULL_SCAN_KEY)
@@ -3471,36 +3474,61 @@ async def stockky_hot_stocks(force: bool = False):
                     if not isinstance(r, dict):
                         continue
                     dec = (r.get("decision") or "").upper()
+                    s = (r.get("symbol") or "").replace(".NS", "").replace(".BO", "").upper()
+                    if not s:
+                        continue
                     if dec in ("BUY NOW", "PREPARE TO BUY"):
-                        s = (r.get("symbol") or "").replace(".NS", "").replace(".BO", "").upper()
-                        if s:
-                            scan_syms.append(s)
-                            # Persist decision cache for ranking
-                            try:
-                                _redis_set(
-                                    f"stockky:last_decision:{s}",
-                                    {
-                                        "decision": r.get("decision"),
-                                        "score": r.get("combined_score") or r.get("score"),
-                                        "reasons": r.get("reasons") or [],
-                                    },
-                                    ttl=86400,
-                                )
-                            except Exception:
-                                pass
+                        scan_syms.append(s)
+                        try:
+                            _redis_set(
+                                f"stockky:last_decision:{s}",
+                                {
+                                    "decision": r.get("decision"),
+                                    "score": r.get("combined_score") or r.get("score"),
+                                    "reasons": r.get("reasons") or [],
+                                },
+                                ttl=86400,
+                            )
+                        except Exception:
+                            pass
     except Exception as e:
         logger.debug("hot seed from scan: %s", e)
 
     watch = _load_watchlist() or []
+    momentum = []
+    news_syms = []
+    event_syms = []
+    try:
+        momentum = _get_momentum_movers() or []
+    except Exception as e:
+        logger.warning("hot momentum: %s", e)
+    try:
+        news_syms = _get_news_mentioned_symbols() or []
+    except Exception as e:
+        logger.warning("hot news: %s", e)
+    try:
+        event_syms = _get_event_symbols() or []
+    except Exception as e:
+        logger.warning("hot events: %s", e)
+
+    # Catalyst sources first so they are never crowded out by scan seed
     universe = list(dict.fromkeys(
-        scan_syms
+        list(momentum)[:80]
+        + list(news_syms)[:60]
+        + list(event_syms)[:80]
+        + list(scan_syms)
         + list(watch)
-        + (_get_event_symbols()[:25] if True else [])
-        + (_get_news_mentioned_symbols()[:20] if True else [])
+        + list(_load_searched() or [])[:40]
+        + list(_get_recent_ipos() or [])[:20]
     ))
     if not universe:
-        universe = list(_load_searched() or [])[:25]
-    universe = universe[:45]
+        universe = list(_get_nifty_indices() or [])[:80]
+    # Free-tier budget: evaluate up to 100 catalyst candidates (was 45)
+    universe = universe[:100]
+    logger.info(
+        "stockky-hot universe=%s (mom=%s news=%s evt=%s scan=%s)",
+        len(universe), len(momentum), len(news_syms), len(event_syms), len(scan_syms),
+    )
 
     news_driven: list = []
     results_driven: list = []
@@ -3574,6 +3602,43 @@ async def stockky_hot_stocks(force: bool = False):
                     )
 
                 from_scan = base in set(scan_syms)
+
+                # Catalyst promotion: strong news / bulk buy / results beat
+                # can surface PREPARE TO BUY even without a prior full decide.
+                catalyst_bits = []
+                if nscore is not None and int(nscore) >= 62 and hc >= 2:
+                    catalyst_bits.append(f"Positive news flow (score {nscore}, {hc} headlines)")
+                if news_summary and any(
+                    k in str(news_summary).lower()
+                    for k in ("surge", "jump", "rally", "beat", "order win", "wins", "bulk", "stake", "upgrade", "record")
+                ):
+                    catalyst_bits.append("Catalyst language in news summary")
+                if has_bulk_insider and bulk:
+                    catalyst_bits.append("Bulk/block deal activity")
+                if has_results and event_data and event_data.get("earnings_surprise"):
+                    try:
+                        sp = float((event_data.get("earnings_surprise") or {}).get("surprise_pct") or 0)
+                        if sp > 0:
+                            catalyst_bits.append(f"Positive earnings surprise {sp}%")
+                    except (TypeError, ValueError):
+                        catalyst_bits.append("Earnings/results event")
+                if event_data and event_data.get("has_positive_catalyst"):
+                    catalyst_bits.append("Positive classified catalyst")
+
+                if catalyst_bits and decision in ("DO NOT BUY", "HOLD", "WAIT", "", None):
+                    decision = "PREPARE TO BUY"
+                    if score is None:
+                        score = 58 + min(12, len(catalyst_bits) * 3)
+                    reasons = list(reasons or []) + catalyst_bits
+                    try:
+                        _redis_set(
+                            f"stockky:last_decision:{base}",
+                            {"decision": decision, "score": score, "reasons": reasons[:8], "catalyst_promoted": True},
+                            ttl=86400,
+                        )
+                    except Exception:
+                        pass
+
                 actionable = decision in ("BUY NOW", "PREPARE TO BUY")
 
                 # NEWS section: stricter — need real headlines + score; drop weak noise
@@ -3667,6 +3732,99 @@ async def stockky_hot_stocks(force: bool = False):
         payload["market_phase"],
     )
     return payload
+
+
+
+
+@app.get("/catalysts/alert")
+@app.post("/catalysts/alert")
+async def catalyst_alert_scan(force: bool = True, notify: bool = True):
+    """Pre-market / intraday catalyst sweep.
+
+    Builds a real-time universe from ≥5% movers, news, bulk/results events,
+    scores them via stockky-hot logic, promotes PREPARE TO BUY, and optionally
+    pushes a Telegram report. Call 1–2h before open and during market hours.
+    """
+    # Bust hot cache so we re-evaluate with latest news/events
+    try:
+        if force and _redis:
+            _redis.delete(HOT_STOCKS_CACHE_KEY)
+    except Exception:
+        pass
+
+    hot = await stockky_hot_stocks(force=True)
+    picks = []
+    for section in ("bulk_insider_driven", "results_driven", "news_driven"):
+        for item in hot.get(section) or []:
+            dec = (item.get("decision") or "").upper()
+            if dec in ("BUY NOW", "PREPARE TO BUY") or item.get("signal_strength") == "high":
+                picks.append({**item, "section": section})
+
+    # de-dupe by symbol, prefer bulk > results > news
+    rank_sec = {"bulk_insider_driven": 0, "results_driven": 1, "news_driven": 2}
+    picks.sort(key=lambda x: (rank_sec.get(x.get("section"), 9), -(x.get("score") or 0)))
+    seen = set()
+    unique = []
+    for p in picks:
+        s = (p.get("symbol") or "").upper()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        unique.append(p)
+
+    lines = [
+        "🔥 *Stockky Catalyst Alert*",
+        f"IST {datetime.now(IST).strftime('%Y-%m-%d %H:%M')}",
+        f"Universe screened: {hot.get('universe_size')} · Actionable: {len(unique)}",
+        "",
+    ]
+    if not unique:
+        lines.append("No strong catalyst names right now.")
+    else:
+        for i, p in enumerate(unique[:15], 1):
+            sym = p.get("symbol")
+            dec = p.get("decision")
+            sc = p.get("score")
+            sec = (p.get("section") or "").replace("_driven", "")
+            why = ""
+            rs = p.get("reasons") or []
+            if isinstance(rs, list) and rs:
+                why = str(rs[0])[:80]
+            elif p.get("summary"):
+                why = str(p.get("summary"))[:80]
+            lines.append(f"{i}. *{sym}* — {dec} (score {sc}) [{sec}]")
+            if why:
+                lines.append(f"   _{why}_")
+
+    message = "\n".join(lines)
+    notified = False
+    if notify and unique:
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                await client.post(
+                    f"{NOTIFICATION_URL.rstrip('/')}/notify",
+                    json={"title": "Catalyst Alert", "message": message, "channel": "telegram"},
+                )
+            notified = True
+        except Exception as e:
+            logger.warning("catalyst telegram failed: %s", e)
+            # Fallback helper if present
+            try:
+                if "send_picks_to_telegram" in dir():
+                    send_picks_to_telegram({"recommendations": unique[:10]})
+                    notified = True
+            except Exception as e2:
+                logger.warning("catalyst telegram fallback: %s", e2)
+
+    return {
+        "ok": True,
+        "actionable_count": len(unique),
+        "picks": unique[:20],
+        "hot_universe_size": hot.get("universe_size"),
+        "notified": notified,
+        "message_preview": message[:500],
+        "generated_at": datetime.now(IST).isoformat(),
+    }
 
 
 # ── WebSocket real-time hub (scan progress + market ticks + training) ─────────

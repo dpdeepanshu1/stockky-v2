@@ -305,10 +305,13 @@ def _extract_event_signals(events: dict | None) -> dict:
         surprise_pct = earnings_surprise.get("surprise_pct")
         if surprise_pct is not None:
             if surprise_pct > 5:
-                delta += 6
-                reasons.append(f"📈 Earnings surprise: +{surprise_pct:.1f}% beat")
+                delta += 10
+                reasons.append(f"📈 Earnings surprise: +{surprise_pct:.1f}% beat — short-term momentum fuel")
+            elif surprise_pct > 0:
+                delta += 5
+                reasons.append(f"📈 Mild earnings beat: +{surprise_pct:.1f}%")
             elif surprise_pct < -5:
-                delta -= 6
+                delta -= 8
                 reasons.append(f"📉 Earnings surprise: {surprise_pct:.1f}% miss")
 
     # Analyst upgrades/downgrades
@@ -341,11 +344,21 @@ def _extract_event_signals(events: dict | None) -> dict:
             reasons.append(f"🏦 Insider selling: {txn.get('insider', 'insider')} sold shares")
             break
 
-    # Bulk/Block deals
+    # Bulk/Block deals — strong short-term signal (Manorama-type moves)
     bulk_deals = events.get("bulk_deals") or []
     if bulk_deals:
-        delta += 4
-        reasons.append(f"📦 Bulk/Block deal detected")
+        buyish = False
+        for d in bulk_deals[:5]:
+            side = str(d.get("buy_sell") or d.get("side") or d.get("transaction") or "").lower()
+            if "buy" in side or side in ("b", "purchase"):
+                buyish = True
+                break
+        if buyish:
+            delta += 10
+            reasons.append("📦 Bulk/Block BUY detected — short-term demand spike risk/reward")
+        else:
+            delta += 6
+            reasons.append("📦 Bulk/Block deal detected")
 
     # FII/DII net flow
     fii_flow = events.get("fii_dii_net_flow")
@@ -360,7 +373,7 @@ def _extract_event_signals(events: dict | None) -> dict:
                 reasons.append(f"📉 FII/DII net outflow negative")
 
     return {
-        "event_score_delta": max(-15, min(15, delta)),
+        "event_score_delta": max(-18, min(18, delta)),
         "event_risk": event_risk,
         "event_reasons": reasons,
         "earnings_days_out": earnings_days_out,
@@ -900,6 +913,15 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
             decision = gated
         else:
             reasons_gate = None
+
+        # Catalyst floor: bulk buy / strong results should not stay buried as DO NOT BUY
+        if (
+            decision in (Decision.DO_NOT_BUY, Decision.HOLD, Decision.WAIT)
+            and event_delta >= 8
+            and combined >= 48
+        ):
+            decision = Decision.PREPARE_TO_BUY
+            reasons_gate = (reasons_gate or "") + " | Catalyst floor: event_delta elevated → PREPARE TO BUY"
 
         entry_low = entry_high = target = stop_loss = None
         if close:

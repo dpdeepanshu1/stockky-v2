@@ -1,0 +1,56 @@
+# Pre-market (07:30 & 08:15 IST) + intraday catalyst sweeps → Telegram
+name: Stockky Catalyst Alert
+
+on:
+  schedule:
+    # IST 07:30 = UTC 02:00
+    - cron: "0 2 * * 1-5"
+    # IST 08:15 = UTC 02:45
+    - cron: "45 2 * * 1-5"
+    # IST 10:30 = UTC 05:00
+    - cron: "0 5 * * 1-5"
+    # IST 12:30 = UTC 07:00
+    - cron: "0 7 * * 1-5"
+    # IST 14:30 = UTC 09:00
+    - cron: "0 9 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      notify:
+        description: "Send Telegram"
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  catalyst:
+    runs-on: ubuntu-latest
+    steps:
+      - name: IST context
+        run: |
+          echo "IST now: $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M %Z')"
+          DOW=$(TZ=Asia/Kolkata date +%u)
+          if [ "$DOW" -gt 5 ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "Weekend — skip"
+            exit 0
+          fi
+
+      - name: Wake gateway + run catalyst alert
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+        run: |
+          set -e
+          GW="${API_GATEWAY_URL%/}"
+          if [ -z "$GW" ]; then
+            echo "API_GATEWAY_URL secret not set"
+            exit 1
+          fi
+          # Wake
+          curl -fsS -m 45 "$GW/health?warm=true" || curl -fsS -m 30 "$GW/health" || true
+          sleep 15
+          NOTIFY=true
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            NOTIFY="${{ inputs.notify }}"
+          fi
+          echo "Calling $GW/catalysts/alert?force=true&notify=$NOTIFY"
+          curl -fsS -m 180 -X POST "$GW/catalysts/alert?force=true&notify=$NOTIFY" || \
+            curl -fsS -m 180 "$GW/catalysts/alert?force=true&notify=$NOTIFY"

@@ -23,6 +23,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from upstash_redis import Redis
+from data_feed import (
+    DataFeedStore, extract_feed_payload, DATA_FEED_TTL,
+    hot_job_get, hot_job_set, HOT_RESULT_KEY,
+)
 from circuit_breaker import get_breaker, CircuitOpenError, all_snapshots
 from metrics import metrics
 from nse_holidays import is_nse_holiday
@@ -147,6 +151,15 @@ SYMBOL_ALIASES: Dict[str, Union[str, List[str]]] = {
 EXTRA_NEW_SYMBOLS = ["TMPV", "TMLCV", "LTM", "ETERNAL"]
 
 # ── Redis helpers ─────────────────────────────────────────────────────────
+_data_feed_store = None
+
+def _feed_store() -> DataFeedStore:
+    global _data_feed_store
+    if _data_feed_store is None:
+        _data_feed_store = DataFeedStore(_redis_get, _redis_set, _redis)
+    return _data_feed_store
+
+
 def _redis_get(key: str):
     if not _redis:
         return None
@@ -815,6 +828,33 @@ def _fetch_price_from_quote(symbol: str) -> Optional[float]:
     return None
 
 async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> tuple[Optional[dict], bool]:
+    # Prefer Data Feed DB/cache for slow fields (reduces upstream rate limits)
+    try:
+        fed = _feed_store().get_symbol(symbol)
+        if fed and fed.get("fundamental_score") is not None:
+            reconstructed = {
+                "symbol": symbol.upper(),
+                "fundamental_score": fed.get("fundamental_score"),
+                "valuation": fed.get("valuation"),
+                "sector": fed.get("sector"),
+                "industry": fed.get("industry"),
+                "peer_relative_score": fed.get("peer_relative_score"),
+                "peer_relative": fed.get("peer_relative"),
+                "peer_list": fed.get("peer_list"),
+                "multi_quarter_score": fed.get("multi_quarter_score"),
+                "multi_quarter_ok": fed.get("multi_quarter_ok"),
+                "multi_quarter_detail": fed.get("multi_quarter_detail"),
+                "quality_score": fed.get("quality_score"),
+                "metrics": fed.get("metrics") or {},
+                "reasons": fed.get("fundamental_reasons") or ["From Data Feed cache"],
+                "fallback_used": fed.get("fallback_used"),
+                "from_data_feed": True,
+                "data_feed_updated_at": fed.get("updated_at"),
+            }
+            return reconstructed, True
+    except Exception as e:
+        logger.debug("data feed fundamental read: %s", e)
+
     cache_key = f"{FUNDAMENTAL_CACHE_PREFIX}{symbol}"
     cached = _redis_get(cache_key)
     if cached and isinstance(cached, dict):
@@ -4135,6 +4175,209 @@ async def startup_event():
         logger.info("Market indices cache pre-populated successfully")
     except Exception as e:
         logger.warning(f"Could not pre-populate indices cache: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Data Feed — slow fields (12–24h) for free-tier rate-limit relief
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.get("/data-feed/meta")
+def data_feed_meta():
+    """Last successful feed timestamp, stock count, job status."""
+    store = _feed_store()
+    meta = store.meta()
+    job = store.job()
+    return {"ok": True, "meta": meta, "job": job}
+
+
+@app.get("/data-feed/status")
+def data_feed_status():
+    store = _feed_store()
+    return {"ok": True, **store.job(), "meta": store.meta()}
+
+
+@app.get("/data-feed/{symbol}")
+def data_feed_symbol(symbol: str):
+    fed = _feed_store().get_symbol(symbol)
+    if not fed:
+        return {"ok": False, "symbol": symbol.upper(), "detail": "No data feed entry"}
+    return {"ok": True, "data": fed}
+
+
+@app.post("/data-feed/run")
+async def data_feed_run(background_tasks: BackgroundTasks, force: bool = False):
+    """Feed slow fields for current scan universe. Manual button + midnight cron."""
+    store = _feed_store()
+    job = store.job()
+    if job.get("status") == "running" and not force:
+        return {"ok": True, "already_running": True, **job}
+
+    universe = _build_scan_universe()
+    if not universe:
+        universe = list(_get_nifty_indices() or [])[:150]
+    universe = universe[:250]
+
+    store.set_job(
+        status="running",
+        processed=0,
+        total=len(universe),
+        started_at=datetime.now(IST).isoformat(),
+        elapsed_sec=0,
+        estimated_remaining_sec=None,
+        message=f"Feeding {len(universe)} symbols…",
+        errors=0,
+    )
+
+    async def _run():
+        ok_n = 0
+        err_n = 0
+        async with httpx.AsyncClient(timeout=40) as client:
+            for i, sym in enumerate(universe):
+                try:
+                    base = sym.upper().replace(".NS", "").replace(".BO", "")
+                    fund = None
+                    events = None
+                    try:
+                        r = await client.get(f"{FUNDAMENTAL_URL}/analyze/{base}", timeout=35)
+                        if r.status_code == 200:
+                            fund = r.json()
+                    except Exception:
+                        pass
+                    try:
+                        r = await client.get(f"{EVENT_URL}/events/{base}", timeout=20)
+                        if r.status_code == 200:
+                            events = r.json()
+                    except Exception:
+                        pass
+                    if fund or events:
+                        payload = extract_feed_payload(base, fund, events)
+                        store.put_symbol(base, payload, ttl=DATA_FEED_TTL)
+                        ok_n += 1
+                    else:
+                        err_n += 1
+                except Exception as e:
+                    err_n += 1
+                    logger.debug("data-feed %s: %s", sym, e)
+                store.set_job(
+                    status="running",
+                    processed=i + 1,
+                    total=len(universe),
+                    message=f"Fed {ok_n}/{len(universe)} ({base})",
+                    errors=err_n,
+                )
+                # gentle pacing for free tier
+                if (i + 1) % 5 == 0:
+                    await asyncio.sleep(0.35)
+
+        ts = datetime.now(IST).isoformat()
+        msg = f"Data feed successfully for {ok_n} stocks at {ts}"
+        store.set_meta(
+            last_success_at=ts,
+            last_count=ok_n,
+            last_errors=err_n,
+            last_message=msg,
+            source="manual_or_api",
+            universe_size=len(universe),
+        )
+        store.set_job(
+            status="done",
+            processed=len(universe),
+            total=len(universe),
+            message=msg,
+            errors=err_n,
+            finished_at=ts,
+        )
+        logger.info(msg)
+
+    background_tasks.add_task(_run)
+    return {
+        "ok": True,
+        "started": True,
+        "total": len(universe),
+        "message": f"Data feed started for {len(universe)} scan-universe stocks",
+    }
+
+
+# ── Hot Picks on-demand job (no auto-load spam) ─────────────────────────────
+
+@app.get("/stockky-hot/status")
+def stockky_hot_status():
+    job = hot_job_get(_redis_get)
+    cached = _redis_get(HOT_RESULT_KEY) or _redis_get(HOT_STOCKS_CACHE_KEY)
+    return {
+        "ok": True,
+        **job,
+        "has_result": bool(cached),
+        "result_generated_at": (cached or {}).get("generated_at") if isinstance(cached, dict) else None,
+    }
+
+
+@app.get("/stockky-hot/result")
+def stockky_hot_result():
+    """Last persisted Hot Picks result (DB/Redis) — does not trigger a new run."""
+    cached = _redis_get(HOT_RESULT_KEY) or _redis_get(HOT_STOCKS_CACHE_KEY)
+    if not cached:
+        return {"ok": False, "detail": "No Hot Picks result yet — run Search Hot Picks Stocks"}
+    return {**cached, "ok": True, "cached": True}
+
+
+@app.post("/stockky-hot/run")
+async def stockky_hot_run(background_tasks: BackgroundTasks, force: bool = True):
+    """Start Hot Picks search with progress (pipeline UI polls /stockky-hot/status)."""
+    job = hot_job_get(_redis_get)
+    if job.get("status") == "running":
+        return {"ok": True, "already_running": True, **job}
+
+    hot_job_set(
+        _redis_set,
+        _redis_get,
+        status="running",
+        processed=0,
+        total=100,
+        started_at=datetime.now(IST).isoformat(),
+        message="Building catalyst universe…",
+        estimated_remaining_sec=None,
+    )
+
+    async def _run_hot():
+        try:
+            hot_job_set(_redis_set, _redis_get, message="Scanning news / events / bulk…", processed=10)
+            # Clear short cache so force refresh
+            try:
+                if _redis:
+                    _redis.delete(HOT_STOCKS_CACHE_KEY)
+            except Exception:
+                pass
+            hot_job_set(_redis_set, _redis_get, processed=30, message="Evaluating catalyst signals…")
+            result = await stockky_hot_stocks(force=True)
+            hot_job_set(_redis_set, _redis_get, processed=90, message="Ranking & saving…")
+            ts = datetime.now(IST).isoformat()
+            if isinstance(result, dict):
+                result = {**result, "generated_at": result.get("generated_at") or ts, "persisted_at": ts}
+                _redis_set(HOT_RESULT_KEY, result, ttl=20 * 3600)
+            hot_job_set(
+                _redis_set,
+                _redis_get,
+                status="done",
+                processed=100,
+                total=100,
+                message=f"Hot Picks ready at {ts}",
+                finished_at=ts,
+                estimated_remaining_sec=0,
+            )
+        except Exception as e:
+            logger.exception("hot run failed")
+            hot_job_set(
+                _redis_set,
+                _redis_get,
+                status="error",
+                message=str(e)[:200],
+            )
+
+    background_tasks.add_task(_run_hot)
+    return {"ok": True, "started": True, "message": "Hot Picks search started"}
+
+
 
 if __name__ == "__main__":
     import uvicorn

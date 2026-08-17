@@ -410,13 +410,15 @@ def _combined_score(
     news = news_score if news_score is not None else 50
     pred = prediction_score if prediction_score is not None else 50
 
+    # Primary combined score leans short-term: ~65% news+events path
+    # (news pillar + event_delta), ~35% technical/fundamental/pred/train/market.
     weights = {
-        "t": 0.30,
-        "f": 0.20,
-        "n": 0.15,
-        "p": 0.15,
-        "m": 0.10,
-        "train": 0.10,
+        "t": 0.12,
+        "f": 0.08,
+        "n": 0.45,
+        "p": 0.08,
+        "m": 0.05,
+        "train": 0.07,
     }
 
     total = (
@@ -428,7 +430,8 @@ def _combined_score(
         training_score * weights["train"]
     )
 
-    total += event_delta + market_adjustment
+    # event_delta already encodes bulk/insider/results — amplify for short-term
+    total += (event_delta * 1.35) + market_adjustment
     return round(max(0, min(100, total)), 1)
 
 

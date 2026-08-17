@@ -16,13 +16,14 @@ SELL = "SELL"
 # Horizon weight profiles (must sum ~1.0 across core pillars)
 HORIZON_WEIGHTS = {
     "short": {
-        "technical": 0.38,
-        "volume_rs": 0.18,
-        "news_events": 0.14,
-        "prediction": 0.12,
-        "fundamental": 0.10,
-        "quality_peers": 0.04,
-        "regime": 0.04,
+        # Short-term: 70% catalyst (news/events/bulk/results), 30% other
+        "technical": 0.12,
+        "volume_rs": 0.08,
+        "news_events": 0.70,
+        "prediction": 0.04,
+        "fundamental": 0.03,
+        "quality_peers": 0.02,
+        "regime": 0.01,
     },
     "mid": {
         "technical": 0.26,

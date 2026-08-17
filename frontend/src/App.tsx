@@ -10,6 +10,7 @@ import NotificationsPanel from "./components/NotificationsPanel";
 import SystemCheck from "./components/SystemCheck";
 import MarketMovers from "./components/MarketMovers";
 import ServiceManager from "./components/ServiceManager";
+import RateLimitDashboard from "./components/RateLimitDashboard";
 import Training from "./components/Training";
 import HotStocks from "./components/HotStocks";
 import DataFeed from "./components/DataFeed";
@@ -565,6 +566,7 @@ export default function App() {
     { id: "alerts", label: "Alerts", group: "Navigate", hint: "tab", run: () => setTab("notifications") },
     { id: "wl", label: "Watchlist", group: "Navigate", hint: "tab", run: () => setTab("watchlist") },
     { id: "settings", label: "Settings", group: "Navigate", hint: "tab", run: () => setTab("settings") },
+    { id: "ratelimits", label: "Rate limit monitor", group: "Navigate", hint: "Settings", run: () => setTab("settings") },
     { id: "scan-wl", label: "Scan Watchlist", group: "Action", keywords: "scan", run: () => { setTab("dashboard"); handleScanWatchlist(); } },
     ...(watchlist || []).slice(0, 30).map((s) => ({
       id: `sym-${s}`,
@@ -1324,6 +1326,10 @@ function SettingsPage({
         <button type="button" className="btn-terminal" onClick={onOpenServices}>
           Open Service Manager
         </button>
+      </section>
+
+      <section className="terminal-panel">
+        <RateLimitDashboard />
       </section>
 
       <section className="terminal-panel">

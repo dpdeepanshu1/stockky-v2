@@ -983,7 +983,7 @@ export const api = {
   resumeDataFeed: () =>
     request<any>("/data-feed/resume", { method: "POST" }, 2, 45000),
   stopDataFeed: () =>
-    request<any>("/data-feed/stop", { method: "POST" }, 2, 30000),
+    request<any>("/data-feed/stop?force=true", { method: "POST" }, 2, 45000),
   getDataFeedSymbol: (symbol: string) =>
     request<any>(`/data-feed/${encodeURIComponent(symbol)}`, undefined, 1, 20000),
 

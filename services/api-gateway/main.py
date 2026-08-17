@@ -29,6 +29,7 @@ from data_feed import (
 )
 from circuit_breaker import get_breaker, CircuitOpenError, all_snapshots
 from metrics import metrics
+from rate_limit_monitor import monitor as rate_limit_monitor
 from nse_holidays import is_nse_holiday
 
 logging.basicConfig(level=logging.INFO)
@@ -1971,6 +1972,29 @@ def circuits_status():
     open_n = sum(1 for v in snaps.values() if v.get("state") == "open")
     metrics.set_gauge("stockky_circuits_open", float(open_n))
     return {"circuits": snaps}
+
+
+@app.get("/ops/rate-limits")
+async def ops_rate_limits():
+    """Dashboard payload: rate-limit events + circuit breakers (last 1h)."""
+    return rate_limit_monitor.snapshot(circuits=all_snapshots())
+
+
+@app.post("/ops/rate-limits/event")
+async def ops_rate_limits_event(payload: dict):
+    """Services may POST {source, status, path?, detail?, symbol?} when they hit 429/503."""
+    try:
+        rate_limit_monitor.record(
+            source=str(payload.get("source") or "unknown"),
+            status=int(payload.get("status") or 0),
+            path=str(payload.get("path") or ""),
+            detail=str(payload.get("detail") or ""),
+            symbol=str(payload.get("symbol") or ""),
+        )
+        metrics.inc("rate_limit_events", source=str(payload.get("source") or "unknown"), status=str(payload.get("status") or 0))
+        return {"ok": True}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)[:120]}, status_code=400)
 
 
 @app.get("/metrics")

@@ -176,8 +176,16 @@ class TrainingScanner:
             # same way as exact-zero fixes this: that axis contributes
             # nothing to distance (mean 0, std 1 after centering-to-mean),
             # exactly like a genuinely constant column would.
-            col_mean = np.nanmean(hist_vecs, axis=0)
-            col_std = np.nanstd(hist_vecs, axis=0)
+            if hist_vecs is None or len(hist_vecs) == 0:
+                logger.info("Empty historical feature matrix — skip similarity for %s", symbol)
+                return None
+            # Guard all-NaN columns / empty slice warnings
+            with np.errstate(all="ignore"):
+                col_mean = np.nanmean(hist_vecs, axis=0)
+                col_std = np.nanstd(hist_vecs, axis=0)
+            if col_mean is None or np.all(np.isnan(col_mean)):
+                logger.info("All-NaN historical features — skip similarity for %s", symbol)
+                return None
             col_mean = np.where(np.isnan(col_mean), 0.0, col_mean)
             col_std = np.where(np.isnan(col_std) | (col_std == 0), 1.0, col_std)
 

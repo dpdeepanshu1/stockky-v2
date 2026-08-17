@@ -30,6 +30,53 @@ MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7
 ANALYSIS_URL = os.getenv("ANALYSIS_INTELLIGENCE_URL", os.getenv("ANALYSIS_URL", "")).rstrip("/")
 MODEL_PATH = os.getenv("MODEL_PATH", "model.pkl")
 
+def _report_rate_limit(source: str, status: int, path: str = "", detail: str = "", symbol: str = "") -> None:
+    """Best-effort notify gateway rate-limit dashboard (non-blocking)."""
+    try:
+        gw = os.getenv("API_GATEWAY_URL", "").rstrip("/")
+        if not gw:
+            return
+        httpx.post(
+            f"{gw}/ops/rate-limits/event",
+            json={"source": source, "status": status, "path": path, "detail": detail[:200], "symbol": symbol},
+            timeout=3.0,
+        )
+    except Exception:
+        pass
+
+
+# Client-side aliases so we never request "NIFTY NEXT 50" as equity.NS
+INDEX_SYMBOL_ALIASES = {
+    "NIFTY": "^NSEI",
+    "NIFTY 50": "^NSEI",
+    "NIFTY50": "^NSEI",
+    "NIFTY NEXT 50": "^NSMIDCP",
+    "NIFTYNEXT50": "^NSMIDCP",
+    "NIFTY BANK": "^NSEBANK",
+    "BANK NIFTY": "^NSEBANK",
+    "BANKNIFTY": "^NSEBANK",
+    "NIFTY MIDCAP 100": "^NSEMDCP100",
+    "NIFTY MIDCAP100": "^NSEMDCP100",
+    "NIFTY MIDCAP 150": "NIFTY_MIDCAP_150.NS",
+    "NIFTY MIDCAP150": "NIFTY_MIDCAP_150.NS",
+    "SENSEX": "^BSESN",
+    "INDIA VIX": "^INDIAVIX",
+}
+
+_gemini_cooldown_until = 0.0  # epoch seconds — skip Gemini after 429
+
+
+def _history_symbol(symbol: str) -> str:
+    s = (symbol or "").strip()
+    key = s.upper().replace("_", " ").replace("  ", " ").strip()
+    if key in INDEX_SYMBOL_ALIASES:
+        return INDEX_SYMBOL_ALIASES[key]
+    compact = key.replace(" ", "")
+    for k, v in INDEX_SYMBOL_ALIASES.items():
+        if k.replace(" ", "") == compact:
+            return v
+    return s
+
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip() or None
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
@@ -39,40 +86,14 @@ app = FastAPI(title="Stockky Prediction Service", version="0.7.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 _model = None
-_decision_threshold = float(os.getenv("PRED_DECISION_THRESHOLD", "0.35"))
-_model_meta = {}
-
-def _load_model_and_meta():
-    global _model, _decision_threshold, _model_meta
-    if os.path.exists(MODEL_PATH):
-        try:
-            _model = joblib.load(MODEL_PATH)
-            logger.info("Loaded trained model from %s", MODEL_PATH)
-        except Exception as e:
-            logger.error("Failed to load model: %s", e)
-            _model = None
-    else:
-        logger.warning("No trained model found — using fallback")
-
-    meta_path = os.getenv("MODEL_META_PATH", "model_meta.joblib")
-    json_path = os.getenv("MODEL_META_JSON", "model_meta.json")
+if os.path.exists(MODEL_PATH):
     try:
-        if os.path.exists(meta_path):
-            _model_meta = joblib.load(meta_path) or {}
-        elif os.path.exists(json_path):
-            import json
-            with open(json_path, "r", encoding="utf-8") as fh:
-                _model_meta = json.load(fh)
-        thr = _model_meta.get("decision_threshold")
-        if thr is not None:
-            _decision_threshold = float(thr)
-            logger.info("Decision threshold from meta: %.3f", _decision_threshold)
-        else:
-            logger.info("Using decision threshold: %.3f", _decision_threshold)
+        _model = joblib.load(MODEL_PATH)
+        logger.info("Loaded trained model from %s", MODEL_PATH)
     except Exception as e:
-        logger.warning("Could not load model meta: %s — threshold=%.3f", e, _decision_threshold)
-
-_load_model_and_meta()
+        logger.error("Failed to load model: %s", e)
+else:
+    logger.warning("No trained model found — using fallback")
 
 
 @app.get("/")
@@ -98,8 +119,6 @@ def model_info():
     info = {
         "model_loaded": _model is not None,
         "model_path": MODEL_PATH,
-        "decision_threshold": _decision_threshold,
-        "model_meta": {k: _model_meta.get(k) for k in ("scale_pos_weight", "target_gain_pct", "universe_size", "rows") if _model_meta},
         "feature_count": len(FEATURE_COLUMNS),
         "features": FEATURE_COLUMNS,
         "technical_features": TECHNICAL_COLUMNS,
@@ -125,10 +144,15 @@ def model_info():
 
 
 def _fetch_history(symbol: str) -> pd.DataFrame:
-    """Fetch OHLCV from market-data with retries for free-tier cold starts."""
+    """Fetch OHLCV from market-data with retries for free-tier cold starts.
+
+    Index *names* are rewritten to Yahoo tickers before the request.
+    404 is not retried (bad symbol). 502/503/504 are retried with backoff.
+    """
     import time as _time
 
-    url = f"{MARKET_DATA_URL}/history/{symbol}"
+    resolved = _history_symbol(symbol)
+    url = f"{MARKET_DATA_URL}/history/{resolved}"
     last_err = None
     data = None
     for attempt in range(4):
@@ -139,45 +163,72 @@ def _fetch_history(symbol: str) -> pd.DataFrame:
                 except Exception:
                     pass
             resp = httpx.get(url, params={"period": "1y"}, timeout=60)
+            if resp.status_code == 404:
+                logger.warning("market-data 404 for %s (resolved=%s) — not retrying", symbol, resolved)
+                return pd.DataFrame()
             if resp.status_code in (502, 503, 504):
-                last_err = httpx.HTTPStatusError(
-                    f"HTTP {resp.status_code}", request=resp.request, response=resp
-                )
+                last_err = f"HTTP {resp.status_code}"
                 wait = 1.5 * (2 ** attempt)
                 logger.warning(
                     "market-data %s for %s (attempt %s/4), retry in %.1fs",
                     resp.status_code, symbol, attempt + 1, wait,
                 )
+                if attempt == 0:
+                    _report_rate_limit("market_data", resp.status_code, path=f"/history/{resolved}", symbol=symbol)
                 _time.sleep(wait)
                 continue
             resp.raise_for_status()
             data = resp.json()
             break
-        except httpx.HTTPError as e:
-            last_err = e
+        except httpx.HTTPStatusError as e:
+            last_err = str(e)
+            if e.response is not None and e.response.status_code == 404:
+                return pd.DataFrame()
             wait = 1.5 * (2 ** attempt)
             logger.warning(
                 "market-data error for %s (attempt %s/4): %s — retry in %.1fs",
-                symbol, attempt + 1, str(e)[:120], wait,
+                symbol, attempt + 1, e, wait,
             )
             _time.sleep(wait)
-    if data is None:
-        raise HTTPException(status_code=502, detail=f"Market data unreachable after retries: {last_err}")
+        except Exception as e:
+            last_err = str(e)
+            wait = 1.5 * (2 ** attempt)
+            logger.warning(
+                "market-data error for %s (attempt %s/4): %s — retry in %.1fs",
+                symbol, attempt + 1, e, wait,
+            )
+            _time.sleep(wait)
 
-    candles = data.get("candles", [])
-    if len(candles) < 210:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Only {len(candles)} trading days of history available; need at least 210 "
-                "for a stable prediction (EMA200 needs that much runway)."
-            ),
-        )
+    if not data:
+        logger.warning("No history data for %s after retries (%s)", symbol, last_err)
+        return pd.DataFrame()
+
+    candles = data.get("candles") or data.get("data") or []
+    if not candles:
+        return pd.DataFrame()
     df = pd.DataFrame(candles)
-    df["date"] = pd.to_datetime(df["date"])
-    df.set_index("date", inplace=True)
-    df.rename(columns=str.title, inplace=True)
+    # Normalize column names
+    colmap = {c: c.lower() for c in df.columns}
+    df = df.rename(columns=colmap)
+    for need, alts in (
+        ("open", ["Open"]),
+        ("high", ["High"]),
+        ("low", ["Low"]),
+        ("close", ["Close"]),
+        ("volume", ["Volume"]),
+    ):
+        if need not in df.columns:
+            for a in alts:
+                if a in df.columns:
+                    df[need] = df[a]
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.set_index("date")
+    # Title-case for ta / feature code
+    rename = {"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}
+    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
     return df
+
 
 
 def _fetch_fundamentals(symbol: str) -> Dict[str, Any]:
@@ -314,7 +365,14 @@ def _call_gemini(system_prompt: str, user_prompt: str) -> Optional[str]:
             data = resp.json()
             note = data["candidates"][0]["content"]["parts"][0]["text"].strip()
             return note or None
-        logger.warning("Gemini returned %s: %s", resp.status_code, resp.text[:300])
+        if resp.status_code == 429:
+            import time as _time
+            global _gemini_cooldown_until
+            _gemini_cooldown_until = _time.time() + 600  # 10 min
+            logger.warning("Gemini 429 — cooling down 10 min")
+            _report_rate_limit("gemini", 429, path="generateContent", detail=resp.text[:120])
+        else:
+            logger.warning("Gemini returned %s: %s", resp.status_code, resp.text[:300])
     except Exception as e:
         logger.warning("Gemini call failed: %s", repr(e))
     return None
@@ -341,7 +399,15 @@ def _generate_llm_note(features: dict, probability: float, symbol: str) -> str:
         f"Model says {round(probability * 100)}% chance of +5% in 10 days. Explain in one sentence."
     )
 
-    for call in (_call_gemini, _call_groq):
+    import time as _time
+    global _gemini_cooldown_until
+    order = []
+    if _time.time() >= _gemini_cooldown_until:
+        order.append(_call_gemini)
+    else:
+        logger.info("Skipping Gemini (cooldown until %s)", int(_gemini_cooldown_until))
+    order.append(_call_groq)
+    for call in order:
         note = call(system_prompt, user_prompt)
         if note:
             return note
@@ -397,7 +463,6 @@ def predict(symbol: str):
         probability = float(_model.predict_proba(X)[0, 1])
         # Convert probability to 0-100 score commonly used by decision engine
         prediction_score = round(probability * 100, 2)
-        signal_positive = probability >= _decision_threshold
 
         note = _generate_llm_note(features, probability, symbol.upper())
 
@@ -406,9 +471,6 @@ def predict(symbol: str):
             "model_loaded": True,
             "probability": round(probability, 4),
             "prediction_score": prediction_score,
-            "decision_threshold": round(_decision_threshold, 4),
-            "signal": "POSITIVE" if signal_positive else "NEUTRAL",
-            "signal_positive": signal_positive,
             "note": note,
             "features_used": "technical+fundamental+news",
             "feature_snapshot": {k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in aligned.items()},

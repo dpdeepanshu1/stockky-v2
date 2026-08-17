@@ -30,6 +30,20 @@ from pydantic import BaseModel
 import httpx
 from circuit_breaker import get_breaker, all_snapshots
 
+def _report_rate_limit(status: int, path: str = "", detail: str = "", symbol: str = "") -> None:
+    try:
+        gw = os.environ.get("API_GATEWAY_URL", "").rstrip("/")
+        if not gw:
+            return
+        requests.post(
+            f"{gw}/ops/rate-limits/event",
+            json={"source": "market_data", "status": status, "path": path, "detail": str(detail)[:200], "symbol": symbol},
+            timeout=2,
+        )
+    except Exception:
+        pass
+
+
 # ── yfinance session patch ────────────────────────────────────────────────────
 session = requests.Session()
 session.headers.update({
@@ -216,11 +230,75 @@ def _fallback_set(key: str, value: dict):
         return
     cache.setex(f"fallback:{key}", FALLBACK_TTL_SECONDS, json.dumps(value, default=str))
 
+# Yahoo Finance tickers for common NSE index display names.
+# Without this, normalize_symbol("NIFTY NEXT 50") → "NIFTY NEXT 50.NS" → 404/503.
+INDEX_YAHOO_MAP = {
+    "NIFTY": "^NSEI",
+    "NIFTY 50": "^NSEI",
+    "NIFTY50": "^NSEI",
+    "NIFTY NEXT 50": "^NSMIDCP",  # proxy; Yahoo ^NN50 sometimes unavailable
+    "NIFTYNEXT50": "^NSMIDCP",
+    "NIFTY NEXT50": "^NSMIDCP",
+    "NIFTY BANK": "^NSEBANK",
+    "NIFTYBANK": "^NSEBANK",
+    "BANK NIFTY": "^NSEBANK",
+    "BANKNIFTY": "^NSEBANK",
+    "NIFTY MIDCAP 100": "^NSEMDCP100",
+    "NIFTY MIDCAP100": "^NSEMDCP100",
+    "NIFTYMIDCAP100": "^NSEMDCP100",
+    "NIFTY MIDCAP 150": "NIFTY_MIDCAP_150.NS",
+    "NIFTY MIDCAP150": "NIFTY_MIDCAP_150.NS",
+    "NIFTYMIDCAP150": "NIFTY_MIDCAP_150.NS",
+    "NIFTY SMALLCAP 100": "NIFTYSMLCAP100.NS",
+    "NIFTY SMALLCAP 250": "NIFTYSMLCAP250.NS",
+    "NIFTY IT": "^CNXIT",
+    "NIFTYIT": "^CNXIT",
+    "SENSEX": "^BSESN",
+    "BSE SENSEX": "^BSESN",
+    "INDIA VIX": "^INDIAVIX",
+    "INDIAVIX": "^INDIAVIX",
+}
+# Alternate Yahoo symbols to try if primary fails
+INDEX_YAHOO_FALLBACKS = {
+    "^NSMIDCP": ["^NSEI"],
+    "NIFTY_MIDCAP_150.NS": ["^NSEMDCP100", "^NSEI"],
+    "^NSEMDCP100": ["^NSEI"],
+}
+
+
 def normalize_symbol(symbol: str) -> str:
-    symbol = symbol.strip().upper()
-    if not symbol.endswith(".NS") and not symbol.endswith(".BO"):
-        symbol = f"{symbol}.NS"
-    return symbol
+    """Map equity and index symbols to Yahoo-compatible tickers.
+
+    Equities get .NS if missing. Index *names* (with spaces) map to ^… tickers
+    so history/quote never request "NIFTY NEXT 50.NS".
+    """
+    raw = (symbol or "").strip()
+    if not raw:
+        return raw
+    upper = raw.upper().replace("_", " ")
+    # Already a Yahoo index
+    if raw.startswith("^"):
+        return raw
+    # Direct map (exact)
+    key = upper.replace("  ", " ").strip()
+    if key in INDEX_YAHOO_MAP:
+        return INDEX_YAHOO_MAP[key]
+    # Compact key without spaces
+    compact = key.replace(" ", "")
+    for k, v in INDEX_YAHOO_MAP.items():
+        if k.replace(" ", "") == compact:
+            return v
+    # Equity path
+    sym = raw.strip().upper()
+    # Do not append .NS to names that still look like multi-word indices
+    if " " in sym or sym.startswith("NIFTY") and not sym.endswith(".NS"):
+        # Unknown nifty-like — try as-is with underscores for Yahoo
+        if "NIFTY" in sym:
+            return sym.replace(" ", "_") + ("" if sym.endswith(".NS") else ".NS")
+    if not sym.endswith(".NS") and not sym.endswith(".BO"):
+        sym = f"{sym}.NS"
+    return sym
+
 
 class QuoteResponse(BaseModel):
     symbol: str
@@ -481,59 +559,92 @@ def get_history(
     period: str = Query("6mo", description="1mo, 3mo, 6mo, 1y, 2y, 5y"),
     interval: str = Query("1d", description="1d, 1wk, 1h"),
 ):
+    """OHLCV for equities and indices.
+
+    Index display names (e.g. "NIFTY NEXT 50") are mapped via normalize_symbol
+    to Yahoo tickers. If the primary ticker fails, INDEX_YAHOO_FALLBACKS are tried
+    so prediction/sentiment never get stuck on 404/503 for known NSE indices.
+    """
     sym = normalize_symbol(symbol)
+    candidates = [sym]
+    for _fb in INDEX_YAHOO_FALLBACKS.get(sym, []):
+        if _fb not in candidates:
+            candidates.append(_fb)
+    # Also try ^NSEI as last resort for any NIFTY* request
+    raw_u = (symbol or "").upper()
+    if "NIFTY" in raw_u and "^NSEI" not in candidates:
+        candidates.append("^NSEI")
+
     cache_key = f"history:{sym}:{period}:{interval}"
     cached = _cache_get(cache_key)
     if cached:
         return cached
 
-    try:
-        ticker = yf.Ticker(sym)
+    last_err = None
+    for cand in candidates:
         try:
-            ticker._tz = "Asia/Kolkata"
-        except Exception:
-            pass
-        # More retries for scan stampedes / Yahoo throttling
-        df = _with_retry(
-            lambda: ticker.history(period=period, interval=interval, auto_adjust=True),
-            max_retries=4,
-            base_delay=1.0,
-        )
-        if df is None or df.empty:
-            raise HTTPException(status_code=404, detail=f"No history found for {sym}")
-
-        candles = []
-        for idx, row in df.iterrows():
-            if _safe(row["Close"]) is None:
-                continue
+            ticker = yf.Ticker(cand)
             try:
-                vol = int(row["Volume"]) if math.isfinite(float(row["Volume"])) else 0
+                ticker._tz = "Asia/Kolkata"
             except Exception:
-                vol = 0
-            candles.append({
-                "date": idx.strftime("%Y-%m-%d %H:%M"),
-                "open": _safe(row["Open"]),
-                "high": _safe(row["High"]),
-                "low": _safe(row["Low"]),
-                "close": _safe(row["Close"]),
-                "volume": vol,
-            })
+                pass
+            df = _with_retry(
+                lambda t=ticker: t.history(period=period, interval=interval, auto_adjust=True),
+                max_retries=3,
+                base_delay=0.8,
+            )
+            if df is None or df.empty:
+                last_err = f"empty history for {cand}"
+                logger.info("No history for candidate %s (requested %s)", cand, symbol)
+                continue
 
-        if not candles:
-            raise HTTPException(status_code=404, detail=f"No valid candles for {sym}")
+            candles = []
+            for idx, row in df.iterrows():
+                if _safe(row["Close"]) is None:
+                    continue
+                try:
+                    vol = int(row["Volume"]) if math.isfinite(float(row["Volume"])) else 0
+                except Exception:
+                    vol = 0
+                candles.append({
+                    "date": idx.strftime("%Y-%m-%d %H:%M"),
+                    "open": _safe(row["Open"]),
+                    "high": _safe(row["High"]),
+                    "low": _safe(row["Low"]),
+                    "close": _safe(row["Close"]),
+                    "volume": vol,
+                })
 
-        result = {"symbol": sym, "period": period, "interval": interval, "candles": candles}
-        # Longer cache when market closed (history doesn't change)
-        hist_ttl = 900 if is_market_open() else 21600
-        _cache_set(cache_key, result, ttl=hist_ttl)
-        return result
+            if not candles:
+                last_err = f"no valid candles for {cand}"
+                continue
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.warning("Failed to fetch history for %s: %s", sym, e)
-        # 503 = transient overload / Yahoo; clients should retry
-        raise HTTPException(status_code=503, detail=f"Temporary history unavailable for {sym}: {e}")
+            result = {
+                "symbol": cand,
+                "requested": (symbol or "").strip(),
+                "period": period,
+                "interval": interval,
+                "candles": candles,
+            }
+            hist_ttl = 900 if is_market_open() else 21600
+            _cache_set(cache_key, result, ttl=hist_ttl)
+            if cand != sym:
+                logger.info("History for %s served via fallback ticker %s", symbol, cand)
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            last_err = str(e)
+            logger.warning("History candidate %s failed for %s: %s", cand, symbol, e)
+            continue
+
+    # All candidates failed
+    detail = last_err or f"No history for {symbol}"
+    # 404 for unknown symbols; 503 only when Yahoo looks transient
+    if last_err and any(x in last_err.lower() for x in ("timeout", "429", "503", "connection", "temporarily")):
+        _report_rate_limit(503, path=f"/history/{symbol}", detail=detail, symbol=symbol)
+        raise HTTPException(status_code=503, detail=f"Temporary history unavailable for {symbol}: {detail}")
+    raise HTTPException(status_code=404, detail=f"No history found for {symbol}: {detail}")
 
 @app.get("/fundamentals/{symbol}")
 def get_fundamentals_raw(symbol: str):

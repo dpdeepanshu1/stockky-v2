@@ -1328,3 +1328,48 @@ html.light .mobile-drawer-backdrop {
   color: var(--muted);
   margin-top: 0.1rem;
 }
+
+
+/* Conviction board filter chips — must not collapse labels */
+.scanner-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0.75rem;
+  position: relative;
+  z-index: 2;
+}
+.scanner-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  padding: 0.4rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid #2a3340;
+  background: #0d1014;
+  color: #9aaba2;
+  cursor: pointer;
+  pointer-events: auto;
+  white-space: nowrap;
+  user-select: none;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.scanner-chip:hover {
+  border-color: rgba(34, 211, 238, 0.45);
+  color: #e8f1ec;
+}
+.scanner-chip[data-active="true"] {
+  border-color: rgba(34, 211, 238, 0.65);
+  color: #22d3ee;
+  background: rgba(34, 211, 238, 0.08);
+}
+.scanner-board {
+  position: relative;
+  z-index: 1;
+}
+.scanner-board button {
+  pointer-events: auto;
+}

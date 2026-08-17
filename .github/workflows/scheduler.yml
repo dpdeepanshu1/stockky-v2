@@ -115,3 +115,18 @@ jobs:
           export BATCH_TIMEOUT=300
           export SCAN_TIMEOUT_TOTAL=5400
           python services/notification-scheduler-service/scheduler/run_once.py
+
+      - name: Post-scan T+1/T+5 evaluation (closed-loop)
+        if: steps.ist.outputs.run == '1'
+        env:
+          DECISION_PREDICTION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
+          DECISION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
+        run: |
+          set +e
+          D="${DECISION_PREDICTION_URL:-$DECISION_URL}"
+          D="${D%/}"
+          [ -z "$D" ] && { echo "No DECISION_PREDICTION_URL — skip evaluate"; exit 0; }
+          curl -fsS -m 25 "$D/health" || true
+          sleep 5
+          curl -fsS -m 120 -X POST "$D/training/api/evaluate/t1?max_batch=40" || curl -fsS -m 120 -X POST "$D/api/evaluate/t1?max_batch=40" || true
+          curl -fsS -m 120 -X POST "$D/training/api/evaluate/t5?max_batch=40" || curl -fsS -m 120 -X POST "$D/api/evaluate/t5?max_batch=40" || true

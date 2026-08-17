@@ -164,13 +164,40 @@ TARGET_GAIN_PCT = 4.5  # Reduced from 5.0 to get more positive samples
 
 
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Fix MultiIndex columns and ensure 1D Series."""
+    """Fix MultiIndex / yfinance quirks and ensure 1D OHLCV Series with title-case names."""
     df = df.copy()
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(1)  # keep price level
-    for col in df.columns:
+        # Prefer price field level if present (e.g. ('Close','ADANIPORTS.NS'))
+        try:
+            lvl0 = [str(x).lower() for x in df.columns.get_level_values(0)]
+            if any(x in ("close", "open", "high", "low", "volume", "adj close") for x in lvl0):
+                df.columns = df.columns.get_level_values(0)
+            else:
+                df.columns = df.columns.droplevel(-1)
+        except Exception:
+            df.columns = df.columns.droplevel(-1)
+    # Flatten any nested frames
+    for col in list(df.columns):
         if isinstance(df[col], pd.DataFrame):
             df[col] = df[col].squeeze()
+    # Map common aliases → Open/High/Low/Close/Volume
+    rename = {}
+    for c in df.columns:
+        cl = str(c).strip().lower().replace(" ", "")
+        if cl in ("open",):
+            rename[c] = "Open"
+        elif cl in ("high",):
+            rename[c] = "High"
+        elif cl in ("low",):
+            rename[c] = "Low"
+        elif cl in ("close", "adjclose", "adj_close"):
+            rename[c] = "Close"
+        elif cl in ("volume", "vol"):
+            rename[c] = "Volume"
+    if rename:
+        df = df.rename(columns=rename)
+    # Drop duplicate columns keeping first
+    df = df.loc[:, ~pd.Index(df.columns.astype(str)).duplicated()]
     return df
 
 
@@ -191,7 +218,10 @@ def fetch_with_retry(symbol: str, max_retries: int = 3) -> pd.DataFrame:
                     progress=False,
                     threads=False,
                 )
-                if not df.empty and "Close" in df.columns:
+                if df is None or df.empty:
+                    break
+                df = _normalize_df(df)
+                if "Close" in df.columns and len(df) > 50:
                     logger.info("Fetched %s from yfinance (%s)", symbol, ticker)
                     return df
                 else:
@@ -233,15 +263,27 @@ def build_dataset() -> pd.DataFrame:
             logger.warning("Feature generation failed for %s: %s", symbol, str(e)[:100])
             continue
 
-        closes = feat_df["Close"].values
+        if "Close" in feat_df.columns:
+            closes = feat_df["Close"].values
+        elif "Close" in df.columns:
+            # Align to feature index
+            closes = df.reindex(feat_df.index)["Close"].values
+        else:
+            logger.warning("%s: no Close column after features — skip", symbol)
+            continue
         for i in range(200, len(feat_df) - LOOKAHEAD_DAYS):
             row = feat_df.iloc[i]
-            if row[FEATURE_COLUMNS].isna().any():
+            # FEATURE_COLUMNS may include fund/news cols not in technical frame
+            missing = [c for c in FEATURE_COLUMNS if c not in feat_df.columns]
+            use_cols = [c for c in FEATURE_COLUMNS if c in feat_df.columns]
+            if not use_cols or row[use_cols].isna().any():
                 continue
             future_close = closes[i + LOOKAHEAD_DAYS]
+            if pd.isna(closes[i]) or pd.isna(future_close) or closes[i] == 0:
+                continue
             gain = (future_close - closes[i]) / closes[i] * 100
             label = 1 if gain >= TARGET_GAIN_PCT else 0
-            record = {col: row[col] for col in FEATURE_COLUMNS}
+            record = {col: (float(row[col]) if col in feat_df.columns else 0.0) for col in FEATURE_COLUMNS}
             record["label"] = label
             record["symbol"] = symbol
             record["date"] = feat_df.index[i]

@@ -48,7 +48,18 @@ else:
     NOTIFICATION_URL = _base(
         os.getenv("NOTIFICATION_URL", f"{NOTIFICATION_SCHEDULER_URL}/notification")
     )
-SCHEDULER_URL = NOTIFICATION_URL
+
+# Scheduler is a sibling mount of /notification on the same host — never alias to NOTIFICATION_URL.
+_sched_env = os.getenv("SCHEDULER_URL")
+if _sched_env:
+    SCHEDULER_URL = _base(_sched_env)
+else:
+    _origin = NOTIFICATION_SCHEDULER_URL
+    if _origin.endswith("/notification"):
+        _origin = _origin[: -len("/notification")]
+    elif _origin.endswith("/scheduler"):
+        _origin = _origin[: -len("/scheduler")]
+    SCHEDULER_URL = _base(f"{_origin}/scheduler")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 TRAINING_DATABASE_URL = os.getenv("TRAINING_DATABASE_URL", DATABASE_URL)

@@ -525,7 +525,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
           )}
           {quoteWs && <span className="mono text-[10px] text-signal-buy">WS quotes live</span>}
         </div>
-        <div className="scanner-chips">
+        <div className="scanner-chips" role="tablist" aria-label="Filter by decision">
           {([
             ["all", "All"],
             ["buy", "BUY NOW"],
@@ -535,9 +535,15 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
             <button
               key={id}
               type="button"
-              className="scanner-chip"
+              role="tab"
+              aria-selected={filterChip === id}
+              className={`scanner-chip${filterChip === id ? " is-active" : ""}`}
               data-active={filterChip === id ? "true" : "false"}
-              onClick={() => setFilterChip(id)}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setFilterChip(id);
+              }}
             >
               {label}
             </button>

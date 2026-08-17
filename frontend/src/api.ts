@@ -139,7 +139,7 @@ export interface NotificationConfig {
   discord: NotificationChannelStatus;
   slack: NotificationChannelStatus;
   telegram: NotificationChannelStatus;
-  callmebot: NotificationChannelStatus & { phone?: string; user?: string; users_preview?: string };
+  callmebot: NotificationChannelStatus & { phone?: string; user?: string; users_preview?: string; users?: string; recipients_count?: number };
   persisted: boolean;
 }
 

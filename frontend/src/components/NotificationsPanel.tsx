@@ -62,6 +62,9 @@ export default function NotificationsPanel() {
       .then((cfg) => {
         setConfig(cfg);
         setTelegramChatId(cfg.telegram.chat_id || "");
+        const cm = cfg.callmebot as { users?: string; users_preview?: string; user?: string };
+        const extras = (cm?.users || cm?.users_preview || "").trim();
+        if (extras) setCallUsers(extras);
       })
       .catch((e) => setLoadError((e as Error).message))
       .finally(() => setLoading(false));
@@ -84,6 +87,9 @@ export default function NotificationsPanel() {
         update = { discord_webhook_url: discordUrl || undefined, enabled: { discord: true } };
       } else if (channel === "callmebot") {
         let user = (callUser || "").trim();
+        if (!user) {
+          user = ((config?.callmebot as any)?.user || "").trim();
+        }
         if (!user) {
           setTestResult("Enter your CallMeBot Telegram user first (e.g. @dpdeep29).");
           window.alert("Enter CallMeBot user like @dpdeep29 before Connect & start.");
@@ -119,7 +125,8 @@ export default function NotificationsPanel() {
       if (channel === "callmebot") {
         setCallUser("");
         setCallKey("");
-        // keep extra users text so user can edit later
+        const savedExtras = (cfg.callmebot as any)?.users || (cfg.callmebot as any)?.users_preview || extras.join(",");
+        setCallUsers(savedExtras || extras.join(","));
         setTestResult(
           `CallMeBot saved & enabled for ${(cfg.callmebot as any)?.user || callUser || "user"}. Status: ${
             cfg.callmebot?.configured ? "CONNECTED" : "not connected — check username"
@@ -345,9 +352,11 @@ export default function NotificationsPanel() {
               if (!config.callmebot?.configured && (callUser || "").trim()) {
                 let user = callUser.trim();
                 if (!user.startsWith("@") && !/^[0-9+]+$/.test(user)) user = "@" + user;
+                let extrasSave = (callUsers || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 4);
                 const cfg = await api.saveNotificationConfig({
                   callmebot_user: user,
                   callmebot_apikey: callKey || undefined,
+                  callmebot_users: extrasSave.length ? extrasSave.join(",") : undefined,
                   callmebot_users: callUsers || undefined,
                   enabled: { callmebot: true },
                 });

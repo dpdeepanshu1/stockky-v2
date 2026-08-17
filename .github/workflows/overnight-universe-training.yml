@@ -138,3 +138,16 @@ jobs:
             curl -fsS -m 30 -X DELETE \
               "${DECISION_PREDICTION_URL}/training/api/universe/purge-expired" || true
           fi
+
+      - name: Evaluate T+1 and T+5 outcomes (closed-loop fuel)
+        env:
+          DECISION_PREDICTION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
+        run: |
+          set +e
+          D="${DECISION_PREDICTION_URL%/}"
+          [ -z "$D" ] && exit 0
+          curl -fsS -m 30 "$D/health" || true
+          sleep 8
+          curl -fsS -m 180 -X POST "$D/training/api/evaluate/t1?max_batch=80" || curl -fsS -m 180 -X POST "$D/api/evaluate/t1?max_batch=80" || true
+          sleep 5
+          curl -fsS -m 180 -X POST "$D/training/api/evaluate/t5?max_batch=80" || curl -fsS -m 180 -X POST "$D/api/evaluate/t5?max_batch=80" || true

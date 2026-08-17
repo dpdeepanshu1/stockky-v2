@@ -1,0 +1,63 @@
+# Daily T+1 / T+5 evaluation sweeps — free-tier safe (does not depend on
+# in-process background tasks that die when Render sleeps).
+#
+# Secrets:
+#   DECISION_PREDICTION_URL  (required) e.g. https://xxx.onrender.com
+#   API_GATEWAY_URL          (optional, for wake)
+name: Stockky Evaluate Outcomes
+
+on:
+  schedule:
+    # ~18:30 IST (13:00 UTC) after market close — primary catch-up
+    - cron: "0 13 * * 1-5"
+    # Mid-morning IST (~10:00) second pass for overnight bars
+    - cron: "30 4 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      max_batch:
+        description: "Max symbols per period this run"
+        required: false
+        default: "80"
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Wake decision + gateway
+        env:
+          DECISION_PREDICTION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+        run: |
+          set +e
+          D="${DECISION_PREDICTION_URL%/}"
+          G="${API_GATEWAY_URL%/}"
+          [ -n "$G" ] && curl -fsS -m 25 "$G/health?warm=true" || curl -fsS -m 20 "$G/health" || true
+          [ -n "$D" ] && curl -fsS -m 30 "$D/health?warm=true" || curl -fsS -m 25 "$D/health" || curl -fsS -m 25 "$D/training/health" || true
+          sleep 12
+
+      - name: Run T+1 then T+5 evaluation sweeps
+        env:
+          DECISION_PREDICTION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
+          MAX_BATCH: ${{ github.event.inputs.max_batch || '80' }}
+        run: |
+          set +e
+          D="${DECISION_PREDICTION_URL%/}"
+          if [ -z "$D" ]; then
+            echo "DECISION_PREDICTION_URL secret not set"
+            exit 0
+          fi
+          # Prefer /training prefix (mounted app)
+          for PATH_BASE in "$D/training" "$D"; do
+            echo "Trying base $PATH_BASE"
+            curl -fsS -m 120 -X POST "$PATH_BASE/api/evaluate/t1?max_batch=${MAX_BATCH}" && break
+            curl -fsS -m 120 -X POST "$PATH_BASE/evaluate/t1?max_batch=${MAX_BATCH}" && break
+          done
+          sleep 5
+          for PATH_BASE in "$D/training" "$D"; do
+            curl -fsS -m 120 -X POST "$PATH_BASE/api/evaluate/t5?max_batch=${MAX_BATCH}" && break
+            curl -fsS -m 120 -X POST "$PATH_BASE/evaluate/t5?max_batch=${MAX_BATCH}" && break
+          done
+          # Status snapshot
+          curl -fsS -m 30 "$D/training/api/evaluate/status" || curl -fsS -m 30 "$D/api/evaluate/status" || true
+          echo "Evaluate workflow done"

@@ -253,9 +253,20 @@ def compute_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
             rename[c] = "Volume"
     work = work.rename(columns=rename)
 
+    if "Close" not in work.columns:
+        # Last-resort: pick a close-like column
+        for c in list(work.columns):
+            if str(c).lower() in ("close", "adj close", "adj_close"):
+                work = work.rename(columns={c: "Close"})
+                break
+    if "Close" not in work.columns:
+        raise KeyError("OHLCV frame missing Close after normalize")
+
     # Rolling technicals as columns (vectorized subset)
     close = work["Close"]
     out = pd.DataFrame(index=work.index)
+    # Keep Close for trainers that label from future price (pred_train)
+    out["Close"] = close
     try:
         out["rsi_14"] = ta.momentum.RSIIndicator(close, window=14).rsi()
         macd = ta.trend.MACD(close)

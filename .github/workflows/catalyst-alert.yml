@@ -1,5 +1,4 @@
-# Pre-market (07:30 & 08:15 IST) + intraday catalyst sweeps → Telegram
-# Uses async /catalysts/alert (returns immediately) + status poll to avoid 180s curl timeout.
+# Full-universe catalyst alert in batches + keep-warm between polls
 name: Stockky Catalyst Alert
 
 on:
@@ -20,7 +19,7 @@ on:
 jobs:
   catalyst:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - name: IST context
         run: |
@@ -31,40 +30,69 @@ jobs:
             exit 0
           fi
 
-      - name: Wake gateway + run catalyst alert (async + poll)
+      - name: Full-universe catalyst (batched) + keep-warm poll
         env:
           API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
         run: |
-          set -e
+          set +e
           GW="${API_GATEWAY_URL%/}"
-          if [ -z "$GW" ]; then
-            echo "API_GATEWAY_URL secret not set"
-            exit 1
-          fi
+          [ -n "$GW" ] || { echo "API_GATEWAY_URL missing"; exit 1; }
 
-          # Aggressive warm for free-tier
-          curl -fsS -m 45 -X POST "$GW/wake-all" || curl -fsS -m 45 "$GW/wake-all" || true
-          curl -fsS -m 30 "$GW/health?warm=true" || curl -fsS -m 25 "$GW/health" || true
-          curl -fsS -m 15 "$GW/ops/keepalive" || true
-          sleep 20
+          warm() {
+            curl -sS -m 25 -X POST "$GW/wake-all" >/dev/null 2>&1 || true
+            curl -sS -m 20 "$GW/health?warm=true" >/dev/null 2>&1 || true
+            curl -sS -m 12 "$GW/ops/keepalive" >/dev/null 2>&1 || true
+          }
+
+          echo "=== Warm ==="
+          warm; sleep 10; warm; sleep 8
 
           NOTIFY=true
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             NOTIFY="${{ inputs.notify }}"
           fi
 
-          echo "Starting async catalyst job…"
-          # Short timeout on start — endpoint returns immediately now
-          START=$(curl -fsS -m 45 -X POST "$GW/catalysts/alert?force=true&notify=$NOTIFY" || echo '{}')
-          echo "$START" | head -c 400; echo
+          # Full universe — batch_size only controls chunking, not stock count
+          echo "=== Start full catalyst (batch_size=25) ==="
+          START=$(curl -sS -m 60 -X POST "$GW/catalysts/alert?force=true&notify=$NOTIFY&batch_size=25" 2>/dev/null || echo '{}')
+          echo "$START" | head -c 500; echo
 
-          # Poll up to ~18 minutes (hot scan can be long on free tier)
-          for i in $(seq 1 72); do
+          LAST=""
+          STUCK=0
+          # ~40 min poll window for full universe in batches
+          for i in $(seq 1 120); do
             sleep 15
-            ST=$(curl -fsS -m 20 "$GW/catalysts/alert/status" || echo '{}')
-            echo "[$i] $ST" | head -c 280; echo
-            echo "$ST" | grep -q '"status":"done"' && { echo "Catalyst done"; exit 0; }
-            echo "$ST" | grep -q '"status":"error"' && { echo "Catalyst error"; exit 1; }
+            if [ $((i % 2)) -eq 0 ]; then
+              warm
+            fi
+            ST=$(curl -sS -m 50 "$GW/catalysts/alert/status" 2>/dev/null || echo '{}')
+            echo "[$i] $ST" | head -c 360; echo
+
+            echo "$ST" | grep -q '"status":"done"' && { echo "Catalyst done (all batches)"; exit 0; }
+            if echo "$ST" | grep -q '"status":"error"'; then
+              echo "Error — force restart once to continue"
+              warm; sleep 10
+              curl -sS -m 60 -X POST "$GW/catalysts/alert?force=true&notify=$NOTIFY&batch_size=25" >/dev/null 2>&1 || true
+              STUCK=$((STUCK + 1))
+              [ "$STUCK" -ge 3 ] && { echo "Too many errors"; exit 1; }
+              continue
+            fi
+
+            MSG=$(echo "$ST" | tr -d '\n')
+            if [ "$MSG" = "$LAST" ] && echo "$ST" | grep -q '"status":"running"'; then
+              STUCK=$((STUCK + 1))
+            else
+              STUCK=0
+            fi
+            LAST="$MSG"
+            # frozen ~2 min → warm + soft nudge (force restart)
+            if [ "$STUCK" -ge 8 ]; then
+              echo "Stuck — warm + force restart (full universe again)"
+              warm; sleep 8
+              curl -sS -m 60 -X POST "$GW/catalysts/alert?force=true&notify=$NOTIFY&batch_size=20" >/dev/null 2>&1 || true
+              STUCK=0
+              LAST=""
+            fi
           done
-          echo "Timed out waiting for catalyst job"
+          echo "Timed out waiting for all batches"
           exit 1

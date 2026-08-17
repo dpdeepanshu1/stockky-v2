@@ -3590,8 +3590,6 @@ def _hot_payload_fingerprint(payload: dict) -> str:
         return ""
 
 
-@app.get("/stockky-hot")
-
 async def _warm_upstream_services(client: Optional[httpx.AsyncClient] = None) -> None:
     """Ping gateway deps so free-tier does not sleep between batches."""
     urls = []
@@ -3599,12 +3597,6 @@ async def _warm_upstream_services(client: Optional[httpx.AsyncClient] = None) ->
         u = globals().get(name) or os.getenv(name)
         if u:
             urls.append(str(u).rstrip("/"))
-    own = None
-    try:
-        # health of self is fine; external is what matters
-        pass
-    except Exception:
-        pass
     close = False
     if client is None:
         client = httpx.AsyncClient(timeout=8.0)
@@ -3623,13 +3615,14 @@ async def _warm_upstream_services(client: Optional[httpx.AsyncClient] = None) ->
 
 
 async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = None, progress_cb=None):
-    """Curated list for the Stockky 🔥 Stocks tab.
+    """Curated list for Stockky 🔥 Stocks (internal; HTTP via /stockky-hot).
 
     Quality-first free-tier ranking:
       1) Prefer bulk/insider + results over weak news-only names
       2) Drop low-signal news (need enough headlines + score)
       3) Seed universe from last full-scan BUY/PREPARE picks aggressively
     Cache: market hours 2–5 min; off-hours until next open.
+    Batching: every HOT_BATCH_SIZE symbols, warm upstream services.
     """
     if not force:
         cached = _redis_get(HOT_STOCKS_CACHE_KEY)
@@ -3933,6 +3926,13 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
     return payload
 
 
+
+
+
+@app.get("/stockky-hot")
+async def stockky_hot_endpoint(force: bool = False):
+    """HTTP entry for Stockky 🔥 Stocks tab — full universe, batched internally."""
+    return await stockky_hot_stocks(force=force, max_symbols=None, progress_cb=None)
 
 
 @app.get("/catalysts/alert/status")

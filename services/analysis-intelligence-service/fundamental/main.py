@@ -1,5 +1,9 @@
 from peers import peers_for, normalize_sector, peer_relative_score, average_metrics, SYMBOL_SECTOR
 try:
+    from indianapi_fallback import get_fundamentals_with_fallback
+except Exception:  # pragma: no cover
+    get_fundamentals_with_fallback = None  # type: ignore
+try:
     from wire_peer_multi_quarter import apply_to_analyze_response
 except Exception:
     apply_to_analyze_response = None  # type: ignore
@@ -166,7 +170,13 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "fundamental-analysis-service"}
+    import os as _os
+    return {
+        "status": "ok",
+        "service": "fundamental-analysis-service",
+        "indianapi_configured": bool(_os.environ.get("INDIANAPI_KEY")),
+        "indianapi_module": get_fundamentals_with_fallback is not None,
+    }
 
 def _pct(x):
     if x is None:
@@ -198,6 +208,25 @@ def analyze(symbol: str):
 
     if not f or not isinstance(f, dict):
         f = {}
+
+    # IndianAPI fallback when market-data/Yahoo path returned nothing useful
+    _core_keys = ("pe_ratio", "roe", "debt_to_equity", "revenue_growth", "market_cap", "sector")
+    _has_core = any(f.get(k) is not None for k in _core_keys)
+    if (not _has_core) and get_fundamentals_with_fallback is not None:
+        try:
+            def _empty_yahoo(_sym: str):
+                return None  # market-data already failed/empty — skip straight to IndianAPI
+
+            ia = get_fundamentals_with_fallback(symbol, _empty_yahoo)
+            if ia and isinstance(ia, dict):
+                # Merge without wiping any sparse fields we might already have
+                for k, v in ia.items():
+                    if v is not None and f.get(k) is None:
+                        f[k] = v
+                fallback_used = True
+                logger.info("IndianAPI fallback filled fundamentals for %s", symbol)
+        except Exception as _iae:
+            logger.warning("IndianAPI fallback failed for %s: %s", symbol, _iae)
 
     # Extract metrics (including new ones)
     pe_ratio = f.get("pe_ratio")

@@ -65,6 +65,37 @@ def health():
     return {"status": "ok", "service": "prediction-service", "model_loaded": _model is not None}
 
 
+@app.get("/model/info")
+def model_info():
+    """Describe the loaded prediction model (features, path, type)."""
+    from pred_features import FEATURE_COLUMNS, TECHNICAL_COLUMNS, FUNDAMENTAL_COLUMNS, NEWS_COLUMNS
+    info = {
+        "model_loaded": _model is not None,
+        "model_path": MODEL_PATH,
+        "feature_count": len(FEATURE_COLUMNS),
+        "features": FEATURE_COLUMNS,
+        "technical_features": TECHNICAL_COLUMNS,
+        "fundamental_features": FUNDAMENTAL_COLUMNS,
+        "news_features": NEWS_COLUMNS,
+        "note": "Live /predict uses latest fund+news. Retrain with pred_train.py after compute_feature_frame fix.",
+    }
+    if _model is not None:
+        info["model_type"] = type(_model).__name__
+        for attr in ("n_features_in_", "classes_", "feature_importances_"):
+            if hasattr(_model, attr):
+                val = getattr(_model, attr)
+                try:
+                    import numpy as np
+                    if hasattr(val, "tolist"):
+                        val = val.tolist()
+                    elif isinstance(val, (list, tuple)) and len(val) > 40:
+                        val = list(val)[:40] + ["…"]
+                except Exception:
+                    val = str(val)[:200]
+                info[attr] = val
+    return info
+
+
 def _fetch_history(symbol: str) -> pd.DataFrame:
     """Fetch OHLCV from market-data with retries for free-tier cold starts."""
     import time as _time

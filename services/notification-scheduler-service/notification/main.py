@@ -196,7 +196,9 @@ def _public_config(cfg: dict) -> dict:
             "masked": _mask(cfg.get("callmebot_apikey", "") or "none"),
             "user": cfg.get("callmebot_user") or cfg.get("callmebot_phone") or "",
             "phone": cfg.get("callmebot_phone") or cfg.get("callmebot_user") or "",
-            "users_preview": (cfg.get("callmebot_users") or "")[:80],
+            "users_preview": (cfg.get("callmebot_users") or ""),
+            "users": (cfg.get("callmebot_users") or ""),
+            "recipients_count": len(_callmebot_recipients(cfg)),
         },
         "persisted": bool(_redis),
     }
@@ -466,14 +468,25 @@ def _send_callmebot(cfg: dict, title: str, message: str, voice_first: bool = Tru
                 last = str(e)[:80]
         return f"{user}:fail ({last})"
 
+    # Primary first (index 0), then extras — sequential with short gap so CallMeBot
+    # rate limits are less likely to drop secondary users. One retry per user.
     results = []
-    with ThreadPoolExecutor(max_workers=min(5, len(users))) as pool:
-        futs = [pool.submit(_one, u, k) for u, k in users]
-        for fut in as_completed(futs):
-            try:
-                results.append(fut.result())
-            except Exception as e:
-                results.append(f"error:{e}")
+    import time as _t
+
+    def _one_with_retry(user: str, apikey: str) -> str:
+        r = _one(user, apikey)
+        if ":ok(" in r or r.endswith(":ok"):
+            return r
+        _t.sleep(1.2)
+        return _one(user, apikey)
+
+    for i, (u, k) in enumerate(users):
+        try:
+            results.append(_one_with_retry(u, k))
+        except Exception as e:
+            results.append(f"{u}:error:{e}")
+        if i < len(users) - 1:
+            _t.sleep(0.8)
 
     any_sent = any(":ok(" in r or r.endswith(":ok") for r in results)
     summary = "; ".join(results)

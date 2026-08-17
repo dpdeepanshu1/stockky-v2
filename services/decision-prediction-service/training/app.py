@@ -74,8 +74,9 @@ SERVICE_URL = os.environ.get(
     "SERVICE_URL",
     os.environ.get("TRAINING_URL", f"{os.environ.get('DECISION_PREDICTION_URL', 'https://decision-prediction-service.onrender.com').rstrip('/')}/training"),
 )
-DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///./training.db')
+DATABASE_URL = os.environ.get('TRAINING_DATABASE_URL') or os.environ.get('DATABASE_URL', 'sqlite:///./training.db')
 _db_backend = 'postgres' if DATABASE_URL.startswith(('postgres://', 'postgresql://')) else 'sqlite'
+_training_db_env_set = bool(os.environ.get('TRAINING_DATABASE_URL') or os.environ.get('DATABASE_URL'))
 logging.getLogger('training-service').info('DB backend=%s (set DATABASE_URL for durable win-rate/T+1/T+5)', _db_backend)
 MODEL_STORE_PATH = os.environ.get('MODEL_STORE_PATH', './model-store')
 # Neon/Supabase-friendly engine (pool_pre_ping, ssl, postgres:// fix)
@@ -311,11 +312,19 @@ def get_training_status():
                     evaluated += 1
                     if val == 1:
                         wins += 1
-            if evaluated >= 5:
+            # Expose n always so UI can show progress toward closed-loop
+            status['live_win_rate_n'] = evaluated
+            # Activate rate from 8 samples (was effectively inert until large n)
+            if evaluated >= 8:
                 wr = round(wins / evaluated, 4)
                 status['live_win_rate'] = wr
                 status['win_rate'] = wr
-                status['live_win_rate_n'] = evaluated
+            elif evaluated > 0:
+                # Provisional rate for display only — decision still scales by n
+                wr = round(wins / evaluated, 4)
+                status['live_win_rate'] = wr
+                status['win_rate'] = wr
+                status['live_win_rate_provisional'] = True
         except Exception as e:
             logger.debug("live win-rate compute skipped: %s", e)
     except Exception as e:
@@ -599,22 +608,22 @@ async def store_prediction(pred: PredictionSnapshotCreate, background_tasks: Bac
         db.close()
 
 @app.post("/api/evaluate/t1")
-async def api_evaluate_t1(background_tasks: BackgroundTasks):
+async def api_evaluate_t1(background_tasks: BackgroundTasks, max_batch: int = 50):
     """Trigger T+1 evaluation of all pending predictions (catch-up sweep)."""
     def run_eval():
         try:
-            evaluate_pending_predictions('T+1')
+            evaluate_pending_predictions('T+1', max_batch=max_batch)
         except Exception as e:
             logger.error(f"T+1 evaluation failed: {e}")
     background_tasks.add_task(run_eval)
     return JSONResponse(content={"status": "T+1 evaluation triggered"})
 
 @app.post("/api/evaluate/t5")
-async def api_evaluate_t5(background_tasks: BackgroundTasks):
+async def api_evaluate_t5(background_tasks: BackgroundTasks, max_batch: int = 50):
     """Trigger T+5 evaluation of all pending predictions (catch-up sweep)."""
     def run_eval():
         try:
-            evaluate_pending_predictions('T+5')
+            evaluate_pending_predictions('T+5', max_batch=max_batch)
         except Exception as e:
             logger.error(f"T+5 evaluation failed: {e}")
     background_tasks.add_task(run_eval)
@@ -1170,6 +1179,7 @@ async def training_score(symbol: str):
     try:
         st = get_training_status()
         live_wr = st.get("live_win_rate") or st.get("win_rate") or st.get("overall_win_rate")
+        live_n = st.get("live_win_rate_n") or 0
     except Exception:
         pass
     if not score:
@@ -1181,6 +1191,7 @@ async def training_score(symbol: str):
             "model_success_probability": None,
             "available": False,
             "live_win_rate": live_wr,
+            "live_win_rate_n": live_n,
             "message": "No training score for this symbol yet — add to Training from a scan first",
         }
     if isinstance(score, dict):
@@ -1195,6 +1206,7 @@ async def training_score(symbol: str):
             score["t5_success_probability"] = score.get("t5_prob") or score.get("t5_success_rate")
         if live_wr is not None and score.get("live_win_rate") is None:
             score["live_win_rate"] = live_wr
+        score["live_win_rate_n"] = live_n
         score.setdefault("symbol", (symbol or "").upper())
     return score
 

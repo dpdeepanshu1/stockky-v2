@@ -37,7 +37,8 @@ logger = logging.getLogger("training-service.scanner")
 # free-form JSON, since JSON key consistency across callers isn't
 # guaranteed the way a fixed schema is.
 SIMILARITY_FEATURES = [
-    "combined_score", "technical_score", "fundamental_score",
+    "combined_score", "technical_score", "fundamental_score", "news_score",
+    "prediction_score",
     "rsi", "volume_ratio", "debt_to_equity", "roe", "roce",
 ]
 

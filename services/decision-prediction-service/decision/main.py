@@ -436,19 +436,28 @@ def _combined_score(
 
 
 # ── Decision logic ──────────────────────────────────────────
-def _live_win_rate_threshold_shift(live_win_rate) -> float:
-    """Closed-loop: positive shift = harder BUY bars when live edge is weak."""
+def _live_win_rate_threshold_shift(live_win_rate, live_n: int = 0) -> float:
+    """Closed-loop: positive shift = harder BUY bars when live edge is weak.
+
+    Full strength from ~25 evaluated samples; partial from 8+.
+    """
     if live_win_rate is None:
         return 0.0
     try:
         wr = float(live_win_rate)
+        n = int(live_n or 0)
     except (TypeError, ValueError):
+        return 0.0
+    if n < 8:
         return 0.0
     if wr > 1.5:
         wr = wr / 100.0
     wr = max(0.0, min(1.0, wr))
     # Baseline expected edge ~55%. Below → raise bars; above → ease slightly.
     delta = (0.55 - wr) * 20.0
+    # Confidence scale: 8 samples → 40%, 25+ → 100%
+    conf = min(1.0, max(0.4, (n - 8) / 17.0 + 0.4))
+    delta *= conf
     return max(-6.0, min(8.0, delta))
 
 
@@ -465,6 +474,7 @@ def _decide(
     combined: float,
     data_insufficient: bool = False,
     live_win_rate=None,
+    live_win_rate_n: int = 0,
 ) -> Decision:
     if data_insufficient:
         if news_score is not None and news_score >= 60:
@@ -490,7 +500,7 @@ def _decide(
     adj = combined - news_penalty - model_penalty - resistance_penalty
 
     # Closed-loop: live win-rate shifts decision thresholds
-    bar_shift = _live_win_rate_threshold_shift(live_win_rate)
+    bar_shift = _live_win_rate_threshold_shift(live_win_rate, live_win_rate_n)
     buy_bar = 68.0 + bar_shift
     prepare_bar = 54.0 + bar_shift * 0.7
 
@@ -845,6 +855,7 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
             "thin_history": bool(technical.get("data_insufficient") or technical.get("thin_history")),
             "low_liquidity": bool(technical.get("low_liquidity")),
             "live_win_rate": (training or {}).get("live_win_rate") or (training or {}).get("win_rate"),
+            "live_win_rate_n": int((training or {}).get("live_win_rate_n") or 0),
         }
         mh = multi_horizon_decide(
             technical=technical if isinstance(technical, dict) else {},
@@ -883,6 +894,7 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
         )
 
         live_wr = (training or {}).get("live_win_rate") or (training or {}).get("win_rate")
+        live_n = int((training or {}).get("live_win_rate_n") or 0)
         # Prefer similarity-based success rate (0–100) when available
         if live_wr is None and (training or {}).get("t1_success_probability") is not None:
             live_wr = (training or {}).get("t1_success_probability")
@@ -899,6 +911,7 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
             combined,
             data_insufficient,
             live_win_rate=live_wr,
+            live_win_rate_n=live_n,
         )
 
         data_quality = _assess_data_quality(

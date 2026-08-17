@@ -220,3 +220,67 @@ def get_feature_columns(include_fundamental: bool = True, include_news: bool = T
     if include_news:
         cols += NEWS_COLUMNS
     return cols
+
+
+def compute_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compatibility wrapper for pred_train.py / legacy OHLCV training.
+
+    Builds a DataFrame of technical feature columns row-by-row where possible.
+    For simplicity and stability, computes the latest technical vector and
+    broadcasts as columns aligned to df index (walk-forward uses full series
+    via compute_technical_features on expanding windows in advanced pipelines).
+    """
+    if df is None or len(df) < 50:
+        return pd.DataFrame(columns=TECHNICAL_COLUMNS)
+
+    work = df.copy()
+    # Normalize column names
+    colmap = {c: c.title() for c in work.columns}
+    # Prefer standard OHLCV names
+    rename = {}
+    for c in work.columns:
+        cl = c.lower()
+        if cl == "open":
+            rename[c] = "Open"
+        elif cl == "high":
+            rename[c] = "High"
+        elif cl == "low":
+            rename[c] = "Low"
+        elif cl == "close":
+            rename[c] = "Close"
+        elif cl == "volume":
+            rename[c] = "Volume"
+    work = work.rename(columns=rename)
+
+    # Rolling technicals as columns (vectorized subset)
+    close = work["Close"]
+    out = pd.DataFrame(index=work.index)
+    try:
+        out["rsi_14"] = ta.momentum.RSIIndicator(close, window=14).rsi()
+        macd = ta.trend.MACD(close)
+        out["macd_hist"] = macd.macd_diff()
+        ema20 = close.ewm(span=20, adjust=False).mean()
+        ema50 = close.ewm(span=50, adjust=False).mean()
+        ema200 = close.ewm(span=200, adjust=False).mean()
+        out["ema20_over_ema50"] = ema20 / ema50.replace(0, np.nan)
+        out["ema50_over_ema200"] = ema50 / ema200.replace(0, np.nan)
+        out["close_over_ema20"] = close / ema20.replace(0, np.nan)
+        out["adx_14"] = ta.trend.ADXIndicator(work["High"], work["Low"], close, window=14).adx()
+        bb = ta.volatility.BollingerBands(close, window=20)
+        out["bb_pct"] = bb.bollinger_pband()
+        vol = work["Volume"]
+        out["volume_ratio_20"] = vol / vol.rolling(20).mean().replace(0, np.nan)
+        roll_high = close.rolling(20).max()
+        roll_low = close.rolling(20).min()
+        out["dist_from_20d_high_pct"] = (close - roll_high) / roll_high.replace(0, np.nan) * 100
+        out["dist_from_20d_low_pct"] = (close - roll_low) / roll_low.replace(0, np.nan) * 100
+        atr = ta.volatility.AverageTrueRange(work["High"], work["Low"], close, window=14).average_true_range()
+        out["atr_pct"] = atr / close.replace(0, np.nan) * 100
+        out["golden_cross"] = (ema50 > ema200).astype(float)
+    except Exception:
+        for col in TECHNICAL_COLUMNS:
+            if col not in out.columns:
+                out[col] = 0.0
+    out = out.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return out

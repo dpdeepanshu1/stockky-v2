@@ -545,7 +545,7 @@ def get_engine(database_url=None):
     import os
     import logging
     _log = logging.getLogger("training-db")
-    url = database_url or os.environ.get("DATABASE_URL", "sqlite:///./training.db")
+    url = database_url or os.environ.get("TRAINING_DATABASE_URL") or os.environ.get("DATABASE_URL", "sqlite:///./training.db")
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
     kwargs = {"echo": False}

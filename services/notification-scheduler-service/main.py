@@ -9,8 +9,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(BASE, "notification"))
+# Sibling mounts: prefer isolated folder order (notification then scheduler)
 sys.path.insert(0, os.path.join(BASE, "scheduler"))
+sys.path.insert(0, os.path.join(BASE, "notification"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("notification-scheduler-service")

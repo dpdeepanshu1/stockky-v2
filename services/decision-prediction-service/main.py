@@ -22,6 +22,9 @@ app = FastAPI(
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ---------- Decision ----------
+# Path inserts are scoped: prediction is loaded via importlib with an isolated
+# sys.path (below). Decision/training use package imports; avoid adding multiple
+# sibling folders that share filenames onto path at once when possible.
 try:
     sys.path.insert(0, os.path.join(BASE, "decision"))
     from decision.main import app as dec_app
@@ -32,7 +35,9 @@ except Exception as e:
 
 # ---------- Training ----------
 try:
-    sys.path.insert(0, os.path.join(BASE, "training"))
+    # Put training ahead of decision so training's models.py wins over decision helpers
+    train_dir = os.path.join(BASE, "training")
+    sys.path = [train_dir] + [p for p in sys.path if p != train_dir]
     from training.app import app as train_app
     app.mount("/training", train_app)
     logger.info("✅ Mounted /training")

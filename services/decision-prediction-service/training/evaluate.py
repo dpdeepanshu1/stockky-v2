@@ -58,7 +58,21 @@ def evaluate_t1(prediction_id: str):
         hist = ticker.history(start=start_date, end=end_date)
 
         if len(hist) < 2:
-            logger.warning(f"Not enough data for {symbol} on T+1")
+            age_days = 0
+            if pred.timestamp is not None:
+                ts = pred.timestamp
+                try:
+                    if getattr(ts, "tzinfo", None) is not None:
+                        ts = ts.replace(tzinfo=None)
+                    age_days = (datetime.utcnow() - ts).days
+                except Exception:
+                    age_days = 0
+            logger.warning(f"Not enough data for {symbol} on T+1 (age={age_days}d)")
+            if age_days >= 14:
+                # Drain stuck queue — mark failed so training/status move on
+                pred.t1_success = 2
+                db.commit()
+                logger.info(f"Marked {prediction_id} T+1 as failed after {age_days}d without bars")
             return
 
         next_day = hist.iloc[1]
@@ -187,29 +201,67 @@ def evaluate_t5(prediction_id: str):
 
 # ---------- NEW: Batch evaluation and summary functions ----------
 
-def evaluate_pending_predictions(period: str = 'T+1'):
+def evaluate_pending_predictions(period: str = 'T+1', max_batch: int = 50):
     """
-    Evaluate all predictions that do not yet have an outcome for the given period.
+    Evaluate due predictions that do not yet have an outcome for the given period.
+
+    - T+1: only after >= 1 calendar day from prediction timestamp (IST-ish UTC date)
+    - T+5: only after >= 5 calendar days
+    - Processes up to max_batch per run to avoid Yahoo rate limits / request timeouts
+    - Small pause between symbols
     period: 'T+1' or 'T+5'
     """
+    import time as _time
+    from datetime import datetime as _dt, timedelta as _td
+
     db = SessionLocal()
     try:
-        # Find predictions without outcome for this period
         subquery = db.query(db_models.PredictionOutcome.prediction_id).filter(
             db_models.PredictionOutcome.evaluation_period == period
         ).subquery()
-        pending = db.query(db_models.PredictionSnapshot).filter(
-            ~db_models.PredictionSnapshot.prediction_id.in_(subquery)
-        ).all()
+        pending = (
+            db.query(db_models.PredictionSnapshot)
+            .filter(~db_models.PredictionSnapshot.prediction_id.in_(subquery))
+            .order_by(db_models.PredictionSnapshot.timestamp.asc())
+            .all()
+        )
 
-        logger.info(f"Found {len(pending)} pending predictions for {period} evaluation")
+        min_days = 1 if period == "T+1" else 5
+        now = _dt.utcnow()
+        due = []
         for pred in pending:
-            if period == 'T+1':
-                evaluate_t1(pred.prediction_id)
-            else:
-                evaluate_t5(pred.prediction_id)
+            ts = pred.timestamp
+            if ts is None:
+                continue
+            if getattr(ts, "tzinfo", None) is not None:
+                try:
+                    ts = ts.replace(tzinfo=None)
+                except Exception:
+                    pass
+            age = (now - ts).days
+            if age >= min_days:
+                due.append(pred)
+
+        logger.info(
+            "Found %s pending, %s due for %s (batch max %s)",
+            len(pending), len(due), period, max_batch,
+        )
+        done = 0
+        for pred in due[:max_batch]:
+            try:
+                if period == "T+1":
+                    evaluate_t1(pred.prediction_id)
+                else:
+                    evaluate_t5(pred.prediction_id)
+                done += 1
+            except Exception as e:
+                logger.warning("%s eval failed for %s: %s", period, pred.prediction_id, e)
+            _time.sleep(0.35)
+        logger.info("%s evaluation batch finished: %s attempted", period, done)
+        return {"pending": len(pending), "due": len(due), "attempted": done, "period": period}
     except Exception as e:
         logger.error(f"Error in batch evaluation: {e}")
+        return {"error": str(e), "period": period}
     finally:
         db.close()
 

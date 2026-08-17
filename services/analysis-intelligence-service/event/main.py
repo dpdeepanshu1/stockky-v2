@@ -571,11 +571,12 @@ def _fetch_events(symbol: str, force: bool = False) -> dict:
 
     if not force:
         cached = _redis_get(cache_key)
-        if cached and cached.get("recent_news") and len(cached["recent_news"]) > 0:
-            logger.info(f"Event cache hit for {sym} with {len(cached['recent_news'])} news")
+        # Honor Redis TTL only. Empty-news entries use EMPTY_NEWS_CACHE_TTL (1h);
+        # requiring recent_news non-empty used to bypass that and re-hit Yahoo all day.
+        if cached:
+            n = len(cached.get("recent_news") or [])
+            logger.info(f"Event cache hit for {sym} (news={n})")
             return cached
-        elif cached:
-            logger.info(f"Cache for {sym} has empty news; will fetch fresh")
 
     logger.info(f"=== Fetching fresh events for {sym} ===")
 

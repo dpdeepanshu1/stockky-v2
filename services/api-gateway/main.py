@@ -828,7 +828,8 @@ def _fetch_price_from_quote(symbol: str) -> Optional[float]:
     return None
 
 async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> tuple[Optional[dict], bool]:
-    # Prefer Data Feed DB/cache for slow fields (reduces upstream rate limits)
+    """Prefer Data Feed → short Redis cache → upstream. Write-through to Data Feed on upstream hit."""
+    # 1) Data Feed (durable 12–24h)
     try:
         fed = _feed_store().get_symbol(symbol)
         if fed and fed.get("fundamental_score") is not None:
@@ -855,28 +856,83 @@ async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> t
     except Exception as e:
         logger.debug("data feed fundamental read: %s", e)
 
+    # 2) Short Redis cache
     cache_key = f"{FUNDAMENTAL_CACHE_PREFIX}{symbol}"
     cached = _redis_get(cache_key)
-    if cached and isinstance(cached, dict):
+    if cached and isinstance(cached, dict) and (cached.get("full") or cached.get("metrics") is not None):
+        if isinstance(cached.get("full"), dict) and cached["full"].get("fundamental_score") is not None:
+            return cached["full"], cached.get("fallback", False)
         return cached.get("metrics"), cached.get("fallback", False)
 
+    # 3) Upstream + write-through to Data Feed
     try:
         resp = await _cb_get(client, "fundamental", f"{FUNDAMENTAL_URL}/analyze/{symbol}", timeout=35)
         if resp.status_code == 200:
             data = resp.json()
+            if not isinstance(data, dict):
+                data = {}
             metrics = data.get("metrics")
-            fallback_used = data.get("fallback_used", False)
-            _redis_set(cache_key, {"metrics": metrics, "fallback": fallback_used}, ttl=STATIC_PARAM_TTL)
+            fallback_used = bool(data.get("fallback_used", False))
+            _redis_set(
+                cache_key,
+                {"metrics": metrics, "fallback": fallback_used, "full": data},
+                ttl=STATIC_PARAM_TTL,
+            )
+            try:
+                payload = extract_feed_payload(symbol, fundamental=data, events=None)
+                # merge with existing feed events if present
+                existing = _feed_store().get_symbol(symbol) or {}
+                if existing:
+                    for k in ("bulk_deals", "recent_insider_transactions", "earnings_surprise",
+                              "next_earnings_date", "event_summary", "has_positive_catalyst",
+                              "recent_event_score"):
+                        if existing.get(k) is not None and payload.get(k) in (None, [], ""):
+                            payload[k] = existing.get(k)
+                _feed_store().put_symbol(symbol, payload, ttl=DATA_FEED_TTL)
+            except Exception as e:
+                logger.debug("data feed write-through fund: %s", e)
+            if data.get("fundamental_score") is not None:
+                out = dict(data)
+                out["from_data_feed"] = False
+                return out, fallback_used
             return metrics, fallback_used
     except Exception as e:
         logger.warning(f"Fundamental fetch failed for {symbol}: {e}")
     return {}, True
 
 async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Optional[dict]:
+    """Prefer short Redis → Data Feed snapshot → upstream. Write-through to both on upstream hit."""
     cache_key = f"{EVENT_CACHE_PREFIX}{symbol}"
     cached = _redis_get(cache_key)
     if cached and isinstance(cached, dict):
         return cached
+
+    # Data Feed semi-static event snapshot
+    try:
+        fed = _feed_store().get_symbol(symbol)
+        if fed and (
+            fed.get("event_summary")
+            or fed.get("bulk_deals")
+            or fed.get("recent_insider_transactions")
+            or fed.get("earnings_surprise") is not None
+            or fed.get("next_earnings_date")
+        ):
+            reconstructed = {
+                "symbol": symbol.upper(),
+                "bulk_deals": fed.get("bulk_deals") or [],
+                "recent_insider_transactions": fed.get("recent_insider_transactions") or [],
+                "earnings_surprise": fed.get("earnings_surprise"),
+                "next_earnings_date": fed.get("next_earnings_date"),
+                "event_summary": fed.get("event_summary"),
+                "summary": fed.get("event_summary"),
+                "has_positive_catalyst": fed.get("has_positive_catalyst"),
+                "recent_event_score": fed.get("recent_event_score"),
+                "from_data_feed": True,
+                "data_feed_updated_at": fed.get("updated_at"),
+            }
+            return reconstructed
+    except Exception as e:
+        logger.debug("data feed events read: %s", e)
 
     try:
         resp = await _cb_get(client, "event", f"{EVENT_URL}/events/{symbol}", timeout=25)
@@ -884,6 +940,31 @@ async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Option
             data = resp.json()
             if data and isinstance(data, dict):
                 _redis_set(cache_key, data, ttl=STATIC_PARAM_TTL)
+                try:
+                    existing = _feed_store().get_symbol(symbol)
+                    payload = extract_feed_payload(
+                        symbol,
+                        fundamental=existing if existing else None,
+                        events=data,
+                    )
+                    if existing:
+                        # keep fund fields
+                        for k, v in existing.items():
+                            if k not in payload or payload.get(k) in (None, [], ""):
+                                payload[k] = v
+                        payload.update({
+                            "bulk_deals": (data.get("bulk_deals") or [])[:5],
+                            "recent_insider_transactions": (data.get("recent_insider_transactions") or [])[:5],
+                            "earnings_surprise": data.get("earnings_surprise"),
+                            "next_earnings_date": data.get("next_earnings_date"),
+                            "event_summary": data.get("event_summary") or data.get("summary"),
+                            "has_positive_catalyst": data.get("has_positive_catalyst"),
+                            "recent_event_score": data.get("recent_event_score"),
+                            "updated_at": payload.get("updated_at"),
+                        })
+                    _feed_store().put_symbol(symbol, payload, ttl=DATA_FEED_TTL)
+                except Exception as e:
+                    logger.debug("data feed write-through events: %s", e)
                 return data
     except Exception as e:
         logger.warning(f"Events fetch failed for {symbol}: {e}")
@@ -4177,6 +4258,34 @@ async def startup_event():
         logger.warning(f"Could not pre-populate indices cache: {e}")
 
 
+
+@app.get("/ops/keepalive")
+@app.post("/ops/keepalive")
+async def ops_keepalive(deep: bool = False):
+    """
+    Lightweight keep-alive for free-tier.
+    - Always: gateway health (cheap)
+    - deep=true: sequential soft-ping of required services (used sparingly by UI while active)
+    Avoids parallel storms; safe during scans.
+    """
+    out = {"ok": True, "gateway": True, "services": {}, "ts": datetime.now(IST).isoformat()}
+    if not deep:
+        return out
+    # Soft sequential pings — never block more than ~12s total
+    async with httpx.AsyncClient(timeout=4.0) as client:
+        for name, cfg in list(SYSTEM_SERVICES.items())[:6]:
+            url = (cfg.get("url") or "").rstrip("/")
+            if not url:
+                continue
+            try:
+                r = await client.get(f"{url}/health", params={"warm": "true"})
+                out["services"][name] = r.status_code == 200
+            except Exception:
+                out["services"][name] = False
+            await asyncio.sleep(0.15)
+    out["ok"] = True
+    return out
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Data Feed — slow fields (12–24h) for free-tier rate-limit relief
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4276,7 +4385,7 @@ async def data_feed_run(background_tasks: BackgroundTasks, force: bool = False):
             last_count=ok_n,
             last_errors=err_n,
             last_message=msg,
-            source="manual_or_api",
+            source="manual_or_api_or_scheduler",
             universe_size=len(universe),
         )
         store.set_job(

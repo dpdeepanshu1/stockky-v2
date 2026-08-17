@@ -39,14 +39,40 @@ app = FastAPI(title="Stockky Prediction Service", version="0.7.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 _model = None
-if os.path.exists(MODEL_PATH):
+_decision_threshold = float(os.getenv("PRED_DECISION_THRESHOLD", "0.35"))
+_model_meta = {}
+
+def _load_model_and_meta():
+    global _model, _decision_threshold, _model_meta
+    if os.path.exists(MODEL_PATH):
+        try:
+            _model = joblib.load(MODEL_PATH)
+            logger.info("Loaded trained model from %s", MODEL_PATH)
+        except Exception as e:
+            logger.error("Failed to load model: %s", e)
+            _model = None
+    else:
+        logger.warning("No trained model found — using fallback")
+
+    meta_path = os.getenv("MODEL_META_PATH", "model_meta.joblib")
+    json_path = os.getenv("MODEL_META_JSON", "model_meta.json")
     try:
-        _model = joblib.load(MODEL_PATH)
-        logger.info("Loaded trained model from %s", MODEL_PATH)
+        if os.path.exists(meta_path):
+            _model_meta = joblib.load(meta_path) or {}
+        elif os.path.exists(json_path):
+            import json
+            with open(json_path, "r", encoding="utf-8") as fh:
+                _model_meta = json.load(fh)
+        thr = _model_meta.get("decision_threshold")
+        if thr is not None:
+            _decision_threshold = float(thr)
+            logger.info("Decision threshold from meta: %.3f", _decision_threshold)
+        else:
+            logger.info("Using decision threshold: %.3f", _decision_threshold)
     except Exception as e:
-        logger.error("Failed to load model: %s", e)
-else:
-    logger.warning("No trained model found — using fallback")
+        logger.warning("Could not load model meta: %s — threshold=%.3f", e, _decision_threshold)
+
+_load_model_and_meta()
 
 
 @app.get("/")
@@ -72,6 +98,8 @@ def model_info():
     info = {
         "model_loaded": _model is not None,
         "model_path": MODEL_PATH,
+        "decision_threshold": _decision_threshold,
+        "model_meta": {k: _model_meta.get(k) for k in ("scale_pos_weight", "target_gain_pct", "universe_size", "rows") if _model_meta},
         "feature_count": len(FEATURE_COLUMNS),
         "features": FEATURE_COLUMNS,
         "technical_features": TECHNICAL_COLUMNS,
@@ -369,6 +397,7 @@ def predict(symbol: str):
         probability = float(_model.predict_proba(X)[0, 1])
         # Convert probability to 0-100 score commonly used by decision engine
         prediction_score = round(probability * 100, 2)
+        signal_positive = probability >= _decision_threshold
 
         note = _generate_llm_note(features, probability, symbol.upper())
 
@@ -377,6 +406,9 @@ def predict(symbol: str):
             "model_loaded": True,
             "probability": round(probability, 4),
             "prediction_score": prediction_score,
+            "decision_threshold": round(_decision_threshold, 4),
+            "signal": "POSITIVE" if signal_positive else "NEUTRAL",
+            "signal_positive": signal_positive,
             "note": note,
             "features_used": "technical+fundamental+news",
             "feature_snapshot": {k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in aligned.items()},

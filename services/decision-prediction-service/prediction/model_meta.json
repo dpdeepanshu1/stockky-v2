@@ -1,0 +1,43 @@
+{
+  "decision_threshold": 0.3,
+  "threshold_stats": {
+    "threshold": 0.3,
+    "f1": 0.27918781725888325,
+    "precision": 0.31029619181946405,
+    "recall": 0.2537485582468281
+  },
+  "scale_pos_weight": 3.3804829419583515,
+  "target_gain_pct": 4.0,
+  "lookahead_days": 10,
+  "feature_columns": [
+    "rsi_14",
+    "macd_hist",
+    "ema20_over_ema50",
+    "ema50_over_ema200",
+    "close_over_ema20",
+    "adx_14",
+    "bb_pct",
+    "volume_ratio_20",
+    "dist_from_20d_high_pct",
+    "dist_from_20d_low_pct",
+    "atr_pct",
+    "golden_cross",
+    "pe_ratio",
+    "roe",
+    "debt_to_equity",
+    "revenue_growth_yoy",
+    "profit_growth_yoy",
+    "promoter_holding",
+    "news_sentiment_7d",
+    "news_sentiment_14d",
+    "earnings_surprise_flag",
+    "days_to_next_earnings",
+    "recent_event_score",
+    "peer_score",
+    "consistency_score"
+  ],
+  "universe_size": 130,
+  "rows": 130827,
+  "n_pos_fit": 22570,
+  "n_neg_fit": 61038
+}

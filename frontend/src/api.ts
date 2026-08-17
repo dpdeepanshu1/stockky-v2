@@ -449,7 +449,51 @@ export interface CategorizedEvents {
 // Request helper
 // ───────────────────────────────────────────────
 
-async function request<T>(path: string, init?: RequestInit, retries = 2, timeoutMs = 60000): Promise<T> {
+/** Soft keep-alive while the UI is open — prevents free-tier sleep without hammering. */
+let _keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+let _lastKeepAlive = 0;
+const KEEP_ALIVE_MIN_GAP_MS = 4 * 60 * 1000; // never more often than every 4 min
+const KEEP_ALIVE_INTERVAL_MS = 4.5 * 60 * 1000; // ~4.5 min while tab visible
+
+export function startSessionKeepAlive(): void {
+  if (typeof window === "undefined") return;
+  if (_keepAliveTimer) return;
+  const tick = () => {
+    if (document.visibilityState === "hidden") return;
+    const now = Date.now();
+    if (now - _lastKeepAlive < KEEP_ALIVE_MIN_GAP_MS) return;
+    _lastKeepAlive = now;
+    const base = getApiUrl();
+    if (!base) return;
+    // Lightweight only — no deep fan-out (avoids overload during scans)
+    fetch(`${base}/ops/keepalive`, { method: "GET", mode: "cors" }).catch(() => {});
+  };
+  // Immediate soft wake when UI mounts
+  tick();
+  _keepAliveTimer = setInterval(tick, KEEP_ALIVE_INTERVAL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") tick();
+  });
+}
+
+export function stopSessionKeepAlive(): void {
+  if (_keepAliveTimer) {
+    clearInterval(_keepAliveTimer);
+    _keepAliveTimer = null;
+  }
+}
+
+async function softWakeGateway(): Promise<void> {
+  const base = getApiUrl();
+  if (!base) return;
+  try {
+    await fetch(`${base}/health?warm=true`, { method: "GET", mode: "cors" });
+  } catch {
+    /* ignore — request still wakes dyno */
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit, retries = 3, timeoutMs = 90000): Promise<T> {
   const base = getApiUrl();
   if (!base) {
     throw new Error(
@@ -459,7 +503,9 @@ async function request<T>(path: string, init?: RequestInit, retries = 2, timeout
 
   const url = `${base}${path}`;
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  // Cold-start budget: first attempt can be longer; retries get progressive wait
+  const attemptTimeout = timeoutMs;
+  const timeoutId = setTimeout(() => controller.abort(), attemptTimeout);
 
   try {
     const response = await fetch(url, {
@@ -474,7 +520,6 @@ async function request<T>(path: string, init?: RequestInit, retries = 2, timeout
       try {
         data = JSON.parse(raw);
       } catch {
-        // Binary/HTML/garbage from a broken proxy — surface a clear message
         const preview = raw.slice(0, 120).replace(/[^\x20-\x7E\n\t]/g, "?");
         throw new Error(
           response.ok
@@ -489,6 +534,12 @@ async function request<T>(path: string, init?: RequestInit, retries = 2, timeout
         (data && (data.detail || data.message || data.error)) ||
         (typeof data === "string" ? data : "") ||
         response.statusText;
+      // 502/503/504 often mean cold start mid-request — retry after soft wake
+      if (retries > 0 && [502, 503, 504].includes(response.status)) {
+        await softWakeGateway();
+        await new Promise((r) => setTimeout(r, 2500 * (4 - retries)));
+        return request<T>(path, init, retries - 1, Math.min(timeoutMs + 15000, 180000));
+      }
       throw new Error(`${response.status}: ${typeof detail === "string" ? detail.slice(0, 300) : JSON.stringify(detail).slice(0, 300)}`);
     }
 
@@ -496,14 +547,23 @@ async function request<T>(path: string, init?: RequestInit, retries = 2, timeout
   } catch (error) {
     clearTimeout(timeoutId);
 
-    if (retries > 0 && (error instanceof TypeError || error instanceof DOMException)) {
-      await new Promise((resolve) => setTimeout(resolve, 1000 * (3 - retries)));
-      return request<T>(path, init, retries - 1, timeoutMs);
+    const isAbort = error instanceof DOMException && error.name === "AbortError";
+    const isNetwork = error instanceof TypeError || isAbort;
+
+    if (retries > 0 && isNetwork) {
+      // Progressive backoff + soft wake (free-tier cold start)
+      await softWakeGateway();
+      const waitMs = isAbort ? 4000 * (4 - retries) : 1500 * (4 - retries);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      // Give cold dynos more time on retry
+      const nextTimeout = Math.min(timeoutMs + (isAbort ? 30000 : 15000), 180000);
+      return request<T>(path, init, retries - 1, nextTimeout);
     }
 
-    if (error instanceof DOMException && error.name === "AbortError") {
+    if (isAbort) {
       throw new Error(
-        `Request timed out after ${timeoutMs / 1000} seconds. The backend may be waking up (free-tier cold start). Try again in a moment.`
+        `Request timed out after ${timeoutMs / 1000} seconds. The backend may be waking up (free-tier cold start). ` +
+          `We already retried with soft-wake — wait a few seconds and try again, or click Wake Services.`
       );
     }
 
@@ -514,9 +574,13 @@ async function request<T>(path: string, init?: RequestInit, retries = 2, timeout
 export async function wakeService(url: string): Promise<void> {
   if (!url) return;
   try {
-    await fetch(url + "/health", { mode: "no-cors" });
+    await fetch(url + "/health?warm=true", { mode: "cors" });
   } catch {
-    // Ignore – request still wakes the service
+    try {
+      await fetch(url + "/health", { mode: "no-cors" });
+    } catch {
+      // Ignore – request still wakes the service
+    }
   }
 }
 
@@ -525,14 +589,14 @@ export async function wakeService(url: string): Promise<void> {
 // ───────────────────────────────────────────────
 
 export const api = {
-  ping: () => request<{ status: string; service: string }>("/health", undefined, 2, 30000),
+  ping: () => request<{ status: string; service: string }>("/health", undefined, 3, 45000),
 
-  systemHealth: () => request<SystemHealth>("/system/health", undefined, 2, 60000),
+  systemHealth: () => request<SystemHealth>("/system/health", undefined, 3, 90000),
 
   getStock: (symbol: string, alreadyOwned = false) =>
-    request<Decision>(`/stock/${symbol}?already_owned=${alreadyOwned}`, undefined, 2, 60000),
+    request<Decision>(`/stock/${symbol}?already_owned=${alreadyOwned}`, undefined, 3, 120000),
 
-  runScan: () => request<ScanResult>("/scan", undefined, 2, 120000),
+  runScan: () => request<ScanResult>("/scan", undefined, 2, 180000),
 
   scanStart: (forceRefresh = false, lite: boolean | null = null) =>
     request<{ task_id: string }>(
@@ -551,7 +615,7 @@ export const api = {
     ),
 
   scanWatchlist: () =>
-    request<ScanResult>("/scan/watchlist", undefined, 2, 120000),
+    request<ScanResult>("/scan/watchlist", undefined, 2, 180000),
 
   getWatchlist: () => request<{ symbols: string[] }>("/watchlist", undefined, 2, 30000),
 

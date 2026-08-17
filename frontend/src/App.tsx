@@ -1,7 +1,7 @@
 // frontend/src/App.tsx
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { api, getApiUrl, setApiUrl, Decision, ScanResult, wakeService } from "./api";
+import { api, getApiUrl, setApiUrl, Decision, ScanResult, wakeService, startSessionKeepAlive, stopSessionKeepAlive } from "./api";
 import Pipeline from "./components/Pipeline";
 import DecisionCard from "./components/DecisionCard";
 import ScanPanel, { MultiHorizonScanLists } from "./components/ScanPanel";
@@ -40,6 +40,13 @@ export default function App() {
     document.documentElement.classList.toggle("light", theme === "light");
     try { localStorage.setItem("stockky_theme", theme); } catch {}
   }, [theme]);
+
+  // Free-tier: soft keep-alive only while the UI tab is open/visible (every ~4.5 min).
+  // Does not run deep service fan-out — avoids overload during scans/schedulers.
+  useEffect(() => {
+    startSessionKeepAlive();
+    return () => stopSessionKeepAlive();
+  }, []);
 
   const [systemReady, setSystemReady] = useState(false);
   const [liteScan, setLiteScan] = useState(true);

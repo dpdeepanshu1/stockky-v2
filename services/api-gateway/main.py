@@ -852,10 +852,17 @@ def _fetch_price_from_quote(symbol: str) -> Optional[float]:
 
 async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> tuple[Optional[dict], bool]:
     """Prefer Data Feed → short Redis cache → upstream. Write-through to Data Feed on upstream hit."""
-    # 1) Data Feed (durable 12–24h)
+    # 1) Data Feed (durable 12–24h) — any useful feed row skips upstream
     try:
         fed = _feed_store().get_symbol(symbol)
-        if fed and fed.get("fundamental_score") is not None:
+        if fed and (
+            fed.get("fundamental_score") is not None
+            or fed.get("metrics")
+            or fed.get("sector")
+            or fed.get("valuation")
+            or fed.get("quality_score") is not None
+            or fed.get("multi_quarter_score") is not None
+        ):
             reconstructed = {
                 "symbol": symbol.upper(),
                 "fundamental_score": fed.get("fundamental_score"),
@@ -875,7 +882,7 @@ async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> t
                 "from_data_feed": True,
                 "data_feed_updated_at": fed.get("updated_at"),
             }
-            return reconstructed, True
+            return reconstructed, bool(fed.get("fallback_used", True))
     except Exception as e:
         logger.debug("data feed fundamental read: %s", e)
 
@@ -924,21 +931,21 @@ async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> t
     return {}, True
 
 async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Optional[dict]:
-    """Prefer short Redis → Data Feed snapshot → upstream. Write-through to both on upstream hit."""
+    """Prefer Data Feed → short Redis → upstream. Write-through on upstream hit."""
     cache_key = f"{EVENT_CACHE_PREFIX}{symbol}"
-    cached = _redis_get(cache_key)
-    if cached and isinstance(cached, dict):
-        return cached
 
-    # Data Feed semi-static event snapshot
+    # 1) Data Feed first (even empty lists mean "was fed" — avoid upstream spam)
     try:
         fed = _feed_store().get_symbol(symbol)
         if fed and (
-            fed.get("event_summary")
-            or fed.get("bulk_deals")
-            or fed.get("recent_insider_transactions")
-            or fed.get("earnings_surprise") is not None
-            or fed.get("next_earnings_date")
+            "event_summary" in fed
+            or "bulk_deals" in fed
+            or "recent_insider_transactions" in fed
+            or "earnings_surprise" in fed
+            or "next_earnings_date" in fed
+            or "has_positive_catalyst" in fed
+            or fed.get("fundamental_score") is not None  # symbol was fed at all
+            or fed.get("metrics")
         ):
             reconstructed = {
                 "symbol": symbol.upper(),
@@ -947,7 +954,7 @@ async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Option
                 "earnings_surprise": fed.get("earnings_surprise"),
                 "next_earnings_date": fed.get("next_earnings_date"),
                 "event_summary": fed.get("event_summary"),
-                "summary": fed.get("event_summary"),
+                "summary": fed.get("event_summary") or "",
                 "has_positive_catalyst": fed.get("has_positive_catalyst"),
                 "recent_event_score": fed.get("recent_event_score"),
                 "from_data_feed": True,
@@ -956,6 +963,11 @@ async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Option
             return reconstructed
     except Exception as e:
         logger.debug("data feed events read: %s", e)
+
+    # 2) Short Redis
+    cached = _redis_get(cache_key)
+    if cached and isinstance(cached, dict):
+        return cached
 
     try:
         resp = await _cb_get(client, "event", f"{EVENT_URL}/events/{symbol}", timeout=25)
@@ -1236,7 +1248,7 @@ def _wake_notification_service() -> bool:
 
 # Free-tier friendly default: 18 workers (was 10). Override via env.
 # Pair with market-data yfinance semaphore to avoid Yahoo rate limits.
-MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "6"))  # free-tier: avoid decision circuit storms
+MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "4"))  # free-tier: fewer timeouts; Data Feed skips upstream
 MAX_RETRIES = 1
 RETRY_BACKOFF = 1.0
 
@@ -1598,13 +1610,32 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
             try:
                 wake_results = await _wake_required_services(client)
                 logger.info("Pre-scan wake: %s", {k: v.get("ok") for k, v in wake_results.items()})
-                # Extra wait when market-data was cold so first history calls succeed
+                try:
+                    await _warm_upstream_services(client)
+                except Exception:
+                    pass
                 wait = max(WAKE_WAIT_SECONDS, 10.0)
                 if not (wake_results.get("market-data") or {}).get("ok"):
                     wait = max(wait, 18.0)
                 await asyncio.sleep(min(wait, 25.0))
             except Exception as e:
                 logger.warning("Pre-scan wake failed (continuing): %s", e)
+
+        # Data Feed coverage for this universe (helps explain scan speed)
+        try:
+            store = _feed_store()
+            hit = 0
+            for s in universe:
+                base = s.upper().replace(".NS", "").replace(".BO", "")
+                fed = store.get_symbol(base)
+                if fed and (fed.get("fundamental_score") is not None or fed.get("metrics") or fed.get("sector")):
+                    hit += 1
+            logger.info(
+                "Scan Data Feed coverage: %s/%s symbols (%.0f%%) — feed hits skip fundamental/event upstream",
+                hit, total, (100.0 * hit / total) if total else 0,
+            )
+        except Exception as e:
+            logger.debug("feed coverage: %s", e)
 
         # asyncio.ensure_future wraps each coroutine as a real Task —
         # bare coroutines (what `_analyze_one_symbol_ultra(...)` returns
@@ -1657,6 +1688,12 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
                     await _ws_push_scan(task_id, _scan_payload)
                 except Exception:
                     pass
+            # Keep free-tier services awake during long scans
+            if processed > 0 and processed % 15 == 0 and not cancelled:
+                try:
+                    await _warm_upstream_services(client)
+                except Exception as e:
+                    logger.debug("mid-scan warm: %s", e)
 
             if cancelled:
                 logger.info(f"Scan {task_id} cancelled after {processed}/{total} symbols — finalizing with partial results")

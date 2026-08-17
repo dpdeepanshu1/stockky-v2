@@ -1,0 +1,140 @@
+# Automatically send the daily scan universe into training between ~12 AM – 6 AM IST
+# and optionally trigger a training run.
+#
+# IST 00:30–05:30 ≈ UTC 19:00–00:00 previous day (UTC+5:30)
+# We run a few times in that window so free-tier cold starts still succeed.
+
+name: Overnight Universe → Training
+
+on:
+  schedule:
+    # 00:30 IST = 19:00 UTC (previous calendar day)
+    - cron: "0 19 * * 1-5"
+    # 02:30 IST = 21:00 UTC
+    - cron: "0 21 * * 1-5"
+    # 04:30 IST = 23:00 UTC
+    - cron: "0 23 * * 1-5"
+    # 05:30 IST = 00:00 UTC
+    - cron: "0 0 * * 2-6"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force run outside window"
+        required: false
+        default: "true"
+
+jobs:
+  universe-to-training:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Wake services
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+          MARKET_DATA_URL: ${{ secrets.MARKET_DATA_URL }}
+          DECISION_PREDICTION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
+        run: |
+          set -e
+          for url in "$API_GATEWAY_URL" "$MARKET_DATA_URL" "$DECISION_PREDICTION_URL"; do
+            if [ -n "$url" ]; then
+              echo "Waking $url"
+              curl -fsS -m 30 "$url/health" || curl -fsS -m 30 "$url/" || true
+            fi
+          done
+          sleep 8
+
+      - name: Run market scan (full universe)
+        id: scan
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+        run: |
+          set -e
+          if [ -z "$API_GATEWAY_URL" ]; then
+            echo "API_GATEWAY_URL secret missing"
+            exit 1
+          fi
+          # Adjust path if your gateway uses a different scan endpoint
+          RESP=$(curl -fsS -m 300 -X POST "$API_GATEWAY_URL/scan" \
+            -H "Content-Type: application/json" \
+            -d '{"mode":"full","include_all":true}' || true)
+          echo "$RESP" > scan.json
+          echo "Scan response size: $(wc -c < scan.json)"
+
+      - name: Send full universe to training
+        env:
+          DECISION_PREDICTION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
+        run: |
+          set -e
+          if [ -z "$DECISION_PREDICTION_URL" ]; then
+            echo "DECISION_PREDICTION_URL secret missing"
+            exit 1
+          fi
+          python3 << 'PY'
+          import json, os, urllib.request
+          base = os.environ["DECISION_PREDICTION_URL"].rstrip("/")
+          symbols, decisions, scores = [], {}, {}
+          try:
+              with open("scan.json") as f:
+                  data = json.load(f)
+              rows = data.get("all_results") or data.get("recommendations") or data.get("results") or []
+              for r in rows:
+                  sym = (r.get("symbol") or "").upper()
+                  if not sym:
+                      continue
+                  symbols.append(sym)
+                  if r.get("decision"):
+                      decisions[sym] = r["decision"]
+                  sc = r.get("combined_score", r.get("score"))
+                  if isinstance(sc, (int, float)):
+                      scores[sym] = float(sc)
+              # Also accept a plain universe list
+              for s in data.get("universe") or []:
+                  if s and s.upper() not in symbols:
+                      symbols.append(s.upper())
+          except Exception as e:
+              print("Could not parse scan.json:", e)
+
+          if not symbols:
+              print("No symbols found – skip ingest")
+              raise SystemExit(0)
+
+          payload = {
+              "symbols": symbols,
+              "decisions": decisions,
+              "scores": scores,
+              "source": "daily_scan",
+              "retention_hours": 48,
+              "trigger_training": True,
+          }
+          url = f"{base}/training/api/universe/train-from-universe"
+          req = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=120) as resp:
+                  body = resp.read().decode()
+                  print("Ingest response:", body)
+          except Exception as e:
+              # Fallback path
+              url2 = f"{base}/training/api/universe/ingest"
+              req2 = urllib.request.Request(
+                  url2,
+                  data=json.dumps(payload).encode(),
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              with urllib.request.urlopen(req2, timeout=120) as resp:
+                  print("Ingest fallback:", resp.read().decode())
+          PY
+
+      - name: Purge expired samples
+        env:
+          DECISION_PREDICTION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
+        run: |
+          if [ -n "$DECISION_PREDICTION_URL" ]; then
+            curl -fsS -m 30 -X DELETE \
+              "${DECISION_PREDICTION_URL}/training/api/universe/purge-expired" || true
+          fi

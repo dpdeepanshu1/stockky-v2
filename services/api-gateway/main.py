@@ -72,6 +72,43 @@ SYSTEM_SERVICES = {
 
 app = FastAPI(title="Stockky API Gateway", version="2.5.16")
 
+# ── Shared HTTP client (persistent TLS pool across downstream services) ──
+_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=20, max_connections=50)
+_HTTP_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
+_HTTP_TIMEOUT_LONG = httpx.Timeout(30.0, connect=3.0)
+_shared_http_client: httpx.AsyncClient | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _shared_http_client
+    if _shared_http_client is not None and not _shared_http_client.is_closed:
+        return _shared_http_client
+    # Lazy create if startup has not run yet
+    _shared_http_client = httpx.AsyncClient(
+        limits=_HTTP_LIMITS, timeout=_HTTP_TIMEOUT, follow_redirects=True
+    )
+    return _shared_http_client
+
+
+@app.on_event("startup")
+async def _start_shared_http():
+    global _shared_http_client
+    if _shared_http_client is None or _shared_http_client.is_closed:
+        _shared_http_client = httpx.AsyncClient(
+            limits=_HTTP_LIMITS, timeout=_HTTP_TIMEOUT, follow_redirects=True
+        )
+        logger.info("Shared httpx.AsyncClient started (keepalive=20, max=50, connect=2s)")
+
+
+@app.on_event("shutdown")
+async def _stop_shared_http():
+    global _shared_http_client
+    if _shared_http_client is not None and not _shared_http_client.is_closed:
+        await _shared_http_client.aclose()
+        logger.info("Shared httpx.AsyncClient closed")
+        _shared_http_client = None
+
+
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
@@ -169,6 +206,17 @@ def _redis_get(key: str):
         return json.loads(val) if val else None
     except Exception:
         return None
+
+
+def _redis_soft_ttl_refresh(key: str, soft_window: int = 10) -> bool:
+    """True if key exists and TTL is in (0, soft_window] — caller should refresh in background."""
+    if not _redis:
+        return False
+    try:
+        ttl = _redis.ttl(key)
+        return isinstance(ttl, int) and 0 < ttl <= soft_window
+    except Exception:
+        return False
 
 def _redis_set(key: str, value, ttl: int = None):
     if not _redis:
@@ -1323,7 +1371,7 @@ def _prioritize_universe(universe: List[str]) -> List[str]:
     return priority + rest
 
 
-async def _cb_get(client: httpx.AsyncClient, name: str, url: str, timeout: float = 30.0, **kwargs):
+async def _cb_get(client: httpx.AsyncClient, name: str, url: str, timeout: float = 5.0, **kwargs):
     """GET with circuit breaker — open circuit fails immediately."""
     br = get_breaker(name)
     if not br.allow():
@@ -1349,7 +1397,7 @@ async def _cb_get(client: httpx.AsyncClient, name: str, url: str, timeout: float
         raise
 
 
-async def _cb_post(client: httpx.AsyncClient, name: str, url: str, timeout: float = 30.0, **kwargs):
+async def _cb_post(client: httpx.AsyncClient, name: str, url: str, timeout: float = 8.0, **kwargs):
     br = get_breaker(name)
     if not br.allow():
         raise CircuitOpenError(name, br.retry_after())
@@ -4548,16 +4596,16 @@ async def ops_keepalive(deep: bool = False):
     if not deep:
         return out
     # Soft sequential pings — never block more than ~12s total
-    async with httpx.AsyncClient(timeout=4.0) as client:
-        for name, cfg in list(SYSTEM_SERVICES.items())[:6]:
-            url = (cfg.get("url") or "").rstrip("/")
-            if not url:
-                continue
-            try:
-                r = await client.get(f"{url}/health", params={"warm": "true"})
-                out["services"][name] = r.status_code == 200
-            except Exception:
-                out["services"][name] = False
+    client = _get_http_client()
+    for name, cfg in list(SYSTEM_SERVICES.items())[:6]:
+        url = (cfg.get("url") or "").rstrip("/")
+        if not url:
+            continue
+        try:
+            r = await client.get(f"{url}/health", params={"warm": "true"}, timeout=4.0)
+            out["services"][name] = r.status_code == 200
+        except Exception:
+            out["services"][name] = False
             await asyncio.sleep(0.15)
     out["ok"] = True
     return out

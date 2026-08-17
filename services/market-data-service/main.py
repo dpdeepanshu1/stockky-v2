@@ -203,6 +203,23 @@ except Exception as e:
     logger.warning("Redis unavailable (%s). Running without cache.", e)
     cache = None
 
+
+def _cache_ttl(key: str) -> int:
+    """Remaining TTL seconds, or -2 if missing / no redis."""
+    if not cache:
+        return -2
+    try:
+        t = cache.ttl(key)
+        return int(t) if t is not None else -2
+    except Exception:
+        return -2
+
+
+def _should_soft_refresh(key: str, soft_window: int = 10) -> bool:
+    """True when key is about to expire — trigger background refresh (stampede guard)."""
+    t = _cache_ttl(key)
+    return 0 < t <= soft_window
+
 def _cache_get(key: str):
     if not cache:
         return None
@@ -210,6 +227,8 @@ def _cache_get(key: str):
     return json.loads(val) if val else None
 
 def _cache_set(key: str, value: dict, ttl: int = None):
+    # Always set TTL — keep Redis under free 256MB (prefer volatile-lru eviction).
+    # Never leave market-data keys with TTL=-1.
     if not cache:
         return
     if ttl is None:
@@ -411,6 +430,10 @@ def get_quote(symbol: str):
     sym = normalize_symbol(symbol)
     cache_key = f"quote:{sym}"
     cached = _cache_get(cache_key)
+    # Stampede guard: if TTL almost gone, let one request fall through to refresh
+    if cached and _should_soft_refresh(cache_key, soft_window=10):
+        logger.info("Soft-TTL refresh for %s", cache_key)
+        cached = None  # force refresh path
     if cached:
         return cached
 

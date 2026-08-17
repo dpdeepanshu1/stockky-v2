@@ -142,6 +142,35 @@ def time_module_time():
     return _t.time()
 
 app = FastAPI(title="Stockky Decision Engine", version="0.7.4")
+
+# Shared downstream client — avoid per-request TLS to analysis/training/market-data
+_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=20, max_connections=50)
+_HTTP_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
+_shared_http: httpx.AsyncClient | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _shared_http
+    if _shared_http is not None and not _shared_http.is_closed:
+        return _shared_http
+    _shared_http = httpx.AsyncClient(limits=_HTTP_LIMITS, timeout=_HTTP_TIMEOUT, follow_redirects=True)
+    return _shared_http
+
+
+@app.on_event("startup")
+async def _start_http_pool():
+    global _shared_http
+    _shared_http = httpx.AsyncClient(limits=_HTTP_LIMITS, timeout=_HTTP_TIMEOUT, follow_redirects=True)
+    logger.info("Decision shared httpx pool started")
+
+
+@app.on_event("shutdown")
+async def _stop_http_pool():
+    global _shared_http
+    if _shared_http is not None and not _shared_http.is_closed:
+        await _shared_http.aclose()
+        _shared_http = None
+
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 @app.exception_handler(Exception)
@@ -207,7 +236,7 @@ async def _fetch_optional(client: httpx.AsyncClient, url: str, label: str):
         logger.warning("%s circuit OPEN — skip (retry in %.0fs)", label, breaker.retry_after())
         return None
     try:
-        resp = await client.get(url, timeout=25)
+        resp = await client.get(url, timeout=httpx.Timeout(5.0, connect=2.0))
         resp.raise_for_status()
         data = resp.json()
         breaker.record_success()
@@ -245,13 +274,13 @@ async def get_market_sentiment() -> dict:
 # ── Training Intelligence fetch ──────────────────────────────────────
 async def get_training_score(symbol: str) -> dict:
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{TRAINING_SERVICE_URL}/training-score/{symbol}")
-            if resp.status_code == 200:
-                data = resp.json()
-                return data
-            else:
-                logger.warning(f"Training score for {symbol} returned {resp.status_code}")
+        client = _get_http_client()
+        resp = await client.get(f"{TRAINING_SERVICE_URL}/training-score/{symbol}", timeout=5.0)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data
+        else:
+            logger.warning(f"Training score for {symbol} returned {resp.status_code}")
     except Exception as e:
         logger.warning(f"Could not fetch training score for {symbol}: {e}")
     # Cold-start resilience: neutral training signal, no invented edge
@@ -856,6 +885,9 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
             "low_liquidity": bool(technical.get("low_liquidity")),
             "live_win_rate": (training or {}).get("live_win_rate") or (training or {}).get("win_rate"),
             "live_win_rate_n": int((training or {}).get("live_win_rate_n") or 0),
+            "news_as_of": (news or {}).get("as_of") or (news or {}).get("fetched_at") or (news or {}).get("updated_at"),
+            "sentiment_as_of": ((sentiment or {}).get("as_of") or (sentiment or {}).get("fetched_at")) if isinstance(sentiment, dict) else None,
+            "as_of": datetime.utcnow().isoformat() + "Z",
         }
         mh = multi_horizon_decide(
             technical=technical if isinstance(technical, dict) else {},

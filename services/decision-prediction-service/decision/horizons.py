@@ -4,7 +4,7 @@ Short (3–21d) / Mid (1–6m) / Long (6–24m) with different weights.
 Free-tier only — pure Python, no paid APIs.
 """
 from __future__ import annotations
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, List, Tuple
 
 # Decision labels (unchanged)
 BUY_NOW = "BUY NOW"
@@ -51,6 +51,33 @@ HORIZON_META = {
     "long": {"label": "Long-term", "days_min": 126, "days_max": 504, "holding": "6–24 months"},
 }
 
+
+
+def _age_hours(ts) -> Optional[float]:
+    """Hours since ts (datetime / iso str). None if unknown."""
+    if ts is None:
+        return None
+    try:
+        from datetime import datetime, timezone
+        if isinstance(ts, str):
+            ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if getattr(ts, "tzinfo", None) is not None:
+            ts = ts.replace(tzinfo=None)
+        return max(0.0, (datetime.utcnow() - ts).total_seconds() / 3600.0)
+    except Exception:
+        return None
+
+
+def time_decay_weight(age_hours: Optional[float], half_life_hours: float = 4.0) -> float:
+    """Exponential decay: full weight at age 0, ~0.5 at half_life, floors at 0.15."""
+    if age_hours is None:
+        return 1.0
+    try:
+        import math
+        w = math.exp(-math.log(2) * float(age_hours) / max(0.5, half_life_hours))
+        return max(0.15, min(1.0, w))
+    except Exception:
+        return 1.0
 
 def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, x))
@@ -219,6 +246,13 @@ def score_horizon(
     score = _clamp(weighted / total_w if total_w else 50.0)
 
     # Closed-loop score nudge from live win-rate (±8 max)
+    # Time-decay: stale news/sentiment (e.g. 4h old) contributes less vs fresh technicals
+    news_age = _age_hours(flags.get("news_as_of") or flags.get("sentiment_as_of") or flags.get("as_of"))
+    news_w = time_decay_weight(news_age, half_life_hours=4.0)
+    if "news_events" in pillars and news_w < 0.999:
+        # Pull news pillar toward neutral 50 as it ages
+        pillars["news_events"] = pillars["news_events"] * news_w + 50.0 * (1.0 - news_w)
+
     live_wr = flags.get("live_win_rate")
     live_n = int(flags.get("live_win_rate_n") or 0)
     if live_wr is not None and live_n >= 8:

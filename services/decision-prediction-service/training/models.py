@@ -560,13 +560,13 @@ def get_engine(database_url=None):
     else:
         kwargs["pool_pre_ping"] = True
         kwargs["pool_recycle"] = int(os.environ.get("DB_POOL_RECYCLE", "280"))
-        kwargs["pool_size"] = int(os.environ.get("DB_POOL_SIZE", "3"))
+        kwargs["pool_size"] = int(os.environ.get("DB_POOL_SIZE", "5"))  # Supabase free: stay well under 60 direct / 200 pooler
         kwargs["max_overflow"] = int(os.environ.get("DB_MAX_OVERFLOW", "2"))
         # Free Neon/Supabase: always require SSL if not specified
         if "sslmode" not in url:
             sep = "&" if "?" in url else "?"
             url = f"{url}{sep}sslmode=require"
-        _log.info("Using durable Postgres DATABASE_URL (pool_pre_ping on)")
+        _log.info("Using durable Postgres (pool_size=%s max_overflow=%s). Prefer Supabase pooler :6543", kwargs["pool_size"], kwargs["max_overflow"])
     return create_engine(url, **kwargs)
 
 def create_tables(engine):

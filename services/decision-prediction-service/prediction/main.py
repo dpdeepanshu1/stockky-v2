@@ -21,6 +21,9 @@ from pred_features import (
     TECHNICAL_COLUMNS,
     build_full_feature_vector,
     latest_feature_vector,
+    validate_feature_vector,
+    features_to_ordered_array,
+    EXPECTED_FEATURES,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -415,13 +418,11 @@ def _generate_llm_note(features: dict, probability: float, symbol: str) -> str:
 
 
 def _align_features(features: dict, model) -> dict:
-    """Return only the features the model was trained on, fill missing with 0."""
+    """Exact feature schema for predict_proba — ordered, zero-filled."""
     if hasattr(model, "feature_names_in_"):
         expected = list(model.feature_names_in_)
-        aligned = {col: features.get(col, 0.0) for col in expected}
-        return aligned
-    # Fallback: use all known columns
-    return {col: features.get(col, 0.0) for col in FEATURE_COLUMNS}
+        return validate_feature_vector(features, expected)
+    return validate_feature_vector(features, EXPECTED_FEATURES)
 
 
 @app.get("/predict/{symbol}")
@@ -455,11 +456,8 @@ def predict(symbol: str):
         )
 
         aligned = _align_features(features, _model)
-        X = pd.DataFrame([aligned])
-
-        if hasattr(_model, "feature_names_in_"):
-            X = X[list(_model.feature_names_in_)]
-
+        expected = list(getattr(_model, "feature_names_in_", EXPECTED_FEATURES))
+        X = features_to_ordered_array(aligned, expected)
         probability = float(_model.predict_proba(X)[0, 1])
         # Convert probability to 0-100 score commonly used by decision engine
         prediction_score = round(probability * 100, 2)

@@ -253,20 +253,9 @@ def compute_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
             rename[c] = "Volume"
     work = work.rename(columns=rename)
 
-    if "Close" not in work.columns:
-        # Last-resort: pick a close-like column
-        for c in list(work.columns):
-            if str(c).lower() in ("close", "adj close", "adj_close"):
-                work = work.rename(columns={c: "Close"})
-                break
-    if "Close" not in work.columns:
-        raise KeyError("OHLCV frame missing Close after normalize")
-
     # Rolling technicals as columns (vectorized subset)
     close = work["Close"]
     out = pd.DataFrame(index=work.index)
-    # Keep Close for trainers that label from future price (pred_train)
-    out["Close"] = close
     try:
         out["rsi_14"] = ta.momentum.RSIIndicator(close, window=14).rsi()
         macd = ta.trend.MACD(close)
@@ -295,3 +284,35 @@ def compute_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
                 out[col] = 0.0
     out = out.replace([np.inf, -np.inf], np.nan).fillna(0.0)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Feature contract — exact schema for model.predict_proba
+# ---------------------------------------------------------------------------
+EXPECTED_FEATURES = list(FEATURE_COLUMNS)
+
+
+def validate_feature_vector(
+    features: Dict[str, Any],
+    expected: Optional[list] = None,
+) -> Dict[str, float]:
+    """
+    Enforce ordered feature schema. Missing → 0.0; extras dropped.
+    Prevents column-order mismatches after indicator failures.
+    """
+    cols = list(expected) if expected is not None else EXPECTED_FEATURES
+    out: Dict[str, float] = {}
+    for col in cols:
+        out[col] = _safe(features.get(col), 0.0)
+    return out
+
+
+def features_to_ordered_array(
+    features: Dict[str, Any],
+    expected: Optional[list] = None,
+):
+    """Return 2D numpy array shape (1, n_features) in EXPECTED order."""
+    import numpy as np
+    validated = validate_feature_vector(features, expected)
+    cols = list(expected) if expected is not None else EXPECTED_FEATURES
+    return np.array([[validated[c] for c in cols]], dtype=np.float64)

@@ -80,3 +80,4 @@ Resume stays disabled and Stop never finishes.
 1. Click **Refresh status** (should flip Job → `stopped`, enable Resume)
 2. Or click **Stop** once more (force commit)
 3. Click **Resume** to continue from 98/186
+

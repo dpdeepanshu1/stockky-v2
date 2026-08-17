@@ -3591,7 +3591,38 @@ def _hot_payload_fingerprint(payload: dict) -> str:
 
 
 @app.get("/stockky-hot")
-async def stockky_hot_stocks(force: bool = False):
+
+async def _warm_upstream_services(client: Optional[httpx.AsyncClient] = None) -> None:
+    """Ping gateway deps so free-tier does not sleep between batches."""
+    urls = []
+    for name in ("FUNDAMENTAL_URL", "EVENT_URL", "NEWS_URL", "TECHNICAL_URL", "MARKET_DATA_URL", "NOTIFICATION_URL"):
+        u = globals().get(name) or os.getenv(name)
+        if u:
+            urls.append(str(u).rstrip("/"))
+    own = None
+    try:
+        # health of self is fine; external is what matters
+        pass
+    except Exception:
+        pass
+    close = False
+    if client is None:
+        client = httpx.AsyncClient(timeout=8.0)
+        close = True
+    try:
+        for base in urls:
+            for path in ("/health?warm=true", "/health"):
+                try:
+                    await client.get(f"{base}{path}", timeout=6.0)
+                    break
+                except Exception:
+                    continue
+    finally:
+        if close:
+            await client.aclose()
+
+
+async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = None, progress_cb=None):
     """Curated list for the Stockky 🔥 Stocks tab.
 
     Quality-first free-tier ranking:
@@ -3667,19 +3698,43 @@ async def stockky_hot_stocks(force: bool = False):
     ))
     if not universe:
         universe = list(_get_nifty_indices() or [])[:80]
-    # Free-tier budget: evaluate up to 100 catalyst candidates (was 45)
-    universe = universe[:100]
+    # Full catalyst universe by default. Optional max_symbols only if caller caps.
+    # Heavy work is processed in batches (CATALYST_BATCH_SIZE / HOT_BATCH_SIZE) with warm between batches.
+    if max_symbols is not None:
+        lim = max(10, int(max_symbols))
+        universe = universe[:lim]
+    else:
+        lim = len(universe)
+    batch_size = max(5, int(os.getenv("HOT_BATCH_SIZE", os.getenv("CATALYST_BATCH_SIZE", "25"))))
     logger.info(
-        "stockky-hot universe=%s (mom=%s news=%s evt=%s scan=%s)",
-        len(universe), len(momentum), len(news_syms), len(event_syms), len(scan_syms),
+        "stockky-hot universe=%s (mom=%s news=%s evt=%s scan=%s lim=%s batch=%s)",
+        len(universe), len(momentum), len(news_syms), len(event_syms), len(scan_syms), lim, batch_size,
     )
 
     news_driven: list = []
     results_driven: list = []
     bulk_insider_driven: list = []
 
-    async with httpx.AsyncClient(timeout=25.0) as client:
-        for sym in universe:
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        for i_sym, sym in enumerate(universe):
+            # Between batches: warm upstreams so free-tier stays awake
+            if i_sym > 0 and i_sym % batch_size == 0:
+                logger.info("stockky-hot batch boundary %s/%s — warming services", i_sym, len(universe))
+                try:
+                    await _warm_upstream_services(client)
+                except Exception as e:
+                    logger.debug("hot batch warm: %s", e)
+                await asyncio.sleep(0.4)
+            if progress_cb is not None:
+                try:
+                    progress_cb(i_sym, len(universe), str(sym), batch=i_sym // batch_size)
+                except TypeError:
+                    try:
+                        progress_cb(i_sym, len(universe), str(sym))
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
             try:
                 base = sym.replace(".NS", "").replace(".BO", "").upper()
                 news_data = None
@@ -3882,8 +3937,36 @@ async def stockky_hot_stocks(force: bool = False):
 
 @app.get("/catalysts/alert/status")
 def catalyst_alert_status():
-    st = _redis_get("stockky:catalyst_job") or {}
-    return {"ok": True, **(st if isinstance(st, dict) else {"status": "idle"})}
+    """Status of last catalyst job. Auto-heal if stuck after free-tier sleep."""
+    job_key = "stockky:catalyst_job"
+    st = _redis_get(job_key) or {}
+    if not isinstance(st, dict):
+        st = {"status": "idle"}
+    try:
+        if st.get("status") == "running":
+            updated = st.get("updated_at") or st.get("started_at")
+            age = None
+            if updated:
+                try:
+                    ts = datetime.fromisoformat(str(updated).replace("Z", "+00:00"))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=IST)
+                    age = int((datetime.now(IST) - ts).total_seconds())
+                except Exception:
+                    age = None
+            # No heartbeat for 5 minutes → worker likely dead
+            if age is not None and age > 300:
+                st = {
+                    **st,
+                    "status": "error",
+                    "error": f"stale_running age={age}s (worker likely slept)",
+                    "message": f"Auto-failed: no progress for {age}s — re-run will continue batches",
+                    "updated_at": datetime.now(IST).isoformat(),
+                }
+                _redis_set(job_key, st, ttl=86400)
+    except Exception as e:
+        logger.debug("catalyst status heal: %s", e)
+    return {"ok": True, **st}
 
 
 @app.get("/catalysts/alert")
@@ -3893,14 +3976,17 @@ async def catalyst_alert_scan(
     force: bool = True,
     notify: bool = True,
     sync: bool = False,
+    batch_size: int = 0,
 ):
-    """Pre-market / intraday catalyst sweep.
+    """Pre-market / intraday catalyst sweep — FULL universe in batches.
 
-    Default: start background job and return immediately (avoids GH Actions 180s timeout).
-    Pass sync=true only for local debugging (may take several minutes on free tier).
-    Poll GET /catalysts/alert/status until status=done|error.
+    Does not reduce stock count. Processes HOT_BATCH_SIZE (default 25) symbols
+    per batch, warms upstream services between batches, then continues until
+    every candidate is scored. Poll GET /catalysts/alert/status.
     """
     job_key = "stockky:catalyst_job"
+    batch_size = int(batch_size or os.getenv("CATALYST_BATCH_SIZE", "25"))
+    batch_size = max(8, min(batch_size, 40))
 
     def _set_job(**kw):
         cur = _redis_get(job_key) or {}
@@ -3913,30 +3999,71 @@ async def catalyst_alert_scan(
 
     existing = _redis_get(job_key) or {}
     if isinstance(existing, dict) and existing.get("status") == "running" and not force:
-        return {"ok": True, "already_running": True, **existing}
+        try:
+            upd = existing.get("updated_at") or existing.get("started_at")
+            ts = datetime.fromisoformat(str(upd).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=IST)
+            if (datetime.now(IST) - ts).total_seconds() < 180:
+                return {"ok": True, "already_running": True, **existing}
+        except Exception:
+            pass
 
     _set_job(
         status="running",
         started_at=datetime.now(IST).isoformat(),
-        message="Catalyst sweep started",
+        message="Catalyst sweep started (full universe, batched)",
         force=force,
         notify=notify,
         actionable_count=0,
+        processed=0,
+        total=0,
+        batch_size=batch_size,
+        batch_index=0,
         error=None,
     )
 
     async def _work():
         try:
-            try:
-                if force and _redis:
-                    _redis.delete(HOT_STOCKS_CACHE_KEY)
-            except Exception:
-                pass
-            _set_job(message="Scoring hot/catalyst universe…")
-            hot = await stockky_hot_stocks(force=True)
+            stop_evt = asyncio.Event()
+
+            async def _keepalive_loop():
+                while not stop_evt.is_set():
+                    try:
+                        await _warm_upstream_services()
+                    except Exception:
+                        pass
+                    try:
+                        await asyncio.wait_for(stop_evt.wait(), timeout=75.0)
+                    except asyncio.TimeoutError:
+                        pass
+
+            ka_task = asyncio.create_task(_keepalive_loop())
+
+            def _progress(i, total, sym, batch=0):
+                _set_job(
+                    status="running",
+                    message=f"Batch {batch + 1}: scoring {i + 1}/{total} ({sym})",
+                    processed=i + 1,
+                    total=total,
+                    batch_index=batch,
+                    batch_size=batch_size,
+                )
+
+            _set_job(message="Building full catalyst universe…")
+            # max_symbols=None → ALL candidates; internal loop warms every batch_size
+            # Temporarily set env for this process batch size
+            os.environ["HOT_BATCH_SIZE"] = str(batch_size)
+
+            hot = await stockky_hot_stocks(
+                force=force,
+                max_symbols=None,  # full universe — no reduction
+                progress_cb=_progress,
+            )
+
             picks = []
             for section in ("bulk_insider_driven", "results_driven", "news_driven"):
-                for item in hot.get(section) or []:
+                for item in (hot or {}).get(section) or []:
                     dec = (item.get("decision") or "").upper()
                     if dec in ("BUY NOW", "PREPARE TO BUY") or item.get("signal_strength") == "high":
                         picks.append({**item, "section": section})
@@ -3955,7 +4082,7 @@ async def catalyst_alert_scan(
             lines = [
                 "🔥 *Stockky Catalyst Alert*",
                 f"IST {datetime.now(IST).strftime('%Y-%m-%d %H:%M')}",
-                f"Universe screened: {hot.get('universe_size')} · Actionable: {len(unique)}",
+                f"Universe screened: {(hot or {}).get('universe_size')} · Actionable: {len(unique)}",
                 "",
             ]
             if not unique:
@@ -3995,18 +4122,27 @@ async def catalyst_alert_scan(
                     except Exception as e2:
                         logger.warning("catalyst telegram fallback: %s", e2)
 
+            total_u = int((hot or {}).get("universe_size") or 0)
             result = {
                 "ok": True,
                 "status": "done",
                 "actionable_count": len(unique),
                 "picks": unique[:20],
-                "hot_universe_size": hot.get("universe_size"),
+                "hot_universe_size": total_u,
                 "notified": notified,
                 "message_preview": message[:500],
                 "generated_at": datetime.now(IST).isoformat(),
-                "message": f"Done — {len(unique)} actionable",
+                "message": f"Done — screened {total_u} · {len(unique)} actionable (batched {batch_size})",
+                "processed": total_u,
+                "total": total_u,
+                "batch_size": batch_size,
             }
             _set_job(**result)
+            stop_evt.set()
+            try:
+                await asyncio.wait_for(ka_task, timeout=2)
+            except Exception:
+                ka_task.cancel()
             return result
         except Exception as e:
             logger.exception("catalyst alert failed")
@@ -4021,10 +4157,10 @@ async def catalyst_alert_scan(
         "ok": True,
         "status": "running",
         "accepted": True,
-        "message": "Catalyst alert started in background — poll /catalysts/alert/status",
+        "batch_size": batch_size,
+        "message": "Catalyst alert started — full universe in batches; poll /catalysts/alert/status",
         "poll": "/catalysts/alert/status",
     }
-
 
 
 # ── WebSocket real-time hub (scan progress + market ticks + training) ─────────
@@ -4480,7 +4616,13 @@ async def data_feed_run(
     universe = _build_scan_universe()
     if not universe:
         universe = list(_get_nifty_indices() or [])[:150]
-    universe = [u.upper().replace(".NS", "").replace(".BO", "") for u in universe[:250]]
+    _df_max = int(os.getenv("DATA_FEED_MAX_SYMBOLS", "0") or 0)
+    if _df_max > 0:
+        universe = universe[:_df_max]
+    universe = [u.upper().replace(".NS", "").replace(".BO", "") for u in universe]
+    # default soft cap only if enormous (protect free tier); 0 env = use full list up to 500
+    if _df_max <= 0 and len(universe) > 500:
+        universe = universe[:500]
 
     # Checkpoint: list of already-fed symbols + cursor
     checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
@@ -4621,8 +4763,20 @@ async def data_feed_run(
                     updated_at=datetime.now(IST).isoformat(),
                     checkpoint={"cursor": i + 1, "done": list(done_set), "universe": universe},
                 )
-                if (i + 1) % 5 == 0:
-                    await asyncio.sleep(0.35)
+                feed_batch = max(5, int(os.getenv("DATA_FEED_BATCH_SIZE", "20")))
+                if (i + 1) % feed_batch == 0:
+                    # Complete batch → warm all upstreams, then continue
+                    store.set_job(
+                        message=f"Batch done {i + 1}/{len(universe)} — warming services…",
+                        updated_at=datetime.now(IST).isoformat(),
+                    )
+                    try:
+                        await _warm_upstream_services(client)
+                    except Exception as e:
+                        logger.debug("data-feed batch warm: %s", e)
+                    await asyncio.sleep(0.5)
+                elif (i + 1) % 5 == 0:
+                    await asyncio.sleep(0.25)
 
         ts = datetime.now(IST).isoformat()
         msg = f"Data feed successfully for {ok_n} stocks at {ts}"

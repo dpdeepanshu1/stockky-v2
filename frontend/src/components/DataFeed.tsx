@@ -177,6 +177,24 @@ export default function DataFeed() {
     }
   };
 
+  /** Only symbols not already in the data-feed cache (new universe members). Manual click only. */
+  const startNewOnly = async () => {
+    setErr(null);
+    setBanner(null);
+    setBusy("start-new");
+    try {
+      setRunning(true);
+      const res = await (api as any).dataFeedRunNewOnly();
+      setBanner(res?.message || "Feeding newly added stocks only…");
+      await refresh();
+    } catch (e: any) {
+      setErr(e?.message || "Failed to start new-only data feed");
+      setRunning(false);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const stocksInFeed =
     meta?.last_count ?? job?.ok_count ?? job?.checkpoint?.done?.length ?? 0;
 
@@ -236,6 +254,15 @@ export default function DataFeed() {
                 : complete
                 ? "Full re-feed"
                 : "Data feed to All Scan Universe Stocks"}
+            </button>
+            <button
+              type="button"
+              onClick={startNewOnly}
+              disabled={busy != null || isActivelyRunning}
+              title="Only feed symbols that are not already in the data-feed store"
+              className="font-mono text-xs px-4 py-2 rounded-lg bg-sky-500/15 border border-sky-500/40 text-sky-100 hover:bg-sky-500/25 disabled:opacity-40"
+            >
+              {busy === "start-new" ? "Feeding new…" : "Feed newly added stocks only"}
             </button>
           </div>
         </div>

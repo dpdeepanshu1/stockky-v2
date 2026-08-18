@@ -989,6 +989,8 @@ export const api = {
     request<any>("/data-feed/meta", undefined, 2, 30000),
   runDataFeed: (force = false) =>
     request<any>(`/data-feed/run?force=${force}`, { method: "POST" }, 2, 45000),
+  dataFeedRunNewOnly: () =>
+    request<any>(`/data-feed/run?only_new=true&force=false&resume=false`, { method: "POST" }, 2, 45000),
   resumeDataFeed: () =>
     request<any>("/data-feed/resume", { method: "POST" }, 2, 45000),
   stopDataFeed: () =>

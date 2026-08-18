@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import re
 import logging
 import os
 from datetime import datetime, timedelta
@@ -146,10 +147,14 @@ def ingest_universe(
                 expires_at=expires,
             ))
         if batch:
-            db.bulk_save_objects(batch)
+            # Commit in chunks so free-tier DB/proxy never times out mid-write
+            chunk = 80
+            for i in range(0, len(batch), chunk):
+                db.bulk_save_objects(batch[i : i + chunk])
+                db.commit()
             ingested = len(batch)
-
-        db.commit()
+        else:
+            db.commit()
         logger.info("Ingested %s universe symbols for training (source=%s, ttl=%sh)", ingested, source, retention_hours)
         return {
             "ok": True,

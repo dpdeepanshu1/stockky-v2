@@ -68,45 +68,44 @@ BATCH_MAX_SYMBOLS = int(os.getenv("DECIDE_BATCH_MAX", "25"))
 BATCH_CONCURRENCY = int(os.getenv("DECIDE_BATCH_CONCURRENCY", "8"))
 
 _decide_mem_cache: dict = {}  # symbol -> (expires_ts, payload)
-# Decide cache: in-memory only (unlimited). Optional Neon via kv_cache for durable keys.
+_redis = None
 try:
-    from kv_cache import kv_get as _kv_get, kv_set as _kv_set
-except Exception:
-    _kv_get = lambda k: None  # type: ignore
-    _kv_set = lambda k, v, ttl=None: None  # type: ignore
-_redis = None  # disconnected by default (USE_REDIS=0)
-logger.info("Decision-engine cache: in-memory (Redis disconnected)")
+    from upstash_redis import Redis
+    _url = os.getenv("UPSTASH_REDIS_REST_URL")
+    _tok = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+    if _url and _tok:
+        _redis = Redis(url=_url, token=_tok)
+        _redis.ping()
+        logger.info("Decision-engine connected to Upstash Redis for decide cache")
+except Exception as e:
+    logger.warning("Decision-engine Redis cache unavailable: %s", e)
 
+def _is_market_open() -> bool:
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    return (t.hour > 9 or (t.hour == 9 and t.minute >= 15)) and (t.hour < 15 or (t.hour == 15 and t.minute <= 30))
 
 def _cache_ttl() -> int:
-    """Return TTL based on market hours (IST)."""
-    now_ist = datetime.now(IST)
-    # Market hours: 9:15 AM to 3:30 PM IST on weekdays
-    is_market_open = (
-        now_ist.weekday() < 5  # Monday-Friday
-        and now_ist.hour >= 9 and (now_ist.hour < 15 or (now_ist.hour == 15 and now_ist.minute < 30))
-    )
-    return DECIDE_CACHE_TTL_OPEN if is_market_open else DECIDE_CACHE_TTL_CLOSED
+    return DECIDE_CACHE_TTL_OPEN if _is_market_open() else DECIDE_CACHE_TTL_CLOSED
 
-
-def _cache_get_decide(symbol: str) -> dict | None:
-    """Retrieve cached decide payload for symbol, checking memory and KV store."""
+def _cache_get_decide(symbol: str):
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     now = time_module_time()
     entry = _decide_mem_cache.get(sym)
     if entry and entry[0] > now:
         return entry[1]
-    try:
-        raw = _kv_get(f"decide:{sym}")
-        if raw is not None:
-            if isinstance(raw, str):
-                raw = json.loads(raw)
-            if isinstance(raw, dict):
-                return raw
-    except Exception:
-        pass
+    if _redis:
+        try:
+            raw = _redis.get(f"decide:{sym}")
+            if raw:
+                data = json.loads(raw) if isinstance(raw, str) else raw
+                _decide_mem_cache[sym] = (now + _cache_ttl(), data)
+                return data
+        except Exception:
+            pass
     return None
-
 
 def _is_weak_decide_payload(payload: dict) -> bool:
     if not isinstance(payload, dict):
@@ -133,10 +132,11 @@ def _cache_set_decide(symbol: str, payload: dict):
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     ttl = _cache_ttl()
     _decide_mem_cache[sym] = (time_module_time() + ttl, payload)
-    try:
-        _kv_set(f"decide:{sym}", payload, ttl=ttl)
-    except Exception:
-        pass
+    if _redis:
+        try:
+            _redis.setex(f"decide:{sym}", ttl, json.dumps(payload, default=str))
+        except Exception:
+            pass
 
 def time_module_time():
     import time as _t
@@ -232,12 +232,12 @@ def circuits_status():
 # ── Fetch helpers ──────────────────────────────────────────────────
 async def _fetch_optional(client: httpx.AsyncClient, url: str, label: str):
     """Fetch optional pillar with circuit breaker (fail fast when dependency is down)."""
-    breaker = get_breaker(f"decision:{label.lower()}", failure_threshold=5, recovery_timeout=60)
+    breaker = get_breaker(f"decision:{label.lower()}", failure_threshold=8, recovery_timeout=45)
     if not breaker.allow():
         logger.warning("%s circuit OPEN — skip (retry in %.0fs)", label, breaker.retry_after())
         return None
     # Fundamentals / prediction need more than 5s on free-tier cold start
-    timeout = httpx.Timeout(18.0 if label.lower() in ("fundamental", "prediction") else 8.0, connect=4.0)
+    timeout = httpx.Timeout(35.0 if label.lower() in ("fundamental", "prediction", "technical") else 20.0, connect=8.0)
     try:
         resp = await client.get(url, timeout=timeout)
         if resp.status_code >= 400:
@@ -282,7 +282,7 @@ async def get_market_sentiment() -> dict:
                 else:
                     logger.warning(f"API Gateway returned {resp.status_code} (attempt {attempt+1})")
         except Exception as e:
-            logger.warning(f"Market sentiment fetch attempt {attempt+1} failed: {e}")
+            logger.warning("Market sentiment fetch attempt %s failed: %s: %s", attempt+1, type(e).__name__, e or "(empty)")
             if attempt == 0:
                 await asyncio.sleep(0.5)
     # Fallback
@@ -297,14 +297,14 @@ async def get_market_sentiment() -> dict:
 async def get_training_score(symbol: str) -> dict:
     try:
         client = _get_http_client()
-        resp = await client.get(f"{TRAINING_SERVICE_URL}/training-score/{symbol}", timeout=5.0)
+        resp = await client.get(f"{TRAINING_SERVICE_URL}/training-score/{symbol}", timeout=15.0)
         if resp.status_code == 200:
             data = resp.json()
             return data
         else:
             logger.warning(f"Training score for {symbol} returned {resp.status_code}")
     except Exception as e:
-        logger.warning(f"Could not fetch training score for {symbol}: {e}")
+        logger.warning("Could not fetch training score for %s: %s: %s", symbol, type(e).__name__, e or "(empty)")
     # Cold-start resilience: neutral training signal, no invented edge
     return {
         "symbol": symbol,

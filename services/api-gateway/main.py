@@ -23,10 +23,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-try:
-    from upstash_redis import Redis
-except ImportError:
-    Redis = None  # type: ignore
+from upstash_redis import Redis
 from data_feed import (
     DataFeedStore, extract_feed_payload, DATA_FEED_TTL,
     hot_job_get, hot_job_set, HOT_RESULT_KEY,
@@ -81,8 +78,8 @@ app = FastAPI(title="Stockky API Gateway", version="2.5.16")
 
 # ── Shared HTTP client (persistent TLS pool across downstream services) ──
 _HTTP_LIMITS = httpx.Limits(max_keepalive_connections=20, max_connections=50)
-_HTTP_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
-_HTTP_TIMEOUT_LONG = httpx.Timeout(30.0, connect=3.0)
+_HTTP_TIMEOUT = httpx.Timeout(90.0, connect=8.0)  # free-tier cold starts; per-call overrides still apply
+_HTTP_TIMEOUT_LONG = httpx.Timeout(120.0, connect=10.0)
 _shared_http_client: httpx.AsyncClient | None = None
 
 
@@ -150,19 +147,17 @@ async def universal_exception_handler(request, exc):
         }
     )
 
-# ── KV cache (memory + optional Neon; Redis only if USE_REDIS=1) ───────────────
-from kv_cache import kv_get, kv_set, kv_ttl, _get_redis as _kv_redis_client
-
+# ── Redis ──────────────────────────────────────────────────────────────────────
 _redis = None
 try:
-    _redis = _kv_redis_client()  # None when USE_REDIS=0 (default)
-    if _redis:
-        logger.info("Upstash Redis enabled (USE_REDIS=1)")
-    else:
-        logger.info("Running Redis-free: in-memory KV + optional Neon stockky_kv")
+    _redis = Redis(
+        url=os.getenv("UPSTASH_REDIS_REST_URL"),
+        token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
+    )
+    _redis.ping()
+    logger.info("Connected to Upstash Redis")
 except Exception as e:
-    logger.warning("KV backend init: %s", e)
-    _redis = None
+    logger.warning("Redis unavailable: %s", e)
 
 WATCHLIST_KEY       = "stockky:watchlist"
 SEARCHED_KEY        = "stockky:searched_symbols"
@@ -214,25 +209,36 @@ def _feed_store() -> DataFeedStore:
 
 
 def _redis_get(key: str):
-    """Memory → optional Neon durable → optional Redis."""
-    return kv_get(key)
-
+    if not _redis:
+        return None
+    try:
+        val = _redis.get(key)
+        return json.loads(val) if val else None
+    except Exception:
+        return None
 
 
 def _redis_soft_ttl_refresh(key: str, soft_window: int = 10) -> bool:
+    """True if key exists and TTL is in (0, soft_window] — caller should refresh in background."""
+    if not _redis:
+        return False
     try:
-        t = kv_ttl(key)
-        return t != -2 and 0 < t <= soft_window
+        ttl = _redis.ttl(key)
+        return isinstance(ttl, int) and 0 < ttl <= soft_window
     except Exception:
         return False
 
-
-
 def _redis_set(key: str, value, ttl: int = None):
-    """Memory always; Neon for durable keys; Redis only if USE_REDIS=1."""
-    kv_set(key, value, ttl=ttl)
-
-
+    if not _redis:
+        return
+    try:
+        data = json.dumps(value, default=str)
+        if ttl:
+            _redis.setex(key, ttl, data)
+        else:
+            _redis.set(key, data)
+    except Exception as e:
+        logger.warning("Redis set failed: %s", e)
 
 def _load_watchlist() -> List[str]:
     return _redis_get(WATCHLIST_KEY) or []
@@ -890,7 +896,7 @@ def _is_symbol_pruned(symbol: str) -> bool:
 # ── Fallback helpers with caching ──────────────────────────────────────────
 def _fetch_price_from_quote(symbol: str) -> Optional[float]:
     try:
-        resp = httpx.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=5)
+        resp = httpx.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=12)
         if resp.status_code == 200:
             data = resp.json()
             price = data.get("price")
@@ -1310,7 +1316,7 @@ def _wake_notification_service() -> bool:
 
 # Free-tier friendly default: 18 workers (was 10). Override via env.
 # Pair with market-data yfinance semaphore to avoid Yahoo rate limits.
-MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "6"))  # full universe; pace via Redis RL; separate dynos
+MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "3"))  # free-tier safe; was 6 → cascade timeouts  # full universe; pace via Redis RL; separate dynos
 MAX_RETRIES = 1
 RETRY_BACKOFF = 1.0
 
@@ -1499,8 +1505,8 @@ async def _wake_required_services(client: httpx.AsyncClient = None) -> dict:
                         pass
                     r = await client.get(f"{base}/health", params={"warm": "true"}, timeout=25)
                     # second ping after short pause so dyno is fully up
-                    await asyncio.sleep(1.5)
-                    r2 = await client.get(f"{base}/health", timeout=10)
+                    await asyncio.sleep(2.5)
+                    r2 = await client.get(f"{base}/health", timeout=15)
                     ok = r.status_code == 200 or r2.status_code == 200
                     return name, {"ok": ok, "status": r2.status_code if r2 else r.status_code, "warmed": True}
                 # Prefer warm query so downstream services pre-touch deps
@@ -1547,7 +1553,7 @@ async def _analyze_one_symbol_ultra(
                 if cached_decide and isinstance(cached_decide, dict) and cached_decide.get("decision"):
                     normalized = _normalize_decision_response(cached_decide, symbol)
                 else:
-                    decision_resp = await _cb_get(client, "decision", f"{DECISION_URL}/decide/{symbol}", timeout=45)
+                    decision_resp = await _cb_get(client, "decision", f"{DECISION_URL}/decide/{symbol}", timeout=90)
                     decision_resp.raise_for_status()
                     raw = decision_resp.json()
                     normalized = _normalize_decision_response(raw, symbol)
@@ -1654,7 +1660,12 @@ async def _analyze_one_symbol_ultra(
                 # Fail fast — no retry storm when dependency circuit is open
                 metrics.inc("stockky_scan_circuit_skip_total", dependency=e.name)
                 logger.warning("Scan skip %s: %s", symbol, e)
-                return {
+                price = None
+                try:
+                    price = _fetch_price_from_quote(symbol)
+                except Exception:
+                    price = None
+                out = {
                     "symbol": symbol,
                     "decision": "DO NOT BUY",
                     "combined_score": 0,
@@ -1662,10 +1673,14 @@ async def _analyze_one_symbol_ultra(
                     "data_insufficient": True,
                     "error": str(e),
                     "circuit_open": e.name,
+                    "close": price,
                     "reasons": {
-                        "data_quality": [f"Circuit open for {e.name}; retry in {e.retry_after:.0f}s"]
+                        "data_quality": [f"Circuit open for {e.name}; retry in {getattr(e, 'retry_after', 30):.0f}s — price may still show"]
                     },
                 }
+                # Brief pace so we do not hammer an open circuit
+                await asyncio.sleep(min(2.0, float(getattr(e, "retry_after", 2) or 2) / 10.0))
+                return out
             except httpx.HTTPError as e:
                 error_type = type(e).__name__
                 error_msg = str(e) or f"{error_type} (empty message)"
@@ -1794,7 +1809,7 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
         hit_rate = (progress.cache_hits / total_c) if total_c else 0.0
         if hit_rate >= 0.85:
             return
-        if progress.processed > 0 and progress.processed % 15 < batch_size and not progress.cancelled:
+        if progress.processed > 0 and progress.processed % 20 == 0 and not progress.cancelled:
             try:
                 await _warm_upstream_services(client)
             except Exception as e:
@@ -3730,9 +3745,14 @@ async def training_other_proxy(path: str, request: Request):
             "walk",
             "history",
             "clear-backup",
+            "universe/ingest",
+            "universe/train",
+            "api/universe",
+            "portfolio/deposit",
         )
     )
-    timeout = 180.0 if heavy else 60.0
+    # Shared client default was too short → 504 on ingest; always pass explicit timeout
+    timeout = 180.0 if heavy else 90.0
     try:
         body = await request.body()
         fwd_headers = {"Accept": "application/json"}
@@ -3749,6 +3769,7 @@ async def training_other_proxy(path: str, request: Request):
                 headers=fwd_headers,
                 content=body if body else None,
                 params=request.query_params,
+                timeout=timeout,
             )
 
         # Always try JSON first — portfolio/deposit/trades all return JSON

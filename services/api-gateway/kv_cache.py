@@ -49,6 +49,7 @@ _DURABLE_PREFIXES = (
     "indianapi:fundamentals:",
     "indianapi:",
     "stockky:decide_cache:",  # optional durability for decide (low volume)
+    "stockky:batch_result:",  # scan batch cache survives free-tier sleep
 )
 
 

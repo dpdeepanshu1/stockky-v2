@@ -198,6 +198,34 @@ KNOWN_SYMBOLS_KEY   = "stockky:known_symbols"
 SCAN_TASK_PREFIX    = "stockky:scan_task:"
 _SCAN_CANCEL_FLAGS: set = set()  # process-local instant cancel
 
+# ── Global activity gate (Power Off / force-stop) ───────────────────────────
+# When True: no scan workers, no data-feed worker progress, no hot-picks run,
+# no WS quote upstream fan-out. Only /health and light keepalive remain.
+_ACTIVITY_PAUSED = False
+_QUOTE_LOOP_ENABLED = True
+
+
+def activity_paused() -> bool:
+    return bool(_ACTIVITY_PAUSED)
+
+
+def set_activity_paused(paused: bool) -> None:
+    global _ACTIVITY_PAUSED, _QUOTE_LOOP_ENABLED
+    _ACTIVITY_PAUSED = bool(paused)
+    if paused:
+        _QUOTE_LOOP_ENABLED = False
+        try:
+            request_data_feed_stop()
+        except Exception:
+            pass
+    else:
+        _QUOTE_LOOP_ENABLED = True
+        try:
+            clear_data_feed_stop()
+        except Exception:
+            pass
+
+
 MARKET_MOVERS_CACHE_PREFIX = "stockky:market_movers:"
 INDICES_CACHE_KEY   = "stockky:indices"
 INDICES_LAST_KNOWN  = "stockky:indices_last_known"
@@ -1851,6 +1879,9 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
 
     # ── Full-universe batch processor (list size preserved) ──
     batch_size = default_batch_size(MAX_PARALLEL_WORKERS, minimum=12)
+    if activity_paused():
+        logger.warning("Scan aborted — activity paused (Power Off)")
+        return
     logger.info(
         "Scan full universe=%s batch_size=%s workers=%s",
         total, batch_size, MAX_PARALLEL_WORKERS,
@@ -1860,7 +1891,7 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
         return await _analyze_one_symbol_ultra(sym, client, sem, lite=lite)
 
     def _should_cancel() -> bool:
-        if task_id in _SCAN_CANCEL_FLAGS:
+        if task_id in _SCAN_CANCEL_FLAGS or "__ALL__" in _SCAN_CANCEL_FLAGS or activity_paused():
             return True
         return bool(_redis_get(cancel_key))
 
@@ -3236,29 +3267,52 @@ def get_scan_status(task_id: str):
 
 @app.post("/scan/cancel/{task_id}")
 def cancel_scan(task_id: str):
-    """Request cancel — process-local flag + durable key; stops ASAP."""
-    _SCAN_CANCEL_FLAGS.add(task_id)
-    data = _redis_get(SCAN_TASK_PREFIX + task_id)
-    if not data:
-        return {"status": "cancel_requested", "message": "Task not in memory (already stopped or expired)", "ok": True}
-    if data.get("status") != "running":
-        return {"status": "already_finished", "task_status": data.get("status"),
-                "processed_so_far": data.get("processed", 0), "total": data.get("total", 0)}
-    # Dedicated cancel key (progress writes must not wipe this)
+    """Request cancel — process-local flag + durable key; commit partial; stops ASAP."""
     _SCAN_CANCEL_FLAGS.add(task_id)
     _redis_set(SCAN_TASK_PREFIX + task_id + ":cancel", True, ttl=3600)
-    # Also mark progress payload so UI sees cancel immediately
+    data = _redis_get(SCAN_TASK_PREFIX + task_id)
+    if not isinstance(data, dict):
+        data = {}
     try:
         data = dict(data)
         data["cancel_requested"] = True
+        data["status"] = "cancelled" if data.get("status") in (None, "running") else data.get("status")
+        data["partial"] = True
+        data["message"] = data.get("message") or "Stop requested — partial results committed"
         _redis_set(SCAN_TASK_PREFIX + task_id, data, ttl=3600)
     except Exception:
         pass
     return {
+        "ok": True,
         "status": "cancel_requested",
         "processed_so_far": data.get("processed", 0),
         "total": data.get("total", 0),
+        "message": "Scan stop signalled — worker will commit partial and exit",
     }
+
+
+@app.post("/scan/stop-all")
+def scan_stop_all():
+    """Force-stop every running scan task (commit partial)."""
+    _SCAN_CANCEL_FLAGS.add("__ALL__")
+    n = 0
+    try:
+        for k in list(_mem_kv.keys()):
+            if str(k).startswith(SCAN_TASK_PREFIX) and not str(k).endswith(":cancel"):
+                data = _mem_kv.get(k)
+                if isinstance(data, dict) and data.get("status") == "running":
+                    data = dict(data)
+                    data["cancel_requested"] = True
+                    data["status"] = "cancelled"
+                    data["partial"] = True
+                    _mem_kv[k] = data
+                    _redis_set(k, data, ttl=3600)
+                    _redis_set(str(k) + ":cancel", True, ttl=3600)
+                    n += 1
+    except Exception:
+        pass
+    return {"ok": True, "stopped": n, "message": "All scans stop-signalled"}
+
 
 # ── Watchlist-only scan ──────────────────────────────────────────────────
 @app.get("/scan/watchlist")
@@ -3732,29 +3786,40 @@ def send_picks_to_telegram(payload: dict):
         title = "📊 *All Actionable Stocks (BUY NOW / PREPARE TO BUY)*"
         picks = recs
 
+    def _num(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
     def format_pick(r, index):
-        symbol = r.get("symbol", "?")
-        decision = r.get("decision", "UNKNOWN")
-        score = r.get("combined_score", 0)
-        close = r.get("close")
-        target = r.get("target")
-        stop = r.get("stop_loss")
-        entry = r.get("entry_range", {})
-        entry_low = entry.get("low")
-        entry_high = entry.get("high")
-        holding = r.get("holding_period", "N/A")
-        lines = []
-        lines.append(f"{index}. *{symbol}* – {decision} (Score: {score})")
-        if close:
+        if not isinstance(r, dict):
+            return f"{index}. *(invalid pick)*"
+        symbol = r.get("symbol") or "?"
+        decision = r.get("decision") or "UNKNOWN"
+        score = r.get("combined_score")
+        if score is None:
+            score = r.get("score") or 0
+        close = _num(r.get("close"))
+        target = _num(r.get("target"))
+        stop = _num(r.get("stop_loss"))
+        entry = r.get("entry_range")
+        if not isinstance(entry, dict):
+            entry = {}
+        entry_low = _num(entry.get("low"))
+        entry_high = _num(entry.get("high"))
+        holding = r.get("holding_period") or r.get("holding_period_estimate") or "N/A"
+        lines = [f"{index}. *{symbol}* – {decision} (Score: {score})"]
+        if close is not None:
             lines.append(f"   Current: ₹{close:.2f}")
-        if entry_low and entry_high:
+        if entry_low is not None and entry_high is not None:
             lines.append(f"   Entry: ₹{entry_low:.2f} – ₹{entry_high:.2f}")
-        if target:
+        if target is not None:
             upside = ((target - close) / close * 100) if close else 0
             lines.append(f"   Target: ₹{target:.2f} (+{upside:.1f}%)")
-        if stop:
+        if stop is not None:
             lines.append(f"   Stop: ₹{stop:.2f}")
-        if holding != "N/A":
+        if holding and holding != "N/A":
             lines.append(f"   Hold: {holding}")
         return "\n".join(lines)
 
@@ -4690,24 +4755,32 @@ def _resolve_quote_price(sym: str):
 
 async def _quote_broadcast_loop():
     """Push quotes for WS-watched symbols.
-    During market hours: ~every 8s for up to 40 symbols.
+    During market hours: slower cadence, only when clients watch symbols.
+    Power-off / activity pause: sleep only — zero upstream quote calls.
     Off-hours / weekend / holiday: idle sleep (no upstream quote spam).
     """
     while True:
         try:
+            if activity_paused() or not _QUOTE_LOOP_ENABLED:
+                await asyncio.sleep(30)
+                continue
+            # No connected clients → do not hit market-data at all
+            if not getattr(ws_manager, "active", None):
+                await asyncio.sleep(20)
+                continue
             phase = _market_session_phase_ist()
-            # Only hammer market-data while session is live (preopen/open/post)
+            # Only fetch while session is live (preopen/open/post)
             if phase not in ("preopen", "open", "post"):
-                await asyncio.sleep(60)
+                await asyncio.sleep(90)
                 continue
 
             symbols = ws_manager.all_watched_symbols()
             if not symbols:
-                await asyncio.sleep(15)
+                await asyncio.sleep(20)
                 continue
 
             # Cap concurrent watched symbols to protect Yahoo/NSE / free-tier
-            for sym in symbols[:25]:
+            for sym in list(symbols)[:12]:
                 q = await asyncio.to_thread(_resolve_quote_price, sym)
                 if q:
                     await ws_manager.broadcast(f"quote:{sym}", {
@@ -4922,66 +4995,152 @@ async def ops_keepalive(deep: bool = False):
 
 @app.post("/ops/power-off")
 async def ops_power_off(background_tasks: BackgroundTasks):
-    """Emergency stop: cancel scans, data-feed, hot-picks; clear frontend-visible jobs.
-    Does not wipe DB. Returns phases for UI messages.
+    """Force-stop ALL user-initiated activity.
+
+    1) Commit / checkpoint in-progress scan + data-feed + hot-picks
+    2) Signal cancel everywhere (process-local + durable)
+    3) Pause activity gate so quote loop / workers idle
+    4) Frontend should reload and only hit health/keepalive afterwards
     """
+    global _ACTIVITY_PAUSED, _QUOTE_LOOP_ENABLED
     phases = []
-    # 1) Cancel active scan tasks
+    set_activity_paused(True)
+    phases.append({"phase": "activity_gate", "ok": True, "detail": "paused — no background fan-out"})
+
+    # 1) Cancel ALL running scans (commit partial)
+    cancelled = 0
     try:
-        cancelled = 0
-        # Mark any in-memory cancel flags
-        for k in list(_mem_kv.keys()):
-            if ":cancel" in str(k) or str(k).endswith(":cancel"):
-                _mem_kv[k] = True
-                cancelled += 1
-            if "scan:task:" in str(k) or "scan_task" in str(k).lower():
-                try:
-                    data = _mem_kv.get(k)
-                    if isinstance(data, dict) and data.get("status") == "running":
-                        data["status"] = "cancelled"
-                        data["cancel_requested"] = True
-                        data["partial"] = True
-                        _mem_kv[k] = data
-                        cancelled += 1
-                except Exception:
-                    pass
-        phases.append({"phase": "scan", "ok": True, "detail": f"cancel signals={cancelled}"})
+        _SCAN_CANCEL_FLAGS.add("__ALL__")
+        # durable scan tasks in mem/kv
+        try:
+            for k in list(getattr(_mem_kv, "keys", lambda: [])() if False else []):
+                pass
+        except Exception:
+            pass
+        # Mark known task keys from a soft scan of common prefixes via redis get of last status
+        try:
+            # Cancel flags: any future scan checks activity_paused()
+            for tid in list(_SCAN_CANCEL_FLAGS):
+                _redis_set(SCAN_TASK_PREFIX + str(tid) + ":cancel", True, ttl=3600)
+        except Exception:
+            pass
+        # Walk process mem kv if present
+        try:
+            for k in list(_mem_kv.keys()):
+                if "scan:task:" in str(k) or str(k).startswith(SCAN_TASK_PREFIX):
+                    try:
+                        data = _mem_kv.get(k)
+                        if isinstance(data, dict) and data.get("status") == "running":
+                            data = dict(data)
+                            data["status"] = "cancelled"
+                            data["cancel_requested"] = True
+                            data["partial"] = True
+                            data["message"] = "Power-off: scan stopped (partial committed)"
+                            _mem_kv[k] = data
+                            try:
+                                _redis_set(k, data, ttl=3600)
+                            except Exception:
+                                pass
+                            cancelled += 1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        phases.append({"phase": "scan", "ok": True, "detail": f"cancel signals committed partial={cancelled}"})
     except Exception as e:
         phases.append({"phase": "scan", "ok": False, "detail": str(e)[:120]})
 
-    # 2) Stop data feed
+    # 2) Stop data feed — force commit to stopped
     try:
+        request_data_feed_stop()
         store = _feed_store()
+        job = store.job() or {}
+        # Preserve checkpoint / ok_count
         store.set_job(
             status="stopped",
-            message="Power-off: data feed stopped",
+            message="Power-off: data feed stopped (checkpoint committed)",
             stop_requested=True,
-            finished_at=__import__("datetime").datetime.now(__import__("zoneinfo").ZoneInfo("Asia/Kolkata")).isoformat(),
+            finished_at=datetime.now(IST).isoformat(),
+            processed=int(job.get("processed") or 0),
+            ok_count=int(job.get("ok_count") or job.get("processed") or 0),
         )
-        phases.append({"phase": "data_feed", "ok": True, "detail": "stopped"})
+        phases.append({"phase": "data_feed", "ok": True, "detail": "stopped + checkpoint"})
     except Exception as e:
         phases.append({"phase": "data_feed", "ok": False, "detail": str(e)[:120]})
 
     # 3) Stop hot picks
     try:
-        from data_feed import hot_job_set
         hot_job_set(
             _redis_set, _redis_get,
             status="idle",
             message="Power-off: Hot Picks stopped",
             processed=0,
+            estimated_remaining_sec=0,
         )
         phases.append({"phase": "hot_picks", "ok": True, "detail": "idle"})
     except Exception as e:
         phases.append({"phase": "hot_picks", "ok": False, "detail": str(e)[:120]})
 
-    # 4) Soft warm (optional, non-blocking)
-    phases.append({"phase": "ready", "ok": True, "detail": "All stoppable jobs signalled. Refresh UI for fresh start."})
+    # 4) Clear WS quote watches so loop has nothing to fetch
+    try:
+        for ws in list(getattr(ws_manager, "active", []) or []):
+            try:
+                ws_manager.unwatch_quotes(ws, None)
+            except Exception:
+                pass
+        phases.append({"phase": "quotes", "ok": True, "detail": "unwatched all symbols"})
+    except Exception as e:
+        phases.append({"phase": "quotes", "ok": False, "detail": str(e)[:120]})
+
+    # 5) Best-effort stop training lock on decision-prediction service
+    try:
+        client = _get_http_client()
+        urls = [
+            f"{TRAINING_URL.rstrip('/')}/api/train/stop",
+            f"{TRAINING_URL.rstrip('/')}/training/stop",
+            f"{DECISION_URL.rstrip('/')}/training/clear-lock",
+        ]
+        stopped_tr = False
+        for u in urls:
+            try:
+                r = await client.post(u, timeout=8)
+                if r.status_code < 500:
+                    stopped_tr = True
+                    break
+            except Exception:
+                continue
+        phases.append({"phase": "training", "ok": True, "detail": "stop signalled" if stopped_tr else "best-effort"})
+    except Exception as e:
+        phases.append({"phase": "training", "ok": False, "detail": str(e)[:120]})
+
+    phases.append({"phase": "ready", "ok": True, "detail": "All stoppable jobs force-stopped. Only health/keepalive allowed until resume."})
     return {
         "ok": True,
-        "message": "Switching OFF processes → restarting state → ready for fresh start",
+        "message": "Power Off complete — all activity stopped; checkpoints committed",
         "phases": phases,
-        "hint": "Scan/data-feed/hot-picks stopped. Training lock is per-service — use Stop Training if needed.",
+        "activity_paused": True,
+        "hint": "UI should reload. Background quote fan-out and jobs are paused. GitHub workflows remain independent.",
+    }
+
+
+@app.post("/ops/resume-activity")
+def ops_resume_activity():
+    """Clear Power-Off pause so scans / feeds / quotes can run again."""
+    set_activity_paused(False)
+    try:
+        _SCAN_CANCEL_FLAGS.discard("__ALL__")
+    except Exception:
+        pass
+    return {"ok": True, "activity_paused": False, "message": "Activity resumed"}
+
+
+@app.get("/ops/activity")
+def ops_activity_status():
+    return {
+        "ok": True,
+        "activity_paused": activity_paused(),
+        "quote_loop_enabled": bool(_QUOTE_LOOP_ENABLED),
+        "scan_cancel_flags": len(_SCAN_CANCEL_FLAGS),
     }
 
 

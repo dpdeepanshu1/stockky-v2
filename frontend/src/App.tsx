@@ -32,21 +32,45 @@ type Tab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "data
 
 async function powerOffAll() {
   try {
-    window.alert("Switching OFF all processes…\nStopping scan / data-feed / hot-picks.\nThen system will be ready for a fresh start.");
-    const base = import.meta.env.VITE_API_URL || "";
-    const r = await fetch(`${base}/ops/power-off`, { method: "POST" });
-    const j = await r.json().catch(() => ({}));
     window.alert(
-      (j?.message || "Processes stopped.") +
-      "\n\n" +
-      (Array.isArray(j?.phases) ? j.phases.map((p: any) => `${p.phase}: ${p.detail}`).join("\n") : "") +
-      "\n\nReady for fresh start. Refreshing…"
+      "Switching OFF all processes…\n" +
+        "Committing in-progress work, then force-stopping scan / data-feed / hot-picks / training.\n" +
+        "Only health checks will remain."
     );
-    // Clear local scan / UI state
+    const base = import.meta.env.VITE_API_URL || "";
+    // Stop client-side keep-alive and any local intervals before backend
+    try {
+      const { stopSessionKeepAlive } = await import("./api");
+      stopSessionKeepAlive();
+    } catch {}
     try {
       sessionStorage.removeItem("stockky_scan_task");
       localStorage.removeItem("stockky_scan_task");
+      sessionStorage.removeItem("stockky_ws_quotes");
     } catch {}
+    // Parallel force-stops so backend workers die even if power-off is slow
+    const stops = [
+      fetch(`${base}/ops/power-off`, { method: "POST" }),
+      fetch(`${base}/scan/stop-all`, { method: "POST" }).catch(() => null),
+      fetch(`${base}/data-feed/stop?force=true`, { method: "POST" }).catch(() => null),
+    ];
+    const results = await Promise.allSettled(stops);
+    let j: any = {};
+    if (results[0].status === "fulfilled") {
+      try {
+        j = await (results[0] as PromiseFulfilledResult<Response>).value.json();
+      } catch {
+        j = {};
+      }
+    }
+    window.alert(
+      (j?.message || "Processes stopped.") +
+        "\n\n" +
+        (Array.isArray(j?.phases)
+          ? j.phases.map((p: any) => `${p.phase}: ${p.detail}`).join("\n")
+          : "") +
+        "\n\nReady for fresh start. Refreshing…"
+    );
     window.location.reload();
   } catch (e: any) {
     window.alert("Power-off failed: " + (e?.message || e));
@@ -470,6 +494,8 @@ export default function App() {
     if (taskId) {
       try {
         await api.scanCancel(taskId);
+        // Belt-and-suspenders: signal every running scan on gateway
+        try { await api.stopAllScans(); } catch {}
       } catch (e) {
         console.warn("Cancel request failed", e);
       }

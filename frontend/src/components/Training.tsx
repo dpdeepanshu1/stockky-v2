@@ -222,9 +222,17 @@ export default function Training() {
     fetchSummaryMetrics();
     refreshEvaluateStatus();
     fetchPeriodRollup("daily");
+    // Slow idle refresh only — never hammer training service when idle
+    const idle = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      if (trainingActiveRef.current) return;
+      fetchStatus();
+    }, 60000);
     return () => {
+      window.clearInterval(idle);
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      if (progressPollRef.current) clearInterval(progressPollRef.current);
     };
   }, []);
 
@@ -285,7 +293,7 @@ export default function Training() {
       }
     };
     poll();
-    progressPollRef.current = setInterval(poll, 3000);  // slightly slower progress poll
+    progressPollRef.current = setInterval(poll, 5000);  // progress while training only
     return () => {
       if (progressPollRef.current) clearInterval(progressPollRef.current);
     };
@@ -330,9 +338,10 @@ export default function Training() {
     }, 1000);
 
     if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+    // Fast poll only while a training run is active
     pollIntervalRef.current = setInterval(() => {
       fetchStatus();
-    }, 3000);
+    }, 5000);
   };
 
   const stopTraining = (success: boolean, data?: TrainingStatusResponse | null) => {

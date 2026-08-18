@@ -42,9 +42,14 @@ function toWsUrl(httpBase: string): string | null {
   }
 }
 
+const MAX_WATCHED = 12;
+
 /**
  * WebSocket client for Stockky API Gateway /ws.
- * Supports scan progress + live quotes. Falls back to disconnected for HTTP polling.
+ * Scan progress + limited live quotes.
+ * - Does NOT HTTP-poll /quote when idle
+ * - Clears quote subscriptions when tab is hidden
+ * - Caps watched symbols to avoid free-tier overload
  */
 export function useStockkyRealtime(onMessage?: (msg: RealtimeMessage) => void) {
   const [connected, setConnected] = useState(false);
@@ -59,6 +64,9 @@ export function useStockkyRealtime(onMessage?: (msg: RealtimeMessage) => void) {
     const base = getApiUrl();
     const url = toWsUrl(base);
     if (!url) return;
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      return;
+    }
 
     try {
       const ws = new WebSocket(url);
@@ -67,7 +75,7 @@ export function useStockkyRealtime(onMessage?: (msg: RealtimeMessage) => void) {
         setConnected(true);
         retries.current = 0;
         ws.send(JSON.stringify({ action: "subscribe", channel: "all" }));
-        const syms = Array.from(watchedRef.current);
+        const syms = Array.from(watchedRef.current).slice(0, MAX_WATCHED);
         if (syms.length) {
           ws.send(JSON.stringify({ action: "subscribe_quotes", symbols: syms }));
         }
@@ -82,20 +90,24 @@ export function useStockkyRealtime(onMessage?: (msg: RealtimeMessage) => void) {
               close: data.close != null ? Number(data.close) : undefined,
               as_of: data.as_of ? String(data.as_of) : undefined,
               source: data.source ? String(data.source) : undefined,
-              change_pct: data.change_pct != null ? Number(data.change_pct) : undefined,
+              change_pct:
+                data.change_pct != null ? Number(data.change_pct) : undefined,
             };
             setQuotes((prev) => ({ ...prev, [q.symbol]: q }));
           }
           onMsgRef.current?.(data);
         } catch {
-          /* ignore */
+          /* ignore malformed */
         }
       };
       ws.onclose = () => {
         setConnected(false);
         wsRef.current = null;
-        const delay = Math.min(15000, 1000 * Math.pow(1.5, retries.current++));
-        setTimeout(connect, delay);
+        // Retry only while tab visible
+        if (typeof document !== "undefined" && document.visibilityState === "visible") {
+          const delay = Math.min(15000, 1500 * Math.pow(1.5, retries.current++));
+          setTimeout(() => connect(), delay);
+        }
       };
       ws.onerror = () => {
         try {
@@ -112,14 +124,41 @@ export function useStockkyRealtime(onMessage?: (msg: RealtimeMessage) => void) {
   useEffect(() => {
     connect();
     const ping = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ action: "ping" }));
       }
-    }, 25000);
+    }, 30000);
+
+    const onVis = () => {
+      if (document.visibilityState === "hidden") {
+        // Drop quote watches when user leaves — stops backend /quote fan-out
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ action: "unsubscribe_quotes" }));
+        }
+      } else if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        connect();
+      } else {
+        const syms = Array.from(watchedRef.current).slice(0, MAX_WATCHED);
+        if (syms.length) {
+          wsRef.current.send(
+            JSON.stringify({ action: "subscribe_quotes", symbols: syms })
+          );
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+
     return () => {
       clearInterval(ping);
+      document.removeEventListener("visibilitychange", onVis);
       try {
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ action: "unsubscribe_quotes" }));
+        }
         wsRef.current?.close();
       } catch {
         /* ignore */
@@ -139,10 +178,16 @@ export function useStockkyRealtime(onMessage?: (msg: RealtimeMessage) => void) {
     const cleaned = symbols
       .map((s) => s.toUpperCase().replace(/\.NS$/i, "").replace(/\.BO$/i, "").trim())
       .filter(Boolean);
-    cleaned.forEach((s) => watchedRef.current.add(s));
+    // Replace watch set (don't accumulate forever across pages)
+    watchedRef.current = new Set(cleaned.slice(0, MAX_WATCHED));
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN && cleaned.length) {
-      ws.send(JSON.stringify({ action: "subscribe_quotes", symbols: cleaned }));
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      // Clear previous then subscribe limited set
+      ws.send(JSON.stringify({ action: "unsubscribe_quotes" }));
+      const syms = Array.from(watchedRef.current);
+      if (syms.length && document.visibilityState !== "hidden") {
+        ws.send(JSON.stringify({ action: "subscribe_quotes", symbols: syms }));
+      }
     }
   }, []);
 

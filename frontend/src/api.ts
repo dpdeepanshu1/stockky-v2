@@ -995,6 +995,15 @@ export const api = {
     request<any>("/data-feed/resume", { method: "POST" }, 2, 45000),
   stopDataFeed: () =>
     request<any>("/data-feed/stop?force=true", { method: "POST" }, 2, 45000),
+
+  stopAllScans: () =>
+    request<any>("/scan/stop-all", { method: "POST" }, 1, 20000),
+
+  powerOff: () =>
+    request<any>("/ops/power-off", { method: "POST" }, 1, 45000),
+
+  resumeActivity: () =>
+    request<any>("/ops/resume-activity", { method: "POST" }, 1, 15000),
   getDataFeedSymbol: (symbol: string) =>
     request<any>(`/data-feed/${encodeURIComponent(symbol)}`, undefined, 1, 20000),
 

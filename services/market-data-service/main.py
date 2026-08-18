@@ -29,6 +29,9 @@ from pydantic import BaseModel
 
 import httpx
 from circuit_breaker import get_breaker, all_snapshots
+import gc
+MAX_HISTORY_ROWS = int(os.environ.get('MAX_HISTORY_ROWS', '260'))  # ~1y daily, 512MB-safe
+MAX_HISTORY_PERIOD = os.environ.get('MAX_HISTORY_PERIOD', '1y')
 
 def _report_rate_limit(status: int, path: str = "", detail: str = "", symbol: str = "") -> None:
     try:
@@ -582,6 +585,10 @@ def get_history(
     period: str = Query("6mo", description="1mo, 3mo, 6mo, 1y, 2y, 5y"),
     interval: str = Query("1d", description="1d, 1wk, 1h"),
 ):
+    # Cap long periods on free-tier 512MB dynos
+    _period_rank = {"1mo": 1, "3mo": 2, "6mo": 3, "1y": 4, "2y": 5, "5y": 6}
+    if _period_rank.get(period, 4) > _period_rank.get(MAX_HISTORY_PERIOD, 4):
+        period = MAX_HISTORY_PERIOD
     """OHLCV for equities and indices.
 
     Index display names (e.g. "NIFTY NEXT 50") are mapped via normalize_symbol
@@ -640,7 +647,14 @@ def get_history(
 
             if not candles:
                 last_err = f"no valid candles for {cand}"
+                del df
+                gc.collect()
                 continue
+
+            if len(candles) > MAX_HISTORY_ROWS:
+                candles = candles[-MAX_HISTORY_ROWS:]
+            del df
+            gc.collect()
 
             result = {
                 "symbol": cand,

@@ -405,11 +405,12 @@ def _generate_llm_note(features: dict, probability: float, symbol: str) -> str:
     import time as _time
     global _gemini_cooldown_until
     order = []
+    # Prefer Groq on free tier (higher reliability); Gemini only as fallback off cooldown
+    order.append(_call_groq)
     if _time.time() >= _gemini_cooldown_until:
         order.append(_call_gemini)
     else:
         logger.info("Skipping Gemini (cooldown until %s)", int(_gemini_cooldown_until))
-    order.append(_call_groq)
     for call in order:
         note = call(system_prompt, user_prompt)
         if note:

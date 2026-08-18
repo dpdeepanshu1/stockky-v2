@@ -22,11 +22,15 @@ from sqlalchemy import create_engine, func, text
 from sqlalchemy.orm import sessionmaker
 
 from models import Base, ensure_schema, PredictionSnapshot, PredictionOutcome, TrainingRun, PaperTrade
+from pit_validation import validate_prediction_snapshot, validate_outcome_vs_prediction
 import trades as trades_module
 from evaluate import (
     evaluate_t1 as _evaluate_t1_prediction,
+    compute_training_metrics,
+    compute_training_metrics,
     evaluate_t5 as _evaluate_t5_prediction,
     evaluate_pending_predictions,
+    compute_training_metrics,
 )
 from train import request_abort   # <-- abort function
 
@@ -550,6 +554,23 @@ async def store_prediction(pred: PredictionSnapshotCreate, background_tasks: Bac
         db.query(PredictionSnapshot).filter(PredictionSnapshot.timestamp < cutoff).delete()
         db.commit()
 
+        # Point-in-time validation (non-fatal warnings; hard issues logged)
+        try:
+            _pit = validate_prediction_snapshot({
+                "timestamp": pred.timestamp if hasattr(pred, "timestamp") else None,
+                "as_of": getattr(pred, "timestamp", None),
+                "combined_score": getattr(pred, "combined_score", None),
+                "technical_score": getattr(pred, "technical_score", None),
+                "fundamental_score": getattr(pred, "fundamental_score", None),
+                "prediction_score": getattr(pred, "prediction_score", None),
+                "decision": getattr(pred, "decision", None),
+                "feature_snapshot": getattr(pred, "feature_snapshot", None),
+                "provisional": getattr(pred, "provisional", None) if hasattr(pred, "provisional") else None,
+            })
+            if not _pit.get("ok"):
+                logger.warning("PIT validation issues for %s: %s", getattr(pred, "symbol", "?"), _pit.get("issues"))
+        except Exception as _pit_e:
+            logger.debug("PIT validate skip: %s", _pit_e)
         snapshot = PredictionSnapshot(
             prediction_id=pred_id,
             symbol=pred.symbol,
@@ -608,26 +629,56 @@ async def store_prediction(pred: PredictionSnapshotCreate, background_tasks: Bac
         db.close()
 
 @app.post("/api/evaluate/t1")
-async def api_evaluate_t1(background_tasks: BackgroundTasks, max_batch: int = 50):
-    """Trigger T+1 evaluation of all pending predictions (catch-up sweep)."""
+async def api_evaluate_t1(background_tasks: BackgroundTasks, max_batch: int = 50, sync: bool = True):
+    """
+    T+1 evaluation of due predictions.
+    sync=true (default): run in-request so GitHub Actions / curl get real counts
+    (background tasks die on free-tier sleep).
+    """
+    max_batch = max(1, min(int(max_batch or 50), 150))
+    if sync:
+        try:
+            result = evaluate_pending_predictions("T+1", max_batch=max_batch)
+            metrics = {}
+            try:
+                metrics = compute_training_metrics() or {}
+            except Exception:
+                pass
+            return JSONResponse(content={
+                "status": "T+1 evaluation complete",
+                "sync": True,
+                "result": result,
+                "metrics_t1": (metrics.get("T+1") if isinstance(metrics, dict) else None),
+            })
+        except Exception as e:
+            logger.error("T+1 evaluation failed: %s", e)
+            raise HTTPException(status_code=500, detail=str(e))
     def run_eval():
         try:
-            evaluate_pending_predictions('T+1', max_batch=max_batch)
+            evaluate_pending_predictions("T+1", max_batch=max_batch)
         except Exception as e:
-            logger.error(f"T+1 evaluation failed: {e}")
+            logger.error("T+1 evaluation failed: %s", e)
     background_tasks.add_task(run_eval)
-    return JSONResponse(content={"status": "T+1 evaluation triggered"})
+    return JSONResponse(content={"status": "T+1 evaluation triggered", "sync": False})
 
 @app.post("/api/evaluate/t5")
-async def api_evaluate_t5(background_tasks: BackgroundTasks, max_batch: int = 50):
-    """Trigger T+5 evaluation of all pending predictions (catch-up sweep)."""
+async def api_evaluate_t5(background_tasks: BackgroundTasks, max_batch: int = 50, sync: bool = True):
+    """T+5 evaluation — sync by default for reliable cron delivery."""
+    max_batch = max(1, min(int(max_batch or 50), 150))
+    if sync:
+        try:
+            result = evaluate_pending_predictions("T+5", max_batch=max_batch)
+            return JSONResponse(content={"status": "T+5 evaluation complete", "sync": True, "result": result})
+        except Exception as e:
+            logger.error("T+5 evaluation failed: %s", e)
+            raise HTTPException(status_code=500, detail=str(e))
     def run_eval():
         try:
-            evaluate_pending_predictions('T+5', max_batch=max_batch)
+            evaluate_pending_predictions("T+5", max_batch=max_batch)
         except Exception as e:
-            logger.error(f"T+5 evaluation failed: {e}")
+            logger.error("T+5 evaluation failed: %s", e)
     background_tasks.add_task(run_eval)
-    return JSONResponse(content={"status": "T+5 evaluation triggered"})
+    return JSONResponse(content={"status": "T+5 evaluation triggered", "sync": False})
 
 
 @app.get("/api/evaluate/status")
@@ -1217,6 +1268,17 @@ async def trigger_train(background_tasks: BackgroundTasks):
 # ----------------------------------------------------------------------
 # Run with uvicorn
 # ----------------------------------------------------------------------
+
+@app.get("/api/rl/explore-info")
+async def api_rl_explore_info():
+    """Research notes + bandit snapshot (not live trading)."""
+    try:
+        from rl_explore import explore_note, bandit
+        return JSONResponse(content={**explore_note(), "bandit": bandit.snapshot()})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)[:200]}, status_code=500)
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get('PORT', 5001))

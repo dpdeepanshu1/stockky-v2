@@ -1,3 +1,4 @@
+import gc
 """
 Technical Analysis Service
 ---------------------------
@@ -130,10 +131,10 @@ def _fetch_history_yfinance(symbol: str):
     try:
         import yfinance as yf
         ticker = yf.Ticker(f"{symbol}.NS")
-        hist = ticker.history(period="1y", interval="1d", auto_adjust=True)
+        hist = ticker.history(period="6mo", interval="1d", auto_adjust=True)
         if hist is None or hist.empty:
             ticker = yf.Ticker(symbol)
-            hist = ticker.history(period="1y", interval="1d", auto_adjust=True)
+            hist = ticker.history(period="6mo", interval="1d", auto_adjust=True)
         if hist is None or hist.empty:
             return None
         candles = []
@@ -165,7 +166,7 @@ def _fetch_history(symbol: str):
             pass
         resp = httpx.get(
             f"{MARKET_DATA_URL}/history/{symbol}",
-            params={"period": "1y"},
+            params={"period": "6mo"},
             timeout=35,
         )
         if resp.status_code == 200:
@@ -182,6 +183,9 @@ def _fetch_history(symbol: str):
     df = _fetch_history_yfinance(symbol)
     if df is not None:
         logger.info("Using yfinance history for %s (%s bars)", symbol, len(df))
+        if len(df) > 260:
+            df = df.iloc[-260:]
+        gc.collect()
         return df
     return None
 

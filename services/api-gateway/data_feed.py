@@ -178,3 +178,53 @@ def hot_job_set(redis_set, redis_get, **kwargs) -> dict:
             pass
     redis_set(HOT_JOB_KEY, j, ttl=86400)
     return j
+
+
+# ── Cache stampede protection ─────────────────────────────────────────────
+LOCK_PREFIX = "stockky:lock:refresh:"
+
+
+def try_refresh_lock(redis_client, symbol: str, ttl_sec: int = 5) -> bool:
+    """
+    Distributed mutex: only one worker refreshes a ticker at a time.
+    Returns True if this caller holds the lock (should fetch upstream).
+    Upstash Redis: SET key value NX EX ttl
+    """
+    if redis_client is None:
+        return True
+    key = f"{LOCK_PREFIX}{(symbol or '').upper()}"
+    try:
+        # upstash-redis supports set with ex + nx
+        ok = redis_client.set(key, "1", nx=True, ex=int(ttl_sec))
+        return bool(ok)
+    except TypeError:
+        try:
+            # fallback signature
+            ok = redis_client.set(key, "1", ex=ttl_sec, nx=True)
+            return bool(ok)
+        except Exception as e:
+            logger.debug("refresh lock unavailable: %s", e)
+            return True
+    except Exception as e:
+        logger.debug("refresh lock error: %s", e)
+        return True
+
+
+def release_refresh_lock(redis_client, symbol: str) -> None:
+    if redis_client is None:
+        return
+    try:
+        redis_client.delete(f"{LOCK_PREFIX}{(symbol or '').upper()}")
+    except Exception:
+        pass
+
+
+def soft_ttl_should_refresh(redis_client, key: str, soft_window: int = 10) -> bool:
+    """True when key is within soft_window seconds of expiry."""
+    if redis_client is None:
+        return False
+    try:
+        ttl = redis_client.ttl(key)
+        return isinstance(ttl, int) and 0 < ttl <= soft_window
+    except Exception:
+        return False

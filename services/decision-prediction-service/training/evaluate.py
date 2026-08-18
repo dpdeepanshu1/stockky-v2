@@ -13,6 +13,10 @@ import pandas as pd
 
 # ✅ Absolute import
 import models as db_models
+try:
+    from pit_validation import validate_outcome_vs_prediction
+except Exception:
+    validate_outcome_vs_prediction = None
 from metrics import calculate_sharpe, calculate_sortino, max_drawdown, cumulative_return, win_rate, profit_factor
 
 logger = logging.getLogger("training-service.evaluate")
@@ -30,34 +34,133 @@ except Exception:
 SessionLocal = sessionmaker(bind=engine)
 
 
+# ---------- Price fetch (market-data first, yfinance fallback) ----------
+MARKET_DATA_URL = os.environ.get("MARKET_DATA_URL", "").rstrip("/")
+
+
+def _fetch_bars(symbol: str, start_date, end_date):
+    """
+    Return list of {date, open, high, low, close} between start and end (inclusive-ish).
+    Prefers market-data service (keeps Yahoo pressure on one dyno); falls back to yfinance.
+    """
+    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "")
+    rows = []
+    # 1) market-data history
+    if MARKET_DATA_URL:
+        try:
+            import httpx
+            # period long enough to cover T+5 + weekends
+            r = httpx.get(
+                f"{MARKET_DATA_URL}/history/{base}",
+                params={"period": "1mo", "interval": "1d"},
+                timeout=20.0,
+            )
+            if r.status_code == 200:
+                data = r.json() or {}
+                candles = data.get("candles") or data.get("data") or []
+                for c in candles:
+                    # support various shapes
+                    d = c.get("date") or c.get("time") or c.get("t")
+                    if not d:
+                        continue
+                    try:
+                        if isinstance(d, (int, float)):
+                            dt = datetime.utcfromtimestamp(d if d < 1e12 else d / 1000).date()
+                        else:
+                            dt = datetime.fromisoformat(str(d).replace("Z", "").split("T")[0]).date()
+                    except Exception:
+                        continue
+                    if start_date and dt < start_date:
+                        continue
+                    if end_date and dt > end_date:
+                        continue
+                    rows.append({
+                        "date": dt,
+                        "open": float(c.get("open") or c.get("o") or 0),
+                        "high": float(c.get("high") or c.get("h") or 0),
+                        "low": float(c.get("low") or c.get("l") or 0),
+                        "close": float(c.get("close") or c.get("c") or 0),
+                    })
+                if len(rows) >= 2:
+                    rows.sort(key=lambda x: x["date"])
+                    return rows
+        except Exception as e:
+            logger.debug("market-data history for eval failed: %s", e)
+
+    # 2) yfinance fallback
+    try:
+        ticker = yf.Ticker(base + ".NS")
+        hist = ticker.history(start=start_date, end=end_date + timedelta(days=1))
+        if hist is None or len(hist) < 2:
+            ticker = yf.Ticker(base)
+            hist = ticker.history(start=start_date, end=end_date + timedelta(days=1))
+        if hist is not None and len(hist) >= 2:
+            for idx, row in hist.iterrows():
+                try:
+                    dt = idx.date() if hasattr(idx, "date") else idx
+                except Exception:
+                    continue
+                rows.append({
+                    "date": dt,
+                    "open": float(row.get("Open", 0) or 0),
+                    "high": float(row.get("High", 0) or 0),
+                    "low": float(row.get("Low", 0) or 0),
+                    "close": float(row.get("Close", 0) or 0),
+                })
+            rows.sort(key=lambda x: x["date"])
+    except Exception as e:
+        logger.warning("yfinance eval bars failed for %s: %s", base, e)
+    return rows
+
+
+def _entry_and_t1_close(pred, bars):
+    """
+    Map prediction date to entry (close on/after pred day) and T+1 close (next session).
+    """
+    if not bars or len(bars) < 2:
+        return None, None, None
+    pred_day = pred.timestamp.date() if pred.timestamp else bars[0]["date"]
+    # first bar on or after prediction date = session 0
+    session0 = None
+    for i, b in enumerate(bars):
+        if b["date"] >= pred_day:
+            session0 = i
+            break
+    if session0 is None:
+        return None, None, None
+    entry = bars[session0]["close"]
+    if session0 + 1 >= len(bars):
+        return entry, None, bars[session0]
+    t1 = bars[session0 + 1]
+    return entry, t1["close"], t1
+
+
+
 # ---------- Existing T+1 / T+5 evaluators (kept intact, with minor enhancements) ----------
 
 def evaluate_t1(prediction_id: str):
-    """Evaluate a prediction on T+1 (next trading day)."""
+    """Evaluate a prediction on T+1 (next trading session close vs entry)."""
     db = SessionLocal()
     try:
         pred = db.query(db_models.PredictionSnapshot).filter(
             db_models.PredictionSnapshot.prediction_id == prediction_id
         ).first()
         if not pred:
-            logger.warning(f"Prediction {prediction_id} not found")
-            return
+            logger.warning("Prediction %s not found", prediction_id)
+            return {"ok": False, "reason": "not_found"}
 
         existing = db.query(db_models.PredictionOutcome).filter(
             db_models.PredictionOutcome.prediction_id == prediction_id,
-            db_models.PredictionOutcome.evaluation_period == 'T+1'
+            db_models.PredictionOutcome.evaluation_period == "T+1",
         ).first()
         if existing:
-            return
+            return {"ok": True, "reason": "already_evaluated", "success": bool(existing.success)}
 
-        symbol = pred.symbol + ".NS"
-        start_date = pred.timestamp.date()
-        end_date = start_date + timedelta(days=5)
+        start_date = pred.timestamp.date() if pred.timestamp else datetime.utcnow().date()
+        end_date = start_date + timedelta(days=10)  # cover weekends/holidays
+        bars = _fetch_bars(pred.symbol, start_date, end_date)
 
-        ticker = yf.Ticker(symbol)
-        hist = ticker.history(start=start_date, end=end_date)
-
-        if len(hist) < 2:
+        if not bars or len(bars) < 2:
             age_days = 0
             if pred.timestamp is not None:
                 ts = pred.timestamp
@@ -67,116 +170,163 @@ def evaluate_t1(prediction_id: str):
                     age_days = (datetime.utcnow() - ts).days
                 except Exception:
                     age_days = 0
-            logger.warning(f"Not enough data for {symbol} on T+1 (age={age_days}d)")
-            if age_days >= 14:
-                # Drain stuck queue — mark failed so training/status move on
+            logger.warning("Not enough data for %s on T+1 (age=%sd)", pred.symbol, age_days)
+            # Mark failed only after enough calendar time that bars should exist
+            if age_days >= 5:
                 pred.t1_success = 2
                 db.commit()
-                logger.info(f"Marked {prediction_id} T+1 as failed after {age_days}d without bars")
-            return
+                return {"ok": False, "reason": "no_bars", "age_days": age_days}
+            return {"ok": False, "reason": "not_enough_bars", "age_days": age_days}
 
-        next_day = hist.iloc[1]
-        open_price = next_day['Open']
-        high = next_day['High']
-        low = next_day['Low']
-        close = next_day['Close']
+        entry_price = pred.entry_range_low or pred.entry_range_high
+        bar_entry, t1_close, t1_bar = _entry_and_t1_close(pred, bars)
+        if entry_price is None or entry_price <= 0:
+            entry_price = bar_entry
+        if entry_price is None or t1_close is None or entry_price <= 0:
+            logger.warning("Cannot resolve entry/T+1 close for %s", pred.symbol)
+            return {"ok": False, "reason": "no_entry_or_t1"}
 
-        entry_price = pred.price
-        max_favorable = max(high - entry_price, 0) / entry_price * 100
-        max_adverse = max(entry_price - low, 0) / entry_price * 100
-        return_pct = (close - entry_price) / entry_price * 100
-
-        entry_reached = 1 if (low <= entry_price <= high) else 0
-        target_reached = 1 if (pred.target and high >= pred.target) else 0
-        stop_loss_reached = 1 if (pred.stop_loss and low <= pred.stop_loss) else 0
-        direction_correct = 1 if (return_pct > 0) else 0
-        success = 1 if (target_reached or (direction_correct and return_pct > 1.0)) else 0
+        target = pred.target
+        return_pct = (t1_close - entry_price) / entry_price * 100.0
+        target_reached = bool(target and t1_close >= target)
+        # BUY/PREPARE: success if target hit OR solid positive move (>1%)
+        # Avoid / Sell: success if price fell or flat
+        decision = (pred.decision or "").upper()
+        if decision in ("BUY NOW", "PREPARE TO BUY", "PREPARE", "BUY"):
+            success = 1 if (target_reached or return_pct > 1.0) else 0
+        elif decision in ("SELL", "AVOID", "AVOID / WAIT", "WAIT"):
+            success = 1 if return_pct <= 0.5 else 0
+        else:
+            success = 1 if return_pct > 0 else 0
 
         outcome = db_models.PredictionOutcome(
             prediction_id=prediction_id,
-            evaluation_period='T+1',
-            evaluation_date=next_day.name.to_pydatetime(),
-            open_price=open_price,
-            high_price=high,
-            low_price=low,
-            close_price=close,
-            max_favorable_excursion=round(max_favorable, 2),
-            max_adverse_excursion=round(max_adverse, 2),
+            evaluation_period="T+1",
+            evaluation_date=datetime.utcnow(),
+            open_price=t1_bar.get("open") if t1_bar else None,
+            high_price=t1_bar.get("high") if t1_bar else None,
+            low_price=t1_bar.get("low") if t1_bar else None,
+            close_price=t1_close,
             return_pct=round(return_pct, 2),
-            entry_reached=entry_reached,
-            target_reached=target_reached,
-            stop_loss_reached=stop_loss_reached,
-            direction_correct=direction_correct,
-            success=success
+            target_reached=1 if target_reached else 0,
+            direction_correct=1 if return_pct > 0 else 0,
+            success=success,
         )
-        db.add(outcome)
-        db.commit()
-        logger.info(f"T+1 evaluation completed for {prediction_id}")
+        # optional columns may not exist on older schema
+        try:
+            db.add(outcome)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            # minimal insert without optional fields
+            logger.warning("Outcome insert retry minimal: %s", e)
+            outcome = db_models.PredictionOutcome(
+                prediction_id=prediction_id,
+                evaluation_period="T+1",
+                evaluation_date=datetime.utcnow(),
+                close_price=t1_close,
+                return_pct=round(return_pct, 2),
+                success=success,
+            )
+            db.add(outcome)
+            db.commit()
 
+        if validate_outcome_vs_prediction:
+            _pit_o = validate_outcome_vs_prediction(
+                pred.timestamp, "T+1",
+                bar_date=t1_bar.get("date") if t1_bar else None,
+                evaluation_date=datetime.utcnow(),
+            )
+            if not _pit_o.get("ok"):
+                logger.warning("PIT outcome reject T+1 %s: %s", pred.symbol, _pit_o.get("issues"))
+                return {"ok": False, "reason": "pit_fail", "issues": _pit_o.get("issues")}
+        logger.info(
+            "T+1 %s %s entry=%.2f close=%.2f ret=%.2f%% success=%s",
+            pred.symbol, decision, entry_price, t1_close, return_pct, success,
+        )
+        update_prediction_success(prediction_id)
+        return {
+            "ok": True,
+            "symbol": pred.symbol,
+            "entry": entry_price,
+            "t1_close": t1_close,
+            "return_pct": round(return_pct, 2),
+            "success": bool(success),
+        }
     except Exception as e:
-        logger.error(f"Error evaluating T+1 for {prediction_id}: {e}")
+        logger.exception("evaluate_t1 failed for %s: %s", prediction_id, e)
         db.rollback()
+        return {"ok": False, "error": str(e)}
     finally:
         db.close()
 
-    # Propagate onto PredictionSnapshot outside the try/finally above so
-    # it still runs even though that block already closed its own session.
-    update_prediction_success(prediction_id)
+
 
 def evaluate_t5(prediction_id: str):
-    """Evaluate a prediction on T+5 (approximately one week)."""
+    """Evaluate a prediction on T+5 (5th session close vs entry)."""
     db = SessionLocal()
     try:
         pred = db.query(db_models.PredictionSnapshot).filter(
             db_models.PredictionSnapshot.prediction_id == prediction_id
         ).first()
         if not pred:
-            return
+            return {"ok": False, "reason": "not_found"}
 
         existing = db.query(db_models.PredictionOutcome).filter(
             db_models.PredictionOutcome.prediction_id == prediction_id,
-            db_models.PredictionOutcome.evaluation_period == 'T+5'
+            db_models.PredictionOutcome.evaluation_period == "T+5",
         ).first()
         if existing:
-            return
+            return {"ok": True, "reason": "already_evaluated", "success": bool(existing.success)}
 
-        symbol = pred.symbol + ".NS"
-        start_date = pred.timestamp.date()
-        end_date = start_date + timedelta(days=15)
+        start_date = pred.timestamp.date() if pred.timestamp else datetime.utcnow().date()
+        end_date = start_date + timedelta(days=20)
+        bars = _fetch_bars(pred.symbol, start_date, end_date)
+        if not bars or len(bars) < 6:
+            logger.warning("Not enough data for %s on T+5 (bars=%s)", pred.symbol, len(bars) if bars else 0)
+            return {"ok": False, "reason": "not_enough_bars"}
 
-        ticker = yf.Ticker(symbol)
-        hist = ticker.history(start=start_date, end=end_date)
+        pred_day = start_date
+        session0 = None
+        for i, b in enumerate(bars):
+            if b["date"] >= pred_day:
+                session0 = i
+                break
+        if session0 is None:
+            return {"ok": False, "reason": "no_session0"}
+        if session0 + 5 >= len(bars):
+            return {"ok": False, "reason": "t5_not_available_yet"}
 
-        if len(hist) < 6:
-            logger.warning(f"Not enough data for {symbol} on T+5")
-            return
-
-        t5_day = hist.iloc[5] if len(hist) > 5 else hist.iloc[-1]
-        open_price = t5_day['Open']
-        high = t5_day['High']
-        low = t5_day['Low']
-        close = t5_day['Close']
-
-        entry_price = pred.price
-        period_high = hist['High'].iloc[1:6].max() if len(hist) > 5 else hist['High'].max()
-        period_low = hist['Low'].iloc[1:6].min() if len(hist) > 5 else hist['Low'].min()
+        entry_price = getattr(pred, "price", None) or pred.entry_range_low or pred.entry_range_high or bars[session0]["close"]
+        window = bars[session0 + 1 : session0 + 6]
+        t5_bar = window[-1]
+        period_high = max(b["high"] for b in window)
+        period_low = min(b["low"] for b in window)
+        close = t5_bar["close"]
+        if not entry_price or entry_price <= 0:
+            return {"ok": False, "reason": "no_entry"}
 
         max_favorable = max(period_high - entry_price, 0) / entry_price * 100
         max_adverse = max(entry_price - period_low, 0) / entry_price * 100
         return_pct = (close - entry_price) / entry_price * 100
-
         target_reached = 1 if (pred.target and period_high >= pred.target) else 0
         stop_loss_reached = 1 if (pred.stop_loss and period_low <= pred.stop_loss) else 0
-        direction_correct = 1 if (return_pct > 0) else 0
-        success = 1 if (target_reached or (direction_correct and return_pct > 2.0)) else 0
+        direction_correct = 1 if return_pct > 0 else 0
+        decision = (pred.decision or "").upper()
+        if decision in ("BUY NOW", "PREPARE TO BUY", "PREPARE", "BUY"):
+            success = 1 if (target_reached or (direction_correct and return_pct > 2.0)) else 0
+        elif decision in ("SELL", "AVOID", "AVOID / WAIT", "WAIT"):
+            success = 1 if return_pct <= 0.5 else 0
+        else:
+            success = 1 if return_pct > 0 else 0
 
         outcome = db_models.PredictionOutcome(
             prediction_id=prediction_id,
-            evaluation_period='T+5',
-            evaluation_date=t5_day.name.to_pydatetime(),
-            open_price=open_price,
-            high_price=high,
-            low_price=low,
+            evaluation_period="T+5",
+            evaluation_date=datetime.utcnow(),
+            open_price=t5_bar.get("open"),
+            high_price=t5_bar.get("high"),
+            low_price=t5_bar.get("low"),
             close_price=close,
             max_favorable_excursion=round(max_favorable, 2),
             max_adverse_excursion=round(max_adverse, 2),
@@ -185,19 +335,24 @@ def evaluate_t5(prediction_id: str):
             target_reached=target_reached,
             stop_loss_reached=stop_loss_reached,
             direction_correct=direction_correct,
-            success=success
+            success=success,
         )
         db.add(outcome)
         db.commit()
-        logger.info(f"T+5 evaluation completed for {prediction_id}")
-
+        logger.info(
+            "T+5 %s entry=%.2f close=%.2f ret=%.2f%% success=%s",
+            pred.symbol, entry_price, close, return_pct, success,
+        )
+        update_prediction_success(prediction_id)
+        return {"ok": True, "symbol": pred.symbol, "return_pct": round(return_pct, 2), "success": bool(success)}
     except Exception as e:
-        logger.error(f"Error evaluating T+5 for {prediction_id}: {e}")
+        logger.error("Error evaluating T+5 for %s: %s", prediction_id, e)
         db.rollback()
+        return {"ok": False, "error": str(e)}
     finally:
         db.close()
 
-    update_prediction_success(prediction_id)
+
 
 # ---------- NEW: Batch evaluation and summary functions ----------
 
@@ -395,17 +550,11 @@ def evaluate_all_predictions():
 if __name__ == "__main__":
     evaluate_all_predictions()
 
-def run_t1_sweep(db_session=None):
-    """Reliable T+1 evaluation sweep — evaluates all pending predictions aged >=1 trading day."""
-    try:
-        from models import Prediction
-        # fallback soft import
-    except Exception:
-        Prediction = None
-    try:
-        return evaluate_t1() if "evaluate_t1" in dir() else {"ok": True, "message": "evaluate_t1 invoked", "evaluated": 0}
-    except Exception as ex:
-        return {"ok": False, "error": str(ex)}
+def run_t1_sweep(db_session=None, max_batch: int = 80):
+    """Reliable T+1 evaluation sweep for cron / GitHub Actions."""
+    return evaluate_pending_predictions("T+1", max_batch=max_batch)
+
+
 
 def run_t5_sweep(db_session=None):
     """Reliable T+5 evaluation sweep."""

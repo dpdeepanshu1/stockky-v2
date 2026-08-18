@@ -8,6 +8,7 @@ import os
 import json
 import time
 import asyncio
+import gc
 import logging
 import difflib
 import uuid
@@ -26,10 +27,13 @@ from upstash_redis import Redis
 from data_feed import (
     DataFeedStore, extract_feed_payload, DATA_FEED_TTL,
     hot_job_get, hot_job_set, HOT_RESULT_KEY,
+    try_refresh_lock, release_refresh_lock, soft_ttl_should_refresh,
 )
 from circuit_breaker import get_breaker, CircuitOpenError, all_snapshots
 from metrics import metrics
 from rate_limit_monitor import monitor as rate_limit_monitor
+from redis_rate_limit import limiter as redis_limiter
+from batch_worker import run_in_batches, default_batch_size
 from nse_holidays import is_nse_holiday
 
 logging.basicConfig(level=logging.INFO)
@@ -98,6 +102,10 @@ async def _start_shared_http():
             limits=_HTTP_LIMITS, timeout=_HTTP_TIMEOUT, follow_redirects=True
         )
         logger.info("Shared httpx.AsyncClient started (keepalive=20, max=50, connect=2s)")
+    try:
+        redis_limiter.set_redis(_redis)
+    except Exception:
+        pass
 
 
 @app.on_event("shutdown")
@@ -167,10 +175,12 @@ NEWS_CACHE_PREFIX = "stockky:news:"
 # Slow-changing layers: 24h. Nightly cron refreshes them after midnight IST.
 STATIC_PARAM_TTL = int(os.getenv("STATIC_PARAM_TTL", "86400"))  # 24 hours
 LAST_FULL_SCAN_KEY = "stockky:last_full_scan"
-LAST_FULL_SCAN_TTL = int(os.getenv("LAST_FULL_SCAN_TTL", "900"))  # 15 min default
+LAST_FULL_SCAN_TTL = int(os.getenv("LAST_FULL_SCAN_TTL", "86400"))  # 24h — survive refresh / stop partial
 DECIDE_CACHE_PREFIX = "stockky:decide_cache:"
 DECIDE_CACHE_TTL_OPEN = int(os.getenv("DECIDE_CACHE_TTL_OPEN", "300"))   # 5 min market open
 DECIDE_CACHE_TTL_CLOSED = int(os.getenv("DECIDE_CACHE_TTL_CLOSED", "21600"))  # 6 h closed
+BATCH_RESULT_CACHE_PREFIX = "stockky:batch_result:"
+BATCH_RESULT_CACHE_ENABLED = os.getenv("BATCH_RESULT_CACHE", "true").lower() in ("1", "true", "yes")
 SCAN_LITE_DEFAULT = os.getenv("SCAN_LITE_DEFAULT", "false").lower() in ("1", "true", "yes")
 WAKE_BEFORE_SCAN = os.getenv("WAKE_BEFORE_SCAN", "true").lower() in ("1", "true", "yes")
 WAKE_WAIT_SECONDS = float(os.getenv("WAKE_WAIT_SECONDS", "12"))
@@ -943,7 +953,15 @@ async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> t
             return cached["full"], cached.get("fallback", False)
         return cached.get("metrics"), cached.get("fallback", False)
 
-    # 3) Upstream + write-through to Data Feed
+    # 3) Upstream + write-through to Data Feed (mutex against stampede)
+    if not try_refresh_lock(_redis, symbol, ttl_sec=5):
+        # Another worker is refreshing — return short cache or None
+        cached2 = _redis_get(cache_key)
+        if cached2 and isinstance(cached2, dict):
+            if isinstance(cached2.get("full"), dict):
+                return cached2["full"], cached2.get("fallback", False)
+            return cached2.get("metrics"), cached2.get("fallback", False)
+        return None, True
     try:
         resp = await _cb_get(client, "fundamental", f"{FUNDAMENTAL_URL}/analyze/{symbol}", timeout=35)
         if resp.status_code == 200:
@@ -970,6 +988,7 @@ async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> t
                 _feed_store().put_symbol(symbol, payload, ttl=DATA_FEED_TTL)
             except Exception as e:
                 logger.debug("data feed write-through fund: %s", e)
+            release_refresh_lock(_redis, symbol)
             if data.get("fundamental_score") is not None:
                 out = dict(data)
                 out["from_data_feed"] = False
@@ -1297,7 +1316,7 @@ def _wake_notification_service() -> bool:
 
 # Free-tier friendly default: 18 workers (was 10). Override via env.
 # Pair with market-data yfinance semaphore to avoid Yahoo rate limits.
-MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "4"))  # free-tier: fewer timeouts; Data Feed skips upstream
+MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "6"))  # full universe; pace via Redis RL; separate dynos
 MAX_RETRIES = 1
 RETRY_BACKOFF = 1.0
 
@@ -1351,6 +1370,40 @@ def _should_force_lite_scan() -> bool:
 def _decide_cache_ttl() -> int:
     return DECIDE_CACHE_TTL_OPEN if _is_market_open_ist() else DECIDE_CACHE_TTL_CLOSED
 
+
+def _batch_result_cache_key(symbol: str, lite: bool = False) -> str:
+    mode = "lite" if lite else "full"
+    return f"{BATCH_RESULT_CACHE_PREFIX}{mode}:{(symbol or '').upper()}"
+
+
+def _batch_result_cache_get(symbol: str, lite: bool = False) -> Optional[dict]:
+    """Return cached scan row if present and has a decision (not ERROR)."""
+    if not BATCH_RESULT_CACHE_ENABLED:
+        return None
+    data = _redis_get(_batch_result_cache_key(symbol, lite))
+    if not isinstance(data, dict):
+        return None
+    if not data.get("decision") or data.get("decision") == "ERROR":
+        return None
+    # Soft-TTL: treat nearly-expired as miss so one worker refreshes
+    key = _batch_result_cache_key(symbol, lite)
+    if _redis_soft_ttl_refresh(key, soft_window=15):
+        return None
+    data = dict(data)
+    data["_from_batch_cache"] = True
+    return data
+
+
+def _batch_result_cache_set(symbol: str, result: dict, lite: bool = False) -> None:
+    if not BATCH_RESULT_CACHE_ENABLED:
+        return
+    if not isinstance(result, dict):
+        return
+    if result.get("decision") in (None, "ERROR"):
+        return
+    payload = {k: v for k, v in result.items() if not str(k).startswith("_")}
+    _redis_set(_batch_result_cache_key(symbol, lite), payload, ttl=_decide_cache_ttl())
+
 def _prioritize_universe(universe: List[str]) -> List[str]:
     """Watchlist + recently searched first so useful results appear early; rest of universe unchanged."""
     watch = _load_watchlist()
@@ -1373,6 +1426,21 @@ def _prioritize_universe(universe: List[str]) -> List[str]:
 
 async def _cb_get(client: httpx.AsyncClient, name: str, url: str, timeout: float = 5.0, **kwargs):
     """GET with circuit breaker — open circuit fails immediately."""
+    # Redis rate limit by downstream family (does not shrink universe — only paces calls)
+    _bucket = "global"
+    _ln = (name or "").lower()
+    if "market" in _ln or "quote" in _ln or "history" in _ln:
+        _bucket = "market_data"
+    elif "fundamental" in _ln or "technical" in _ln or "news" in _ln or "event" in _ln:
+        _bucket = "analysis"
+    elif "decision" in _ln or "predict" in _ln or "training" in _ln:
+        _bucket = "decision"
+    elif "gemini" in _ln:
+        _bucket = "gemini"
+    if not redis_limiter.allow(_bucket):
+        await asyncio.sleep(min(2.0, redis_limiter.wait_budget_sec(_bucket)))
+        if not redis_limiter.allow(_bucket):
+            raise CircuitOpenError(name or "rate_limit", redis_limiter.wait_budget_sec(_bucket))
     br = get_breaker(name)
     if not br.allow():
         metrics.inc("stockky_circuit_open_total", dependency=name)
@@ -1419,7 +1487,7 @@ async def _wake_required_services(client: httpx.AsyncClient = None) -> dict:
     """Wake free-tier services before scan. Market-data gets a warm yfinance touch + double ping."""
     own_client = client is None
     if own_client:
-        client = httpx.AsyncClient(timeout=20)
+        client = _get_http_client()
     results = {}
     try:
         async def ping(name: str, url: str):
@@ -1458,8 +1526,8 @@ async def _wake_required_services(client: httpx.AsyncClient = None) -> dict:
             pairs2 = await asyncio.gather(*(ping(n, SYSTEM_SERVICES[n]["url"]) for n in failed if n in SYSTEM_SERVICES))
             results.update(dict(pairs2))
     finally:
-        if own_client:
-            await client.aclose()
+        # Do NOT aclose shared pool client
+        pass
     return results
 
 async def _analyze_one_symbol_ultra(
@@ -1650,111 +1718,131 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
     }, ttl=3600)
 
     sem = asyncio.Semaphore(MAX_PARALLEL_WORKERS)
-    limits = httpx.Limits(max_keepalive_connections=200, max_connections=200)
-    cancelled = False
     cancel_key = SCAN_TASK_PREFIX + task_id + ":cancel"
-    async with httpx.AsyncClient(timeout=240, limits=limits) as client:
-        # Wake services first on free-tier so cold starts don't serialize into every symbol
-        if WAKE_BEFORE_SCAN:
-            try:
-                wake_results = await _wake_required_services(client)
-                logger.info("Pre-scan wake: %s", {k: v.get("ok") for k, v in wake_results.items()})
-                try:
-                    await _warm_upstream_services(client)
-                except Exception:
-                    pass
-                wait = max(WAKE_WAIT_SECONDS, 10.0)
-                if not (wake_results.get("market-data") or {}).get("ok"):
-                    wait = max(wait, 18.0)
-                await asyncio.sleep(min(wait, 25.0))
-            except Exception as e:
-                logger.warning("Pre-scan wake failed (continuing): %s", e)
+    client = _get_http_client()  # shared keepalive pool
 
-        # Data Feed coverage for this universe (helps explain scan speed)
+    # ── Pre-scan: wake free-tier dynos (does not change universe size) ──
+    if WAKE_BEFORE_SCAN:
         try:
-            store = _feed_store()
-            hit = 0
-            for s in universe:
-                base = s.upper().replace(".NS", "").replace(".BO", "")
-                fed = store.get_symbol(base)
-                if fed and (fed.get("fundamental_score") is not None or fed.get("metrics") or fed.get("sector")):
-                    hit += 1
-            logger.info(
-                "Scan Data Feed coverage: %s/%s symbols (%.0f%%) — feed hits skip fundamental/event upstream",
-                hit, total, (100.0 * hit / total) if total else 0,
-            )
-        except Exception as e:
-            logger.debug("feed coverage: %s", e)
-
-        # asyncio.ensure_future wraps each coroutine as a real Task —
-        # bare coroutines (what `_analyze_one_symbol_ultra(...)` returns
-        # before being scheduled) don't have .done()/.cancel() at all.
-        # The cancellation code below used to call those on the bare
-        # coroutines directly, which raised an unhandled AttributeError
-        # the instant a cancel was requested — silently killing this
-        # entire background task before it ever reached the code that
-        # writes the finalized "done" status, which is exactly why
-        # Stop Scan appeared to hang forever with no summary.
-        tasks = [
-            asyncio.ensure_future(_analyze_one_symbol_ultra(sym, client, sem, lite=lite))
-            for sym in universe
-        ]
-
-        for coro in asyncio.as_completed(tasks):
+            wake_results = await _wake_required_services(client)
+            logger.info("Pre-scan wake: %s", {k: v.get("ok") for k, v in wake_results.items()})
             try:
-                result = await coro
-                if result.get("decision") == "ERROR":
-                    errors.append({"symbol": result.get("symbol"), "error": result.get("error", "Unknown error")})
-                else:
-                    results.append(result)
-            except asyncio.CancelledError:
+                await _warm_upstream_services(client)
+            except Exception:
                 pass
+            wait = max(WAKE_WAIT_SECONDS, 10.0)
+            if not (wake_results.get("market-data") or {}).get("ok"):
+                wait = max(wait, 18.0)
+            await asyncio.sleep(min(wait, 25.0))
+        except Exception as e:
+            logger.warning("Pre-scan wake failed (continuing): %s", e)
+
+    # Data Feed coverage stats (informational only)
+    try:
+        store = _feed_store()
+        hit = 0
+        for s in universe:
+            base = s.upper().replace(".NS", "").replace(".BO", "")
+            fed = store.get_symbol(base)
+            if fed and (fed.get("fundamental_score") is not None or fed.get("metrics") or fed.get("sector")):
+                hit += 1
+        logger.info(
+            "Scan Data Feed coverage: %s/%s symbols (%.0f%%)",
+            hit, total, (100.0 * hit / total) if total else 0,
+        )
+    except Exception as e:
+        logger.debug("feed coverage: %s", e)
+
+    # ── Full-universe batch processor (list size preserved) ──
+    batch_size = default_batch_size(MAX_PARALLEL_WORKERS, minimum=12)
+    logger.info(
+        "Scan full universe=%s batch_size=%s workers=%s",
+        total, batch_size, MAX_PARALLEL_WORKERS,
+    )
+
+    async def _worker(sym: str):
+        return await _analyze_one_symbol_ultra(sym, client, sem, lite=lite)
+
+    def _should_cancel() -> bool:
+        return bool(_redis_get(cancel_key))
+
+    def _classify(result: dict):
+        if not isinstance(result, dict):
+            return {"symbol": "?", "error": "invalid result"}
+        if result.get("decision") == "ERROR":
+            return {"symbol": result.get("symbol"), "error": result.get("error", "Unknown error")}
+        return None
+
+    async def _on_progress(progress):
+        payload = {
+            "status": "running",
+            "total": progress.total,
+            "processed": progress.processed,
+            "elapsed": progress.elapsed_sec,
+            "result": None,
+            "error": None,
+            "lite": lite,
+            "batch": progress.batch_index + 1,
+            "batches": progress.batch_count,
+            "cache_hits": progress.cache_hits,
+            "cache_misses": progress.cache_misses,
+        }
+        _redis_set(SCAN_TASK_PREFIX + task_id, payload, ttl=3600)
+        try:
+            await _ws_push_scan(task_id, payload)
+        except Exception:
+            pass
+
+    async def _on_batch_end(progress):
+        # Keep free-tier services awake during long full-universe scans.
+        # Skip warm when this scan is mostly cache hits (no upstream pressure).
+        total_c = progress.cache_hits + progress.cache_misses
+        hit_rate = (progress.cache_hits / total_c) if total_c else 0.0
+        if hit_rate >= 0.85:
+            return
+        if progress.processed > 0 and progress.processed % 15 < batch_size and not progress.cancelled:
+            try:
+                await _warm_upstream_services(client)
             except Exception as e:
-                logger.error(f"Task failed: {e}")
-            processed += 1
-            elapsed = round(time.time() - start_time, 1)
+                logger.debug("mid-scan warm: %s", e)
 
-            # Separate Redis key from the progress-status one below, so a
-            # cancel request can never be silently overwritten by the
-            # periodic progress write two lines down — that write used to
-            # replace the entire stored dict (including cancel_requested)
-            # with a fresh one that didn't have that key at all.
-            # Check cancel on every symbol so Stop is near-instant
-            if _redis_get(cancel_key):
-                cancelled = True
+    def _cache_get(sym: str):
+        return _batch_result_cache_get(sym, lite=lite)
 
-            if processed % 2 == 0 or processed == total or cancelled:
-                _scan_payload = {
-                    "status": "running",
-                    "total": total,
-                    "processed": processed,
-                    "elapsed": elapsed,
-                    "result": None,
-                    "error": None,
-                }
-                _redis_set(SCAN_TASK_PREFIX + task_id, _scan_payload, ttl=3600)
-                try:
-                    await _ws_push_scan(task_id, _scan_payload)
-                except Exception:
-                    pass
-            # Keep free-tier services awake during long scans
-            if processed > 0 and processed % 15 == 0 and not cancelled:
-                try:
-                    await _warm_upstream_services(client)
-                except Exception as e:
-                    logger.debug("mid-scan warm: %s", e)
+    def _cache_set(sym: str, result: dict):
+        _batch_result_cache_set(sym, result, lite=lite)
 
-            if cancelled:
-                logger.info(f"Scan {task_id} cancelled after {processed}/{total} symbols — finalizing with partial results")
-                for t in tasks:
-                    if not t.done():
-                        t.cancel()
-                # Drain quickly — don't wait on cancelled tasks
-                try:
-                    await asyncio.wait(tasks, timeout=2.0)
-                except Exception:
-                    pass
-                break
+    batch_out = await run_in_batches(
+        universe,
+        _worker,
+        batch_size=batch_size,
+        should_cancel=_should_cancel,
+        on_progress=_on_progress,
+        on_batch_end=_on_batch_end,
+        classify_result=_classify,
+        gc_each_batch=True,
+        start_time=start_time,
+        cache_get=_cache_get if BATCH_RESULT_CACHE_ENABLED else None,
+        cache_set=_cache_set if BATCH_RESULT_CACHE_ENABLED else None,
+    )
+    if batch_out.cache_hits or batch_out.cache_misses:
+        logger.info(
+            "Scan batch cache hits=%s misses=%s (%.0f%% hit rate)",
+            batch_out.cache_hits,
+            batch_out.cache_misses,
+            100.0 * batch_out.cache_hits / max(1, batch_out.cache_hits + batch_out.cache_misses),
+        )
+    results = batch_out.results
+    errors = batch_out.errors
+    processed = batch_out.processed
+    cancelled = batch_out.cancelled
+    if cancelled:
+        logger.info(
+            "Scan %s cancelled after %s/%s (full universe size=%s)",
+            task_id, processed, total, total,
+        )
+
+    gc.collect()
 
     results.sort(key=lambda r: r.get("combined_score", 0), reverse=True)
 
@@ -1853,8 +1941,18 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
     final_result["lite"] = lite
     final_result["scanned_at"] = datetime.now(IST).isoformat()
 
+    if cancelled and isinstance(final_result, dict):
+        final_result = {
+            **final_result,
+            "partial": True,
+            "stopped_early": True,
+            "verdict": final_result.get("verdict")
+            or f"Stopped early — {processed}/{total} symbols scored",
+        }
     _done_payload = {
-        "status": "done",
+        "status": "done",  # always done so UI can load partial result
+        "cancelled": bool(cancelled),
+        "partial": bool(cancelled),
         "total": total,
         "processed": processed,
         "elapsed": elapsed_final,
@@ -1873,16 +1971,26 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
     except Exception:
         pass
 
-    # Cache full scan result so repeated "Run market scan" within TTL is instant
-    if not cancelled and results:
+    # Cache scan result (full OR partial after Stop) so refresh / dashboard keep last scan
+    if results:
         _redis_set(LAST_FULL_SCAN_KEY, {
             "task_id": task_id,
             "result": final_result,
-            "scanned_at": final_result["scanned_at"],
-            "universe_size": final_result["universe_size"],
+            "scanned_at": final_result.get("scanned_at"),
+            "universe_size": final_result.get("universe_size"),
+            "partial": bool(cancelled),
+            "cancelled": bool(cancelled),
+            "processed": processed,
+            "total": total,
         }, ttl=LAST_FULL_SCAN_TTL)
 
-    _send_scan_notification(final_result.get("recommendations", []), final_result["verdict"], final_result["scanned"], final_result["universe_size"])
+    if not cancelled:
+        _send_scan_notification(
+            final_result.get("recommendations", []),
+            final_result["verdict"],
+            final_result["scanned"],
+            final_result["universe_size"],
+        )
 
 # ── Cached Market Movers Data ──────────────────────────────────────────────
 def _get_nifty50_data() -> List[dict]:
@@ -2082,7 +2190,8 @@ async def ops_check_alert():
     message = " | ".join(problems)
     delivered = False
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        client = _get_http_client()  # shared keepalive pool
+        if True:
             r = await client.post(
                 f"{NOTIFICATION_URL.rstrip('/')}/notify",
                 json={
@@ -2114,7 +2223,8 @@ async def ops_refresh_static_params(limit: int = 60):
     """
     universe = _build_scan_universe()[: max(10, min(limit, 80))]
     refreshed = {"fundamental": 0, "event": 0, "news": 0, "errors": 0}
-    async with httpx.AsyncClient(timeout=40.0) as client:
+    client = _get_http_client()  # shared keepalive pool
+    if True:
         for sym in universe:
             base = (sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
             if not base:
@@ -2167,7 +2277,8 @@ async def market_history(symbol: str, period: str = "1mo"):
     sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "")
     md_period = {"1d": "1mo", "5d": "1mo", "1mo": "1mo", "1y": "1y", "5y": "5y", "3mo": "3mo", "6mo": "6mo"}.get(period, "1mo")
     last_err = None
-    async with httpx.AsyncClient(timeout=45.0) as client:
+    client = _get_http_client()  # shared keepalive pool
+    if True:
         try:
             try:
                 await client.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"})
@@ -2214,7 +2325,8 @@ async def market_history(symbol: str, period: str = "1mo"):
 async def ops_db_status():
     """Frontend banner: is Supabase/Postgres connected on decision-prediction/training?"""
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
+        client = _get_http_client()  # shared keepalive pool
+        if True:
             r = await client.get(f"{TRAINING_URL.rstrip('/')}/health")
             if r.status_code == 200:
                 data = r.json()
@@ -2317,7 +2429,8 @@ async def system_health():
             return name, {"ok": False, "required": required, "status": "not_configured", "url": None}
         timeout = 15 if name == "market-data" else 10
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            client = _get_http_client()  # shared keepalive pool
+            if True:
                 resp = await client.get(f"{url.rstrip('/')}/health")
             if resp.status_code == 200:
                 return name, {"ok": True, "required": required, "status": "up", "url": url}
@@ -2338,7 +2451,8 @@ async def system_health():
 @app.post("/wake/all")
 async def wake_all_services():
     results = {}
-    async with httpx.AsyncClient(timeout=5) as client:
+    client = _get_http_client()  # shared keepalive pool
+    if True:
         for name, svc in SYSTEM_SERVICES.items():
             url = svc["url"]
             if not url:
@@ -2848,7 +2962,8 @@ async def scan_batch(request: Request):
 
     # Use a semaphore to limit concurrent downstream calls inside this batch
     sem = asyncio.Semaphore(10)
-    async with httpx.AsyncClient(timeout=240) as client:
+    client = _get_http_client()  # shared keepalive pool
+    if True:
         tasks = [_analyze_one_symbol_ultra(sym, client, sem) for sym in symbols]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         final_results = []
@@ -2917,8 +3032,26 @@ def start_scan(
         logger.error(f"Scan start failed: {e}")
         raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)}")
 
+@app.get("/scan/last")
+def get_last_scan():
+    """Last full or partial market scan (Redis). Used on dashboard refresh."""
+    cached = _redis_get(LAST_FULL_SCAN_KEY)
+    if not cached or not isinstance(cached, dict):
+        return {"ok": False, "detail": "No scan cached yet", "result": None}
+    return {
+        "ok": True,
+        "task_id": cached.get("task_id"),
+        "scanned_at": cached.get("scanned_at"),
+        "partial": bool(cached.get("partial") or cached.get("cancelled")),
+        "processed": cached.get("processed"),
+        "total": cached.get("total") or cached.get("universe_size"),
+        "result": cached.get("result"),
+    }
+
+
 @app.get("/scan/status/{task_id}")
 def get_scan_status(task_id: str):
+
     data = _redis_get(SCAN_TASK_PREFIX + task_id)
     if not data:
         raise HTTPException(status_code=404, detail="Task not found or expired")
@@ -3532,7 +3665,8 @@ def send_picks_to_telegram(payload: dict):
 @app.get("/training/status")
 async def training_status():
     try:
-        async with httpx.AsyncClient(timeout=45) as client:
+        client = _get_http_client()  # shared keepalive pool
+        if True:
             resp = await client.get(f"{TRAINING_URL.rstrip('/')}/model-status")
             # Also try /api/status if model-status 404s
             if resp.status_code == 404:
@@ -3545,7 +3679,8 @@ async def training_status():
 @app.post("/training/train")
 async def trigger_training():
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
+        client = _get_http_client()  # shared keepalive pool
+        if True:
             base = TRAINING_URL.rstrip("/")
             resp = await client.post(f"{base}/api/train")
             if resp.status_code == 404:
@@ -3566,7 +3701,8 @@ async def trigger_training():
 @app.get("/training/score/{symbol}")
 async def get_training_score(symbol: str):
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        client = _get_http_client()  # shared keepalive pool
+        if True:
             resp = await client.get(f"{TRAINING_URL}/training-score/{symbol}")
             if resp.status_code == 404:
                 return {
@@ -3611,11 +3747,8 @@ async def training_other_proxy(path: str, request: Request):
             fwd_headers["Content-Type"] = ct
 
         target_url = f"{TRAINING_URL.rstrip('/')}/{path.lstrip('/')}"
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            follow_redirects=True,
-            # httpx decompresses; do not ask upstream for identity only — default is fine
-        ) as client:
+        client = _get_http_client()  # shared keepalive pool
+        if True:
             response = await client.request(
                 method=request.method,
                 url=target_url,
@@ -3706,21 +3839,15 @@ async def _warm_upstream_services(client: Optional[httpx.AsyncClient] = None) ->
         u = globals().get(name) or os.getenv(name)
         if u:
             urls.append(str(u).rstrip("/"))
-    close = False
     if client is None:
-        client = httpx.AsyncClient(timeout=8.0)
-        close = True
-    try:
-        for base in urls:
-            for path in ("/health?warm=true", "/health"):
-                try:
-                    await client.get(f"{base}{path}", timeout=6.0)
-                    break
-                except Exception:
-                    continue
-    finally:
-        if close:
-            await client.aclose()
+        client = _get_http_client()
+    for base in urls:
+        for path in ("/health?warm=true", "/health"):
+            try:
+                await client.get(f"{base}{path}", timeout=6.0)
+                break
+            except Exception:
+                continue
 
 
 async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = None, progress_cb=None):
@@ -3817,7 +3944,9 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
     results_driven: list = []
     bulk_insider_driven: list = []
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    client = _get_http_client()  # shared keepalive pool
+
+    if True:
         for i_sym, sym in enumerate(universe):
             # Between batches: warm upstreams so free-tier stays awake
             if i_sym > 0 and i_sym % batch_size == 0:
@@ -4216,7 +4345,8 @@ async def catalyst_alert_scan(
             notified = False
             if notify and unique:
                 try:
-                    async with httpx.AsyncClient(timeout=20) as client:
+                    client = _get_http_client()  # shared keepalive pool
+                    if True:
                         await client.post(
                             f"{NOTIFICATION_URL.rstrip('/')}/notify",
                             json={"title": "Catalyst Alert", "message": message, "channel": "telegram"},
@@ -4729,9 +4859,7 @@ async def data_feed_run(
     if _df_max > 0:
         universe = universe[:_df_max]
     universe = [u.upper().replace(".NS", "").replace(".BO", "") for u in universe]
-    # default soft cap only if enormous (protect free tier); 0 env = use full list up to 500
-    if _df_max <= 0 and len(universe) > 500:
-        universe = universe[:500]
+    # Full universe by default. Only DATA_FEED_MAX_SYMBOLS>0 truncates (explicit opt-in).
 
     # Checkpoint: list of already-fed symbols + cursor
     checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
@@ -4790,7 +4918,8 @@ async def data_feed_run(
         ok_n = ok0
         err_n = err0
         done_set = set(done0)
-        async with httpx.AsyncClient(timeout=40) as client:
+        client = _get_http_client()  # shared keepalive pool
+        if True:
             for i in range(start_at, len(universe)):
                 # Cooperative stop
                 jnow = store.job()

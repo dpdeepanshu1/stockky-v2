@@ -10,6 +10,7 @@ Changes:
 import os
 import json
 import asyncio
+import gc
 import logging
 from datetime import datetime, timezone, timedelta
 from enum import Enum
@@ -252,7 +253,8 @@ async def get_market_sentiment() -> dict:
     """Fetch live market sentiment from the API Gateway's /market/indices endpoint."""
     for attempt in range(2):
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            client = _get_http_client()
+            if True:
                 # Use the API Gateway's endpoint – it always returns a score
                 resp = await client.get(f"{API_GATEWAY_URL}/market/indices?force_refresh=false")
                 if resp.status_code == 200:
@@ -646,7 +648,8 @@ async def record_prediction_for_training(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        client = _get_http_client()
+        if True:
             response = await client.post(
                 f"{TRAINING_SERVICE_URL}/api/predictions",
                 json=payload,
@@ -671,6 +674,14 @@ def _assess_data_quality(
     data_insufficient: bool,
 ) -> dict:
     """Score how many decision pillars are live vs fallback/missing (free-tier honesty)."""
+    training = training if isinstance(training, dict) else {}
+    fundamental = fundamental if isinstance(fundamental, dict) else {}
+    technical = technical if isinstance(technical, dict) else {}
+    live_n = int(training.get("live_win_rate_n") or training.get("evaluated_n") or 0)
+    provisional_flag = bool(training.get("live_win_rate_provisional") or training.get("provisional"))
+    # Closed-loop incomplete until enough T+1/T+5 outcomes
+    sparse_loop = live_n < 8
+    fallback_fund = bool(fundamental.get("fallback_used"))
     pillars = {
         "price": bool(technical and technical.get("close") is not None),
         "technical": bool(
@@ -678,21 +689,27 @@ def _assess_data_quality(
             and not technical.get("data_insufficient")
             and technical.get("technical_score") is not None
         ),
-        "fundamental": bool(fundamental and not fundamental.get("fallback_used")),
+        "fundamental": bool(fundamental and not fallback_fund and fundamental.get("fundamental_score") is not None),
         "news": bool(news and isinstance(news, dict) and news.get("news_score") is not None),
         "events": bool(events and isinstance(events, dict)),
         "prediction": bool(
             prediction and isinstance(prediction, dict) and prediction.get("model_loaded")
         ),
-        "training": bool(
-            training and isinstance(training, dict) and training.get("training_score") is not None
-        ),
+        "training": bool(training and training.get("training_score") is not None),
     }
     live = sum(1 for v in pillars.values() if v)
     total = len(pillars)
     core_ok = pillars["price"] and pillars["technical"]
-    actionable_ok = core_ok and live >= 3 and not data_insufficient
-    quality = "high" if live >= 5 and core_ok else "medium" if live >= 3 and core_ok else "low"
+    actionable_ok = core_ok and live >= 3 and not data_insufficient and not sparse_loop and not fallback_fund
+    quality = "high" if live >= 5 and core_ok and not sparse_loop else "medium" if live >= 3 and core_ok else "low"
+    # Provisional = not enough evaluated outcomes OR thin pillars OR fund fallback
+    provisional = bool(
+        provisional_flag
+        or sparse_loop
+        or quality == "low"
+        or data_insufficient
+        or (fallback_fund and live < 5)
+    )
     return {
         "pillars": pillars,
         "live_count": live,
@@ -700,20 +717,47 @@ def _assess_data_quality(
         "quality": quality,
         "actionable_ok": actionable_ok,
         "core_ok": core_ok,
+        "provisional": provisional,
+        "live_win_rate_n": live_n,
+        "fallback_fundamental": fallback_fund,
+        "sparse_closed_loop": sparse_loop,
+        "block_buy_now": provisional,
     }
 
 
 def _apply_data_quality_gate(decision: Decision, quality: dict, already_owned: bool) -> Decision:
-    """Force WAIT / DO NOT BUY when free-tier data is too thin for a confident buy."""
+    """
+    Free-tier honesty gate:
+    - Provisional / low-n / fallback / thin data → never emit BUY NOW
+    - BUY NOW demoted to WAIT (or PREPARE only if core data is solid but loop is sparse)
+    """
     if already_owned:
         return decision
     if decision not in (Decision.BUY_NOW, Decision.PREPARE_TO_BUY):
         return decision
-    if quality.get("actionable_ok"):
-        return decision
-    if decision == Decision.BUY_NOW and quality.get("core_ok") and quality.get("live_count", 0) >= 2:
+
+    provisional = bool(quality.get("provisional") or quality.get("block_buy_now"))
+    live_n = int(quality.get("live_win_rate_n") or 0)
+    core_ok = bool(quality.get("core_ok"))
+    live_count = int(quality.get("live_count") or 0)
+    quality_label = quality.get("quality") or "low"
+
+    # Hard rule: provisional status blocks BUY NOW
+    if decision == Decision.BUY_NOW and provisional:
+        if core_ok and live_count >= 3 and quality_label != "low" and live_n >= 0:
+            # Data looks OK but closed-loop still sparse → allow PREPARE, not BUY NOW
+            return Decision.PREPARE_TO_BUY
         return Decision.WAIT
-    return Decision.DO_NOT_BUY
+
+    if decision == Decision.BUY_NOW and not quality.get("actionable_ok"):
+        if core_ok and live_count >= 2:
+            return Decision.WAIT
+        return Decision.DO_NOT_BUY
+
+    if decision == Decision.PREPARE_TO_BUY and quality_label == "low" and not core_ok:
+        return Decision.DO_NOT_BUY
+
+    return decision
 
 
 
@@ -730,7 +774,8 @@ async def _fallback_technical_from_market_data(symbol: str) -> dict:
         "data_insufficient": False,
     }
     try:
-        async with httpx.AsyncClient(timeout=40) as client:
+        client = _get_http_client()
+        if True:
             try:
                 await client.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"})
             except Exception:
@@ -795,7 +840,8 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
             cached["from_cache"] = True
             return cached
     try:
-        async with httpx.AsyncClient(timeout=70) as client:
+        client = _get_http_client()
+        if True:
             technical_task = asyncio.create_task(_fetch_optional(client, f"{TECHNICAL_URL}/analyze/{symbol}", "Technical"))
             fundamental_task = asyncio.create_task(_fetch_optional(client, f"{FUNDAMENTAL_URL}/analyze/{symbol}", "Fundamental"))
             news_task = asyncio.create_task(_fetch_optional(client, f"{NEWS_URL}/analyze/{symbol}", "News"))
@@ -957,19 +1003,31 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
         )
         gated = _apply_data_quality_gate(decision, data_quality, already_owned)
         if gated != decision:
-            reasons_gate = f"Data quality gate: {data_quality.get('quality')} ({data_quality.get('live_count')}/{data_quality.get('total_pillars')} pillars live)"
+            bits = [
+                f"quality={data_quality.get('quality')}",
+                f"pillars={data_quality.get('live_count')}/{data_quality.get('total_pillars')}",
+                f"n={data_quality.get('live_win_rate_n')}",
+            ]
+            if data_quality.get("provisional"):
+                bits.append("PROVISIONAL→block BUY NOW")
+            if data_quality.get("sparse_closed_loop"):
+                bits.append("closed-loop n<8")
+            if data_quality.get("fallback_fundamental"):
+                bits.append("fund fallback")
+            reasons_gate = "Data quality gate: " + ", ".join(bits)
             decision = gated
         else:
             reasons_gate = None
 
-        # Catalyst floor: bulk buy / strong results should not stay buried as DO NOT BUY
+        # Catalyst floor: bulk buy / strong results should not stay buried as DO NOT BUY.
+        # Never promotes to BUY NOW; still respects provisional (PREPARE max).
         if (
             decision in (Decision.DO_NOT_BUY, Decision.HOLD, Decision.WAIT)
             and event_delta >= 8
             and combined >= 48
         ):
             decision = Decision.PREPARE_TO_BUY
-            reasons_gate = (reasons_gate or "") + " | Catalyst floor: event_delta elevated → PREPARE TO BUY"
+            reasons_gate = (reasons_gate or "") + " | Catalyst floor: event_delta elevated → PREPARE TO BUY (not BUY NOW)"
 
         entry_low = entry_high = target = stop_loss = None
         if close:
@@ -1047,6 +1105,8 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
             "data_insufficient": data_insufficient,
             "fundamental_fallback": fundamental.get("fallback_used", False),
             "data_quality": data_quality,
+            "provisional": bool(data_quality.get("provisional")),
+            "block_buy_now": bool(data_quality.get("block_buy_now")),
         }
 
 

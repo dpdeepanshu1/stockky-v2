@@ -548,6 +548,11 @@ def get_engine(database_url=None):
     url = database_url or os.environ.get("TRAINING_DATABASE_URL") or os.environ.get("DATABASE_URL", "sqlite:///./training.db")
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
+    # Prefer transaction pooler port 6543 (Supabase free 60-conn direct limit)
+    if os.environ.get("FORCE_DB_POOLER", "1").lower() in ("1", "true", "yes") and url.startswith("postgresql"):
+        if ":5432/" in url:
+            url = url.replace(":5432/", ":6543/")
+            _log.info("DB URL rewritten to pooler port 6543")
     kwargs = {"echo": False}
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}

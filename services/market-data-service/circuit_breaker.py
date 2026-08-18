@@ -1,26 +1,50 @@
 """
-Lightweight in-process circuit breaker for free-tier microservice calls.
+Circuit breaker with optional Redis-shared state across Render instances.
 
-States:
-  closed     — normal traffic
-  open       — fail fast after consecutive failures (no long timeouts)
-  half_open  — allow a probe after recovery_timeout
+Local memory is always used as a fast path; when UPSTASH_REDIS_* is set,
+failure counts and open state are mirrored to Redis keys:
+  cb:{name}:failures  (TTL = recovery_timeout * 2)
+  cb:{name}:state     (open|half_open|closed)
+  cb:{name}:opened_at (monotonic-ish epoch)
 
-No external dependencies. One breaker per downstream name (process-local).
+This way gateway and decision services share the same open/closed picture.
 """
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger("circuit-breaker")
 
-# Defaults tuned for Render free tier: open quickly, recover in ~1–2 min
-DEFAULT_FAILURE_THRESHOLD = 4
-DEFAULT_RECOVERY_TIMEOUT = 90.0
-DEFAULT_HALF_OPEN_SUCCESS = 1
+DEFAULT_FAILURE_THRESHOLD = int(os.getenv("CB_FAILURE_THRESHOLD", "12"))
+DEFAULT_RECOVERY_TIMEOUT = float(os.getenv("CB_RECOVERY_TIMEOUT", "45"))
+DEFAULT_HALF_OPEN_SUCCESS = int(os.getenv("CB_HALF_OPEN_SUCCESS", "2"))
+
+_redis = None
+_redis_init = False
+
+
+def _get_redis():
+    global _redis, _redis_init
+    if _redis_init:
+        return _redis
+    _redis_init = True
+    url = os.environ.get("UPSTASH_REDIS_REST_URL")
+    token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+    if not url or not token:
+        return None
+    try:
+        from upstash_redis import Redis
+        _redis = Redis(url=url, token=token)
+        _redis.ping()
+        logger.info("Circuit breaker Redis backend enabled")
+    except Exception as e:
+        logger.warning("Circuit breaker Redis unavailable: %s", e)
+        _redis = None
+    return _redis
 
 
 class CircuitOpenError(Exception):
@@ -45,9 +69,45 @@ class CircuitBreaker:
         self._lock = threading.Lock()
         self._failures = 0
         self._successes_half = 0
-        self._state = "closed"  # closed | open | half_open
+        self._state = "closed"
         self._opened_at = 0.0
         self._last_error: Optional[str] = None
+        self._load_remote()
+
+    def _rk(self, suffix: str) -> str:
+        return f"cb:{self.name}:{suffix}"
+
+    def _load_remote(self) -> None:
+        r = _get_redis()
+        if not r:
+            return
+        try:
+            st = r.get(self._rk("state"))
+            if isinstance(st, bytes):
+                st = st.decode()
+            if st in ("open", "half_open", "closed"):
+                self._state = st
+            fails = r.get(self._rk("failures"))
+            if fails is not None:
+                self._failures = int(fails)
+            opened = r.get(self._rk("opened_at"))
+            if opened is not None:
+                self._opened_at = float(opened)
+        except Exception as e:
+            logger.debug("cb load remote %s: %s", self.name, e)
+
+    def _persist(self) -> None:
+        r = _get_redis()
+        if not r:
+            return
+        try:
+            ttl = int(max(60, self.recovery_timeout * 3))
+            r.set(self._rk("state"), self._state, ex=ttl)
+            r.set(self._rk("failures"), str(self._failures), ex=ttl)
+            if self._opened_at:
+                r.set(self._rk("opened_at"), str(self._opened_at), ex=ttl)
+        except Exception as e:
+            logger.debug("cb persist %s: %s", self.name, e)
 
     def state(self) -> str:
         with self._lock:
@@ -65,29 +125,36 @@ class CircuitBreaker:
                 "last_error": self._last_error,
                 "failure_threshold": self.failure_threshold,
                 "recovery_timeout": self.recovery_timeout,
+                "redis_backed": bool(_get_redis()),
             }
 
     def _maybe_half_open_unlocked(self) -> None:
-        if self._state == "open":
-            elapsed = time.monotonic() - self._opened_at
-            if elapsed >= self.recovery_timeout:
-                self._state = "half_open"
-                self._successes_half = 0
-                logger.info("circuit %s → half_open after %.0fs", self.name, elapsed)
+        if self._state != "open":
+            return
+        # Prefer wall clock when redis-shared
+        opened = self._opened_at
+        now = time.time() if opened > 1e9 else time.monotonic()
+        if opened and (now - opened) >= self.recovery_timeout:
+            self._state = "half_open"
+            self._successes_half = 0
+            self._persist()
 
     def allow(self) -> bool:
         with self._lock:
+            self._load_remote()
             self._maybe_half_open_unlocked()
-            if self._state == "open":
-                return False
-            return True
+            if self._state == "closed":
+                return True
+            if self._state == "half_open":
+                return True
+            return False
 
     def retry_after(self) -> float:
         with self._lock:
-            if self._state != "open":
+            if self._state != "open" or not self._opened_at:
                 return 0.0
-            left = self.recovery_timeout - (time.monotonic() - self._opened_at)
-            return max(0.0, left)
+            now = time.time() if self._opened_at > 1e9 else time.monotonic()
+            return max(0.0, self.recovery_timeout - (now - self._opened_at))
 
     def record_success(self) -> None:
         with self._lock:
@@ -96,34 +163,34 @@ class CircuitBreaker:
                 if self._successes_half >= self.half_open_success:
                     self._state = "closed"
                     self._failures = 0
+                    self._opened_at = 0.0
                     self._last_error = None
-                    logger.info("circuit %s → closed (recovered)", self.name)
+                    logger.info("circuit %s → closed", self.name)
             else:
                 self._failures = 0
-                self._state = "closed"
+            self._persist()
 
-    def record_failure(self, err: str = None) -> None:
+    def record_failure(self, error: str = "") -> None:
         with self._lock:
-            self._last_error = (err or "")[:200]
+            self._last_error = (error or "")[:200]
             if self._state == "half_open":
                 self._state = "open"
-                self._opened_at = time.monotonic()
+                self._opened_at = time.time()
                 self._failures = self.failure_threshold
+                self._persist()
                 logger.warning("circuit %s → open (half_open probe failed): %s", self.name, self._last_error)
                 return
             self._failures += 1
             if self._failures >= self.failure_threshold:
                 self._state = "open"
-                self._opened_at = time.monotonic()
+                self._opened_at = time.time()
                 logger.warning(
                     "circuit %s → open after %s failures: %s",
-                    self.name,
-                    self._failures,
-                    self._last_error,
+                    self.name, self._failures, self._last_error,
                 )
+            self._persist()
 
     def call(self, func: Callable, *args, **kwargs):
-        """Sync call through the breaker."""
         if not self.allow():
             raise CircuitOpenError(self.name, self.retry_after())
         try:
@@ -135,7 +202,6 @@ class CircuitBreaker:
             raise
 
 
-# Process-wide registry
 _registry: Dict[str, CircuitBreaker] = {}
 _registry_lock = threading.Lock()
 

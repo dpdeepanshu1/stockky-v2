@@ -59,29 +59,46 @@ def _yf_mark_rate_limited(err=None) -> None:
 
 def _fetch_bars(symbol: str, start_date, end_date):
     """
-    Return list of {date, open, high, low, close} between start and end.
-    Prefer market-data exclusively when it returns HTTP 200 (even if few bars).
-    yfinance is last-resort only when market-data fails AND not rate-limited.
+    Return list of {date, open, high, low, close} between start and end (inclusive).
+
+    Prefer market-data with a long enough window (3mo) so T+1/T+5 always has
+    prior sessions. If market-data returns too few bars in-range, merge with
+    yfinance (when not rate-limited). Never treat a single same-day bar as enough.
     """
     base = (symbol or "").upper().replace(".NS", "").replace(".BO", "")
     rows = []
-    market_data_ok = False
+    seen = set()
 
-    # 1) market-data history
+    def _add(dt, o, h, l, c):
+        if dt in seen:
+            return
+        if start_date and dt < start_date:
+            return
+        if end_date and dt > end_date:
+            return
+        seen.add(dt)
+        rows.append({
+            "date": dt,
+            "open": float(o or 0),
+            "high": float(h or 0),
+            "low": float(l or 0),
+            "close": float(c or 0),
+        })
+
+    # 1) market-data history — request 3mo so we have prior sessions for new picks
     if MARKET_DATA_URL:
         try:
             import httpx
             r = httpx.get(
                 f"{MARKET_DATA_URL}/history/{base}",
-                params={"period": "1mo", "interval": "1d"},
-                timeout=20.0,
+                params={"period": "3mo", "interval": "1d"},
+                timeout=25.0,
             )
             if r.status_code == 200:
-                market_data_ok = True
                 data = r.json() or {}
-                candles = data.get("candles") or data.get("data") or data.get("bars") or []
+                candles = data.get("candles") or data.get("data") or data.get("bars") or data.get("history") or []
                 for c in candles:
-                    d = c.get("date") or c.get("time") or c.get("t")
+                    d = c.get("date") or c.get("time") or c.get("t") or c.get("datetime")
                     if not d:
                         continue
                     try:
@@ -91,53 +108,65 @@ def _fetch_bars(symbol: str, start_date, end_date):
                             dt = datetime.fromisoformat(str(d).replace("Z", "").split("T")[0]).date()
                     except Exception:
                         continue
-                    if start_date and dt < start_date:
-                        continue
-                    if end_date and dt > end_date:
-                        continue
-                    rows.append({
-                        "date": dt,
-                        "open": float(c.get("open") or c.get("o") or 0),
-                        "high": float(c.get("high") or c.get("h") or 0),
-                        "low": float(c.get("low") or c.get("l") or 0),
-                        "close": float(c.get("close") or c.get("c") or 0),
-                    })
-                rows.sort(key=lambda x: x["date"])
-                # Trust market-data on 200 — never hammer Yahoo for the same symbol
-                return rows
+                    _add(
+                        dt,
+                        c.get("open") or c.get("o"),
+                        c.get("high") or c.get("h"),
+                        c.get("low") or c.get("l"),
+                        c.get("close") or c.get("c") or c.get("adj_close"),
+                    )
         except Exception as e:
             logger.debug("market-data history for eval failed: %s", e)
 
-    if market_data_ok:
-        return rows
+    # 2) yfinance fallback / fill if still thin
+    need = 6
+    if len(rows) < need and not _yf_is_rate_limited():
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(f"{base}.NS")
+            # Pad range so Yahoo returns prior sessions
+            y_start = (start_date - timedelta(days=45)) if start_date else None
+            y_end = (end_date + timedelta(days=2)) if end_date else None
+            hist = ticker.history(start=y_start, end=y_end)
+            if hist is None or hist.empty:
+                hist = yf.Ticker(f"{base}.BO").history(start=y_start, end=y_end)
+            if hist is not None and not hist.empty:
+                for idx, row in hist.iterrows():
+                    try:
+                        dt = idx.date() if hasattr(idx, "date") else idx
+                    except Exception:
+                        continue
+                    _add(dt, row.get("Open"), row.get("High"), row.get("Low"), row.get("Close"))
+        except Exception as e:
+            _yf_mark_rate_limited(e)
+            logger.debug("yfinance eval bars %s: %s", base, e)
 
-    # 2) yfinance fallback only if market-data failed
-    if _yf_is_rate_limited():
-        return rows
-    try:
-        ticker = yf.Ticker(base + ".NS")
-        hist = ticker.history(start=start_date, end=end_date + timedelta(days=1))
-        if hist is None or len(hist) < 2:
-            ticker = yf.Ticker(base)
-            hist = ticker.history(start=start_date, end=end_date + timedelta(days=1))
-        if hist is not None and len(hist) >= 2:
-            for idx, row in hist.iterrows():
-                try:
-                    dt = idx.date() if hasattr(idx, "date") else idx
-                except Exception:
-                    continue
-                rows.append({
-                    "date": dt,
-                    "open": float(row.get("Open", 0) or 0),
-                    "high": float(row.get("High", 0) or 0),
-                    "low": float(row.get("Low", 0) or 0),
-                    "close": float(row.get("Close", 0) or 0),
-                })
-            rows.sort(key=lambda x: x["date"])
-    except Exception as e:
-        _yf_mark_rate_limited(e)
-        logger.warning("yfinance eval bars failed for %s: %s", base, e)
+    rows.sort(key=lambda x: x["date"])
     return rows
+
+
+def _calendar_age_days(ts) -> int:
+    """Non-negative calendar age in days (IST-aware, never negative)."""
+    if ts is None:
+        return 0
+    try:
+        from zoneinfo import ZoneInfo
+        IST = ZoneInfo("Asia/Kolkata")
+        now = datetime.now(IST)
+        if getattr(ts, "tzinfo", None) is None:
+            # Assume stored as IST-naive
+            ts_i = ts.replace(tzinfo=IST)
+        else:
+            ts_i = ts.astimezone(IST)
+        delta = (now.date() - ts_i.date()).days
+        return max(0, int(delta))
+    except Exception:
+        try:
+            if getattr(ts, "tzinfo", None) is not None:
+                ts = ts.replace(tzinfo=None)
+            return max(0, (datetime.utcnow() - ts).days)
+        except Exception:
+            return 0
 
 
 def _entry_and_t1_close(pred, bars):
@@ -183,21 +212,25 @@ def evaluate_t1(prediction_id: str):
         if existing:
             return {"ok": True, "reason": "already_evaluated", "success": bool(existing.success)}
 
-        start_date = pred.timestamp.date() if pred.timestamp else datetime.utcnow().date()
-        end_date = start_date + timedelta(days=10)  # cover weekends/holidays
+        raw_day = pred.timestamp.date() if pred.timestamp else datetime.utcnow().date()
+        start_date = raw_day - timedelta(days=7)  # prior sessions for entry match
+        end_date = raw_day + timedelta(days=12)  # cover weekends/holidays
         bars = _fetch_bars(pred.symbol, start_date, end_date)
 
         if not bars or len(bars) < 2:
-            age_days = 0
-            if pred.timestamp is not None:
-                ts = pred.timestamp
-                try:
-                    if getattr(ts, "tzinfo", None) is not None:
-                        ts = ts.replace(tzinfo=None)
-                    age_days = (datetime.utcnow() - ts).days
-                except Exception:
-                    age_days = 0
-            logger.warning("Not enough data for %s on T+1 (age=%sd)", pred.symbol, age_days)
+            age_days = _calendar_age_days(pred.timestamp)
+            logger.warning(
+                "Not enough data for %s on T+1 (age=%sd, bars=%s, start=%s)",
+                pred.symbol, age_days, len(bars) if bars else 0, start_date,
+            )
+            # Same-day / next-session not available yet — do NOT mark failed
+            if age_days < 1:
+                return {
+                    "ok": False,
+                    "reason": "waiting_next_session",
+                    "age_days": age_days,
+                    "message": "T+1 needs at least the next trading session close",
+                }
             # Mark failed only after enough calendar time that bars should exist
             if age_days >= 5:
                 pred.t1_success = 2
@@ -306,8 +339,8 @@ def evaluate_t5(prediction_id: str):
         if existing:
             return {"ok": True, "reason": "already_evaluated", "success": bool(existing.success)}
 
-        start_date = pred.timestamp.date() if pred.timestamp else datetime.utcnow().date()
-        end_date = start_date + timedelta(days=20)
+        start_date = (pred.timestamp.date() - timedelta(days=5)) if pred.timestamp else datetime.utcnow().date()
+        end_date = (pred.timestamp.date() if pred.timestamp else datetime.utcnow().date()) + timedelta(days=25)
         bars = _fetch_bars(pred.symbol, start_date, end_date)
         if not bars or len(bars) < 6:
             logger.warning("Not enough data for %s on T+5 (bars=%s)", pred.symbol, len(bars) if bars else 0)
@@ -409,38 +442,60 @@ def evaluate_pending_predictions(period: str = 'T+1', max_batch: int = 50):
         )
 
         min_days = 1 if period == "T+1" else 5
-        now = _dt.utcnow()
         due = []
+        waiting = 0
         for pred in pending:
-            ts = pred.timestamp
-            if ts is None:
-                continue
-            if getattr(ts, "tzinfo", None) is not None:
-                try:
-                    ts = ts.replace(tzinfo=None)
-                except Exception:
-                    pass
-            age = (now - ts).days
+            age = _calendar_age_days(pred.timestamp)
             if age >= min_days:
                 due.append(pred)
+            else:
+                waiting += 1
 
         logger.info(
-            "Found %s pending, %s due for %s (batch max %s)",
-            len(pending), len(due), period, max_batch,
+            "Found %s pending, %s due, %s waiting for %s (batch max %s)",
+            len(pending), len(due), waiting, period, max_batch,
         )
         done = 0
+        skipped = []
+        reasons = {}
         for pred in due[:max_batch]:
             try:
                 if period == "T+1":
-                    evaluate_t1(pred.prediction_id)
+                    res = evaluate_t1(pred.prediction_id)
                 else:
-                    evaluate_t5(pred.prediction_id)
-                done += 1
+                    res = evaluate_t5(pred.prediction_id)
+                rsn = (res or {}).get("reason") or ("ok" if (res or {}).get("ok") else "error")
+                reasons[rsn] = reasons.get(rsn, 0) + 1
+                if (res or {}).get("ok"):
+                    done += 1
+                else:
+                    skipped.append({"symbol": pred.symbol, "reason": rsn})
             except Exception as e:
                 logger.warning("%s eval failed for %s: %s", period, pred.prediction_id, e)
+                reasons["exception"] = reasons.get("exception", 0) + 1
             _time.sleep(0.35)
-        logger.info("%s evaluation batch finished: %s attempted", period, done)
-        return {"pending": len(pending), "due": len(due), "attempted": done, "period": period}
+        logger.info("%s evaluation batch finished: %s succeeded reasons=%s", period, done, reasons)
+        return {
+            "ok": True,
+            "pending": len(pending),
+            "due": len(due),
+            "waiting": waiting,
+            "attempted": min(len(due), max_batch),
+            "succeeded": done,
+            "period": period,
+            "reasons": reasons,
+            "skipped_sample": skipped[:8],
+            "pipeline": [
+                {"step": "load_pending", "ok": True, "detail": f"{len(pending)} snapshots without {period} outcome"},
+                {"step": "filter_due", "ok": True, "detail": f"{len(due)} due (≥{min_days}d), {waiting} waiting next sessions"},
+                {"step": "fetch_bars", "ok": True, "detail": "market-data 3mo → yfinance fill"},
+                {"step": "score_outcomes", "ok": done > 0 or len(due) == 0, "detail": f"{done} labeled; reasons={reasons}"},
+            ],
+            "message": (
+                f"{period}: {done} evaluated, {len(due)} were due, {waiting} still waiting. "
+                + ("Same-day picks need the next trading close before T+1 labels exist." if waiting and done == 0 else "")
+            ),
+        }
     except Exception as e:
         logger.error(f"Error in batch evaluation: {e}")
         return {"error": str(e), "period": period}

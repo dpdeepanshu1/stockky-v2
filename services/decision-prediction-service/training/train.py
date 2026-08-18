@@ -317,6 +317,166 @@ PICK_MODEL_FEATURES = SIMILARITY_FEATURES + ["market_score", "event_risk"]
 MIN_TRAINING_SAMPLES = 30
 
 
+def _bootstrap_rows_from_history(
+    db_session,
+    lookback_days: int = 7,
+    max_symbols: int = 80,
+) -> tuple:
+    """
+    When T+1 labels are missing, build synthetic training rows from recent
+    price history (market-data daily bars / bhavcopy-style).
+
+    For each candidate symbol (universe samples + recent prediction snapshots):
+      - load ~1mo daily bars
+      - for each session in the last `lookback_days` trading days that has a
+        next session, label = 1 if next close > entry close else 0
+      - features filled from PredictionSnapshot when available, else neutral
+
+    Returns (rows, meta) where meta describes date range and source.
+    """
+    import os
+    from datetime import datetime, timedelta
+
+    MARKET_DATA_URL = (os.environ.get("MARKET_DATA_URL") or "").rstrip("/")
+    symbols = []
+    feat_by_sym = {}
+
+    try:
+        from training.universe_ingest import get_active_universe_samples
+        for s in get_active_universe_samples(limit=500) or []:
+            sym = (s.get("symbol") or "").upper()
+            if not sym:
+                continue
+            symbols.append(sym)
+            snap = s.get("feature_snapshot") or {}
+            if isinstance(snap, dict):
+                feat_by_sym[sym] = snap
+    except Exception as e:
+        logger.debug("universe samples for bootstrap: %s", e)
+
+    try:
+        if HAS_DB and db_session is not None:
+            recent = (
+                db_session.query(db_models.PredictionSnapshot)
+                .order_by(db_models.PredictionSnapshot.timestamp.desc())
+                .limit(300)
+                .all()
+            )
+            for pred in recent:
+                sym = (pred.symbol or "").upper()
+                if not sym:
+                    continue
+                symbols.append(sym)
+                feat_by_sym.setdefault(sym, {})
+                for col in PICK_MODEL_FEATURES:
+                    if feat_by_sym[sym].get(col) is None:
+                        feat_by_sym[sym][col] = getattr(pred, col, None)
+    except Exception as e:
+        logger.debug("prediction snapshots for bootstrap: %s", e)
+
+    seen = set()
+    uniq = []
+    for s in symbols:
+        if s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    symbols = uniq[:max_symbols]
+
+    def fetch_closes(sym: str):
+        bars = []
+        if MARKET_DATA_URL:
+            try:
+                import httpx
+                r = httpx.get(
+                    f"{MARKET_DATA_URL}/history/{sym}",
+                    params={"period": "1mo", "interval": "1d"},
+                    timeout=20.0,
+                )
+                if r.status_code == 200:
+                    data = r.json() or {}
+                    candles = data.get("candles") or data.get("data") or data.get("bars") or []
+                    for c in candles:
+                        d = c.get("date") or c.get("time") or c.get("t")
+                        if not d:
+                            continue
+                        try:
+                            if isinstance(d, (int, float)):
+                                dt = datetime.utcfromtimestamp(d if d < 1e12 else d / 1000).date()
+                            else:
+                                dt = datetime.fromisoformat(str(d).replace("Z", "").split("T")[0]).date()
+                        except Exception:
+                            continue
+                        close = c.get("close") or c.get("c") or c.get("adj_close")
+                        if close is None:
+                            continue
+                        bars.append((dt, float(close)))
+            except Exception as e:
+                logger.debug("bootstrap history %s: %s", sym, e)
+        if len(bars) < 5:
+            try:
+                import yfinance as yf
+                hist = yf.Ticker(f"{sym}.NS").history(period="1mo", interval="1d")
+                if hist is not None and not hist.empty:
+                    for idx, row in hist.iterrows():
+                        try:
+                            dt = idx.date() if hasattr(idx, "date") else idx
+                        except Exception:
+                            continue
+                        bars.append((dt, float(row.get("Close") or 0)))
+            except Exception:
+                pass
+        bars = sorted({d: c for d, c in bars}.items(), key=lambda x: x[0])
+        return bars
+
+    rows = []
+    min_d = max_d = None
+    sources = set()
+    for sym in symbols:
+        bars = fetch_closes(sym)
+        if len(bars) < 3:
+            continue
+        pairs = list(zip(bars[:-1], bars[1:]))
+        pairs = pairs[-lookback_days:]
+        for (d0, c0), (d1, c1) in pairs:
+            if c0 <= 0:
+                continue
+            label = 1 if c1 > c0 else 0
+            feat = dict(feat_by_sym.get(sym) or {})
+            row = {col: feat.get(col) for col in PICK_MODEL_FEATURES}
+            for col in PICK_MODEL_FEATURES:
+                if row.get(col) is None:
+                    row[col] = 50.0 if ("score" in col or col == "rsi") else 0.0
+            row["event_risk"] = float(bool(row.get("event_risk")))
+            row["label"] = label
+            row["timestamp"] = datetime.combine(d0, datetime.min.time())
+            row["symbol"] = sym
+            row["_bootstrap"] = True
+            rows.append(row)
+            sources.add("market-data/history+yfinance")
+            min_d = d0 if min_d is None or d0 < min_d else min_d
+            max_d = d1 if max_d is None or d1 > max_d else max_d
+
+    meta = {
+        "bootstrap": True,
+        "lookback_days": lookback_days,
+        "symbols_considered": len(symbols),
+        "rows": len(rows),
+        "date_from": min_d.isoformat() if min_d else None,
+        "date_to": max_d.isoformat() if max_d else None,
+        "sources": sorted(sources) or ["none"],
+        "note": (
+            "Synthetic next-day up/down labels from daily bars because "
+            "PredictionSnapshot.t1_success has fewer than MIN_TRAINING_SAMPLES evaluated rows. "
+            "Run T+1 evaluation after the next session to train on real outcomes."
+        ),
+    }
+    logger.info(
+        "Bootstrap labels: %s rows from %s symbols, %s → %s sources=%s",
+        len(rows), len(symbols), meta["date_from"], meta["date_to"], meta["sources"],
+    )
+    return rows, meta
+
+
 def train_pick_success_model(
     db_session,
     model_store_path: str = "./model-store",
@@ -411,8 +571,46 @@ def train_pick_success_model(
         else:
             raise ValueError(f"Unknown label_source: {label_source!r}")
 
+        bootstrap_meta = None
+        if len(rows) < min_samples:
+            logger.warning(
+                "Only %d labeled examples for label_source=%s (need %d) — bootstrapping from last 7d daily bars",
+                len(rows), label_source, min_samples,
+            )
+            write_progress(
+                0, 0, time.time() - _train_start_time, stage="loading_data",
+                detail={
+                    "label_source": label_source,
+                    "reason": "insufficient_real_labels",
+                    "labeled": len(rows),
+                    "action": "bootstrap_bhavcopy_7d",
+                },
+            )
+            try:
+                boot_rows, bootstrap_meta = _bootstrap_rows_from_history(
+                    db_session, lookback_days=7, max_symbols=80
+                )
+                rows = list(rows) + list(boot_rows)
+                logger.info(
+                    "After bootstrap: %d rows (real+synthetic). window=%s→%s source=%s",
+                    len(rows),
+                    (bootstrap_meta or {}).get("date_from"),
+                    (bootstrap_meta or {}).get("date_to"),
+                    (bootstrap_meta or {}).get("sources"),
+                )
+            except Exception as be:
+                logger.exception("Bootstrap failed: %s", be)
+
         report["dataset_size"] = len(rows)
         report["num_symbols"] = len({r["symbol"] for r in rows})
+        if bootstrap_meta:
+            report["bootstrap"] = bootstrap_meta
+            report["data_window"] = {
+                "from": bootstrap_meta.get("date_from"),
+                "to": bootstrap_meta.get("date_to"),
+                "sources": bootstrap_meta.get("sources"),
+                "note": bootstrap_meta.get("note"),
+            }
         write_progress(
             0, 0, time.time() - _train_start_time, stage="data_loaded",
             detail={

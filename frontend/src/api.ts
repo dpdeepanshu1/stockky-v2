@@ -766,7 +766,20 @@ export const api = {
     request<PeriodRollupItem[]>(`/training/api/metrics/weekly?weeks=${weeks}`, undefined, 2, 30000),
 
   triggerEvaluation: (period: "t1" | "t5") =>
-    request<{ status: string }>(`/training/api/evaluate/${period}`, { method: "POST" }, 1, 30000),
+    request<{
+      status?: string;
+      ok?: boolean;
+      pending?: number;
+      due?: number;
+      waiting?: number;
+      attempted?: number;
+      succeeded?: number;
+      period?: string;
+      reasons?: Record<string, number>;
+      pipeline?: { step: string; ok: boolean; detail: string }[];
+      message?: string;
+      skipped_sample?: { symbol: string; reason: string }[];
+    }>(`/training/api/evaluate/${period}`, { method: "POST" }, 1, 120000),
 
   /** Record picks for training/T+1/T+5 tracking. Does NOT open trades by default. */
   commitActionablePicks: (picks: ActionablePick[], capitalPerTrade = 10000, openTrades = false) =>

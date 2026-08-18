@@ -31,6 +31,13 @@ export default function Training() {
   // NEW: manual intervention controls (for when scheduler-service isn't running)
   const [runningT1, setRunningT1] = useState(false);
   const [runningT5, setRunningT5] = useState(false);
+  const [evalPipeline, setEvalPipeline] = useState<{
+    period: "t1" | "t5";
+    steps: { step: string; ok: boolean; detail: string }[];
+    message?: string;
+    reasons?: Record<string, number>;
+    at?: string;
+  } | null>(null);
   const [evalStatus, setEvalStatus] = useState<{
     t1?: {
       pending: number;
@@ -173,44 +180,68 @@ export default function Training() {
   const runEvaluation = async (period: "t1" | "t5") => {
     const setRunning = period === "t1" ? setRunningT1 : setRunningT5;
     setRunning(true);
+    const label = period === "t1" ? "T+1" : "T+5";
+    setEvalPipeline({
+      period,
+      steps: [
+        { step: "request", ok: true, detail: `POST /api/evaluate/${period}` },
+        { step: "load_pending", ok: true, detail: "waiting…" },
+        { step: "filter_due", ok: true, detail: "waiting…" },
+        { step: "fetch_bars", ok: true, detail: "market-data 3mo → yfinance" },
+        { step: "score_outcomes", ok: true, detail: "waiting…" },
+      ],
+      message: `${label} sweep starting…`,
+      at: new Date().toISOString(),
+    });
     try {
-      await api.triggerEvaluation(period);
-      const label = period === "t1" ? "T+1" : "T+5";
+      const raw: any = await api.triggerEvaluation(period);
+      // Gateway/training may wrap as { status, result: {...pipeline fields} }
+      const res: any = raw?.result && typeof raw.result === "object" ? raw.result : raw;
+      const pipeline = Array.isArray(res?.pipeline)
+        ? res.pipeline
+        : [
+            { step: "load_pending", ok: true, detail: `pending=${res?.pending ?? "?"}` },
+            { step: "filter_due", ok: true, detail: `due=${res?.due ?? "?"} waiting=${res?.waiting ?? "?"}` },
+            { step: "fetch_bars", ok: true, detail: "market-data 3mo → yfinance fill" },
+            {
+              step: "score_outcomes",
+              ok: (res?.succeeded ?? res?.attempted ?? 0) > 0 || (res?.due ?? 0) === 0,
+              detail: res?.message || JSON.stringify(res?.reasons || {}),
+            },
+          ];
+      setEvalPipeline({
+        period,
+        steps: pipeline,
+        message:
+          res?.message ||
+          `${label}: due=${res?.due ?? 0} succeeded=${res?.succeeded ?? res?.attempted ?? 0}`,
+        reasons: res?.reasons,
+        at: new Date().toISOString(),
+      });
       showToast(
         "info",
-        `${label} evaluation started. Tracking progress (same style as Market Scan stages)...`
+        res?.message ||
+          `${label} sweep finished. If succeeded=0 and pending>0, picks need the next trading session before labels exist.`
       );
       await refreshEvaluateStatus();
-      // Poll evaluate status for ~25s while background sweep runs
-      let ticks = 0;
-      const poll = window.setInterval(async () => {
-        ticks += 1;
-        await refreshEvaluateStatus();
-        if (ticks >= 12) {
-          window.clearInterval(poll);
-          setRunning(false);
-          fetchPredictionHistory();
-          fetchPeriodRollup(periodView);
-          fetchStatus();
-          showToast(
-            "info",
-            `${label} sweep requested. Empty outcomes usually mean not enough calendar time / price bars yet.`
-          );
-        }
-      }, 2000);
-      setTimeout(() => {
-        fetchPredictionHistory();
-        fetchPeriodRollup(periodView);
-        fetchStatus();
-      }, 4000);
+      fetchPredictionHistory();
+      fetchPeriodRollup(periodView);
+      fetchStatus();
     } catch (err: any) {
-      setRunning(false);
       const msg = err?.message || String(err || "");
+      setEvalPipeline({
+        period,
+        steps: [{ step: "error", ok: false, detail: msg.slice(0, 240) }],
+        message: msg,
+        at: new Date().toISOString(),
+      });
       if (msg.includes("502") || msg.includes("unreachable") || msg.includes("timeout")) {
-        showToast("error", `Could not reach training service for ${period.toUpperCase()} (cold start / timeout). Wait ~30s and try again.`);
+        showToast("error", `Could not reach training service for ${label} (cold start / timeout). Wait ~30s and try again.`);
       } else {
-        showToast("error", `Failed to trigger ${period.toUpperCase()} evaluation: ${msg.slice(0, 180)}`);
+        showToast("error", `Failed to trigger ${label} evaluation: ${msg.slice(0, 180)}`);
       }
+    } finally {
+      setRunning(false);
     }
   };
 
@@ -767,6 +798,36 @@ export default function Training() {
         <p className="text-mist/40 text-[11px] mt-2">
           Trade mark-to-market has its own manual trigger on the Trades tab.
         </p>
+        {evalPipeline && (
+          <div className="mt-4 rounded-lg border border-signal-prepare/30 bg-slate/20 p-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="font-mono text-xs text-mist uppercase tracking-widest">
+                {evalPipeline.period.toUpperCase()} evaluation pipeline
+              </span>
+              <span className="font-mono text-[10px] text-mist/60">
+                {evalPipeline.at ? new Date(evalPipeline.at).toLocaleTimeString() : ""}
+              </span>
+            </div>
+            <ol className="space-y-1.5 mb-2">
+              {evalPipeline.steps.map((s, i) => (
+                <li key={i} className="flex gap-2 text-[11px] font-mono">
+                  <span className={s.ok ? "text-signal-buy" : "text-signal-sell"}>{s.ok ? "✓" : "✗"}</span>
+                  <span className="text-mist/90 min-w-[7rem]">{s.step}</span>
+                  <span className="text-mist/60 break-all">{s.detail}</span>
+                </li>
+              ))}
+            </ol>
+            {evalPipeline.message && (
+              <p className="text-xs text-mist/80 mb-0">{evalPipeline.message}</p>
+            )}
+            {evalPipeline.reasons && (
+              <p className="text-[10px] font-mono text-mist/50 mb-0 mt-1">
+                reasons: {Object.entries(evalPipeline.reasons).map(([k, v]) => `${k}=${v}`).join(" · ")}
+              </p>
+            )}
+          </div>
+        )}
+
         {evalStatus && (
           <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
             {(["t1", "t5"] as const).map((key) => {

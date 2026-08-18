@@ -80,6 +80,11 @@ def extract_feed_payload(
     return payload
 
 
+# Process-local job/meta so status works even when Redis is off
+_LOCAL_JOB: dict = {}
+_LOCAL_META: dict = {}
+_LOCAL_SYMBOLS: dict = {}
+
 class DataFeedStore:
     def __init__(self, redis_get, redis_set, redis_client=None):
         self._get = redis_get
@@ -88,14 +93,19 @@ class DataFeedStore:
 
     def get_symbol(self, symbol: str) -> Optional[dict]:
         key = DATA_FEED_PREFIX + symbol.upper().replace(".NS", "").replace(".BO", "")
+        if key in _LOCAL_SYMBOLS:
+            return _LOCAL_SYMBOLS[key]
         val = self._get(key)
         return val if isinstance(val, dict) else None
 
     def put_symbol(self, symbol: str, payload: dict, ttl: int = DATA_FEED_TTL) -> None:
         key = DATA_FEED_PREFIX + symbol.upper().replace(".NS", "").replace(".BO", "")
+        _LOCAL_SYMBOLS[key] = payload
         self._set(key, payload, ttl=ttl)
 
     def meta(self) -> dict:
+        if _LOCAL_META:
+            return dict(_LOCAL_META)
         m = self._get(DATA_FEED_META_KEY)
         return m if isinstance(m, dict) else {
             "last_success_at": None,
@@ -108,10 +118,14 @@ class DataFeedStore:
         m = self.meta()
         m.update(kwargs)
         m["updated_at"] = _now_iso()
+        _LOCAL_META.clear()
+        _LOCAL_META.update(m)
         self._set(DATA_FEED_META_KEY, m, ttl=7 * 86400)
         return m
 
     def job(self) -> dict:
+        if _LOCAL_JOB:
+            return dict(_LOCAL_JOB)
         j = self._get(DATA_FEED_JOB_KEY)
         return j if isinstance(j, dict) else {
             "status": "idle",
@@ -139,6 +153,8 @@ class DataFeedStore:
                     j["estimated_remaining_sec"] = int(rate * (total - done))
             except Exception:
                 pass
+        _LOCAL_JOB.clear()
+        _LOCAL_JOB.update(j)
         self._set(DATA_FEED_JOB_KEY, j, ttl=86400)
         return j
 

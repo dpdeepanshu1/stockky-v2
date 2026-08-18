@@ -1,3 +1,4 @@
+import time
 import gc
 """
 Technical Analysis Service
@@ -56,16 +57,20 @@ def _rs_vs_nifty(close_series, nifty_close_series=None):
 app = FastAPI(title="Stockky Technical Analysis Service", version="0.3.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ── Redis cache ────────────────────────────────────────────────────────────────
+# ── Cache: memory-first; Redis only if USE_REDIS=1 ─────────────────────────────
+_USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
+_mem_tech: dict = {}
+_mem_tech_exp: dict = {}
+cache = None
 try:
-    if UPSTASH_URL and UPSTASH_TOKEN:
+    if _USE_REDIS and UPSTASH_URL and UPSTASH_TOKEN:
         cache = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN)
         cache.ping()
-        logger.info("Connected to Upstash Redis")
+        logger.info("Technical: Upstash Redis ON (USE_REDIS=1)")
     else:
-        raise ValueError("Upstash credentials not set")
+        logger.info("Technical: USE_REDIS=0 — in-memory cache only")
 except Exception as e:
-    logger.warning("Redis unavailable (%s). Running without cache.", e)
+    logger.warning("Redis unavailable (%s). Memory-only.", e)
     cache = None
 
 def is_market_open() -> bool:
@@ -78,16 +83,24 @@ def get_cache_ttl() -> int:
     return 300 if is_market_open() else 21600
 
 def _cache_get(key: str):
+    exp = _mem_tech_exp.get(key)
+    if key in _mem_tech and (exp is None or exp > time.time()):
+        return _mem_tech[key]
     if not cache:
         return None
-    val = cache.get(key)
-    return json.loads(val) if val else None
+    try:
+        val = cache.get(key)
+        return json.loads(val) if val else None
+    except Exception:
+        return None
 
 def _cache_set(key: str, value: dict, ttl: int = None):
-    if not cache:
-        return
     if ttl is None:
         ttl = get_cache_ttl()
+    _mem_tech[key] = value
+    _mem_tech_exp[key] = time.time() + int(ttl)
+    if not cache:
+        return
     cache.setex(key, ttl, json.dumps(value, default=str))
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

@@ -272,6 +272,7 @@ try:
         cache.ping()
         logger.info("Connected to Upstash Redis (USE_REDIS=1)")
     else:
+        cache = None  # hard-disable even if credentials present
         logger.info("Market-data cache: in-memory only (USE_REDIS=0) — no Upstash commands")
 except Exception as e:
     logger.warning("Redis unavailable (%s). Memory-only cache.", e)

@@ -4785,6 +4785,73 @@ async def ops_keepalive(deep: bool = False):
 # Data Feed — slow fields (12–24h) for free-tier rate-limit relief
 # ═══════════════════════════════════════════════════════════════════════════
 
+
+
+@app.post("/ops/power-off")
+async def ops_power_off(background_tasks: BackgroundTasks):
+    """Emergency stop: cancel scans, data-feed, hot-picks; clear frontend-visible jobs.
+    Does not wipe DB. Returns phases for UI messages.
+    """
+    phases = []
+    # 1) Cancel active scan tasks
+    try:
+        cancelled = 0
+        # Mark any in-memory cancel flags
+        for k in list(_mem_kv.keys()):
+            if ":cancel" in str(k) or str(k).endswith(":cancel"):
+                _mem_kv[k] = True
+                cancelled += 1
+            if "scan:task:" in str(k) or "scan_task" in str(k).lower():
+                try:
+                    data = _mem_kv.get(k)
+                    if isinstance(data, dict) and data.get("status") == "running":
+                        data["status"] = "cancelled"
+                        data["cancel_requested"] = True
+                        data["partial"] = True
+                        _mem_kv[k] = data
+                        cancelled += 1
+                except Exception:
+                    pass
+        phases.append({"phase": "scan", "ok": True, "detail": f"cancel signals={cancelled}"})
+    except Exception as e:
+        phases.append({"phase": "scan", "ok": False, "detail": str(e)[:120]})
+
+    # 2) Stop data feed
+    try:
+        store = _feed_store()
+        store.set_job(
+            status="stopped",
+            message="Power-off: data feed stopped",
+            stop_requested=True,
+            finished_at=__import__("datetime").datetime.now(__import__("zoneinfo").ZoneInfo("Asia/Kolkata")).isoformat(),
+        )
+        phases.append({"phase": "data_feed", "ok": True, "detail": "stopped"})
+    except Exception as e:
+        phases.append({"phase": "data_feed", "ok": False, "detail": str(e)[:120]})
+
+    # 3) Stop hot picks
+    try:
+        from data_feed import hot_job_set
+        hot_job_set(
+            _redis_set, _redis_get,
+            status="idle",
+            message="Power-off: Hot Picks stopped",
+            processed=0,
+        )
+        phases.append({"phase": "hot_picks", "ok": True, "detail": "idle"})
+    except Exception as e:
+        phases.append({"phase": "hot_picks", "ok": False, "detail": str(e)[:120]})
+
+    # 4) Soft warm (optional, non-blocking)
+    phases.append({"phase": "ready", "ok": True, "detail": "All stoppable jobs signalled. Refresh UI for fresh start."})
+    return {
+        "ok": True,
+        "message": "Switching OFF processes → restarting state → ready for fresh start",
+        "phases": phases,
+        "hint": "Scan/data-feed/hot-picks stopped. Training lock is per-service — use Stop Training if needed.",
+    }
+
+
 @app.get("/data-feed/meta")
 def data_feed_meta():
     """Last successful feed timestamp, stock count, job status."""

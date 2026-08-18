@@ -17,6 +17,7 @@ import json
 import math
 import time
 import random
+import time
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
@@ -75,30 +76,54 @@ def cached_yf(method_name: str):
     return decorator
 
 
-# ── Redis ──────────────────────────────────────────────────────────────────────
+# ── Cache: memory-first; Redis only if USE_REDIS=1 ─────────────────────────────
+_USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
 _redis = None
+_mem: dict = {}
+_mem_exp: dict = {}
+
 try:
-    _redis = Redis(
-        url=os.getenv("UPSTASH_REDIS_REST_URL"),
-        token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
-    )
-    _redis.ping()
-    logger.info("Connected to Upstash Redis")
+    if _USE_REDIS and os.getenv("UPSTASH_REDIS_REST_URL") and os.getenv("UPSTASH_REDIS_REST_TOKEN"):
+        _redis = Redis(
+            url=os.getenv("UPSTASH_REDIS_REST_URL"),
+            token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
+        )
+        _redis.ping()
+        logger.info("Event tracker: Upstash Redis ON (USE_REDIS=1)")
+    else:
+        logger.info("Event tracker: USE_REDIS=0 — in-memory cache only (no Upstash)")
 except Exception as e:
-    logger.warning("Redis unavailable, caching and persistence disabled: %s", e)
+    logger.warning("Redis unavailable, memory-only: %s", e)
+    _redis = None
 
 
 def _redis_get(key: str):
+    exp = _mem_exp.get(key)
+    if key in _mem and (exp is None or exp > time.time()):
+        return _mem[key]
     if not _redis:
         return None
     try:
         val = _redis.get(key)
-        return json.loads(val) if val else None
+        if not val:
+            return None
+        parsed = json.loads(val) if isinstance(val, (str, bytes)) else val
+        _mem[key] = parsed
+        return parsed
     except Exception:
         return None
 
 
 def _redis_set(key: str, value, ttl: int = None):
+    if ttl:
+        _mem_exp[key] = time.time() + int(ttl)
+    else:
+        _mem_exp[key] = None
+    _mem[key] = value
+    if len(_mem) > 4000:
+        for k in list(_mem.keys())[:400]:
+            _mem.pop(k, None)
+            _mem_exp.pop(k, None)
     if not _redis:
         return
     try:
@@ -108,7 +133,7 @@ def _redis_set(key: str, value, ttl: int = None):
         else:
             _redis.set(key, data)
     except Exception as e:
-        logger.warning("Redis set failed for %s: %s", key, e)
+        logger.debug("Redis set failed for %s: %s", key, e)
 
 
 def _load_state() -> dict:

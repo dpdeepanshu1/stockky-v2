@@ -6,10 +6,9 @@ name: Stockky Scheduler
 
 on:
   schedule:
-    # Every 15 min during UTC hours covering IST market Mon–Fri
-    - cron: "0,15,30,45 4-9 * * 1-5"
-    - cron: "45 3 * * 1-5"
-    - cron: "0,15,30 10 * * 1-5"
+    # Hourly only during NSE session (IST ~09:30–15:30 ≈ UTC 04:00–10:00 Mon–Fri)
+    # Cuts GitHub Actions + Redis/command burn vs every-15-min ticks
+    - cron: "0 4-10 * * 1-5"
   workflow_dispatch:
     inputs:
       force_scan:

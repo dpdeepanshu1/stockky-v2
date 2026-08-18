@@ -36,6 +36,7 @@ export default function Training() {
     steps: { step: string; ok: boolean; detail: string }[];
     message?: string;
     reasons?: Record<string, number>;
+    labeled_sample?: { symbol?: string; mode?: string; success?: boolean; entry_date?: string; t1_date?: string }[];
     at?: string;
   } | null>(null);
   const [evalStatus, setEvalStatus] = useState<{
@@ -214,14 +215,17 @@ export default function Training() {
         steps: pipeline,
         message:
           res?.message ||
-          `${label}: due=${res?.due ?? 0} succeeded=${res?.succeeded ?? res?.attempted ?? 0}`,
+          `${label}: due=${res?.due ?? 0} succeeded=${res?.succeeded ?? res?.attempted ?? 0} backfill=${res?.backfilled ?? 0}`,
         reasons: res?.reasons,
+        labeled_sample: res?.labeled_sample,
         at: new Date().toISOString(),
       });
+      const nOk = res?.succeeded ?? 0;
+      const nBack = res?.backfilled ?? 0;
       showToast(
-        "info",
+        nOk > 0 ? "success" : "info",
         res?.message ||
-          `${label} sweep finished. If succeeded=0 and pending>0, picks need the next trading session before labels exist.`
+          `${label}: labeled ${nOk} (history_backfill=${nBack}). Check pipeline panel below.`
       );
       await refreshEvaluateStatus();
       fetchPredictionHistory();
@@ -824,6 +828,17 @@ export default function Training() {
               <p className="text-[10px] font-mono text-mist/50 mb-0 mt-1">
                 reasons: {Object.entries(evalPipeline.reasons).map(([k, v]) => `${k}=${v}`).join(" · ")}
               </p>
+            )}
+            {evalPipeline.labeled_sample && evalPipeline.labeled_sample.length > 0 && (
+              <ul className="mt-2 space-y-0.5 text-[10px] font-mono text-mist/70 mb-0">
+                {evalPipeline.labeled_sample.map((row, i) => (
+                  <li key={i}>
+                    {row.symbol}: {row.mode || "?"}{" "}
+                    {row.success == null ? "" : row.success ? "✓" : "✗"}{" "}
+                    {row.entry_date || "?"} → {row.t1_date || "?"}
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
         )}

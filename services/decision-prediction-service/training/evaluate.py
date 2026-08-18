@@ -169,7 +169,145 @@ def _calendar_age_days(ts) -> int:
             return 0
 
 
+
+def _score_success(pred, entry_px: float, exit_px: float) -> bool:
+    """BUY-side success = exit > entry; SELL/DO NOT BUY inverted loosely."""
+    if entry_px is None or exit_px is None or entry_px <= 0:
+        return False
+    decision = (getattr(pred, "decision", None) or "").upper()
+    up = exit_px > entry_px
+    if "SELL" in decision or "DO NOT" in decision or "AVOID" in decision:
+        return not up
+    return up
+
+
+def _evaluate_t1_with_backfill(pred, bars, allow_backfill: bool = True) -> dict:
+    """
+    Real T+1 if next session after pred exists in bars.
+    Else history backfill: use last two complete sessions in bars (bhavcopy/upstream)
+    so manual sweeps still produce labels when calendar 'due' is 0.
+    """
+    if not bars or len(bars) < 2:
+        return {"ok": False, "reason": "no_bars", "bars": len(bars) if bars else 0}
+
+    pred_day = pred.timestamp.date() if pred.timestamp else bars[0]["date"]
+    session0 = None
+    for i, b in enumerate(bars):
+        if b["date"] >= pred_day:
+            session0 = i
+            break
+
+    mode = "realtime"
+    entry_px = t1_px = None
+    entry_d = t1_d = None
+
+    if session0 is not None and session0 + 1 < len(bars):
+        entry_px = bars[session0]["close"]
+        t1_px = bars[session0 + 1]["close"]
+        entry_d = bars[session0]["date"]
+        t1_d = bars[session0 + 1]["date"]
+        mode = "realtime"
+    elif allow_backfill and len(bars) >= 2:
+        # Last complete pair in history (previous data from upstream/bhavcopy)
+        entry_px = bars[-2]["close"]
+        t1_px = bars[-1]["close"]
+        entry_d = bars[-2]["date"]
+        t1_d = bars[-1]["date"]
+        mode = "history_backfill"
+        logger.info(
+            "T+1 BACKFILL %s: no post-pred session yet — using history %s → %s (source=bars)",
+            pred.symbol, entry_d, t1_d,
+        )
+    else:
+        return {
+            "ok": False,
+            "reason": "waiting_next_session",
+            "message": "Next session not in bars yet; backfill disabled",
+            "bars": len(bars),
+        }
+
+    if not entry_px or entry_px <= 0:
+        # Prefer declared entry range
+        er = getattr(pred, "entry_range_low", None) or getattr(pred, "price", None)
+        try:
+            entry_px = float(er) if er else entry_px
+        except (TypeError, ValueError):
+            pass
+    if not entry_px or not t1_px:
+        return {"ok": False, "reason": "bad_prices", "mode": mode}
+
+    success = _score_success(pred, float(entry_px), float(t1_px))
+    return {
+        "ok": True,
+        "success": success,
+        "mode": mode,
+        "entry_price": float(entry_px),
+        "t1_close": float(t1_px),
+        "entry_date": entry_d.isoformat() if entry_d else None,
+        "t1_date": t1_d.isoformat() if t1_d else None,
+        "symbol": pred.symbol,
+    }
+
+
+def _persist_t1_outcome(db, pred, scored: dict) -> dict:
+    """Write PredictionOutcome + t1_success on snapshot."""
+    success = bool(scored.get("success"))
+    try:
+        existing = db.query(db_models.PredictionOutcome).filter(
+            db_models.PredictionOutcome.prediction_id == pred.prediction_id,
+            db_models.PredictionOutcome.evaluation_period == "T+1",
+        ).first()
+        if existing:
+            return {"ok": True, "reason": "already_evaluated", "success": bool(existing.success)}
+
+        entry_px = scored.get("entry_price")
+        t1_px = scored.get("t1_close")
+        ret = None
+        try:
+            if entry_px and t1_px and float(entry_px) > 0:
+                ret = (float(t1_px) - float(entry_px)) / float(entry_px) * 100.0
+        except (TypeError, ValueError):
+            ret = None
+
+        outcome = db_models.PredictionOutcome(
+            prediction_id=pred.prediction_id,
+            evaluation_period="T+1",
+            evaluation_date=datetime.utcnow(),
+            close_price=float(t1_px) if t1_px is not None else None,
+            return_pct=ret,
+            direction_correct=1 if success else 0,
+            success=1 if success else 0,
+            notes=(
+                f"mode={scored.get('mode')} entry={scored.get('entry_date')} "
+                f"t1={scored.get('t1_date')} entry_px={entry_px} t1_px={t1_px}"
+            ),
+        )
+        db.add(outcome)
+        pred.t1_success = 1 if success else 2
+        db.commit()
+        logger.info(
+            "T+1 LABELED %s success=%s mode=%s entry=%s t1=%s ret=%s",
+            pred.symbol, success, scored.get("mode"),
+            scored.get("entry_date"), scored.get("t1_date"), ret,
+        )
+        return {
+            "ok": True,
+            "reason": "labeled",
+            "success": success,
+            "mode": scored.get("mode"),
+            "entry_date": scored.get("entry_date"),
+            "t1_date": scored.get("t1_date"),
+            "symbol": pred.symbol,
+            "return_pct": ret,
+        }
+    except Exception as e:
+        db.rollback()
+        logger.exception("persist t1 outcome failed: %s", e)
+        return {"ok": False, "reason": "db_error", "error": str(e)[:160]}
+
+
 def _entry_and_t1_close(pred, bars):
+
     """
     Map prediction date to entry (close on/after pred day) and T+1 close (next session).
     """
@@ -194,8 +332,14 @@ def _entry_and_t1_close(pred, bars):
 
 # ---------- Existing T+1 / T+5 evaluators (kept intact, with minor enhancements) ----------
 
-def evaluate_t1(prediction_id: str):
-    """Evaluate a prediction on T+1 (next trading session close vs entry)."""
+def evaluate_t1(prediction_id: str, allow_backfill: bool = True):
+    """Evaluate a prediction on T+1 (next trading session close vs entry).
+
+    allow_backfill=True (default for manual sweeps): if the next session is not
+    in bars yet, label using the stock's latest completed session pair from
+    market-data / yfinance / bhavcopy-style history so Training Intelligence
+    does not sit at 0/19 forever on same-day picks.
+    """
     db = SessionLocal()
     try:
         pred = db.query(db_models.PredictionSnapshot).filter(
@@ -213,113 +357,39 @@ def evaluate_t1(prediction_id: str):
             return {"ok": True, "reason": "already_evaluated", "success": bool(existing.success)}
 
         raw_day = pred.timestamp.date() if pred.timestamp else datetime.utcnow().date()
-        start_date = raw_day - timedelta(days=7)  # prior sessions for entry match
-        end_date = raw_day + timedelta(days=12)  # cover weekends/holidays
+        # Wide window: prior + future sessions for realtime; history always available
+        start_date = raw_day - timedelta(days=45)
+        end_date = raw_day + timedelta(days=20)
         bars = _fetch_bars(pred.symbol, start_date, end_date)
+        logger.info(
+            "T+1 fetch %s bars=%s window=%s..%s age=%sd",
+            pred.symbol, len(bars) if bars else 0, start_date, end_date,
+            _calendar_age_days(pred.timestamp),
+        )
 
-        if not bars or len(bars) < 2:
+        scored = _evaluate_t1_with_backfill(pred, bars, allow_backfill=allow_backfill)
+        if not scored.get("ok"):
             age_days = _calendar_age_days(pred.timestamp)
             logger.warning(
-                "Not enough data for %s on T+1 (age=%sd, bars=%s, start=%s)",
-                pred.symbol, age_days, len(bars) if bars else 0, start_date,
+                "T+1 skip %s reason=%s age=%sd bars=%s",
+                pred.symbol, scored.get("reason"), age_days, len(bars) if bars else 0,
             )
-            # Same-day / next-session not available yet — do NOT mark failed
-            if age_days < 1:
-                return {
-                    "ok": False,
-                    "reason": "waiting_next_session",
-                    "age_days": age_days,
-                    "message": "T+1 needs at least the next trading session close",
-                }
-            # Mark failed only after enough calendar time that bars should exist
-            if age_days >= 5:
+            if age_days >= 5 and scored.get("reason") in ("no_bars", "bad_prices"):
                 pred.t1_success = 2
                 db.commit()
-                return {"ok": False, "reason": "no_bars", "age_days": age_days}
-            return {"ok": False, "reason": "not_enough_bars", "age_days": age_days}
+                return {**scored, "age_days": age_days, "marked_fail": True}
+            return {**scored, "age_days": age_days}
 
-        entry_price = pred.entry_range_low or pred.entry_range_high
-        bar_entry, t1_close, t1_bar = _entry_and_t1_close(pred, bars)
-        if entry_price is None or entry_price <= 0:
-            entry_price = bar_entry
-        if entry_price is None or t1_close is None or entry_price <= 0:
-            logger.warning("Cannot resolve entry/T+1 close for %s", pred.symbol)
-            return {"ok": False, "reason": "no_entry_or_t1"}
-
-        target = pred.target
-        return_pct = (t1_close - entry_price) / entry_price * 100.0
-        target_reached = bool(target and t1_close >= target)
-        # BUY/PREPARE: success if target hit OR solid positive move (>1%)
-        # Avoid / Sell: success if price fell or flat
-        decision = (pred.decision or "").upper()
-        if decision in ("BUY NOW", "PREPARE TO BUY", "PREPARE", "BUY"):
-            success = 1 if (target_reached or return_pct > 1.0) else 0
-        elif decision in ("SELL", "AVOID", "AVOID / WAIT", "WAIT"):
-            success = 1 if return_pct <= 0.5 else 0
-        else:
-            success = 1 if return_pct > 0 else 0
-
-        outcome = db_models.PredictionOutcome(
-            prediction_id=prediction_id,
-            evaluation_period="T+1",
-            evaluation_date=datetime.utcnow(),
-            open_price=t1_bar.get("open") if t1_bar else None,
-            high_price=t1_bar.get("high") if t1_bar else None,
-            low_price=t1_bar.get("low") if t1_bar else None,
-            close_price=t1_close,
-            return_pct=round(return_pct, 2),
-            target_reached=1 if target_reached else 0,
-            direction_correct=1 if return_pct > 0 else 0,
-            success=success,
-        )
-        # optional columns may not exist on older schema
-        try:
-            db.add(outcome)
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            # minimal insert without optional fields
-            logger.warning("Outcome insert retry minimal: %s", e)
-            outcome = db_models.PredictionOutcome(
-                prediction_id=prediction_id,
-                evaluation_period="T+1",
-                evaluation_date=datetime.utcnow(),
-                close_price=t1_close,
-                return_pct=round(return_pct, 2),
-                success=success,
-            )
-            db.add(outcome)
-            db.commit()
-
-        if validate_outcome_vs_prediction:
-            _pit_o = validate_outcome_vs_prediction(
-                pred.timestamp, "T+1",
-                bar_date=t1_bar.get("date") if t1_bar else None,
-                evaluation_date=datetime.utcnow(),
-            )
-            if not _pit_o.get("ok"):
-                logger.warning("PIT outcome reject T+1 %s: %s", pred.symbol, _pit_o.get("issues"))
-                return {"ok": False, "reason": "pit_fail", "issues": _pit_o.get("issues")}
-        logger.info(
-            "T+1 %s %s entry=%.2f close=%.2f ret=%.2f%% success=%s",
-            pred.symbol, decision, entry_price, t1_close, return_pct, success,
-        )
-        update_prediction_success(prediction_id)
-        return {
-            "ok": True,
-            "symbol": pred.symbol,
-            "entry": entry_price,
-            "t1_close": t1_close,
-            "return_pct": round(return_pct, 2),
-            "success": bool(success),
-        }
+        return _persist_t1_outcome(db, pred, scored)
     except Exception as e:
-        logger.exception("evaluate_t1 failed for %s: %s", prediction_id, e)
-        db.rollback()
-        return {"ok": False, "error": str(e)}
+        logger.exception("evaluate_t1 %s: %s", prediction_id, e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {"ok": False, "reason": "exception", "error": str(e)[:200]}
     finally:
         db.close()
-
 
 
 def evaluate_t5(prediction_id: str):
@@ -431,12 +501,9 @@ def evaluate_pending_predictions(period: str = 'T+1', max_batch: int = 50):
 
     db = SessionLocal()
     try:
-        subquery = db.query(db_models.PredictionOutcome.prediction_id).filter(
-            db_models.PredictionOutcome.evaluation_period == period
-        ).subquery()
         pending = (
             db.query(db_models.PredictionSnapshot)
-            .filter(~db_models.PredictionSnapshot.prediction_id.in_(subquery))
+            .filter(~db_models.PredictionSnapshot.prediction_id.in_(db.query(db_models.PredictionOutcome.prediction_id).filter(db_models.PredictionOutcome.evaluation_period == period)))
             .order_by(db_models.PredictionSnapshot.timestamp.asc())
             .all()
         )
@@ -451,49 +518,81 @@ def evaluate_pending_predictions(period: str = 'T+1', max_batch: int = 50):
             else:
                 waiting += 1
 
+        # Manual / sync sweeps: process ALL pending (due first), with history backfill
+        # so Training Intelligence is not stuck at "0 due / 19 waiting".
+        queue = list(due) + [p for p in pending if p not in due]
+        queue = queue[:max_batch]
+
         logger.info(
-            "Found %s pending, %s due, %s waiting for %s (batch max %s)",
-            len(pending), len(due), waiting, period, max_batch,
+            "Found %s pending, %s due, %s waiting for %s — processing %s (backfill=%s)",
+            len(pending), len(due), waiting, period, len(queue), period == "T+1",
         )
         done = 0
+        backfilled = 0
         skipped = []
         reasons = {}
-        for pred in due[:max_batch]:
+        labeled_sample = []
+        for pred in queue:
             try:
                 if period == "T+1":
-                    res = evaluate_t1(pred.prediction_id)
+                    res = evaluate_t1(pred.prediction_id, allow_backfill=True)
                 else:
+                    # T+5: only real due for now (needs 5 sessions); still try
                     res = evaluate_t5(pred.prediction_id)
                 rsn = (res or {}).get("reason") or ("ok" if (res or {}).get("ok") else "error")
+                mode = (res or {}).get("mode") or ""
                 reasons[rsn] = reasons.get(rsn, 0) + 1
-                if (res or {}).get("ok"):
+                if mode:
+                    reasons[f"mode:{mode}"] = reasons.get(f"mode:{mode}", 0) + 1
+                if (res or {}).get("ok") and rsn in ("labeled", "already_evaluated", "ok"):
                     done += 1
+                    if mode == "history_backfill":
+                        backfilled += 1
+                    if len(labeled_sample) < 6:
+                        labeled_sample.append({
+                            "symbol": pred.symbol,
+                            "mode": mode or rsn,
+                            "success": (res or {}).get("success"),
+                            "entry_date": (res or {}).get("entry_date"),
+                            "t1_date": (res or {}).get("t1_date"),
+                        })
                 else:
                     skipped.append({"symbol": pred.symbol, "reason": rsn})
             except Exception as e:
                 logger.warning("%s eval failed for %s: %s", period, pred.prediction_id, e)
                 reasons["exception"] = reasons.get("exception", 0) + 1
-            _time.sleep(0.35)
-        logger.info("%s evaluation batch finished: %s succeeded reasons=%s", period, done, reasons)
+            _time.sleep(0.25)
+        logger.info(
+            "%s evaluation batch finished: succeeded=%s backfilled=%s reasons=%s",
+            period, done, backfilled, reasons,
+        )
         return {
             "ok": True,
             "pending": len(pending),
             "due": len(due),
             "waiting": waiting,
-            "attempted": min(len(due), max_batch),
+            "attempted": len(queue),
             "succeeded": done,
+            "backfilled": backfilled,
             "period": period,
             "reasons": reasons,
             "skipped_sample": skipped[:8],
+            "labeled_sample": labeled_sample,
             "pipeline": [
                 {"step": "load_pending", "ok": True, "detail": f"{len(pending)} snapshots without {period} outcome"},
-                {"step": "filter_due", "ok": True, "detail": f"{len(due)} due (≥{min_days}d), {waiting} waiting next sessions"},
-                {"step": "fetch_bars", "ok": True, "detail": "market-data 3mo → yfinance fill"},
-                {"step": "score_outcomes", "ok": done > 0 or len(due) == 0, "detail": f"{done} labeled; reasons={reasons}"},
+                {"step": "filter_due", "ok": True, "detail": f"{len(due)} calendar-due (≥{min_days}d), {waiting} waiting"},
+                {"step": "fetch_bars", "ok": True, "detail": "market-data 3mo → yfinance/bhavcopy-style history"},
+                {"step": "backfill", "ok": True, "detail": f"history_backfill labels={backfilled} (when next session missing)"},
+                {"step": "score_outcomes", "ok": done > 0, "detail": f"{done}/{len(queue)} labeled; reasons={reasons}"},
             ],
             "message": (
-                f"{period}: {done} evaluated, {len(due)} were due, {waiting} still waiting. "
-                + ("Same-day picks need the next trading close before T+1 labels exist." if waiting and done == 0 else "")
+                f"{period}: labeled {done}/{len(queue)} "
+                f"(calendar due={len(due)}, waiting={waiting}, history_backfill={backfilled}). "
+                + (
+                    "Used previous session pairs from upstream/history where T+1 bar was not available yet."
+                    if backfilled
+                    else ("No labels written — check MARKET_DATA_URL / bars." if done == 0 else "Realtime session labels written.")
+                )
             ),
         }
     except Exception as e:

@@ -681,12 +681,22 @@ async def api_evaluate_t1(background_tasks: BackgroundTasks, max_batch: int = 50
                 metrics = compute_training_metrics() or {}
             except Exception:
                 pass
-            return JSONResponse(content={
+            # Flatten result fields so UI/gateway logs see pipeline without digging
+            payload = {
                 "status": "T+1 evaluation complete",
                 "sync": True,
                 "result": result,
                 "metrics_t1": (metrics.get("T+1") if isinstance(metrics, dict) else None),
-            })
+            }
+            if isinstance(result, dict):
+                for k in (
+                    "ok", "pending", "due", "waiting", "attempted", "succeeded",
+                    "backfilled", "period", "reasons", "pipeline", "message",
+                    "labeled_sample", "skipped_sample",
+                ):
+                    if k in result:
+                        payload[k] = result[k]
+            return JSONResponse(content=payload)
         except Exception as e:
             logger.error("T+1 evaluation failed: %s", e)
             raise HTTPException(status_code=500, detail=str(e))
@@ -705,7 +715,16 @@ async def api_evaluate_t5(background_tasks: BackgroundTasks, max_batch: int = 50
     if sync:
         try:
             result = evaluate_pending_predictions("T+5", max_batch=max_batch)
-            return JSONResponse(content={"status": "T+5 evaluation complete", "sync": True, "result": result})
+            payload = {"status": "T+5 evaluation complete", "sync": True, "result": result}
+            if isinstance(result, dict):
+                for k in (
+                    "ok", "pending", "due", "waiting", "attempted", "succeeded",
+                    "backfilled", "period", "reasons", "pipeline", "message",
+                    "labeled_sample", "skipped_sample",
+                ):
+                    if k in result:
+                        payload[k] = result[k]
+            return JSONResponse(content=payload)
         except Exception as e:
             logger.error("T+5 evaluation failed: %s", e)
             raise HTTPException(status_code=500, detail=str(e))

@@ -791,7 +791,7 @@ def _get_news_mentioned_symbols() -> List[str]:
             seen.add(s)
             out.append(s)
     logger.info("News-mentioned symbols: %s", len(out))
-    return out[:60]
+    return out[:120]
 
 def _get_event_symbols() -> List[str]:
     """Symbols with upcoming/recent corporate events, bulk deals, insider activity."""
@@ -831,8 +831,153 @@ def _get_event_symbols() -> List[str]:
     logger.info("Event-driven symbols: %s", len(out))
     return out[:80]
 
+
+def _get_bulk_deal_symbols() -> List[str]:
+    """Symbols appearing in recent NSE bulk / block deals (institutional flow)."""
+    out: List[str] = []
+    seen = set()
+
+    def _add(sym: str):
+        s = (sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        if not s or s in seen or len(s) < 2:
+            return
+        seen.add(s)
+        out.append(s)
+
+    # 1) NSE official bulk-deals board
+    for endpoint, key in (
+        ("equity-stockIndices?index=SECURITIES%20IN%20F%26O", "nse:fo_bulk_seed"),
+        ("historical/bulk-deals", "nse:bulk_deals"),
+        ("historical/block-deals", "nse:block_deals"),
+    ):
+        try:
+            data = _fetch_from_nse_api(endpoint, key, ttl=1800)
+            rows = []
+            if isinstance(data, dict):
+                rows = data.get("data") or data.get("bulkDeals") or data.get("blockDeals") or []
+            elif isinstance(data, list):
+                rows = data
+            if isinstance(rows, list):
+                for item in rows[:80]:
+                    if isinstance(item, dict):
+                        _add(item.get("symbol") or item.get("symbolName") or item.get("scm"))
+                    elif isinstance(item, str):
+                        _add(item)
+        except Exception as e:
+            logger.debug("bulk deals %s: %s", endpoint, e)
+
+    # 2) Market-data service bulk/block endpoints (if exposed)
+    try:
+        base = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
+        for path in ("/market/bulk-deals", "/market/block-deals", "/nse/bulk-deals"):
+            try:
+                r = httpx.get(f"{base}{path}", timeout=10)
+                if r.status_code != 200:
+                    continue
+                payload = r.json()
+                rows = payload if isinstance(payload, list) else (payload.get("data") or payload.get("deals") or [])
+                for item in (rows or [])[:80]:
+                    if isinstance(item, dict):
+                        _add(item.get("symbol") or item.get("Symbol"))
+                    elif isinstance(item, str):
+                        _add(item)
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug("market-data bulk: %s", e)
+
+    # 3) Event service bulk/insider tags
+    try:
+        resp = httpx.get(f"{EVENT_URL}/bulk_deals", timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            rows = data if isinstance(data, list) else (data.get("symbols") or data.get("data") or [])
+            for item in rows[:80]:
+                if isinstance(item, dict):
+                    _add(item.get("symbol"))
+                elif isinstance(item, str):
+                    _add(item)
+    except Exception:
+        pass
+
+    logger.info("Bulk/block deal symbols: %s", len(out))
+    return out[:100]
+
+
+def _get_52w_extreme_symbols() -> List[str]:
+    """Symbols near 52-week high/low or with sharp multi-day moves (surprise raise)."""
+    out: List[str] = []
+    seen = set()
+
+    def _add(sym: str):
+        s = (sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        if not s or s in seen:
+            return
+        seen.add(s)
+        out.append(s)
+
+    base = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
+    for path in (
+        "/market/near-52w-high",
+        "/market/near-52w-low",
+        "/market/52-week-high",
+        "/market/52-week-low",
+        "/market/top-gainers",
+        "/market/most-active",
+    ):
+        try:
+            r = httpx.get(f"{base}{path}", timeout=10)
+            if r.status_code != 200:
+                continue
+            payload = r.json()
+            rows = payload if isinstance(payload, list) else (
+                payload.get("data") or payload.get("symbols") or payload.get("stocks") or []
+            )
+            for item in (rows or [])[:50]:
+                if isinstance(item, dict):
+                    # Prefer names with ≥4% day move or near 52w when fields exist
+                    chg = item.get("change_pct") or item.get("pChange") or item.get("pctChange")
+                    try:
+                        chg_f = abs(float(chg)) if chg is not None else None
+                    except (TypeError, ValueError):
+                        chg_f = None
+                    near = item.get("near_52w_high") or item.get("near_52w_low") or item.get("at_52w_high")
+                    if near or chg_f is None or chg_f >= 3.0:
+                        _add(item.get("symbol") or item.get("Symbol") or item.get("ticker"))
+                elif isinstance(item, str):
+                    _add(item)
+        except Exception as e:
+            logger.debug("52w/movers %s: %s", path, e)
+
+    # NSE gainers already partially covered; add all-time/52w boards if present
+    for endpoint, key in (
+        ("live-analysis-variations?index=gainers", "nse:gainers52"),
+        ("liveEquity-market?index=gainers", "nse:live_gainers"),
+    ):
+        try:
+            data = _fetch_from_nse_api(endpoint, key, ttl=900)
+            rows = []
+            if isinstance(data, dict):
+                rows = data.get("data") or []
+            for item in (rows or [])[:40]:
+                if isinstance(item, dict):
+                    chg = item.get("pChange") or item.get("perChange")
+                    try:
+                        if chg is not None and abs(float(chg)) < 3.0:
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+                    _add(item.get("symbol") or item.get("symbolName"))
+        except Exception:
+            continue
+
+    logger.info("52w/extreme move symbols: %s", len(out))
+    return out[:80]
+
+
 # ── Build scan universe ──────────────────────────────────────────────────────
 def _build_scan_universe() -> List[str]:
+
     cached = _redis_get(SCAN_UNIVERSE_KEY)
     if cached and isinstance(cached, list) and len(cached) > 0:
         return cached
@@ -855,6 +1000,8 @@ def _build_scan_universe() -> List[str]:
 
     try:
         universe.update(_get_momentum_movers())
+        universe.update(_get_bulk_deal_symbols())
+        universe.update(_get_52w_extreme_symbols())
     except Exception as e:
         logger.warning(f"Failed to fetch momentum movers: {e}")
 
@@ -906,10 +1053,12 @@ def _build_scan_universe() -> List[str]:
     if pruned_count:
         logger.info(f"Universe pruning: excluded {pruned_count} chronically-unproductive symbols")
 
-    # Prefer dynamic signal names first so movers/news/events always get scanned
+    # Prefer dynamic signal names first so movers/news/bulk/52w/events always get scanned
     dynamic_priority = []
     try:
         for src in (
+            _get_bulk_deal_symbols(),
+            _get_52w_extreme_symbols(),
             _get_momentum_movers(),
             _get_news_mentioned_symbols(),
             _get_event_symbols(),
@@ -2011,6 +2160,28 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
         )
     except Exception as e:
         logger.debug("feed coverage: %s", e)
+
+    # Seed per-symbol batch cache from last partial scan so 60/300 style
+    # resumes don't re-score already completed names (Neon/redis durable).
+    try:
+        last = _redis_get(LAST_FULL_SCAN_KEY)
+        if last and isinstance(last, dict):
+            prev = (last.get("result") or {})
+            prev_all = prev.get("all_results") or []
+            seeded = 0
+            for row in prev_all:
+                if not isinstance(row, dict):
+                    continue
+                sym = (row.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "")
+                if not sym or row.get("decision") == "ERROR":
+                    continue
+                if not _batch_result_cache_get(sym, lite=lite):
+                    _batch_result_cache_set(sym, row, lite=lite)
+                    seeded += 1
+            if seeded:
+                logger.info("Seeded batch_result cache with %s symbols from last partial scan", seeded)
+    except Exception as e:
+        logger.debug("seed batch cache: %s", e)
 
     # ── Full-universe batch processor (list size preserved) ──
     batch_size = default_batch_size(MAX_PARALLEL_WORKERS, minimum=12)
@@ -3322,33 +3493,74 @@ def start_scan(
             except Exception:
                 pass
 
-        # Serve recent scan from cache unless force_refresh
+        # Serve recent COMPLETE scan from cache unless force_refresh.
+        # Partial scans (e.g. 60/300 after Stop) must CONTINUE: cache-hit the done
+        # symbols via batch_result/Neon, then process the remaining universe upstream.
         if not force_refresh:
             cached = _redis_get(LAST_FULL_SCAN_KEY)
             if cached and isinstance(cached, dict) and cached.get("result"):
-                task_id = cached.get("task_id") or str(uuid.uuid4())
-                # Re-publish as a finished task so /scan/status works the same
-                _redis_set(SCAN_TASK_PREFIX + task_id, {
-                    "status": "done",
-                    "total": cached["result"].get("universe_size", 0),
-                    "processed": cached["result"].get("scanned", 0),
-                    "elapsed": cached["result"].get("elapsed_seconds", 0),
-                    "result": cached["result"],
-                    "error": None,
-                    "from_cache": True,
-                    "scanned_at": cached.get("scanned_at"),
-                }, ttl=3600)
-                return {
-                    "task_id": task_id,
-                    "from_cache": True,
-                    "scanned_at": cached.get("scanned_at"),
-                    "message": "Returning recent scan result (within cache TTL). Use force_refresh=true for a new run.",
-                }
+                res = cached.get("result") or {}
+                processed = int(
+                    cached.get("processed")
+                    or res.get("scanned")
+                    or 0
+                )
+                total = int(
+                    cached.get("total")
+                    or res.get("universe_size")
+                    or processed
+                    or 0
+                )
+                is_partial = bool(
+                    cached.get("partial")
+                    or cached.get("cancelled")
+                    or res.get("partial")
+                    or res.get("stopped_early")
+                    or res.get("cancelled")
+                    or (total > 0 and processed < int(total * 0.9))
+                )
+                if not is_partial and total > 0 and processed >= int(total * 0.9):
+                    task_id = cached.get("task_id") or str(uuid.uuid4())
+                    _redis_set(SCAN_TASK_PREFIX + task_id, {
+                        "status": "done",
+                        "total": total,
+                        "processed": processed,
+                        "elapsed": res.get("elapsed_seconds", 0),
+                        "result": res,
+                        "error": None,
+                        "from_cache": True,
+                        "scanned_at": cached.get("scanned_at"),
+                    }, ttl=3600)
+                    return {
+                        "task_id": task_id,
+                        "from_cache": True,
+                        "scanned_at": cached.get("scanned_at"),
+                        "universe_size": total,
+                        "message": "Returning recent complete scan (within cache TTL). Use force_refresh=true for a new run.",
+                    }
+                else:
+                    logger.info(
+                        "Last scan was partial (%s/%s) — continuing full universe "
+                        "(batch_result/Neon cache hits for already scored symbols)",
+                        processed, total,
+                    )
+
+        if force_refresh and _redis:
+            try:
+                _redis.delete(SCAN_UNIVERSE_KEY)
+            except Exception:
+                pass
 
         universe = _build_scan_universe()
         task_id = str(uuid.uuid4())
         background_tasks.add_task(run_scan_parallel, task_id, universe, use_lite)
-        return {"task_id": task_id, "from_cache": False, "lite": use_lite, "universe_size": len(universe)}
+        return {
+            "task_id": task_id,
+            "from_cache": False,
+            "lite": use_lite,
+            "universe_size": len(universe),
+            "message": f"Scanning {len(universe)} symbols (dynamic universe; Neon/batch cache for hits, upstream for rest)",
+        }
     except Exception as e:
         logger.error(f"Scan start failed: {e}")
         raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)}")

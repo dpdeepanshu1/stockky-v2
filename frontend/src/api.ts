@@ -606,7 +606,14 @@ export const api = {
   runScan: () => request<ScanResult>("/scan", undefined, 2, 180000),
 
   scanStart: (forceRefresh = false, lite: boolean | null = null) =>
-    request<{ task_id: string }>(
+    request<{
+      task_id: string;
+      from_cache?: boolean;
+      lite?: boolean;
+      universe_size?: number;
+      message?: string;
+      scanned_at?: string;
+    }>(
       `/scan/start?force_refresh=${forceRefresh}${lite === null ? "" : `&lite=${lite ? "true" : "false"}`}`,
       { method: "POST" },
       2,

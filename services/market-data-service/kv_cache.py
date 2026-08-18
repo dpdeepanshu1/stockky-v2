@@ -150,17 +150,15 @@ def _get_neon():
     try:
         from sqlalchemy import create_engine, text
 
-        # Free-tier friendly pool: 1 connection, recycle often, LIFO reuse
-        pool_size = int(os.getenv("CACHE_DB_POOL_SIZE", "1"))
         eng = create_engine(
             url,
             pool_pre_ping=True,
-            pool_size=max(1, pool_size),
-            max_overflow=int(os.getenv("CACHE_DB_MAX_OVERFLOW", "1")),
-            pool_recycle=int(os.getenv("CACHE_DB_POOL_RECYCLE", "120")),
+            pool_size=int(os.getenv("CACHE_DB_POOL_SIZE", "2")),
+            max_overflow=1,
+            pool_recycle=180,
             pool_use_lifo=True,
-            pool_timeout=10,
-            connect_args={"connect_timeout": int(os.getenv("CACHE_DB_CONNECT_TIMEOUT", "8"))},
+            pool_timeout=15,
+            connect_args={"connect_timeout": 10},
         )
         with eng.begin() as conn:
             conn.execute(

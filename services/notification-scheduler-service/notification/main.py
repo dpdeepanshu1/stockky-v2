@@ -42,6 +42,11 @@ try:
 except ImportError:  # pragma: no cover - optional dep during local dev
     Redis = None  # type: ignore
 
+try:
+    import kv_cache as _kv
+except Exception:
+    _kv = None  # type: ignore
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("notification-service")
 
@@ -89,13 +94,11 @@ if _USE_REDIS and Redis is not None:
             _redis = Redis(url=url, token=token)
             _redis.ping()
             logger.info("Connected to Upstash Redis (USE_REDIS=1)")
-        else:
-            logger.info("Notification Redis OFF — missing credentials")
     except Exception as e:
-        logger.warning("Redis unavailable — memory config only: %s", e)
+        logger.warning("Redis unavailable — using Neon/memory: %s", e)
         _redis = None
 else:
-    logger.info("Notification Redis OFF (USE_REDIS=0) — zero Upstash commands")
+    logger.info("Notification Redis OFF (USE_REDIS=0) — Neon/memory config")
 
 # In-memory fallback so the service still works (for the current process
 # lifetime) when Redis isn't configured, e.g. local `docker compose up`.
@@ -121,17 +124,17 @@ def root():
 
 def _load_config() -> dict:
     global _memory_config
-    if _redis:
+    if _kv is not None:
         try:
-            val = _redis.get(CONFIG_KEY)
+            val = _kv.get(CONFIG_KEY)
             if val:
-                cfg = json.loads(val)
+                cfg = val if isinstance(val, dict) else json.loads(val)
                 # Backfill any keys added in later versions.
                 for k, v in ENV_DEFAULTS.items():
                     cfg.setdefault(k, v)
                 return cfg
         except Exception as e:
-            logger.warning("Failed to load notification config from Redis: %s", e)
+            logger.warning("Failed to load notification config from Neon: %s", e)
     if _memory_config is not None:
         return _memory_config
     return dict(ENV_DEFAULTS)
@@ -140,6 +143,12 @@ def _load_config() -> dict:
 def _save_config(cfg: dict):
     global _memory_config
     _memory_config = cfg
+    if _kv is not None:
+        try:
+            _kv.set(CONFIG_KEY, cfg, ttl=None)
+            return
+        except Exception as e:
+            logger.warning("Failed to persist notification config to Neon: %s", e)
     if _redis:
         try:
             _redis.set(CONFIG_KEY, json.dumps(cfg))

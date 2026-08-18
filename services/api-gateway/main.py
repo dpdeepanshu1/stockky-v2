@@ -233,10 +233,18 @@ EXTRA_NEW_SYMBOLS = ["TMPV", "TMLCV", "LTM", "ETERNAL"]
 # ── Redis helpers ─────────────────────────────────────────────────────────
 _data_feed_store = None
 
+
 def _feed_store() -> DataFeedStore:
     global _data_feed_store
     if _data_feed_store is None:
         _data_feed_store = DataFeedStore(_redis_get, _redis_set, _redis)
+        # Warm local meta/job/index from Neon so UI is not blank after cold start
+        try:
+            _data_feed_store.meta()
+            _data_feed_store.job()
+            _data_feed_store.list_symbols()
+        except Exception as e:
+            logger.debug("data_feed warm: %s", e)
     return _data_feed_store
 
 
@@ -5055,11 +5063,23 @@ def data_feed_status():
                 meta = store.meta()
     except Exception as e:
         logger.warning("data-feed status heal: %s", e)
+    # Prefer durable index count so UI survives cold start after a successful feed
+    try:
+        fed_count = int(store.count_symbols())
+    except Exception:
+        fed_count = 0
+    if fed_count <= 0:
+        fed_count = int((meta or {}).get("last_count") or (job or {}).get("ok_count") or 0)
+    last_ok = (meta or {}).get("last_success_at") or (job or {}).get("finished_at")
     return {
-        "stocks_in_feed": int((meta or {}).get("last_count") or (job or {}).get("ok_count") or 0),
-        "last_success": (meta or {}).get("last_success_at"),
-        "last_success_at": (meta or {}).get("last_success_at"),
-"ok": True, **job, "meta": meta}
+        "ok": True,
+        **job,
+        "meta": meta,
+        "stocks_in_feed": fed_count,
+        "last_success": last_ok,
+        "last_success_at": last_ok,
+        "last_count": fed_count,
+    }
 
 
 @app.get("/data-feed/{symbol}")

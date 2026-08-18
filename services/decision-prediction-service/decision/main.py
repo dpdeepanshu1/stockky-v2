@@ -69,16 +69,27 @@ BATCH_CONCURRENCY = int(os.getenv("DECIDE_BATCH_CONCURRENCY", "8"))
 
 _decide_mem_cache: dict = {}  # symbol -> (expires_ts, payload)
 _redis = None
+_USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
+if os.getenv("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
+    _USE_REDIS = False
 try:
-    from upstash_redis import Redis
-    _url = os.getenv("UPSTASH_REDIS_REST_URL")
-    _tok = os.getenv("UPSTASH_REDIS_REST_TOKEN")
-    if _url and _tok:
-        _redis = Redis(url=_url, token=_tok)
-        _redis.ping()
-        logger.info("Decision-engine connected to Upstash Redis for decide cache")
-except Exception as e:
-    logger.warning("Decision-engine Redis cache unavailable: %s", e)
+    import kv_cache as _kv
+except Exception:
+    _kv = None  # type: ignore
+if _USE_REDIS:
+    try:
+        from upstash_redis import Redis
+        _url = os.getenv("UPSTASH_REDIS_REST_URL")
+        _tok = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+        if _url and _tok:
+            _redis = Redis(url=_url, token=_tok)
+            _redis.ping()
+            logger.info("Decision-engine Upstash Redis ON (USE_REDIS=1)")
+    except Exception as e:
+        logger.warning("Decision-engine Redis unavailable: %s", e)
+        _redis = None
+else:
+    logger.info("Decision-engine Redis OFF — memory + optional Neon decide cache")
 
 def _is_market_open() -> bool:
     now = datetime.now(IST)
@@ -101,6 +112,14 @@ def _cache_get_decide(symbol: str):
             raw = _redis.get(f"decide:{sym}")
             if raw:
                 data = json.loads(raw) if isinstance(raw, str) else raw
+                _decide_mem_cache[sym] = (now + _cache_ttl(), data)
+                return data
+        except Exception:
+            pass
+    if _kv is not None:
+        try:
+            data = _kv.get(f"stockky:decide_cache:{sym}")
+            if data is not None:
                 _decide_mem_cache[sym] = (now + _cache_ttl(), data)
                 return data
         except Exception:
@@ -135,6 +154,11 @@ def _cache_set_decide(symbol: str, payload: dict):
     if _redis:
         try:
             _redis.setex(f"decide:{sym}", ttl, json.dumps(payload, default=str))
+        except Exception:
+            pass
+    if _kv is not None:
+        try:
+            _kv.set(f"stockky:decide_cache:{sym}", payload, ttl=ttl)
         except Exception:
             pass
 

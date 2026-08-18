@@ -3,20 +3,24 @@ Stockky KV cache — Redis-free by default.
 
 Layers (fast → durable):
   1. In-process memory with TTL  (always on — free, unlimited "commands")
-  2. Optional Neon/Postgres table `stockky_kv` for keys that must survive restarts
-     (watchlist, data-feed, scan universe). Use CACHE_DATABASE_URL or DATABASE_URL.
-  3. Optional Upstash Redis only if USE_REDIS=1 (legacy / multi-instance).
+  2. Neon/Postgres table `stockky_kv` for keys that must survive restarts
+     (watchlist, data-feed, scan universe, notification config, IndianAPI).
+     Use CACHE_DATABASE_URL (preferred) or DATABASE_URL / TRAINING_DATABASE_URL.
+  3. Optional Upstash Redis only if USE_REDIS=1 (legacy).
 
 Env:
-  USE_REDIS=0|1          default 0 — disconnect Upstash
-  CACHE_DATABASE_URL     optional dedicated Neon for cache (else DATABASE_URL / TRAINING_DATABASE_URL)
-  KV_MEMORY_MAX_KEYS     default 8000 — soft cap for free 512MB dynos
+  USE_REDIS=0|1              default 0 — disconnect Upstash
+  DISABLE_UPSTASH=1          force Redis off even if USE_REDIS=1
+  CACHE_DATABASE_URL         dedicated Neon for cache (recommended separate DB)
+  CACHE_DB_POOL_SIZE         default 2
+  KV_MEMORY_MAX_KEYS         default 8000
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any, Optional
@@ -24,9 +28,12 @@ from typing import Any, Optional
 logger = logging.getLogger("kv-cache")
 
 USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
+if os.getenv("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
+    USE_REDIS = False
+
 KV_MEMORY_MAX_KEYS = int(os.getenv("KV_MEMORY_MAX_KEYS", "8000"))
 
-# Keys that should also land in Neon so a Render restart does not wipe them
+# Keys written to Neon so Render restarts do not wipe them
 _DURABLE_PREFIXES = (
     "stockky:watchlist",
     "stockky:searched",
@@ -37,6 +44,11 @@ _DURABLE_PREFIXES = (
     "stockky:hot_result",
     "stockky:last_full_scan",
     "stockky:lock:",
+    "stockky:notification_config",
+    "stockky:notification:",
+    "indianapi:fundamentals:",
+    "indianapi:",
+    "stockky:decide_cache:",  # optional durability for decide (low volume)
 )
 
 
@@ -67,7 +79,6 @@ class MemoryTTLCache:
     def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
         with self._lock:
             if len(self._store) >= self._max and key not in self._store:
-                # Drop ~10% oldest-ish (simple: random sample of expired + first keys)
                 now = time.time()
                 expired = [k for k, v in self._store.items() if v.expires_at and v.expires_at < now]
                 for k in expired[: max(1, self._max // 10)]:
@@ -103,6 +114,19 @@ def _is_durable(key: str) -> bool:
     return any(key.startswith(p) or key == p for p in _DURABLE_PREFIXES)
 
 
+def _normalize_db_url(url: str) -> str:
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    # Neon pooler rejects channel_binding & invalid sslmode=required
+    if "channel_binding=" in url:
+        url = re.sub(r"([&?])channel_binding=[^&]*", r"\1", url)
+        url = url.replace("?&", "?").rstrip("?&")
+    url = re.sub(r"(?i)([?&]sslmode=)required\b", r"\1require", url)
+    if "sslmode=" not in url.lower():
+        url = url + ("&" if "?" in url else "?") + "sslmode=require"
+    return url
+
+
 def _neon_url() -> Optional[str]:
     url = (
         os.getenv("CACHE_DATABASE_URL")
@@ -111,15 +135,7 @@ def _neon_url() -> Optional[str]:
     )
     if not url:
         return None
-    if url.startswith("postgres://"):
-        url = "postgresql://" + url[len("postgres://") :]
-    if url.startswith("postgresql") and "sslmode=" not in url.lower():
-        url += ("&" if "?" in url else "?") + "sslmode=require"
-    if "channel_binding=" in url:
-        import re as _re
-        url = _re.sub(r"([&?])channel_binding=[^&]*", r"\1", url)
-        url = url.replace("?&", "?").rstrip("?&")
-    return url
+    return _normalize_db_url(url)
 
 
 def _get_neon():
@@ -129,31 +145,43 @@ def _get_neon():
     _neon_init = True
     url = _neon_url()
     if not url:
+        logger.info("KV: no CACHE_DATABASE_URL/DATABASE_URL — memory-only")
         return None
     try:
         from sqlalchemy import create_engine, text
+
+        # Free-tier friendly pool: 1 connection, recycle often, LIFO reuse
+        pool_size = int(os.getenv("CACHE_DB_POOL_SIZE", "1"))
         eng = create_engine(
             url,
             pool_pre_ping=True,
-            pool_size=int(os.getenv("CACHE_DB_POOL_SIZE", "2")),
-            max_overflow=0,
-            pool_recycle=280,
+            pool_size=max(1, pool_size),
+            max_overflow=int(os.getenv("CACHE_DB_MAX_OVERFLOW", "1")),
+            pool_recycle=int(os.getenv("CACHE_DB_POOL_RECYCLE", "120")),
+            pool_use_lifo=True,
+            pool_timeout=10,
+            connect_args={"connect_timeout": int(os.getenv("CACHE_DB_CONNECT_TIMEOUT", "8"))},
         )
         with eng.begin() as conn:
-            conn.execute(text(
-                """
-                CREATE TABLE IF NOT EXISTS stockky_kv (
-                    k TEXT PRIMARY KEY,
-                    v TEXT NOT NULL,
-                    expires_at TIMESTAMPTZ NULL
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS stockky_kv (
+                        k TEXT PRIMARY KEY,
+                        v TEXT NOT NULL,
+                        expires_at TIMESTAMPTZ NULL,
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                    """
                 )
-                """
-            ))
-            conn.execute(text(
-                "CREATE INDEX IF NOT EXISTS stockky_kv_expires_idx ON stockky_kv (expires_at)"
-            ))
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS stockky_kv_expires_idx ON stockky_kv (expires_at)"
+                )
+            )
         _neon_engine = eng
-        logger.info("KV durable layer: Neon/Postgres stockky_kv ready")
+        logger.info("KV durable layer: Neon stockky_kv ready (pool_size=%s)", os.getenv("CACHE_DB_POOL_SIZE", "2"))
     except Exception as e:
         logger.warning("KV Neon unavailable (memory-only): %s", e)
         _neon_engine = None
@@ -166,24 +194,23 @@ def _neon_get(key: str) -> Any:
         return None
     try:
         from sqlalchemy import text
+        import datetime as _dt
+
         with eng.connect() as conn:
             row = conn.execute(
-                text(
-                    "SELECT v, expires_at FROM stockky_kv WHERE k = :k"
-                ),
+                text("SELECT v, expires_at FROM stockky_kv WHERE k = :k"),
                 {"k": key},
             ).fetchone()
             if not row:
                 return None
             v, exp = row[0], row[1]
             if exp is not None:
-                import datetime as _dt
                 now = _dt.datetime.now(_dt.timezone.utc)
-                if exp.tzinfo is None:
+                if getattr(exp, "tzinfo", None) is None:
                     exp = exp.replace(tzinfo=_dt.timezone.utc)
                 if exp < now:
-                    conn.execute(text("DELETE FROM stockky_kv WHERE k = :k"), {"k": key})
-                    conn.commit()
+                    with eng.begin() as c2:
+                        c2.execute(text("DELETE FROM stockky_kv WHERE k = :k"), {"k": key})
                     return None
             try:
                 return json.loads(v)
@@ -201,6 +228,7 @@ def _neon_set(key: str, value: Any, ttl: Optional[int] = None) -> None:
     try:
         from sqlalchemy import text
         import datetime as _dt
+
         payload = json.dumps(value, default=str)
         exp = None
         if ttl:
@@ -209,9 +237,12 @@ def _neon_set(key: str, value: Any, ttl: Optional[int] = None) -> None:
             conn.execute(
                 text(
                     """
-                    INSERT INTO stockky_kv (k, v, expires_at)
-                    VALUES (:k, :v, :e)
-                    ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, expires_at = EXCLUDED.expires_at
+                    INSERT INTO stockky_kv (k, v, expires_at, updated_at)
+                    VALUES (:k, :v, :e, NOW())
+                    ON CONFLICT (k) DO UPDATE
+                      SET v = EXCLUDED.v,
+                          expires_at = EXCLUDED.expires_at,
+                          updated_at = NOW()
                     """
                 ),
                 {"k": key, "v": payload, "e": exp},
@@ -234,6 +265,7 @@ def _get_redis():
         return None
     try:
         from upstash_redis import Redis
+
         _redis = Redis(url=url, token=tok)
         _redis.ping()
         logger.info("KV: Upstash Redis connected (USE_REDIS=1)")
@@ -244,7 +276,7 @@ def _get_redis():
 
 
 def kv_get(key: str) -> Any:
-    """Memory first → Redis (if enabled) → Neon durable."""
+    """Memory → Redis (if USE_REDIS=1) → Neon durable."""
     val = _mem.get(key)
     if val is not None:
         return val
@@ -272,7 +304,7 @@ def kv_get(key: str) -> Any:
 
 
 def kv_set(key: str, value: Any, ttl: Optional[int] = None) -> None:
-    """Write memory always; Redis only if USE_REDIS=1; Neon for durable keys."""
+    """Memory always; Redis only if USE_REDIS=1; Neon for durable prefixes."""
     _mem.set(key, value, ttl=ttl)
     r = _get_redis()
     if r:
@@ -296,19 +328,62 @@ def kv_delete(key: str) -> None:
             r.delete(key)
         except Exception:
             pass
+    if _is_durable(key):
+        eng = _get_neon()
+        if eng:
+            try:
+                from sqlalchemy import text
+
+                with eng.begin() as conn:
+                    conn.execute(text("DELETE FROM stockky_kv WHERE k = :k"), {"k": key})
+            except Exception:
+                pass
 
 
 def kv_ttl(key: str) -> int:
-    t = _mem.ttl(key)
-    if t != -2:
-        return t
-    return -2
+    return _mem.ttl(key)
 
 
-# Back-compat aliases used by older modules
+# Module-level API expected by api-gateway: _kv_cache.get / _kv_cache.set
+def get(key: str) -> Any:
+    return kv_get(key)
+
+
+def set(key: str, value: Any, ttl: Optional[int] = None) -> None:  # noqa: A001
+    kv_set(key, value, ttl=ttl)
+
+
+def delete(key: str) -> None:
+    kv_delete(key)
+
+
+# Back-compat
 def cache_get(key: str) -> Any:
     return kv_get(key)
 
 
 def cache_set(key: str, value: Any, ttl: Optional[int] = None) -> None:
     kv_set(key, value, ttl=ttl)
+
+
+def status() -> dict:
+    """Health snippet for /system/health or Service Manager."""
+    neon_ok = False
+    neon_err = None
+    try:
+        eng = _get_neon()
+        if eng is not None:
+            from sqlalchemy import text
+
+            with eng.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            neon_ok = True
+    except Exception as e:
+        neon_err = str(e)[:120]
+    return {
+        "use_redis": USE_REDIS,
+        "memory_keys": len(_mem._store),
+        "neon_connected": neon_ok,
+        "neon_error": neon_err,
+        "cache_database_configured": bool(_neon_url()),
+    }

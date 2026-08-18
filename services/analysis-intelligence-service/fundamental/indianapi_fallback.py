@@ -39,6 +39,13 @@ import requests
 
 logger = logging.getLogger("fundamental-analysis-service.indianapi_fallback")
 
+try:
+    import kv_cache as _kv
+except Exception:
+    _kv = None  # type: ignore
+_MEM_LAST_TS = 0.0
+
+
 IST = ZoneInfo("Asia/Kolkata")
 NSE_MARKET_OPEN = dtime(9, 15)
 
@@ -54,101 +61,56 @@ MIN_REQUEST_INTERVAL_SECONDS = 1.0
 REQUEST_TIMEOUT_SECONDS = 10
 
 
-
-# ── Memory-first cache (USE_REDIS=0 default — stops Upstash burn during data-feed) ──
-_USE_REDIS = os.environ.get("USE_REDIS", "0").lower() in ("1", "true", "yes")
-if os.environ.get("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
-    _USE_REDIS = False
-
-_MEM_CACHE: Dict[str, Any] = {}
-_MEM_LAST_TS: float = 0.0
-_redis_client = None
-_redis_init = False
-
-
 def _get_redis_client():
-    """Optional Upstash only when USE_REDIS=1. Default: None (memory only)."""
-    global _redis_client, _redis_init
-    if not _USE_REDIS:
-        return None
-    if _redis_init:
-        return _redis_client
-    _redis_init = True
-    try:
-        from upstash_redis import Redis
-        url = os.environ.get("UPSTASH_REDIS_REST_URL")
-        token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
-        if not url or not token:
-            logger.info("IndianAPI: USE_REDIS=1 but no Upstash credentials — memory only")
-            _redis_client = None
-            return None
-        _redis_client = Redis(url=url, token=token)
-        logger.info("IndianAPI: Upstash Redis ON (USE_REDIS=1)")
-    except Exception as e:
-        logger.warning("IndianAPI Redis unavailable: %s — memory only", e)
-        _redis_client = None
-    return _redis_client
+    """Unused — storage is kv_cache (memory + Neon). Kept for call-site compat."""
+    return None
 
 
-def _cache_get(redis_client, symbol: str) -> Optional[Dict[str, Any]]:
+
+def _cache_get(redis_client, symbol: str):
     key = CACHE_KEY_PREFIX + symbol.upper()
-    # memory first
-    hit = _MEM_CACHE.get(key)
-    if hit is not None:
-        return hit if isinstance(hit, dict) else None
-    if redis_client is None:
-        return None
-    try:
-        raw = redis_client.get(key)
-        if raw is None:
+    if _kv is not None:
+        try:
+            return _kv.get(key)
+        except Exception:
             return None
-        data = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
-        if isinstance(data, dict):
-            _MEM_CACHE[key] = data
-        return data
-    except Exception:
+    return None
+
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
         return None
 
 
 def _cache_set(redis_client, symbol: str, payload: Dict[str, Any]) -> None:
     key = CACHE_KEY_PREFIX + symbol.upper()
-    _MEM_CACHE[key] = payload
-    # Soft cap memory
-    if len(_MEM_CACHE) > 2000:
-        for k in list(_MEM_CACHE.keys())[:200]:
-            _MEM_CACHE.pop(k, None)
-    if redis_client is None:
-        return
-    try:
-        redis_client.set(key, json.dumps(payload, default=str))
-    except Exception as e:
-        logger.debug("IndianAPI redis set skip: %s", e)
+    if _kv is not None:
+        try:
+            _kv.set(key, payload, ttl=7 * 86400)
+        except Exception as e:
+            logger.debug("indianapi cache set: %s", e)
 
 
-def _rate_limit_wait(redis_client) -> None:
-    """In-process 1 req/sec. Redis path only if USE_REDIS=1."""
-    global _MEM_LAST_TS
-    import time as _t
-    now = _t.time()
-    wait = MIN_REQUEST_INTERVAL_SECONDS - (now - _MEM_LAST_TS)
-    if wait > 0:
-        _t.sleep(wait)
-    _MEM_LAST_TS = _t.time()
-    if redis_client is None:
-        return
-    try:
-        last = redis_client.get(RATE_LIMIT_KEY)
-        if last is not None:
-            try:
-                last_f = float(last)
-                gap = MIN_REQUEST_INTERVAL_SECONDS - (_t.time() - last_f)
-                if gap > 0:
-                    _t.sleep(gap)
-            except Exception:
-                pass
-        redis_client.set(RATE_LIMIT_KEY, str(_t.time()))
-    except Exception:
-        pass
+
+def _add_trading_days(start: date, n: int) -> date:
+    """Skips Sat/Sun. Does NOT know NSE holidays (no holiday calendar
+    available) — worst case this treats an NSE holiday as a trading day,
+    making the cache refresh very slightly earlier than strictly
+    necessary. That's a safe direction to be wrong in for a rate-limited
+    free-tier budget: it costs at most one extra call around a holiday,
+    it never under-refreshes."""
+    d = start
+    added = 0
+    while added < n:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            added += 1
+    return d
+
+
+def _cache_expiry(cached_at: datetime) -> datetime:
+    expiry_date = _add_trading_days(cached_at.astimezone(IST).date(), CACHE_TRADING_DAYS)
+    return datetime.combine(expiry_date, NSE_MARKET_OPEN, tzinfo=IST)
 
 
 def _is_cache_fresh(cached_payload: Dict[str, Any]) -> bool:
@@ -160,19 +122,13 @@ def _is_cache_fresh(cached_payload: Dict[str, Any]) -> bool:
 
 
 def _enforce_rate_limit(redis_client) -> None:
-    """Blocks the calling thread until at least 1 second has passed since
-    the last real IndianAPI call from ANY process sharing this Redis
-    instance. Not perfectly race-free under concurrent callers (two
-    processes could both pass the check within the same tiny window),
-    but for a single shared free-tier API key the goal is "don't burst",
-    not strict mutual exclusion — good enough for that."""
-    while True:
-        last_ts = redis_client.get(RATE_LIMIT_KEY)
-        now = time.time()
-        if last_ts is None or (now - float(last_ts)) >= MIN_REQUEST_INTERVAL_SECONDS:
-            redis_client.set(RATE_LIMIT_KEY, str(now))
-            return
-        time.sleep(MIN_REQUEST_INTERVAL_SECONDS - (now - float(last_ts)) + 0.01)
+    """Process-local 1 req/sec — no Upstash."""
+    global _MEM_LAST_TS
+    now = time.time()
+    wait = MIN_REQUEST_INTERVAL_SECONDS - (now - _MEM_LAST_TS)
+    if wait > 0:
+        time.sleep(wait)
+    _MEM_LAST_TS = time.time()
 
 
 def _fetch_from_indianapi(symbol: str) -> Optional[Dict[str, Any]]:

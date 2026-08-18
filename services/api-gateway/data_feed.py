@@ -5,25 +5,21 @@ Purpose: free-tier rate-limit relief. Real-time paths (quote, decide, scan)
 reuse fundamentals / sector / peer / multi-quarter / static event snapshot
 from this store instead of hitting upstream APIs every time.
 
+Persistence (required):
+  - Every symbol payload → Neon via kv_cache (prefix stockky:data_feed:)
+  - Meta + job status → Neon so UI survives Render cold starts
+  - Symbol index → Neon for "STOCKS IN FEED" count without scanning all keys
+
 NOT stored here (always live when needed):
   - last price / quote
   - intraday technicals
-  - brand-new headlines (optional short news summary may be refreshed)
-
-Stored (stable ≥ hours):
-  - fundamental score + metrics + sector + valuation + peers
-  - multi-quarter / quality scores
-  - industry, company name
-  - semi-static event snapshot (bulk/insider/earnings surprise)
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
-import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger("data-feed")
 
@@ -32,7 +28,15 @@ IST = timezone(timedelta(hours=5, minutes=30))
 DATA_FEED_PREFIX = "stockky:data_feed:sym:"
 DATA_FEED_META_KEY = "stockky:data_feed:meta"
 DATA_FEED_JOB_KEY = "stockky:data_feed:job"
-DATA_FEED_TTL = int(os.getenv("DATA_FEED_TTL_SECONDS", str(20 * 3600)))  # ~20h
+DATA_FEED_INDEX_KEY = "stockky:data_feed:index"  # list of symbols currently in feed
+# Default 24h — long enough for full trading day + overnight; midnight scheduler refreshes
+DATA_FEED_TTL = int(os.getenv("DATA_FEED_TTL_SECONDS", str(24 * 3600)))
+
+# Process-local hot cache (speed). Durable source of truth is Neon via _get/_set.
+_LOCAL_SYMBOLS: Dict[str, dict] = {}
+_LOCAL_META: Dict[str, Any] = {}
+_LOCAL_JOB: Dict[str, Any] = {}
+_LOCAL_INDEX: Set[str] = set()
 
 
 def _now_iso() -> str:
@@ -66,76 +70,175 @@ def extract_feed_payload(
         "metrics": metrics,
         "fundamental_reasons": (f.get("reasons") or [])[:6],
         "fallback_used": f.get("fallback_used"),
-        # Semi-static event snapshot
-        "bulk_deals": (e.get("bulk_deals") or [])[:5],
-        "recent_insider_transactions": (e.get("recent_insider_transactions") or [])[:5],
-        "earnings_surprise": e.get("earnings_surprise"),
-        "next_earnings_date": e.get("next_earnings_date"),
-        "event_summary": e.get("event_summary") or e.get("summary"),
-        "has_positive_catalyst": e.get("has_positive_catalyst"),
-        "recent_event_score": e.get("recent_event_score"),
+        "bulk_deals": (e.get("bulk_deals") or e.get("bulk") or [])[:5] if isinstance(e, dict) else [],
+        "insider": (e.get("insider") or e.get("insider_trades") or [])[:5] if isinstance(e, dict) else [],
+        "earnings_surprise": e.get("earnings_surprise") if isinstance(e, dict) else None,
+        "event_summary": e.get("summary") if isinstance(e, dict) else None,
+        "events_count": e.get("count") or e.get("total") if isinstance(e, dict) else None,
     }
-    if extra and isinstance(extra, dict):
-        payload.update(extra)
+    if isinstance(extra, dict):
+        for k, v in extra.items():
+            if k not in payload and v is not None:
+                payload[k] = v
     return payload
 
 
-# Process-local job/meta so status works even when Redis is off
-_LOCAL_JOB: dict = {}
-_LOCAL_META: dict = {}
-_LOCAL_SYMBOLS: dict = {}
-
 class DataFeedStore:
+    """
+    Durable data-feed store.
+
+    _get / _set must point at kv_cache (memory + Neon). Redis is optional
+    and disabled when USE_REDIS=0.
+    """
+
     def __init__(self, redis_get, redis_set, redis_client=None):
         self._get = redis_get
         self._set = redis_set
-        self._redis = redis_client
+        self._redis = redis_client  # legacy; may be None
 
+    # ── Symbol payload ──────────────────────────────────────────────────
     def get_symbol(self, symbol: str) -> Optional[dict]:
-        key = DATA_FEED_PREFIX + symbol.upper().replace(".NS", "").replace(".BO", "")
+        key = DATA_FEED_PREFIX + (symbol or "").upper().replace(".NS", "").replace(".BO", "")
         if key in _LOCAL_SYMBOLS:
-            return _LOCAL_SYMBOLS[key]
+            return dict(_LOCAL_SYMBOLS[key])
         val = self._get(key)
-        return val if isinstance(val, dict) else None
+        if isinstance(val, dict):
+            _LOCAL_SYMBOLS[key] = val
+            base = key.split(":")[-1]
+            _LOCAL_INDEX.add(base)
+            return dict(val)
+        return None
 
     def put_symbol(self, symbol: str, payload: dict, ttl: int = DATA_FEED_TTL) -> None:
-        key = DATA_FEED_PREFIX + symbol.upper().replace(".NS", "").replace(".BO", "")
+        base = (symbol or "").upper().replace(".NS", "").replace(".BO", "")
+        key = DATA_FEED_PREFIX + base
+        if not isinstance(payload, dict):
+            return
+        payload = dict(payload)
+        payload.setdefault("symbol", base)
+        payload.setdefault("updated_at", _now_iso())
         _LOCAL_SYMBOLS[key] = payload
-        self._set(key, payload, ttl=ttl)
+        _LOCAL_INDEX.add(base)
+        # Durable write (Neon via kv_cache for stockky:data_feed:*)
+        try:
+            self._set(key, payload, ttl=ttl)
+        except Exception as e:
+            logger.warning("data_feed put_symbol durable fail %s: %s", base, e)
+        # Update durable index periodically (every put is fine; small list)
+        try:
+            self._persist_index(ttl=ttl)
+        except Exception as e:
+            logger.debug("data_feed index persist: %s", e)
 
-    def meta(self) -> dict:
-        if _LOCAL_META:
-            return dict(_LOCAL_META)
-        m = self._get(DATA_FEED_META_KEY)
-        return m if isinstance(m, dict) else {
-            "last_success_at": None,
-            "last_count": 0,
-            "last_message": "No data feed run yet",
-            "source": None,
+    def has_symbol(self, symbol: str) -> bool:
+        return self.get_symbol(symbol) is not None
+
+    def list_symbols(self) -> List[str]:
+        """Symbols currently in feed (local ∪ durable index)."""
+        idx = set(_LOCAL_INDEX)
+        try:
+            durable = self._get(DATA_FEED_INDEX_KEY)
+            if isinstance(durable, list):
+                idx.update(str(s).upper() for s in durable)
+            elif isinstance(durable, dict) and isinstance(durable.get("symbols"), list):
+                idx.update(str(s).upper() for s in durable["symbols"])
+        except Exception:
+            pass
+        return sorted(idx)
+
+    def count_symbols(self) -> int:
+        return len(self.list_symbols())
+
+    def _persist_index(self, ttl: int = DATA_FEED_TTL) -> None:
+        symbols = self.list_symbols()
+        payload = {
+            "symbols": symbols,
+            "count": len(symbols),
+            "updated_at": _now_iso(),
         }
+        self._set(DATA_FEED_INDEX_KEY, payload, ttl=ttl)
+
+    # ── Meta (STOCKS IN FEED / LAST SUCCESS) ─────────────────────────────
+    def meta(self) -> dict:
+        durable = None
+        try:
+            durable = self._get(DATA_FEED_META_KEY)
+        except Exception:
+            durable = None
+        if not isinstance(durable, dict):
+            durable = {}
+        # Local overrides only when it has real progress (running or newer)
+        local = dict(_LOCAL_META) if _LOCAL_META else {}
+        m = {**durable, **local} if local else dict(durable)
+        if not m:
+            m = {
+                "last_success_at": None,
+                "last_count": 0,
+                "last_message": "No data feed run yet",
+                "source": None,
+            }
+        # Heal last_count from index if meta is empty/stale zero but index has symbols
+        try:
+            cnt = self.count_symbols()
+            if cnt > 0 and int(m.get("last_count") or 0) < cnt:
+                m["last_count"] = cnt
+            if cnt > 0 and not m.get("last_success_at"):
+                # best-effort: use index updated_at
+                idx = self._get(DATA_FEED_INDEX_KEY)
+                if isinstance(idx, dict) and idx.get("updated_at"):
+                    m["last_success_at"] = idx["updated_at"]
+        except Exception:
+            pass
+        return m
 
     def set_meta(self, **kwargs) -> dict:
         m = self.meta()
         m.update(kwargs)
         m["updated_at"] = _now_iso()
+        # Keep stocks count honest
+        try:
+            cnt = self.count_symbols()
+            if cnt > int(m.get("last_count") or 0):
+                m["last_count"] = cnt
+        except Exception:
+            pass
         _LOCAL_META.clear()
         _LOCAL_META.update(m)
-        self._set(DATA_FEED_META_KEY, m, ttl=7 * 86400)
+        try:
+            self._set(DATA_FEED_META_KEY, m, ttl=7 * 86400)  # meta survives a week
+        except Exception as e:
+            logger.warning("data_feed set_meta durable fail: %s", e)
         return m
 
+    # ── Job (progress UI) ────────────────────────────────────────────────
     def job(self) -> dict:
-        if _LOCAL_JOB:
-            return dict(_LOCAL_JOB)
-        j = self._get(DATA_FEED_JOB_KEY)
-        return j if isinstance(j, dict) else {
-            "status": "idle",
-            "processed": 0,
-            "total": 0,
-            "started_at": None,
-            "elapsed_sec": 0,
-            "estimated_remaining_sec": None,
-            "message": "Idle",
-        }
+        durable = None
+        try:
+            durable = self._get(DATA_FEED_JOB_KEY)
+        except Exception:
+            durable = None
+        if not isinstance(durable, dict):
+            durable = {}
+        local = dict(_LOCAL_JOB) if _LOCAL_JOB else {}
+        # Prefer local when actively running
+        if local.get("status") == "running":
+            j = {**durable, **local}
+        elif local:
+            j = {**durable, **local}
+        else:
+            j = dict(durable) if durable else {}
+        if not j:
+            j = {
+                "status": "idle",
+                "processed": 0,
+                "total": 0,
+                "started_at": None,
+                "elapsed_sec": 0,
+                "estimated_remaining_sec": None,
+                "message": "Idle",
+                "ok_count": 0,
+            }
+        return j
 
     def set_job(self, **kwargs) -> dict:
         j = self.job()
@@ -153,25 +256,33 @@ class DataFeedStore:
                     j["estimated_remaining_sec"] = int(rate * (total - done))
             except Exception:
                 pass
+        j["updated_at"] = _now_iso()
         _LOCAL_JOB.clear()
         _LOCAL_JOB.update(j)
-        self._set(DATA_FEED_JOB_KEY, j, ttl=86400)
-        # Keep meta in sync so UI "STOCKS IN FEED" / "LAST SUCCESS" are not blank mid-run
+        try:
+            self._set(DATA_FEED_JOB_KEY, j, ttl=7 * 86400)
+        except Exception as e:
+            logger.warning("data_feed set_job durable fail: %s", e)
+        # Keep meta in sync for UI cards during / after run
         try:
             ok_n = int(j.get("ok_count") or j.get("processed") or 0)
-            if ok_n > 0 or j.get("status") in ("done", "stopped", "error"):
-                self.set_meta(
-                    last_count=max(ok_n, int(self.meta().get("last_count") or 0)),
-                    last_success_at=j.get("updated_at") or _now_iso(),
-                    last_message=j.get("message") or self.meta().get("last_message"),
-                    source="job_progress",
-                )
+            if ok_n > 0 or j.get("status") in ("done", "stopped", "error", "idle"):
+                meta_kw = {
+                    "last_count": max(ok_n, int(self.meta().get("last_count") or 0)),
+                    "last_message": j.get("message") or self.meta().get("last_message"),
+                    "source": "job_progress",
+                }
+                if j.get("status") in ("done", "stopped"):
+                    meta_kw["last_success_at"] = j.get("finished_at") or j.get("updated_at") or _now_iso()
+                elif ok_n > 0:
+                    meta_kw["last_success_at"] = j.get("updated_at") or _now_iso()
+                self.set_meta(**meta_kw)
         except Exception:
             pass
         return j
 
 
-# Hot-picks job keys (on-demand run)
+# ── Hot-picks job (on-demand) ─────────────────────────────────────────────
 HOT_JOB_KEY = "stockky:hot_job"
 HOT_RESULT_KEY = "stockky:hot_result_db"
 
@@ -208,47 +319,46 @@ def hot_job_set(redis_set, redis_get, **kwargs) -> dict:
     return j
 
 
-# ── Cache stampede protection ─────────────────────────────────────────────
+# ── Cache stampede protection (memory lock when Redis off) ────────────────
 LOCK_PREFIX = "stockky:lock:refresh:"
+_MEM_LOCKS: Dict[str, float] = {}
 
 
 def try_refresh_lock(redis_client, symbol: str, ttl_sec: int = 5) -> bool:
-    """
-    Distributed mutex: only one worker refreshes a ticker at a time.
-    Returns True if this caller holds the lock (should fetch upstream).
-    Upstash Redis: SET key value NX EX ttl
-    """
+    key = f"{LOCK_PREFIX}{(symbol or '').upper()}"
+    now = datetime.now(IST).timestamp()
+    # Always use process lock first
+    exp = _MEM_LOCKS.get(key)
+    if exp and exp > now:
+        return False
+    _MEM_LOCKS[key] = now + ttl_sec
     if redis_client is None:
         return True
-    key = f"{LOCK_PREFIX}{(symbol or '').upper()}"
     try:
-        # upstash-redis supports set with ex + nx
         ok = redis_client.set(key, "1", nx=True, ex=int(ttl_sec))
         return bool(ok)
     except TypeError:
         try:
-            # fallback signature
             ok = redis_client.set(key, "1", ex=ttl_sec, nx=True)
             return bool(ok)
-        except Exception as e:
-            logger.debug("refresh lock unavailable: %s", e)
+        except Exception:
             return True
-    except Exception as e:
-        logger.debug("refresh lock error: %s", e)
+    except Exception:
         return True
 
 
 def release_refresh_lock(redis_client, symbol: str) -> None:
+    key = f"{LOCK_PREFIX}{(symbol or '').upper()}"
+    _MEM_LOCKS.pop(key, None)
     if redis_client is None:
         return
     try:
-        redis_client.delete(f"{LOCK_PREFIX}{(symbol or '').upper()}")
+        redis_client.delete(key)
     except Exception:
         pass
 
 
 def soft_ttl_should_refresh(redis_client, key: str, soft_window: int = 10) -> bool:
-    """True when key is within soft_window seconds of expiry."""
     if redis_client is None:
         return False
     try:

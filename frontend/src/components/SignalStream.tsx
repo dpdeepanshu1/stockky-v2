@@ -68,7 +68,7 @@ export default function SignalStream({
         <p className="mono text-xs text-mist py-6 text-center">No signals in this filter — run Market Scan.</p>
       ) : (
         filtered.slice(0, 12).map((r) => {
-          const ds = decisionStyle(r.decision || "");
+          const ds = decisionStyle[r.decision || ""] ?? decisionStyle["DO NOT BUY"];
           const prov = r.provisional || r.data_quality?.provisional;
           const pillars = r.data_quality?.pillars;
           return (

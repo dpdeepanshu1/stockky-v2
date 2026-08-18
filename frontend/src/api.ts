@@ -111,6 +111,10 @@ export interface ScanStatus {
   estimated_remaining?: number | null;
   result?: ScanResult;
   error?: string;
+  /** True when scan was user-cancelled and result is partial. */
+  cancelled?: boolean;
+  /** True when rankings are incomplete / partial. */
+  partial?: boolean;
 }
 
 export interface MarketStock {
@@ -150,6 +154,8 @@ export interface SystemServiceStatus {
   seconds?: number;
   error?: string;
   url?: string | null;
+  latency_ms?: number | null;
+  detail?: string | null;
 }
 
 export interface SystemHealth {

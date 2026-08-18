@@ -544,6 +544,7 @@ def get_engine(database_url=None):
     """
     import os
     import logging
+    import re
     _log = logging.getLogger("training-db")
     url = database_url or os.environ.get("TRAINING_DATABASE_URL") or os.environ.get("DATABASE_URL", "sqlite:///./training.db")
     if url.startswith("postgres://"):
@@ -567,11 +568,18 @@ def get_engine(database_url=None):
         kwargs["pool_recycle"] = int(os.environ.get("DB_POOL_RECYCLE", "280"))
         kwargs["pool_size"] = int(os.environ.get("DB_POOL_SIZE", "5"))  # Supabase free: stay well under 60 direct / 200 pooler
         kwargs["max_overflow"] = int(os.environ.get("DB_MAX_OVERFLOW", "2"))
-        # Free Neon/Supabase: always require SSL if not specified
-        if "sslmode" not in url:
+        # Normalize SSL mode (psycopg2 accepts require/prefer/... — NOT "required")
+        # Common typo: sslmode=required → invalid sslmode value: "required"
+        url = re.sub(r"(?i)([?&]sslmode=)required\b", r"\1require", url)
+        url = re.sub(r"(?i)([?&]ssl=)true\b", r"\1require", url)  # rare aliases
+        if "sslmode=" not in url.lower():
             sep = "&" if "?" in url else "?"
             url = f"{url}{sep}sslmode=require"
-        _log.info("Using durable Postgres (pool_size=%s max_overflow=%s). Prefer Supabase pooler :6543", kwargs["pool_size"], kwargs["max_overflow"])
+        _log.info(
+            "Using durable Postgres (pool_size=%s max_overflow=%s). Prefer pooler :6543",
+            kwargs["pool_size"],
+            kwargs["max_overflow"],
+        )
     return create_engine(url, **kwargs)
 
 def create_tables(engine):

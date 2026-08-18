@@ -49,9 +49,14 @@ try:
     from models import get_engine
     engine = get_engine(DATABASE_URL)
 except Exception:
+    import re as _re
     _url = DATABASE_URL
     if _url.startswith("postgres://"):
         _url = "postgresql://" + _url[len("postgres://"):]
+    # Fix common typo sslmode=required → require (psycopg2)
+    _url = _re.sub(r"(?i)([?&]sslmode=)required\b", r"\1require", _url)
+    if _url.startswith("postgresql") and "sslmode=" not in _url.lower():
+        _url += ("&" if "?" in _url else "?") + "sslmode=require"
     engine = create_engine(_url, echo=False, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 

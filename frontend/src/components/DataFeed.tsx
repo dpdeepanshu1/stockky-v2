@@ -44,33 +44,39 @@ export default function DataFeed() {
 
   const refresh = useCallback(async () => {
     try {
-      // status endpoint auto-heals stale "running" → "stopped"
       const st = await api.getDataFeedStatus();
       setJob(st);
       setMeta(st.meta || null);
-      const isRun = st.status === "running" && !st.stop_requested;
-      setRunning(isRun);
-      if (st.status === "done" && st.message) setRunning(true);
-      void refresh();
-      setBanner(st.message);
-      if (st.status === "stopped" && st.message) setBanner(st.message);
+      const stStatus = String(st.status || "idle");
+      // Active only while worker is running/stopping — never when done/idle
+      const active = stStatus === "running" || stStatus === "stopping";
+      setRunning(active);
+      if (st.message) setBanner(String(st.message));
       setErr(null);
+      return st;
     } catch (e: any) {
       setErr(e?.message || "Failed to load data feed status");
+      return null;
     }
   }, []);
 
+  // Load once on mount — no recursive refresh
   useEffect(() => {
-    refresh();
+    void refresh();
   }, [refresh]);
 
+  // Poll only while backend job is running/stopping (stops immediately when done)
   useEffect(() => {
-    // After optimistic "started" banner, keep polling until job leaves idle/running
-    // Poll while running OR while stop is committing
-    if (job?.status !== "running" && !running) return;
-    const id = setInterval(refresh, 2000);
-    return () => clearInterval(id);
-  }, [job?.status, refresh]);
+    const st = job?.status || "idle";
+    if (st !== "running" && st !== "stopping") {
+      if (running) setRunning(false);
+      return;
+    }
+    const id = window.setInterval(() => {
+      void refresh();
+    }, 2500);
+    return () => window.clearInterval(id);
+  }, [job?.status, refresh, running]);
 
   const total = job?.total ?? 0;
   const processed = job?.processed ?? job?.checkpoint?.cursor ?? 0;
@@ -98,7 +104,7 @@ export default function DataFeed() {
       status === "running");
 
   // Stop only when truly running (worker alive or claimed running)
-  const canStop = busy == null && status === "running";
+  const canStop = busy == null && (status === "running" || status === "stopping");
 
   // Full feed when not complete and not running
   const isActivelyRunning = status === "running" && !job?.stop_requested;
@@ -155,10 +161,10 @@ export default function DataFeed() {
   const onStop = async () => {
     setErr(null);
     setBusy("stop");
+    setRunning(false); // stop local poll immediately
     try {
       const res = await api.stopDataFeed();
-      setBanner(res.message || "Stopped — progress committed");
-      setRunning(false);
+      setBanner((res && res.message) || "Stopped — progress committed");
       await refresh();
     } catch (e: any) {
       setErr(e?.message || "Failed to stop data feed");

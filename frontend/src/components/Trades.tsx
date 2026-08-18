@@ -174,8 +174,11 @@ export default function Trades() {
 
   useEffect(() => {
     fetchAll();
-    // Poll slowly — avoids hammering Postgres/Supabase egress
-    const id = window.setInterval(() => { fetchAll(); }, 20000);
+    // Poll every 60s and only when tab is visible — free-tier decision-prediction is 512MB
+    const id = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      fetchAll();
+    }, 60000);
     return () => window.clearInterval(id);
   }, [fetchAll]);
 

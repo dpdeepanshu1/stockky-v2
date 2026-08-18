@@ -8,7 +8,7 @@ on:
 jobs:
   feed:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - name: IST check
         run: echo "IST $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M %Z')"

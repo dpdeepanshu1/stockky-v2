@@ -86,15 +86,16 @@ def _ensure_trade_tables():
 
 # ── Redis read-through cache for portfolio/reports (cuts Supabase egress) ──
 _REPORT_TTL = int(os.environ.get("REPORT_CACHE_TTL_SEC", "90"))
-_trades_redis = None
+_trades_redis = None  # Redis disconnected — memory report cache only
 try:
-    from upstash_redis import Redis as _UpstashRedis
-    _ru = os.environ.get("UPSTASH_REDIS_REST_URL")
-    _rt = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
-    if _ru and _rt:
-        _trades_redis = _UpstashRedis(url=_ru, token=_rt)
+    from kv_cache import kv_get as _t_kv_get, kv_set as _t_kv_set
 except Exception:
-    _trades_redis = None
+    _mem_report = {}
+    def _t_kv_get(k):
+        return _mem_report.get(k)
+    def _t_kv_set(k, v, ttl=None):
+        _mem_report[k] = v
+
 _trades_mem_cache = {}
 
 
@@ -105,15 +106,12 @@ def _report_cache_get(key: str):
     hit = _trades_mem_cache.get(key)
     if hit and hit[0] > now:
         return hit[1]
-    if _trades_redis:
-        try:
-            raw = _trades_redis.get(f"trades:{key}")
-            if raw:
-                data = _json.loads(raw) if isinstance(raw, str) else raw
-                _trades_mem_cache[key] = (now + _REPORT_TTL, data)
-                return data
-        except Exception:
-            pass
+    try:
+        raw = _t_kv_get(f"trades:{key}")
+        if raw is not None:
+            return raw
+    except Exception:
+        pass
     return None
 
 
@@ -121,11 +119,10 @@ def _report_cache_set(key: str, value):
     import time as _t
     import json as _json
     _trades_mem_cache[key] = (_t.time() + _REPORT_TTL, value)
-    if _trades_redis:
-        try:
-            _trades_redis.setex(f"trades:{key}", _REPORT_TTL, _json.dumps(value, default=str))
-        except Exception:
-            pass
+    try:
+        _t_kv_set(f"trades:{key}", value, ttl=_REPORT_TTL)
+    except Exception:
+        pass
 
 
 def _report_cache_invalidate():

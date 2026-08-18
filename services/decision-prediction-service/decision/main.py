@@ -68,44 +68,45 @@ BATCH_MAX_SYMBOLS = int(os.getenv("DECIDE_BATCH_MAX", "25"))
 BATCH_CONCURRENCY = int(os.getenv("DECIDE_BATCH_CONCURRENCY", "8"))
 
 _decide_mem_cache: dict = {}  # symbol -> (expires_ts, payload)
-_redis = None
+# Decide cache: in-memory only (unlimited). Optional Neon via kv_cache for durable keys.
 try:
-    from upstash_redis import Redis
-    _url = os.getenv("UPSTASH_REDIS_REST_URL")
-    _tok = os.getenv("UPSTASH_REDIS_REST_TOKEN")
-    if _url and _tok:
-        _redis = Redis(url=_url, token=_tok)
-        _redis.ping()
-        logger.info("Decision-engine connected to Upstash Redis for decide cache")
-except Exception as e:
-    logger.warning("Decision-engine Redis cache unavailable: %s", e)
+    from kv_cache import kv_get as _kv_get, kv_set as _kv_set
+except Exception:
+    _kv_get = lambda k: None  # type: ignore
+    _kv_set = lambda k, v, ttl=None: None  # type: ignore
+_redis = None  # disconnected by default (USE_REDIS=0)
+logger.info("Decision-engine cache: in-memory (Redis disconnected)")
 
-def _is_market_open() -> bool:
-    now = datetime.now(IST)
-    if now.weekday() >= 5:
-        return False
-    t = now.time()
-    return (t.hour > 9 or (t.hour == 9 and t.minute >= 15)) and (t.hour < 15 or (t.hour == 15 and t.minute <= 30))
 
 def _cache_ttl() -> int:
-    return DECIDE_CACHE_TTL_OPEN if _is_market_open() else DECIDE_CACHE_TTL_CLOSED
+    """Return TTL based on market hours (IST)."""
+    now_ist = datetime.now(IST)
+    # Market hours: 9:15 AM to 3:30 PM IST on weekdays
+    is_market_open = (
+        now_ist.weekday() < 5  # Monday-Friday
+        and now_ist.hour >= 9 and (now_ist.hour < 15 or (now_ist.hour == 15 and now_ist.minute < 30))
+    )
+    return DECIDE_CACHE_TTL_OPEN if is_market_open else DECIDE_CACHE_TTL_CLOSED
 
-def _cache_get_decide(symbol: str):
+
+def _cache_get_decide(symbol: str) -> dict | None:
+    """Retrieve cached decide payload for symbol, checking memory and KV store."""
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     now = time_module_time()
     entry = _decide_mem_cache.get(sym)
     if entry and entry[0] > now:
         return entry[1]
-    if _redis:
-        try:
-            raw = _redis.get(f"decide:{sym}")
-            if raw:
-                data = json.loads(raw) if isinstance(raw, str) else raw
-                _decide_mem_cache[sym] = (now + _cache_ttl(), data)
-                return data
-        except Exception:
-            pass
+    try:
+        raw = _kv_get(f"decide:{sym}")
+        if raw is not None:
+            if isinstance(raw, str):
+                raw = json.loads(raw)
+            if isinstance(raw, dict):
+                return raw
+    except Exception:
+        pass
     return None
+
 
 def _is_weak_decide_payload(payload: dict) -> bool:
     if not isinstance(payload, dict):
@@ -132,11 +133,10 @@ def _cache_set_decide(symbol: str, payload: dict):
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     ttl = _cache_ttl()
     _decide_mem_cache[sym] = (time_module_time() + ttl, payload)
-    if _redis:
-        try:
-            _redis.setex(f"decide:{sym}", ttl, json.dumps(payload, default=str))
-        except Exception:
-            pass
+    try:
+        _kv_set(f"decide:{sym}", payload, ttl=ttl)
+    except Exception:
+        pass
 
 def time_module_time():
     import time as _t

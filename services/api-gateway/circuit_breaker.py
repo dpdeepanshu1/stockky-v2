@@ -32,6 +32,11 @@ def _get_redis():
     if _redis_init:
         return _redis
     _redis_init = True
+    # Local-only by default (USE_REDIS / CB_REDIS_SYNC must both be on)
+    if os.getenv("USE_REDIS", "0").lower() not in ("1", "true", "yes"):
+        return None
+    if os.getenv("CB_REDIS_SYNC", "0").lower() not in ("1", "true", "yes"):
+        return None
     url = os.environ.get("UPSTASH_REDIS_REST_URL")
     token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
     if not url or not token:

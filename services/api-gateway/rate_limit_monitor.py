@@ -45,6 +45,9 @@ class RateLimitMonitor:
         self._init_redis()
 
     def _init_redis(self) -> None:
+        if os.environ.get("USE_REDIS", "0").lower() not in ("1", "true", "yes"):
+            self._redis = None
+            return
         url = os.environ.get("UPSTASH_REDIS_REST_URL")
         token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
         if not url or not token:

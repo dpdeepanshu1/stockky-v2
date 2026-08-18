@@ -23,7 +23,10 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from upstash_redis import Redis
+try:
+    from upstash_redis import Redis
+except ImportError:
+    Redis = None  # type: ignore
 from data_feed import (
     DataFeedStore, extract_feed_payload, DATA_FEED_TTL,
     hot_job_get, hot_job_set, HOT_RESULT_KEY,
@@ -147,17 +150,19 @@ async def universal_exception_handler(request, exc):
         }
     )
 
-# ── Redis ──────────────────────────────────────────────────────────────────────
+# ── KV cache (memory + optional Neon; Redis only if USE_REDIS=1) ───────────────
+from kv_cache import kv_get, kv_set, kv_ttl, _get_redis as _kv_redis_client
+
 _redis = None
 try:
-    _redis = Redis(
-        url=os.getenv("UPSTASH_REDIS_REST_URL"),
-        token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
-    )
-    _redis.ping()
-    logger.info("Connected to Upstash Redis")
+    _redis = _kv_redis_client()  # None when USE_REDIS=0 (default)
+    if _redis:
+        logger.info("Upstash Redis enabled (USE_REDIS=1)")
+    else:
+        logger.info("Running Redis-free: in-memory KV + optional Neon stockky_kv")
 except Exception as e:
-    logger.warning("Redis unavailable: %s", e)
+    logger.warning("KV backend init: %s", e)
+    _redis = None
 
 WATCHLIST_KEY       = "stockky:watchlist"
 SEARCHED_KEY        = "stockky:searched_symbols"
@@ -209,36 +214,25 @@ def _feed_store() -> DataFeedStore:
 
 
 def _redis_get(key: str):
-    if not _redis:
-        return None
-    try:
-        val = _redis.get(key)
-        return json.loads(val) if val else None
-    except Exception:
-        return None
+    """Memory → optional Neon durable → optional Redis."""
+    return kv_get(key)
+
 
 
 def _redis_soft_ttl_refresh(key: str, soft_window: int = 10) -> bool:
-    """True if key exists and TTL is in (0, soft_window] — caller should refresh in background."""
-    if not _redis:
-        return False
     try:
-        ttl = _redis.ttl(key)
-        return isinstance(ttl, int) and 0 < ttl <= soft_window
+        t = kv_ttl(key)
+        return t != -2 and 0 < t <= soft_window
     except Exception:
         return False
 
+
+
 def _redis_set(key: str, value, ttl: int = None):
-    if not _redis:
-        return
-    try:
-        data = json.dumps(value, default=str)
-        if ttl:
-            _redis.setex(key, ttl, data)
-        else:
-            _redis.set(key, data)
-    except Exception as e:
-        logger.warning("Redis set failed: %s", e)
+    """Memory always; Neon for durable keys; Redis only if USE_REDIS=1."""
+    kv_set(key, value, ttl=ttl)
+
+
 
 def _load_watchlist() -> List[str]:
     return _redis_get(WATCHLIST_KEY) or []

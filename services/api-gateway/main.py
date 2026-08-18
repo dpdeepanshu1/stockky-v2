@@ -129,12 +129,35 @@ async def _start_shared_http():
 
 
 @app.on_event("shutdown")
-async def _stop_shared_http():
-    global _shared_http_client
-    if _shared_http_client is not None and not _shared_http_client.is_closed:
-        await _shared_http_client.aclose()
-        logger.info("Shared httpx.AsyncClient closed")
-        _shared_http_client = None
+async def _graceful_shutdown():
+    """FastAPI/uvicorn SIGTERM path: commit work, stop loops, close clients."""
+    global _shared_http_client, _quote_loop_task
+    logger.info("Graceful shutdown starting…")
+    try:
+        phases = _graceful_shutdown_commit(reason="process_shutdown")
+        logger.info("Graceful shutdown commit: %s", phases)
+    except Exception as e:
+        logger.warning("Graceful shutdown commit failed: %s", e)
+    # Cancel quote loop task
+    try:
+        if _quote_loop_task is not None and not _quote_loop_task.done():
+            _quote_loop_task.cancel()
+            try:
+                await _quote_loop_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            _quote_loop_task = None
+    except Exception as e:
+        logger.debug("quote loop cancel: %s", e)
+    # Close shared HTTP client
+    try:
+        if _shared_http_client is not None and not _shared_http_client.is_closed:
+            await _shared_http_client.aclose()
+            logger.info("Shared httpx.AsyncClient closed")
+            _shared_http_client = None
+    except Exception as e:
+        logger.warning("http client close: %s", e)
+    logger.info("Graceful shutdown complete")
 
 
 # --- CORS ---
@@ -224,6 +247,118 @@ def set_activity_paused(paused: bool) -> None:
             clear_data_feed_stop()
         except Exception:
             pass
+
+
+def _graceful_shutdown_commit(reason: str = "shutdown") -> list:
+    """
+    Commit in-progress work and force-stop background activity.
+    Safe to call from Power Off, FastAPI shutdown, or SIGTERM/SIGINT.
+    Does not close HTTP clients (caller may do that after).
+    """
+    phases = []
+    try:
+        set_activity_paused(True)
+        phases.append({"phase": "activity_gate", "ok": True, "detail": f"paused ({reason})"})
+    except Exception as e:
+        phases.append({"phase": "activity_gate", "ok": False, "detail": str(e)[:120]})
+
+    # Cancel all scans — preserve partial status in durable kv
+    cancelled = 0
+    try:
+        _SCAN_CANCEL_FLAGS.add("__ALL__")
+        try:
+            for k in list(_mem_kv.keys()):
+                sk = str(k)
+                if sk.startswith(SCAN_TASK_PREFIX) and not sk.endswith(":cancel"):
+                    data = _mem_kv.get(k)
+                    if isinstance(data, dict) and data.get("status") == "running":
+                        data = dict(data)
+                        data["cancel_requested"] = True
+                        data["status"] = "cancelled"
+                        data["partial"] = True
+                        data["message"] = f"{reason}: scan stopped (partial committed)"
+                        _mem_kv[k] = data
+                        try:
+                            _redis_set(k, data, ttl=3600)
+                            _redis_set(sk + ":cancel", True, ttl=3600)
+                        except Exception:
+                            pass
+                        cancelled += 1
+        except Exception:
+            pass
+        phases.append({"phase": "scan", "ok": True, "detail": f"cancel committed partial={cancelled}"})
+    except Exception as e:
+        phases.append({"phase": "scan", "ok": False, "detail": str(e)[:120]})
+
+    # Data feed — force stop + checkpoint
+    try:
+        try:
+            request_data_feed_stop()
+        except Exception:
+            pass
+        store = _feed_store()
+        job = store.job() or {}
+        store.set_job(
+            status="stopped",
+            message=f"{reason}: data feed stopped (checkpoint committed)",
+            stop_requested=True,
+            finished_at=datetime.now(IST).isoformat(),
+            processed=int(job.get("processed") or 0),
+            ok_count=int(job.get("ok_count") or job.get("processed") or 0),
+        )
+        phases.append({"phase": "data_feed", "ok": True, "detail": "stopped + checkpoint"})
+    except Exception as e:
+        phases.append({"phase": "data_feed", "ok": False, "detail": str(e)[:120]})
+
+    # Hot picks idle
+    try:
+        hot_job_set(
+            _redis_set,
+            _redis_get,
+            status="idle",
+            message=f"{reason}: Hot Picks stopped",
+            processed=0,
+            estimated_remaining_sec=0,
+        )
+        phases.append({"phase": "hot_picks", "ok": True, "detail": "idle"})
+    except Exception as e:
+        phases.append({"phase": "hot_picks", "ok": False, "detail": str(e)[:120]})
+
+    # Drop WS quote watches + close sockets
+    try:
+        for ws in list(getattr(ws_manager, "active", []) or []):
+            try:
+                ws_manager.unwatch_quotes(ws, None)
+            except Exception:
+                pass
+            try:
+                # Best-effort close; may already be gone
+                import asyncio as _aio
+                try:
+                    loop = _aio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(ws.close())
+                    else:
+                        loop.run_until_complete(ws.close())
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        phases.append({"phase": "websocket", "ok": True, "detail": "unwatched + close signalled"})
+    except Exception as e:
+        phases.append({"phase": "websocket", "ok": False, "detail": str(e)[:120]})
+
+    # Stop quote broadcast task
+    try:
+        task = globals().get("_quote_loop_task")
+        if task is not None and hasattr(task, "done") and not task.done():
+            task.cancel()
+        phases.append({"phase": "quote_loop", "ok": True, "detail": "cancelled"})
+    except Exception as e:
+        phases.append({"phase": "quote_loop", "ok": False, "detail": str(e)[:120]})
+
+    logger.info("graceful_shutdown_commit reason=%s phases=%s", reason, phases)
+    return phases
 
 
 MARKET_MOVERS_CACHE_PREFIX = "stockky:market_movers:"
@@ -4995,104 +5130,16 @@ async def ops_keepalive(deep: bool = False):
 
 @app.post("/ops/power-off")
 async def ops_power_off(background_tasks: BackgroundTasks):
-    """Force-stop ALL user-initiated activity.
+    """Force-stop ALL user-initiated activity (same path as process shutdown).
 
     1) Commit / checkpoint in-progress scan + data-feed + hot-picks
     2) Signal cancel everywhere (process-local + durable)
     3) Pause activity gate so quote loop / workers idle
     4) Frontend should reload and only hit health/keepalive afterwards
     """
-    global _ACTIVITY_PAUSED, _QUOTE_LOOP_ENABLED
-    phases = []
-    set_activity_paused(True)
-    phases.append({"phase": "activity_gate", "ok": True, "detail": "paused — no background fan-out"})
+    phases = _graceful_shutdown_commit(reason="power_off")
 
-    # 1) Cancel ALL running scans (commit partial)
-    cancelled = 0
-    try:
-        _SCAN_CANCEL_FLAGS.add("__ALL__")
-        # durable scan tasks in mem/kv
-        try:
-            for k in list(getattr(_mem_kv, "keys", lambda: [])() if False else []):
-                pass
-        except Exception:
-            pass
-        # Mark known task keys from a soft scan of common prefixes via redis get of last status
-        try:
-            # Cancel flags: any future scan checks activity_paused()
-            for tid in list(_SCAN_CANCEL_FLAGS):
-                _redis_set(SCAN_TASK_PREFIX + str(tid) + ":cancel", True, ttl=3600)
-        except Exception:
-            pass
-        # Walk process mem kv if present
-        try:
-            for k in list(_mem_kv.keys()):
-                if "scan:task:" in str(k) or str(k).startswith(SCAN_TASK_PREFIX):
-                    try:
-                        data = _mem_kv.get(k)
-                        if isinstance(data, dict) and data.get("status") == "running":
-                            data = dict(data)
-                            data["status"] = "cancelled"
-                            data["cancel_requested"] = True
-                            data["partial"] = True
-                            data["message"] = "Power-off: scan stopped (partial committed)"
-                            _mem_kv[k] = data
-                            try:
-                                _redis_set(k, data, ttl=3600)
-                            except Exception:
-                                pass
-                            cancelled += 1
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        phases.append({"phase": "scan", "ok": True, "detail": f"cancel signals committed partial={cancelled}"})
-    except Exception as e:
-        phases.append({"phase": "scan", "ok": False, "detail": str(e)[:120]})
-
-    # 2) Stop data feed — force commit to stopped
-    try:
-        request_data_feed_stop()
-        store = _feed_store()
-        job = store.job() or {}
-        # Preserve checkpoint / ok_count
-        store.set_job(
-            status="stopped",
-            message="Power-off: data feed stopped (checkpoint committed)",
-            stop_requested=True,
-            finished_at=datetime.now(IST).isoformat(),
-            processed=int(job.get("processed") or 0),
-            ok_count=int(job.get("ok_count") or job.get("processed") or 0),
-        )
-        phases.append({"phase": "data_feed", "ok": True, "detail": "stopped + checkpoint"})
-    except Exception as e:
-        phases.append({"phase": "data_feed", "ok": False, "detail": str(e)[:120]})
-
-    # 3) Stop hot picks
-    try:
-        hot_job_set(
-            _redis_set, _redis_get,
-            status="idle",
-            message="Power-off: Hot Picks stopped",
-            processed=0,
-            estimated_remaining_sec=0,
-        )
-        phases.append({"phase": "hot_picks", "ok": True, "detail": "idle"})
-    except Exception as e:
-        phases.append({"phase": "hot_picks", "ok": False, "detail": str(e)[:120]})
-
-    # 4) Clear WS quote watches so loop has nothing to fetch
-    try:
-        for ws in list(getattr(ws_manager, "active", []) or []):
-            try:
-                ws_manager.unwatch_quotes(ws, None)
-            except Exception:
-                pass
-        phases.append({"phase": "quotes", "ok": True, "detail": "unwatched all symbols"})
-    except Exception as e:
-        phases.append({"phase": "quotes", "ok": False, "detail": str(e)[:120]})
-
-    # 5) Best-effort stop training lock on decision-prediction service
+    # Best-effort stop training lock on decision-prediction service
     try:
         client = _get_http_client()
         urls = [
@@ -5655,6 +5702,38 @@ async def stockky_hot_run(background_tasks: BackgroundTasks, force: bool = True)
     return {"ok": True, "started": True, "message": "Hot Picks search started"}
 
 
+
+
+# ── OS signal hooks (Render deploy / free-tier SIGTERM) ─────────────────────
+def _install_signal_handlers() -> None:
+    """Ensure SIGTERM/SIGINT commit checkpoints even if uvicorn path is skipped."""
+    import signal
+    import threading
+
+    _once = getattr(_install_signal_handlers, "_installed", False)
+    if _once:
+        return
+    _install_signal_handlers._installed = True  # type: ignore[attr-defined]
+
+    def _handle(signum, frame):
+        name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
+        logger.warning("Received %s — running graceful shutdown commit", name)
+        try:
+            _graceful_shutdown_commit(reason=f"signal_{name}")
+        except Exception as e:
+            logger.warning("signal shutdown commit failed: %s", e)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handle)
+        except Exception as e:
+            logger.debug("signal %s install: %s", sig, e)
+
+
+try:
+    _install_signal_handlers()
+except Exception as _sig_err:
+    logger.debug("signal handlers: %s", _sig_err)
 
 if __name__ == "__main__":
     import uvicorn

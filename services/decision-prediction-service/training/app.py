@@ -173,9 +173,21 @@ def convert_numpy(obj):
 # ---------- Startup ----------
 @app.on_event("startup")
 def startup():
-    Base.metadata.create_all(engine)
-    ensure_schema(engine)   # <-- this will add missing columns
-    logger.info("Database schema initialized.")
+    try:
+        from models import init_db
+        ok = init_db(engine)
+        if ok:
+            logger.info("Database schema initialized (create_all + ensure_schema).")
+        else:
+            logger.error("Database schema init reported failure — trades may 500 until tables exist.")
+    except Exception as e:
+        logger.exception("Database schema initialization failed: %s", e)
+        try:
+            Base.metadata.create_all(engine)
+            ensure_schema(engine)
+            logger.info("Database schema initialized (fallback path).")
+        except Exception as e2:
+            logger.exception("Fallback schema init also failed: %s", e2)
     if os.path.exists(LOCK_FILE):
         try:
             os.remove(LOCK_FILE)
@@ -432,6 +444,18 @@ async def health(warm: bool = False):
         "status": "ok" if ok else "degraded",
         **info,
     })
+
+@app.post("/api/admin/init-schema")
+async def admin_init_schema():
+    """Create missing tables on Neon/Postgres (paper_trades, portfolio_account, etc.)."""
+    try:
+        from models import init_db
+        ok = init_db(engine)
+        return JSONResponse(content={"ok": ok, "message": "Schema create_all + ensure_schema completed" if ok else "init_db returned false"})
+    except Exception as e:
+        logger.exception("init-schema failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/lock-status")
 async def lock_status():
@@ -1162,6 +1186,11 @@ async def list_trades(status: str = "all"):
             q = q.filter(PaperTrade.status == "OPEN")
         elif status == "closed":
             q = q.filter(PaperTrade.status == "CLOSED")
+        try:
+            from models import init_db
+            init_db(engine)
+        except Exception:
+            pass
         rows = q.order_by(PaperTrade.entry_date.desc()).all()
         return JSONResponse(content=convert_numpy([{
             "trade_id": t.trade_id, "prediction_id": t.prediction_id, "symbol": t.symbol,

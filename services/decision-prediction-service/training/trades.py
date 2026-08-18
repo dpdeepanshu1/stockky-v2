@@ -44,7 +44,7 @@ MAX_HOLDING_DAYS = 21
 WEEKLY_TAKE_PROFIT_PCT = 5.0
 
 # ---------- Database engine and session factory ----------
-DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///./training.db')
+DATABASE_URL = os.environ.get('TRAINING_DATABASE_URL') or os.environ.get('DATABASE_URL', 'sqlite:///./training.db')
 try:
     from models import get_engine
     engine = get_engine(DATABASE_URL)
@@ -59,6 +59,27 @@ except Exception:
         _url += ("&" if "?" in _url else "?") + "sslmode=require"
     engine = create_engine(_url, echo=False, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
+_tables_ready = False
+
+
+def _ensure_trade_tables():
+    """Lazy-create paper_trades / portfolio_* if Neon DB is empty."""
+    global _tables_ready
+    if _tables_ready:
+        return
+    try:
+        from models import init_db, Base
+        init_db(engine)
+        _tables_ready = True
+    except Exception as e:
+        try:
+            from models import Base
+            Base.metadata.create_all(engine)
+            _tables_ready = True
+        except Exception as e2:
+            import logging
+            logging.getLogger("training-trades").error("ensure tables failed: %s / %s", e, e2)
+
 
 # ── Redis read-through cache for portfolio/reports (cuts Supabase egress) ──
 _REPORT_TTL = int(os.environ.get("REPORT_CACHE_TTL_SEC", "90"))
@@ -110,6 +131,7 @@ def _report_cache_invalidate():
 
 
 def get_or_create_account(db):
+    _ensure_trade_tables()
     account = db.query(db_models.PortfolioAccount).filter(db_models.PortfolioAccount.id == 1).first()
     if account is None:
         account = db_models.PortfolioAccount(
@@ -151,6 +173,7 @@ def deposit_funds(amount: float, note: str = None):
 
 
 def get_portfolio_summary():
+    _ensure_trade_tables()
     cached = _report_cache_get("portfolio_summary")
     if cached is not None:
         return cached
@@ -445,6 +468,7 @@ def get_trade_summary():
 
 
 def _build_trade_report(period: str, lookback: int):
+    _ensure_trade_tables()
     db = SessionLocal()
     try:
         cutoff = ist_now() - (timedelta(days=lookback) if period == "daily" else timedelta(weeks=lookback))

@@ -549,6 +549,11 @@ def get_engine(database_url=None):
     url = database_url or os.environ.get("TRAINING_DATABASE_URL") or os.environ.get("DATABASE_URL", "sqlite:///./training.db")
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
+    # psycopg2 does not always accept channel_binding=require (Neon SQLAlchemy snippet)
+    if "channel_binding=" in url:
+        import re as _re
+        url = _re.sub(r"([&?])channel_binding=[^&]*", r"\1", url)
+        url = url.replace("?&", "?").rstrip("?&")
     # Prefer transaction pooler port 6543 (Supabase free 60-conn direct limit)
     if os.environ.get("FORCE_DB_POOLER", "1").lower() in ("1", "true", "yes") and url.startswith("postgresql"):
         if ":5432/" in url:
@@ -584,6 +589,21 @@ def get_engine(database_url=None):
 
 def create_tables(engine):
     Base.metadata.create_all(engine)
+
+
+def init_db(engine=None):
+    """Create all Stockky training/trades tables if missing (safe to call repeatedly)."""
+    import logging
+    _log = logging.getLogger("training-db")
+    eng = engine or get_engine()
+    try:
+        Base.metadata.create_all(eng)
+        ensure_schema(eng)
+        _log.info("init_db: schema ready")
+        return True
+    except Exception as e:
+        _log.error("init_db failed: %s", e)
+        return False
 
 def get_session(engine):
     Session = sessionmaker(bind=engine)

@@ -226,10 +226,15 @@ _SCAN_CANCEL_FLAGS: set = set()  # process-local instant cancel
 # no WS quote upstream fan-out. Only /health and light keepalive remain.
 _ACTIVITY_PAUSED = False
 _QUOTE_LOOP_ENABLED = True
+_SCAN_IN_PROGRESS = False  # True while market scan runs — pauses WS quote upstream
 
 
 def activity_paused() -> bool:
     return bool(_ACTIVITY_PAUSED)
+
+
+def scan_in_progress() -> bool:
+    return bool(_SCAN_IN_PROGRESS)
 
 
 def set_activity_paused(paused: bool) -> None:
@@ -1945,20 +1950,67 @@ async def _analyze_one_symbol_ultra(
     async with sem:
         for attempt in range(MAX_RETRIES + 1):
             try:
+                base_sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+                # ── Neon Data Feed (stockky_kv) — static fields without upstream ──
+                feed_row = None
+                try:
+                    feed_row = _feed_store().get_symbol(base_sym)
+                except Exception:
+                    feed_row = None
+
                 # ── Decide-level cache (same symbol within TTL → instant) ──
-                cache_key = f"{DECIDE_CACHE_PREFIX}{symbol.upper()}"
+                cache_key = f"{DECIDE_CACHE_PREFIX}{base_sym}"
                 cached_decide = _redis_get(cache_key)
                 if cached_decide and isinstance(cached_decide, dict) and cached_decide.get("decision"):
                     normalized = _normalize_decision_response(cached_decide, symbol)
+                    normalized["from_decide_cache"] = True
                 else:
-                    decision_resp = await _cb_get(client, "decision", f"{DECISION_URL}/decide/{symbol}", timeout=90)
+                    # Prefer shorter timeout on free-tier; feed covers fundamentals
+                    decision_resp = await _cb_get(
+                        client, "decision", f"{DECISION_URL}/decide/{symbol}", timeout=45
+                    )
                     decision_resp.raise_for_status()
                     raw = decision_resp.json()
                     normalized = _normalize_decision_response(raw, symbol)
                     _redis_set(cache_key, normalized, ttl=_decide_cache_ttl())
 
+                # Overlay durable Neon feed onto decision (do not call fund/news upstream if present)
+                if isinstance(feed_row, dict) and feed_row:
+                    normalized.setdefault("from_data_feed", True)
+                    normalized["data_feed_updated_at"] = feed_row.get("updated_at")
+                    if normalized.get("fundamental_metrics") is None and feed_row.get("metrics"):
+                        normalized["fundamental_metrics"] = feed_row.get("metrics")
+                    if normalized.get("fundamental_score") is None and feed_row.get("fundamental_score") is not None:
+                        normalized["fundamental_score"] = feed_row.get("fundamental_score")
+                    for k in ("sector", "industry", "valuation", "quality_score", "multi_quarter_score"):
+                        if normalized.get(k) is None and feed_row.get(k) is not None:
+                            normalized[k] = feed_row.get(k)
+                    if not normalized.get("event_data") and (
+                        feed_row.get("events") or feed_row.get("event_risk") is not None
+                    ):
+                        normalized["event_data"] = feed_row.get("events") or {
+                            "event_risk": feed_row.get("event_risk")
+                        }
+                    if normalized.get("event_risk") is None and feed_row.get("event_risk") is not None:
+                        normalized["event_risk"] = feed_row.get("event_risk")
+                    if normalized.get("news_score") is None and feed_row.get("news_score") is not None:
+                        normalized["news_score"] = feed_row.get("news_score")
+                    # Price from feed if upstream quote is rate-limited
+                    if normalized.get("close") is None:
+                        for pk in ("close", "price", "last", "ltp"):
+                            if feed_row.get(pk) is not None:
+                                try:
+                                    normalized["close"] = float(feed_row[pk])
+                                    break
+                                except (TypeError, ValueError):
+                                    pass
+
                 if normalized.get("close") is None:
-                    price = _fetch_price_from_quote(symbol)
+                    # Avoid hammering market-data during Yahoo 429 storms — soft try only
+                    try:
+                        price = _fetch_price_from_quote(symbol)
+                    except Exception:
+                        price = None
                     if price is not None:
                         normalized["close"] = price
                         if normalized.get("support") is None:
@@ -2107,7 +2159,15 @@ async def _analyze_one_symbol_ultra(
         return {"symbol": symbol, "decision": "ERROR", "error": "Max retries exceeded"}
 
 async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = False):
+    global _SCAN_IN_PROGRESS
     start_time = time.time()
+    _SCAN_IN_PROGRESS = True
+    try:
+        set_activity_paused(False)
+        _SCAN_CANCEL_FLAGS.discard("__ALL__")
+    except Exception:
+        pass
+
     # Prioritize watchlist / searched so useful picks surface early without shrinking universe
     universe = _prioritize_universe(universe)
     total = len(universe)
@@ -2115,35 +2175,37 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
     results = []
     errors = []
 
-    _redis_set(SCAN_TASK_PREFIX + task_id, {
-        "status": "running",
-        "total": total,
-        "processed": 0,
-        "elapsed": 0,
-        "result": None,
-        "error": None,
-        "lite": lite,
-    }, ttl=3600)
+    def _status(processed_n=0, message=None, **extra):
+        payload = {
+            "status": "running",
+            "total": total,
+            "processed": processed_n,
+            "elapsed": round(time.time() - start_time, 1),
+            "result": None,
+            "error": None,
+            "lite": lite,
+            "message": message,
+        }
+        payload.update({k: v for k, v in extra.items() if v is not None})
+        _redis_set(SCAN_TASK_PREFIX + task_id, payload, ttl=3600)
+
+    _status(0, message="Starting — Neon data-feed preferred; upstream only for live fields")
+    logger.info("Scan %s started universe=%s lite=%s", task_id, total, lite)
 
     sem = asyncio.Semaphore(MAX_PARALLEL_WORKERS)
     cancel_key = SCAN_TASK_PREFIX + task_id + ":cancel"
     client = _get_http_client()  # shared keepalive pool
 
-    # ── Pre-scan: wake free-tier dynos (does not change universe size) ──
+    # ── Pre-scan: short wake (never block minutes at 0/300) ──
     if WAKE_BEFORE_SCAN:
         try:
-            wake_results = await _wake_required_services(client)
+            _status(0, message="Waking decision / market-data…")
+            wake_results = await asyncio.wait_for(_wake_required_services(client), timeout=18.0)
             logger.info("Pre-scan wake: %s", {k: v.get("ok") for k, v in wake_results.items()})
-            try:
-                await _warm_upstream_services(client)
-            except Exception:
-                pass
-            wait = max(WAKE_WAIT_SECONDS, 10.0)
-            if not (wake_results.get("market-data") or {}).get("ok"):
-                wait = max(wait, 18.0)
-            await asyncio.sleep(min(wait, 25.0))
+            wait = min(float(WAKE_WAIT_SECONDS or 6), 10.0)
+            await asyncio.sleep(wait)
         except Exception as e:
-            logger.warning("Pre-scan wake failed (continuing): %s", e)
+            logger.warning("Pre-scan wake failed/timeout (continuing Neon-first): %s", e)
 
     # Data Feed coverage stats (informational only)
     try:
@@ -2186,12 +2248,26 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
     # ── Full-universe batch processor (list size preserved) ──
     batch_size = default_batch_size(MAX_PARALLEL_WORKERS, minimum=12)
     if activity_paused():
+        # Should be rare — we clear pause at start; still never leave UI at 0/N forever
         logger.warning("Scan aborted — activity paused (Power Off)")
+        _redis_set(SCAN_TASK_PREFIX + task_id, {
+            "status": "cancelled",
+            "total": total,
+            "processed": 0,
+            "elapsed": round(time.time() - start_time, 1),
+            "result": None,
+            "error": "activity_paused",
+            "message": "Scan aborted — system was Powered Off. Click Power Off→Resume or Run Scan again.",
+            "cancelled": True,
+            "partial": True,
+        }, ttl=3600)
+        _SCAN_IN_PROGRESS = False
         return
     logger.info(
-        "Scan full universe=%s batch_size=%s workers=%s",
+        "Scan full universe=%s batch_size=%s workers=%s (Neon data-feed preferred)",
         total, batch_size, MAX_PARALLEL_WORKERS,
     )
+    _status(0, message=f"Processing {total} symbols — Neon feed first, upstream for live fields only")
 
     async def _worker(sym: str):
         return await _analyze_one_symbol_ultra(sym, client, sem, lite=lite)
@@ -2395,6 +2471,8 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
         "error": None,
     }
     _redis_set(SCAN_TASK_PREFIX + task_id, _done_payload, ttl=3600)
+    _SCAN_IN_PROGRESS = False
+    logger.info("Scan %s finished processed=%s/%s", task_id, processed, total)
     try:
         await _ws_push_scan(task_id, _done_payload)
     except Exception:
@@ -5108,7 +5186,7 @@ async def _quote_broadcast_loop():
     """
     while True:
         try:
-            if activity_paused() or not _QUOTE_LOOP_ENABLED:
+            if activity_paused() or scan_in_progress() or not _QUOTE_LOOP_ENABLED:
                 await asyncio.sleep(30)
                 continue
             # No connected clients → do not hit market-data at all

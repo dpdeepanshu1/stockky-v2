@@ -591,6 +591,7 @@ export async function wakeService(url: string): Promise<void> {
 export const api = {
   ping: () => request<{ status: string; service: string }>("/health", undefined, 3, 45000),
 
+  wakeAll: () => request<any>("/wake-all", undefined, 1, 45000),
   systemHealth: () => request<SystemHealth>("/system/health", undefined, 3, 90000),
 
   getStock: (symbol: string, alreadyOwned = false) =>
@@ -609,6 +610,7 @@ export const api = {
   scanStatus: (taskId: string) =>
     request<ScanStatus>(`/scan/status/${taskId}`, undefined, 2, 10000),
 
+  getLastScan: () => request<any>("/scan/last", undefined, 2, 15000),
   scanCancel: (taskId: string) =>
     request<{ status: string; processed_so_far?: number; total?: number }>(
       `/scan/cancel/${taskId}`, { method: "POST" }, 1, 10000

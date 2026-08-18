@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { api, getApiUrl, setApiUrl, Decision, ScanResult, wakeService, startSessionKeepAlive, stopSessionKeepAlive } from "./api";
 import Pipeline from "./components/Pipeline";
 import DecisionCard from "./components/DecisionCard";
+import SignalStream, { BreadthStrip } from "./components/SignalStream";
 import ScanPanel, { MultiHorizonScanLists } from "./components/ScanPanel";
 import WatchlistManager from "./components/WatchlistManager";
 import NotificationsPanel from "./components/NotificationsPanel";
@@ -54,6 +55,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("dashboard");
   const [query, setQuery] = useState("");
   const [view, setView] = useState<ViewState>({ mode: "idle" });
+  const [signalFilter, setSignalFilter] = useState<"ALL" | "BUY" | "PREPARE" | "HOLD">("ALL");
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [showWatchlist, setShowWatchlist] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -203,19 +205,29 @@ export default function App() {
 
   useEffect(() => {
     checkBackend();
-    try {
-      const raw = localStorage.getItem("stockky_last_analysis");
-      if (raw && view.mode === "idle") {
-        // restore last analysis on refresh without wiping scan resume logic
-        const parsed = JSON.parse(raw);
-        if (parsed && parsed.symbol) {
-          // only restore if no scan task in flight
-          if (!sessionStorage.getItem("stockky_scan_task_id")) {
-            setView({ mode: "stock", data: parsed });
+    // Refresh should restore last MARKET SCAN, not last single-stock analysis.
+    (async () => {
+      if (sessionStorage.getItem("stockky_scan_task_id")) return;
+      try {
+        const raw = localStorage.getItem("stockky_last_scan");
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && (parsed.all_results || parsed.recommendations || parsed.scanned != null)) {
+            setView({ mode: "scan", data: parsed });
+            return;
           }
         }
-      }
-    } catch {}
+      } catch {}
+      try {
+        const last = await api.getLastScan();
+        if (last?.ok && last.result) {
+          try {
+            localStorage.setItem("stockky_last_scan", JSON.stringify(last.result));
+          } catch {}
+          setView({ mode: "scan", data: last.result });
+        }
+      } catch {}
+    })();
   }, []);
 
   // Resumes a scan across a page refresh — without this, reloading mid-scan
@@ -230,6 +242,9 @@ export default function App() {
         const status = await api.scanStatus(savedTaskId);
         if (status.status === "done") {
           sessionStorage.removeItem("stockky_scan_task_id");
+          try {
+            if (status.result) localStorage.setItem("stockky_last_scan", JSON.stringify(status.result));
+          } catch {}
           setView({ mode: "scan", data: status.result! });
         } else if (status.status === "error") {
           sessionStorage.removeItem("stockky_scan_task_id");
@@ -419,21 +434,82 @@ export default function App() {
   async function handleStopScan() {
     if (!scanTaskId && !cancelRequested) return;
     const taskId = scanTaskId;
-    // ── Immediate UI clear (no waiting on backend) ──
-    scanCancelledRef.current = true;
     setCancelRequested(true);
     setStoppingScan(true);
+    setStatusMessage("⏹ Stopping — keeping symbols scored so far…");
+    setView({
+      mode: "loading",
+      label: "Stopping scan — finalizing partial results…",
+      progress: view.mode === "loading" ? view.progress : { processed: 0, total: 0, elapsed: 0 },
+    });
+
+    // Request cancel; keep task id so we can poll for partial result
+    if (taskId) {
+      try {
+        await api.scanCancel(taskId);
+      } catch (e) {
+        console.warn("Cancel request failed", e);
+      }
+      // Poll briefly for done + result (backend builds partial rankings)
+      for (let i = 0; i < 45; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        try {
+          const status = await api.scanStatus(taskId);
+          if (status.status === "done" && status.result) {
+            try {
+              localStorage.setItem("stockky_last_scan", JSON.stringify(status.result));
+            } catch {}
+            clearScanActivity();
+            setScanTaskId(null);
+            setView({ mode: "scan", data: status.result });
+            setStatusMessage(
+              status.cancelled || status.partial
+                ? "⏹ Scan stopped — partial results shown"
+                : "Scan complete"
+            );
+            setStoppingScan(false);
+            setCancelRequested(false);
+            setTimeout(() => setStatusMessage(null), 4000);
+            return;
+          }
+          if (status.status === "error") break;
+          if (status.status === "running") {
+            setView({
+              mode: "loading",
+              label: `Stopping… (${status.processed}/${status.total})`,
+              progress: {
+                processed: status.processed,
+                total: status.total,
+                elapsed: status.elapsed,
+              },
+            });
+          }
+        } catch {
+          /* keep trying */
+        }
+      }
+    }
+
+    // Fallback: try last cached scan from backend
+    try {
+      const last = await (api as any).getLastScan();
+      if (last?.ok && last.result) {
+        localStorage.setItem("stockky_last_scan", JSON.stringify(last.result));
+        setView({ mode: "scan", data: last.result });
+        setStatusMessage("⏹ Stopped — showing last available scan results");
+      } else {
+        setView({ mode: "idle" });
+        setStatusMessage("⏹ Scan stopped (no partial results yet)");
+      }
+    } catch {
+      setView({ mode: "idle" });
+      setStatusMessage("⏹ Scan stopped");
+    }
     clearScanActivity();
     setScanTaskId(null);
-    setView({ mode: "idle" });
-    setStatusMessage("⏹ Scan stopped — UI cleared. Backend cancel sent in background.");
-    setTimeout(() => setStatusMessage(null), 4000);
     setStoppingScan(false);
     setCancelRequested(false);
-    // Fire-and-forget backend cancel so free-tier work winds down
-    if (taskId) {
-      api.scanCancel(taskId).catch((e) => console.warn("Background cancel failed", e));
-    }
+    setTimeout(() => setStatusMessage(null), 4000);
   }
 
   const handleRetry = async () => {
@@ -986,11 +1062,14 @@ export default function App() {
 
             <section>
               {view.mode === "idle" && (
-                <div className="border border-dashed border-slate rounded-xl p-10 sm:p-16 text-center">
-                  <p className="text-mist/40 font-mono text-xs">
-                    Search a symbol or run the scanner to begin.
-                  </p>
-                </div>
+                <>
+                  <BreadthStrip mood={null} />
+                  <div className="border border-dashed border-slate rounded-xl p-10 sm:p-16 text-center mb-4">
+                    <p className="text-mist/40 font-mono text-xs">
+                      Search a symbol or run Market Scan. Last scan results restore after refresh.
+                    </p>
+                  </div>
+                </>
               )}
 
               {view.mode === "loading" && (
@@ -1107,6 +1186,23 @@ export default function App() {
 
               {view.mode === "scan" && (
                 <>
+                  <BreadthStrip
+                    mood={(view.data as any)?.market_mood}
+                    advancing={(view.data as any)?.market_stats?.buy_signals}
+                    declining={(view.data as any)?.market_stats?.sell_signals}
+                  />
+                  <SignalStream
+                    rows={
+                      ((view.data as any)?.recommendations ||
+                        (view.data as any)?.all_results ||
+                        []) as any[]
+                    }
+                    partial={Boolean((view.data as any)?.partial || (view.data as any)?.stopped_early)}
+                    filter={signalFilter}
+                    onFilter={setSignalFilter}
+                    onSelect={(sym) => handleSearch(sym)}
+                    title="Signal Stream & Audit"
+                  />
                   <MultiHorizonScanLists data={(view as any).data} />
                   <ScanPanel
                     result={view.data}

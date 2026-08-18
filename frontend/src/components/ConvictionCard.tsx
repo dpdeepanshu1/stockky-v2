@@ -45,7 +45,13 @@ export type ConvictionData = {
     missing?: string[];
     note?: string;
     flags?: string[];
+    live_count?: number;
+    total_pillars?: number;
+    provisional?: boolean;
+    live_win_rate_n?: number;
   } | string | null;
+  provisional?: boolean;
+  block_buy_now?: boolean;
   data_insufficient?: boolean;
   news_data?: { summary?: string; headline_count?: number } | null;
   event_data?: { summary?: string; next_earnings_date?: string } | null;
@@ -211,6 +217,15 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
               </span>
             ))}
           </div>
+          {typeof data.data_quality === "object" && data.data_quality?.pillars && (
+            <div className="pillar-row">
+              {Object.entries(data.data_quality.pillars).map(([k, v]) => (
+                <span key={k} className={`pillar-chip ${v ? "pass" : "fail"}`}>
+                  {k.toUpperCase().slice(0, 4)} {v ? "PASS" : "MISS"}
+                </span>
+              ))}
+            </div>
+          )}
           {blurb && <p className="cc-blurb">{blurb}</p>}
           {reasons.length > 0 && (
             <ul className="cc-reasons">

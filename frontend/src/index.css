@@ -31,15 +31,21 @@
 }
 
 html.light {
-  --bg: #f4f6f8;
+  --bg: #eef2f6;
   --bg-elevated: #ffffff;
   --panel: #ffffff;
-  --panel-2: #f0f3f6;
-  --border: #d8dee6;
-  --border-strong: #b8c2ce;
-  --fg: #0f1419;
-  --muted: #5c6b7a;
-  --muted-2: #8b9aab;
+  --panel-2: #f4f7fb;
+  --border: #cfd8e3;
+  --border-strong: #9aa8b8;
+  --fg: #0b1220;
+  --muted: #4a5a6d;
+  --muted-2: #6b7c8f;
+  --cyan: #2563eb;
+  --amber: #d97706;
+  --buy: #059669;
+  --sell: #dc2626;
+  --hold: #d97706;
+  color-scheme: light;
 }
 
 html, body, #root {
@@ -640,21 +646,153 @@ html, body, #root {
   color: var(--amber);
 }
 
-/* ── Light mode bridges for Tailwind utility classes ────────── */
-html.light .bg-ink { background-color: var(--bg) !important; }
+
+/* ═══════════════════════════════════════════════════════════════
+   LIGHT MODE — full terminal readability (not washed-out grey)
+   ═══════════════════════════════════════════════════════════════ */
+html.light {
+  --bg: #eef2f6;
+  --bg-elevated: #ffffff;
+  --panel: #ffffff;
+  --panel-2: #f4f7fb;
+  --border: #cfd8e3;
+  --border-strong: #9aa8b8;
+  --fg: #0b1220;
+  --muted: #4a5a6d;
+  --muted-2: #6b7c8f;
+  --cyan: #2563eb;
+  --amber: #d97706;
+  --buy: #059669;
+  --sell: #dc2626;
+  --hold: #d97706;
+  color-scheme: light;
+}
+
+html.light body,
+html.light #root {
+  background: var(--bg) !important;
+  color: var(--fg) !important;
+}
+
+html.light .terminal-shell,
+html.light .terminal-premium {
+  background: var(--bg) !important;
+  color: var(--fg) !important;
+}
+
+html.light .bg-ink,
+html.light .bg-ink\/60,
+html.light .bg-ink\/80 { background-color: var(--bg) !important; }
 html.light .bg-graphite { background-color: var(--panel) !important; }
 html.light .text-paper { color: var(--fg) !important; }
-html.light .text-mist { color: var(--muted) !important; }
+html.light .text-mist,
+html.light .text-mist\/60,
+html.light .text-mist\/70,
+html.light .text-mist\/80 { color: var(--muted) !important; }
 html.light .border-slate,
+html.light .border-slate\/40,
 html.light .border-slate\/60 { border-color: var(--border) !important; }
+
 html.light .terminal-sidebar {
-  background: #f8fafc;
-  border-right-color: var(--border);
+  background: #ffffff !important;
+  border-right: 1px solid var(--border) !important;
+  box-shadow: 4px 0 24px rgba(15, 23, 42, 0.04);
 }
+html.light .sidebar-brand { color: var(--fg); }
+html.light .sidebar-link { color: var(--muted); }
+html.light .sidebar-link:hover { background: var(--panel-2); color: var(--fg); }
 html.light .sidebar-link.active {
-  color: #b45309;
-  background: linear-gradient(90deg, rgba(245, 166, 35, 0.15), transparent);
+  color: #b45309 !important;
+  background: linear-gradient(90deg, rgba(217, 119, 6, 0.14), transparent) !important;
+  border-left-color: var(--amber);
 }
+
+html.light .terminal-panel,
+html.light .dash-hero,
+html.light .card-terminal {
+  background: var(--panel) !important;
+  border-color: var(--border) !important;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.04);
+}
+
+html.light .terminal-bottom-nav {
+  background: rgba(255, 255, 255, 0.94) !important;
+  border-top-color: var(--border) !important;
+}
+html.light .terminal-bottom-nav button.active { color: var(--amber) !important; }
+
+html.light input,
+html.light textarea,
+html.light select {
+  background: #ffffff !important;
+  border-color: var(--border) !important;
+  color: var(--fg) !important;
+}
+html.light .btn-terminal {
+  background: var(--panel-2) !important;
+  border-color: var(--border-strong) !important;
+  color: var(--fg) !important;
+}
+html.light .btn-terminal:hover {
+  border-color: var(--amber) !important;
+  color: #92400e !important;
+}
+
+html.light .num-up, html.light .text-signal-buy { color: var(--buy) !important; }
+html.light .num-down, html.light .text-signal-sell { color: var(--sell) !important; }
+html.light .num-amber, html.light .text-signal-prepare { color: var(--amber) !important; }
+
+html.light .fixed.top-4.right-4 {
+  background: #ffffff !important;
+  border-color: rgba(217, 119, 6, 0.4) !important;
+  color: var(--fg) !important;
+  box-shadow: 0 8px 30px rgba(15, 23, 42, 0.12);
+}
+
+html.light .mobile-drawer,
+html.light .mobile-drawer-panel {
+  background: #ffffff !important;
+  color: var(--fg) !important;
+  border-color: var(--border) !important;
+}
+html.light .eval-bar-track, html.light .h-1\.5 {
+  background: #e2e8f0 !important;
+}
+
+html.light .signal-pill-buy {
+  background: rgba(5, 150, 105, 0.12) !important;
+  color: #047857 !important;
+  border-color: rgba(5, 150, 105, 0.35) !important;
+}
+html.light .signal-pill-prepare {
+  background: rgba(217, 119, 6, 0.12) !important;
+  color: #b45309 !important;
+}
+html.light .signal-pill-avoid {
+  background: rgba(220, 38, 38, 0.1) !important;
+  color: #b91c1c !important;
+}
+
+html.light .topo-card,
+html.light .signal-stream-card,
+html.light .alpha-row,
+html.light .breadth-panel {
+  background: var(--panel) !important;
+  border-color: var(--border) !important;
+}
+
+html.light .heat-scale-bar {
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+/* Scrollbars light */
+html.light * {
+  scrollbar-color: #c5d0dc transparent;
+}
+html.light *::-webkit-scrollbar-thumb {
+  background: #c5d0dc;
+}
+
 
 /* ── Inputs / forms density ─────────────────────────────────── */
 input[type="text"],
@@ -1372,4 +1510,366 @@ html.light .mobile-drawer-backdrop {
 }
 .scanner-board button {
   pointer-events: auto;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   SYSTEM TOPOLOGY · SIGNAL STREAM · BREADTH (screenshot-inspired)
+   ═══════════════════════════════════════════════════════════════ */
+.topo-shell {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 1rem 1.1rem 1.15rem;
+}
+.topo-title {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.35rem;
+}
+.topo-sub {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin: 0 0 0.85rem;
+  line-height: 1.45;
+}
+.topo-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid rgba(14, 203, 129, 0.35);
+  background: rgba(14, 203, 129, 0.08);
+  color: var(--buy);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  margin-bottom: 0.85rem;
+}
+.topo-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.55rem;
+  margin-bottom: 0.85rem;
+}
+@media (min-width: 640px) {
+  .topo-grid { grid-template-columns: repeat(4, 1fr); }
+}
+.topo-metric {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.65rem 0.7rem;
+  background: var(--panel-2);
+}
+.topo-metric label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  margin-bottom: 0.25rem;
+}
+.topo-metric strong {
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  color: var(--cyan);
+  font-weight: 600;
+}
+.topo-service {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.75rem 0.85rem;
+  margin-bottom: 0.55rem;
+  background: var(--panel-2);
+}
+.topo-service-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.45rem;
+}
+.topo-service-name {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--fg);
+  font-weight: 600;
+}
+.topo-online {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid rgba(14, 203, 129, 0.4);
+  color: var(--buy);
+  background: rgba(14, 203, 129, 0.08);
+}
+.topo-offline {
+  border-color: rgba(246, 70, 93, 0.4);
+  color: var(--sell);
+  background: rgba(246, 70, 93, 0.08);
+}
+.topo-service-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+  margin-bottom: 0.35rem;
+}
+.topo-service-meta span {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--muted);
+}
+.topo-service-meta b {
+  display: block;
+  color: var(--cyan);
+  font-size: 0.85rem;
+  margin-top: 0.1rem;
+}
+.topo-service p {
+  margin: 0;
+  font-size: 0.7rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+/* Signal stream / conviction list */
+.signal-stream-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.9rem 1rem;
+  background: var(--panel);
+  margin-bottom: 0.65rem;
+}
+.signal-stream-card:hover {
+  border-color: var(--border-strong);
+}
+.signal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-bottom: 0.55rem;
+}
+.signal-sym {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 1rem;
+  color: var(--fg);
+}
+.signal-name {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.signal-pill-buy {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.04em;
+  padding: 0.25rem 0.55rem;
+  border-radius: 6px;
+  border: 1px solid rgba(14, 203, 129, 0.45);
+  color: var(--buy);
+  background: rgba(14, 203, 129, 0.1);
+  white-space: nowrap;
+}
+.signal-pill-prepare {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  padding: 0.25rem 0.55rem;
+  border-radius: 6px;
+  border: 1px solid rgba(245, 166, 35, 0.45);
+  color: var(--hold);
+  background: rgba(245, 166, 35, 0.1);
+}
+.signal-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+.signal-metrics div {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.4rem 0.5rem;
+  background: var(--panel-2);
+}
+.signal-metrics label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+.signal-metrics b {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--cyan);
+}
+.pillar-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+.pillar-chip {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.pillar-chip.pass {
+  color: var(--buy);
+  border-color: rgba(14, 203, 129, 0.4);
+  background: rgba(14, 203, 129, 0.08);
+}
+.pillar-chip.fail {
+  color: var(--sell);
+  border-color: rgba(246, 70, 93, 0.35);
+}
+
+/* Market breadth */
+.breadth-panel {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+  background: var(--panel);
+  margin-bottom: 0.75rem;
+}
+.breadth-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--buy) 0%, var(--buy) var(--adv, 50%), var(--sell) var(--adv, 50%), var(--sell) 100%);
+  margin: 0.45rem 0 0.35rem;
+  overflow: hidden;
+}
+.breadth-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--buy);
+  border-radius: 999px;
+}
+
+/* Alpha / conviction bars */
+.alpha-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  margin-bottom: 0.45rem;
+}
+.alpha-row .sym {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  min-width: 5.5rem;
+  color: var(--fg);
+}
+.alpha-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.alpha-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--buy), #34d399);
+}
+.alpha-fill.prepare {
+  background: linear-gradient(90deg, var(--hold), #fbbf24);
+}
+.alpha-score {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  min-width: 3.2rem;
+  text-align: right;
+}
+
+/* Heat scale legend */
+.heat-scale {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+  background: var(--panel);
+}
+.heat-scale-bar {
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #f6465d 0%, #8b9aab 50%, #0ecb81 100%);
+  margin: 0.5rem 0 0.65rem;
+}
+.heat-cells {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+}
+.heat-cell {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  background: var(--panel-2);
+  color: var(--fg);
+}
+.heat-cell b {
+  float: right;
+  color: var(--muted);
+}
+
+/* News list terminal */
+.news-term-item {
+  border-left: 2px solid var(--border-strong);
+  padding: 0.45rem 0 0.45rem 0.65rem;
+  margin-bottom: 0.35rem;
+}
+.news-term-item .title {
+  font-size: 0.78rem;
+  color: var(--fg);
+  line-height: 1.35;
+}
+.news-term-item .meta {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--muted-2);
+  margin-top: 0.15rem;
+}
+
+/* Filter chips (scanner) */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.75rem;
+}
+.chip {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.04em;
+  padding: 0.35rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+}
+.chip.active {
+  border-color: rgba(59, 130, 246, 0.55);
+  color: var(--cyan);
+  background: rgba(59, 130, 246, 0.1);
 }

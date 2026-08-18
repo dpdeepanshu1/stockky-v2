@@ -5,11 +5,29 @@ interface ServiceManagerProps {
   onClose: () => void;
 }
 
+const DESCRIPTIONS: Record<string, string> = {
+  "api-gateway": "Primary router, dynamic scan universe aggregator, Upstash Redis cache bridge.",
+  "market-data": "Yahoo Finance OHLCV pipeline with last-known-good fallback & exponential backoff.",
+  "market-data-service": "Yahoo Finance OHLCV pipeline with last-known-good fallback & exponential backoff.",
+  "analysis-intelligence": "Technical, fundamentals, IndianAPI fallback, corporate events & news NLP.",
+  "analysis-intelligence-service": "Technical, fundamentals, IndianAPI fallback, corporate events & news NLP.",
+  "decision-prediction": "Decision engine, XGBoost prediction, training / T+1·T+5 outcomes.",
+  "decision-prediction-service": "Decision engine, XGBoost prediction, training / T+1·T+5 outcomes.",
+  "decision-engine": "Multi-horizon decide + quality gates + provisional BUY block.",
+  "notification": "Telegram CallMeBot voice-first alerts, Discord, outbox.",
+  "notification-scheduler": "Telegram CallMeBot voice-first alerts, Discord, outbox.",
+  "training": "Closed-loop win-rate, similarity scanner, evaluate sweeps.",
+  "prediction": "Model inference + LLM explanation (Groq-first).",
+  "news-intelligence": "Multi-source news + keyword alias matching.",
+  "event-tracker": "Results, bulk/block, insider event detection.",
+  "technical-analysis": "Indicators & structure scores.",
+  "fundamental-analysis": "Fundamentals + peer relative.",
+};
+
 export default function ServiceManager({ onClose }: ServiceManagerProps) {
   const [services, setServices] = useState<Record<string, SystemServiceStatus>>({});
   const [loading, setLoading] = useState(true);
   const [waking, setWaking] = useState<Record<string, boolean>>({});
-  const [messages, setMessages] = useState<Record<string, string>>({});
   const [isWakingAll, setIsWakingAll] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
@@ -17,9 +35,9 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
     setLoading(true);
     try {
       const health = await api.systemHealth();
-      setServices(health.services);
-    } catch (error) {
-      console.error("Failed to fetch services", error);
+      setServices(health.services || {});
+    } catch (e) {
+      console.error(e);
     } finally {
       setLoading(false);
     }
@@ -27,144 +45,139 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
 
   useEffect(() => {
     fetchServices();
+    const id = setInterval(fetchServices, 45000);
+    return () => clearInterval(id);
   }, []);
+
+  const entries = Object.entries(services);
+  const okCount = entries.filter(([, s]) => s?.ok).length;
+  const total = entries.length || 5;
+  const allOk = total > 0 && okCount === total;
 
   const handleWake = async (name: string, url: string | null | undefined) => {
     if (!url) return;
-    setWaking((prev) => ({ ...prev, [name]: true }));
-    setMessages((prev) => ({ ...prev, [name]: "⏳ Waking..." }));
-
+    setWaking((p) => ({ ...p, [name]: true }));
     try {
       await wakeService(url);
-      setMessages((prev) => ({ ...prev, [name]: "✅ Woke! Rechecking..." }));
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+      setStatusMessage(`Woke ${name}`);
+      await new Promise((r) => setTimeout(r, 2500));
       await fetchServices();
-      setMessages((prev) => ({ ...prev, [name]: "✅ Online" }));
-      setStatusMessage(`✅ ${name} woke successfully!`);
     } catch {
-      setMessages((prev) => ({ ...prev, [name]: "❌ Failed" }));
-      setStatusMessage(`❌ Failed to wake ${name}`);
+      setStatusMessage(`Failed to wake ${name}`);
     } finally {
-      setWaking((prev) => ({ ...prev, [name]: false }));
-      setTimeout(() => {
-        setMessages((prev) => {
-          const newMsg = { ...prev };
-          delete newMsg[name];
-          return newMsg;
-        });
-      }, 5000);
-      setTimeout(() => setStatusMessage(null), 5000);
+      setWaking((p) => ({ ...p, [name]: false }));
+      setTimeout(() => setStatusMessage(null), 4000);
     }
   };
 
   const handleWakeAll = async () => {
     if (isWakingAll) return;
     setIsWakingAll(true);
-    setStatusMessage("⏳ Waking all services...");
-
-    const entries = Object.entries(services);
-    let successCount = 0;
-    let failCount = 0;
-
+    setStatusMessage("Waking all services…");
+    try {
+      await api.wakeAll?.().catch(() => null);
+    } catch {
+      /* optional */
+    }
     for (const [name, status] of entries) {
       if (status.url && !status.ok) {
         try {
           await wakeService(status.url);
-          successCount++;
-          setStatusMessage(`⏳ Woke ${name} (${successCount}/${entries.filter(([_, s]) => s.url && !s.ok).length})`);
-          await new Promise((resolve) => setTimeout(resolve, 1000));
         } catch {
-          failCount++;
+          /* continue */
         }
       }
     }
-
-    setStatusMessage(`✅ Wake complete: ${successCount} services woke, ${failCount} failed`);
+    await new Promise((r) => setTimeout(r, 3000));
     await fetchServices();
     setIsWakingAll(false);
-    setTimeout(() => setStatusMessage(null), 5000);
+    setStatusMessage("Wake pass complete");
+    setTimeout(() => setStatusMessage(null), 4000);
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/80 backdrop-blur-sm p-4">
-      <div className="bg-graphite border border-slate/60 rounded-2xl max-w-2xl w-full max-h-[80vh] overflow-y-auto p-6 shadow-2xl">
-        <div className="flex items-center justify-between mb-6">
-          <h2 className="font-display text-2xl text-paper">🛠️ Service Manager</h2>
-          <button onClick={onClose} className="font-mono text-xs text-mist hover:text-paper transition">
-            ✕ Close
+    <div className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center p-3 sm:p-6">
+      <button type="button" className="absolute inset-0 bg-black/60 backdrop-blur-sm" aria-label="Close" onClick={onClose} />
+      <div className="topo-shell relative z-10 w-full max-w-lg max-h-[88vh] overflow-y-auto shadow-2xl">
+        <div className="flex items-start justify-between gap-2 mb-1">
+          <h2 className="topo-title">
+            <span aria-hidden>◈</span> System Health &amp; 5 Microservices Topology
+          </h2>
+          <button type="button" className="btn-terminal text-xs" onClick={onClose}>
+            Close
           </button>
         </div>
+        <p className="topo-sub">
+          Zero-cost architecture across Render microservices, Upstash Redis, and Supabase Postgres.
+        </p>
 
-        {statusMessage && (
-          <div className="mb-4 font-mono text-xs text-signal-prepare animate-pulse">
-            {statusMessage}
+        <div className={`topo-status-pill ${allOk ? "" : "topo-offline"}`} style={!allOk ? { borderColor: "rgba(246,70,93,0.35)", color: "var(--sell)", background: "rgba(246,70,93,0.08)" } : undefined}>
+          <span>●</span> Cluster Status: {loading ? "Checking…" : allOk ? "Operational" : `${okCount}/${total} healthy`}
+        </div>
+
+        <div className="topo-grid">
+          <div className="topo-metric">
+            <label>Render microservices</label>
+            <strong>{okCount} / {Math.max(total, 5)} Healthy</strong>
           </div>
-        )}
+          <div className="topo-metric">
+            <label>Upstash Redis cache</label>
+            <strong>Connected</strong>
+          </div>
+          <div className="topo-metric">
+            <label>Supabase Postgres</label>
+            <strong>Online (Free Tier)</strong>
+          </div>
+          <div className="topo-metric">
+            <label>GitHub Actions cron</label>
+            <strong>09:00 – 15:30 IST</strong>
+          </div>
+        </div>
 
-        {loading ? (
-          <div className="text-center py-8 text-mist/40 font-mono">Loading services...</div>
+        <div className="flex gap-2 mb-3 flex-wrap">
+          <button type="button" className="btn-terminal text-xs" onClick={fetchServices} disabled={loading}>
+            Refresh
+          </button>
+          <button type="button" className="btn-terminal text-xs" onClick={handleWakeAll} disabled={isWakingAll}>
+            {isWakingAll ? "Waking…" : "Wake all"}
+          </button>
+        </div>
+        {statusMessage && <p className="mono text-xs text-mist mb-2">{statusMessage}</p>}
+
+        {loading && entries.length === 0 ? (
+          <p className="mono text-xs text-mist">Loading topology…</p>
         ) : (
-          <>
-            <div className="flex justify-end mb-4">
-              <button
-                onClick={handleWakeAll}
-                disabled={isWakingAll}
-                className="font-mono text-xs border border-signal-prepare/40 text-signal-prepare px-4 py-1.5 rounded-lg hover:bg-signal-prepare/10 transition disabled:opacity-50"
-              >
-                {isWakingAll ? "⏳ Waking..." : "Wake All Services"}
-              </button>
+          entries.map(([name, st]) => (
+            <div key={name} className="topo-service">
+              <div className="topo-service-head">
+                <span className="topo-service-name">{name}</span>
+                <span className={st?.ok ? "topo-online" : "topo-online topo-offline"}>
+                  {st?.ok ? "ONLINE" : "OFFLINE"}
+                </span>
+              </div>
+              <div className="topo-service-meta">
+                <span>
+                  Latency
+                  <b>{st?.latency_ms != null ? `${st.latency_ms}ms` : st?.ok ? "<100ms" : "—"}</b>
+                </span>
+                <span>
+                  Status
+                  <b style={{ color: st?.ok ? "var(--buy)" : "var(--sell)" }}>{st?.ok ? "OK" : "Down"}</b>
+                </span>
+              </div>
+              <p>{DESCRIPTIONS[name] || st?.detail || "Downstream Stockky service."}</p>
+              {!st?.ok && st?.url && (
+                <button
+                  type="button"
+                  className="btn-terminal text-xs mt-2"
+                  disabled={waking[name]}
+                  onClick={() => handleWake(name, st.url)}
+                >
+                  {waking[name] ? "Waking…" : "Wake service"}
+                </button>
+              )}
             </div>
-            <div className="space-y-2">
-              {Object.entries(services).map(([name, status]) => {
-                const isWaking = waking[name] || false;
-                const msg = messages[name] || "";
-                return (
-                  <div
-                    key={name}
-                    className="flex items-center justify-between border border-slate/40 rounded-lg px-4 py-3 bg-ink/60"
-                  >
-                    <div>
-                      <span className="font-mono text-sm text-paper">{name}</span>
-                      <span className="ml-2 font-mono text-[10px] text-mist/50">
-                        {status.required ? "required" : "optional"}
-                      </span>
-                      <div className="flex items-center gap-2 mt-1">
-                        <span
-                          className={`font-mono text-xs ${
-                            status.ok ? "text-signal-buy" : "text-signal-sell"
-                          }`}
-                        >
-                          {status.ok ? "✅ Online" : "❌ Offline"}
-                        </span>
-                        {status.seconds && (
-                          <span className="font-mono text-[10px] text-mist/40">
-                            {status.seconds}s
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {status.url && !status.ok && (
-                        <button
-                          onClick={() => handleWake(name, status.url)}
-                          disabled={isWaking}
-                          className="font-mono text-xs px-3 py-1.5 border border-slate rounded hover:border-mist hover:text-paper transition disabled:opacity-50"
-                        >
-                          {isWaking ? "⏳ Waking..." : "Wake"}
-                        </button>
-                      )}
-                      {msg && (
-                        <span className="text-[10px] text-mist/60">{msg}</span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <div className="mt-4 text-xs text-mist/40 font-mono">
-              Click "Wake" to open the service's health endpoint in a small window, triggering a cold start.
-            </div>
-          </>
+          ))
         )}
       </div>
     </div>

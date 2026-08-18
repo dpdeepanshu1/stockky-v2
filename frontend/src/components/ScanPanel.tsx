@@ -525,7 +525,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
           )}
           {quoteWs && <span className="mono text-[10px] text-signal-buy">WS quotes live</span>}
         </div>
-        <div className="scanner-chips" role="tablist" aria-label="Filter by decision">
+        <div className="chip scanner-chips" role="tablist" aria-label="Filter by decision">
           {([
             ["all", "All"],
             ["buy", "BUY NOW"],

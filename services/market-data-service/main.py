@@ -235,7 +235,7 @@ async def global_exception_handler(request, exc):
     )
 
 # ── Cache: memory-first (unlimited). Redis only if USE_REDIS=1 ─────────────────
-USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
+USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")  # default OFF — Neon/memory only
 # Emergency kill-switch (also set DISABLE_UPSTASH=1 on Render)
 if os.getenv("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
     USE_REDIS = False

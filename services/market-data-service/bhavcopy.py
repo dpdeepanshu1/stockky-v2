@@ -20,6 +20,9 @@ from zoneinfo import ZoneInfo
 import httpx
 
 logger = logging.getLogger("market-data-bhavcopy")
+
+# Remember which URL class worked last (process-local)
+_BHAV_LAST_GOOD_PREFIX: str = ""
 IST = ZoneInfo("Asia/Kolkata")
 
 NSE_HEADERS = {
@@ -80,7 +83,7 @@ def delivery_from_quote(symbol: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _candidate_session_dates(n: int = 12) -> List:
+def _candidate_session_dates(n: int = 6) -> List:
     """Recent business-looking dates (skip pure weekends; holidays still tried)."""
     out = []
     d = datetime.now(IST).date()
@@ -96,24 +99,35 @@ def _candidate_session_dates(n: int = 12) -> List:
 
 
 def _bhav_urls_for_date(d) -> List[str]:
-    """Possible NSE archive URL patterns for a date (NSE changes paths periodically)."""
+    """
+    NSE archive URL patterns for a session date (newest patterns first).
+
+    Prefer sec_bhavdata_full CSV (currently reliable). Historical cm{DD}{MON}{YYYY}bhav.zip
+    often 404s until NSE publishes / renames paths — try those last.
+    Month folder is UPPER (AUG); day is zero-padded.
+    """
     dd = d.strftime("%d")
-    mon = d.strftime("%b").upper()
+    mon = d.strftime("%b").upper()          # AUG
+    mon_title = d.strftime("%b").title()    # Aug
     yyyy = d.strftime("%Y")
-    ddmmyyyy = d.strftime("%d%m%Y")
+    ddmmyyyy = d.strftime("%d%m%Y")         # 18082026
     mm = d.strftime("%m")
-    mon_cap = d.strftime("%b").capitalize()
+    yyyymmdd = d.strftime("%Y%m%d")
     return [
-        f"https://nsearchives.nseindia.com/content/historical/EQUITIES/{yyyy}/{mon}/cm{dd}{mon}{yyyy}bhav.csv.zip",
-        f"https://archives.nseindia.com/content/historical/EQUITIES/{yyyy}/{mon}/cm{dd}{mon}{yyyy}bhav.csv.zip",
+        # 1) Working daily full bhav (delivery cols) — try first
         f"https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{ddmmyyyy}.csv",
         f"https://archives.nseindia.com/products/content/sec_bhavdata_full_{ddmmyyyy}.csv",
-        f"https://www.nseindia.com/content/historical/EQUITIES/{yyyy}/{mon}/cm{dd}{mon}{yyyy}bhav.csv.zip",
-        f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{yyyy}{mm}{dd}_F_0000.csv.zip",
-        f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{yyyy}{mm}{dd}_F_0000.csv",
         f"https://nsearchives.nseindia.com/content/Equities/sec_bhavdata_full_{ddmmyyyy}.csv",
-        f"https://www1.nseindia.com/content/historical/EQUITIES/{yyyy}/{mon}/cm{dd}{mon}{yyyy}bhav.csv.zip",
-        f"https://www.nseindia.com/api/reports?archives=%5B%7B%22name%22%3A%22CM%20-%20Bhavcopy(csv)%22%2C%22type%22%3A%22archives%22%2C%22category%22%3A%22capital-market%22%2C%22section%22%3A%22equities%22%7D%5D&date={dd}-{mon_cap}-{yyyy}&type=equities&mode=single",
+        # 2) Newer CM UDiFF-style names
+        f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{yyyymmdd}_F_0000.csv.gz",
+        f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{yyyymmdd}_F_0000.csv.zip",
+        f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{yyyymmdd}_F_0000.csv",
+        # 3) Legacy monthly folder zips (often 404 mid-day / path changes)
+        f"https://nsearchives.nseindia.com/content/historical/EQUITIES/{yyyy}/{mon}/cm{dd}{mon}{yyyy}bhav.csv.zip",
+        f"https://archives.nseindia.com/content/historical/EQUITIES/{yyyy}/{mon}/cm{dd}{mon}{yyyy}bhav.csv.zip",
+        f"https://www.nseindia.com/content/historical/EQUITIES/{yyyy}/{mon}/cm{dd}{mon}{yyyy}bhav.csv.zip",
+        # 4) Reports API (needs cookies sometimes)
+        f"https://www.nseindia.com/api/reports?archives=%5B%7B%22name%22%3A%22CM%20-%20Bhavcopy(csv)%22%2C%22type%22%3A%22archives%22%2C%22category%22%3A%22capital-market%22%2C%22section%22%3A%22equities%22%7D%5D&date={dd}-{mon_title}-{yyyy}&type=equities&mode=single",
     ]
 
 

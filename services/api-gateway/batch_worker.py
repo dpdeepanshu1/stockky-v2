@@ -212,6 +212,6 @@ async def run_in_batches(
     return out
 
 
-def default_batch_size(workers: int, minimum: int = 12) -> int:
+def default_batch_size(workers: int, minimum: int = 6) -> int:
     """In-flight batch sizing for scans: ~2x worker pool, never reduces item list."""
     return max(int(workers) * 2, int(minimum))

@@ -129,12 +129,35 @@ async def _start_shared_http():
 
 
 @app.on_event("shutdown")
-async def _stop_shared_http():
-    global _shared_http_client
-    if _shared_http_client is not None and not _shared_http_client.is_closed:
-        await _shared_http_client.aclose()
-        logger.info("Shared httpx.AsyncClient closed")
-        _shared_http_client = None
+async def _graceful_shutdown():
+    """FastAPI/uvicorn SIGTERM path: commit work, stop loops, close clients."""
+    global _shared_http_client, _quote_loop_task
+    logger.info("Graceful shutdown starting…")
+    try:
+        phases = _graceful_shutdown_commit(reason="process_shutdown")
+        logger.info("Graceful shutdown commit: %s", phases)
+    except Exception as e:
+        logger.warning("Graceful shutdown commit failed: %s", e)
+    # Cancel quote loop task
+    try:
+        if _quote_loop_task is not None and not _quote_loop_task.done():
+            _quote_loop_task.cancel()
+            try:
+                await _quote_loop_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            _quote_loop_task = None
+    except Exception as e:
+        logger.debug("quote loop cancel: %s", e)
+    # Close shared HTTP client
+    try:
+        if _shared_http_client is not None and not _shared_http_client.is_closed:
+            await _shared_http_client.aclose()
+            logger.info("Shared httpx.AsyncClient closed")
+            _shared_http_client = None
+    except Exception as e:
+        logger.warning("http client close: %s", e)
+    logger.info("Graceful shutdown complete")
 
 
 # --- CORS ---
@@ -203,10 +226,15 @@ _SCAN_CANCEL_FLAGS: set = set()  # process-local instant cancel
 # no WS quote upstream fan-out. Only /health and light keepalive remain.
 _ACTIVITY_PAUSED = False
 _QUOTE_LOOP_ENABLED = True
+_SCAN_IN_PROGRESS = False  # True while market scan runs — pauses WS quote upstream
 
 
 def activity_paused() -> bool:
     return bool(_ACTIVITY_PAUSED)
+
+
+def scan_in_progress() -> bool:
+    return bool(_SCAN_IN_PROGRESS)
 
 
 def set_activity_paused(paused: bool) -> None:
@@ -224,6 +252,118 @@ def set_activity_paused(paused: bool) -> None:
             clear_data_feed_stop()
         except Exception:
             pass
+
+
+def _graceful_shutdown_commit(reason: str = "shutdown") -> list:
+    """
+    Commit in-progress work and force-stop background activity.
+    Safe to call from Power Off, FastAPI shutdown, or SIGTERM/SIGINT.
+    Does not close HTTP clients (caller may do that after).
+    """
+    phases = []
+    try:
+        set_activity_paused(True)
+        phases.append({"phase": "activity_gate", "ok": True, "detail": f"paused ({reason})"})
+    except Exception as e:
+        phases.append({"phase": "activity_gate", "ok": False, "detail": str(e)[:120]})
+
+    # Cancel all scans — preserve partial status in durable kv
+    cancelled = 0
+    try:
+        _SCAN_CANCEL_FLAGS.add("__ALL__")
+        try:
+            for k in list(_mem_kv.keys()):
+                sk = str(k)
+                if sk.startswith(SCAN_TASK_PREFIX) and not sk.endswith(":cancel"):
+                    data = _mem_kv.get(k)
+                    if isinstance(data, dict) and data.get("status") == "running":
+                        data = dict(data)
+                        data["cancel_requested"] = True
+                        data["status"] = "cancelled"
+                        data["partial"] = True
+                        data["message"] = f"{reason}: scan stopped (partial committed)"
+                        _mem_kv[k] = data
+                        try:
+                            _redis_set(k, data, ttl=3600)
+                            _redis_set(sk + ":cancel", True, ttl=3600)
+                        except Exception:
+                            pass
+                        cancelled += 1
+        except Exception:
+            pass
+        phases.append({"phase": "scan", "ok": True, "detail": f"cancel committed partial={cancelled}"})
+    except Exception as e:
+        phases.append({"phase": "scan", "ok": False, "detail": str(e)[:120]})
+
+    # Data feed — force stop + checkpoint
+    try:
+        try:
+            request_data_feed_stop()
+        except Exception:
+            pass
+        store = _feed_store()
+        job = store.job() or {}
+        store.set_job(
+            status="stopped",
+            message=f"{reason}: data feed stopped (checkpoint committed)",
+            stop_requested=True,
+            finished_at=datetime.now(IST).isoformat(),
+            processed=int(job.get("processed") or 0),
+            ok_count=int(job.get("ok_count") or job.get("processed") or 0),
+        )
+        phases.append({"phase": "data_feed", "ok": True, "detail": "stopped + checkpoint"})
+    except Exception as e:
+        phases.append({"phase": "data_feed", "ok": False, "detail": str(e)[:120]})
+
+    # Hot picks idle
+    try:
+        hot_job_set(
+            _redis_set,
+            _redis_get,
+            status="idle",
+            message=f"{reason}: Hot Picks stopped",
+            processed=0,
+            estimated_remaining_sec=0,
+        )
+        phases.append({"phase": "hot_picks", "ok": True, "detail": "idle"})
+    except Exception as e:
+        phases.append({"phase": "hot_picks", "ok": False, "detail": str(e)[:120]})
+
+    # Drop WS quote watches + close sockets
+    try:
+        for ws in list(getattr(ws_manager, "active", []) or []):
+            try:
+                ws_manager.unwatch_quotes(ws, None)
+            except Exception:
+                pass
+            try:
+                # Best-effort close; may already be gone
+                import asyncio as _aio
+                try:
+                    loop = _aio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(ws.close())
+                    else:
+                        loop.run_until_complete(ws.close())
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        phases.append({"phase": "websocket", "ok": True, "detail": "unwatched + close signalled"})
+    except Exception as e:
+        phases.append({"phase": "websocket", "ok": False, "detail": str(e)[:120]})
+
+    # Stop quote broadcast task
+    try:
+        task = globals().get("_quote_loop_task")
+        if task is not None and hasattr(task, "done") and not task.done():
+            task.cancel()
+        phases.append({"phase": "quote_loop", "ok": True, "detail": "cancelled"})
+    except Exception as e:
+        phases.append({"phase": "quote_loop", "ok": False, "detail": str(e)[:120]})
+
+    logger.info("graceful_shutdown_commit reason=%s phases=%s", reason, phases)
+    return phases
 
 
 MARKET_MOVERS_CACHE_PREFIX = "stockky:market_movers:"
@@ -656,7 +796,7 @@ def _get_news_mentioned_symbols() -> List[str]:
             seen.add(s)
             out.append(s)
     logger.info("News-mentioned symbols: %s", len(out))
-    return out[:60]
+    return out[:120]
 
 def _get_event_symbols() -> List[str]:
     """Symbols with upcoming/recent corporate events, bulk deals, insider activity."""
@@ -696,8 +836,153 @@ def _get_event_symbols() -> List[str]:
     logger.info("Event-driven symbols: %s", len(out))
     return out[:80]
 
+
+def _get_bulk_deal_symbols() -> List[str]:
+    """Symbols appearing in recent NSE bulk / block deals (institutional flow)."""
+    out: List[str] = []
+    seen = set()
+
+    def _add(sym: str):
+        s = (sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        if not s or s in seen or len(s) < 2:
+            return
+        seen.add(s)
+        out.append(s)
+
+    # 1) NSE official bulk-deals board
+    for endpoint, key in (
+        ("equity-stockIndices?index=SECURITIES%20IN%20F%26O", "nse:fo_bulk_seed"),
+        ("historical/bulk-deals", "nse:bulk_deals"),
+        ("historical/block-deals", "nse:block_deals"),
+    ):
+        try:
+            data = _fetch_from_nse_api(endpoint, key, ttl=1800)
+            rows = []
+            if isinstance(data, dict):
+                rows = data.get("data") or data.get("bulkDeals") or data.get("blockDeals") or []
+            elif isinstance(data, list):
+                rows = data
+            if isinstance(rows, list):
+                for item in rows[:80]:
+                    if isinstance(item, dict):
+                        _add(item.get("symbol") or item.get("symbolName") or item.get("scm"))
+                    elif isinstance(item, str):
+                        _add(item)
+        except Exception as e:
+            logger.debug("bulk deals %s: %s", endpoint, e)
+
+    # 2) Market-data service bulk/block endpoints (if exposed)
+    try:
+        base = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
+        for path in ("/market/bulk-deals", "/market/block-deals", "/nse/bulk-deals"):
+            try:
+                r = httpx.get(f"{base}{path}", timeout=10)
+                if r.status_code != 200:
+                    continue
+                payload = r.json()
+                rows = payload if isinstance(payload, list) else (payload.get("data") or payload.get("deals") or [])
+                for item in (rows or [])[:80]:
+                    if isinstance(item, dict):
+                        _add(item.get("symbol") or item.get("Symbol"))
+                    elif isinstance(item, str):
+                        _add(item)
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug("market-data bulk: %s", e)
+
+    # 3) Event service bulk/insider tags
+    try:
+        resp = httpx.get(f"{EVENT_URL}/bulk_deals", timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            rows = data if isinstance(data, list) else (data.get("symbols") or data.get("data") or [])
+            for item in rows[:80]:
+                if isinstance(item, dict):
+                    _add(item.get("symbol"))
+                elif isinstance(item, str):
+                    _add(item)
+    except Exception:
+        pass
+
+    logger.info("Bulk/block deal symbols: %s", len(out))
+    return out[:100]
+
+
+def _get_52w_extreme_symbols() -> List[str]:
+    """Symbols near 52-week high/low or with sharp multi-day moves (surprise raise)."""
+    out: List[str] = []
+    seen = set()
+
+    def _add(sym: str):
+        s = (sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        if not s or s in seen:
+            return
+        seen.add(s)
+        out.append(s)
+
+    base = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
+    for path in (
+        "/market/near-52w-high",
+        "/market/near-52w-low",
+        "/market/52-week-high",
+        "/market/52-week-low",
+        "/market/top-gainers",
+        "/market/most-active",
+    ):
+        try:
+            r = httpx.get(f"{base}{path}", timeout=10)
+            if r.status_code != 200:
+                continue
+            payload = r.json()
+            rows = payload if isinstance(payload, list) else (
+                payload.get("data") or payload.get("symbols") or payload.get("stocks") or []
+            )
+            for item in (rows or [])[:50]:
+                if isinstance(item, dict):
+                    # Prefer names with ≥4% day move or near 52w when fields exist
+                    chg = item.get("change_pct") or item.get("pChange") or item.get("pctChange")
+                    try:
+                        chg_f = abs(float(chg)) if chg is not None else None
+                    except (TypeError, ValueError):
+                        chg_f = None
+                    near = item.get("near_52w_high") or item.get("near_52w_low") or item.get("at_52w_high")
+                    if near or chg_f is None or chg_f >= 3.0:
+                        _add(item.get("symbol") or item.get("Symbol") or item.get("ticker"))
+                elif isinstance(item, str):
+                    _add(item)
+        except Exception as e:
+            logger.debug("52w/movers %s: %s", path, e)
+
+    # NSE gainers already partially covered; add all-time/52w boards if present
+    for endpoint, key in (
+        ("live-analysis-variations?index=gainers", "nse:gainers52"),
+        ("liveEquity-market?index=gainers", "nse:live_gainers"),
+    ):
+        try:
+            data = _fetch_from_nse_api(endpoint, key, ttl=900)
+            rows = []
+            if isinstance(data, dict):
+                rows = data.get("data") or []
+            for item in (rows or [])[:40]:
+                if isinstance(item, dict):
+                    chg = item.get("pChange") or item.get("perChange")
+                    try:
+                        if chg is not None and abs(float(chg)) < 3.0:
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+                    _add(item.get("symbol") or item.get("symbolName"))
+        except Exception:
+            continue
+
+    logger.info("52w/extreme move symbols: %s", len(out))
+    return out[:80]
+
+
 # ── Build scan universe ──────────────────────────────────────────────────────
 def _build_scan_universe() -> List[str]:
+
     cached = _redis_get(SCAN_UNIVERSE_KEY)
     if cached and isinstance(cached, list) and len(cached) > 0:
         return cached
@@ -720,6 +1005,8 @@ def _build_scan_universe() -> List[str]:
 
     try:
         universe.update(_get_momentum_movers())
+        universe.update(_get_bulk_deal_symbols())
+        universe.update(_get_52w_extreme_symbols())
     except Exception as e:
         logger.warning(f"Failed to fetch momentum movers: {e}")
 
@@ -771,10 +1058,12 @@ def _build_scan_universe() -> List[str]:
     if pruned_count:
         logger.info(f"Universe pruning: excluded {pruned_count} chronically-unproductive symbols")
 
-    # Prefer dynamic signal names first so movers/news/events always get scanned
+    # Prefer dynamic signal names first so movers/news/bulk/52w/events always get scanned
     dynamic_priority = []
     try:
         for src in (
+            _get_bulk_deal_symbols(),
+            _get_52w_extreme_symbols(),
             _get_momentum_movers(),
             _get_news_mentioned_symbols(),
             _get_event_symbols(),
@@ -1430,7 +1719,8 @@ def _wake_notification_service() -> bool:
 
 # Free-tier friendly default: 18 workers (was 10). Override via env.
 # Pair with market-data yfinance semaphore to avoid Yahoo rate limits.
-MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "2"))  # free-tier safe; was 6 → cascade timeouts  # full universe; pace via Redis RL; separate dynos
+MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "2"))  # free-tier safe
+SCAN_BATCH_SIZE = int(os.getenv("SCAN_BATCH_SIZE", "6"))  # small batches reduce load spikes
 MAX_RETRIES = 1
 RETRY_BACKOFF = 1.0
 
@@ -1661,20 +1951,109 @@ async def _analyze_one_symbol_ultra(
     async with sem:
         for attempt in range(MAX_RETRIES + 1):
             try:
+                base_sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+                # ── Neon Data Feed (stockky_kv) — static fields without upstream ──
+                feed_row = None
+                try:
+                    feed_row = _feed_store().get_symbol(base_sym)
+                except Exception:
+                    feed_row = None
+
+                # Lite + rich Neon row → skip decision-engine HTTP (biggest latency win)
+                if lite and isinstance(feed_row, dict) and feed_row and (
+                    feed_row.get("fundamental_score") is not None
+                    or feed_row.get("metrics")
+                    or feed_row.get("combined_score") is not None
+                ):
+                    try:
+                        fast = _normalize_decision_response({
+                            "symbol": base_sym,
+                            "decision": feed_row.get("decision") or "HOLD",
+                            "combined_score": feed_row.get("combined_score")
+                                or feed_row.get("fundamental_score")
+                                or 50,
+                            "confidence": feed_row.get("confidence") or "Medium",
+                            "close": feed_row.get("close") or feed_row.get("price") or feed_row.get("ltp"),
+                            "fundamental_score": feed_row.get("fundamental_score"),
+                            "fundamental_metrics": feed_row.get("metrics"),
+                            "sector": feed_row.get("sector"),
+                            "industry": feed_row.get("industry"),
+                            "technical_score": feed_row.get("technical_score"),
+                            "news_score": feed_row.get("news_score"),
+                            "event_risk": feed_row.get("event_risk"),
+                            "prediction_score": feed_row.get("prediction_score"),
+                            "reasons": {"data_feed": ["Lite scan from Neon data-feed (stockky_kv)"]},
+                            "from_data_feed": True,
+                            "lite_neon_fastpath": True,
+                        }, symbol)
+                        if fast.get("close") is None:
+                            try:
+                                px = _fetch_price_from_quote(symbol)
+                                if px is not None:
+                                    fast["close"] = px
+                            except Exception:
+                                pass
+                        fast["natural_language_summary"] = (
+                            f"{base_sym}: lite Neon feed path — "
+                            f"decision={fast.get('decision')} score={fast.get('combined_score')}"
+                        )
+                        return fast
+                    except Exception as e:
+                        logger.debug("lite neon fastpath %s: %s", base_sym, e)
+
                 # ── Decide-level cache (same symbol within TTL → instant) ──
-                cache_key = f"{DECIDE_CACHE_PREFIX}{symbol.upper()}"
+                cache_key = f"{DECIDE_CACHE_PREFIX}{base_sym}"
                 cached_decide = _redis_get(cache_key)
                 if cached_decide and isinstance(cached_decide, dict) and cached_decide.get("decision"):
                     normalized = _normalize_decision_response(cached_decide, symbol)
+                    normalized["from_decide_cache"] = True
                 else:
-                    decision_resp = await _cb_get(client, "decision", f"{DECISION_URL}/decide/{symbol}", timeout=90)
+                    # Prefer shorter timeout on free-tier; feed covers fundamentals
+                    decision_resp = await _cb_get(
+                        client, "decision", f"{DECISION_URL}/decide/{symbol}", timeout=45
+                    )
                     decision_resp.raise_for_status()
                     raw = decision_resp.json()
                     normalized = _normalize_decision_response(raw, symbol)
                     _redis_set(cache_key, normalized, ttl=_decide_cache_ttl())
 
+                # Overlay durable Neon feed onto decision (do not call fund/news upstream if present)
+                if isinstance(feed_row, dict) and feed_row:
+                    normalized.setdefault("from_data_feed", True)
+                    normalized["data_feed_updated_at"] = feed_row.get("updated_at")
+                    if normalized.get("fundamental_metrics") is None and feed_row.get("metrics"):
+                        normalized["fundamental_metrics"] = feed_row.get("metrics")
+                    if normalized.get("fundamental_score") is None and feed_row.get("fundamental_score") is not None:
+                        normalized["fundamental_score"] = feed_row.get("fundamental_score")
+                    for k in ("sector", "industry", "valuation", "quality_score", "multi_quarter_score"):
+                        if normalized.get(k) is None and feed_row.get(k) is not None:
+                            normalized[k] = feed_row.get(k)
+                    if not normalized.get("event_data") and (
+                        feed_row.get("events") or feed_row.get("event_risk") is not None
+                    ):
+                        normalized["event_data"] = feed_row.get("events") or {
+                            "event_risk": feed_row.get("event_risk")
+                        }
+                    if normalized.get("event_risk") is None and feed_row.get("event_risk") is not None:
+                        normalized["event_risk"] = feed_row.get("event_risk")
+                    if normalized.get("news_score") is None and feed_row.get("news_score") is not None:
+                        normalized["news_score"] = feed_row.get("news_score")
+                    # Price from feed if upstream quote is rate-limited
+                    if normalized.get("close") is None:
+                        for pk in ("close", "price", "last", "ltp"):
+                            if feed_row.get(pk) is not None:
+                                try:
+                                    normalized["close"] = float(feed_row[pk])
+                                    break
+                                except (TypeError, ValueError):
+                                    pass
+
                 if normalized.get("close") is None:
-                    price = _fetch_price_from_quote(symbol)
+                    # Avoid hammering market-data during Yahoo 429 storms — soft try only
+                    try:
+                        price = _fetch_price_from_quote(symbol)
+                    except Exception:
+                        price = None
                     if price is not None:
                         normalized["close"] = price
                         if normalized.get("support") is None:
@@ -1823,7 +2202,15 @@ async def _analyze_one_symbol_ultra(
         return {"symbol": symbol, "decision": "ERROR", "error": "Max retries exceeded"}
 
 async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = False):
+    global _SCAN_IN_PROGRESS
     start_time = time.time()
+    _SCAN_IN_PROGRESS = True
+    try:
+        set_activity_paused(False)
+        _SCAN_CANCEL_FLAGS.discard("__ALL__")
+    except Exception:
+        pass
+
     # Prioritize watchlist / searched so useful picks surface early without shrinking universe
     universe = _prioritize_universe(universe)
     total = len(universe)
@@ -1831,61 +2218,112 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
     results = []
     errors = []
 
-    _redis_set(SCAN_TASK_PREFIX + task_id, {
-        "status": "running",
-        "total": total,
-        "processed": 0,
-        "elapsed": 0,
-        "result": None,
-        "error": None,
-        "lite": lite,
-    }, ttl=3600)
+    def _status(processed_n=0, message=None, **extra):
+        payload = {
+            "status": "running",
+            "total": total,
+            "processed": processed_n,
+            "elapsed": round(time.time() - start_time, 1),
+            "result": None,
+            "error": None,
+            "lite": lite,
+            "message": message,
+        }
+        payload.update({k: v for k, v in extra.items() if v is not None})
+        _redis_set(SCAN_TASK_PREFIX + task_id, payload, ttl=3600)
+
+    _status(0, message="Starting — Neon data-feed preferred; upstream only for live fields")
+    logger.info("Scan %s started universe=%s lite=%s", task_id, total, lite)
 
     sem = asyncio.Semaphore(MAX_PARALLEL_WORKERS)
     cancel_key = SCAN_TASK_PREFIX + task_id + ":cancel"
     client = _get_http_client()  # shared keepalive pool
 
-    # ── Pre-scan: wake free-tier dynos (does not change universe size) ──
-    if WAKE_BEFORE_SCAN:
-        try:
-            wake_results = await _wake_required_services(client)
-            logger.info("Pre-scan wake: %s", {k: v.get("ok") for k, v in wake_results.items()})
-            try:
-                await _warm_upstream_services(client)
-            except Exception:
-                pass
-            wait = max(WAKE_WAIT_SECONDS, 10.0)
-            if not (wake_results.get("market-data") or {}).get("ok"):
-                wait = max(wait, 18.0)
-            await asyncio.sleep(min(wait, 25.0))
-        except Exception as e:
-            logger.warning("Pre-scan wake failed (continuing): %s", e)
-
-    # Data Feed coverage stats (informational only)
+    # Data Feed coverage FIRST (Neon stockky_kv) — decides whether wake is needed
+    feed_hit = 0
     try:
+        _status(0, message="Checking Neon data-feed coverage…")
         store = _feed_store()
-        hit = 0
         for s in universe:
             base = s.upper().replace(".NS", "").replace(".BO", "")
             fed = store.get_symbol(base)
-            if fed and (fed.get("fundamental_score") is not None or fed.get("metrics") or fed.get("sector")):
-                hit += 1
+            if fed and (
+                fed.get("fundamental_score") is not None
+                or fed.get("metrics")
+                or fed.get("sector")
+                or fed.get("close") is not None
+            ):
+                feed_hit += 1
         logger.info(
             "Scan Data Feed coverage: %s/%s symbols (%.0f%%)",
-            hit, total, (100.0 * hit / total) if total else 0,
+            feed_hit, total, (100.0 * feed_hit / total) if total else 0,
         )
+        _status(0, message=f"Neon feed coverage {feed_hit}/{total} — starting batches")
     except Exception as e:
         logger.debug("feed coverage: %s", e)
 
+    # Pre-scan wake only when feed is cold (<50%). Full wake is slow and unnecessary
+    # when Data Feed already holds fundamentals for the universe.
+    feed_ratio = (feed_hit / total) if total else 0
+    if WAKE_BEFORE_SCAN and feed_ratio < 0.5:
+        try:
+            _status(0, message="Feed cold — waking decision / market-data…")
+            wake_results = await asyncio.wait_for(_wake_required_services(client), timeout=12.0)
+            logger.info("Pre-scan wake: %s", {k: v.get("ok") for k, v in wake_results.items()})
+            await asyncio.sleep(min(float(WAKE_WAIT_SECONDS or 4), 6.0))
+        except Exception as e:
+            logger.warning("Pre-scan wake failed/timeout (continuing Neon-first): %s", e)
+    else:
+        logger.info(
+            "Skipping long pre-scan wake (Neon feed coverage %.0f%%) — proceed to batches",
+            feed_ratio * 100,
+        )
+
+    # Seed per-symbol batch cache from last partial scan so 60/300 style
+    # resumes don't re-score already completed names (Neon/redis durable).
+    try:
+        last = _redis_get(LAST_FULL_SCAN_KEY)
+        if last and isinstance(last, dict):
+            prev = (last.get("result") or {})
+            prev_all = prev.get("all_results") or []
+            seeded = 0
+            for row in prev_all:
+                if not isinstance(row, dict):
+                    continue
+                sym = (row.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "")
+                if not sym or row.get("decision") == "ERROR":
+                    continue
+                if not _batch_result_cache_get(sym, lite=lite):
+                    _batch_result_cache_set(sym, row, lite=lite)
+                    seeded += 1
+            if seeded:
+                logger.info("Seeded batch_result cache with %s symbols from last partial scan", seeded)
+    except Exception as e:
+        logger.debug("seed batch cache: %s", e)
+
     # ── Full-universe batch processor (list size preserved) ──
-    batch_size = default_batch_size(MAX_PARALLEL_WORKERS, minimum=12)
+    batch_size = max(4, min(SCAN_BATCH_SIZE, default_batch_size(MAX_PARALLEL_WORKERS, minimum=6)))
     if activity_paused():
+        # Should be rare — we clear pause at start; still never leave UI at 0/N forever
         logger.warning("Scan aborted — activity paused (Power Off)")
+        _redis_set(SCAN_TASK_PREFIX + task_id, {
+            "status": "cancelled",
+            "total": total,
+            "processed": 0,
+            "elapsed": round(time.time() - start_time, 1),
+            "result": None,
+            "error": "activity_paused",
+            "message": "Scan aborted — system was Powered Off. Click Power Off→Resume or Run Scan again.",
+            "cancelled": True,
+            "partial": True,
+        }, ttl=3600)
+        _SCAN_IN_PROGRESS = False
         return
     logger.info(
-        "Scan full universe=%s batch_size=%s workers=%s",
+        "Scan full universe=%s batch_size=%s workers=%s (Neon data-feed preferred)",
         total, batch_size, MAX_PARALLEL_WORKERS,
     )
+    _status(0, message=f"Processing {total} symbols — Neon feed first, upstream for live fields only")
 
     async def _worker(sym: str):
         return await _analyze_one_symbol_ultra(sym, client, sem, lite=lite)
@@ -2089,6 +2527,8 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
         "error": None,
     }
     _redis_set(SCAN_TASK_PREFIX + task_id, _done_payload, ttl=3600)
+    _SCAN_IN_PROGRESS = False
+    logger.info("Scan %s finished processed=%s/%s", task_id, processed, total)
     try:
         await _ws_push_scan(task_id, _done_payload)
     except Exception:
@@ -3187,33 +3627,74 @@ def start_scan(
             except Exception:
                 pass
 
-        # Serve recent scan from cache unless force_refresh
+        # Serve recent COMPLETE scan from cache unless force_refresh.
+        # Partial scans (e.g. 60/300 after Stop) must CONTINUE: cache-hit the done
+        # symbols via batch_result/Neon, then process the remaining universe upstream.
         if not force_refresh:
             cached = _redis_get(LAST_FULL_SCAN_KEY)
             if cached and isinstance(cached, dict) and cached.get("result"):
-                task_id = cached.get("task_id") or str(uuid.uuid4())
-                # Re-publish as a finished task so /scan/status works the same
-                _redis_set(SCAN_TASK_PREFIX + task_id, {
-                    "status": "done",
-                    "total": cached["result"].get("universe_size", 0),
-                    "processed": cached["result"].get("scanned", 0),
-                    "elapsed": cached["result"].get("elapsed_seconds", 0),
-                    "result": cached["result"],
-                    "error": None,
-                    "from_cache": True,
-                    "scanned_at": cached.get("scanned_at"),
-                }, ttl=3600)
-                return {
-                    "task_id": task_id,
-                    "from_cache": True,
-                    "scanned_at": cached.get("scanned_at"),
-                    "message": "Returning recent scan result (within cache TTL). Use force_refresh=true for a new run.",
-                }
+                res = cached.get("result") or {}
+                processed = int(
+                    cached.get("processed")
+                    or res.get("scanned")
+                    or 0
+                )
+                total = int(
+                    cached.get("total")
+                    or res.get("universe_size")
+                    or processed
+                    or 0
+                )
+                is_partial = bool(
+                    cached.get("partial")
+                    or cached.get("cancelled")
+                    or res.get("partial")
+                    or res.get("stopped_early")
+                    or res.get("cancelled")
+                    or (total > 0 and processed < int(total * 0.9))
+                )
+                if not is_partial and total > 0 and processed >= int(total * 0.9):
+                    task_id = cached.get("task_id") or str(uuid.uuid4())
+                    _redis_set(SCAN_TASK_PREFIX + task_id, {
+                        "status": "done",
+                        "total": total,
+                        "processed": processed,
+                        "elapsed": res.get("elapsed_seconds", 0),
+                        "result": res,
+                        "error": None,
+                        "from_cache": True,
+                        "scanned_at": cached.get("scanned_at"),
+                    }, ttl=3600)
+                    return {
+                        "task_id": task_id,
+                        "from_cache": True,
+                        "scanned_at": cached.get("scanned_at"),
+                        "universe_size": total,
+                        "message": "Returning recent complete scan (within cache TTL). Use force_refresh=true for a new run.",
+                    }
+                else:
+                    logger.info(
+                        "Last scan was partial (%s/%s) — continuing full universe "
+                        "(batch_result/Neon cache hits for already scored symbols)",
+                        processed, total,
+                    )
+
+        if force_refresh and _redis:
+            try:
+                _redis.delete(SCAN_UNIVERSE_KEY)
+            except Exception:
+                pass
 
         universe = _build_scan_universe()
         task_id = str(uuid.uuid4())
         background_tasks.add_task(run_scan_parallel, task_id, universe, use_lite)
-        return {"task_id": task_id, "from_cache": False, "lite": use_lite, "universe_size": len(universe)}
+        return {
+            "task_id": task_id,
+            "from_cache": False,
+            "lite": use_lite,
+            "universe_size": len(universe),
+            "message": f"Scanning {len(universe)} symbols (dynamic universe; Neon/batch cache for hits, upstream for rest)",
+        }
     except Exception as e:
         logger.error(f"Scan start failed: {e}")
         raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)}")
@@ -4761,7 +5242,7 @@ async def _quote_broadcast_loop():
     """
     while True:
         try:
-            if activity_paused() or not _QUOTE_LOOP_ENABLED:
+            if activity_paused() or scan_in_progress() or not _QUOTE_LOOP_ENABLED:
                 await asyncio.sleep(30)
                 continue
             # No connected clients → do not hit market-data at all
@@ -4995,104 +5476,16 @@ async def ops_keepalive(deep: bool = False):
 
 @app.post("/ops/power-off")
 async def ops_power_off(background_tasks: BackgroundTasks):
-    """Force-stop ALL user-initiated activity.
+    """Force-stop ALL user-initiated activity (same path as process shutdown).
 
     1) Commit / checkpoint in-progress scan + data-feed + hot-picks
     2) Signal cancel everywhere (process-local + durable)
     3) Pause activity gate so quote loop / workers idle
     4) Frontend should reload and only hit health/keepalive afterwards
     """
-    global _ACTIVITY_PAUSED, _QUOTE_LOOP_ENABLED
-    phases = []
-    set_activity_paused(True)
-    phases.append({"phase": "activity_gate", "ok": True, "detail": "paused — no background fan-out"})
+    phases = _graceful_shutdown_commit(reason="power_off")
 
-    # 1) Cancel ALL running scans (commit partial)
-    cancelled = 0
-    try:
-        _SCAN_CANCEL_FLAGS.add("__ALL__")
-        # durable scan tasks in mem/kv
-        try:
-            for k in list(getattr(_mem_kv, "keys", lambda: [])() if False else []):
-                pass
-        except Exception:
-            pass
-        # Mark known task keys from a soft scan of common prefixes via redis get of last status
-        try:
-            # Cancel flags: any future scan checks activity_paused()
-            for tid in list(_SCAN_CANCEL_FLAGS):
-                _redis_set(SCAN_TASK_PREFIX + str(tid) + ":cancel", True, ttl=3600)
-        except Exception:
-            pass
-        # Walk process mem kv if present
-        try:
-            for k in list(_mem_kv.keys()):
-                if "scan:task:" in str(k) or str(k).startswith(SCAN_TASK_PREFIX):
-                    try:
-                        data = _mem_kv.get(k)
-                        if isinstance(data, dict) and data.get("status") == "running":
-                            data = dict(data)
-                            data["status"] = "cancelled"
-                            data["cancel_requested"] = True
-                            data["partial"] = True
-                            data["message"] = "Power-off: scan stopped (partial committed)"
-                            _mem_kv[k] = data
-                            try:
-                                _redis_set(k, data, ttl=3600)
-                            except Exception:
-                                pass
-                            cancelled += 1
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        phases.append({"phase": "scan", "ok": True, "detail": f"cancel signals committed partial={cancelled}"})
-    except Exception as e:
-        phases.append({"phase": "scan", "ok": False, "detail": str(e)[:120]})
-
-    # 2) Stop data feed — force commit to stopped
-    try:
-        request_data_feed_stop()
-        store = _feed_store()
-        job = store.job() or {}
-        # Preserve checkpoint / ok_count
-        store.set_job(
-            status="stopped",
-            message="Power-off: data feed stopped (checkpoint committed)",
-            stop_requested=True,
-            finished_at=datetime.now(IST).isoformat(),
-            processed=int(job.get("processed") or 0),
-            ok_count=int(job.get("ok_count") or job.get("processed") or 0),
-        )
-        phases.append({"phase": "data_feed", "ok": True, "detail": "stopped + checkpoint"})
-    except Exception as e:
-        phases.append({"phase": "data_feed", "ok": False, "detail": str(e)[:120]})
-
-    # 3) Stop hot picks
-    try:
-        hot_job_set(
-            _redis_set, _redis_get,
-            status="idle",
-            message="Power-off: Hot Picks stopped",
-            processed=0,
-            estimated_remaining_sec=0,
-        )
-        phases.append({"phase": "hot_picks", "ok": True, "detail": "idle"})
-    except Exception as e:
-        phases.append({"phase": "hot_picks", "ok": False, "detail": str(e)[:120]})
-
-    # 4) Clear WS quote watches so loop has nothing to fetch
-    try:
-        for ws in list(getattr(ws_manager, "active", []) or []):
-            try:
-                ws_manager.unwatch_quotes(ws, None)
-            except Exception:
-                pass
-        phases.append({"phase": "quotes", "ok": True, "detail": "unwatched all symbols"})
-    except Exception as e:
-        phases.append({"phase": "quotes", "ok": False, "detail": str(e)[:120]})
-
-    # 5) Best-effort stop training lock on decision-prediction service
+    # Best-effort stop training lock on decision-prediction service
     try:
         client = _get_http_client()
         urls = [
@@ -5655,6 +6048,38 @@ async def stockky_hot_run(background_tasks: BackgroundTasks, force: bool = True)
     return {"ok": True, "started": True, "message": "Hot Picks search started"}
 
 
+
+
+# ── OS signal hooks (Render deploy / free-tier SIGTERM) ─────────────────────
+def _install_signal_handlers() -> None:
+    """Ensure SIGTERM/SIGINT commit checkpoints even if uvicorn path is skipped."""
+    import signal
+    import threading
+
+    _once = getattr(_install_signal_handlers, "_installed", False)
+    if _once:
+        return
+    _install_signal_handlers._installed = True  # type: ignore[attr-defined]
+
+    def _handle(signum, frame):
+        name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
+        logger.warning("Received %s — running graceful shutdown commit", name)
+        try:
+            _graceful_shutdown_commit(reason=f"signal_{name}")
+        except Exception as e:
+            logger.warning("signal shutdown commit failed: %s", e)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handle)
+        except Exception as e:
+            logger.debug("signal %s install: %s", sig, e)
+
+
+try:
+    _install_signal_handlers()
+except Exception as _sig_err:
+    logger.debug("signal handlers: %s", _sig_err)
 
 if __name__ == "__main__":
     import uvicorn

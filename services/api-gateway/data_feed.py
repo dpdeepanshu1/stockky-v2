@@ -156,6 +156,18 @@ class DataFeedStore:
         _LOCAL_JOB.clear()
         _LOCAL_JOB.update(j)
         self._set(DATA_FEED_JOB_KEY, j, ttl=86400)
+        # Keep meta in sync so UI "STOCKS IN FEED" / "LAST SUCCESS" are not blank mid-run
+        try:
+            ok_n = int(j.get("ok_count") or j.get("processed") or 0)
+            if ok_n > 0 or j.get("status") in ("done", "stopped", "error"):
+                self.set_meta(
+                    last_count=max(ok_n, int(self.meta().get("last_count") or 0)),
+                    last_success_at=j.get("updated_at") or _now_iso(),
+                    last_message=j.get("message") or self.meta().get("last_message"),
+                    source="job_progress",
+                )
+        except Exception:
+            pass
         return j
 
 

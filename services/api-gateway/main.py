@@ -5055,7 +5055,11 @@ def data_feed_status():
                 meta = store.meta()
     except Exception as e:
         logger.warning("data-feed status heal: %s", e)
-    return {"ok": True, **job, "meta": meta}
+    return {
+        "stocks_in_feed": int((meta or {}).get("last_count") or (job or {}).get("ok_count") or 0),
+        "last_success": (meta or {}).get("last_success_at"),
+        "last_success_at": (meta or {}).get("last_success_at"),
+"ok": True, **job, "meta": meta}
 
 
 @app.get("/data-feed/{symbol}")

@@ -78,17 +78,24 @@ ENV_DEFAULTS = {
 }
 
 _redis = None
-if Redis is not None:
+_USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
+if os.getenv("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
+    _USE_REDIS = False
+if _USE_REDIS and Redis is not None:
     try:
-        _redis = Redis(
-            url=os.getenv("UPSTASH_REDIS_REST_URL"),
-            token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
-        )
-        _redis.ping()
-        logger.info("Connected to Upstash Redis")
+        url = os.getenv("UPSTASH_REDIS_REST_URL")
+        token = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+        if url and token:
+            _redis = Redis(url=url, token=token)
+            _redis.ping()
+            logger.info("Connected to Upstash Redis (USE_REDIS=1)")
+        else:
+            logger.info("Notification Redis OFF — missing credentials")
     except Exception as e:
-        logger.warning("Redis unavailable — notification config will not persist across restarts: %s", e)
+        logger.warning("Redis unavailable — memory config only: %s", e)
         _redis = None
+else:
+    logger.info("Notification Redis OFF (USE_REDIS=0) — zero Upstash commands")
 
 # In-memory fallback so the service still works (for the current process
 # lifetime) when Redis isn't configured, e.g. local `docker compose up`.

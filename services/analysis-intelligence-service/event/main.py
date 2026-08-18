@@ -290,10 +290,18 @@ def _get_earnings_history(symbol: str):
 def _get_news(symbol: str):
     ticker = _get_ticker(symbol)
     try:
-        return ticker.news
+        news = ticker.news
+        if not news:
+            return []
+        return news
     except Exception as e:
-        logger.warning(f"news failed for {symbol}: {e}")
-        return None
+        # Yahoo often returns empty body → json "Expecting value: line 1 column 1"
+        msg = str(e)
+        if "Expecting value" in msg or "line 1 column 1" in msg:
+            logger.debug("Yahoo news empty/non-JSON for %s — skipping", symbol)
+        else:
+            logger.warning("news failed for %s: %s", symbol, e)
+        return []
 
 
 # Extra name aliases for better matching (e.g. PWL / Physics Wallah)

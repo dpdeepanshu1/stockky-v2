@@ -54,61 +54,101 @@ MIN_REQUEST_INTERVAL_SECONDS = 1.0
 REQUEST_TIMEOUT_SECONDS = 10
 
 
+
+# ── Memory-first cache (USE_REDIS=0 default — stops Upstash burn during data-feed) ──
+_USE_REDIS = os.environ.get("USE_REDIS", "0").lower() in ("1", "true", "yes")
+if os.environ.get("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
+    _USE_REDIS = False
+
+_MEM_CACHE: Dict[str, Any] = {}
+_MEM_LAST_TS: float = 0.0
+_redis_client = None
+_redis_init = False
+
+
 def _get_redis_client():
-    """Uses upstash_redis.Redis (REST-based), matching what api-gateway
-    and scheduler-service actually use in this codebase — confirmed by
-    reading api-gateway's source, not guessed. Needs UPSTASH_REDIS_REST_URL
-    and UPSTASH_REDIS_REST_TOKEN, the same pair those services already use,
-    not a separate REDIS_URL."""
-    from upstash_redis import Redis
-    url = os.environ.get("UPSTASH_REDIS_REST_URL")
-    token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
-    if not url or not token:
-        raise RuntimeError(
-            "UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN not set — required "
-            "for indianapi_fallback's cache and rate limiter. Same credentials "
-            "api-gateway and scheduler-service already use."
-        )
-    return Redis(url=url, token=token)
+    """Optional Upstash only when USE_REDIS=1. Default: None (memory only)."""
+    global _redis_client, _redis_init
+    if not _USE_REDIS:
+        return None
+    if _redis_init:
+        return _redis_client
+    _redis_init = True
+    try:
+        from upstash_redis import Redis
+        url = os.environ.get("UPSTASH_REDIS_REST_URL")
+        token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+        if not url or not token:
+            logger.info("IndianAPI: USE_REDIS=1 but no Upstash credentials — memory only")
+            _redis_client = None
+            return None
+        _redis_client = Redis(url=url, token=token)
+        logger.info("IndianAPI: Upstash Redis ON (USE_REDIS=1)")
+    except Exception as e:
+        logger.warning("IndianAPI Redis unavailable: %s — memory only", e)
+        _redis_client = None
+    return _redis_client
 
 
 def _cache_get(redis_client, symbol: str) -> Optional[Dict[str, Any]]:
-    raw = redis_client.get(CACHE_KEY_PREFIX + symbol.upper())
-    if raw is None:
+    key = CACHE_KEY_PREFIX + symbol.upper()
+    # memory first
+    hit = _MEM_CACHE.get(key)
+    if hit is not None:
+        return hit if isinstance(hit, dict) else None
+    if redis_client is None:
         return None
     try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
+        raw = redis_client.get(key)
+        if raw is None:
+            return None
+        data = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+        if isinstance(data, dict):
+            _MEM_CACHE[key] = data
+        return data
+    except Exception:
         return None
 
 
 def _cache_set(redis_client, symbol: str, payload: Dict[str, Any]) -> None:
-    # No Redis TTL set deliberately — expiry is trading-day-aware
-    # (_is_cache_fresh), not a flat wall-clock TTL, so we manage
-    # expiry ourselves in the stored `cached_at` field rather than
-    # relying on Redis to evict it.
-    redis_client.set(CACHE_KEY_PREFIX + symbol.upper(), json.dumps(payload))
+    key = CACHE_KEY_PREFIX + symbol.upper()
+    _MEM_CACHE[key] = payload
+    # Soft cap memory
+    if len(_MEM_CACHE) > 2000:
+        for k in list(_MEM_CACHE.keys())[:200]:
+            _MEM_CACHE.pop(k, None)
+    if redis_client is None:
+        return
+    try:
+        redis_client.set(key, json.dumps(payload, default=str))
+    except Exception as e:
+        logger.debug("IndianAPI redis set skip: %s", e)
 
 
-def _add_trading_days(start: date, n: int) -> date:
-    """Skips Sat/Sun. Does NOT know NSE holidays (no holiday calendar
-    available) — worst case this treats an NSE holiday as a trading day,
-    making the cache refresh very slightly earlier than strictly
-    necessary. That's a safe direction to be wrong in for a rate-limited
-    free-tier budget: it costs at most one extra call around a holiday,
-    it never under-refreshes."""
-    d = start
-    added = 0
-    while added < n:
-        d += timedelta(days=1)
-        if d.weekday() < 5:
-            added += 1
-    return d
-
-
-def _cache_expiry(cached_at: datetime) -> datetime:
-    expiry_date = _add_trading_days(cached_at.astimezone(IST).date(), CACHE_TRADING_DAYS)
-    return datetime.combine(expiry_date, NSE_MARKET_OPEN, tzinfo=IST)
+def _rate_limit_wait(redis_client) -> None:
+    """In-process 1 req/sec. Redis path only if USE_REDIS=1."""
+    global _MEM_LAST_TS
+    import time as _t
+    now = _t.time()
+    wait = MIN_REQUEST_INTERVAL_SECONDS - (now - _MEM_LAST_TS)
+    if wait > 0:
+        _t.sleep(wait)
+    _MEM_LAST_TS = _t.time()
+    if redis_client is None:
+        return
+    try:
+        last = redis_client.get(RATE_LIMIT_KEY)
+        if last is not None:
+            try:
+                last_f = float(last)
+                gap = MIN_REQUEST_INTERVAL_SECONDS - (_t.time() - last_f)
+                if gap > 0:
+                    _t.sleep(gap)
+            except Exception:
+                pass
+        redis_client.set(RATE_LIMIT_KEY, str(_t.time()))
+    except Exception:
+        pass
 
 
 def _is_cache_fresh(cached_payload: Dict[str, Any]) -> bool:

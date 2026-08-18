@@ -20,6 +20,7 @@ import logging
 import os
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
+import threading
 
 logger = logging.getLogger("data-feed")
 
@@ -37,6 +38,23 @@ _LOCAL_SYMBOLS: Dict[str, dict] = {}
 _LOCAL_META: Dict[str, Any] = {}
 _LOCAL_JOB: Dict[str, Any] = {}
 _LOCAL_INDEX: Set[str] = set()
+
+# Hard stop: process-local flag so Stop is immediate (does not wait for next Neon read)
+_DATA_FEED_STOP_FLAG = threading.Event()
+
+
+def request_data_feed_stop() -> None:
+    """Called by /data-feed/stop — worker checks this every symbol."""
+    _DATA_FEED_STOP_FLAG.set()
+
+
+def clear_data_feed_stop() -> None:
+    """Called when starting/resuming a feed run."""
+    _DATA_FEED_STOP_FLAG.clear()
+
+
+def data_feed_stop_requested() -> bool:
+    return _DATA_FEED_STOP_FLAG.is_set()
 
 
 def _now_iso() -> str:

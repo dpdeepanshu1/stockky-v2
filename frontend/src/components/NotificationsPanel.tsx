@@ -222,10 +222,14 @@ export default function NotificationsPanel() {
           <p className="text-mist text-sm max-w-lg">
             Connect a free channel to get pinged on new BUY NOW calls and SELL flips. Everything
             here is configured from the page -- no code or redeploy needed.
-            {!config.persisted && (
+            {config.persisted ? (
+              <span className="block mt-1 text-signal-buy text-xs opacity-80">
+                Config is saved on the backend (Neon) — survives restarts.
+              </span>
+            ) : (
               <span className="block mt-1 text-signal-hold">
-                Redis isn't connected on the backend, so this config resets on restart. Add
-                UPSTASH_REDIS_REST_URL / TOKEN to make it stick.
+                Config is only in memory right now — set CACHE_DATABASE_URL on the
+                notification service so Telegram / CallMeBot settings survive restarts.
               </span>
             )}
           </p>

@@ -28,6 +28,7 @@ from data_feed import (
     DataFeedStore, extract_feed_payload, DATA_FEED_TTL,
     hot_job_get, hot_job_set, HOT_RESULT_KEY,
     try_refresh_lock, release_refresh_lock, soft_ttl_should_refresh,
+    request_data_feed_stop, clear_data_feed_stop, data_feed_stop_requested,
 )
 from circuit_breaker import get_breaker, CircuitOpenError, all_snapshots
 from metrics import metrics
@@ -328,7 +329,8 @@ def _load_watchlist() -> List[str]:
     return _redis_get(WATCHLIST_KEY) or []
 
 def _save_watchlist(symbols: List[str]):
-    _redis_set(WATCHLIST_KEY, symbols)
+    # No TTL — durable on Neon (prefix stockky:watchlist)
+    _redis_set(WATCHLIST_KEY, list(symbols) if symbols else [], ttl=None)
 
 def _load_searched() -> List[str]:
     return _redis_get(SEARCHED_KEY) or []
@@ -5195,15 +5197,16 @@ async def data_feed_run(
         mode = "refresh" if force else "start"
 
     async def _run(start_at: int, ok0: int, err0: int, done0: set):
+        clear_data_feed_stop()
         ok_n = ok0
         err_n = err0
         done_set = set(done0)
         client = _get_http_client()  # shared keepalive pool
         if True:
             for i in range(start_at, len(universe)):
-                # Cooperative stop
+                # Cooperative stop (process flag OR job flag) — ASAP
                 jnow = store.job()
-                if jnow.get("stop_requested"):
+                if data_feed_stop_requested() or jnow.get("stop_requested") or jnow.get("status") in ("stopped", "stopping"):
                     ts = datetime.now(IST).isoformat()
                     msg = f"Stopped at {i}/{len(universe)} — committed {ok_n} fed stocks at {ts}"
                     store.set_meta(
@@ -5343,7 +5346,17 @@ async def data_feed_stop(force: bool = True):
     Free-tier workers often die after sleep, so cooperative stop alone leaves
     status=running forever. We always force-commit from the last checkpoint.
     """
+    # Hard stop first — worker sees this on next symbol (no Neon round-trip)
+    try:
+        request_data_feed_stop()
+    except Exception:
+        pass
     store = _feed_store()
+    # Mark stopping so in-flight loop exits even if Event was cleared
+    try:
+        store.set_job(stop_requested=True, status="stopping", message="Stop requested — finishing current symbol…")
+    except Exception:
+        pass
     job = store.job()
     status = job.get("status")
     if status not in ("running", "stopped") and not force:

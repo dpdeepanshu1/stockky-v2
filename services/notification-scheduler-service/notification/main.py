@@ -216,13 +216,22 @@ def _public_config(cfg: dict) -> dict:
             "users": (cfg.get("callmebot_users") or ""),
             "recipients_count": len(_callmebot_recipients(cfg)),
         },
-        "persisted": bool(_redis),
+        "persisted": bool(_kv is not None or _redis),
+        "persist_backend": (
+            "neon" if _kv is not None else ("redis" if _redis else "memory")
+        ),
     }
 
 
 @app.get("/health")
 def health(warm: bool = False):
-    out = {"status": "ok", "service": "notification-service", "redis": bool(_redis)}
+    out = {
+        "status": "ok",
+        "service": "notification-service",
+        "redis": bool(_redis),
+        "neon": bool(_kv is not None),
+        "persisted": bool(_kv is not None or _redis),
+    }
     if warm:
         if _redis:
             try:

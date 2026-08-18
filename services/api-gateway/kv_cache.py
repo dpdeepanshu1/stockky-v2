@@ -1,3 +1,4 @@
+import re
 """
 Stockky KV cache — Redis-free by default.
 
@@ -132,12 +133,22 @@ def _get_neon():
         return None
     try:
         from sqlalchemy import create_engine, text
+        import re as _re
+        if url.startswith("postgres://"):
+            url = "postgresql://" + url[len("postgres://"):]
+        if "channel_binding=" in url:
+            url = _re.sub(r"([&?])channel_binding=[^&]*", r"\1", url)
+            url = url.replace("?&", "?").rstrip("?&")
+        url = _re.sub(r"(?i)([?&]sslmode=)required\b", r"\1require", url)
+        if "sslmode=" not in url.lower():
+            url = url + ("&" if "?" in url else "?") + "sslmode=require"
         eng = create_engine(
             url,
             pool_pre_ping=True,
             pool_size=int(os.getenv("CACHE_DB_POOL_SIZE", "2")),
             max_overflow=0,
-            pool_recycle=280,
+            pool_recycle=180,
+            connect_args={"connect_timeout": 10},
         )
         with eng.begin() as conn:
             conn.execute(text(

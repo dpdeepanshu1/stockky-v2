@@ -635,9 +635,9 @@ def get_engine(database_url=None):
                 kwargs["max_overflow"] = int(os.environ.get("DB_MAX_OVERFLOW", "1"))
                 kwargs["pool_timeout"] = int(os.environ.get("DB_POOL_TIMEOUT", "20"))
                 kwargs["pool_use_lifo"] = True  # prefer hot connections under burst
+                # Neon pooler rejects startup options like statement_timeout
                 kwargs["connect_args"] = {
                     "connect_timeout": int(os.environ.get("DB_CONNECT_TIMEOUT", "10")),
-                    "options": "-c statement_timeout=30000",  # 30s statement cap
                 }
                 _log.info(
                     "Neon/Postgres pool ready (size=%s overflow=%s recycle=%ss lifo=1)",

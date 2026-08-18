@@ -33,6 +33,11 @@ from circuit_breaker import get_breaker, CircuitOpenError, all_snapshots
 from metrics import metrics
 from rate_limit_monitor import monitor as rate_limit_monitor
 try:
+    import kv_cache as _kv_cache
+except Exception:
+    _kv_cache = None  # type: ignore
+
+try:
     import qstash_client
 except Exception:
     qstash_client = None  # type: ignore
@@ -190,6 +195,8 @@ SCAN_UNIVERSE_KEY   = "stockky:scan_universe"
 IPO_CACHE_KEY       = "stockky:ipos:recent"
 KNOWN_SYMBOLS_KEY   = "stockky:known_symbols"
 SCAN_TASK_PREFIX    = "stockky:scan_task:"
+_SCAN_CANCEL_FLAGS: set = set()  # process-local instant cancel
+
 MARKET_MOVERS_CACHE_PREFIX = "stockky:market_movers:"
 INDICES_CACHE_KEY   = "stockky:indices"
 INDICES_LAST_KNOWN  = "stockky:indices_last_known"
@@ -234,13 +241,37 @@ def _feed_store() -> DataFeedStore:
 
 
 def _redis_get(key: str):
-    if not _redis:
-        return None
+    """Memory + optional Neon durable (kv_cache). Never requires Upstash."""
+    if _kv_cache is not None:
+        try:
+            return _kv_cache.get(key)
+        except Exception as e:
+            logger.debug("kv get %s: %s", key, e)
+    # legacy mem fallback
     try:
-        val = _redis.get(key)
-        return json.loads(val) if val else None
+        exp = _mem_kv_exp.get(key)
+        if exp is not None and _time_mod.time() > exp:
+            _mem_kv.pop(key, None)
+            _mem_kv_exp.pop(key, None)
+            return None
+        if key in _mem_kv:
+            return _mem_kv[key]
     except Exception:
-        return None
+        pass
+    if _redis is not None:
+        try:
+            raw = _redis.get(key)
+            if raw is None:
+                return None
+            if isinstance(raw, (bytes, str)):
+                try:
+                    return json.loads(raw)
+                except Exception:
+                    return raw
+            return raw
+        except Exception:
+            pass
+    return None
 
 
 def _redis_soft_ttl_refresh(key: str, soft_window: int = 10) -> bool:
@@ -254,29 +285,35 @@ def _redis_soft_ttl_refresh(key: str, soft_window: int = 10) -> bool:
         return False
 
 def _redis_set(key: str, value, ttl: int = None):
-    # Always memory; Redis only if USE_REDIS=1
-    if ttl:
-        _mem_kv_exp[key] = _time_mod.time() + int(ttl)
-    else:
-        _mem_kv_exp[key] = None
-    _mem_kv[key] = value
-    # Cap memory
-    if len(_mem_kv) > 8000:
-        for k in list(_mem_kv.keys())[:500]:
-            _mem_kv.pop(k, None)
-            _mem_kv_exp.pop(k, None)
-    if not _redis:
-        return
+    """Memory always; Neon for durable prefixes; Redis only if USE_REDIS=1."""
+    if _kv_cache is not None:
+        try:
+            _kv_cache.set(key, value, ttl=ttl)
+            return
+        except Exception as e:
+            logger.debug("kv set %s: %s", key, e)
     try:
-        import json as _json
-        data = _json.dumps(value, default=str)
+        _mem_kv[key] = value
         if ttl:
-            _redis.setex(key, int(ttl), data)
+            _mem_kv_exp[key] = _time_mod.time() + int(ttl)
         else:
-            _redis.set(key, data)
-    except Exception as e:
-        logger.debug("redis set %s: %s", key, e)
-
+            _mem_kv_exp.pop(key, None)
+        # soft cap
+        if len(_mem_kv) > 8000:
+            for k in list(_mem_kv.keys())[:500]:
+                _mem_kv.pop(k, None)
+                _mem_kv_exp.pop(k, None)
+    except Exception:
+        pass
+    if _redis is not None:
+        try:
+            payload = json.dumps(value, default=str) if not isinstance(value, str) else value
+            if ttl:
+                _redis.setex(key, int(ttl), payload)
+            else:
+                _redis.set(key, payload)
+        except Exception:
+            pass
 
 
 def _load_watchlist() -> List[str]:
@@ -1813,6 +1850,8 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
         return await _analyze_one_symbol_ultra(sym, client, sem, lite=lite)
 
     def _should_cancel() -> bool:
+        if task_id in _SCAN_CANCEL_FLAGS:
+            return True
         return bool(_redis_get(cancel_key))
 
     def _classify(result: dict):
@@ -3187,14 +3226,16 @@ def get_scan_status(task_id: str):
 
 @app.post("/scan/cancel/{task_id}")
 def cancel_scan(task_id: str):
-    """Request cancel — checked every completed symbol; pending tasks cancelled ASAP."""
+    """Request cancel — process-local flag + durable key; stops ASAP."""
+    _SCAN_CANCEL_FLAGS.add(task_id)
     data = _redis_get(SCAN_TASK_PREFIX + task_id)
     if not data:
-        raise HTTPException(status_code=404, detail="Task not found or expired")
+        return {"status": "cancel_requested", "message": "Task not in memory (already stopped or expired)", "ok": True}
     if data.get("status") != "running":
         return {"status": "already_finished", "task_status": data.get("status"),
                 "processed_so_far": data.get("processed", 0), "total": data.get("total", 0)}
     # Dedicated cancel key (progress writes must not wipe this)
+    _SCAN_CANCEL_FLAGS.add(task_id)
     _redis_set(SCAN_TASK_PREFIX + task_id + ":cancel", True, ttl=3600)
     # Also mark progress payload so UI sees cancel immediately
     try:

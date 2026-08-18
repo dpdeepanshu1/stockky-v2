@@ -177,6 +177,34 @@ def is_market_open() -> bool:
         return False
     return dtime(9, 15) <= now.time() <= dtime(15, 30)
 
+
+def _sanitize_for_json(obj):
+    """Replace NaN/Inf so FastAPI json.dumps never 500s (fundamentals etc.)."""
+    import math
+    if obj is None:
+        return None
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(v) for v in obj]
+    try:
+        import numpy as np
+        if isinstance(obj, (np.floating,)):
+            f = float(obj)
+            return None if (math.isnan(f) or math.isinf(f)) else f
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, np.ndarray):
+            return [_sanitize_for_json(x) for x in obj.tolist()]
+    except Exception:
+        pass
+    return obj
+
+
 def get_cache_ttl() -> int:
     """Return TTL in seconds: 300 if market open, else 21600 (6 hours)."""
     return 300 if is_market_open() else 21600
@@ -816,6 +844,19 @@ def get_history(
 
 @app.get("/fundamentals/{symbol}")
 def get_fundamentals_raw(symbol: str):
+    try:
+        return _get_fundamentals_inner(symbol)
+    except Exception as e:
+        logger.warning("fundamentals failed for %s: %s", symbol, e)
+        return _sanitize_for_json({
+            "symbol": str(symbol).upper().replace(".NS", "") + ".NS" if not str(symbol).endswith(".NS") else str(symbol),
+            "error": "fundamentals_unavailable",
+            "message": str(e)[:200],
+            "pe_ratio": None,
+            "roe": None,
+        })
+
+def _get_fundamentals_inner(symbol: str):
     sym = normalize_symbol(symbol)
     cache_key = f"fundamentals:{sym}"
     cached = _cache_get(cache_key)

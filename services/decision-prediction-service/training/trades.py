@@ -60,6 +60,54 @@ except Exception:
     engine = create_engine(_url, echo=False, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 
+# ── Redis read-through cache for portfolio/reports (cuts Supabase egress) ──
+_REPORT_TTL = int(os.environ.get("REPORT_CACHE_TTL_SEC", "90"))
+_trades_redis = None
+try:
+    from upstash_redis import Redis as _UpstashRedis
+    _ru = os.environ.get("UPSTASH_REDIS_REST_URL")
+    _rt = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+    if _ru and _rt:
+        _trades_redis = _UpstashRedis(url=_ru, token=_rt)
+except Exception:
+    _trades_redis = None
+_trades_mem_cache = {}
+
+
+def _report_cache_get(key: str):
+    import time as _t
+    import json as _json
+    now = _t.time()
+    hit = _trades_mem_cache.get(key)
+    if hit and hit[0] > now:
+        return hit[1]
+    if _trades_redis:
+        try:
+            raw = _trades_redis.get(f"trades:{key}")
+            if raw:
+                data = _json.loads(raw) if isinstance(raw, str) else raw
+                _trades_mem_cache[key] = (now + _REPORT_TTL, data)
+                return data
+        except Exception:
+            pass
+    return None
+
+
+def _report_cache_set(key: str, value):
+    import time as _t
+    import json as _json
+    _trades_mem_cache[key] = (_t.time() + _REPORT_TTL, value)
+    if _trades_redis:
+        try:
+            _trades_redis.setex(f"trades:{key}", _REPORT_TTL, _json.dumps(value, default=str))
+        except Exception:
+            pass
+
+
+def _report_cache_invalidate():
+    _trades_mem_cache.clear()
+
+
 
 def get_or_create_account(db):
     account = db.query(db_models.PortfolioAccount).filter(db_models.PortfolioAccount.id == 1).first()
@@ -103,16 +151,37 @@ def deposit_funds(amount: float, note: str = None):
 
 
 def get_portfolio_summary():
+    cached = _report_cache_get("portfolio_summary")
+    if cached is not None:
+        return cached
     db = SessionLocal()
     try:
         account = get_or_create_account(db)
         open_trades = db.query(db_models.PaperTrade).filter(db_models.PaperTrade.status == "OPEN").all()
         open_value = sum((t.current_price or t.entry_price) * t.quantity for t in open_trades)
         open_pnl = sum(t.pnl_amount or 0 for t in open_trades)
-        closed_trades = db.query(db_models.PaperTrade).filter(db_models.PaperTrade.status == "CLOSED").all()
+        # Cap closed-trade scan for win-rate (egress control)
+        closed_q = (
+            db.query(db_models.PaperTrade)
+            .filter(db_models.PaperTrade.status == "CLOSED")
+            .order_by(db_models.PaperTrade.exit_date.desc())
+            .limit(500)
+        )
+        closed_trades = closed_q.all()
         wins = [t for t in closed_trades if (t.pnl_amount or 0) > 0]
+        # Approximate total closed count without full table pull when limited
+        closed_count = len(closed_trades)
+        try:
+            from sqlalchemy import func
+            closed_count = (
+                db.query(func.count(db_models.PaperTrade.id))
+                .filter(db_models.PaperTrade.status == "CLOSED")
+                .scalar()
+            ) or closed_count
+        except Exception:
+            pass
         win_rate = round(len(wins) / len(closed_trades) * 100, 1) if closed_trades else None
-        return {
+        out = {
             "cash_balance": round(account.cash_balance, 2),
             "total_deposited": round(account.total_deposited, 2),
             "realized_pnl": round(account.realized_pnl, 2),
@@ -120,9 +189,11 @@ def get_portfolio_summary():
             "open_positions_pnl": round(open_pnl, 2),
             "total_equity": round(account.cash_balance + open_value, 2),
             "open_positions": len(open_trades),
-            "closed_positions": len(closed_trades),
+            "closed_positions": int(closed_count),
             "win_rate": win_rate,
         }
+        _report_cache_set("portfolio_summary", out)
+        return out
     finally:
         db.close()
 
@@ -362,6 +433,10 @@ def mark_all_open_trades():
             if result.status == "CLOSED":
                 closed += 1
     logger.info(f"Mark-to-market sweep: {marked} marked, {closed} closed")
+    try:
+        _report_cache_invalidate()
+    except Exception:
+        pass
     return {"marked": marked, "closed": closed, "total_open_before": len(open_trade_ids)}
 
 
@@ -423,11 +498,25 @@ def _build_trade_report(period: str, lookback: int):
 
 
 def get_daily_trade_report(days: int = 30):
-    return _build_trade_report("daily", days)
+    days = max(1, min(int(days or 30), 60))  # hard cap lookback
+    key = f"daily_report:{days}"
+    cached = _report_cache_get(key)
+    if cached is not None:
+        return cached
+    out = _build_trade_report("daily", days)
+    _report_cache_set(key, out)
+    return out
 
 
 def get_weekly_trade_report(weeks: int = 12):
-    return _build_trade_report("weekly", weeks)
+    weeks = max(1, min(int(weeks or 12), 26))
+    key = f"weekly_report:{weeks}"
+    cached = _report_cache_get(key)
+    if cached is not None:
+        return cached
+    out = _build_trade_report("weekly", weeks)
+    _report_cache_set(key, out)
+    return out
 
 # ── Clear All + Backup (paper trades / tracking) ──────────────────────────
 import json, os

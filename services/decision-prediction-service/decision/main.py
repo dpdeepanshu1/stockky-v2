@@ -232,19 +232,26 @@ def circuits_status():
 # ── Fetch helpers ──────────────────────────────────────────────────
 async def _fetch_optional(client: httpx.AsyncClient, url: str, label: str):
     """Fetch optional pillar with circuit breaker (fail fast when dependency is down)."""
-    breaker = get_breaker(f"decision:{label.lower()}", failure_threshold=4, recovery_timeout=90)
+    breaker = get_breaker(f"decision:{label.lower()}", failure_threshold=5, recovery_timeout=60)
     if not breaker.allow():
         logger.warning("%s circuit OPEN — skip (retry in %.0fs)", label, breaker.retry_after())
         return None
+    # Fundamentals / prediction need more than 5s on free-tier cold start
+    timeout = httpx.Timeout(18.0 if label.lower() in ("fundamental", "prediction") else 8.0, connect=4.0)
     try:
-        resp = await client.get(url, timeout=httpx.Timeout(5.0, connect=2.0))
-        resp.raise_for_status()
+        resp = await client.get(url, timeout=timeout)
+        if resp.status_code >= 400:
+            detail = (resp.text or "")[:180].replace("\n", " ")
+            breaker.record_failure(f"HTTP {resp.status_code}")
+            logger.warning("%s unavailable: HTTP %s %s", label, resp.status_code, detail)
+            return None
         data = resp.json()
         breaker.record_success()
         return data
     except Exception as e:
-        breaker.record_failure(str(e))
-        logger.warning("%s unavailable: %s", label, e)
+        msg = str(e) or type(e).__name__
+        breaker.record_failure(msg)
+        logger.warning("%s unavailable: %s", label, msg)
         return None
 
 

@@ -38,28 +38,49 @@ SessionLocal = sessionmaker(bind=engine)
 MARKET_DATA_URL = os.environ.get("MARKET_DATA_URL", "").rstrip("/")
 
 
+# Global Yahoo cool-down after 429 (shared across T+1/T+5 batch)
+_yf_rate_limited_until = 0.0
+_YF_COOLDOWN_SEC = float(os.environ.get("YF_EVAL_COOLDOWN_SEC", "180"))
+
+
+def _yf_is_rate_limited() -> bool:
+    import time as _t
+    return _t.time() < _yf_rate_limited_until
+
+
+def _yf_mark_rate_limited(err=None) -> None:
+    import time as _t
+    global _yf_rate_limited_until
+    msg = str(err or "")
+    if "429" in msg or "Too Many Requests" in msg or "Rate limited" in msg:
+        _yf_rate_limited_until = max(_yf_rate_limited_until, _t.time() + _YF_COOLDOWN_SEC)
+        logger.warning("yfinance rate-limited — eval cool-down %.0fs", _YF_COOLDOWN_SEC)
+
+
 def _fetch_bars(symbol: str, start_date, end_date):
     """
-    Return list of {date, open, high, low, close} between start and end (inclusive-ish).
-    Prefers market-data service (keeps Yahoo pressure on one dyno); falls back to yfinance.
+    Return list of {date, open, high, low, close} between start and end.
+    Prefer market-data exclusively when it returns HTTP 200 (even if few bars).
+    yfinance is last-resort only when market-data fails AND not rate-limited.
     """
     base = (symbol or "").upper().replace(".NS", "").replace(".BO", "")
     rows = []
+    market_data_ok = False
+
     # 1) market-data history
     if MARKET_DATA_URL:
         try:
             import httpx
-            # period long enough to cover T+5 + weekends
             r = httpx.get(
                 f"{MARKET_DATA_URL}/history/{base}",
                 params={"period": "1mo", "interval": "1d"},
                 timeout=20.0,
             )
             if r.status_code == 200:
+                market_data_ok = True
                 data = r.json() or {}
-                candles = data.get("candles") or data.get("data") or []
+                candles = data.get("candles") or data.get("data") or data.get("bars") or []
                 for c in candles:
-                    # support various shapes
                     d = c.get("date") or c.get("time") or c.get("t")
                     if not d:
                         continue
@@ -81,13 +102,18 @@ def _fetch_bars(symbol: str, start_date, end_date):
                         "low": float(c.get("low") or c.get("l") or 0),
                         "close": float(c.get("close") or c.get("c") or 0),
                     })
-                if len(rows) >= 2:
-                    rows.sort(key=lambda x: x["date"])
-                    return rows
+                rows.sort(key=lambda x: x["date"])
+                # Trust market-data on 200 — never hammer Yahoo for the same symbol
+                return rows
         except Exception as e:
             logger.debug("market-data history for eval failed: %s", e)
 
-    # 2) yfinance fallback
+    if market_data_ok:
+        return rows
+
+    # 2) yfinance fallback only if market-data failed
+    if _yf_is_rate_limited():
+        return rows
     try:
         ticker = yf.Ticker(base + ".NS")
         hist = ticker.history(start=start_date, end=end_date + timedelta(days=1))
@@ -109,6 +135,7 @@ def _fetch_bars(symbol: str, start_date, end_date):
                 })
             rows.sort(key=lambda x: x["date"])
     except Exception as e:
+        _yf_mark_rate_limited(e)
         logger.warning("yfinance eval bars failed for %s: %s", base, e)
     return rows
 

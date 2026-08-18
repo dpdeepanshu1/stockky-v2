@@ -174,6 +174,9 @@ export default function Trades() {
 
   useEffect(() => {
     fetchAll();
+    // Poll slowly — avoids hammering Postgres/Supabase egress
+    const id = window.setInterval(() => { fetchAll(); }, 20000);
+    return () => window.clearInterval(id);
   }, [fetchAll]);
 
   const runMarkToMarket = async () => {

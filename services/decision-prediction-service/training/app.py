@@ -412,7 +412,20 @@ async def root():
     })
 
 @app.get("/health")
-async def health():
+async def health(warm: bool = False):
+    """Light health by default — does not touch Postgres (saves Supabase egress).
+    Pass ?db=1 only when you need connectivity diagnostics.
+    """
+    import os as _os
+    skip = _os.environ.get("HEALTH_SKIP_DB", "1").lower() in ("1", "true", "yes")
+    # warm is for waking the dyno only
+    if skip:
+        return JSONResponse(content={
+            "status": "ok",
+            "service": "training",
+            "db_checked": False,
+            "warm": bool(warm),
+        })
     info = _db_connection_info()
     ok = info.get("db_connected", False)
     return JSONResponse(content={

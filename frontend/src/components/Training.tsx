@@ -271,7 +271,7 @@ export default function Training() {
       }
     };
     poll();
-    progressPollRef.current = setInterval(poll, 2000);
+    progressPollRef.current = setInterval(poll, 3000);  // slightly slower progress poll
     return () => {
       if (progressPollRef.current) clearInterval(progressPollRef.current);
     };

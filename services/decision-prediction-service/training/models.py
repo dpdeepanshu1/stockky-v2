@@ -28,6 +28,34 @@ def ist_now() -> datetime:
 Base = declarative_base()
 
 # ---------- Numpy conversion helper ----------
+def convert_numpy_nan_safe(obj):
+    """Recursively convert numpy + strip NaN/Inf for JSON (IREDA etc.)."""
+    import math
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+    if obj is None:
+        return None
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if np is not None:
+        if isinstance(obj, (np.floating,)):
+            f = float(obj)
+            return None if (math.isnan(f) or math.isinf(f)) else f
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, np.ndarray):
+            return [convert_numpy_nan_safe(x) for x in obj.tolist()]
+    if isinstance(obj, dict):
+        return {k: convert_numpy_nan_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [convert_numpy_nan_safe(v) for v in obj]
+    return obj
+
+
 def convert_numpy(obj):
     """Recursively convert numpy types to Python native types."""
     if isinstance(obj, np.integer):
@@ -536,56 +564,93 @@ def ensure_schema(engine):
                     print(f"Added column {col_name} to {table_name}")
 
 # ---------- Database setup helpers ----------
-def get_engine(database_url=None):
-    """Create SQLAlchemy engine. Supports SQLite and Neon/Supabase Postgres.
+# Singleton engine — avoid opening a new pool on every request (Trades/Training latency)
+_ENGINE = None
+_ENGINE_URL = None
+_ENGINE_LOCK = None
 
-    Set DATABASE_URL on decision-prediction-service so win-rate, T+1/T+5,
-    and paper trades survive Render redeploys (sqlite is ephemeral).
+def get_engine(database_url=None):
+    """Create (or reuse) SQLAlchemy engine. Neon/Supabase-optimized pooling.
+
+    Free-tier rules:
+      - Prefer pooler :6543 (transaction mode)
+      - Small pool (default 2+1), pre-ping, recycle < Neon idle timeout
+      - Strip channel_binding / sslmode=required typos
+      - Singleton so Trades/Training pages do not re-init pool every call
     """
+    global _ENGINE, _ENGINE_URL, _ENGINE_LOCK
     import os
     import logging
     import re
+    import threading
+    from sqlalchemy.pool import NullPool, QueuePool
     _log = logging.getLogger("training-db")
+    if _ENGINE_LOCK is None:
+        _ENGINE_LOCK = threading.Lock()
+
     url = database_url or os.environ.get("TRAINING_DATABASE_URL") or os.environ.get("DATABASE_URL", "sqlite:///./training.db")
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
-    # psycopg2 does not always accept channel_binding=require (Neon SQLAlchemy snippet)
+    # Neon dashboard often appends channel_binding=require — psycopg2 can choke
     if "channel_binding=" in url:
-        import re as _re
-        url = _re.sub(r"([&?])channel_binding=[^&]*", r"\1", url)
+        url = re.sub(r"([&?])channel_binding=[^&]*", r"\1", url)
         url = url.replace("?&", "?").rstrip("?&")
-    # Prefer transaction pooler port 6543 (Supabase free 60-conn direct limit)
+    # Prefer transaction pooler port 6543
     if os.environ.get("FORCE_DB_POOLER", "1").lower() in ("1", "true", "yes") and url.startswith("postgresql"):
         if ":5432/" in url:
             url = url.replace(":5432/", ":6543/")
             _log.info("DB URL rewritten to pooler port 6543")
-    kwargs = {"echo": False}
-    if url.startswith("sqlite"):
-        kwargs["connect_args"] = {"check_same_thread": False}
-        if not os.environ.get("DATABASE_URL"):
-            _log.warning(
-                "DATABASE_URL not set — using ephemeral sqlite. "
-                "Win-rate / T+1/T+5 / trades will reset on redeploy. "
-                "Set Neon or Supabase Postgres DATABASE_URL in production."
-            )
-    else:
-        kwargs["pool_pre_ping"] = True
-        kwargs["pool_recycle"] = int(os.environ.get("DB_POOL_RECYCLE", "280"))
-        kwargs["pool_size"] = int(os.environ.get("DB_POOL_SIZE", "3"))  # Supabase free: stay well under 60 direct / 200 pooler
-        kwargs["max_overflow"] = int(os.environ.get("DB_MAX_OVERFLOW", "1"))
-        # Normalize SSL mode (psycopg2 accepts require/prefer/... — NOT "required")
-        # Common typo: sslmode=required → invalid sslmode value: "required"
-        url = re.sub(r"(?i)([?&]sslmode=)required\b", r"\1require", url)
-        url = re.sub(r"(?i)([?&]ssl=)true\b", r"\1require", url)  # rare aliases
-        if "sslmode=" not in url.lower():
-            sep = "&" if "?" in url else "?"
-            url = f"{url}{sep}sslmode=require"
-        _log.info(
-            "Using durable Postgres (pool_size=%s max_overflow=%s). Prefer pooler :6543",
-            kwargs["pool_size"],
-            kwargs["max_overflow"],
-        )
-    return create_engine(url, **kwargs)
+        # Neon -pooler host is preferred when present in dashboard connection string
+
+    with _ENGINE_LOCK:
+        if _ENGINE is not None and _ENGINE_URL == url and not database_url:
+            return _ENGINE
+
+        kwargs = {"echo": False}
+        if url.startswith("sqlite"):
+            kwargs["connect_args"] = {"check_same_thread": False}
+            if not os.environ.get("DATABASE_URL"):
+                _log.warning(
+                    "DATABASE_URL not set — using ephemeral sqlite. "
+                    "Set Neon DATABASE_URL for durable trades/training."
+                )
+        else:
+            # Normalize SSL (psycopg2: require NOT required)
+            url = re.sub(r"(?i)([?&]sslmode=)required\b", r"\1require", url)
+            url = re.sub(r"(?i)([?&]ssl=)true\b", r"\1require", url)
+            if "sslmode=" not in url.lower():
+                sep = "&" if "?" in url else "?"
+                url = f"{url}{sep}sslmode=require"
+
+            # Extreme serverless: one connection per checkout (no idle pool)
+            use_null = os.environ.get("DB_NULL_POOL", "0").lower() in ("1", "true", "yes")
+            if use_null:
+                kwargs["poolclass"] = NullPool
+                kwargs["connect_args"] = {"connect_timeout": int(os.environ.get("DB_CONNECT_TIMEOUT", "10"))}
+                _log.info("Using NullPool (serverless / Neon extreme free-tier)")
+            else:
+                kwargs["pool_pre_ping"] = True
+                kwargs["pool_recycle"] = int(os.environ.get("DB_POOL_RECYCLE", "180"))  # < typical idle timeout
+                kwargs["pool_size"] = int(os.environ.get("DB_POOL_SIZE", "2"))
+                kwargs["max_overflow"] = int(os.environ.get("DB_MAX_OVERFLOW", "1"))
+                kwargs["pool_timeout"] = int(os.environ.get("DB_POOL_TIMEOUT", "20"))
+                kwargs["pool_use_lifo"] = True  # prefer hot connections under burst
+                kwargs["connect_args"] = {
+                    "connect_timeout": int(os.environ.get("DB_CONNECT_TIMEOUT", "10")),
+                    "options": "-c statement_timeout=30000",  # 30s statement cap
+                }
+                _log.info(
+                    "Neon/Postgres pool ready (size=%s overflow=%s recycle=%ss lifo=1)",
+                    kwargs["pool_size"],
+                    kwargs["max_overflow"],
+                    kwargs["pool_recycle"],
+                )
+
+        eng = create_engine(url, **kwargs)
+        if not database_url:
+            _ENGINE = eng
+            _ENGINE_URL = url
+        return eng
 
 def create_tables(engine):
     Base.metadata.create_all(engine)

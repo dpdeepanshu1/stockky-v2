@@ -26,12 +26,24 @@ const daysHeld = (entryDate: string) =>
 type Toast = { type: "success" | "error" | "info"; message: string };
 
 export default function Trades() {
+  const TRADES_SNAP = "stockky_trades_snapshot_v1";
+  const readSnap = () => {
+    try {
+      const r = sessionStorage.getItem(TRADES_SNAP);
+      return r ? JSON.parse(r) : null;
+    } catch { return null; }
+  };
+  const writeSnap = (payload: any) => {
+    try { sessionStorage.setItem(TRADES_SNAP, JSON.stringify({ ...payload, saved_at: Date.now() })); } catch {}
+  };
+
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [openTrades, setOpenTrades] = useState<PaperTrade[]>([]);
   const [closedTrades, setClosedTrades] = useState<PaperTrade[]>([]);
   const [dailyReport, setDailyReport] = useState<TradeReportBucket[]>([]);
   const [weeklyReport, setWeeklyReport] = useState<TradeReportBucket[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !readSnap());
+  const [stale, setStale] = useState(false);
   const [markingToMarket, setMarkingToMarket] = useState(false);
   const [closingId, setClosingId] = useState<string | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);

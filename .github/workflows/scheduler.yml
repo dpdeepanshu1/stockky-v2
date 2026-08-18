@@ -6,9 +6,11 @@ name: Stockky Scheduler
 
 on:
   schedule:
-    # Hourly only during NSE session (IST ~09:30–15:30 ≈ UTC 04:00–10:00 Mon–Fri)
-    # Cuts GitHub Actions + Redis/command burn vs every-15-min ticks
-    - cron: "0 4-10 * * 1-5"
+    # Only 3 times during NSE session (IST ~09:30, 12:30, 15:00)
+    # UTC 04:00, 07:00, 09:30 → keep free-tier load low
+    - cron: "0 4 * * 1-5"
+    - cron: "0 7 * * 1-5"
+    - cron: "30 9 * * 1-5"
   workflow_dispatch:
     inputs:
       force_scan:
@@ -105,14 +107,18 @@ jobs:
           API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
           EVENT_TRACKER_URL: ${{ secrets.EVENT_TRACKER_URL }}
           NOTIFICATION_URL: ${{ secrets.NOTIFICATION_URL }}
-          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
-          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          USE_REDIS: "0"
           FORCE_SCAN: ${{ github.event_name == 'workflow_dispatch' && inputs.force_scan == true && 'true' || 'false' }}
         run: |
           export USE_FULL_UNIVERSE=true
           export USE_GATEWAY_ASYNC_SCAN=true
           export BATCH_TIMEOUT=300
           export SCAN_TIMEOUT_TOTAL=5400
+          # Skip heavy scan if one already in progress
+          ST=$(curl -fsS -m 15 "$API_GATEWAY_URL/scan/active" 2>/dev/null || curl -fsS -m 15 "$API_GATEWAY_URL/health" 2>/dev/null || echo '{}')
+          echo "$ST" | grep -qi 'scan.*running\|\"running\":true' && { echo "Scan already running — skip this tick"; exit 0; }
+          export USE_REDIS=0
+          export PREFER_DATA_FEED=1
           python services/notification-scheduler-service/scheduler/run_once.py
 
       - name: Post-scan T+1/T+5 evaluation (closed-loop)

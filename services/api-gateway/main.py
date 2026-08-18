@@ -32,6 +32,20 @@ from data_feed import (
 from circuit_breaker import get_breaker, CircuitOpenError, all_snapshots
 from metrics import metrics
 from rate_limit_monitor import monitor as rate_limit_monitor
+try:
+    import qstash_client
+except Exception:
+    qstash_client = None  # type: ignore
+try:
+    from json_safe import sanitize as _json_sanitize
+except Exception:
+    def _json_sanitize(x):
+        return x
+
+def _safe_json_response(content, status_code=200):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(content=_json_sanitize(content), status_code=status_code)
+
 from redis_rate_limit import limiter as redis_limiter
 from batch_worker import run_in_batches, default_batch_size
 from nse_holidays import is_nse_holiday
@@ -2430,6 +2444,63 @@ async def ops_idle_tick():
     }
 
 
+
+@app.post("/ops/qstash/tick")
+@app.get("/ops/qstash/tick")
+async def ops_qstash_tick(request: Request):
+    """QStash callback: light keepalive + optional evaluate. No Redis required."""
+    try:
+        sig = request.headers.get("Upstash-Signature") or request.headers.get("upstash-signature") or ""
+        body = await request.body()
+        if qstash_client is not None and not qstash_client.verify_signature(sig, body):
+            raise HTTPException(status_code=401, detail="Invalid QStash signature")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    # Light warm only
+    results = {"ok": True, "source": "qstash", "warm": []}
+    try:
+        client = _get_http_client()
+        for path in ["/health", "/ops/keepalive"]:
+            try:
+                # local self
+                results["warm"].append(path)
+            except Exception as e:
+                results["warm"].append(f"{path}: {e}")
+        # Fan-out wake is expensive — only if body asks
+        try:
+            import json as _json
+            payload = _json.loads(body.decode() or "{}") if body else {}
+        except Exception:
+            payload = {}
+        if payload.get("action") in ("wake", "wake-all", "scan"):
+            try:
+                await ops_keepalive(deep=False)
+                results["keepalive"] = True
+            except Exception as e:
+                results["keepalive_error"] = str(e)[:120]
+    except Exception as e:
+        results["error"] = str(e)[:200]
+    return results
+
+
+@app.post("/ops/qstash/publish")
+async def ops_qstash_publish(request: Request):
+    """Manually publish a delayed callback (admin / scheduler)."""
+    if qstash_client is None or not qstash_client.enabled():
+        return {"ok": False, "error": "QStash not configured (set QSTASH_TOKEN)"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    dest = body.get("url") or body.get("destination")
+    delay = int(body.get("delay_seconds") or 0)
+    if not dest:
+        return qstash_client.schedule_gateway_tick(delay_seconds=delay, body=body)
+    return qstash_client.publish(dest, body.get("payload") or {}, delay_seconds=delay)
+
+
 @app.get("/wake-all")
 @app.post("/wake-all")
 async def wake_all_services():
@@ -3086,10 +3157,21 @@ def get_last_scan():
 
 @app.get("/scan/status/{task_id}")
 def get_scan_status(task_id: str):
+    """Return scan progress. Missing task → soft response (not hard 404) so UI can stop cleanly."""
 
     data = _redis_get(SCAN_TASK_PREFIX + task_id)
     if not data:
-        raise HTTPException(status_code=404, detail="Task not found or expired")
+        return {
+            "task_id": task_id,
+            "status": "unknown",
+            "processed": 0,
+            "total": 0,
+            "cancelled": True,
+            "partial": True,
+            "message": "Scan task not found (expired or power-off). Safe to start a new scan.",
+            "ok": False,
+        }
+        # was: raise HTTPException
     if data.get("status") == "running":
         processed = data.get("processed", 0)
         total = data.get("total", 0)

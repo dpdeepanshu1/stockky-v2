@@ -5,6 +5,10 @@ import TrainingProgressPanel from "./TrainingProgressPanel";
 import { api, TrainingStatusResponse, PeriodRollupItem, TrainingProgress } from "../api";
 
 export default function Training() {
+  const TRAIN_SNAP = "stockky_training_snapshot_v1";
+  const readTrainSnap = () => { try { const r = sessionStorage.getItem(TRAIN_SNAP); return r ? JSON.parse(r) : null; } catch { return null; } };
+  const writeTrainSnap = (p: any) => { try { sessionStorage.setItem(TRAIN_SNAP, JSON.stringify({ ...p, saved_at: Date.now() })); } catch {} };
+
   const [status, setStatus] = useState<TrainingStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [training, setTraining] = useState(false);

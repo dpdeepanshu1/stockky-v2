@@ -13,15 +13,15 @@ from typing import List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
-from upstash_redis import Redis
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scheduler-once")
 
 API_GATEWAY_URL = os.environ["API_GATEWAY_URL"]
-EVENT_TRACKER_URL = os.environ["EVENT_TRACKER_URL"]
-NOTIFICATION_URL = os.environ["NOTIFICATION_URL"]
+EVENT_TRACKER_URL = os.environ.get("EVENT_TRACKER_URL", "")
+NOTIFICATION_URL = os.environ.get("NOTIFICATION_URL", "")
 IST = ZoneInfo("Asia/Kolkata")
+USE_REDIS = os.environ.get("USE_REDIS", "0").lower() in ("1", "true", "yes")
 
 # Market hours (IST)
 MARKET_OPEN = dtime(9, 15)
@@ -48,10 +48,64 @@ HOLIDAYS_2026 = [
     "2026-10-02", "2026-10-22", "2026-11-14", "2026-11-15", "2026-12-25",
 ]
 
-_redis = Redis(
-    url=os.environ["UPSTASH_REDIS_REST_URL"],
-    token=os.environ["UPSTASH_REDIS_REST_TOKEN"],
-)
+_redis = None
+if USE_REDIS:
+    try:
+        from upstash_redis import Redis as _UR
+        _redis = _UR(
+            url=os.environ.get("UPSTASH_REDIS_REST_URL", ""),
+            token=os.environ.get("UPSTASH_REDIS_REST_TOKEN", ""),
+        )
+        _redis.ping()
+        logger.info("Scheduler Redis ON (USE_REDIS=1)")
+    except Exception as e:
+        logger.warning("Scheduler Redis unavailable (%s) — file state only", e)
+        _redis = None
+else:
+    logger.info("Scheduler Redis OFF — local file state + optional QStash")
+
+_STATE_DIR = os.environ.get("SCHEDULER_STATE_DIR", "/tmp/stockky_scheduler")
+try:
+    os.makedirs(_STATE_DIR, exist_ok=True)
+except Exception:
+    pass
+
+def _file_key_path(key: str) -> str:
+    safe = key.replace(":", "_").replace("/", "_")
+    return os.path.join(_STATE_DIR, safe + ".json")
+
+def _state_get(key: str):
+    if _redis is not None:
+        try:
+            return _state_get(key)
+        except Exception:
+            pass
+    path = _file_key_path(key)
+    try:
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                return f.read()
+    except Exception:
+        pass
+    return None
+
+def _state_set(key: str, value, ex=None):
+    raw = value if isinstance(value, str) else json.dumps(value, default=str)
+    if _redis is not None:
+        try:
+            if ex:
+                _state_set(key, raw, ex=ex)
+            else:
+                _state_set(key, raw)
+            return
+        except Exception as e:
+            logger.debug("redis set fail: %s", e)
+    path = _file_key_path(key)
+    try:
+        with open(path, "w") as f:
+            f.write(raw)
+    except Exception as e:
+        logger.debug("file state set fail: %s", e)
 
 BUY_FAMILY = {"BUY NOW", "PREPARE TO BUY", "HOLD"}
 
@@ -129,7 +183,7 @@ def _notify(title: str, message: str, channel: str = "all", retries: int = 3):
 
 def _load_last_decisions() -> dict:
     try:
-        val = _redis.get(STATE_KEY)
+        val = _state_get(STATE_KEY)
         return json.loads(val) if val else {}
     except Exception:
         return {}
@@ -137,7 +191,7 @@ def _load_last_decisions() -> dict:
 
 def _save_last_decisions(decisions: dict):
     try:
-        _redis.set(STATE_KEY, json.dumps(decisions))
+        _state_set(STATE_KEY, json.dumps(decisions))
     except Exception:
         pass
 
@@ -384,7 +438,7 @@ def format_stock_picks(picks: List[Dict]) -> str:
 
 def store_daily_picks(date_str: str, picks: List[Dict]):
     key = DAILY_PICKS_KEY + date_str
-    existing = _redis.get(key)
+    existing = _state_get(key)
     if existing:
         try:
             existing_picks = json.loads(existing)
@@ -399,12 +453,12 @@ def store_daily_picks(date_str: str, picks: List[Dict]):
     new_list.sort(key=lambda x: x.get("combined_score", 0), reverse=True)
     if len(new_list) > 20:
         new_list = new_list[:20]
-    _redis.set(key, json.dumps(new_list, default=str))
+    _state_set(key, json.dumps(new_list, default=str))
 
 
 def get_daily_picks(date_str: str) -> List[Dict]:
     key = DAILY_PICKS_KEY + date_str
-    data = _redis.get(key)
+    data = _state_get(key)
     if data:
         try:
             return json.loads(data)
@@ -479,7 +533,7 @@ def send_sleep_message():
 
 def should_skip_scan() -> bool:
     try:
-        last_scan_str = _redis.get(LAST_SCAN_KEY)
+        last_scan_str = _state_get(LAST_SCAN_KEY)
         if not last_scan_str:
             return False
         last_scan_time = datetime.fromisoformat(last_scan_str)
@@ -510,21 +564,21 @@ def main():
         send_start_message()
 
     # Timed notifications (once per day)
-    if time_now == OPEN_ANNOUNCE_TIME and not _redis.get(OPEN_MSG_KEY + today_str):
+    if time_now == OPEN_ANNOUNCE_TIME and not _state_get(OPEN_MSG_KEY + today_str):
         send_market_open_announcement()
-        _redis.set(OPEN_MSG_KEY + today_str, "1", ex=86400)
+        _state_set(OPEN_MSG_KEY + today_str, "1", ex=86400)
 
-    if time_now == MARKET_OPEN and not _redis.get(OPEN_NOW_KEY + today_str):
+    if time_now == MARKET_OPEN and not _state_get(OPEN_NOW_KEY + today_str):
         send_market_open_now()
-        _redis.set(OPEN_NOW_KEY + today_str, "1", ex=86400)
+        _state_set(OPEN_NOW_KEY + today_str, "1", ex=86400)
 
-    if time_now == CLOSE_SUMMARY_TIME and not _redis.get(CLOSE_MSG_KEY + today_str):
+    if time_now == CLOSE_SUMMARY_TIME and not _state_get(CLOSE_MSG_KEY + today_str):
         send_close_summary(today_str)
-        _redis.set(CLOSE_MSG_KEY + today_str, "1", ex=86400)
+        _state_set(CLOSE_MSG_KEY + today_str, "1", ex=86400)
 
-    if time_now == SLEEP_TIME and not _redis.get(SLEEP_MSG_KEY + today_str):
+    if time_now == SLEEP_TIME and not _state_get(SLEEP_MSG_KEY + today_str):
         send_sleep_message()
-        _redis.set(SLEEP_MSG_KEY + today_str, "1", ex=86400)
+        _state_set(SLEEP_MSG_KEY + today_str, "1", ex=86400)
 
     # Run scan?
     should_run = FORCE_SCAN or (SCAN_START <= time_now <= SCAN_END)
@@ -563,5 +617,21 @@ def main():
     logger.info("Scheduler tick completed.")
 
 
+def _prefer_data_feed_then_scan():
+    """If data-feed has fresh data, skip heavy upstream fan-out where possible."""
+    if os.environ.get("PREFER_DATA_FEED", "1").lower() not in ("1", "true", "yes"):
+        return
+    try:
+        with httpx.Client(timeout=20.0) as c:
+            r = c.get(f"{API_GATEWAY_URL.rstrip('/')}/data-feed/status")
+            if r.status_code == 200:
+                st = r.json()
+                logger.info("data-feed status before scan: %s", str(st)[:200])
+    except Exception as e:
+        logger.debug("data-feed status: %s", e)
+
+
 if __name__ == "__main__":
+    _prefer_data_feed_then_scan()
+
     main()

@@ -1,3 +1,4 @@
+import math
 """
 Market Data Service
 --------------------
@@ -107,7 +108,13 @@ def _safe_int(val):
 def _compute_growth(current, previous):
     if previous is None or previous == 0:
         return None
-    return ((current - previous) / previous) * 100
+    try:
+        g = ((float(current) - float(previous)) / float(previous)) * 100
+        if g != g or abs(g) == float("inf"):  # NaN/Inf
+            return None
+        return g
+    except Exception:
+        return None
 
 # Global yfinance concurrency guard (free-tier / Yahoo rate-limit safe).
 # Caps concurrent Yahoo calls across quote + history + fundamentals so a
@@ -201,6 +208,10 @@ async def global_exception_handler(request, exc):
 
 # ── Cache: memory-first (unlimited). Redis only if USE_REDIS=1 ─────────────────
 USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
+# Emergency kill-switch (also set DISABLE_UPSTASH=1 on Render)
+if os.getenv("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
+    USE_REDIS = False
+
 FALLBACK_TTL_SECONDS = 30 * 24 * 60 * 60
 
 # Global Yahoo/upstream cooldown after 429 (stops stampede + Redis write storm)
@@ -320,8 +331,10 @@ def _cache_get(key: str):
 def _cache_set(key: str, value: dict, ttl: int = None):
     if ttl is None:
         ttl = get_cache_ttl()
+    value = _sanitize_for_json(value)
     _mem.set(key, value, ttl=ttl)
-    if not cache:
+    # HARD OFF: never write Upstash unless USE_REDIS explicitly enabled
+    if not USE_REDIS or not cache:
         return
     try:
         cache.setex(key, ttl, json.dumps(value, default=str))
@@ -343,8 +356,9 @@ def _fallback_get(key: str):
 
 
 def _fallback_set(key: str, value: dict):
+    value = _sanitize_for_json(value)
     _mem.set(f"fallback:{key}", value, ttl=FALLBACK_TTL_SECONDS)
-    if not cache:
+    if not USE_REDIS or not cache:
         return
     try:
         cache.setex(f"fallback:{key}", FALLBACK_TTL_SECONDS, json.dumps(value, default=str))
@@ -566,6 +580,7 @@ def get_quote(symbol: str):
                 "pe_ratio": _safe(nse_data.get("priceInfo", {}).get("pe")),
                 "fetched_at": datetime.utcnow().isoformat(),
             }
+            result = _sanitize_for_json(result)
             _cache_set(cache_key, result)
             return result
 
@@ -666,7 +681,9 @@ def get_quote(symbol: str):
             "pe_ratio": None,
             "fetched_at": datetime.utcnow().isoformat(),
         }
+        result = _sanitize_for_json(result)
         _cache_set(cache_key, result)
+        _fallback_set(cache_key, result)
         return result
 
     # No price – return fallback
@@ -803,7 +820,19 @@ def get_fundamentals_raw(symbol: str):
     cache_key = f"fundamentals:{sym}"
     cached = _cache_get(cache_key)
     if cached:
-        return cached
+        return _sanitize_for_json(cached)
+    if _in_cooldown("yfinance"):
+        fb = _fallback_get(cache_key)
+        if fb:
+            return _sanitize_for_json(fb)
+        return _sanitize_for_json({
+            "symbol": sym,
+            "error": "yfinance_cooldown",
+            "message": "Yahoo rate-limited — serving empty fundamentals until cooldown ends",
+            "pe_ratio": None,
+            "roe": None,
+            "revenue_growth": None,
+        })
 
     result = {}
     try:

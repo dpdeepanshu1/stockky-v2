@@ -45,8 +45,10 @@ class RateLimitMonitor:
         self._init_redis()
 
     def _init_redis(self) -> None:
+        # Default OFF — process memory only (dashboard still works in-process)
         if os.environ.get("USE_REDIS", "0").lower() not in ("1", "true", "yes"):
             self._redis = None
+            logger.info("RateLimitMonitor: memory-only (USE_REDIS=0)")
             return
         url = os.environ.get("UPSTASH_REDIS_REST_URL")
         token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")

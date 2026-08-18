@@ -217,7 +217,6 @@ export default function NotificationsPanel() {
     <div className="space-y-5 alerts-terminal">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <p className="dash-section-title">Alerts</p>
           <h2 className="font-display text-xl mb-1 text-cyan-300/90">Notification channels</h2>
           <p className="text-xs text-mist/60 mb-2">Voice-first CallMeBot on urgent alerts · outbox retry · Telegram / Discord / Slack</p>
           <p className="text-mist text-sm max-w-lg">

@@ -24,6 +24,7 @@ from urllib.parse import quote
 from functools import wraps
 
 import yfinance as yf
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 import feedparser
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -138,29 +139,51 @@ def _safe_float(val):
 # ── Cached yfinance calls ──
 
 _yf_ticker_cache: Dict[str, yf.Ticker] = {}
+# When Yahoo returns 429, skip further heavy yfinance calls for a cool-down window
+_yf_rate_limited_until: float = 0.0
+_YF_COOLDOWN_SEC = 120.0
+
+
+def _yf_is_rate_limited() -> bool:
+    import time as _t
+    return _t.time() < _yf_rate_limited_until
+
+
+def _yf_mark_rate_limited(err: Exception | str | None = None) -> None:
+    import time as _t
+    global _yf_rate_limited_until
+    msg = str(err or "")
+    if "429" in msg or "Too Many Requests" in msg or "Rate limited" in msg:
+        _yf_rate_limited_until = max(_yf_rate_limited_until, _t.time() + _YF_COOLDOWN_SEC)
+        logger.warning("Yahoo/yfinance rate-limited — pausing yfinance enrichment for %.0fs", _YF_COOLDOWN_SEC)
+
 
 def _get_ticker(symbol: str) -> yf.Ticker:
     if symbol not in _yf_ticker_cache:
         _yf_ticker_cache[symbol] = yf.Ticker(symbol)
-        _yf_ticker_cache[symbol]._tz = "Asia/Kolkata"
+        try:
+            _yf_ticker_cache[symbol]._tz = "Asia/Kolkata"
+        except Exception:
+            pass
     return _yf_ticker_cache[symbol]
 
 def _get_company_name(symbol: str) -> str:
     """Get the long company name from yfinance, with fallback to the symbol."""
     if symbol in _company_name_cache:
         return _company_name_cache[symbol]
-    
+    fallback = symbol.replace(".NS", "").replace(".BO", "")
+    if _yf_is_rate_limited():
+        _company_name_cache[symbol] = fallback
+        return fallback
     ticker = _get_ticker(symbol)
     try:
-        info = ticker.info
-        name = info.get('longName') or info.get('shortName') or symbol.replace(".NS", "").replace(".BO", "")
-        # Cache it
+        info = ticker.info or {}
+        name = info.get("longName") or info.get("shortName") or fallback
         _company_name_cache[symbol] = name
-        logger.info(f"Company name for {symbol}: {name}")
         return name
     except Exception as e:
-        logger.warning(f"Could not fetch company name for {symbol}: {e}")
-        fallback = symbol.replace(".NS", "").replace(".BO", "")
+        _yf_mark_rate_limited(e)
+        logger.debug("Could not fetch company name for %s: %s", symbol, e)
         _company_name_cache[symbol] = fallback
         return fallback
 
@@ -220,11 +243,22 @@ def _get_institutional_holders(symbol: str):
 
 @cached_yf("earnings_history")
 def _get_earnings_history(symbol: str):
+    if _yf_is_rate_limited():
+        return None
     ticker = _get_ticker(symbol)
     try:
-        return ticker.earnings_history
+        # Newer yfinance versions removed `.earnings_history`; prefer getattr + fallbacks
+        eh = getattr(ticker, "earnings_history", None)
+        if eh is None:
+            get_eh = getattr(ticker, "get_earnings_history", None)
+            if callable(get_eh):
+                eh = get_eh()
+        if eh is None:
+            return None
+        return eh
     except Exception as e:
-        logger.warning(f"earnings_history failed for {symbol}: {e}")
+        _yf_mark_rate_limited(e)
+        logger.debug("earnings_history failed for %s: %s", symbol, e)
         return None
 
 @cached_yf("news")
@@ -579,6 +613,8 @@ def _fetch_events(symbol: str, force: bool = False) -> dict:
             return cached
 
     logger.info(f"=== Fetching fresh events for {sym} ===")
+    if _yf_is_rate_limited():
+        logger.info("yfinance cool-down active — relying on RSS news only for %s", sym)
 
     # Use cached yfinance calls
     earnings_dates = _get_earnings_dates(sym, limit=1)

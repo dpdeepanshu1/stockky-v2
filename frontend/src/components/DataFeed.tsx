@@ -50,7 +50,9 @@ export default function DataFeed() {
       setMeta(st.meta || null);
       const isRun = st.status === "running" && !st.stop_requested;
       setRunning(isRun);
-      if (st.status === "done" && st.message) setBanner(st.message);
+      if (st.status === "done" && st.message) setRunning(true);
+      void refresh();
+      setBanner(st.message);
       if (st.status === "stopped" && st.message) setBanner(st.message);
       setErr(null);
     } catch (e: any) {
@@ -63,8 +65,9 @@ export default function DataFeed() {
   }, [refresh]);
 
   useEffect(() => {
+    // After optimistic "started" banner, keep polling until job leaves idle/running
     // Poll while running OR while stop is committing
-    if (job?.status !== "running") return;
+    if (job?.status !== "running" && !running) return;
     const id = setInterval(refresh, 2000);
     return () => clearInterval(id);
   }, [job?.status, refresh]);

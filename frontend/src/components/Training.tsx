@@ -67,6 +67,16 @@ export default function Training() {
 
       // If UI thinks training is running but backend lock is gone → finish
       if (training && !data.training_in_progress) {
+        setTraining(false);
+        trainingActiveRef.current = false;
+        // Show reason if backend finished without model
+        const msg = (data as any)?.last_train_message || (data as any)?.message || "";
+        if (String(msg).toLowerCase().includes("insufficient")) {
+          showToast("error", "Training stopped: not enough labeled T+1 data yet (need ~30). Add picks from Market Scan first.");
+        } else {
+          showToast("info", "Training finished.");
+        }
+
         stopTraining(true, data);
       }
     } catch (err) {

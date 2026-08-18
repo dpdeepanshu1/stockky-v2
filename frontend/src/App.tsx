@@ -30,6 +30,29 @@ type ViewState =
 
 type Tab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "datafeed" | "settings" | "watchlist";
 
+async function powerOffAll() {
+  try {
+    window.alert("Switching OFF all processes…\nStopping scan / data-feed / hot-picks.\nThen system will be ready for a fresh start.");
+    const base = import.meta.env.VITE_API_URL || "";
+    const r = await fetch(`${base}/ops/power-off`, { method: "POST" });
+    const j = await r.json().catch(() => ({}));
+    window.alert(
+      (j?.message || "Processes stopped.") +
+      "\n\n" +
+      (Array.isArray(j?.phases) ? j.phases.map((p: any) => `${p.phase}: ${p.detail}`).join("\n") : "") +
+      "\n\nReady for fresh start. Refreshing…"
+    );
+    // Clear local scan / UI state
+    try {
+      sessionStorage.removeItem("stockky_scan_task");
+      localStorage.removeItem("stockky_scan_task");
+    } catch {}
+    window.location.reload();
+  } catch (e: any) {
+    window.alert("Power-off failed: " + (e?.message || e));
+  }
+}
+
 export default function App() {
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
@@ -1419,9 +1442,19 @@ function SettingsPage({
       <section className="terminal-panel">
         <h3 className="mono text-xs text-mist uppercase tracking-widest mb-2">Services</h3>
         <p className="text-mist/70 text-xs mb-3">Wake or inspect microservice health.</p>
-        <button type="button" className="btn-terminal" onClick={onOpenServices}>
-          Open Service Manager
-        </button>
+        <div className="flex flex-wrap gap-2 mb-2">
+          <button
+            type="button"
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-600/90 hover:bg-red-500 text-white border border-red-400/40"
+            onClick={() => powerOffAll()}
+            title="Stop scan, data-feed, hot-picks; reset UI"
+          >
+            ⏻ Power Off
+          </button>
+          <button type="button" className="btn-terminal" onClick={onOpenServices}>
+            Open Service Manager
+          </button>
+        </div>
       </section>
 
       <section className="terminal-panel">

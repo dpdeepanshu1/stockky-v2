@@ -14,6 +14,7 @@ Designed to be called:
 from __future__ import annotations
 
 import json
+import re
 import logging
 import os
 from datetime import datetime, timedelta
@@ -49,10 +50,15 @@ class UniverseTrainingSample(Base):
 
 
 def _get_engine():
-    url = DATABASE_URL
+    url = os.getenv("TRAINING_DATABASE_URL") or os.getenv("DATABASE_URL") or DATABASE_URL
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
-    return create_engine(url, pool_pre_ping=True, echo=False)
+    # Neon/Supabase SSL
+    if url.startswith("postgresql") and "sslmode=" not in url.lower():
+        url += ("&" if "?" in url else "?") + "sslmode=require"
+    if "channel_binding=" in url:
+        url = re.sub(r"([&?])channel_binding=[^&]*", r"\1", url).replace("?&", "?").rstrip("?&")
+    return create_engine(url, pool_pre_ping=True, pool_size=3, max_overflow=1, echo=False)
 
 
 def init_universe_tables():
@@ -100,46 +106,48 @@ def ingest_universe(
 
     ingested = 0
     try:
-        # Optional: purge expired first
+        # Purge expired first (one query)
         deleted = db.query(UniverseTrainingSample).filter(
             UniverseTrainingSample.expires_at < now
         ).delete(synchronize_session=False)
         if deleted:
             logger.info("Purged %s expired universe samples", deleted)
 
+        # Normalize symbols once
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        clean = []
+        seen = set()
         for sym in symbols:
-            sym = (sym or "").strip().upper()
-            if not sym:
+            s = (sym or "").strip().upper().replace(".NS", "").replace(".BO", "")
+            if not s or s in seen:
                 continue
-            # Avoid exact same symbol+day duplicates
-            existing = (
-                db.query(UniverseTrainingSample)
-                .filter(
-                    UniverseTrainingSample.symbol == sym,
-                    UniverseTrainingSample.as_of >= now.replace(hour=0, minute=0, second=0, microsecond=0),
-                    UniverseTrainingSample.source == source,
-                )
-                .first()
-            )
-            snap = feature_snapshots.get(sym) or feature_snapshots.get(sym.replace(".NS", ""))
-            row = UniverseTrainingSample(
+            seen.add(s)
+            clean.append(s)
+
+        # Delete today's rows for this source in one shot, then bulk insert
+        # (avoids N SELECT-per-symbol which times out on free tier with 200+ symbols)
+        if clean:
+            db.query(UniverseTrainingSample).filter(
+                UniverseTrainingSample.symbol.in_(clean),
+                UniverseTrainingSample.as_of >= day_start,
+                UniverseTrainingSample.source == source,
+            ).delete(synchronize_session=False)
+
+        batch = []
+        for sym in clean:
+            snap = feature_snapshots.get(sym) or feature_snapshots.get(sym + ".NS")
+            batch.append(UniverseTrainingSample(
                 symbol=sym,
                 as_of=now,
                 source=source,
-                decision=decisions.get(sym) or decisions.get(sym.replace(".NS", "")),
-                combined_score=scores.get(sym) or scores.get(sym.replace(".NS", "")),
+                decision=decisions.get(sym) or decisions.get(sym + ".NS"),
+                combined_score=scores.get(sym) or scores.get(sym + ".NS"),
                 feature_snapshot=json.dumps(snap) if snap else None,
                 expires_at=expires,
-            )
-            if existing:
-                existing.decision = row.decision
-                existing.combined_score = row.combined_score
-                existing.feature_snapshot = row.feature_snapshot
-                existing.expires_at = expires
-                existing.created_at = now
-            else:
-                db.add(row)
-            ingested += 1
+            ))
+        if batch:
+            db.bulk_save_objects(batch)
+            ingested = len(batch)
 
         db.commit()
         logger.info("Ingested %s universe symbols for training (source=%s, ttl=%sh)", ingested, source, retention_hours)

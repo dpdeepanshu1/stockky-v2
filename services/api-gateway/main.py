@@ -4761,7 +4761,7 @@ def data_feed_status():
     meta = store.meta()
     try:
         if job.get("status") == "running":
-            stale_sec = int(os.getenv("DATA_FEED_STALE_SEC", "180"))  # 3 min no progress → stuck
+            stale_sec = int(os.getenv("DATA_FEED_STALE_SEC", "900"))  # 15 min — free-tier sleep is not a restart signal
             updated = None
             # Prefer checkpoint/elapsed; fall back to started_at
             for key in ("updated_at", "resumed_at", "started_at"):
@@ -4840,12 +4840,15 @@ async def data_feed_run(
     background_tasks: BackgroundTasks,
     force: bool = False,
     resume: bool = False,
+    only_new: bool = False,
 ):
     """Feed slow fields for scan universe.
 
-    - force=true  → full refresh from index 0 (Refresh button)
-    - resume=true → continue from checkpoint cursor (Resume button)
+    - force=true  → full refresh from index 0
+    - resume=true → continue from checkpoint cursor (Resume)
+    - only_new=true → only symbols not already in feed store (new universe members)
     - default     → start fresh only if not running
+    Never auto-starts from status polling — UI/scheduler must POST explicitly.
     """
     store = _feed_store()
     job = store.job()
@@ -4860,6 +4863,28 @@ async def data_feed_run(
         universe = universe[:_df_max]
     universe = [u.upper().replace(".NS", "").replace(".BO", "") for u in universe]
     # Full universe by default. Only DATA_FEED_MAX_SYMBOLS>0 truncates (explicit opt-in).
+
+    if only_new:
+        store = _feed_store()
+        fresh = []
+        for s in universe:
+            try:
+                entry = store.get_symbol(s)
+                if not entry:
+                    fresh.append(s)
+            except Exception:
+                fresh.append(s)
+        if not fresh:
+            return {
+                "ok": True,
+                "started": False,
+                "mode": "only_new",
+                "total": 0,
+                "message": "No new symbols — all universe members already have feed data. Use full feed only if you need a refresh.",
+            }
+        universe = fresh
+        logger.info("data-feed only_new: %s symbols without feed entry", len(universe))
+
 
     # Checkpoint: list of already-fed symbols + cursor
     checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}

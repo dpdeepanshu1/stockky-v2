@@ -752,7 +752,7 @@ def get_fundamentals_raw(symbol: str):
 
         roe = None
         if "returnOnEquity" in info:
-            roe = _safe_info("returnOnEquity") * 100 if _safe_info("returnOnEquity") else None
+            roe = ((lambda v: (v * 100) if isinstance(v, (int, float)) else None)(_safe_info("returnOnEquity"))) if _safe_info("returnOnEquity") else None
         elif balance_available and "Total Equity Gross Minority Interest" in balance.index:
             equity = balance.loc["Total Equity Gross Minority Interest"].iloc[0]
             if financials_available and "Net Income" in financials.index:
@@ -777,7 +777,7 @@ def get_fundamentals_raw(symbol: str):
 
         profit_margins = None
         if "profitMargins" in info:
-            profit_margins = _safe_info("profitMargins") * 100
+            profit_margins = ((lambda v: (v * 100) if isinstance(v, (int, float)) else None)(_safe_info("profitMargins")))
         else:
             if financials_available and "Net Income" in financials.index and "Total Revenue" in financials.index:
                 net_income = financials.loc["Net Income"].iloc[0]
@@ -787,9 +787,9 @@ def get_fundamentals_raw(symbol: str):
 
         held_percent_institutions = None
         if "heldPercentInstitutions" in info:
-            held_percent_institutions = _safe_info("heldPercentInstitutions") * 100
+            held_percent_institutions = ((lambda v: (v * 100) if isinstance(v, (int, float)) else None)(_safe_info("heldPercentInstitutions")))
         elif "institutionalPercent" in info:
-            held_percent_institutions = _safe_info("institutionalPercent") * 100
+            held_percent_institutions = ((lambda v: (v * 100) if isinstance(v, (int, float)) else None)(_safe_info("institutionalPercent")))
 
         pe_ratio = _safe_info("trailingPE") if "trailingPE" in info else _safe_info("peRatio")
         forward_pe = _safe_info("forwardPE")
@@ -797,7 +797,7 @@ def get_fundamentals_raw(symbol: str):
         market_cap = _safe_info("marketCap")
         dividend_yield = None
         if "dividendYield" in info:
-            dividend_yield = _safe_info("dividendYield") * 100
+            dividend_yield = ((lambda v: (v * 100) if isinstance(v, (int, float)) else None)(_safe_info("dividendYield")))
         else:
             try:
                 divs = ticker.dividends
@@ -823,8 +823,8 @@ def get_fundamentals_raw(symbol: str):
         pe_growth = pe_ratio / earnings_growth if (pe_ratio is not None and earnings_growth is not None and earnings_growth != 0) else None
         ev_ebitda = _safe_info("enterpriseToEbitda")
         price_to_book = _safe_info("priceToBook")
-        roce = _safe_info("returnOnCapitalEmployed") * 100 if _safe_info("returnOnCapitalEmployed") else None
-        opm = _safe_info("operatingMargins") * 100
+        roce = ((lambda v: (v * 100) if isinstance(v, (int, float)) else None)(_safe_info("returnOnCapitalEmployed"))) if _safe_info("returnOnCapitalEmployed") else None
+        opm = ((lambda v: (v * 100) if isinstance(v, (int, float)) else None)(_safe_info("operatingMargins")))
         if opm is None and financials_available and "Operating Income" in financials.index and "Total Revenue" in financials.index:
             op_income = financials.loc["Operating Income"].iloc[0]
             revenue = financials.loc["Total Revenue"].iloc[0]
@@ -847,8 +847,8 @@ def get_fundamentals_raw(symbol: str):
                 interest = financials.loc["Interest Expense"].iloc[0]
                 interest_coverage = ebit / interest if interest != 0 else None
 
-        promoter_holding = _safe_info("promoterHolding") * 100 if "promoterHolding" in info else None
-        promoter_pledging = _safe_info("promoterPledging") * 100 if "promoterPledging" in info else None
+        promoter_holding = ((lambda v: (v * 100) if isinstance(v, (int, float)) else None)(_safe_info("promoterHolding"))) if "promoterHolding" in info else None
+        promoter_pledging = ((lambda v: (v * 100) if isinstance(v, (int, float)) else None)(_safe_info("promoterPledging"))) if "promoterPledging" in info else None
 
         result = {
             "symbol": sym,
@@ -872,7 +872,7 @@ def get_fundamentals_raw(symbol: str):
             "opm": opm,
             "current_ratio": current_ratio,
             "interest_coverage": interest_coverage,
-            "held_percent_insiders": _safe_info("heldPercentInsiders") * 100 if _safe_info("heldPercentInsiders") else None,
+            "held_percent_insiders": (lambda v: (v * 100) if v is not None else None)(_safe_info("heldPercentInsiders")),
             "held_percent_institutions": held_percent_institutions,
             "price_to_book": price_to_book,
             "pe_growth": pe_growth,

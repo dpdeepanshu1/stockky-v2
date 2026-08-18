@@ -62,8 +62,8 @@ EARNINGS_BOOST_DAYS = 7
 
 # ── Decide cache (avoids re-running full fan-out for same symbol within TTL) ──
 IST = ZoneInfo("Asia/Kolkata")
-DECIDE_CACHE_TTL_OPEN = int(os.getenv("DECIDE_CACHE_TTL_OPEN", "300"))
-DECIDE_CACHE_TTL_CLOSED = int(os.getenv("DECIDE_CACHE_TTL_CLOSED", "21600"))
+DECIDE_CACHE_TTL_OPEN = int(os.getenv("DECIDE_CACHE_TTL_OPEN", "600"))
+DECIDE_CACHE_TTL_CLOSED = int(os.getenv("DECIDE_CACHE_TTL_CLOSED", "43200"))
 BATCH_MAX_SYMBOLS = int(os.getenv("DECIDE_BATCH_MAX", "25"))
 BATCH_CONCURRENCY = int(os.getenv("DECIDE_BATCH_CONCURRENCY", "8"))
 
@@ -256,8 +256,16 @@ async def _fetch_optional(client: httpx.AsyncClient, url: str, label: str):
 
 
 # ── Market Sentiment fetch from API Gateway ──────────────────────
+_sentiment_cache = {"ts": 0.0, "data": None}
+_SENTIMENT_TTL = float(os.getenv("MARKET_SENTIMENT_TTL_SEC", "120"))
+
+
 async def get_market_sentiment() -> dict:
     """Fetch live market sentiment from the API Gateway's /market/indices endpoint."""
+    import time as _t
+    now = _t.time()
+    if _sentiment_cache["data"] is not None and (now - _sentiment_cache["ts"]) < _SENTIMENT_TTL:
+        return _sentiment_cache["data"]
     for attempt in range(2):
         try:
             client = _get_http_client()
@@ -268,6 +276,8 @@ async def get_market_sentiment() -> dict:
                     data = resp.json()
                     score = data.get("market_score", 50)
                     logger.info(f"Market sentiment fetched from API Gateway: {score}")
+                    _sentiment_cache["ts"] = _t.time()
+                    _sentiment_cache["data"] = {"market_score": score, "source": "api_gateway"}
                     return {"market_score": score, **data}
                 else:
                     logger.warning(f"API Gateway returned {resp.status_code} (attempt {attempt+1})")
@@ -277,7 +287,10 @@ async def get_market_sentiment() -> dict:
                 await asyncio.sleep(0.5)
     # Fallback
     logger.warning("All market sentiment fetches failed, using neutral 50")
-    return {"market_score": 50, "classification": "NEUTRAL", "trend": "Neutral"}
+    neutral = {"market_score": 50, "classification": "NEUTRAL", "trend": "Neutral"}
+    _sentiment_cache["ts"] = _t.time()
+    _sentiment_cache["data"] = neutral
+    return neutral
 
 
 # ── Training Intelligence fetch ──────────────────────────────────────

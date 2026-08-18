@@ -78,8 +78,14 @@ class CircuitBreaker:
         return f"cb:{self.name}:{suffix}"
 
     def _load_remote(self) -> None:
+        if os.getenv("CB_REDIS_SYNC", "0").lower() not in ("1", "true", "yes"):
+            return
         r = _get_redis()
         if not r:
+            return
+        now = time.time()
+        min_iv = float(os.getenv("CB_REDIS_MIN_INTERVAL", "15"))
+        if (now - getattr(self, "_last_load_at", 0.0)) < min_iv:
             return
         try:
             st = r.get(self._rk("state"))
@@ -93,12 +99,25 @@ class CircuitBreaker:
             opened = r.get(self._rk("opened_at"))
             if opened is not None:
                 self._opened_at = float(opened)
+            self._last_load_at = now
         except Exception as e:
             logger.debug("cb load remote %s: %s", self.name, e)
 
     def _persist(self) -> None:
+        """Write breaker state to Redis at most once per CB_REDIS_MIN_INTERVAL seconds
+        and only when state/failure count changes. Cuts Upstash command burn on free tier.
+        """
+        # Local-only mode (default recommended on free Upstash)
+        if os.getenv("CB_REDIS_SYNC", "0").lower() not in ("1", "true", "yes"):
+            return
         r = _get_redis()
         if not r:
+            return
+        now = time.time()
+        min_iv = float(os.getenv("CB_REDIS_MIN_INTERVAL", "15"))
+        last = getattr(self, "_last_persist_at", 0.0)
+        sig = (self._state, self._failures)
+        if sig == getattr(self, "_last_persist_sig", None) and (now - last) < min_iv:
             return
         try:
             ttl = int(max(60, self.recovery_timeout * 3))
@@ -106,6 +125,8 @@ class CircuitBreaker:
             r.set(self._rk("failures"), str(self._failures), ex=ttl)
             if self._opened_at:
                 r.set(self._rk("opened_at"), str(self._opened_at), ex=ttl)
+            self._last_persist_at = now
+            self._last_persist_sig = sig
         except Exception as e:
             logger.debug("cb persist %s: %s", self.name, e)
 
@@ -141,6 +162,7 @@ class CircuitBreaker:
 
     def allow(self) -> bool:
         with self._lock:
+            # remote load is throttled; local state is authoritative on free tier
             self._load_remote()
             self._maybe_half_open_unlocked()
             if self._state == "closed":

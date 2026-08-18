@@ -147,17 +147,28 @@ async def universal_exception_handler(request, exc):
         }
     )
 
-# ── Redis ──────────────────────────────────────────────────────────────────────
+# ── Redis (OFF by default — USE_REDIS=1 to enable Upstash) ─────────────────────
 _redis = None
+_USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
 try:
-    _redis = Redis(
-        url=os.getenv("UPSTASH_REDIS_REST_URL"),
-        token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
-    )
-    _redis.ping()
-    logger.info("Connected to Upstash Redis")
+    if _USE_REDIS and os.getenv("UPSTASH_REDIS_REST_URL") and os.getenv("UPSTASH_REDIS_REST_TOKEN"):
+        _redis = Redis(
+            url=os.getenv("UPSTASH_REDIS_REST_URL"),
+            token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
+        )
+        _redis.ping()
+        logger.info("Connected to Upstash Redis (USE_REDIS=1)")
+    else:
+        logger.info("Gateway Redis disabled (USE_REDIS=0) — in-memory scan/status cache")
 except Exception as e:
     logger.warning("Redis unavailable: %s", e)
+    _redis = None
+
+# In-memory fallback so scan status / universe work without Redis
+_mem_kv = {}
+_mem_kv_exp = {}
+import time as _time_mod
+
 
 WATCHLIST_KEY       = "stockky:watchlist"
 SEARCHED_KEY        = "stockky:searched_symbols"
@@ -229,16 +240,30 @@ def _redis_soft_ttl_refresh(key: str, soft_window: int = 10) -> bool:
         return False
 
 def _redis_set(key: str, value, ttl: int = None):
+    # Always memory; Redis only if USE_REDIS=1
+    if ttl:
+        _mem_kv_exp[key] = _time_mod.time() + int(ttl)
+    else:
+        _mem_kv_exp[key] = None
+    _mem_kv[key] = value
+    # Cap memory
+    if len(_mem_kv) > 8000:
+        for k in list(_mem_kv.keys())[:500]:
+            _mem_kv.pop(k, None)
+            _mem_kv_exp.pop(k, None)
     if not _redis:
         return
     try:
-        data = json.dumps(value, default=str)
+        import json as _json
+        data = _json.dumps(value, default=str)
         if ttl:
-            _redis.setex(key, ttl, data)
+            _redis.setex(key, int(ttl), data)
         else:
             _redis.set(key, data)
     except Exception as e:
-        logger.warning("Redis set failed: %s", e)
+        logger.debug("redis set %s: %s", key, e)
+
+
 
 def _load_watchlist() -> List[str]:
     return _redis_get(WATCHLIST_KEY) or []
@@ -1316,7 +1341,7 @@ def _wake_notification_service() -> bool:
 
 # Free-tier friendly default: 18 workers (was 10). Override via env.
 # Pair with market-data yfinance semaphore to avoid Yahoo rate limits.
-MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "3"))  # free-tier safe; was 6 → cascade timeouts  # full universe; pace via Redis RL; separate dynos
+MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "2"))  # free-tier safe; was 6 → cascade timeouts  # full universe; pace via Redis RL; separate dynos
 MAX_RETRIES = 1
 RETRY_BACKOFF = 1.0
 
@@ -1660,6 +1685,7 @@ async def _analyze_one_symbol_ultra(
                 # Fail fast — no retry storm when dependency circuit is open
                 metrics.inc("stockky_scan_circuit_skip_total", dependency=e.name)
                 logger.warning("Scan skip %s: %s", symbol, e)
+                await asyncio.sleep(1.5)
                 price = None
                 try:
                     price = _fetch_price_from_quote(symbol)

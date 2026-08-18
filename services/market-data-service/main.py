@@ -113,9 +113,9 @@ def _compute_growth(current, previous):
 # Caps concurrent Yahoo calls across quote + history + fundamentals so a
 # parallel market scan does not stampede Yahoo and get empty responses.
 import threading
-_YFINANCE_MAX_CONCURRENT = int(os.getenv("YFINANCE_MAX_CONCURRENT", "3"))
+_YFINANCE_MAX_CONCURRENT = int(os.getenv("YFINANCE_MAX_CONCURRENT", "1"))
 _yf_semaphore = threading.Semaphore(_YFINANCE_MAX_CONCURRENT)
-_YF_MIN_INTERVAL = float(os.getenv("YFINANCE_MIN_INTERVAL_SEC", "0.18"))
+_YF_MIN_INTERVAL = float(os.getenv("YFINANCE_MIN_INTERVAL_SEC", "0.35"))
 _yf_last_call = 0.0
 _yf_lock = threading.Lock()
 
@@ -148,6 +148,11 @@ def _with_retry(func, max_retries=4, base_delay=1.0):
             return result
         except Exception as e:
             last_err = e
+            msg = str(e).lower()
+            if "429" in msg or "too many" in msg or "rate limit" in msg:
+                _set_cooldown("yfinance", _YF_COOLDOWN_SEC)
+                br.record_failure(str(e))
+                raise
             if attempt == max_retries - 1:
                 br.record_failure(str(e))
                 raise
@@ -194,63 +199,156 @@ async def global_exception_handler(request, exc):
         headers={"Access-Control-Allow-Origin": "*"}
     )
 
-# ── Redis cache ────────────────────────────────────────────────────────────────
+# ── Cache: memory-first (unlimited). Redis only if USE_REDIS=1 ─────────────────
+USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
+FALLBACK_TTL_SECONDS = 30 * 24 * 60 * 60
+
+# Global Yahoo/upstream cooldown after 429 (stops stampede + Redis write storm)
+_YF_COOLDOWN_UNTIL = 0.0
+_YF_COOLDOWN_SEC = float(os.getenv("YFINANCE_COOLDOWN_SEC", "180"))  # 3 min
+_UPSTREAM_COOLDOWN = {}  # name -> until epoch
+
+def _in_cooldown(name: str = "yfinance") -> bool:
+    return time.time() < _UPSTREAM_COOLDOWN.get(name, 0)
+
+def _set_cooldown(name: str = "yfinance", sec: float = None):
+    global _YF_COOLDOWN_UNTIL
+    until = time.time() + (sec if sec is not None else _YF_COOLDOWN_SEC)
+    _UPSTREAM_COOLDOWN[name] = until
+    if name == "yfinance":
+        _YF_COOLDOWN_UNTIL = until
+    logger.warning("%s cooldown until +%.0fs (rate limit / 429)", name, sec or _YF_COOLDOWN_SEC)
+
+
+class _MemCache:
+    def __init__(self, max_keys: int = 6000):
+        self._d = {}
+        self._lock = threading.Lock()
+        self._max = max_keys
+
+    def get(self, key: str):
+        with self._lock:
+            e = self._d.get(key)
+            if not e:
+                return None
+            val, exp = e
+            if exp is not None and time.time() > exp:
+                self._d.pop(key, None)
+                return None
+            return val
+
+    def set(self, key: str, value, ttl: int = None):
+        with self._lock:
+            if len(self._d) >= self._max and key not in self._d:
+                # drop expired + some oldest keys
+                now = time.time()
+                for k in list(self._d.keys())[: max(50, self._max // 20)]:
+                    v = self._d.get(k)
+                    if not v or (v[1] is not None and v[1] < now):
+                        self._d.pop(k, None)
+                if len(self._d) >= self._max:
+                    for k in list(self._d.keys())[:50]:
+                        self._d.pop(k, None)
+            exp = (time.time() + ttl) if ttl else None
+            self._d[key] = (value, exp)
+
+    def ttl(self, key: str) -> int:
+        with self._lock:
+            e = self._d.get(key)
+            if not e:
+                return -2
+            _, exp = e
+            if exp is None:
+                return -1
+            left = int(exp - time.time())
+            return left if left > 0 else -2
+
+
+_mem = _MemCache()
+cache = None  # optional Upstash
 try:
-    if UPSTASH_URL and UPSTASH_TOKEN:
+    if USE_REDIS and UPSTASH_URL and UPSTASH_TOKEN:
         cache = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN)
         cache.ping()
-        logger.info("Connected to Upstash Redis")
+        logger.info("Connected to Upstash Redis (USE_REDIS=1)")
     else:
-        raise ValueError("Upstash credentials not set")
+        logger.info("Market-data cache: in-memory only (USE_REDIS=0) — no Upstash commands")
 except Exception as e:
-    logger.warning("Redis unavailable (%s). Running without cache.", e)
+    logger.warning("Redis unavailable (%s). Memory-only cache.", e)
     cache = None
 
 
 def _cache_ttl(key: str) -> int:
-    """Remaining TTL seconds, or -2 if missing / no redis."""
+    t = _mem.ttl(key)
+    if t != -2:
+        return t
     if not cache:
         return -2
     try:
-        t = cache.ttl(key)
-        return int(t) if t is not None else -2
+        tt = cache.ttl(key)
+        return int(tt) if tt is not None else -2
     except Exception:
         return -2
 
 
-def _should_soft_refresh(key: str, soft_window: int = 10) -> bool:
-    """True when key is about to expire — trigger background refresh (stampede guard)."""
+def _should_soft_refresh(key: str, soft_window: int = 30) -> bool:
+    """Soft refresh only when NOT rate-limited (avoids stampede during 429)."""
+    if _in_cooldown("yfinance") or _in_cooldown("nse"):
+        return False
     t = _cache_ttl(key)
     return 0 < t <= soft_window
 
+
 def _cache_get(key: str):
+    val = _mem.get(key)
+    if val is not None:
+        return val
     if not cache:
         return None
-    val = cache.get(key)
-    return json.loads(val) if val else None
+    try:
+        raw = cache.get(key)
+        if not raw:
+            return None
+        parsed = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+        _mem.set(key, parsed, ttl=60)  # warm memory
+        return parsed
+    except Exception:
+        return None
+
 
 def _cache_set(key: str, value: dict, ttl: int = None):
-    # Always set TTL — keep Redis under free 256MB (prefer volatile-lru eviction).
-    # Never leave market-data keys with TTL=-1.
-    if not cache:
-        return
     if ttl is None:
         ttl = get_cache_ttl()
-    cache.setex(key, ttl, json.dumps(value, default=str))
-
-# Fallback cache (30 days)
-FALLBACK_TTL_SECONDS = 30 * 24 * 60 * 60
-
-def _fallback_get(key: str):
-    if not cache:
-        return None
-    val = cache.get(f"fallback:{key}")
-    return json.loads(val) if val else None
-
-def _fallback_set(key: str, value: dict):
+    _mem.set(key, value, ttl=ttl)
     if not cache:
         return
-    cache.setex(f"fallback:{key}", FALLBACK_TTL_SECONDS, json.dumps(value, default=str))
+    try:
+        cache.setex(key, ttl, json.dumps(value, default=str))
+    except Exception as e:
+        logger.debug("redis set failed: %s", e)
+
+
+def _fallback_get(key: str):
+    val = _mem.get(f"fallback:{key}")
+    if val is not None:
+        return val
+    if not cache:
+        return None
+    try:
+        raw = cache.get(f"fallback:{key}")
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _fallback_set(key: str, value: dict):
+    _mem.set(f"fallback:{key}", value, ttl=FALLBACK_TTL_SECONDS)
+    if not cache:
+        return
+    try:
+        cache.setex(f"fallback:{key}", FALLBACK_TTL_SECONDS, json.dumps(value, default=str))
+    except Exception:
+        pass
 
 # Yahoo Finance tickers for common NSE index display names.
 # Without this, normalize_symbol("NIFTY NEXT 50") → "NIFTY NEXT 50.NS" → 404/503.
@@ -433,15 +531,24 @@ def get_quote(symbol: str):
     sym = normalize_symbol(symbol)
     cache_key = f"quote:{sym}"
     cached = _cache_get(cache_key)
-    # Stampede guard: if TTL almost gone, let one request fall through to refresh
-    if cached and _should_soft_refresh(cache_key, soft_window=10):
+    # Soft refresh only if not rate-limited; prefer stale price over N/A during 429
+    if cached and _should_soft_refresh(cache_key, soft_window=45):
         logger.info("Soft-TTL refresh for %s", cache_key)
-        cached = None  # force refresh path
+        # keep cached as safety net if all upstreams fail
+        soft_cached = cached
+        cached = None
+    else:
+        soft_cached = cached
     if cached:
         return cached
+    if soft_cached and (_in_cooldown("yfinance") or _in_cooldown("nse")):
+        return soft_cached
 
-    # 1. NSE India
-    nse_data = _fetch_nse_quote(sym)
+    # 1. NSE India (skip if NSE cooldown)
+    if _in_cooldown("nse"):
+        nse_data = None
+    else:
+        nse_data = _fetch_nse_quote(sym)
     if nse_data:
         price = _safe(nse_data.get("priceInfo", {}).get("lastPrice"))
         if price is not None:
@@ -562,7 +669,13 @@ def get_quote(symbol: str):
         return result
 
     # No price – return fallback
-    logger.warning(f"Could not fetch price for {sym} from any source. Returning fallback.")
+    logger.warning("Could not fetch price for %s from any source. Returning fallback.", sym)
+    # Prefer last good cached/soft value over empty N/A
+    if soft_cached and isinstance(soft_cached, dict) and soft_cached.get("price") is not None:
+        return soft_cached
+    fb = _fallback_get(cache_key)
+    if fb and isinstance(fb, dict) and fb.get("price") is not None:
+        return fb
     result = {
         "symbol": sym,
         "name": sym,

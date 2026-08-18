@@ -49,32 +49,32 @@ def delivery_from_quote(symbol: str) -> Optional[Dict[str, Any]]:
     """Live delivery % from NSE quote-equity (securityWiseDP)."""
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     try:
-        with _nse_client() as client:
-            r = client.get(f"https://www.nseindia.com/api/quote-equity?symbol={sym}")
-            if r.status_code != 200:
-                return None
-            data = r.json()
-            sw = data.get("securityWiseDP") or {}
-            pct = sw.get("deliveryToTradedQuantity")
-            if pct is not None:
-                return {
-                    "symbol": sym,
-                    "delivery_pct": round(float(pct), 2),
-                    "traded_qty": sw.get("quantityTraded"),
-                    "delivery_qty": sw.get("deliveryQuantity"),
-                    "source": "nse_quote_equity",
-                    "session_date": None,
-                }
-            tq, dq = sw.get("quantityTraded"), sw.get("deliveryQuantity")
-            if tq and dq:
-                return {
-                    "symbol": sym,
-                    "delivery_pct": round(float(dq) / float(tq) * 100.0, 2),
-                    "traded_qty": tq,
-                    "delivery_qty": dq,
-                    "source": "nse_quote_equity",
-                    "session_date": None,
-                }
+        client = _nse_client()
+        r = client.get(f"https://www.nseindia.com/api/quote-equity?symbol={sym}")
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        sw = data.get("securityWiseDP") or {}
+        pct = sw.get("deliveryToTradedQuantity")
+        if pct is not None:
+            return {
+                "symbol": sym,
+                "delivery_pct": round(float(pct), 2),
+                "traded_qty": sw.get("quantityTraded"),
+                "delivery_qty": sw.get("deliveryQuantity"),
+                "source": "nse_quote_equity",
+                "session_date": None,
+            }
+        tq, dq = sw.get("quantityTraded"), sw.get("deliveryQuantity")
+        if tq and dq:
+            return {
+                "symbol": sym,
+                "delivery_pct": round(float(dq) / float(tq) * 100.0, 2),
+                "traded_qty": tq,
+                "delivery_qty": dq,
+                "source": "nse_quote_equity",
+                "session_date": None,
+            }
     except Exception as e:
         logger.warning("quote delivery failed %s: %s", sym, e)
     return None
@@ -185,46 +185,46 @@ def delivery_from_bhavcopy(symbol: str) -> Optional[Dict[str, Any]]:
     """Download recent official bhavcopy / sec_bhavdata and extract delivery %."""
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     try:
-        with _nse_client() as client:
-            for d in _candidate_session_dates(12):
-                for url in _bhav_urls_for_date(d):
-                    try:
-                        r = client.get(url)
-                        if r.status_code != 200 or not r.content:
-                            continue
-                        content_type = (r.headers.get("content-type") or "").lower()
-                        text = None
-                        body = r.content
-                        if url.endswith(".zip") or "zip" in content_type or body[:2] == b"PK":
-                            try:
-                                with zipfile.ZipFile(io.BytesIO(body)) as zf:
-                                    name = next(
-                                        (n for n in zf.namelist() if n.lower().endswith(".csv")),
-                                        None,
-                                    )
-                                    if not name:
-                                        continue
-                                    text = zf.read(name).decode("utf-8", errors="ignore")
-                            except zipfile.BadZipFile:
-                                continue
-                        else:
-                            # JSON report wrappers sometimes return download links — skip non-CSV
-                            if "application/json" in content_type:
-                                continue
-                            text = r.text
-                        if not text:
-                            continue
-                        head = text[:800].upper()
-                        if "SYMBOL" not in head and "TCKRSYMB" not in head and "SECURITY" not in head:
-                            continue
-                        parsed = _parse_bhav_csv(text, sym)
-                        if parsed:
-                            parsed["session_date"] = d.isoformat()
-                            parsed["source_url"] = url
-                            return parsed
-                    except Exception as e:
-                        logger.debug("bhav try failed %s %s: %s", d, url, e)
+        client = _nse_client()
+        for d in _candidate_session_dates(12):
+            for url in _bhav_urls_for_date(d):
+                try:
+                    r = client.get(url)
+                    if r.status_code != 200 or not r.content:
                         continue
+                    content_type = (r.headers.get("content-type") or "").lower()
+                    text = None
+                    body = r.content
+                    if url.endswith(".zip") or "zip" in content_type or body[:2] == b"PK":
+                        try:
+                            with zipfile.ZipFile(io.BytesIO(body)) as zf:
+                                name = next(
+                                    (n for n in zf.namelist() if n.lower().endswith(".csv")),
+                                    None,
+                                )
+                                if not name:
+                                    continue
+                                text = zf.read(name).decode("utf-8", errors="ignore")
+                        except zipfile.BadZipFile:
+                            continue
+                    else:
+                        # JSON report wrappers sometimes return download links — skip non-CSV
+                        if "application/json" in content_type:
+                            continue
+                        text = r.text
+                    if not text:
+                        continue
+                    head = text[:800].upper()
+                    if "SYMBOL" not in head and "TCKRSYMB" not in head and "SECURITY" not in head:
+                        continue
+                    parsed = _parse_bhav_csv(text, sym)
+                    if parsed:
+                        parsed["session_date"] = d.isoformat()
+                        parsed["source_url"] = url
+                        return parsed
+                except Exception as e:
+                    logger.debug("bhav try failed %s %s: %s", d, url, e)
+                    continue
     except Exception as e:
         logger.warning("bhavcopy pipeline failed for %s: %s", sym, e)
     return None
@@ -234,33 +234,33 @@ def delivery_from_nse_cm_series(symbol: str) -> Optional[Dict[str, Any]]:
     """Try NSE equity master / series-wise snapshot if available via public API."""
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     try:
-        with _nse_client() as client:
-            # Historical data API used by NSE charts — may include delivery on some builds
-            r = client.get(
-                f"https://www.nseindia.com/api/historical/cm/equity"
-                f"?symbol={sym}&series=[%22EQ%22]&from="
-                f"{(datetime.now(IST).date() - timedelta(days=10)).strftime('%d-%m-%Y')}"
-                f"&to={datetime.now(IST).date().strftime('%d-%m-%Y')}"
-            )
-            if r.status_code != 200:
-                return None
-            data = r.json()
-            rows = data.get("data") or data.get("historicalData") or []
-            if not rows:
-                return None
-            # Prefer newest row with delivery fields
-            for row in reversed(rows):
-                pct = row.get("CH_DELIVERY_PERC") or row.get("DELIV_PER") or row.get("deliveryToTradedQuantity")
-                if pct is None:
-                    continue
-                return {
-                    "symbol": sym,
-                    "delivery_pct": round(float(pct), 2),
-                    "traded_qty": row.get("CH_TOT_TRADED_QTY") or row.get("TTL_TRD_QNTY"),
-                    "delivery_qty": row.get("CH_DELIV_QTY"),
-                    "source": "nse_cm_historical",
-                    "session_date": row.get("CH_TIMESTAMP") or row.get("mTIMESTAMP"),
-                }
+        client = _nse_client()
+        # Historical data API used by NSE charts — may include delivery on some builds
+        r = client.get(
+            f"https://www.nseindia.com/api/historical/cm/equity"
+            f"?symbol={sym}&series=[%22EQ%22]&from="
+            f"{(datetime.now(IST).date() - timedelta(days=10)).strftime('%d-%m-%Y')}"
+            f"&to={datetime.now(IST).date().strftime('%d-%m-%Y')}"
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        rows = data.get("data") or data.get("historicalData") or []
+        if not rows:
+            return None
+        # Prefer newest row with delivery fields
+        for row in reversed(rows):
+            pct = row.get("CH_DELIVERY_PERC") or row.get("DELIV_PER") or row.get("deliveryToTradedQuantity")
+            if pct is None:
+                continue
+            return {
+                "symbol": sym,
+                "delivery_pct": round(float(pct), 2),
+                "traded_qty": row.get("CH_TOT_TRADED_QTY") or row.get("TTL_TRD_QNTY"),
+                "delivery_qty": row.get("CH_DELIV_QTY"),
+                "source": "nse_cm_historical",
+                "session_date": row.get("CH_TIMESTAMP") or row.get("mTIMESTAMP"),
+            }
     except Exception as e:
         logger.debug("cm series delivery failed %s: %s", sym, e)
     return None

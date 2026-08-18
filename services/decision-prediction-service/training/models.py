@@ -571,8 +571,8 @@ def get_engine(database_url=None):
     else:
         kwargs["pool_pre_ping"] = True
         kwargs["pool_recycle"] = int(os.environ.get("DB_POOL_RECYCLE", "280"))
-        kwargs["pool_size"] = int(os.environ.get("DB_POOL_SIZE", "5"))  # Supabase free: stay well under 60 direct / 200 pooler
-        kwargs["max_overflow"] = int(os.environ.get("DB_MAX_OVERFLOW", "2"))
+        kwargs["pool_size"] = int(os.environ.get("DB_POOL_SIZE", "3"))  # Supabase free: stay well under 60 direct / 200 pooler
+        kwargs["max_overflow"] = int(os.environ.get("DB_MAX_OVERFLOW", "1"))
         # Normalize SSL mode (psycopg2 accepts require/prefer/... — NOT "required")
         # Common typo: sslmode=required → invalid sslmode value: "required"
         url = re.sub(r"(?i)([?&]sslmode=)required\b", r"\1require", url)
@@ -591,19 +591,40 @@ def create_tables(engine):
     Base.metadata.create_all(engine)
 
 
+_INIT_DONE = False
+_INIT_LOCK = None
+
 def init_db(engine=None):
-    """Create all Stockky training/trades tables if missing (safe to call repeatedly)."""
+    """Create all Stockky training/trades tables if missing (safe to call repeatedly).
+
+    Cheap path: if paper_trades already exists, no-op (no log spam, no DDL).
+    """
+    global _INIT_DONE, _INIT_LOCK
     import logging
+    import threading
+    from sqlalchemy import inspect as sa_inspect
     _log = logging.getLogger("training-db")
-    eng = engine or get_engine()
-    try:
-        Base.metadata.create_all(eng)
-        ensure_schema(eng)
-        _log.info("init_db: schema ready")
+    if _INIT_DONE:
         return True
-    except Exception as e:
-        _log.error("init_db failed: %s", e)
-        return False
+    if _INIT_LOCK is None:
+        _INIT_LOCK = threading.Lock()
+    with _INIT_LOCK:
+        if _INIT_DONE:
+            return True
+        eng = engine or get_engine()
+        try:
+            insp = sa_inspect(eng)
+            if insp.has_table("paper_trades") and insp.has_table("portfolio_account"):
+                _INIT_DONE = True
+                return True
+            Base.metadata.create_all(eng)
+            ensure_schema(eng)
+            _INIT_DONE = True
+            _log.info("init_db: schema created/verified")
+            return True
+        except Exception as e:
+            _log.error("init_db failed: %s", e)
+            return False
 
 def get_session(engine):
     Session = sessionmaker(bind=engine)

@@ -60,25 +60,28 @@ except Exception:
     engine = create_engine(_url, echo=False, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 _tables_ready = False
+_tables_lock = None
 
 
 def _ensure_trade_tables():
-    """Lazy-create paper_trades / portfolio_* if Neon DB is empty."""
-    global _tables_ready
+    """Lazy-create paper_trades / portfolio_* once per process (Neon empty DB)."""
+    global _tables_ready, _tables_lock
     if _tables_ready:
         return
-    try:
-        from models import init_db, Base
-        init_db(engine)
-        _tables_ready = True
-    except Exception as e:
+    import threading
+    if _tables_lock is None:
+        _tables_lock = threading.Lock()
+    with _tables_lock:
+        if _tables_ready:
+            return
         try:
-            from models import Base
-            Base.metadata.create_all(engine)
-            _tables_ready = True
-        except Exception as e2:
+            from models import init_db
+            if init_db(engine):
+                _tables_ready = True
+                return
+        except Exception as e:
             import logging
-            logging.getLogger("training-trades").error("ensure tables failed: %s / %s", e, e2)
+            logging.getLogger("training-trades").error("ensure tables failed: %s", e)
 
 
 # ── Redis read-through cache for portfolio/reports (cuts Supabase egress) ──

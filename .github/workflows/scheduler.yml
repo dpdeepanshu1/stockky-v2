@@ -1,16 +1,13 @@
-# Stockky Scheduler — IST (Asia/Kolkata) market-aware only.
-# GitHub cron is UTC; times below map to NSE session windows.
-#
-# IST 09:15–15:30 ≈ UTC 03:45–10:00 (Mon–Fri)
-name: Stockky Scheduler
+# Market Scheduler — every 2 hours during NSE session (IST)
+# 10:00, 12:00, 14:00 IST = 04:30, 06:30, 08:30 UTC — using :00 of 4,6,8 UTC ≈ 09:30, 11:30, 13:30 IST
+# User plan: 10:00, 12:00, 14:00 IST → cron '0 4,6,8 * * 1-5' (04:00 UTC = 09:30 IST close enough;
+# exact 10:00 IST = 04:30 UTC — use 30 4,6,8 for precision)
+name: Market Scheduler Runner
 
 on:
   schedule:
-    # Only 3 times during NSE session (IST ~09:30, 12:30, 15:00)
-    # UTC 04:00, 07:00, 09:30 → keep free-tier load low
-    - cron: "0 4 * * 1-5"
-    - cron: "0 7 * * 1-5"
-    - cron: "30 9 * * 1-5"
+    # 10:00, 12:00, 14:00 IST (Mon–Fri) → 04:30, 06:30, 08:30 UTC
+    - cron: "30 4,6,8 * * 1-5"
   workflow_dispatch:
     inputs:
       force_scan:
@@ -22,6 +19,7 @@ on:
 jobs:
   tick:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -69,69 +67,28 @@ jobs:
             echo "API_GATEWAY_URL not set — skip wake"
             exit 0
           fi
-          echo "Waking via $GW/wake-all (IST market window only) ..."
+          # Must include https:// in secret
+          case "$GW" in http://*|https://*) ;; *) echo "API_GATEWAY_URL missing protocol"; exit 1;; esac
+          echo "Waking via $GW/wake-all ..."
           curl -fsS -m 60 -X POST "$GW/wake-all" || curl -fsS -m 60 "$GW/wake-all" || true
           for U in "$API_GATEWAY_URL" "$MARKET_DATA_URL" "$NOTIFICATION_URL" "$ANALYSIS_URL" "$DECISION_URL"; do
             [ -z "$U" ] && continue
+            case "$U" in http://*|https://*) ;; *) continue;; esac
             curl -fsS -m 20 "${U%/}/health?warm=true" || curl -fsS -m 15 "${U%/}/health" || true
           done
-          # Lightweight keepalive (no deep fan-out)
           curl -fsS -m 15 "$GW/ops/keepalive" || true
-          if [ -n "$NOTIFICATION_URL" ]; then
-            curl -fsS -m 30 -X POST "${NOTIFICATION_URL%/}/outbox/process" || true
-          fi
-          sleep 20
 
-      - name: Ensure Data Feed is fresh enough (non-blocking)
+      - name: Run scheduler once
         if: steps.ist.outputs.run == '1'
         env:
           API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
-        run: |
-          set +e
-          GW="${API_GATEWAY_URL%/}"
-          [ -n "$GW" ] || exit 0
-          # Check status — if never run or empty, kick a background feed (does not block scan)
-          ST=$(curl -fsS -m 20 "$GW/data-feed/status" || echo '{}')
-          echo "data-feed status: $ST" | head -c 400; echo
-          # Only start feed if idle/missing — force=false so we never double-run
-          echo "$ST" | grep -q '"status":"running"' && { echo "Data feed already running"; exit 0; }
-          # If meta missing or last_count is 0, start feed in background via API
-          if echo "$ST" | grep -Eq '"status":"(idle|done|error)"' || ! echo "$ST" | grep -q last_count; then
-            curl -fsS -m 25 -X POST "$GW/data-feed/run?force=false" || true
-            echo "Data feed kick issued (background)"
-          fi
-
-      - name: Run scheduler tick
-        if: steps.ist.outputs.run == '1'
-        env:
-          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
-          EVENT_TRACKER_URL: ${{ secrets.EVENT_TRACKER_URL }}
           NOTIFICATION_URL: ${{ secrets.NOTIFICATION_URL }}
+          EVENT_TRACKER_URL: ${{ secrets.EVENT_TRACKER_URL }}
           USE_REDIS: "0"
-          FORCE_SCAN: ${{ github.event_name == 'workflow_dispatch' && inputs.force_scan == true && 'true' || 'false' }}
+          PREFER_DATA_FEED: "1"
         run: |
-          export USE_FULL_UNIVERSE=true
-          export USE_GATEWAY_ASYNC_SCAN=true
-          export BATCH_TIMEOUT=300
-          export SCAN_TIMEOUT_TOTAL=5400
-          # Skip heavy scan if one already in progress
-          ST=$(curl -fsS -m 15 "$API_GATEWAY_URL/scan/active" 2>/dev/null || curl -fsS -m 15 "$API_GATEWAY_URL/health" 2>/dev/null || echo '{}')
-          echo "$ST" | grep -qi 'scan.*running\|\"running\":true' && { echo "Scan already running — skip this tick"; exit 0; }
-          export USE_REDIS=0
-          export PREFER_DATA_FEED=1
-          python services/notification-scheduler-service/scheduler/run_once.py
-
-      - name: Post-scan T+1/T+5 evaluation (closed-loop)
-        if: steps.ist.outputs.run == '1'
-        env:
-          DECISION_PREDICTION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
-          DECISION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
-        run: |
-          set +e
-          D="${DECISION_PREDICTION_URL:-$DECISION_URL}"
-          D="${D%/}"
-          [ -z "$D" ] && { echo "No DECISION_PREDICTION_URL — skip evaluate"; exit 0; }
-          curl -fsS -m 25 "$D/health" || true
-          sleep 5
-          curl -fsS -m 120 -X POST "$D/training/api/evaluate/t1?max_batch=40" || curl -fsS -m 120 -X POST "$D/api/evaluate/t1?max_batch=40" || true
-          curl -fsS -m 120 -X POST "$D/training/api/evaluate/t5?max_batch=40" || curl -fsS -m 120 -X POST "$D/api/evaluate/t5?max_batch=40" || true
+          set -e
+          GW="${API_GATEWAY_URL%/}"
+          case "$GW" in http://*|https://*) ;; *) echo "API_GATEWAY_URL must include https://"; exit 1;; esac
+          cd services/notification-scheduler-service/scheduler
+          python run_once.py

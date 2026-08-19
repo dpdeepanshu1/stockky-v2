@@ -1312,19 +1312,61 @@ def _is_symbol_pruned(symbol: str) -> bool:
 
 # ── Fallback helpers with caching ──────────────────────────────────────────
 def _fetch_price_from_quote(symbol: str) -> Optional[float]:
+    """Live price with short timeout (free-tier). Tries several JSON fields."""
     try:
-        resp = httpx.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=12)
-        if resp.status_code == 200:
-            data = resp.json()
-            price = data.get("price")
-            if price is not None:
-                logger.info(f"Price fallback for {symbol}: ₹{price}")
-                return price
-        else:
-            logger.warning(f"Quote endpoint returned {resp.status_code} for {symbol}")
+        resp = httpx.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=4.0)
+        if resp.status_code != 200:
+            return None
+        data = resp.json() if resp.content else {}
+        if not isinstance(data, dict):
+            return None
+        for k in ("price", "close", "ltp", "regularMarketPrice", "last"):
+            v = data.get(k)
+            if v is not None:
+                try:
+                    px = float(v)
+                    if px > 0:
+                        return px
+                except (TypeError, ValueError):
+                    pass
     except Exception as e:
-        logger.warning(f"Price fetch failed for {symbol}: {e}")
+        logger.debug("Price fetch failed for %s: %s", symbol, e)
     return None
+
+
+async def _fetch_prices_bulk_async(symbols: list, client: httpx.AsyncClient) -> dict:
+    """Concurrent short quotes for a scan chunk → {BASE: float}."""
+    out = {}
+    sem = asyncio.Semaphore(15)
+
+    async def one(sym: str):
+        base = (sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        async with sem:
+            try:
+                r = await client.get(
+                    f"{MARKET_DATA_URL.rstrip('/')}/quote/{sym}",
+                    timeout=3.5,
+                )
+                if r.status_code != 200:
+                    return
+                data = r.json()
+                if not isinstance(data, dict):
+                    return
+                for k in ("price", "close", "ltp", "regularMarketPrice", "last"):
+                    v = data.get(k)
+                    if v is not None:
+                        try:
+                            px = float(v)
+                            if px > 0:
+                                out[base] = px
+                                return
+                        except (TypeError, ValueError):
+                            pass
+            except Exception:
+                return
+
+    await asyncio.gather(*(one(s) for s in symbols), return_exceptions=True)
+    return out
 
 async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> tuple[Optional[dict], bool]:
     """Prefer Data Feed → short Redis cache → upstream. Write-through to Data Feed on upstream hit."""
@@ -2078,7 +2120,7 @@ async def _analyze_one_symbol_ultra(
                 else:
                     # Prefer shorter timeout on free-tier; feed covers fundamentals
                     decision_resp = await _cb_get(
-                        client, "decision", f"{DECISION_URL}/decide/{symbol}", timeout=45
+                        client, "decision", f"{DECISION_URL}/decide/{symbol}", timeout=15
                     )
                     decision_resp.raise_for_status()
                     raw = decision_resp.json()
@@ -4016,6 +4058,23 @@ async def stream_market_scan(
             except Exception:
                 pass
             chunk = universe[i : i + chunk_size]
+            # Live prices for this chunk in parallel (fills N/A when feed has no close)
+            try:
+                chunk_prices = await _fetch_prices_bulk_async(chunk, client)
+            except Exception:
+                chunk_prices = {}
+            # Inject into feed_row copies so lite/full paths see close
+            for sym in chunk:
+                base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
+                px = chunk_prices.get(base)
+                if px is None:
+                    continue
+                if not isinstance(prefetched, dict):
+                    prefetched = {}
+                row = dict(prefetched.get(base) or {})
+                row.setdefault("close", px)
+                row.setdefault("price", px)
+                prefetched[base] = row
             tasks = [
                 _analyze_one_symbol_ultra(
                     sym,
@@ -5287,8 +5346,8 @@ async def api_surprise_scan_stream(
     symbols: str = None,
 ):
     """
-    NDJSON stream of surprise hits as each concurrent batch finishes.
-    First line is meta (static_loaded); then scored stocks; final line event=done.
+    NDJSON stream of surprise hits with progress (like /scan/stream).
+    Lines: meta static_loaded → progress batches → scored stocks → done.
     """
     try:
         from surprise_scanner import surprise_engine
@@ -5307,6 +5366,7 @@ async def api_surprise_scan_stream(
             "_meta": True,
             "event": "static_loaded",
             "static_loaded": n_static,
+            "total": n_static,
         }) + "\n"
         if n_static == 0:
             yield json.dumps({
@@ -5314,13 +5374,13 @@ async def api_surprise_scan_stream(
                 "event": "error",
                 "error": "surprise_static_feed empty — run premarket first",
             }) + "\n"
+            yield json.dumps({"_meta": True, "event": "done", "hits": 0, "universe": 0, "elapsed": 0}) + "\n"
             return
 
         if sym_list:
             keys = [
                 s.upper().replace(".NS", "").replace(".BO", "").strip()
-                for s in sym_list
-                if s
+                for s in sym_list if s
             ]
             keys = [k for k in keys if k in surprise_engine.static_cache]
         else:
@@ -5329,33 +5389,68 @@ async def api_surprise_scan_stream(
                 if v.get("is_liquid", True)
             ] or list(surprise_engine.static_cache.keys())
 
+        total = len(keys)
         hits = 0
+        quotes_ok = 0
         chunk = 20
-        for i in range(0, len(keys), chunk):
+        yield json.dumps({
+            "_meta": True,
+            "event": "scan_start",
+            "total": total,
+            "static_loaded": n_static,
+        }) + "\n"
+
+        for i in range(0, total, chunk):
             batch = keys[i : i + chunk]
-            ticks = await asyncio.gather(
-                *(surprise_engine._fetch_quote(client, MARKET_DATA_URL, s) for s in batch),
-                return_exceptions=True,
-            )
+            try:
+                ticks = await asyncio.gather(
+                    *[surprise_engine._fetch_quote(client, MARKET_DATA_URL, s) for s in batch],
+                    return_exceptions=True,
+                )
+            except Exception as e:
+                logger.warning("surprise stream chunk: %s", e)
+                ticks = [None] * len(batch)
+
             for sym, tick in zip(batch, ticks):
                 if isinstance(tick, Exception) or not tick:
-                    continue
-                scored = surprise_engine.score_stock(sym, tick)
+                    scored = surprise_engine.score_stock(sym, {})
+                else:
+                    quotes_ok += 1
+                    scored = surprise_engine.score_stock(sym, tick)
                 if scored:
                     hits += 1
                     scored["_progress"] = {
-                        "processed": min(i + chunk, len(keys)),
-                        "total": len(keys),
+                        "processed": min(i + chunk, total),
+                        "total": total,
                         "hits": hits,
+                        "quotes_ok": quotes_ok,
                         "elapsed": round(time.time() - t0, 1),
                     }
                     yield json.dumps(scored, default=str) + "\n"
+
+            processed = min(i + chunk, total)
+            elapsed = round(time.time() - t0, 1)
+            eta = None
+            if processed > 0 and processed < total and elapsed > 0:
+                eta = round((total - processed) * (elapsed / processed), 1)
+            yield json.dumps({
+                "_meta": True,
+                "event": "progress",
+                "processed": processed,
+                "total": total,
+                "hits": hits,
+                "quotes_ok": quotes_ok,
+                "elapsed": elapsed,
+                "eta_sec": eta,
+                "percent": int(100 * processed / max(total, 1)),
+            }) + "\n"
 
         yield json.dumps({
             "_meta": True,
             "event": "done",
             "hits": hits,
-            "universe": len(keys),
+            "universe": total,
+            "quotes_ok": quotes_ok,
             "elapsed": round(time.time() - t0, 1),
         }) + "\n"
 
@@ -5364,6 +5459,7 @@ async def api_surprise_scan_stream(
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
 
 
 @app.get("/api/surprise/static")

@@ -28,8 +28,8 @@ logger = logging.getLogger("surprise-scanner")
 
 MIN_SCORE = int(os.getenv("SURPRISE_MIN_SCORE", "60"))
 MIN_CHANGE_PCT = float(os.getenv("SURPRISE_MIN_CHANGE_PCT", "1.0"))
-CONCURRENCY = int(os.getenv("SURPRISE_SCAN_CONCURRENCY", "12"))
-QUOTE_TIMEOUT = float(os.getenv("SURPRISE_QUOTE_TIMEOUT", "8"))
+CONCURRENCY = int(os.getenv("SURPRISE_SCAN_CONCURRENCY", "20"))
+QUOTE_TIMEOUT = float(os.getenv("SURPRISE_QUOTE_TIMEOUT", "3"))
 
 
 def _normalize_db_url(url: str) -> str:
@@ -142,10 +142,16 @@ class SurpriseStockEngine:
             current_price = float(tick.get("price") or tick.get("close") or tick.get("ltp") or 0.0)
         except Exception:
             current_price = 0.0
+        prev_close = float(static.get("prev_close") or 0.0)
+        # If live quote missing/rate-limited, still finish using baseline prev_close
+        if current_price <= 0 and prev_close > 0:
+            current_price = prev_close
+            tick = dict(tick or {})
+            tick["_price_from_baseline"] = True
         if current_price <= 0:
             return None
-
-        prev_close = float(static.get("prev_close") or 0.0) or current_price
+        if prev_close <= 0:
+            prev_close = current_price
         open_price = float(tick.get("open") or prev_close)
         current_vol_15m = float(tick.get("vol_15m") or tick.get("volume") or 0.0)
         # If only full-day volume is available, approximate current 15m slice
@@ -286,18 +292,24 @@ class SurpriseStockEngine:
             if not keys:
                 keys = list(self.static_cache.keys())
 
-        tasks = [self._fetch_quote(client, market_data_url, sym) for sym in keys]
-        ticks = await asyncio.gather(*tasks, return_exceptions=True)
-
         results: List[dict] = []
         quote_ok = 0
-        for sym, tick in zip(keys, ticks):
-            if isinstance(tick, Exception) or not tick:
-                continue
-            quote_ok += 1
-            scored = self.score_stock(sym, tick)
-            if scored:
-                results.append(scored)
+        chunk = 25
+        for i in range(0, len(keys), chunk):
+            batch = keys[i : i + chunk]
+            ticks = await asyncio.gather(
+                *[self._fetch_quote(client, market_data_url, sym) for sym in batch],
+                return_exceptions=True,
+            )
+            for sym, tick in zip(batch, ticks):
+                if isinstance(tick, Exception) or not tick:
+                    # Score with empty tick → uses prev_close baseline so scan finishes
+                    scored = self.score_stock(sym, {})
+                else:
+                    quote_ok += 1
+                    scored = self.score_stock(sym, tick)
+                if scored:
+                    results.append(scored)
 
         results.sort(key=lambda x: x["score"], reverse=True)
         return {

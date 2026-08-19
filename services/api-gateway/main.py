@@ -1954,6 +1954,8 @@ async def _analyze_one_symbol_ultra(
     client: httpx.AsyncClient,
     sem: asyncio.Semaphore,
     lite: bool = False,
+    feed_row: dict = None,
+    prefetched_feeds: dict = None,
 ) -> dict:
     """
     Analyse one symbol with parallel internal calls and caching.
@@ -1967,54 +1969,105 @@ async def _analyze_one_symbol_ultra(
         for attempt in range(MAX_RETRIES + 1):
             try:
                 base_sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
-                # ── Neon Data Feed (stockky_kv) — static fields without upstream ──
-                feed_row = None
-                try:
-                    feed_row = _feed_store().get_symbol(base_sym)
-                except Exception:
-                    feed_row = None
-
-                # Lite + rich Neon row → skip decision-engine HTTP (biggest latency win)
-                if lite and isinstance(feed_row, dict) and feed_row and (
-                    feed_row.get("fundamental_score") is not None
-                    or feed_row.get("metrics")
-                    or feed_row.get("combined_score") is not None
-                ):
+                # ── Neon Data Feed (stockky_kv) — prefer bulk-prefetched row ──
+                # Scan stream / batch passes prefetched_feeds from one get_symbols_bulk()
+                # so we do NOT re-query Neon per symbol (that was the slow path).
+                if feed_row is None and isinstance(prefetched_feeds, dict) and base_sym:
+                    feed_row = prefetched_feeds.get(base_sym)
+                if feed_row is None:
                     try:
-                        fast = _normalize_decision_response({
-                            "symbol": base_sym,
-                            "decision": feed_row.get("decision") or "HOLD",
-                            "combined_score": feed_row.get("combined_score")
-                                or feed_row.get("fundamental_score")
-                                or 50,
-                            "confidence": feed_row.get("confidence") or "Medium",
-                            "close": feed_row.get("close") or feed_row.get("price") or feed_row.get("ltp"),
-                            "fundamental_score": feed_row.get("fundamental_score"),
-                            "fundamental_metrics": feed_row.get("metrics"),
-                            "sector": feed_row.get("sector"),
-                            "industry": feed_row.get("industry"),
-                            "technical_score": feed_row.get("technical_score"),
-                            "news_score": feed_row.get("news_score"),
-                            "event_risk": feed_row.get("event_risk"),
-                            "prediction_score": feed_row.get("prediction_score"),
-                            "reasons": {"data_feed": ["Lite scan from Neon data-feed (stockky_kv)"]},
-                            "from_data_feed": True,
-                            "lite_neon_fastpath": True,
-                        }, symbol)
-                        if fast.get("close") is None:
+                        feed_row = _feed_store().get_symbol(base_sym)
+                    except Exception:
+                        feed_row = None
+                if isinstance(feed_row, dict) and feed_row:
+                    # Warm process-local cache so later get_symbol hits memory
+                    try:
+                        from data_feed import DATA_FEED_PREFIX as _dfp, _LOCAL_SYMBOLS as _ls, _LOCAL_INDEX as _li
+                        _ls[_dfp + base_sym] = dict(feed_row)
+                        _li.add(base_sym)
+                    except Exception:
+                        pass
+
+                # Lite mode: NEVER wait on decision-engine (45s) — free-tier scan must stay fast.
+                # Prefer Neon feed row; otherwise quote-only HOLD with a real price when available.
+                if lite:
+                    try:
+                        close_px = None
+                        if isinstance(feed_row, dict) and feed_row:
+                            for pk in ("close", "price", "ltp", "prev_close", "last"):
+                                if feed_row.get(pk) is not None:
+                                    try:
+                                        close_px = float(feed_row[pk])
+                                        break
+                                    except (TypeError, ValueError):
+                                        pass
+                        if close_px is None:
                             try:
-                                px = _fetch_price_from_quote(symbol)
-                                if px is not None:
-                                    fast["close"] = px
+                                close_px = _fetch_price_from_quote(symbol)
                             except Exception:
-                                pass
-                        fast["natural_language_summary"] = (
-                            f"{base_sym}: lite Neon feed path — "
-                            f"decision={fast.get('decision')} score={fast.get('combined_score')}"
+                                close_px = None
+
+                        has_feed = isinstance(feed_row, dict) and feed_row and (
+                            feed_row.get("fundamental_score") is not None
+                            or feed_row.get("metrics")
+                            or feed_row.get("combined_score") is not None
+                            or feed_row.get("decision")
                         )
-                        return fast
+                        if has_feed or close_px is not None or True:
+                            # Always take lite fast-path (skip decision HTTP)
+                            fr = feed_row if isinstance(feed_row, dict) else {}
+                            score = (
+                                fr.get("combined_score")
+                                or fr.get("fundamental_score")
+                                or fr.get("technical_score")
+                                or 50
+                            )
+                            try:
+                                score = float(score)
+                            except Exception:
+                                score = 50.0
+                            fast = _normalize_decision_response({
+                                "symbol": base_sym,
+                                "decision": fr.get("decision") or "HOLD",
+                                "combined_score": score,
+                                "confidence": fr.get("confidence") or "Low",
+                                "close": close_px,
+                                "fundamental_score": fr.get("fundamental_score"),
+                                "fundamental_metrics": fr.get("metrics"),
+                                "sector": fr.get("sector"),
+                                "industry": fr.get("industry"),
+                                "technical_score": fr.get("technical_score"),
+                                "news_score": fr.get("news_score"),
+                                "event_risk": fr.get("event_risk"),
+                                "prediction_score": fr.get("prediction_score"),
+                                "reasons": {
+                                    "lite": [
+                                        "Lite scan: skipped decision-engine for speed",
+                                        "Price from data-feed or market-data quote when available",
+                                    ]
+                                },
+                                "from_data_feed": bool(fr),
+                                "lite_fastpath": True,
+                            }, symbol)
+                            if fast.get("close") is None and close_px is not None:
+                                fast["close"] = close_px
+                            if fast.get("close") is not None:
+                                try:
+                                    c = float(fast["close"])
+                                    if fast.get("support") is None:
+                                        fast["support"] = round(c * 0.95, 2)
+                                    if fast.get("resistance") is None:
+                                        fast["resistance"] = round(c * 1.05, 2)
+                                except Exception:
+                                    pass
+                            fast["natural_language_summary"] = (
+                                f"{base_sym}: lite path — "
+                                f"decision={fast.get('decision')} score={fast.get('combined_score')} "
+                                f"close={fast.get('close')}"
+                            )
+                            return fast
                     except Exception as e:
-                        logger.debug("lite neon fastpath %s: %s", base_sym, e)
+                        logger.debug("lite fastpath %s: %s", base_sym, e)
 
                 # ── Decide-level cache (same symbol within TTL → instant) ──
                 cache_key = f"{DECIDE_CACHE_PREFIX}{base_sym}"
@@ -2344,7 +2397,17 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
     _status(0, message=f"Processing {total} symbols — Neon feed first, upstream for live fields only")
 
     async def _worker(sym: str):
-        return await _analyze_one_symbol_ultra(sym, client, sem, lite=lite)
+        base = (sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        fed = prefetched_feeds.get(base) if isinstance(prefetched_feeds, dict) else None
+        return await _analyze_one_symbol_ultra(
+            sym,
+            client,
+            sem,
+            lite=lite,
+            feed_row=fed,
+            prefetched_feeds=prefetched_feeds,
+        )
+
 
     def _should_cancel() -> bool:
         if task_id in _SCAN_CANCEL_FLAGS or "__ALL__" in _SCAN_CANCEL_FLAGS or activity_paused():
@@ -3666,8 +3729,29 @@ async def scan_batch(request: Request):
     sem = asyncio.Semaphore(10)
     client = _get_http_client()  # shared keepalive pool
     if True:
-        tasks = [_analyze_one_symbol_ultra(sym, client, sem) for sym in symbols]
+        # One Neon bulk for this batch
+        try:
+            bases = [
+                str(s).upper().replace(".NS", "").replace(".BO", "").strip()
+                for s in symbols
+            ]
+            batch_feeds = _feed_store().get_symbols_bulk(bases) or {}
+        except Exception:
+            batch_feeds = {}
+        tasks = [
+            _analyze_one_symbol_ultra(
+                sym,
+                client,
+                sem,
+                feed_row=batch_feeds.get(
+                    str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
+                ),
+                prefetched_feeds=batch_feeds,
+            )
+            for sym in symbols
+        ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+
         final_results = []
         for sym, result in zip(symbols, results):
             if isinstance(result, Exception):
@@ -3897,7 +3981,16 @@ async def stream_market_scan(
                 break
             chunk = universe[i : i + chunk_size]
             tasks = [
-                _analyze_one_symbol_ultra(sym, client, sem, lite=use_lite)
+                _analyze_one_symbol_ultra(
+                    sym,
+                    client,
+                    sem,
+                    lite=use_lite,
+                    feed_row=(prefetched or {}).get(
+                        str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
+                    ),
+                    prefetched_feeds=prefetched,
+                )
                 for sym in chunk
             ]
             batch = await asyncio.gather(*tasks, return_exceptions=True)
@@ -3913,6 +4006,28 @@ async def stream_market_scan(
                     out = res
                 else:
                     out = {"symbol": sym, "decision": "ERROR", "error": "invalid"}
+                # Fill missing price from Neon feed bulk or live quote (fixes N/A on lite scan)
+                if isinstance(out, dict) and out.get("close") is None and out.get("price") is None:
+                    try:
+                        base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
+                        fed = (prefetched or {}).get(base) if isinstance(prefetched, dict) else None
+                        if isinstance(fed, dict):
+                            for pk in ("close", "price", "ltp", "prev_close"):
+                                if fed.get(pk) is not None:
+                                    try:
+                                        out["close"] = float(fed[pk])
+                                        break
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+                if isinstance(out, dict) and out.get("close") is None:
+                    try:
+                        px = _fetch_price_from_quote(sym)
+                        if px is not None:
+                            out["close"] = float(px)
+                    except Exception:
+                        pass
                 out["_progress"] = {
                     "processed": processed,
                     "total": total,
@@ -5241,6 +5356,12 @@ async def api_surprise_premarket_proxy(request: Request):
     Automatically injects the gateway scan universe when the client body
     has no symbols — so cron can hit the gateway without maintaining a list.
     """
+    # Create Neon table using gateway DB credentials (market-data may lack DATABASE_URL)
+    try:
+        from surprise_schema import ensure_surprise_schema
+        ensure_surprise_schema()
+    except Exception as e:
+        logger.warning("gateway ensure_surprise_schema: %s", e)
     client = _get_http_client()
     target = f"{MARKET_DATA_URL.rstrip('/')}/surprise/premarket"
     try:

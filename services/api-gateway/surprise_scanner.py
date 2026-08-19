@@ -60,7 +60,7 @@ class SurpriseStockEngine:
         self.semaphore = asyncio.Semaphore(max(4, min(CONCURRENCY, 20)))
 
     def load_static_cache(self, force: bool = False) -> int:
-        """Sync load of all baselines — one SQL round-trip."""
+        """Sync load of all baselines — one SQL round-trip. Creates table if missing."""
         if self.static_cache and not force and (time.time() - self._loaded_at) < 300:
             return len(self.static_cache)
         url = _db_url()
@@ -69,6 +69,14 @@ class SurpriseStockEngine:
             self.static_cache = {}
             return 0
         try:
+            # Always ensure table exists before SELECT (fixes UndefinedTable on first deploy)
+            try:
+                from surprise_schema import ensure_surprise_schema
+
+                ensure_surprise_schema()
+            except Exception as se:
+                logger.debug("ensure_surprise_schema: %s", se)
+
             from sqlalchemy import create_engine, text
 
             eng = create_engine(
@@ -79,7 +87,25 @@ class SurpriseStockEngine:
                 pool_timeout=8,
                 connect_args={"connect_timeout": 8, "application_name": "stockky-surprise-scan"},
             )
-            with eng.connect() as conn:
+            with eng.begin() as conn:
+                # Idempotent DDL in case ensure_schema module unavailable
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE IF NOT EXISTS surprise_static_feed (
+                            symbol VARCHAR(30) PRIMARY KEY,
+                            prev_close NUMERIC(12, 2) NOT NULL DEFAULT 0,
+                            avg_15m_volume BIGINT NOT NULL DEFAULT 10000,
+                            daily_atr NUMERIC(12, 2) NOT NULL DEFAULT 0.0,
+                            high_52w NUMERIC(12, 2) NOT NULL DEFAULT 0,
+                            dist_52w_pct NUMERIC(8, 2) NOT NULL DEFAULT 100,
+                            sector VARCHAR(80),
+                            is_liquid BOOLEAN DEFAULT TRUE,
+                            updated_at TIMESTAMPTZ DEFAULT NOW()
+                        )
+                        """
+                    )
+                )
                 rows = conn.execute(text("SELECT * FROM surprise_static_feed")).mappings().all()
             eng.dispose()
             cache: Dict[str, Dict[str, Any]] = {}
@@ -88,7 +114,6 @@ class SurpriseStockEngine:
                 sym = str(d.get("symbol") or "").upper().strip()
                 if not sym:
                     continue
-                # Coerce numerics
                 for k in ("prev_close", "daily_atr", "high_52w", "dist_52w_pct"):
                     try:
                         d[k] = float(d[k]) if d.get(k) is not None else 0.0
@@ -106,6 +131,7 @@ class SurpriseStockEngine:
         except Exception as e:
             logger.warning("load_static_cache failed: %s", e)
             return len(self.static_cache)
+
 
     def score_stock(self, symbol: str, tick: dict) -> Optional[dict]:
         static = self.static_cache.get(symbol.upper().replace(".NS", "").replace(".BO", ""))

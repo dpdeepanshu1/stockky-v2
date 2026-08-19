@@ -50,32 +50,44 @@ def _db_url() -> Optional[str]:
 def ensure_schema() -> bool:
     url = _db_url()
     if not url:
-        logger.warning("No DATABASE_URL — cannot ensure surprise_static_feed")
+        logger.warning(
+            "No DATABASE_URL/CACHE_DATABASE_URL — cannot ensure surprise_static_feed. "
+            "Set Neon pooler URL on market-data service env."
+        )
         return False
     try:
         from sqlalchemy import create_engine, text
 
-        eng = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
-        ddl = """
-        CREATE TABLE IF NOT EXISTS surprise_static_feed (
-            symbol VARCHAR(30) PRIMARY KEY,
-            prev_close NUMERIC(12, 2) NOT NULL,
-            avg_15m_volume BIGINT NOT NULL DEFAULT 10000,
-            daily_atr NUMERIC(12, 2) NOT NULL DEFAULT 0.0,
-            high_52w NUMERIC(12, 2) NOT NULL,
-            dist_52w_pct NUMERIC(8, 2) NOT NULL,
-            sector VARCHAR(80),
-            is_liquid BOOLEAN DEFAULT TRUE,
-            updated_at TIMESTAMPTZ DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS idx_surprise_static_sym ON surprise_static_feed(symbol);
-        """
+        eng = create_engine(
+            url,
+            pool_pre_ping=True,
+            pool_size=1,
+            max_overflow=0,
+            connect_args={"connect_timeout": 15, "application_name": "surprise-premarket-ddl"},
+        )
+        create_sql = text(
+            """
+            CREATE TABLE IF NOT EXISTS surprise_static_feed (
+                symbol VARCHAR(30) PRIMARY KEY,
+                prev_close NUMERIC(12, 2) NOT NULL DEFAULT 0,
+                avg_15m_volume BIGINT NOT NULL DEFAULT 10000,
+                daily_atr NUMERIC(12, 2) NOT NULL DEFAULT 0.0,
+                high_52w NUMERIC(12, 2) NOT NULL DEFAULT 0,
+                dist_52w_pct NUMERIC(8, 2) NOT NULL DEFAULT 100,
+                sector VARCHAR(80),
+                is_liquid BOOLEAN DEFAULT TRUE,
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+            """
+        )
+        idx_sql = text(
+            "CREATE INDEX IF NOT EXISTS idx_surprise_static_sym ON surprise_static_feed(symbol)"
+        )
         with eng.begin() as conn:
-            for stmt in ddl.strip().split(";"):
-                s = stmt.strip()
-                if s:
-                    conn.execute(text(s))
+            conn.execute(create_sql)
+            conn.execute(idx_sql)
         eng.dispose()
+        logger.info("surprise_static_feed schema OK")
         return True
     except Exception as e:
         logger.error("schema ensure failed: %s", e)

@@ -116,8 +116,8 @@ def extract_feed_payload(
 
 
 def _payload_is_useful(payload: Optional[dict]) -> bool:
-    """True when feed row has any slow field worth short-circuiting upstream."""
-    if not isinstance(payload, dict):
+    """True when feed row has any field that can short-circuit upstream work."""
+    if not isinstance(payload, dict) or not payload:
         return False
     return bool(
         payload.get("fundamental_score") is not None
@@ -131,7 +131,14 @@ def _payload_is_useful(payload: Optional[dict]) -> bool:
         or payload.get("recent_insider_transactions")
         or payload.get("earnings_surprise") is not None
         or payload.get("next_earnings_date")
+        or payload.get("close") is not None
+        or payload.get("price") is not None
+        or payload.get("ltp") is not None
+        or payload.get("combined_score") is not None
+        or payload.get("technical_score") is not None
+        or payload.get("decision")
     )
+
 
 
 class DataFeedStore:

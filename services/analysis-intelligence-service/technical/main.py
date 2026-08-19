@@ -169,28 +169,87 @@ def _fetch_history_yfinance(symbol: str):
         return None
 
 
-def _fetch_history(symbol: str):
-    # 1) market-data-service (preferred, shared cache)
+def _fetch_history_from_market_data(symbol: str, period: str = "6mo"):
+    """One attempt against market-data /history."""
     try:
-        # wake cold free-tier dyno
-        try:
-            httpx.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=8)
-        except Exception:
-            pass
         resp = httpx.get(
             f"{MARKET_DATA_URL}/history/{symbol}",
-            params={"period": "6mo"},
+            params={"period": period},
             timeout=35,
         )
         if resp.status_code == 200:
             data = resp.json()
             df = _candles_to_df(data.get("candles", []))
-            if df is not None:
+            if df is not None and len(df) >= 5:
                 return df
         else:
-            logger.warning("market-data history HTTP %s for %s", resp.status_code, symbol)
+            logger.warning("market-data history HTTP %s for %s period=%s", resp.status_code, symbol, period)
     except httpx.HTTPError as e:
-        logger.warning("Market data service unreachable for %s: %s — trying yfinance", symbol, e)
+        logger.warning("market-data history error %s period=%s: %s", symbol, period, e)
+    return None
+
+
+def _fetch_history_bhavcopy_hint(symbol: str):
+    """
+    Optional: ask market-data delivery/bhavcopy path for last close when history is empty.
+    Builds a minimal 1-row frame so analyze() can still attach a price-based fallback.
+    """
+    try:
+        resp = httpx.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=12)
+        if resp.status_code != 200:
+            return None
+        q = resp.json() if resp.content else {}
+        px = None
+        for k in ("price", "cmp", "last_price", "ltp", "close", "prev_close"):
+            try:
+                v = float(q.get(k) or 0)
+                if v > 0:
+                    px = v
+                    break
+            except (TypeError, ValueError):
+                continue
+        if not px:
+            return None
+        # Minimal synthetic OHLC so downstream len checks can still produce a quote-based result
+        import pandas as pd
+        from datetime import datetime, timezone
+        row = {
+            "Open": px,
+            "High": px,
+            "Low": px,
+            "Close": px,
+            "Volume": int(q.get("volume") or 0),
+        }
+        df = pd.DataFrame([row], index=[datetime.now(timezone.utc)])
+        df.attrs["bhavcopy_hint"] = True
+        return df
+    except Exception as e:
+        logger.debug("bhavcopy/quote hint failed for %s: %s", symbol, e)
+        return None
+
+
+def _fetch_history(symbol: str):
+    # 1) market-data-service (preferred, shared cache) — try multiple periods
+    try:
+        try:
+            httpx.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=8)
+        except Exception:
+            pass
+        for period in ("6mo", "3mo", "1mo", "1y"):
+            df = _fetch_history_from_market_data(symbol, period=period)
+            if df is not None and len(df) >= 20:
+                return df
+            if df is not None and len(df) >= 5:
+                # Keep short series but continue trying longer periods first
+                short = df
+            else:
+                short = None
+        # Accept short series if that is all we got
+        df = _fetch_history_from_market_data(symbol, period="6mo")
+        if df is not None:
+            return df
+    except Exception as e:
+        logger.warning("Market data history chain failed for %s: %s — trying yfinance", symbol, e)
 
     # 2) direct yfinance (free-tier resilience)
     df = _fetch_history_yfinance(symbol)
@@ -200,6 +259,13 @@ def _fetch_history(symbol: str):
             df = df.iloc[-260:]
         gc.collect()
         return df
+
+    # 3) last-resort quote/bhavcopy hint (single bar) — analyze() treats <5 as insufficient
+    #    but still returns structured fallback with close price
+    hint = _fetch_history_bhavcopy_hint(symbol)
+    if hint is not None:
+        logger.info("Using quote/bhavcopy hint for %s (minimal bar)", symbol)
+        return hint
     return None
 
 # ── Indicator calculations ─────────────────────────────────────────────────────
@@ -282,9 +348,12 @@ def analyze(symbol: str):
                 "trend_strength": "unknown",
                 "volume_surge": False,
                 "close": price,
+                "price": price,
+                "rsi": 50,
                 "support": None,
                 "resistance": None,
                 "data_insufficient": True,
+                "summary": f"Technical indicators neutral (RSI: 50). Last quote ₹{price:.2f}; history temporarily thin.",
                 "reasons": [
                     f"Limited history for {sym}; using last quote ₹{price:.2f}. Retry for full technicals."
                 ],
@@ -296,9 +365,12 @@ def analyze(symbol: str):
                 "trend_strength": "unknown",
                 "volume_surge": False,
                 "close": None,
+                "price": None,
+                "rsi": 50,
                 "support": None,
                 "resistance": None,
                 "data_insufficient": True,
+                "summary": "Technical indicators neutral (RSI: 50). Price history unavailable — retry shortly.",
                 "reasons": [
                     f"Price history unavailable for {sym} right now (upstream busy). Retry shortly."
                 ],

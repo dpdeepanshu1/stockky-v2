@@ -55,6 +55,7 @@ _DURABLE_PREFIXES = (
     "indianapi:",
     "stockky:decide_cache:",  # optional durability for decide (low volume)
     "stockky:batch_result:",  # scan batch cache survives free-tier sleep
+    "stockky:rate_limit",  # rate-limit dashboard durable events/stats
 )
 
 

@@ -230,7 +230,21 @@ class DataFeedStore:
     Write path always hits Neon for durable prefixes.
     """
 
-    def __init__(self, redis_get, redis_set, redis_client=None):
+    def __init__(self, redis_get=None, redis_set=None, redis_client=None):
+        # Optional deps: when omitted, bind to kv_cache (memory + Neon).
+        # Fixes TypeError: DataFeedStore() missing 2 required positional arguments
+        # which previously caused get_all_stock_feeds → {} → all scores=40 HOLD.
+        if redis_get is None or redis_set is None:
+            try:
+                from kv_cache import kv_get, kv_set
+                redis_get = redis_get or kv_get
+                redis_set = redis_set or kv_set
+            except Exception:
+                pass
+        if redis_get is None or redis_set is None:
+            raise TypeError(
+                "DataFeedStore requires redis_get/redis_set or working kv_cache"
+            )
         self._get = redis_get
         self._set = redis_set
         self._redis = redis_client  # legacy; may be None
@@ -703,6 +717,29 @@ def feed_legacy_key(symbol: str) -> str:
     return FEED_LEGACY_PREFIX + _norm_sym(symbol)
 
 
+_feed_store_singleton: Optional["DataFeedStore"] = None
+_feed_store_lock = threading.Lock()
+
+
+def get_data_feed_store() -> "DataFeedStore":
+    """
+    Process-wide DataFeedStore bound to kv_cache.
+    Safe to call from helpers that previously did DataFeedStore() with no args.
+    """
+    global _feed_store_singleton
+    if _feed_store_singleton is not None:
+        return _feed_store_singleton
+    with _feed_store_lock:
+        if _feed_store_singleton is None:
+            try:
+                from kv_cache import kv_get, kv_set
+                _feed_store_singleton = DataFeedStore(kv_get, kv_set, None)
+            except Exception:
+                # Last resort: still construct with defaults inside __init__
+                _feed_store_singleton = DataFeedStore()
+        return _feed_store_singleton
+
+
 def get_all_stock_feeds(symbols: List[str]) -> Dict[str, dict]:
     """
     One bulk Neon round-trip for many symbols.
@@ -710,7 +747,7 @@ def get_all_stock_feeds(symbols: List[str]) -> Dict[str, dict]:
     (+ alias feed:SYMBOL fallback for older writers).
     """
     try:
-        return DataFeedStore().get_symbols_bulk(symbols) or {}
+        return get_data_feed_store().get_symbols_bulk(symbols) or {}
     except Exception as e:
         logger.warning("get_all_stock_feeds failed: %s", e)
         return {}
@@ -718,4 +755,4 @@ def get_all_stock_feeds(symbols: List[str]) -> Dict[str, dict]:
 
 def save_stock_feed(symbol: str, payload: dict, ttl: int = DATA_FEED_TTL) -> None:
     """Standardized write: dual key stockky:data_feed:sym: + feed:"""
-    DataFeedStore().put_symbol(symbol, payload, ttl=ttl)
+    get_data_feed_store().put_symbol(symbol, payload, ttl=ttl)

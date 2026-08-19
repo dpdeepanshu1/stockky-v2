@@ -2836,6 +2836,8 @@ def circuits_status():
 
 
 @app.get("/ops/rate-limits")
+@app.get("/api/rate-limits")
+@app.get("/api/ops/rate-limits")
 async def ops_rate_limits():
     """Dashboard payload: rate-limit events + circuit breakers (last 1h)."""
     return rate_limit_monitor.snapshot(circuits=all_snapshots())

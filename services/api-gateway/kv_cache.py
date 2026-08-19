@@ -43,6 +43,7 @@ _DURABLE_PREFIXES = (
     "stockky:scan_universe",
     "stockky:known_symbols",
     "stockky:data_feed",
+    "feed:",  # alias key for data-feed payloads (Sticky Fix Step 2)
     "stockky:hot_job",
     "stockky:hot_result",
     "stockky:last_full_scan",

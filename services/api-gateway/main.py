@@ -1206,6 +1206,11 @@ def _normalize_decision_response(raw, symbol: str) -> dict:
         "fundamental_fallback": False,
     }
     merged = {**default, **raw}
+    try:
+        from price_resolver import ensure_row_price
+        merged = ensure_row_price(merged)
+    except Exception:
+        pass
     return merged
 
 # ── Value-buying adjustment for top-pick ranking ────────────────────────────
@@ -2354,9 +2359,9 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
     prefetched_feeds: dict = {}
     try:
         _status(0, message="Bulk-loading Neon data-feed (single query)…")
-        store = _feed_store()
+        from data_feed import get_all_stock_feeds
         bases = [s.upper().replace(".NS", "").replace(".BO", "").strip() for s in universe]
-        prefetched_feeds = store.get_symbols_bulk(bases) or {}
+        prefetched_feeds = get_all_stock_feeds(bases) or {}
         for base, fed in prefetched_feeds.items():
             if fed and (
                 fed.get("fundamental_score") is not None
@@ -3949,6 +3954,84 @@ def get_scan_status(task_id: str):
     return data
 
 
+
+def _lite_evaluate_from_feed(symbol: str, feed: dict, live_price: float = 0.0) -> dict:
+    """
+    Sticky Fix Step 3 — lite path with ZERO downstream HTTP (decide/fund/news).
+    Uses Neon feed + optional live price only.
+    """
+    from price_resolver import extract_safe_price, apply_price_aliases
+
+    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    feed = feed if isinstance(feed, dict) else {}
+    tick = {"price": live_price} if live_price and live_price > 0 else {}
+    cmp_price = extract_safe_price(base, tick=tick, feed=feed, decision=None)
+    prev = 0.0
+    for k in ("prev_close", "close", "price"):
+        try:
+            if feed.get(k) is not None:
+                prev = float(feed[k])
+                if prev > 0:
+                    break
+        except Exception:
+            pass
+    if prev <= 0:
+        prev = cmp_price if cmp_price > 0 else 1.0
+    change_pct = 0.0
+    if cmp_price > 0 and prev > 0:
+        change_pct = round(((cmp_price - prev) / prev) * 100.0, 2)
+
+    score = feed.get("combined_score") or feed.get("fundamental_score") or feed.get("technical_score") or 50
+    try:
+        score = float(score)
+    except Exception:
+        score = 50.0
+
+    decision = feed.get("decision") or "HOLD"
+    if not feed.get("decision"):
+        if change_pct >= 1.5:
+            decision = "PREPARE TO BUY"
+        elif change_pct <= -1.5:
+            decision = "DO NOT BUY"
+        else:
+            decision = "HOLD"
+
+    out = {
+        "symbol": base,
+        "decision": decision,
+        "confidence": feed.get("confidence") or "Low",
+        "combined_score": score,
+        "technical_score": feed.get("technical_score") or score,
+        "fundamental_score": feed.get("fundamental_score"),
+        "fundamental_metrics": feed.get("metrics"),
+        "sector": feed.get("sector"),
+        "industry": feed.get("industry"),
+        "news_score": feed.get("news_score"),
+        "event_risk": feed.get("event_risk"),
+        "change_pct": change_pct,
+        "close": cmp_price,
+        "price": cmp_price,
+        "cmp": cmp_price,
+        "current_price": cmp_price,
+        "ltp": cmp_price,
+        "from_data_feed": bool(feed),
+        "lite_fastpath": True,
+        "status": "READY",
+        "reasons": {
+            "lite": [
+                "Lite scan: Neon data-feed + live quote only (no decision-engine hop)",
+            ]
+        },
+        "natural_language_summary": (
+            f"{base}: lite — decision={decision} score={score} close={cmp_price}"
+        ),
+    }
+    if cmp_price > 0:
+        out["support"] = round(cmp_price * 0.95, 2)
+        out["resistance"] = round(cmp_price * 1.05, 2)
+    return apply_price_aliases(out, cmp_price)
+
+
 @app.get("/scan/stream")
 async def stream_market_scan(
     lite: bool = None,
@@ -4006,15 +4089,31 @@ async def stream_market_scan(
             }) + "\n"
             return
 
-        # 1) Single bulk Neon load
+        # 1) Single bulk Neon load (canonical stockky:data_feed:sym: + alias feed:)
         prefetched = {}
         try:
-            store = _feed_store()
+            from data_feed import get_all_stock_feeds
             bases = [
                 s.upper().replace(".NS", "").replace(".BO", "").strip()
                 for s in universe
             ]
-            prefetched = store.get_symbols_bulk(bases) or {}
+            prefetched = get_all_stock_feeds(bases) or {}
+            # Also warm process-local store for any later get_symbol
+            try:
+                store = _feed_store()
+                for b, row in prefetched.items():
+                    if isinstance(row, dict):
+                        store.put_symbol  # attribute check
+                # lightweight local warm without re-write to Neon
+                from data_feed import DATA_FEED_PREFIX, FEED_ALIAS_PREFIX, _LOCAL_SYMBOLS, _LOCAL_INDEX
+                for b, row in prefetched.items():
+                    if not isinstance(row, dict):
+                        continue
+                    _LOCAL_SYMBOLS[DATA_FEED_PREFIX + b] = dict(row)
+                    _LOCAL_SYMBOLS[FEED_ALIAS_PREFIX + b] = dict(row)
+                    _LOCAL_INDEX.add(b)
+            except Exception:
+                pass
             yield json.dumps({
                 "_meta": True,
                 "event": "feed_bulk_loaded",
@@ -4033,7 +4132,7 @@ async def stream_market_scan(
             }) + "\n"
 
         # 2) Process in chunks so results stream early
-        chunk_size = max(5, min(SCAN_BATCH_SIZE, 15))
+        chunk_size = max(10, min(25 if use_lite else SCAN_BATCH_SIZE, 25 if use_lite else 15))
         processed = 0
         for i in range(0, total, chunk_size):
             if "__ALL__" in _SCAN_CANCEL_FLAGS:
@@ -4058,12 +4157,11 @@ async def stream_market_scan(
             except Exception:
                 pass
             chunk = universe[i : i + chunk_size]
-            # Live prices for this chunk in parallel (fills N/A when feed has no close)
+            # Live prices for this chunk in parallel
             try:
                 chunk_prices = await _fetch_prices_bulk_async(chunk, client)
             except Exception:
                 chunk_prices = {}
-            # Inject into feed_row copies so lite/full paths see close
             for sym in chunk:
                 base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
                 px = chunk_prices.get(base)
@@ -4075,36 +4173,49 @@ async def stream_market_scan(
                 row.setdefault("close", px)
                 row.setdefault("price", px)
                 prefetched[base] = row
-            tasks = [
-                _analyze_one_symbol_ultra(
-                    sym,
-                    client,
-                    sem,
-                    lite=use_lite,
-                    feed_row=(prefetched or {}).get(
-                        str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
-                    ),
-                    prefetched_feeds=prefetched,
-                )
-                for sym in chunk
-            ]
-            try:
-                batch = await asyncio.gather(*tasks, return_exceptions=True)
-            except Exception as e:
-                logger.exception("scan stream chunk failed: %s", e)
+
+            # Sticky Fix Step 3: lite = pure gateway eval (no decision HTTP)
+            if use_lite:
+                batch = []
                 for sym in chunk:
-                    processed += 1
-                    yield json.dumps({
-                        "symbol": sym,
-                        "decision": "ERROR",
-                        "error": str(e)[:200],
-                        "_progress": {
-                            "processed": processed,
-                            "total": total,
-                            "elapsed": round(time.time() - start, 1),
-                        },
-                    }, default=str) + "\n"
-                continue
+                    base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
+                    fed = (prefetched or {}).get(base) if isinstance(prefetched, dict) else {}
+                    px = float(chunk_prices.get(base) or 0) if chunk_prices else 0.0
+                    try:
+                        batch.append(_lite_evaluate_from_feed(sym, fed or {}, px))
+                    except Exception as e:
+                        batch.append({"symbol": base, "decision": "ERROR", "error": str(e)[:200]})
+            else:
+                tasks = [
+                    _analyze_one_symbol_ultra(
+                        sym,
+                        client,
+                        sem,
+                        lite=False,
+                        feed_row=(prefetched or {}).get(
+                            str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
+                        ),
+                        prefetched_feeds=prefetched,
+                    )
+                    for sym in chunk
+                ]
+                try:
+                    batch = await asyncio.gather(*tasks, return_exceptions=True)
+                except Exception as e:
+                    logger.exception("scan stream chunk failed: %s", e)
+                    for sym in chunk:
+                        processed += 1
+                        yield json.dumps({
+                            "symbol": sym,
+                            "decision": "ERROR",
+                            "error": str(e)[:200],
+                            "_progress": {
+                                "processed": processed,
+                                "total": total,
+                                "elapsed": round(time.time() - start, 1),
+                            },
+                        }, default=str) + "\n"
+                    continue
             for sym, res in zip(chunk, batch):
                 processed += 1
                 if isinstance(res, Exception):
@@ -4117,28 +4228,24 @@ async def stream_market_scan(
                     out = res
                 else:
                     out = {"symbol": sym, "decision": "ERROR", "error": "invalid"}
-                # Fill missing price from Neon feed bulk or live quote (fixes N/A on lite scan)
-                if isinstance(out, dict) and out.get("close") is None and out.get("price") is None:
+                # Sticky Fix Step 1: unified price resolution + all frontend aliases
+                if isinstance(out, dict):
                     try:
+                        from price_resolver import ensure_row_price, extract_safe_price, apply_price_aliases
                         base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
                         fed = (prefetched or {}).get(base) if isinstance(prefetched, dict) else None
-                        if isinstance(fed, dict):
-                            for pk in ("close", "price", "ltp", "prev_close"):
-                                if fed.get(pk) is not None:
-                                    try:
-                                        out["close"] = float(fed[pk])
-                                        break
-                                    except Exception:
-                                        pass
-                    except Exception:
-                        pass
-                if isinstance(out, dict) and out.get("close") is None:
-                    try:
-                        px = _fetch_price_from_quote(sym)
-                        if px is not None:
-                            out["close"] = float(px)
-                    except Exception:
-                        pass
+                        tick = {"price": None}
+                        # Prefer bulk-injected feed close already in prefetched
+                        out = ensure_row_price(out, feed=fed if isinstance(fed, dict) else None)
+                        if extract_safe_price(decision=out) <= 0:
+                            try:
+                                px = _fetch_price_from_quote(sym)
+                                if px is not None:
+                                    out = apply_price_aliases(out, float(px))
+                            except Exception:
+                                pass
+                    except Exception as _pe:
+                        logger.debug("price_resolver stream: %s", _pe)
                 out["_progress"] = {
                     "processed": processed,
                     "total": total,

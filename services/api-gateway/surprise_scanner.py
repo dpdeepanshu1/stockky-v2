@@ -106,7 +106,14 @@ class SurpriseStockEngine:
                         """
                     )
                 )
-                rows = conn.execute(text("SELECT * FROM surprise_static_feed")).mappings().all()
+                # Sticky Fix Step 4: explicit columns (match surprise_premarket INSERT)
+                rows = conn.execute(
+                    text(
+                        "SELECT symbol, prev_close, avg_15m_volume, daily_atr, "
+                        "high_52w, dist_52w_pct, sector, is_liquid, updated_at "
+                        "FROM surprise_static_feed"
+                    )
+                ).mappings().all()
             eng.dispose()
             cache: Dict[str, Dict[str, Any]] = {}
             for r in rows:
@@ -119,8 +126,12 @@ class SurpriseStockEngine:
                         d[k] = float(d[k]) if d.get(k) is not None else 0.0
                     except Exception:
                         d[k] = 0.0
+                # avg_15m_volume OR legacy avg_volume
                 try:
-                    d["avg_15m_volume"] = int(d.get("avg_15m_volume") or 10000)
+                    vol = d.get("avg_15m_volume")
+                    if vol is None:
+                        vol = d.get("avg_volume")
+                    d["avg_15m_volume"] = int(vol or 10000)
                 except Exception:
                     d["avg_15m_volume"] = 10000
                 cache[sym] = d

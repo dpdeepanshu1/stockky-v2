@@ -48,11 +48,21 @@ def _db_url() -> Optional[str]:
 
 
 def ensure_schema() -> bool:
+    # Sticky Fix Step 4: single schema source (surprise_schema.py)
+    try:
+        from surprise_schema import ensure_surprise_schema
+        result = ensure_surprise_schema()
+        if result.get("ok"):
+            return True
+        logger.warning("ensure_surprise_schema: %s", result.get("error"))
+    except Exception as e:
+        logger.debug("surprise_schema import/call: %s", e)
+
     url = _db_url()
     if not url:
         logger.warning(
             "No DATABASE_URL/CACHE_DATABASE_URL — cannot ensure surprise_static_feed. "
-            "Set Neon pooler URL on market-data service env."
+            "Set Neon pooler URL on api-gateway env."
         )
         return False
     try:

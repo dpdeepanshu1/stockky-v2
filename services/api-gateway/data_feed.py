@@ -27,6 +27,8 @@ logger = logging.getLogger("data-feed")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 DATA_FEED_PREFIX = "stockky:data_feed:sym:"
+# Alias used by some callers / older docs ("feed:RELIANCE"). Dual-write + dual-read.
+FEED_ALIAS_PREFIX = "feed:"
 DATA_FEED_META_KEY = "stockky:data_feed:meta"
 DATA_FEED_JOB_KEY = "stockky:data_feed:job"
 DATA_FEED_INDEX_KEY = "stockky:data_feed:index"  # list of symbols currently in feed
@@ -224,12 +226,16 @@ class DataFeedStore:
             if not base:
                 continue
             key = DATA_FEED_PREFIX + base
-            local = _LOCAL_SYMBOLS.get(key)
+            alias_key = FEED_ALIAS_PREFIX + base
+            local = _LOCAL_SYMBOLS.get(key) or _LOCAL_SYMBOLS.get(alias_key)
             if isinstance(local, dict) and _payload_is_useful(local):
                 result[base] = dict(local)
             else:
                 missing_keys.append(key)
                 key_to_base[key] = base
+                # Also request alias in same bulk round-trip
+                missing_keys.append(alias_key)
+                key_to_base[alias_key] = base
 
         if not missing_keys:
             return result
@@ -261,10 +267,25 @@ class DataFeedStore:
         for key, val in bulk.items():
             if not isinstance(val, dict) or not val:
                 continue
-            base = key_to_base.get(key) or key.replace(DATA_FEED_PREFIX, "")
-            _LOCAL_SYMBOLS[key] = val
+            base = key_to_base.get(key)
+            if not base:
+                if key.startswith(DATA_FEED_PREFIX):
+                    base = key[len(DATA_FEED_PREFIX):]
+                elif key.startswith(FEED_ALIAS_PREFIX):
+                    base = key[len(FEED_ALIAS_PREFIX):]
+                else:
+                    base = key
+            base = _norm_sym(base)
+            if not base:
+                continue
+            # Prefer first hit; do not overwrite richer payload with thinner alias
+            if base in result and _payload_is_useful(result[base]):
+                pass
+            else:
+                result[base] = dict(val)
+            _LOCAL_SYMBOLS[DATA_FEED_PREFIX + base] = result[base]
+            _LOCAL_SYMBOLS[FEED_ALIAS_PREFIX + base] = result[base]
             _LOCAL_INDEX.add(base)
-            result[base] = dict(val)
 
         return result
 
@@ -273,16 +294,22 @@ class DataFeedStore:
         if not base or not isinstance(payload, dict):
             return
         key = DATA_FEED_PREFIX + base
+        alias_key = FEED_ALIAS_PREFIX + base
         payload = dict(payload)
         payload.setdefault("symbol", base)
         payload.setdefault("updated_at", _now_iso())
         _LOCAL_SYMBOLS[key] = payload
+        _LOCAL_SYMBOLS[alias_key] = payload
         _LOCAL_INDEX.add(base)
-        # Durable write (Neon via kv_cache for stockky:data_feed:*)
+        # Durable write: canonical + alias (stops key-mismatch cache misses)
         try:
             self._set(key, payload, ttl=ttl)
         except Exception as e:
             logger.warning("data_feed put_symbol durable fail %s: %s", base, e)
+        try:
+            self._set(alias_key, payload, ttl=ttl)
+        except Exception as e:
+            logger.debug("data_feed alias write %s: %s", base, e)
         # Update durable index (batched cheaply every put — list is small)
         try:
             self._persist_index(ttl=ttl)
@@ -564,3 +591,32 @@ def soft_ttl_should_refresh(redis_client, key: str, soft_window: int = 10) -> bo
         return isinstance(ttl, int) and 0 < ttl <= soft_window
     except Exception:
         return False
+
+
+# ── Sticky Fix Step 2: bulk helpers used by /scan/stream ───────────────────
+
+def feed_key(symbol: str) -> str:
+    """Canonical Neon key for a symbol feed payload."""
+    return DATA_FEED_PREFIX + _norm_sym(symbol)
+
+
+def feed_alias_key(symbol: str) -> str:
+    return FEED_ALIAS_PREFIX + _norm_sym(symbol)
+
+
+def get_all_stock_feeds(symbols: List[str]) -> Dict[str, dict]:
+    """
+    One bulk Neon round-trip for many symbols.
+    Returns { "RELIANCE": {...}, "TCS": {...} } using canonical keys
+    (+ alias feed:SYMBOL fallback for older writers).
+    """
+    try:
+        return DataFeedStore().get_symbols_bulk(symbols) or {}
+    except Exception as e:
+        logger.warning("get_all_stock_feeds failed: %s", e)
+        return {}
+
+
+def save_stock_feed(symbol: str, payload: dict, ttl: int = DATA_FEED_TTL) -> None:
+    """Standardized write: dual key stockky:data_feed:sym: + feed:"""
+    DataFeedStore().put_symbol(symbol, payload, ttl=ttl)

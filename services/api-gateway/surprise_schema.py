@@ -1,8 +1,14 @@
 """
 Surprise static feed schema — Neon / Postgres.
 
-Creates `surprise_static_feed` used by pre-market baseline job and
-lightweight intraday surprise scanner.
+Single source of truth for table name + columns used by:
+  - surprise_premarket.py (INSERT)
+  - surprise_scanner.py (SELECT)
+
+Table: surprise_static_feed
+Columns:
+  symbol, prev_close, avg_15m_volume, daily_atr, high_52w, dist_52w_pct,
+  sector, is_liquid, updated_at
 
 Env: CACHE_DATABASE_URL | DATABASE_URL | TRAINING_DATABASE_URL
 """
@@ -15,21 +21,37 @@ from typing import Optional
 
 logger = logging.getLogger("surprise-schema")
 
-DDL = """
-CREATE TABLE IF NOT EXISTS surprise_static_feed (
-    symbol VARCHAR(30) PRIMARY KEY,
-    prev_close NUMERIC(12, 2) NOT NULL,
-    avg_15m_volume BIGINT NOT NULL DEFAULT 10000,
-    daily_atr NUMERIC(12, 2) NOT NULL DEFAULT 0.0,
-    high_52w NUMERIC(12, 2) NOT NULL,
-    dist_52w_pct NUMERIC(8, 2) NOT NULL,
-    sector VARCHAR(80),
-    is_liquid BOOLEAN DEFAULT TRUE,
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_surprise_static_sym ON surprise_static_feed(symbol);
-CREATE INDEX IF NOT EXISTS idx_surprise_static_updated ON surprise_static_feed(updated_at);
-"""
+TABLE_NAME = "surprise_static_feed"
+
+# Defaults allow CREATE/INSERT even when a metric is missing
+DDL_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS surprise_static_feed (
+        symbol VARCHAR(30) PRIMARY KEY,
+        prev_close NUMERIC(12, 2) NOT NULL DEFAULT 0,
+        avg_15m_volume BIGINT NOT NULL DEFAULT 10000,
+        daily_atr NUMERIC(12, 2) NOT NULL DEFAULT 0.0,
+        high_52w NUMERIC(12, 2) NOT NULL DEFAULT 0,
+        dist_52w_pct NUMERIC(8, 2) NOT NULL DEFAULT 100,
+        sector VARCHAR(80),
+        is_liquid BOOLEAN DEFAULT TRUE,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_surprise_static_sym ON surprise_static_feed(symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_surprise_static_updated ON surprise_static_feed(updated_at)",
+]
+
+# Explicit column list — never rely on SELECT * for scanner logic
+SELECT_COLUMNS = (
+    "symbol, prev_close, avg_15m_volume, daily_atr, high_52w, "
+    "dist_52w_pct, sector, is_liquid, updated_at"
+)
+
+INSERT_COLUMNS = (
+    "symbol, prev_close, avg_15m_volume, daily_atr, high_52w, "
+    "dist_52w_pct, sector, is_liquid, updated_at"
+)
 
 
 def _normalize_db_url(url: str) -> str:
@@ -54,7 +76,7 @@ def database_url() -> Optional[str]:
 
 
 def ensure_surprise_schema() -> dict:
-    """Create table/indexes if missing. Safe to call on every premarket run."""
+    """Create table/indexes if missing. Safe to call on every premarket / scan."""
     url = database_url()
     if not url:
         return {"ok": False, "error": "No DATABASE_URL / CACHE_DATABASE_URL configured"}
@@ -70,13 +92,13 @@ def ensure_surprise_schema() -> dict:
             connect_args={"connect_timeout": 8, "application_name": "stockky-surprise-schema"},
         )
         with eng.begin() as conn:
-            for stmt in DDL.strip().split(";"):
+            for stmt in DDL_STATEMENTS:
                 s = stmt.strip()
                 if s:
                     conn.execute(text(s))
         eng.dispose()
         logger.info("surprise_static_feed schema ready")
-        return {"ok": True, "table": "surprise_static_feed"}
+        return {"ok": True, "table": TABLE_NAME}
     except Exception as e:
         logger.warning("ensure_surprise_schema failed: %s", e)
         return {"ok": False, "error": str(e)[:240]}

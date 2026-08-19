@@ -3957,80 +3957,36 @@ def get_scan_status(task_id: str):
 
 def _lite_evaluate_from_feed(symbol: str, feed: dict, live_price: float = 0.0) -> dict:
     """
-    Sticky Fix Step 3 — lite path with ZERO downstream HTTP (decide/fund/news).
-    Uses Neon feed + optional live price only.
+    Lite path: ZERO downstream HTTP.
+    Delegates to instant_scanner (Neon feed + live tick → full score card).
     """
-    from price_resolver import extract_safe_price, apply_price_aliases
-
-    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
-    feed = feed if isinstance(feed, dict) else {}
     tick = {"price": live_price} if live_price and live_price > 0 else {}
-    cmp_price = extract_safe_price(base, tick=tick, feed=feed, decision=None)
-    prev = 0.0
-    for k in ("prev_close", "close", "price"):
-        try:
-            if feed.get(k) is not None:
-                prev = float(feed[k])
-                if prev > 0:
-                    break
-        except Exception:
-            pass
-    if prev <= 0:
-        prev = cmp_price if cmp_price > 0 else 1.0
-    change_pct = 0.0
-    if cmp_price > 0 and prev > 0:
-        change_pct = round(((cmp_price - prev) / prev) * 100.0, 2)
-
-    score = feed.get("combined_score") or feed.get("fundamental_score") or feed.get("technical_score") or 50
     try:
-        score = float(score)
-    except Exception:
-        score = 50.0
-
-    decision = feed.get("decision") or "HOLD"
-    if not feed.get("decision"):
-        if change_pct >= 1.5:
-            decision = "PREPARE TO BUY"
-        elif change_pct <= -1.5:
-            decision = "DO NOT BUY"
-        else:
-            decision = "HOLD"
-
-    out = {
-        "symbol": base,
-        "decision": decision,
-        "confidence": feed.get("confidence") or "Low",
-        "combined_score": score,
-        "technical_score": feed.get("technical_score") or score,
-        "fundamental_score": feed.get("fundamental_score"),
-        "fundamental_metrics": feed.get("metrics"),
-        "sector": feed.get("sector"),
-        "industry": feed.get("industry"),
-        "news_score": feed.get("news_score"),
-        "event_risk": feed.get("event_risk"),
-        "change_pct": change_pct,
-        "close": cmp_price,
-        "price": cmp_price,
-        "cmp": cmp_price,
-        "current_price": cmp_price,
-        "ltp": cmp_price,
-        "from_data_feed": bool(feed),
-        "lite_fastpath": True,
-        "status": "READY",
-        "reasons": {
-            "lite": [
-                "Lite scan: Neon data-feed + live quote only (no decision-engine hop)",
-            ]
-        },
-        "natural_language_summary": (
-            f"{base}: lite — decision={decision} score={score} close={cmp_price}"
-        ),
-    }
-    if cmp_price > 0:
-        out["support"] = round(cmp_price * 0.95, 2)
-        out["resistance"] = round(cmp_price * 1.05, 2)
-    return apply_price_aliases(out, cmp_price)
-
+        from instant_scanner import compute_instant_scores
+        return compute_instant_scores(symbol, feed if isinstance(feed, dict) else {}, tick)
+    except Exception as e:
+        logger.warning("instant_scanner failed for %s: %s — minimal fallback", symbol, e)
+        base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        feed = feed if isinstance(feed, dict) else {}
+        px = float(live_price or 0) or 0.0
+        try:
+            from price_resolver import extract_safe_price, apply_price_aliases
+            px = extract_safe_price(base, tick=tick, feed=feed) or px
+            out = {
+                "symbol": base,
+                "decision": "HOLD",
+                "confidence": "Low",
+                "combined_score": 50,
+                "technical_score": 50,
+                "fundamental_score": feed.get("fundamental_score") or 50,
+                "close": px,
+                "price": px,
+                "lite_fastpath": True,
+                "status": "READY",
+            }
+            return apply_price_aliases(out, px) if px > 0 else out
+        except Exception:
+            return {"symbol": base, "decision": "HOLD", "combined_score": 50, "technical_score": 50, "fundamental_score": 50, "price": px, "lite_fastpath": True}
 
 @app.get("/api/scan/stream")
 @app.get("/scan/stream")
@@ -4187,21 +4143,47 @@ async def stream_market_scan(
                     except Exception as e:
                         batch.append({"symbol": base, "decision": "ERROR", "error": str(e)[:200]})
             else:
-                tasks = [
-                    _analyze_one_symbol_ultra(
-                        sym,
-                        client,
-                        sem,
-                        lite=False,
-                        feed_row=(prefetched or {}).get(
-                            str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
-                        ),
-                        prefetched_feeds=prefetched,
-                    )
-                    for sym in chunk
-                ]
+                # Full mode: bounded wait per symbol; cold microservices must not stall the stream
+                STREAM_SYM_TIMEOUT = float(os.getenv("SCAN_STREAM_SYMBOL_TIMEOUT", "12"))
+
+                async def _ultra_or_instant(sym: str):
+                    base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
+                    fed = (prefetched or {}).get(base) if isinstance(prefetched, dict) else {}
+                    px = float(chunk_prices.get(base) or 0) if chunk_prices else 0.0
+                    try:
+                        return await asyncio.wait_for(
+                            _analyze_one_symbol_ultra(
+                                sym,
+                                client,
+                                sem,
+                                lite=False,
+                                feed_row=fed,
+                                prefetched_feeds=prefetched,
+                            ),
+                            timeout=STREAM_SYM_TIMEOUT,
+                        )
+                    except Exception as e:
+                        logger.debug("stream ultra fallback %s: %s", base, e)
+                        try:
+                            from instant_scanner import compute_instant_scores
+                            out = compute_instant_scores(
+                                base, fed or {}, {"price": px} if px > 0 else {}
+                            )
+                            out["fallback_instant"] = True
+                            out["fallback_reason"] = str(e)[:120]
+                            return out
+                        except Exception as e2:
+                            return {
+                                "symbol": base,
+                                "decision": "ERROR",
+                                "error": str(e2)[:200],
+                            }
+
                 try:
-                    batch = await asyncio.gather(*tasks, return_exceptions=True)
+                    batch = await asyncio.gather(
+                        *[_ultra_or_instant(sym) for sym in chunk],
+                        return_exceptions=True,
+                    )
                 except Exception as e:
                     logger.exception("scan stream chunk failed: %s", e)
                     for sym in chunk:
@@ -4220,11 +4202,20 @@ async def stream_market_scan(
             for sym, res in zip(chunk, batch):
                 processed += 1
                 if isinstance(res, Exception):
-                    out = {
-                        "symbol": sym,
-                        "decision": "ERROR",
-                        "error": str(res)[:200],
-                    }
+                    try:
+                        base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
+                        fed = (prefetched or {}).get(base) if isinstance(prefetched, dict) else {}
+                        px = float(chunk_prices.get(base) or 0) if chunk_prices else 0.0
+                        from instant_scanner import compute_instant_scores
+                        out = compute_instant_scores(base, fed or {}, {"price": px} if px > 0 else {})
+                        out["fallback_instant"] = True
+                        out["fallback_reason"] = str(res)[:120]
+                    except Exception:
+                        out = {
+                            "symbol": sym,
+                            "decision": "ERROR",
+                            "error": str(res)[:200],
+                        }
                 elif isinstance(res, dict):
                     out = res
                 else:
@@ -4270,6 +4261,42 @@ async def stream_market_scan(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+
+
+@app.post("/api/scan/find-buys")
+@app.post("/scan/find-buys")
+async def find_actionable_buys(request: Request):
+    """
+    Buy Sniper — return 1–4 high-conviction setups from a scan result list.
+    Always HTTP 200: empty suggestions is a valid outcome (not 400).
+    Body: { "stocks": [...], "target_count": 4, "min_conviction": 58 }
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {"stocks": payload if isinstance(payload, list) else []}
+    try:
+        from buy_sniper import suggestions_from_scan_payload
+        out = suggestions_from_scan_payload(payload)
+        if not isinstance(out, dict):
+            return {"ok": True, "count": 0, "suggestions": []}
+        out.setdefault("ok", True)
+        out.setdefault("count", len(out.get("suggestions") or []))
+        out.setdefault("suggestions", [])
+        return out
+    except Exception as e:
+        logger.exception("find-buys failed")
+        return {
+            "ok": False,
+            "count": 0,
+            "suggestions": [],
+            "error": str(e)[:300],
+            "message": "Sniper could not evaluate candidates",
+        }
 
 
 @app.post("/scan/cancel/{task_id}")
@@ -6368,6 +6395,7 @@ def ops_activity_status():
 
 
 @app.get("/data-feed/meta")
+@app.get("/api/data-feed/meta")
 def data_feed_meta():
     """Last successful feed timestamp, stock count, job status."""
     store = _feed_store()
@@ -6377,6 +6405,7 @@ def data_feed_meta():
 
 
 @app.get("/data-feed/status")
+@app.get("/api/data-feed/status")
 def data_feed_status():
     """Return job+meta. Auto-heal stale 'running' jobs (worker died after free-tier sleep)."""
     store = _feed_store()
@@ -6467,6 +6496,8 @@ def data_feed_status():
 
 
 @app.get("/data-feed/{symbol}")
+@app.get("/api/data-feed/{symbol}")
+@app.get("/api/feed/{symbol}")
 def data_feed_symbol(symbol: str):
     fed = _feed_store().get_symbol(symbol)
     if not fed:
@@ -6474,7 +6505,86 @@ def data_feed_symbol(symbol: str):
     return {"ok": True, "data": fed}
 
 
+@app.post("/api/feed/update")
+@app.post("/data-feed/update")
+async def data_feed_update_single(request: Request):
+    """Persist one symbol feed payload into Neon (canonical + alias keys)."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "JSON object required"}
+    symbol = payload.get("symbol")
+    if not symbol:
+        return {"ok": False, "error": "symbol required"}
+    try:
+        from data_feed import save_stock_feed, extract_feed_payload
+        base = str(symbol).upper().replace(".NS", "").replace(".BO", "").strip()
+        # Accept either full payload or nested fields
+        body = dict(payload)
+        body.pop("symbol", None)
+        if body.get("fundamental") or body.get("events"):
+            row = extract_feed_payload(
+                base,
+                fundamental=body.get("fundamental") if isinstance(body.get("fundamental"), dict) else body,
+                events=body.get("events") if isinstance(body.get("events"), dict) else None,
+                extra={k: v for k, v in body.items() if k not in ("fundamental", "events")},
+            )
+        else:
+            row = dict(body)
+            row["symbol"] = base
+        save_stock_feed(base, row)
+        return {"ok": True, "status": "SUCCESS", "symbol": base}
+    except Exception as e:
+        logger.exception("data_feed update failed")
+        return {"ok": False, "error": str(e)[:300]}
+
+
+@app.post("/api/feed/batch")
+@app.post("/data-feed/batch")
+async def data_feed_update_batch(request: Request):
+    """Bulk upsert: { "feeds": { "RELIANCE": {...}, ... } } or list of payloads."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    feeds = {}
+    if isinstance(payload, dict):
+        raw = payload.get("feeds") or payload.get("items") or payload.get("data")
+        if isinstance(raw, dict):
+            feeds = raw
+        elif isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, dict) and item.get("symbol"):
+                    feeds[str(item["symbol"])] = item
+        else:
+            # treat entire dict as symbol->payload if values are dicts
+            if payload and all(isinstance(v, dict) for v in payload.values()):
+                feeds = payload
+    if not feeds:
+        return {"ok": False, "error": "No feeds provided", "count": 0}
+    try:
+        from data_feed import save_stock_feed
+        n = 0
+        for sym, row in feeds.items():
+            if not isinstance(row, dict):
+                continue
+            base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
+            body = dict(row)
+            body["symbol"] = base
+            save_stock_feed(base, body)
+            n += 1
+        return {"ok": True, "status": "SUCCESS", "count": n}
+    except Exception as e:
+        logger.exception("data_feed batch failed")
+        return {"ok": False, "error": str(e)[:300], "count": 0}
+
+
+
+
 @app.post("/data-feed/run")
+@app.post("/api/data-feed/run")
 async def data_feed_run(
     background_tasks: BackgroundTasks,
     force: bool = False,
@@ -6722,6 +6832,7 @@ async def data_feed_run(
 
 
 @app.post("/data-feed/stop")
+@app.post("/api/data-feed/stop")
 async def data_feed_stop(force: bool = True):
     """Stop data feed and commit checkpoint immediately.
 
@@ -6784,6 +6895,7 @@ async def data_feed_stop(force: bool = True):
 
 
 @app.post("/data-feed/resume")
+@app.post("/api/data-feed/resume")
 async def data_feed_resume(background_tasks: BackgroundTasks):
     """Resume from last checkpoint.
 

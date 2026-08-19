@@ -29,6 +29,8 @@ IST = timezone(timedelta(hours=5, minutes=30))
 DATA_FEED_PREFIX = "stockky:data_feed:sym:"
 # Alias used by some callers / older docs ("feed:RELIANCE"). Dual-write + dual-read.
 FEED_ALIAS_PREFIX = "feed:"
+# Legacy mistaken key seen in older gateway paths ("data_feed:RELIANCE")
+FEED_LEGACY_PREFIX = "data_feed:"
 DATA_FEED_META_KEY = "stockky:data_feed:meta"
 DATA_FEED_JOB_KEY = "stockky:data_feed:job"
 DATA_FEED_INDEX_KEY = "stockky:data_feed:index"  # list of symbols currently in feed
@@ -67,6 +69,78 @@ def _now_iso() -> str:
 
 def _norm_sym(symbol: str) -> str:
     return (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+
+
+
+def normalize_feed_payload(data: dict) -> dict:
+    """
+    Map mixed-case / alternate metric keys from CSV/manual uploads to the
+    canonical keys expected by instant_scanner and decide paths.
+    """
+    if not isinstance(data, dict):
+        return {}
+    key_mapping = {
+        "symbol": "symbol",
+        "price": "prev_close",
+        "prev_close": "prev_close",
+        "prevclose": "prev_close",
+        "cmp": "prev_close",
+        "ltp": "last_price",
+        "last_price": "last_price",
+        "close": "prev_close",
+        "pe": "pe_ratio",
+        "p/e": "pe_ratio",
+        "pe_ratio": "pe_ratio",
+        "roce": "roce",
+        "roe": "roe",
+        "rsi": "rsi",
+        "macd": "macd_hist",
+        "macd_hist": "macd_hist",
+        "ema20": "ema20",
+        "ema_20": "ema20",
+        "ema50": "ema50",
+        "ema_50": "ema50",
+        "sector": "sector",
+        "industry": "industry",
+        "technical_score": "technical_score",
+        "fundamental_score": "fundamental_score",
+        "combined_score": "combined_score",
+        "tech_score": "technical_score",
+        "fund_score": "fundamental_score",
+        "change_pct": "change_pct",
+        "change%": "change_pct",
+        "rvol": "rvol",
+        "volume": "volume",
+        "atr": "atr",
+        "daily_atr": "daily_atr",
+        "high_52w": "high_52w",
+        "52w_high": "high_52w",
+        "dist_52w_pct": "dist_52w_pct",
+    }
+    normalized: Dict[str, Any] = {}
+    for k, v in data.items():
+        if k is None:
+            continue
+        raw = str(k).strip()
+        lk = raw.lower().replace(" ", "_")
+        standard = key_mapping.get(lk, lk)
+        # Prefer numeric when clearly numeric
+        if isinstance(v, bool):
+            normalized[standard] = v
+        elif isinstance(v, (int, float)):
+            normalized[standard] = float(v)
+        elif isinstance(v, str):
+            s = v.strip().replace(",", "")
+            try:
+                if s and s.replace(".", "", 1).replace("-", "", 1).isdigit():
+                    normalized[standard] = float(s)
+                else:
+                    normalized[standard] = v
+            except Exception:
+                normalized[standard] = v
+        else:
+            normalized[standard] = v
+    return normalized
 
 
 def extract_feed_payload(
@@ -181,32 +255,45 @@ class DataFeedStore:
     # ── Symbol payload ──────────────────────────────────────────────────
     def get_symbol(self, symbol: str) -> Optional[dict]:
         """
-        Prefer local cache; on miss always read Neon (via kv_cache).
+        Prefer local cache; on miss read Neon via ALL known key aliases.
+        Canonical: stockky:data_feed:sym:SYM
+        Alias:     feed:SYM
+        Legacy:    data_feed:SYM
         Never treat an empty local dict as authoritative when Neon has data.
         """
         base = _norm_sym(symbol)
         if not base:
             return None
-        key = DATA_FEED_PREFIX + base
+        keys = [
+            DATA_FEED_PREFIX + base,
+            FEED_ALIAS_PREFIX + base,
+            FEED_LEGACY_PREFIX + base,
+        ]
 
-        # 1) Local hit only if payload looks useful
-        local = _LOCAL_SYMBOLS.get(key)
-        if isinstance(local, dict) and _payload_is_useful(local):
-            return dict(local)
+        # 1) Local hit on any alias if payload looks useful
+        for key in keys:
+            local = _LOCAL_SYMBOLS.get(key)
+            if isinstance(local, dict) and _payload_is_useful(local):
+                return dict(local)
 
-        # 2) Durable read (Neon via kv_cache)
-        try:
-            val = self._get(key)
-        except Exception as e:
-            logger.debug("data_feed get_symbol neon %s: %s", base, e)
-            val = None
+        # 2) Durable read (Neon via kv_cache) — try each key
+        val = None
+        for key in keys:
+            try:
+                val = self._get(key)
+            except Exception as e:
+                logger.debug("data_feed get_symbol neon %s: %s", key, e)
+                val = None
+            if isinstance(val, dict) and val:
+                break
 
         if isinstance(val, dict) and val:
-            _LOCAL_SYMBOLS[key] = val
+            # Warm all aliases locally so later reads are free
+            for key in keys:
+                _LOCAL_SYMBOLS[key] = val
             _LOCAL_INDEX.add(base)
             return dict(val)
 
-        # Keep empty local miss so we don't thrash; still return None
         return None
 
     def get_symbols_bulk(self, symbols: List[str]) -> Dict[str, dict]:
@@ -233,9 +320,12 @@ class DataFeedStore:
             else:
                 missing_keys.append(key)
                 key_to_base[key] = base
-                # Also request alias in same bulk round-trip
+                # Also request alias + legacy in same bulk round-trip
                 missing_keys.append(alias_key)
                 key_to_base[alias_key] = base
+                legacy_key = FEED_LEGACY_PREFIX + base
+                missing_keys.append(legacy_key)
+                key_to_base[legacy_key] = base
 
         if not missing_keys:
             return result
@@ -285,6 +375,7 @@ class DataFeedStore:
                 result[base] = dict(val)
             _LOCAL_SYMBOLS[DATA_FEED_PREFIX + base] = result[base]
             _LOCAL_SYMBOLS[FEED_ALIAS_PREFIX + base] = result[base]
+            _LOCAL_SYMBOLS[FEED_LEGACY_PREFIX + base] = result[base]
             _LOCAL_INDEX.add(base)
 
         return result
@@ -295,13 +386,13 @@ class DataFeedStore:
             return
         key = DATA_FEED_PREFIX + base
         alias_key = FEED_ALIAS_PREFIX + base
-        payload = dict(payload)
+        payload = normalize_feed_payload(dict(payload))
         payload.setdefault("symbol", base)
         payload.setdefault("updated_at", _now_iso())
         _LOCAL_SYMBOLS[key] = payload
         _LOCAL_SYMBOLS[alias_key] = payload
         _LOCAL_INDEX.add(base)
-        # Durable write: canonical + alias (stops key-mismatch cache misses)
+        # Durable write: canonical + alias + legacy (stops key-mismatch cache misses)
         try:
             self._set(key, payload, ttl=ttl)
         except Exception as e:
@@ -310,6 +401,10 @@ class DataFeedStore:
             self._set(alias_key, payload, ttl=ttl)
         except Exception as e:
             logger.debug("data_feed alias write %s: %s", base, e)
+        try:
+            self._set(FEED_LEGACY_PREFIX + base, payload, ttl=ttl)
+        except Exception as e:
+            logger.debug("data_feed legacy write %s: %s", base, e)
         # Update durable index (batched cheaply every put — list is small)
         try:
             self._persist_index(ttl=ttl)
@@ -602,6 +697,10 @@ def feed_key(symbol: str) -> str:
 
 def feed_alias_key(symbol: str) -> str:
     return FEED_ALIAS_PREFIX + _norm_sym(symbol)
+
+
+def feed_legacy_key(symbol: str) -> str:
+    return FEED_LEGACY_PREFIX + _norm_sym(symbol)
 
 
 def get_all_stock_feeds(symbols: List[str]) -> Dict[str, dict]:

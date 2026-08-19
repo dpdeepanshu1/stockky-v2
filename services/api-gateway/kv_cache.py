@@ -44,6 +44,7 @@ _DURABLE_PREFIXES = (
     "stockky:known_symbols",
     "stockky:data_feed",
     "feed:",  # alias key for data-feed payloads (Sticky Fix Step 2)
+    "data_feed:",  # legacy mistaken prefix
     "stockky:hot_job",
     "stockky:hot_result",
     "stockky:last_full_scan",
@@ -143,69 +144,80 @@ def _neon_url() -> Optional[str]:
     return _normalize_db_url(url)
 
 
+_neon_lock = threading.Lock()
+
+
 def _get_neon():
+    """
+    Strict singleton Neon engine for stockky_kv.
+    Double-checked locking prevents concurrent create_engine() storms
+    (Render 512MB + Neon free max connections).
+    """
     global _neon_engine, _neon_init
     if _neon_init:
         return _neon_engine
-    _neon_init = True
-    url = _neon_url()
-    if not url:
-        logger.info("KV: no CACHE_DATABASE_URL/DATABASE_URL — memory-only (Redis ignored)")
-        return None
-    try:
-        from sqlalchemy import create_engine, text
+    with _neon_lock:
+        if _neon_init:
+            return _neon_engine
+        _neon_init = True
+        url = _neon_url()
+        if not url:
+            logger.info("KV: no CACHE_DATABASE_URL/DATABASE_URL — memory-only (Redis ignored)")
+            return None
+        try:
+            from sqlalchemy import create_engine, text
 
-        # Free-tier friendly pool. Prefer Neon *pooler* endpoint (port 6543)
-        # over direct (5432) to avoid cold-start + connection storms.
-        # Set CACHE_DATABASE_URL to the -pooler connection string.
-        pool_size = int(os.getenv("CACHE_DB_POOL_SIZE", "2"))
-        eng = create_engine(
-            url,
-            pool_pre_ping=True,
-            pool_size=max(1, min(pool_size, 5)),  # hard-cap for free tier
-            max_overflow=int(os.getenv("CACHE_DB_MAX_OVERFLOW", "2")),
-            pool_recycle=int(os.getenv("CACHE_DB_POOL_RECYCLE", "180")),
-            pool_use_lifo=True,
-            pool_timeout=8,
-            connect_args={
-                "connect_timeout": int(os.getenv("CACHE_DB_CONNECT_TIMEOUT", "6")),
-                "application_name": "stockky-kv-cache",
-            },
-        )
-        with eng.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    CREATE TABLE IF NOT EXISTS stockky_kv (
-                        k TEXT PRIMARY KEY,
-                        v TEXT NOT NULL,
-                        expires_at TIMESTAMPTZ NULL,
-                        updated_at TIMESTAMPTZ DEFAULT NOW()
+            # Free-tier: default pool 1 + overflow 1 (max 2). Cap hard at 4.
+            # Prefer Neon *pooler* URL (port 6543) in CACHE_DATABASE_URL.
+            pool_size = int(os.getenv("CACHE_DB_POOL_SIZE", "1"))
+            max_overflow = int(os.getenv("CACHE_DB_MAX_OVERFLOW", "1"))
+            eng = create_engine(
+                url,
+                pool_pre_ping=True,
+                pool_size=max(1, min(pool_size, 4)),
+                max_overflow=max(0, min(max_overflow, 2)),
+                pool_recycle=int(os.getenv("CACHE_DB_POOL_RECYCLE", "180")),
+                pool_use_lifo=True,
+                pool_timeout=8,
+                connect_args={
+                    "connect_timeout": int(os.getenv("CACHE_DB_CONNECT_TIMEOUT", "6")),
+                    "application_name": "stockky-kv-cache",
+                },
+            )
+            with eng.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE IF NOT EXISTS stockky_kv (
+                            k TEXT PRIMARY KEY,
+                            v TEXT NOT NULL,
+                            expires_at TIMESTAMPTZ NULL,
+                            updated_at TIMESTAMPTZ DEFAULT NOW()
+                        )
+                        """
                     )
-                    """
                 )
-            )
-            conn.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS stockky_kv_expires_idx ON stockky_kv (expires_at)"
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS stockky_kv_expires_idx ON stockky_kv (expires_at)"
+                    )
                 )
-            )
-            # Also ensure key index exists (PRIMARY KEY already covers it)
-            conn.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS idx_stockky_kv_k ON stockky_kv (k)"
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS idx_stockky_kv_k ON stockky_kv (k)"
+                    )
                 )
+            _neon_engine = eng
+            logger.info(
+                "KV durable layer: Neon stockky_kv ready (pool_size=%s max_overflow=%s redis_disabled=%s)",
+                pool_size,
+                max_overflow,
+                not USE_REDIS,
             )
-        _neon_engine = eng
-        logger.info(
-            "KV durable layer: Neon stockky_kv ready (pool_size=%s, redis_disabled=%s)",
-            pool_size,
-            not USE_REDIS,
-        )
-    except Exception as e:
-        logger.warning("KV Neon unavailable (memory-only): %s", e)
-        _neon_engine = None
-    return _neon_engine
+        except Exception as e:
+            logger.warning("KV Neon unavailable (memory-only): %s", e)
+            _neon_engine = None
+        return _neon_engine
 
 
 

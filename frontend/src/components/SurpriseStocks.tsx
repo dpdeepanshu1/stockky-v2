@@ -31,12 +31,25 @@ type PremarketProgress = {
   error?: string;
 };
 
+type ScanProgress = {
+  processed: number;
+  total: number;
+  hits: number;
+  quotes_ok: number;
+  elapsed: number;
+  eta_sec?: number | null;
+  percent: number;
+};
+
 function formatEta(sec?: number | null) {
   if (sec == null || !Number.isFinite(sec)) return "—";
   const s = Math.max(0, Math.round(sec));
-  const m = Math.floor(s / 60);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
   const r = s % 60;
-  return m > 0 ? `${m}m ${r}s` : `${r}s`;
+  if (h > 0) return `${h}h ${m}m ${r}s`;
+  if (m > 0) return `${m}m ${r}s`;
+  return `${r}s`;
 }
 
 export default function SurpriseStocks({
@@ -53,12 +66,14 @@ export default function SurpriseStocks({
     universe_scanned?: number;
     elapsed_sec?: number;
   } | null>(null);
+  const [scanProg, setScanProg] = useState<ScanProgress | null>(null);
   const [lastAt, setLastAt] = useState<string | null>(null);
 
   const [pmRunning, setPmRunning] = useState(false);
   const [pmProgress, setPmProgress] = useState<PremarketProgress | null>(null);
   const [pmError, setPmError] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
+  const scanAbort = useRef<AbortController | null>(null);
 
   const stopPmPoll = () => {
     if (pollRef.current != null) {
@@ -74,8 +89,6 @@ export default function SurpriseStocks({
       setPmRunning(!!st?.is_running);
       if (!st?.is_running && st?.stage === "done") {
         stopPmPoll();
-        // Refresh scan after baselines ready
-        setTimeout(() => fetchSurpriseStocks(true), 500);
       }
       if (st?.stage === "error") {
         setPmError(st.error || st.message || "Premarket failed");
@@ -83,7 +96,6 @@ export default function SurpriseStocks({
         stopPmPoll();
       }
     } catch (e: any) {
-      // soft — keep polling while running
       console.warn("premarket status", e);
     }
   }, []);
@@ -100,10 +112,7 @@ export default function SurpriseStocks({
       message: "Starting premarket job…",
     });
     try {
-      const res = await api.surprisePremarket();
-      if (res?.already_running) {
-        setPmProgress((res.progress as PremarketProgress) || pmProgress);
-      }
+      await api.surprisePremarket();
       stopPmPoll();
       pollRef.current = window.setInterval(pollPremarket, 2000);
       await pollPremarket();
@@ -115,9 +124,18 @@ export default function SurpriseStocks({
   };
 
   const fetchSurpriseStocks = useCallback(async (force = false) => {
+    if (scanAbort.current) {
+      try {
+        scanAbort.current.abort();
+      } catch {}
+    }
+    const ac = new AbortController();
+    scanAbort.current = ac;
     setLoading(true);
     setError(null);
-    const ac = new AbortController();
+    setStocks([]);
+    setScanProg({ processed: 0, total: 0, hits: 0, quotes_ok: 0, elapsed: 0, percent: 0 });
+
     try {
       const live: SurpriseStock[] = [];
       let usedStream = false;
@@ -128,8 +146,33 @@ export default function SurpriseStocks({
         })) {
           usedStream = true;
           if (row?._meta) {
-            if (row.event === "static_loaded") {
-              setMeta((m) => ({ ...m, static_loaded: row.static_loaded }));
+            if (row.event === "static_loaded" || row.event === "scan_start") {
+              setMeta((m) => ({
+                ...m,
+                static_loaded: row.static_loaded ?? row.total ?? m?.static_loaded,
+              }));
+              if (row.total) {
+                setScanProg((p) => ({
+                  processed: p?.processed ?? 0,
+                  total: Number(row.total) || 0,
+                  hits: p?.hits ?? 0,
+                  quotes_ok: p?.quotes_ok ?? 0,
+                  elapsed: p?.elapsed ?? 0,
+                  percent: 0,
+                  eta_sec: null,
+                }));
+              }
+            }
+            if (row.event === "progress") {
+              setScanProg({
+                processed: Number(row.processed) || 0,
+                total: Number(row.total) || 0,
+                hits: Number(row.hits) || 0,
+                quotes_ok: Number(row.quotes_ok) || 0,
+                elapsed: Number(row.elapsed) || 0,
+                eta_sec: row.eta_sec ?? null,
+                percent: Number(row.percent) || 0,
+              });
             }
             if (row.event === "error") {
               setError(String(row.error || "stream error"));
@@ -137,10 +180,24 @@ export default function SurpriseStocks({
             if (row.event === "done") {
               setMeta({
                 static_loaded: row.universe ?? live.length,
-                quotes_ok: row.universe,
+                quotes_ok: row.quotes_ok,
                 universe_scanned: row.universe,
                 elapsed_sec: row.elapsed,
               });
+              setScanProg((p) =>
+                p
+                  ? {
+                      ...p,
+                      processed: Number(row.universe) || p.total,
+                      total: Number(row.universe) || p.total,
+                      hits: Number(row.hits) || p.hits,
+                      quotes_ok: Number(row.quotes_ok) || p.quotes_ok,
+                      elapsed: Number(row.elapsed) || p.elapsed,
+                      percent: 100,
+                      eta_sec: 0,
+                    }
+                  : p
+              );
             }
             continue;
           }
@@ -148,6 +205,22 @@ export default function SurpriseStocks({
             live.push(row as SurpriseStock);
             const sorted = [...live].sort((a, b) => b.score - a.score);
             setStocks(sorted);
+            if (row._progress) {
+              setScanProg({
+                processed: Number(row._progress.processed) || live.length,
+                total: Number(row._progress.total) || 0,
+                hits: Number(row._progress.hits) || live.length,
+                quotes_ok: Number(row._progress.quotes_ok) || 0,
+                elapsed: Number(row._progress.elapsed) || 0,
+                percent: Math.min(
+                  99,
+                  Math.round(
+                    (100 * (Number(row._progress.processed) || 0)) /
+                      Math.max(1, Number(row._progress.total) || 1)
+                  )
+                ),
+              });
+            }
           }
         }
       } catch (streamErr: any) {
@@ -172,21 +245,23 @@ export default function SurpriseStocks({
       console.error("Surprise scan failed", err);
     } finally {
       setLoading(false);
+      scanAbort.current = null;
     }
   }, []);
 
   useEffect(() => {
     fetchSurpriseStocks(false);
-    const interval = window.setInterval(() => fetchSurpriseStocks(false), 60_000);
-    // Resume progress if a job is already running
     pollPremarket();
     return () => {
-      window.clearInterval(interval);
       stopPmPoll();
+      try {
+        scanAbort.current?.abort();
+      } catch {}
     };
   }, [fetchSurpriseStocks, pollPremarket]);
 
-  const pct = Math.min(100, Math.max(0, Number(pmProgress?.percent ?? 0)));
+  const pmPct = Math.min(100, Math.max(0, Number(pmProgress?.percent ?? 0)));
+  const scPct = Math.min(100, Math.max(0, Number(scanProg?.percent ?? 0)));
 
   return (
     <div className="rounded-xl border border-slate bg-graphite p-4 sm:p-6">
@@ -196,8 +271,7 @@ export default function SurpriseStocks({
             ⚡ Surprise Momentum Stocks
           </h2>
           <p className="font-mono text-[11px] text-mist/60 mt-1 max-w-xl">
-            High RVOL, ORB breakouts & range expansion vs pre-market Neon baselines.
-            Free-tier safe: one SQL load + bounded live quotes.
+            High RVOL / ORB vs Neon baselines. Live quotes only for ticks; static from premarket.
           </p>
           {meta && (
             <p className="font-mono text-[10px] text-mist/45 mt-2">
@@ -213,7 +287,6 @@ export default function SurpriseStocks({
             onClick={startPremarket}
             disabled={pmRunning}
             className="font-mono text-xs px-4 py-2 rounded-lg bg-amber-600/25 text-amber-200 border border-amber-500/40 hover:bg-amber-600/40 transition disabled:opacity-50"
-            title="Rebuild Neon surprise_static_feed (if GitHub cron was missed)"
           >
             {pmRunning ? "Premarket running…" : "🛠 Run Premarket Feed"}
           </button>
@@ -228,31 +301,48 @@ export default function SurpriseStocks({
         </div>
       </div>
 
-      {/* Premarket pipeline progress */}
       {(pmRunning || (pmProgress && pmProgress.stage && pmProgress.stage !== "idle")) && (
-        <div className="mb-5 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3">
-          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+        <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3">
+          <div className="flex flex-wrap justify-between gap-2 mb-2">
             <p className="font-mono text-[11px] text-amber-200">
-              Premarket pipeline · {pmProgress?.stage || "—"}
-              {pmProgress?.current_symbol ? (
-                <span className="text-mist/60"> · {pmProgress.current_symbol}</span>
-              ) : null}
+              Premarket · {pmProgress?.stage || "—"}
             </p>
             <p className="font-mono text-[10px] text-mist/60">
-              {pmProgress?.processed ?? 0}/{pmProgress?.total ?? "—"} · elapsed{" "}
-              {formatEta(pmProgress?.elapsed_sec)} · ETA {formatEta(pmProgress?.eta_sec)}
+              {pmProgress?.processed ?? 0}/{pmProgress?.total ?? "—"} · {formatEta(pmProgress?.elapsed_sec)} · ETA{" "}
+              {formatEta(pmProgress?.eta_sec)}
             </p>
           </div>
           <div className="h-2 rounded-full bg-ink/60 overflow-hidden border border-slate/50">
             <div
               className="h-full bg-gradient-to-r from-amber-500/80 to-emerald-500/80 transition-all duration-500"
-              style={{ width: `${pct}%` }}
+              style={{ width: `${pmPct}%` }}
             />
           </div>
           <p className="font-mono text-[10px] text-mist/50 mt-1.5">
-            {pct}% · {pmProgress?.message || "…"}
-            {pmProgress?.errors ? ` · errors ${pmProgress.errors}` : ""}
+            {pmPct}% · {pmProgress?.message || "…"}
           </p>
+        </div>
+      )}
+
+      {/* Live surprise scan pipeline (same idea as Market Scan) */}
+      {(loading || (scanProg && scanProg.total > 0 && scanProg.percent < 100)) && (
+        <div className="mb-4 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-3">
+          <div className="flex flex-wrap justify-between gap-2 mb-2">
+            <p className="font-mono text-[11px] text-emerald-300">
+              Surprise scan · {scanProg?.hits ?? 0} hits
+            </p>
+            <p className="font-mono text-[10px] text-mist/60">
+              {scanProg?.processed ?? 0}/{scanProg?.total ?? "—"} · quotes {scanProg?.quotes_ok ?? 0} ·{" "}
+              {formatEta(scanProg?.elapsed)} · ETA {formatEta(scanProg?.eta_sec)}
+            </p>
+          </div>
+          <div className="h-2 rounded-full bg-ink/60 overflow-hidden border border-slate/50">
+            <div
+              className="h-full bg-gradient-to-r from-sky-500/80 to-emerald-500/80 transition-all duration-300"
+              style={{ width: `${scPct}%` }}
+            />
+          </div>
+          <p className="font-mono text-[10px] text-mist/50 mt-1.5">{scPct}% complete</p>
         </div>
       )}
 
@@ -261,16 +351,9 @@ export default function SurpriseStocks({
           Premarket: {pmError}
         </div>
       )}
-
       {error && (
         <div className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 font-mono text-[11px] text-amber-200">
           {error}
-          {String(error).toLowerCase().includes("premarket") ||
-          String(error).toLowerCase().includes("empty") ? (
-            <span className="block mt-1 text-mist/60">
-              Run <strong>Premarket Feed</strong> first (or wait for the 08:55 GitHub Action).
-            </span>
-          ) : null}
         </div>
       )}
 
@@ -290,10 +373,7 @@ export default function SurpriseStocks({
           </thead>
           <tbody>
             {stocks.map((s) => (
-              <tr
-                key={s.symbol}
-                className="border-b border-slate/40 hover:bg-ink/40 text-sm transition"
-              >
+              <tr key={s.symbol} className="border-b border-slate/40 hover:bg-ink/40 text-sm transition">
                 <td className="py-2.5 px-3">
                   <button
                     type="button"
@@ -312,7 +392,8 @@ export default function SurpriseStocks({
                   ₹{Number(s.price).toFixed(2)}
                 </td>
                 <td className="py-2.5 px-3 font-mono text-xs font-semibold text-emerald-400">
-                  +{Number(s.change_pct).toFixed(2)}%
+                  {Number(s.change_pct) >= 0 ? "+" : ""}
+                  {Number(s.change_pct).toFixed(2)}%
                 </td>
                 <td className="py-2.5 px-3 font-mono text-xs text-amber-300 font-bold">
                   {Number(s.rvol).toFixed(2)}x
@@ -333,14 +414,14 @@ export default function SurpriseStocks({
             {stocks.length === 0 && !loading && (
               <tr>
                 <td colSpan={8} className="py-10 text-center font-mono text-xs text-mist/45">
-                  No surprise breakouts meeting volume / score thresholds right now.
+                  No surprise breakouts meeting score ≥60 / volume thresholds right now.
                 </td>
               </tr>
             )}
             {loading && stocks.length === 0 && (
               <tr>
                 <td colSpan={8} className="py-10 text-center font-mono text-xs text-mist/50">
-                  Scanning universe…
+                  Scanning universe… {scanProg ? `${scanProg.processed}/${scanProg.total}` : ""}
                 </td>
               </tr>
             )}

@@ -150,7 +150,7 @@ class SurpriseStockEngine:
             return None
 
         try:
-            current_price = float(tick.get("price") or tick.get("close") or tick.get("ltp") or 0.0)
+            current_price = float(tick.get("price") or tick.get("last_price") or tick.get("ltp") or tick.get("close") or tick.get("cmp") or 0.0)
         except Exception:
             current_price = 0.0
         prev_close = float(static.get("prev_close") or 0.0)
@@ -219,10 +219,11 @@ class SurpriseStockEngine:
                 trigger_type = "Range Expansion"
 
         if score >= MIN_SCORE and price_change_pct > MIN_CHANGE_PCT:
-            return {
+            px = round(current_price, 2)
+            hit = {
                 "symbol": symbol.upper().replace(".NS", "").replace(".BO", ""),
                 "score": int(score),
-                "price": round(current_price, 2),
+                "price": px,
                 "change_pct": price_change_pct,
                 "rvol": rvol,
                 "trigger_type": trigger_type,
@@ -232,6 +233,13 @@ class SurpriseStockEngine:
                 "sector": static.get("sector"),
                 "dist_52w_pct": round(dist, 2),
             }
+            # Step 6: stamp all FE price aliases (align with price_resolver / priceDisplay)
+            hit["cmp"] = px
+            hit["ltp"] = px
+            hit["last_price"] = px
+            hit["close"] = px
+            hit["current_price"] = px
+            return hit
         return None
 
     async def _fetch_quote(

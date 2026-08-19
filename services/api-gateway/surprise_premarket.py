@@ -10,7 +10,10 @@ Computes once per session:
 Writes into Neon table `surprise_static_feed` so intraday scans never
 re-query multi-day history on the free-tier dyno.
 
-Sources: yfinance history (free). Optional future: daily_bhavcopy table.
+Sources: yfinance history (free). Optional: daily_bhavcopy table if present.
+
+Step 3 fix: concurrent ThreadPoolExecutor + batched multi-row upserts
+instead of sequential per-symbol Neon/yfinance round-trips (was 45–90s).
 """
 from __future__ import annotations
 
@@ -18,12 +21,17 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("surprise-premarket")
 
 LOOKBACK_DAYS = int(os.getenv("SURPRISE_LOOKBACK_DAYS", "30"))
 MAX_SYMBOLS = int(os.getenv("SURPRISE_MAX_SYMBOLS", "320"))
+# Concurrent yfinance workers (free-tier safe; override via env)
+MAX_WORKERS = int(os.getenv("SURPRISE_PREMARKET_WORKERS", "6"))  # free-tier safe
+# Flush to Neon every N successful rows
+UPSERT_BATCH = int(os.getenv("SURPRISE_UPSERT_BATCH", "40"))
 
 
 def _normalize_db_url(url: str) -> str:
@@ -108,7 +116,6 @@ def _yahoo_sym(symbol: str) -> str:
     s = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
     if not s:
         return ""
-    # Indices / special cases left to caller
     return f"{s}.NS"
 
 
@@ -128,11 +135,9 @@ def compute_baseline_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
 
     try:
         t = yf.Ticker(ysym)
-        # 60d covers ~20–30 trading sessions + buffer for 52w approx via period
         hist = t.history(period="1y", interval="1d", auto_adjust=True)
         if hist is None or hist.empty or len(hist) < 5:
             return None
-        # Last LOOKBACK_DAYS sessions for ATR / avg volume
         tail = hist.tail(max(LOOKBACK_DAYS, 20))
         highs = tail["High"].astype("float64").values
         lows = tail["Low"].astype("float64").values
@@ -144,20 +149,18 @@ def compute_baseline_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
         if high_52w <= 0:
             return None
         dist_52w_pct = float(((high_52w - prev_close) / high_52w) * 100.0)
-        # ~25 fifteen-minute slots in NSE continuous session
         avg_daily_vol = float(np.nanmean(volumes)) if len(volumes) else 0.0
         avg_15m_vol = int(max(1, avg_daily_vol / 25.0))
         daily_atr = float(np.nanmean(highs - lows)) if len(highs) else 0.0
-        is_liquid = avg_daily_vol >= float(os.getenv("SURPRISE_MIN_AVG_VOLUME", "50000"))
 
         sector = None
+        is_liquid = avg_daily_vol >= 50000
         try:
             info = getattr(t, "info", None) or {}
-            sector = (info.get("sector") or info.get("industry") or None)
-            if sector:
-                sector = str(sector)[:80]
+            if isinstance(info, dict):
+                sector = info.get("sector") or info.get("industry")
         except Exception:
-            sector = None
+            pass
 
         return {
             "symbol": base,
@@ -174,7 +177,192 @@ def compute_baseline_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def compute_baseline_from_bhavcopy(symbol: str, conn) -> Optional[Dict[str, Any]]:
+    """
+    Optional fast path: read from daily_bhavcopy if the table exists.
+    Returns None when table/rows missing so caller falls back to yfinance.
+    """
+    try:
+        import numpy as np
+        from sqlalchemy import text
+
+        base = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
+        rows = conn.execute(
+            text(
+                """
+                SELECT high, low, close, volume
+                FROM daily_bhavcopy
+                WHERE symbol = :sym
+                ORDER BY trade_date DESC
+                LIMIT 20
+                """
+            ),
+            {"sym": base},
+        ).mappings().all()
+        if not rows or len(rows) < 5:
+            return None
+
+        closes = np.array([float(r["close"]) for r in rows], dtype=np.float64)
+        highs = np.array([float(r["high"]) for r in rows], dtype=np.float64)
+        lows = np.array([float(r["low"]) for r in rows], dtype=np.float64)
+        volumes = np.array([float(r["volume"] or 0) for r in rows], dtype=np.float64)
+
+        prev_close = float(closes[0])
+        high_52w = float(np.max(highs))
+        if high_52w <= 0:
+            return None
+        dist_52w_pct = float(((high_52w - prev_close) / high_52w) * 100.0)
+        avg_15m_vol = int(max(1, float(np.mean(volumes)) / 25.0))
+        daily_atr = float(np.mean(highs - lows))
+
+        return {
+            "symbol": base,
+            "prev_close": round(prev_close, 2),
+            "avg_15m_volume": avg_15m_vol,
+            "daily_atr": round(daily_atr, 2),
+            "high_52w": round(high_52w, 2),
+            "dist_52w_pct": round(dist_52w_pct, 2),
+            "sector": None,
+            "is_liquid": bool(float(np.mean(volumes)) >= 50000),
+        }
+    except Exception as e:
+        # Table missing or query error → silent fallback to yfinance
+        logger.debug("bhavcopy path %s: %s", symbol, e)
+        return None
+
+
+
+def _table_exists(conn, table_name: str) -> bool:
+    try:
+        from sqlalchemy import text
+        row = conn.execute(
+            text(
+                """
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = :t
+                LIMIT 1
+                """
+            ),
+            {"t": table_name},
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def bulk_baselines_from_bhavcopy(symbols: List[str]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """
+    Fast path: one Neon connection, pull last ~20 sessions per symbol from
+    daily_bhavcopy (if the table exists). Returns (rows, remaining_symbols).
+    remaining_symbols should fall back to yfinance.
+    """
+    url = _db_url()
+    if not url or not symbols:
+        return [], list(symbols)
+    try:
+        import numpy as np
+        from sqlalchemy import create_engine, text
+
+        eng = create_engine(
+            url,
+            pool_pre_ping=True,
+            pool_size=1,
+            max_overflow=0,
+            connect_args={"connect_timeout": 20, "application_name": "surprise-bhav-bulk"},
+        )
+        with eng.connect() as conn:
+            if not _table_exists(conn, "daily_bhavcopy"):
+                eng.dispose()
+                return [], list(symbols)
+
+            # Normalize symbols for IN clause
+            bases = [s.upper().replace(".NS", "").replace(".BO", "").strip() for s in symbols]
+            bases = [b for b in bases if b]
+            if not bases:
+                eng.dispose()
+                return [], list(symbols)
+
+            # Window function: last 20 rows per symbol
+            sql = text(
+                """
+                WITH ranked AS (
+                    SELECT
+                        symbol,
+                        high,
+                        low,
+                        close,
+                        volume,
+                        ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date DESC) AS rn
+                    FROM daily_bhavcopy
+                    WHERE symbol = ANY(:syms)
+                )
+                SELECT symbol, high, low, close, volume
+                FROM ranked
+                WHERE rn <= 20
+                ORDER BY symbol, rn
+                """
+            )
+            try:
+                result = conn.execute(sql, {"syms": bases})
+                raw = result.mappings().all()
+            except Exception as e:
+                # Some Neon/pg versions prefer different array binding
+                logger.debug("bulk bhavcopy query failed: %s", e)
+                eng.dispose()
+                return [], list(symbols)
+
+        eng.dispose()
+
+        by_sym: Dict[str, List[Dict[str, Any]]] = {}
+        for r in raw:
+            sym = str(r["symbol"]).upper().strip()
+            by_sym.setdefault(sym, []).append(dict(r))
+
+        rows: List[Dict[str, Any]] = []
+        found = set()
+        for sym, hist in by_sym.items():
+            if len(hist) < 5:
+                continue
+            try:
+                closes = np.array([float(x["close"]) for x in hist], dtype=np.float64)
+                highs = np.array([float(x["high"]) for x in hist], dtype=np.float64)
+                lows = np.array([float(x["low"]) for x in hist], dtype=np.float64)
+                volumes = np.array([float(x.get("volume") or 0) for x in hist], dtype=np.float64)
+                prev_close = float(closes[0])
+                high_52w = float(np.max(highs))
+                if high_52w <= 0 or prev_close <= 0:
+                    continue
+                dist_52w_pct = float(((high_52w - prev_close) / high_52w) * 100.0)
+                avg_15m_vol = int(max(1, float(np.mean(volumes)) / 25.0))
+                daily_atr = float(np.mean(highs - lows))
+                rows.append({
+                    "symbol": sym,
+                    "prev_close": round(prev_close, 2),
+                    "avg_15m_volume": avg_15m_vol,
+                    "daily_atr": round(daily_atr, 2),
+                    "high_52w": round(high_52w, 2),
+                    "dist_52w_pct": round(dist_52w_pct, 2),
+                    "sector": None,
+                    "is_liquid": bool(float(np.mean(volumes)) >= 50000),
+                })
+                found.add(sym)
+            except Exception:
+                continue
+
+        remaining = [s for s in bases if s not in found]
+        logger.info(
+            "bulk bhavcopy: %s baselines from Neon, %s remaining for yfinance",
+            len(rows), len(remaining),
+        )
+        return rows, remaining
+    except Exception as e:
+        logger.debug("bulk_baselines_from_bhavcopy: %s", e)
+        return [], list(symbols)
+
+
 def upsert_baselines(rows: List[Dict[str, Any]]) -> int:
+    """Batch upsert — single transaction, executemany-style."""
     if not rows:
         return 0
     url = _db_url()
@@ -183,7 +371,13 @@ def upsert_baselines(rows: List[Dict[str, Any]]) -> int:
     try:
         from sqlalchemy import create_engine, text
 
-        eng = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=1)
+        eng = create_engine(
+            url,
+            pool_pre_ping=True,
+            pool_size=1,
+            max_overflow=1,
+            connect_args={"connect_timeout": 20, "application_name": "surprise-premarket-upsert"},
+        )
         sql = text(
             """
             INSERT INTO surprise_static_feed
@@ -196,21 +390,51 @@ def upsert_baselines(rows: List[Dict[str, Any]]) -> int:
                 daily_atr = EXCLUDED.daily_atr,
                 high_52w = EXCLUDED.high_52w,
                 dist_52w_pct = EXCLUDED.dist_52w_pct,
-                sector = EXCLUDED.sector,
+                sector = COALESCE(EXCLUDED.sector, surprise_static_feed.sector),
                 is_liquid = EXCLUDED.is_liquid,
                 updated_at = NOW()
             """
         )
-        n = 0
         with eng.begin() as conn:
-            for r in rows:
-                conn.execute(sql, r)
-                n += 1
+            # executemany in one transaction (far fewer Neon round-trips)
+            conn.execute(sql, rows)
         eng.dispose()
-        return n
+        return len(rows)
     except Exception as e:
-        logger.error("upsert_baselines failed: %s", e)
-        return 0
+        logger.error("upsert_baselines failed (%s rows): %s", len(rows), e)
+        # Fallback: one-by-one so partial success is still stored
+        n = 0
+        try:
+            from sqlalchemy import create_engine, text
+            eng = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+            sql = text(
+                """
+                INSERT INTO surprise_static_feed
+                    (symbol, prev_close, avg_15m_volume, daily_atr, high_52w, dist_52w_pct, sector, is_liquid, updated_at)
+                VALUES
+                    (:symbol, :prev_close, :avg_15m_volume, :daily_atr, :high_52w, :dist_52w_pct, :sector, :is_liquid, NOW())
+                ON CONFLICT (symbol) DO UPDATE SET
+                    prev_close = EXCLUDED.prev_close,
+                    avg_15m_volume = EXCLUDED.avg_15m_volume,
+                    daily_atr = EXCLUDED.daily_atr,
+                    high_52w = EXCLUDED.high_52w,
+                    dist_52w_pct = EXCLUDED.dist_52w_pct,
+                    sector = COALESCE(EXCLUDED.sector, surprise_static_feed.sector),
+                    is_liquid = EXCLUDED.is_liquid,
+                    updated_at = NOW()
+                """
+            )
+            with eng.begin() as conn:
+                for r in rows:
+                    try:
+                        conn.execute(sql, r)
+                        n += 1
+                    except Exception:
+                        pass
+            eng.dispose()
+        except Exception as e2:
+            logger.error("upsert fallback failed: %s", e2)
+        return n
 
 
 # Progress file for UI polling (manual premarket button)
@@ -257,9 +481,10 @@ def get_premarket_progress() -> Dict[str, Any]:
 
 def precalculate_surprise_baselines(symbols: List[str]) -> Dict[str, Any]:
     """
-    Main entry: schema → compute → upsert.
-    Rate-limits yfinance to stay free-tier safe.
-    Writes progress JSON for frontend polling.
+    Main entry: schema → concurrent compute → batched upsert.
+
+    Step 3: ThreadPoolExecutor (default 10 workers) + batch Neon writes
+    replaces the old sequential loop (sleep 0.12s × 300 ≈ 40s+ of pure wait).
     """
     global _job_lock
     t0 = time.time()
@@ -304,49 +529,111 @@ def precalculate_surprise_baselines(symbols: List[str]) -> Dict[str, Any]:
             "eta_sec": None,
             "is_running": True,
             "current_symbol": None,
-            "message": f"Starting baselines for {total} symbols",
+            "message": f"Starting concurrent baselines for {total} symbols (workers={MAX_WORKERS})",
         })
 
-        interval = float(os.getenv("SURPRISE_YF_INTERVAL_SEC", "0.12"))
+        workers = max(1, min(MAX_WORKERS, total or 1))
         ok_rows: List[Dict[str, Any]] = []
         errors = 0
         computed = 0
-        for i, sym in enumerate(uniq):
-            row = compute_baseline_for_symbol(sym)
-            if row:
-                ok_rows.append(row)
-                computed += 1
-            else:
-                errors += 1
-            if interval > 0:
-                time.sleep(interval)
-            if len(ok_rows) >= 40:
-                upsert_baselines(ok_rows)
-                ok_rows = []
+        processed = 0
+        total_upserted = 0
+        current_sym: Optional[str] = None
+        source_bhav = 0
+        source_yf = 0
 
-            processed = i + 1
-            elapsed = time.time() - t0
-            rate = processed / elapsed if elapsed > 0.5 else 0
-            remaining = total - processed
-            eta = (remaining / rate) if rate > 0 else None
-            pct = min(99, int(100 * processed / max(total, 1)))
+        def _flush() -> None:
+            nonlocal ok_rows, total_upserted
+            if not ok_rows:
+                return
+            n = upsert_baselines(ok_rows)
+            total_upserted += n
+            ok_rows = []
+
+        # Step 5: try bulk Neon daily_bhavcopy first (seconds, not tens of seconds)
+        _write_progress({
+            "stage": "bhavcopy",
+            "percent": 2,
+            "processed": 0,
+            "total": total,
+            "errors": 0,
+            "elapsed_sec": 0,
+            "eta_sec": None,
+            "is_running": True,
+            "current_symbol": None,
+            "message": "Checking daily_bhavcopy fast path…",
+        })
+        bhav_rows, remaining = bulk_baselines_from_bhavcopy(uniq)
+        if bhav_rows:
+            ok_rows.extend(bhav_rows)
+            computed += len(bhav_rows)
+            processed += len(bhav_rows)
+            source_bhav = len(bhav_rows)
+            _flush()
             _write_progress({
                 "stage": "computing",
-                "percent": pct,
+                "percent": max(5, int(100 * processed / total)) if total else 5,
                 "processed": processed,
                 "total": total,
                 "computed": computed,
                 "errors": errors,
-                "elapsed_sec": round(elapsed, 1),
-                "eta_sec": round(eta, 1) if eta is not None else None,
+                "elapsed_sec": round(time.time() - t0, 1),
+                "eta_sec": None,
                 "is_running": True,
-                "current_symbol": sym,
-                "message": f"{processed}/{total} · {sym}",
+                "current_symbol": None,
+                "message": f"Neon bhavcopy: {source_bhav} · yfinance left: {len(remaining)}",
             })
-            if processed % 50 == 0:
-                logger.info("surprise premarket progress %s/%s", processed, total)
+        else:
+            remaining = list(uniq)
 
-        upserted = upsert_baselines(ok_rows) if ok_rows else 0
+        # Concurrent yfinance for symbols not covered by bhavcopy
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(compute_baseline_for_symbol, sym): sym for sym in remaining}
+            for fut in as_completed(futures):
+                sym = futures[fut]
+                current_sym = sym
+                try:
+                    row = fut.result()
+                    if row:
+                        ok_rows.append(row)
+                        computed += 1
+                        source_yf += 1
+                    else:
+                        errors += 1
+                except Exception as e:
+                    errors += 1
+                    logger.debug("worker %s: %s", sym, e)
+
+                processed += 1
+                if len(ok_rows) >= UPSERT_BATCH:
+                    _flush()
+
+                elapsed = time.time() - t0
+                rate = processed / elapsed if elapsed > 0.5 else 0
+                remaining = (total - processed) / rate if rate > 0 else None
+                eta = remaining
+                pct = int(100 * processed / total) if total else 0
+                _write_progress({
+                    "stage": "computing",
+                    "percent": min(99, pct),
+                    "processed": processed,
+                    "total": total,
+                    "computed": computed,
+                    "errors": errors,
+                    "elapsed_sec": round(elapsed, 1),
+                    "eta_sec": round(eta, 1) if eta is not None else None,
+                    "is_running": True,
+                    "current_symbol": current_sym,
+                    "message": f"{processed}/{total} · {sym} · {workers}w",
+                })
+                if processed % 50 == 0:
+                    logger.info(
+                        "surprise premarket progress %s/%s (computed=%s errors=%s elapsed=%.1fs)",
+                        processed, total, computed, errors, elapsed,
+                    )
+
+        _flush()  # remaining rows
+
         elapsed = round(time.time() - t0, 1)
         result = {
             "ok": True,
@@ -355,7 +642,11 @@ def precalculate_surprise_baselines(symbols: List[str]) -> Dict[str, Any]:
             "errors": errors,
             "elapsed_sec": elapsed,
             "table": "surprise_static_feed",
-            "upserted_last_batch": upserted,
+            "upserted": total_upserted,
+            "upserted_last_batch": total_upserted,
+            "workers": workers,
+            "source_bhavcopy": source_bhav,
+            "source_yfinance": source_yf,
         }
         _write_progress({
             "stage": "done",
@@ -368,9 +659,13 @@ def precalculate_surprise_baselines(symbols: List[str]) -> Dict[str, Any]:
             "eta_sec": 0,
             "is_running": False,
             "current_symbol": None,
-            "message": f"Done · {computed} baselines · {errors} errors · {elapsed}s",
+            "message": f"Done · {computed} baselines · {errors} errors · {elapsed}s · {workers} workers",
             "result": result,
         })
+        logger.info(
+            "precalculate_surprise_baselines done: %s computed, %s errors, %.1fs, workers=%s",
+            computed, errors, elapsed, workers,
+        )
         return result
     except Exception as e:
         logger.exception("precalculate_surprise_baselines failed")
@@ -391,12 +686,10 @@ def precalculate_surprise_baselines(symbols: List[str]) -> Dict[str, Any]:
         _job_lock = False
 
 
-
 def default_universe_from_env() -> List[str]:
     raw = os.getenv("SURPRISE_UNIVERSE", "") or os.getenv("SCAN_UNIVERSE", "")
     if raw.strip():
         return [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]
-    # Small seed; gateway will pass full universe when calling the job
     return [
         "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "BHARTIARTL",
         "ITC", "LT", "KOTAKBANK", "AXISBANK", "HINDUNILVR", "BAJFINANCE", "MARUTI",

@@ -1,7 +1,7 @@
 """
 Unified safe price resolution for Market Scan / Lite Scan / Surprise.
 
-Frontend may bind: close | price | cmp | current_price | ltp
+Frontend may bind: close | price | cmp | current_price | ltp | last_price | prev_close
 Every scan row should set all of these to the same positive float when known.
 """
 from __future__ import annotations
@@ -100,6 +100,11 @@ def apply_price_aliases(row: Dict[str, Any], price: float) -> Dict[str, Any]:
     row["cmp"] = px
     row["current_price"] = px
     row["ltp"] = px
+    row["last_price"] = px
+    # Preserve existing prev_close if already a positive baseline; else mirror
+    existing_pc = _as_positive_float(row.get("prev_close"))
+    if existing_pc is None:
+        row["prev_close"] = px
     return row
 
 

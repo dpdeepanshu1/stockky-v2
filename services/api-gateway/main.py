@@ -4032,6 +4032,7 @@ def _lite_evaluate_from_feed(symbol: str, feed: dict, live_price: float = 0.0) -
     return apply_price_aliases(out, cmp_price)
 
 
+@app.get("/api/scan/stream")
 @app.get("/scan/stream")
 async def stream_market_scan(
     lite: bool = None,

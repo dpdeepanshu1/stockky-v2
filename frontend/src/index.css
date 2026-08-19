@@ -1873,3 +1873,159 @@ html.light .mobile-drawer-backdrop {
   color: var(--cyan);
   background: rgba(59, 130, 246, 0.1);
 }
+
+/* ── Scan results · Bento layout ─────────────────────────────────── */
+.scan-bento-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+}
+@media (min-width: 900px) {
+  .scan-bento-grid {
+    grid-template-columns: 1.1fr 1fr 1.4fr;
+    align-items: stretch;
+  }
+}
+.scan-bento-card {
+  border: 1px solid var(--border, rgba(148, 163, 184, 0.2));
+  background: var(--panel-2, rgba(15, 23, 42, 0.55));
+  border-radius: 0.9rem;
+  padding: 1rem 1.1rem;
+}
+.scan-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 0.5rem;
+  background: rgba(0, 0, 0, 0.2);
+}
+.scan-stat-label {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted, #94a3b8);
+}
+.scan-stat-value {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--paper, #f8fafc);
+}
+.scan-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.scan-action-btn {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.68rem;
+  padding: 0.4rem 0.65rem;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(30, 41, 59, 0.55);
+  color: var(--paper, #e2e8f0);
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+  cursor: pointer;
+}
+.scan-action-btn:hover:not(:disabled) {
+  background: rgba(51, 65, 85, 0.7);
+  border-color: rgba(148, 163, 184, 0.55);
+}
+.scan-action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.scan-action-trade {
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #a7f3d0;
+}
+.scan-action-violet {
+  border-color: rgba(139, 92, 246, 0.45);
+  color: #ddd6fe;
+  background: rgba(91, 33, 182, 0.25);
+}
+
+.scan-conviction-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.85rem;
+}
+@media (min-width: 768px) {
+  .scan-conviction-grid {
+    grid-template-columns: repeat(6, 1fr);
+  }
+  .scan-pick-wrap.is-hero {
+    grid-column: span 3;
+  }
+  .scan-pick-wrap:not(.is-hero) {
+    grid-column: span 3;
+  }
+}
+@media (min-width: 1100px) {
+  .scan-conviction-grid {
+    grid-template-columns: repeat(12, 1fr);
+  }
+  .scan-pick-wrap.is-hero {
+    grid-column: span 6;
+  }
+  .scan-pick-wrap:not(.is-hero) {
+    grid-column: span 3;
+  }
+}
+.scan-pick-wrap.is-hero > button {
+  min-height: 100%;
+  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.2), 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+.scan-row-onboard {
+  background: rgba(16, 185, 129, 0.04);
+}
+.scan-table-wrap {
+  max-height: min(70vh, 720px);
+  overflow: auto;
+}
+.scan-table-wrap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel, #0f172a);
+}
+
+/* Dual scan CTAs on dashboard */
+.dash-scan-pair {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+.btn-scan-lite {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+  padding: 0.55rem 0.9rem;
+  border-radius: 0.55rem;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.12);
+  color: #fde68a;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-scan-lite:hover {
+  background: rgba(251, 191, 36, 0.22);
+  border-color: rgba(251, 191, 36, 0.65);
+}
+.btn-scan-full {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+  padding: 0.55rem 0.9rem;
+  border-radius: 0.55rem;
+  border: 1px solid rgba(16, 185, 129, 0.5);
+  background: rgba(16, 185, 129, 0.15);
+  color: #a7f3d0;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-scan-full:hover {
+  background: rgba(16, 185, 129, 0.28);
+  border-color: rgba(16, 185, 129, 0.7);
+}

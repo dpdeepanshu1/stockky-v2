@@ -107,9 +107,24 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   const [sniperError, setSniperError] = useState<string | null>(null);
   const { connected: quoteWs, subscribeQuotes, quotes: liveQuotes } = useStockkyRealtime();
 
+  /** Keep first occurrence of each symbol (normalized). Prevents the same stock
+   *  showing 2–3 times across Top Picks / value board / full table. */
+  const uniqueBySymbol = (rows: Decision[]): Decision[] => {
+    const seen = new Set<string>();
+    const out: Decision[] = [];
+    for (const d of rows) {
+      if (!d || !d.symbol) continue;
+      const key = String(d.symbol).toUpperCase().replace(/\.NS$|\.BO$/i, "").trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(d);
+    }
+    return out;
+  };
+
   const filteredResults = useMemo(() => {
     // Drop high-ticket SKIP rows (price > ₹5000) so they never clutter the table
-    const rows = (result.all_results || []).filter((d: any) => {
+    const raw = (result.all_results || []).filter((d: any) => {
       if (!d || d.skipped_high_price) return false;
       const dec = String(d.decision || "").toUpperCase();
       if (dec === "SKIP" || dec === "SKIPPED") return false;
@@ -117,6 +132,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
       if (px > 5000) return false;
       return true;
     });
+    const rows = uniqueBySymbol(raw);
     if (filterChip === "buy") return rows.filter((d) => d.decision === "BUY NOW");
     if (filterChip === "prepare") return rows.filter((d) => d.decision === "PREPARE TO BUY");
     if (filterChip === "avoid") return rows.filter((d) => d.decision === "DO NOT BUY" || d.decision === "WAIT" || d.decision === "SELL");
@@ -124,31 +140,52 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   }, [result.all_results, filterChip]);
 
   const allSorted = useMemo(
-    () => [...filteredResults].sort((a, b) => b.combined_score - a.combined_score),
+    () => [...filteredResults].sort((a, b) => (b.combined_score ?? 0) - (a.combined_score ?? 0)),
     [filteredResults]
   );
 
-  const valueAdjustedTopPicks = useMemo(() => {
-    return filteredResults
-      .filter((d) => d.decision === "BUY NOW" || d.decision === "PREPARE TO BUY")
+  /** Single conviction board: value-adjusted ranking, max 5 unique symbols.
+   *  Replaces the old dual "recommendations" + "value-adjusted" grids that
+   *  repeated the same stocks. */
+  const convictionBoard = useMemo(() => {
+    const actionable = filteredResults.filter(
+      (d) => d.decision === "BUY NOW" || d.decision === "PREPARE TO BUY"
+    );
+    const ranked = actionable
       .map((d) => ({ decision: d, ...valueAdjustedScore(d) }))
       .filter((x) => x.eligible)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 5);
-  }, [filteredResults]);
+      .sort((a, b) => b.score - a.score);
+    // Fallback: if value filter emptied the board, use raw server recommendations (deduped)
+    if (ranked.length === 0) {
+      const recs = uniqueBySymbol(result.recommendations || []).slice(0, 5);
+      return recs.map((d) => ({ decision: d, score: d.combined_score, eligible: true, bonus: 0 }));
+    }
+    return ranked.slice(0, 5);
+  }, [filteredResults, result.recommendations]);
 
   const allActionable = useMemo(
     () =>
-      result.all_results
+      uniqueBySymbol(result.all_results || [])
         .filter((d) => d.decision === "BUY NOW" || d.decision === "PREPARE TO BUY")
         .sort((a, b) => valueAdjustedScore(b).score - valueAdjustedScore(a).score),
     [result.all_results]
   );
 
   const top5Actionable = useMemo(
-    () => valueAdjustedTopPicks.map((x) => x.decision),
-    [valueAdjustedTopPicks]
+    () => convictionBoard.map((x) => x.decision),
+    [convictionBoard]
   );
+
+  /** Symbols already on the conviction board — omit from "All results" hero feel,
+   *  but still list them once in the full table (table is the source of truth). */
+  const convictionSymbols = useMemo(() => {
+    const s = new Set<string>();
+    for (const x of convictionBoard) {
+      const k = String(x.decision.symbol || "").toUpperCase().replace(/\.NS$|\.BO$/i, "").trim();
+      if (k) s.add(k);
+    }
+    return s;
+  }, [convictionBoard]);
 
   useEffect(() => {
     const rows = result.all_results || [];
@@ -392,8 +429,8 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   };
 
   return (
-    <div className="space-y-6 animate-fadeIn">
-      {/* Sticky control bar — Back + stats + primary Sniper CTA always visible */}
+    <div className="scan-bento animate-fadeIn space-y-5">
+      {/* ── Sticky header ── */}
       <div className="sticky top-0 z-20 -mx-1 px-1 py-3 mb-1 bg-ink/95 backdrop-blur-md border-b border-slate/50">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <button
@@ -404,10 +441,13 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
           </button>
           <div className="text-right flex-1 min-w-[10rem]">
             <div className="font-mono text-xs text-mist/60">
-              Scanned {result.scanned} stocks · {result.universe_size} in universe
+              Scanned {result.scanned} · universe {result.universe_size}
+              {(result as any).lite && (
+                <span className="ml-2 text-amber-300/90 border border-amber-500/30 px-1.5 py-0.5 rounded text-[10px]">LITE</span>
+              )}
             </div>
             <div className="font-mono text-xs text-mist/60">
-              {result.market_stats.buy_signals} BUY · {result.market_stats.sell_signals} SELL · {result.market_stats.hold_signals} HOLD
+              {result.market_stats?.buy_signals ?? 0} BUY · {result.market_stats?.sell_signals ?? 0} SELL · {result.market_stats?.hold_signals ?? 0} HOLD
               <span className="text-mist/40"> · ≤ ₹5000</span>
             </div>
           </div>
@@ -422,112 +462,102 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
                 Sniping…
               </>
             ) : (
-              "🎯 Search for Buy Stocks (1-4)"
+              "🎯 Buy Sniper"
             )}
           </button>
         </div>
       </div>
 
-      {/* Secondary action buttons */}
-      <div className="flex flex-wrap gap-3">
-        <button
-          onClick={handleSendTopPicks}
-          disabled={!!isSendingTelegram}
-          className={`font-mono text-xs bg-signal-prepare/20 border border-signal-prepare/40 rounded-lg px-4 py-2 transition hover:bg-signal-prepare/30 disabled:opacity-50 flex items-center gap-2`}
-        >
-          {isSendingTelegram === "top5" ? (
-            <>
-              <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-signal-prepare animate-spin"></span>
-              Sending Top 5...
-            </>
-          ) : (
-            "📤 Send Top 5 Picks"
-          )}
-        </button>
-        <button
-          onClick={handleSendAllActionable}
-          disabled={!!isSendingTelegram}
-          className={`font-mono text-xs bg-signal-buy/20 border border-signal-buy/40 rounded-lg px-4 py-2 transition hover:bg-signal-buy/30 disabled:opacity-50 flex items-center gap-2`}
-        >
-          {isSendingTelegram === "all" ? (
-            <>
-              <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-signal-buy animate-spin"></span>
-              Sending All...
-            </>
-          ) : (
-            "📤 Send All Actionable"
-          )}
-        </button>
-        <button
-          onClick={handleTop5ToTrade}
-          disabled={!!committing || top5Actionable.length === 0}
-          className="font-mono text-xs bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 rounded-lg px-4 py-2 transition hover:bg-emerald-500/30 disabled:opacity-50 flex items-center gap-2"
-        >
-          {committing === "trade_top5" ? (
-            <>
-              <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-emerald-400 animate-spin"></span>
-              Opening trades...
-            </>
-          ) : (
-            `📈 Top 5 to Trade (${top5Actionable.length})`
-          )}
-        </button>
-        <button
-          onClick={handleAllActionableToTrade}
-          disabled={!!committing || allActionable.length === 0}
-          className="font-mono text-xs bg-emerald-600/20 border border-emerald-600/40 text-emerald-200 rounded-lg px-4 py-2 transition hover:bg-emerald-600/30 disabled:opacity-50 flex items-center gap-2"
-        >
-          {committing === "trade_all" ? (
-            <>
-              <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-emerald-400 animate-spin"></span>
-              Opening trades...
-            </>
-          ) : (
-            `📈 All Actionable to Trade (${allActionable.length})`
-          )}
-        </button>
-        <button
-          onClick={handleAddActionableToTraining}
-          disabled={!!committing || allActionable.length === 0}
-          className="font-mono text-xs bg-mint/20 border border-mint/40 rounded-lg px-4 py-2 transition hover:bg-mint/30 disabled:opacity-50 flex items-center gap-2"
-        >
-          {committing === "training" ? (
-            <>
-              <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-mint animate-spin"></span>
-              Adding...
-            </>
-          ) : (
-            `🎓 All Actionable for Training (${allActionable.length})`
-          )}
-        </button>
-          <button
-            type="button"
-            className="text-xs px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-white font-medium disabled:opacity-50"
-            onClick={handleSendUniverseForTraining}
-            disabled={!!committing || !result}
-            title="Send the entire daily scan universe into training (more stocks = better model)"
-          >
-            {committing === "universe" ? "Sending universe…" : "Send the Stock Universe For Training"}
-          </button>
-        <button
-          onClick={() =>
-            onAddManyToWatchlist(result.recommendations.map((r) => r.symbol), "Top Picks")
-          }
-          disabled={result.recommendations.length === 0}
-          className="font-mono text-xs bg-signal-prepare/15 border border-signal-prepare/40 text-signal-prepare rounded-lg px-4 py-2 transition hover:bg-signal-prepare/25 disabled:opacity-40"
-        >
-          ⭐ Add Top Picks to Watchlist ({result.recommendations.length})
-        </button>
-        <button
-          onClick={() => onAddManyToWatchlist(allActionable.map((d) => d.symbol), "All Actionable")}
-          disabled={allActionable.length === 0}
-          className="font-mono text-xs bg-signal-prepare/15 border border-signal-prepare/40 text-signal-prepare rounded-lg px-4 py-2 transition hover:bg-signal-prepare/25 disabled:opacity-40"
-        >
-          ⭐ Add All Actionable to Watchlist ({allActionable.length})
-        </button>
+      {/* ── Bento: stats + filters + actions ── */}
+      <div className="scan-bento-grid">
+        <div className="scan-bento-card scan-bento-stats">
+          <p className="dash-section-title mb-2">Scan summary</p>
+          <div className="grid grid-cols-3 gap-2">
+            <div className="scan-stat">
+              <span className="scan-stat-label">Scanned</span>
+              <span className="scan-stat-value">{result.scanned}</span>
+            </div>
+            <div className="scan-stat">
+              <span className="scan-stat-label">Actionable</span>
+              <span className="scan-stat-value text-signal-buy">{allActionable.length}</span>
+            </div>
+            <div className="scan-stat">
+              <span className="scan-stat-label">Top board</span>
+              <span className="scan-stat-value text-signal-prepare">{convictionBoard.length}</span>
+            </div>
+          </div>
+          {quoteWs && <p className="mono text-[10px] text-signal-buy mt-2 mb-0">WS quotes live</p>}
+        </div>
+
+        <div className="scan-bento-card scan-bento-filters">
+          <p className="dash-section-title mb-2">Filter</p>
+          <div className="chip scanner-chips" role="tablist" aria-label="Filter by decision">
+            {([
+              ["all", "All"],
+              ["buy", "BUY NOW"],
+              ["prepare", "PREPARE"],
+              ["avoid", "Avoid"],
+            ] as const).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={filterChip === id}
+                className={`scanner-chip${filterChip === id ? " is-active" : ""}`}
+                data-active={filterChip === id ? "true" : "false"}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setFilterChip(id);
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="scan-bento-card scan-bento-actions">
+          <p className="dash-section-title mb-2">Actions</p>
+          <div className="scan-action-row">
+            <button onClick={handleSendTopPicks} disabled={!!isSendingTelegram || top5Actionable.length === 0} className="scan-action-btn">
+              {isSendingTelegram === "top5" ? "Sending…" : "📤 Top 5"}
+            </button>
+            <button onClick={handleSendAllActionable} disabled={!!isSendingTelegram || allActionable.length === 0} className="scan-action-btn">
+              {isSendingTelegram === "all" ? "Sending…" : "📤 All actionable"}
+            </button>
+            <button onClick={handleTop5ToTrade} disabled={!!committing || top5Actionable.length === 0} className="scan-action-btn scan-action-trade">
+              {committing === "trade_top5" ? "Opening…" : `📈 Trade top (${top5Actionable.length})`}
+            </button>
+            <button onClick={handleAllActionableToTrade} disabled={!!committing || allActionable.length === 0} className="scan-action-btn scan-action-trade">
+              {committing === "trade_all" ? "Opening…" : `📈 Trade all (${allActionable.length})`}
+            </button>
+            <button onClick={handleAddActionableToTraining} disabled={!!committing || allActionable.length === 0} className="scan-action-btn">
+              {committing === "training" ? "Adding…" : "🎓 Train actionable"}
+            </button>
+            <button type="button" onClick={handleSendUniverseForTraining} disabled={!!committing || !result} className="scan-action-btn scan-action-violet" title="Send entire scan universe into training">
+              {committing === "universe" ? "Sending…" : "🌌 Universe → train"}
+            </button>
+            <button
+              onClick={() => onAddManyToWatchlist(top5Actionable.map((r) => r.symbol), "Top Picks")}
+              disabled={top5Actionable.length === 0}
+              className="scan-action-btn"
+            >
+              ⭐ Watchlist top
+            </button>
+            <button
+              onClick={() => onAddManyToWatchlist(allActionable.map((d) => d.symbol), "All Actionable")}
+              disabled={allActionable.length === 0}
+              className="scan-action-btn"
+            >
+              ⭐ Watchlist all
+            </button>
+          </div>
+        </div>
       </div>
+
       {commitMessage && (
-        <div className="font-mono text-xs text-mist/70 -mt-3">{commitMessage}</div>
+        <div className="font-mono text-xs text-mist/70">{commitMessage}</div>
       )}
       {balanceLow && (
         <div className="balance-modal-overlay" role="dialog" aria-modal="true">
@@ -580,56 +610,18 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         </div>
       )}
 
-      
-      <div className="scanner-board signals-terminal mb-4">
-        <p className="dash-section-title">Signals · conviction board</p>
-        <div className="scanner-toolbar-row flex flex-wrap items-center gap-2 mb-2">
-          {(result as any).lite && (
-            <span className="mono text-[10px] text-amber-300/90 border border-amber-500/30 px-2 py-0.5 rounded">LITE SCAN</span>
-          )}
-          {quoteWs && <span className="mono text-[10px] text-signal-buy">WS quotes live</span>}
-        </div>
-        <div className="chip scanner-chips" role="tablist" aria-label="Filter by decision">
-          {([
-            ["all", "All"],
-            ["buy", "BUY NOW"],
-            ["prepare", "PREPARE"],
-            ["avoid", "Avoid / Wait"],
-          ] as const).map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              role="tab"
-              aria-selected={filterChip === id}
-              className={`scanner-chip${filterChip === id ? " is-active" : ""}`}
-              data-active={filterChip === id ? "true" : "false"}
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                setFilterChip(id);
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <p className="mono text-[11px] text-mist/60 mb-0">
-          Ranked by conviction · {allActionable.length} actionable · {result.recommendations?.length || 0} top picks
-        </p>
-      </div>
-
-{/* Verdict banner */}
-      {result.recommendations.length === 0 ? (
-        <div className="no-conviction">
-          <h2>NO HIGH-CONVICTION OPPORTUNITY FOUND — WAIT</h2>
+      {/* ── Conviction board (single, deduped, value-aware) ── */}
+      {convictionBoard.length === 0 ? (
+        <div className="no-conviction scan-bento-card">
+          <h2>NO HIGH-CONVICTION OPPORTUNITY — WAIT</h2>
           <p className="text-mist text-sm max-w-md mx-auto mb-0">
-            {result.scanned} stocks scanned. None cleared the conviction bar today. Waiting is the decision.
+            {result.scanned} stocks scanned. None cleared the conviction bar today.
           </p>
-          {result.watchlist_candidates.length > 0 && (
+          {(result.watchlist_candidates?.length ?? 0) > 0 && (
             <div className="mt-6">
-              <p className="text-mist/60 text-sm mb-2">But these are worth watching:</p>
+              <p className="text-mist/60 text-sm mb-2">Worth watching:</p>
               <div className="flex flex-wrap justify-center gap-3">
-                {result.watchlist_candidates.slice(0, 5).map((d) => (
+                {uniqueBySymbol(result.watchlist_candidates || []).slice(0, 6).map((d) => (
                   <button
                     key={d.symbol}
                     onClick={() => onSelect(d.symbol)}
@@ -643,97 +635,71 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
           )}
         </div>
       ) : (
-        <>
-          <div className="font-mono text-xs text-mist/60 uppercase tracking-widest">{result.verdict}</div>
-          <div className="grid md:grid-cols-3 gap-4">
-            {result.recommendations.map((r, i) => (
-              <div key={r.symbol} className="space-y-1">
-                <TopPick
-                  rank={i + 1}
-                  data={{
-                    ...r,
-                    close: resolveDisplayPrice(r, liveQuotes[r.symbol]?.price) || r.close,
-                  }}
-                  onSelect={onSelect}
-                  onAddToWatchlist={handleAddToWatchlist}
-                  addingWatchlist={addingWatchlist}
-                />
-                {(qualityLabel(r) || rowSummary(r)) && (
-                  <div className="quality-gate-inline mono text-[10px] px-1">
-                    {qualityLabel(r) && <span className={`qg-${qualityLabel(r).toLowerCase() === "high" ? "high" : qualityLabel(r).toLowerCase() === "medium" ? "med" : "low"}`}>DATA {qualityLabel(r).toUpperCase()}</span>}
-                    {rowSummary(r) && <span className="text-mist/70 ml-2">{rowSummary(r).slice(0, 120)}</span>}
+        <section className="scan-conviction">
+          <div className="flex flex-wrap items-end justify-between gap-2 mb-3">
+            <div>
+              <p className="dash-section-title mb-0">Conviction board</p>
+              <p className="mono text-[11px] text-mist/60 mb-0">
+                {result.verdict || "Ranked by value-adjusted conviction"} · ≤ ₹{PRICE_CAP} preferred
+              </p>
+            </div>
+            <span className="mono text-[10px] text-mist/50">{convictionBoard.length} unique picks</span>
+          </div>
+
+          {/* Hero pick (rank 1) spans wider on large screens */}
+          <div className="scan-conviction-grid">
+            {convictionBoard.map((x, i) => {
+              const r = x.decision;
+              const isHero = i === 0;
+              return (
+                <div
+                  key={r.symbol}
+                  className={`scan-pick-wrap${isHero ? " is-hero" : ""}`}
+                >
+                  <TopPick
+                    rank={i + 1}
+                    data={{
+                      ...r,
+                      close: resolveDisplayPrice(r, liveQuotes[r.symbol]?.price) || r.close,
+                    }}
+                    onSelect={onSelect}
+                    onAddToWatchlist={handleAddToWatchlist}
+                    addingWatchlist={addingWatchlist}
+                  />
+                  <div className="quality-gate-inline mono text-[10px] px-1 mt-1 flex flex-wrap gap-x-2 gap-y-0.5">
+                    {x.bonus > 0 && (
+                      <span className="text-mint">+{x.bonus} value bonus</span>
+                    )}
+                    {qualityLabel(r) && (
+                      <span className={`qg-${qualityLabel(r).toLowerCase() === "high" ? "high" : qualityLabel(r).toLowerCase() === "medium" ? "med" : "low"}`}>
+                        DATA {qualityLabel(r).toUpperCase()}
+                      </span>
+                    )}
+                    {rowSummary(r) && (
+                      <span className="text-mist/70">{rowSummary(r).slice(0, 100)}</span>
+                    )}
                     {liveQuotes[r.symbol]?.price != null && (
-                      <span className="text-signal-buy ml-2">₹{liveQuotes[r.symbol].price.toLocaleString("en-IN")}</span>
+                      <span className="text-signal-buy">₹{Number(liveQuotes[r.symbol].price).toLocaleString("en-IN")}</span>
                     )}
                   </div>
-                )}
-              </div>
-            ))}
+                </div>
+              );
+            })}
           </div>
-        </>
+        </section>
       )}
 
-      {/* Value-adjusted Top Picks: client-side re-rank applying the Rs 2000
-          cap + low-price/good-fundamentals bonus. Additive to the section
-          above, not a replacement — result.recommendations above still
-          reflects api-gateway's own ranking untouched, since Telegram
-          sends and anything scheduler-service records still key off that,
-          not this view. */}
-      {valueAdjustedTopPicks.length > 0 && (
-        <div>
-          <div className="font-mono text-[10px] text-mist uppercase tracking-widest mb-3">
-            💎 Value-Adjusted Top Picks (≤ ₹{PRICE_CAP}, bonus for good fundamentals at a low price)
+      {/* ── Full results (unique symbols only) ── */}
+      <section className="scan-table-section">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <div className="font-mono text-[10px] text-mist uppercase tracking-widest">
+            All results · {allSorted.length} unique
           </div>
-          <div className="grid md:grid-cols-3 gap-4">
-            {valueAdjustedTopPicks.map((x, i) => (
-              <div
-                key={x.decision.symbol}
-                onClick={() => onSelect(x.decision.symbol)}
-                className="rounded-xl border border-mint/40 bg-mint/5 p-4 cursor-pointer hover:border-mint/70 transition"
-              >
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-mono text-xs text-mist/50">#{i + 1}</span>
-                  <span className="font-mono text-xs text-mint">+{x.bonus} bonus</span>
-                </div>
-                <div className="font-display text-lg text-paper">{x.decision.symbol}</div>
-                <div className="font-mono text-xs text-mist/60">
-                  ₹{resolveDisplayPrice(x.decision) || "—"} · fundamentals {x.decision.fundamental_score}/100
-                </div>
-                <div className="font-mono text-xs text-mist/60 mt-1">
-                  raw {x.decision.combined_score} → adjusted {Math.round(x.score * 10) / 10}
-                </div>
-              </div>
-            ))}
-          </div>
-          <p className="text-mist/40 text-[11px] mt-2">
-            Client-side ranking only — doesn't change what api-gateway recorded as
-            "recommendations" for this scan, or what Send Top 5 sends.
-          </p>
+          <span className="mono text-[10px] text-mist/40">
+            Top board symbols marked · filter: {filterChip}
+          </span>
         </div>
-      )}
-
-      {/* Watchlist candidates (fallback) */}
-      {result.recommendations.length === 0 && result.watchlist_candidates.length > 0 && (
-        <div className="mt-6">
-          <div className="font-mono text-[10px] text-mist uppercase tracking-widest mb-3">Watchlist Candidates</div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            {result.watchlist_candidates.slice(0, 6).map((d) => (
-              <CandidateCard 
-                key={d.symbol} 
-                data={d} 
-                onSelect={onSelect} 
-                onAddToWatchlist={handleAddToWatchlist}
-                addingWatchlist={addingWatchlist}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Full results table */}
-      <div>
-        <div className="font-mono text-[10px] text-mist uppercase tracking-widest mb-3">All results</div>
-        <div className="rounded-xl border border-slate overflow-hidden">
+        <div className="rounded-xl border border-slate overflow-hidden scan-table-wrap">
           <table className="w-full text-sm font-mono">
             <thead>
               <tr className="border-b border-slate bg-graphite">
@@ -748,10 +714,18 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
             </thead>
             <tbody>
               {allSorted.map((r) => {
-                const style = decisionStyle[r.decision];
+                const style = decisionStyle[r.decision] || { color: "text-mist", border: "border-slate", bg: "bg-graphite/20" };
+                const key = String(r.symbol || "").toUpperCase().replace(/\.NS$|\.BO$/i, "").trim();
+                const onBoard = convictionSymbols.has(key);
                 return (
-                  <tr key={r.symbol} className="border-b border-slate/40 hover:bg-graphite transition">
-                    <td className="px-4 py-3 text-paper font-semibold">{r.symbol}</td>
+                  <tr
+                    key={key || r.symbol}
+                    className={`border-b border-slate/40 hover:bg-graphite transition${onBoard ? " scan-row-onboard" : ""}`}
+                  >
+                    <td className="px-4 py-3 text-paper font-semibold">
+                      {r.symbol}
+                      {onBoard && <span className="ml-1.5 text-[9px] text-mint/80 uppercase tracking-wide">board</span>}
+                    </td>
                     <td className={`px-4 py-3 text-xs ${style.color}`}>{r.decision}</td>
                     <td className="px-4 py-3 text-right text-mist">{r.combined_score}</td>
                     <td className="px-4 py-3 text-right text-paper">
@@ -772,8 +746,11 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
               })}
             </tbody>
           </table>
+          {allSorted.length === 0 && (
+            <p className="mono text-xs text-mist/50 p-6 text-center mb-0">No rows match this filter.</p>
+          )}
         </div>
-      </div>
+      </section>
 
       {result.errors.length > 0 && (
         <div className="rounded-xl border border-slate bg-graphite p-4">

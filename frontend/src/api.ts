@@ -1411,6 +1411,12 @@ export const api = {
     request<any>("/ops/resume-activity", { method: "POST" }, 1, 15000),
   getDataFeedSymbol: (symbol: string) =>
     request<any>(`/data-feed/${encodeURIComponent(symbol)}`, undefined, 1, 20000),
+  auditMissingFeed: () =>
+    request<any>("/api/feed/audit-missing", undefined, 2, 60000),
+  repairFeedSingle: (symbol: string) =>
+    request<any>(`/api/feed/repair-single/${encodeURIComponent(symbol)}`, { method: "POST" }, 2, 90000),
+  repairFeedBatch: (limit: number = 15) =>
+    request<any>(`/api/feed/repair-batch?limit=${limit}`, { method: "POST" }, 2, 180000),
 
   getStockkyHotStatus: () =>
     request<any>("/stockky-hot/status", undefined, 1, 15000),

@@ -16,6 +16,7 @@ import Training from "./components/Training";
 import HotStocks from "./components/HotStocks";
 import SurpriseStocks from "./components/SurpriseStocks";
 import DataFeed from "./components/DataFeed";
+import DataHealthAudit from "./components/DataHealthAudit";
 import Trades from "./components/Trades";
 // ── NEW: import Market Sentiment Header ──
 import MarketSentimentHeader from "./components/MarketSentimentHeader";
@@ -427,14 +428,16 @@ export default function App() {
     }
   }
 
-  async function handleScan() {
-    const modeLabel = liteScan ? "Lite Market Run" : "Full Market Run";
+  async function handleScan(liteOverride?: boolean) {
+    const useLite = typeof liteOverride === "boolean" ? liteOverride : liteScan;
+    if (typeof liteOverride === "boolean") setLiteScan(liteOverride);
+    const modeLabel = useLite ? "Lite Market Run" : "Full Market Run";
     try {
       window.alert(
         `${modeLabel} started.\n\nStreaming results as they finish (NDJSON).\nYou can press Stop Scan anytime.`
       );
     } catch {}
-    setStatusMessage(liteScan ? "🟢 Lite Market Run (live stream)" : "🟢 Full Market Run (live stream)");
+    setStatusMessage(useLite ? "🟢 Lite Market Run (live stream)" : "🟢 Full Market Run (live stream)");
     setTimeout(() => setStatusMessage(null), 5000);
 
     scanCancelledRef.current = false;
@@ -462,7 +465,7 @@ export default function App() {
 
     try {
       for await (const row of api.scanStream({
-        lite: liteScan,
+        lite: useLite,
         forceRefresh: false,
         signal: ac.signal,
       })) {
@@ -562,7 +565,7 @@ export default function App() {
       setScanTransport("poll");
       setStatusMessage("Stream unavailable — falling back to background scan…");
       try {
-        const { task_id } = await api.scanStart(false, liteScan);
+        const { task_id } = await api.scanStart(false, useLite);
         if (scanCancelledRef.current) return;
         setScanTaskId(task_id);
         try { subscribeScan(task_id); } catch {}
@@ -1170,6 +1173,7 @@ export default function App() {
           <div className="page-terminal">
             <p className="dash-section-title">Data Feed</p>
             <DataFeed />
+            <DataHealthAudit />
           </div>
         ) : tab === "hot" ? (
           <div className="page-terminal">
@@ -1258,22 +1262,22 @@ export default function App() {
                       Analyse
                     </button>
                   </div>
-                  <div className="dash-search-actions">
-                    <label className="dash-lite-toggle">
-                      <input
-                        type="checkbox"
-                        checked={liteScan}
-                        onChange={(e) => setLiteScan(e.target.checked)}
-                      />
-                      <span>Lite</span>
-                    </label>
+                  <div className="dash-search-actions dash-scan-pair">
                     <button
                       type="button"
-                      onClick={handleScan}
-                      className="btn-terminal whitespace-nowrap"
-                      title={liteScan ? "Lite scan: faster, less enrichment" : "Full scan: all pillars + summaries"}
+                      onClick={() => handleScan(true)}
+                      className="btn-scan-lite whitespace-nowrap"
+                      title="Lite Market Scan — Neon feed + instant scores, minimal downstream load (recommended on free tier)"
                     >
-                      {liteScan ? "Run lite scan" : "Run full scan"}
+                      ⚡ Lite Market Scan
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleScan(false)}
+                      className="btn-scan-full whitespace-nowrap"
+                      title="Full Market Scan — all pillars (technical, fundamental, news, events, prediction)"
+                    >
+                      ▶ Run Market Scan
                     </button>
                   </div>
                 </div>

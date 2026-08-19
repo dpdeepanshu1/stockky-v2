@@ -108,7 +108,15 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   const { connected: quoteWs, subscribeQuotes, quotes: liveQuotes } = useStockkyRealtime();
 
   const filteredResults = useMemo(() => {
-    const rows = result.all_results || [];
+    // Drop high-ticket SKIP rows (price > ₹5000) so they never clutter the table
+    const rows = (result.all_results || []).filter((d: any) => {
+      if (!d || d.skipped_high_price) return false;
+      const dec = String(d.decision || "").toUpperCase();
+      if (dec === "SKIP" || dec === "SKIPPED") return false;
+      const px = Number(d.price ?? d.close ?? d.cmp ?? d.ltp ?? 0);
+      if (px > 5000) return false;
+      return true;
+    });
     if (filterChip === "buy") return rows.filter((d) => d.decision === "BUY NOW");
     if (filterChip === "prepare") return rows.filter((d) => d.decision === "PREPARE TO BUY");
     if (filterChip === "avoid") return rows.filter((d) => d.decision === "DO NOT BUY" || d.decision === "WAIT" || d.decision === "SELL");
@@ -385,39 +393,43 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
 
   return (
     <div className="space-y-6 animate-fadeIn">
-      <div className="flex items-center justify-between">
-        <button
-          onClick={onBack}
-          className="font-mono text-xs text-mist hover:text-paper transition flex items-center gap-1"
-        >
-          ← Back
-        </button>
-        <div className="text-right">
-          <div className="font-mono text-xs text-mist/60">
-            Scanned {result.scanned} stocks · {result.universe_size} in universe
+      {/* Sticky control bar — Back + stats + primary Sniper CTA always visible */}
+      <div className="sticky top-0 z-20 -mx-1 px-1 py-3 mb-1 bg-ink/95 backdrop-blur-md border-b border-slate/50">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <button
+            onClick={onBack}
+            className="font-mono text-xs text-mist hover:text-paper transition flex items-center gap-1 px-2 py-1.5 rounded-lg hover:bg-graphite/60"
+          >
+            ← Back
+          </button>
+          <div className="text-right flex-1 min-w-[10rem]">
+            <div className="font-mono text-xs text-mist/60">
+              Scanned {result.scanned} stocks · {result.universe_size} in universe
+            </div>
+            <div className="font-mono text-xs text-mist/60">
+              {result.market_stats.buy_signals} BUY · {result.market_stats.sell_signals} SELL · {result.market_stats.hold_signals} HOLD
+              <span className="text-mist/40"> · ≤ ₹5000</span>
+            </div>
           </div>
-          <div className="font-mono text-xs text-mist/60">
-            {result.market_stats.buy_signals} BUY · {result.market_stats.sell_signals} SELL · {result.market_stats.hold_signals} HOLD
-          </div>
+          <button
+            onClick={handleSearchBuys}
+            disabled={!result || sniperLoading}
+            className="font-mono text-xs bg-emerald-600/30 border border-emerald-500/60 text-emerald-100 rounded-lg px-4 py-2 transition hover:bg-emerald-600/45 disabled:opacity-50 flex items-center gap-2 shadow-lg shadow-emerald-900/30 shrink-0"
+          >
+            {sniperLoading ? (
+              <>
+                <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-emerald-300 animate-spin"></span>
+                Sniping…
+              </>
+            ) : (
+              "🎯 Search for Buy Stocks (1-4)"
+            )}
+          </button>
         </div>
       </div>
 
-      {/* Action buttons */}
+      {/* Secondary action buttons */}
       <div className="flex flex-wrap gap-3">
-        <button
-          onClick={handleSearchBuys}
-          disabled={!result || sniperLoading}
-          className="font-mono text-xs bg-emerald-600/25 border border-emerald-500/50 text-emerald-200 rounded-lg px-4 py-2 transition hover:bg-emerald-600/35 disabled:opacity-50 flex items-center gap-2 shadow-lg shadow-emerald-900/20"
-        >
-          {sniperLoading ? (
-            <>
-              <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-emerald-300 animate-spin"></span>
-              Sniping…
-            </>
-          ) : (
-            "🎯 Search for Buy Stocks (1-4)"
-          )}
-        </button>
         <button
           onClick={handleSendTopPicks}
           disabled={!!isSendingTelegram}

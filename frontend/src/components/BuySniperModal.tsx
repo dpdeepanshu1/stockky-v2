@@ -83,7 +83,7 @@ export function BuySniperModal({
               🎯 High-Conviction Buy Setups
             </h2>
             <p className="text-xs text-mist/70 mt-0.5 font-mono">
-              Filtered from PREPARE TO BUY / BUY NOW · entry, target, stop, hold window
+              ≤ ₹5000 · PREPARE TO BUY / BUY NOW · entry, target, stop, hold window
             </p>
           </div>
           <button
@@ -117,7 +117,7 @@ export function BuySniperModal({
           ) : list.length === 0 ? (
             <div className="py-12 text-center">
               <p className="font-mono text-sm text-mist/80">
-                No candidates meet the strict entry criteria right now.
+                No ≤ ₹5000 setups meet conviction / decision criteria right now.
               </p>
               <p className="text-[11px] text-mist/45 mt-2 font-mono max-w-md mx-auto">
                 Need PREPARE TO BUY / BUY NOW (or strong HOLD breakout) with conviction ≥ 58 and a

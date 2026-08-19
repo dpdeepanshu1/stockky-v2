@@ -28,10 +28,28 @@ _redis_init = False
 
 
 def _get_redis():
+    """
+    Redis for CB state is OPTIONAL and OFF by default.
+
+    Upstash free tier is nearly exhausted when every quote miss persists
+    circuit state — that alone can burn ~3 commands per failed symbol.
+    Set USE_REDIS=1 only if you intentionally want shared CB state.
+    """
     global _redis, _redis_init
     if _redis_init:
         return _redis
     _redis_init = True
+
+    use = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
+    if os.getenv("DISABLE_REDIS", "0").lower() in ("1", "true", "yes"):
+        use = False
+    if os.getenv("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
+        use = False
+    if not use:
+        logger.info("Circuit breaker: memory-only (USE_REDIS=0) — no Upstash commands")
+        _redis = None
+        return None
+
     url = os.environ.get("UPSTASH_REDIS_REST_URL")
     token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
     if not url or not token:
@@ -40,11 +58,12 @@ def _get_redis():
         from upstash_redis import Redis
         _redis = Redis(url=url, token=token)
         _redis.ping()
-        logger.info("Circuit breaker Redis backend enabled")
+        logger.info("Circuit breaker Redis backend enabled (USE_REDIS=1)")
     except Exception as e:
         logger.warning("Circuit breaker Redis unavailable: %s", e)
         _redis = None
     return _redis
+
 
 
 class CircuitOpenError(Exception):

@@ -191,55 +191,183 @@ def upsert_baselines(rows: List[Dict[str, Any]]) -> int:
         return 0
 
 
+# Progress file for UI polling (manual premarket button)
+_PROGRESS_PATH = os.getenv(
+    "SURPRISE_PREMARKET_PROGRESS_PATH",
+    "/tmp/surprise_premarket_progress.json",
+)
+_job_lock = False
+
+
+def _write_progress(data: Dict[str, Any]) -> None:
+    try:
+        import json as _json
+        payload = dict(data)
+        payload["updated_at"] = time.time()
+        with open(_PROGRESS_PATH, "w", encoding="utf-8") as f:
+            _json.dump(payload, f)
+    except Exception as e:
+        logger.debug("progress write: %s", e)
+
+
+def get_premarket_progress() -> Dict[str, Any]:
+    try:
+        import json as _json
+        with open(_PROGRESS_PATH, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {
+        "stage": "idle",
+        "percent": 0,
+        "processed": 0,
+        "total": 0,
+        "errors": 0,
+        "elapsed_sec": 0,
+        "eta_sec": None,
+        "is_running": False,
+        "current_symbol": None,
+        "message": "Idle",
+    }
+
+
 def precalculate_surprise_baselines(symbols: List[str]) -> Dict[str, Any]:
     """
     Main entry: schema → compute → upsert.
     Rate-limits yfinance to stay free-tier safe.
+    Writes progress JSON for frontend polling.
     """
+    global _job_lock
     t0 = time.time()
-    if not ensure_schema():
-        return {"ok": False, "error": "schema_failed", "upserted": 0}
+    if _job_lock:
+        return {"ok": False, "error": "already_running", "progress": get_premarket_progress()}
+    _job_lock = True
 
-    uniq: List[str] = []
-    seen = set()
-    for s in symbols:
-        b = (s or "").upper().replace(".NS", "").replace(".BO", "").strip()
-        if b and b not in seen:
-            seen.add(b)
-            uniq.append(b)
-    uniq = uniq[:MAX_SYMBOLS]
+    try:
+        if not ensure_schema():
+            out = {"ok": False, "error": "schema_failed", "upserted": 0}
+            _write_progress({
+                "stage": "error",
+                "percent": 0,
+                "processed": 0,
+                "total": 0,
+                "errors": 0,
+                "elapsed_sec": 0,
+                "eta_sec": None,
+                "is_running": False,
+                "message": "Schema ensure failed (check DATABASE_URL)",
+                "error": "schema_failed",
+            })
+            return out
 
-    interval = float(os.getenv("SURPRISE_YF_INTERVAL_SEC", "0.12"))
-    ok_rows: List[Dict[str, Any]] = []
-    errors = 0
-    for i, sym in enumerate(uniq):
-        row = compute_baseline_for_symbol(sym)
-        if row:
-            ok_rows.append(row)
-        else:
-            errors += 1
-        if interval > 0:
-            time.sleep(interval)
-        # Batch upsert every 40 symbols to limit memory
-        if len(ok_rows) >= 40:
-            upsert_baselines(ok_rows)
-            ok_rows = []
-        if (i + 1) % 50 == 0:
-            logger.info("surprise premarket progress %s/%s", i + 1, len(uniq))
+        uniq: List[str] = []
+        seen = set()
+        for s in symbols:
+            b = (s or "").upper().replace(".NS", "").replace(".BO", "").strip()
+            if b and b not in seen:
+                seen.add(b)
+                uniq.append(b)
+        uniq = uniq[:MAX_SYMBOLS]
+        total = len(uniq)
 
-    upserted = upsert_baselines(ok_rows) if ok_rows else 0
-    # recount approximate
-    total_up = upserted + (len(uniq) - errors - len(ok_rows) if False else 0)
-    # simpler: final full upsert of remaining already done; report computed
-    elapsed = round(time.time() - t0, 1)
-    return {
-        "ok": True,
-        "symbols_requested": len(uniq),
-        "computed": len(uniq) - errors,
-        "errors": errors,
-        "elapsed_sec": elapsed,
-        "table": "surprise_static_feed",
-    }
+        _write_progress({
+            "stage": "starting",
+            "percent": 1,
+            "processed": 0,
+            "total": total,
+            "errors": 0,
+            "elapsed_sec": 0,
+            "eta_sec": None,
+            "is_running": True,
+            "current_symbol": None,
+            "message": f"Starting baselines for {total} symbols",
+        })
+
+        interval = float(os.getenv("SURPRISE_YF_INTERVAL_SEC", "0.12"))
+        ok_rows: List[Dict[str, Any]] = []
+        errors = 0
+        computed = 0
+        for i, sym in enumerate(uniq):
+            row = compute_baseline_for_symbol(sym)
+            if row:
+                ok_rows.append(row)
+                computed += 1
+            else:
+                errors += 1
+            if interval > 0:
+                time.sleep(interval)
+            if len(ok_rows) >= 40:
+                upsert_baselines(ok_rows)
+                ok_rows = []
+
+            processed = i + 1
+            elapsed = time.time() - t0
+            rate = processed / elapsed if elapsed > 0.5 else 0
+            remaining = total - processed
+            eta = (remaining / rate) if rate > 0 else None
+            pct = min(99, int(100 * processed / max(total, 1)))
+            _write_progress({
+                "stage": "computing",
+                "percent": pct,
+                "processed": processed,
+                "total": total,
+                "computed": computed,
+                "errors": errors,
+                "elapsed_sec": round(elapsed, 1),
+                "eta_sec": round(eta, 1) if eta is not None else None,
+                "is_running": True,
+                "current_symbol": sym,
+                "message": f"{processed}/{total} · {sym}",
+            })
+            if processed % 50 == 0:
+                logger.info("surprise premarket progress %s/%s", processed, total)
+
+        upserted = upsert_baselines(ok_rows) if ok_rows else 0
+        elapsed = round(time.time() - t0, 1)
+        result = {
+            "ok": True,
+            "symbols_requested": total,
+            "computed": computed,
+            "errors": errors,
+            "elapsed_sec": elapsed,
+            "table": "surprise_static_feed",
+            "upserted_last_batch": upserted,
+        }
+        _write_progress({
+            "stage": "done",
+            "percent": 100,
+            "processed": total,
+            "total": total,
+            "computed": computed,
+            "errors": errors,
+            "elapsed_sec": elapsed,
+            "eta_sec": 0,
+            "is_running": False,
+            "current_symbol": None,
+            "message": f"Done · {computed} baselines · {errors} errors · {elapsed}s",
+            "result": result,
+        })
+        return result
+    except Exception as e:
+        logger.exception("precalculate_surprise_baselines failed")
+        _write_progress({
+            "stage": "error",
+            "percent": 0,
+            "processed": 0,
+            "total": 0,
+            "errors": 1,
+            "elapsed_sec": round(time.time() - t0, 1),
+            "eta_sec": None,
+            "is_running": False,
+            "message": str(e)[:200],
+            "error": str(e)[:200],
+        })
+        return {"ok": False, "error": str(e)[:200]}
+    finally:
+        _job_lock = False
+
 
 
 def default_universe_from_env() -> List[str]:

@@ -236,9 +236,15 @@ async def global_exception_handler(request, exc):
 
 # ── Cache: memory-first (unlimited). Redis only if USE_REDIS=1 ─────────────────
 USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")  # default OFF — Neon/memory only
-# Emergency kill-switch (also set DISABLE_UPSTASH=1 on Render)
+# Kill-switches — any of these force Redis completely off (even if credentials exist)
 if os.getenv("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
     USE_REDIS = False
+if os.getenv("DISABLE_REDIS", "0").lower() in ("1", "true", "yes"):
+    USE_REDIS = False
+# Hard safety: if not explicitly USE_REDIS=1, never touch Upstash (credentials alone are not enough)
+if os.getenv("USE_REDIS", "0").strip() in ("", "0", "false", "False", "no", "NO"):
+    USE_REDIS = False
+
 
 FALLBACK_TTL_SECONDS = 30 * 24 * 60 * 60
 
@@ -1135,13 +1141,19 @@ class SurprisePremarketRequest(BaseModel):
 def surprise_premarket_run(
     body: Optional[SurprisePremarketRequest] = None,
     symbols: Optional[str] = Query(None, description="Comma-separated symbols"),
+    background: bool = Query(True, description="Run in background and poll /surprise/premarket/status"),
 ):
     """
-    Pre-compute static baselines for surprise scanner (run ~08:55 IST).
-    Body: {"symbols": ["RELIANCE", ...]} or query ?symbols=A,B,C
-    Without input uses SURPRISE_UNIVERSE env or a small seed list.
+    Pre-compute static baselines for surprise scanner (run ~08:55 IST or manual).
+    Default background=true so Render does not hit the 100s gateway timeout.
+    Poll GET /surprise/premarket/status for progress %.
     """
-    from surprise_premarket import precalculate_surprise_baselines, default_universe_from_env
+    from surprise_premarket import (
+        precalculate_surprise_baselines,
+        default_universe_from_env,
+        get_premarket_progress,
+    )
+    import threading
 
     syms: list = []
     if body and body.symbols:
@@ -1150,6 +1162,34 @@ def surprise_premarket_run(
         syms = [x.strip() for x in symbols.split(",") if x.strip()]
     if not syms:
         syms = default_universe_from_env()
+
+    prog = get_premarket_progress()
+    if prog.get("is_running"):
+        return {
+            "ok": True,
+            "accepted": False,
+            "already_running": True,
+            "message": "Premarket already running — poll /surprise/premarket/status",
+            "progress": prog,
+        }
+
+    if background:
+        def _job():
+            try:
+                precalculate_surprise_baselines(syms)
+            except Exception as e:
+                logger.exception("background premarket: %s", e)
+
+        threading.Thread(target=_job, daemon=True, name="surprise-premarket").start()
+        return {
+            "ok": True,
+            "accepted": True,
+            "background": True,
+            "symbols": len(syms),
+            "message": "Premarket started — poll /surprise/premarket/status",
+            "progress": get_premarket_progress(),
+        }
+
     result = precalculate_surprise_baselines(syms)
     return result
 
@@ -1157,9 +1197,19 @@ def surprise_premarket_run(
 @app.get("/surprise/premarket")
 def surprise_premarket_get(
     symbols: Optional[str] = Query(None, description="Comma-separated symbols"),
+    background: bool = Query(True),
 ):
     """GET variant for cron curl simplicity."""
-    return surprise_premarket_run(body=None, symbols=symbols)
+    return surprise_premarket_run(body=None, symbols=symbols, background=background)
+
+
+@app.get("/surprise/premarket/status")
+def surprise_premarket_status():
+    """Progress for manual UI button (percent, ETA, current symbol)."""
+    from surprise_premarket import get_premarket_progress
+
+    return get_premarket_progress()
+
 
 
 @app.get("/surprise/static")

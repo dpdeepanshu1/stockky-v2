@@ -5217,6 +5217,22 @@ async def api_surprise_static(limit: int = 50):
         return {"ok": False, "error": str(e)[:200], "rows": []}
 
 
+@app.get("/surprise/premarket/status")
+@app.get("/api/surprise/premarket/status")
+async def api_surprise_premarket_status():
+    """Proxy premarket progress for Surprise tab UI."""
+    client = _get_http_client()
+    target = f"{MARKET_DATA_URL.rstrip('/')}/surprise/premarket/status"
+    try:
+        resp = await client.get(target, timeout=15.0)
+        try:
+            return JSONResponse(content=resp.json(), status_code=resp.status_code)
+        except Exception:
+            return JSONResponse(content={"is_running": False, "error": "bad_json"}, status_code=502)
+    except Exception as e:
+        return JSONResponse(content={"is_running": False, "error": str(e)[:160]}, status_code=502)
+
+
 @app.post("/surprise/premarket")
 @app.get("/surprise/premarket")
 async def api_surprise_premarket_proxy(request: Request):

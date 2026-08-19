@@ -901,6 +901,32 @@ export const api = {
     }
   },
 
+  surprisePremarket: () =>
+    request<{
+      ok?: boolean;
+      accepted?: boolean;
+      already_running?: boolean;
+      message?: string;
+      symbols?: number;
+      progress?: Record<string, unknown>;
+    }>("/surprise/premarket?background=true", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, 1, 30000),
+
+  surprisePremarketStatus: () =>
+    request<{
+      stage?: string;
+      percent?: number;
+      processed?: number;
+      total?: number;
+      computed?: number;
+      errors?: number;
+      elapsed_sec?: number;
+      eta_sec?: number | null;
+      is_running?: boolean;
+      current_symbol?: string | null;
+      message?: string;
+      error?: string;
+    }>("/surprise/premarket/status", undefined, 1, 15000),
+
   surpriseStatic: (limit = 50) =>
     request<{ ok: boolean; count?: number; rows?: any[]; error?: string }>(
       `/api/surprise/static?limit=${limit}`,

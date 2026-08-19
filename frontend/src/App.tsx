@@ -507,8 +507,11 @@ export default function App() {
               total: total || processed,
               elapsed,
               estimatedRemaining:
-                processed > 0 && total > processed && elapsed > 0
-                  ? ((total - processed) * elapsed) / processed
+                processed >= 8 && total > processed && elapsed > 0
+                  ? Math.min(
+                      6 * 3600, // cap display at 6h so early slow symbols don't show 80h
+                      ((total - processed) * elapsed) / processed
+                    )
                   : undefined,
             },
           });
@@ -846,9 +849,13 @@ export default function App() {
   }
 
   function formatTime(seconds: number): string {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+    const s = Math.max(0, Math.floor(Number(seconds) || 0));
+    const hours = Math.floor(s / 3600);
+    const mins = Math.floor((s % 3600) / 60);
+    const secs = s % 60;
+    if (hours > 0) return `${hours}h ${mins}m ${secs}s`;
+    if (mins > 0) return `${mins}m ${secs}s`;
+    return `${secs}s`;
   }
 
   const cmdActions: CommandAction[] = [
@@ -1314,9 +1321,9 @@ export default function App() {
                           const p = view.progress;
                           const pct = Math.min(100, Math.round((p.processed / Math.max(1, p.total)) * 100));
                           let rem = p.estimatedRemaining;
-                          if ((rem === undefined || rem === null || rem <= 0) && p.processed > 0 && p.total > p.processed && p.elapsed > 0) {
-                            const avg = Math.max(p.elapsed / p.processed, 0.8);
-                            rem = (p.total - p.processed) * avg;
+                          if ((rem === undefined || rem === null || rem <= 0) && p.processed >= 8 && p.total > p.processed && p.elapsed > 0) {
+                            const avg = Math.min(30, Math.max(p.elapsed / p.processed, 0.3)); // clamp 0.3–30s/symbol
+                            rem = Math.min(6 * 3600, (p.total - p.processed) * avg);
                           }
                           return (
                             <>

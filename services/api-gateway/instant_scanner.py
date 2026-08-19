@@ -17,6 +17,9 @@ from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger("instant-scanner")
 
+# Universal soft-cap: never score / surface stocks above this LTP (₹).
+MAX_STOCK_PRICE = 5000.0
+
 # Neutral-but-not-zero baselines so sparse feeds still produce differentiated
 # scores once a live price is available (avoids every symbol = 40 HOLD).
 DEFAULT_STATIC_INDICATORS: Dict[str, Any] = {
@@ -258,6 +261,34 @@ def compute_instant_scores(
     prev_close = feats["prev_close"]
     if prev_close <= 0 and price > 0:
         prev_close = price
+
+    # Universal ≤ ₹5000 gate — skip scoring for high-ticket names
+    if price > MAX_STOCK_PRICE:
+        return {
+            "symbol": base,
+            "decision": "SKIP",
+            "confidence": "Low",
+            "combined_score": 0,
+            "technical_score": 0,
+            "fundamental_score": 0,
+            "conviction": 0,
+            "change_pct": 0.0,
+            "close": price,
+            "price": price,
+            "cmp": price,
+            "current_price": price,
+            "ltp": price,
+            "last_price": price,
+            "skipped_high_price": True,
+            "max_stock_price": MAX_STOCK_PRICE,
+            "data_insufficient": False,
+            "lite_fastpath": True,
+            "instant_scanner": True,
+            "status": "SKIPPED",
+            "natural_language_summary": (
+                f"{base}: SKIPPED — price ₹{price:.2f} > ₹{MAX_STOCK_PRICE:.0f} cap"
+            ),
+        }
 
     change_pct = 0.0
     if price > 0 and prev_close > 0:

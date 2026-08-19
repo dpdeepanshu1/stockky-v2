@@ -27,6 +27,41 @@ from universe_ingest import (
 logger = logging.getLogger("universe_routes")
 router = APIRouter(prefix="/api/universe", tags=["universe-training"])
 
+# Universal ≤ ₹5000 gate for training samples that carry a known price
+MAX_STOCK_PRICE = 5000.0
+
+
+def get_filtered_universe(
+    symbols: List[str],
+    feature_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[str]:
+    """
+    Drop symbols whose snapshot price exceeds MAX_STOCK_PRICE.
+    When no snapshot/price is available, keep the symbol (root filters
+    in data_feed / bhavcopy are the primary gate).
+    """
+    snaps = feature_snapshots if isinstance(feature_snapshots, dict) else {}
+    out: List[str] = []
+    for s in symbols or []:
+        base = str(s or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        if not base:
+            continue
+        snap = snaps.get(base) or snaps.get(s) or {}
+        px = 0.0
+        if isinstance(snap, dict):
+            for k in ("price", "close", "cmp", "ltp", "last_price", "current_price"):
+                try:
+                    v = float(snap.get(k) or 0)
+                    if v > 0:
+                        px = v
+                        break
+                except (TypeError, ValueError):
+                    pass
+        if px > MAX_STOCK_PRICE:
+            continue
+        out.append(base)
+    return out
+
 
 class UniverseIngestRequest(BaseModel):
     symbols: List[str] = Field(..., min_length=1, description="Full scan universe symbols")
@@ -68,11 +103,17 @@ def api_ingest_universe(body: UniverseIngestRequest, background_tasks: Backgroun
     Store the full daily scan universe for training.
     Use this for the button: "Send the Stock Universe For Training".
     """
+    filtered = get_filtered_universe(body.symbols, body.feature_snapshots)
+    # Keep only decision/score keys for retained symbols
+    keep = set(filtered)
+    decisions = {k: v for k, v in (body.decisions or {}).items() if str(k).upper().replace(".NS", "").replace(".BO", "").strip() in keep} if body.decisions else None
+    scores = {k: v for k, v in (body.scores or {}).items() if str(k).upper().replace(".NS", "").replace(".BO", "").strip() in keep} if body.scores else None
+    snaps = {k: v for k, v in (body.feature_snapshots or {}).items() if str(k).upper().replace(".NS", "").replace(".BO", "").strip() in keep} if body.feature_snapshots else None
     result = ingest_universe(
-        symbols=body.symbols,
-        decisions=body.decisions,
-        scores=body.scores,
-        feature_snapshots=body.feature_snapshots,
+        symbols=filtered,
+        decisions=decisions,
+        scores=scores,
+        feature_snapshots=snaps,
         source=body.source or "manual_universe",
         retention_hours=body.retention_hours or 48,
     )

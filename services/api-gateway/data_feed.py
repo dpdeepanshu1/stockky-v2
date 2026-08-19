@@ -71,6 +71,33 @@ def _norm_sym(symbol: str) -> str:
     return (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
 
 
+# Universal ≤ ₹5000 gate — refuse to persist high-ticket stocks into the feed cache
+MAX_STOCK_PRICE = 5000.0
+
+
+def _payload_price(payload: dict) -> float:
+    """Best-effort positive price from a feed payload (flat or nested metrics)."""
+    if not isinstance(payload, dict):
+        return 0.0
+    for k in ("price", "close", "cmp", "ltp", "last_price", "current_price", "prev_close"):
+        try:
+            v = float(payload.get(k) or 0)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    for nest_key in ("metrics", "data", "quote", "ohlc", "ticker"):
+        nested = payload.get(nest_key)
+        if isinstance(nested, dict):
+            for k in ("price", "close", "cmp", "ltp", "last_price", "current_price", "prev_close"):
+                try:
+                    v = float(nested.get(k) or 0)
+                    if v > 0:
+                        return v
+                except (TypeError, ValueError):
+                    pass
+    return 0.0
+
 
 def normalize_feed_payload(data: dict) -> dict:
     """
@@ -398,15 +425,26 @@ class DataFeedStore:
         base = _norm_sym(symbol)
         if not base or not isinstance(payload, dict):
             return
-        key = DATA_FEED_PREFIX + base
-        alias_key = FEED_ALIAS_PREFIX + base
         payload = normalize_feed_payload(dict(payload))
         payload.setdefault("symbol", base)
         payload.setdefault("updated_at", _now_iso())
+
+        # Universal ≤ ₹5000 gate at the write path — never store high-ticket rows
+        px = _payload_price(payload)
+        if px > MAX_STOCK_PRICE:
+            logger.debug(
+                "data_feed put_symbol SKIP %s — price ₹%.2f > ₹%.0f cap",
+                base, px, MAX_STOCK_PRICE,
+            )
+            return
+
+        key = DATA_FEED_PREFIX + base
+        alias_key = FEED_ALIAS_PREFIX + base
         _LOCAL_SYMBOLS[key] = payload
         _LOCAL_SYMBOLS[alias_key] = payload
         _LOCAL_INDEX.add(base)
         # Durable write: canonical + alias + legacy (stops key-mismatch cache misses)
+        # kv_cache._neon_set already uses ON CONFLICT (k) DO UPDATE — true UPSERT, no duplicates.
         try:
             self._set(key, payload, ttl=ttl)
         except Exception as e:
@@ -419,7 +457,7 @@ class DataFeedStore:
             self._set(FEED_LEGACY_PREFIX + base, payload, ttl=ttl)
         except Exception as e:
             logger.debug("data_feed legacy write %s: %s", base, e)
-        # Update durable index (batched cheaply every put — list is small)
+        # Update durable index (batched cheaply every put — list is small, set-deduped)
         try:
             self._persist_index(ttl=ttl)
         except Exception as e:
@@ -450,7 +488,8 @@ class DataFeedStore:
         return len(self.list_symbols())
 
     def _persist_index(self, ttl: int = DATA_FEED_TTL) -> None:
-        symbols = self.list_symbols()
+        # Always set-dedupe + sorted for stable index (prevents "1208 duplicates" growth)
+        symbols = sorted(set(self.list_symbols()))
         payload = {
             "symbols": symbols,
             "count": len(symbols),

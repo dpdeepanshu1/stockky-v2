@@ -168,15 +168,16 @@ def _get_neon():
         try:
             from sqlalchemy import create_engine, text
 
-            # Free-tier: default pool 1 + overflow 1 (max 2). Cap hard at 4.
+            # Free-tier: default pool 1 + overflow 1 (max 2 total). Cap hard at 2.
             # Prefer Neon *pooler* URL (port 6543) in CACHE_DATABASE_URL.
+            # With 5 services × max 2 = 10 cluster-wide — stays under Neon free 20.
             pool_size = int(os.getenv("CACHE_DB_POOL_SIZE", "1"))
             max_overflow = int(os.getenv("CACHE_DB_MAX_OVERFLOW", "1"))
             eng = create_engine(
                 url,
                 pool_pre_ping=True,
-                pool_size=max(1, min(pool_size, 4)),
-                max_overflow=max(0, min(max_overflow, 2)),
+                pool_size=max(1, min(pool_size, 2)),
+                max_overflow=max(0, min(max_overflow, 1)),
                 pool_recycle=int(os.getenv("CACHE_DB_POOL_RECYCLE", "180")),
                 pool_use_lifo=True,
                 pool_timeout=8,

@@ -18,7 +18,8 @@ logger = logging.getLogger("buy-sniper")
 # Default thresholds (override via kwargs if needed)
 MIN_CONVICTION = 58
 MIN_PRICE = 5.0
-MAX_PRICE = 20000.0
+# Universal ≤ ₹5000 gate (align with instant_scanner / data_feed / bhavcopy)
+MAX_PRICE = 5000.0
 DEFAULT_TARGET_COUNT = 4
 EST_PROFIT_PCT = 6.5
 STOP_LOSS_PCT = 3.2

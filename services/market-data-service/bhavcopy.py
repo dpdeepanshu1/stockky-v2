@@ -21,6 +21,9 @@ import httpx
 
 logger = logging.getLogger("market-data-bhavcopy")
 
+# Universal ≤ ₹5000 gate — drop high-ticket equities at the bhavcopy root
+MAX_STOCK_PRICE = 5000.0
+
 # Remember which URL class worked last (process-local)
 _BHAV_LAST_GOOD_PREFIX: str = ""
 IST = ZoneInfo("Asia/Kolkata")
@@ -131,6 +134,36 @@ def _bhav_urls_for_date(d) -> List[str]:
     ]
 
 
+def process_bhavcopy_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Universal ≤ ₹5000 + EQ-only filter for any bulk bhavcopy row list.
+    Drop high-ticket names before they reach Neon / scanners / training.
+    """
+    out: List[Dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        # SERIES / series filter when present
+        series = str(row.get("SERIES") or row.get("series") or row.get("SctySrs") or "EQ").strip().upper()
+        if series and series not in ("EQ", "BE", "BZ", ""):
+            continue
+        close = None
+        for k in ("CLOSE", "close", "LAST", "last", "ClsPric", "LastPric", "price", "ltp"):
+            raw = row.get(k)
+            if raw is None or raw == "":
+                continue
+            try:
+                close = float(str(raw).replace(",", "").strip())
+                if close > 0:
+                    break
+            except (TypeError, ValueError):
+                close = None
+        if close is not None and close > MAX_STOCK_PRICE:
+            continue
+        out.append(row)
+    return out
+
+
 def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     # Normalise possible BOM / whitespace
@@ -149,6 +182,8 @@ def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
         return None
 
     sym_col = col("SYMBOL", "symbol", "TckrSymb", "SECURITY")
+    series_col = col("SERIES", "series", "SctySrs")
+    close_col = col("CLOSE", "close", "LAST", "last", "ClsPric", "LastPric")
     deliv_pct_col = col(
         "DELIV_PER", "DELIVERY_PER", "DELIV_PERCENTAGE", "DELIV_PERC",
         "DELIVERY_%", "DELIVERY_PERCENT", "DelivPer",
@@ -167,6 +202,21 @@ def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
         row_sym = (row.get(sym_col) or "").strip().upper()
         if row_sym != sym:
             continue
+        # EQ-prefer when series column present
+        if series_col:
+            series = str(row.get(series_col) or "").strip().upper()
+            if series and series not in ("EQ", "BE", "BZ"):
+                continue
+        # Universal ≤ ₹5000 gate when close/last is present
+        if close_col:
+            try:
+                close_raw = str(row.get(close_col) or "").replace(",", "").strip()
+                if close_raw and close_raw.upper() not in ("-", "NA", "N/A"):
+                    close_px = float(close_raw)
+                    if close_px > MAX_STOCK_PRICE:
+                        return None  # high-ticket — do not use this row
+            except (TypeError, ValueError):
+                pass
         pct = None
         if deliv_pct_col and row.get(deliv_pct_col):
             try:
@@ -190,7 +240,7 @@ def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
             "traded_qty": row.get(tq_col) if tq_col else None,
             "delivery_qty": row.get(deliv_qty_col) if deliv_qty_col else None,
             "source": "nse_bhavcopy",
-            "raw_row": {k: row.get(k) for k in (sym_col, deliv_pct_col, deliv_qty_col, tq_col) if k},
+            "raw_row": {k: row.get(k) for k in (sym_col, deliv_pct_col, deliv_qty_col, tq_col, close_col) if k},
         }
     return None
 

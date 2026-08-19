@@ -77,8 +77,26 @@ def extract_safe_price(
             px = _as_positive_float(feed.get(k))
             if px is not None:
                 return px
+        # Nested Neon / upstream shapes: metrics, data, quote, ohlc, ticker
+        for nest_key in ("metrics", "data", "quote", "ohlc", "ticker", "info"):
+            nested = feed.get(nest_key)
+            if isinstance(nested, dict):
+                for k in _FEED_KEYS:
+                    px = _as_positive_float(nested.get(k))
+                    if px is not None:
+                        return px
 
     return 0.0
+
+
+def resolve_display_price(
+    symbol: str = "",
+    tick: Optional[dict] = None,
+    feed: Optional[dict] = None,
+    decision: Optional[dict] = None,
+) -> float:
+    """Alias used by scan / sniper call sites — same as extract_safe_price."""
+    return extract_safe_price(symbol=symbol, tick=tick, feed=feed, decision=decision)
 
 
 def apply_price_aliases(row: Dict[str, Any], price: float) -> Dict[str, Any]:

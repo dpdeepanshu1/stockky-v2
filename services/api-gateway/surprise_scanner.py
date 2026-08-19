@@ -30,6 +30,8 @@ MIN_SCORE = int(os.getenv("SURPRISE_MIN_SCORE", "60"))
 MIN_CHANGE_PCT = float(os.getenv("SURPRISE_MIN_CHANGE_PCT", "1.0"))
 CONCURRENCY = int(os.getenv("SURPRISE_SCAN_CONCURRENCY", "20"))
 QUOTE_TIMEOUT = float(os.getenv("SURPRISE_QUOTE_TIMEOUT", "3"))
+# Universal ≤ ₹5000 gate (root filter also applied in data_feed / bhavcopy)
+MAX_STOCK_PRICE = float(os.getenv("MAX_STOCK_PRICE", "5000"))
 
 
 def _normalize_db_url(url: str) -> str:
@@ -220,6 +222,9 @@ class SurpriseStockEngine:
 
         if score >= MIN_SCORE and price_change_pct > MIN_CHANGE_PCT:
             px = round(current_price, 2)
+            # Universal ≤ ₹5000 gate — never surface high-ticket surprises
+            if px > MAX_STOCK_PRICE:
+                return None
             hit = {
                 "symbol": symbol.upper().replace(".NS", "").replace(".BO", ""),
                 "score": int(score),

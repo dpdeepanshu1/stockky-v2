@@ -947,7 +947,7 @@ export const api = {
       10000
     ),
 
-  getRateLimits: () => request<any>("/ops/rate-limits", undefined, 2, 20000),
+  getRateLimits: () => request<any>("/api/rate-limits", undefined, 2, 20000),
   getNotificationConfig: () => request<NotificationConfig>("/notifications/config", undefined, 2, 30000),
 
   saveNotificationConfig: (update: {

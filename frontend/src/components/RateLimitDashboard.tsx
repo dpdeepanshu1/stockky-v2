@@ -34,6 +34,7 @@ type RateLimitSnapshot = {
     symbol?: string;
   }>;
   redis_backed: boolean;
+  neon_backed?: boolean;
   advice: string[];
   generated_at: number;
 };
@@ -91,7 +92,7 @@ export default function RateLimitDashboard() {
           </h3>
           <p className="text-xs text-mist/60 mb-0">
             Yahoo / market-data 503 · Gemini 429 · circuit breakers · last {data?.window_sec ? Math.round(data.window_sec / 60) : 60}m
-            {data?.redis_backed ? " · Redis-backed" : " · process memory"}
+            {data?.neon_backed ? " · Neon-backed" : data?.redis_backed ? " · Redis-backed" : " · process memory"}
           </p>
         </div>
         <button type="button" className="btn-terminal text-xs" onClick={load} disabled={loading}>

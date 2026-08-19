@@ -624,7 +624,18 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
 
       {/* Reasons – excluding News (handled separately below) */}
       <div className="grid md:grid-cols-2 gap-4">
-        <ReasonList title="Technical" items={data.reasons.technical} />
+        <ReasonList
+          title="Technical"
+          items={
+            (data.reasons?.technical && data.reasons.technical.length > 0)
+              ? data.reasons.technical
+              : [
+                  (data as any).technical?.summary
+                    || (data as any).technical_summary
+                    || `Technical indicators neutral (RSI: ${(data as any).technical?.rsi ?? (data as any).rsi ?? 50})`,
+                ]
+          }
+        />
         <ReasonList title="Fundamental" items={fundamentalReasons} maxItems={4} />
         {(() => {
           const raw = (data.reasons?.prediction || []).map(String).filter(Boolean);

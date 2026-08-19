@@ -52,6 +52,8 @@ export interface Decision {
   cmp?: number | null;
   current_price?: number | null;
   ltp?: number | null;
+  last_price?: number | null;
+  prev_close?: number | null;
   support: number | null;
   resistance: number | null;
   reasons: {
@@ -611,6 +613,135 @@ export async function wakeService(url: string): Promise<void> {
   }
 }
 
+
+/**
+ * Step 1 fix — callback-style NDJSON stream consumer for /api/scan/stream
+ * (and /scan/stream). Emits each parsed line to onItemReceived as it arrives.
+ * Prefer this when you want progressive React setState without an async generator.
+ *
+ * Also see api.scanStream (async generator) which App.tsx already uses.
+ */
+export async function streamMarketScan(
+  mode: "full" | "lite" = "full",
+  onItemReceived: (item: any) => void,
+  opts?: { signal?: AbortSignal; forceRefresh?: boolean }
+): Promise<void> {
+  const base = getApiUrl();
+  if (!base) {
+    throw new Error("API base URL not set. Configure backend URL first.");
+  }
+  const lite = mode === "lite";
+  const force = opts?.forceRefresh ? "true" : "false";
+  // Step 5: both /api/scan/stream and /scan/stream are registered on the gateway
+  const url = `${base}/api/scan/stream?force_refresh=${force}&lite=${lite ? "true" : "false"}`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    signal: opts?.signal,
+    headers: { Accept: "application/x-ndjson" },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Scan failed with status ${response.status}`);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("ReadableStream not supported in this browser.");
+  }
+
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    // Keep the last incomplete fragment in the buffer
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed);
+        onItemReceived(parsed);
+      } catch (e) {
+        console.error("Failed to parse NDJSON line:", trimmed.slice(0, 120), e);
+      }
+    }
+  }
+
+  // Flush any trailing complete object
+  const tail = buffer.trim();
+  if (tail) {
+    try {
+      onItemReceived(JSON.parse(tail));
+    } catch (e) {
+      console.error("Failed to parse trailing NDJSON:", tail.slice(0, 120), e);
+    }
+  }
+}
+
+
+/**
+ * Step 6 — callback-style NDJSON consumer for surprise scan stream.
+ * Mirrors streamMarketScan; progressive upserts via onItemReceived.
+ */
+export async function streamSurpriseScan(
+  onItemReceived: (item: any) => void,
+  opts?: { signal?: AbortSignal; forceReload?: boolean }
+): Promise<void> {
+  const base = getApiUrl();
+  if (!base) {
+    throw new Error("API base URL not set. Configure backend URL first.");
+  }
+  const force = opts?.forceReload ? "true" : "false";
+  const url = `${base}/api/surprise/scan/stream?force_reload=${force}`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    signal: opts?.signal,
+    headers: { Accept: "application/x-ndjson" },
+  });
+  if (!response.ok) {
+    throw new Error(`Surprise scan failed with status ${response.status}`);
+  }
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("ReadableStream not supported in this browser.");
+  }
+
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        onItemReceived(JSON.parse(trimmed));
+      } catch (e) {
+        console.error("Failed to parse surprise NDJSON line:", trimmed.slice(0, 120), e);
+      }
+    }
+  }
+  const tail = buffer.trim();
+  if (tail) {
+    try {
+      onItemReceived(JSON.parse(tail));
+    } catch (e) {
+      console.error("Failed to parse trailing surprise NDJSON:", tail.slice(0, 120), e);
+    }
+  }
+}
+
 // ───────────────────────────────────────────────
 // API object
 // ───────────────────────────────────────────────
@@ -675,7 +806,7 @@ export const api = {
     const liteQ =
       lite === undefined || lite === null ? "" : `&lite=${lite ? "true" : "false"}`;
     const base = getApiUrl();
-    const url = `${base}/scan/stream?force_refresh=${force}${liteQ}`;
+    const url = `${base}/api/scan/stream?force_refresh=${force}${liteQ}`;
     const res = await fetch(url, {
       method: "GET",
       signal: opts?.signal,

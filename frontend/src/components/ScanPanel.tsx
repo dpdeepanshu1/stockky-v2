@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
-import { ScanResult, Decision, api, ActionablePick } from "../api";
+import { ScanResult, Decision, api, ActionablePick, streamMarketScan } from "../api";
+// streamMarketScan available for progressive NDJSON consumption (see upsertScanResultItem below)
 import { sendStockUniverseForTraining, buildUniversePayloadFromScan } from "../api_universe";
 import { useStockkyRealtime } from "../useRealtime";
 import { decisionStyle } from "../decisionStyle";

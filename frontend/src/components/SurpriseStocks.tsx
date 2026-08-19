@@ -1,6 +1,7 @@
 // frontend/src/components/SurpriseStocks.tsx
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { formatInrPrice, getSafePrice } from "../priceDisplay";
 
 export interface SurpriseStock {
   symbol: string;
@@ -202,7 +203,15 @@ export default function SurpriseStocks({
             continue;
           }
           if (row?.symbol) {
-            live.push(row as SurpriseStock);
+            // Step 6: upsert by symbol + normalize price from any alias
+            const hit = { ...(row as SurpriseStock) };
+            const safePx = getSafePrice(hit);
+            if (safePx > 0) {
+              hit.price = safePx;
+            }
+            const idx = live.findIndex((s) => s.symbol === hit.symbol);
+            if (idx >= 0) live[idx] = hit;
+            else live.push(hit);
             const sorted = [...live].sort((a, b) => b.score - a.score);
             setStocks(sorted);
             if (row._progress) {
@@ -389,7 +398,7 @@ export default function SurpriseStocks({
                   </span>
                 </td>
                 <td className="py-2.5 px-3 font-mono text-xs text-paper">
-                  ₹{Number(s.price).toFixed(2)}
+                  {formatInrPrice(s as any, null, "—")}
                 </td>
                 <td className="py-2.5 px-3 font-mono text-xs font-semibold text-emerald-400">
                   {Number(s.change_pct) >= 0 ? "+" : ""}

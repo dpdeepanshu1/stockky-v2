@@ -487,16 +487,25 @@ export default function App() {
           continue;
         }
 
-        // Symbol result line
+        // Symbol result line — Step 2: upsert by symbol (no duplicates on re-emit)
         const dec = row as Decision;
         if (dec && dec.symbol) {
-          rows.push(dec);
+          const idx = rows.findIndex((s) => s.symbol === dec.symbol);
+          if (idx >= 0) rows[idx] = dec;
+          else rows.push(dec);
           processed = Number(row._progress?.processed) || rows.length;
           total = Number(row._progress?.total) || total;
           const elapsed = Number(row._progress?.elapsed) || (Date.now() - t0) / 1000;
-          // Keep UI responsive: update live list every row, but cap stored preview
+          // Progressive live list with upsert + soft cap for UI
           setLiveScanRows((prev) => {
-            const next = [...prev, dec];
+            const i = prev.findIndex((s) => s.symbol === dec.symbol);
+            let next: Decision[];
+            if (i >= 0) {
+              next = [...prev];
+              next[i] = dec;
+            } else {
+              next = [...prev, dec];
+            }
             return next.length > 80 ? next.slice(-80) : next;
           });
           setView({
@@ -1414,7 +1423,7 @@ export default function App() {
                                   : "text-mist";
                           return (
                             <button
-                              key={`${r.symbol}-${i}`}
+                              key={r.symbol || `row-${i}`}
                               type="button"
                               onClick={() => r.symbol && handleSearch(r.symbol)}
                               className="w-full flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 hover:bg-ink/50 transition text-left"

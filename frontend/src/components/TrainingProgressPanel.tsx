@@ -42,12 +42,18 @@ function stageIndex(stage?: string | null): number {
   const map: Record<string, StageKey> = {
     loading_data: "loading_data",
     load: "loading_data",
+    loading: "loading_data",
+    data_loaded: "building_features",
     building_features: "building_features",
     features: "building_features",
+    splitting: "building_features",
     walk_forward: "walk_forward",
     training: "walk_forward",
+    fitting_model: "walk_forward",
+    fitting: "walk_forward",
     calibrating: "calibrating",
     calibration: "calibrating",
+    evaluating: "calibrating",
     saving_model: "saving_model",
     save: "saving_model",
     evaluating_t1: "evaluating_t1",
@@ -55,8 +61,12 @@ function stageIndex(stage?: string | null): number {
     evaluating_t5: "evaluating_t5",
     t5: "evaluating_t5",
     done: "done",
+    complete: "done",
+    completed: "done",
+    Completed: "done",
     aborted: "aborted",
     error: "error",
+    Failed: "error",
   };
   const key = map[stage] || (stage as StageKey);
   if (key === "done") return STAGES.length;

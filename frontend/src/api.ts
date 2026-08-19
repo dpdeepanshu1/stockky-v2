@@ -357,11 +357,28 @@ export interface StockHistory {
 }
 
 export interface TrainingProgress {
-  stage: "idle" | "loading_data" | "data_loaded" | "splitting" | "fitting_model" | "evaluating" | "saving_model" | "done" | "aborted";
+  stage:
+    | "idle"
+    | "loading_data"
+    | "data_loaded"
+    | "building_features"
+    | "splitting"
+    | "walk_forward"
+    | "fitting_model"
+    | "calibrating"
+    | "evaluating"
+    | "saving_model"
+    | "done"
+    | "aborted"
+    | "error";
   detail: Record<string, unknown>;
   timestamp: number | null;
   elapsed?: number | null;
+  percent?: number | null;
+  is_running?: boolean;
+  error?: string | null;
 }
+
 
 export interface ActionablePick {
   symbol: string;
@@ -632,7 +649,77 @@ export const api = {
   scanWatchlist: () =>
     request<ScanResult>("/scan/watchlist", undefined, 2, 180000),
 
+  /**
+   * Stream full-market scan as NDJSON (one JSON object per line).
+   * Prefer this over scanStart+polling when you want progressive UI updates
+   * and to avoid Render ~100s gateway timeouts on large universes.
+   *
+   * Usage:
+   *   const ac = new AbortController();
+   *   for await (const row of api.scanStream({ lite: true, signal: ac.signal })) {
+   *     if (row._meta) { /* progress / done *\/ }
+   *     else { /* symbol result *\/ }
+   *   }
+   */
+  scanStream: async function* (opts?: {
+    lite?: boolean | null;
+    forceRefresh?: boolean;
+    signal?: AbortSignal;
+  }): AsyncGenerator<Record<string, any>, void, unknown> {
+    const lite = opts?.lite;
+    const force = opts?.forceRefresh ? "true" : "false";
+    const liteQ =
+      lite === undefined || lite === null ? "" : `&lite=${lite ? "true" : "false"}`;
+    const base = getApiUrl();
+    const url = `${base}/scan/stream?force_refresh=${force}${liteQ}`;
+    const res = await fetch(url, {
+      method: "GET",
+      signal: opts?.signal,
+      headers: { Accept: "application/x-ndjson" },
+    });
+
+    if (!res.ok || !res.body) {
+      throw new Error(`scanStream failed: HTTP ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        try {
+          yield JSON.parse(line);
+        } catch {
+          // skip malformed line
+        }
+      }
+    }
+    const tail = buf.trim();
+    if (tail) {
+      try {
+        yield JSON.parse(tail);
+      } catch {
+        /* ignore */
+      }
+    }
+  },
+
+  neonKeepalive: () =>
+    request<{ ok: boolean; neon_connected?: boolean; error?: string }>(
+      "/ops/neon-keepalive",
+      { method: "POST" },
+      1,
+      15000
+    ),
+
   getWatchlist: () => request<{ symbols: string[] }>("/watchlist", undefined, 2, 30000),
+
 
   setWatchlist: (symbols: string[]) =>
     request<{ symbols: string[] }>(
@@ -739,6 +826,89 @@ export const api = {
       30000
     ),
 
+  // ─── Surprise momentum scanner ───
+
+  surpriseScan: (forceReload = false) =>
+    request<{
+      count: number;
+      stocks: Array<{
+        symbol: string;
+        score: number;
+        price: number;
+        change_pct: number;
+        rvol: number;
+        trigger_type: string;
+        trailing_stop: number;
+        target_1: number;
+        prev_close?: number;
+        sector?: string | null;
+        dist_52w_pct?: number;
+      }>;
+      static_loaded?: number;
+      quotes_ok?: number;
+      universe_scanned?: number;
+      elapsed_sec?: number;
+      error?: string;
+      min_score?: number;
+    }>(
+      `/api/surprise/scan?force_reload=${forceReload ? "true" : "false"}`,
+      undefined,
+      2,
+      120000
+    ),
+
+  surpriseScanStream: async function* (opts?: {
+    forceReload?: boolean;
+    signal?: AbortSignal;
+  }): AsyncGenerator<Record<string, any>, void, unknown> {
+    const force = opts?.forceReload ? "true" : "false";
+    const base = getApiUrl();
+    const url = `${base}/api/surprise/scan/stream?force_reload=${force}`;
+    const res = await fetch(url, {
+      method: "GET",
+      signal: opts?.signal,
+      headers: { Accept: "application/x-ndjson" },
+    });
+    if (!res.ok || !res.body) {
+      throw new Error(`surpriseScanStream failed: HTTP ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        try {
+          yield JSON.parse(line);
+        } catch {
+          /* skip */
+        }
+      }
+    }
+    const tail = buf.trim();
+    if (tail) {
+      try {
+        yield JSON.parse(tail);
+      } catch {
+        /* ignore */
+      }
+    }
+  },
+
+  surpriseStatic: (limit = 50) =>
+    request<{ ok: boolean; count?: number; rows?: any[]; error?: string }>(
+      `/api/surprise/static?limit=${limit}`,
+      undefined,
+      1,
+      20000
+    ),
+
   // ─── Training Service endpoints ───
 
   getTrainingStatus: () =>
@@ -752,14 +922,26 @@ export const api = {
       `/training/api/train?label_source=${labelSource}`,
       { method: "POST" },
       2,
-      60000
+      90000 // only waits for 202 Accepted; training continues in background
     ),
 
   getTrainingScore: (symbol: string) =>
     request<TrainingScore>(`/training/score/${symbol}`, undefined, 2, 30000),
 
-  clearTrainingLock: () =>
-    request<{ status: string }>("/training/lock", { method: "DELETE" }, 1, 15000),
+  clearTrainingLock: async () => {
+    // Prefer /api/lock/clear (POST — most reliable through gateway), then DELETE /lock
+    try {
+      return await request<{ status: string }>(
+        "/training/api/lock/clear",
+        { method: "POST" },
+        1,
+        15000
+      );
+    } catch {
+      return request<{ status: string }>("/training/lock", { method: "DELETE" }, 1, 15000);
+    }
+  },
+
 
   getPredictionHistory: (limit = 20) =>
     request<{ predictions: PredictionHistoryItem[]; total: number }>(

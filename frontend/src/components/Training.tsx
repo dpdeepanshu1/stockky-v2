@@ -158,10 +158,20 @@ export default function Training() {
   const clearLock = async () => {
     try {
       await api.clearTrainingLock();
-      showToast("success", "Training lock cleared.");
+      setTraining(false);
+      trainingActiveRef.current = false;
+      setTrainProgress({
+        stage: "idle",
+        detail: {},
+        timestamp: Date.now(),
+        percent: 0,
+        is_running: false,
+      } as any);
+      setStatus((prev) => (prev ? { ...prev, training_in_progress: false } : prev));
+      showToast("success", "Training lock cleared. You can Trigger Training again.");
       return true;
     } catch {
-      showToast("error", "Failed to clear lock.");
+      showToast("error", "Failed to clear lock. Retry or redeploy training service.");
       return false;
     }
   };
@@ -320,19 +330,33 @@ export default function Training() {
         }
         if (p?.stage === "done") {
           stopTraining(true);
-        } else if (p?.stage === "aborted") {
+        } else if (p?.stage === "aborted" || p?.stage === "error") {
+          if (p?.error || (p?.detail as any)?.error) {
+            showToast("error", String(p.error || (p.detail as any).error).slice(0, 180));
+          }
           stopTraining(false);
+        } else if (
+          trainingActiveRef.current &&
+          p?.is_running === false &&
+          p?.stage &&
+          !["loading_data", "idle"].includes(String(p.stage)) &&
+          elapsedSeconds > 15
+        ) {
+          // Backend finished without writing done — treat as complete
+          stopTraining(true);
         }
       } catch {
         // Progress endpoint may fail during cold start — fail quietly
       }
+
     };
     poll();
-    progressPollRef.current = setInterval(poll, 5000);  // progress while training only
+    progressPollRef.current = setInterval(poll, 2500); // responsive progress while training
     return () => {
       if (progressPollRef.current) clearInterval(progressPollRef.current);
     };
   }, [training, status?.training_in_progress]);
+
 
   // ---------- UI helpers ----------
   const showToast = (type: "success" | "error" | "info", message: string) => {
@@ -429,22 +453,44 @@ export default function Training() {
     }
 
     showToast("info", "⏳ Starting training...");
+    setTrainProgress({
+      stage: "loading_data",
+      detail: {},
+      timestamp: Date.now(),
+      percent: 5,
+      is_running: true,
+    } as any);
 
     try {
       const response = await api.triggerTraining();
-      if (response.status === "started" || response.status === "Training started successfully" || (response as any).ok === true || String(response.status || "").toLowerCase().includes("start")) {
+      const st = String((response as any)?.status || "");
+      const ok =
+        st === "started" ||
+        st === "Training started successfully" ||
+        st === "ACCEPTED" ||
+        (response as any)?.ok === true ||
+        st.toLowerCase().includes("start") ||
+        st.toLowerCase().includes("accept");
+      if (ok) {
         startTraining();
-        showToast("info", "⏳ Training started. This may take a few minutes.");
+        showToast("info", "⏳ Training accepted (background). Progress updates every ~2.5s.");
       } else {
-        showToast("error", `⚠️ Training failed: ${response.status}`);
+        showToast("error", `⚠️ Training failed: ${st || "unknown response"}`);
       }
     } catch (err: any) {
       const msg = err?.message || String(err || "");
-      if (err?.status === 409 || msg.includes("409") || msg.toLowerCase().includes("already")) {
-        showToast("info", "⏳ Training already in progress. Resuming monitoring...");
+      if (err?.status === 409 || msg.includes("409") || msg.toLowerCase().includes("already") || msg.toLowerCase().includes("in progress")) {
+        // Offer clear-lock path: often a crashed run left a lock file
+        showToast(
+          "info",
+          "⏳ Backend reports training in progress. Monitoring… If stuck, use Clear Lock."
+        );
         startTraining();
-      } else if (msg.includes("502") || msg.includes("timeout") || msg.includes("unreachable")) {
-        showToast("error", "❌ Training service unreachable (cold start). Wait 20–40s and try again.");
+      } else if (msg.includes("502") || msg.includes("timeout") || msg.includes("unreachable") || msg.includes("504")) {
+        showToast(
+          "error",
+          "❌ Training service unreachable/timeout (cold start). Wait 20–40s and try again."
+        );
       } else {
         showToast("error", `❌ Failed to trigger training: ${msg.slice(0, 160)}`);
       }
@@ -452,7 +498,7 @@ export default function Training() {
   };
 
   const handleStopTraining = async () => {
-    if (!training) {
+    if (!training && !status?.training_in_progress) {
       showToast("info", "No training in progress.");
       return;
     }
@@ -466,6 +512,7 @@ export default function Training() {
     }
     setIsStopping(false);
   };
+
 
   const handleRefresh = () => {
     fetchStatus();
@@ -703,29 +750,51 @@ export default function Training() {
         <div className="flex flex-wrap gap-3">
           <button
             onClick={handleTriggerTraining}
-            disabled={training || status?.training_in_progress}
+            disabled={training}
+            title={
+              status?.training_in_progress && !training
+                ? "Backend still reports a lock — will resume monitoring, or Clear Lock first"
+                : undefined
+            }
             className={`font-mono text-sm px-5 py-2 rounded-lg transition-all ${
-              training || status?.training_in_progress
+              training
                 ? "bg-slate/30 text-mist/50 cursor-not-allowed"
                 : "bg-signal-prepare/20 text-signal-prepare border border-signal-prepare/30 hover:bg-signal-prepare/30"
             }`}
           >
-            {training || status?.training_in_progress ? (
+            {training ? (
               <span className="flex items-center gap-2">
                 <Spinner />
-                {training ? "Training..." : "Running..."}
+                Training...
               </span>
+            ) : status?.training_in_progress ? (
+              "⚡ Resume / Trigger"
             ) : (
               "⚡ Trigger Training"
             )}
           </button>
 
+
           <button
             onClick={handleStopTraining}
-            disabled={!training || isStopping}
+            disabled={(!training && !status?.training_in_progress) || isStopping}
             className="font-mono text-sm px-4 py-2 rounded-lg bg-red-500/20 text-red-400 border border-red-400/30 hover:bg-red-500/30 transition disabled:opacity-50"
           >
             {isStopping ? "Stopping..." : "⏹ Stop Training"}
+          </button>
+
+          <button
+            onClick={async () => {
+              setIsStopping(true);
+              await clearLock();
+              stopTraining(false);
+              setIsStopping(false);
+            }}
+            disabled={isStopping}
+            title="Force-release training.lock if a previous run crashed or timed out"
+            className="font-mono text-sm px-4 py-2 rounded-lg bg-amber-500/15 text-amber-300 border border-amber-400/40 hover:bg-amber-500/25 transition disabled:opacity-50"
+          >
+            🔓 Clear Lock
           </button>
 
           <button
@@ -743,6 +812,51 @@ export default function Training() {
           </button>
         </div>
       </div>
+
+      {/* Stuck-lock / live progress banner */}
+      {(training || status?.training_in_progress) && (
+        <div className="rounded-xl border border-signal-prepare/30 bg-signal-prepare/5 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="font-mono text-xs text-mist space-y-1">
+            <p>
+              <span className="text-signal-prepare">● Training active</span>
+              {trainProgress?.stage ? (
+                <span className="text-mist/70">
+                  {" "}
+                  · stage <span className="text-paper">{trainProgress.stage}</span>
+                </span>
+              ) : null}
+              {trainProgress?.percent != null ? (
+                <span className="text-mist/70">
+                  {" "}
+                  · <span className="text-paper">{Math.round(Number(trainProgress.percent))}%</span>
+                </span>
+              ) : null}
+              {elapsedSeconds > 0 ? (
+                <span className="text-mist/50"> · elapsed {Math.floor(elapsedSeconds / 60)}m {elapsedSeconds % 60}s</span>
+              ) : null}
+            </p>
+            {elapsedSeconds >= 90 &&
+              (!trainProgress?.stage || trainProgress.stage === "idle" || trainProgress.stage === "loading_data") && (
+                <p className="text-amber-300/90">
+                  Progress looks stuck. If this persists, click <strong>Clear Lock</strong> then Trigger Training again.
+                </p>
+              )}
+          </div>
+          <button
+            type="button"
+            onClick={async () => {
+              setIsStopping(true);
+              await clearLock();
+              stopTraining(false);
+              setIsStopping(false);
+            }}
+            className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-200 border border-amber-400/40 hover:bg-amber-500/30"
+          >
+            Unlock &amp; reset
+          </button>
+        </div>
+      )}
+
 
       {/* Manual intervention: for when scheduler-service isn't running these on
           its own cron. Each button hits the same endpoint the automation would. */}

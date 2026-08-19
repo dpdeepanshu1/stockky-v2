@@ -14,6 +14,7 @@ import ServiceManager from "./components/ServiceManager";
 import RateLimitDashboard from "./components/RateLimitDashboard";
 import Training from "./components/Training";
 import HotStocks from "./components/HotStocks";
+import SurpriseStocks from "./components/SurpriseStocks";
 import DataFeed from "./components/DataFeed";
 import Trades from "./components/Trades";
 // ── NEW: import Market Sentiment Header ──
@@ -28,7 +29,8 @@ type ViewState =
   | { mode: "scan"; data: ScanResult }
   | { mode: "error"; message: string };
 
-type Tab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "datafeed" | "settings" | "watchlist";
+type Tab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "surprise" | "datafeed" | "settings" | "watchlist";
+
 
 async function powerOffAll() {
   try {
@@ -197,11 +199,18 @@ export default function App() {
   const [scanTaskId, setScanTaskId] = useState<string | null>(null);
   const [pollInterval, setPollInterval] = useState<number | null>(null);
   const [wsLive, setWsLive] = useState(false);
+  const [liveScanRows, setLiveScanRows] = useState<Decision[]>([]);
+  const [scanTransport, setScanTransport] = useState<"stream" | "poll" | null>(null);
   const pollIntervalRefWs = useRef<number | null>(null);
   const scanCancelledRef = useRef(false);
+  const scanAbortRef = useRef<AbortController | null>(null);
 
   /** Stop all scan polling / session tracking on the client. */
   function clearScanActivity() {
+    if (scanAbortRef.current) {
+      try { scanAbortRef.current.abort(); } catch {}
+      scanAbortRef.current = null;
+    }
     if (pollIntervalRefWs.current) {
       window.clearInterval(pollIntervalRefWs.current);
       pollIntervalRefWs.current = null;
@@ -212,6 +221,38 @@ export default function App() {
     });
     try { sessionStorage.removeItem("stockky_scan_task_id"); } catch {}
   }
+
+  function buildScanResultFromRows(rows: Decision[], total: number, partial: boolean): ScanResult {
+    const actionable = new Set(["BUY NOW", "PREPARE TO BUY", "SELL"]);
+    const recommendations = rows.filter((r) => actionable.has(String(r.decision || "")));
+    const buy = rows.filter((r) => r.decision === "BUY NOW" || r.decision === "PREPARE TO BUY").length;
+    const sell = rows.filter((r) => r.decision === "SELL").length;
+    const hold = rows.filter((r) => r.decision === "HOLD").length;
+    const cautious = rows.filter((r) => r.decision === "DO NOT BUY" || r.decision === "WAIT").length;
+    return {
+      scanned: rows.length,
+      universe_size: total || rows.length,
+      watchlist_size: 0,
+      recommendations,
+      watchlist_candidates: [],
+      verdict: partial
+        ? `Partial stream: ${rows.length}/${total || rows.length}`
+        : `Stream complete: ${rows.length} symbols`,
+      market_mood: buy > sell ? "bullish" : sell > buy ? "bearish" : "mixed",
+      market_stats: {
+        buy_signals: buy,
+        sell_signals: sell,
+        hold_signals: hold,
+        cautious,
+      },
+      all_results: rows,
+      errors: rows
+        .filter((r) => (r as any).error)
+        .map((r) => ({ symbol: r.symbol, error: (r as any).error || "ERROR" })),
+      ...(partial ? { partial: true, stopped_early: true } as any : {}),
+    };
+  }
+
 
   const handleRealtime = useCallback((msg: RealtimeMessage) => {
     if (msg.type !== "scan_status" || !msg.task_id) return;
@@ -389,38 +430,149 @@ export default function App() {
   async function handleScan() {
     const modeLabel = liteScan ? "Lite Market Run" : "Full Market Run";
     try {
-      window.alert(`${modeLabel} started.\n\nScanning the market universe. You can press Stop Scan anytime.`);
+      window.alert(
+        `${modeLabel} started.\n\nStreaming results as they finish (NDJSON).\nYou can press Stop Scan anytime.`
+      );
     } catch {}
-    setStatusMessage(liteScan ? "🟢 Lite Market Run started" : "🟢 Full Market Run started");
+    setStatusMessage(liteScan ? "🟢 Lite Market Run (live stream)" : "🟢 Full Market Run (live stream)");
     setTimeout(() => setStatusMessage(null), 5000);
 
     scanCancelledRef.current = false;
     lastRequestType.current = "scan";
     setScanTaskId(null);
     setCancelRequested(false);
+    setStoppingScan(false);
+    setLiveScanRows([]);
+    setScanTransport("stream");
     clearScanActivity();
-    setView({ mode: "loading", label: `Starting ${modeLabel.toLowerCase()}...` });
+
+    const ac = new AbortController();
+    scanAbortRef.current = ac;
+
+    setView({
+      mode: "loading",
+      label: `Streaming ${modeLabel.toLowerCase()}…`,
+      progress: { processed: 0, total: 0, elapsed: 0 },
+    });
+
+    const rows: Decision[] = [];
+    let total = 0;
+    let processed = 0;
+    const t0 = Date.now();
+
     try {
-      const { task_id } = await api.scanStart(false, liteScan);
-      if (scanCancelledRef.current) return;
-      setScanTaskId(task_id);
-      try { subscribeScan(task_id); } catch {}
-      sessionStorage.setItem("stockky_scan_task_id", task_id);
-      const interval = window.setInterval(() => {
-        if (scanCancelledRef.current) {
-          window.clearInterval(interval);
-          return;
+      for await (const row of api.scanStream({
+        lite: liteScan,
+        forceRefresh: false,
+        signal: ac.signal,
+      })) {
+        if (scanCancelledRef.current) break;
+
+        if (row && row._meta) {
+          if (row.event === "feed_bulk_loaded") {
+            total = Number(row.total) || total;
+            setView({
+              mode: "loading",
+              label: `Neon feed ${row.feed_hits ?? "?"}/${total} — streaming symbols…`,
+              progress: {
+                processed,
+                total: total || processed,
+                elapsed: (Date.now() - t0) / 1000,
+              },
+            });
+          } else if (row.event === "done" || row.event === "cancelled") {
+            processed = Number(row.processed) || processed;
+            total = Number(row.total) || total;
+          }
+          continue;
         }
-        pollScanStatus(task_id);
-      }, 1000);
-      setPollInterval(interval);
-      pollIntervalRefWs.current = interval;
-      await pollScanStatus(task_id);
-    } catch (e) {
-      clearScanActivity();
-      setView({ mode: "error", message: (e as Error).message });
+
+        // Symbol result line
+        const dec = row as Decision;
+        if (dec && dec.symbol) {
+          rows.push(dec);
+          processed = Number(row._progress?.processed) || rows.length;
+          total = Number(row._progress?.total) || total;
+          const elapsed = Number(row._progress?.elapsed) || (Date.now() - t0) / 1000;
+          // Keep UI responsive: update live list every row, but cap stored preview
+          setLiveScanRows((prev) => {
+            const next = [...prev, dec];
+            return next.length > 80 ? next.slice(-80) : next;
+          });
+          setView({
+            mode: "loading",
+            label: `Live scan ${processed}/${total || "?"} — ${dec.symbol} → ${dec.decision || "?"}`,
+            progress: {
+              processed,
+              total: total || processed,
+              elapsed,
+              estimatedRemaining:
+                processed > 0 && total > processed && elapsed > 0
+                  ? ((total - processed) * elapsed) / processed
+                  : undefined,
+            },
+          });
+        }
+      }
+
+      const partial = scanCancelledRef.current;
+      const result = buildScanResultFromRows(rows, total || rows.length, partial);
+      try {
+        localStorage.setItem("stockky_last_scan", JSON.stringify(result));
+      } catch {}
+      setLiveScanRows([]);
+      setScanTransport(null);
+      scanAbortRef.current = null;
+      setView({ mode: "scan", data: result });
+      setStatusMessage(partial ? "⏹ Stream stopped — partial results kept" : "✅ Live stream complete");
+      setTimeout(() => setStatusMessage(null), 3000);
+    } catch (e: any) {
+      if (e?.name === "AbortError" || scanCancelledRef.current) {
+        const result = buildScanResultFromRows(rows, total || rows.length, true);
+        try {
+          localStorage.setItem("stockky_last_scan", JSON.stringify(result));
+        } catch {}
+        setLiveScanRows([]);
+        setScanTransport(null);
+        scanAbortRef.current = null;
+        if (rows.length) {
+          setView({ mode: "scan", data: result });
+          setStatusMessage("⏹ Stream aborted — partial results kept");
+        } else {
+          setView({ mode: "idle" });
+        }
+        setTimeout(() => setStatusMessage(null), 3000);
+        return;
+      }
+
+      // Fallback: classic async task + poll if stream endpoint unavailable
+      console.warn("scanStream failed, falling back to /scan/start", e);
+      setScanTransport("poll");
+      setStatusMessage("Stream unavailable — falling back to background scan…");
+      try {
+        const { task_id } = await api.scanStart(false, liteScan);
+        if (scanCancelledRef.current) return;
+        setScanTaskId(task_id);
+        try { subscribeScan(task_id); } catch {}
+        sessionStorage.setItem("stockky_scan_task_id", task_id);
+        const interval = window.setInterval(() => {
+          if (scanCancelledRef.current) {
+            window.clearInterval(interval);
+            return;
+          }
+          pollScanStatus(task_id);
+        }, 1000);
+        setPollInterval(interval);
+        pollIntervalRefWs.current = interval;
+        await pollScanStatus(task_id);
+      } catch (e2) {
+        clearScanActivity();
+        setScanTransport(null);
+        setView({ mode: "error", message: (e2 as Error).message || (e as Error).message });
+      }
     }
   }
+
 
   async function handleScanWatchlist() {
     setView({ mode: "loading", label: "Scanning watchlist..." });
@@ -479,6 +631,22 @@ export default function App() {
   const [stoppingScan, setStoppingScan] = useState(false);
   const [cancelRequested, setCancelRequested] = useState(false);
   async function handleStopScan() {
+    // Stream mode: abort fetch; generator path finalizes partial rows
+    if (scanTransport === "stream" || scanAbortRef.current) {
+      setCancelRequested(true);
+      setStoppingScan(true);
+      scanCancelledRef.current = true;
+      setStatusMessage("⏹ Stopping live stream — keeping symbols scored so far…");
+      setView({
+        mode: "loading",
+        label: "Stopping stream — finalizing partial results…",
+        progress: view.mode === "loading" ? view.progress : { processed: 0, total: 0, elapsed: 0 },
+      });
+      try { scanAbortRef.current?.abort(); } catch {}
+      try { await api.stopAllScans(); } catch {}
+      return;
+    }
+
     if (!scanTaskId && !cancelRequested) return;
     const taskId = scanTaskId;
     setCancelRequested(true);
@@ -492,6 +660,7 @@ export default function App() {
 
     // Request cancel; keep task id so we can poll for partial result
     if (taskId) {
+
       try {
         await api.scanCancel(taskId);
         // Belt-and-suspenders: signal every running scan on gateway
@@ -686,7 +855,9 @@ export default function App() {
     { id: "dash", label: "Dashboard", group: "Navigate", hint: "tab", run: () => setTab("dashboard") },
     { id: "datafeed", label: "Data Feed", group: "Navigate", hint: "tab", run: () => setTab("datafeed") },
     { id: "hot", label: "Stockky Hot Picks", group: "Navigate", hint: "tab", run: () => setTab("hot") },
+    { id: "surprise", label: "Surprise Momentum", group: "Navigate", hint: "tab", run: () => setTab("surprise") },
     { id: "train", label: "Training Lab", group: "Navigate", hint: "tab", run: () => setTab("training") },
+
     { id: "trades", label: "Trades", group: "Navigate", hint: "tab", run: () => setTab("trades") },
     { id: "alerts", label: "Alerts", group: "Navigate", hint: "tab", run: () => setTab("notifications") },
     { id: "wl", label: "Watchlist", group: "Navigate", hint: "tab", run: () => setTab("watchlist") },
@@ -705,7 +876,9 @@ export default function App() {
   const navItems: { id: Tab; label: string; short: string; icon: string }[] = [
     { id: "dashboard", label: "Dashboard", short: "Home", icon: "▣" },
     { id: "datafeed", label: "Data Feed", short: "Feed", icon: "🗄️" },
-    { id: "hot", label: "Hot Picks", short: "Picks", icon: "⚡" },
+    { id: "hot", label: "Hot Picks", short: "Picks", icon: "🔥" },
+    { id: "surprise", label: "Surprise", short: "Surp", icon: "⚡" },
+
     { id: "training", label: "Training", short: "Train", icon: "◈" },
     { id: "trades", label: "Trades", short: "Trade", icon: "⇄" },
     { id: "notifications", label: "Alerts", short: "Alerts", icon: "◉" },
@@ -992,6 +1165,16 @@ export default function App() {
               }}
             />
           </div>
+        ) : tab === "surprise" ? (
+          <div className="page-terminal">
+            <p className="dash-section-title">Surprise Momentum</p>
+            <SurpriseStocks
+              onSelect={(s) => {
+                setTab("dashboard");
+                handleSearch(s);
+              }}
+            />
+          </div>
         ) : tab === "settings" ? (
           <SettingsPage
             backendUp={backendUp}
@@ -1122,77 +1305,127 @@ export default function App() {
               )}
 
               {view.mode === "loading" && (
-                <div className="rounded-xl border border-slate bg-graphite p-8 max-w-sm">
-                  <p className="font-mono text-xs text-mist mb-2">{view.label}</p>
-                  {view.progress && (
-                    <div className="mt-4 space-y-3">
-                      {(() => {
-                        const p = view.progress;
-                        const pct = Math.min(100, Math.round((p.processed / Math.max(1, p.total)) * 100));
-                        let rem = p.estimatedRemaining;
-                        if ((rem === undefined || rem === null || rem <= 0) && p.processed > 0 && p.total > p.processed && p.elapsed > 0) {
-                          const avg = Math.max(p.elapsed / p.processed, 0.8);
-                          rem = (p.total - p.processed) * avg;
-                        }
-                        return (
-                          <>
-                            <div className="flex justify-between items-end font-mono text-[11px]">
-                              <div>
-                                <span className="text-mist/50">Processed </span>
-                                <span className="text-paper font-semibold">{p.processed}</span>
-                                <span className="text-mist/40"> / {p.total}</span>
+                <div className="w-full max-w-2xl space-y-4">
+                  <div className="rounded-xl border border-slate bg-graphite p-6 sm:p-8">
+                    <p className="font-mono text-xs text-mist mb-2">{view.label}</p>
+                    {view.progress && (
+                      <div className="mt-4 space-y-3">
+                        {(() => {
+                          const p = view.progress;
+                          const pct = Math.min(100, Math.round((p.processed / Math.max(1, p.total)) * 100));
+                          let rem = p.estimatedRemaining;
+                          if ((rem === undefined || rem === null || rem <= 0) && p.processed > 0 && p.total > p.processed && p.elapsed > 0) {
+                            const avg = Math.max(p.elapsed / p.processed, 0.8);
+                            rem = (p.total - p.processed) * avg;
+                          }
+                          return (
+                            <>
+                              <div className="flex justify-between items-end font-mono text-[11px]">
+                                <div>
+                                  <span className="text-mist/50">Processed </span>
+                                  <span className="text-paper font-semibold">{p.processed}</span>
+                                  <span className="text-mist/40"> / {p.total}</span>
+                                </div>
+                                <div className="text-right">
+                                  <span className="text-signal-prepare text-sm font-semibold">{pct}%</span>
+                                  <span className="text-mist/50 ml-2">⏱️ {formatTime(p.elapsed)}</span>
+                                </div>
                               </div>
-                              <div className="text-right">
-                                <span className="text-signal-prepare text-sm font-semibold">{pct}%</span>
-                                <span className="text-mist/50 ml-2">⏱️ {formatTime(p.elapsed)}</span>
+                              <div className="relative w-full h-2.5 bg-ink/80 border border-slate/50 rounded-full overflow-hidden">
+                                <div
+                                  className="h-full rounded-full bg-gradient-to-r from-signal-prepare/80 via-sky-400/70 to-signal-prepare transition-all duration-500 ease-out"
+                                  style={{ width: `${pct}%` }}
+                                />
+                                <div
+                                  className="absolute inset-0 opacity-30 pointer-events-none"
+                                  style={{
+                                    background:
+                                      "linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent)",
+                                    backgroundSize: "200% 100%",
+                                    animation: pct < 100 ? "stockky-shimmer 1.6s linear infinite" : "none",
+                                  }}
+                                />
                               </div>
-                            </div>
-                            <div className="relative w-full h-2.5 bg-ink/80 border border-slate/50 rounded-full overflow-hidden">
-                              <div
-                                className="h-full rounded-full bg-gradient-to-r from-signal-prepare/80 via-sky-400/70 to-signal-prepare transition-all duration-500 ease-out"
-                                style={{ width: `${pct}%` }}
-                              />
-                              <div
-                                className="absolute inset-0 opacity-30 pointer-events-none"
-                                style={{
-                                  background:
-                                    "linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent)",
-                                  backgroundSize: "200% 100%",
-                                  animation: pct < 100 ? "stockky-shimmer 1.6s linear infinite" : "none",
-                                }}
-                              />
-                            </div>
-                            <div className="flex justify-between font-mono text-[10px] text-mist/50">
-                              <span>{wsLive ? "● Live WS" : "○ HTTP poll"}</span>
-                              <span>
-                                {rem != null && rem > 0
-                                  ? `Est. remaining ${formatTime(rem)}`
-                                  : p.processed === 0
-                                    ? "Calculating…"
-                                    : p.processed >= p.total
-                                      ? "Finishing…"
-                                      : ""}
+                              <div className="flex justify-between font-mono text-[10px] text-mist/50">
+                                <span>
+                                  {scanTransport === "stream"
+                                    ? "● NDJSON stream"
+                                    : wsLive
+                                      ? "● Live WS"
+                                      : "○ HTTP poll"}
+                                </span>
+                                <span>
+                                  {rem != null && rem > 0
+                                    ? `Est. remaining ${formatTime(rem)}`
+                                    : p.processed === 0
+                                      ? "Calculating…"
+                                      : p.processed >= p.total
+                                        ? "Finishing…"
+                                        : ""}
+                                </span>
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    )}
+                    {(scanTaskId || scanTransport === "stream") && (
+                      <button
+                        onClick={handleStopScan}
+                        disabled={stoppingScan || cancelRequested}
+                        className="mt-4 font-mono text-xs text-signal-avoid border border-signal-avoid/40 rounded-lg px-3 py-2 hover:bg-signal-avoid/10 transition disabled:opacity-50 w-full"
+                      >
+                        {cancelRequested ? "Stopping — finishing up..." : "⏹ Stop Scan"}
+                      </button>
+                    )}
+                    <div className="mt-6">
+                      <Pipeline running={true} />
+                    </div>
+                  </div>
+
+                  {/* Live results strip while streaming */}
+                  {scanTransport === "stream" && liveScanRows.length > 0 && (
+                    <div className="rounded-xl border border-slate/80 bg-graphite/80 p-4">
+                      <div className="flex items-center justify-between mb-3">
+                        <p className="font-mono text-[10px] uppercase tracking-widest text-mist/60">
+                          Live results
+                        </p>
+                        <p className="font-mono text-[10px] text-mist/40">
+                          last {Math.min(liveScanRows.length, 12)} of {liveScanRows.length}
+                        </p>
+                      </div>
+                      <div className="space-y-1 max-h-64 overflow-y-auto pr-1">
+                        {[...liveScanRows].slice(-12).reverse().map((r, i) => {
+                          const d = String(r.decision || "?");
+                          const color =
+                            d.includes("BUY")
+                              ? "text-signal-buy"
+                              : d === "SELL"
+                                ? "text-signal-sell"
+                                : d === "ERROR"
+                                  ? "text-signal-avoid"
+                                  : "text-mist";
+                          return (
+                            <button
+                              key={`${r.symbol}-${i}`}
+                              type="button"
+                              onClick={() => r.symbol && handleSearch(r.symbol)}
+                              className="w-full flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 hover:bg-ink/50 transition text-left"
+                            >
+                              <span className="font-mono text-xs text-paper truncate">{r.symbol}</span>
+                              <span className={`font-mono text-[10px] shrink-0 ${color}`}>{d}</span>
+                              <span className="font-mono text-[10px] text-mist/40 shrink-0 w-10 text-right">
+                                {r.combined_score != null ? Math.round(Number(r.combined_score)) : "—"}
                               </span>
-                            </div>
-                          </>
-                        );
-                      })()}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   )}
-                  {scanTaskId && (
-                    <button
-                      onClick={handleStopScan}
-                      disabled={stoppingScan || cancelRequested}
-                      className="mt-4 font-mono text-xs text-signal-avoid border border-signal-avoid/40 rounded-lg px-3 py-2 hover:bg-signal-avoid/10 transition disabled:opacity-50 w-full"
-                    >
-                      {cancelRequested ? "Stopping — finishing up..." : "⏹ Stop Scan"}
-                    </button>
-                  )}
-                  <div className="mt-6">
-                    <Pipeline running={true} />
-                  </div>
                 </div>
               )}
+
 
               {view.mode === "error" && (
                 <div className="rounded-xl border border-signal-sell/40 bg-signal-sell/5 p-6">

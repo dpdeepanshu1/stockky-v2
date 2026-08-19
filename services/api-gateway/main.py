@@ -3942,6 +3942,27 @@ async def stream_market_scan(
         client = _get_http_client()
         sem = asyncio.Semaphore(MAX_PARALLEL_WORKERS)
         start = time.time()
+        # Never inherit a stale Power-Off / cancel from a previous session
+        try:
+            _SCAN_CANCEL_FLAGS.discard("__ALL__")
+        except Exception:
+            pass
+
+        if total <= 0:
+            yield json.dumps({
+                "_meta": True,
+                "event": "error",
+                "error": "empty_universe",
+                "total": 0,
+            }) + "\n"
+            yield json.dumps({
+                "_meta": True,
+                "event": "done",
+                "processed": 0,
+                "total": 0,
+                "elapsed": 0,
+            }) + "\n"
+            return
 
         # 1) Single bulk Neon load
         prefetched = {}
@@ -3961,17 +3982,19 @@ async def stream_market_scan(
                 "workers": MAX_PARALLEL_WORKERS,
             }) + "\n"
         except Exception as e:
+            logger.warning("scan stream feed bulk: %s", e)
             yield json.dumps({
                 "_meta": True,
                 "event": "feed_bulk_error",
                 "error": str(e)[:200],
+                "total": total,
             }) + "\n"
 
         # 2) Process in chunks so results stream early
         chunk_size = max(5, min(SCAN_BATCH_SIZE, 15))
         processed = 0
         for i in range(0, total, chunk_size):
-            if activity_paused() or "__ALL__" in _SCAN_CANCEL_FLAGS:
+            if "__ALL__" in _SCAN_CANCEL_FLAGS:
                 yield json.dumps({
                     "_meta": True,
                     "event": "cancelled",
@@ -3979,6 +4002,19 @@ async def stream_market_scan(
                     "total": total,
                 }) + "\n"
                 break
+            # activity_paused only cancels if Power Off was requested mid-scan
+            try:
+                if activity_paused() and processed > 0:
+                    yield json.dumps({
+                        "_meta": True,
+                        "event": "cancelled",
+                        "processed": processed,
+                        "total": total,
+                        "reason": "activity_paused",
+                    }) + "\n"
+                    break
+            except Exception:
+                pass
             chunk = universe[i : i + chunk_size]
             tasks = [
                 _analyze_one_symbol_ultra(
@@ -3993,7 +4029,23 @@ async def stream_market_scan(
                 )
                 for sym in chunk
             ]
-            batch = await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                batch = await asyncio.gather(*tasks, return_exceptions=True)
+            except Exception as e:
+                logger.exception("scan stream chunk failed: %s", e)
+                for sym in chunk:
+                    processed += 1
+                    yield json.dumps({
+                        "symbol": sym,
+                        "decision": "ERROR",
+                        "error": str(e)[:200],
+                        "_progress": {
+                            "processed": processed,
+                            "total": total,
+                            "elapsed": round(time.time() - start, 1),
+                        },
+                    }, default=str) + "\n"
+                continue
             for sym, res in zip(chunk, batch):
                 processed += 1
                 if isinstance(res, Exception):
@@ -5335,83 +5387,129 @@ async def api_surprise_static(limit: int = 50):
 @app.get("/surprise/premarket/status")
 @app.get("/api/surprise/premarket/status")
 async def api_surprise_premarket_status():
-    """Proxy premarket progress for Surprise tab UI."""
-    client = _get_http_client()
-    target = f"{MARKET_DATA_URL.rstrip('/')}/surprise/premarket/status"
+    """Premarket progress from gateway-local progress file."""
     try:
-        resp = await client.get(target, timeout=15.0)
-        try:
-            return JSONResponse(content=resp.json(), status_code=resp.status_code)
-        except Exception:
-            return JSONResponse(content={"is_running": False, "error": "bad_json"}, status_code=502)
+        from surprise_premarket import get_premarket_progress
+        return get_premarket_progress()
     except Exception as e:
-        return JSONResponse(content={"is_running": False, "error": str(e)[:160]}, status_code=502)
+        return {
+            "is_running": False,
+            "stage": "error",
+            "percent": 0,
+            "error": str(e)[:160],
+            "message": str(e)[:160],
+        }
 
 
 @app.post("/surprise/premarket")
 @app.get("/surprise/premarket")
 async def api_surprise_premarket_proxy(request: Request):
     """
-    Proxy premarket job to market-data-service.
-    Automatically injects the gateway scan universe when the client body
-    has no symbols — so cron can hit the gateway without maintaining a list.
+    Premarket baselines → Neon surprise_static_feed.
+
+    Prefer RUNNING ON THE GATEWAY (has DATABASE_URL / Neon).
+    market-data often lacks DATABASE_URL → schema_failed; gateway always ensures schema
+    and computes baselines with yfinance, then writes Neon.
+
+    Body optional: {"symbols": [...]} — else injects scan universe.
+    Query background=true (default) returns immediately; poll /surprise/premarket/status.
     """
-    # Create Neon table using gateway DB credentials (market-data may lack DATABASE_URL)
+    import threading
+    import json as _json
+
     try:
         from surprise_schema import ensure_surprise_schema
-        ensure_surprise_schema()
+        schema = ensure_surprise_schema()
     except Exception as e:
+        schema = {"ok": False, "error": str(e)[:200]}
         logger.warning("gateway ensure_surprise_schema: %s", e)
-    client = _get_http_client()
-    target = f"{MARKET_DATA_URL.rstrip('/')}/surprise/premarket"
-    try:
-        raw = await request.body()
-        payload = {}
-        if raw:
-            try:
-                payload = json.loads(raw.decode("utf-8") or "{}")
-            except Exception:
-                payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
 
-        # Inject scan universe when caller did not supply symbols
-        if not payload.get("symbols"):
-            try:
-                uni = _build_scan_universe()
-                if uni:
-                    payload["symbols"] = [
-                        str(s).upper().replace(".NS", "").replace(".BO", "").strip()
-                        for s in uni
-                        if s
-                    ]
-            except Exception as e:
-                logger.warning("premarket universe inject failed: %s", e)
-
-        # Query-string symbols still forwarded via params
-        body_out = json.dumps(payload).encode("utf-8") if payload else (raw or b"{}")
-        resp = await client.request(
-            method="POST",
-            url=target,
-            content=body_out,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            params=request.query_params,
-            timeout=600.0,
+    if not schema.get("ok"):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "error": "schema_failed",
+                "message": "Set DATABASE_URL or CACHE_DATABASE_URL on api-gateway to Neon pooler URL",
+                "schema": schema,
+            },
         )
+
+    # Parse symbols
+    raw = await request.body()
+    payload = {}
+    if raw:
         try:
-            data = resp.json()
-            if isinstance(data, dict) and payload.get("symbols"):
-                data["universe_injected"] = len(payload["symbols"])
-            return JSONResponse(content=data, status_code=resp.status_code)
+            payload = _json.loads(raw.decode("utf-8") or "{}")
         except Exception:
-            return JSONResponse(
-                content={"detail": (resp.text or "")[:500]},
-                status_code=resp.status_code if resp.status_code >= 400 else 502,
-            )
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Premarket job timed out")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Premarket proxy error: {e}")
+            payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    symbols = payload.get("symbols") if isinstance(payload.get("symbols"), list) else None
+    q = request.query_params.get("symbols")
+    if not symbols and q:
+        symbols = [x.strip() for x in q.split(",") if x.strip()]
+    if not symbols:
+        try:
+            uni = _build_scan_universe()
+            symbols = [
+                str(s).upper().replace(".NS", "").replace(".BO", "").strip()
+                for s in (uni or [])
+                if s
+            ]
+        except Exception as e:
+            logger.warning("universe inject failed: %s", e)
+            symbols = []
+
+    background = str(request.query_params.get("background", "true")).lower() in (
+        "1", "true", "yes", ""
+    )
+
+    from surprise_premarket import (
+        precalculate_surprise_baselines,
+        get_premarket_progress,
+        default_universe_from_env,
+    )
+
+    if not symbols:
+        symbols = default_universe_from_env()
+
+    prog = get_premarket_progress()
+    if prog.get("is_running"):
+        return {
+            "ok": True,
+            "accepted": False,
+            "already_running": True,
+            "message": "Premarket already running — poll /surprise/premarket/status",
+            "progress": prog,
+            "schema": schema,
+        }
+
+    if background:
+        def _job(syms=list(symbols)):
+            try:
+                precalculate_surprise_baselines(syms)
+            except Exception as e:
+                logger.exception("gateway premarket job: %s", e)
+
+        threading.Thread(target=_job, daemon=True, name="gw-surprise-premarket").start()
+        return {
+            "ok": True,
+            "accepted": True,
+            "background": True,
+            "symbols": len(symbols),
+            "universe_injected": len(symbols),
+            "runner": "api-gateway",
+            "message": "Premarket started on gateway (Neon) — poll /surprise/premarket/status",
+            "progress": get_premarket_progress(),
+            "schema": schema,
+        }
+
+    result = precalculate_surprise_baselines(symbols)
+    result["runner"] = "api-gateway"
+    result["schema"] = schema
+    return result
 
 
 

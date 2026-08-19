@@ -7,3 +7,4 @@ yfinance==1.5.2
 feedparser==6.0.11
 sqlalchemy==2.0.31
 psycopg2-binary==2.9.9
+numpy==1.26.4

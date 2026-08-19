@@ -7,12 +7,42 @@
 // as positions close.
 
 import { useEffect, useState, useCallback } from "react";
-import { api, PaperTrade, PortfolioSummary, TradeReportBucket } from "../api";
+import { api, apiUrl, PaperTrade, PortfolioSummary, TradeReportBucket } from "../api";
+import { getSafePrice } from "../priceDisplay";
 import StockChart from "./StockChart";
 
 const fmtMoney = (n: number | null | undefined) =>
-  n == null ? "—" : `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
-const fmtPct = (n: number | null | undefined) => (n == null ? "—" : `${n > 0 ? "+" : ""}${n}%`);
+  n == null || !Number.isFinite(Number(n)) ? "—" : `₹${Number(n).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+const fmtPct = (n: number | null | undefined) =>
+  n == null || !Number.isFinite(Number(n)) ? "—" : `${Number(n) > 0 ? "+" : ""}${n}%`;
+
+/** Resolve entry/exit/last from trade row without ₹NaN / ₹0 ghosts. */
+function safeTradePrice(t: any, preferred?: "entry" | "exit" | "last"): number {
+  if (!t || typeof t !== "object") return 0;
+  if (preferred === "entry") {
+    const e = Number(t.entry_price ?? t.avg_entry ?? t.buy_price);
+    if (Number.isFinite(e) && e > 0) return e;
+  }
+  if (preferred === "exit") {
+    const x = Number(t.exit_price ?? t.sell_price);
+    if (Number.isFinite(x) && x > 0) return x;
+  }
+  return getSafePrice({
+    price: t.price ?? t.last_price ?? t.ltp,
+    cmp: t.cmp,
+    last_price: t.last_price,
+    ltp: t.ltp,
+    close: t.close ?? t.exit_price,
+    current_price: t.current_price,
+    prev_close: t.prev_close ?? t.entry_price,
+    entry_price: t.entry_price,
+  });
+}
+
+function fmtPriceCell(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(Number(n)) || Number(n) <= 0) return "—";
+  return `₹${Number(n).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+}
 const fmtDate = (s: string | null) =>
   s
     ? new Date(s).toLocaleString("en-IN", {
@@ -106,7 +136,7 @@ export default function Trades() {
     if (!confirm("Clear all paper trades? A backup will be saved first.")) return;
     setClearing(true);
     try {
-      const res = await (api as any).clearTradesBackup?.() ?? await fetch("/api/trades/clear-backup", { method: "POST" }).then(r => r.json());
+      const res = await (api as any).clearTradesBackup?.() ?? await fetch(apiUrl("/api/trades/clear-backup"), { method: "POST" }).then(r => r.json());
       if (res?.ok) {
         const durable = dbStatus?.db_durable || dbStatus?.db_backend === "postgres";
         showToast(
@@ -489,8 +519,8 @@ export default function Trades() {
                       {t.status || "—"}
                       {" · qty "}
                       {t.quantity ?? "—"}
-                      {" @ ₹"}
-                      {t.entry_price ?? "—"}
+                      {" @ "}
+                      {fmtPriceCell(safeTradePrice(t, "entry"))}
                       {t.pnl_pct != null && (
                         <span className={Number(t.pnl_pct) >= 0 ? " text-emerald-400" : " text-red-400"}>
                           {" · PnL "}{Number(t.pnl_pct)}%
@@ -693,8 +723,8 @@ export default function Trades() {
                   {closedTrades.map((t) => (
                     <tr key={t.trade_id} className="border-b border-slate/20 text-paper hover:bg-ink/20 transition">
                       <td className="py-2 pr-3">{t.symbol}</td>
-                      <td className="text-right py-2 px-2">₹{t.entry_price}</td>
-                      <td className="text-right py-2 px-2">{t.exit_price ? `₹${t.exit_price}` : "—"}</td>
+                      <td className="text-right py-2 px-2">{fmtPriceCell(safeTradePrice(t, "entry"))}</td>
+                      <td className="text-right py-2 px-2">{fmtPriceCell(safeTradePrice(t, "exit"))}</td>
                       <td className={`text-right py-2 px-2 ${(t.pnl_pct ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                         {fmtPct(t.pnl_pct)}
                       </td>
@@ -736,12 +766,12 @@ function PositionCard({
           <div className="min-w-0">
             <div className="font-display text-lg text-paper truncate">{trade.symbol}</div>
             <div className="font-mono text-[10px] text-mist/50">
-              {trade.quantity} sh @ ₹{trade.entry_price} · {days}d held
+              {trade.quantity} sh @ {fmtPriceCell(safeTradePrice(trade, "entry"))} · {days}d held
             </div>
           </div>
         </div>
         <div className="text-right shrink-0">
-          <div className="font-mono text-sm text-paper">{trade.current_price ? `₹${trade.current_price}` : "—"}</div>
+          <div className="font-mono text-sm text-paper">{fmtPriceCell(safeTradePrice(trade, "last") || Number(trade.current_price))}</div>
           <div className={`font-mono text-xs ${isUp ? "text-emerald-400" : "text-red-400"}`}>
             {fmtPct(trade.pnl_pct)}
           </div>

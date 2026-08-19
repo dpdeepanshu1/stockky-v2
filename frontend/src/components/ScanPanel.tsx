@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
+import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { ScanResult, Decision, api, ActionablePick, streamMarketScan } from "../api";
 // streamMarketScan available for progressive NDJSON consumption (see upsertScanResultItem below)
 import { sendStockUniverseForTraining, buildUniversePayloadFromScan } from "../api_universe";
@@ -99,6 +100,11 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   const [commitMessage, setCommitMessage] = useState<string | null>(null);
   const [filterChip, setFilterChip] = useState<"all" | "buy" | "prepare" | "avoid">("all");
   const [balanceLow, setBalanceLow] = useState<{ needed: number; available: number } | null>(null);
+  // Step 4 — Buy Sniper
+  const [sniperOpen, setSniperOpen] = useState(false);
+  const [suggestions, setSuggestions] = useState<BuySuggestion[]>([]);
+  const [sniperLoading, setSniperLoading] = useState(false);
+  const [sniperError, setSniperError] = useState<string | null>(null);
   const { connected: quoteWs, subscribeQuotes, quotes: liveQuotes } = useStockkyRealtime();
 
   const filteredResults = useMemo(() => {
@@ -141,6 +147,36 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
     const syms = rows.slice(0, 25).map((r) => r.symbol).filter(Boolean);
     if (syms.length) subscribeQuotes(syms);
   }, [result.all_results, subscribeQuotes]);
+
+
+  const handleSearchBuys = async () => {
+    setSniperOpen(true);
+    setSniperLoading(true);
+    setSniperError(null);
+    setSuggestions([]);
+    try {
+      const rows =
+        (result?.all_results && result.all_results.length > 0
+          ? result.all_results
+          : result?.recommendations) || [];
+      const data = await api.findBuys({
+        stocks: rows,
+        all_results: result?.all_results || [],
+        recommendations: result?.recommendations || [],
+        target_count: 4,
+        min_conviction: 58,
+      });
+      setSuggestions((data?.suggestions || []) as BuySuggestion[]);
+      if (data?.error) setSniperError(String(data.error));
+    } catch (err: any) {
+      console.error("Failed to find buys:", err);
+      setSniperError(err?.message || "Failed to find buy setups");
+      setSuggestions([]);
+    } finally {
+      setSniperLoading(false);
+    }
+  };
+
 
   const handleSendTopPicks = async () => {
     setIsSendingTelegram("top5");
@@ -368,6 +404,20 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
 
       {/* Action buttons */}
       <div className="flex flex-wrap gap-3">
+        <button
+          onClick={handleSearchBuys}
+          disabled={!result || sniperLoading}
+          className="font-mono text-xs bg-emerald-600/25 border border-emerald-500/50 text-emerald-200 rounded-lg px-4 py-2 transition hover:bg-emerald-600/35 disabled:opacity-50 flex items-center gap-2 shadow-lg shadow-emerald-900/20"
+        >
+          {sniperLoading ? (
+            <>
+              <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-emerald-300 animate-spin"></span>
+              Sniping…
+            </>
+          ) : (
+            "🎯 Search for Buy Stocks (1-4)"
+          )}
+        </button>
         <button
           onClick={handleSendTopPicks}
           disabled={!!isSendingTelegram}
@@ -723,6 +773,15 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
           </div>
         </div>
       )}
+
+      <BuySniperModal
+        isOpen={sniperOpen}
+        onClose={() => setSniperOpen(false)}
+        suggestions={suggestions}
+        loading={sniperLoading}
+        error={sniperError}
+        onSelectSymbol={onSelect}
+      />
     </div>
   );
 }
@@ -838,6 +897,7 @@ function CandidateCard({
 }
 
 /** Renders Short / Mid / Long Top lists when present on ScanResult */
+
 export function MultiHorizonScanLists({ data, onSendTelegram, onAddTraining }: {
   data: any;
   onSendTelegram?: (list: any[], label: string) => void;

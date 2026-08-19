@@ -1,7 +1,8 @@
 // frontend/src/components/SurpriseStocks.tsx
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { api } from "../api"; // all calls use getApiUrl() — never relative /api on separate Render hosts
 import { formatInrPrice, getSafePrice } from "../priceDisplay";
+import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 
 export interface SurpriseStock {
   symbol: string;
@@ -59,6 +60,10 @@ export default function SurpriseStocks({
   onSelect?: (symbol: string) => void;
 }) {
   const [stocks, setStocks] = useState<SurpriseStock[]>([]);
+  const [sniperOpen, setSniperOpen] = useState(false);
+  const [suggestions, setSuggestions] = useState<BuySuggestion[]>([]);
+  const [sniperLoading, setSniperLoading] = useState(false);
+  const [sniperError, setSniperError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [meta, setMeta] = useState<{
@@ -121,6 +126,48 @@ export default function SurpriseStocks({
       setPmRunning(false);
       setPmError(e?.message || "Failed to start premarket");
       stopPmPoll();
+    }
+  };
+
+
+  const handleSearchBuysFromSurprise = async () => {
+    setSniperOpen(true);
+    setSniperLoading(true);
+    setSniperError(null);
+    setSuggestions([]);
+    try {
+      const mapped = stocks.map((s) => {
+        const safePrice = getSafePrice(s as any);
+        return {
+          symbol: s.symbol,
+          decision: s.score >= 75 ? "BUY NOW" : "PREPARE TO BUY",
+          combined_score: s.score || 70,
+          conviction: s.score || 70,
+          price: safePrice,
+          cmp: safePrice,
+          ltp: safePrice,
+          close: safePrice,
+          change_pct: s.change_pct,
+          technical_score: s.score || 70,
+          fundamental_score: 70,
+          target: s.target_1,
+          stop_loss: s.trailing_stop,
+          prev_close: s.prev_close,
+          sector: s.sector,
+        };
+      }).filter((x) => x.symbol && Number(x.price) > 0);
+      const data = await api.findBuys({
+        stocks: mapped,
+        target_count: 4,
+        min_conviction: 55,
+      });
+      setSuggestions((data?.suggestions || []) as BuySuggestion[]);
+      if (data?.error) setSniperError(String(data.error));
+    } catch (err: any) {
+      console.error("Sniper error:", err);
+      setSniperError(err?.message || "Failed to find buy setups");
+    } finally {
+      setSniperLoading(false);
     }
   };
 
@@ -307,6 +354,15 @@ export default function SurpriseStocks({
           >
             {loading ? "Scanning…" : "Refresh Scan"}
           </button>
+          <button
+            type="button"
+            onClick={handleSearchBuysFromSurprise}
+            disabled={stocks.length === 0 || sniperLoading}
+            className="font-mono text-xs bg-emerald-600/25 border border-emerald-500/50 text-emerald-200 rounded-lg px-3 py-2 transition hover:bg-emerald-600/35 disabled:opacity-50 shadow-lg shadow-emerald-900/20"
+          >
+            {sniperLoading ? "Sniping…" : "🎯 Search for Buy Stocks (1-4)"}
+          </button>
+
         </div>
       </div>
 
@@ -437,6 +493,15 @@ export default function SurpriseStocks({
           </tbody>
         </table>
       </div>
+
+      <BuySniperModal
+        isOpen={sniperOpen}
+        onClose={() => setSniperOpen(false)}
+        suggestions={suggestions}
+        loading={sniperLoading}
+        error={sniperError}
+        onSelectSymbol={onSelect}
+      />
     </div>
   );
 }

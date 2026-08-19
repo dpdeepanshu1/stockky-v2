@@ -8,6 +8,19 @@ export function getApiUrl(): string {
   return (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
 }
 
+
+/** Alias for callers that import API_BASE_URL — resolves live base (Settings + VITE_API_URL). */
+export function API_BASE_URL(): string {
+  return getApiUrl();
+}
+
+/** Absolute gateway URL for a path (works across separate Render domains). */
+export function apiUrl(path: string): string {
+  const base = getApiUrl().replace(/\/$/, "");
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return `${base}${p}`;
+}
+
 export function setApiUrl(url: string) {
   const clean = url.trim().replace(/\/$/, "");
   if (clean) localStorage.setItem(STORAGE_KEY, clean);
@@ -783,6 +796,35 @@ export const api = {
 
   scanWatchlist: () =>
     request<ScanResult>("/scan/watchlist", undefined, 2, 180000),
+
+  /**
+   * Buy Sniper — 1–4 high-conviction setups from scan rows.
+   * POST /api/scan/find-buys
+   */
+  findBuys: (payload: {
+    stocks?: any[];
+    all_results?: any[];
+    results?: any[];
+    recommendations?: any[];
+    target_count?: number;
+    min_conviction?: number;
+  }) =>
+    request<{
+      ok?: boolean;
+      count: number;
+      suggestions: any[];
+      scanned_input?: number;
+      error?: string;
+    }>(
+      "/api/scan/find-buys",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+      1,
+      30000
+    ),
 
   /**
    * Stream full-market scan as NDJSON (one JSON object per line).

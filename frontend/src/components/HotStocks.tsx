@@ -3,6 +3,8 @@ import { api } from "../api";
 import { useStockkyRealtime } from "../useRealtime";
 import ConvictionCard from "./ConvictionCard";
 import Pipeline from "./Pipeline";
+import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
+import { getSafePrice } from "../priceDisplay";
 
 type HotItem = {
   symbol: string;
@@ -113,6 +115,10 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
     remaining?: number | null;
     pct: number;
   } | null>(null);
+  const [sniperOpen, setSniperOpen] = useState(false);
+  const [suggestions, setSuggestions] = useState<BuySuggestion[]>([]);
+  const [sniperLoading, setSniperLoading] = useState(false);
+  const [sniperError, setSniperError] = useState<string | null>(null);
 
   const { quotes: liveQuotes, subscribeQuotes } = useStockkyRealtime();
 
@@ -181,6 +187,59 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
     return () => clearInterval(id);
   }, [loading, pollJob]);
 
+
+  const handleSearchBuysFromHot = async () => {
+    setSniperOpen(true);
+    setSniperLoading(true);
+    setSniperError(null);
+    setSuggestions([]);
+    try {
+      const list = [
+        ...(data?.bulk_insider_driven || []),
+        ...(data?.results_driven || []),
+        ...(data?.news_driven || []),
+      ];
+      const mapped = list.map((p) => {
+        const live = (liveQuotes as any)?.[p.symbol!];
+        const safePrice = getSafePrice({
+          price: live?.price ?? (p as any).price,
+          cmp: (p as any).cmp,
+          last_price: (p as any).last_price,
+          ltp: (p as any).ltp,
+          close: (p as any).close,
+          current_price: (p as any).current_price,
+          prev_close: (p as any).prev_close,
+        });
+        return {
+          symbol: p.symbol,
+          decision: p.decision || "PREPARE TO BUY",
+          combined_score: p.combined_score ?? p.score ?? 75,
+          conviction: p.combined_score ?? p.score ?? 75,
+          price: safePrice,
+          cmp: safePrice,
+          ltp: safePrice,
+          close: safePrice,
+          change_pct: Number((p as any).change_pct || 0),
+          technical_score: Number((p as any).technical_score || 75),
+          fundamental_score: Number((p as any).fundamental_score || 70),
+          news_score: p.news_score,
+        };
+      }).filter((x) => x.symbol && Number(x.price) > 0);
+      const res = await api.findBuys({
+        stocks: mapped,
+        target_count: 4,
+        min_conviction: 55,
+      });
+      setSuggestions((res?.suggestions || []) as BuySuggestion[]);
+      if (res?.error) setSniperError(String(res.error));
+    } catch (err: any) {
+      console.error("Hot picks sniper error:", err);
+      setSniperError(err?.message || "Failed to find buy setups");
+    } finally {
+      setSniperLoading(false);
+    }
+  };
+
   const startSearch = async () => {
     setError(null);
     setLoading(true);
@@ -213,6 +272,14 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
             className="font-mono text-xs px-4 py-2 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-100 hover:bg-rose-500/30 disabled:opacity-50"
           >
             {loading ? "Searching…" : "Search Hot Picks Stocks"}
+          </button>
+          <button
+            type="button"
+            onClick={handleSearchBuysFromHot}
+            disabled={sniperLoading || !data}
+            className="font-mono text-xs px-4 py-2 rounded-lg border border-emerald-500/50 bg-emerald-600/20 text-emerald-200 hover:bg-emerald-600/35 disabled:opacity-50 shadow-lg shadow-emerald-900/20"
+          >
+            {sniperLoading ? "Sniping…" : "🎯 Search for Buy Stocks (1-4)"}
           </button>
         </div>
 
@@ -282,6 +349,15 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
           pipeline. Nothing is auto-loaded (free-tier friendly).
         </div>
       )}
+
+      <BuySniperModal
+        isOpen={sniperOpen}
+        onClose={() => setSniperOpen(false)}
+        suggestions={suggestions}
+        loading={sniperLoading}
+        error={sniperError}
+        onSelectSymbol={onAnalyze}
+      />
     </div>
   );
 }

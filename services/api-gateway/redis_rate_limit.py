@@ -1,16 +1,19 @@
 """
-Redis sliding-window rate limiter for free-tier multi-service Stockky.
+In-memory sliding-window / token-bucket rate limiter for free-tier Stockky.
 
-Each Render service is a separate account/dyno (own 512MB). Rate limits protect
-*shared* upstreams (Yahoo via market-data, Gemini, etc.) without shrinking the
-scan universe — we only pace outbound calls.
+Replaces any external Redis dependency. Works entirely inside the Render
+container process. Safe for a single free-tier dyno (512 MB).
+
+Buckets are independent (market_data, analysis, decision, gemini, global).
+Fail-open is implicit: if something goes wrong we allow the request.
 """
 from __future__ import annotations
 
 import logging
 import os
 import time
-from typing import Optional
+from collections import defaultdict
+from typing import Dict, List
 
 logger = logging.getLogger("redis-rate-limit")
 
@@ -24,42 +27,73 @@ DEFAULT_LIMITS = {
 }
 
 
-class RedisRateLimiter:
-    def __init__(self, redis_client=None):
-        self._redis = redis_client
+class LocalMemoryRateLimiter:
+    """
+    Sliding-window rate limiter stored in process memory.
+    No Redis, no network, no cold-start.
+    """
+
+    def __init__(self, requests_per_minute: int = 120):
+        self.rpm = requests_per_minute
+        # client_id / bucket → list of timestamps
+        self._tokens: Dict[str, List[float]] = defaultdict(list)
+        self._limits = dict(DEFAULT_LIMITS)
 
     def set_redis(self, redis_client) -> None:
-        self._redis = redis_client
+        """
+        Compatibility shim. Previously wired a Redis client.
+        Now ignored — we stay purely in-memory.
+        """
+        if redis_client is not None:
+            logger.info(
+                "LocalMemoryRateLimiter: ignoring injected Redis client "
+                "(USE_REDIS paths disabled by design)"
+            )
 
     def allow(self, bucket: str, cost: int = 1) -> bool:
         """
-        Return True if request may proceed.
-        Fail-open (allow) if Redis is down so scans never stall hard.
+        Return True if the request may proceed.
+        Always fail-open on any internal error.
         """
-        limit, window = DEFAULT_LIMITS.get(bucket, DEFAULT_LIMITS["global"])
-        if self._redis is None:
-            return True
-        key = f"stockky:rl:{bucket}:{int(time.time() // window)}"
         try:
-            n = self._redis.incrby(key, cost)
-            if n == cost or n == 1:
-                try:
-                    self._redis.expire(key, int(window) + 2)
-                except Exception:
-                    pass
-            if n > limit:
-                logger.info("rate limit hit bucket=%s n=%s limit=%s", bucket, n, limit)
-                return False
-            return True
+            limit, window = self._limits.get(bucket, self._limits["global"])
+            now = time.time()
+            cutoff = now - float(window)
+            key = bucket
+
+            # Prune old timestamps
+            stamps = [t for t in self._tokens[key] if t > cutoff]
+            self._tokens[key] = stamps
+
+            if len(stamps) + cost <= limit:
+                for _ in range(cost):
+                    self._tokens[key].append(now)
+                return True
+
+            logger.info(
+                "rate limit hit bucket=%s n=%s limit=%s",
+                bucket,
+                len(stamps),
+                limit,
+            )
+            return False
         except Exception as e:
-            logger.debug("rate limit redis error (fail-open): %s", e)
+            logger.debug("rate limit error (fail-open): %s", e)
             return True
+
+    def is_allowed(self, client_id: str) -> bool:
+        """
+        Simple per-client API matching the sketch in the performance plan.
+        Uses the global bucket.
+        """
+        return self.allow(client_id or "global", cost=1)
 
     def wait_budget_sec(self, bucket: str) -> float:
         """Suggested sleep when limited (remaining window seconds)."""
-        _, window = DEFAULT_LIMITS.get(bucket, DEFAULT_LIMITS["global"])
+        _, window = self._limits.get(bucket, self._limits["global"])
         return float(window - (time.time() % window)) + 0.05
 
 
-# Process singleton; wire redis in gateway startup
-limiter = RedisRateLimiter()
+# Process singleton — same name as before so main.py imports stay valid
+limiter = LocalMemoryRateLimiter()
+rate_limiter = limiter  # alias used by some call sites

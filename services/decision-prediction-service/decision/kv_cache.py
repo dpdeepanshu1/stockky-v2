@@ -30,8 +30,11 @@ logger = logging.getLogger("kv-cache")
 USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
 if os.getenv("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
     USE_REDIS = False
+if os.getenv("DISABLE_REDIS", "0").lower() in ("1", "true", "yes"):
+    USE_REDIS = False
 
 KV_MEMORY_MAX_KEYS = int(os.getenv("KV_MEMORY_MAX_KEYS", "8000"))
+
 
 # Keys written to Neon so Render restarts do not wipe them
 _DURABLE_PREFIXES = (
@@ -49,6 +52,7 @@ _DURABLE_PREFIXES = (
     "indianapi:fundamentals:",
     "indianapi:",
     "stockky:decide_cache:",  # optional durability for decide (low volume)
+    "stockky:batch_result:",  # scan batch cache survives free-tier sleep
 )
 
 
@@ -145,22 +149,27 @@ def _get_neon():
     _neon_init = True
     url = _neon_url()
     if not url:
-        logger.info("KV: no CACHE_DATABASE_URL/DATABASE_URL — memory-only")
+        logger.info("KV: no CACHE_DATABASE_URL/DATABASE_URL — memory-only (Redis ignored)")
         return None
     try:
         from sqlalchemy import create_engine, text
 
-        # Free-tier friendly pool: 1 connection, recycle often, LIFO reuse
-        pool_size = int(os.getenv("CACHE_DB_POOL_SIZE", "1"))
+        # Free-tier friendly pool. Prefer Neon *pooler* endpoint (port 6543)
+        # over direct (5432) to avoid cold-start + connection storms.
+        # Set CACHE_DATABASE_URL to the -pooler connection string.
+        pool_size = int(os.getenv("CACHE_DB_POOL_SIZE", "2"))
         eng = create_engine(
             url,
             pool_pre_ping=True,
-            pool_size=max(1, pool_size),
-            max_overflow=int(os.getenv("CACHE_DB_MAX_OVERFLOW", "1")),
-            pool_recycle=int(os.getenv("CACHE_DB_POOL_RECYCLE", "120")),
+            pool_size=max(1, min(pool_size, 5)),  # hard-cap for free tier
+            max_overflow=int(os.getenv("CACHE_DB_MAX_OVERFLOW", "2")),
+            pool_recycle=int(os.getenv("CACHE_DB_POOL_RECYCLE", "180")),
             pool_use_lifo=True,
-            pool_timeout=10,
-            connect_args={"connect_timeout": int(os.getenv("CACHE_DB_CONNECT_TIMEOUT", "8"))},
+            pool_timeout=8,
+            connect_args={
+                "connect_timeout": int(os.getenv("CACHE_DB_CONNECT_TIMEOUT", "6")),
+                "application_name": "stockky-kv-cache",
+            },
         )
         with eng.begin() as conn:
             conn.execute(
@@ -180,12 +189,23 @@ def _get_neon():
                     "CREATE INDEX IF NOT EXISTS stockky_kv_expires_idx ON stockky_kv (expires_at)"
                 )
             )
+            # Also ensure key index exists (PRIMARY KEY already covers it)
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_stockky_kv_k ON stockky_kv (k)"
+                )
+            )
         _neon_engine = eng
-        logger.info("KV durable layer: Neon stockky_kv ready (pool_size=%s)", os.getenv("CACHE_DB_POOL_SIZE", "2"))
+        logger.info(
+            "KV durable layer: Neon stockky_kv ready (pool_size=%s, redis_disabled=%s)",
+            pool_size,
+            not USE_REDIS,
+        )
     except Exception as e:
         logger.warning("KV Neon unavailable (memory-only): %s", e)
         _neon_engine = None
     return _neon_engine
+
 
 
 def _neon_get(key: str) -> Any:
@@ -344,6 +364,93 @@ def kv_ttl(key: str) -> int:
     return _mem.ttl(key)
 
 
+def kv_get_many(keys: list) -> dict:
+    """
+    Bulk fetch many keys in as few round-trips as possible.
+    Order: memory → (optional Redis) → single Neon IN/ANY query for remaining durable keys.
+    Critical for scanning ~300 stocks without N+1 latency (~12s → ~50ms for static feeds).
+    """
+    if not keys:
+        return {}
+    result: dict = {}
+    missing: list = []
+
+    for k in keys:
+        val = _mem.get(k)
+        if val is not None:
+            result[k] = val
+        else:
+            missing.append(k)
+
+    if not missing:
+        return result
+
+    # Optional Redis path (only when USE_REDIS=1)
+    r = _get_redis()
+    if r and missing:
+        still_missing = []
+        for k in missing:
+            try:
+                raw = r.get(k)
+                if raw is not None:
+                    if isinstance(raw, (bytes, bytearray)):
+                        raw = raw.decode()
+                    try:
+                        val = json.loads(raw) if isinstance(raw, str) else raw
+                    except Exception:
+                        val = raw
+                    _mem.set(k, val, ttl=300)
+                    result[k] = val
+                else:
+                    still_missing.append(k)
+            except Exception:
+                still_missing.append(k)
+        missing = still_missing
+
+    if not missing:
+        return result
+
+    # Single Neon round-trip for remaining durable keys
+    eng = _get_neon()
+    if eng and missing:
+        durable_missing = [k for k in missing if _is_durable(k)]
+        if durable_missing:
+            try:
+                from sqlalchemy import text
+                import datetime as _dt
+
+                with eng.connect() as conn:
+                    rows = conn.execute(
+                        text(
+                            "SELECT k, v, expires_at FROM stockky_kv WHERE k = ANY(:keys)"
+                        ),
+                        {"keys": durable_missing},
+                    ).fetchall()
+                    now = _dt.datetime.now(_dt.timezone.utc)
+                    for row in rows:
+                        k, v, exp = row[0], row[1], row[2]
+                        if exp is not None:
+                            if getattr(exp, "tzinfo", None) is None:
+                                exp = exp.replace(tzinfo=_dt.timezone.utc)
+                            if exp < now:
+                                continue
+                        try:
+                            val = json.loads(v)
+                        except Exception:
+                            val = v
+                        _mem.set(k, val, ttl=600)
+                        result[k] = val
+            except Exception as e:
+                logger.debug("neon get_many failed: %s", e)
+                # Safe fallback: individual gets
+                for k in durable_missing:
+                    val = _neon_get(k)
+                    if val is not None:
+                        result[k] = val
+
+    return result
+
+
 # Module-level API expected by api-gateway: _kv_cache.get / _kv_cache.set
 def get(key: str) -> Any:
     return kv_get(key)
@@ -355,6 +462,11 @@ def set(key: str, value: Any, ttl: Optional[int] = None) -> None:  # noqa: A001
 
 def delete(key: str) -> None:
     kv_delete(key)
+
+
+def get_many(keys: list) -> dict:
+    """Public bulk API — used by full_market_scan to avoid 300 sequential DB hits."""
+    return kv_get_many(keys)
 
 
 # Back-compat
@@ -387,3 +499,4 @@ def status() -> dict:
         "neon_error": neon_err,
         "cache_database_configured": bool(_neon_url()),
     }
+

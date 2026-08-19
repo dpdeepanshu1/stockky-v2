@@ -144,8 +144,14 @@ DEFAULT_TRAINING_CONFIG = {
 }
 
 # ---------- Lock and progress files ----------
-LOCK_FILE = 'training.lock'
-PROGRESS_FILE = 'training_progress.json'
+_DATA_DIR = os.environ.get("TRAINING_DATA_DIR") or os.environ.get("MODEL_STORE_PATH") or "."
+try:
+    os.makedirs(_DATA_DIR, exist_ok=True)
+except Exception:
+    _DATA_DIR = "."
+LOCK_FILE = os.path.join(_DATA_DIR, "training.lock")
+PROGRESS_FILE = os.path.join(_DATA_DIR, "training_progress.json")
+
 
 # Thread-safe abort event
 abort_event = threading.Event()
@@ -168,31 +174,62 @@ def write_progress(current_fold, total_folds, elapsed_seconds=None, stage: str =
     legacy OHLCV pipeline's fold-based progress (-1 means aborted); stage/
     detail are used by train_pick_success_model instead, since a single
     classifier fit doesn't have folds the same way."""
+    stage_pct = {
+        "idle": 0,
+        "loading_data": 15,
+        "data_loaded": 30,
+        "building_features": 40,
+        "splitting": 45,
+        "walk_forward": 55,
+        "fitting_model": 70,
+        "calibrating": 80,
+        "evaluating": 85,
+        "saving_model": 92,
+        "done": 100,
+        "aborted": 0,
+        "error": 0,
+    }
+    # Fold-based percent when stage not provided
+    fold_pct = 0
+    try:
+        if total_folds and int(total_folds) > 0 and current_fold is not None and int(current_fold) >= 0:
+            fold_pct = int(min(99, max(5, 100 * float(current_fold) / float(total_folds))))
+    except Exception:
+        fold_pct = 0
+    pct = stage_pct.get(stage or "", fold_pct if fold_pct else 5)
     data = {
-        'current_fold': current_fold,
-        'total_folds': total_folds,
-        'timestamp': time.time(),
-        'elapsed': elapsed_seconds,
-        'stage': stage,
-        'detail': detail or {},
+        "current_fold": current_fold,
+        "total_folds": total_folds,
+        "timestamp": time.time(),
+        "elapsed": elapsed_seconds,
+        "stage": stage or ("walk_forward" if total_folds else "idle"),
+        "detail": detail or {},
+        "percent": pct,
+        "error": (detail or {}).get("error") if isinstance(detail, dict) else None,
     }
     try:
-        with open(PROGRESS_FILE, 'w') as f:
+        with open(PROGRESS_FILE, "w") as f:
             json.dump(data, f)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("write_progress failed: %s", e)
 
 
 def get_training_progress():
     """Reads whatever write_progress() last wrote. Returns a default idle
     state if training hasn't run yet or the file's missing/unreadable."""
     if not os.path.exists(PROGRESS_FILE):
-        return {"stage": "idle", "detail": {}, "timestamp": None}
+        return {"stage": "idle", "detail": {}, "timestamp": None, "percent": 0, "is_running": False}
     try:
-        with open(PROGRESS_FILE, 'r') as f:
-            return json.load(f)
+        with open(PROGRESS_FILE, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {"stage": "idle", "detail": {}, "timestamp": None, "percent": 0}
+        data.setdefault("percent", 0)
+        data.setdefault("detail", {})
+        return data
     except Exception:
-        return {"stage": "idle", "detail": {}, "timestamp": None}
+        return {"stage": "idle", "detail": {}, "timestamp": None, "percent": 0, "is_running": False}
+
 
 def lock_checker():
     """Background thread that checks the lock file and sets abort event if missing."""

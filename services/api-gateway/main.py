@@ -21,9 +21,10 @@ import yfinance as yf
 import feedparser
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from upstash_redis import Redis
+# NOTE: upstash_redis is imported LAZILY only when USE_REDIS=1.
+# Top-level import was removed so free-tier cold starts never touch Redis.
 from data_feed import (
     DataFeedStore, extract_feed_payload, DATA_FEED_TTL,
     hot_job_get, hot_job_set, HOT_RESULT_KEY,
@@ -191,26 +192,39 @@ async def universal_exception_handler(request, exc):
     )
 
 # ── Redis (OFF by default — USE_REDIS=1 to enable Upstash) ─────────────────────
+# CRITICAL: Never import or ping Upstash unless USE_REDIS=1.
+# Residual REDIS_URL / UPSTASH_* env vars on Render must not cause a handshake.
 _redis = None
 _USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
-try:
-    if _USE_REDIS and os.getenv("UPSTASH_REDIS_REST_URL") and os.getenv("UPSTASH_REDIS_REST_TOKEN"):
-        _redis = Redis(
-            url=os.getenv("UPSTASH_REDIS_REST_URL"),
-            token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
-        )
-        _redis.ping()
-        logger.info("Connected to Upstash Redis (USE_REDIS=1)")
+if os.getenv("DISABLE_REDIS", "0").lower() in ("1", "true", "yes") or \
+   os.getenv("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
+    _USE_REDIS = False
+
+if _USE_REDIS:
+    url = os.getenv("UPSTASH_REDIS_REST_URL")
+    tok = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+    if url and tok:
+        try:
+            from upstash_redis import Redis as _UpstashRedis
+            _redis = _UpstashRedis(url=url, token=tok)
+            _redis.ping()
+            logger.info("Connected to Upstash Redis (USE_REDIS=1)")
+        except Exception as e:
+            logger.warning("Redis unavailable (falling back to memory+Neon): %s", e)
+            _redis = None
     else:
-        logger.info("Gateway Redis disabled (USE_REDIS=0) — in-memory scan/status cache")
-except Exception as e:
-    logger.warning("Redis unavailable: %s", e)
-    _redis = None
+        logger.info("USE_REDIS=1 but UPSTASH credentials missing — memory+Neon only")
+else:
+    logger.info(
+        "Gateway Redis disabled (USE_REDIS=0 / DISABLE_REDIS) — "
+        "in-memory + Neon durable cache only; no Upstash handshake"
+    )
 
 # In-memory fallback so scan status / universe work without Redis
 _mem_kv = {}
 _mem_kv_exp = {}
 import time as _time_mod
+
 
 
 WATCHLIST_KEY       = "stockky:watchlist"
@@ -1717,10 +1731,11 @@ def _wake_notification_service() -> bool:
 # ⚡ PARALLEL SCAN with reduced workers and retries
 # ============================================================================
 
-# Free-tier friendly default: 18 workers (was 10). Override via env.
-# Pair with market-data yfinance semaphore to avoid Yahoo rate limits.
-MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "2"))  # free-tier safe
-SCAN_BATCH_SIZE = int(os.getenv("SCAN_BATCH_SIZE", "6"))  # small batches reduce load spikes
+# Free-tier friendly default: 12–15 concurrent workers (bounded by Semaphore).
+# Override via MAX_PARALLEL_SCAN_WORKERS. Pair with market-data yfinance limits.
+MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "12"))  # free-tier safe
+SCAN_BATCH_SIZE = int(os.getenv("SCAN_BATCH_SIZE", "10"))  # modest batches; bulk Neon removes DB N+1
+
 MAX_RETRIES = 1
 RETRY_BACKOFF = 1.0
 
@@ -2239,14 +2254,15 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
     cancel_key = SCAN_TASK_PREFIX + task_id + ":cancel"
     client = _get_http_client()  # shared keepalive pool
 
-    # Data Feed coverage FIRST (Neon stockky_kv) — decides whether wake is needed
+    # Data Feed coverage FIRST — ONE Neon bulk query (not 300 sequential hits)
     feed_hit = 0
+    prefetched_feeds: dict = {}
     try:
-        _status(0, message="Checking Neon data-feed coverage…")
+        _status(0, message="Bulk-loading Neon data-feed (single query)…")
         store = _feed_store()
-        for s in universe:
-            base = s.upper().replace(".NS", "").replace(".BO", "")
-            fed = store.get_symbol(base)
+        bases = [s.upper().replace(".NS", "").replace(".BO", "").strip() for s in universe]
+        prefetched_feeds = store.get_symbols_bulk(bases) or {}
+        for base, fed in prefetched_feeds.items():
             if fed and (
                 fed.get("fundamental_score") is not None
                 or fed.get("metrics")
@@ -2255,12 +2271,14 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
             ):
                 feed_hit += 1
         logger.info(
-            "Scan Data Feed coverage: %s/%s symbols (%.0f%%)",
+            "Scan Data Feed bulk coverage: %s/%s symbols (%.0f%%) in 1 query",
             feed_hit, total, (100.0 * feed_hit / total) if total else 0,
         )
-        _status(0, message=f"Neon feed coverage {feed_hit}/{total} — starting batches")
+        _status(0, message=f"Neon bulk feed {feed_hit}/{total} — starting batches")
     except Exception as e:
-        logger.debug("feed coverage: %s", e)
+        logger.debug("feed bulk coverage: %s", e)
+        prefetched_feeds = {}
+
 
     # Pre-scan wake only when feed is cold (<50%). Full wake is slow and unnecessary
     # when Data Feed already holds fundamentals for the universe.
@@ -2631,9 +2649,11 @@ def root():
             "/scan": "GET – synchronous scan (legacy)",
             "/scan/start": "POST – start async parallel scan, returns task_id",
             "/scan/status/{task_id}": "GET – get progress/result of async scan",
+            "/scan/stream": "GET – NDJSON stream of scan results (incremental UI, avoids 100s timeout)",
             "/scan/watchlist": "GET – scan only your watchlist",
             "/scan/universe": "GET – preview current scan universe",
             "/scan/universe/cache": "DELETE – clear universe cache",
+
             "/searched": "GET – list searched symbols",
             "/market/top-gainers": "GET – top 10 gainers",
             "/market/top-losers": "GET – top 10 losers",
@@ -2648,9 +2668,15 @@ def root():
             "/training/status": "GET – get training model status",
             "/training/train": "POST – trigger a new training run",
             "/training/score/{symbol}": "GET – get training intelligence score for a symbol",
+            "/api/surprise/scan": "GET – lightweight surprise momentum scan",
+            "/api/surprise/scan/stream": "GET – NDJSON stream of surprise hits",
+            "/api/surprise/static": "GET – surprise_static_feed baselines",
+            "/surprise/premarket": "POST/GET – premarket baselines (injects scan universe)",
+
             "/docs": "Swagger UI documentation",
         },
     }
+
 
 
 @app.get("/quote/{symbol}")
@@ -2924,6 +2950,49 @@ async def ops_db_status():
         }
 
 
+
+def _neon_keepalive_ping() -> dict:
+    """Lightweight SELECT 1 against Neon to keep free-tier compute warm."""
+    out = {"ok": False, "neon_connected": False, "error": None}
+    try:
+        if _kv_cache is None:
+            out["error"] = "kv_cache not loaded"
+            return out
+        if hasattr(_kv_cache, "status"):
+            st = _kv_cache.status() or {}
+            out["neon_connected"] = bool(st.get("neon_connected"))
+            out["ok"] = bool(st.get("neon_connected"))
+            if st.get("neon_error"):
+                out["error"] = st.get("neon_error")
+            return out
+        _kv_cache.get("__neon_keepalive__")
+        out["ok"] = True
+        out["neon_connected"] = True
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
+@app.get("/ops/neon-keepalive")
+@app.post("/ops/neon-keepalive")
+async def ops_neon_keepalive():
+    """
+    Cron-friendly Neon keep-alive (every ~4 minutes recommended).
+
+    Prevents Neon free-tier compute auto-suspend so the next user scan
+    does not pay 0.5–2.5s cold-start latency.
+
+    Example (GitHub Actions / external cron):
+      curl -X POST https://<api-gateway>/ops/neon-keepalive
+    """
+    result = _neon_keepalive_ping()
+    return {
+        **result,
+        "at": datetime.now(IST).isoformat(),
+        "hint": "Schedule every 4 minutes while you need warm Neon",
+    }
+
+
 @app.post("/ops/idle-tick")
 async def ops_idle_tick():
     """Called by frontend after ~5 min idle during market hours only.
@@ -2940,6 +3009,12 @@ async def ops_idle_tick():
             "note": "Background idle work only during market window; use manual Wake otherwise.",
         }
     did = []
+    try:
+        nk = _neon_keepalive_ping()
+        did.append("neon_keepalive_ok" if nk.get("ok") else "neon_keepalive_error")
+    except Exception as e:
+        logger.debug("idle-tick neon keepalive: %s", e)
+        did.append("neon_keepalive_error")
     try:
         # Indices: cheap, 5 min cache already
         get_market_indices(force_refresh=False)
@@ -2962,6 +3037,7 @@ async def ops_idle_tick():
         "actions": did,
         "at": datetime.now(IST).isoformat(),
     }
+
 
 
 
@@ -3746,6 +3822,122 @@ def get_scan_status(task_id: str):
             data["estimated_remaining"] = None
     return data
 
+
+@app.get("/scan/stream")
+async def stream_market_scan(
+    lite: bool = None,
+    force_refresh: bool = False,
+):
+    """
+    Stream market-scan results as application/x-ndjson.
+    Each line is one completed symbol JSON object so the UI can update
+    incrementally instead of waiting for the full 300-stock response
+    (avoids Render 100s gateway timeout and perceived freezes).
+
+    Flow:
+      1. Bulk Neon get_many for all static feeds (1 query)
+      2. Bounded concurrent workers (Semaphore)
+      3. Yield each result as soon as its batch chunk finishes
+    """
+    if lite is None:
+        use_lite = SCAN_LITE_DEFAULT or _should_force_lite_scan()
+    else:
+        use_lite = bool(lite)
+
+    universe = _build_scan_universe()
+    if force_refresh:
+        try:
+            _redis_set(SCAN_UNIVERSE_KEY, None, ttl=1)
+        except Exception:
+            pass
+        universe = _build_scan_universe()
+    universe = _prioritize_universe(universe)
+    total = len(universe)
+
+    async def event_generator():
+        client = _get_http_client()
+        sem = asyncio.Semaphore(MAX_PARALLEL_WORKERS)
+        start = time.time()
+
+        # 1) Single bulk Neon load
+        prefetched = {}
+        try:
+            store = _feed_store()
+            bases = [
+                s.upper().replace(".NS", "").replace(".BO", "").strip()
+                for s in universe
+            ]
+            prefetched = store.get_symbols_bulk(bases) or {}
+            yield json.dumps({
+                "_meta": True,
+                "event": "feed_bulk_loaded",
+                "total": total,
+                "feed_hits": len(prefetched),
+                "lite": use_lite,
+                "workers": MAX_PARALLEL_WORKERS,
+            }) + "\n"
+        except Exception as e:
+            yield json.dumps({
+                "_meta": True,
+                "event": "feed_bulk_error",
+                "error": str(e)[:200],
+            }) + "\n"
+
+        # 2) Process in chunks so results stream early
+        chunk_size = max(5, min(SCAN_BATCH_SIZE, 15))
+        processed = 0
+        for i in range(0, total, chunk_size):
+            if activity_paused() or "__ALL__" in _SCAN_CANCEL_FLAGS:
+                yield json.dumps({
+                    "_meta": True,
+                    "event": "cancelled",
+                    "processed": processed,
+                    "total": total,
+                }) + "\n"
+                break
+            chunk = universe[i : i + chunk_size]
+            tasks = [
+                _analyze_one_symbol_ultra(sym, client, sem, lite=use_lite)
+                for sym in chunk
+            ]
+            batch = await asyncio.gather(*tasks, return_exceptions=True)
+            for sym, res in zip(chunk, batch):
+                processed += 1
+                if isinstance(res, Exception):
+                    out = {
+                        "symbol": sym,
+                        "decision": "ERROR",
+                        "error": str(res)[:200],
+                    }
+                elif isinstance(res, dict):
+                    out = res
+                else:
+                    out = {"symbol": sym, "decision": "ERROR", "error": "invalid"}
+                out["_progress"] = {
+                    "processed": processed,
+                    "total": total,
+                    "elapsed": round(time.time() - start, 1),
+                }
+                yield json.dumps(out, default=str) + "\n"
+
+        yield json.dumps({
+            "_meta": True,
+            "event": "done",
+            "processed": processed,
+            "total": total,
+            "elapsed": round(time.time() - start, 1),
+        }) + "\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.post("/scan/cancel/{task_id}")
 def cancel_scan(task_id: str):
     """Request cancel — process-local flag + durable key; commit partial; stops ASAP."""
@@ -3755,6 +3947,7 @@ def cancel_scan(task_id: str):
     if not isinstance(data, dict):
         data = {}
     try:
+
         data = dict(data)
         data["cancel_requested"] = True
         data["status"] = "cancelled" if data.get("status") in (None, "running") else data.get("status")
@@ -4884,6 +5077,204 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
     return payload
 
 
+
+
+
+
+# ── Surprise momentum scanner (static Neon baselines + live ticks) ──────────
+@app.get("/api/surprise/scan")
+@app.get("/surprise/scan")
+async def api_surprise_scan(
+    force_reload: bool = False,
+    symbols: str = None,
+):
+    """
+    Lightweight surprise scan:
+      1) bulk-load surprise_static_feed from Neon
+      2) concurrent live quotes (bounded)
+      3) score filter (>=60, change >1%)
+    """
+    try:
+        from surprise_scanner import surprise_engine
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"surprise_scanner import failed: {e}")
+
+    sym_list = None
+    if symbols:
+        sym_list = [x.strip() for x in symbols.replace(";", ",").split(",") if x.strip()]
+
+    client = _get_http_client()
+    result = await surprise_engine.scan(
+        client=client,
+        market_data_url=MARKET_DATA_URL,
+        symbols=sym_list,
+        force_reload_static=bool(force_reload),
+    )
+    return result
+
+
+@app.get("/api/surprise/scan/stream")
+@app.get("/surprise/scan/stream")
+async def api_surprise_scan_stream(
+    force_reload: bool = False,
+    symbols: str = None,
+):
+    """
+    NDJSON stream of surprise hits as each concurrent batch finishes.
+    First line is meta (static_loaded); then scored stocks; final line event=done.
+    """
+    try:
+        from surprise_scanner import surprise_engine
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"surprise_scanner import failed: {e}")
+
+    sym_list = None
+    if symbols:
+        sym_list = [x.strip() for x in symbols.replace(";", ",").split(",") if x.strip()]
+
+    async def event_generator():
+        t0 = time.time()
+        client = _get_http_client()
+        n_static = surprise_engine.load_static_cache(force=bool(force_reload))
+        yield json.dumps({
+            "_meta": True,
+            "event": "static_loaded",
+            "static_loaded": n_static,
+        }) + "\n"
+        if n_static == 0:
+            yield json.dumps({
+                "_meta": True,
+                "event": "error",
+                "error": "surprise_static_feed empty — run premarket first",
+            }) + "\n"
+            return
+
+        if sym_list:
+            keys = [
+                s.upper().replace(".NS", "").replace(".BO", "").strip()
+                for s in sym_list
+                if s
+            ]
+            keys = [k for k in keys if k in surprise_engine.static_cache]
+        else:
+            keys = [
+                k for k, v in surprise_engine.static_cache.items()
+                if v.get("is_liquid", True)
+            ] or list(surprise_engine.static_cache.keys())
+
+        hits = 0
+        chunk = 20
+        for i in range(0, len(keys), chunk):
+            batch = keys[i : i + chunk]
+            ticks = await asyncio.gather(
+                *(surprise_engine._fetch_quote(client, MARKET_DATA_URL, s) for s in batch),
+                return_exceptions=True,
+            )
+            for sym, tick in zip(batch, ticks):
+                if isinstance(tick, Exception) or not tick:
+                    continue
+                scored = surprise_engine.score_stock(sym, tick)
+                if scored:
+                    hits += 1
+                    scored["_progress"] = {
+                        "processed": min(i + chunk, len(keys)),
+                        "total": len(keys),
+                        "hits": hits,
+                        "elapsed": round(time.time() - t0, 1),
+                    }
+                    yield json.dumps(scored, default=str) + "\n"
+
+        yield json.dumps({
+            "_meta": True,
+            "event": "done",
+            "hits": hits,
+            "universe": len(keys),
+            "elapsed": round(time.time() - t0, 1),
+        }) + "\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/surprise/static")
+@app.get("/surprise/static")
+async def api_surprise_static(limit: int = 50):
+    """Proxy / health peek of baselines (also tries local SQL if configured)."""
+    try:
+        from surprise_scanner import surprise_engine
+        n = surprise_engine.load_static_cache()
+        rows = list(surprise_engine.static_cache.values())[: max(1, min(limit, 200))]
+        # JSON-safe
+        out = []
+        for r in rows:
+            d = {k: (str(v) if hasattr(v, "isoformat") else v) for k, v in r.items()}
+            out.append(d)
+        return {"ok": True, "count": n, "rows": out, "source": "gateway_cache"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200], "rows": []}
+
+
+@app.post("/surprise/premarket")
+@app.get("/surprise/premarket")
+async def api_surprise_premarket_proxy(request: Request):
+    """
+    Proxy premarket job to market-data-service.
+    Automatically injects the gateway scan universe when the client body
+    has no symbols — so cron can hit the gateway without maintaining a list.
+    """
+    client = _get_http_client()
+    target = f"{MARKET_DATA_URL.rstrip('/')}/surprise/premarket"
+    try:
+        raw = await request.body()
+        payload = {}
+        if raw:
+            try:
+                payload = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        # Inject scan universe when caller did not supply symbols
+        if not payload.get("symbols"):
+            try:
+                uni = _build_scan_universe()
+                if uni:
+                    payload["symbols"] = [
+                        str(s).upper().replace(".NS", "").replace(".BO", "").strip()
+                        for s in uni
+                        if s
+                    ]
+            except Exception as e:
+                logger.warning("premarket universe inject failed: %s", e)
+
+        # Query-string symbols still forwarded via params
+        body_out = json.dumps(payload).encode("utf-8") if payload else (raw or b"{}")
+        resp = await client.request(
+            method="POST",
+            url=target,
+            content=body_out,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            params=request.query_params,
+            timeout=600.0,
+        )
+        try:
+            data = resp.json()
+            if isinstance(data, dict) and payload.get("symbols"):
+                data["universe_injected"] = len(payload["symbols"])
+            return JSONResponse(content=data, status_code=resp.status_code)
+        except Exception:
+            return JSONResponse(
+                content={"detail": (resp.text or "")[:500]},
+                status_code=resp.status_code if resp.status_code >= 400 else 502,
+            )
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Premarket job timed out")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Premarket proxy error: {e}")
 
 
 

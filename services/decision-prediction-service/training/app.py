@@ -94,8 +94,17 @@ except Exception:
     engine = create_engine(_url, echo=False, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 
-LOCK_FILE = 'training.lock'
-LOCK_TIMEOUT_SECONDS = 300  # 5 minutes
+# Prefer durable/writable paths on free-tier Render (cwd may be read-only after crash)
+_DATA_DIR = os.environ.get("TRAINING_DATA_DIR") or os.environ.get("MODEL_STORE_PATH") or "."
+try:
+    os.makedirs(_DATA_DIR, exist_ok=True)
+except Exception:
+    _DATA_DIR = "."
+LOCK_FILE = os.path.join(_DATA_DIR, "training.lock")
+# Training a full universe can exceed 5 minutes — a short timeout made the lock
+# look "stale" mid-run so a second Trigger would delete the lock and abort the job.
+LOCK_TIMEOUT_SECONDS = int(os.environ.get("TRAINING_LOCK_TIMEOUT_SECONDS", "2700"))  # 45 min default
+
 
 # ---------- Pydantic models for prediction recording ----------
 class PredictionSnapshotCreate(BaseModel):
@@ -207,25 +216,46 @@ def is_lock_stale():
             return True
         return False
     except Exception:
-        return False
+        return True  # unreadable lock → treat as stale
 
 def acquire_lock():
     if is_lock_stale():
-        os.remove(LOCK_FILE)
-        logger.info("Removed stale lock file")
+        try:
+            os.remove(LOCK_FILE)
+            logger.info("Removed stale lock file (age > %ss)", LOCK_TIMEOUT_SECONDS)
+        except Exception as e:
+            logger.warning("Could not remove stale lock: %s", e)
     if os.path.exists(LOCK_FILE):
         return False
-    with open(LOCK_FILE, 'w') as f:
-        f.write(str(os.getpid()))
-    return True
+    try:
+        with open(LOCK_FILE, "w") as f:
+            f.write(f"{os.getpid()}\n{time.time()}\n")
+        return True
+    except Exception as e:
+        logger.error("acquire_lock failed: %s", e)
+        return False
 
 def release_lock():
     if os.path.exists(LOCK_FILE):
-        os.remove(LOCK_FILE)
-        logger.info("Lock released")
+        try:
+            os.remove(LOCK_FILE)
+            logger.info("Lock released")
+        except Exception as e:
+            logger.warning("release_lock failed: %s", e)
 
 def is_training_running():
-    return os.path.exists(LOCK_FILE)
+    """True only for a live lock — stale locks must not block the UI forever."""
+    if not os.path.exists(LOCK_FILE):
+        return False
+    if is_lock_stale():
+        try:
+            os.remove(LOCK_FILE)
+            logger.info("Cleared stale lock inside is_training_running()")
+        except Exception:
+            pass
+        return False
+    return True
+
 
 # ----------------------------------------------------------------------
 # Helper functions
@@ -489,22 +519,56 @@ async def api_status():
     return JSONResponse(content=get_training_status())
 
 @app.post("/api/train")
+@app.post("/train/run")
 async def api_trigger_training(background_tasks: BackgroundTasks, label_source: str = "t1_outcome"):
     if label_source not in ("t1_outcome", "trade_pnl"):
         raise HTTPException(status_code=400, detail="label_source must be 't1_outcome' or 'trade_pnl'")
     if not acquire_lock():
-        raise HTTPException(status_code=409, detail="Training already in progress (or stale lock)")
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Training is currently in progress. Wait for completion, or clear a "
+                "stale lock via DELETE /training/lock or POST /training/api/lock/clear."
+            ),
+        )
+
     def run_training():
         try:
+            try:
+                from train import write_progress
+                write_progress(0, 0, 0, stage="loading_data", detail={"label_source": label_source})
+            except Exception:
+                pass
             from train import train_model
-            train_model(SessionLocal(), os.environ.get('MODEL_STORE_PATH', './model-store'), label_source=label_source)
+            train_model(
+                SessionLocal(),
+                os.environ.get("MODEL_STORE_PATH", "./model-store"),
+                label_source=label_source,
+            )
         except Exception as e:
-            logger.error(f"Training failed: {e}")
+            logger.error("Training failed: %s", e)
+            try:
+                from train import write_progress
+                write_progress(0, 0, 0, stage="aborted", detail={"error": str(e)[:300]})
+            except Exception:
+                pass
         finally:
             release_lock()
             logger.info("Training completed and lock released.")
+
     background_tasks.add_task(run_training)
-    return JSONResponse(content={"status": "Training started successfully", "label_source": label_source, "service_url": SERVICE_URL}, status_code=202)
+    return JSONResponse(
+        content={
+            "status": "Training started successfully",
+            "status_code": "ACCEPTED",
+            "label_source": label_source,
+            "service_url": SERVICE_URL,
+            "progress_url": "/training/api/train/progress",
+            "message": "Training job started in background.",
+        },
+        status_code=202,
+    )
+
 
 @app.get("/api/report")
 async def api_report():
@@ -1266,13 +1330,49 @@ async def api_lock_status():
     return JSONResponse(content={"training_in_progress": is_training_running()})
 
 @app.get("/api/train/progress")
+@app.get("/train/status")
 async def api_train_progress():
     """Polled by the animated Training tab view — current stage
     (loading_data/data_loaded/splitting/fitting_model/evaluating/
     saving_model/done/aborted/idle) plus stage-specific detail, e.g. the
     sample of symbols in the training set once data's loaded."""
     from train import get_training_progress
-    return JSONResponse(content=convert_numpy(get_training_progress()))
+    data = convert_numpy(get_training_progress())
+    if not isinstance(data, dict):
+        data = {"stage": "idle", "detail": {}}
+    data["is_running"] = is_training_running()
+    # Derive percent for UIs that expect a simple 0–100 bar
+    stage = str(data.get("stage") or "idle")
+    pct_map = {
+        "idle": 0,
+        "loading_data": 15,
+        "data_loaded": 30,
+        "building_features": 40,
+        "splitting": 45,
+        "walk_forward": 55,
+        "fitting_model": 70,
+        "calibrating": 80,
+        "evaluating": 85,
+        "saving_model": 92,
+        "done": 100,
+        "aborted": 0,
+        "error": 0,
+        "Failed": 0,
+        "Completed": 100,
+    }
+    if "percent" not in data or data.get("percent") is None:
+        data["percent"] = pct_map.get(stage, 10 if data.get("is_running") else 0)
+    if data.get("is_running") and stage in ("idle", None, ""):
+        data["stage"] = "loading_data"
+        data["percent"] = max(int(data.get("percent") or 0), 5)
+    return JSONResponse(content=data)
+
+
+@app.post("/train/clear-lock")
+async def train_clear_lock_alias():
+    """Alias for clients that call /train/clear-lock."""
+    return await api_clear_lock()
+
 
 # ----------------------------------------------------------------------
 # Aliases for frontend (no /api prefix)

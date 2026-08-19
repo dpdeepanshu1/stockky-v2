@@ -755,12 +755,88 @@ def test_notifications():
     return {"delivered": delivered, "results": attempted, "note": note}
 
 
+# ── Neon keep-alive (every ~4 minutes) — prevents free-tier auto-suspend ──
+_NEON_KEEPALIVE_SEC = int(os.getenv("NEON_KEEPALIVE_INTERVAL_SEC", "240"))
+_neon_keepalive_task = None
+
+
+def _neon_select_1() -> dict:
+    """Lightweight SELECT 1 against Neon via shared kv_cache helpers."""
+    try:
+        if _kv is not None:
+            eng = None
+            if hasattr(_kv, "_get_neon"):
+                eng = _kv._get_neon()
+            if eng is not None:
+                from sqlalchemy import text
+
+                with eng.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+                return {"ok": True, "source": "kv_cache"}
+        # Fallback: direct DATABASE_URL
+        url = (
+            os.getenv("CACHE_DATABASE_URL")
+            or os.getenv("DATABASE_URL")
+            or os.getenv("TRAINING_DATABASE_URL")
+        )
+        if not url:
+            return {"ok": False, "error": "no_database_url"}
+        if url.startswith("postgres://"):
+            url = "postgresql://" + url[len("postgres://") :]
+        from sqlalchemy import create_engine, text
+
+        eng = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+        with eng.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        eng.dispose()
+        return {"ok": True, "source": "direct"}
+    except Exception as e:
+        logger.debug("neon keepalive failed: %s", e)
+        return {"ok": False, "error": str(e)[:160]}
+
+
+@app.get("/ops/neon-keepalive")
+@app.post("/ops/neon-keepalive")
+def neon_keepalive_endpoint():
+    """Cron-friendly keep-alive (also run in-process every ~4 min)."""
+    return _neon_select_1()
+
+
+@app.on_event("startup")
+async def _start_neon_keepalive_loop():
+    """Background loop so Neon stays warm even without external cron."""
+    import asyncio
+
+    global _neon_keepalive_task
+
+    async def _loop():
+        # Stagger first ping slightly after boot
+        await asyncio.sleep(15)
+        while True:
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(None, _neon_select_1)
+                if result.get("ok"):
+                    logger.info("Neon keep-alive OK (%s)", result.get("source"))
+                else:
+                    logger.debug("Neon keep-alive skip/fail: %s", result.get("error"))
+            except Exception as e:
+                logger.debug("Neon keep-alive loop: %s", e)
+            await asyncio.sleep(max(60, _NEON_KEEPALIVE_SEC))
+
+    try:
+        _neon_keepalive_task = asyncio.create_task(_loop())
+        logger.info("Neon keep-alive loop started (every %ss)", _NEON_KEEPALIVE_SEC)
+    except Exception as e:
+        logger.warning("Could not start Neon keep-alive loop: %s", e)
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8008))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
 
 # ── CallMeBot free Telegram voice call ─────────────────────────────────────
+
 # Docs: https://www.callmebot.com/blog/free-api-telegram-bot/
 # Env: CALLMEBOT_PHONE=+91xxxxxxxxxx  CALLMEBOT_APIKEY=xxxxx
 # Multi-user: CALLMEBOT_USERS=phone1:apikey1,phone2:apikey2

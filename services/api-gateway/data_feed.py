@@ -200,6 +200,67 @@ class DataFeedStore:
         # Keep empty local miss so we don't thrash; still return None
         return None
 
+    def get_symbols_bulk(self, symbols: List[str]) -> Dict[str, dict]:
+        """
+        Bulk-load many symbol feeds in one Neon round-trip via kv_cache.get_many.
+        Populates the process-local cache so subsequent get_symbol() hits are free.
+        Returns mapping of base_symbol → payload (only keys that had data).
+        """
+        if not symbols:
+            return {}
+        result: Dict[str, dict] = {}
+        missing_keys: List[str] = []
+        key_to_base: Dict[str, str] = {}
+
+        for sym in symbols:
+            base = _norm_sym(sym)
+            if not base:
+                continue
+            key = DATA_FEED_PREFIX + base
+            local = _LOCAL_SYMBOLS.get(key)
+            if isinstance(local, dict) and _payload_is_useful(local):
+                result[base] = dict(local)
+            else:
+                missing_keys.append(key)
+                key_to_base[key] = base
+
+        if not missing_keys:
+            return result
+
+        # Prefer kv_cache.get_many when available (single Neon ANY query)
+        bulk: Dict[str, Any] = {}
+        try:
+            import kv_cache as _kc
+            if hasattr(_kc, "get_many"):
+                bulk = _kc.get_many(missing_keys) or {}
+            else:
+                for k in missing_keys:
+                    try:
+                        v = self._get(k)
+                        if v is not None:
+                            bulk[k] = v
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug("get_symbols_bulk kv_cache path: %s", e)
+            for k in missing_keys:
+                try:
+                    v = self._get(k)
+                    if v is not None:
+                        bulk[k] = v
+                except Exception:
+                    pass
+
+        for key, val in bulk.items():
+            if not isinstance(val, dict) or not val:
+                continue
+            base = key_to_base.get(key) or key.replace(DATA_FEED_PREFIX, "")
+            _LOCAL_SYMBOLS[key] = val
+            _LOCAL_INDEX.add(base)
+            result[base] = dict(val)
+
+        return result
+
     def put_symbol(self, symbol: str, payload: dict, ttl: int = DATA_FEED_TTL) -> None:
         base = _norm_sym(symbol)
         if not base or not isinstance(payload, dict):

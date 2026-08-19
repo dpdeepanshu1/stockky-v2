@@ -45,7 +45,16 @@ class RateLimitMonitor:
         self._init_redis()
 
     def _init_redis(self) -> None:
-        # Default OFF — process memory only (dashboard still works in-process)
+        # Default OFF — process memory only (dashboard still works in-process).
+        # DISABLE_REDIS / DISABLE_UPSTASH force memory-only even if USE_REDIS=1.
+        if os.environ.get("DISABLE_REDIS", "0").lower() in ("1", "true", "yes"):
+            self._redis = None
+            logger.info("RateLimitMonitor: memory-only (DISABLE_REDIS=1)")
+            return
+        if os.environ.get("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
+            self._redis = None
+            logger.info("RateLimitMonitor: memory-only (DISABLE_UPSTASH=1)")
+            return
         if os.environ.get("USE_REDIS", "0").lower() not in ("1", "true", "yes"):
             self._redis = None
             logger.info("RateLimitMonitor: memory-only (USE_REDIS=0)")
@@ -62,6 +71,7 @@ class RateLimitMonitor:
         except Exception as e:
             logger.warning("RateLimitMonitor Redis unavailable: %s", e)
             self._redis = None
+
 
     def record(
         self,

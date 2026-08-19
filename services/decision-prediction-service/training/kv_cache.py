@@ -24,7 +24,12 @@ from typing import Any, Optional
 logger = logging.getLogger("kv-cache")
 
 USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
+if os.getenv("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
+    USE_REDIS = False
+if os.getenv("DISABLE_REDIS", "0").lower() in ("1", "true", "yes"):
+    USE_REDIS = False
 KV_MEMORY_MAX_KEYS = int(os.getenv("KV_MEMORY_MAX_KEYS", "8000"))
+
 
 # Keys that should also land in Neon so a Render restart does not wipe them
 _DURABLE_PREFIXES = (
@@ -305,6 +310,62 @@ def kv_ttl(key: str) -> int:
     return -2
 
 
+def kv_get_many(keys: list) -> dict:
+    """Bulk fetch — memory first, then optional Redis, then single Neon ANY query."""
+    if not keys:
+        return {}
+    result: dict = {}
+    missing: list = []
+    for k in keys:
+        val = _mem.get(k)
+        if val is not None:
+            result[k] = val
+        else:
+            missing.append(k)
+    if not missing:
+        return result
+    r = _get_redis()
+    if r and missing:
+        still = []
+        for k in missing:
+            try:
+                raw = r.get(k)
+                if raw is not None:
+                    if isinstance(raw, (bytes, bytearray)):
+                        raw = raw.decode()
+                    try:
+                        val = json.loads(raw) if isinstance(raw, str) else raw
+                    except Exception:
+                        val = raw
+                    _mem.set(k, val, ttl=300)
+                    result[k] = val
+                else:
+                    still.append(k)
+            except Exception:
+                still.append(k)
+        missing = still
+    if not missing:
+        return result
+    durable = [k for k in missing if _is_durable(k)]
+    for k in durable:
+        val = _neon_get(k)
+        if val is not None:
+            result[k] = val
+    return result
+
+
+def get(key: str) -> Any:
+    return kv_get(key)
+
+
+def set(key: str, value: Any, ttl: Optional[int] = None) -> None:  # noqa: A001
+    kv_set(key, value, ttl=ttl)
+
+
+def get_many(keys: list) -> dict:
+    return kv_get_many(keys)
+
+
 # Back-compat aliases used by older modules
 def cache_get(key: str) -> Any:
     return kv_get(key)
@@ -312,3 +373,4 @@ def cache_get(key: str) -> Any:
 
 def cache_set(key: str, value: Any, ttl: Optional[int] = None) -> None:
     kv_set(key, value, ttl=ttl)
+

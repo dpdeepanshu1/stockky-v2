@@ -1125,10 +1125,86 @@ def _get_fundamentals_inner(symbol: str):
 
     raise HTTPException(status_code=502, detail=f"Could not fetch fundamentals for {sym}")
 
+
+# ── Surprise pre-market baselines (Neon surprise_static_feed) ───────────────
+class SurprisePremarketRequest(BaseModel):
+    symbols: Optional[list] = None
+
+
+@app.post("/surprise/premarket")
+def surprise_premarket_run(
+    body: Optional[SurprisePremarketRequest] = None,
+    symbols: Optional[str] = Query(None, description="Comma-separated symbols"),
+):
+    """
+    Pre-compute static baselines for surprise scanner (run ~08:55 IST).
+    Body: {"symbols": ["RELIANCE", ...]} or query ?symbols=A,B,C
+    Without input uses SURPRISE_UNIVERSE env or a small seed list.
+    """
+    from surprise_premarket import precalculate_surprise_baselines, default_universe_from_env
+
+    syms: list = []
+    if body and body.symbols:
+        syms = [str(s).strip() for s in body.symbols if str(s).strip()]
+    elif symbols:
+        syms = [x.strip() for x in symbols.split(",") if x.strip()]
+    if not syms:
+        syms = default_universe_from_env()
+    result = precalculate_surprise_baselines(syms)
+    return result
+
+
+@app.get("/surprise/premarket")
+def surprise_premarket_get(
+    symbols: Optional[str] = Query(None, description="Comma-separated symbols"),
+):
+    """GET variant for cron curl simplicity."""
+    return surprise_premarket_run(body=None, symbols=symbols)
+
+
+@app.get("/surprise/static")
+def surprise_static_list(limit: int = 50):
+    """Peek rows in surprise_static_feed (debug / health)."""
+    from surprise_premarket import _db_url
+
+    url = _db_url()
+    if not url:
+        return {"ok": False, "error": "no_database_url", "rows": []}
+    try:
+        from sqlalchemy import create_engine, text
+
+        eng = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+        with eng.connect() as conn:
+            rows = (
+                conn.execute(
+                    text(
+                        "SELECT symbol, prev_close, avg_15m_volume, daily_atr, high_52w, "
+                        "dist_52w_pct, sector, is_liquid, updated_at "
+                        "FROM surprise_static_feed ORDER BY updated_at DESC LIMIT :lim"
+                    ),
+                    {"lim": max(1, min(limit, 500))},
+                )
+                .mappings()
+                .all()
+            )
+        eng.dispose()
+        out = []
+        for r in rows:
+            d = dict(r)
+            if d.get("updated_at") is not None:
+                d["updated_at"] = str(d["updated_at"])
+            out.append(d)
+        return {"ok": True, "count": len(out), "rows": out}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200], "rows": []}
+
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8001))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+
 
 
 # ── Official NSE Bhavcopy + quote delivery % (free) ─────────────────────────

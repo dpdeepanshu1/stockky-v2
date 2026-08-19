@@ -1,11 +1,17 @@
 """
-Decision Engine Service v0.7.4
+Decision Engine Service v0.7.6
 Changes:
 - Fetches market sentiment from API Gateway's /market/indices endpoint (fast and reliable)
 - Always includes the live market_score in the response
 - Added retry and logging
 - Speed: in-process + Redis decide cache, bulk /decide/batch endpoint (free-tier friendly)
 - Multi-horizon scoring (short/mid/long) via horizons.py
+- v0.7.5: Expanded shared httpx pool (150 keepalive / 400 max connections, 45s timeout)
+  to eliminate PoolTimeout and ReadTimeout under concurrent free-tier scan load
+- v0.7.6: Short-circuit path — when gateway/Neon already supplies RSI, PE, technical_score,
+  fundamental_score, news_score etc., skip the corresponding HTTP calls to analysis-intelligence.
+  New POST /decide/evaluate accepts a payload and prefers supplied data (eliminates ~90% of
+  internal traffic during market scans on free tier).
 """
 import os
 import json
@@ -166,11 +172,13 @@ def time_module_time():
     import time as _t
     return _t.time()
 
-app = FastAPI(title="Stockky Decision Engine", version="0.7.4")
+app = FastAPI(title="Stockky Decision Engine", version="0.7.6")
 
 # Shared downstream client — avoid per-request TLS to analysis/training/market-data
-_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=20, max_connections=50)
-_HTTP_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
+# Expanded pool + longer timeouts for free-tier Render (prevents PoolTimeout / ReadTimeout
+# when scanning many symbols and fanning out to technical/fundamental/news/event/prediction)
+_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=150, max_connections=400)
+_HTTP_TIMEOUT = httpx.Timeout(45.0, connect=15.0)
 _shared_http: httpx.AsyncClient | None = None
 
 
@@ -186,7 +194,7 @@ def _get_http_client() -> httpx.AsyncClient:
 async def _start_http_pool():
     global _shared_http
     _shared_http = httpx.AsyncClient(limits=_HTTP_LIMITS, timeout=_HTTP_TIMEOUT, follow_redirects=True)
-    logger.info("Decision shared httpx pool started")
+    logger.info("Decision shared httpx pool started (limits=150 keepalive / 400 max, timeout=45s)")
 
 
 @app.on_event("shutdown")
@@ -219,7 +227,7 @@ class Decision(str, Enum):
 
 @app.get("/")
 def root():
-    return {"service": "Stockky Decision Engine", "version": "0.7.4", "status": "running",
+    return {"service": "Stockky Decision Engine", "version": "0.7.6", "status": "running",
             "features": ["decide_cache", "decide_batch"]}
 
 
@@ -873,9 +881,158 @@ async def _fallback_technical_from_market_data(symbol: str) -> dict:
     return out
 
 
+# ── Short-circuit helpers (prefer gateway / Neon payload over HTTP) ─────────
+def _derive_technical_from_payload(payload: dict) -> dict:
+    """Build a technical pillar dict from prefetched fields (RSI, scores, price)."""
+    rsi = _safe_float(payload.get("rsi"), 52.0)
+    close = _safe_float(payload.get("close") or payload.get("price") or payload.get("ltp") or payload.get("cmp"))
+    stored = payload.get("technical_score")
+    if stored is not None:
+        tech_score = _safe_int(stored, 50)
+    else:
+        # Lightweight RSI-based score (mirrors instant_scanner heuristics)
+        if 45 <= rsi <= 65:
+            tech_score = 62
+        elif 35 <= rsi < 45 or 65 < rsi <= 72:
+            tech_score = 55
+        elif rsi < 30:
+            tech_score = 68  # oversold bounce potential
+        elif rsi > 75:
+            tech_score = 38  # overbought
+        else:
+            tech_score = 50
+    return {
+        "technical_score": tech_score,
+        "trend_strength": payload.get("trend_strength") or "neutral",
+        "volume_surge": bool(payload.get("volume_surge", False)),
+        "close": close,
+        "support": _safe_float(payload.get("support")),
+        "resistance": _safe_float(payload.get("resistance")),
+        "rsi": rsi,
+        "macd": payload.get("macd") or payload.get("macd_hist"),
+        "ema20": payload.get("ema20") or payload.get("ema"),
+        "reasons": ["Short-circuit: technical derived from gateway/Neon payload (no HTTP)"],
+        "from_payload": True,
+        "data_insufficient": close is None,
+    }
+
+
+def _derive_fundamental_from_payload(payload: dict) -> dict:
+    """Build a fundamental pillar dict from PE / stored score / metrics."""
+    pe = _safe_float(payload.get("pe_ratio") or payload.get("pe"), 22.0)
+    stored = payload.get("fundamental_score")
+    if stored is not None:
+        fund_score = _safe_int(stored, 50)
+    else:
+        if 8 <= pe <= 28:
+            fund_score = 62
+        elif 28 < pe <= 40:
+            fund_score = 48
+        elif 0 < pe < 8:
+            fund_score = 55
+        elif pe > 50:
+            fund_score = 35
+        else:
+            fund_score = 50
+    metrics = payload.get("metrics") or payload.get("fundamental_metrics") or {}
+    if not isinstance(metrics, dict):
+        metrics = {}
+    return {
+        "fundamental_score": fund_score,
+        "valuation": payload.get("valuation") or "fair",
+        "sector": payload.get("sector"),
+        "industry": payload.get("industry"),
+        "quality_score": payload.get("quality_score"),
+        "metrics": metrics,
+        "reasons": ["Short-circuit: fundamental derived from gateway/Neon payload (no HTTP)"],
+        "from_payload": True,
+        "fallback_used": False,
+    }
+
+
+def _has_usable_prefetched(payload: dict | None) -> bool:
+    """True when payload has enough fields to skip at least one expensive HTTP call."""
+    if not isinstance(payload, dict) or not payload:
+        return False
+    keys = (
+        "technical_score", "fundamental_score", "news_score",
+        "rsi", "pe_ratio", "pe", "sentiment_score", "market_score",
+        "close", "price", "ltp",
+    )
+    return any(payload.get(k) is not None for k in keys)
+
+
 # ── Main route ────────────────────────────────────────────────────
 @app.get("/decide/{symbol}")
-async def decide(symbol: str, already_owned: bool = False, background_tasks: BackgroundTasks = None, force: bool = False):
+async def decide(
+    symbol: str,
+    already_owned: bool = False,
+    background_tasks: BackgroundTasks = None,
+    force: bool = False,
+    # Optional short-circuit query params (gateway can pass Neon values)
+    rsi: float | None = None,
+    pe_ratio: float | None = None,
+    technical_score: int | None = None,
+    fundamental_score: int | None = None,
+    news_score: int | None = None,
+    close: float | None = None,
+    skip_http: bool = False,
+):
+    # Build prefetched bag from query params when present
+    prefetched = None
+    if any(v is not None for v in (rsi, pe_ratio, technical_score, fundamental_score, news_score, close)) or skip_http:
+        prefetched = {
+            k: v for k, v in {
+                "rsi": rsi,
+                "pe_ratio": pe_ratio,
+                "technical_score": technical_score,
+                "fundamental_score": fundamental_score,
+                "news_score": news_score,
+                "close": close,
+            }.items() if v is not None
+        }
+        if skip_http:
+            prefetched["skip_http"] = True
+    return await _decide_impl(symbol, already_owned=already_owned, background_tasks=background_tasks, force=force, prefetched=prefetched)
+
+
+@app.post("/decide/evaluate")
+async def decide_evaluate(request: Request, background_tasks: BackgroundTasks = None):
+    """
+    Short-circuit evaluate: prefer payload data from API Gateway / Neon cache.
+    Eliminates most internal HTTP calls to analysis-intelligence-service during scans.
+    Body example:
+      {
+        "symbol": "RELIANCE",
+        "rsi": 54.2,
+        "pe_ratio": 24.1,
+        "technical_score": 61,
+        "fundamental_score": 58,
+        "news_score": 55,
+        "sentiment_score": 52,
+        "close": 2450.5,
+        "already_owned": false,
+        "force": false
+      }
+    """
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON body required")
+    symbol = (body.get("symbol") or "").strip().upper().replace(".NS", "").replace(".BO", "")
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol required")
+    already_owned = bool(body.get("already_owned", False))
+    force = bool(body.get("force", False))
+    return await _decide_impl(symbol, already_owned=already_owned, background_tasks=background_tasks, force=force, prefetched=body)
+
+
+async def _decide_impl(
+    symbol: str,
+    already_owned: bool = False,
+    background_tasks: BackgroundTasks = None,
+    force: bool = False,
+    prefetched: dict | None = None,
+):
     # Speed: serve from decide cache unless force=true
     if not force:
         cached = _cache_get_decide(symbol)
@@ -885,19 +1042,85 @@ async def decide(symbol: str, already_owned: bool = False, background_tasks: Bac
             return cached
     try:
         client = _get_http_client()
-        if True:
-            technical_task = asyncio.create_task(_fetch_optional(client, f"{TECHNICAL_URL}/analyze/{symbol}", "Technical"))
-            fundamental_task = asyncio.create_task(_fetch_optional(client, f"{FUNDAMENTAL_URL}/analyze/{symbol}", "Fundamental"))
-            news_task = asyncio.create_task(_fetch_optional(client, f"{NEWS_URL}/analyze/{symbol}", "News"))
-            events_task = asyncio.create_task(_fetch_optional(client, f"{EVENT_URL}/events/{symbol}", "Events"))
-            prediction_task = asyncio.create_task(_fetch_optional(client, f"{PREDICTION_URL}/predict/{symbol}", "Prediction"))
-            sentiment_task = asyncio.create_task(get_market_sentiment())
-            training_task = asyncio.create_task(get_training_score(symbol))
+        use_short = _has_usable_prefetched(prefetched)
+        skip_all_http = bool(prefetched and prefetched.get("skip_http"))
 
-            technical, fundamental, news, events, prediction, sentiment, training = await asyncio.gather(
-                technical_task, fundamental_task, news_task, events_task,
-                prediction_task, sentiment_task, training_task
-            )
+        # Decide which pillars we can satisfy from payload vs must fetch
+        need_technical = not (use_short and (
+            prefetched.get("technical_score") is not None or prefetched.get("rsi") is not None
+        ))
+        need_fundamental = not (use_short and (
+            prefetched.get("fundamental_score") is not None
+            or prefetched.get("pe_ratio") is not None
+            or prefetched.get("pe") is not None
+        ))
+        need_news = not (use_short and prefetched.get("news_score") is not None)
+        # Events + prediction are cheaper to keep live (or still fetch) unless skip_http
+        need_events = not skip_all_http
+        need_prediction = not skip_all_http
+        need_sentiment = not (use_short and (
+            prefetched.get("sentiment_score") is not None or prefetched.get("market_score") is not None
+        ))
+        need_training = not skip_all_http
+
+        if skip_all_http:
+            need_technical = need_fundamental = need_news = False
+            need_events = need_prediction = need_sentiment = need_training = False
+
+        tasks = {}
+        if need_technical:
+            tasks["technical"] = asyncio.create_task(_fetch_optional(client, f"{TECHNICAL_URL}/analyze/{symbol}", "Technical"))
+        if need_fundamental:
+            tasks["fundamental"] = asyncio.create_task(_fetch_optional(client, f"{FUNDAMENTAL_URL}/analyze/{symbol}", "Fundamental"))
+        if need_news:
+            tasks["news"] = asyncio.create_task(_fetch_optional(client, f"{NEWS_URL}/analyze/{symbol}", "News"))
+        if need_events:
+            tasks["events"] = asyncio.create_task(_fetch_optional(client, f"{EVENT_URL}/events/{symbol}", "Events"))
+        if need_prediction:
+            tasks["prediction"] = asyncio.create_task(_fetch_optional(client, f"{PREDICTION_URL}/predict/{symbol}", "Prediction"))
+        if need_sentiment:
+            tasks["sentiment"] = asyncio.create_task(get_market_sentiment())
+        if need_training:
+            tasks["training"] = asyncio.create_task(get_training_score(symbol))
+
+        if tasks:
+            keys = list(tasks.keys())
+            results = await asyncio.gather(*(tasks[k] for k in keys))
+            fetched = dict(zip(keys, results))
+        else:
+            fetched = {}
+
+        # Fill pillars from payload first, then from HTTP results
+        if not need_technical:
+            technical = _derive_technical_from_payload(prefetched or {})
+            logger.info("%s technical SHORT-CIRCUIT (from payload)", symbol)
+        else:
+            technical = fetched.get("technical")
+
+        if not need_fundamental:
+            fundamental = _derive_fundamental_from_payload(prefetched or {})
+            logger.info("%s fundamental SHORT-CIRCUIT (from payload)", symbol)
+        else:
+            fundamental = fetched.get("fundamental")
+
+        if not need_news:
+            ns = prefetched.get("news_score") if prefetched else None
+            news = {"news_score": _safe_int(ns, 50), "from_payload": True, "reasons": ["Short-circuit: news from payload"]} if ns is not None else None
+            logger.info("%s news SHORT-CIRCUIT (from payload)", symbol)
+        else:
+            news = fetched.get("news")
+
+        events = fetched.get("events") if need_events else (prefetched.get("events") or prefetched.get("event_data") if prefetched else None) or {}
+        prediction = fetched.get("prediction") if need_prediction else None
+
+        if not need_sentiment:
+            ms = prefetched.get("market_score") or prefetched.get("sentiment_score") if prefetched else None
+            sentiment = {"market_score": _safe_int(ms, 50), "classification": "NEUTRAL", "from_payload": True}
+            logger.info("%s sentiment SHORT-CIRCUIT (from payload)", symbol)
+        else:
+            sentiment = fetched.get("sentiment")
+
+        training = fetched.get("training") if need_training else {"training_score": 50, "from_payload": True}
 
         data_insufficient = False
 

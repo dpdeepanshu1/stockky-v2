@@ -35,13 +35,35 @@ MAX_HISTORY_ROWS = int(os.environ.get('MAX_HISTORY_ROWS', '260'))  # ~1y daily, 
 MAX_HISTORY_PERIOD = os.environ.get('MAX_HISTORY_PERIOD', '1y')
 
 def _report_rate_limit(status: int, path: str = "", detail: str = "", symbol: str = "") -> None:
+    """
+    Dual-write rate-limit events:
+      1) Direct Neon KV so the gateway Rate Limit Dashboard is not blind
+      2) Best-effort POST to gateway /ops/rate-limits/event for in-process monitor
+    """
+    try:
+        from circuit_breaker import record_rate_limit_hit
+        record_rate_limit_hit(
+            provider="market_data",
+            status=int(status),
+            path=path or "",
+            detail=str(detail)[:200],
+            symbol=symbol or "",
+        )
+    except Exception:
+        pass
     try:
         gw = os.environ.get("API_GATEWAY_URL", "").rstrip("/")
         if not gw:
             return
         requests.post(
             f"{gw}/ops/rate-limits/event",
-            json={"source": "market_data", "status": status, "path": path, "detail": str(detail)[:200], "symbol": symbol},
+            json={
+                "source": "market_data",
+                "status": status,
+                "path": path,
+                "detail": str(detail)[:200],
+                "symbol": symbol,
+            },
             timeout=2,
         )
     except Exception:
@@ -159,6 +181,7 @@ def _with_retry(func, max_retries=4, base_delay=1.0):
             if "429" in msg or "too many" in msg or "rate limit" in msg:
                 _set_cooldown("yfinance", _YF_COOLDOWN_SEC)
                 br.record_failure(str(e))
+                _report_rate_limit(429, path="yfinance", detail=str(e)[:200])
                 raise
             if attempt == max_retries - 1:
                 br.record_failure(str(e))

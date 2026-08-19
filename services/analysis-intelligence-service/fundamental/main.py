@@ -198,7 +198,18 @@ def analyze(symbol: str):
         fallback_used = True
     except httpx.HTTPStatusError as e:
         logger.error(f"Market data service error for {symbol}: {e}")
-        if e.response.status_code >= 500:
+        try:
+            from rate_limit_report import report_if_rate_limited
+            report_if_rate_limited(
+                e,
+                provider="analysis" if e.response.status_code < 500 else "market_data",
+                path=f"/fundamentals/{symbol}",
+                symbol=symbol,
+                status=e.response.status_code,
+            )
+        except Exception:
+            pass
+        if e.response.status_code >= 500 or e.response.status_code == 429:
             fallback_used = True
         else:
             raise HTTPException(status_code=e.response.status_code, detail=f"Market data service error: {e}")

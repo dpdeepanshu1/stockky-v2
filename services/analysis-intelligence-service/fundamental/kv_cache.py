@@ -53,6 +53,9 @@ _DURABLE_PREFIXES = (
     "indianapi:",
     "stockky:decide_cache:",  # optional durability for decide (low volume)
     "stockky:batch_result:",  # scan batch cache survives free-tier sleep
+    "stockky:rate_limit_stats",  # cross-service rate-limit dashboard (Neon)
+    "stockky:rate_limit_events_neon",
+    "stockky:rate_limit",  # prefix catch-all for rate-limit keys
 )
 
 

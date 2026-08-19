@@ -181,6 +181,11 @@ def _yf_mark_rate_limited(err: Exception | str | None = None) -> None:
     if "429" in msg or "Too Many Requests" in msg or "Rate limited" in msg:
         _yf_rate_limited_until = max(_yf_rate_limited_until, _t.time() + _YF_COOLDOWN_SEC)
         logger.warning("Yahoo/yfinance rate-limited — pausing yfinance enrichment for %.0fs", _YF_COOLDOWN_SEC)
+        try:
+            from rate_limit_report import report_if_rate_limited
+            report_if_rate_limited(err, provider="market_data", path="event/yfinance")
+        except Exception:
+            pass
 
 
 def _get_ticker(symbol: str) -> yf.Ticker:

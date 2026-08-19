@@ -190,6 +190,7 @@ class CircuitBreaker:
             self._persist()
 
     def record_failure(self, error: str = "") -> None:
+        opened = False
         with self._lock:
             self._last_error = (error or "")[:200]
             if self._state == "half_open":
@@ -198,16 +199,28 @@ class CircuitBreaker:
                 self._failures = self.failure_threshold
                 self._persist()
                 logger.warning("circuit %s → open (half_open probe failed): %s", self.name, self._last_error)
-                return
-            self._failures += 1
-            if self._failures >= self.failure_threshold:
-                self._state = "open"
-                self._opened_at = time.time()
-                logger.warning(
-                    "circuit %s → open after %s failures: %s",
-                    self.name, self._failures, self._last_error,
+                opened = True
+            else:
+                self._failures += 1
+                if self._failures >= self.failure_threshold:
+                    self._state = "open"
+                    self._opened_at = time.time()
+                    logger.warning(
+                        "circuit %s → open after %s failures: %s",
+                        self.name, self._failures, self._last_error,
+                    )
+                    opened = True
+                self._persist()
+        # Cross-service Neon write so gateway Rate Limit Dashboard is not blind
+        if opened or _looks_like_rate_limit(error):
+            try:
+                record_rate_limit_hit(
+                    provider=_provider_from_breaker(self.name),
+                    status=429 if _looks_like_rate_limit(error) else 503,
+                    detail=error or f"circuit {self.name} open",
                 )
-            self._persist()
+            except Exception:
+                pass
 
     def call(self, func: Callable, *args, **kwargs):
         if not self.allow():
@@ -223,6 +236,119 @@ class CircuitBreaker:
 
 _registry: Dict[str, CircuitBreaker] = {}
 _registry_lock = threading.Lock()
+
+# Must match api-gateway rate_limit_monitor.NEON_STATS_KEY / NEON_EVENTS_KEY
+NEON_STATS_KEY = "stockky:rate_limit_stats"
+NEON_EVENTS_KEY = "stockky:rate_limit_events_neon"
+NEON_TTL = 86400
+
+
+def _looks_like_rate_limit(error: str = "") -> bool:
+    msg = (error or "").lower()
+    return any(x in msg for x in ("429", "rate limit", "too many", "quota", "throttl"))
+
+
+def _provider_from_breaker(name: str) -> str:
+    n = (name or "").lower()
+    if "yahoo" in n or "yfinance" in n or "yf" in n:
+        return "market_data"
+    if "nse" in n:
+        return "nse"
+    if "alpha" in n:
+        return "market_data"
+    if "indian" in n:
+        return "indianapi"
+    if "gemini" in n:
+        return "gemini"
+    if "groq" in n:
+        return "groq"
+    return "market_data"
+
+
+def record_rate_limit_hit(
+    provider: str,
+    status: int = 429,
+    path: str = "",
+    detail: str = "",
+    symbol: str = "",
+) -> None:
+    """
+    Push 429/503 failures directly to the central Neon stockky_kv table so the
+    API Gateway Rate Limit Dashboard can read real worker hits (not empty zeros).
+
+    Uses the same keys as services/api-gateway/rate_limit_monitor.py.
+    Best-effort: never raises to callers.
+    """
+    try:
+        from kv_cache import kv_get, kv_set
+    except Exception as e:
+        logger.debug("record_rate_limit_hit: kv_cache unavailable: %s", e)
+        return
+
+    src = (provider or "market_data").lower()[:40]
+    now = time.time()
+    event = {
+        "ts": now,
+        "source": src,
+        "status": int(status),
+        "path": (path or "")[:120],
+        "detail": (detail or "")[:200],
+        "symbol": (symbol or "")[:32],
+        "origin": "market-data-service",
+    }
+
+    try:
+        # Rolling events list
+        raw_events = kv_get(NEON_EVENTS_KEY)
+        events: list = []
+        if isinstance(raw_events, list):
+            events = list(raw_events)
+        elif isinstance(raw_events, dict) and isinstance(raw_events.get("events"), list):
+            events = list(raw_events["events"])
+        events.insert(0, event)
+        events = events[:500]
+        kv_set(NEON_EVENTS_KEY, events, ttl=NEON_TTL)
+
+        # Aggregate stats (last 1h by source)
+        cutoff = now - 3600
+        counts: Dict[str, int] = {}
+        for e in events:
+            if not isinstance(e, dict):
+                continue
+            if float(e.get("ts") or 0) < cutoff:
+                continue
+            s = str(e.get("source") or "unknown")
+            counts[s] = counts.get(s, 0) + 1
+
+        # Merge with any prior stats blob so concurrent writers don't fully clobber
+        prior = kv_get(NEON_STATS_KEY)
+        if isinstance(prior, dict) and isinstance(prior.get("by_source_1h"), dict):
+            for k, v in prior["by_source_1h"].items():
+                # Prefer live event-derived counts when present
+                if k not in counts:
+                    try:
+                        counts[k] = int(v)
+                    except (TypeError, ValueError):
+                        pass
+
+        stats = {
+            "updated_at": now,
+            "window_sec": 3600,
+            "by_source_1h": counts,
+            "events_1h": sum(counts.values()),
+            "limits": {
+                "market_data": {"limit": 500},
+                "indianapi": {"limit": 250},
+                "gemini": {"limit": 60},
+                "groq": {"limit": 60},
+                "nse": {"limit": 200},
+            },
+            "last_hit": event,
+        }
+        kv_set(NEON_STATS_KEY, stats, ttl=NEON_TTL)
+        logger.info("rate_limit_hit recorded provider=%s status=%s", src, status)
+    except Exception as e:
+        logger.warning("Failed to record rate limit stat: %s", e)
 
 
 def get_breaker(

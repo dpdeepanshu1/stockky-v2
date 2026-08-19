@@ -166,6 +166,11 @@ def _fetch_history_yfinance(symbol: str):
         return _candles_to_df(candles)
     except Exception as e:
         logger.warning("yfinance history fallback failed for %s: %s", symbol, e)
+        try:
+            from rate_limit_report import report_if_rate_limited
+            report_if_rate_limited(e, provider="market_data", path="technical/yfinance", symbol=symbol)
+        except Exception:
+            pass
         return None
 
 
@@ -184,8 +189,24 @@ def _fetch_history_from_market_data(symbol: str, period: str = "6mo"):
                 return df
         else:
             logger.warning("market-data history HTTP %s for %s period=%s", resp.status_code, symbol, period)
+            if resp.status_code in (429, 503):
+                try:
+                    from rate_limit_report import record_rate_limit_hit
+                    record_rate_limit_hit(
+                        provider="market_data",
+                        status=resp.status_code,
+                        path=f"/history/{symbol}",
+                        symbol=symbol,
+                    )
+                except Exception:
+                    pass
     except httpx.HTTPError as e:
         logger.warning("market-data history error %s period=%s: %s", symbol, period, e)
+        try:
+            from rate_limit_report import report_if_rate_limited
+            report_if_rate_limited(e, provider="market_data", path=f"/history/{symbol}", symbol=symbol)
+        except Exception:
+            pass
     return None
 
 

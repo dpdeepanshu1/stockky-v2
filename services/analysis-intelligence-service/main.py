@@ -13,6 +13,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+# Allow sub-apps (technical/fundamental/news/event) to import shared rate_limit_report
+if BASE not in sys.path:
+    sys.path.insert(0, BASE)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("analysis-intelligence-service")
 

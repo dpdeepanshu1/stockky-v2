@@ -329,6 +329,16 @@ def _fetch_newsapi(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
             resp = client.get(url)
             if resp.status_code != 200:
                 logger.warning("NewsAPI returned status %s", resp.status_code)
+                if resp.status_code in (429, 403, 503):
+                    try:
+                        from rate_limit_report import record_rate_limit_hit
+                        record_rate_limit_hit(
+                            provider="analysis",
+                            status=resp.status_code,
+                            path="news/newsapi",
+                        )
+                    except Exception:
+                        pass
                 return []
             data = resp.json()
             items = []
@@ -452,9 +462,24 @@ def _score_headline(title: str) -> float:
                 return 0.0
         else:
             logger.warning(f"HF API error: {resp.status_code}")
+            if resp.status_code in (429, 503):
+                try:
+                    from rate_limit_report import record_rate_limit_hit
+                    record_rate_limit_hit(
+                        provider="analysis",
+                        status=resp.status_code,
+                        path="news/huggingface",
+                    )
+                except Exception:
+                    pass
             return 0.0
     except Exception as e:
         logger.warning(f"HF API call failed: {e}")
+        try:
+            from rate_limit_report import report_if_rate_limited
+            report_if_rate_limited(e, provider="analysis", path="news/huggingface")
+        except Exception:
+            pass
         return 0.0
 
 

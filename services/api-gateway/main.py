@@ -1342,7 +1342,7 @@ def _fetch_price_from_quote(symbol: str) -> Optional[float]:
 async def _fetch_prices_bulk_async(symbols: list, client: httpx.AsyncClient) -> dict:
     """Concurrent short quotes for a scan chunk → {BASE: float}."""
     out = {}
-    sem = asyncio.Semaphore(15)
+    sem = asyncio.Semaphore(8)  # aligned with MAX_PARALLEL_WORKERS (free-tier safe)
 
     async def one(sym: str):
         base = (sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
@@ -1778,10 +1778,13 @@ def _wake_notification_service() -> bool:
 # ⚡ PARALLEL SCAN with reduced workers and retries
 # ============================================================================
 
-# Free-tier friendly default: 12–15 concurrent workers (bounded by Semaphore).
-# Override via MAX_PARALLEL_SCAN_WORKERS. Pair with market-data yfinance limits.
-MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "12"))  # free-tier safe
-SCAN_BATCH_SIZE = int(os.getenv("SCAN_BATCH_SIZE", "10"))  # modest batches; bulk Neon removes DB N+1
+# Free-tier safe default: 8 concurrent workers (was 12).
+# Higher values (12–20) spawn 4–5 internal HTTP calls per stock → 50–100+ concurrent
+# requests into analysis-intelligence-service, causing PoolTimeout / ReadTimeout and
+# circuit-breaker opens that feed neutral 50.0 scores into the ML model.
+# Override via MAX_PARALLEL_SCAN_WORKERS if you move to paid tier.
+MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "8"))  # free-tier safe
+SCAN_BATCH_SIZE = int(os.getenv("SCAN_BATCH_SIZE", "8"))  # aligned with workers; bulk Neon removes DB N+1
 
 MAX_RETRIES = 1
 RETRY_BACKOFF = 1.0
@@ -2123,10 +2126,47 @@ async def _analyze_one_symbol_ultra(
                     normalized = _normalize_decision_response(cached_decide, symbol)
                     normalized["from_decide_cache"] = True
                 else:
-                    # Prefer shorter timeout on free-tier; feed covers fundamentals
-                    decision_resp = await _cb_get(
-                        client, "decision", f"{DECISION_URL}/decide/{symbol}", timeout=15
+                    # Prefer POST /decide/evaluate when Neon feed already has RSI/PE/scores.
+                    # This short-circuits internal HTTP fan-out inside the decision service
+                    # and prevents free-tier PoolTimeout / circuit opens.
+                    feed_has_data = isinstance(feed_row, dict) and any(
+                        feed_row.get(k) is not None
+                        for k in (
+                            "rsi", "pe_ratio", "pe", "technical_score",
+                            "fundamental_score", "news_score", "close", "price", "ltp",
+                        )
                     )
+                    if feed_has_data:
+                        eval_payload = {
+                            "symbol": base_sym or symbol,
+                            "rsi": feed_row.get("rsi"),
+                            "pe_ratio": feed_row.get("pe_ratio") or feed_row.get("pe"),
+                            "technical_score": feed_row.get("technical_score"),
+                            "fundamental_score": feed_row.get("fundamental_score"),
+                            "news_score": feed_row.get("news_score"),
+                            "sentiment_score": feed_row.get("sentiment_score") or feed_row.get("market_score"),
+                            "close": feed_row.get("close") or feed_row.get("price") or feed_row.get("ltp") or feed_row.get("cmp"),
+                            "support": feed_row.get("support"),
+                            "resistance": feed_row.get("resistance"),
+                            "sector": feed_row.get("sector"),
+                            "valuation": feed_row.get("valuation"),
+                            "metrics": feed_row.get("metrics"),
+                            "events": feed_row.get("events"),
+                            "event_risk": feed_row.get("event_risk"),
+                        }
+                        # Drop None values to keep payload clean
+                        eval_payload = {k: v for k, v in eval_payload.items() if v is not None}
+                        decision_resp = await _cb_post(
+                            client,
+                            "decision",
+                            f"{DECISION_URL}/decide/evaluate",
+                            timeout=20,
+                            json=eval_payload,
+                        )
+                    else:
+                        decision_resp = await _cb_get(
+                            client, "decision", f"{DECISION_URL}/decide/{symbol}", timeout=15
+                        )
                     decision_resp.raise_for_status()
                     raw = decision_resp.json()
                     normalized = _normalize_decision_response(raw, symbol)
@@ -3775,7 +3815,8 @@ async def scan_batch(request: Request):
         raise HTTPException(status_code=400, detail="Maximum 15 symbols per batch")
 
     # Use a semaphore to limit concurrent downstream calls inside this batch
-    sem = asyncio.Semaphore(10)
+    # Aligned with MAX_PARALLEL_WORKERS=8 so analysis service is never overloaded
+    sem = asyncio.Semaphore(8)
     client = _get_http_client()  # shared keepalive pool
     if True:
         # One Neon bulk for this batch
@@ -6583,6 +6624,333 @@ async def data_feed_update_batch(request: Request):
         return {"ok": False, "error": str(e)[:300], "count": 0}
 
 
+@app.post("/api/feed/update-batch")
+@app.post("/data-feed/update-batch")
+async def data_feed_update_batch_refresh(request: Request):
+    """
+    Process a small symbol list in ONE short HTTP request (GitHub Action driver).
+
+    Body: { "symbols": ["RELIANCE", "TCS", ...] }  — max 15 recommended.
+    Fetches fundamental + events for each, writes Neon feed, returns counts.
+    Designed so each call finishes in <1–2 min (well under Render's ~100m hard cap).
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    symbols = payload.get("symbols") if isinstance(payload, dict) else None
+    if not isinstance(symbols, list) or not symbols:
+        return {"ok": False, "error": "symbols list required", "ok_count": 0, "error_count": 0}
+    # Hard cap protects free-tier CPU / upstream rate limits
+    max_n = int(os.getenv("DATA_FEED_UPDATE_BATCH_MAX", "15"))
+    symbols = [
+        str(s).upper().replace(".NS", "").replace(".BO", "").strip()
+        for s in symbols
+        if s
+    ][:max_n]
+    if not symbols:
+        return {"ok": False, "error": "no valid symbols", "ok_count": 0, "error_count": 0}
+
+    from data_feed import extract_feed_payload
+    store = _feed_store()
+    ok_n = 0
+    err_n = 0
+    results = []
+    client = _get_http_client()
+    for base in symbols:
+        try:
+            fund = None
+            events = None
+            try:
+                r = await client.get(f"{FUNDAMENTAL_URL}/analyze/{base}", timeout=35)
+                if r.status_code == 200:
+                    fund = r.json()
+                elif r.status_code in (429, 503):
+                    try:
+                        rate_limit_monitor.record(
+                            source="analysis",
+                            status=r.status_code,
+                            path=f"/fundamental/{base}",
+                            detail="update-batch",
+                            symbol=base,
+                        )
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug("update-batch fund %s: %s", base, e)
+            try:
+                r = await client.get(f"{EVENT_URL}/events/{base}", timeout=20)
+                if r.status_code == 200:
+                    events = r.json()
+            except Exception as e:
+                logger.debug("update-batch events %s: %s", base, e)
+            if fund or events:
+                row = extract_feed_payload(base, fund, events)
+                store.put_symbol(base, row, ttl=DATA_FEED_TTL)
+                ok_n += 1
+                results.append({"symbol": base, "ok": True})
+            else:
+                err_n += 1
+                results.append({"symbol": base, "ok": False, "error": "no fund/events"})
+        except Exception as e:
+            err_n += 1
+            results.append({"symbol": base, "ok": False, "error": str(e)[:120]})
+        await asyncio.sleep(0.15)
+
+    return {
+        "ok": True,
+        "ok_count": ok_n,
+        "error_count": err_n,
+        "processed": len(symbols),
+        "results": results,
+    }
+
+
+# ── Surgical Data Repair (audit + non-destructive patch) ───────────────────
+_REQUIRED_FEED_FIELDS = ("price", "rsi", "pe_ratio", "roce", "sentiment_score")
+
+
+def _feed_missing_fields(payload: dict) -> list:
+    """Return list of missing/zeroed fields for a feed payload."""
+    data = payload if isinstance(payload, dict) else {}
+    m = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
+    missing = []
+    # Price: any of price/close/ltp/cmp/prev_close
+    price = 0.0
+    for k in ("price", "close", "ltp", "cmp", "last_price", "prev_close"):
+        try:
+            v = float(data.get(k) or m.get(k) or 0)
+            if v > 0:
+                price = v
+                break
+        except (TypeError, ValueError):
+            pass
+    if price <= 0:
+        missing.append("price")
+    rsi = data.get("rsi", m.get("rsi"))
+    try:
+        if rsi is None or float(rsi) == 0:
+            missing.append("rsi")
+    except (TypeError, ValueError):
+        missing.append("rsi")
+    pe = data.get("pe_ratio", data.get("pe", m.get("pe_ratio", m.get("pe"))))
+    try:
+        if pe is None or float(pe) == 0:
+            missing.append("pe_ratio")
+    except (TypeError, ValueError):
+        missing.append("pe_ratio")
+    roce = data.get("roce", m.get("roce"))
+    try:
+        if roce is None or float(roce) == 0:
+            missing.append("roce")
+    except (TypeError, ValueError):
+        missing.append("roce")
+    sent = data.get("sentiment_score", data.get("news_score", m.get("sentiment_score")))
+    if sent is None:
+        missing.append("sentiment_score")
+    return missing
+
+
+def _feed_resolved_price(payload: dict) -> float:
+    data = payload if isinstance(payload, dict) else {}
+    m = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
+    for k in ("price", "close", "ltp", "cmp", "last_price", "prev_close"):
+        try:
+            v = float(data.get(k) or m.get(k) or 0)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return 0.0
+
+
+async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> dict:
+    """
+    Surgically fetch ONLY missing fields and merge into existing Neon feed blob.
+    Never wipes valid existing values.
+    """
+    store = _feed_store()
+    base = str(symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    current = dict(store.get_symbol(base) or {})
+    missing = set(_feed_missing_fields(current))
+    patched = []
+
+    if "price" in missing:
+        try:
+            r = await client.get(f"{MARKET_DATA_URL.rstrip('/')}/quote/{base}", timeout=8.0)
+            if r.status_code == 200:
+                q = r.json() if isinstance(r.json(), dict) else {}
+                for k in ("price", "cmp", "ltp", "close", "last_price", "regularMarketPrice"):
+                    v = q.get(k)
+                    try:
+                        if v is not None and float(v) > 0:
+                            current["price"] = float(v)
+                            current.setdefault("close", float(v))
+                            patched.append("price")
+                            break
+                    except (TypeError, ValueError):
+                        pass
+        except Exception as e:
+            logger.debug("repair price %s: %s", base, e)
+
+    if "rsi" in missing:
+        try:
+            r = await client.get(f"{TECHNICAL_URL.rstrip('/')}/analyze/{base}", timeout=20.0)
+            if r.status_code == 200:
+                t = r.json() if isinstance(r.json(), dict) else {}
+                if t.get("rsi") is not None:
+                    current["rsi"] = t.get("rsi")
+                    patched.append("rsi")
+                if t.get("ema20") is not None:
+                    current["ema20"] = t.get("ema20")
+                if t.get("technical_score") is not None and current.get("technical_score") is None:
+                    current["technical_score"] = t.get("technical_score")
+                if t.get("macd_hist") is not None or t.get("macd") is not None:
+                    current["macd_hist"] = t.get("macd_hist", t.get("macd"))
+        except Exception as e:
+            logger.debug("repair rsi %s: %s", base, e)
+
+    if "pe_ratio" in missing or "roce" in missing:
+        try:
+            r = await client.get(f"{FUNDAMENTAL_URL.rstrip('/')}/analyze/{base}", timeout=35.0)
+            if r.status_code == 200:
+                f = r.json() if isinstance(r.json(), dict) else {}
+                metrics = f.get("metrics") if isinstance(f.get("metrics"), dict) else {}
+                pe = f.get("pe_ratio", f.get("pe", metrics.get("pe_ratio", metrics.get("pe"))))
+                roce = f.get("roce", metrics.get("roce"))
+                if "pe_ratio" in missing and pe is not None:
+                    try:
+                        if float(pe) != 0:
+                            current["pe_ratio"] = float(pe)
+                            patched.append("pe_ratio")
+                    except (TypeError, ValueError):
+                        pass
+                if "roce" in missing and roce is not None:
+                    try:
+                        if float(roce) != 0:
+                            current["roce"] = float(roce)
+                            patched.append("roce")
+                    except (TypeError, ValueError):
+                        pass
+                if f.get("fundamental_score") is not None and current.get("fundamental_score") is None:
+                    current["fundamental_score"] = f.get("fundamental_score")
+                if f.get("sector") and not current.get("sector"):
+                    current["sector"] = f.get("sector")
+                if metrics:
+                    cur_m = current.get("metrics") if isinstance(current.get("metrics"), dict) else {}
+                    current["metrics"] = {**cur_m, **{k: v for k, v in metrics.items() if v is not None}}
+        except Exception as e:
+            logger.debug("repair fund %s: %s", base, e)
+
+    if "sentiment_score" in missing:
+        try:
+            r = await client.get(f"{NEWS_URL.rstrip('/')}/analyze/{base}", timeout=20.0)
+            if r.status_code == 200:
+                n = r.json() if isinstance(r.json(), dict) else {}
+                ns = n.get("news_score", n.get("sentiment_score"))
+                if ns is not None:
+                    current["sentiment_score"] = ns
+                    current.setdefault("news_score", ns)
+                    patched.append("sentiment_score")
+        except Exception as e:
+            logger.debug("repair sentiment %s: %s", base, e)
+
+    current["symbol"] = base
+    current["repair_patched"] = patched
+    current["repair_updated_at"] = datetime.now(IST).isoformat()
+    # Non-destructive: put_symbol merges over existing durable key
+    store.put_symbol(base, current, ttl=DATA_FEED_TTL)
+    still_missing = _feed_missing_fields(current)
+    return {
+        "symbol": base,
+        "patched_fields": patched,
+        "still_missing": still_missing,
+        "price": _feed_resolved_price(current),
+        "complete": len(still_missing) == 0,
+    }
+
+
+@app.get("/api/feed/audit-missing")
+@app.get("/data-feed/audit-missing")
+async def audit_missing_feed_data(limit: int = 500):
+    """
+    Zero upstream load — reads Neon data-feed only.
+    Finds symbols missing price / rsi / pe_ratio / roce / sentiment_score.
+    """
+    store = _feed_store()
+    try:
+        symbols = store.list_symbols() or []
+    except Exception:
+        symbols = []
+    incomplete = []
+    complete_count = 0
+    total = 0
+    for sym in symbols:
+        total += 1
+        try:
+            row = store.get_symbol(sym) or {}
+        except Exception:
+            row = {}
+        missing = _feed_missing_fields(row)
+        if missing:
+            incomplete.append({
+                "symbol": sym,
+                "current_price": _feed_resolved_price(row),
+                "missing_fields": missing,
+                "updated_at": row.get("updated_at") or row.get("repair_updated_at") or row.get("fed_at"),
+            })
+        else:
+            complete_count += 1
+    # Sort: most missing first, then alpha
+    incomplete.sort(key=lambda x: (-len(x["missing_fields"]), x["symbol"]))
+    if limit and limit > 0:
+        incomplete = incomplete[: int(limit)]
+    health = round((complete_count / max(total, 1)) * 100, 1)
+    return {
+        "total_universe": total,
+        "fully_populated": complete_count,
+        "incomplete_count": len(incomplete) if limit <= 0 else max(0, total - complete_count),
+        "health_score": health,
+        "incomplete_stocks": incomplete,
+        "required_fields": list(_REQUIRED_FEED_FIELDS),
+    }
+
+
+@app.post("/api/feed/repair-single/{symbol}")
+@app.post("/data-feed/repair-single/{symbol}")
+async def repair_single_stock(symbol: str):
+    """Repair one symbol — fetch only missing fields, merge into Neon."""
+    client = _get_http_client()
+    result = await _patch_single_stock_feed(symbol, client)
+    return {"status": "success", **result}
+
+
+@app.post("/api/feed/repair-batch")
+@app.post("/data-feed/repair-batch")
+async def repair_batch_missing(limit: int = 10):
+    """
+    Rate-safe batch repair (default 10). 500ms spacing between symbols.
+    """
+    limit = max(1, min(int(limit or 10), 25))
+    audit = await audit_missing_feed_data(limit=limit)
+    targets = [item["symbol"] for item in (audit.get("incomplete_stocks") or [])[:limit]]
+    client = _get_http_client()
+    repaired = []
+    for sym in targets:
+        try:
+            res = await _patch_single_stock_feed(sym, client)
+            repaired.append(res)
+        except Exception as e:
+            repaired.append({"symbol": sym, "error": str(e)[:160], "complete": False})
+        await asyncio.sleep(0.5)
+    ok_n = sum(1 for r in repaired if r.get("complete") or r.get("patched_fields"))
+    return {
+        "status": "completed",
+        "repaired_count": len(repaired),
+        "successish_count": ok_n,
+        "repaired": repaired,
+        "repaired_symbols": [r.get("symbol") for r in repaired],
+    }
 
 
 @app.post("/data-feed/run")

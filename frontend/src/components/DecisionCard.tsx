@@ -4,6 +4,7 @@ import { decisionStyle } from "../decisionStyle";
 import StockChart from "./StockChart";
 import { useStockkyRealtime } from "../useRealtime";
 import { toActionablePick } from "./ScanPanel";
+import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
 
 // ── Types & helper for structured news (from v2) ──
 interface NewsItem {
@@ -218,8 +219,8 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
 
   const metrics = data.fundamental_metrics;
   const hasMetrics = metrics && Object.values(metrics).some(v => v != null);
-  const hasPrice = data.close != null || liveQuote?.price != null;
-  const displayClose = liveQuote?.price ?? data.close ?? null;
+  const displayClose = resolveDisplayPrice(data, liveQuote?.price);
+  const hasPrice = displayClose > 0;
 
   const hasNews = data.reasons.news && data.reasons.news.length > 0 &&
     !(data.event_data && (data.event_data.news || data.event_data.recent_news));
@@ -358,7 +359,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
           <div className="dc-col-side">
             <div className="dc-price-block font-mono">
               <div className="text-2xl sm:text-3xl text-paper tabular-nums">
-                {displayClose != null ? `₹${displayClose.toLocaleString("en-IN")}` : data.data_insufficient ? "Awaiting Data" : "N/A"}
+                {hasPrice ? `₹${displayClose.toLocaleString("en-IN")}` : data.data_insufficient ? "Awaiting Data" : "Syncing…"}
               </div>
               <div className="text-[11px] text-mist/65 mt-0.5 flex items-center justify-end gap-2 flex-wrap">
                 <span>Combined {data.combined_score}/100</span>

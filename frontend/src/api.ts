@@ -48,6 +48,10 @@ export interface Decision {
   stop_loss: number | null;
   holding_period: string;
   close: number | null;
+  price?: number | null;
+  cmp?: number | null;
+  current_price?: number | null;
+  ltp?: number | null;
   support: number | null;
   resistance: number | null;
   reasons: {

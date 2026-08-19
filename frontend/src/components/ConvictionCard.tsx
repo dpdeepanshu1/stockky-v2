@@ -1,4 +1,5 @@
 import { decisionStyle } from "../decisionStyle";
+import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
 
 /** Minimal decision-like shape so card works from scan, hot stocks, or full Decision */
 export type ConvictionData = {
@@ -123,7 +124,7 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
   const score = data.combined_score ?? data.score ?? null;
   const entryLow = data.entry_range?.low ?? data.entry_range_low ?? null;
   const entryHigh = data.entry_range?.high ?? data.entry_range_high ?? null;
-  const up = upsidePct(data.close ?? data.live_price, data.target);
+  const up = upsidePct(resolveDisplayPrice(data, data.live_price), data.target);
   const horizon = data.holding_period_estimate?.label || data.holding_period || "—";
   const reasons = collectReasons(data);
   const blurb =
@@ -166,7 +167,7 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
         </div>
         <div className="cc-metric">
           <span className="cc-label">Price</span>
-          <span className="cc-value">₹{fmt(data.live_price ?? data.close)}</span>
+          <span className="cc-value">₹{fmt(resolveDisplayPrice(data, data.live_price))}</span>
         </div>
         {data.confidence && (
           <div className="cc-metric">

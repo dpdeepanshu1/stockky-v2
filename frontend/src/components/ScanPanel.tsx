@@ -3,6 +3,7 @@ import { ScanResult, Decision, api, ActionablePick } from "../api";
 import { sendStockUniverseForTraining, buildUniversePayloadFromScan } from "../api_universe";
 import { useStockkyRealtime } from "../useRealtime";
 import { decisionStyle } from "../decisionStyle";
+import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
 
 interface Props {
   result: ScanResult;
@@ -28,8 +29,8 @@ const VALUE_BONUS_MAX = 8; // max points added to combined_score
 const MIN_FUNDAMENTAL_FOR_BONUS = 50; // out of 100 — "good stock", not just cheap
 
 function valueAdjustedScore(d: Decision): { score: number; eligible: boolean; bonus: number } {
-  const price = d.close;
-  if (price == null || price <= 0) return { score: d.combined_score, eligible: true, bonus: 0 };
+  const price = resolveDisplayPrice(d);
+  if (price <= 0) return { score: d.combined_score, eligible: true, bonus: 0 };
   const eligible = price <= PRICE_CAP;
   if (!eligible) return { score: d.combined_score, eligible: false, bonus: 0 };
   const isGoodStock = d.fundamental_score >= MIN_FUNDAMENTAL_FOR_BONUS;
@@ -588,7 +589,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
                   rank={i + 1}
                   data={{
                     ...r,
-                    close: liveQuotes[r.symbol]?.price ?? r.close,
+                    close: resolveDisplayPrice(r, liveQuotes[r.symbol]?.price) || r.close,
                   }}
                   onSelect={onSelect}
                   onAddToWatchlist={handleAddToWatchlist}
@@ -633,7 +634,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
                 </div>
                 <div className="font-display text-lg text-paper">{x.decision.symbol}</div>
                 <div className="font-mono text-xs text-mist/60">
-                  ₹{x.decision.close} · fundamentals {x.decision.fundamental_score}/100
+                  ₹{resolveDisplayPrice(x.decision) || "—"} · fundamentals {x.decision.fundamental_score}/100
                 </div>
                 <div className="font-mono text-xs text-mist/60 mt-1">
                   raw {x.decision.combined_score} → adjusted {Math.round(x.score * 10) / 10}
@@ -691,7 +692,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
                     <td className={`px-4 py-3 text-xs ${style.color}`}>{r.decision}</td>
                     <td className="px-4 py-3 text-right text-mist">{r.combined_score}</td>
                     <td className="px-4 py-3 text-right text-paper">
-                      {r.close != null ? `₹${r.close.toLocaleString("en-IN")}` : "N/A"}
+                      {formatInrPrice(r, liveQuotes[r.symbol]?.price)}
                     </td>
                     <td className="px-4 py-3 text-right text-mist hidden md:table-cell">{r.technical_score}</td>
                     <td className="px-4 py-3 text-right text-mist hidden md:table-cell">{r.fundamental_score}</td>
@@ -754,7 +755,7 @@ function TopPick({
       <div className="font-mono text-sm text-mist mb-1">{data.symbol}</div>
       <div className={`font-display text-2xl ${style.color} mb-3`}>{data.decision}</div>
       <div className="flex justify-between font-mono text-xs text-mist">
-        <span>{data.close != null ? `₹${data.close.toLocaleString("en-IN")}` : "N/A"}</span>
+        <span>{formatInrPrice(data)}</span>
         <span>Score {data.combined_score}/100</span>
       </div>
       <div className="mt-3 pt-3 border-t border-slate/40 flex items-center justify-between">
@@ -809,7 +810,7 @@ function CandidateCard({
           <div className={`font-display text-lg ${style.color}`}>{data.decision}</div>
         </div>
         <div className="text-right">
-          <div className="text-sm font-mono text-paper">{data.close != null ? `₹${data.close.toLocaleString("en-IN")}` : "N/A"}</div>
+          <div className="text-sm font-mono text-paper">{formatInrPrice(data)}</div>
           <div className="text-xs text-mist/60">Score: {data.combined_score}</div>
         </div>
       </div>

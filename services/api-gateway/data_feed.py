@@ -87,6 +87,35 @@ def _norm_sym(symbol: str) -> str:
     return (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
 
 
+# Index / garbage tokens that must never be sent to yfinance as equities
+_INVALID_EQUITY_TOKENS = frozenset({
+    "NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
+    "MIDCAP", "SMALLCAP", "NEXT", "INDEX", "INDICES",
+    "NIFTY50", "NIFTY100", "NIFTY200", "NIFTY500",
+    "NIFTYNEXT50", "NIFTYMIDCAP", "NIFTYSMALLCAP",
+    "INDIA", "VIX", "INDIAVIX",
+})
+
+
+def _is_valid_equity_symbol(symbol: str) -> bool:
+    """Reject index fragments, pure numbers, empty tokens that cause Yahoo 429 noise."""
+    b = _norm_sym(symbol)
+    if not b or len(b) < 2:
+        return False
+    if b in _INVALID_EQUITY_TOKENS:
+        return False
+    # Pure digits ("50", "100", "150") come from split index names
+    if b.isdigit():
+        return False
+    # Must contain at least one letter
+    if not any(c.isalpha() for c in b):
+        return False
+    # Reject multi-word index labels that slipped through
+    if " " in b or "&" in b:
+        return False
+    return True
+
+
 # Universal ≤ ₹5000 gate — refuse to persist high-ticket stocks into the feed cache
 MAX_STOCK_PRICE = 5000.0
 
@@ -1004,8 +1033,8 @@ def patch_feed_price(symbol: str, live_price: float) -> bool:
 
 
 # ── Yahoo 1-call (chunked) bulk price feeder — bypasses NSE 403 on Render ───
-BULK_YF_CHUNK = int(__import__("os").getenv("BULK_YF_CHUNK", "30"))  # safer Yahoo chunk size (was 50)
-BULK_YF_CHUNK_SLEEP = float(__import__("os").getenv("BULK_YF_CHUNK_SLEEP", "1.5"))  # cooldown between chunks
+BULK_YF_CHUNK = int(__import__("os").getenv("BULK_YF_CHUNK", "20"))  # smaller chunks = fewer Yahoo 429s
+BULK_YF_CHUNK_SLEEP = float(__import__("os").getenv("BULK_YF_CHUNK_SLEEP", "2.5"))  # longer cooldown vs rate limit
 
 
 def _yf_close_volume(frame, sym_ns: str):
@@ -1077,7 +1106,11 @@ def compute_rsi_from_closes(closes, period: int = 14) -> Optional[float]:
         return None
 
 
-def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Dict[str, dict]:
+def bulk_yahoo_download_prices(
+    symbols: List[str],
+    chunk_size: int = None,
+    on_chunk_done=None,
+) -> Dict[str, dict]:
     """
     Chunked yfinance download (period=1mo) for price + local RSI.
     Seeds baseline pe_ratio / roce / sentiment_score so UI 5-field health
@@ -1085,6 +1118,9 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
 
     Real PE/ROCE/sentiment can overwrite later via surgical repair (no peer fan-out).
     Only includes symbols with 0 < price <= MAX_STOCK_PRICE.
+
+    on_chunk_done(processed, total, kept_so_far) — optional progress callback
+    so the UI job status moves during bulk instead of staying at 0/300.
     """
     import os
     try:
@@ -1093,22 +1129,39 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
         logger.error("yfinance not installed — bulk feed unavailable")
         return {}
 
-    chunk_size = int(chunk_size or BULK_YF_CHUNK or 80)
-    chunk_size = max(10, min(chunk_size, 150))
+    chunk_size = int(chunk_size or BULK_YF_CHUNK or 20)
+    chunk_size = max(5, min(chunk_size, 40))
 
     bases: List[str] = []
     seen = set()
+    skipped_invalid = 0
     for s in symbols or []:
         b = _norm_sym(str(s))
-        if b and b not in seen:
-            seen.add(b)
-            bases.append(b)
+        if not b or b in seen:
+            continue
+        if not _is_valid_equity_symbol(b):
+            skipped_invalid += 1
+            continue
+        seen.add(b)
+        bases.append(b)
+
+    if skipped_invalid:
+        logger.info("bulk_yahoo: skipped %s invalid/index symbols", skipped_invalid)
 
     out: Dict[str, dict] = {}
     if not bases:
         return out
 
-    for i in range(0, len(bases), chunk_size):
+    total = len(bases)
+    for i in range(0, total, chunk_size):
+        # Cooperative stop between chunks
+        try:
+            if data_feed_stop_requested():
+                logger.info("bulk_yahoo: stop requested at chunk %s/%s", i, total)
+                break
+        except Exception:
+            pass
+
         chunk = bases[i : i + chunk_size]
         tickers = [f"{b}.NS" for b in chunk]
         ticker_string = " ".join(tickers)
@@ -1123,6 +1176,16 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
             )
         except Exception as e:
             logger.warning("yf.download chunk %s-%s failed: %s", i, i + len(chunk), e)
+            if on_chunk_done:
+                try:
+                    on_chunk_done(min(i + len(chunk), total), total, len(out))
+                except Exception:
+                    pass
+            try:
+                import time as _time
+                _time.sleep(max(1.0, float(BULK_YF_CHUNK_SLEEP)))
+            except Exception:
+                pass
             continue
 
         for b in chunk:
@@ -1202,18 +1265,26 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
             except Exception:
                 continue
 
+        kept_chunk = sum(1 for b in chunk if b in out)
         logger.info(
-            "bulk_yahoo chunk %s-%s: kept %s/%s under ₹%.0f",
+            "bulk_yahoo chunk %s-%s: kept %s/%s under ₹%.0f (total kept %s/%s)",
             i,
             i + len(chunk),
-            sum(1 for b in chunk if b in out),
+            kept_chunk,
             len(chunk),
             MAX_STOCK_PRICE,
+            len(out),
+            total,
         )
+        if on_chunk_done:
+            try:
+                on_chunk_done(min(i + len(chunk), total), total, len(out))
+            except Exception:
+                pass
         # Pause between chunks so Yahoo does not drop tickers / rate-limit
         try:
             import time as _time
-            _time.sleep(max(0.2, float(BULK_YF_CHUNK_SLEEP)))
+            _time.sleep(max(0.5, float(BULK_YF_CHUNK_SLEEP)))
         except Exception:
             pass
 
@@ -1227,6 +1298,7 @@ def run_bulk_yahoo_price_feed(
     """
     Bulk-download prices via Yahoo and upsert into Neon data-feed.
     Single (or few chunked) Yahoo calls — no NSE bhavcopy, no 300 sequential quotes.
+    Updates job progress after every chunk so the UI is not stuck at 0/N.
     """
     store = get_data_feed_store()
     if not symbols:
@@ -1235,15 +1307,31 @@ def run_bulk_yahoo_price_feed(
         except Exception:
             symbols = []
 
+    # Sanitize: drop index fragments before any Yahoo call
+    symbols = [s for s in (symbols or []) if _is_valid_equity_symbol(str(s))]
+
     if not symbols:
         return {
             "status": "error",
-            "message": "No symbols provided and feed index is empty",
+            "message": "No valid equity symbols provided (index tokens filtered)",
             "tracked_stocks": 0,
             "symbols": [],
         }
 
-    prices = bulk_yahoo_download_prices(symbols)
+    def _progress(processed: int, total: int, kept: int) -> None:
+        try:
+            store.set_job(
+                status="running",
+                message=f"Bulk Yahoo {processed}/{total} scanned — {kept} saved (≤₹{int(MAX_STOCK_PRICE)})",
+                processed=processed,
+                total=total,
+                ok_count=kept,
+                updated_at=_now_iso(),
+            )
+        except Exception:
+            pass
+
+    prices = bulk_yahoo_download_prices(symbols, on_chunk_done=_progress)
     saved = 0
     skipped = 0
     for base, rec in prices.items():

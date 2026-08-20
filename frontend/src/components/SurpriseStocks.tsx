@@ -7,9 +7,12 @@ import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 export interface SurpriseStock {
   symbol: string;
   score: number;
+  tier?: "breakout" | "building";
   price: number;
   change_pct: number;
   rvol: number;
+  rvol_slope?: number;
+  buy_pct?: number;
   trigger_type: string;
   trailing_stop: number;
   target_1: number;
@@ -657,6 +660,7 @@ export default function SurpriseStocks({
           <thead>
             <tr className="border-b border-slate/80 text-mist/50 font-mono text-[10px] uppercase tracking-wider">
               <th className="py-2.5 px-3">Symbol</th>
+              <th className="py-2.5 px-3">Tier</th>
               <th className="py-2.5 px-3">Score</th>
               <th className="py-2.5 px-3">Price</th>
               <th className="py-2.5 px-3">Change %</th>
@@ -667,7 +671,9 @@ export default function SurpriseStocks({
             </tr>
           </thead>
           <tbody>
-            {stocks.map((s) => (
+            {stocks.map((s) => {
+              const isBuilding = s.tier === "building";
+              return (
               <tr key={s.symbol} className="border-b border-slate/40 hover:bg-ink/40 text-sm transition">
                 <td className="py-2.5 px-3">
                   <button
@@ -677,6 +683,18 @@ export default function SurpriseStocks({
                   >
                     {s.symbol}
                   </button>
+                </td>
+                <td className="py-2.5 px-3">
+                  <span
+                    className={
+                      "font-mono text-[10px] px-2 py-0.5 rounded border " +
+                      (isBuilding
+                        ? "bg-amber-950/60 text-amber-300 border-amber-700/40"
+                        : "bg-emerald-950/60 text-emerald-300 border-emerald-700/40")
+                    }
+                  >
+                    {isBuilding ? "Building" : "Breakout"}
+                  </span>
                 </td>
                 <td className="py-2.5 px-3">
                   <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-700/50">
@@ -692,6 +710,9 @@ export default function SurpriseStocks({
                 </td>
                 <td className="py-2.5 px-3 font-mono text-xs text-amber-300 font-bold">
                   {Number(s.rvol).toFixed(2)}x
+                  {typeof s.rvol_slope === "number" && s.rvol_slope > 0 && (
+                    <span className="text-emerald-400 ml-1">↑{s.rvol_slope.toFixed(2)}</span>
+                  )}
                 </td>
                 <td className="py-2.5 px-3">
                   <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-700/40">
@@ -705,17 +726,18 @@ export default function SurpriseStocks({
                   ₹{Number(s.trailing_stop).toFixed(2)}
                 </td>
               </tr>
-            ))}
+              );
+            })}
             {stocks.length === 0 && !loading && (
               <tr>
-                <td colSpan={8} className="py-10 text-center font-mono text-xs text-mist/45">
-                  No surprise breakouts meeting score ≥60 / volume thresholds right now.
+                <td colSpan={9} className="py-10 text-center font-mono text-xs text-mist/45">
+                  No surprise breakouts or early-building setups right now.
                 </td>
               </tr>
             )}
             {loading && stocks.length === 0 && (
               <tr>
-                <td colSpan={8} className="py-10 text-center font-mono text-xs text-mist/50">
+                <td colSpan={9} className="py-10 text-center font-mono text-xs text-mist/50">
                   Scanning universe… {scanProg ? `${scanProg.processed}/${scanProg.total}` : ""}
                 </td>
               </tr>

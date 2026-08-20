@@ -33,6 +33,19 @@ QUOTE_TIMEOUT = float(os.getenv("SURPRISE_QUOTE_TIMEOUT", "3"))
 # Universal ≤ ₹5000 gate (root filter also applied in data_feed / bhavcopy)
 MAX_STOCK_PRICE = float(os.getenv("MAX_STOCK_PRICE", "5000"))
 
+# ── Early-detection tuning ───────────────────────────────────────────────
+# "Building" tier: volume/imbalance arriving BEFORE price confirms breakout.
+# Surfaced separately from the main >= MIN_SCORE breakout tier so the UI can
+# show a distinct "Accumulating" watchlist instead of discarding these.
+BUILDING_MIN_SCORE = int(os.getenv("SURPRISE_BUILDING_MIN_SCORE", "30"))
+BUILDING_MAX_SCORE = MIN_SCORE  # anything scoring >= MIN_SCORE goes to breakout tier instead
+BUILDING_MIN_CHANGE_PCT = float(os.getenv("SURPRISE_BUILDING_MIN_CHANGE_PCT", "0.2"))
+# RVOL slope: compare this scan's RVOL to the previous scan's RVOL per symbol
+RVOL_SLOPE_MIN = float(os.getenv("SURPRISE_RVOL_SLOPE_MIN", "0.4"))
+# Sector sympathy: once any stock in a sector clears MIN_SCORE, rescan peers
+# in that sector with a relaxed threshold for SYMPATHY_WINDOW_SEC.
+SECTOR_SYMPATHY_MIN_SCORE = int(os.getenv("SURPRISE_SECTOR_SYMPATHY_MIN_SCORE", "40"))
+
 
 def _normalize_db_url(url: str) -> str:
     if url.startswith("postgres://"):
@@ -60,6 +73,10 @@ class SurpriseStockEngine:
         self.static_cache: Dict[str, Dict[str, Any]] = {}
         self._loaded_at: float = 0.0
         self.semaphore = asyncio.Semaphore(max(4, min(CONCURRENCY, 20)))
+        # Rolling per-symbol memory for slope/imbalance features (in-process,
+        # resets on dyno restart — fine for intraday-only signals)
+        self._last_rvol: Dict[str, float] = {}
+        self._last_scan_ts: float = 0.0
 
     def load_static_cache(self, force: bool = False) -> int:
         """Sync load of all baselines — one SQL round-trip. Creates table if missing."""
@@ -283,6 +300,27 @@ class SurpriseStockEngine:
         rvol = round(current_vol_15m / avg_15m_vol, 2) if avg_15m_vol else 0.0
         price_change_pct = round(((current_price - prev_close) / prev_close) * 100.0, 2) if prev_close else 0.0
 
+        # Order-book imbalance (buy-side %). Feed from market-depth if present
+        # on the tick; falls back to neutral 50 when unavailable so it never
+        # penalizes symbols the depth feed hasn't reached yet.
+        buy_pct = tick.get("buy_pct")
+        if buy_pct is None:
+            total_bid = float(tick.get("total_bid_qty") or 0.0)
+            total_ask = float(tick.get("total_ask_qty") or 0.0)
+            if (total_bid + total_ask) > 0:
+                buy_pct = round((total_bid / (total_bid + total_ask)) * 100.0, 2)
+        try:
+            buy_pct = float(buy_pct) if buy_pct is not None else 50.0
+        except (TypeError, ValueError):
+            buy_pct = 50.0
+
+        # RVOL slope vs the previous scan for this symbol — catches volume
+        # *arriving* (inflecting up) rather than just already being high.
+        key = symbol.upper().replace(".NS", "").replace(".BO", "")
+        prev_rvol = self._last_rvol.get(key)
+        rvol_slope = round(rvol - prev_rvol, 2) if prev_rvol is not None else 0.0
+        self._last_rvol[key] = rvol
+
         score = 0
         trigger_type = "Consolidation"
 
@@ -294,14 +332,32 @@ class SurpriseStockEngine:
         elif rvol >= 1.5:
             score += 10
 
+        # 1b. Volume slope (10) — volume accelerating right now, independent
+        # of absolute RVOL level. This is what flags a stock BEFORE it
+        # crosses the RVOL thresholds above.
+        if rvol_slope >= RVOL_SLOPE_MIN:
+            score += 10
+            if trigger_type == "Consolidation":
+                trigger_type = "Volume Accelerating"
+
         # 2. ORB / VWAP (30)
         if current_price > orb_high and current_price > vwap:
             score += 30
             trigger_type = "Morning ORB Breakout"
         elif current_price > vwap:
             score += 15
-            if trigger_type == "Consolidation":
+            if trigger_type in ("Consolidation", "Volume Accelerating"):
                 trigger_type = "Above VWAP"
+
+        # 2b. Order-book imbalance (10) — buy pressure building ahead of the
+        # technical breakout (this is what your Balrampur/Bajaj screenshots
+        # showed: 80%+ buy-side before the big move).
+        if buy_pct >= 75.0:
+            score += 10
+            if trigger_type == "Consolidation":
+                trigger_type = "Buy-Side Imbalance"
+        elif buy_pct >= 60.0:
+            score += 5
 
         # 3. 52W proximity (20)
         dist = float(static.get("dist_52w_pct") or 100.0)
@@ -320,32 +376,46 @@ class SurpriseStockEngine:
             if trigger_type == "Consolidation":
                 trigger_type = "Range Expansion"
 
+        px = round(current_price, 2)
+        # Universal ≤ ₹5000 gate — never surface high-ticket surprises
+        if px > MAX_STOCK_PRICE:
+            return None
+
+        # Breakout tier: existing behaviour, unchanged threshold.
+        # Building tier: lower score band, much lower change_pct floor —
+        # this is the tier that catches stocks BEFORE the big % move.
         if score >= MIN_SCORE and price_change_pct > MIN_CHANGE_PCT:
-            px = round(current_price, 2)
-            # Universal ≤ ₹5000 gate — never surface high-ticket surprises
-            if px > MAX_STOCK_PRICE:
-                return None
-            hit = {
-                "symbol": symbol.upper().replace(".NS", "").replace(".BO", ""),
-                "score": int(score),
-                "price": px,
-                "change_pct": price_change_pct,
-                "rvol": rvol,
-                "trigger_type": trigger_type,
-                "trailing_stop": round(vwap * 0.985, 2),
-                "target_1": round(current_price * 1.05, 2),
-                "prev_close": round(prev_close, 2),
-                "sector": static.get("sector"),
-                "dist_52w_pct": round(dist, 2),
-            }
-            # Step 6: stamp all FE price aliases (align with price_resolver / priceDisplay)
-            hit["cmp"] = px
-            hit["ltp"] = px
-            hit["last_price"] = px
-            hit["close"] = px
-            hit["current_price"] = px
-            return hit
-        return None
+            tier = "breakout"
+        elif score >= BUILDING_MIN_SCORE and price_change_pct > BUILDING_MIN_CHANGE_PCT:
+            tier = "building"
+            if trigger_type == "Consolidation":
+                trigger_type = "Early Accumulation"
+        else:
+            return None
+
+        hit = {
+            "symbol": key,
+            "score": int(score),
+            "tier": tier,
+            "price": px,
+            "change_pct": price_change_pct,
+            "rvol": rvol,
+            "rvol_slope": rvol_slope,
+            "buy_pct": buy_pct,
+            "trigger_type": trigger_type,
+            "trailing_stop": round(vwap * 0.985, 2),
+            "target_1": round(current_price * 1.05, 2),
+            "prev_close": round(prev_close, 2),
+            "sector": static.get("sector"),
+            "dist_52w_pct": round(dist, 2),
+        }
+        # Step 6: stamp all FE price aliases (align with price_resolver / priceDisplay)
+        hit["cmp"] = px
+        hit["ltp"] = px
+        hit["last_price"] = px
+        hit["close"] = px
+        hit["current_price"] = px
+        return hit
 
     async def _fetch_quote(
         self,
@@ -376,6 +446,10 @@ class SurpriseStockEngine:
                     "vwap": data.get("vwap"),
                     "orb_high": data.get("orb_high"),
                     "vol_15m": data.get("vol_15m"),
+                    # Market-depth imbalance, when the quote endpoint carries it
+                    "buy_pct": data.get("buy_pct") or data.get("buy_percentage"),
+                    "total_bid_qty": data.get("total_bid_qty") or data.get("total_buy_quantity"),
+                    "total_ask_qty": data.get("total_ask_qty") or data.get("total_sell_quantity"),
                 }
             except Exception as e:
                 logger.debug("quote %s: %s", symbol, e)
@@ -435,15 +509,49 @@ class SurpriseStockEngine:
                 if scored:
                     results.append(scored)
 
+        # ── Sector sympathy pass ────────────────────────────────────────
+        # If any stock cleared the breakout tier, its sector peers are
+        # rescanned with a relaxed threshold — this is what would have
+        # caught the second sugar stock (Bajaj Hindusthan) once the first
+        # (Balrampur Chini) confirmed, in the same scan cycle.
+        breakout_sectors = {
+            r.get("sector") for r in results if r.get("tier") == "breakout" and r.get("sector")
+        }
+        if breakout_sectors:
+            already_hit = {r["symbol"] for r in results}
+            peer_keys = [
+                k
+                for k, v in self.static_cache.items()
+                if v.get("sector") in breakout_sectors and k not in already_hit
+            ]
+            for i in range(0, len(peer_keys), chunk):
+                batch = peer_keys[i : i + chunk]
+                ticks = await asyncio.gather(
+                    *[self._fetch_quote(client, market_data_url, sym) for sym in batch],
+                    return_exceptions=True,
+                )
+                for sym, tick in zip(batch, ticks):
+                    t = {} if isinstance(tick, Exception) or not tick else tick
+                    scored = self.score_stock(sym, t)
+                    if scored and scored["score"] >= SECTOR_SYMPATHY_MIN_SCORE:
+                        scored["trigger_type"] = f"Sector Sympathy ({scored.get('sector')})"
+                        results.append(scored)
+
+        self._last_scan_ts = time.time()
         results.sort(key=lambda x: x["score"], reverse=True)
+        breakout_count = sum(1 for r in results if r.get("tier") == "breakout")
+        building_count = sum(1 for r in results if r.get("tier") == "building")
         return {
             "count": len(results),
             "stocks": results,
+            "breakout_count": breakout_count,
+            "building_count": building_count,
             "static_loaded": n_static,
             "quotes_ok": quote_ok,
             "universe_scanned": len(keys),
             "elapsed_sec": round(time.time() - t0, 2),
             "min_score": MIN_SCORE,
+            "building_min_score": BUILDING_MIN_SCORE,
         }
 
 

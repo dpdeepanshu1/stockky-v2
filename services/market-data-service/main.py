@@ -237,7 +237,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── NEW ROOT ENDPOINT (fixes 404 on base URL) ─────────────────────────────
+# ─── ROOT ENDPOINT ──────────────────────────────────────────────────────────
 @app.get("/")
 def root():
     return {
@@ -245,6 +245,8 @@ def root():
         "version": "2.2.0",
         "status": "healthy",
         "endpoints": [
+            "/",
+            "/health",
             "/quote/{symbol}",
             "/history/{symbol}",
             "/fundamentals/{symbol}",
@@ -256,6 +258,12 @@ def root():
         ],
         "docs": "/docs"
     }
+
+# ─── HEALTH ENDPOINT ──────────────────────────────────────────────────────
+@app.get("/health")
+def health_check():
+    """Simple health check for load balancers and monitoring."""
+    return {"status": "ok", "service": "market-data-service", "version": "2.2.0"}
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):

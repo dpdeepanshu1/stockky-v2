@@ -280,16 +280,28 @@ def compute_fundamental_score(feed: dict) -> int:
 
 
 def derive_decision(combined: int, change_pct: float, tech: int, fund: int) -> Tuple[str, str]:
-    """Map composite → decision label + confidence."""
-    if combined >= 72 and change_pct >= 0.6 and tech >= 60:
+    """Map composite → decision label + confidence.
+
+    Rebalanced thresholds (Step 4):
+      - BUY NOW requires a clearly stronger setup (stops the old 70–80 cluster
+        from all becoming PREPARE TO BUY).
+      - PREPARE TO BUY is a solid mid-tier band, not the default for everything.
+      - Weaker scores fall to HOLD / AVOID so the board has real separation.
+    """
+    # High-conviction only
+    if combined >= 85 and tech >= 82 and change_pct >= 0.4:
         return "BUY NOW", "High"
-    if combined >= 65 and change_pct >= 0.2:
+    if combined >= 80 and tech >= 75 and change_pct >= 0.8:
+        return "BUY NOW", "High"
+    # Solid mid-tier
+    if combined >= 72 and fund >= 70 and change_pct >= 0.0:
         return "PREPARE TO BUY", "Medium"
-    if combined >= 58 and change_pct >= -0.5:
+    if combined >= 68 and change_pct >= 0.3 and tech >= 60:
         return "PREPARE TO BUY", "Medium"
-    if change_pct <= -2.5 or (combined < 38 and change_pct < 0):
+    # Clear rejects
+    if change_pct <= -2.5 or (combined < 45 and change_pct < 0):
         return "AVOID", "Medium"
-    if combined < 42:
+    if combined < 50:
         return "HOLD", "Low"
     return "HOLD", "Medium"
 

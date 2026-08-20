@@ -135,12 +135,15 @@ def _normalize_db_url(url: str) -> str:
 
 
 def _neon_url() -> Optional[str]:
-    # Single source of truth — prevent Split-Brain across Render containers.
-    # Prefer DATABASE_URL (shared) over CACHE_DATABASE_URL so gateway + market-data
-    # never point at different Neon databases.
+    """
+    Routes Data Feed & Surprise Feed storage exclusively to CACHE_DATABASE_URL
+    if configured, leaving DATABASE_URL / TRAINING_DATABASE_URL strictly for training.
+    Prevents data bleeding into the Training Database.
+    """
     url = (
-        os.getenv("DATABASE_URL")
-        or os.getenv("CACHE_DATABASE_URL")
+        os.getenv("CACHE_DATABASE_URL")
+        or os.getenv("KV_DATABASE_URL")
+        or os.getenv("DATABASE_URL")
         or os.getenv("TRAINING_DATABASE_URL")
     )
     if not url:

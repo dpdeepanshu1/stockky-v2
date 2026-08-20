@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, Optional
 logger = logging.getLogger("circuit-breaker")
 
 DEFAULT_FAILURE_THRESHOLD = int(os.getenv("CB_FAILURE_THRESHOLD", "12"))
-DEFAULT_RECOVERY_TIMEOUT = float(os.getenv("CB_RECOVERY_TIMEOUT", "45"))
+DEFAULT_RECOVERY_TIMEOUT = float(os.getenv("CB_RECOVERY_TIMEOUT", "30"))  # faster half-open after cold start
 DEFAULT_HALF_OPEN_SUCCESS = int(os.getenv("CB_HALF_OPEN_SUCCESS", "2"))
 
 _redis = None
@@ -217,6 +217,17 @@ class CircuitBreaker:
                 )
             self._persist()
 
+    def reset(self) -> None:
+        """Force circuit closed — used by /ops/circuit-reset after intentional warm-up."""
+        with self._lock:
+            self._state = "closed"
+            self._failures = 0
+            self._successes_half = 0
+            self._opened_at = 0.0
+            self._last_error = None
+            self._persist()
+            logger.info("circuit %s → closed (manual reset)", self.name)
+
     def call(self, func: Callable, *args, **kwargs):
         if not self.allow():
             raise CircuitOpenError(self.name, self.retry_after())
@@ -251,3 +262,17 @@ def get_breaker(
 def all_snapshots() -> Dict[str, dict]:
     with _registry_lock:
         return {k: v.snapshot() for k, v in _registry.items()}
+
+
+def reset_all_breakers() -> list:
+    """Force-close every registered breaker. Returns list of names reset."""
+    names = []
+    with _registry_lock:
+        for name, br in list(_registry.items()):
+            try:
+                br.reset()
+                names.append(name)
+            except Exception as e:
+                logger.debug("reset %s: %s", name, e)
+    return names
+

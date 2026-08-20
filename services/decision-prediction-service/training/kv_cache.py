@@ -110,9 +110,11 @@ def _is_durable(key: str) -> bool:
 
 def _neon_url() -> Optional[str]:
     url = (
-        os.getenv("CACHE_DATABASE_URL")
+        os.getenv("TRAINING_DATABASE_URL")
         or os.getenv("DATABASE_URL")
-        or os.getenv("TRAINING_DATABASE_URL")
+        or os.getenv("CACHE_DATABASE_URL")
+        or os.getenv("KV_DATABASE_URL")
+        
     )
     if not url:
         return None

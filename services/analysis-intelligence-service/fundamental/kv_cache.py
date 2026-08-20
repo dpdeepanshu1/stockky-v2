@@ -137,6 +137,7 @@ def _normalize_db_url(url: str) -> str:
 def _neon_url() -> Optional[str]:
     url = (
         os.getenv("CACHE_DATABASE_URL")
+        or os.getenv("KV_DATABASE_URL")
         or os.getenv("DATABASE_URL")
         or os.getenv("TRAINING_DATABASE_URL")
     )

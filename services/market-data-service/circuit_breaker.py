@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, Optional
 logger = logging.getLogger("circuit-breaker")
 
 DEFAULT_FAILURE_THRESHOLD = int(os.getenv("CB_FAILURE_THRESHOLD", "12"))
-DEFAULT_RECOVERY_TIMEOUT = float(os.getenv("CB_RECOVERY_TIMEOUT", "45"))
+DEFAULT_RECOVERY_TIMEOUT = float(os.getenv("CB_RECOVERY_TIMEOUT", "30"))  # faster half-open after cold start
 DEFAULT_HALF_OPEN_SUCCESS = int(os.getenv("CB_HALF_OPEN_SUCCESS", "2"))
 
 _redis = None

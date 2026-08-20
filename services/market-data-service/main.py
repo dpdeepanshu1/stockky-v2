@@ -784,193 +784,100 @@ def _waterfall_polygon_price(symbol: str) -> Optional[float]:
 
 @app.get("/quote/{symbol}", response_model=QuoteResponse)
 def get_quote(symbol: str):
+    """
+    Clean, rate-safe quote path.
+
+    - Primary: local Yahoo OHLCV (period=2d) — no external API hopping
+    - Soft cache + last-good fallback so UI never sees empty during brief Yahoo blips
+    - Aggressive multi-API waterfall (AlphaVantage / TwelveData / Polygon) removed
+      to stop 429 cascades that previously froze the gateway event loop.
+    """
     sym = normalize_symbol(symbol)
     cache_key = f"quote:{sym}"
     cached = _cache_get(cache_key)
-    # Soft refresh only if not rate-limited; prefer stale price over N/A during 429
+
+    # Soft refresh window: serve stale while refreshing only if Yahoo is healthy
     if cached and _should_soft_refresh(cache_key, soft_window=45):
-        logger.info("Soft-TTL refresh for %s", cache_key)
-        # keep cached as safety net if all upstreams fail
         soft_cached = cached
         cached = None
     else:
         soft_cached = cached
+
     if cached:
         return cached
-    if soft_cached and (_in_cooldown("yfinance") or _in_cooldown("nse")):
+    if soft_cached and _in_cooldown("yfinance"):
         return soft_cached
 
-    # 0. WATERFALL PRIMARY: Yahoo period=2d real OHLCV (no fake zeros)
-    price = None
-    source = None
+    # ── Primary: Yahoo clean OHLCV ──────────────────────────────────────────
     yahoo_full = None
     if not _in_cooldown("yfinance"):
         try:
             yahoo_full = _yahoo_ohlcv_quote(sym)
-            if yahoo_full and yahoo_full.get("price"):
-                price = float(yahoo_full["price"])
-                source = "yahoo"
-                logger.info(
-                    "Yahoo OHLCV primary hit %s → ₹%.2f vol=%s chg=%s",
-                    sym, price, yahoo_full.get("volume"), yahoo_full.get("day_change_pct"),
-                )
         except Exception as e:
             logger.debug("yahoo primary %s: %s", sym, e)
-    # NSE scraper removed (403 on Render + NameError). Yahoo waterfall is primary.
 
-    # Early return if Yahoo primary already resolved real OHLCV
-    if yahoo_full and price is not None and price > 0:
+    if yahoo_full and yahoo_full.get("price") and float(yahoo_full["price"] or 0) > 0:
         result = _pad_quote_response(sym, yahoo_full)
         result = _sanitize_for_json(result)
-        _cache_set(cache_key, result)
-        return result
-    if price is not None and price > 0:
-        result = _pad_quote_response(sym, {
-            "symbol": sym,
-            "name": sym,
-            "price": float(price),
-            "cmp": float(price),
-            "source": source or "yahoo",
-            "fetched_at": datetime.utcnow().isoformat(),
-        })
-        result = _sanitize_for_json(result)
-        _cache_set(cache_key, result)
-        return result
-
-    # 2. Alpha Vantage
-    price = None
-    if ALPHA_VANTAGE_API_KEY:
-        possible_symbols = [sym, sym.replace(".NS", "")]
-        for alpha_sym in possible_symbols:
-            try:
-                alpha_url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={alpha_sym}&apikey={ALPHA_VANTAGE_API_KEY}"
-                alpha_resp = httpx.get(alpha_url, timeout=8)
-                if alpha_resp.status_code == 200:
-                    alpha_data = alpha_resp.json()
-                    quote = alpha_data.get("Global Quote", {})
-                    if quote:
-                        price = _safe(quote.get("05. price"))
-                        if price is not None:
-                            logger.info(f"Alpha Vantage fallback found price for {alpha_sym}: {price}")
-                            break
-            except Exception as e:
-                logger.warning(f"Alpha Vantage fallback for {alpha_sym} failed: {e}")
-
-    # 3. Twelve Data
-    if price is None and TWELVE_DATA_API_KEY:
-        try:
-            clean_sym = sym.replace(".NS", "").replace(".BO", "")
-            url = f"https://api.twelvedata.com/price?symbol={clean_sym}&apikey={TWELVE_DATA_API_KEY}"
-            resp = httpx.get(url, timeout=8)
-            if resp.status_code == 200:
-                data = resp.json()
-                price = _safe(data.get("price"))
-                if price is not None:
-                    logger.info(f"Twelve Data fallback found price for {sym}: {price}")
-        except Exception as e:
-            logger.warning(f"Twelve Data fallback failed: {e}")
-
-    # 4. Polygon.io
-    if price is None and POLYGON_API_KEY:
-        try:
-            clean_sym = sym.replace(".NS", "").replace(".BO", "")
-            url = f"https://api.polygon.io/v1/open-close/{clean_sym}/latest?apiKey={POLYGON_API_KEY}"
-            resp = httpx.get(url, timeout=8)
-            if resp.status_code == 200:
-                data = resp.json()
-                price = _safe(data.get("close"))
-                if price is not None:
-                    logger.info(f"Polygon.io fallback found price for {sym}: {price}")
-        except Exception as e:
-            logger.warning(f"Polygon.io fallback failed: {e}")
-
-    # 4b. TwelveData / Polygon structured waterfall (if earlier steps used different endpoints)
-    if price is None:
-        price = _waterfall_twelvedata_price(sym)
-        if price is not None:
-            source = "twelvedata"
-    if price is None:
-        price = _waterfall_polygon_price(sym)
-        if price is not None:
-            source = "polygon"
-
-    # 5. Yahoo history fallback (replaces removed _fetch_price_from_yahoo_raw)
-    if price is None:
-        try:
-            yq = _yahoo_ohlcv_quote(sym)
-            if yq and yq.get("price"):
-                price = float(yq["price"])
-                source = source or "yahoo"
-                # Prefer full OHLCV when available
-                if yahoo_full is None:
-                    yahoo_full = yq
-        except Exception as e:
-            logger.debug("yahoo ohlcv fallback %s: %s", sym, e)
-
-    # 6. yfinance final fallback
-    if price is None:
-        try:
-            ticker = yf.Ticker(sym)
-            ticker._tz = "Asia/Kolkata"
-            info = _with_retry(lambda: ticker.info, max_retries=2, base_delay=0.5)
-            if info:
-                price = info.get("regularMarketPrice") or info.get("last_price")
-                prev_close = info.get("previousClose")
-                change_pct = None
-                if price and prev_close:
-                    change_pct = round(((price - prev_close) / prev_close) * 100, 2)
-
-                result = _pad_quote_response(sym, {
-                    "symbol": sym,
-                    "name": info.get("longName") or info.get("shortName") or sym,
-                    "price": price,
-                    "previous_close": prev_close,
-                    "day_change_pct": change_pct,
-                    "day_high": info.get("dayHigh"),
-                    "day_low": info.get("dayLow"),
-                    "volume": info.get("volume"),
-                    "market_cap": info.get("marketCap"),
-                    "pe_ratio": info.get("trailingPE"),
-                    "source": "yfinance",
-                    "fetched_at": datetime.utcnow().isoformat(),
-                })
-                result = _sanitize_for_json(result)
-                _cache_set(cache_key, result)
-                return result
-        except Exception as e:
-            logger.warning(f"yfinance quote failed for {sym}: {e}")
-
-    # If we have a price from one of the APIs, build padded response (no 500)
-    if price is not None:
-        result = _pad_quote_response(sym, {
-            "symbol": sym,
-            "name": sym,
-            "price": price,
-            "source": source or "waterfall",
-            "fetched_at": datetime.utcnow().isoformat(),
-        })
-        result = _sanitize_for_json(result)
+        result["source"] = result.get("source") or "yahoo_clean"
         _cache_set(cache_key, result)
         _fallback_set(cache_key, result)
         return result
 
-    # No price – return fallback
-    logger.warning("Could not fetch price for %s from any source. Returning fallback.", sym)
-    # Prefer last good cached/soft value over empty N/A
+    # ── Light Yahoo Ticker.info fallback (still no third-party APIs) ────────
+    try:
+        ticker_sym = f"{sym}.NS" if not sym.endswith((".NS", ".BO")) else sym
+        ticker = yf.Ticker(ticker_sym)
+        info = {}
+        try:
+            info = ticker.info or {}
+        except Exception:
+            info = {}
+        price = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("last_price")
+        if price and float(price) > 0:
+            prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
+            change_pct = None
+            if prev_close and float(prev_close) > 0:
+                change_pct = round(((float(price) - float(prev_close)) / float(prev_close)) * 100, 2)
+            result = _pad_quote_response(sym, {
+                "symbol": sym,
+                "name": info.get("longName") or info.get("shortName") or sym,
+                "price": float(price),
+                "cmp": float(price),
+                "previous_close": float(prev_close) if prev_close else None,
+                "day_change_pct": change_pct,
+                "day_high": info.get("dayHigh") or info.get("regularMarketDayHigh"),
+                "day_low": info.get("dayLow") or info.get("regularMarketDayLow"),
+                "volume": info.get("volume") or info.get("regularMarketVolume"),
+                "market_cap": info.get("marketCap"),
+                "pe_ratio": info.get("trailingPE"),
+                "source": "yahoo_info",
+                "fetched_at": datetime.utcnow().isoformat(),
+            })
+            result = _sanitize_for_json(result)
+            _cache_set(cache_key, result)
+            _fallback_set(cache_key, result)
+            return result
+    except Exception as e:
+        logger.debug("yahoo info fallback %s: %s", sym, e)
+
+    # ── Last-good soft / durable fallback (never invent zeros) ──────────────
     if soft_cached and isinstance(soft_cached, dict) and soft_cached.get("price") is not None:
         return _pad_quote_response(sym, soft_cached)
     fb = _fallback_get(cache_key)
     if fb and isinstance(fb, dict) and fb.get("price") is not None:
         return _pad_quote_response(sym, fb)
+
     result = _pad_quote_response(sym, {
         "symbol": sym,
         "name": sym,
         "price": None,
+        "cmp": None,
         "source": "failed",
         "fetched_at": datetime.utcnow().isoformat(),
     })
-    _cache_set(cache_key, result)
-    return result
+    return _sanitize_for_json(result)
+
 
 @app.get("/history/{symbol}")
 def get_history(

@@ -140,10 +140,110 @@ class SurpriseStockEngine:
             self.static_cache = cache
             self._loaded_at = time.time()
             logger.info("surprise static cache loaded: %s symbols", len(cache))
-            return len(cache)
+            # If dedicated surprise table is empty/sparse, seed from Data Feed Cache (stockky_kv)
+            if len(cache) < 20:
+                seeded = self._seed_from_data_feed_kv(cache)
+                if seeded:
+                    self.static_cache = cache
+                    logger.info("surprise: seeded %s symbols from stockky_kv data-feed cache", seeded)
+            return len(self.static_cache)
         except Exception as e:
             logger.warning("load_static_cache failed: %s", e)
+            # Last resort: still try Cache DB data-feed so scan is not stuck at 0 hits
+            try:
+                cache = dict(self.static_cache or {})
+                seeded = self._seed_from_data_feed_kv(cache)
+                if seeded:
+                    self.static_cache = cache
+                    self._loaded_at = time.time()
+                    logger.info("surprise: fallback seeded %s from stockky_kv after static failure", seeded)
+            except Exception as e2:
+                logger.debug("surprise kv seed failed: %s", e2)
             return len(self.static_cache)
+
+    def _seed_from_data_feed_kv(self, cache: Dict[str, Dict[str, Any]]) -> int:
+        """Read Data Feed payloads from stockky_kv (CACHE_DATABASE_URL) — zero external API lag."""
+        url = _db_url()
+        if not url:
+            return 0
+        try:
+            from sqlalchemy import create_engine, text
+            import json as _json
+            eng = create_engine(
+                url,
+                pool_pre_ping=True,
+                pool_size=1,
+                max_overflow=0,
+                pool_timeout=6,
+                connect_args={"connect_timeout": 6, "application_name": "stockky-surprise-kv"},
+            )
+            added = 0
+            with eng.connect() as conn:
+                # Prefer durable feed keys written by data_feed background worker
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT k, v FROM stockky_kv
+                        WHERE (k LIKE 'stockky:data_feed:%'
+                               OR k LIKE 'feed:%'
+                               OR (k NOT LIKE 'system:%' AND k NOT LIKE 'stockky:%'))
+                          AND k NOT LIKE '%:index'
+                          AND k NOT LIKE '%:meta'
+                          AND k NOT LIKE '%:job'
+                        LIMIT 800
+                        """
+                    )
+                ).fetchall()
+                for row in rows:
+                    k = str(row[0] or "")
+                    raw = row[1]
+                    # Extract symbol from key
+                    sym = k
+                    for prefix in ("stockky:data_feed:", "feed:", "data_feed:"):
+                        if sym.startswith(prefix):
+                            sym = sym[len(prefix):]
+                            break
+                    sym = sym.upper().replace(".NS", "").replace(".BO", "").strip()
+                    if not sym or sym in cache:
+                        continue
+                    try:
+                        data = raw if isinstance(raw, dict) else _json.loads(raw) if isinstance(raw, str) else {}
+                    except Exception:
+                        continue
+                    if not isinstance(data, dict):
+                        continue
+                    # Nested payload common in feed store
+                    payload = data.get("payload") if isinstance(data.get("payload"), dict) else data
+                    try:
+                        price = float(payload.get("price") or payload.get("cmp") or 0)
+                    except Exception:
+                        price = 0.0
+                    if price <= 0 or price > MAX_STOCK_PRICE:
+                        continue
+                    try:
+                        prev = float(payload.get("previous_close") or price)
+                    except Exception:
+                        prev = price
+                    try:
+                        vol = int(payload.get("volume") or 10000)
+                    except Exception:
+                        vol = 10000
+                    cache[sym] = {
+                        "symbol": sym,
+                        "prev_close": prev,
+                        "avg_15m_volume": max(1000, vol // 20),
+                        "daily_atr": abs(price - prev) or (price * 0.015),
+                        "high_52w": float(payload.get("day_high") or price),
+                        "dist_52w_pct": 5.0,
+                        "sector": payload.get("sector") or "",
+                        "is_liquid": True,
+                        "source": "data_feed_kv",
+                    }
+                    added += 1
+            return added
+        except Exception as e:
+            logger.debug("_seed_from_data_feed_kv: %s", e)
+            return 0
 
 
     def score_stock(self, symbol: str, tick: dict) -> Optional[dict]:

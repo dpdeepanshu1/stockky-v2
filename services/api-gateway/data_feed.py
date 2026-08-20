@@ -1004,8 +1004,8 @@ def patch_feed_price(symbol: str, live_price: float) -> bool:
 
 
 # ── Yahoo 1-call (chunked) bulk price feeder — bypasses NSE 403 on Render ───
-BULK_YF_CHUNK = int(__import__("os").getenv("BULK_YF_CHUNK", "50"))  # safe Yahoo chunk size
-BULK_YF_CHUNK_SLEEP = float(__import__("os").getenv("BULK_YF_CHUNK_SLEEP", "1.0"))
+BULK_YF_CHUNK = int(__import__("os").getenv("BULK_YF_CHUNK", "30"))  # safer Yahoo chunk size (was 50)
+BULK_YF_CHUNK_SLEEP = float(__import__("os").getenv("BULK_YF_CHUNK_SLEEP", "1.5"))  # cooldown between chunks
 
 
 def _yf_close_volume(frame, sym_ns: str):

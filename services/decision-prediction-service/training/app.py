@@ -108,21 +108,26 @@ LOCK_TIMEOUT_SECONDS = int(os.environ.get("TRAINING_LOCK_TIMEOUT_SECONDS", "2700
 
 # ---------- Pydantic models for prediction recording ----------
 class PredictionSnapshotCreate(BaseModel):
+    """Flexible schema — missing fields no longer cause 422 Unprocessable Entity.
+
+    Frontend / Trade Top / Train Actionable often omit optional scores.
+    Defaults keep the commit path alive without inventing false conviction.
+    """
     symbol: str
-    decision: str  # "BUY NOW", "PREPARE TO BUY", "HOLD", etc.
-    confidence: str  # "High", "Medium", "Low"
-    price: float
+    decision: str = "HOLD"  # "BUY NOW", "PREPARE TO BUY", "HOLD", etc.
+    confidence: Optional[str] = "Medium"  # "High", "Medium", "Low"
+    price: float = 0.0
     target: Optional[float] = None
     stop_loss: Optional[float] = None
     entry_range_low: Optional[float] = None
     entry_range_high: Optional[float] = None
-    combined_score: float
-    technical_score: float
-    fundamental_score: float
+    combined_score: Optional[float] = 50.0
+    technical_score: Optional[float] = 50.0
+    fundamental_score: Optional[float] = 50.0
     news_score: Optional[float] = None
     prediction_score: Optional[float] = None
-    market_score: float
-    training_score: float
+    market_score: Optional[float] = 50.0
+    training_score: Optional[float] = 50.0
     event_risk: bool = False
     rsi: Optional[float] = None
     macd: Optional[str] = None
@@ -134,18 +139,16 @@ class PredictionSnapshotCreate(BaseModel):
     market_mood: Optional[str] = None
     nifty_change_pct: Optional[float] = None
     sensex_change_pct: Optional[float] = None
-    # These were being sent by decision-engine's record_prediction_for_training()
-    # and already have columns on PredictionSnapshot, but weren't declared
-    # here — Pydantic silently drops undeclared fields on a request body.
     market_sentiment_adjustment: Optional[float] = None
     holding_period: Optional[str] = None
     support: Optional[float] = None
     resistance: Optional[float] = None
     sector: Optional[str] = None
     valuation: Optional[str] = None
-    # Renamed from `extra`: decision-engine sends this key as
-    # "feature_snapshot" (matching the DB column name), not "extra".
     feature_snapshot: Optional[dict] = None
+    # Accept extra keys the frontend may still send (score aliases, etc.)
+    class Config:
+        extra = "ignore"
 
 # ---------- Numpy conversion helper ----------
 def convert_numpy(obj):
@@ -1004,6 +1007,11 @@ class ActionableCommitRequest(BaseModel):
     open_trades: bool = False
     # When True, refresh today's snapshot scores instead of skipping as already_recorded
     force_refresh: bool = False
+    # Optional top-level market_score some frontends send — ignored safely
+    market_score: Optional[float] = 50.0
+
+    class Config:
+        extra = "ignore"
 
 @app.post("/api/actionable/commit")
 async def commit_actionable_picks(req: ActionableCommitRequest, background_tasks: BackgroundTasks):

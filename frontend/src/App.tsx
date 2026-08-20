@@ -466,7 +466,8 @@ export default function App() {
     try {
       for await (const row of api.scanStream({
         lite: useLite,
-        forceRefresh: false,
+        // Full runs must rebuild universe; lite can use cache but still needs full list
+        forceRefresh: !useLite,
         signal: ac.signal,
       })) {
         if (scanCancelledRef.current) break;
@@ -531,7 +532,37 @@ export default function App() {
       }
 
       const partial = scanCancelledRef.current;
-      const result = buildScanResultFromRows(rows, total || rows.length, partial);
+      // If stream ended early (proxy timeout / free-tier), continue via background scan
+      const expected = total || 0;
+      const got = rows.length;
+      const earlyExit = expected > 40 && got > 0 && got < Math.floor(expected * 0.85);
+      if (earlyExit && !scanCancelledRef.current) {
+        console.warn(`Stream partial ${got}/${expected} — continuing via /scan/start`);
+        setStatusMessage(`Stream reached ${got}/${expected} — continuing full scan in background…`);
+        setScanTransport("poll");
+        try {
+          const { task_id } = await api.scanStart(true, useLite);
+          if (task_id) {
+            setScanTaskId(task_id);
+            try { subscribeScan(task_id); } catch {}
+            sessionStorage.setItem("stockky_scan_task_id", task_id);
+            const interval = window.setInterval(() => {
+              if (scanCancelledRef.current) {
+                window.clearInterval(interval);
+                return;
+              }
+              pollScanStatus(task_id);
+            }, 1500);
+            setPollInterval(interval);
+            pollIntervalRefWs.current = interval;
+            await pollScanStatus(task_id);
+            return;
+          }
+        } catch (contErr) {
+          console.warn("continue scanStart failed", contErr);
+        }
+      }
+      const result = buildScanResultFromRows(rows, total || rows.length, partial || earlyExit);
       try {
         localStorage.setItem("stockky_last_scan", JSON.stringify(result));
       } catch {}
@@ -539,8 +570,12 @@ export default function App() {
       setScanTransport(null);
       scanAbortRef.current = null;
       setView({ mode: "scan", data: result });
-      setStatusMessage(partial ? "⏹ Stream stopped — partial results kept" : "✅ Live stream complete");
-      setTimeout(() => setStatusMessage(null), 3000);
+      setStatusMessage(
+        partial || earlyExit
+          ? `⏹ Partial scan ${got || rows.length}/${expected || "?"} — results kept`
+          : "✅ Live stream complete"
+      );
+      setTimeout(() => setStatusMessage(null), 4000);
     } catch (e: any) {
       if (e?.name === "AbortError" || scanCancelledRef.current) {
         const result = buildScanResultFromRows(rows, total || rows.length, true);

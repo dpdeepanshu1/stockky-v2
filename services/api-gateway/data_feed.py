@@ -88,7 +88,7 @@ def _norm_sym(symbol: str) -> str:
 
 
 # Universal ≤ ₹5000 gate — refuse to persist high-ticket stocks into the feed cache
-MAX_STOCK_PRICE = 5000.0
+MAX_STOCK_PRICE = float(os.getenv("MAX_STOCK_PRICE", "5000") or 5000)
 
 
 def _coerce_price(val) -> float:
@@ -470,13 +470,15 @@ class DataFeedStore:
         if not missing_keys:
             return result
 
-        # Prefer kv_cache.get_many when available (single Neon ANY query)
+        # Single Neon ANY query via kv_cache.get_many (required for scan performance)
         bulk: Dict[str, Any] = {}
         try:
             import kv_cache as _kc
-            if hasattr(_kc, "get_many"):
-                bulk = _kc.get_many(missing_keys) or {}
+            get_many = getattr(_kc, "get_many", None) or getattr(_kc, "kv_get_many", None)
+            if callable(get_many):
+                bulk = get_many(missing_keys) or {}
             else:
+                logger.warning("kv_cache.get_many missing — falling back to serial gets (slow)")
                 for k in missing_keys:
                     try:
                         v = self._get(k)
@@ -485,7 +487,7 @@ class DataFeedStore:
                     except Exception:
                         pass
         except Exception as e:
-            logger.debug("get_symbols_bulk kv_cache path: %s", e)
+            logger.warning("get_symbols_bulk kv_cache path failed: %s", e)
             for k in missing_keys:
                 try:
                     v = self._get(k)
@@ -536,14 +538,30 @@ class DataFeedStore:
         payload.setdefault("symbol", base)
         payload.setdefault("updated_at", _now_iso())
 
-        # Universal ≤ ₹5000 gate at the write path — never store high-ticket rows
+        # ≤ max-price gate: high-ticket names are not scan targets, but we still
+        # persist slow fields (PE/sector/scores) so Neon stays warm. Volatile
+        # price fields are stripped so the universe price-filter does not
+        # re-admit them via a cached over-cap LTP.
         px = _payload_price(payload)
         if px > MAX_STOCK_PRICE:
             logger.debug(
-                "data_feed put_symbol SKIP %s — price ₹%.2f > ₹%.0f cap",
+                "data_feed put_symbol %s — price ₹%.2f > ₹%.0f; store durable fields only",
                 base, px, MAX_STOCK_PRICE,
             )
-            return
+            for drop_k in (
+                "price", "close", "cmp", "ltp", "last_price", "current_price",
+                "day_high", "day_low", "day_change_pct", "previous_close", "volume",
+            ):
+                payload.pop(drop_k, None)
+            payload["price_over_cap"] = True
+            payload["price_cap"] = MAX_STOCK_PRICE
+            # If nothing durable remains, skip entirely
+            durable_keys = (
+                "pe_ratio", "roce", "roe", "sector", "industry", "fundamental_score",
+                "quality_score", "metrics", "technical_score", "sentiment_score",
+            )
+            if not any(payload.get(k) is not None for k in durable_keys):
+                return
 
         key = DATA_FEED_PREFIX + base
         alias_key = FEED_ALIAS_PREFIX + base

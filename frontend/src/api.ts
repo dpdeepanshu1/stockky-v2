@@ -768,7 +768,41 @@ export const api = {
   getStock: (symbol: string, alreadyOwned = false) =>
     request<Decision>(`/stock/${symbol}?already_owned=${alreadyOwned}`, undefined, 3, 120000),
 
-  runScan: () => request<ScanResult>("/scan", undefined, 2, 180000),
+  /**
+   * Legacy alias — prefer scanStream / scanStart for progress UI.
+   * Starts parallel scan (POST /scan/start) and polls until done, returning the
+   * same ScanResult shape. forceRefresh=true is supported (unlike old hardcoded false).
+   */
+  runScan: async (forceRefresh = false, lite: boolean | null = null): Promise<ScanResult> => {
+    const start = await api.scanStart(forceRefresh, lite);
+    const taskId = start?.task_id;
+    if (!taskId) {
+      // Fallback: blocking parallel wrapper on GET /scan
+      return request<ScanResult>(`/scan?force_refresh=${forceRefresh}`, undefined, 2, 300000);
+    }
+    if (start.from_cache && start.message) {
+      // Try last scan payload
+      try {
+        const last = await api.getLastScan();
+        const res = (last?.result || last) as ScanResult;
+        if (res && (res.all_results || res.results || res.recommendations)) {
+          return res;
+        }
+      } catch { /* continue poll */ }
+    }
+    const deadline = Date.now() + 300000;
+    while (Date.now() < deadline) {
+      const st = await api.scanStatus(taskId);
+      if (st?.status === "done" || st?.status === "error" || st?.status === "cancelled") {
+        const result = (st as any).result;
+        if (result && typeof result === "object") return result as ScanResult;
+        const last = await api.getLastScan();
+        return (last?.result || last || { all_results: [], recommendations: [], scanned: 0 }) as ScanResult;
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    throw new Error("runScan timed out waiting for /scan/start task");
+  },
 
   scanStart: (forceRefresh = false, lite: boolean | null = null) =>
     request<{

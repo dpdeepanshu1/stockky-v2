@@ -1007,7 +1007,7 @@ def _get_52w_extreme_symbols() -> List[str]:
 
 
 # ── ≤ ₹5000 universe pre-filter ─────────────────────────────────────────────
-MAX_UNIVERSE_PRICE = 5000.0
+MAX_UNIVERSE_PRICE = float(os.getenv("MAX_UNIVERSE_PRICE", os.getenv("MAX_STOCK_PRICE", "5000")) or 5000)
 
 
 def _filter_symbols_under_max_price(symbols: List[str]) -> List[str]:
@@ -1137,7 +1137,12 @@ def _build_scan_universe() -> List[str]:
             clean.append(s)
 
     if not clean:
-        fallback = ["RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "HCLTECH", "ITC", "SBIN", "BHARTIARTL", "KOTAKBANK"]
+        fallback = [
+            # Under typical ≤₹5000 liquid names (mega-caps like RELIANCE/TCS excluded —
+            # they fail the price gate and would never get durable price rows)
+            "HDFCBANK", "ICICIBANK", "INFY", "HCLTECH", "ITC", "SBIN",
+            "BHARTIARTL", "KOTAKBANK", "AXISBANK", "WIPRO",
+        ]
         clean = fallback
 
     # Prune symbols that have gone UNIVERSE_PRUNE_AFTER_WEAK_SCANS consecutive
@@ -2171,7 +2176,7 @@ async def _analyze_one_symbol_ultra(
                             or feed_row.get("combined_score") is not None
                             or feed_row.get("decision")
                         )
-                        if has_feed or close_px is not None or True:
+                        if has_feed or close_px is not None:
                             # Always take lite fast-path (skip decision HTTP)
                             fr = feed_row if isinstance(feed_row, dict) else {}
                             score = (
@@ -2345,7 +2350,10 @@ async def _analyze_one_symbol_ultra(
                         await asyncio.gather(*tasks.values(), return_exceptions=True)
 
                     if "fund" in tasks:
-                        fund_res = tasks["fund"].result() if not tasks["fund"].exception() else ({}, True)
+                        try:
+                            fund_res = tasks["fund"].result()
+                        except Exception:
+                            fund_res = ({}, True)
                         if isinstance(fund_res, tuple):
                             fund_metrics, fund_fallback = fund_res
                         else:
@@ -2355,7 +2363,10 @@ async def _analyze_one_symbol_ultra(
                             normalized["fundamental_fallback"] = fund_fallback
 
                     if "event" in tasks:
-                        event_data = tasks["event"].result() if not tasks["event"].exception() else None
+                        try:
+                            event_data = tasks["event"].result()
+                        except Exception:
+                            event_data = None
                         if event_data:
                             # Previously only next_earnings_date survived here —
                             # whatever else event-tracker-service returns (bulk
@@ -2372,7 +2383,10 @@ async def _analyze_one_symbol_ultra(
                                 normalized["reasons"] = reasons
 
                     if "news" in tasks:
-                        news_data = tasks["news"].result() if not tasks["news"].exception() else None
+                        try:
+                            news_data = tasks["news"].result()
+                        except Exception:
+                            news_data = None
                         if news_data:
                             normalized["news_score"] = news_data.get("news_score")
                             reasons = normalized.get("reasons", {})
@@ -2381,7 +2395,10 @@ async def _analyze_one_symbol_ultra(
                                 normalized["reasons"] = reasons
 
                     if "pred" in tasks:
-                        pred_res = tasks["pred"].result() if not tasks["pred"].exception() else (None, None)
+                        try:
+                            pred_res = tasks["pred"].result()
+                        except Exception:
+                            pred_res = (None, None)
                         if isinstance(pred_res, tuple):
                             pred_score, pred_note = pred_res
                         else:
@@ -3408,7 +3425,30 @@ async def system_health():
             if True:
                 resp = await client.get(f"{url.rstrip('/')}/health")
             if resp.status_code == 200:
-                return name, {"ok": True, "required": required, "status": "up", "url": url}
+                body = {}
+                try:
+                    body = resp.json() if resp.content else {}
+                except Exception:
+                    body = {}
+                failed = body.get("failed") or []
+                mounts = body.get("mounts") or {}
+                # Sub-services that expose MOUNT_STATUS: degraded if any mount failed
+                mount_ok = not failed
+                ok = mount_ok
+                status = "up" if ok else "degraded"
+                entry = {
+                    "ok": ok,
+                    "required": required,
+                    "status": status,
+                    "url": url,
+                }
+                if failed:
+                    entry["failed_mounts"] = failed
+                if mounts:
+                    entry["mounts"] = mounts
+                if body.get("status"):
+                    entry["upstream_status"] = body.get("status")
+                return name, entry
             return name, {"ok": False, "required": required, "status": f"http_{resp.status_code}", "url": url}
         except Exception as e:
             return name, {"ok": False, "required": required, "status": "unreachable", "error": str(e)[:100], "url": url}
@@ -3513,7 +3553,15 @@ def get_searched_symbols():
 
 # ── Stock decision ──────────────────────────────────────────────────────────
 @app.get("/stock/{symbol}")
-def get_stock_decision(symbol: str, already_owned: bool = False):
+async def get_stock_decision(symbol: str, already_owned: bool = False):
+    """
+    Single-stock Analyse.
+
+    1) One live decide/{symbol}?force=true (decision service already parallel-gathers
+       technical/fundamental/news/events/prediction).
+    2) Optional enrichment only when decide clearly lacked a pillar — all conditional
+       re-fetches run concurrently via asyncio.gather (no serial waterfall).
+    """
     original = symbol.strip()
     resolved = _resolve_symbol(original)
     if resolved is None:
@@ -3533,126 +3581,189 @@ def get_stock_decision(symbol: str, already_owned: bool = False):
         except Exception:
             pass
 
+    def _reason_blob(reasons: dict, key: str) -> str:
+        return " ".join(str(x) for x in (reasons.get(key) or [])).lower()
+
+    def _pillar_failed(blob: str) -> bool:
+        """True only when decide explicitly reported failure — not merely a neutral score."""
+        needles = (
+            "temporarily unavailable",
+            "error processing",
+            "recovering",
+            "unavailable",
+            "timed out",
+            "timeout",
+            "failed to",
+            "not available",
+            "data insufficient",
+            "could not",
+        )
+        return any(n in blob for n in needles)
+
     try:
-        # Interactive Analyse always requests live decide (skip weak cache)
-        resp = httpx.get(
-            f"{DECISION_URL}/decide/{symbol_to_use}",
-            params={"already_owned": already_owned, "force": "true"},
-            timeout=90,
-        )
-        resp.raise_for_status()
-        raw = resp.json()
-        result = _normalize_decision_response(raw, symbol_to_use)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as client:
+            # ── 1) Live decide (already fans out in parallel downstream) ──
+            resp = await client.get(
+                f"{DECISION_URL}/decide/{symbol_to_use}",
+                params={"already_owned": str(already_owned).lower(), "force": "true"},
+            )
+            resp.raise_for_status()
+            raw = resp.json()
+            result = _normalize_decision_response(raw, symbol_to_use)
 
-        reasons = result.get("reasons") if isinstance(result.get("reasons"), dict) else {}
-        if not isinstance(reasons, dict):
-            reasons = {}
-            result["reasons"] = reasons
-
-        # Live quote + S/R always (works off-hours too)
-        price = result.get("close")
-        if price is None:
-            price = _fetch_price_from_quote(symbol_to_use)
-            if price is not None:
-                result["close"] = price
-        if result.get("close") is not None:
-            result["data_insufficient"] = False
-            c = float(result["close"])
-            if result.get("support") is None:
-                result["support"] = round(c * 0.97, 2)
-            if result.get("resistance") is None:
-                result["resistance"] = round(c * 1.03, 2)
-
-        # Live technical when decide said unavailable / default 50
-        tech_blob = " ".join(str(x) for x in (reasons.get("technical") or [])).lower()
-        need_tech = (
-            "temporarily unavailable" in tech_blob
-            or "error processing" in tech_blob
-            or "recovering" in tech_blob
-            or result.get("technical_score") in (None, 50)
-        )
-        if need_tech:
-            try:
-                tr = httpx.get(f"{TECHNICAL_URL}/analyze/{symbol_to_use}", timeout=45)
-                if tr.status_code == 200:
-                    td = tr.json() or {}
-                    if td.get("technical_score") is not None:
-                        result["technical_score"] = td.get("technical_score")
-                    if td.get("close") is not None:
-                        result["close"] = td.get("close")
-                        result["data_insufficient"] = False
-                    if td.get("support") is not None:
-                        result["support"] = td.get("support")
-                    if td.get("resistance") is not None:
-                        result["resistance"] = td.get("resistance")
-                    if td.get("reasons"):
-                        reasons["technical"] = td.get("reasons") if isinstance(td.get("reasons"), list) else [str(td.get("reasons"))]
-                        result["reasons"] = reasons
-                    elif td.get("close"):
-                        reasons["technical"] = [f"Live technical refreshed · close ₹{td.get('close')}"]
-                        result["reasons"] = reasons
-            except Exception as te:
-                logger.warning("live technical enrich %s: %s", symbol_to_use, te)
-
-        # Ensure S/R after technical enrich
-        if result.get("close") is not None:
-            c = float(result["close"])
-            if result.get("support") is None:
-                result["support"] = round(c * 0.97, 2)
-            if result.get("resistance") is None:
-                result["resistance"] = round(c * 1.03, 2)
-
-        _merge_fundamentals(result, symbol_to_use)
-
-        # If fund still fallback / unavailable text, refresh reasons from live fundamental
-        fund_blob = " ".join(str(x) for x in (reasons.get("fundamental") or [])).lower()
-        if "unavailable" in fund_blob or "error processing" in fund_blob or result.get("fundamental_fallback"):
-            try:
-                fr = httpx.get(f"{FUNDAMENTAL_URL}/analyze/{symbol_to_use}", timeout=45)
-                if fr.status_code == 200:
-                    fd = fr.json() or {}
-                    if fd.get("fundamental_score") is not None:
-                        result["fundamental_score"] = fd.get("fundamental_score")
-                    if fd.get("metrics"):
-                        result["fundamental_metrics"] = fd.get("metrics")
-                    if fd.get("reasons"):
-                        reasons["fundamental"] = fd["reasons"] if isinstance(fd["reasons"], list) else [str(fd["reasons"])]
-                        result["reasons"] = reasons
-                    result["fundamental_fallback"] = bool(fd.get("fallback_used"))
-                    if fd.get("valuation"):
-                        result["valuation"] = fd.get("valuation")
-                    if fd.get("sector"):
-                        result["sector"] = fd.get("sector")
-            except Exception as fe:
-                logger.warning("live fundamental enrich %s: %s", symbol_to_use, fe)
-
-        if result.get("news_score") is None:
-            news = _fetch_news(symbol_to_use)
-            if news:
-                result["news_score"] = news.get("news_score")
-                reasons = result.get("reasons", {})
-                if news.get("reasons"):
-                    reasons["news"] = news["reasons"]
-                    result["reasons"] = reasons
-
-        if result.get("event_risk") is False and not result.get("reasons", {}).get("event"):
-            events = _fetch_events(symbol_to_use)
-            if events and events.get("next_earnings_date"):
-                result["event_risk"] = True
-                reasons = result.get("reasons", {})
-                reasons["event"] = [f"Earnings due: {events['next_earnings_date']}"]
+            reasons = result.get("reasons") if isinstance(result.get("reasons"), dict) else {}
+            if not isinstance(reasons, dict):
+                reasons = {}
                 result["reasons"] = reasons
 
-        if result.get("prediction_score") is None:
-            try:
-                pred_resp = httpx.get(f"{PREDICTION_URL}/predict/{symbol_to_use}", timeout=60)
-                if pred_resp.status_code == 200:
-                    pred_data = pred_resp.json()
-                    if pred_data.get("model_loaded"):
-                        result["prediction_score"] = pred_data.get("prediction_score")
-                        result["prediction_note"] = pred_data.get("note")
-            except Exception as e:
-                logger.warning(f"Prediction service lookup failed for {symbol_to_use}: {e}")
+            # Price fill if decide returned no close
+            if result.get("close") is None:
+                try:
+                    price = await asyncio.to_thread(_fetch_price_from_quote, symbol_to_use)
+                    if price is not None:
+                        result["close"] = price
+                except Exception:
+                    pass
+            if result.get("close") is not None:
+                result["data_insufficient"] = False
+                try:
+                    c = float(result["close"])
+                    if result.get("support") is None:
+                        result["support"] = round(c * 0.97, 2)
+                    if result.get("resistance") is None:
+                        result["resistance"] = round(c * 1.03, 2)
+                except (TypeError, ValueError):
+                    pass
+
+            tech_blob = _reason_blob(reasons, "technical")
+            fund_blob = _reason_blob(reasons, "fundamental")
+            news_blob = _reason_blob(reasons, "news")
+
+            # Tighten: neutral score 50 alone is NOT a re-fetch trigger
+            need_tech = _pillar_failed(tech_blob) or (
+                result.get("technical_score") is None and result.get("data_insufficient")
+            )
+            need_fund = _pillar_failed(fund_blob) or (
+                result.get("fundamental_score") is None
+                and not result.get("fundamental_metrics")
+            )
+            need_news = result.get("news_score") is None and (
+                _pillar_failed(news_blob) or not (reasons.get("news") or [])
+            )
+            need_events = (
+                not result.get("event_data")
+                and not reasons.get("event")
+                and not result.get("event_risk")  # None or False both mean "no event risk known yet"
+            )
+            need_pred = result.get("prediction_score") is None and result.get("prediction_note") is None
+
+            async def _get(url: str, timeout: float = 45.0):
+                try:
+                    r = await client.get(url, timeout=timeout)
+                    if r.status_code == 200 and r.content:
+                        data = r.json()
+                        return data if isinstance(data, dict) else None
+                except Exception as e:
+                    logger.debug("enrich %s: %s", url, e)
+                return None
+
+            tasks = {}
+            if need_tech:
+                tasks["tech"] = asyncio.create_task(
+                    _get(f"{TECHNICAL_URL}/analyze/{symbol_to_use}?force=true", 45.0)
+                )
+            if need_fund:
+                tasks["fund"] = asyncio.create_task(
+                    _get(f"{FUNDAMENTAL_URL}/analyze/{symbol_to_use}?force=true", 60.0)
+                )
+            if need_news:
+                tasks["news"] = asyncio.create_task(
+                    _get(f"{NEWS_URL}/analyze/{symbol_to_use}", 30.0)
+                )
+            if need_events:
+                tasks["events"] = asyncio.create_task(
+                    _get(f"{EVENT_URL}/events/{symbol_to_use}?force=true", 45.0)
+                )
+            if need_pred:
+                tasks["pred"] = asyncio.create_task(
+                    _get(f"{PREDICTION_URL}/predict/{symbol_to_use}", 30.0)
+                )
+
+            fetched = {}
+            if tasks:
+                keys = list(tasks.keys())
+                vals = await asyncio.gather(*(tasks[k] for k in keys), return_exceptions=True)
+                for k, v in zip(keys, vals):
+                    if isinstance(v, Exception):
+                        logger.debug("enrich task %s failed: %s", k, v)
+                        fetched[k] = None
+                    else:
+                        fetched[k] = v
+
+            # Apply enrichment
+            td = fetched.get("tech")
+            if isinstance(td, dict):
+                if td.get("technical_score") is not None:
+                    result["technical_score"] = td["technical_score"]
+                for k in ("support", "resistance", "trend_strength", "volume_surge", "rsi", "close"):
+                    if td.get(k) is not None and result.get(k) is None:
+                        result[k] = td[k]
+                if td.get("reasons"):
+                    reasons["technical"] = td["reasons"] if isinstance(td["reasons"], list) else [str(td["reasons"])]
+
+            fd = fetched.get("fund")
+            if isinstance(fd, dict):
+                if fd.get("fundamental_score") is not None:
+                    result["fundamental_score"] = fd["fundamental_score"]
+                metrics = fd.get("metrics")
+                if metrics:
+                    result["fundamental_metrics"] = metrics
+                result["fundamental_fallback"] = bool(fd.get("fallback_used"))
+                if fd.get("reasons"):
+                    reasons["fundamental"] = fd["reasons"] if isinstance(fd["reasons"], list) else [str(fd["reasons"])]
+                # Write real fundamentals back to Neon data-feed (merge, never wipe)
+                try:
+                    from data_feed import save_stock_feed, extract_feed_payload
+                    row = extract_feed_payload(symbol_to_use, fundamental=fd, extra={
+                        "fundamental_score": fd.get("fundamental_score"),
+                        "source": "stock_enrich_fundamental",
+                    })
+                    if row:
+                        save_stock_feed(symbol_to_use, row)
+                except Exception as _fe:
+                    logger.debug("fund writeback %s: %s", symbol_to_use, _fe)
+
+            nd = fetched.get("news")
+            if isinstance(nd, dict) and nd.get("news_score") is not None:
+                result["news_score"] = nd.get("news_score")
+                if nd.get("reasons"):
+                    reasons["news"] = nd["reasons"] if isinstance(nd["reasons"], list) else [str(nd["reasons"])]
+
+            ed = fetched.get("events")
+            if isinstance(ed, dict):
+                result["event_data"] = ed
+                if ed.get("next_earnings_date"):
+                    result["event_risk"] = True
+                    reasons.setdefault("event", [])
+                    if isinstance(reasons["event"], list):
+                        reasons["event"] = list(reasons["event"]) + [f"Earnings due: {ed['next_earnings_date']}"]
+
+            pd = fetched.get("pred")
+            if isinstance(pd, dict) and pd.get("model_loaded"):
+                if pd.get("prediction_score") is not None:
+                    result["prediction_score"] = pd.get("prediction_score")
+                if pd.get("note"):
+                    result["prediction_note"] = pd.get("note")
+
+            result["reasons"] = reasons
+            result["enrichment"] = {
+                "need_tech": need_tech,
+                "need_fund": need_fund,
+                "need_news": need_news,
+                "need_events": need_events,
+                "need_pred": need_pred,
+                "fetched": [k for k, v in fetched.items() if v],
+            }
 
         if corrected_from:
             result["corrected_from"] = corrected_from
@@ -3660,7 +3771,6 @@ def get_stock_decision(symbol: str, already_owned: bool = False):
 
         result["natural_language_summary"] = _generate_summary(result)
 
-        # Soft data-quality flags for UI (free-tier honesty)
         flags = []
         level = "high"
         if result.get("fundamental_fallback") or result.get("data_insufficient"):
@@ -3691,12 +3801,17 @@ def get_stock_decision(symbol: str, already_owned: bool = False):
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             suggestions = difflib.get_close_matches(symbol_to_use, _get_all_known_symbols(), n=3, cutoff=0.5)
-            suggestion_text = f"Symbol '{symbol_to_use}' not found. Did you mean: {', '.join(suggestions)}?" if suggestions else f"Symbol '{symbol_to_use}' not found."
+            suggestion_text = (
+                f"Symbol '{symbol_to_use}' not found. Did you mean: {', '.join(suggestions)}?"
+                if suggestions
+                else f"Symbol '{symbol_to_use}' not found."
+            )
             raise HTTPException(status_code=404, detail=suggestion_text)
         else:
             raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Decision engine unreachable: {e}")
+
 
 # ── Legacy sync fallback helpers ──────────────────────────────────────────
 def _merge_fundamentals(normalized: dict, symbol: str):
@@ -3756,194 +3871,122 @@ def _fetch_events(symbol: str) -> Optional[dict]:
     return None
 
 # ── Legacy synchronous scan ──────────────────────────────────────────────────
+@app.post("/scan")
+async def run_scan_post(
+    force_refresh: bool = True,
+    lite: bool = False,
+    background_tasks: BackgroundTasks = None,
+):
+    """
+    Compatibility alias: overnight cron and external tools used POST /scan and got 405
+    because only GET /scan existed. Delegate to the async parallel scan starter.
+    """
+    # FastAPI injects BackgroundTasks when annotated; guard None for safety
+    if background_tasks is None:
+        background_tasks = BackgroundTasks()
+    return start_scan(force_refresh=force_refresh, lite=lite, background_tasks=background_tasks)
+
+
 @app.get("/scan")
-def run_scan(force_refresh: bool = False):
+async def run_scan(force_refresh: bool = False, lite: bool = False):
+    """
+    Legacy synchronous scan entrypoint.
+
+    Previously: sequential httpx loop over the full universe hitting decide/{symbol}
+    live with no Neon prefetch (slow + rate-limit heavy).
+
+    Now: thin wrapper around the same parallel Neon-prefetch pipeline used by
+    POST /scan/start and GET /api/scan/stream. Starts run_scan_parallel, waits for
+    completion, returns the final result payload (or task status if still running
+    past the wait budget).
+    """
     if force_refresh and _redis:
         try:
             _redis.delete(SCAN_UNIVERSE_KEY)
+            _redis.delete(LAST_FULL_SCAN_KEY)
         except Exception:
             pass
 
+    # Serve recent complete scan from cache when not forcing
+    if not force_refresh:
+        cached = _redis_get(LAST_FULL_SCAN_KEY)
+        if cached and isinstance(cached, dict) and cached.get("result"):
+            res = cached.get("result") or {}
+            processed = int(cached.get("processed") or res.get("scanned") or 0)
+            total = int(cached.get("total") or res.get("universe_size") or processed or 0)
+            is_partial = bool(
+                cached.get("partial")
+                or cached.get("cancelled")
+                or res.get("partial")
+                or (total > 0 and processed < int(total * 0.9))
+            )
+            if not is_partial and total > 0 and processed >= int(total * 0.9):
+                return res
+
     universe = _build_scan_universe()
-    results = []
-    errors = []
+    if not universe:
+        return {
+            "scanned_at": datetime.now(IST).isoformat(),
+            "scanned": 0,
+            "universe_size": 0,
+            "recommendations": [],
+            "all_results": [],
+            "errors": ["empty_universe"],
+            "verdict": "NO_DATA",
+        }
 
-    with httpx.Client(timeout=150) as client:
-        for symbol in universe:
-            try:
-                resp = client.get(f"{DECISION_URL}/decide/{symbol}")
-                resp.raise_for_status()
-                raw = resp.json()
-                normalized = _normalize_decision_response(raw, symbol)
+    use_lite = bool(lite) if lite else (SCAN_LITE_DEFAULT or _should_force_lite_scan())
+    task_id = str(uuid.uuid4())
+    # Run the real parallel pipeline in-process (Neon bulk + semaphore workers)
+    try:
+        await run_scan_parallel(task_id, universe, use_lite)
+    except Exception as e:
+        logger.exception("legacy /scan parallel wrapper failed: %s", e)
+        data = _redis_get(SCAN_TASK_PREFIX + task_id) or {}
+        if data.get("result"):
+            return data["result"]
+        raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)[:200]}")
 
-                if normalized.get("close") is None:
-                    price = _fetch_price_from_quote(symbol)
-                    if price is not None:
-                        normalized["close"] = price
-                        if normalized.get("support") is None:
-                            normalized["support"] = round(price * 0.95, 2)
-                        if normalized.get("resistance") is None:
-                            normalized["resistance"] = round(price * 1.05, 2)
+    data = _redis_get(SCAN_TASK_PREFIX + task_id) or {}
+    result = data.get("result")
+    if isinstance(result, dict) and result:
+        return result
 
-                _merge_fundamentals(normalized, symbol)
-
-                if normalized.get("news_score") is None:
-                    news = _fetch_news(symbol)
-                    if news:
-                        normalized["news_score"] = news.get("news_score")
-                        reasons = normalized.get("reasons", {})
-                        if news.get("reasons"):
-                            reasons["news"] = news["reasons"]
-                            normalized["reasons"] = reasons
-
-                if normalized.get("event_risk") is False and not normalized.get("reasons", {}).get("event"):
-                    events = _fetch_events(symbol)
-                    if events:
-                        # See the async analyzer's equivalent block for why
-                        # the full dict is passed through, not just
-                        # next_earnings_date.
-                        normalized["event_data"] = events
-                        if events.get("next_earnings_date"):
-                            normalized["event_risk"] = True
-                            reasons = normalized.get("reasons", {})
-                            reasons["event"] = [f"Earnings due: {events['next_earnings_date']}"]
-                            normalized["reasons"] = reasons
-
-                if normalized.get("prediction_score") is None:
-                    try:
-                        pred_resp = client.get(f"{PREDICTION_URL}/predict/{symbol}", timeout=60)
-                        if pred_resp.status_code == 200:
-                            pred_data = pred_resp.json()
-                            if pred_data.get("model_loaded"):
-                                normalized["prediction_score"] = pred_data.get("prediction_score")
-                                normalized["prediction_note"] = pred_data.get("note")
-                    except Exception as e:
-                        logger.warning(f"Prediction service lookup failed during scan for {symbol}: {e}")
-
-                # Adds a concrete calendar-date holding period estimate
-                # alongside whatever decision-engine's own holding_period
-                # string is (often a static "2-6 weeks" or "N/A") — kept as
-                # a separate field so nothing that already reads
-                # holding_period breaks.
-                entry = normalized.get("entry_range") or {}
-                entry_price = entry.get("low") or normalized.get("close")
-                normalized["holding_period_estimate"] = _estimate_holding_period(
-                    entry_price, normalized.get("target"), normalized.get("decision")
-                )
-                normalized["natural_language_summary"] = _generate_summary(normalized)
-                results.append(normalized)
-            except httpx.HTTPError as e:
-                logger.warning("Scan skipped %s: %s", symbol, e)
-                errors.append({"symbol": symbol, "error": str(e)})
-
-    results.sort(key=lambda r: r.get("combined_score", 0), reverse=True)
-    actionable = [r for r in results if r.get("decision") in ("BUY NOW", "PREPARE TO BUY")]
-    top_picks = _select_top_picks(actionable, limit=5)
-    # horizon picks for sync scan as well (though sync is legacy)
-    def _horizon_picks_sync(results_list, horizon_key, limit=5):
-        scored = []
-        for r in results_list:
-            if r.get("decision") == "ERROR":
-                continue
-            hz = (r.get("horizons") or {}).get(horizon_key) or {}
-            sc = hz.get("score")
-            if sc is None:
-                sc = r.get("combined_score", 0) or 0
-                if horizon_key == "mid":
-                    sc = sc * 0.95
-                elif horizon_key == "long":
-                    sc = (r.get("fundamental_score") or sc) * 0.9 + (r.get("combined_score") or 0) * 0.1
-            decision = hz.get("decision") or r.get("decision")
-            min_sc = {"short": 54, "mid": 56, "long": 58}.get(horizon_key, 54)
-            if decision in ("BUY NOW", "PREPARE TO BUY") or (sc or 0) >= min_sc:
-                row = {**r, "_hz_score": sc, "horizon_focus": horizon_key}
-                if decision == "DO NOT BUY" and (sc or 0) >= min_sc:
-                    row = {**row, "decision": "PREPARE TO BUY", "promoted_from_score": True}
-                scored.append(row)
-        scored.sort(key=lambda x: x.get("_hz_score", 0), reverse=True)
-        return scored[:limit]
-    top_picks_short = _horizon_picks_sync(results, "short")
-    top_picks_mid = _horizon_picks_sync(results, "mid")
-    top_picks_long = _horizon_picks_sync(results, "long")
-    # Guarantee Top-5 boards never empty (sync scan path)
-    sorted_all = sorted(
-        [r for r in results if r.get("decision") != "ERROR"],
-        key=lambda x: x.get("combined_score", 0) or 0,
-        reverse=True,
-    )
-    if not top_picks_short:
-        top_picks_short = top_picks or sorted_all[:5]
-    if not top_picks_mid:
-        top_picks_mid = sorted_all[5:10] if len(sorted_all) >= 10 else sorted_all[:min(5, len(sorted_all))]
-    if not top_picks_long:
-        top_picks_long = sorted_all[10:15] if len(sorted_all) >= 15 else sorted_all[:min(5, len(sorted_all))]
-    final_verdict_scan = {
-        "preferred_horizon": "short",
-        "short_count": len(top_picks_short),
-        "mid_count": len(top_picks_mid),
-        "long_count": len(top_picks_long),
-        "headline": f"Short: {len(top_picks_short)} pick(s). Mid: {len(top_picks_mid)}, Long: {len(top_picks_long)}.",
-        "best_short": top_picks_short[0].get("symbol") if top_picks_short else None,
-    }
-    _record_symbol_outcomes(results)  # feeds universe self-pruning — see _build_scan_universe
-    watchlist_candidates = []
-    if not top_picks:
-        watchlist_candidates = results[:3]
-
-    buy_count = len([r for r in results if r.get("decision") in ("BUY NOW", "PREPARE TO BUY")])
-    sell_count = len([r for r in results if r.get("decision") == "SELL"])
-    hold_count = len([r for r in results if r.get("decision") == "HOLD"])
-
-    if buy_count >= 5:
-        market_mood = "Bullish"
-    elif sell_count > buy_count:
-        market_mood = "Bearish"
-    elif buy_count > 0:
-        market_mood = "Selective"
-    else:
-        market_mood = "Cautious"
-
-    verdict = f"{len(top_picks)} strong opportunity(ies) found" if top_picks else "DO NOT BUY ANY STOCK TODAY — market conditions cautious"
-
-    result = {
-        "scanned": len(results),
-        "universe_size": len(universe),
-        "watchlist_size": len(_load_watchlist()),
-        "recommendations": top_picks_short,
-        "recommendations_short": top_picks_short,
-        "recommendations_mid": top_picks_mid,
-        "recommendations_long": top_picks_long,
-        "final_verdict": final_verdict_scan,
-        "watchlist_candidates": watchlist_candidates,
-        "verdict": verdict,
-        "market_mood": market_mood,
-        "market_stats": {
-            "buy_signals": buy_count,
-            "sell_signals": sell_count,
-            "hold_signals": hold_count,
-            "cautious": len(results) - buy_count - sell_count - hold_count,
-        },
-        "all_results": results,
-        "errors": errors,
+    # Fallback shape if parallel task stored status without nested result
+    return {
+        "scanned_at": datetime.now(IST).isoformat(),
+        "scanned": data.get("processed") or 0,
+        "universe_size": data.get("total") or len(universe),
+        "recommendations": (data.get("result") or {}).get("recommendations", []) if isinstance(data.get("result"), dict) else [],
+        "all_results": (data.get("result") or {}).get("all_results", []) if isinstance(data.get("result"), dict) else [],
+        "errors": [data.get("error")] if data.get("error") else [],
+        "verdict": (data.get("result") or {}).get("verdict", "UNKNOWN") if isinstance(data.get("result"), dict) else "UNKNOWN",
+        "task_id": task_id,
+        "status": data.get("status"),
+        "parallel": True,
+        "deprecated_note": "GET /scan now uses parallel Neon-prefetch pipeline (same as /scan/start)",
     }
 
-    _send_scan_notification(result.get("recommendations", []), result["verdict"], result["scanned"], result["universe_size"])
-    return result
 
-# ============================================================================
-# NEW: Batch scan endpoint – used by GitHub Actions runner
-# ============================================================================
 
 @app.post("/scan/batch")
 async def scan_batch(request: Request):
     """
     Analyse a batch of symbols (max 15) and return results quickly.
-    Uses the same parallel logic as the full scan but limited to the batch.
+    Already uses Neon bulk prefetch + asyncio.Semaphore parallel workers
+    (same family as /scan/start and /api/scan/stream). Kept for GHA runners.
     """
     data = await request.json()
-    symbols = data.get("symbols", [])
-    if len(symbols) > 15:
+    raw_symbols = data.get("symbols", [])
+    if len(raw_symbols) > 15:
         raise HTTPException(status_code=400, detail="Maximum 15 symbols per batch")
+
+    # Normalize once so feed keys and analyze() symbol always match (RELIANCE.NS → RELIANCE)
+    symbols = [
+        str(s).upper().replace(".NS", "").replace(".BO", "").strip()
+        for s in raw_symbols
+        if str(s).strip()
+    ]
 
     # Use a semaphore to limit concurrent downstream calls inside this batch
     # Aligned with MAX_PARALLEL_WORKERS=8 so analysis service is never overloaded
@@ -3952,11 +3995,7 @@ async def scan_batch(request: Request):
     if True:
         # One Neon bulk for this batch
         try:
-            bases = [
-                str(s).upper().replace(".NS", "").replace(".BO", "").strip()
-                for s in symbols
-            ]
-            batch_feeds = _feed_store().get_symbols_bulk(bases) or {}
+            batch_feeds = _feed_store().get_symbols_bulk(symbols) or {}
         except Exception:
             batch_feeds = {}
         tasks = [
@@ -3964,9 +4003,7 @@ async def scan_batch(request: Request):
                 sym,
                 client,
                 sem,
-                feed_row=batch_feeds.get(
-                    str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
-                ),
+                feed_row=batch_feeds.get(sym),
                 prefetched_feeds=batch_feeds,
             )
             for sym in symbols
@@ -3978,6 +4015,8 @@ async def scan_batch(request: Request):
             if isinstance(result, Exception):
                 final_results.append({"symbol": sym, "decision": "ERROR", "error": str(result)})
             else:
+                if isinstance(result, dict):
+                    result["symbol"] = sym  # enforce normalized symbol
                 final_results.append(result)
         return {"results": final_results}
 

@@ -500,3 +500,176 @@ def status() -> dict:
         "cache_database_configured": bool(_neon_url()),
     }
 
+
+# ── Dedicated durable settings (never expire, never data-feed wipe) ─────────
+import threading as _threading_settings
+
+_SETTINGS_MEM: dict = {}
+_SETTINGS_LOCK = _threading_settings.RLock()
+
+
+def _ensure_settings_tables(conn, text_fn):
+    conn.execute(text_fn("""
+        CREATE TABLE IF NOT EXISTS stockky_notification (
+            k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    """))
+    conn.execute(text_fn("""
+        CREATE TABLE IF NOT EXISTS stockky_watchlist (
+            k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    """))
+
+
+def settings_get(table: str, key: str = "default"):
+    if table not in ("stockky_notification", "stockky_watchlist"):
+        raise ValueError(table)
+    mk = f"{table}:{key}"
+    with _SETTINGS_LOCK:
+        if mk in _SETTINGS_MEM:
+            return _SETTINGS_MEM[mk]
+    eng = _get_neon() if "_get_neon" in dir() else None
+    try:
+        eng = eng or globals().get("_get_neon", lambda: None)()
+    except Exception:
+        eng = None
+    if eng is None:
+        try:
+            eng = _get_neon()
+        except Exception:
+            return None
+    try:
+        from sqlalchemy import text
+        with eng.connect() as conn:
+            _ensure_settings_tables(conn, text)
+            row = conn.execute(text(f"SELECT v FROM {table} WHERE k = :k"), {"k": key}).fetchone()
+            if not row:
+                return None
+            raw = row[0]
+            try:
+                val = json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                val = raw
+            with _SETTINGS_LOCK:
+                _SETTINGS_MEM[mk] = val
+            return val
+    except Exception as e:
+        logger.warning("settings_get %s/%s: %s", table, key, e)
+        return None
+
+
+def settings_set(table: str, key: str, value) -> bool:
+    if table not in ("stockky_notification", "stockky_watchlist"):
+        raise ValueError(table)
+    mk = f"{table}:{key}"
+    try:
+        payload = json.dumps(value) if not isinstance(value, str) else value
+    except Exception:
+        payload = json.dumps(value, default=str)
+    try:
+        parsed = json.loads(payload)
+    except Exception:
+        parsed = value
+    with _SETTINGS_LOCK:
+        _SETTINGS_MEM[mk] = parsed
+    try:
+        eng = _get_neon()
+    except Exception:
+        eng = None
+    if eng is None:
+        return True
+    try:
+        from sqlalchemy import text
+        with eng.begin() as conn:
+            _ensure_settings_tables(conn, text)
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {table} (k, v, updated_at) VALUES (:k, :v, NOW())
+                    ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = NOW()
+                    """
+                ),
+                {"k": key, "v": payload},
+            )
+        return True
+    except Exception as e:
+        logger.error("settings_set %s/%s: %s", table, key, e)
+        return False
+
+
+def settings_delete(table: str, key: str = "default") -> bool:
+    if table not in ("stockky_notification", "stockky_watchlist"):
+        raise ValueError(table)
+    mk = f"{table}:{key}"
+    with _SETTINGS_LOCK:
+        _SETTINGS_MEM.pop(mk, None)
+    try:
+        eng = _get_neon()
+    except Exception:
+        return True
+    if eng is None:
+        return True
+    try:
+        from sqlalchemy import text
+        with eng.begin() as conn:
+            conn.execute(text(f"DELETE FROM {table} WHERE k = :k"), {"k": key})
+        return True
+    except Exception as e:
+        logger.error("settings_delete %s/%s: %s", table, key, e)
+        return False
+
+
+def notification_config_get():
+    val = settings_get("stockky_notification", "config")
+    if val is not None:
+        return val
+    legacy = get("stockky:notification_config")
+    if legacy is not None:
+        settings_set("stockky_notification", "config", legacy)
+        return legacy
+    return None
+
+
+def notification_config_set(cfg) -> bool:
+    ok = settings_set("stockky_notification", "config", cfg)
+    try:
+        set("stockky:notification_config", cfg, ttl=None)
+    except Exception:
+        pass
+    return ok
+
+
+def notification_config_delete() -> bool:
+    try:
+        delete("stockky:notification_config")
+    except Exception:
+        pass
+    return settings_delete("stockky_notification", "config")
+
+
+def watchlist_get():
+    val = settings_get("stockky_watchlist", "default")
+    if val is not None:
+        return val
+    legacy = get("stockky:watchlist")
+    if legacy is not None:
+        settings_set("stockky_watchlist", "default", legacy)
+        return legacy
+    return None
+
+
+def watchlist_set(symbols) -> bool:
+    ok = settings_set("stockky_watchlist", "default", symbols)
+    try:
+        set("stockky:watchlist", symbols, ttl=None)
+    except Exception:
+        pass
+    return ok
+
+
+def watchlist_delete() -> bool:
+    try:
+        delete("stockky:watchlist")
+    except Exception:
+        pass
+    return settings_delete("stockky_watchlist", "default")

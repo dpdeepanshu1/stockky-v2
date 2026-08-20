@@ -123,32 +123,48 @@ def root():
 
 
 def _load_config() -> dict:
+    """
+    Load notification channels from durable table `stockky_notification`.
+    Survives stockky_kv hard-reset / data-feed wipes. Only explicit API DELETE clears it.
+    """
     global _memory_config
+    # 1) Dedicated durable table (preferred)
     if _kv is not None:
         try:
-            val = _kv.get(CONFIG_KEY)
+            getter = getattr(_kv, "notification_config_get", None)
+            val = getter() if callable(getter) else None
+            if val is None:
+                # Legacy key still in stockky_kv / memory
+                val = _kv.get(CONFIG_KEY)
             if val:
                 cfg = val if isinstance(val, dict) else json.loads(val)
-                # Backfill any keys added in later versions.
-                for k, v in ENV_DEFAULTS.items():
-                    cfg.setdefault(k, v)
-                return cfg
+                if isinstance(cfg, dict):
+                    for k, v in ENV_DEFAULTS.items():
+                        cfg.setdefault(k, v)
+                    return cfg
         except Exception as e:
-            logger.warning("Failed to load notification config from Neon: %s", e)
+            logger.warning("Failed to load notification config from durable store: %s", e)
     if _memory_config is not None:
         return _memory_config
     return dict(ENV_DEFAULTS)
 
 
 def _save_config(cfg: dict):
+    """
+    Persist to table `stockky_notification` (no TTL, never hard-reset).
+    """
     global _memory_config
     _memory_config = cfg
     if _kv is not None:
         try:
+            setter = getattr(_kv, "notification_config_set", None)
+            if callable(setter):
+                setter(cfg)
+                return
             _kv.set(CONFIG_KEY, cfg, ttl=None)
             return
         except Exception as e:
-            logger.warning("Failed to persist notification config to Neon: %s", e)
+            logger.warning("Failed to persist notification config to durable store: %s", e)
     if _redis:
         try:
             _redis.set(CONFIG_KEY, json.dumps(cfg))

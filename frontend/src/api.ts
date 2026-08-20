@@ -1394,6 +1394,17 @@ export const api = {
     request<any>("/data-feed/meta", undefined, 2, 30000),
   runDataFeed: (force = false) =>
     request<any>(`/data-feed/run?force=${force}`, { method: "POST" }, 2, 45000),
+  /** Nuke stockky_kv + lock constraints before a pristine full feed */
+  hardResetDataFeed: () =>
+    request<any>("/data-feed/hard-reset", { method: "POST" }, 1, 60000),
+  /** Surgical quote refresh for Prepare-to-Buy band only (no 300-stock storm) */
+  refreshPrepareToBuy: (minScore = 58, maxScore = 68) =>
+    request<any>(
+      `/data-feed/refresh-prepare-to-buy?min_score=${minScore}&max_score=${maxScore}`,
+      { method: "POST" },
+      1,
+      120000
+    ),
   dataFeedRunNewOnly: () =>
     request<any>(`/data-feed/run?only_new=true&force=false&resume=false`, { method: "POST" }, 2, 45000),
   resumeDataFeed: () =>

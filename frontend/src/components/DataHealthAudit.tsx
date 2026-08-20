@@ -209,7 +209,9 @@ export default function DataHealthAudit() {
                 <td colSpan={4} className="text-center py-10 text-signal-buy font-medium">
                   {loading
                     ? "Loading audit…"
-                    : "🎉 All tracked feed records look complete for required fields."}
+                    : (stats?.total_universe ?? 0) === 0
+                      ? "No feed records yet — run Data Feed first, then Refresh Audit."
+                      : "🎉 All tracked feed records look complete for required fields."}
                 </td>
               </tr>
             )}

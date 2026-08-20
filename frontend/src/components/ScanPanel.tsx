@@ -105,6 +105,8 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   const [suggestions, setSuggestions] = useState<BuySuggestion[]>([]);
   const [sniperLoading, setSniperLoading] = useState(false);
   const [sniperError, setSniperError] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
   const { connected: quoteWs, subscribeQuotes, quotes: liveQuotes } = useStockkyRealtime();
 
   /** Keep first occurrence of each symbol (normalized). Prevents the same stock
@@ -221,6 +223,24 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
       setSniperLoading(false);
     }
   };
+
+  const handleRefreshPrepareToBuy = async () => {
+    setIsRefreshing(true);
+    setRefreshMsg(null);
+    try {
+      const res = await api.refreshPrepareToBuy(58, 68);
+      const n = res?.refreshed_count ?? 0;
+      const total = (res?.symbols || []).length;
+      setRefreshMsg(
+        res?.message || `Refreshed ${n}/${total} Prepare-to-Buy quotes`
+      );
+    } catch (err: any) {
+      setRefreshMsg(err?.message || "Prepare-to-Buy refresh failed");
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
 
 
   const handleSendTopPicks = async () => {
@@ -430,42 +450,58 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
 
   return (
     <div className="scan-bento animate-fadeIn space-y-5">
-      {/* ── Sticky header ── */}
-      <div className="sticky top-0 z-20 -mx-1 px-1 py-3 mb-1 bg-ink/95 backdrop-blur-md border-b border-slate/50">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <button
-            onClick={onBack}
-            className="font-mono text-xs text-mist hover:text-paper transition flex items-center gap-1 px-2 py-1.5 rounded-lg hover:bg-graphite/60"
-          >
-            ← Back
-          </button>
-          <div className="text-right flex-1 min-w-[10rem]">
-            <div className="font-mono text-xs text-mist/60">
-              Scanned {result.scanned} · universe {result.universe_size}
+      {/* ── Sticky header (responsive) ── */}
+      <div className="sticky top-0 z-30 -mx-1 px-1 py-3 mb-1 bg-ink/95 backdrop-blur-md border-b border-slate/50 shadow-lg">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          {/* Left: Back + stats */}
+          <div className="flex items-center gap-3 w-full sm:w-auto">
+            <button
+              onClick={onBack}
+              className="font-mono text-xs text-mist hover:text-paper transition flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-graphite/40 hover:bg-graphite/60 border border-slate/40"
+            >
+              ← Back
+            </button>
+            <span className="font-mono text-xs text-mist/70">
+              Scanned: <strong className="text-paper">{result.scanned}</strong>
+              {" / "}
+              Universe {result.universe_size}
               {(result as any).lite && (
                 <span className="ml-2 text-amber-300/90 border border-amber-500/30 px-1.5 py-0.5 rounded text-[10px]">LITE</span>
               )}
-            </div>
-            <div className="font-mono text-xs text-mist/60">
-              {result.market_stats?.buy_signals ?? 0} BUY · {result.market_stats?.sell_signals ?? 0} SELL · {result.market_stats?.hold_signals ?? 0} HOLD
               <span className="text-mist/40"> · ≤ ₹5000</span>
-            </div>
+            </span>
           </div>
-          <button
-            onClick={handleSearchBuys}
-            disabled={!result || sniperLoading}
-            className="font-mono text-xs bg-emerald-600/30 border border-emerald-500/60 text-emerald-100 rounded-lg px-4 py-2 transition hover:bg-emerald-600/45 disabled:opacity-50 flex items-center gap-2 shadow-lg shadow-emerald-900/30 shrink-0"
-          >
-            {sniperLoading ? (
-              <>
-                <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-emerald-300 animate-spin"></span>
-                Sniping…
-              </>
-            ) : (
-              "🎯 Buy Sniper"
-            )}
-          </button>
+
+          {/* Right: action buttons */}
+          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+            <button
+              type="button"
+              onClick={handleRefreshPrepareToBuy}
+              disabled={isRefreshing}
+              className="font-mono text-xs px-3 py-2 rounded-lg bg-amber-600/80 hover:bg-amber-500 text-white font-bold transition disabled:opacity-50 flex-1 sm:flex-none"
+            >
+              {isRefreshing ? "⏳ Syncing…" : "🔄 Refresh 'Prepare to Buy'"}
+            </button>
+            <button
+              type="button"
+              onClick={handleSearchBuys}
+              disabled={!result || sniperLoading}
+              className="font-mono text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg px-4 py-2 transition disabled:opacity-50 flex items-center justify-center gap-2 shadow-md hover:shadow-emerald-900/40 animate-pulse flex-1 sm:flex-none"
+            >
+              {sniperLoading ? (
+                <>
+                  <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-white animate-spin"></span>
+                  Sniping…
+                </>
+              ) : (
+                "🎯 Search for Buy Stocks (1-4)"
+              )}
+            </button>
+          </div>
         </div>
+        {refreshMsg && (
+          <p className="font-mono text-[10px] text-amber-200/90 mt-2 mb-0">{refreshMsg}</p>
+        )}
       </div>
 
       {/* ── Bento: stats + filters + actions ── */}

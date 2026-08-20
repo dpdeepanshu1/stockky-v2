@@ -122,6 +122,16 @@ export default function DataFeed() {
     setBusy("start");
     try {
       setRunning(true);
+      // 1. Instantly nuke corrupted DB state and re-lock unique constraint on k
+      try {
+        const reset = await api.hardResetDataFeed();
+        setBanner(reset?.message || "Database wiped and locked. Starting fresh feed…");
+      } catch (resetErr: any) {
+        // Soft-fail: still attempt feed so a transient reset error does not block the user
+        console.warn("hard-reset failed, continuing to feed:", resetErr);
+        setBanner("Hard-reset skipped — starting feed…");
+      }
+      // 2. Trigger the fresh data feed
       const res = await api.runDataFeed(true);
       setBanner(res.message || "Data feed started");
       await refresh();

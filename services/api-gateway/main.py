@@ -4262,6 +4262,12 @@ async def stream_market_scan(
             _SCAN_CANCEL_FLAGS.discard("__ALL__")
         except Exception:
             pass
+        # Critical: clear activity_paused so a prior Power-Off does not abort
+        # the stream after the first chunk (was causing 10–25 symbol "full" scans).
+        try:
+            set_activity_paused(False)
+        except Exception:
+            pass
 
         if total <= 0:
             yield json.dumps({
@@ -4333,20 +4339,20 @@ async def stream_market_scan(
                     "total": total,
                 }) + "\n"
                 break
-            # activity_paused only cancels if Power Off was requested mid-scan
+            # Explicit cancel only — residual activity_paused must not stop the stream.
+            chunk = universe[i : i + chunk_size]
+            # Keepalive meta so proxies/clients don't idle-timeout mid-universe
             try:
-                if activity_paused() and processed > 0:
-                    yield json.dumps({
-                        "_meta": True,
-                        "event": "cancelled",
-                        "processed": processed,
-                        "total": total,
-                        "reason": "activity_paused",
-                    }) + "\n"
-                    break
+                yield json.dumps({
+                    "_meta": True,
+                    "event": "heartbeat",
+                    "processed": processed,
+                    "total": total,
+                    "chunk": i // max(chunk_size, 1) + 1,
+                    "elapsed": round(time.time() - start, 1),
+                }) + "\n"
             except Exception:
                 pass
-            chunk = universe[i : i + chunk_size]
             # Live prices for this chunk in parallel
             try:
                 chunk_prices = await _fetch_prices_bulk_async(chunk, client)

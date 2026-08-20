@@ -238,7 +238,7 @@ logger = logging.getLogger("market-data-service")
 UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL")
 UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
-TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
+TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY") or os.getenv("TWELVEDATA_API_KEY")
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
 
 app = FastAPI(title="Stockky Market Data Service", version="2.2.0")
@@ -598,6 +598,70 @@ def _fetch_price_from_yahoo_raw(symbol: str) -> Optional[float]:
         logger.warning(f"Yahoo Raw API fallback failed: {e}")
     return None
 
+
+def _waterfall_yahoo_history_price(symbol: str) -> Optional[float]:
+    """Primary free path: yfinance 1d Close for NSE (.NS) / BSE (.BO)."""
+    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    if not base:
+        return None
+    for suffix in (".NS", ".BO", ""):
+        ticker = f"{base}{suffix}" if suffix else base
+        try:
+            t = yf.Ticker(ticker)
+            hist = t.history(period="5d")
+            if hist is not None and not hist.empty and "Close" in hist.columns:
+                px = float(hist["Close"].dropna().iloc[-1])
+                if px > 0:
+                    return px
+        except Exception as e:
+            logger.debug("yahoo history %s: %s", ticker, e)
+    return None
+
+
+def _waterfall_twelvedata_price(symbol: str) -> Optional[float]:
+    key = TWELVE_DATA_API_KEY
+    if not key:
+        return None
+    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    # Indian symbols often need exchange suffix on TwelveData
+    candidates = [f"{base}.NSE", f"{base}.BSE", base]
+    for sym in candidates:
+        try:
+            url = f"https://api.twelvedata.com/price?symbol={sym}&apikey={key}"
+            resp = httpx.get(url, timeout=4.0)
+            if resp.status_code == 200:
+                data = resp.json() if isinstance(resp.json(), dict) else {}
+                px = _safe(data.get("price"))
+                if px is not None and px > 0:
+                    logger.info("TwelveData waterfall hit %s → ₹%.2f", sym, px)
+                    return float(px)
+        except Exception as e:
+            logger.debug("TwelveData %s: %s", sym, e)
+    return None
+
+
+def _waterfall_polygon_price(symbol: str) -> Optional[float]:
+    key = POLYGON_API_KEY
+    if not key:
+        return None
+    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    # Polygon primarily US; still try as last resort with .NS ticker style
+    for sym in (f"X:{base}", base, f"{base}.NS"):
+        try:
+            url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/prev?adjusted=true&apiKey={key}"
+            resp = httpx.get(url, timeout=4.0)
+            if resp.status_code == 200:
+                data = resp.json() if isinstance(resp.json(), dict) else {}
+                results = data.get("results") or []
+                if results:
+                    px = _safe(results[0].get("c"))
+                    if px is not None and px > 0:
+                        logger.info("Polygon waterfall hit %s → ₹%.2f", sym, px)
+                        return float(px)
+        except Exception as e:
+            logger.debug("Polygon %s: %s", sym, e)
+    return None
+
 @app.get("/quote/{symbol}", response_model=QuoteResponse)
 def get_quote(symbol: str):
     sym = normalize_symbol(symbol)
@@ -616,11 +680,27 @@ def get_quote(symbol: str):
     if soft_cached and (_in_cooldown("yfinance") or _in_cooldown("nse")):
         return soft_cached
 
-    # 1. NSE India (skip if NSE cooldown)
-    if _in_cooldown("nse"):
-        nse_data = None
+    # 0. WATERFALL PRIMARY: Yahoo 1d history (bypasses NSE 403 on Render)
+    price = None
+    source = None
+    if not _in_cooldown("yfinance"):
+        try:
+            ypx = _waterfall_yahoo_history_price(sym)
+            if ypx is not None and ypx > 0:
+                price = ypx
+                source = "yahoo"
+                logger.info("Yahoo waterfall primary hit %s → ₹%.2f", sym, ypx)
+        except Exception as e:
+            logger.debug("yahoo primary %s: %s", sym, e)
+
+    # 1. NSE India (skip if NSE cooldown) — often 403 on cloud IPs
+    if price is None:
+      if _in_cooldown("nse"):
+          nse_data = None
+      else:
+          nse_data = _fetch_nse_quote(sym)
     else:
-        nse_data = _fetch_nse_quote(sym)
+        nse_data = None
     if nse_data:
         price = _safe(nse_data.get("priceInfo", {}).get("lastPrice"))
         if price is not None:
@@ -635,11 +715,26 @@ def get_quote(symbol: str):
                 "volume": _safe_int(nse_data.get("priceInfo", {}).get("totalTradedVolume")),
                 "market_cap": _safe(nse_data.get("priceInfo", {}).get("marketCap")),
                 "pe_ratio": _safe(nse_data.get("priceInfo", {}).get("pe")),
+                "source": "nse",
                 "fetched_at": datetime.utcnow().isoformat(),
             }
             result = _sanitize_for_json(result)
             _cache_set(cache_key, result)
             return result
+
+    # Early return if Yahoo primary already resolved price
+    if price is not None and price > 0:
+        result = {
+            "symbol": sym,
+            "name": sym,
+            "price": float(price),
+            "cmp": float(price),
+            "source": source or "yahoo",
+            "fetched_at": datetime.utcnow().isoformat(),
+        }
+        result = _sanitize_for_json(result)
+        _cache_set(cache_key, result)
+        return result
 
     # 2. Alpha Vantage
     price = None
@@ -688,9 +783,21 @@ def get_quote(symbol: str):
         except Exception as e:
             logger.warning(f"Polygon.io fallback failed: {e}")
 
+    # 4b. TwelveData / Polygon structured waterfall (if earlier steps used different endpoints)
+    if price is None:
+        price = _waterfall_twelvedata_price(sym)
+        if price is not None:
+            source = "twelvedata"
+    if price is None:
+        price = _waterfall_polygon_price(sym)
+        if price is not None:
+            source = "polygon"
+
     # 5. Yahoo Raw API
     if price is None:
         price = _fetch_price_from_yahoo_raw(sym)
+        if price is not None:
+            source = source or "yahoo_raw"
 
     # 6. yfinance final fallback
     if price is None:

@@ -219,6 +219,41 @@ def _parse_feed_items(parsed, publisher: str, keywords: List[str], max_items: in
     return items
 
 
+
+def _fetch_yahoo_news(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
+    """LEVEL 1: Yahoo Finance news (free, often rate-limited → fall through)."""
+    base = _base_symbol(symbol)
+    items: List[Dict[str, Any]] = []
+    try:
+        import yfinance as yf
+        tkr = yf.Ticker(f"{base}.NS")
+        raw = getattr(tkr, "news", None) or []
+        for n in raw[:max_items]:
+            if not isinstance(n, dict):
+                continue
+            # yfinance news shapes vary (content / title)
+            content = n.get("content") if isinstance(n.get("content"), dict) else {}
+            title = n.get("title") or content.get("title") or ""
+            link = (
+                n.get("link")
+                or (content.get("clickThroughUrl") or {}).get("url")
+                or (content.get("canonicalUrl") or {}).get("url")
+                or ""
+            )
+            if not title:
+                continue
+            items.append({
+                "title": title,
+                "link": link,
+                "publisher": n.get("publisher") or content.get("provider", {}).get("displayName") or "Yahoo",
+                "published": str(n.get("providerPublishTime") or content.get("pubDate") or ""),
+                "source": "yahoo",
+            })
+    except Exception as e:
+        logger.debug("yahoo news %s: %s", base, e)
+    return items
+
+
 def _fetch_google_news(symbol: str, max_items: int = 15) -> List[Dict[str, Any]]:
     """Fetch from Google News RSS with company name + aliases."""
     name = _company_query(symbol)
@@ -373,7 +408,8 @@ def _fetch_headlines(symbol: str, max_items: int = 15) -> List[dict]:
     """Aggregate from 5–10 free sources, filter by relevance, dedupe, sort."""
     all_news = []
     sources = [
-        _fetch_google_news,
+        _fetch_yahoo_news,   # LEVEL 1
+        _fetch_google_news,  # LEVEL 2 waterfall
         _fetch_moneycontrol,
         _fetch_economic_times,
         _fetch_business_standard,

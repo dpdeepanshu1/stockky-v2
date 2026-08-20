@@ -960,3 +960,272 @@ def patch_feed_price(symbol: str, live_price: float) -> bool:
     except Exception as e:
         logger.warning("patch_feed_price %s failed: %s", base, e)
         return False
+
+
+# ── Yahoo 1-call (chunked) bulk price feeder — bypasses NSE 403 on Render ───
+BULK_YF_CHUNK = int(__import__("os").getenv("BULK_YF_CHUNK", "50"))  # safe Yahoo chunk size
+BULK_YF_CHUNK_SLEEP = float(__import__("os").getenv("BULK_YF_CHUNK_SLEEP", "1.0"))
+
+
+def _yf_close_volume(frame, sym_ns: str):
+    """Extract last Close + Volume from a yfinance multi-ticker or single frame."""
+    import math
+    try:
+        import pandas as pd
+    except ImportError:
+        pd = None
+
+    close = None
+    volume = None
+    try:
+        if frame is None:
+            return None, None
+        # MultiIndex columns: (Ticker, OHLCV)
+        if hasattr(frame, "columns") and getattr(frame.columns, "nlevels", 1) > 1:
+            if sym_ns in frame.columns.get_level_values(0):
+                sub = frame[sym_ns]
+            else:
+                return None, None
+        else:
+            sub = frame
+        if sub is None or (hasattr(sub, "empty") and sub.empty):
+            return None, None
+        if "Close" in getattr(sub, "columns", []):
+            series = sub["Close"].dropna()
+            if len(series) > 0:
+                close = float(series.iloc[-1])
+        elif hasattr(sub, "iloc") and not hasattr(sub, "columns"):
+            # single series
+            series = sub.dropna()
+            if len(series) > 0:
+                close = float(series.iloc[-1])
+        if "Volume" in getattr(sub, "columns", []):
+            vs = sub["Volume"].dropna()
+            if len(vs) > 0:
+                try:
+                    volume = int(float(vs.iloc[-1]))
+                except (TypeError, ValueError):
+                    volume = None
+        if close is not None and (math.isnan(close) or close <= 0):
+            close = None
+    except Exception as e:
+        logger.debug("yf extract %s: %s", sym_ns, e)
+        return None, None
+    return close, volume
+
+
+def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Dict[str, dict]:
+    """
+    Fetch last close for many NSE symbols via yfinance bulk download.
+    Bypasses NSE India 403 blocks on cloud IPs (Render/AWS).
+
+    Uses chunked yf.download (default 80 tickers/call) so free-tier RAM stays safe
+    while still avoiding per-symbol HTTP storms. One chunk ≈ one Yahoo call.
+    Returns { "RELIANCE": {"price": ..., "volume": ..., "source": "yfinance_bulk"}, ... }
+    Only includes symbols with 0 < price <= MAX_STOCK_PRICE.
+    """
+    import os
+    try:
+        import yfinance as yf
+    except ImportError:
+        logger.error("yfinance not installed — bulk feed unavailable")
+        return {}
+
+    chunk_size = int(chunk_size or BULK_YF_CHUNK or 80)
+    chunk_size = max(10, min(chunk_size, 150))
+
+    bases: List[str] = []
+    seen = set()
+    for s in symbols or []:
+        b = _norm_sym(str(s))
+        if b and b not in seen:
+            seen.add(b)
+            bases.append(b)
+
+    out: Dict[str, dict] = {}
+    if not bases:
+        return out
+
+    for i in range(0, len(bases), chunk_size):
+        chunk = bases[i : i + chunk_size]
+        tickers = [f"{b}.NS" for b in chunk]
+        ticker_string = " ".join(tickers)
+        try:
+            df = yf.download(
+                ticker_string,
+                period="5d",  # 5d so we still get last close on holidays/weekends
+                group_by="ticker",
+                threads=False,
+                progress=False,
+                auto_adjust=True,
+            )
+        except Exception as e:
+            logger.warning("yf.download chunk %s-%s failed: %s", i, i + len(chunk), e)
+            continue
+
+        for b in chunk:
+            sym_ns = f"{b}.NS"
+            close, volume = _yf_close_volume(df, sym_ns)
+            if close is None:
+                # Single-ticker fallback shape when only 1 symbol in chunk
+                if len(chunk) == 1:
+                    close, volume = _yf_close_volume(df, sym_ns)
+            if close is None or close <= 0:
+                continue
+            if close > MAX_STOCK_PRICE:
+                logger.debug("bulk_yahoo skip %s — ₹%.2f > cap", b, close)
+                continue
+            rec = {
+                "symbol": b,
+                "price": round(close, 2),
+                "close": round(close, 2),
+                "cmp": round(close, 2),
+                "ltp": round(close, 2),
+                "last_price": round(close, 2),
+                "current_price": round(close, 2),
+                "source": "yfinance_bulk",
+                "price_refreshed_at": _now_iso(),
+            }
+            if volume is not None:
+                rec["volume"] = volume
+            out[b] = rec
+
+        logger.info(
+            "bulk_yahoo chunk %s-%s: kept %s/%s under ₹%.0f",
+            i,
+            i + len(chunk),
+            sum(1 for b in chunk if b in out),
+            len(chunk),
+            MAX_STOCK_PRICE,
+        )
+        # Pause between chunks so Yahoo does not drop tickers / rate-limit
+        try:
+            import time as _time
+            _time.sleep(max(0.2, float(BULK_YF_CHUNK_SLEEP)))
+        except Exception:
+            pass
+
+    return out
+
+
+def run_bulk_yahoo_price_feed(
+    symbols: Optional[List[str]] = None,
+    merge_existing: bool = True,
+) -> dict:
+    """
+    Bulk-download prices via Yahoo and upsert into Neon data-feed.
+    Single (or few chunked) Yahoo calls — no NSE bhavcopy, no 300 sequential quotes.
+    """
+    store = get_data_feed_store()
+    if not symbols:
+        try:
+            symbols = store.list_symbols() or []
+        except Exception:
+            symbols = []
+
+    if not symbols:
+        return {
+            "status": "error",
+            "message": "No symbols provided and feed index is empty",
+            "tracked_stocks": 0,
+            "symbols": [],
+        }
+
+    prices = bulk_yahoo_download_prices(symbols)
+    saved = 0
+    skipped = 0
+    for base, rec in prices.items():
+        try:
+            if merge_existing:
+                existing = store.get_symbol(base) or {}
+                if isinstance(existing, dict) and existing:
+                    existing.update(rec)
+                    store.put_symbol(base, existing)
+                else:
+                    store.put_symbol(base, rec)
+            else:
+                store.put_symbol(base, rec)
+            saved += 1
+        except Exception as e:
+            skipped += 1
+            logger.debug("bulk upsert %s: %s", base, e)
+
+    return {
+        "status": "success",
+        "tracked_stocks": saved,
+        "requested": len(symbols),
+        "yahoo_hits": len(prices),
+        "skipped": skipped,
+        "max_price": MAX_STOCK_PRICE,
+        "message": f"Bulk Yahoo feed saved {saved}/{len(symbols)} (≤₹{MAX_STOCK_PRICE:.0f})",
+        "symbols": sorted(prices.keys()),
+    }
+
+
+def clear_stuck_feed_job_on_boot() -> dict:
+    """
+    Container-amnesia safe boot heal.
+
+    ONLY resets a stuck job status (running/stopping left behind when Render
+    killed the worker). NEVER truncates stockky_kv symbol payloads — that is
+    what hard-reset is for. Stock data must survive free-tier sleep/restart.
+    """
+    store = get_data_feed_store()
+    job = {}
+    try:
+        job = store.job() or {}
+    except Exception as e:
+        logger.debug("boot heal job read: %s", e)
+        return {"healed": False, "reason": str(e)[:120]}
+
+    status = str(job.get("status") or "idle").lower()
+    if status not in ("running", "stopping"):
+        # Still clear process-local stop flag so a fresh process is clean
+        try:
+            clear_data_feed_stop()
+        except Exception:
+            pass
+        return {"healed": False, "status": status, "reason": "job not stuck"}
+
+    try:
+        store.set_job(
+            status="idle",
+            message="Boot heal: cleared stuck job after container restart (stock data preserved)",
+            stop_requested=False,
+        )
+        clear_data_feed_stop()
+        logger.info("Boot heal: stuck data-feed job %s → idle (stock rows preserved)", status)
+        return {"healed": True, "previous_status": status}
+    except Exception as e:
+        logger.warning("Boot heal failed: %s", e)
+        return {"healed": False, "reason": str(e)[:120]}
+
+
+def list_feed_symbols_from_neon_under_max_price(max_price: float = None) -> List[str]:
+    """
+    Stateless universe from Neon data-feed only (survives container amnesia).
+    Keeps symbols with unknown price (0) or price <= max_price.
+    """
+    cap = float(max_price if max_price is not None else MAX_STOCK_PRICE)
+    store = get_data_feed_store()
+    try:
+        symbols = store.list_symbols() or []
+    except Exception:
+        symbols = []
+    if not symbols:
+        return []
+    feeds = {}
+    try:
+        feeds = get_all_stock_feeds(symbols) or {}
+    except Exception:
+        feeds = {}
+    kept: List[str] = []
+    for sym in symbols:
+        base = _norm_sym(sym)
+        if not base:
+            continue
+        data = feeds.get(base) or {}
+        px = _payload_price(data) if isinstance(data, dict) else 0.0
+        if px <= 0 or px <= cap:
+            kept.append(base)
+    return kept

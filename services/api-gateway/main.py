@@ -127,6 +127,13 @@ async def _start_shared_http():
         redis_limiter.set_redis(_redis)
     except Exception:
         pass
+    # Container-amnesia cure: wipe ONLY stuck job status — never stock payloads
+    try:
+        from data_feed import clear_stuck_feed_job_on_boot
+        result = clear_stuck_feed_job_on_boot()
+        logger.info("Boot feed-job heal: %s", result)
+    except Exception as e:
+        logger.debug("Boot feed-job heal skipped: %s", e)
 
 
 @app.on_event("shutdown")
@@ -4835,31 +4842,44 @@ def get_scan_universe():
 @app.get("/universe")
 async def get_universe():
     """
-    Frontend-facing universe list, strictly ≤ ₹5000 (or unknown price).
-    Prefer decision-prediction training universe when available; fall back to
-    the local scan universe. Always re-apply the price gate so "Scanned" and
-    "Total" counters stay aligned with the root filter.
+    Stateless ≤ ₹5000 universe — prefers Neon data-feed (survives container sleep).
+    Order:
+      1) Neon feed symbols with price unknown or ≤ 5000 (durable, no RAM dependency)
+      2) Decision-service training universe (if available)
+      3) Local scan-universe builder
+    Always re-applies the price gate.
     """
     symbols: List[str] = []
+
+    # 1) Neon / data-feed (anti-amnesia primary source)
     try:
-        decision_base = os.getenv("DECISION_URL", DECISION_URL)
-        # DECISION_URL may already end with /decision — strip to service root for /training
-        root = decision_base.rstrip("/")
-        if root.endswith("/decision"):
-            root = root[: -len("/decision")]
-        training_url = f"{root}/training/universe"
-        async with httpx.AsyncClient() as client:
-            res = await client.get(training_url, timeout=10.0)
-            if res.status_code == 200:
-                body = res.json()
-                if isinstance(body, list):
-                    symbols = [str(s) for s in body]
-                elif isinstance(body, dict):
-                    symbols = [str(s) for s in (body.get("symbols") or body.get("universe") or [])]
+        from data_feed import list_feed_symbols_from_neon_under_max_price
+        symbols = list_feed_symbols_from_neon_under_max_price(MAX_UNIVERSE_PRICE) or []
     except Exception as e:
-        logger.debug("api/universe training fetch: %s", e)
+        logger.debug("api/universe neon feed: %s", e)
         symbols = []
 
+    # 2) Training universe fallback
+    if not symbols:
+        try:
+            decision_base = os.getenv("DECISION_URL", DECISION_URL)
+            root = decision_base.rstrip("/")
+            if root.endswith("/decision"):
+                root = root[: -len("/decision")]
+            training_url = f"{root}/training/universe"
+            async with httpx.AsyncClient() as client:
+                res = await client.get(training_url, timeout=10.0)
+                if res.status_code == 200:
+                    body = res.json()
+                    if isinstance(body, list):
+                        symbols = [str(s) for s in body]
+                    elif isinstance(body, dict):
+                        symbols = [str(s) for s in (body.get("symbols") or body.get("universe") or [])]
+        except Exception as e:
+            logger.debug("api/universe training fetch: %s", e)
+            symbols = []
+
+    # 3) Dynamic scan universe last resort
     if not symbols:
         try:
             symbols = _build_scan_universe()
@@ -5597,6 +5617,78 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
 
 
 # ── Surprise momentum scanner (static Neon baselines + live ticks) ──────────
+
+@app.post("/api/surprise/run-premarket-feed")
+@app.post("/surprise/run-premarket-feed")
+@app.get("/api/surprise/run-premarket-feed")
+async def api_run_premarket_feed(force: bool = False, request: Request = None):
+    """
+    Market-aware surprise quote feed:
+      - OPEN: cache ≤ 2h
+      - CLOSED: durable cache (no Yahoo storm)
+      - force=true: always refresh sequentially with 0.5s gaps
+    """
+    symbols = None
+    try:
+        if request is not None:
+            body = await request.body()
+            if body:
+                import json as _json
+                payload = _json.loads(body.decode("utf-8") or "{}")
+                if isinstance(payload, dict) and payload.get("symbols"):
+                    symbols = payload["symbols"]
+    except Exception:
+        symbols = None
+    if not symbols:
+        try:
+            symbols = _build_scan_universe()[:200]
+        except Exception:
+            symbols = None
+    try:
+        from surprise_scanner import run_market_aware_surprise_feed
+        return await run_market_aware_surprise_feed(
+            symbols=symbols,
+            market_data_url=MARKET_DATA_URL,
+            force=force,
+        )
+    except Exception as e:
+        logger.exception("run-premarket-feed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)[:240])
+
+
+
+@app.post("/api/surprise/repair-batch")
+@app.post("/surprise/repair-batch")
+async def api_surprise_repair_batch(limit: int = 15):
+    """Fill missing surprise quotes via market-data waterfall (0.5s pacing)."""
+    try:
+        from surprise_scanner import repair_surprise_batch
+        return repair_surprise_batch(limit=limit, market_data_url=MARKET_DATA_URL)
+    except Exception as e:
+        logger.exception("surprise repair-batch: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)[:240])
+
+
+@app.get("/api/surprise/audit")
+@app.get("/surprise/audit")
+async def api_surprise_audit():
+    """Premarket / surprise feed health for the Surprise dashboard."""
+    try:
+        from surprise_scanner import audit_surprise_feed
+        return audit_surprise_feed()
+    except Exception as e:
+        logger.exception("surprise audit: %s", e)
+        return {
+            "ok": False,
+            "total_tracked": 0,
+            "fully_populated": 0,
+            "missing_data": 0,
+            "health_score": 0,
+            "incomplete_stocks": [],
+            "message": str(e)[:200],
+        }
+
+
 @app.get("/api/surprise/scan")
 @app.get("/surprise/scan")
 async def api_surprise_scan(
@@ -6637,6 +6729,115 @@ async def hard_reset_database():
         raise HTTPException(status_code=500, detail=str(e)[:240])
 
 
+
+@app.post("/data-feed/start-bulk-feed")
+@app.post("/api/data-feed/start-bulk-feed")
+@app.post("/api/feed/start-bulk-feed")
+async def start_bulk_feed(
+    force: bool = True,
+    use_universe: bool = True,
+    background_tasks: BackgroundTasks = None,
+):
+    """
+    Yahoo bulk price feeder — bypasses NSE 403 on Render cloud IPs.
+
+    1) Build symbol list from scan universe (or existing feed index)
+    2) yf.download in chunks (~80 tickers / call) — not 300 sequential NSE hits
+    3) Strict ≤ ₹5000 filter in memory
+    4) Upsert into Neon data-feed in one pass
+    """
+    from data_feed import run_bulk_yahoo_price_feed, clear_data_feed_stop
+
+    try:
+        clear_data_feed_stop()
+    except Exception:
+        pass
+
+    symbols: list = []
+    if use_universe:
+        try:
+            symbols = _build_scan_universe() or []
+        except Exception as e:
+            logger.warning("bulk-feed universe: %s", e)
+            symbols = []
+    if not symbols:
+        try:
+            symbols = _feed_store().list_symbols() or []
+        except Exception:
+            symbols = []
+    if not symbols:
+        try:
+            symbols = list(_get_nifty_indices() or [])[:150]
+        except Exception:
+            symbols = []
+
+    symbols = [
+        str(s).upper().replace(".NS", "").replace(".BO", "").strip()
+        for s in symbols
+        if s
+    ]
+    # de-dupe preserve order
+    seen = set()
+    clean = []
+    for s in symbols:
+        if s and s not in seen:
+            seen.add(s)
+            clean.append(s)
+    symbols = clean
+
+    if not symbols:
+        raise HTTPException(status_code=400, detail="No symbols available for bulk feed")
+
+    # Mark job running for UI
+    try:
+        store = _feed_store()
+        store.set_job(
+            status="running",
+            message=f"Bulk Yahoo feed for {len(symbols)} symbols…",
+            processed=0,
+            total=len(symbols),
+            stop_requested=False,
+        )
+    except Exception:
+        pass
+
+    try:
+        result = run_bulk_yahoo_price_feed(symbols, merge_existing=True)
+    except Exception as e:
+        logger.exception("start_bulk_feed failed: %s", e)
+        try:
+            _feed_store().set_job(
+                status="error",
+                message=str(e)[:200],
+            )
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=str(e)[:240])
+
+    try:
+        store = _feed_store()
+        n = int(result.get("tracked_stocks") or 0)
+        store.set_job(
+            status="done",
+            message=result.get("message") or f"Bulk feed done: {n}",
+            processed=n,
+            total=len(symbols),
+            ok_count=n,
+        )
+        store.set_meta(
+            last_success_at=__import__("datetime").datetime.now(
+                __import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))
+            ).isoformat(),
+            last_count=n,
+            last_message=result.get("message"),
+            source="yfinance_bulk",
+        )
+    except Exception as e:
+        logger.debug("bulk-feed job/meta: %s", e)
+
+    return {"ok": True, **result}
+
+
 @app.post("/data-feed/refresh-prepare-to-buy")
 @app.post("/api/data-feed/refresh-prepare-to-buy")
 @app.post("/api/feed/refresh-prepare-to-buy")
@@ -7069,6 +7270,26 @@ async def data_feed_update_batch_refresh(request: Request):
 # ── Surgical Data Repair (audit + non-destructive patch) ───────────────────
 # _REQUIRED_FEED_FIELDS defined above (before audit-missing route)
 
+REPAIR_COOLDOWN_SEC = float(os.getenv("REPAIR_COOLDOWN_SEC", "0.5"))
+
+
+def _safe_float(val, default: float = 0.0) -> float:
+    """Parse floats safely including NSE comma formats; never raises."""
+    if val is None or val == "":
+        return default
+    try:
+        if isinstance(val, (int, float)):
+            f = float(val)
+            return f if f == f else default  # NaN guard
+        s = str(val).replace(",", "").replace(" ", "").strip()
+        if not s or s.upper() in ("-", "NA", "N/A", "NONE", "NULL"):
+            return default
+        f = float(s)
+        return f if f == f else default
+    except (TypeError, ValueError):
+        return default
+
+
 
 def _feed_missing_fields(payload: dict) -> list:
     """Return list of missing/zeroed fields for a feed payload."""
@@ -7080,22 +7301,13 @@ def _feed_missing_fields(payload: dict) -> list:
     if price <= 0:
         missing.append("price")
     rsi = data.get("rsi", m.get("rsi"))
-    try:
-        if rsi is None or float(rsi) == 0:
-            missing.append("rsi")
-    except (TypeError, ValueError):
+    if rsi is None or _safe_float(rsi) == 0:
         missing.append("rsi")
     pe = data.get("pe_ratio", data.get("pe", m.get("pe_ratio", m.get("pe"))))
-    try:
-        if pe is None or float(pe) == 0:
-            missing.append("pe_ratio")
-    except (TypeError, ValueError):
+    if pe is None or _safe_float(pe) == 0:
         missing.append("pe_ratio")
     roce = data.get("roce", m.get("roce"))
-    try:
-        if roce is None or float(roce) == 0:
-            missing.append("roce")
-    except (TypeError, ValueError):
+    if roce is None or _safe_float(roce) == 0:
         missing.append("roce")
     sent = data.get("sentiment_score", data.get("news_score", m.get("sentiment_score")))
     if sent is None:
@@ -7138,39 +7350,58 @@ def _feed_resolved_price(payload: dict) -> float:
 async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> dict:
     """
     Surgically fetch ONLY missing fields and merge into existing Neon feed blob.
-    Never wipes valid existing values.
+    Sequential calls with REPAIR_COOLDOWN_SEC (default 0.5s) between upstream
+    hits — cures 429/401 crumb storms from parallel repair storms.
+    Never wipes valid existing values. Uses MARKET_DATA_URL / TECHNICAL_URL /
+    FUNDAMENTAL_URL / NEWS_URL env vars (never hardcoded localhost).
     """
     store = _feed_store()
     base = str(symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
     current = dict(store.get_symbol(base) or {})
     missing = set(_feed_missing_fields(current))
     patched = []
+    cooldown = max(0.1, float(REPAIR_COOLDOWN_SEC))
 
-    if "price" in missing:
+    market_url = (os.getenv("MARKET_DATA_URL") or MARKET_DATA_URL or "").rstrip("/")
+    technical_url = (os.getenv("TECHNICAL_URL") or TECHNICAL_URL or "").rstrip("/")
+    fundamental_url = (os.getenv("FUNDAMENTAL_URL") or FUNDAMENTAL_URL or "").rstrip("/")
+    news_url = (os.getenv("NEWS_URL") or NEWS_URL or "").rstrip("/")
+
+    if "price" in missing and market_url:
         try:
-            r = await client.get(f"{MARKET_DATA_URL.rstrip('/')}/quote/{base}", timeout=8.0)
+            r = await client.get(f"{market_url}/quote/{base}", timeout=8.0)
             if r.status_code == 200:
                 q = r.json() if isinstance(r.json(), dict) else {}
                 for k in ("price", "cmp", "ltp", "close", "last_price", "regularMarketPrice"):
-                    v = q.get(k)
-                    try:
-                        if v is not None and float(v) > 0:
-                            current["price"] = float(v)
-                            current.setdefault("close", float(v))
-                            patched.append("price")
+                    px = _safe_float(q.get(k))
+                    if px > 0:
+                        if px > MAX_UNIVERSE_PRICE:
+                            logger.info("repair price skip %s — ₹%.2f > cap", base, px)
                             break
-                    except (TypeError, ValueError):
-                        pass
+                        current["price"] = px
+                        current.setdefault("close", px)
+                        current.setdefault("cmp", px)
+                        current.setdefault("ltp", px)
+                        patched.append("price")
+                        break
+            elif r.status_code in (401, 429):
+                logger.warning("repair price %s HTTP %s — backing off", base, r.status_code)
+                await asyncio.sleep(cooldown * 2)
         except Exception as e:
             logger.debug("repair price %s: %s", base, e)
+        await asyncio.sleep(cooldown)
 
-    if "rsi" in missing:
+    if "rsi" in missing and technical_url:
         try:
-            r = await client.get(f"{TECHNICAL_URL.rstrip('/')}/analyze/{base}", timeout=20.0)
+            # Prefer /analyze/{sym}; also try /technical/{sym} if 404
+            r = await client.get(f"{technical_url}/analyze/{base}", timeout=20.0)
+            if r.status_code == 404:
+                r = await client.get(f"{technical_url}/technical/{base}", timeout=20.0)
             if r.status_code == 200:
                 t = r.json() if isinstance(r.json(), dict) else {}
-                if t.get("rsi") is not None:
-                    current["rsi"] = t.get("rsi")
+                rsi = t.get("rsi")
+                if rsi is not None and _safe_float(rsi) != 0:
+                    current["rsi"] = _safe_float(rsi)
                     patched.append("rsi")
                 if t.get("ema20") is not None:
                     current["ema20"] = t.get("ema20")
@@ -7178,31 +7409,29 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                     current["technical_score"] = t.get("technical_score")
                 if t.get("macd_hist") is not None or t.get("macd") is not None:
                     current["macd_hist"] = t.get("macd_hist", t.get("macd"))
+            elif r.status_code in (401, 429):
+                logger.warning("repair rsi %s HTTP %s — backing off", base, r.status_code)
+                await asyncio.sleep(cooldown * 2)
         except Exception as e:
             logger.debug("repair rsi %s: %s", base, e)
+        await asyncio.sleep(cooldown)
 
-    if "pe_ratio" in missing or "roce" in missing:
+    if ("pe_ratio" in missing or "roce" in missing) and fundamental_url:
         try:
-            r = await client.get(f"{FUNDAMENTAL_URL.rstrip('/')}/analyze/{base}", timeout=35.0)
+            r = await client.get(f"{fundamental_url}/analyze/{base}", timeout=35.0)
+            if r.status_code == 404:
+                r = await client.get(f"{fundamental_url}/fundamental/{base}", timeout=35.0)
             if r.status_code == 200:
                 f = r.json() if isinstance(r.json(), dict) else {}
                 metrics = f.get("metrics") if isinstance(f.get("metrics"), dict) else {}
                 pe = f.get("pe_ratio", f.get("pe", metrics.get("pe_ratio", metrics.get("pe"))))
                 roce = f.get("roce", metrics.get("roce"))
-                if "pe_ratio" in missing and pe is not None:
-                    try:
-                        if float(pe) != 0:
-                            current["pe_ratio"] = float(pe)
-                            patched.append("pe_ratio")
-                    except (TypeError, ValueError):
-                        pass
-                if "roce" in missing and roce is not None:
-                    try:
-                        if float(roce) != 0:
-                            current["roce"] = float(roce)
-                            patched.append("roce")
-                    except (TypeError, ValueError):
-                        pass
+                if "pe_ratio" in missing and pe is not None and _safe_float(pe) != 0:
+                    current["pe_ratio"] = _safe_float(pe)
+                    patched.append("pe_ratio")
+                if "roce" in missing and roce is not None and _safe_float(roce) != 0:
+                    current["roce"] = _safe_float(roce)
+                    patched.append("roce")
                 if f.get("fundamental_score") is not None and current.get("fundamental_score") is None:
                     current["fundamental_score"] = f.get("fundamental_score")
                 if f.get("sector") and not current.get("sector"):
@@ -7210,12 +7439,16 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                 if metrics:
                     cur_m = current.get("metrics") if isinstance(current.get("metrics"), dict) else {}
                     current["metrics"] = {**cur_m, **{k: v for k, v in metrics.items() if v is not None}}
+            elif r.status_code in (401, 429):
+                logger.warning("repair fund %s HTTP %s — backing off", base, r.status_code)
+                await asyncio.sleep(cooldown * 2)
         except Exception as e:
             logger.debug("repair fund %s: %s", base, e)
+        await asyncio.sleep(cooldown)
 
-    if "sentiment_score" in missing:
+    if "sentiment_score" in missing and news_url:
         try:
-            r = await client.get(f"{NEWS_URL.rstrip('/')}/analyze/{base}", timeout=20.0)
+            r = await client.get(f"{news_url}/analyze/{base}", timeout=20.0)
             if r.status_code == 200:
                 n = r.json() if isinstance(r.json(), dict) else {}
                 ns = n.get("news_score", n.get("sentiment_score"))
@@ -7223,13 +7456,15 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                     current["sentiment_score"] = ns
                     current.setdefault("news_score", ns)
                     patched.append("sentiment_score")
+            elif r.status_code in (401, 429):
+                await asyncio.sleep(cooldown * 2)
         except Exception as e:
             logger.debug("repair sentiment %s: %s", base, e)
+        await asyncio.sleep(cooldown)
 
     current["symbol"] = base
     current["repair_patched"] = patched
     current["repair_updated_at"] = datetime.now(IST).isoformat()
-    # Non-destructive: put_symbol merges over existing durable key
     store.put_symbol(base, current, ttl=DATA_FEED_TTL)
     still_missing = _feed_missing_fields(current)
     return {
@@ -7239,6 +7474,8 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
         "price": _feed_resolved_price(current),
         "complete": len(still_missing) == 0,
     }
+
+
 
 
 

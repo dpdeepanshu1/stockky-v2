@@ -348,3 +348,333 @@ class SurpriseStockEngine:
 
 
 surprise_engine = SurpriseStockEngine()
+
+
+# ── Market-aware live surprise quote cache (anti-429 / 401) ─────────────────
+SURPRISE_FEED_CACHE_KEY = "system:surprise_feed"
+SURPRISE_FEED_OPEN_TTL_SEC = int(__import__("os").getenv("SURPRISE_FEED_OPEN_TTL_SEC", "7200"))  # 2h
+SURPRISE_FEED_COOLDOWN_SEC = float(__import__("os").getenv("SURPRISE_FEED_COOLDOWN_SEC", "0.5"))
+
+
+def is_market_open_ist() -> bool:
+    """NSE continuous session 09:15–15:30 IST, Mon–Fri."""
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, time as dtime
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        if now.weekday() >= 5:
+            return False
+        try:
+            from nse_holidays import is_nse_holiday
+            if is_nse_holiday(now.date()):
+                return False
+        except Exception:
+            pass
+        tt = now.time()
+        return dtime(9, 15) <= tt <= dtime(15, 30)
+    except Exception:
+        return False
+
+
+def _read_surprise_feed_cache() -> Optional[dict]:
+    try:
+        import kv_cache as _kc
+        raw = _kc.kv_get(SURPRISE_FEED_CACHE_KEY)
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            import json as _json
+            return _json.loads(raw)
+    except Exception as e:
+        logger.debug("surprise feed cache read: %s", e)
+    return None
+
+
+def _write_surprise_feed_cache(payload: dict) -> None:
+    try:
+        import kv_cache as _kc
+        # Durable: long TTL when closed; 2h when open (still stored in Neon)
+        ttl = None if not is_market_open_ist() else max(SURPRISE_FEED_OPEN_TTL_SEC, 3600)
+        _kc.kv_set(SURPRISE_FEED_CACHE_KEY, payload, ttl=ttl)
+    except Exception as e:
+        logger.warning("surprise feed cache write: %s", e)
+
+
+async def run_market_aware_surprise_feed(
+    symbols: Optional[list] = None,
+    market_data_url: str = "",
+    force: bool = False,
+) -> dict:
+    """
+    Live quote batch for surprise dashboard with market-aware Neon cache.
+
+    - Market OPEN: reuse cache if age < 2 hours (default)
+    - Market CLOSED (nights/weekends/holidays): reuse cache forever until force=true
+    - Live path: sequential quotes with 0.5s cooldown (401 crumb killer)
+    """
+    import json as _json
+    import httpx
+
+    cached = _read_surprise_feed_cache()
+    if cached and not force:
+        age = time.time() - float(cached.get("timestamp") or 0)
+        open_now = is_market_open_ist()
+        if not open_now:
+            return {
+                "status": "success",
+                "source": "cache",
+                "market_open": False,
+                "age_sec": int(age),
+                "data": cached.get("data") or [],
+                "message": "Market closed — serving durable cache (no API calls)",
+            }
+        if age < SURPRISE_FEED_OPEN_TTL_SEC:
+            return {
+                "status": "success",
+                "source": "cache",
+                "market_open": True,
+                "age_sec": int(age),
+                "data": cached.get("data") or [],
+                "message": f"Cache hit ({int(age)}s old, TTL {SURPRISE_FEED_OPEN_TTL_SEC}s)",
+            }
+
+    # Resolve symbol list
+    syms = []
+    if symbols:
+        syms = [str(s).upper().replace(".NS", "").replace(".BO", "").strip() for s in symbols if s]
+    if not syms:
+        # Prefer static cache keys, else empty
+        if surprise_engine.static_cache:
+            syms = list(surprise_engine.static_cache.keys())
+        else:
+            try:
+                surprise_engine.load_static_cache()
+                syms = list(surprise_engine.static_cache.keys())
+            except Exception:
+                syms = []
+    # de-dupe
+    seen = set()
+    clean = []
+    for s in syms:
+        if s and s not in seen:
+            seen.add(s)
+            clean.append(s)
+    syms = clean
+
+    if not syms:
+        return {
+            "status": "error",
+            "source": "live",
+            "data": [],
+            "message": "No symbols — run premarket baselines first",
+        }
+
+    # CHUNKED YF DOWNLOAD (50-ticker chunks) — primary path
+    results = []
+    errors = 0
+    got = set()
+    chunk_size = 50
+    try:
+        import yfinance as yf
+        for i in range(0, len(syms), chunk_size):
+            chunk = syms[i : i + chunk_size]
+            ticker_string = " ".join(f"{s}.NS" for s in chunk)
+            try:
+                df = yf.download(
+                    ticker_string,
+                    period="5d",
+                    group_by="ticker",
+                    threads=False,
+                    progress=False,
+                    auto_adjust=True,
+                )
+                for s in chunk:
+                    try:
+                        sym_ns = f"{s}.NS"
+                        sub = None
+                        if df is not None and hasattr(df, "columns") and getattr(df.columns, "nlevels", 1) > 1:
+                            if sym_ns in df.columns.get_level_values(0):
+                                sub = df[sym_ns]
+                        elif len(chunk) == 1:
+                            sub = df
+                        if sub is None or (hasattr(sub, "empty") and sub.empty):
+                            continue
+                        if "Close" not in getattr(sub, "columns", []):
+                            continue
+                        series = sub["Close"].dropna()
+                        if series.empty:
+                            continue
+                        px = float(series.iloc[-1])
+                        if px <= 0 or px > 5000:
+                            continue
+                        results.append({"symbol": s, "price": px, "cmp": px, "source": "yfinance_bulk"})
+                        got.add(s)
+                    except Exception:
+                        errors += 1
+            except Exception as e:
+                logger.warning("surprise yf chunk %s: %s", i, e)
+                errors += 1
+            await asyncio.sleep(1.0)
+    except Exception as e:
+        logger.warning("surprise chunked yf unavailable: %s", e)
+
+    # Waterfall fill for misses via market-data /quote
+    misses = [s for s in syms if s not in got]
+    md = (market_data_url or "").rstrip("/")
+    if misses and md:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+            for sym in misses:
+                try:
+                    r = await client.get(f"{md}/quote/{sym}")
+                    if r.status_code == 200:
+                        body = r.json() if isinstance(r.json(), dict) else {}
+                        px = None
+                        for k in ("price", "cmp", "ltp", "close", "last_price", "regularMarketPrice"):
+                            try:
+                                v = float(body.get(k) or 0)
+                                if v > 0:
+                                    px = v
+                                    break
+                            except (TypeError, ValueError):
+                                pass
+                        if px is not None and 0 < px <= 5000:
+                            results.append({"symbol": sym, "price": px, "cmp": px, "source": body.get("source") or "waterfall"})
+                            got.add(sym)
+                    elif r.status_code in (401, 429):
+                        errors += 1
+                        await asyncio.sleep(SURPRISE_FEED_COOLDOWN_SEC * 2)
+                except Exception:
+                    errors += 1
+                await asyncio.sleep(SURPRISE_FEED_COOLDOWN_SEC)
+
+    payload = {
+        "timestamp": time.time(),
+        "data": results,
+        "count": len(results),
+        "errors": errors,
+        "market_open": is_market_open_ist(),
+    }
+    _write_surprise_feed_cache(payload)
+    return {
+        "status": "success",
+        "source": "live",
+        "market_open": is_market_open_ist(),
+        "data": results,
+        "count": len(results),
+        "errors": errors,
+        "message": f"Live surprise feed: {len(results)} quotes, {errors} errors",
+    }
+
+
+def audit_surprise_feed() -> dict:
+    """Health snapshot for the Surprise dashboard (mirrors data-feed audit)."""
+    cached = _read_surprise_feed_cache() or {}
+    data = cached.get("data") if isinstance(cached, dict) else []
+    if not isinstance(data, list):
+        data = []
+    total = len(data)
+    missing = []
+    complete = 0
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        sym = str(row.get("symbol") or "").upper()
+        px = 0.0
+        for k in ("price", "cmp", "ltp", "close"):
+            try:
+                v = float(row.get(k) or 0)
+                if v > 0:
+                    px = v
+                    break
+            except (TypeError, ValueError):
+                pass
+        if px <= 0:
+            missing.append({"symbol": sym, "missing_fields": ["price"]})
+        else:
+            complete += 1
+    health = round((complete / max(total, 1)) * 100, 1) if total > 0 else 0.0
+    return {
+        "ok": True,
+        "total_tracked": total,
+        "fully_populated": complete,
+        "missing_data": len(missing),
+        "health_score": health,
+        "incomplete_stocks": missing[:200],
+        "cache_age_sec": int(time.time() - float(cached.get("timestamp") or 0)) if cached else None,
+        "market_open": is_market_open_ist(),
+        "source": "cache" if cached else "empty",
+    }
+
+
+def repair_surprise_batch(limit: int = 15, market_data_url: str = "") -> dict:
+    """
+    Waterfall fill for missing surprise quote rows only.
+    Hits market-data /quote (Yahoo → TwelveData → Polygon) with 0.5s cooldown.
+    """
+    import os
+    import httpx
+
+    cached = _read_surprise_feed_cache() or {}
+    data_list = list(cached.get("data") or [])
+    if not data_list:
+        return {"status": "no_data", "repaired": []}
+
+    targets = []
+    for item in data_list:
+        if not isinstance(item, dict):
+            continue
+        try:
+            px = float(item.get("price") or item.get("cmp") or 0)
+        except (TypeError, ValueError):
+            px = 0.0
+        if px <= 0:
+            sym = str(item.get("symbol") or "").upper().strip()
+            if sym:
+                targets.append(sym)
+    targets = targets[: max(1, min(int(limit or 15), 30))]
+    if not targets:
+        return {"status": "completed", "repaired": [], "message": "Nothing missing"}
+
+    md = (market_data_url or os.getenv("MARKET_DATA_URL") or "").rstrip("/")
+    repaired = []
+    try:
+        with httpx.Client(timeout=8.0, follow_redirects=True) as client:
+            for sym in targets:
+                try:
+                    r = client.get(f"{md}/quote/{sym}")
+                    if r.status_code == 200:
+                        body = r.json() if isinstance(r.json(), dict) else {}
+                        px = None
+                        for k in ("price", "cmp", "ltp", "close", "last_price"):
+                            try:
+                                v = float(body.get(k) or 0)
+                                if v > 0:
+                                    px = v
+                                    break
+                            except (TypeError, ValueError):
+                                pass
+                        if px is None or px > 5000:
+                            time.sleep(SURPRISE_FEED_COOLDOWN_SEC)
+                            continue
+                        for item in data_list:
+                            if str(item.get("symbol") or "").upper() == sym:
+                                item["price"] = px
+                                item["cmp"] = px
+                                item["source"] = body.get("source") or "waterfall"
+                                repaired.append(sym)
+                                break
+                except Exception:
+                    pass
+                time.sleep(SURPRISE_FEED_COOLDOWN_SEC)
+    except Exception as e:
+        logger.warning("repair_surprise_batch: %s", e)
+
+    cached["data"] = data_list
+    cached["timestamp"] = time.time()
+    _write_surprise_feed_cache(cached)
+    return {
+        "status": "completed",
+        "repaired": repaired,
+        "repaired_count": len(repaired),
+        "targets": targets,
+    }

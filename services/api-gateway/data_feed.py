@@ -1019,7 +1019,7 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
     Fetch last close for many NSE symbols via yfinance bulk download.
     Bypasses NSE India 403 blocks on cloud IPs (Render/AWS).
 
-    Uses chunked yf.download (default 80 tickers/call) so free-tier RAM stays safe
+    Uses chunked yf.download (default 50 tickers/call, threads=True) so free-tier RAM stays safe
     while still avoiding per-symbol HTTP storms. One chunk ≈ one Yahoo call.
     Returns { "RELIANCE": {"price": ..., "volume": ..., "source": "yfinance_bulk"}, ... }
     Only includes symbols with 0 < price <= MAX_STOCK_PRICE.
@@ -1055,7 +1055,7 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
                 ticker_string,
                 period="5d",  # 5d so we still get last close on holidays/weekends
                 group_by="ticker",
-                threads=False,
+                threads=True,   # multi-thread chunk ~1.5s vs ~15s; reduces crumb 401 window
                 progress=False,
                 auto_adjust=True,
             )

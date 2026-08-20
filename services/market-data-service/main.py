@@ -493,17 +493,91 @@ def normalize_symbol(symbol: str) -> str:
 
 
 class QuoteResponse(BaseModel):
+    """Always-valid quote payload — waterfall fallbacks pad missing fields."""
     symbol: str
-    name: Optional[str]
-    price: Optional[float]
-    previous_close: Optional[float]
-    day_change_pct: Optional[float]
-    day_high: Optional[float]
-    day_low: Optional[float]
-    volume: Optional[int]
-    market_cap: Optional[float]
-    pe_ratio: Optional[float]
-    fetched_at: str
+    name: Optional[str] = None
+    price: Optional[float] = None
+    cmp: Optional[float] = None
+    previous_close: Optional[float] = None
+    day_change_pct: Optional[float] = 0.0
+    day_high: Optional[float] = None
+    day_low: Optional[float] = None
+    volume: Optional[int] = 0
+    market_cap: Optional[float] = 0.0
+    pe_ratio: Optional[float] = 0.0
+    source: Optional[str] = None
+    fetched_at: str = ""
+
+    class Config:
+        extra = "ignore"
+
+
+def _pad_quote_response(sym: str, data: Optional[dict] = None) -> dict:
+    """
+    Build a QuoteResponse-safe dict so FastAPI never 500s on partial waterfall hits.
+    Missing OHLC fields are padded from price (or 0) rather than left as schema gaps.
+    """
+    d = dict(data) if isinstance(data, dict) else {}
+    base = (sym or d.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip() or "UNKNOWN"
+
+    def _f(key, default=None):
+        v = d.get(key)
+        if v is None or v == "":
+            return default
+        try:
+            f = float(v)
+            if f != f:  # NaN
+                return default
+            return f
+        except (TypeError, ValueError):
+            return default
+
+    def _i(key, default=0):
+        v = d.get(key)
+        if v is None or v == "":
+            return default
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return default
+
+    price = _f("price")
+    if price is None:
+        price = _f("cmp")
+    if price is None:
+        price = _f("ltp")
+    if price is None:
+        price = _f("close")
+    if price is None:
+        price = _f("last_price")
+
+    px = float(price) if price is not None and price > 0 else None
+    prev = _f("previous_close", px)
+    high = _f("day_high", px)
+    low = _f("day_low", px)
+    chg = _f("day_change_pct", 0.0)
+    if chg is None:
+        chg = 0.0
+
+    fetched = d.get("fetched_at") or datetime.utcnow().isoformat()
+    if not isinstance(fetched, str):
+        fetched = str(fetched)
+
+    return {
+        "symbol": base if not str(sym).endswith((".NS", ".BO")) else str(sym).upper(),
+        "name": d.get("name") or base,
+        "price": px,
+        "cmp": px if px is not None else _f("cmp"),
+        "previous_close": prev if prev is not None else px,
+        "day_change_pct": float(chg),
+        "day_high": high if high is not None else px,
+        "day_low": low if low is not None else px,
+        "volume": _i("volume", 0),
+        "market_cap": _f("market_cap", 0.0) or 0.0,
+        "pe_ratio": _f("pe_ratio", 0.0) or 0.0,
+        "source": d.get("source") or "unknown",
+        "fetched_at": fetched,
+    }
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 @app.get("/")
@@ -718,20 +792,21 @@ def get_quote(symbol: str):
                 "source": "nse",
                 "fetched_at": datetime.utcnow().isoformat(),
             }
+            result = _pad_quote_response(sym, result)
             result = _sanitize_for_json(result)
             _cache_set(cache_key, result)
             return result
 
     # Early return if Yahoo primary already resolved price
     if price is not None and price > 0:
-        result = {
+        result = _pad_quote_response(sym, {
             "symbol": sym,
             "name": sym,
             "price": float(price),
             "cmp": float(price),
             "source": source or "yahoo",
             "fetched_at": datetime.utcnow().isoformat(),
-        }
+        })
         result = _sanitize_for_json(result)
         _cache_set(cache_key, result)
         return result
@@ -812,7 +887,7 @@ def get_quote(symbol: str):
                 if price and prev_close:
                     change_pct = round(((price - prev_close) / prev_close) * 100, 2)
 
-                result = {
+                result = _pad_quote_response(sym, {
                     "symbol": sym,
                     "name": info.get("longName") or info.get("shortName") or sym,
                     "price": price,
@@ -823,28 +898,24 @@ def get_quote(symbol: str):
                     "volume": info.get("volume"),
                     "market_cap": info.get("marketCap"),
                     "pe_ratio": info.get("trailingPE"),
+                    "source": "yfinance",
                     "fetched_at": datetime.utcnow().isoformat(),
-                }
+                })
+                result = _sanitize_for_json(result)
                 _cache_set(cache_key, result)
                 return result
         except Exception as e:
             logger.warning(f"yfinance quote failed for {sym}: {e}")
 
-    # If we have a price from one of the APIs, build minimal response
+    # If we have a price from one of the APIs, build padded response (no 500)
     if price is not None:
-        result = {
+        result = _pad_quote_response(sym, {
             "symbol": sym,
             "name": sym,
             "price": price,
-            "previous_close": None,
-            "day_change_pct": None,
-            "day_high": None,
-            "day_low": None,
-            "volume": None,
-            "market_cap": None,
-            "pe_ratio": None,
+            "source": source or "waterfall",
             "fetched_at": datetime.utcnow().isoformat(),
-        }
+        })
         result = _sanitize_for_json(result)
         _cache_set(cache_key, result)
         _fallback_set(cache_key, result)
@@ -854,23 +925,17 @@ def get_quote(symbol: str):
     logger.warning("Could not fetch price for %s from any source. Returning fallback.", sym)
     # Prefer last good cached/soft value over empty N/A
     if soft_cached and isinstance(soft_cached, dict) and soft_cached.get("price") is not None:
-        return soft_cached
+        return _pad_quote_response(sym, soft_cached)
     fb = _fallback_get(cache_key)
     if fb and isinstance(fb, dict) and fb.get("price") is not None:
-        return fb
-    result = {
+        return _pad_quote_response(sym, fb)
+    result = _pad_quote_response(sym, {
         "symbol": sym,
         "name": sym,
         "price": None,
-        "previous_close": None,
-        "day_change_pct": None,
-        "day_high": None,
-        "day_low": None,
-        "volume": None,
-        "market_cap": None,
-        "pe_ratio": None,
+        "source": "failed",
         "fetched_at": datetime.utcnow().isoformat(),
-    }
+    })
     _cache_set(cache_key, result)
     return result
 

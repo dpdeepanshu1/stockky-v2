@@ -484,7 +484,7 @@ async def run_market_aware_surprise_feed(
                     ticker_string,
                     period="5d",
                     group_by="ticker",
-                    threads=False,
+                    threads=True,  # multi-thread chunk speedup / shorter 401 window
                     progress=False,
                     auto_adjust=True,
                 )
@@ -606,10 +606,15 @@ def audit_surprise_feed() -> dict:
     }
 
 
-def repair_surprise_batch(limit: int = 15, market_data_url: str = "") -> dict:
+def repair_surprise_batch(
+    limit: int = 15,
+    market_data_url: str = "",
+    symbol: str = None,
+) -> dict:
     """
     Waterfall fill for missing surprise quote rows only.
     Hits market-data /quote (Yahoo → TwelveData → Polygon) with 0.5s cooldown.
+    If symbol= is set, only that ticker is repaired (single-row UI button).
     """
     import os
     import httpx
@@ -619,19 +624,32 @@ def repair_surprise_batch(limit: int = 15, market_data_url: str = "") -> dict:
     if not data_list:
         return {"status": "no_data", "repaired": []}
 
+    force_sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip() or None
+
     targets = []
-    for item in data_list:
-        if not isinstance(item, dict):
-            continue
-        try:
-            px = float(item.get("price") or item.get("cmp") or 0)
-        except (TypeError, ValueError):
-            px = 0.0
-        if px <= 0:
-            sym = str(item.get("symbol") or "").upper().strip()
-            if sym:
-                targets.append(sym)
-    targets = targets[: max(1, min(int(limit or 15), 30))]
+    if force_sym:
+        # Ensure the symbol exists in the cache list (or append a stub to patch)
+        found = False
+        for item in data_list:
+            if str(item.get("symbol") or "").upper() == force_sym:
+                found = True
+                break
+        if not found:
+            data_list.append({"symbol": force_sym, "price": 0, "cmp": 0})
+        targets = [force_sym]
+    else:
+        for item in data_list:
+            if not isinstance(item, dict):
+                continue
+            try:
+                px = float(item.get("price") or item.get("cmp") or 0)
+            except (TypeError, ValueError):
+                px = 0.0
+            if px <= 0:
+                sym = str(item.get("symbol") or "").upper().strip()
+                if sym:
+                    targets.append(sym)
+        targets = targets[: max(1, min(int(limit or 15), 30))]
     if not targets:
         return {"status": "completed", "repaired": [], "message": "Nothing missing"}
 

@@ -5659,11 +5659,17 @@ async def api_run_premarket_feed(force: bool = False, request: Request = None):
 
 @app.post("/api/surprise/repair-batch")
 @app.post("/surprise/repair-batch")
-async def api_surprise_repair_batch(limit: int = 15):
-    """Fill missing surprise quotes via market-data waterfall (0.5s pacing)."""
+async def api_surprise_repair_batch(limit: int = 15, symbol: str = None):
+    """Fill missing surprise quotes via market-data waterfall (0.5s pacing).
+    Optional symbol= targets a single ticker (UI Repair button).
+    """
     try:
         from surprise_scanner import repair_surprise_batch
-        return repair_surprise_batch(limit=limit, market_data_url=MARKET_DATA_URL)
+        return repair_surprise_batch(
+            limit=limit,
+            market_data_url=MARKET_DATA_URL,
+            symbol=symbol,
+        )
     except Exception as e:
         logger.exception("surprise repair-batch: %s", e)
         raise HTTPException(status_code=500, detail=str(e)[:240])

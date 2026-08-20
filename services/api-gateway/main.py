@@ -7378,8 +7378,10 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
             r = await client.get(f"{market_url}/quote/{base}", timeout=8.0)
             if r.status_code == 200:
                 q = r.json() if isinstance(r.json(), dict) else {}
+                # Only merge non-None quote fields — never write pe_ratio=0 / volume=0 poison
+                cleaned = {k: v for k, v in q.items() if v is not None}
                 for k in ("price", "cmp", "ltp", "close", "last_price", "regularMarketPrice"):
-                    px = _safe_float(q.get(k))
+                    px = _safe_float(cleaned.get(k))
                     if px > 0:
                         if px > MAX_UNIVERSE_PRICE:
                             logger.info("repair price skip %s — ₹%.2f > cap", base, px)
@@ -7388,6 +7390,17 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                         current.setdefault("close", px)
                         current.setdefault("cmp", px)
                         current.setdefault("ltp", px)
+                        # Real OHLCV from Yahoo 2d when present
+                        for ok in ("previous_close", "day_high", "day_low", "day_change_pct"):
+                            if cleaned.get(ok) is not None:
+                                current[ok] = cleaned[ok]
+                        if cleaned.get("volume") is not None:
+                            try:
+                                vol = int(float(cleaned["volume"]))
+                                if vol > 0:
+                                    current["volume"] = vol
+                            except (TypeError, ValueError):
+                                pass
                         patched.append("price")
                         break
             elif r.status_code in (401, 429):

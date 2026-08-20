@@ -493,53 +493,63 @@ def normalize_symbol(symbol: str) -> str:
 
 
 class QuoteResponse(BaseModel):
-    """Always-valid quote payload — waterfall fallbacks pad missing fields."""
+    """
+    Quote-only schema. Fundamentals (pe_ratio, market_cap) stay Optional=None —
+    never inject fake 0s that poison Neon merges / scanners / ML.
+    """
     symbol: str
     name: Optional[str] = None
     price: Optional[float] = None
     cmp: Optional[float] = None
     previous_close: Optional[float] = None
-    day_change_pct: Optional[float] = 0.0
+    day_change_pct: Optional[float] = None
     day_high: Optional[float] = None
     day_low: Optional[float] = None
-    volume: Optional[int] = 0
-    market_cap: Optional[float] = 0.0
-    pe_ratio: Optional[float] = 0.0
-    source: Optional[str] = None
-    fetched_at: str = ""
+    volume: Optional[int] = None
+    market_cap: Optional[float] = None  # fundamental service owns this
+    pe_ratio: Optional[float] = None    # fundamental service owns this
+    source: Optional[str] = "unknown"
+    fetched_at: Optional[str] = None
 
     class Config:
         extra = "ignore"
 
 
+def _clean_quote_dict(d: dict) -> dict:
+    """Drop keys whose value is None so callers never JSON-merge nulls over real data."""
+    return {k: v for k, v in (d or {}).items() if v is not None}
+
+
 def _pad_quote_response(sym: str, data: Optional[dict] = None) -> dict:
     """
-    Build a QuoteResponse-safe dict so FastAPI never 500s on partial waterfall hits.
-    Missing OHLC fields are padded from price (or 0) rather than left as schema gaps.
+    Schema-safe quote dict WITHOUT inventing zeros.
+    - Real OHLCV fields pass through only if present and valid
+    - Missing fields stay None (not 0) so Neon merges keep prior real values
+    - pe_ratio / market_cap never forced — owned by fundamental service
     """
     d = dict(data) if isinstance(data, dict) else {}
     base = (sym or d.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip() or "UNKNOWN"
 
-    def _f(key, default=None):
+    def _f(key):
         v = d.get(key)
         if v is None or v == "":
-            return default
+            return None
         try:
             f = float(v)
             if f != f:  # NaN
-                return default
+                return None
             return f
         except (TypeError, ValueError):
-            return default
+            return None
 
-    def _i(key, default=0):
+    def _i(key):
         v = d.get(key)
         if v is None or v == "":
-            return default
+            return None
         try:
             return int(float(v))
         except (TypeError, ValueError):
-            return default
+            return None
 
     price = _f("price")
     if price is None:
@@ -550,126 +560,94 @@ def _pad_quote_response(sym: str, data: Optional[dict] = None) -> dict:
         price = _f("close")
     if price is None:
         price = _f("last_price")
-
     px = float(price) if price is not None and price > 0 else None
-    prev = _f("previous_close", px)
-    high = _f("day_high", px)
-    low = _f("day_low", px)
-    chg = _f("day_change_pct", 0.0)
-    if chg is None:
-        chg = 0.0
+
+    prev = _f("previous_close")
+    high = _f("day_high")
+    low = _f("day_low")
+    chg = _f("day_change_pct")
+    vol = _i("volume")
+    # Only accept positive volume — never treat missing as 0
+    if vol is not None and vol < 0:
+        vol = None
 
     fetched = d.get("fetched_at") or datetime.utcnow().isoformat()
     if not isinstance(fetched, str):
         fetched = str(fetched)
 
-    return {
+    out = {
         "symbol": base if not str(sym).endswith((".NS", ".BO")) else str(sym).upper(),
         "name": d.get("name") or base,
         "price": px,
-        "cmp": px if px is not None else _f("cmp"),
-        "previous_close": prev if prev is not None else px,
-        "day_change_pct": float(chg),
-        "day_high": high if high is not None else px,
-        "day_low": low if low is not None else px,
-        "volume": _i("volume", 0),
-        "market_cap": _f("market_cap", 0.0) or 0.0,
-        "pe_ratio": _f("pe_ratio", 0.0) or 0.0,
+        "cmp": px,
+        "previous_close": prev,
+        "day_change_pct": chg,
+        "day_high": high,
+        "day_low": low,
+        "volume": vol,
+        # Fundamentals: pass through only if explicitly provided (never invent)
+        "market_cap": _f("market_cap"),
+        "pe_ratio": _f("pe_ratio"),
         "source": d.get("source") or "unknown",
         "fetched_at": fetched,
     }
+    return out
 
-# ── Endpoints ──────────────────────────────────────────────────────────────────
-@app.get("/")
-async def root():
-    return {
-        "service": "Stockky Market Data Service",
-        "version": "2.2.0",
-        "status": "running",
-        "cache_enabled": bool(cache),
-        "endpoints": {
-            "/health": "GET – health check",
-            "/quote/{symbol}": "GET – latest quote",
-            "/history/{symbol}": "GET – OHLCV candles",
-            "/fundamentals/{symbol}": "GET – raw fundamental data",
-        },
-    }
 
-@app.get("/health")
-def health(warm: bool = Query(False, description="If true, touch yfinance once to reduce cold latency")):
-    # Lightweight – returns quickly; optional warm for free-tier wake
-    if warm:
+def _yahoo_ohlcv_quote(symbol: str) -> Optional[dict]:
+    """
+    Real candle metrics via yfinance period=2d:
+      price, previous_close, day_change_pct, day_high, day_low, volume
+    Returns None on failure — never fake zeros.
+    """
+    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    if not base:
+        return None
+    for suffix in (".NS", ".BO"):
+        ticker = f"{base}{suffix}"
         try:
-            def _touch():
-                t = yf.Ticker("^NSEI")
-                t.history(period="5d", interval="1d")
-            _with_retry(_touch, max_retries=2, base_delay=0.5)
-            return {"status": "ok", "service": "market-data-service", "cache": bool(cache), "warmed": True, "circuits": all_snapshots()}
+            t = yf.Ticker(ticker)
+            hist = t.history(period="2d")
+            if hist is None or hist.empty or "Close" not in hist.columns:
+                continue
+            latest = hist.iloc[-1]
+            price = float(latest["Close"])
+            if price != price or price <= 0:
+                continue
+            high = float(latest["High"]) if "High" in hist.columns else None
+            low = float(latest["Low"]) if "Low" in hist.columns else None
+            vol = None
+            if "Volume" in hist.columns:
+                try:
+                    vol = int(float(latest["Volume"]))
+                    if vol < 0:
+                        vol = None
+                except (TypeError, ValueError):
+                    vol = None
+            prev_close = price
+            if len(hist) >= 2:
+                try:
+                    prev_close = float(hist.iloc[-2]["Close"])
+                except (TypeError, ValueError, IndexError):
+                    prev_close = price
+            change_pct = None
+            if prev_close and prev_close > 0:
+                change_pct = round(((price - prev_close) / prev_close) * 100, 2)
+            return {
+                "symbol": base,
+                "name": base,
+                "price": price,
+                "cmp": price,
+                "previous_close": prev_close,
+                "day_change_pct": change_pct,
+                "day_high": high if high == high else None,
+                "day_low": low if low == low else None,
+                "volume": vol,
+                "source": "yahoo",
+                "fetched_at": datetime.utcnow().isoformat(),
+            }
         except Exception as e:
-            return {"status": "ok", "service": "market-data-service", "cache": bool(cache), "warmed": False, "warm_error": str(e)[:120]}
-    return {"status": "ok", "service": "market-data-service", "cache": bool(cache), "circuits": all_snapshots()}
-
-@app.get("/wake")
-def wake():
-    """Explicit cold-start wake used by api-gateway before scans."""
-    return health(warm=True)
-
-# ── NSE India Official API (Primary) ─────────────────────────────────────────
-_nse_headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.nseindia.com/",
-    "DNT": "1",
-}
-
-def _fetch_nse_quote(symbol: str) -> Optional[dict]:
-    try:
-        clean_sym = symbol.replace(".NS", "").replace(".BO", "")
-        with httpx.Client(headers=_nse_headers, timeout=10) as client:
-            client.get("https://www.nseindia.com")
-            time.sleep(0.3)
-            url = f"https://www.nseindia.com/api/quote-equity?symbol={clean_sym}"
-            resp = client.get(url)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data and "priceInfo" in data:
-                    return data
-    except Exception as e:
-        logger.warning(f"NSE Quote fetch failed: {e}")
-    return None
-
-def _fetch_nse_fundamentals(symbol: str) -> Optional[dict]:
-    try:
-        clean_sym = symbol.replace(".NS", "").replace(".BO", "")
-        with httpx.Client(headers=_nse_headers, timeout=10) as client:
-            client.get("https://www.nseindia.com")
-            url = f"https://www.nseindia.com/api/quote-equity?symbol={clean_sym}&section=secinfo"
-            resp = client.get(url)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data and "secInfo" in data:
-                    return data
-    except Exception as e:
-        logger.warning(f"NSE Fundamentals fetch failed: {e}")
-    return None
-
-def _fetch_price_from_yahoo_raw(symbol: str) -> Optional[float]:
-    try:
-        for sym in [symbol, symbol.replace(".NS", "")]:
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
-            resp = httpx.get(url, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                chart = data.get("chart", {})
-                result = chart.get("result", [])
-                if result and "meta" in result[0]:
-                    price = result[0]["meta"].get("regularMarketPrice")
-                    if price is not None:
-                        logger.info(f"Yahoo Raw API fallback found price for {sym}: {price}")
-                        return price
-    except Exception as e:
-        logger.warning(f"Yahoo Raw API fallback failed: {e}")
+            logger.debug("yahoo ohlcv %s: %s", ticker, e)
     return None
 
 
@@ -754,16 +732,20 @@ def get_quote(symbol: str):
     if soft_cached and (_in_cooldown("yfinance") or _in_cooldown("nse")):
         return soft_cached
 
-    # 0. WATERFALL PRIMARY: Yahoo 1d history (bypasses NSE 403 on Render)
+    # 0. WATERFALL PRIMARY: Yahoo period=2d real OHLCV (no fake zeros)
     price = None
     source = None
+    yahoo_full = None
     if not _in_cooldown("yfinance"):
         try:
-            ypx = _waterfall_yahoo_history_price(sym)
-            if ypx is not None and ypx > 0:
-                price = ypx
+            yahoo_full = _yahoo_ohlcv_quote(sym)
+            if yahoo_full and yahoo_full.get("price"):
+                price = float(yahoo_full["price"])
                 source = "yahoo"
-                logger.info("Yahoo waterfall primary hit %s → ₹%.2f", sym, ypx)
+                logger.info(
+                    "Yahoo OHLCV primary hit %s → ₹%.2f vol=%s chg=%s",
+                    sym, price, yahoo_full.get("volume"), yahoo_full.get("day_change_pct"),
+                )
         except Exception as e:
             logger.debug("yahoo primary %s: %s", sym, e)
 
@@ -797,7 +779,12 @@ def get_quote(symbol: str):
             _cache_set(cache_key, result)
             return result
 
-    # Early return if Yahoo primary already resolved price
+    # Early return if Yahoo primary already resolved real OHLCV
+    if yahoo_full and price is not None and price > 0:
+        result = _pad_quote_response(sym, yahoo_full)
+        result = _sanitize_for_json(result)
+        _cache_set(cache_key, result)
+        return result
     if price is not None and price > 0:
         result = _pad_quote_response(sym, {
             "symbol": sym,

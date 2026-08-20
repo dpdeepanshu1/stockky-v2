@@ -87,9 +87,16 @@ export default function SurpriseStocks({
     source?: string;
     cache_age_sec?: number | null;
     message?: string;
+    incomplete_stocks?: Array<{
+      symbol: string;
+      missing_fields?: string[];
+      current_price?: number;
+    }>;
   } | null>(null);
   const [healthLoading, setHealthLoading] = useState(false);
   const [quoteFeedBusy, setQuoteFeedBusy] = useState(false);
+  const [patchingSymbol, setPatchingSymbol] = useState<string | null>(null);
+  const [batchRepairBusy, setBatchRepairBusy] = useState(false);
   const pollRef = useRef<number | null>(null);
   const scanAbort = useRef<AbortController | null>(null);
 
@@ -340,12 +347,40 @@ export default function SurpriseStocks({
         health_score: 0,
         total_tracked: 0,
         missing_data: 0,
+        incomplete_stocks: [],
         message: e?.message || "Audit failed",
       });
     } finally {
       setHealthLoading(false);
     }
   }, []);
+
+  const handleRepairSingle = useCallback(
+    async (symbol: string) => {
+      setPatchingSymbol(symbol);
+      try {
+        await api.surpriseRepairBatch(1, symbol);
+        await fetchSurpriseHealth();
+      } catch (e: any) {
+        setPmError(e?.message || `Repair failed for ${symbol}`);
+      } finally {
+        setPatchingSymbol(null);
+      }
+    },
+    [fetchSurpriseHealth]
+  );
+
+  const handleRepairBatchMissing = useCallback(async () => {
+    setBatchRepairBusy(true);
+    try {
+      await api.surpriseRepairBatch(15);
+      await fetchSurpriseHealth();
+    } catch (e: any) {
+      setPmError(e?.message || "Batch repair failed");
+    } finally {
+      setBatchRepairBusy(false);
+    }
+  }, [fetchSurpriseHealth]);
 
   const runMarketAwareQuoteFeed = useCallback(async (force = false) => {
     setQuoteFeedBusy(true);
@@ -542,6 +577,64 @@ export default function SurpriseStocks({
         </div>
         {healthData?.message && (
           <p className="font-mono text-[10px] text-mist/50 mt-3">{healthData.message}</p>
+        )}
+
+        <div className="flex flex-wrap gap-2 mt-4">
+          <button
+            type="button"
+            onClick={() => void handleRepairBatchMissing()}
+            disabled={
+              batchRepairBusy ||
+              healthLoading ||
+              (healthData?.missing_data ?? 0) === 0
+            }
+            className="font-mono text-xs px-3 py-1.5 rounded-lg bg-rose-600/20 text-rose-200 border border-rose-500/40 hover:bg-rose-600/35 transition disabled:opacity-50"
+          >
+            {batchRepairBusy ? "Repairing…" : "⚡ Auto-Repair Missing (15)"}
+          </button>
+        </div>
+
+        {(healthData?.incomplete_stocks?.length ?? 0) > 0 && (
+          <div className="mt-4 overflow-x-auto rounded-lg border border-slate/60">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="text-mist/50 border-b border-slate/60 font-mono text-[10px] uppercase tracking-wider">
+                  <th className="py-2 px-3">Symbol</th>
+                  <th className="py-2 px-3">Price</th>
+                  <th className="py-2 px-3">Missing</th>
+                  <th className="py-2 px-3 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(healthData?.incomplete_stocks || []).map((stock) => (
+                  <tr key={stock.symbol} className="border-b border-slate/40 hover:bg-ink/40">
+                    <td className="py-2 px-3 font-mono font-semibold text-paper">{stock.symbol}</td>
+                    <td className="py-2 px-3 font-mono text-rose-400">0 (missing)</td>
+                    <td className="py-2 px-3">
+                      {(stock.missing_fields || ["price"]).map((m) => (
+                        <span
+                          key={m}
+                          className="inline-block bg-rose-900/40 text-rose-300 px-1.5 py-0.5 rounded mr-1 text-[10px] uppercase"
+                        >
+                          {m}
+                        </span>
+                      ))}
+                    </td>
+                    <td className="py-2 px-3 text-right">
+                      <button
+                        type="button"
+                        onClick={() => void handleRepairSingle(stock.symbol)}
+                        disabled={patchingSymbol === stock.symbol || batchRepairBusy}
+                        className="font-mono text-[11px] px-2 py-1 bg-graphite text-mist rounded border border-slate hover:bg-slate/40 disabled:opacity-50"
+                      >
+                        {patchingSymbol === stock.symbol ? "Patching…" : "Repair"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 

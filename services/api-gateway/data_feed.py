@@ -272,6 +272,39 @@ def _payload_is_useful(payload: Optional[dict]) -> bool:
 
 
 
+
+def strip_none_fields(payload: dict) -> dict:
+    """Remove keys whose value is None so Neon merges never wipe real metrics with null."""
+    if not isinstance(payload, dict):
+        return {}
+    return {k: v for k, v in payload.items() if v is not None}
+
+
+def merge_feed_payload(existing: dict, incoming: dict) -> dict:
+    """
+    Merge incoming quote/repair fields into existing feed row.
+    - Drops None from incoming (no poison overwrite)
+    - Does not write volume/pe_ratio/day_change_pct when incoming is 0 and existing has real data
+      (0 can be legitimate volume only if source explicitly sent it; still prefer existing if
+       existing > 0 and incoming == 0 from a sparse fallback)
+    """
+    base = dict(existing) if isinstance(existing, dict) else {}
+    inc = strip_none_fields(incoming if isinstance(incoming, dict) else {})
+    for k, v in inc.items():
+        if k in ("volume", "pe_ratio", "market_cap", "day_change_pct", "roce", "rsi"):
+            try:
+                old = base.get(k)
+                old_f = float(old) if old is not None else None
+                new_f = float(v) if v is not None else None
+                # Protect real values from sparse fallback zeros
+                if old_f is not None and old_f != 0 and new_f == 0:
+                    continue
+            except (TypeError, ValueError):
+                pass
+        base[k] = v
+    return base
+
+
 class DataFeedStore:
     """
     Durable data-feed store.
@@ -453,7 +486,15 @@ class DataFeedStore:
         base = _norm_sym(symbol)
         if not base or not isinstance(payload, dict):
             return
-        payload = normalize_feed_payload(dict(payload))
+        # Never let None / sparse zeros wipe durable Neon fields
+        existing = {}
+        try:
+            existing = self.get_symbol(base) or {}
+        except Exception:
+            existing = {}
+        if isinstance(existing, dict) and existing:
+            payload = merge_feed_payload(existing, payload)
+        payload = strip_none_fields(normalize_feed_payload(dict(payload)))
         payload.setdefault("symbol", base)
         payload.setdefault("updated_at", _now_iso())
 

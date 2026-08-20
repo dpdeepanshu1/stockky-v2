@@ -119,7 +119,12 @@ export interface ScanResult {
     cautious: number;
   };
   all_results: Decision[];
+  /** Some gateway payloads use `results` as an alias of all_results */
+  results?: Decision[];
   errors: { symbol: string; error: string }[];
+  partial?: boolean;
+  cancelled?: boolean;
+  task_id?: string;
 }
 
 export interface ScanStatus {
@@ -797,7 +802,19 @@ export const api = {
         const result = (st as any).result;
         if (result && typeof result === "object") return result as ScanResult;
         const last = await api.getLastScan();
-        return (last?.result || last || { all_results: [], recommendations: [], scanned: 0 }) as ScanResult;
+        return (last?.result || last || {
+          scanned: 0,
+          universe_size: 0,
+          watchlist_size: 0,
+          recommendations: [],
+          watchlist_candidates: [],
+          verdict: "UNKNOWN",
+          market_mood: "",
+          market_stats: { buy_signals: 0, sell_signals: 0, hold_signals: 0, cautious: 0 },
+          all_results: [],
+          results: [],
+          errors: [],
+        }) as ScanResult;
       }
       await new Promise((r) => setTimeout(r, 1500));
     }

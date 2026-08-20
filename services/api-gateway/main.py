@@ -8009,33 +8009,17 @@ async def data_feed_run(
         # Replaces sequential /quote calls that took ~15 min with ~20s total.
         if start_at == 0 and not done_set:
             try:
-                from data_feed import (
-                    run_bulk_yahoo_price_feed_cached as run_bulk_yahoo_price_feed,
-                    _is_valid_equity_symbol,
-                    BULK_YF_CHUNK,
-                )
-                # Drop index fragments (NIFTY, 50, MIDCAP…) before Yahoo bulk
-                clean_universe = [s for s in universe if _is_valid_equity_symbol(s)]
-                if len(clean_universe) < len(universe):
-                    logger.info(
-                        "data-feed: filtered %s invalid/index symbols → %s equities",
-                        len(universe) - len(clean_universe),
-                        len(clean_universe),
-                    )
-                universe = clean_universe or universe
-                chunk_n = int(BULK_YF_CHUNK or 20)
+                from data_feed import run_bulk_yahoo_price_feed_cached as run_bulk_yahoo_price_feed
                 store.set_job(
                     status="running",
-                    message=f"Bulk Yahoo quotes for {len(universe)} symbols (chunks of {chunk_n})…",
+                    message=f"Bulk Yahoo quotes for {len(universe)} symbols (chunks of 50)…",
                     processed=0,
                     total=len(universe),
                     updated_at=datetime.now(IST).isoformat(),
                 )
                 # run_bulk is sync (yfinance) — offload to thread so event loop stays responsive
-                # Progress updates happen inside run_bulk via store.set_job after each chunk
-                # force=True on this route → bypass bulk quote cache
                 bulk_result = await asyncio.to_thread(
-                    run_bulk_yahoo_price_feed, universe, True, bool(force)
+                    run_bulk_yahoo_price_feed, universe, True
                 )
                 saved = int((bulk_result or {}).get("tracked_stocks") or 0)
                 for sym in (bulk_result or {}).get("symbols") or []:

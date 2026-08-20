@@ -1405,6 +1405,25 @@ export const api = {
       1,
       300000
     ),
+  bulkQuoteCache: () =>
+    request<any>("/api/quotes/bulk-cache", undefined, 2, 20000),
+  listPriceAlerts: () =>
+    request<any>("/api/price-alerts", undefined, 2, 20000),
+  addPriceAlert: (body: {
+    symbol: string;
+    target_price: number;
+    direction?: "above" | "below";
+    note?: string;
+  }) =>
+    request<any>("/api/price-alerts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 1, 20000),
+  deletePriceAlert: (id: string) =>
+    request<any>(`/api/price-alerts/${encodeURIComponent(id)}`, { method: "DELETE" }, 1, 15000),
+  evaluatePriceAlerts: () =>
+    request<any>("/api/price-alerts/evaluate", { method: "POST" }, 1, 60000),
   runSurprisePremarketFeed: (force = false) =>
     request<any>(`/api/surprise/run-premarket-feed?force=${force}`, { method: "POST" }, 1, 300000),
   surpriseAudit: () =>

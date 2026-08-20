@@ -137,7 +137,21 @@ export default function SurpriseStocks({
       message: "Starting premarket job…",
     });
     try {
+      // 1) Static baselines (Neon surprise_static_feed)
       await api.surprisePremarket();
+      // 2) Chunked bulk Yahoo live quotes (50/chunk) into system:surprise_feed
+      try {
+        setPmProgress((p) => ({
+          ...(p || {}),
+          message: "Bulk Yahoo quotes (50/chunk)…",
+          percent: Math.max(Number(p?.percent) || 1, 15),
+        }));
+        await api.runSurprisePremarketFeed(true);
+        await fetchSurpriseHealth();
+      } catch (bulkErr: any) {
+        console.warn("surprise bulk quote feed", bulkErr);
+        // Baselines may still succeed; quote cache can be retried via Live Quote Cache
+      }
       stopPmPoll();
       pollRef.current = window.setInterval(pollPremarket, 2000);
       await pollPremarket();
@@ -437,7 +451,7 @@ export default function SurpriseStocks({
             disabled={quoteFeedBusy || pmRunning}
             className="font-mono text-xs px-4 py-2 rounded-lg bg-sky-600/25 text-sky-200 border border-sky-500/40 hover:bg-sky-600/40 transition disabled:opacity-50"
           >
-            {quoteFeedBusy ? "Quote feed…" : "📡 Live Quote Cache"}
+            {quoteFeedBusy ? "Bulk quotes…" : "📡 Bulk Quote Feed (50×)"}
           </button>
           <button
             type="button"

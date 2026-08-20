@@ -6384,6 +6384,30 @@ async def _quote_broadcast_loop():
                 await asyncio.sleep(0.2)
         except Exception as e:
             logger.debug("quote loop: %s", e)
+        # Real-time price alerts (15-min cooldown per rule)
+        try:
+            from data_feed import evaluate_price_alerts
+            triggered = evaluate_price_alerts()
+            for t in triggered[:5]:
+                try:
+                    _wake_notification_service()
+                    msg = (
+                        f"⚡ {t.get('symbol')} ₹{t.get('current_price')} "
+                        f"({t.get('direction')} target ₹{t.get('target_price')})"
+                    )
+                    httpx.post(
+                        f"{NOTIFICATION_URL}/notify",
+                        json={"title": f"Price Alert · {t.get('symbol')}", "message": msg, "channel": "all"},
+                        timeout=8,
+                    )
+                    await ws_manager.broadcast("alerts", {
+                        "type": "price_alert",
+                        **{k: t.get(k) for k in ("symbol", "current_price", "target_price", "direction", "note", "id")},
+                    })
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug("quote loop alerts: %s", e)
         # Open: 8s; preopen/post: slower
         phase = _market_session_phase_ist()
         await asyncio.sleep(8 if phase == "open" else 20)
@@ -6643,6 +6667,96 @@ def ops_activity_status():
         "activity_paused": activity_paused(),
         "quote_loop_enabled": bool(_QUOTE_LOOP_ENABLED),
         "scan_cancel_flags": len(_SCAN_CANCEL_FLAGS),
+    }
+
+
+
+@app.get("/api/quotes/bulk-cache")
+@app.get("/data-feed/bulk-cache")
+async def api_bulk_quote_cache():
+    """Shared bulk quote cache status + map (market-aware TTL)."""
+    from data_feed import get_bulk_quote_cache, bulk_cache_age_sec, should_refresh_bulk_cache
+    cache = get_bulk_quote_cache()
+    return {
+        "ok": True,
+        "age_sec": bulk_cache_age_sec(),
+        "should_refresh": should_refresh_bulk_cache(),
+        "meta": (cache or {}).get("_meta"),
+        "count": len((cache or {}).get("quotes") or {}),
+        "quotes": (cache or {}).get("quotes") or {},
+    }
+
+
+@app.get("/api/price-alerts")
+@app.get("/price-alerts")
+async def api_list_price_alerts():
+    from data_feed import list_price_alerts
+    alerts = list_price_alerts()
+    return {"ok": True, "alerts": alerts, "count": len(alerts)}
+
+
+@app.post("/api/price-alerts")
+@app.post("/price-alerts")
+async def api_add_price_alert(request: Request):
+    """Body: {symbol, target_price, direction: above|below, note?}"""
+    from data_feed import add_price_alert
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sym = str((body or {}).get("symbol") or "").strip()
+    try:
+        target = float((body or {}).get("target_price") or (body or {}).get("target") or 0)
+    except (TypeError, ValueError):
+        target = 0
+    direction = str((body or {}).get("direction") or "above").lower()
+    note = str((body or {}).get("note") or "")
+    if not sym or target <= 0:
+        raise HTTPException(status_code=400, detail="symbol and target_price required")
+    entry = add_price_alert(sym, target, direction=direction, note=note)
+    return {"ok": True, "alert": entry}
+
+
+@app.delete("/api/price-alerts/{alert_id}")
+@app.delete("/price-alerts/{alert_id}")
+async def api_delete_price_alert(alert_id: str):
+    from data_feed import delete_price_alert
+    ok = delete_price_alert(alert_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="alert not found")
+    return {"ok": True, "deleted": alert_id}
+
+
+@app.post("/api/price-alerts/evaluate")
+@app.post("/price-alerts/evaluate")
+async def api_evaluate_price_alerts():
+    """Evaluate alerts vs bulk cache / feed; notify on triggers."""
+    from data_feed import evaluate_price_alerts
+    triggered = evaluate_price_alerts()
+    notified = 0
+    for t in triggered:
+        try:
+            _wake_notification_service()
+            msg = (
+                f"Price alert: {t.get('symbol')} is ₹{t.get('current_price')} "
+                f"({t.get('direction')} ₹{t.get('target_price')})"
+            )
+            if t.get("note"):
+                msg += f" — {t.get('note')}"
+            resp = httpx.post(
+                f"{NOTIFICATION_URL}/notify",
+                json={"title": f"Price Alert · {t.get('symbol')}", "message": msg, "channel": "all"},
+                timeout=12,
+            )
+            if resp.status_code == 200:
+                notified += 1
+        except Exception as e:
+            logger.debug("price alert notify: %s", e)
+    return {
+        "ok": True,
+        "triggered": triggered,
+        "triggered_count": len(triggered),
+        "notified": notified,
     }
 
 
@@ -7652,7 +7766,7 @@ async def data_feed_run(
         # Replaces sequential /quote calls that took ~15 min with ~20s total.
         if start_at == 0 and not done_set:
             try:
-                from data_feed import run_bulk_yahoo_price_feed
+                from data_feed import run_bulk_yahoo_price_feed_cached as run_bulk_yahoo_price_feed
                 store.set_job(
                     status="running",
                     message=f"Bulk Yahoo quotes for {len(universe)} symbols (chunks of 50)…",

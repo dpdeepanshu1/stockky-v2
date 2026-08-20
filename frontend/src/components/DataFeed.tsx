@@ -38,6 +38,11 @@ export default function DataFeed() {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [running, setRunning] = useState(false);
+  const [alerts, setAlerts] = useState<any[]>([]);
+  const [alertSym, setAlertSym] = useState("");
+  const [alertTarget, setAlertTarget] = useState("");
+  const [alertDir, setAlertDir] = useState<"above" | "below">("above");
+  const [alertBusy, setAlertBusy] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -63,6 +68,14 @@ export default function DataFeed() {
   // Load once on mount — no recursive refresh
   useEffect(() => {
     void refresh();
+    void (async () => {
+      try {
+        const res = await api.listPriceAlerts();
+        setAlerts(res?.alerts || []);
+      } catch {
+        /* ignore */
+      }
+    })();
   }, [refresh]);
 
   // Poll only while backend job is running/stopping (stops immediately when done)
@@ -132,8 +145,12 @@ export default function DataFeed() {
         setBanner("Hard-reset skipped — starting feed…");
       }
       // 2. Trigger the fresh data feed
+      // run path includes PHASE 0 bulk Yahoo (50/chunk) then fundamentals
       const res = await api.runDataFeed(true);
-      setBanner(res.message || "Data feed started");
+      setBanner(
+        res.message ||
+          "Data feed started — bulk Yahoo quotes first (~20s), then fundamentals"
+      );
       await refresh();
     } catch (e: any) {
       setErr(e?.message || "Failed to start data feed");
@@ -357,6 +374,119 @@ export default function DataFeed() {
           <p className="mt-3 font-mono text-[11px] text-mist/60">{meta.last_message}</p>
         )}
       </div>
+
+      {/* Real-time price alerts */}
+      <div className="mt-6 rounded-xl border border-slate bg-ink/40 p-4">
+        <div className="flex flex-wrap justify-between items-center gap-2 mb-3">
+          <h3 className="font-mono text-sm font-bold text-paper">⚡ Price Alerts</h3>
+          <button
+            type="button"
+            className="font-mono text-[11px] px-2 py-1 rounded border border-slate text-mist hover:bg-slate/40"
+            onClick={async () => {
+              try {
+                const res = await api.listPriceAlerts();
+                setAlerts(res?.alerts || []);
+              } catch { /* ignore */ }
+            }}
+          >
+            Refresh
+          </button>
+        </div>
+        <div className="flex flex-wrap gap-2 mb-3">
+          <input
+            className="font-mono text-xs bg-graphite border border-slate rounded px-2 py-1.5 text-paper w-28"
+            placeholder="Symbol"
+            value={alertSym}
+            onChange={(e) => setAlertSym(e.target.value.toUpperCase())}
+          />
+          <input
+            className="font-mono text-xs bg-graphite border border-slate rounded px-2 py-1.5 text-paper w-28"
+            placeholder="Target ₹"
+            value={alertTarget}
+            onChange={(e) => setAlertTarget(e.target.value)}
+          />
+          <select
+            className="font-mono text-xs bg-graphite border border-slate rounded px-2 py-1.5 text-paper"
+            value={alertDir}
+            onChange={(e) => setAlertDir(e.target.value as "above" | "below")}
+          >
+            <option value="above">Above</option>
+            <option value="below">Below</option>
+          </select>
+          <button
+            type="button"
+            disabled={alertBusy || !alertSym || !alertTarget}
+            className="font-mono text-xs px-3 py-1.5 rounded bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 disabled:opacity-50"
+            onClick={async () => {
+              setAlertBusy(true);
+              try {
+                await api.addPriceAlert({
+                  symbol: alertSym,
+                  target_price: Number(alertTarget),
+                  direction: alertDir,
+                });
+                setAlertSym("");
+                setAlertTarget("");
+                const res = await api.listPriceAlerts();
+                setAlerts(res?.alerts || []);
+              } catch (e: any) {
+                setErr(e?.message || "Failed to add alert");
+              } finally {
+                setAlertBusy(false);
+              }
+            }}
+          >
+            Add alert
+          </button>
+          <button
+            type="button"
+            className="font-mono text-xs px-3 py-1.5 rounded bg-amber-600/20 text-amber-200 border border-amber-500/40"
+            onClick={async () => {
+              try {
+                const res = await api.evaluatePriceAlerts();
+                setBanner(
+                  res?.triggered_count
+                    ? `Triggered ${res.triggered_count} alert(s), notified ${res.notified}`
+                    : "No alerts triggered"
+                );
+              } catch (e: any) {
+                setErr(e?.message || "Evaluate failed");
+              }
+            }}
+          >
+            Check now
+          </button>
+        </div>
+        <ul className="space-y-1 max-h-40 overflow-y-auto">
+          {(alerts || []).length === 0 ? (
+            <li className="font-mono text-[11px] text-mist/50">No alerts yet</li>
+          ) : (
+            alerts.map((a) => (
+              <li
+                key={a.id}
+                className="flex justify-between items-center font-mono text-[11px] text-mist border-b border-slate/40 py-1"
+              >
+                <span>
+                  {a.symbol} {a.direction} ₹{a.target_price}
+                  {a.trigger_count ? ` · fired ${a.trigger_count}×` : ""}
+                </span>
+                <button
+                  type="button"
+                  className="text-rose-300 hover:text-rose-200"
+                  onClick={async () => {
+                    await api.deletePriceAlert(a.id);
+                    const res = await api.listPriceAlerts();
+                    setAlerts(res?.alerts || []);
+                  }}
+                >
+                  Remove
+                </button>
+              </li>
+            ))
+          )}
+        </ul>
+      </div>
+
     </div>
   );
 }

@@ -1305,3 +1305,316 @@ def list_feed_symbols_from_neon_under_max_price(max_price: float = None) -> List
         if px <= 0 or px <= cap:
             kept.append(base)
     return kept
+
+
+# ── Optimized bulk quote cache (shared Data Feed + Surprise) ───────────────
+BULK_QUOTE_CACHE_KEY = "system:bulk_quote_cache"
+PRICE_ALERTS_KEY = "system:price_alerts"
+BULK_QUOTE_OPEN_TTL = int(__import__("os").getenv("BULK_QUOTE_OPEN_TTL", "120"))   # 2 min during market
+BULK_QUOTE_CLOSED_TTL = int(__import__("os").getenv("BULK_QUOTE_CLOSED_TTL", "21600"))  # 6h closed
+
+
+def _is_nse_session_open() -> bool:
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, time as dtime
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        if now.weekday() >= 5:
+            return False
+        try:
+            from nse_holidays import is_nse_holiday
+            if is_nse_holiday(now.date()):
+                return False
+        except Exception:
+            pass
+        t = now.time()
+        return dtime(9, 15) <= t <= dtime(15, 30)
+    except Exception:
+        return False
+
+
+def get_bulk_quote_cache() -> dict:
+    """Read shared bulk quote map {SYMBOL: {price, ...}, _meta: {...}}."""
+    try:
+        import kv_cache as _kc
+        raw = _kc.kv_get(BULK_QUOTE_CACHE_KEY)
+        if isinstance(raw, dict):
+            return raw
+    except Exception as e:
+        logger.debug("bulk quote cache read: %s", e)
+    return {}
+
+
+def set_bulk_quote_cache(quotes: dict, source: str = "yahoo_bulk") -> dict:
+    """
+    Persist bulk quotes with market-aware TTL.
+    Open: short TTL so UI stays fresh; Closed: long TTL (no Yahoo storm).
+    """
+    open_now = _is_nse_session_open()
+    ttl = BULK_QUOTE_OPEN_TTL if open_now else BULK_QUOTE_CLOSED_TTL
+    payload = {
+        "_meta": {
+            "timestamp": __import__("time").time(),
+            "source": source,
+            "market_open": open_now,
+            "count": len([k for k in quotes.keys() if not str(k).startswith("_")]),
+            "ttl_sec": ttl,
+        },
+        "quotes": {str(k).upper(): v for k, v in (quotes or {}).items() if not str(k).startswith("_")},
+    }
+    try:
+        import kv_cache as _kc
+        _kc.kv_set(BULK_QUOTE_CACHE_KEY, payload, ttl=ttl)
+    except Exception as e:
+        logger.warning("bulk quote cache write: %s", e)
+    return payload
+
+
+def get_cached_quote(symbol: str) -> Optional[dict]:
+    """Single-symbol lookup from bulk cache (avoids /quote when warm)."""
+    base = _norm_sym(symbol)
+    cache = get_bulk_quote_cache()
+    quotes = cache.get("quotes") if isinstance(cache, dict) else {}
+    if isinstance(quotes, dict):
+        row = quotes.get(base)
+        if isinstance(row, dict) and _payload_price(row) > 0:
+            return row
+    return None
+
+
+def bulk_cache_age_sec() -> Optional[float]:
+    cache = get_bulk_quote_cache()
+    meta = (cache or {}).get("_meta") or {}
+    ts = meta.get("timestamp")
+    if ts is None:
+        return None
+    try:
+        return __import__("time").time() - float(ts)
+    except (TypeError, ValueError):
+        return None
+
+
+def should_refresh_bulk_cache(max_age_open: int = None, max_age_closed: int = None) -> bool:
+    age = bulk_cache_age_sec()
+    if age is None:
+        return True
+    open_now = _is_nse_session_open()
+    limit = max_age_open if open_now else max_age_closed
+    if limit is None:
+        limit = BULK_QUOTE_OPEN_TTL if open_now else BULK_QUOTE_CLOSED_TTL
+    return age >= float(limit)
+
+
+# Patch run_bulk_yahoo_price_feed to also write shared cache — done via wrapper below
+def run_bulk_yahoo_price_feed_cached(
+    symbols: Optional[List[str]] = None,
+    merge_existing: bool = True,
+    force: bool = False,
+) -> dict:
+    """
+    Bulk Yahoo feed with shared cache:
+      - If cache warm and not force → return cached hits (near-zero Yahoo calls)
+      - Else download chunks, write Neon feed + bulk cache
+    """
+    if not force and not should_refresh_bulk_cache():
+        cache = get_bulk_quote_cache()
+        quotes = (cache or {}).get("quotes") or {}
+        if quotes:
+            # Optionally still merge into feed store for dashboard consistency
+            if merge_existing and symbols:
+                store = get_data_feed_store()
+                saved = 0
+                for sym in symbols:
+                    b = _norm_sym(sym)
+                    row = quotes.get(b)
+                    if isinstance(row, dict) and _payload_price(row) > 0:
+                        try:
+                            existing = store.get_symbol(b) or {}
+                            existing.update({k: v for k, v in row.items() if v is not None})
+                            store.put_symbol(b, existing)
+                            saved += 1
+                        except Exception:
+                            pass
+            return {
+                "status": "success",
+                "source": "cache",
+                "tracked_stocks": len(quotes),
+                "requested": len(symbols or []),
+                "yahoo_hits": 0,
+                "cache_age_sec": bulk_cache_age_sec(),
+                "message": f"Bulk quote cache hit ({len(quotes)} symbols, age {int(bulk_cache_age_sec() or 0)}s)",
+                "symbols": sorted(quotes.keys()),
+            }
+
+    result = run_bulk_yahoo_price_feed(symbols, merge_existing=merge_existing)
+    # Build quotes map from result symbols via store
+    store = get_data_feed_store()
+    quotes = {}
+    for sym in (result.get("symbols") or []):
+        row = store.get_symbol(sym) or {}
+        px = _payload_price(row)
+        if px > 0:
+            quotes[sym] = {
+                "symbol": sym,
+                "price": px,
+                "cmp": px,
+                "previous_close": row.get("previous_close"),
+                "day_change_pct": row.get("day_change_pct"),
+                "day_high": row.get("day_high"),
+                "day_low": row.get("day_low"),
+                "volume": row.get("volume"),
+                "source": row.get("source") or "yahoo_bulk",
+            }
+            quotes[sym] = {k: v for k, v in quotes[sym].items() if v is not None}
+    if quotes:
+        set_bulk_quote_cache(quotes, source="yahoo_bulk")
+    result["source"] = result.get("source") or "live"
+    result["cache_written"] = bool(quotes)
+    return result
+
+
+# ── Real-time price alerts ─────────────────────────────────────────────────
+def list_price_alerts() -> list:
+    try:
+        import kv_cache as _kc
+        raw = _kc.kv_get(PRICE_ALERTS_KEY)
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, dict) and isinstance(raw.get("alerts"), list):
+            return raw["alerts"]
+    except Exception as e:
+        logger.debug("list_price_alerts: %s", e)
+    return []
+
+
+def save_price_alerts(alerts: list) -> list:
+    try:
+        import kv_cache as _kc
+        clean = []
+        for a in alerts or []:
+            if not isinstance(a, dict):
+                continue
+            sym = _norm_sym(a.get("symbol"))
+            if not sym:
+                continue
+            try:
+                target = float(a.get("target_price") or a.get("target") or 0)
+            except (TypeError, ValueError):
+                continue
+            if target <= 0:
+                continue
+            direction = str(a.get("direction") or "above").lower()
+            if direction not in ("above", "below"):
+                direction = "above"
+            clean.append({
+                "id": str(a.get("id") or f"{sym}-{direction}-{target}"),
+                "symbol": sym,
+                "target_price": target,
+                "direction": direction,
+                "enabled": bool(a.get("enabled", True)),
+                "note": str(a.get("note") or "")[:120],
+                "created_at": a.get("created_at") or _now_iso(),
+                "last_triggered_at": a.get("last_triggered_at"),
+                "trigger_count": int(a.get("trigger_count") or 0),
+            })
+        _kc.kv_set(PRICE_ALERTS_KEY, {"alerts": clean}, ttl=None)
+        return clean
+    except Exception as e:
+        logger.warning("save_price_alerts: %s", e)
+        return alerts or []
+
+
+def add_price_alert(symbol: str, target_price: float, direction: str = "above", note: str = "") -> dict:
+    alerts = list_price_alerts()
+    entry = {
+        "id": f"{_norm_sym(symbol)}-{direction}-{target_price}-{int(__import__('time').time())}",
+        "symbol": _norm_sym(symbol),
+        "target_price": float(target_price),
+        "direction": direction if direction in ("above", "below") else "above",
+        "enabled": True,
+        "note": (note or "")[:120],
+        "created_at": _now_iso(),
+        "last_triggered_at": None,
+        "trigger_count": 0,
+    }
+    alerts.append(entry)
+    save_price_alerts(alerts)
+    return entry
+
+
+def delete_price_alert(alert_id: str) -> bool:
+    alerts = list_price_alerts()
+    new = [a for a in alerts if str(a.get("id")) != str(alert_id)]
+    if len(new) == len(alerts):
+        return False
+    save_price_alerts(new)
+    return True
+
+
+def evaluate_price_alerts(price_map: Optional[dict] = None) -> list:
+    """
+    Check alerts against price_map {SYM: float} or bulk cache / feed store.
+    Returns list of triggered alert dicts (with current_price).
+    Cooldown: skip re-trigger within 15 minutes per alert id.
+    """
+    import time as _time
+    alerts = list_price_alerts()
+    if not alerts:
+        return []
+
+    if not price_map:
+        price_map = {}
+        cache = get_bulk_quote_cache()
+        for sym, row in ((cache.get("quotes") or {}) if isinstance(cache, dict) else {}).items():
+            if isinstance(row, dict):
+                px = _payload_price(row)
+                if px > 0:
+                    price_map[str(sym).upper()] = px
+        if not price_map:
+            store = get_data_feed_store()
+            for a in alerts:
+                sym = a.get("symbol")
+                row = store.get_symbol(sym) or {}
+                px = _payload_price(row)
+                if px > 0:
+                    price_map[sym] = px
+
+    triggered = []
+    updated = False
+    now = _time.time()
+    for a in alerts:
+        if not a.get("enabled", True):
+            continue
+        sym = a.get("symbol")
+        px = float(price_map.get(sym) or 0)
+        if px <= 0:
+            continue
+        target = float(a.get("target_price") or 0)
+        direction = a.get("direction") or "above"
+        hit = (px >= target) if direction == "above" else (px <= target)
+        if not hit:
+            continue
+        last = a.get("last_triggered_at")
+        if last:
+            try:
+                # ISO or epoch
+                if isinstance(last, (int, float)):
+                    last_ts = float(last)
+                else:
+                    from datetime import datetime
+                    last_ts = datetime.fromisoformat(str(last).replace("Z", "+00:00")).timestamp()
+                if now - last_ts < 900:  # 15 min cooldown
+                    continue
+            except Exception:
+                pass
+        a["last_triggered_at"] = _now_iso()
+        a["trigger_count"] = int(a.get("trigger_count") or 0) + 1
+        updated = True
+        triggered.append({
+            **a,
+            "current_price": px,
+            "triggered_at": a["last_triggered_at"],
+        })
+    if updated:
+        save_price_alerts(alerts)
+    return triggered

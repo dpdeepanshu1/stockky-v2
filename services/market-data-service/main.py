@@ -1,15 +1,3 @@
-import math
-"""
-Market Data Service
---------------------
-Single responsibility: fetch raw market data (price history, quote, company info)
-for Indian equities from free public sources (yfinance) and serve over REST.
-All data is cached with TTL that depends on market hours:
-- During NSE trading hours (09:15-15:30 IST, Mon-Fri): TTL = 300 seconds (5 min)
-- Outside: TTL = 21600 seconds (6 hours)
-
-v2.2 – reduced retries and timeouts for faster responses.
-"""
 import os
 import time
 import json
@@ -248,6 +236,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── NEW ROOT ENDPOINT (fixes 404 on base URL) ─────────────────────────────
+@app.get("/")
+def root():
+    return {
+        "service": "Stockky Market Data Service",
+        "version": "2.2.0",
+        "status": "healthy",
+        "endpoints": [
+            "/quote/{symbol}",
+            "/history/{symbol}",
+            "/fundamentals/{symbol}",
+            "/surprise/premarket",
+            "/surprise/premarket/status",
+            "/surprise/static",
+            "/delivery/{symbol}",
+            "/delivery/{symbol}/refresh"
+        ],
+        "docs": "/docs"
+    }
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
@@ -1478,4 +1486,3 @@ def refresh_delivery_pct(symbol: str):
     result["from_cache"] = False
     _cache_set(cache_key, result, ttl=get_cache_ttl())
     return result
-

@@ -787,8 +787,6 @@ def _waterfall_polygon_price(symbol: str) -> Optional[float]:
             logger.debug("Polygon %s: %s", sym, e)
     return None
 
-@app.get("/quote/{symbol}", response_model=QuoteResponse)
-
 def _waterfall_alphavantage_price(symbol: str) -> Optional[float]:
     """Emergency last resort — free tier is only ~25 req/day. Use sparingly."""
     key = ALPHA_VANTAGE_API_KEY
@@ -868,6 +866,7 @@ def get_realtime_price(symbol: str) -> Optional[float]:
     return None
 
 
+@app.get("/quote/{symbol}", response_model=QuoteResponse)
 def get_quote(symbol: str):
     """
     Short-circuit waterfall quote path (never parallel-fan-out):

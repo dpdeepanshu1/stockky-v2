@@ -20,7 +20,7 @@ import math
 import random
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
-from typing import Optional
+from typing import Optional, List
 
 import requests
 import yfinance as yf
@@ -583,6 +583,11 @@ class QuoteResponse(BaseModel):
         extra = "ignore"
 
 
+class BulkQuoteRequest(BaseModel):
+    """Request body for single-call bulk quotes (eliminates sequential 429 cascade)."""
+    symbols: List[str]
+
+
 def _clean_quote_dict(d: dict) -> dict:
     """Drop keys whose value is None so callers never JSON-merge nulls over real data."""
     return {k: v for k, v in (d or {}).items() if v is not None}
@@ -783,14 +788,99 @@ def _waterfall_polygon_price(symbol: str) -> Optional[float]:
     return None
 
 @app.get("/quote/{symbol}", response_model=QuoteResponse)
+
+def _waterfall_alphavantage_price(symbol: str) -> Optional[float]:
+    """Emergency last resort — free tier is only ~25 req/day. Use sparingly."""
+    key = ALPHA_VANTAGE_API_KEY
+    if not key:
+        return None
+    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    if not base:
+        return None
+    # AlphaVantage has limited NSE support; try SYMBOL.BSE / plain
+    for sym in (f"{base}.BSE", f"{base}.NSE", base):
+        try:
+            url = (
+                "https://www.alphavantage.co/query"
+                f"?function=GLOBAL_QUOTE&symbol={sym}&apikey={key}"
+            )
+            resp = httpx.get(url, timeout=5.0)
+            if resp.status_code != 200:
+                continue
+            data = resp.json() if resp.content else {}
+            gq = data.get("Global Quote") or data.get("globalQuote") or {}
+            px = _safe(gq.get("05. price") or gq.get("05.price") or gq.get("price"))
+            if px is not None and px > 0:
+                logger.info("AlphaVantage waterfall hit %s → ₹%.2f", sym, px)
+                return float(px)
+        except Exception as e:
+            logger.debug("AlphaVantage %s: %s", sym, e)
+    return None
+
+
+def get_realtime_price(symbol: str) -> Optional[float]:
+    """
+    Priority Waterfall for real-time price discovery.
+    Stops executing immediately upon a successful fetch.
+      1) Yahoo Finance (0 cost)
+      2) TwelveData (800/day)
+      3) AlphaVantage (25/day — last resort)
+      4) Polygon (sparse India coverage)
+    """
+    # 1. Primary: Yahoo
+    try:
+        q = _yahoo_ohlcv_quote(symbol)
+        if q and q.get("price") and float(q["price"]) > 0:
+            return float(q["price"])
+    except Exception:
+        pass
+    try:
+        px = _waterfall_yahoo_history_price(symbol)
+        if px and px > 0:
+            return float(px)
+    except Exception:
+        pass
+
+    # 2. TwelveData
+    try:
+        px = _waterfall_twelvedata_price(symbol)
+        if px and px > 0:
+            return float(px)
+    except Exception:
+        pass
+
+    # 3. AlphaVantage (quota-scarce)
+    try:
+        px = _waterfall_alphavantage_price(symbol)
+        if px and px > 0:
+            return float(px)
+    except Exception:
+        pass
+
+    # 4. Polygon
+    try:
+        px = _waterfall_polygon_price(symbol)
+        if px and px > 0:
+            return float(px)
+    except Exception:
+        pass
+
+    return None
+
+
 def get_quote(symbol: str):
     """
-    Clean, rate-safe quote path.
+    Short-circuit waterfall quote path (never parallel-fan-out):
 
-    - Primary: local Yahoo OHLCV (period=2d) — no external API hopping
-    - Soft cache + last-good fallback so UI never sees empty during brief Yahoo blips
-    - Aggressive multi-API waterfall (AlphaVantage / TwelveData / Polygon) removed
-      to stop 429 cascades that previously froze the gateway event loop.
+    1) Soft / durable cache (if warm)
+    2) Yahoo OHLCV (primary, $0)
+    3) Yahoo Ticker.info (still $0)
+    4) TwelveData price (only if Yahoo failed)
+    5) AlphaVantage (emergency, 25/day)
+    6) Polygon (last resort)
+    7) Last-good soft/durable fallback — never invent zeros
+
+    Each stage stops the chain on the first valid price.
     """
     sym = normalize_symbol(symbol)
     cache_key = f"quote:{sym}"
@@ -861,6 +951,47 @@ def get_quote(symbol: str):
     except Exception as e:
         logger.debug("yahoo info fallback %s: %s", sym, e)
 
+    # ── Short-circuit waterfall (only when Yahoo paths failed) ─────────────
+    # TwelveData → AlphaVantage → Polygon — sequential, stop on first hit
+    waterfall_price = None
+    waterfall_source = None
+    try:
+        waterfall_price = _waterfall_twelvedata_price(sym)
+        if waterfall_price and waterfall_price > 0:
+            waterfall_source = "twelvedata"
+    except Exception as e:
+        logger.debug("twelvedata waterfall %s: %s", sym, e)
+
+    if not waterfall_price:
+        try:
+            waterfall_price = _waterfall_alphavantage_price(sym)
+            if waterfall_price and waterfall_price > 0:
+                waterfall_source = "alphavantage"
+        except Exception as e:
+            logger.debug("alphavantage waterfall %s: %s", sym, e)
+
+    if not waterfall_price:
+        try:
+            waterfall_price = _waterfall_polygon_price(sym)
+            if waterfall_price and waterfall_price > 0:
+                waterfall_source = "polygon"
+        except Exception as e:
+            logger.debug("polygon waterfall %s: %s", sym, e)
+
+    if waterfall_price and waterfall_price > 0:
+        result = _pad_quote_response(sym, {
+            "symbol": sym,
+            "name": sym,
+            "price": float(waterfall_price),
+            "cmp": float(waterfall_price),
+            "source": waterfall_source or "waterfall",
+            "fetched_at": datetime.utcnow().isoformat(),
+        })
+        result = _sanitize_for_json(result)
+        _cache_set(cache_key, result)
+        _fallback_set(cache_key, result)
+        return result
+
     # ── Last-good soft / durable fallback (never invent zeros) ──────────────
     if soft_cached and isinstance(soft_cached, dict) and soft_cached.get("price") is not None:
         return _pad_quote_response(sym, soft_cached)
@@ -879,11 +1010,163 @@ def get_quote(symbol: str):
     return _sanitize_for_json(result)
 
 
+
+@app.post("/quotes/bulk")
+def get_quotes_bulk(req: BulkQuoteRequest):
+    """
+    Single-call bulk quotes via yf.download for the entire requested universe.
+    Replaces ticker-by-ticker loops that trigger free-tier 429 cascades.
+    Returns padded quote dicts compatible with the single /quote/{symbol} shape.
+    """
+    if not req.symbols:
+        return {"ok": False, "error": "No symbols", "quotes": []}
+
+    yf_tickers = []
+    symbol_map = {}  # yf ticker -> original base symbol (without .NS)
+    seen = set()
+    for sym in req.symbols:
+        raw = (sym or "").strip()
+        if not raw:
+            continue
+        mapped = normalize_symbol(raw)
+        if not mapped or mapped in seen:
+            continue
+        seen.add(mapped)
+        yf_tickers.append(mapped)
+        # Prefer clean base for response symbol
+        base = mapped.replace(".NS", "").replace(".BO", "")
+        if mapped.startswith("^"):
+            base = mapped
+        # Keep original request form if it was already clean
+        orig_base = raw.upper().replace(".NS", "").replace(".BO", "").strip()
+        symbol_map[mapped] = orig_base or base
+
+    if not yf_tickers:
+        return {"ok": False, "error": "No valid symbols after normalize", "quotes": []}
+
+    try:
+        data = yf.download(
+            tickers=" ".join(yf_tickers),
+            period="2d",
+            interval="1d",
+            group_by="ticker",
+            threads=True,
+            progress=False,
+            auto_adjust=True,
+        )
+    except Exception as e:
+        logger.exception("yf.download bulk failed: %s", e)
+        try:
+            _report_rate_limit(429 if "429" in str(e) or "Too Many" in str(e) else 502, path="/quotes/bulk", detail=str(e)[:200])
+        except Exception:
+            pass
+        raise HTTPException(status_code=502, detail=str(e)[:300])
+
+    results = []
+    if data is None or (hasattr(data, "empty") and data.empty):
+        return {"ok": True, "quotes": [], "note": "empty download"}
+
+    # Ensure pandas is available (yfinance already depends on it)
+    import pandas as pd
+
+    # yf.download shapes:
+    # - 1 ticker: columns are Open/High/Low/Close/Volume (no MultiIndex levels)
+    # - N tickers: columns MultiIndex (ticker, OHLCV)
+    try:
+        is_multi = isinstance(data.columns, pd.MultiIndex) if hasattr(data, "columns") else False
+    except Exception:
+        is_multi = False
+
+    def _extract_one(sub_df, ticker_key: str):
+        try:
+            if sub_df is None or (hasattr(sub_df, "empty") and sub_df.empty):
+                return None
+            sub = sub_df.dropna(how="all")
+            if len(sub) < 1:
+                return None
+            latest = sub.iloc[-1]
+            prev = sub.iloc[-2] if len(sub) >= 2 else latest
+
+            def _cell(row, col):
+                try:
+                    if col not in row.index and col not in getattr(sub, "columns", []):
+                        return None
+                    v = row[col] if col in row.index else None
+                    if v is None:
+                        return None
+                    f = float(v)
+                    if f != f:  # NaN
+                        return None
+                    return f
+                except Exception:
+                    return None
+
+            price = _cell(latest, "Close")
+            if price is None or price <= 0:
+                return None
+            prev_close = _cell(prev, "Close")
+            if prev_close is None or prev_close <= 0:
+                prev_close = price
+            chg = ((price - prev_close) / prev_close) * 100.0 if prev_close > 0 else 0.0
+            day_high = _cell(latest, "High")
+            day_low = _cell(latest, "Low")
+            vol_raw = _cell(latest, "Volume")
+            volume = int(vol_raw) if vol_raw is not None and vol_raw >= 0 else None
+
+            original_sym = symbol_map.get(ticker_key, ticker_key.replace(".NS", "").replace(".BO", ""))
+            quote = _pad_quote_response(original_sym, {
+                "symbol": original_sym,
+                "price": price,
+                "previous_close": prev_close,
+                "day_change_pct": round(chg, 2),
+                "day_high": day_high,
+                "day_low": day_low,
+                "volume": volume,
+                "source": "yahoo_bulk",
+                "fetched_at": datetime.utcnow().isoformat(),
+            })
+            # Cache under both the yf key and the base symbol
+            try:
+                _cache_set(f"quote:{ticker_key}", quote)
+                base_key = original_sym if not original_sym.startswith("^") else ticker_key
+                _cache_set(f"quote:{normalize_symbol(base_key)}", quote)
+            except Exception:
+                pass
+            return quote
+        except Exception as ex:
+            logger.debug("bulk extract failed for %s: %s", ticker_key, ex)
+            return None
+
+    if is_multi:
+        # columns.levels[0] are the ticker keys
+        try:
+            tickers_in_df = list(data.columns.levels[0])
+        except Exception:
+            tickers_in_df = yf_tickers
+        for ticker_key in tickers_in_df:
+            try:
+                sub_df = data[ticker_key]
+            except Exception:
+                continue
+            q = _extract_one(sub_df, str(ticker_key))
+            if q:
+                results.append(q)
+    else:
+        # Single-ticker flat frame — map back to the only requested ticker
+        ticker_key = yf_tickers[0] if yf_tickers else "UNKNOWN"
+        q = _extract_one(data, ticker_key)
+        if q:
+            results.append(q)
+
+    return {"ok": True, "quotes": _sanitize_for_json(results)}
+
+
 @app.get("/history/{symbol}")
 def get_history(
     symbol: str,
     period: str = Query("6mo", description="1mo, 3mo, 6mo, 1y, 2y, 5y"),
     interval: str = Query("1d", description="1d, 1wk, 1h"),
+    force: bool = Query(False, description="Bypass cache for real-time sniper analysis"),
 ):
     # Cap long periods on free-tier 512MB dynos
     _period_rank = {"1mo": 1, "3mo": 2, "6mo": 3, "1y": 4, "2y": 5, "5y": 6}
@@ -906,9 +1189,10 @@ def get_history(
         candidates.append("^NSEI")
 
     cache_key = f"history:{sym}:{period}:{interval}"
-    cached = _cache_get(cache_key)
-    if cached:
-        return cached
+    if not force:
+        cached = _cache_get(cache_key)
+        if cached:
+            return cached
 
     last_err = None
     for cand in candidates:
@@ -984,9 +1268,12 @@ def get_history(
     raise HTTPException(status_code=404, detail=f"No history found for {symbol}: {detail}")
 
 @app.get("/fundamentals/{symbol}")
-def get_fundamentals_raw(symbol: str):
+def get_fundamentals_raw(
+    symbol: str,
+    force: bool = Query(False, description="Bypass cache for real-time sniper analysis"),
+):
     try:
-        return _get_fundamentals_inner(symbol)
+        return _get_fundamentals_inner(symbol, force=force)
     except Exception as e:
         logger.warning("fundamentals failed for %s: %s", symbol, e)
         return _sanitize_for_json({
@@ -997,12 +1284,13 @@ def get_fundamentals_raw(symbol: str):
             "roe": None,
         })
 
-def _get_fundamentals_inner(symbol: str):
+def _get_fundamentals_inner(symbol: str, force: bool = False):
     sym = normalize_symbol(symbol)
     cache_key = f"fundamentals:{sym}"
-    cached = _cache_get(cache_key)
-    if cached:
-        return _sanitize_for_json(cached)
+    if not force:
+        cached = _cache_get(cache_key)
+        if cached:
+            return _sanitize_for_json(cached)
     if _in_cooldown("yfinance"):
         fb = _fallback_get(cache_key)
         if fb:

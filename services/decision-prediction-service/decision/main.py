@@ -777,15 +777,20 @@ def _assess_data_quality(
     }
 
 
-def _apply_data_quality_gate(decision: Decision, quality: dict, already_owned: bool) -> Decision:
+def _apply_data_quality_gate(
+    decision: Decision,
+    quality: dict,
+    already_owned: bool,
+    technical: dict = None,
+) -> Decision:
     """
-    Free-tier honesty gate:
-    - Provisional / low-n / fallback / thin data → never emit BUY NOW
-    - BUY NOW demoted to WAIT (or PREPARE only if core data is solid but loop is sparse)
+    Free-tier honesty gate with momentum override for sniper setups:
+    - Provisional / low-n / fallback / thin data → normally never emit BUY NOW
+    - Exception: strong technical (score >= 65) + volume_surge may keep BUY NOW
+      even on provisional data so exceptional setups are not starved
+    - Otherwise BUY NOW demoted to WAIT / PREPARE / DO_NOT_BUY per quality
     """
-    if already_owned:
-        return decision
-    if decision not in (Decision.BUY_NOW, Decision.PREPARE_TO_BUY):
+    if already_owned or decision not in (Decision.BUY_NOW, Decision.PREPARE_TO_BUY):
         return decision
 
     provisional = bool(quality.get("provisional") or quality.get("block_buy_now"))
@@ -794,15 +799,22 @@ def _apply_data_quality_gate(decision: Decision, quality: dict, already_owned: b
     live_count = int(quality.get("live_count") or 0)
     quality_label = quality.get("quality") or "low"
 
-    # Hard rule: provisional status blocks BUY NOW
+    tech_dict = technical if isinstance(technical, dict) else {}
+    tech_score = int(tech_dict.get("technical_score") or 50)
+    vol_surge = bool(tech_dict.get("volume_surge", False))
+
+    # Provisional block with momentum override for exceptional technical setups
     if decision == Decision.BUY_NOW and provisional:
-        if core_ok and live_count >= 3 and quality_label != "low" and live_n >= 0:
+        if core_ok and tech_score >= 65 and vol_surge:
+            # Sniper exception: strong technical + volume surge may pass
+            return Decision.BUY_NOW
+        if core_ok and live_count >= 3 and quality_label != "low":
             # Data looks OK but closed-loop still sparse → allow PREPARE, not BUY NOW
             return Decision.PREPARE_TO_BUY
         return Decision.WAIT
 
     if decision == Decision.BUY_NOW and not quality.get("actionable_ok"):
-        if core_ok and live_count >= 2:
+        if core_ok and (live_count >= 2 or tech_score >= 60):
             return Decision.WAIT
         return Decision.DO_NOT_BUY
 
@@ -1068,16 +1080,30 @@ async def _decide_impl(
             need_events = need_prediction = need_sentiment = need_training = False
 
         tasks = {}
+        # Propagate force so sniper / force=True bypasses downstream analysis caches
+        force_query = f"?force={str(force).lower()}"
+
         if need_technical:
-            tasks["technical"] = asyncio.create_task(_fetch_optional(client, f"{TECHNICAL_URL}/analyze/{symbol}", "Technical"))
+            tasks["technical"] = asyncio.create_task(
+                _fetch_optional(client, f"{TECHNICAL_URL}/analyze/{symbol}{force_query}", "Technical")
+            )
         if need_fundamental:
-            tasks["fundamental"] = asyncio.create_task(_fetch_optional(client, f"{FUNDAMENTAL_URL}/analyze/{symbol}", "Fundamental"))
+            tasks["fundamental"] = asyncio.create_task(
+                _fetch_optional(client, f"{FUNDAMENTAL_URL}/analyze/{symbol}{force_query}", "Fundamental")
+            )
         if need_news:
-            tasks["news"] = asyncio.create_task(_fetch_optional(client, f"{NEWS_URL}/analyze/{symbol}", "News"))
+            tasks["news"] = asyncio.create_task(
+                _fetch_optional(client, f"{NEWS_URL}/analyze/{symbol}{force_query}", "News")
+            )
         if need_events:
-            tasks["events"] = asyncio.create_task(_fetch_optional(client, f"{EVENT_URL}/events/{symbol}", "Events"))
+            tasks["events"] = asyncio.create_task(
+                _fetch_optional(client, f"{EVENT_URL}/events/{symbol}{force_query}", "Events")
+            )
         if need_prediction:
-            tasks["prediction"] = asyncio.create_task(_fetch_optional(client, f"{PREDICTION_URL}/predict/{symbol}", "Prediction"))
+            # Prediction path currently has no force cache layer; keep URL clean
+            tasks["prediction"] = asyncio.create_task(
+                _fetch_optional(client, f"{PREDICTION_URL}/predict/{symbol}", "Prediction")
+            )
         if need_sentiment:
             tasks["sentiment"] = asyncio.create_task(get_market_sentiment())
         if need_training:
@@ -1268,7 +1294,7 @@ async def _decide_impl(
             training,
             data_insufficient,
         )
-        gated = _apply_data_quality_gate(decision, data_quality, already_owned)
+        gated = _apply_data_quality_gate(decision, data_quality, already_owned, technical=technical if isinstance(technical, dict) else None)
         if gated != decision:
             bits = [
                 f"quality={data_quality.get('quality')}",
@@ -1467,7 +1493,10 @@ async def _decide_impl(
                 try:
                     dq = response.get("data_quality") or data_quality
                     d_enum = Decision(response.get("decision", Decision.DO_NOT_BUY.value))
-                    gated2 = _apply_data_quality_gate(d_enum, dq, already_owned)
+                    tech_for_gate = technical if isinstance(technical, dict) else None
+                    if not tech_for_gate and isinstance(response.get("technical"), dict):
+                        tech_for_gate = response.get("technical")
+                    gated2 = _apply_data_quality_gate(d_enum, dq, already_owned, technical=tech_for_gate)
                     if gated2.value != response.get("decision"):
                         response["decision"] = gated2.value
                         response.setdefault("reasons", {})

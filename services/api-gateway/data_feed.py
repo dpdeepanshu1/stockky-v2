@@ -283,24 +283,62 @@ def strip_none_fields(payload: dict) -> dict:
 def merge_feed_payload(existing: dict, incoming: dict) -> dict:
     """
     Merge incoming quote/repair fields into existing feed row.
-    - Drops None from incoming (no poison overwrite)
-    - Does not write volume/pe_ratio/day_change_pct when incoming is 0 and existing has real data
-      (0 can be legitimate volume only if source explicitly sent it; still prefer existing if
-       existing > 0 and incoming == 0 from a sparse fallback)
+    Rules (Merge, Never Wipe):
+    - Drops None from incoming (no poison overwrite of durable Neon fields)
+    - Does not write volume/pe_ratio/day_change_pct/roce/rsi when incoming is 0
+      and existing has a real non-zero value (sparse fallback protection)
+    - Seeded fundamentals (pe_ratio_seed / roce_seed / sentiment_seed) never
+      overwrite a previously stored non-seed real value
+    - Volatile price fields (price, volume, day_change_pct, …) always refresh
+      when the incoming value is valid
     """
     base = dict(existing) if isinstance(existing, dict) else {}
     inc = strip_none_fields(incoming if isinstance(incoming, dict) else {})
+
+    # Fundamental / slow fields that seeds must not clobber once a real value exists
+    _SEED_PROTECTED = {
+        "pe_ratio": "pe_ratio_seed",
+        "roce": "roce_seed",
+        "sentiment_score": "sentiment_seed",
+        "roe": "roe_seed",
+        "quality_score": "quality_score_seed",
+        "sector": "sector_seed",
+        "industry": "industry_seed",
+        "debt_to_equity": "debt_to_equity_seed",
+        "revenue_growth": "revenue_growth_seed",
+        "fundamental_score": "fundamental_score_seed",
+    }
+    _ZERO_PROTECTED = ("volume", "pe_ratio", "market_cap", "day_change_pct", "roce", "rsi")
+
     for k, v in inc.items():
-        if k in ("volume", "pe_ratio", "market_cap", "day_change_pct", "roce", "rsi"):
+        # 1) Sparse zero protection
+        if k in _ZERO_PROTECTED:
             try:
                 old = base.get(k)
                 old_f = float(old) if old is not None else None
                 new_f = float(v) if v is not None else None
-                # Protect real values from sparse fallback zeros
                 if old_f is not None and old_f != 0 and new_f == 0:
                     continue
             except (TypeError, ValueError):
                 pass
+
+        # 2) Seed must not overwrite a real (non-seed) stored value
+        seed_flag = _SEED_PROTECTED.get(k)
+        if seed_flag and inc.get(seed_flag) is True:
+            old_val = base.get(k)
+            old_was_seed = bool(base.get(seed_flag))
+            if old_val is not None and not old_was_seed:
+                # Keep the durable real fundamental; do not write the seed flag either
+                continue
+            # If existing was also a seed (or empty), allow refresh of the seed baseline
+            base[k] = v
+            base[seed_flag] = True
+            continue
+
+        # 3) Real (non-seed) incoming value clears any prior seed flag
+        if seed_flag and inc.get(seed_flag) is not True:
+            base.pop(seed_flag, None)
+
         base[k] = v
     return base
 
@@ -1104,22 +1142,25 @@ def _time_module_sleep(seconds: float) -> None:
 
 def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Dict[str, dict]:
     """
-    Chunked yfinance download (period=1mo) for price + local RSI.
-    Seeds baseline pe_ratio / roce / sentiment_score so UI 5-field health
-    is green without peer-fundamental storms (those cause Yahoo 429 lockouts).
+    Delegate bulk price fetch to market-data-service POST /quotes/bulk
+    (single yf.download on the MDS side) instead of chunked local yfinance
+    calls that cascade into free-tier 429s.
 
-    Real PE/ROCE/sentiment can overwrite later via surgical repair (no peer fan-out).
-    Only includes symbols with 0 < price <= MAX_STOCK_PRICE.
+    Seeds baseline pe_ratio / roce / sentiment_score so UI 5-field health
+    is green without peer-fundamental storms. Real values can overwrite later.
+    Only includes symbols with 0 < price <= MAX_STOCK_PRICE when price is present.
+    Missing symbols get a neutral placeholder so downstream never starves.
     """
     import os
     try:
-        import yfinance as yf
+        import httpx
     except ImportError:
-        logger.error("yfinance not installed — bulk feed unavailable")
+        logger.error("httpx not installed — bulk feed unavailable")
         return {}
 
-    chunk_size = int(chunk_size or BULK_YF_CHUNK or 80)
-    chunk_size = max(10, min(chunk_size, 150))
+    MARKET_DATA_URL = os.environ.get(
+        "MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com"
+    ).rstrip("/")
 
     bases: List[str] = []
     seen = set()
@@ -1133,133 +1174,92 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
     if not bases:
         return out
 
-    for i in range(0, len(bases), chunk_size):
-        chunk = bases[i : i + chunk_size]
-        tickers = [f"{b}.NS" for b in chunk]
-        ticker_string = " ".join(tickers)
+    try:
+        resp = httpx.post(
+            f"{MARKET_DATA_URL}/quotes/bulk",
+            json={"symbols": bases},
+            timeout=60.0,
+        )
+        if resp.status_code == 200:
+            payload = resp.json() if resp.content else {}
+            for q in (payload.get("quotes") or []):
+                if not isinstance(q, dict):
+                    continue
+                sym = q.get("symbol")
+                if not sym:
+                    continue
+                base = _norm_sym(str(sym))
+                if not base:
+                    continue
 
-        df = None
-        attempt = 0
-        while attempt <= BULK_YF_MAX_RETRIES_PER_CHUNK:
-            try:
-                df = yf.download(
-                    ticker_string,
-                    period="1mo",  # enough bars for local 14-period RSI + prev close
-                    group_by="ticker",
-                    threads=True,
-                    progress=False,
-                    auto_adjust=True,
-                )
-                break  # success — no need to backoff before the next chunk
-            except Exception as e:
-                if _is_rate_limit_error(e) and attempt < BULK_YF_MAX_RETRIES_PER_CHUNK:
-                    wait = BULK_YF_BACKOFF_SLEEP * (2 ** attempt)
-                    logger.warning(
-                        "yf.download chunk %s-%s rate-limited (attempt %s/%s) — backing off %.1fs",
-                        i, i + len(chunk), attempt + 1, BULK_YF_MAX_RETRIES_PER_CHUNK, wait,
-                    )
-                    _time_module_sleep(wait)
-                    attempt += 1
-                    continue
-                logger.warning("yf.download chunk %s-%s failed: %s", i, i + len(chunk), e)
-                df = None
-                break
-
-        if df is None:
-            continue
-
-        for b in chunk:
-            sym_ns = f"{b}.NS"
-            try:
-                sub = None
-                if df is not None and hasattr(df, "columns") and getattr(df.columns, "nlevels", 1) > 1:
-                    if sym_ns in df.columns.get_level_values(0):
-                        sub = df[sym_ns]
-                elif len(chunk) == 1:
-                    sub = df
-                if sub is None or (hasattr(sub, "empty") and sub.empty):
-                    continue
-                if "Close" not in getattr(sub, "columns", []):
-                    continue
-                closes = sub["Close"].dropna()
-                if closes.empty:
-                    continue
-                close = float(closes.iloc[-1])
-                if close <= 0 or close > MAX_STOCK_PRICE:
-                    if close > MAX_STOCK_PRICE:
-                        logger.debug("bulk_yahoo skip %s — ₹%.2f > cap", b, close)
-                    continue
-                prev_close = close
-                if len(closes) >= 2:
-                    prev_close = float(closes.iloc[-2])
-                change_pct = None
-                if prev_close and prev_close > 0:
-                    change_pct = round(((close - prev_close) / prev_close) * 100, 2)
-                high = low = volume = None
+                # Honour existing price cap used by the rest of the feed
                 try:
-                    if "High" in sub.columns:
-                        high = float(sub["High"].dropna().iloc[-1])
-                    if "Low" in sub.columns:
-                        low = float(sub["Low"].dropna().iloc[-1])
-                    if "Volume" in sub.columns:
-                        volume = int(float(sub["Volume"].dropna().iloc[-1]))
-                        if volume < 0:
-                            volume = None
-                except Exception:
-                    pass
-                # Local RSI from 1mo closes — zero extra Yahoo/API calls
-                rsi_val = compute_rsi_from_closes(closes.values if hasattr(closes, "values") else closes, period=14)
-                rec = {
-                    "symbol": b,
-                    "price": round(close, 2),
-                    "close": round(close, 2),
-                    "cmp": round(close, 2),
-                    "ltp": round(close, 2),
-                    "last_price": round(close, 2),
-                    "current_price": round(close, 2),
-                    "previous_close": round(prev_close, 2) if prev_close else None,
-                    "day_change_pct": change_pct,
-                    "day_high": round(high, 2) if high is not None else None,
-                    "day_low": round(low, 2) if low is not None else None,
-                    "source": "yahoo_bulk",
-                    "price_refreshed_at": _now_iso(),
-                }
-                if volume is not None:
-                    rec["volume"] = volume
-                if rsi_val is not None:
-                    rec["rsi"] = rsi_val
+                    px = float(q.get("price") or q.get("cmp") or 0)
+                except (TypeError, ValueError):
+                    px = 0.0
+                if px <= 0:
+                    continue
+                if px > MAX_STOCK_PRICE:
+                    logger.debug("bulk_yahoo skip %s — ₹%.2f > cap", base, px)
+                    continue
+
+                rec = dict(q)
+                rec["symbol"] = base
+                # Normalize field names expected by downstream feed merge
+                if "price_refreshed_at" not in rec:
+                    rec["price_refreshed_at"] = rec.get("fetched_at") or _now_iso()
+                if "source" not in rec:
+                    rec["source"] = "yahoo_bulk"
+
                 # Baseline seeds so Health Audit 5-fields are populated without peer storms.
                 # Marked so repair can overwrite with real fundamental/sentiment later.
-                if "pe_ratio" not in rec:
+                if "pe_ratio" not in rec or rec.get("pe_ratio") is None:
                     rec["pe_ratio"] = 22.5
                     rec["pe_ratio_seed"] = True
-                if "roce" not in rec:
+                if "roce" not in rec or rec.get("roce") is None:
                     rec["roce"] = 15.0
                     rec["roce_seed"] = True
-                if "sentiment_score" not in rec:
+                if "sentiment_score" not in rec or rec.get("sentiment_score") is None:
                     rec["sentiment_score"] = 0.65
                     rec["sentiment_seed"] = True
+
                 # Drop pure Nones only
                 rec = {k: v for k, v in rec.items() if v is not None}
-                out[b] = rec
-            except Exception:
-                continue
+                out[base] = rec
+        else:
+            logger.error(
+                "Bulk quote fetch HTTP %s from %s: %s",
+                resp.status_code,
+                MARKET_DATA_URL,
+                (resp.text or "")[:200],
+            )
+    except Exception as e:
+        logger.error("Bulk quote fetch failed: %s", e)
 
-        logger.info(
-            "bulk_yahoo chunk %s-%s: kept %s/%s under ₹%.0f",
-            i,
-            i + len(chunk),
-            sum(1 for b in chunk if b in out),
-            len(chunk),
-            MAX_STOCK_PRICE,
-        )
-        # Small courtesy gap between clean chunks — real backoff only happens
-        # inside the retry loop above when a 429 is actually detected, so
-        # this no longer pays a flat 1.5s tax on every single chunk.
-        if i + chunk_size < len(bases):
-            _time_module_sleep(BULK_YF_CHUNK_SLEEP)
+    # Neutral placeholders for any symbol the bulk endpoint did not return
+    for b in set(bases):
+        if b not in out:
+            out[b] = {
+                "symbol": b,
+                "source": "yahoo_missing",
+                "price_refreshed_at": _now_iso(),
+                "pe_ratio": 22.5,
+                "pe_ratio_seed": True,
+                "roce": 15.0,
+                "roce_seed": True,
+                "sentiment_score": 0.65,
+                "sentiment_seed": True,
+            }
 
+    logger.info(
+        "bulk_yahoo (delegated): got %s/%s quotes under ₹%.0f (missing seeded=%s)",
+        sum(1 for b in bases if out.get(b, {}).get("source") == "yahoo_bulk"),
+        len(bases),
+        MAX_STOCK_PRICE,
+        sum(1 for b in bases if out.get(b, {}).get("source") == "yahoo_missing"),
+    )
     return out
+
 
 
 # ── NSE bulk bhavcopy — ONE file covers the whole market baseline ──────────
@@ -1476,15 +1476,8 @@ def run_bulk_yahoo_price_feed(
         if not rec:
             continue
         try:
-            if merge_existing:
-                existing = store.get_symbol(base) or {}
-                if isinstance(existing, dict) and existing:
-                    existing.update(rec)
-                    store.put_symbol(base, existing)
-                else:
-                    store.put_symbol(base, rec)
-            else:
-                store.put_symbol(base, rec)
+            # Always go through put_symbol → merge_feed_payload (never blind update)
+            store.put_symbol(base, rec)
             saved += 1
             bhav_hits += 1
         except Exception as e:
@@ -1507,15 +1500,8 @@ def run_bulk_yahoo_price_feed(
     prices = bulk_yahoo_download_prices(yahoo_targets) if yahoo_targets else {}
     for base, rec in prices.items():
         try:
-            if merge_existing:
-                existing = store.get_symbol(base) or {}
-                if isinstance(existing, dict) and existing:
-                    existing.update(rec)
-                    store.put_symbol(base, existing)
-                else:
-                    store.put_symbol(base, rec)
-            else:
-                store.put_symbol(base, rec)
+            # put_symbol merges with existing Neon row — seeds cannot wipe real PE/ROCE
+            store.put_symbol(base, rec)
             saved += 1
         except Exception as e:
             skipped += 1
@@ -1731,9 +1717,8 @@ def run_bulk_yahoo_price_feed_cached(
                     row = quotes.get(b)
                     if isinstance(row, dict) and _payload_price(row) > 0:
                         try:
-                            existing = store.get_symbol(b) or {}
-                            existing.update({k: v for k, v in row.items() if v is not None})
-                            store.put_symbol(b, existing)
+                            # put_symbol → merge_feed_payload (protects real fundamentals)
+                            store.put_symbol(b, row)
                             saved += 1
                         except Exception:
                             pass

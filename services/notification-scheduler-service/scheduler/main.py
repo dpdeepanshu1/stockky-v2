@@ -55,6 +55,23 @@ def neon_keepalive():
     return _select_1()
 
 
+
+@app.get("/hydrate/weekend")
+@app.post("/hydrate/weekend")
+def hydrate_weekend(hour_idx: int | None = None):
+    """
+    Time-sliced weekend fundamental hydration (force=true).
+    hour_idx 0..47 selects the slice; omit to use current UTC hour % 48.
+    Safe for free-tier hourly cron.
+    """
+    try:
+        from weekend_hydrator import hydrate_batch
+        return hydrate_batch(hour_idx=hour_idx)
+    except Exception as e:
+        logger.exception("hydrate_weekend failed")
+        return {"ok": False, "error": str(e)[:300]}
+
+
 @app.on_event("startup")
 async def start_loop():
     global _task

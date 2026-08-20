@@ -184,11 +184,13 @@ def _pct(x):
     return x * 100 if abs(x) < 5 else x
 
 @app.get("/analyze/{symbol}")
-def analyze(symbol: str):
+def analyze(symbol: str, force: bool = False):
     f = {}
     fallback_used = False
     try:
-        resp = httpx.get(f"{MARKET_DATA_URL}/fundamentals/{symbol}", timeout=60)
+        # Propagate force so market-data does not serve a 24h-old fundamentals cache
+        force_param = str(force).lower()
+        resp = httpx.get(f"{MARKET_DATA_URL}/fundamentals/{symbol}?force={force_param}", timeout=60)
         resp.raise_for_status()
         f = resp.json()
         if not f or not isinstance(f, dict):

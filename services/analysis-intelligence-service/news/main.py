@@ -540,7 +540,7 @@ def health():
 
 
 @app.get("/analyze/{symbol}")
-def analyze(symbol: str, company_name: str | None = None):
+def analyze(symbol: str, company_name: str | None = None, force: bool = False):
     # INTEGRATION: news_quality multi-source + better summary (fallback to legacy below)
     if build_news_response is not None:
         try:

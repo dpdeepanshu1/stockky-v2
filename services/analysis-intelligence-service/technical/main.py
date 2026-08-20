@@ -174,12 +174,12 @@ def _fetch_history_yfinance(symbol: str):
         return None
 
 
-def _fetch_history_from_market_data(symbol: str, period: str = "6mo"):
+def _fetch_history_from_market_data(symbol: str, period: str = "6mo", force: bool = False):
     """One attempt against market-data /history."""
     try:
         resp = httpx.get(
             f"{MARKET_DATA_URL}/history/{symbol}",
-            params={"period": period},
+            params={"period": period, "force": str(force).lower()},
             timeout=35,
         )
         if resp.status_code == 200:
@@ -249,7 +249,7 @@ def _fetch_history_bhavcopy_hint(symbol: str):
         return None
 
 
-def _fetch_history(symbol: str):
+def _fetch_history(symbol: str, force: bool = False):
     # 1) market-data-service (preferred, shared cache) — try multiple periods
     try:
         try:
@@ -257,7 +257,7 @@ def _fetch_history(symbol: str):
         except Exception:
             pass
         for period in ("6mo", "3mo", "1mo", "1y"):
-            df = _fetch_history_from_market_data(symbol, period=period)
+            df = _fetch_history_from_market_data(symbol, period=period, force=force)
             if df is not None and len(df) >= 20:
                 return df
             if df is not None and len(df) >= 5:
@@ -266,7 +266,7 @@ def _fetch_history(symbol: str):
             else:
                 short = None
         # Accept short series if that is all we got
-        df = _fetch_history_from_market_data(symbol, period="6mo")
+        df = _fetch_history_from_market_data(symbol, period="6mo", force=force)
         if df is not None:
             return df
     except Exception as e:
@@ -351,14 +351,17 @@ def root():
             "endpoints": ["/health", "/analyze/{symbol}"]}
 
 @app.get("/analyze/{symbol}")
-def analyze(symbol: str):
+def analyze(symbol: str, force: bool = False):
     sym = normalize_symbol(symbol)
     cache_key = f"tech_analysis:{sym}"
-    cached = _cache_get(cache_key)
-    if cached:
-        return cached
 
-    df = _fetch_history(sym)
+    # Bypass local memory/Upstash cache when force=True (sniper / real-time)
+    if not force:
+        cached = _cache_get(cache_key)
+        if cached:
+            return cached
+
+    df = _fetch_history(sym, force=force)
 
     if df is None or len(df) < 5:
         price = _fetch_quote_price(sym)

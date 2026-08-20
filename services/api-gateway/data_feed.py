@@ -87,35 +87,6 @@ def _norm_sym(symbol: str) -> str:
     return (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
 
 
-# Index / garbage tokens that must never be sent to yfinance as equities
-_INVALID_EQUITY_TOKENS = frozenset({
-    "NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
-    "MIDCAP", "SMALLCAP", "NEXT", "INDEX", "INDICES",
-    "NIFTY50", "NIFTY100", "NIFTY200", "NIFTY500",
-    "NIFTYNEXT50", "NIFTYMIDCAP", "NIFTYSMALLCAP",
-    "INDIA", "VIX", "INDIAVIX",
-})
-
-
-def _is_valid_equity_symbol(symbol: str) -> bool:
-    """Reject index fragments, pure numbers, empty tokens that cause Yahoo 429 noise."""
-    b = _norm_sym(symbol)
-    if not b or len(b) < 2:
-        return False
-    if b in _INVALID_EQUITY_TOKENS:
-        return False
-    # Pure digits ("50", "100", "150") come from split index names
-    if b.isdigit():
-        return False
-    # Must contain at least one letter
-    if not any(c.isalpha() for c in b):
-        return False
-    # Reject multi-word index labels that slipped through
-    if " " in b or "&" in b:
-        return False
-    return True
-
-
 # Universal ≤ ₹5000 gate — refuse to persist high-ticket stocks into the feed cache
 MAX_STOCK_PRICE = 5000.0
 
@@ -1033,8 +1004,28 @@ def patch_feed_price(symbol: str, live_price: float) -> bool:
 
 
 # ── Yahoo 1-call (chunked) bulk price feeder — bypasses NSE 403 on Render ───
-BULK_YF_CHUNK = int(__import__("os").getenv("BULK_YF_CHUNK", "20"))  # smaller chunks = fewer Yahoo 429s
-BULK_YF_CHUNK_SLEEP = float(__import__("os").getenv("BULK_YF_CHUNK_SLEEP", "2.5"))  # longer cooldown vs rate limit
+# Bumped back up: yf.download(ticker_string) is ONE HTTP call regardless of
+# how many tickers are in the string, so shrinking chunk_size doesn't reduce
+# Yahoo request *rate* — it only adds more chunks, each paying the same
+# between-chunk pause. Bigger chunks = fewer round-trips = faster overall.
+BULK_YF_CHUNK = int(__import__("os").getenv("BULK_YF_CHUNK", "60"))
+# Base courtesy gap between clean chunks. Real backoff (see below) only
+# kicks in when a chunk actually signals rate-limiting.
+BULK_YF_CHUNK_SLEEP = float(__import__("os").getenv("BULK_YF_CHUNK_SLEEP", "0.3"))
+BULK_YF_BACKOFF_SLEEP = float(__import__("os").getenv("BULK_YF_BACKOFF_SLEEP", "8.0"))
+BULK_YF_MAX_RETRIES_PER_CHUNK = int(__import__("os").getenv("BULK_YF_MAX_RETRIES_PER_CHUNK", "2"))
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Detect Yahoo 429 / throttling signatures across yfinance's various exception shapes."""
+    msg = str(exc).lower()
+    return (
+        "429" in msg
+        or "too many requests" in msg
+        or "rate limit" in msg
+        or "yfratelimiterror" in msg
+        or "throttle" in msg
+    )
 
 
 def _yf_close_volume(frame, sym_ns: str):
@@ -1106,11 +1097,12 @@ def compute_rsi_from_closes(closes, period: int = 14) -> Optional[float]:
         return None
 
 
-def bulk_yahoo_download_prices(
-    symbols: List[str],
-    chunk_size: int = None,
-    on_chunk_done=None,
-) -> Dict[str, dict]:
+def _time_module_sleep(seconds: float) -> None:
+    import time as _time
+    _time.sleep(max(0.0, float(seconds)))
+
+
+def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Dict[str, dict]:
     """
     Chunked yfinance download (period=1mo) for price + local RSI.
     Seeds baseline pe_ratio / roce / sentiment_score so UI 5-field health
@@ -1118,9 +1110,6 @@ def bulk_yahoo_download_prices(
 
     Real PE/ROCE/sentiment can overwrite later via surgical repair (no peer fan-out).
     Only includes symbols with 0 < price <= MAX_STOCK_PRICE.
-
-    on_chunk_done(processed, total, kept_so_far) — optional progress callback
-    so the UI job status moves during bulk instead of staying at 0/300.
     """
     import os
     try:
@@ -1129,63 +1118,54 @@ def bulk_yahoo_download_prices(
         logger.error("yfinance not installed — bulk feed unavailable")
         return {}
 
-    chunk_size = int(chunk_size or BULK_YF_CHUNK or 20)
-    chunk_size = max(5, min(chunk_size, 40))
+    chunk_size = int(chunk_size or BULK_YF_CHUNK or 80)
+    chunk_size = max(10, min(chunk_size, 150))
 
     bases: List[str] = []
     seen = set()
-    skipped_invalid = 0
     for s in symbols or []:
         b = _norm_sym(str(s))
-        if not b or b in seen:
-            continue
-        if not _is_valid_equity_symbol(b):
-            skipped_invalid += 1
-            continue
-        seen.add(b)
-        bases.append(b)
-
-    if skipped_invalid:
-        logger.info("bulk_yahoo: skipped %s invalid/index symbols", skipped_invalid)
+        if b and b not in seen:
+            seen.add(b)
+            bases.append(b)
 
     out: Dict[str, dict] = {}
     if not bases:
         return out
 
-    total = len(bases)
-    for i in range(0, total, chunk_size):
-        # Cooperative stop between chunks
-        try:
-            if data_feed_stop_requested():
-                logger.info("bulk_yahoo: stop requested at chunk %s/%s", i, total)
-                break
-        except Exception:
-            pass
-
+    for i in range(0, len(bases), chunk_size):
         chunk = bases[i : i + chunk_size]
         tickers = [f"{b}.NS" for b in chunk]
         ticker_string = " ".join(tickers)
-        try:
-            df = yf.download(
-                ticker_string,
-                period="1mo",  # enough bars for local 14-period RSI + prev close
-                group_by="ticker",
-                threads=True,
-                progress=False,
-                auto_adjust=True,
-            )
-        except Exception as e:
-            logger.warning("yf.download chunk %s-%s failed: %s", i, i + len(chunk), e)
-            if on_chunk_done:
-                try:
-                    on_chunk_done(min(i + len(chunk), total), total, len(out))
-                except Exception:
-                    pass
+
+        df = None
+        attempt = 0
+        while attempt <= BULK_YF_MAX_RETRIES_PER_CHUNK:
             try:
-                import time as _time
-                _time.sleep(max(1.0, float(BULK_YF_CHUNK_SLEEP)))
-            except Exception:
-                pass
+                df = yf.download(
+                    ticker_string,
+                    period="1mo",  # enough bars for local 14-period RSI + prev close
+                    group_by="ticker",
+                    threads=True,
+                    progress=False,
+                    auto_adjust=True,
+                )
+                break  # success — no need to backoff before the next chunk
+            except Exception as e:
+                if _is_rate_limit_error(e) and attempt < BULK_YF_MAX_RETRIES_PER_CHUNK:
+                    wait = BULK_YF_BACKOFF_SLEEP * (2 ** attempt)
+                    logger.warning(
+                        "yf.download chunk %s-%s rate-limited (attempt %s/%s) — backing off %.1fs",
+                        i, i + len(chunk), attempt + 1, BULK_YF_MAX_RETRIES_PER_CHUNK, wait,
+                    )
+                    _time_module_sleep(wait)
+                    attempt += 1
+                    continue
+                logger.warning("yf.download chunk %s-%s failed: %s", i, i + len(chunk), e)
+                df = None
+                break
+
+        if df is None:
             continue
 
         for b in chunk:
@@ -1265,40 +1245,197 @@ def bulk_yahoo_download_prices(
             except Exception:
                 continue
 
-        kept_chunk = sum(1 for b in chunk if b in out)
         logger.info(
-            "bulk_yahoo chunk %s-%s: kept %s/%s under ₹%.0f (total kept %s/%s)",
+            "bulk_yahoo chunk %s-%s: kept %s/%s under ₹%.0f",
             i,
             i + len(chunk),
-            kept_chunk,
+            sum(1 for b in chunk if b in out),
             len(chunk),
             MAX_STOCK_PRICE,
-            len(out),
-            total,
         )
-        if on_chunk_done:
+        # Small courtesy gap between clean chunks — real backoff only happens
+        # inside the retry loop above when a 429 is actually detected, so
+        # this no longer pays a flat 1.5s tax on every single chunk.
+        if i + chunk_size < len(bases):
+            _time_module_sleep(BULK_YF_CHUNK_SLEEP)
+
+    return out
+
+
+# ── NSE bulk bhavcopy — ONE file covers the whole market baseline ──────────
+# Whereas bulk_yahoo_download_prices() needs N Yahoo calls (chunked) to build
+# prev_close/open/high/low/volume for N symbols, NSE publishes all of that
+# for the entire exchange in a single daily CSV. Fetching it once per session
+# and reusing it removes most symbols from the Yahoo path entirely — Yahoo is
+# then only needed for live intraday LTP while the market is open.
+_BHAV_CACHE: Dict[str, Any] = {"data": None, "fetched_at": 0.0}
+BHAV_CACHE_TTL_SEC = int(__import__("os").getenv("BHAV_CACHE_TTL_SEC", "1800"))  # 30 min
+
+_NSE_BHAV_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/all-reports",
+    "Connection": "keep-alive",
+}
+
+
+def _bhav_candidate_dates(n: int = 6):
+    d = datetime.now(IST).date()
+    now = datetime.now(IST)
+    if now.hour < 18:
+        d = d - timedelta(days=1)
+    out = []
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.append(d)
+        d -= timedelta(days=1)
+    return out
+
+
+def _bhav_urls_for_date(d) -> List[str]:
+    ddmmyyyy = d.strftime("%d%m%Y")
+    return [
+        f"https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{ddmmyyyy}.csv",
+        f"https://archives.nseindia.com/products/content/sec_bhavdata_full_{ddmmyyyy}.csv",
+        f"https://nsearchives.nseindia.com/content/Equities/sec_bhavdata_full_{ddmmyyyy}.csv",
+    ]
+
+
+def download_nse_bhavcopy_bulk(force: bool = False) -> Dict[str, dict]:
+    """
+    ONE HTTP call → baseline (prev_close, open, high, low, volume, close) for
+    the whole NSE EQ universe. In-process cached for BHAV_CACHE_TTL_SEC so a
+    premarket run + an intraday feed run + a surprise scan in the same
+    session share one download instead of each re-fetching it.
+    """
+    now = __import__("time").time()
+    if not force and _BHAV_CACHE["data"] is not None and (now - _BHAV_CACHE["fetched_at"]) < BHAV_CACHE_TTL_SEC:
+        return _BHAV_CACHE["data"]
+
+    import csv
+    import io as _io
+    import httpx as _httpx
+
+    out: Dict[str, dict] = {}
+    try:
+        with _httpx.Client(timeout=25, headers=_NSE_BHAV_HEADERS, follow_redirects=True) as client:
             try:
-                on_chunk_done(min(i + len(chunk), total), total, len(out))
+                client.get("https://www.nseindia.com")
             except Exception:
                 pass
-        # Pause between chunks so Yahoo does not drop tickers / rate-limit
-        try:
-            import time as _time
-            _time.sleep(max(0.5, float(BULK_YF_CHUNK_SLEEP)))
-        except Exception:
-            pass
+            for d in _bhav_candidate_dates(6):
+                for url in _bhav_urls_for_date(d):
+                    try:
+                        r = client.get(url)
+                        if r.status_code != 200 or not r.content:
+                            continue
+                        text = r.text
+                        head = text[:800].upper()
+                        if "SYMBOL" not in head:
+                            continue
+                        reader = csv.DictReader(_io.StringIO(text))
+                        if not reader.fieldnames:
+                            continue
+                        fields = {f.strip().upper(): f for f in reader.fieldnames}
 
+                        def col(*names):
+                            for n in names:
+                                if n in fields:
+                                    return fields[n]
+                            return None
+
+                        sym_c = col("SYMBOL")
+                        series_c = col("SERIES")
+                        close_c = col("CLOSE_PRICE", "CLOSE")
+                        open_c = col("OPEN_PRICE", "OPEN")
+                        high_c = col("HIGH_PRICE", "HIGH")
+                        low_c = col("LOW_PRICE", "LOW")
+                        prev_c = col("PREV_CLOSE", "PREVCLOSE")
+                        vol_c = col("TTL_TRD_QNTY", "TOTTRDQTY")
+                        if not sym_c or not close_c:
+                            continue
+
+                        def _num(row, c):
+                            if not c:
+                                return None
+                            raw = row.get(c)
+                            if raw is None or raw == "":
+                                return None
+                            try:
+                                return float(str(raw).replace(",", "").strip())
+                            except (TypeError, ValueError):
+                                return None
+
+                        for row in reader:
+                            series = str(row.get(series_c) or "EQ").strip().upper() if series_c else "EQ"
+                            if series not in ("EQ", "BE", "BZ"):
+                                continue
+                            base = str(row.get(sym_c) or "").strip().upper()
+                            if not base:
+                                continue
+                            close = _num(row, close_c)
+                            if close is None or close <= 0 or close > MAX_STOCK_PRICE:
+                                continue
+                            prev = _num(row, prev_c) or close
+                            rec = {
+                                "symbol": base,
+                                "price": round(close, 2),
+                                "close": round(close, 2),
+                                "cmp": round(close, 2),
+                                "ltp": round(close, 2),
+                                "last_price": round(close, 2),
+                                "current_price": round(close, 2),
+                                "previous_close": round(prev, 2),
+                                "day_change_pct": round(((close - prev) / prev) * 100, 2) if prev else None,
+                                "source": "nse_bhavcopy",
+                                "price_refreshed_at": _now_iso(),
+                            }
+                            oh = _num(row, open_c)
+                            hi = _num(row, high_c)
+                            lo = _num(row, low_c)
+                            vo = _num(row, vol_c)
+                            if oh is not None:
+                                rec["open"] = round(oh, 2)
+                            if hi is not None:
+                                rec["day_high"] = round(hi, 2)
+                            if lo is not None:
+                                rec["day_low"] = round(lo, 2)
+                            if vo is not None:
+                                rec["volume"] = int(vo)
+                            out[base] = rec
+                        if out:
+                            logger.info("bhavcopy bulk: %s symbols from %s", len(out), url)
+                            _BHAV_CACHE["data"] = out
+                            _BHAV_CACHE["fetched_at"] = now
+                            return out
+                    except Exception as e:
+                        logger.debug("bhav url failed %s: %s", url, e)
+                        continue
+    except Exception as e:
+        logger.warning("download_nse_bhavcopy_bulk failed: %s", e)
+
+    # Failure — don't cache an empty result, so the next call retries fresh
     return out
 
 
 def run_bulk_yahoo_price_feed(
     symbols: Optional[List[str]] = None,
     merge_existing: bool = True,
+    use_bhavcopy_baseline: bool = True,
 ) -> dict:
     """
-    Bulk-download prices via Yahoo and upsert into Neon data-feed.
-    Single (or few chunked) Yahoo calls — no NSE bhavcopy, no 300 sequential quotes.
-    Updates job progress after every chunk so the UI is not stuck at 0/N.
+    Bulk price feed — bhavcopy-first.
+
+    1) One NSE bhavcopy file fills prev_close/open/high/low/volume/close for
+       every requested symbol it covers — this is what used to take N chunked
+       Yahoo calls.
+    2) Yahoo is only called for symbols bhavcopy didn't cover, PLUS — while
+       the market is open — a live-LTP refresh so price isn't stuck at
+       yesterday's close during the session.
     """
     store = get_data_feed_store()
     if not symbols:
@@ -1307,33 +1444,67 @@ def run_bulk_yahoo_price_feed(
         except Exception:
             symbols = []
 
-    # Sanitize: drop index fragments before any Yahoo call
-    symbols = [s for s in (symbols or []) if _is_valid_equity_symbol(str(s))]
-
     if not symbols:
         return {
             "status": "error",
-            "message": "No valid equity symbols provided (index tokens filtered)",
+            "message": "No symbols provided and feed index is empty",
             "tracked_stocks": 0,
             "symbols": [],
         }
 
-    def _progress(processed: int, total: int, kept: int) -> None:
-        try:
-            store.set_job(
-                status="running",
-                message=f"Bulk Yahoo {processed}/{total} scanned — {kept} saved (≤₹{int(MAX_STOCK_PRICE)})",
-                processed=processed,
-                total=total,
-                ok_count=kept,
-                updated_at=_now_iso(),
-            )
-        except Exception:
-            pass
+    bases = []
+    seen_b = set()
+    for s in symbols:
+        b = _norm_sym(str(s))
+        if b and b not in seen_b:
+            seen_b.add(b)
+            bases.append(b)
 
-    prices = bulk_yahoo_download_prices(symbols, on_chunk_done=_progress)
+    bhav: Dict[str, dict] = {}
+    if use_bhavcopy_baseline:
+        try:
+            bhav = download_nse_bhavcopy_bulk()
+        except Exception as e:
+            logger.warning("bhavcopy baseline unavailable, falling back to Yahoo-only: %s", e)
+            bhav = {}
+
     saved = 0
     skipped = 0
+    bhav_hits = 0
+    for base in bases:
+        rec = bhav.get(base)
+        if not rec:
+            continue
+        try:
+            if merge_existing:
+                existing = store.get_symbol(base) or {}
+                if isinstance(existing, dict) and existing:
+                    existing.update(rec)
+                    store.put_symbol(base, existing)
+                else:
+                    store.put_symbol(base, rec)
+            else:
+                store.put_symbol(base, rec)
+            saved += 1
+            bhav_hits += 1
+        except Exception as e:
+            skipped += 1
+            logger.debug("bhav upsert %s: %s", base, e)
+
+    # Missed-by-bhavcopy symbols always need Yahoo. Covered symbols only need
+    # Yahoo while the market is open (to overwrite yesterday's close with a
+    # live LTP) — skip Yahoo entirely outside session hours, since bhavcopy's
+    # close is already the correct last price.
+    missed = [b for b in bases if b not in bhav]
+    market_open = False
+    try:
+        from surprise_scanner import is_market_open_ist
+        market_open = is_market_open_ist()
+    except Exception:
+        pass
+    yahoo_targets = bases if market_open else missed
+
+    prices = bulk_yahoo_download_prices(yahoo_targets) if yahoo_targets else {}
     for base, rec in prices.items():
         try:
             if merge_existing:
@@ -1350,15 +1521,22 @@ def run_bulk_yahoo_price_feed(
             skipped += 1
             logger.debug("bulk upsert %s: %s", base, e)
 
+    total_hits = len(set(bhav.keys()) & set(bases) | set(prices.keys()))
     return {
         "status": "success",
         "tracked_stocks": saved,
         "requested": len(symbols),
+        "bhavcopy_hits": bhav_hits,
+        "yahoo_calls_needed_for": len(yahoo_targets),
         "yahoo_hits": len(prices),
         "skipped": skipped,
+        "market_open": market_open,
         "max_price": MAX_STOCK_PRICE,
-        "message": f"Bulk Yahoo feed saved {saved}/{len(symbols)} (≤₹{MAX_STOCK_PRICE:.0f})",
-        "symbols": sorted(prices.keys()),
+        "message": (
+            f"Bulk feed saved {saved}/{len(symbols)} "
+            f"(bhavcopy {bhav_hits}, yahoo {len(prices)}, ≤₹{MAX_STOCK_PRICE:.0f})"
+        ),
+        "symbols": sorted(set(bhav.keys()) & set(bases) | set(prices.keys())),
     }
 
 

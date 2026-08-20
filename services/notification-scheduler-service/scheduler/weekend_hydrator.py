@@ -1,23 +1,23 @@
 """
-Weekend / off-hours fundamental hydrator.
+Weekend / off-hours additional-data hydrator (fundamentals + technical + events).
 
-Time-sliced across a 48-hour window so free-tier cron can warm the full
-universe without slamming rate limits in one shot.
-
-Designed to be invoked hourly by GitHub Actions (or any cron) over the weekend.
-Each run processes ~1/48 of the scan universe with force=true so caches are
-refreshed for Monday open.
+Time-sliced across HYDRATOR_BATCH_HOURS (default 48) so hourly cron can warm the
+full universe without rate-limit storms. Manual / full mode processes everything
+with long timeouts and generous inter-symbol delays.
 
 Usage:
-  python -m weekend_hydrator
-  # or: python weekend_hydrator.py
+  python weekend_hydrator.py              # current hour slice
+  python weekend_hydrator.py 3            # slice 3
+  python weekend_hydrator.py --full       # entire universe (slow, intentional)
 """
 from __future__ import annotations
 
 import logging
 import math
 import os
+import sys
 import time
+from typing import Any, Optional
 
 import httpx
 
@@ -25,26 +25,21 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("weekend-hydrator")
 
 API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "http://localhost:8000").rstrip("/")
-ANALYSIS_URL = os.getenv(
-    "ANALYSIS_INTELLIGENCE_URL",
-    os.getenv("FUNDAMENTAL_URL", "http://localhost:8002"),
-).rstrip("/")
-# Prefer explicit fundamental path if ANALYSIS is the root host
-if not ANALYSIS_URL.endswith("/fundamental"):
-    # If caller set ANALYSIS_INTELLIGENCE_URL to the root, append /fundamental
-    _fund = os.getenv("FUNDAMENTAL_URL", "").rstrip("/")
-    if _fund:
-        ANALYSIS_URL = _fund
-    else:
-        ANALYSIS_URL = f"{ANALYSIS_URL}/fundamental"
+_AI = os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com").rstrip("/")
+FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_AI}/fundamental").rstrip("/")
+TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_AI}/technical").rstrip("/")
+EVENT_URL = os.getenv("EVENT_URL", f"{_AI}/event").rstrip("/")
 
-DELAY_SEC = float(os.getenv("HYDRATOR_DELAY_SEC", "12.0"))
-BATCH_HOURS = int(os.getenv("HYDRATOR_BATCH_HOURS", "48"))  # slice universe into N hourly chunks
-REQUEST_TIMEOUT = float(os.getenv("HYDRATOR_TIMEOUT_SEC", "45.0"))
+# Generous free-tier pacing (manual + weekend)
+DELAY_SEC = float(os.getenv("HYDRATOR_DELAY_SEC", "18.0"))
+BATCH_HOURS = int(os.getenv("HYDRATOR_BATCH_HOURS", "48"))
+REQUEST_TIMEOUT = float(os.getenv("HYDRATOR_TIMEOUT_SEC", "90.0"))
+PERSIST_TIMEOUT = float(os.getenv("HYDRATOR_PERSIST_TIMEOUT_SEC", "30.0"))
+MAX_RETRIES = int(os.getenv("HYDRATOR_MAX_RETRIES", "2"))
+RETRY_BACKOFF = float(os.getenv("HYDRATOR_RETRY_BACKOFF_SEC", "25.0"))
 
 
 def _fetch_universe() -> list[str]:
-    """Pull current scan universe from the API gateway."""
     urls = [
         f"{API_GATEWAY_URL}/scan/universe",
         f"{API_GATEWAY_URL}/api/universe",
@@ -52,23 +47,23 @@ def _fetch_universe() -> list[str]:
     ]
     for url in urls:
         try:
-            resp = httpx.get(url, timeout=30.0)
+            resp = httpx.get(url, timeout=60.0)
             if resp.status_code != 200:
                 continue
             data = resp.json() if resp.content else {}
-            # Support several response shapes
             if isinstance(data, list):
                 symbols = data
             elif isinstance(data, dict):
-                symbols = (
-                    data.get("symbols")
-                    or data.get("universe")
-                    or data.get("tickers")
-                    or []
-                )
+                symbols = data.get("symbols") or data.get("universe") or data.get("tickers") or []
             else:
                 symbols = []
-            out = sorted({str(s).strip().upper().replace(".NS", "").replace(".BO", "") for s in symbols if s})
+            out = sorted(
+                {
+                    str(s).strip().upper().replace(".NS", "").replace(".BO", "")
+                    for s in symbols
+                    if s
+                }
+            )
             if out:
                 logger.info("Universe from %s: %d symbols", url, len(out))
                 return out
@@ -78,126 +73,211 @@ def _fetch_universe() -> list[str]:
     return []
 
 
-def hydrate_batch(hour_idx: int | None = None) -> dict:
-    """
-    Hydrate one time-slice of the universe with force=true fundamental analysis.
+def _get_json(client: httpx.Client, url: str) -> Optional[dict]:
+    last_err = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            r = client.get(url, timeout=REQUEST_TIMEOUT)
+            if r.status_code == 429:
+                logger.warning("429 from %s — backoff %.0fs", url, RETRY_BACKOFF * (attempt + 1))
+                time.sleep(RETRY_BACKOFF * (attempt + 1))
+                last_err = "429"
+                continue
+            if r.status_code == 200 and r.content:
+                data = r.json()
+                return data if isinstance(data, dict) else None
+            last_err = f"HTTP {r.status_code}"
+        except Exception as e:
+            last_err = str(e)[:120]
+            time.sleep(RETRY_BACKOFF * (attempt + 1) * 0.5)
+    logger.debug("GET failed %s: %s", url, last_err)
+    return None
 
-    hour_idx: 0..BATCH_HOURS-1. Defaults to current UTC hour modulo BATCH_HOURS
-    so hourly cron automatically walks the full universe over a weekend.
+
+def _extract_fund_row(sym: str, analysis: dict) -> dict[str, Any]:
+    metrics = analysis.get("metrics") if isinstance(analysis.get("metrics"), dict) else {}
+    row: dict[str, Any] = {"symbol": sym, "source": "weekend_hydrator"}
+    for key in (
+        "pe_ratio", "roe", "roce", "debt_to_equity", "revenue_growth",
+        "market_cap", "sector", "industry", "quality_score", "fundamental_score",
+        "promoter_holding", "eps", "book_value", "dividend_yield",
+        "forward_pe", "earnings_growth", "current_ratio",
+    ):
+        val = analysis.get(key)
+        if val is None:
+            val = metrics.get(key)
+        if val is not None:
+            row[key] = val
+            row[f"{key}_seed"] = False
+    if analysis.get("summary"):
+        row["fundamental_summary"] = analysis.get("summary")
+    return row
+
+
+def _extract_tech_fields(analysis: dict) -> dict[str, Any]:
+    if not isinstance(analysis, dict):
+        return {}
+    out = {}
+    for key in (
+        "technical_score", "rsi", "trend_strength", "volume_surge",
+        "support", "resistance", "close", "price", "volume_ratio",
+    ):
+        if analysis.get(key) is not None:
+            out[key] = analysis.get(key)
+    return out
+
+
+def _extract_event_fields(analysis: dict) -> dict[str, Any]:
+    if not isinstance(analysis, dict):
+        return {}
+    out = {}
+    for key in (
+        "next_earnings_date", "earnings_surprise", "event_summary",
+        "has_positive_catalyst", "recent_event_score", "count", "total",
+    ):
+        if analysis.get(key) is not None:
+            out[key if key not in ("count", "total") else "events_count"] = analysis.get(key)
+    if analysis.get("summary") and "event_summary" not in out:
+        out["event_summary"] = analysis.get("summary")
+    return out
+
+
+def _persist(client: httpx.Client, row: dict) -> bool:
+    if not row or len(row) <= 2:
+        return False
+    try:
+        pr = client.post(
+            f"{API_GATEWAY_URL}/data-feed/update",
+            json=row,
+            timeout=PERSIST_TIMEOUT,
+        )
+        return pr.status_code < 400
+    except Exception as e:
+        logger.debug("persist %s failed: %s", row.get("symbol"), e)
+        return False
+
+
+def hydrate_symbol(client: httpx.Client, sym: str) -> dict[str, Any]:
+    """Force-refresh fundamental + technical + events and merge into data-feed."""
+    result = {"symbol": sym, "ok": False, "parts": []}
+    row: dict[str, Any] = {"symbol": sym, "source": "weekend_hydrator"}
+
+    fund = _get_json(client, f"{FUNDAMENTAL_URL}/analyze/{sym}?force=true")
+    if fund:
+        row.update(_extract_fund_row(sym, fund))
+        result["parts"].append("fundamental")
+
+    tech = _get_json(client, f"{TECHNICAL_URL}/analyze/{sym}?force=true")
+    if tech:
+        row.update(_extract_tech_fields(tech))
+        result["parts"].append("technical")
+
+    events = _get_json(client, f"{EVENT_URL}/events/{sym}?force=true")
+    if events:
+        row.update(_extract_event_fields(events))
+        result["parts"].append("events")
+
+    if _persist(client, row):
+        result["ok"] = True
+        result["parts"].append("persisted")
+    elif result["parts"]:
+        # Analysis warmed caches even if persist failed
+        result["ok"] = True
+        result["parts"].append("cache_only")
+    return result
+
+
+def hydrate_batch(
+    hour_idx: Optional[int] = None,
+    full: bool = False,
+    symbols: Optional[list[str]] = None,
+) -> dict:
     """
-    symbols = _fetch_universe()
-    if not symbols:
+    Hydrate one time-slice (or full universe).
+    full=True ignores hour slicing (for manual Refill Additional Data / GHA full pass).
+    """
+    all_symbols = symbols if symbols is not None else _fetch_universe()
+    if not all_symbols:
         return {"ok": False, "error": "empty_universe", "processed": 0, "total": 0}
 
-    if hour_idx is None:
-        hour_idx = int(time.time() / 3600) % BATCH_HOURS
-    hour_idx = max(0, min(int(hour_idx), BATCH_HOURS - 1))
-
-    chunk_size = max(1, math.ceil(len(symbols) / BATCH_HOURS))
-    start = hour_idx * chunk_size
-    end = min(start + chunk_size, len(symbols))
-    batch = symbols[start:end]
+    if full:
+        batch = list(all_symbols)
+        hour_idx = -1
+        start, end = 0, len(batch)
+    else:
+        if hour_idx is None:
+            hour_idx = int(time.time() / 3600) % BATCH_HOURS
+        hour_idx = max(0, min(int(hour_idx), BATCH_HOURS - 1))
+        chunk_size = max(1, math.ceil(len(all_symbols) / BATCH_HOURS))
+        start = hour_idx * chunk_size
+        end = min(start + chunk_size, len(all_symbols))
+        batch = all_symbols[start:end]
 
     logger.info(
-        "Hydrating slice %d/%d: symbols[%d:%d] = %d names (delay=%.1fs)",
-        hour_idx + 1,
-        BATCH_HOURS,
-        start,
-        end,
+        "Hydrating %s: %d symbols (delay=%.1fs timeout=%.0fs)",
+        "FULL" if full else f"slice {hour_idx + 1}/{BATCH_HOURS} [{start}:{end}]",
         len(batch),
         DELAY_SEC,
+        REQUEST_TIMEOUT,
     )
 
     ok_count = 0
     err_count = 0
     rate_limited = False
 
-    def _persist_fundamentals(client: httpx.Client, sym: str, analysis: dict) -> None:
-        """Selectively merge real fundamental fields into Neon via gateway (merge, never wipe)."""
-        if not isinstance(analysis, dict):
-            return
-        # Pull common fundamental keys from analysis payload / nested metrics
-        metrics = analysis.get("metrics") if isinstance(analysis.get("metrics"), dict) else {}
-        row = {"symbol": sym, "source": "weekend_hydrator"}
-        for key in (
-            "pe_ratio", "roe", "roce", "debt_to_equity", "revenue_growth",
-            "market_cap", "sector", "industry", "quality_score", "fundamental_score",
-            "promoter_holding", "eps", "book_value", "dividend_yield",
-        ):
-            val = analysis.get(key)
-            if val is None:
-                val = metrics.get(key)
-            if val is not None:
-                row[key] = val
-                # Clear seed flags so merge treats these as real values
-                seed_k = f"{key}_seed"
-                row[seed_k] = False
-        if analysis.get("summary"):
-            row["fundamental_summary"] = analysis.get("summary")
-        if len(row) <= 2:
-            return  # nothing useful beyond symbol/source
-        try:
-            pr = client.post(f"{API_GATEWAY_URL}/data-feed/update", json=row, timeout=20.0)
-            if pr.status_code >= 400:
-                logger.debug("persist %s → HTTP %s", sym, pr.status_code)
-        except Exception as e:
-            logger.debug("persist %s failed: %s", sym, e)
-
-    with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+    with httpx.Client(timeout=REQUEST_TIMEOUT, follow_redirects=True) as client:
         for i, sym in enumerate(batch):
             try:
-                r = client.get(f"{ANALYSIS_URL}/analyze/{sym}?force=true")
-                if r.status_code == 200:
+                r = hydrate_symbol(client, sym)
+                if r.get("ok"):
                     ok_count += 1
-                    try:
-                        body = r.json() if r.content else {}
-                        _persist_fundamentals(client, sym, body)
-                    except Exception:
-                        pass
-                    logger.info("[%d/%d] %s OK", i + 1, len(batch), sym)
-                elif r.status_code == 429:
-                    rate_limited = True
-                    err_count += 1
-                    logger.warning("[%d/%d] %s rate-limited (429) — stopping batch", i + 1, len(batch), sym)
-                    break
+                    logger.info("[%d/%d] %s OK (%s)", i + 1, len(batch), sym, ",".join(r.get("parts") or []))
                 else:
                     err_count += 1
-                    logger.warning("[%d/%d] %s HTTP %s", i + 1, len(batch), sym, r.status_code)
+                    logger.warning("[%d/%d] %s no data", i + 1, len(batch), sym)
             except Exception as e:
                 err_count += 1
-                logger.error("[%d/%d] Error hydrating %s: %s", i + 1, len(batch), sym, e)
+                msg = str(e)
+                if "429" in msg:
+                    rate_limited = True
+                    logger.warning("[%d/%d] %s rate-limited — stopping batch", i + 1, len(batch), sym)
+                    break
+                logger.error("[%d/%d] Error %s: %s", i + 1, len(batch), sym, e)
 
             if i < len(batch) - 1:
                 time.sleep(DELAY_SEC)
 
     result = {
         "ok": True,
+        "full": full,
         "hour_idx": hour_idx,
         "batch_hours": BATCH_HOURS,
         "slice_start": start,
         "slice_end": end,
         "batch_size": len(batch),
-        "total_universe": len(symbols),
+        "total_universe": len(all_symbols),
         "processed_ok": ok_count,
         "errors": err_count,
         "rate_limited": rate_limited,
-        "analysis_url": ANALYSIS_URL,
+        "delay_sec": DELAY_SEC,
+        "timeout_sec": REQUEST_TIMEOUT,
+        "fundamental_url": FUNDAMENTAL_URL,
     }
     logger.info("Hydration done: %s", result)
     return result
 
 
 if __name__ == "__main__":
-    import sys
-
+    args = [a for a in sys.argv[1:] if a]
+    full = "--full" in args or "full" in args
+    args = [a for a in args if a not in ("--full", "full")]
     idx = None
-    if len(sys.argv) > 1:
+    if args:
         try:
-            idx = int(sys.argv[1])
+            idx = int(args[0])
         except ValueError:
             pass
-    out = hydrate_batch(hour_idx=idx)
-    # Non-zero exit if nothing succeeded and we had work to do
+    out = hydrate_batch(hour_idx=idx, full=full)
     if out.get("batch_size", 0) > 0 and out.get("processed_ok", 0) == 0:
         sys.exit(1)
     sys.exit(0)

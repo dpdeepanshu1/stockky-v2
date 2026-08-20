@@ -7170,6 +7170,81 @@ async def refresh_prepare_to_buy(
     }
 
 
+
+@app.get("/data-feed/refill-additional/status")
+@app.get("/api/data-feed/refill-additional/status")
+def data_feed_refill_status():
+    """Status of the Refill Additional Data job."""
+    try:
+        from refill_additional import get_refill_job
+        return {"ok": True, **get_refill_job()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200], "status": "idle"}
+
+
+@app.post("/data-feed/refill-additional")
+@app.post("/api/data-feed/refill-additional")
+async def data_feed_refill_additional(
+    background_tasks: BackgroundTasks,
+    force: bool = True,
+):
+    """
+    Manual / API trigger: Refill Additional Data (fundamentals + technical + events)
+    into the data-feed store with force=true upstream calls.
+
+    Returns immediately; work runs in BackgroundTasks. Poll
+    GET /data-feed/status or /data-feed/refill-additional/status.
+    """
+    try:
+        from refill_additional import get_refill_job, run_refill_additional, _set_job
+        job = get_refill_job()
+        if job.get("status") == "running" and not force:
+            return {"ok": True, "already_running": True, **job}
+
+        # Resolve universe before returning so UI shows total quickly
+        store = _feed_store()
+        symbols = []
+        try:
+            symbols = list(store.list_symbols() or [])
+        except Exception:
+            symbols = []
+        if not symbols:
+            try:
+                symbols = _build_scan_universe()
+            except Exception:
+                symbols = []
+        symbols = [str(s).upper().replace(".NS", "").replace(".BO", "") for s in (symbols or []) if s]
+        _set_job(
+            status="running",
+            message=f"Starting Refill Additional Data for {len(symbols)} symbols…",
+            processed=0,
+            total=len(symbols),
+            ok_count=0,
+            error_count=0,
+        )
+
+        def _worker(syms=symbols):
+            try:
+                run_refill_additional(syms)
+            except Exception as e:
+                logger.exception("refill_additional worker: %s", e)
+                try:
+                    _set_job(status="error", message=str(e)[:240])
+                except Exception:
+                    pass
+
+        background_tasks.add_task(_worker)
+        return {
+            "ok": True,
+            "status": "running",
+            "message": f"Refill Additional Data started for {len(symbols)} symbols",
+            "total": len(symbols),
+        }
+    except Exception as e:
+        logger.exception("data_feed_refill_additional: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)[:240])
+
+
 @app.get("/data-feed/meta")
 @app.get("/api/data-feed/meta")
 def data_feed_meta():

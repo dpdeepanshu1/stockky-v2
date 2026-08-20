@@ -58,15 +58,15 @@ def neon_keepalive():
 
 @app.get("/hydrate/weekend")
 @app.post("/hydrate/weekend")
-def hydrate_weekend(hour_idx: int | None = None):
+def hydrate_weekend(hour_idx: int | None = None, full: bool = False):
     """
-    Time-sliced weekend fundamental hydration (force=true).
+    Time-sliced weekend hydration (force=true) for fundamentals + technical + events.
     hour_idx 0..47 selects the slice; omit to use current UTC hour % 48.
-    Safe for free-tier hourly cron.
+    full=true processes the entire universe (manual / GHA full pass — slow by design).
     """
     try:
         from weekend_hydrator import hydrate_batch
-        return hydrate_batch(hour_idx=hour_idx)
+        return hydrate_batch(hour_idx=hour_idx, full=full)
     except Exception as e:
         logger.exception("hydrate_weekend failed")
         return {"ok": False, "error": str(e)[:300]}

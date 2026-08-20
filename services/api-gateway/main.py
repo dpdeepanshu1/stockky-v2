@@ -7647,6 +7647,40 @@ async def data_feed_run(
         err_n = err0
         done_set = set(done0)
         client = _get_http_client()  # shared keepalive pool
+
+        # ── PHASE 0: Chunked Yahoo bulk quotes (50/chunk, threads=True) ──
+        # Replaces sequential /quote calls that took ~15 min with ~20s total.
+        if start_at == 0 and not done_set:
+            try:
+                from data_feed import run_bulk_yahoo_price_feed
+                store.set_job(
+                    status="running",
+                    message=f"Bulk Yahoo quotes for {len(universe)} symbols (chunks of 50)…",
+                    processed=0,
+                    total=len(universe),
+                    updated_at=datetime.now(IST).isoformat(),
+                )
+                # run_bulk is sync (yfinance) — offload to thread so event loop stays responsive
+                bulk_result = await asyncio.to_thread(
+                    run_bulk_yahoo_price_feed, universe, True
+                )
+                saved = int((bulk_result or {}).get("tracked_stocks") or 0)
+                for sym in (bulk_result or {}).get("symbols") or []:
+                    done_set.add(str(sym).upper().replace(".NS", "").replace(".BO", ""))
+                ok_n = max(ok_n, saved)
+                store.set_job(
+                    status="running",
+                    message=f"Bulk quotes done: {saved}/{len(universe)} — filling fundamentals…",
+                    processed=saved,
+                    total=len(universe),
+                    ok_count=ok_n,
+                    updated_at=datetime.now(IST).isoformat(),
+                    checkpoint={"cursor": 0, "done": list(done_set), "universe": universe},
+                )
+                logger.info("data-feed bulk phase: %s", bulk_result)
+            except Exception as e:
+                logger.warning("data-feed bulk phase failed (continuing sequential fund fill): %s", e)
+
         if True:
             for i in range(start_at, len(universe)):
                 # Cooperative stop (process flag OR job flag) — ASAP

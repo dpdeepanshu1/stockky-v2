@@ -1,4 +1,18 @@
+import math
+"""
+Market Data Service
+--------------------
+Single responsibility: fetch raw market data (price history, quote, company info)
+for Indian equities from free public sources (yfinance) and serve over REST.
+All data is cached with TTL that depends on market hours:
+- During NSE trading hours (09:15-15:30 IST, Mon-Fri): TTL = 300 seconds (5 min)
+- Outside: TTL = 21600 seconds (6 hours)
+
+v2.2 – reduced retries and timeouts for faster responses.
+"""
 import os
+import re
+import urllib.parse
 import time
 import json
 import logging
@@ -237,34 +251,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── ROOT ENDPOINT ──────────────────────────────────────────────────────────
-@app.get("/")
-def root():
-    return {
-        "service": "Stockky Market Data Service",
-        "version": "2.2.0",
-        "status": "healthy",
-        "endpoints": [
-            "/",
-            "/health",
-            "/quote/{symbol}",
-            "/history/{symbol}",
-            "/fundamentals/{symbol}",
-            "/surprise/premarket",
-            "/surprise/premarket/status",
-            "/surprise/static",
-            "/delivery/{symbol}",
-            "/delivery/{symbol}/refresh"
-        ],
-        "docs": "/docs"
-    }
-
-# ─── HEALTH ENDPOINT ──────────────────────────────────────────────────────
-@app.get("/health")
-def health_check():
-    """Simple health check for load balancers and monitoring."""
-    return {"status": "ok", "service": "market-data-service", "version": "2.2.0"}
-
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     return JSONResponse(
@@ -474,15 +460,71 @@ INDEX_YAHOO_FALLBACKS = {
 }
 
 
+
+# Explicit map for multi-word / ambiguous NSE names (KFINTECH ≠ KPITTECH)
+SMART_SYMBOL_MAP = {
+    "KFIN TECHNOLOGIES": "KFINTECH",
+    "KFINTECHNOLOGIES": "KFINTECH",
+    "KPIT TECHNOLOGIES": "KPITTECH",
+    "KPITTECHNOLOGIES": "KPITTECH",
+    "BAJAJ HOLDINGS": "BAJAJHLDNG",
+    "AIA ENGINEERING": "AIAENG",
+    "360 ONE": "360ONE",
+    "360ONE WAM": "360ONE",
+    "HONASA CONSUMER": "HONASA",
+    "PB FINTECH": "POLICYBZR",
+    "MOTILAL OSWAL": "MOTILALOFS",
+    "NAM INDIA": "NAM-INDIA",
+    "ONE 97": "PAYTM",
+    "ONE97": "PAYTM",
+}
+
+
+def sanitize_symbol(raw_symbol: str) -> str:
+    """Decode URL params and map company names to canonical NSE tickers."""
+    decoded = urllib.parse.unquote(str(raw_symbol or "")).upper().strip()
+    decoded = decoded.replace(".NS", "").replace(".BO", "").strip()
+    decoded = re.sub(r"\s+", " ", decoded)
+
+    if decoded in SMART_SYMBOL_MAP:
+        return SMART_SYMBOL_MAP[decoded]
+    compact = decoded.replace(" ", "")
+    if compact in SMART_SYMBOL_MAP:
+        return SMART_SYMBOL_MAP[compact]
+
+    # Conservative replacements only after smart map
+    out = decoded
+    out = out.replace(" TECHNOLOGIES", "TECH")
+    out = out.replace(" TECHNOLOGY", "TECH")
+    out = out.replace(" LIMITED", "")
+    out = out.replace(" LTD", "")
+    out = out.replace(" ", "")
+    return out or decoded
+
+
 def normalize_symbol(symbol: str) -> str:
     """Map equity and index symbols to Yahoo-compatible tickers.
 
     Equities get .NS if missing. Index *names* (with spaces) map to ^… tickers
     so history/quote never request "NIFTY NEXT 50.NS".
+    Uses SMART_SYMBOL_MAP so KFIN TECHNOLOGIES → KFINTECH (not KPITTECH).
     """
     raw = (symbol or "").strip()
     if not raw:
         return raw
+    # Decode %20 and map multi-word names before any other logic
+    try:
+        mapped = sanitize_symbol(raw)
+        if mapped and " " not in mapped and mapped not in ("NIFTY",):
+            # If sanitize produced a clean ticker (no spaces), use it as equity base
+            if mapped.startswith("^"):
+                return mapped
+            # Index names still handled below via INDEX_YAHOO_MAP on original
+            upper_check = urllib.parse.unquote(raw).upper().replace("_", " ").strip()
+            if upper_check not in INDEX_YAHOO_MAP and not upper_check.startswith("NIFTY"):
+                raw = mapped
+    except Exception:
+        pass
     upper = raw.upper().replace("_", " ")
     # Already a Yahoo index
     if raw.startswith("^"):
@@ -764,36 +806,7 @@ def get_quote(symbol: str):
                 )
         except Exception as e:
             logger.debug("yahoo primary %s: %s", sym, e)
-
-    # 1. NSE India (skip if NSE cooldown) — often 403 on cloud IPs
-    if price is None:
-      if _in_cooldown("nse"):
-          nse_data = None
-      else:
-          nse_data = _fetch_nse_quote(sym)
-    else:
-        nse_data = None
-    if nse_data:
-        price = _safe(nse_data.get("priceInfo", {}).get("lastPrice"))
-        if price is not None:
-            result = {
-                "symbol": sym,
-                "name": nse_data.get("securityInfo", {}).get("symbol") or sym,
-                "price": price,
-                "previous_close": _safe(nse_data.get("priceInfo", {}).get("previousClose")),
-                "day_change_pct": _safe(nse_data.get("priceInfo", {}).get("pChange")),
-                "day_high": _safe(nse_data.get("priceInfo", {}).get("dayHigh")),
-                "day_low": _safe(nse_data.get("priceInfo", {}).get("dayLow")),
-                "volume": _safe_int(nse_data.get("priceInfo", {}).get("totalTradedVolume")),
-                "market_cap": _safe(nse_data.get("priceInfo", {}).get("marketCap")),
-                "pe_ratio": _safe(nse_data.get("priceInfo", {}).get("pe")),
-                "source": "nse",
-                "fetched_at": datetime.utcnow().isoformat(),
-            }
-            result = _pad_quote_response(sym, result)
-            result = _sanitize_for_json(result)
-            _cache_set(cache_key, result)
-            return result
+    # NSE scraper removed (403 on Render + NameError). Yahoo waterfall is primary.
 
     # Early return if Yahoo primary already resolved real OHLCV
     if yahoo_full and price is not None and price > 0:
@@ -1494,3 +1507,4 @@ def refresh_delivery_pct(symbol: str):
     result["from_cache"] = False
     _cache_set(cache_key, result, ttl=get_cache_ttl())
     return result
+

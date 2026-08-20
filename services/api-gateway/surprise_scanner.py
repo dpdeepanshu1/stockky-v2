@@ -469,22 +469,50 @@ async def run_market_aware_surprise_feed(
             "message": "No symbols — run premarket baselines first",
         }
 
-    # CHUNKED YF DOWNLOAD (50-ticker chunks) — primary path
+    # CHUNKED YF DOWNLOAD (50-ticker chunks, period=2d, threads=True) — primary path
     results = []
     errors = 0
     got = set()
     chunk_size = 50
+
+    def _clean_sym(s: str) -> str:
+        u = str(s or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        u = u.replace("%20", " ")
+        # Light local map (gateway may not import market-data sanitize)
+        _map = {
+            "KFIN TECHNOLOGIES": "KFINTECH",
+            "KPIT TECHNOLOGIES": "KPITTECH",
+            "360 ONE": "360ONE",
+            "360ONE WAM": "360ONE",
+            "PB FINTECH": "POLICYBZR",
+            "HONASA CONSUMER": "HONASA",
+        }
+        if u in _map:
+            return _map[u]
+        u = u.replace(" TECHNOLOGIES", "TECH").replace(" TECHNOLOGY", "TECH")
+        u = u.replace(" LIMITED", "").replace(" LTD", "").replace(" ", "")
+        return u
+
     try:
         import yfinance as yf
+        clean_syms = []
+        seen_c = set()
+        for s in syms:
+            c = _clean_sym(s)
+            if c and c not in seen_c:
+                seen_c.add(c)
+                clean_syms.append(c)
+        syms = clean_syms or syms
+
         for i in range(0, len(syms), chunk_size):
             chunk = syms[i : i + chunk_size]
             ticker_string = " ".join(f"{s}.NS" for s in chunk)
             try:
                 df = yf.download(
                     ticker_string,
-                    period="5d",
+                    period="2d",
                     group_by="ticker",
-                    threads=True,  # multi-thread chunk speedup / shorter 401 window
+                    threads=True,
                     progress=False,
                     auto_adjust=True,
                 )
@@ -507,14 +535,43 @@ async def run_market_aware_surprise_feed(
                         px = float(series.iloc[-1])
                         if px <= 0 or px > 5000:
                             continue
-                        results.append({"symbol": s, "price": px, "cmp": px, "source": "yfinance_bulk"})
+                        prev = px
+                        if len(series) >= 2:
+                            prev = float(series.iloc[-2])
+                        chg = round(((px - prev) / prev) * 100, 2) if prev > 0 else None
+                        high = low = vol = None
+                        try:
+                            if "High" in sub.columns:
+                                high = float(sub["High"].dropna().iloc[-1])
+                            if "Low" in sub.columns:
+                                low = float(sub["Low"].dropna().iloc[-1])
+                            if "Volume" in sub.columns:
+                                vol = int(float(sub["Volume"].dropna().iloc[-1]))
+                                if vol < 0:
+                                    vol = None
+                        except Exception:
+                            pass
+                        row = {
+                            "symbol": s,
+                            "price": px,
+                            "cmp": px,
+                            "previous_close": prev,
+                            "day_change_pct": chg,
+                            "day_high": high,
+                            "day_low": low,
+                            "source": "yahoo_bulk",
+                        }
+                        if vol is not None:
+                            row["volume"] = vol
+                        row = {k: v for k, v in row.items() if v is not None}
+                        results.append(row)
                         got.add(s)
                     except Exception:
                         errors += 1
             except Exception as e:
                 logger.warning("surprise yf chunk %s: %s", i, e)
                 errors += 1
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
     except Exception as e:
         logger.warning("surprise chunked yf unavailable: %s", e)
 

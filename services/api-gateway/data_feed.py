@@ -1094,9 +1094,9 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
         try:
             df = yf.download(
                 ticker_string,
-                period="5d",  # 5d so we still get last close on holidays/weekends
+                period="2d",  # 2d → real previous_close + day_change_pct
                 group_by="ticker",
-                threads=True,   # multi-thread chunk ~1.5s vs ~15s; reduces crumb 401 window
+                threads=True,   # multi-thread chunk ~1–2s; fewer 401 crumb bans
                 progress=False,
                 auto_adjust=True,
             )
@@ -1106,30 +1106,65 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
 
         for b in chunk:
             sym_ns = f"{b}.NS"
-            close, volume = _yf_close_volume(df, sym_ns)
-            if close is None:
-                # Single-ticker fallback shape when only 1 symbol in chunk
-                if len(chunk) == 1:
-                    close, volume = _yf_close_volume(df, sym_ns)
-            if close is None or close <= 0:
+            try:
+                sub = None
+                if df is not None and hasattr(df, "columns") and getattr(df.columns, "nlevels", 1) > 1:
+                    if sym_ns in df.columns.get_level_values(0):
+                        sub = df[sym_ns]
+                elif len(chunk) == 1:
+                    sub = df
+                if sub is None or (hasattr(sub, "empty") and sub.empty):
+                    continue
+                if "Close" not in getattr(sub, "columns", []):
+                    continue
+                closes = sub["Close"].dropna()
+                if closes.empty:
+                    continue
+                close = float(closes.iloc[-1])
+                if close <= 0 or close > MAX_STOCK_PRICE:
+                    if close > MAX_STOCK_PRICE:
+                        logger.debug("bulk_yahoo skip %s — ₹%.2f > cap", b, close)
+                    continue
+                prev_close = close
+                if len(closes) >= 2:
+                    prev_close = float(closes.iloc[-2])
+                change_pct = None
+                if prev_close and prev_close > 0:
+                    change_pct = round(((close - prev_close) / prev_close) * 100, 2)
+                high = low = volume = None
+                try:
+                    if "High" in sub.columns:
+                        high = float(sub["High"].dropna().iloc[-1])
+                    if "Low" in sub.columns:
+                        low = float(sub["Low"].dropna().iloc[-1])
+                    if "Volume" in sub.columns:
+                        volume = int(float(sub["Volume"].dropna().iloc[-1]))
+                        if volume < 0:
+                            volume = None
+                except Exception:
+                    pass
+                rec = {
+                    "symbol": b,
+                    "price": round(close, 2),
+                    "close": round(close, 2),
+                    "cmp": round(close, 2),
+                    "ltp": round(close, 2),
+                    "last_price": round(close, 2),
+                    "current_price": round(close, 2),
+                    "previous_close": round(prev_close, 2) if prev_close else None,
+                    "day_change_pct": change_pct,
+                    "day_high": round(high, 2) if high is not None else None,
+                    "day_low": round(low, 2) if low is not None else None,
+                    "source": "yahoo_bulk",
+                    "price_refreshed_at": _now_iso(),
+                }
+                if volume is not None:
+                    rec["volume"] = volume
+                # Drop Nones so merge never poisons Neon
+                rec = {k: v for k, v in rec.items() if v is not None}
+                out[b] = rec
+            except Exception:
                 continue
-            if close > MAX_STOCK_PRICE:
-                logger.debug("bulk_yahoo skip %s — ₹%.2f > cap", b, close)
-                continue
-            rec = {
-                "symbol": b,
-                "price": round(close, 2),
-                "close": round(close, 2),
-                "cmp": round(close, 2),
-                "ltp": round(close, 2),
-                "last_price": round(close, 2),
-                "current_price": round(close, 2),
-                "source": "yfinance_bulk",
-                "price_refreshed_at": _now_iso(),
-            }
-            if volume is not None:
-                rec["volume"] = volume
-            out[b] = rec
 
         logger.info(
             "bulk_yahoo chunk %s-%s: kept %s/%s under ₹%.0f",

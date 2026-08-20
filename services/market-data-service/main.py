@@ -716,6 +716,9 @@ def _is_rate_limit_error(err: Exception) -> bool:
         or "too many requests" in msg
         or "yfratelimiterror" in msg
         or "429" in msg
+        or "invalid crumb" in msg
+        or "unauthorized" in msg
+        or "401" in msg
     )
 
 

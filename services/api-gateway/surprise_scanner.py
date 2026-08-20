@@ -417,12 +417,51 @@ class SurpriseStockEngine:
         hit["current_price"] = px
         return hit
 
+    def _tick_from_bulk_cache(self, symbol: str) -> Optional[dict]:
+        """
+        Read a symbol's live quote from the already-warm bulk quote cache
+        (same-process, populated by run_bulk_yahoo_price_feed_cached / the
+        bhavcopy+Yahoo bulk feed) instead of an individual /quote HTTP call.
+        Zero upstream cost when warm — this is what removes most of the
+        per-symbol fan-out during a surprise scan.
+        """
+        try:
+            from data_feed import get_cached_quote
+            row = get_cached_quote(symbol)
+        except Exception:
+            row = None
+        if not isinstance(row, dict):
+            return None
+        price = row.get("price") or row.get("close") or row.get("cmp") or row.get("ltp")
+        if not price:
+            return None
+        return {
+            "price": price,
+            "close": row.get("close") or price,
+            "open": row.get("open"),
+            "high": row.get("day_high") or row.get("high"),
+            "low": row.get("day_low") or row.get("low"),
+            "volume": row.get("volume"),
+            "vwap": row.get("vwap"),
+            "orb_high": row.get("orb_high"),
+            "vol_15m": row.get("vol_15m"),
+            "buy_pct": row.get("buy_pct") or row.get("buy_percentage"),
+            "total_bid_qty": row.get("total_bid_qty") or row.get("total_buy_quantity"),
+            "total_ask_qty": row.get("total_ask_qty") or row.get("total_sell_quantity"),
+            "_from_cache": True,
+        }
+
     async def _fetch_quote(
         self,
         client: httpx.AsyncClient,
         market_data_url: str,
         symbol: str,
     ) -> Optional[dict]:
+        # Warm-cache path first — no upstream call at all when the bulk feed
+        # already has a fresh quote for this symbol.
+        cached = self._tick_from_bulk_cache(symbol)
+        if cached:
+            return cached
         async with self.semaphore:
             try:
                 r = await client.get(
@@ -492,6 +531,8 @@ class SurpriseStockEngine:
 
         results: List[dict] = []
         quote_ok = 0
+        cache_hits = 0
+        upstream_calls = 0
         chunk = 25
         for i in range(0, len(keys), chunk):
             batch = keys[i : i + chunk]
@@ -501,10 +542,15 @@ class SurpriseStockEngine:
             )
             for sym, tick in zip(batch, ticks):
                 if isinstance(tick, Exception) or not tick:
+                    upstream_calls += 1
                     # Score with empty tick → uses prev_close baseline so scan finishes
                     scored = self.score_stock(sym, {})
                 else:
                     quote_ok += 1
+                    if tick.get("_from_cache"):
+                        cache_hits += 1
+                    else:
+                        upstream_calls += 1
                     scored = self.score_stock(sym, tick)
                 if scored:
                     results.append(scored)
@@ -548,6 +594,8 @@ class SurpriseStockEngine:
             "building_count": building_count,
             "static_loaded": n_static,
             "quotes_ok": quote_ok,
+            "cache_hits": cache_hits,
+            "upstream_calls": upstream_calls,
             "universe_scanned": len(keys),
             "elapsed_sec": round(time.time() - t0, 2),
             "min_score": MIN_SCORE,

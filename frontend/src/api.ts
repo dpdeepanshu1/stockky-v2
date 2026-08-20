@@ -55,7 +55,7 @@ export interface Decision {
   market_score: number;
   market_sentiment_adjustment: number;
   training_score: number;
-  event_risk: boolean;
+  event_risk?: boolean | null;
   entry_range: { low: number | null; high: number | null } | null;
   target: number | null;
   stop_loss: number | null;
@@ -1224,6 +1224,22 @@ export const api = {
       skipped_sample?: { symbol: string; reason: string }[];
     }>(`/training/api/evaluate/${period}`, { method: "POST" }, 1, 120000),
 
+  /** Coerce nullable fields so training service never 422s on null bools. */
+  _sanitizeActionablePicks: (picks: ActionablePick[]): ActionablePick[] =>
+    (picks || []).map((p) => ({
+      ...p,
+      event_risk: Boolean(p?.event_risk),
+      price: Number(p?.price) || 0,
+      combined_score: Number(p?.combined_score) || 0,
+      technical_score: Number(p?.technical_score) || 0,
+      fundamental_score: Number(p?.fundamental_score) || 0,
+      market_score: Number(p?.market_score) || 0,
+      training_score: Number(p?.training_score) || 0,
+      confidence: p?.confidence || "Medium",
+      decision: p?.decision || "HOLD",
+      symbol: String(p?.symbol || "").toUpperCase(),
+    })),
+
   /** Record picks for training/T+1/T+5 tracking. Does NOT open trades by default. */
   commitActionablePicks: (picks: ActionablePick[], capitalPerTrade = 10000, openTrades = false) =>
     request<{ results: ActionableCommitResult[]; db_backend?: string; db_durable?: boolean; db_connected?: boolean; db_message?: string }>(
@@ -1231,7 +1247,11 @@ export const api = {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ picks, capital_per_trade: capitalPerTrade, open_trades: openTrades }),
+        body: JSON.stringify({
+          picks: api._sanitizeActionablePicks(picks),
+          capital_per_trade: capitalPerTrade,
+          open_trades: openTrades,
+        }),
       },
       1,
       60000
@@ -1244,7 +1264,11 @@ export const api = {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ picks, capital_per_trade: capitalPerTrade, open_trades: true }),
+        body: JSON.stringify({
+          picks: api._sanitizeActionablePicks(picks),
+          capital_per_trade: capitalPerTrade,
+          open_trades: true,
+        }),
       },
       1,
       60000

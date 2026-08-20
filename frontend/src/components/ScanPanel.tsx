@@ -56,9 +56,10 @@ export function toActionablePick(d: Decision): ActionablePick {
     news_score: d.news_score,
     prediction_score: d.prediction_score,
     market_score: d.market_score,
-    training_score: d.training_score,
-    event_risk: d.event_risk,
-    holding_period: d.holding_period,
+    training_score: d.training_score ?? 0,
+    // Backend requires bool — null from lite/stream paths caused HTTP 422
+    event_risk: Boolean(d.event_risk),
+    holding_period: d.holding_period ?? null,
     support: d.support,
     resistance: d.resistance,
     sector: d.sector,

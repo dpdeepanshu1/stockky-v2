@@ -487,6 +487,12 @@ SMART_SYMBOL_MAP = {
     "NAM INDIA": "NAM-INDIA",
     "ONE 97": "PAYTM",
     "ONE97": "PAYTM",
+    "ZOMATO": "ETERNAL",
+    "GMRINFRA": "GMRAIRPORT",
+    "SRTRANSFIN": "SHRIRAMFIN",
+    "MOTHERSUMI": "MOTHERSON",
+    "CADILAHC": "ZYDUSLIFE",
+    "MINDTREE": "LTIM",
 }
 
 
@@ -549,15 +555,23 @@ def normalize_symbol(symbol: str) -> str:
         if k.replace(" ", "") == compact:
             return v
     # Equity path
-    sym = raw.strip().upper()
-    # Do not append .NS to names that still look like multi-word indices
-    if " " in sym or sym.startswith("NIFTY") and not sym.endswith(".NS"):
-        # Unknown nifty-like — try as-is with underscores for Yahoo
-        if "NIFTY" in sym:
-            return sym.replace(" ", "_") + ("" if sym.endswith(".NS") else ".NS")
-    if not sym.endswith(".NS") and not sym.endswith(".BO"):
-        sym = f"{sym}.NS"
-    return sym
+    sym = raw.strip().upper().replace(".NS", "").replace(".BO", "").strip()
+    if sym.startswith("^"):
+        return sym
+    if sym.startswith("NIFTY") or sym in ("SENSEX", "INDIAVIX", "BANKNIFTY"):
+        if sym in INDEX_YAHOO_MAP:
+            return INDEX_YAHOO_MAP[sym]
+        compact = sym.replace(" ", "").replace("_", "")
+        for k, v in INDEX_YAHOO_MAP.items():
+            if k.replace(" ", "").replace("_", "") == compact:
+                return v
+        return "^NSEI" if "NIFTY" in sym else sym
+    bare = SMART_SYMBOL_MAP.get(sym, sym)
+    if bare.startswith("^"):
+        return bare
+    if not bare.endswith(".NS") and not bare.endswith(".BO"):
+        bare = f"{bare}.NS"
+    return bare
 
 
 class QuoteResponse(BaseModel):
@@ -667,17 +681,55 @@ def _pad_quote_response(sym: str, data: Optional[dict] = None) -> dict:
     return out
 
 
+def _yahoo_tickers_for(symbol: str) -> list:
+    """Yahoo candidates. Never turn ^NSEI into ^NSEI.NS. Apply renames."""
+    raw = (symbol or "").strip()
+    if not raw:
+        return []
+    try:
+        mapped = normalize_symbol(raw)
+    except Exception:
+        mapped = raw.upper()
+    if mapped.startswith("^"):
+        return [mapped]
+    base = mapped.upper().replace(".NS", "").replace(".BO", "").strip()
+    if not base:
+        return []
+    if base.startswith("^"):
+        return [base]
+    bare = SMART_SYMBOL_MAP.get(base, base)
+    if bare.startswith("^"):
+        return [bare]
+    # Index display names that slipped through
+    if bare.startswith("NIFTY") or bare in ("SENSEX", "INDIAVIX", "BANKNIFTY"):
+        idx = INDEX_YAHOO_MAP.get(bare) or INDEX_YAHOO_MAP.get(bare.replace("_", ""))
+        if idx:
+            return [idx]
+        return ["^NSEI"] if "NIFTY" in bare else [bare]
+    return [f"{bare}.NS", f"{bare}.BO"]
+
+
+def _is_rate_limit_error(err: Exception) -> bool:
+    msg = str(err).lower()
+    return (
+        "rate limit" in msg
+        or "too many requests" in msg
+        or "yfratelimiterror" in msg
+        or "429" in msg
+    )
+
+
 def _yahoo_ohlcv_quote(symbol: str) -> Optional[dict]:
     """
-    Real candle metrics via yfinance period=2d:
-      price, previous_close, day_change_pct, day_high, day_low, volume
+    Real candle metrics via yfinance period=2d.
     Returns None on failure — never fake zeros.
     """
-    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
-    if not base:
+    if _in_cooldown("yfinance"):
         return None
-    for suffix in (".NS", ".BO"):
-        ticker = f"{base}{suffix}"
+    tickers = _yahoo_tickers_for(symbol)
+    if not tickers:
+        return None
+    for ticker in tickers:
         try:
             t = yf.Ticker(ticker)
             hist = t.history(period="2d")
@@ -706,6 +758,7 @@ def _yahoo_ohlcv_quote(symbol: str) -> Optional[dict]:
             change_pct = None
             if prev_close and prev_close > 0:
                 change_pct = round(((price - prev_close) / prev_close) * 100, 2)
+            base = ticker.replace(".NS", "").replace(".BO", "")
             return {
                 "symbol": base,
                 "name": base,
@@ -717,20 +770,23 @@ def _yahoo_ohlcv_quote(symbol: str) -> Optional[dict]:
                 "day_low": low if low == low else None,
                 "volume": vol,
                 "source": "yahoo",
+                "yahoo_ticker": ticker,
                 "fetched_at": datetime.utcnow().isoformat(),
             }
         except Exception as e:
+            if _is_rate_limit_error(e):
+                _set_cooldown("yfinance")
+                logger.warning("Yahoo rate-limited on %s — cooldown set", ticker)
+                return None
             logger.debug("yahoo ohlcv %s: %s", ticker, e)
     return None
 
 
 def _waterfall_yahoo_history_price(symbol: str) -> Optional[float]:
-    """Primary free path: yfinance 1d Close for NSE (.NS) / BSE (.BO)."""
-    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
-    if not base:
+    """Primary free path: yfinance Close. Respects index tickers and cooldown."""
+    if _in_cooldown("yfinance"):
         return None
-    for suffix in (".NS", ".BO", ""):
-        ticker = f"{base}{suffix}" if suffix else base
+    for ticker in _yahoo_tickers_for(symbol):
         try:
             t = yf.Ticker(ticker)
             hist = t.history(period="5d")
@@ -739,80 +795,123 @@ def _waterfall_yahoo_history_price(symbol: str) -> Optional[float]:
                 if px > 0:
                     return px
         except Exception as e:
+            if _is_rate_limit_error(e):
+                _set_cooldown("yfinance")
+                return None
             logger.debug("yahoo history %s: %s", ticker, e)
     return None
 
 
+def _waterfall_equity_base(symbol: str) -> str:
+    """Bare equity ticker for third-party APIs (no ^ indices, apply renames)."""
+    raw = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    if raw.startswith("^"):
+        return ""  # skip paid APIs for indices when Yahoo failed
+    try:
+        mapped = normalize_symbol(raw)
+        if mapped.startswith("^"):
+            return ""
+        bare = mapped.replace(".NS", "").replace(".BO", "").strip()
+        return SMART_SYMBOL_MAP.get(bare, bare)
+    except Exception:
+        return SMART_SYMBOL_MAP.get(raw, raw)
+
+
 def _waterfall_twelvedata_price(symbol: str) -> Optional[float]:
+    if _in_cooldown("twelvedata"):
+        return None
     key = TWELVE_DATA_API_KEY
     if not key:
         return None
-    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
-    # Indian symbols often need exchange suffix on TwelveData
-    candidates = [f"{base}.NSE", f"{base}.BSE", base]
+    base = _waterfall_equity_base(symbol)
+    if not base:
+        return None
+    # One primary candidate first — stop multi-suffix stampede on 429
+    candidates = [f"{base}.NSE", base]
     for sym in candidates:
         try:
             url = f"https://api.twelvedata.com/price?symbol={sym}&apikey={key}"
             resp = httpx.get(url, timeout=4.0)
+            if resp.status_code == 429:
+                _set_cooldown("twelvedata", 120)
+                logger.warning("TwelveData 429 — cooldown 120s")
+                return None
             if resp.status_code == 200:
-                data = resp.json() if isinstance(resp.json(), dict) else {}
-                px = _safe(data.get("price"))
-                if px is not None and px > 0:
-                    logger.info("TwelveData waterfall hit %s → ₹%.2f", sym, px)
-                    return float(px)
+                data = resp.json() if resp.content else {}
+                if isinstance(data, dict):
+                    px = _safe(data.get("price"))
+                    if px is not None and px > 0:
+                        logger.info("TwelveData waterfall hit %s → ₹%.2f", sym, px)
+                        return float(px)
         except Exception as e:
             logger.debug("TwelveData %s: %s", sym, e)
     return None
 
 
 def _waterfall_polygon_price(symbol: str) -> Optional[float]:
+    if _in_cooldown("polygon"):
+        return None
     key = POLYGON_API_KEY
     if not key:
         return None
-    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
-    # Polygon primarily US; still try as last resort with .NS ticker style
-    for sym in (f"X:{base}", base, f"{base}.NS"):
-        try:
-            url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/prev?adjusted=true&apiKey={key}"
-            resp = httpx.get(url, timeout=4.0)
-            if resp.status_code == 200:
-                data = resp.json() if isinstance(resp.json(), dict) else {}
-                results = data.get("results") or []
-                if results:
-                    px = _safe(results[0].get("c"))
-                    if px is not None and px > 0:
-                        logger.info("Polygon waterfall hit %s → ₹%.2f", sym, px)
-                        return float(px)
-        except Exception as e:
-            logger.debug("Polygon %s: %s", sym, e)
+    base = _waterfall_equity_base(symbol)
+    if not base:
+        return None
+    # Single attempt — India coverage is sparse; avoid 3x burn
+    sym = base
+    try:
+        url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/prev?adjusted=true&apiKey={key}"
+        resp = httpx.get(url, timeout=4.0)
+        if resp.status_code == 429:
+            _set_cooldown("polygon", 120)
+            return None
+        if resp.status_code == 200:
+            data = resp.json() if resp.content else {}
+            results = (data or {}).get("results") or []
+            if results:
+                px = _safe(results[0].get("c"))
+                if px is not None and px > 0:
+                    logger.info("Polygon waterfall hit %s → ₹%.2f", sym, px)
+                    return float(px)
+    except Exception as e:
+        logger.debug("Polygon %s: %s", sym, e)
     return None
 
+
 def _waterfall_alphavantage_price(symbol: str) -> Optional[float]:
-    """Emergency last resort — free tier is only ~25 req/day. Use sparingly."""
+    """Emergency last resort — free tier ~25 req/day. One try only."""
+    if _in_cooldown("alphavantage"):
+        return None
     key = ALPHA_VANTAGE_API_KEY
     if not key:
         return None
-    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    base = _waterfall_equity_base(symbol)
     if not base:
         return None
-    # AlphaVantage has limited NSE support; try SYMBOL.BSE / plain
-    for sym in (f"{base}.BSE", f"{base}.NSE", base):
-        try:
-            url = (
-                "https://www.alphavantage.co/query"
-                f"?function=GLOBAL_QUOTE&symbol={sym}&apikey={key}"
-            )
-            resp = httpx.get(url, timeout=5.0)
-            if resp.status_code != 200:
-                continue
+    # Prefer BSE style once — do not fire BSE+NSE+plain every time
+    sym = f"{base}.BSE"
+    try:
+        url = (
+            "https://www.alphavantage.co/query"
+            f"?function=GLOBAL_QUOTE&symbol={sym}&apikey={key}"
+        )
+        resp = httpx.get(url, timeout=5.0)
+        if resp.status_code == 429:
+            _set_cooldown("alphavantage", 300)
+            return None
+        if resp.status_code == 200 and resp.content:
             data = resp.json() if resp.content else {}
-            gq = data.get("Global Quote") or data.get("globalQuote") or {}
+            gq = (data or {}).get("Global Quote") or (data or {}).get("globalQuote") or {}
             px = _safe(gq.get("05. price") or gq.get("05.price") or gq.get("price"))
             if px is not None and px > 0:
                 logger.info("AlphaVantage waterfall hit %s → ₹%.2f", sym, px)
                 return float(px)
-        except Exception as e:
-            logger.debug("AlphaVantage %s: %s", sym, e)
+            # Note rate limit messages in body
+            note = str((data or {}).get("Note") or (data or {}).get("Information") or "")
+            if "rate" in note.lower() or "call frequency" in note.lower():
+                _set_cooldown("alphavantage", 300)
+    except Exception as e:
+        logger.debug("AlphaVantage %s: %s", base, e)
     return None
 
 
@@ -950,32 +1049,38 @@ def get_quote(symbol: str):
     except Exception as e:
         logger.debug("yahoo info fallback %s: %s", sym, e)
 
-    # ── Short-circuit waterfall (only when Yahoo paths failed) ─────────────
-    # TwelveData → AlphaVantage → Polygon — sequential, stop on first hit
+    # ── Short-circuit waterfall (only when Yahoo failed AND not cooling) ──
+    # Skip paid APIs for pure index symbols; skip all when soft cache can serve.
     waterfall_price = None
     waterfall_source = None
-    try:
-        waterfall_price = _waterfall_twelvedata_price(sym)
-        if waterfall_price and waterfall_price > 0:
-            waterfall_source = "twelvedata"
-    except Exception as e:
-        logger.debug("twelvedata waterfall %s: %s", sym, e)
-
-    if not waterfall_price:
+    is_index = str(sym).startswith("^") or str(sym).upper().startswith("NIFTY")
+    if soft_cached and isinstance(soft_cached, dict) and soft_cached.get("price") is not None:
+        # Prefer stale-good over burning TwelveData/AV on bulk feed storms
+        if _in_cooldown("yfinance") or _in_cooldown("twelvedata"):
+            return _pad_quote_response(sym, soft_cached)
+    if not is_index and not _in_cooldown("yfinance"):
         try:
-            waterfall_price = _waterfall_alphavantage_price(sym)
+            waterfall_price = _waterfall_twelvedata_price(sym)
             if waterfall_price and waterfall_price > 0:
-                waterfall_source = "alphavantage"
+                waterfall_source = "twelvedata"
         except Exception as e:
-            logger.debug("alphavantage waterfall %s: %s", sym, e)
+            logger.debug("twelvedata waterfall %s: %s", sym, e)
 
-    if not waterfall_price:
-        try:
-            waterfall_price = _waterfall_polygon_price(sym)
-            if waterfall_price and waterfall_price > 0:
-                waterfall_source = "polygon"
-        except Exception as e:
-            logger.debug("polygon waterfall %s: %s", sym, e)
+        if not waterfall_price:
+            try:
+                waterfall_price = _waterfall_alphavantage_price(sym)
+                if waterfall_price and waterfall_price > 0:
+                    waterfall_source = "alphavantage"
+            except Exception as e:
+                logger.debug("alphavantage waterfall %s: %s", sym, e)
+
+        if not waterfall_price:
+            try:
+                waterfall_price = _waterfall_polygon_price(sym)
+                if waterfall_price and waterfall_price > 0:
+                    waterfall_source = "polygon"
+            except Exception as e:
+                logger.debug("polygon waterfall %s: %s", sym, e)
 
     if waterfall_price and waterfall_price > 0:
         result = _pad_quote_response(sym, {

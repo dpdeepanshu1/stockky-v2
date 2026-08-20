@@ -51,7 +51,7 @@ jobs:
         run: |
           set -euo pipefail
           GW="${API_GATEWAY_URL%/}"
-          BATCH_SIZE="${FEED_BATCH_SIZE:-10}"
+          BATCH_SIZE="${FEED_BATCH_SIZE:-5}"
           SLEEP_SEC="${FEED_BATCH_SLEEP:-45}"
 
           echo "Fetching scan universe…"

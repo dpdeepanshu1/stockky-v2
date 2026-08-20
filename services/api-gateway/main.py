@@ -8182,7 +8182,7 @@ async def data_feed_run(
                 skip_fund = os.getenv("DATA_FEED_SKIP_FUNDAMENTALS_AFTER_BULK", "1").strip().lower() in (
                     "1", "true", "yes", "on",
                 )
-                if skip_fund and saved >= max(1, int(0.8 * len(universe))):
+                if skip_fund and saved >= max(1, int(0.35 * len(universe))):
                     ts = datetime.now(IST).isoformat()
                     msg = (
                         f"Data feed bulk-complete for {saved} stocks at {ts} "
@@ -8212,7 +8212,43 @@ async def data_feed_run(
             except Exception as e:
                 logger.warning("data-feed bulk phase failed (continuing sequential fund fill): %s", e)
 
+        # PHASE 1: optional concurrent fund fill (rate-safe). Skip when bulk already
+        # covered enough OR DATA_FEED_SKIP_FUNDAMENTALS_AFTER_BULK=1 and any seed exists.
+        _skip_seq = os.getenv("DATA_FEED_SKIP_SEQUENTIAL_FUND", "0").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if _skip_seq and ok_n > 0:
+            ts = datetime.now(IST).isoformat()
+            msg = f"Data feed stopped after bulk seed ({ok_n} rows) — sequential fund skipped"
+            store.set_job(status="done", processed=len(universe), total=len(universe),
+                          message=msg, ok_count=ok_n, finished_at=ts)
+            store.set_meta(last_success_at=ts, last_count=ok_n, last_message=msg,
+                           universe_size=len(universe), partial=True)
+            logger.info(msg)
+            return
+
         if True:
+            # Concurrent fund-only fill (no news storm) — max 3 in-flight
+            fund_sem = asyncio.Semaphore(int(os.getenv("DATA_FEED_FUND_CONCURRENCY", "3")))
+
+            async def _feed_one(base: str):
+                async with fund_sem:
+                    fund = None
+                    events = None
+                    try:
+                        r = await client.get(f"{FUNDAMENTAL_URL}/analyze/{base}", timeout=25)
+                        if r.status_code == 200:
+                            fund = r.json()
+                    except Exception:
+                        pass
+                    try:
+                        r = await client.get(f"{EVENT_URL}/events/{base}", timeout=12)
+                        if r.status_code == 200:
+                            events = r.json()
+                    except Exception:
+                        pass
+                    return base, fund, events
+
             for i in range(start_at, len(universe)):
                 # Cooperative stop (process flag OR job flag) — ASAP
                 jnow = store.job()
@@ -8258,20 +8294,7 @@ async def data_feed_run(
                     )
                     continue
                 try:
-                    fund = None
-                    events = None
-                    try:
-                        r = await client.get(f"{FUNDAMENTAL_URL}/analyze/{base}", timeout=35)
-                        if r.status_code == 200:
-                            fund = r.json()
-                    except Exception:
-                        pass
-                    try:
-                        r = await client.get(f"{EVENT_URL}/events/{base}", timeout=20)
-                        if r.status_code == 200:
-                            events = r.json()
-                    except Exception:
-                        pass
+                    base, fund, events = await _feed_one(base)
                     if fund or events:
                         payload = extract_feed_payload(base, fund, events)
                         store.put_symbol(base, payload, ttl=DATA_FEED_TTL)

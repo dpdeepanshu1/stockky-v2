@@ -251,16 +251,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Root & Health endpoints (fix 404) ────────────────────────────────────────
-@app.get("/")
-async def root():
-    return {"message": "Market Data Service", "version": "2.2.0", "status": "running"}
-
-@app.get("/health")
-async def health():
-    # Simple health check; optionally verify dependencies (Redis, etc.)
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
-
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     return JSONResponse(
@@ -894,11 +884,18 @@ def get_quote(symbol: str):
         if price is not None:
             source = "polygon"
 
-    # 5. Yahoo Raw API
+    # 5. Yahoo history fallback (replaces removed _fetch_price_from_yahoo_raw)
     if price is None:
-        price = _fetch_price_from_yahoo_raw(sym)
-        if price is not None:
-            source = source or "yahoo_raw"
+        try:
+            yq = _yahoo_ohlcv_quote(sym)
+            if yq and yq.get("price"):
+                price = float(yq["price"])
+                source = source or "yahoo"
+                # Prefer full OHLCV when available
+                if yahoo_full is None:
+                    yahoo_full = yq
+        except Exception as e:
+            logger.debug("yahoo ohlcv fallback %s: %s", sym, e)
 
     # 6. yfinance final fallback
     if price is None:

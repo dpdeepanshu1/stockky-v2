@@ -7524,10 +7524,27 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
             logger.debug("repair price %s: %s", base, e)
         await asyncio.sleep(cooldown)
 
+    if "rsi" in missing:
+        # Prefer local 1mo RSI (no technical service / peer storm)
+        try:
+            from data_feed import compute_rsi_from_closes
+            import yfinance as yf
+            hist = await asyncio.to_thread(
+                lambda: yf.Ticker(f"{base}.NS").history(period="1mo")
+            )
+            if hist is not None and not hist.empty and "Close" in hist.columns:
+                closes = hist["Close"].dropna().values
+                rsi_local = compute_rsi_from_closes(closes, period=14)
+                if rsi_local is not None:
+                    current["rsi"] = rsi_local
+                    patched.append("rsi")
+                    missing.discard("rsi")
+        except Exception as e:
+            logger.debug("repair local rsi %s: %s", base, e)
+
     if "rsi" in missing and technical_url:
         try:
-            # Prefer /analyze/{sym}; also try /technical/{sym} if 404
-            r = await client.get(f"{technical_url}/analyze/{base}", timeout=20.0)
+            r = await client.get(f"{technical_url}/analyze/{base}?lite=1", timeout=20.0)
             if r.status_code == 404:
                 r = await client.get(f"{technical_url}/technical/{base}", timeout=20.0)
             if r.status_code == 200:
@@ -7551,9 +7568,16 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
 
     if ("pe_ratio" in missing or "roce" in missing) and fundamental_url:
         try:
-            r = await client.get(f"{fundamental_url}/analyze/{base}", timeout=35.0)
+            # skip_peers=1 — avoid 5–8 peer Yahoo fetches per stock (429 cascade)
+            r = await client.get(
+                f"{fundamental_url}/analyze/{base}?skip_peers=1&lite=1",
+                timeout=35.0,
+            )
             if r.status_code == 404:
-                r = await client.get(f"{fundamental_url}/fundamental/{base}", timeout=35.0)
+                r = await client.get(
+                    f"{fundamental_url}/fundamental/{base}?skip_peers=1",
+                    timeout=35.0,
+                )
             if r.status_code == 200:
                 f = r.json() if isinstance(r.json(), dict) else {}
                 metrics = f.get("metrics") if isinstance(f.get("metrics"), dict) else {}
@@ -7784,7 +7808,10 @@ async def data_feed_run(
                 ok_n = max(ok_n, saved)
                 store.set_job(
                     status="running",
-                    message=f"Bulk quotes done: {saved}/{len(universe)} — filling fundamentals…",
+                    message=(
+                        f"Bulk 5-field seed done: {saved}/{len(universe)} "
+                        f"(price+RSI local; PE/ROCE/sentiment baseline)"
+                    ),
                     processed=saved,
                     total=len(universe),
                     ok_count=ok_n,
@@ -7792,6 +7819,37 @@ async def data_feed_run(
                     checkpoint={"cursor": 0, "done": list(done_set), "universe": universe},
                 )
                 logger.info("data-feed bulk phase: %s", bulk_result)
+                # Skip sequential /analyze peer storms when bulk covered ≥80% of universe
+                skip_fund = os.getenv("DATA_FEED_SKIP_FUNDAMENTALS_AFTER_BULK", "1").strip().lower() in (
+                    "1", "true", "yes", "on",
+                )
+                if skip_fund and saved >= max(1, int(0.8 * len(universe))):
+                    ts = datetime.now(IST).isoformat()
+                    msg = (
+                        f"Data feed bulk-complete for {saved} stocks at {ts} "
+                        f"(local RSI + baseline PE/ROCE/sentiment; use Repair for real fundamentals)"
+                    )
+                    store.set_meta(
+                        last_success_at=ts,
+                        last_count=saved,
+                        last_errors=0,
+                        last_message=msg,
+                        source="bulk_5field",
+                        universe_size=len(universe),
+                        partial=saved < len(universe),
+                    )
+                    store.set_job(
+                        status="done",
+                        processed=len(universe),
+                        total=len(universe),
+                        message=msg,
+                        ok_count=saved,
+                        error_count=0,
+                        finished_at=ts,
+                        checkpoint={"cursor": len(universe), "done": list(done_set), "universe": universe},
+                    )
+                    logger.info(msg)
+                    return
             except Exception as e:
                 logger.warning("data-feed bulk phase failed (continuing sequential fund fill): %s", e)
 

@@ -520,11 +520,31 @@ def _redis_set(key: str, value, ttl: int = None):
 
 
 def _load_watchlist() -> List[str]:
-    return _redis_get(WATCHLIST_KEY) or []
+    """Load watchlist from dedicated durable table stockky_watchlist (survives hard-reset)."""
+    try:
+        import kv_cache as _kc
+        val = _kc.watchlist_get()
+        if isinstance(val, list):
+            return [str(s).upper().replace(".NS", "").replace(".BO", "").strip() for s in val if s]
+        if isinstance(val, dict) and isinstance(val.get("symbols"), list):
+            return [str(s).upper().replace(".NS", "").replace(".BO", "").strip() for s in val["symbols"] if s]
+    except Exception as e:
+        logger.debug("watchlist_get fallback: %s", e)
+    # Legacy fallback
+    raw = _redis_get(WATCHLIST_KEY) or []
+    if isinstance(raw, list):
+        return [str(s).upper().replace(".NS", "").replace(".BO", "").strip() for s in raw if s]
+    return []
 
 def _save_watchlist(symbols: List[str]):
-    # No TTL — durable on Neon (prefix stockky:watchlist)
-    _redis_set(WATCHLIST_KEY, list(symbols) if symbols else [], ttl=None)
+    """Persist watchlist to stockky_watchlist table — never wiped by data-feed hard-reset."""
+    clean = [str(s).upper().replace(".NS", "").replace(".BO", "").strip() for s in (symbols or []) if s]
+    try:
+        import kv_cache as _kc
+        _kc.watchlist_set(clean)
+    except Exception as e:
+        logger.warning("watchlist_set failed, legacy write: %s", e)
+        _redis_set(WATCHLIST_KEY, clean, ttl=None)
 
 def _load_searched() -> List[str]:
     return _redis_get(SEARCHED_KEY) or []

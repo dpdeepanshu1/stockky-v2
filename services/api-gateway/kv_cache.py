@@ -215,9 +215,32 @@ def _get_neon():
                         "CREATE INDEX IF NOT EXISTS idx_stockky_kv_k ON stockky_kv (k)"
                     )
                 )
+                # Durable settings tables — NEVER truncated by hard_reset / data-feed wipe
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE IF NOT EXISTS stockky_notification (
+                            k TEXT PRIMARY KEY,
+                            v TEXT NOT NULL,
+                            updated_at TIMESTAMPTZ DEFAULT NOW()
+                        )
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE IF NOT EXISTS stockky_watchlist (
+                            k TEXT PRIMARY KEY,
+                            v TEXT NOT NULL,
+                            updated_at TIMESTAMPTZ DEFAULT NOW()
+                        )
+                        """
+                    )
+                )
             _neon_engine = eng
             logger.info(
-                "KV durable layer: Neon stockky_kv ready (pool_size=%s max_overflow=%s redis_disabled=%s)",
+                "KV durable layer: Neon stockky_kv + stockky_notification + stockky_watchlist ready (pool_size=%s max_overflow=%s redis_disabled=%s)",
                 pool_size,
                 max_overflow,
                 not USE_REDIS,
@@ -549,33 +572,70 @@ def hard_reset_stockky_kv() -> dict:
 
     # k is already PRIMARY KEY (unique). We TRUNCATE, ensure a named UNIQUE
     # constraint exists for older schemas, and re-assert supporting indexes.
-    statements = [
-        "TRUNCATE TABLE stockky_kv",
-        "ALTER TABLE stockky_kv DROP CONSTRAINT IF EXISTS uq_stockky_kv_k",
-        "ALTER TABLE stockky_kv ADD CONSTRAINT uq_stockky_kv_k UNIQUE (k)",
-        "CREATE INDEX IF NOT EXISTS idx_stockky_kv_k ON stockky_kv (k)",
-        "CREATE INDEX IF NOT EXISTS stockky_kv_expires_idx ON stockky_kv (expires_at)",
-    ]
-
+    # Protect user settings: notification + watchlist live in dedicated tables
+    # and must survive feed hard-reset. Also snapshot legacy keys from stockky_kv
+    # before truncate and restore them into the dedicated tables.
     try:
         with eng.begin() as conn:
-            for sql in statements:
+            # Ensure settings tables exist
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS stockky_notification (
+                    k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS stockky_watchlist (
+                    k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
+            # Migrate any legacy keys still sitting in stockky_kv
+            for legacy_k, table, dest_k in (
+                ("stockky:notification_config", "stockky_notification", "config"),
+                ("stockky:watchlist", "stockky_watchlist", "default"),
+            ):
                 try:
-                    conn.execute(text(sql))
-                except Exception as e:
-                    # UNIQUE may already be covered by PRIMARY KEY — ignore
-                    logger.debug("hard_reset statement skipped/failed: %s — %s", sql[:60], e)
-        # Also wipe the process-local memory layer so UI cannot read ghosts
+                    row = conn.execute(
+                        text("SELECT v FROM stockky_kv WHERE k = :k"),
+                        {"k": legacy_k},
+                    ).fetchone()
+                    if row and row[0]:
+                        conn.execute(
+                            text(
+                                f"""
+                                INSERT INTO {table} (k, v, updated_at)
+                                VALUES (:k, :v, NOW())
+                                ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = NOW()
+                                """
+                            ),
+                            {"k": dest_k, "v": row[0]},
+                        )
+                except Exception as mig_e:
+                    logger.debug("hard_reset migrate %s: %s", legacy_k, mig_e)
+
+            # Wipe ONLY stockky_kv (data-feed / scan cache) — never settings tables
+            conn.execute(text("TRUNCATE TABLE stockky_kv"))
+            try:
+                conn.execute(text("ALTER TABLE stockky_kv DROP CONSTRAINT IF EXISTS uq_stockky_kv_k"))
+                conn.execute(text("ALTER TABLE stockky_kv ADD CONSTRAINT uq_stockky_kv_k UNIQUE (k)"))
+            except Exception as e:
+                logger.debug("hard_reset constraint: %s", e)
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_stockky_kv_k ON stockky_kv (k)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS stockky_kv_expires_idx ON stockky_kv (expires_at)"))
+        # Clear process memory EXCEPT protected settings keys
         try:
+            protect = {"stockky:notification_config", "stockky:watchlist"}
             with _mem._lock:
-                _mem._store.clear()
+                for k in list(_mem._store.keys()):
+                    if k not in protect and not k.startswith("stockky:notification"):
+                        _mem._store.pop(k, None)
         except Exception:
             pass
-        logger.info("hard_reset_stockky_kv: table truncated and constraints re-applied")
+        logger.info("hard_reset_stockky_kv: stockky_kv truncated; notification+watchlist tables preserved")
         return {
             "status": "success",
-            "message": "Database wiped and locked. Ready for fresh feed.",
+            "message": "Data-feed cache wiped. Notification settings and watchlist preserved.",
             "mode": "neon",
+            "preserved": ["stockky_notification", "stockky_watchlist"],
         }
     except Exception as e:
         logger.exception("hard_reset_stockky_kv failed: %s", e)
@@ -585,3 +645,175 @@ def hard_reset_stockky_kv() -> dict:
             "mode": "neon",
         }
 
+
+# ── Durable settings tables (never hard-reset) ─────────────────────────────
+# stockky_notification  — bot tokens, chat ids, channel config
+# stockky_watchlist     — user watchlist symbols
+# Only explicit DELETE from the frontend/API removes these.
+
+_SETTINGS_MEM: dict = {}
+_SETTINGS_LOCK = threading.RLock()
+
+
+def _settings_table_ok(table: str) -> str:
+    allowed = {"stockky_notification", "stockky_watchlist"}
+    if table not in allowed:
+        raise ValueError(f"settings table not allowed: {table}")
+    return table
+
+
+def settings_get(table: str, key: str = "default") -> Any:
+    """Read from dedicated durable table (no TTL expiry)."""
+    table = _settings_table_ok(table)
+    mk = f"{table}:{key}"
+    with _SETTINGS_LOCK:
+        if mk in _SETTINGS_MEM:
+            return _SETTINGS_MEM[mk]
+    eng = _get_neon()
+    if eng is None:
+        return None
+    try:
+        from sqlalchemy import text
+        with eng.connect() as conn:
+            row = conn.execute(
+                text(f"SELECT v FROM {table} WHERE k = :k"),
+                {"k": key},
+            ).fetchone()
+            if not row:
+                return None
+            raw = row[0]
+            try:
+                val = json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                val = raw
+            with _SETTINGS_LOCK:
+                _SETTINGS_MEM[mk] = val
+            return val
+    except Exception as e:
+        logger.warning("settings_get %s/%s: %s", table, key, e)
+        return None
+
+
+def settings_set(table: str, key: str, value: Any) -> bool:
+    """Upsert into dedicated durable table (no expiry). Survives hard_reset."""
+    table = _settings_table_ok(table)
+    mk = f"{table}:{key}"
+    try:
+        payload = json.dumps(value) if not isinstance(value, str) else value
+    except Exception:
+        payload = json.dumps(value, default=str)
+    with _SETTINGS_LOCK:
+        try:
+            _SETTINGS_MEM[mk] = json.loads(payload) if isinstance(value, (dict, list)) else value
+        except Exception:
+            _SETTINGS_MEM[mk] = value
+    eng = _get_neon()
+    if eng is None:
+        logger.warning("settings_set: no Neon — memory only for %s/%s", table, key)
+        return True
+    try:
+        from sqlalchemy import text
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {table} (
+                        k TEXT PRIMARY KEY,
+                        v TEXT NOT NULL,
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {table} (k, v, updated_at)
+                    VALUES (:k, :v, NOW())
+                    ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = NOW()
+                    """
+                ),
+                {"k": key, "v": payload},
+            )
+        return True
+    except Exception as e:
+        logger.error("settings_set %s/%s failed: %s", table, key, e)
+        return False
+
+
+def settings_delete(table: str, key: str = "default") -> bool:
+    """Explicit delete only (frontend clear). Never called by hard_reset."""
+    table = _settings_table_ok(table)
+    mk = f"{table}:{key}"
+    with _SETTINGS_LOCK:
+        _SETTINGS_MEM.pop(mk, None)
+    eng = _get_neon()
+    if eng is None:
+        return True
+    try:
+        from sqlalchemy import text
+        with eng.begin() as conn:
+            conn.execute(text(f"DELETE FROM {table} WHERE k = :k"), {"k": key})
+        return True
+    except Exception as e:
+        logger.error("settings_delete %s/%s: %s", table, key, e)
+        return False
+
+
+def notification_config_get() -> Any:
+    """Prefer dedicated table; migrate from legacy stockky_kv key once."""
+    val = settings_get("stockky_notification", "config")
+    if val is not None:
+        return val
+    # One-time migrate from legacy key in stockky_kv
+    legacy = kv_get("stockky:notification_config")
+    if legacy is not None:
+        settings_set("stockky_notification", "config", legacy)
+        return legacy
+    return None
+
+
+def notification_config_set(cfg: Any) -> bool:
+    ok = settings_set("stockky_notification", "config", cfg)
+    # Also mirror to legacy key for older readers (optional, still durable until hard_reset)
+    try:
+        kv_set("stockky:notification_config", cfg, ttl=None)
+    except Exception:
+        pass
+    return ok
+
+
+def notification_config_delete() -> bool:
+    try:
+        kv_delete("stockky:notification_config")
+    except Exception:
+        pass
+    return settings_delete("stockky_notification", "config")
+
+
+def watchlist_get() -> Any:
+    val = settings_get("stockky_watchlist", "default")
+    if val is not None:
+        return val
+    legacy = kv_get("stockky:watchlist")
+    if legacy is not None:
+        settings_set("stockky_watchlist", "default", legacy)
+        return legacy
+    return None
+
+
+def watchlist_set(symbols: Any) -> bool:
+    ok = settings_set("stockky_watchlist", "default", symbols)
+    try:
+        kv_set("stockky:watchlist", symbols, ttl=None)
+    except Exception:
+        pass
+    return ok
+
+
+def watchlist_delete() -> bool:
+    try:
+        kv_delete("stockky:watchlist")
+    except Exception:
+        pass
+    return settings_delete("stockky_watchlist", "default")

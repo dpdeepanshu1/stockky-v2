@@ -53,6 +53,8 @@ _DURABLE_PREFIXES = (
     "indianapi:",
     "stockky:decide_cache:",  # optional durability for decide (low volume)
     "stockky:batch_result:",  # scan batch cache survives free-tier sleep
+    "stockky:rate_limit",     # 429 / API health dashboard (shared with api-gateway)
+    "system:rate_limit",      # plan-compatible alias key
 )
 
 
@@ -132,9 +134,12 @@ def _normalize_db_url(url: str) -> str:
 
 
 def _neon_url() -> Optional[str]:
+    # Single source of truth — prevent Split-Brain across Render containers.
+    # Prefer DATABASE_URL (shared) over CACHE_DATABASE_URL so gateway + market-data
+    # never point at different Neon databases.
     url = (
-        os.getenv("CACHE_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
+        os.getenv("DATABASE_URL")
+        or os.getenv("CACHE_DATABASE_URL")
         or os.getenv("TRAINING_DATABASE_URL")
     )
     if not url:

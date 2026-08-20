@@ -135,9 +135,12 @@ def _normalize_db_url(url: str) -> str:
 
 
 def _neon_url() -> Optional[str]:
+    # Single source of truth — prevent Split-Brain across Render containers.
+    # Prefer DATABASE_URL (shared) over CACHE_DATABASE_URL so gateway + market-data
+    # never point at different Neon databases.
     url = (
-        os.getenv("CACHE_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
+        os.getenv("DATABASE_URL")
+        or os.getenv("CACHE_DATABASE_URL")
         or os.getenv("TRAINING_DATABASE_URL")
     )
     if not url:
@@ -514,4 +517,68 @@ def status() -> dict:
         "neon_error": neon_err,
         "cache_database_configured": bool(_neon_url()),
     }
+
+
+def hard_reset_stockky_kv() -> dict:
+    """
+    Wipe stockky_kv and re-assert uniqueness + index on k.
+    Used by the "Feed Fresh Data" flow so a corrupted / bloated
+    universe is nuked before the next full feed rebuild.
+    Primary key already enforces uniqueness; we still DROP/ADD the
+    named constraint for compatibility with older schemas and
+    re-create the supporting index.
+    """
+    eng = _get_neon()
+    if eng is None:
+        # Memory-only mode: clear process cache and report success
+        try:
+            with _mem._lock:
+                _mem._store.clear()
+        except Exception:
+            pass
+        return {
+            "status": "success",
+            "message": "No Neon configured — cleared in-process memory only.",
+            "mode": "memory-only",
+        }
+
+    from sqlalchemy import text
+
+    # k is already PRIMARY KEY (unique). We TRUNCATE, ensure a named UNIQUE
+    # constraint exists for older schemas, and re-assert supporting indexes.
+    statements = [
+        "TRUNCATE TABLE stockky_kv",
+        "ALTER TABLE stockky_kv DROP CONSTRAINT IF EXISTS uq_stockky_kv_k",
+        "ALTER TABLE stockky_kv ADD CONSTRAINT uq_stockky_kv_k UNIQUE (k)",
+        "CREATE INDEX IF NOT EXISTS idx_stockky_kv_k ON stockky_kv (k)",
+        "CREATE INDEX IF NOT EXISTS stockky_kv_expires_idx ON stockky_kv (expires_at)",
+    ]
+
+    try:
+        with eng.begin() as conn:
+            for sql in statements:
+                try:
+                    conn.execute(text(sql))
+                except Exception as e:
+                    # UNIQUE may already be covered by PRIMARY KEY — ignore
+                    logger.debug("hard_reset statement skipped/failed: %s — %s", sql[:60], e)
+        # Also wipe the process-local memory layer so UI cannot read ghosts
+        try:
+            with _mem._lock:
+                _mem._store.clear()
+        except Exception:
+            pass
+        logger.info("hard_reset_stockky_kv: table truncated and constraints re-applied")
+        return {
+            "status": "success",
+            "message": "Database wiped and locked. Ready for fresh feed.",
+            "mode": "neon",
+        }
+    except Exception as e:
+        logger.exception("hard_reset_stockky_kv failed: %s", e)
+        return {
+            "status": "error",
+            "message": str(e)[:240],
+            "mode": "neon",
+        }
 

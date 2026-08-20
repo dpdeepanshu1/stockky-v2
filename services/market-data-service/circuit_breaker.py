@@ -344,8 +344,31 @@ def record_rate_limit_hit(
                 "nse": {"limit": 200},
             },
             "last_hit": event,
+            # Flat provider counters for simple dashboard widgets
+            "providers": {**counts},
         }
         kv_set(NEON_STATS_KEY, stats, ttl=NEON_TTL)
+
+        # Plan-compatible simple counter key (system:rate_limit_stats)
+        # Shape: { "market_data": N, "nse": M, ... } — cumulative session hits
+        try:
+            simple_key = "system:rate_limit_stats"
+            prior_simple = kv_get(simple_key)
+            simple = {}
+            if isinstance(prior_simple, dict):
+                simple = dict(prior_simple)
+            elif isinstance(prior_simple, str):
+                import json as _json
+                try:
+                    simple = _json.loads(prior_simple) or {}
+                except Exception:
+                    simple = {}
+            simple[src] = int(simple.get(src, 0) or 0) + 1
+            simple["_updated_at"] = now
+            kv_set(simple_key, simple, ttl=NEON_TTL)
+        except Exception as e:
+            logger.debug("system:rate_limit_stats write: %s", e)
+
         logger.info("rate_limit_hit recorded provider=%s status=%s", src, status)
     except Exception as e:
         logger.warning("Failed to record rate limit stat: %s", e)

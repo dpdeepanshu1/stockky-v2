@@ -9,6 +9,8 @@ Sources (in order):
 """
 from __future__ import annotations
 
+import gc
+
 import csv
 import io
 import logging
@@ -140,27 +142,186 @@ def process_bhavcopy_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     Drop high-ticket names before they reach Neon / scanners / training.
     """
     out: List[Dict[str, Any]] = []
+    dropped_price = 0
+    dropped_series = 0
     for row in rows or []:
         if not isinstance(row, dict):
             continue
         # SERIES / series filter when present
         series = str(row.get("SERIES") or row.get("series") or row.get("SctySrs") or "EQ").strip().upper()
         if series and series not in ("EQ", "BE", "BZ", ""):
+            dropped_series += 1
             continue
         close = None
-        for k in ("CLOSE", "close", "LAST", "last", "ClsPric", "LastPric", "price", "ltp"):
+        for k in ("CLOSE", "close", "LAST", "last", "ClsPric", "LastPric", "price", "ltp", "CLOSE_PRICE"):
             raw = row.get(k)
             if raw is None or raw == "":
                 continue
             try:
-                close = float(str(raw).replace(",", "").strip())
+                # Strip NSE comma formats: "5,123.45" / "12,34,567.00" / NBSP
+                s = (
+                    str(raw)
+                    .replace(",", "")
+                    .replace("\u00a0", "")
+                    .replace(" ", "")
+                    .strip()
+                )
+                if not s or s.upper() in ("-", "NA", "N/A", "NONE", "NULL"):
+                    continue
+                close = float(s)
                 if close > 0:
                     break
             except (TypeError, ValueError):
                 close = None
+        # Strict: known close > ₹5000 → drop.
         if close is not None and close > MAX_STOCK_PRICE:
+            dropped_price += 1
             continue
         out.append(row)
+    if dropped_price or dropped_series:
+        logger.info(
+            "process_bhavcopy_rows: kept=%s dropped_price=%s dropped_series=%s (max=%.0f)",
+            len(out), dropped_price, dropped_series, MAX_STOCK_PRICE,
+        )
+    return out
+
+
+
+# Columns required for EQ filter + ₹5000 gate — ignore the rest to cut RAM ~80%
+_BHAV_USECOLS = frozenset({
+    "SYMBOL", "symbol", "TckrSymb", "SECURITY",
+    "SERIES", "series", "SctySrs",
+    "CLOSE", "close", "LAST", "last", "ClsPric", "LastPric", "CLOSE_PRICE",
+    "price", "ltp",
+})
+
+
+def load_bhavcopy_slim(file_path_or_buffer) -> "pd.DataFrame":
+    """
+    RAM-safe bhavcopy reader: only SYMBOL / SERIES / CLOSE|LAST columns.
+    Accepts a path, file handle, or in-memory buffer (StringIO / BytesIO text).
+    """
+    import pandas as pd
+
+    def _usecols(c):
+        try:
+            return str(c).strip() in _BHAV_USECOLS
+        except Exception:
+            return False
+
+    try:
+        df = pd.read_csv(
+            file_path_or_buffer,
+            usecols=_usecols,
+            dtype=str,  # keep as str until we coerce prices — avoids mixed-type RAM bloat
+            low_memory=True,
+        )
+    except ValueError:
+        # usecols mismatch (header variants) — fall back to full read then drop
+        df = pd.read_csv(file_path_or_buffer, dtype=str, low_memory=True)
+        keep = [c for c in df.columns if str(c).strip() in _BHAV_USECOLS]
+        if keep:
+            df = df[keep]
+
+    # Free any intermediate frames
+    gc.collect()
+    return df
+
+
+def process_bhavcopy_dataframe(df):  # type: ignore[no-untyped-def]
+    """
+    Root ₹5000 filter for pandas DataFrames (NSE bhavcopy / sec_bhavdata).
+    Drop expensive stocks immediately before they enter the database during
+    a fresh feed. Accepts a pandas DataFrame *or* a list of dict rows.
+    Returns a filtered DataFrame when input was a DataFrame, otherwise a list.
+    Falls back to pure-Python if pandas is not installed.
+    """
+    # Path / buffer → slim CSV load (only SYMBOL/SERIES/CLOSE columns)
+    if isinstance(df, (str, bytes)) or hasattr(df, "read"):
+        try:
+            df = load_bhavcopy_slim(df)
+        except Exception as e:
+            logger.warning("load_bhavcopy_slim failed: %s", e)
+            return df if not isinstance(df, (str, bytes)) else None
+
+    # List / records path — always use process_bhavcopy_rows
+    if isinstance(df, list):
+        kept = process_bhavcopy_rows(df)
+        gc.collect()
+        return kept
+
+    if df is None:
+        return df
+
+    try:
+        import pandas as pd  # optional dependency
+    except ImportError:
+        # Pure-Python fallback for objects that look like DataFrames
+        if hasattr(df, "to_dict"):
+            try:
+                return process_bhavcopy_rows(df.to_dict(orient="records"))
+            except Exception:
+                return df
+        return df
+
+    if not isinstance(df, pd.DataFrame):
+        # Unknown type — try records conversion, else pass through
+        if hasattr(df, "to_dict"):
+            try:
+                return process_bhavcopy_rows(df.to_dict(orient="records"))
+            except Exception:
+                pass
+        return df
+
+    if df.empty:
+        return df
+
+    work = df.copy()
+    work.columns = work.columns.str.strip()
+
+    # EQ-only (allow BE/BZ which are still cash equity)
+    series_col = None
+    for c in ("SERIES", "series", "SctySrs"):
+        if c in work.columns:
+            series_col = c
+            break
+    if series_col is not None:
+        s = work[series_col].astype(str).str.strip().str.upper()
+        work = work[s.isin(["EQ", "BE", "BZ", ""]) | s.isna()]
+
+    # Force conversion to float on ALL known price columns (NSE comma formats)
+    for col in ("CLOSE", "close", "LAST", "last", "ClsPric", "LastPric", "CLOSE_PRICE", "price", "ltp"):
+        if col in work.columns:
+            work[col] = pd.to_numeric(
+                work[col]
+                .astype(str)
+                .str.replace(",", "", regex=False)
+                .str.replace("\u00a0", "", regex=False)
+                .str.strip(),
+                errors="coerce",
+            )
+
+    # Strict <= 5000 filter (NaN after coerce is dropped — prevents string-trap survivors)
+    if "CLOSE" in work.columns:
+        work = work[work["CLOSE"].notna() & (work["CLOSE"] > 0) & (work["CLOSE"] <= MAX_STOCK_PRICE)]
+    elif "close" in work.columns:
+        work = work[work["close"].notna() & (work["close"] > 0) & (work["close"] <= MAX_STOCK_PRICE)]
+    elif "LAST" in work.columns:
+        work = work[work["LAST"].notna() & (work["LAST"] > 0) & (work["LAST"] <= MAX_STOCK_PRICE)]
+    elif "last" in work.columns:
+        work = work[work["last"].notna() & (work["last"] > 0) & (work["last"] <= MAX_STOCK_PRICE)]
+
+    logger.info(
+        "process_bhavcopy_dataframe: %s → %s rows (strict max_price=%.0f, commas stripped)",
+        len(df), len(work), MAX_STOCK_PRICE,
+    )
+    out = work.reset_index(drop=True)
+    # Drop reference to full work frame and reclaim RAM on free-tier (512MB)
+    try:
+        del work
+    except Exception:
+        pass
+    gc.collect()
     return out
 
 

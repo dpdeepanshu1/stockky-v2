@@ -49,6 +49,22 @@ _INDEX_WARM_LOCK = threading.Lock()
 _DATA_FEED_STOP_FLAG = threading.Event()
 
 
+def clear_local_data_feed_caches() -> None:
+    """
+    Wipe every process-local data-feed structure.
+    Called by hard-reset so the UI cannot serve ghost symbols after a TRUNCATE.
+    """
+    global _INDEX_WARMED
+    with _INDEX_WARM_LOCK:
+        _LOCAL_SYMBOLS.clear()
+        _LOCAL_META.clear()
+        _LOCAL_JOB.clear()
+        _LOCAL_INDEX.clear()
+        _INDEX_WARMED = False
+    _DATA_FEED_STOP_FLAG.clear()
+    logger.info("data_feed: process-local caches cleared (hard-reset)")
+
+
 def request_data_feed_stop() -> None:
     """Called by /data-feed/stop — worker checks this every symbol."""
     _DATA_FEED_STOP_FLAG.set()
@@ -75,28 +91,40 @@ def _norm_sym(symbol: str) -> str:
 MAX_STOCK_PRICE = 5000.0
 
 
+def _coerce_price(val) -> float:
+    """Parse NSE-style prices that may contain commas: '5,123.45' / '1,20,000'."""
+    if val is None or val == "":
+        return 0.0
+    try:
+        if isinstance(val, (int, float)):
+            f = float(val)
+            return f if f > 0 and f == f else 0.0
+        s = str(val).replace(",", "").replace("\u00a0", "").replace(" ", "").strip()
+        if not s or s.upper() in ("-", "NA", "N/A", "NONE", "NULL"):
+            return 0.0
+        f = float(s)
+        return f if f > 0 and f == f else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _payload_price(payload: dict) -> float:
     """Best-effort positive price from a feed payload (flat or nested metrics)."""
     if not isinstance(payload, dict):
         return 0.0
     for k in ("price", "close", "cmp", "ltp", "last_price", "current_price", "prev_close"):
-        try:
-            v = float(payload.get(k) or 0)
-            if v > 0:
-                return v
-        except (TypeError, ValueError):
-            pass
+        v = _coerce_price(payload.get(k))
+        if v > 0:
+            return v
     for nest_key in ("metrics", "data", "quote", "ohlc", "ticker"):
         nested = payload.get(nest_key)
         if isinstance(nested, dict):
             for k in ("price", "close", "cmp", "ltp", "last_price", "current_price", "prev_close"):
-                try:
-                    v = float(nested.get(k) or 0)
-                    if v > 0:
-                        return v
-                except (TypeError, ValueError):
-                    pass
+                v = _coerce_price(nested.get(k))
+                if v > 0:
+                    return v
     return 0.0
+
 
 
 def normalize_feed_payload(data: dict) -> dict:
@@ -795,3 +823,140 @@ def get_all_stock_feeds(symbols: List[str]) -> Dict[str, dict]:
 def save_stock_feed(symbol: str, payload: dict, ttl: int = DATA_FEED_TTL) -> None:
     """Standardized write: dual key stockky:data_feed:sym: + feed:"""
     get_data_feed_store().put_symbol(symbol, payload, ttl=ttl)
+
+
+def _score_from_payload(data: dict) -> float:
+    """Best-effort conviction / combined score from a feed or scan row."""
+    if not isinstance(data, dict):
+        return 0.0
+    for k in (
+        "conviction_score",
+        "conviction",
+        "combined_score",
+        "score",
+        "decision_score",
+    ):
+        try:
+            v = float(data.get(k) or 0)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    # Nested metrics
+    for nest in ("metrics", "data", "decision"):
+        nested = data.get(nest)
+        if isinstance(nested, dict):
+            for k in ("conviction_score", "conviction", "combined_score", "score"):
+                try:
+                    v = float(nested.get(k) or 0)
+                    if v > 0:
+                        return v
+                except (TypeError, ValueError):
+                    pass
+    return 0.0
+
+
+def find_prepare_to_buy_candidates(
+    min_score: float = 58.0,
+    max_score: float = 68.0,
+) -> List[str]:
+    """
+    High-conviction "Prepare to Buy" band only — used by surgical quote refresh
+    so we never storm market-data for the full 300-symbol universe.
+    Sources:
+      1) Neon data-feed payloads in the score band
+      2) Last full-scan / hot-result rows with decision PREPARE TO BUY
+    """
+    store = get_data_feed_store()
+    candidates: List[str] = []
+    seen = set()
+
+    try:
+        symbols = store.list_symbols() or []
+    except Exception:
+        symbols = []
+
+    feeds = {}
+    try:
+        feeds = get_all_stock_feeds(symbols) if symbols else {}
+    except Exception as e:
+        logger.debug("prepare-to-buy feed load: %s", e)
+
+    for sym in symbols:
+        base = _norm_sym(sym)
+        if not base or base in seen:
+            continue
+        data = feeds.get(base) or {}
+        score = _score_from_payload(data)
+        decision = str(data.get("decision") or data.get("action") or "").upper()
+        in_band = min_score <= score < max_score
+        is_ptb = "PREPARE" in decision
+        if in_band or is_ptb:
+            seen.add(base)
+            candidates.append(base)
+
+    # Also pull from last full scan / hot result if available
+    for key in ("stockky:last_full_scan", "stockky:hot_result_db", "stockky:hot_result"):
+        try:
+            from kv_cache import kv_get
+            blob = kv_get(key)
+        except Exception:
+            blob = None
+        rows = []
+        if isinstance(blob, dict):
+            rows = blob.get("results") or blob.get("recommendations") or blob.get("all_results") or []
+            if not rows and isinstance(blob.get("data"), list):
+                rows = blob["data"]
+        elif isinstance(blob, list):
+            rows = blob
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            base = _norm_sym(str(row.get("symbol") or ""))
+            if not base or base in seen:
+                continue
+            score = _score_from_payload(row)
+            decision = str(row.get("decision") or row.get("action") or "").upper()
+            if (min_score <= score < max_score) or ("PREPARE" in decision):
+                seen.add(base)
+                candidates.append(base)
+
+    logger.info(
+        "prepare-to-buy candidates: %s (band %.0f–%.0f)",
+        len(candidates), min_score, max_score,
+    )
+    return candidates
+
+
+def patch_feed_price(symbol: str, live_price: float) -> bool:
+    """Update only the price fields on an existing feed row (surgical refresh)."""
+    base = _norm_sym(symbol)
+    if not base:
+        return False
+    try:
+        px = float(live_price)
+    except (TypeError, ValueError):
+        return False
+    if px <= 0:
+        return False
+    if px > MAX_STOCK_PRICE:
+        logger.info("patch_feed_price skip %s — ₹%.2f > cap", base, px)
+        return False
+
+    store = get_data_feed_store()
+    existing = store.get_symbol(base) or {}
+    if not isinstance(existing, dict):
+        existing = {}
+    existing["price"] = px
+    existing["close"] = px
+    existing["cmp"] = px
+    existing["ltp"] = px
+    existing["last_price"] = px
+    existing["current_price"] = px
+    existing["price_refreshed_at"] = _now_iso()
+    try:
+        store.put_symbol(base, existing)
+        return True
+    except Exception as e:
+        logger.warning("patch_feed_price %s failed: %s", base, e)
+        return False

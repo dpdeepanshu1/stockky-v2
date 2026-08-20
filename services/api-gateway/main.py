@@ -994,12 +994,81 @@ def _get_52w_extreme_symbols() -> List[str]:
     return out[:80]
 
 
+# ── ≤ ₹5000 universe pre-filter ─────────────────────────────────────────────
+MAX_UNIVERSE_PRICE = 5000.0
+
+
+def _filter_symbols_under_max_price(symbols: List[str]) -> List[str]:
+    """
+    Drop symbols whose known feed/DB price is > ₹5000.
+    Unknown price (0) is KEPT so a later live fetch can still populate them;
+    the scanner AVOID path will kill any that remain missing or over-limit.
+    Aligns frontend "Scanned" vs "Total" counters with the root price gate.
+    """
+    if not symbols:
+        return []
+    clean = []
+    seen = set()
+    for s in symbols:
+        su = str(s or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        if su and su not in seen:
+            seen.add(su)
+            clean.append(su)
+    if not clean:
+        return []
+
+    feeds: dict = {}
+    try:
+        from data_feed import get_all_stock_feeds
+        feeds = get_all_stock_feeds(clean) or {}
+    except Exception as e:
+        logger.debug("universe price filter feed load: %s", e)
+        feeds = {}
+
+    try:
+        from price_resolver import resolve_display_price
+    except Exception:
+        resolve_display_price = None  # type: ignore
+
+    kept: List[str] = []
+    dropped = 0
+    for sym in clean:
+        feed_item = feeds.get(sym) or {}
+        price = 0.0
+        if resolve_display_price is not None:
+            try:
+                price = float(resolve_display_price(sym, {}, feed_item) or 0)
+            except Exception:
+                price = 0.0
+        else:
+            for k in ("price", "close", "cmp", "ltp", "last_price", "prev_close"):
+                try:
+                    v = float(feed_item.get(k) or 0)
+                    if v > 0:
+                        price = v
+                        break
+                except (TypeError, ValueError):
+                    pass
+        # Keep if unknown (0) OR <= 5000
+        if price <= 0 or price <= MAX_UNIVERSE_PRICE:
+            kept.append(sym)
+        else:
+            dropped += 1
+    if dropped:
+        logger.info(
+            "Universe ≤₹%.0f filter: kept=%s dropped=%s",
+            MAX_UNIVERSE_PRICE, len(kept), dropped,
+        )
+    return kept
+
+
 # ── Build scan universe ──────────────────────────────────────────────────────
 def _build_scan_universe() -> List[str]:
 
     cached = _redis_get(SCAN_UNIVERSE_KEY)
     if cached and isinstance(cached, list) and len(cached) > 0:
-        return cached
+        # Always re-apply ≤₹5000 gate so a stale cache cannot reintroduce high-ticket names
+        return _filter_symbols_under_max_price(cached)
 
     universe = set()
     try:
@@ -1111,12 +1180,14 @@ def _build_scan_universe() -> List[str]:
         ttl = 1800 if market_open else 21600  # 30m vs 6h
     except Exception:
         ttl = 3600
+    result = _filter_symbols_under_max_price(result)
     _redis_set(SCAN_UNIVERSE_KEY, result, ttl=ttl)
     logger.info(
-        "Scan universe built: %s symbols (dynamic=%s, ttl=%ss)",
+        "Scan universe built: %s symbols (dynamic=%s, ttl=%ss, ≤₹%.0f gate)",
         len(result),
         len(dynamic_priority),
         ttl,
+        MAX_UNIVERSE_PRICE,
     )
     return result
 
@@ -4745,10 +4816,10 @@ def get_market_indices(force_refresh: bool = False):
                 }
             )
 
-# ── Universe preview ──────────────────────────────────────────────────────
+# ── Universe preview + ≤ ₹5000 pre-filter ─────────────────────────────────
 @app.get("/scan/universe")
 def get_scan_universe():
-    universe = _build_scan_universe()
+    universe = _build_scan_universe()  # already ≤₹5000 filtered
     searched = _load_searched()
     movers = _get_momentum_movers()
     return {
@@ -4756,7 +4827,47 @@ def get_scan_universe():
         "symbols": universe,
         "searched_symbols_included": [s for s in searched if s in universe],
         "momentum_movers": movers,
+        "max_price": MAX_UNIVERSE_PRICE,
     }
+
+
+@app.get("/api/universe")
+@app.get("/universe")
+async def get_universe():
+    """
+    Frontend-facing universe list, strictly ≤ ₹5000 (or unknown price).
+    Prefer decision-prediction training universe when available; fall back to
+    the local scan universe. Always re-apply the price gate so "Scanned" and
+    "Total" counters stay aligned with the root filter.
+    """
+    symbols: List[str] = []
+    try:
+        decision_base = os.getenv("DECISION_URL", DECISION_URL)
+        # DECISION_URL may already end with /decision — strip to service root for /training
+        root = decision_base.rstrip("/")
+        if root.endswith("/decision"):
+            root = root[: -len("/decision")]
+        training_url = f"{root}/training/universe"
+        async with httpx.AsyncClient() as client:
+            res = await client.get(training_url, timeout=10.0)
+            if res.status_code == 200:
+                body = res.json()
+                if isinstance(body, list):
+                    symbols = [str(s) for s in body]
+                elif isinstance(body, dict):
+                    symbols = [str(s) for s in (body.get("symbols") or body.get("universe") or [])]
+    except Exception as e:
+        logger.debug("api/universe training fetch: %s", e)
+        symbols = []
+
+    if not symbols:
+        try:
+            symbols = _build_scan_universe()
+        except Exception:
+            symbols = []
+
+    filtered = _filter_symbols_under_max_price(symbols)
+    return filtered
 
 @app.delete("/scan/universe/cache")
 def clear_universe_cache():
@@ -6437,6 +6548,169 @@ def ops_activity_status():
     }
 
 
+@app.post("/data-feed/hard-reset")
+@app.post("/api/data-feed/hard-reset")
+@app.post("/api/feed/hard-reset")
+async def hard_reset_database():
+    """
+    Wipes stockky_kv and re-asserts unique constraint + index on k.
+    Called by the frontend "Feed Fresh Data" button *before* /data-feed/run
+    so a corrupted / over-₹5000 universe is nuked on autopilot.
+    """
+    try:
+        from kv_cache import hard_reset_stockky_kv
+        from data_feed import clear_local_data_feed_caches, request_data_feed_stop, clear_data_feed_stop
+
+        # Stop any in-flight feed first
+        try:
+            request_data_feed_stop()
+        except Exception:
+            pass
+
+        result = hard_reset_stockky_kv()
+        try:
+            clear_local_data_feed_caches()
+        except Exception:
+            pass
+        try:
+            clear_data_feed_stop()
+        except Exception:
+            pass
+
+        # Destroy Split-Brain ghosts: scan-universe cache, last-scan, known-symbols
+        ghost_keys = [
+            SCAN_UNIVERSE_KEY,
+            "stockky:last_full_scan",
+            "stockky:known_symbols",
+            "stockky:data_feed:index",
+            "stockky:data_feed:meta",
+            "stockky:data_feed:job",
+            "stockky:hot_result",
+            "stockky:hot_result_db",
+            "stockky:hot_job",
+        ]
+        for gk in ghost_keys:
+            try:
+                _redis_delete(gk) if "_redis_delete" in dir() else None
+            except Exception:
+                pass
+            try:
+                if _kv_cache is not None:
+                    _kv_cache.kv_delete(gk)
+            except Exception:
+                pass
+            try:
+                if _redis:
+                    _redis.delete(gk)
+            except Exception:
+                pass
+
+        # Reset job/meta so UI shows 0 stocks immediately
+        try:
+            store = _feed_store()
+            store.set_job(
+                status="idle",
+                message="Hard-reset complete — ready for fresh feed",
+                stop_requested=False,
+                processed=0,
+                total=0,
+                ok_count=0,
+            )
+            store.set_meta(
+                last_success_at=None,
+                last_count=0,
+                last_message="Hard-reset — memory + Neon wiped",
+                stock_count=0,
+            )
+        except Exception as e:
+            logger.debug("hard-reset job/meta clear: %s", e)
+
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail=result.get("message", "hard-reset failed"))
+        result["message"] = result.get("message") or "Database wiped, locked, and memory cleared. Ready for feed."
+        result["ghosts_cleared"] = ghost_keys
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("hard_reset_database: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)[:240])
+
+
+@app.post("/data-feed/refresh-prepare-to-buy")
+@app.post("/api/data-feed/refresh-prepare-to-buy")
+@app.post("/api/feed/refresh-prepare-to-buy")
+async def refresh_prepare_to_buy(
+    min_score: float = 58.0,
+    max_score: float = 68.0,
+):
+    """
+    Surgical live-quote refresh for high-conviction "Prepare to Buy" setups only.
+    Completely bypasses the 300-stock API storm — only candidates in the
+    [min_score, max_score) band (default 58–68) are quoted, with a 0.3s gap.
+    """
+    import asyncio
+    from data_feed import (
+        find_prepare_to_buy_candidates,
+        patch_feed_price,
+    )
+
+    try:
+        candidates = find_prepare_to_buy_candidates(min_score=min_score, max_score=max_score)
+    except Exception as e:
+        logger.exception("refresh_prepare_to_buy candidates: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+    if not candidates:
+        return {
+            "status": "success",
+            "refreshed_count": 0,
+            "symbols": [],
+            "message": "No Prepare-to-Buy candidates in score band",
+            "min_score": min_score,
+            "max_score": max_score,
+        }
+
+    md_base = (MARKET_DATA_URL or "").rstrip("/")
+    updated: list = []
+    errors: list = []
+
+    async with httpx.AsyncClient() as client:
+        for symbol in candidates:
+            try:
+                q_res = await client.get(f"{md_base}/quote/{symbol}", timeout=3.0)
+                if q_res.status_code == 200:
+                    body = q_res.json() if q_res.content else {}
+                    live_price = None
+                    if isinstance(body, dict):
+                        for k in ("cmp", "price", "ltp", "close", "last_price", "regularMarketPrice"):
+                            try:
+                                v = float(body.get(k) or 0)
+                                if v > 0:
+                                    live_price = v
+                                    break
+                            except (TypeError, ValueError):
+                                pass
+                    if live_price and patch_feed_price(symbol, live_price):
+                        updated.append(symbol)
+                else:
+                    errors.append({"symbol": symbol, "status": q_res.status_code})
+            except Exception as e:
+                errors.append({"symbol": symbol, "error": str(e)[:120]})
+            await asyncio.sleep(0.3)
+
+    return {
+        "status": "success",
+        "refreshed_count": len(updated),
+        "symbols": candidates,
+        "updated": updated,
+        "errors": errors[:20],
+        "min_score": min_score,
+        "max_score": max_score,
+        "message": f"Refreshed {len(updated)}/{len(candidates)} Prepare-to-Buy quotes",
+    }
+
+
 @app.get("/data-feed/meta")
 @app.get("/api/data-feed/meta")
 def data_feed_meta():
@@ -6535,6 +6809,92 @@ def data_feed_status():
         "last_success": last_ok,
         "last_success_at": last_ok,
         "last_count": fed_count,
+    }
+
+
+
+
+_REQUIRED_FEED_FIELDS = ("price", "rsi", "pe_ratio", "roce", "sentiment_score")
+
+@app.get("/api/feed/audit-missing")
+@app.get("/data-feed/audit-missing")
+@app.get("/api/data-feed/audit-missing")
+async def audit_missing_feed_data(limit: int = 500):
+    """
+    Audits data-feed records to calculate the exact DB Health Score.
+    MUST be registered BEFORE /api/feed/{symbol} so 'audit-missing' is not
+    captured as a symbol path (silent 404 / null → UI 0% and dashes).
+    """
+    store = _feed_store()
+    symbols: list = []
+    try:
+        symbols = list(store.list_symbols() or [])
+    except Exception as e:
+        logger.debug("audit list_symbols: %s", e)
+        symbols = []
+
+    if not symbols:
+        try:
+            import kv_cache as _kc
+            idx = _kc.kv_get("stockky:data_feed:index")
+            if isinstance(idx, dict) and isinstance(idx.get("symbols"), list):
+                symbols = [str(s).upper().strip() for s in idx["symbols"] if s]
+            elif isinstance(idx, list):
+                symbols = [str(s).upper().strip() for s in idx if s]
+        except Exception as e:
+            logger.debug("audit index fallback: %s", e)
+
+    seen = set()
+    clean = []
+    for s in symbols:
+        su = str(s or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        if su and su not in seen and not su.startswith("SYSTEM:"):
+            seen.add(su)
+            clean.append(su)
+    symbols = clean
+
+    incomplete = []
+    complete_count = 0
+    total = 0
+    for sym in symbols:
+        total += 1
+        try:
+            row = store.get_symbol(sym) or {}
+        except Exception:
+            row = {}
+        if not isinstance(row, dict):
+            row = {}
+        missing = _feed_missing_fields(row)
+        if missing:
+            incomplete.append({
+                "symbol": sym,
+                "current_price": _feed_resolved_price(row),
+                "missing_fields": missing,
+                "updated_at": str(row.get("updated_at") or row.get("repair_updated_at") or row.get("fed_at") or ""),
+            })
+        else:
+            complete_count += 1
+
+    incomplete.sort(key=lambda x: (-len(x["missing_fields"]), x["symbol"]))
+    incomplete_total = len(incomplete)
+    if limit and limit > 0:
+        incomplete = incomplete[: int(limit)]
+
+    health = round((complete_count / max(total, 1)) * 100, 1) if total > 0 else 0.0
+
+    return {
+        "ok": True,
+        "total_universe": total,
+        "fully_populated": complete_count,
+        "incomplete_count": incomplete_total,
+        "health_score": health,
+        "incomplete_stocks": incomplete,
+        "required_fields": list(_REQUIRED_FEED_FIELDS),
+        "message": (
+            "No feed symbols tracked yet — run Data Feed first."
+            if total == 0
+            else f"Health {health}% · {complete_count}/{total} complete"
+        ),
     }
 
 
@@ -6707,7 +7067,7 @@ async def data_feed_update_batch_refresh(request: Request):
 
 
 # ── Surgical Data Repair (audit + non-destructive patch) ───────────────────
-_REQUIRED_FEED_FIELDS = ("price", "rsi", "pe_ratio", "roce", "sentiment_score")
+# _REQUIRED_FEED_FIELDS defined above (before audit-missing route)
 
 
 def _feed_missing_fields(payload: dict) -> list:
@@ -6715,16 +7075,8 @@ def _feed_missing_fields(payload: dict) -> list:
     data = payload if isinstance(payload, dict) else {}
     m = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
     missing = []
-    # Price: any of price/close/ltp/cmp/prev_close
-    price = 0.0
-    for k in ("price", "close", "ltp", "cmp", "last_price", "prev_close"):
-        try:
-            v = float(data.get(k) or m.get(k) or 0)
-            if v > 0:
-                price = v
-                break
-        except (TypeError, ValueError):
-            pass
+    # Price: comma-safe via _feed_resolved_price
+    price = _feed_resolved_price(data)
     if price <= 0:
         missing.append("price")
     rsi = data.get("rsi", m.get("rsi"))
@@ -6753,15 +7105,34 @@ def _feed_missing_fields(payload: dict) -> list:
 
 def _feed_resolved_price(payload: dict) -> float:
     data = payload if isinstance(payload, dict) else {}
+    try:
+        from data_feed import _payload_price
+        px = float(_payload_price(data) or 0)
+        if px > 0:
+            return px
+    except Exception:
+        pass
+    try:
+        from price_resolver import resolve_display_price
+        px = float(resolve_display_price(str(data.get("symbol") or ""), {}, data) or 0)
+        if px > 0:
+            return px
+    except Exception:
+        pass
     m = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
     for k in ("price", "close", "ltp", "cmp", "last_price", "prev_close"):
+        raw = data.get(k) if data.get(k) not in (None, "") else m.get(k)
         try:
-            v = float(data.get(k) or m.get(k) or 0)
+            s = str(raw or "").replace(",", "").replace(" ", "").strip()
+            if not s or s.upper() in ("-", "NA", "N/A"):
+                continue
+            v = float(s)
             if v > 0:
                 return v
         except (TypeError, ValueError):
             pass
     return 0.0
+
 
 
 async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> dict:
@@ -6870,50 +7241,6 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
     }
 
 
-@app.get("/api/feed/audit-missing")
-@app.get("/data-feed/audit-missing")
-async def audit_missing_feed_data(limit: int = 500):
-    """
-    Zero upstream load — reads Neon data-feed only.
-    Finds symbols missing price / rsi / pe_ratio / roce / sentiment_score.
-    """
-    store = _feed_store()
-    try:
-        symbols = store.list_symbols() or []
-    except Exception:
-        symbols = []
-    incomplete = []
-    complete_count = 0
-    total = 0
-    for sym in symbols:
-        total += 1
-        try:
-            row = store.get_symbol(sym) or {}
-        except Exception:
-            row = {}
-        missing = _feed_missing_fields(row)
-        if missing:
-            incomplete.append({
-                "symbol": sym,
-                "current_price": _feed_resolved_price(row),
-                "missing_fields": missing,
-                "updated_at": row.get("updated_at") or row.get("repair_updated_at") or row.get("fed_at"),
-            })
-        else:
-            complete_count += 1
-    # Sort: most missing first, then alpha
-    incomplete.sort(key=lambda x: (-len(x["missing_fields"]), x["symbol"]))
-    if limit and limit > 0:
-        incomplete = incomplete[: int(limit)]
-    health = round((complete_count / max(total, 1)) * 100, 1)
-    return {
-        "total_universe": total,
-        "fully_populated": complete_count,
-        "incomplete_count": len(incomplete) if limit <= 0 else max(0, total - complete_count),
-        "health_score": health,
-        "incomplete_stocks": incomplete,
-        "required_fields": list(_REQUIRED_FEED_FIELDS),
-    }
 
 
 @app.post("/api/feed/repair-single/{symbol}")

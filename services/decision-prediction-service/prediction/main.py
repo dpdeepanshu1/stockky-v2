@@ -88,15 +88,50 @@ GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip() or None
 app = FastAPI(title="Stockky Prediction Service", version="0.7.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# ── Model singleton (RAM protection) ──────────────────────────────────────
+# Load XGBoost / calibrated pipeline ONCE at process start. Never re-joblib.load
+# inside request handlers — duplicate in-memory copies blow free-tier 512MB.
+import threading
+
 _model = None
-if os.path.exists(MODEL_PATH):
-    try:
-        _model = joblib.load(MODEL_PATH)
-        logger.info("Loaded trained model from %s", MODEL_PATH)
-    except Exception as e:
-        logger.error("Failed to load model: %s", e)
-else:
-    logger.warning("No trained model found — using fallback")
+_model_lock = threading.Lock()
+_model_load_attempted = False
+GLOBAL_ML_MODEL = None  # public alias for the singleton
+
+
+def get_ml_model():
+    """
+    Thread-safe accessor for the process-wide ML model.
+    Loads at most once; subsequent calls return the same object in memory.
+    """
+    global _model, GLOBAL_ML_MODEL, _model_load_attempted
+    if _model is not None or _model_load_attempted:
+        return _model
+    with _model_lock:
+        if _model is not None or _model_load_attempted:
+            return _model
+        _model_load_attempted = True
+        if not os.path.exists(MODEL_PATH):
+            logger.warning("No trained model found at %s — using fallback", MODEL_PATH)
+            return None
+        try:
+            _model = joblib.load(MODEL_PATH)
+            GLOBAL_ML_MODEL = _model
+            logger.info(
+                "Loaded trained model singleton from %s (type=%s)",
+                MODEL_PATH,
+                type(_model).__name__,
+            )
+        except Exception as e:
+            logger.error("Failed to load model: %s", e)
+            _model = None
+            GLOBAL_ML_MODEL = None
+        return _model
+
+
+# Eager load at import / startup so first /predict is warm
+_model = get_ml_model()
+GLOBAL_ML_MODEL = _model
 
 
 @app.get("/")
@@ -106,21 +141,22 @@ async def root():
         "version": "0.7.0",
         "status": "running",
         "features": "technical + fundamental + news",
-        "model_loaded": _model is not None,
+        "model_loaded": get_ml_model() is not None,
     }
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "prediction-service", "model_loaded": _model is not None}
+    return {"status": "ok", "service": "prediction-service", "model_loaded": get_ml_model() is not None}
 
 
 @app.get("/model/info")
 def model_info():
     """Describe the loaded prediction model (features, path, type)."""
     from pred_features import FEATURE_COLUMNS, TECHNICAL_COLUMNS, FUNDAMENTAL_COLUMNS, NEWS_COLUMNS
+    _m0 = get_ml_model()
     info = {
-        "model_loaded": _model is not None,
+        "model_loaded": _m0 is not None,
         "model_path": MODEL_PATH,
         "feature_count": len(FEATURE_COLUMNS),
         "features": FEATURE_COLUMNS,
@@ -129,11 +165,12 @@ def model_info():
         "news_features": NEWS_COLUMNS,
         "note": "Live /predict uses latest fund+news. Retrain with pred_train.py after compute_feature_frame fix.",
     }
-    if _model is not None:
-        info["model_type"] = type(_model).__name__
+    _m = get_ml_model()
+    if _m is not None:
+        info["model_type"] = type(_m).__name__
         for attr in ("n_features_in_", "classes_", "feature_importances_"):
-            if hasattr(_model, attr):
-                val = getattr(_model, attr)
+            if hasattr(_m, attr):
+                val = getattr(_m, attr)
                 try:
                     import numpy as np
                     if hasattr(val, "tolist"):
@@ -434,7 +471,8 @@ def predict(symbol: str):
     (correct by definition — no future information).
     """
     try:
-        if _model is None:
+        model = get_ml_model()  # singleton — never reloads per request
+        if model is None:
             return {
                 "symbol": symbol.upper(),
                 "model_loaded": False,
@@ -456,10 +494,10 @@ def predict(symbol: str):
             as_of_date=datetime.utcnow(),
         )
 
-        aligned = _align_features(features, _model)
-        expected = list(getattr(_model, "feature_names_in_", EXPECTED_FEATURES))
+        aligned = _align_features(features, model)
+        expected = list(getattr(model, "feature_names_in_", EXPECTED_FEATURES))
         X = features_to_ordered_array(aligned, expected)
-        probability = float(_model.predict_proba(X)[0, 1])
+        probability = float(model.predict_proba(X)[0, 1])
         # Convert probability to 0-100 score commonly used by decision engine
         prediction_score = round(probability * 100, 2)
 

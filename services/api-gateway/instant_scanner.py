@@ -32,6 +32,57 @@ DEFAULT_STATIC_INDICATORS: Dict[str, Any] = {
 }
 
 
+def _avoid_payload(symbol: str, price: float = 0.0, reason: str = "PRICE > 5000 FILTER / NO DATA") -> Dict[str, Any]:
+    """
+    Definitive AVOID card — kills frontend "Syncing..." ghosts for missing
+    or over-₹5000 symbols. Zero downstream HTTP. Shape matches decision cards
+    so the UI can render immediately without a pending state.
+    """
+    base = str(symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    px = float(price or 0.0)
+    if px < 0:
+        px = 0.0
+    out: Dict[str, Any] = {
+        "symbol": base,
+        "price": px,
+        "cmp": px,
+        "close": px if px > 0 else None,
+        "current_price": px if px > 0 else None,
+        "ltp": px if px > 0 else None,
+        "last_price": px if px > 0 else None,
+        "action": "AVOID",
+        "decision": "AVOID",
+        "conviction_score": 0.0,
+        "conviction": 0.0,
+        "combined_score": 0,
+        "verdict": reason,
+        "technical_score": 0.0,
+        "fundamental_score": 0.0,
+        "confidence": "Low",
+        "change_pct": 0.0,
+        "status": "AVOID",
+        "skipped_high_price": px > MAX_STOCK_PRICE,
+        "data_insufficient": px <= 0,
+        "max_stock_price": MAX_STOCK_PRICE,
+        "lite_fastpath": True,
+        "instant_scanner": True,
+        "from_data_feed": False,
+        "natural_language_summary": f"{base}: AVOID — {reason}",
+        "reasons": {
+            "lite": [reason],
+            "technical": [reason],
+            "fundamental": [reason],
+        },
+    }
+    try:
+        from price_resolver import apply_price_aliases
+        if px > 0:
+            out = apply_price_aliases(out, px)
+    except Exception:
+        pass
+    return out
+
+
 def _f(val: Any, default: float = 0.0) -> float:
     try:
         if val is None or val == "":
@@ -262,33 +313,29 @@ def compute_instant_scores(
     if prev_close <= 0 and price > 0:
         prev_close = price
 
-    # Universal ≤ ₹5000 gate — skip scoring for high-ticket names
+    # Universal ≤ ₹5000 gate — definitive AVOID (not SKIP) so UI never spins
     if price > MAX_STOCK_PRICE:
-        return {
-            "symbol": base,
-            "decision": "SKIP",
-            "confidence": "Low",
-            "combined_score": 0,
-            "technical_score": 0,
-            "fundamental_score": 0,
-            "conviction": 0,
-            "change_pct": 0.0,
-            "close": price,
-            "price": price,
-            "cmp": price,
-            "current_price": price,
-            "ltp": price,
-            "last_price": price,
-            "skipped_high_price": True,
-            "max_stock_price": MAX_STOCK_PRICE,
-            "data_insufficient": False,
-            "lite_fastpath": True,
-            "instant_scanner": True,
-            "status": "SKIPPED",
-            "natural_language_summary": (
-                f"{base}: SKIPPED — price ₹{price:.2f} > ₹{MAX_STOCK_PRICE:.0f} cap"
-            ),
-        }
+        return _avoid_payload(
+            base,
+            price,
+            f"PRICE > ₹{MAX_STOCK_PRICE:.0f} FILTER (₹{price:.2f})",
+        )
+
+    # No usable price and no feed → AVOID immediately (kills Syncing… ghosts)
+    has_feed = bool(feed) and (
+        feed.get("fundamental_score") is not None
+        or feed.get("technical_score") is not None
+        or feed.get("metrics")
+        or feed.get("combined_score") is not None
+        or feed.get("rsi") is not None
+        or feed.get("prev_close") is not None
+        or feed.get("pe_ratio") is not None
+        or feed.get("roce") is not None
+        or feed.get("price") is not None
+        or feed.get("close") is not None
+    )
+    if price <= 0 and not has_feed:
+        return _avoid_payload(base, 0.0, "NO DATA / MISSING FROM FEED")
 
     change_pct = 0.0
     if price > 0 and prev_close > 0:
@@ -311,31 +358,15 @@ def compute_instant_scores(
     entry_low = round(price * 0.995, 2) if price > 0 else None
     entry_high = round(price * 1.008, 2) if price > 0 else None
 
-    has_feed = bool(feed) and (
-        feed.get("fundamental_score") is not None
-        or feed.get("technical_score") is not None
-        or feed.get("metrics")
-        or feed.get("combined_score") is not None
-        or feed.get("rsi") is not None
-        or feed.get("prev_close") is not None
-        or feed.get("pe_ratio") is not None
-        or feed.get("roce") is not None
-    )
-
-    sparse = not has_feed and price <= 0
-    if sparse:
-        decision = "HOLD"
-        confidence = "Low"
-        combined = 40
-        tech = 40
-        fund = 40
-        status = "SYNCING"
-    else:
-        # Price-only (no Neon row): still READY with default indicators + momentum
-        status = "READY" if price > 0 else "SYNCING"
-        if not has_feed and price > 0:
-            # Tag so UI knows scores are provisional
+    # Price-only (no Neon row): still READY with default indicators + momentum
+    if price > 0:
+        status = "READY"
+        if not has_feed:
             confidence = confidence if confidence else "Low"
+    else:
+        # Has some feed metrics but no price — provisional, not infinite Syncing
+        status = "READY"
+        confidence = "Low"
 
     out: Dict[str, Any] = {
         "symbol": base,
@@ -367,7 +398,7 @@ def compute_instant_scores(
         "news_score": feed.get("news_score"),
         "event_risk": feed.get("event_risk"),
         "from_data_feed": has_feed,
-        "data_insufficient": sparse,
+        "data_insufficient": (price <= 0),
         "provisional_defaults": (not has_feed and price > 0),
         "lite_fastpath": True,
         "instant_scanner": True,
@@ -385,7 +416,7 @@ def compute_instant_scores(
             ],
         },
         "natural_language_summary": (
-            f"{base}: {'SYNCING — awaiting feed/quote' if status == 'SYNCING' else 'instant'} — "
+            f"{base}: instant — "
             f"{decision} · tech {tech} · fund {fund} · combined {combined} · Δ {change_pct:+.2f}%"
         ),
     }
@@ -398,3 +429,80 @@ def compute_instant_scores(
         pass
 
     return out
+
+
+async def process_single_stock(
+    symbol: str,
+    feed_data: dict,
+    semaphore,
+    client,
+    market_data_url: str,
+    decision_url: str,
+) -> dict:
+    """
+    Zero-API-first single-stock evaluator for parallel scan workers.
+
+    1. Resolve price strictly from Neon / data-feed cache (no quote storm).
+    2. If missing or > ₹5000 → definitive AVOID payload (kills Syncing… UI).
+    3. Otherwise POST a compact feature bag to decision-engine when available;
+       on failure fall back to compute_instant_scores (still zero market-data HTTP).
+    """
+    async with semaphore:
+        sym_clean = str(symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        feed_item = {}
+        if isinstance(feed_data, dict):
+            feed_item = feed_data.get(sym_clean) or feed_data.get(symbol) or {}
+            if not isinstance(feed_item, dict):
+                feed_item = {}
+
+        # 1. Resolve price strictly from DB / feed cache
+        try:
+            from price_resolver import resolve_display_price
+            cached_price = float(resolve_display_price(sym_clean, {}, feed_item) or 0.0)
+        except Exception:
+            cached_price = _extract_price(sym_clean, feed_item, None)
+
+        # 2. STRICT GUARD: AVOID if missing or > Rs 5000
+        if cached_price <= 0 or cached_price > MAX_STOCK_PRICE:
+            reason = (
+                f"PRICE > ₹{MAX_STOCK_PRICE:.0f} FILTER (₹{cached_price:.2f})"
+                if cached_price > MAX_STOCK_PRICE
+                else "NO DATA / MISSING FROM FEED"
+            )
+            return _avoid_payload(sym_clean, cached_price, reason)
+
+        rsi = float(feed_item.get("rsi") or DEFAULT_STATIC_INDICATORS["rsi"])
+        pe = float(feed_item.get("pe_ratio") or feed_item.get("pe") or DEFAULT_STATIC_INDICATORS["pe_ratio"])
+        roce = float(feed_item.get("roce") or DEFAULT_STATIC_INDICATORS["roce"])
+        sentiment = float(feed_item.get("sentiment_score") or 50.0)
+
+        payload = {
+            "symbol": sym_clean,
+            "price": cached_price,
+            "rsi": rsi,
+            "pe_ratio": pe,
+            "roce": roce,
+            "sentiment_score": sentiment,
+        }
+
+        # 3. Optional decision-engine evaluate (bounded timeout) — never hits market-data
+        if client is not None and decision_url:
+            try:
+                base = str(decision_url).rstrip("/")
+                # Accept either .../decision or service root
+                evaluate_url = f"{base}/evaluate" if base.endswith("/decision") else f"{base}/decision/evaluate"
+                d_resp = await client.post(evaluate_url, json=payload, timeout=3.0)
+                if d_resp.status_code == 200:
+                    result = d_resp.json()
+                    if isinstance(result, dict):
+                        result["price"] = cached_price
+                        result["cmp"] = cached_price
+                        result.setdefault("close", cached_price)
+                        result.setdefault("symbol", sym_clean)
+                        result.setdefault("instant_scanner", True)
+                        return result
+            except Exception as e:
+                logger.debug("process_single_stock decision call %s: %s", sym_clean, e)
+
+        # Local zero-HTTP fallback
+        return compute_instant_scores(sym_clean, feed_item, {"price": cached_price})

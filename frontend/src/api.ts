@@ -1450,6 +1450,13 @@ export const api = {
   stopDataFeed: () =>
     request<any>("/data-feed/stop?force=true", { method: "POST" }, 2, 45000),
 
+  /** Refill Additional Data — force-refresh fundamentals/technical/events into data-feed */
+  refillAdditionalData: () =>
+    request<any>("/data-feed/refill-additional?force=true", { method: "POST" }, 1, 120000),
+  getRefillAdditionalStatus: () =>
+    request<any>("/data-feed/refill-additional/status", undefined, 2, 30000),
+
+
   stopAllScans: () =>
     request<any>("/scan/stop-all", { method: "POST" }, 1, 20000),
 

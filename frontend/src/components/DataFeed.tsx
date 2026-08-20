@@ -200,7 +200,27 @@ export default function DataFeed() {
     }
   };
 
+  const onRefillAdditional = async () => {
+    setBusy("refill");
+    setBanner("Starting Refill Additional Data (fundamentals + technical + events)…");
+    setErr(null);
+    try {
+      const res = await api.refillAdditionalData();
+      setBanner(
+        res?.message ||
+          `Refill Additional Data started${res?.total != null ? ` for ${res.total} symbols` : ""}`
+      );
+      setRunning(true);
+      await refresh();
+    } catch (e: any) {
+      setErr(e?.message || "Refill Additional Data failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const onRefreshPage = async () => {
+
     setErr(null);
     setBusy("refresh-ui");
     try {
@@ -273,6 +293,15 @@ export default function DataFeed() {
               className="font-mono text-xs px-3 py-2 rounded-lg bg-slate-500/20 border border-slate-400/40 text-paper hover:bg-slate-500/30 disabled:opacity-40"
             >
               {busy === "refresh-ui" ? "…" : "Refresh status"}
+            </button>
+            <button
+              type="button"
+              onClick={onRefillAdditional}
+              disabled={busy != null || status === "running"}
+              title="Force-refresh fundamentals, technical snapshot, and events into the data-feed (merge, never wipe). Slow and deliberate on free tier."
+              className="font-mono text-xs px-3 py-2 rounded-lg bg-violet-500/20 border border-violet-400/40 text-violet-100 hover:bg-violet-500/30 disabled:opacity-40"
+            >
+              {busy === "refill" ? "Refilling…" : "Refill Additional Data"}
             </button>
             <button
               type="button"

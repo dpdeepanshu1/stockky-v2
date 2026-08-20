@@ -251,6 +251,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Root & Health endpoints (fix 404) ────────────────────────────────────────
+@app.get("/")
+async def root():
+    return {"message": "Market Data Service", "version": "2.2.0", "status": "running"}
+
+@app.get("/health")
+async def health():
+    # Simple health check; optionally verify dependencies (Redis, etc.)
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     return JSONResponse(
@@ -1507,4 +1517,3 @@ def refresh_delivery_pct(symbol: str):
     result["from_cache"] = False
     _cache_set(cache_key, result, ttl=get_cache_ttl())
     return result
-

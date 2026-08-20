@@ -78,6 +78,18 @@ export default function SurpriseStocks({
   const [pmRunning, setPmRunning] = useState(false);
   const [pmProgress, setPmProgress] = useState<PremarketProgress | null>(null);
   const [pmError, setPmError] = useState<string | null>(null);
+  const [healthData, setHealthData] = useState<{
+    health_score?: number;
+    total_tracked?: number;
+    missing_data?: number;
+    fully_populated?: number;
+    market_open?: boolean;
+    source?: string;
+    cache_age_sec?: number | null;
+    message?: string;
+  } | null>(null);
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [quoteFeedBusy, setQuoteFeedBusy] = useState(false);
   const pollRef = useRef<number | null>(null);
   const scanAbort = useRef<AbortController | null>(null);
 
@@ -317,6 +329,44 @@ export default function SurpriseStocks({
   }, [fetchSurpriseStocks, pollPremarket]);
 
   const pmPct = Math.min(100, Math.max(0, Number(pmProgress?.percent ?? 0)));
+
+  const fetchSurpriseHealth = useCallback(async () => {
+    setHealthLoading(true);
+    try {
+      const data = await api.surpriseAudit();
+      setHealthData(data);
+    } catch (e: any) {
+      setHealthData({
+        health_score: 0,
+        total_tracked: 0,
+        missing_data: 0,
+        message: e?.message || "Audit failed",
+      });
+    } finally {
+      setHealthLoading(false);
+    }
+  }, []);
+
+  const runMarketAwareQuoteFeed = useCallback(async (force = false) => {
+    setQuoteFeedBusy(true);
+    setPmError(null);
+    try {
+      const res = await api.runSurprisePremarketFeed(force);
+      if (res?.message) {
+        setPmError(null);
+      }
+      await fetchSurpriseHealth();
+    } catch (e: any) {
+      setPmError(e?.message || "Quote feed failed");
+    } finally {
+      setQuoteFeedBusy(false);
+    }
+  }, [fetchSurpriseHealth]);
+
+  useEffect(() => {
+    void fetchSurpriseHealth();
+  }, [fetchSurpriseHealth]);
+
   const scPct = Math.min(100, Math.max(0, Number(scanProg?.percent ?? 0)));
 
   return (
@@ -345,6 +395,14 @@ export default function SurpriseStocks({
             className="font-mono text-xs px-4 py-2 rounded-lg bg-amber-600/25 text-amber-200 border border-amber-500/40 hover:bg-amber-600/40 transition disabled:opacity-50"
           >
             {pmRunning ? "Premarket running…" : "🛠 Run Premarket Feed"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void runMarketAwareQuoteFeed(false)}
+            disabled={quoteFeedBusy || pmRunning}
+            className="font-mono text-xs px-4 py-2 rounded-lg bg-sky-600/25 text-sky-200 border border-sky-500/40 hover:bg-sky-600/40 transition disabled:opacity-50"
+          >
+            {quoteFeedBusy ? "Quote feed…" : "📡 Live Quote Cache"}
           </button>
           <button
             type="button"
@@ -421,6 +479,71 @@ export default function SurpriseStocks({
           {error}
         </div>
       )}
+
+
+      {/* Premarket / Surprise Feed Health */}
+      <div className="mt-2 mb-6 border border-slate bg-ink/40 rounded-xl p-4 sm:p-5">
+        <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
+          <div>
+            <h3 className="font-mono text-sm font-bold text-paper">Premarket Feed Health</h3>
+            <p className="font-mono text-[10px] text-mist/50 mt-0.5">
+              Audit live quote cache and refresh safely (2h open / durable closed).
+              {healthData?.market_open != null
+                ? healthData.market_open
+                  ? " · Market OPEN"
+                  : " · Market CLOSED"
+                : ""}
+              {healthData?.source ? ` · source: ${healthData.source}` : ""}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void fetchSurpriseHealth()}
+            disabled={healthLoading}
+            className="font-mono text-xs px-3 py-1.5 bg-graphite text-mist rounded-lg border border-slate hover:bg-slate/40 transition disabled:opacity-50"
+          >
+            {healthLoading ? "Auditing…" : "🔄 Refresh Audit"}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="p-3 rounded-lg bg-graphite/80 border border-slate/60">
+            <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">Health score</div>
+            <div
+              className={`font-mono text-xl font-bold mt-1 ${
+                (healthData?.health_score ?? 0) >= 90
+                  ? "text-emerald-400"
+                  : (healthData?.health_score ?? 0) >= 70
+                    ? "text-amber-300"
+                    : "text-rose-400"
+              }`}
+            >
+              {healthData?.health_score ?? "—"}%
+            </div>
+          </div>
+          <div className="p-3 rounded-lg bg-graphite/80 border border-slate/60">
+            <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">Total tracked</div>
+            <div className="font-mono text-xl font-bold text-paper mt-1">
+              {healthData?.total_tracked ?? "—"}
+            </div>
+          </div>
+          <div className="p-3 rounded-lg bg-graphite/80 border border-slate/60">
+            <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">Fully populated</div>
+            <div className="font-mono text-xl font-bold text-emerald-400 mt-1">
+              {healthData?.fully_populated ?? "—"}
+            </div>
+          </div>
+          <div className="p-3 rounded-lg bg-graphite/80 border border-slate/60">
+            <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">Missing data</div>
+            <div className="font-mono text-xl font-bold text-rose-400 mt-1">
+              {healthData?.missing_data ?? "—"}
+            </div>
+          </div>
+        </div>
+        {healthData?.message && (
+          <p className="font-mono text-[10px] text-mist/50 mt-3">{healthData.message}</p>
+        )}
+      </div>
 
       <div className="overflow-x-auto">
         <table className="w-full text-left border-collapse">

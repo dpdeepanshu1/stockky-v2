@@ -1397,6 +1397,20 @@ export const api = {
   /** Nuke stockky_kv + lock constraints before a pristine full feed */
   hardResetDataFeed: () =>
     request<any>("/data-feed/hard-reset", { method: "POST" }, 1, 60000),
+  /** Yahoo bulk price feed — bypasses NSE 403 on Render (1-call chunks) */
+  startBulkFeed: (useUniverse = true) =>
+    request<any>(
+      `/data-feed/start-bulk-feed?use_universe=${useUniverse}`,
+      { method: "POST" },
+      1,
+      300000
+    ),
+  runSurprisePremarketFeed: (force = false) =>
+    request<any>(`/api/surprise/run-premarket-feed?force=${force}`, { method: "POST" }, 1, 300000),
+  surpriseAudit: () =>
+    request<any>("/api/surprise/audit", undefined, 2, 30000),
+  surpriseRepairBatch: (limit = 15) =>
+    request<any>(`/api/surprise/repair-batch?limit=${limit}`, { method: "POST" }, 1, 180000),
   /** Surgical quote refresh for Prepare-to-Buy band only (no 300-stock storm) */
   refreshPrepareToBuy: (minScore = 58, maxScore = 68) =>
     request<any>(

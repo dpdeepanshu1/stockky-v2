@@ -683,14 +683,14 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
           </div>
 
           {/* Hero pick (rank 1) spans wider on large screens */}
-          <div className="scan-conviction-grid">
+          <div className="scan-conviction-grid grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 items-stretch">
             {convictionBoard.map((x, i) => {
               const r = x.decision;
               const isHero = i === 0;
               return (
                 <div
                   key={r.symbol}
-                  className={`scan-pick-wrap${isHero ? " is-hero" : ""}`}
+                  className={`scan-pick-wrap h-full${isHero ? " is-hero md:col-span-2 xl:col-span-1" : ""}`}
                 >
                   <TopPick
                     rank={i + 1}
@@ -811,6 +811,44 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   );
 }
 
+/** Horizon stamps for actionable picks (short / mid / long). Multiple allowed. */
+function deriveHorizonStamps(data: Decision): { key: string; label: string }[] {
+  const stamps: { key: string; label: string }[] = [];
+  const labels: Record<string, string> = {
+    short: "Short 3–21d",
+    mid: "Mid 1–6m",
+    long: "Long 6–24m",
+  };
+  const hz = ((data as any).horizons || {}) as Record<string, any>;
+  const tech = Number(data.technical_score ?? 50);
+  const fund = Number(data.fundamental_score ?? 50);
+  const comb = Number(data.combined_score ?? 50);
+  const dec = String(data.decision || "");
+  const actionable = dec === "BUY NOW" || dec === "PREPARE TO BUY";
+  if (!actionable) return stamps;
+
+  const buyish = (h: any) => {
+    if (!h || typeof h !== "object") return false;
+    const d = String(h.decision || "");
+    const sc = Number(h.score ?? 0);
+    return d === "BUY NOW" || d === "PREPARE TO BUY" || sc >= 54;
+  };
+
+  for (const k of ["short", "mid", "long"] as const) {
+    if (buyish(hz[k])) stamps.push({ key: k, label: labels[k] });
+  }
+  if (stamps.length) return stamps;
+
+  // Synthetic from scores when backend omitted horizons (stream / lite path)
+  if (tech >= 65 || comb >= 72) stamps.push({ key: "short", label: labels.short });
+  if (comb >= 68 || (tech >= 55 && fund >= 55)) stamps.push({ key: "mid", label: labels.mid });
+  if (fund >= 70 || (fund >= 60 && comb >= 65)) stamps.push({ key: "long", label: labels.long });
+  if (!stamps.length) stamps.push({ key: "short", label: labels.short });
+  // de-dupe by key
+  const seen = new Set<string>();
+  return stamps.filter((s) => (seen.has(s.key) ? false : (seen.add(s.key), true)));
+}
+
 function TopPick({
   rank,
   data,
@@ -824,47 +862,75 @@ function TopPick({
   onAddToWatchlist: (s: string) => void;
   addingWatchlist: string | null;
 }) {
-  const style = decisionStyle[data.decision];
-  const upside = data.close != null && data.target != null ? (((data.target - data.close) / data.close) * 100).toFixed(1) : "N/A";
+  const style = decisionStyle[data.decision] || decisionStyle["HOLD"];
+  const upside =
+    data.close != null && data.target != null
+      ? (((data.target - data.close) / data.close) * 100).toFixed(1)
+      : "N/A";
   const isAdding = addingWatchlist === data.symbol;
+  const stamps = deriveHorizonStamps(data);
 
   return (
     <button
       onClick={() => onSelect(data.symbol)}
-      className={`text-left rounded-xl border ${style.border} ${style.bg} p-6 hover:brightness-110 transition group`}
+      className={`text-left rounded-xl border ${style.border} ${style.bg} p-5 sm:p-6 hover:brightness-110 transition group h-full min-h-[11.5rem] flex flex-col w-full`}
     >
-      <div className="flex items-start justify-between mb-4">
-        <span className="font-mono text-[10px] text-mist/60">#{rank}</span>
-        <span className="font-mono text-xs text-signal-buy">+{upside}% target</span>
+      <div className="flex items-start justify-between mb-3 gap-2">
+        <span className="font-mono text-[10px] text-mist/60 shrink-0">#{rank}</span>
+        <span className="font-mono text-xs text-signal-buy shrink-0">+{upside}% target</span>
       </div>
-      <div className="font-mono text-sm text-mist mb-1">{data.symbol}</div>
-      <div className={`font-display text-2xl ${style.color} mb-3`}>{data.decision}</div>
-      <div className="flex justify-between font-mono text-xs text-mist">
+      <div className="font-mono text-sm text-mist mb-1 truncate">{data.symbol}</div>
+      <div className={`font-display text-xl sm:text-2xl ${style.color} mb-2 leading-tight`}>
+        {data.decision}
+      </div>
+      {/* Horizon stamps — replace empty Top-5 horizon blocks */}
+      {stamps.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {stamps.map((s) => (
+            <span
+              key={s.key}
+              className={
+                s.key === "short"
+                  ? "font-mono text-[9px] uppercase tracking-wide px-2 py-0.5 rounded-full border border-sky-400/40 bg-sky-500/15 text-sky-200"
+                  : s.key === "mid"
+                  ? "font-mono text-[9px] uppercase tracking-wide px-2 py-0.5 rounded-full border border-violet-400/40 bg-violet-500/15 text-violet-200"
+                  : "font-mono text-[9px] uppercase tracking-wide px-2 py-0.5 rounded-full border border-amber-400/40 bg-amber-500/15 text-amber-200"
+              }
+            >
+              {s.label}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="flex justify-between font-mono text-xs text-mist mt-auto">
         <span>{formatInrPrice(data)}</span>
         <span>Score {data.combined_score}/100</span>
       </div>
-      <div className="mt-3 pt-3 border-t border-slate/40 flex items-center justify-between">
+      <div className="mt-3 pt-3 border-t border-slate/40 flex items-center justify-between gap-2">
         <span className="font-mono text-[10px] text-mist/50 group-hover:text-mist transition">
           View full analysis →
         </span>
-        <button
-          onClick={(e) => { e.stopPropagation(); onAddToWatchlist(data.symbol); }}
-          disabled={isAdding}
-          className={`text-[10px] font-mono transition border px-2 py-0.5 rounded flex items-center gap-1 ${
-            isAdding 
-              ? "bg-signal-buy/20 border-signal-buy text-signal-buy" 
+        <span
+          role="button"
+          tabIndex={0}
+          onClick={(e) => {
+            e.stopPropagation();
+            onAddToWatchlist(data.symbol);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.stopPropagation();
+              onAddToWatchlist(data.symbol);
+            }
+          }}
+          className={`text-[10px] font-mono transition border px-2 py-0.5 rounded flex items-center gap-1 cursor-pointer ${
+            isAdding
+              ? "bg-signal-buy/20 border-signal-buy text-signal-buy"
               : "text-signal-prepare hover:text-paper border-signal-prepare/30"
           }`}
         >
-          {isAdding ? (
-            <>
-              <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-signal-buy animate-spin"></span>
-              Adding...
-            </>
-          ) : (
-            "+ Watchlist"
-          )}
-        </button>
+          {isAdding ? "Adding…" : "+ Watchlist"}
+        </span>
       </div>
     </button>
   );
@@ -921,57 +987,14 @@ function CandidateCard({
   );
 }
 
-/** Renders Short / Mid / Long Top lists when present on ScanResult */
-
-export function MultiHorizonScanLists({ data, onSendTelegram, onAddTraining }: {
+/**
+ * Horizon Top-5 blocks removed from UI — stamps live on each PREPARE TO BUY /
+ * BUY NOW card (see deriveHorizonStamps / TopPick). Export kept so App imports stay valid.
+ */
+export function MultiHorizonScanLists(_props: {
   data: any;
   onSendTelegram?: (list: any[], label: string) => void;
   onAddTraining?: (list: any[], label: string) => void;
 }) {
-  const blocks = [
-    { key: "recommendations_short", title: "Top 5 · Short-term (3–21d)" },
-    { key: "recommendations_mid", title: "Top 5 · Mid-term (1–6m)" },
-    { key: "recommendations_long", title: "Top 5 · Long-term (6–24m)" },
-  ];
-  return (
-    <div className="space-y-6">
-      {data?.final_verdict && (
-        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
-          <div className="font-semibold text-amber-300">Final Verdict</div>
-          <p className="text-sm text-slate-200 mt-1">{data.final_verdict.headline || data.final_verdict.summary}</p>
-        </div>
-      )}
-      {blocks.map((b) => {
-        const list = data?.[b.key] || [];
-        return (
-          <div key={b.key} className="rounded-xl border border-slate-700 p-4">
-            <div className="flex items-center justify-between gap-2 mb-3">
-              <h3 className="font-semibold text-white">{b.title}</h3>
-              <div className="flex gap-2">
-                {onSendTelegram && (
-                  <button className="text-xs px-2 py-1 rounded bg-sky-600 text-white" onClick={() => onSendTelegram(list, b.title)}>Send to Telegram</button>
-                )}
-                {onAddTraining && (
-                  <button className="text-xs px-2 py-1 rounded bg-violet-600 text-white" onClick={() => onAddTraining(list, b.title)}>Add to Training</button>
-                )}
-              </div>
-            </div>
-            {list.length === 0 ? (
-              <p className="text-sm text-slate-400">No picks in this horizon.</p>
-            ) : (
-              <ul className="space-y-2">
-                {list.map((r: any, i: number) => (
-                  <li key={r.symbol || i} className="flex justify-between text-sm border-b border-slate-800 py-2">
-                    <span className="font-medium text-white">{r.symbol}</span>
-                    <span className="text-emerald-400">{r.decision || r.horizons?.short?.decision}</span>
-                    <span className="text-slate-300">{r.combined_score ?? r._hz_score}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
+  return null;
 }

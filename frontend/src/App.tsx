@@ -1540,7 +1540,6 @@ export default function App() {
                     onSelect={(sym) => handleSearch(sym)}
                     title="Signal Stream & Audit"
                   />
-                  <MultiHorizonScanLists data={(view as any).data} />
                   <ScanPanel
                     result={view.data}
                     onSelect={handleSearch}

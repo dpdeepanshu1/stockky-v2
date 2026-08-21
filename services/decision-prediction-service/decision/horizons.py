@@ -16,40 +16,43 @@ SELL = "SELL"
 # Horizon weight profiles (must sum ~1.0 across core pillars)
 HORIZON_WEIGHTS = {
     "short": {
-        # Fix: news_events at 70% meant a stock with excellent technicals
-        # (RSI/MACD/EMA/Supertrend/volume breakout — the actual "surprise"
-        # signals this project scans for) could not reach BUY NOW (bar=66)
-        # without news_events ALSO scoring high. Since news_score is very
-        # often unavailable/neutral (50) for a given symbol at scan time,
-        # the weighted score capped out around ~56 even for a textbook
-        # technical breakout — PREPARE TO BUY sometimes, BUY NOW almost
-        # never. Rebalanced so technical + volume/RS (the reliably-available
-        # signals) can drive a decision on their own, while news/events still
-        # carries real weight as a catalyst booster rather than a gate.
-        "technical": 0.30,
-        "volume_rs": 0.20,
-        "news_events": 0.30,
-        "prediction": 0.08,
-        "fundamental": 0.05,
-        "quality_peers": 0.04,
-        "regime": 0.03,
+        # News/Event fix: split the old combined "news_events" pillar into
+        # two independently-weighted pillars per your spec — News 25%,
+        # Event 25% for short-term (catalyst-heavy horizon), with the
+        # remaining 50% spread across technical/volume/prediction/
+        # fundamental/quality/regime in the same relative proportions used
+        # before.
+        "technical": 0.21,
+        "volume_rs": 0.14,
+        "news": 0.25,
+        "event": 0.25,
+        "prediction": 0.06,
+        "fundamental": 0.04,
+        "quality_peers": 0.03,
+        "regime": 0.02,
     },
     "mid": {
-        "technical": 0.26,
-        "volume_rs": 0.12,
-        "news_events": 0.10,
-        "prediction": 0.12,
-        "fundamental": 0.22,
-        "quality_peers": 0.10,
-        "regime": 0.08,
+        # Mid-term: catalysts still matter (earnings/events shape the next
+        # 1-6 months) but less than short-term momentum — News/Event scaled
+        # down from short's 25/25 while fundamentals stay the dominant pillar.
+        "technical": 0.23,
+        "volume_rs": 0.11,
+        "news": 0.10,
+        "event": 0.10,
+        "prediction": 0.11,
+        "fundamental": 0.20,
+        "quality_peers": 0.09,
+        "regime": 0.06,
     },
     "long": {
+        # Long-term: catalysts matter least, fundamentals/quality dominate.
         "technical": 0.12,
         "volume_rs": 0.06,
-        "news_events": 0.06,
-        "prediction": 0.08,
-        "fundamental": 0.34,
-        "quality_peers": 0.22,
+        "news": 0.05,
+        "event": 0.05,
+        "prediction": 0.07,
+        "fundamental": 0.32,
+        "quality_peers": 0.21,
         "regime": 0.12,
     },
 }
@@ -106,10 +109,10 @@ def regime_multipliers(market_score: float, classification: str = "") -> Dict[st
     ms = _n(market_score, 50)
     # Bull: favour momentum/RS; Bear: favour quality/fundamentals; Neutral: balanced
     if ms >= 65 or "bull" in (classification or "").lower():
-        return {"technical": 1.15, "volume_rs": 1.20, "fundamental": 0.90, "quality_peers": 0.95, "news_events": 1.05}
+        return {"technical": 1.15, "volume_rs": 1.20, "fundamental": 0.90, "quality_peers": 0.95, "news": 1.05, "event": 1.05}
     if ms <= 40 or "bear" in (classification or "").lower():
-        return {"technical": 0.85, "volume_rs": 0.80, "fundamental": 1.20, "quality_peers": 1.25, "news_events": 0.95}
-    return {"technical": 1.0, "volume_rs": 1.0, "fundamental": 1.0, "quality_peers": 1.0, "news_events": 1.0}
+        return {"technical": 0.85, "volume_rs": 0.80, "fundamental": 1.20, "quality_peers": 1.25, "news": 0.95, "event": 0.95}
+    return {"technical": 1.0, "volume_rs": 1.0, "fundamental": 1.0, "quality_peers": 1.0, "news": 1.0, "event": 1.0}
 
 
 def _threshold_offsets(live_win_rate, live_n: int = 0) -> tuple:
@@ -213,11 +216,16 @@ def compute_pillar_scores(
     peer = _n(extras.get("peer_relative_score"), 50)
     quality_peers = _clamp(0.55 * quality + 0.45 * peer)
 
-    news_s = _n((news or {}).get("news_score"), 50)
-    event_penalty = 0.0
-    if events and (events.get("event_risk") or events.get("next_earnings_date")):
-        event_penalty = 8.0
-    news_events = _clamp(news_s - event_penalty)
+    # News and Event are now independent pillars (previously combined into
+    # one "news_events" pillar with an ad-hoc -8 event penalty baked in).
+    # News = pure news-sentiment score from the news service.
+    news_pillar = _n((news or {}).get("news_score"), 50)
+
+    # Event = the proper nature-based 0-100 score from
+    # event_depth.compute_event_score (analysis-intelligence-service),
+    # passed through via extras["event_score"]. Falls back to a neutral 50
+    # if the event pipeline hasn't scored this symbol yet.
+    event_pillar = _n(extras.get("event_score") or (events or {}).get("event_score"), 50)
 
     pred = 50.0
     if prediction and prediction.get("model_loaded"):
@@ -228,7 +236,8 @@ def compute_pillar_scores(
     return {
         "technical": tech,
         "volume_rs": volume_rs,
-        "news_events": news_events,
+        "news": news_pillar,
+        "event": event_pillar,
         "prediction": pred,
         "fundamental": fund,
         "quality_peers": quality_peers,
@@ -255,12 +264,15 @@ def score_horizon(
     score = _clamp(weighted / total_w if total_w else 50.0)
 
     # Closed-loop score nudge from live win-rate (±8 max)
-    # Time-decay: stale news/sentiment (e.g. 4h old) contributes less vs fresh technicals
+    # Time-decay: stale news/sentiment (e.g. 4h old) contributes less vs fresh technicals.
+    # Only applied to the "news" pillar — "event" already carries its own
+    # per-item recency decay from event_depth.compute_event_score, so
+    # decaying it again here would double-penalize old events.
     news_age = _age_hours(flags.get("news_as_of") or flags.get("sentiment_as_of") or flags.get("as_of"))
     news_w = time_decay_weight(news_age, half_life_hours=4.0)
-    if "news_events" in pillars and news_w < 0.999:
+    if "news" in pillars and news_w < 0.999:
         # Pull news pillar toward neutral 50 as it ages
-        pillars["news_events"] = pillars["news_events"] * news_w + 50.0 * (1.0 - news_w)
+        pillars["news"] = pillars["news"] * news_w + 50.0 * (1.0 - news_w)
 
     live_wr = flags.get("live_win_rate")
     live_n = int(flags.get("live_win_rate_n") or 0)

@@ -790,6 +790,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
             Next earnings: {(data as any).event_data.next_earnings_date}
           </p>
         )}
+        <EventScoreBadge data={data} />
         <EventSection symbol={data.symbol} compact />
       </section>
 
@@ -1387,6 +1388,45 @@ function MetricItem({ label, value }: { label: string; value: string }) {
     <div className="bg-ink/40 border border-slate/40 rounded-lg px-3 py-2">
       <div className="font-mono text-[9px] text-mist/50 uppercase tracking-wider">{label}</div>
       <div className="font-mono text-sm text-paper mt-0.5">{value}</div>
+    </div>
+  );
+}
+
+// ── Event Score badge (nature-based 0-100 score + top contributors) ──
+function EventScoreBadge({ data }: { data: any }) {
+  const score: number | undefined =
+    data?.event_score ?? data?.event_data?.event_score ?? data?.events?.event_score;
+  const breakdown: any[] =
+    data?.event_score_breakdown ?? data?.event_data?.event_score_breakdown ?? data?.events?.event_score_breakdown ?? [];
+  if (score == null) return null;
+
+  const tone = score >= 65 ? "text-emerald-400 border-emerald-500/40 bg-emerald-500/10"
+    : score >= 50 ? "text-amber-300 border-amber-500/30 bg-amber-500/10"
+    : "text-rose-400 border-rose-500/40 bg-rose-500/10";
+
+  const top = [...breakdown]
+    .sort((a, b) => Math.abs(b.decayed_impact ?? 0) - Math.abs(a.decayed_impact ?? 0))
+    .slice(0, 3);
+
+  return (
+    <div className="mt-2 mb-3 flex flex-wrap items-center gap-2">
+      <span className={`font-mono text-[11px] px-2 py-1 rounded-md border ${tone}`}>
+        Event Score {Math.round(score)}/100
+      </span>
+      {top.map((b, i) => (
+        <span
+          key={i}
+          className={`font-mono text-[10px] px-1.5 py-0.5 rounded border ${
+            (b.decayed_impact ?? 0) >= 0
+              ? "text-emerald-300/90 border-emerald-500/25 bg-emerald-500/5"
+              : "text-rose-300/90 border-rose-500/25 bg-rose-500/5"
+          }`}
+          title={`base ${b.base_impact} · age ${b.age_days ?? "?"}d`}
+        >
+          {String(b.type || "").replace(/_/g, " ")} {(b.decayed_impact ?? 0) >= 0 ? "+" : ""}
+          {b.decayed_impact}
+        </span>
+      ))}
     </div>
   );
 }

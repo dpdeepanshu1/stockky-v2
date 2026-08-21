@@ -355,7 +355,10 @@ async def get_training_score(symbol: str) -> dict:
 # ── Event signal extraction ────────────────────────────────────
 def _extract_event_signals(events: dict | None) -> dict:
     if not events or not isinstance(events, dict):
-        return {"event_score_delta": 0, "event_risk": False, "event_reasons": [], "earnings_days_out": None}
+        return {
+            "event_score_delta": 0, "event_risk": False, "event_reasons": [],
+            "earnings_days_out": None, "event_score": 50.0,
+        }
 
     delta = 0
     reasons = []
@@ -460,6 +463,20 @@ def _extract_event_signals(events: dict | None) -> dict:
         "event_risk": event_risk,
         "event_reasons": reasons,
         "earnings_days_out": earnings_days_out,
+        # Event scoring pipeline fix: the event/main.py service now computes
+        # a proper nature-based 0-100 event_score (event_depth.compute_event_score)
+        # — earnings beat vs miss, bonus/buyback vs dilutive rights issue,
+        # insider buy vs sell, rating up/downgrade, bulk-deal direction,
+        # regulatory action, all recency-decayed. Prefer that directly so
+        # horizon scoring uses the same number the event box displays,
+        # instead of a second, disconnected delta-only calculation. Fall
+        # back to converting the local -18..+18 delta only for older cached
+        # event payloads that predate the upstream event_score field.
+        "event_score": (
+            float(events.get("event_score"))
+            if events.get("event_score") is not None
+            else max(0.0, min(100.0, 50.0 + max(-18, min(18, delta)) * 2.5))
+        ),
     }
 
 
@@ -1210,11 +1227,21 @@ async def _decide_impl(
         market_adjustment, market_adjustment_reason = _market_sentiment_adjustment(market_score)
 
         # ── Multi-horizon scoring (Short / Mid / Long) — short is primary ──
+        # event_signals moved up so its nature-based event_score can feed
+        # multi_horizon_decide directly (see extras["event_score"] below) —
+        # previously computed after mh, so horizons.py never saw it and
+        # events only ever nudged the legacy combined_score post-hoc.
+        event_signals = _extract_event_signals(events)
+        event_delta = event_signals["event_score_delta"]
+        event_risk = event_signals["event_risk"]
+        event_reasons = event_signals["event_reasons"]
+
         extras = {
             "rs_vs_nifty": technical.get("rs_score") or technical.get("rs_vs_nifty"),
             "delivery_pct": technical.get("delivery_pct"),
             "quality_score": fundamental.get("quality_score") or fundamental.get("fundamental_score"),
             "peer_relative_score": fundamental.get("peer_relative_score"),
+            "event_score": event_signals.get("event_score"),
         }
         flags = {
             "already_owned": already_owned,
@@ -1238,11 +1265,6 @@ async def _decide_impl(
             extras=extras,
             flags=flags,
         )
-
-        event_signals = _extract_event_signals(events)
-        event_delta = event_signals["event_score_delta"]
-        event_risk = event_signals["event_risk"]
-        event_reasons = event_signals["event_reasons"]
 
         close = technical.get("close")
         support = technical.get("support")
@@ -1382,6 +1404,8 @@ async def _decide_impl(
             "market_sentiment_adjustment": market_adjustment,
             "training_score": training_score,
             "event_score_delta": event_delta,
+            "event_score": event_signals.get("event_score"),
+            "event_score_breakdown": (events or {}).get("event_score_breakdown"),
             "event_risk": event_risk,
             "entry_range": {"low": entry_low, "high": entry_high} if entry_low else None,
             "target": target,

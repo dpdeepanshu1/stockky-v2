@@ -6938,11 +6938,18 @@ async def api_evaluate_price_alerts():
 @app.post("/data-feed/hard-reset")
 @app.post("/api/data-feed/hard-reset")
 @app.post("/api/feed/hard-reset")
-async def hard_reset_database():
+async def hard_reset_database(preserve_days: int = 7):
     """
-    Wipes stockky_kv and re-asserts unique constraint + index on k.
-    Called by the frontend "Feed Fresh Data" button *before* /data-feed/run
-    so a corrupted / over-₹5000 universe is nuked on autopilot.
+    Wipes VOLATILE stockky_kv fields (price/volume) and re-asserts unique
+    constraint + index on k. Called by the frontend "Feed Fresh Data" button
+    *before* /data-feed/run so a corrupted / over-₹5000 universe is nuked
+    on autopilot.
+
+    Durable/slow per-symbol fields (PE ratio, ROCE, sector, technical &
+    fundamental scores, model prediction outputs, etc.) updated within the
+    last `preserve_days` days are snapshotted and restored automatically —
+    only stale (older than preserve_days) or price/volume fields are lost.
+    Pass preserve_days=0 to force the old full-wipe behavior.
     """
     try:
         from kv_cache import hard_reset_stockky_kv
@@ -6954,7 +6961,7 @@ async def hard_reset_database():
         except Exception:
             pass
 
-        result = hard_reset_stockky_kv()
+        result = hard_reset_stockky_kv(preserve_days=preserve_days)
         try:
             clear_local_data_feed_caches()
         except Exception:

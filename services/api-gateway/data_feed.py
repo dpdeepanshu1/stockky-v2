@@ -522,16 +522,12 @@ class DataFeedStore:
 
         return result
 
-    def put_symbol(self, symbol: str, payload: dict, ttl: int = DATA_FEED_TTL) -> None:
-        base = _norm_sym(symbol)
-        if not base or not isinstance(payload, dict):
-            return
-        # Never let None / sparse zeros wipe durable Neon fields
-        existing = {}
-        try:
-            existing = self.get_symbol(base) or {}
-        except Exception:
-            existing = {}
+    def _prepare_symbol_payload(self, base: str, payload: dict, existing: Optional[dict]) -> Optional[dict]:
+        """
+        Shared prep for a single symbol write: merge-never-wipe against existing,
+        normalize, apply the ≤max-price durable-fields-only gate.
+        Returns the final payload dict to persist, or None if nothing to write.
+        """
         if isinstance(existing, dict) and existing:
             payload = merge_feed_payload(existing, payload)
         payload = strip_none_fields(normalize_feed_payload(dict(payload)))
@@ -544,10 +540,6 @@ class DataFeedStore:
         # re-admit them via a cached over-cap LTP.
         px = _payload_price(payload)
         if px > MAX_STOCK_PRICE:
-            logger.debug(
-                "data_feed put_symbol %s — price ₹%.2f > ₹%.0f; store durable fields only",
-                base, px, MAX_STOCK_PRICE,
-            )
             for drop_k in (
                 "price", "close", "cmp", "ltp", "last_price", "current_price",
                 "day_high", "day_low", "day_change_pct", "previous_close", "volume",
@@ -555,13 +547,26 @@ class DataFeedStore:
                 payload.pop(drop_k, None)
             payload["price_over_cap"] = True
             payload["price_cap"] = MAX_STOCK_PRICE
-            # If nothing durable remains, skip entirely
             durable_keys = (
                 "pe_ratio", "roce", "roe", "sector", "industry", "fundamental_score",
                 "quality_score", "metrics", "technical_score", "sentiment_score",
             )
             if not any(payload.get(k) is not None for k in durable_keys):
-                return
+                return None
+        return payload
+
+    def put_symbol(self, symbol: str, payload: dict, ttl: int = DATA_FEED_TTL) -> None:
+        base = _norm_sym(symbol)
+        if not base or not isinstance(payload, dict):
+            return
+        existing = {}
+        try:
+            existing = self.get_symbol(base) or {}
+        except Exception:
+            existing = {}
+        payload = self._prepare_symbol_payload(base, payload, existing)
+        if payload is None:
+            return
 
         key = DATA_FEED_PREFIX + base
         alias_key = FEED_ALIAS_PREFIX + base
@@ -587,6 +592,91 @@ class DataFeedStore:
             self._persist_index(ttl=ttl)
         except Exception as e:
             logger.debug("data_feed index persist: %s", e)
+
+    def put_symbols_bulk(self, payload_map: Dict[str, dict], ttl: int = DATA_FEED_TTL) -> int:
+        """
+        Bulk version of put_symbol — the fix for the "no bulk feeding" slowness.
+
+        Old path: N symbols → N sequential put_symbol() calls, each doing
+        1 read + 3 writes + 1 index read/write (its own Neon transaction) ⇒
+        for a 300-symbol feed, ~1500-1800 sequential DB round trips.
+
+        New path: 1 bulk read (get_symbols_bulk, already existed) for merge,
+        then ALL canonical+alias+legacy keys for ALL symbols are written in a
+        handful of multi-row upserts via kv_cache.set_many — a few round trips
+        total, and the symbol index is persisted ONCE at the end instead of
+        once per symbol.
+
+        Returns the number of symbols actually written.
+        """
+        if not payload_map:
+            return 0
+
+        bases: List[str] = []
+        norm_map: Dict[str, dict] = {}
+        for sym, payload in payload_map.items():
+            base = _norm_sym(sym)
+            if not base or not isinstance(payload, dict):
+                continue
+            bases.append(base)
+            norm_map[base] = payload
+
+        if not bases:
+            return 0
+
+        # One bulk read instead of N single reads
+        try:
+            existing_map = self.get_symbols_bulk(bases)
+        except Exception as e:
+            logger.warning("put_symbols_bulk: bulk read failed, proceeding without merge: %s", e)
+            existing_map = {}
+
+        write_items: Dict[str, dict] = {}
+        written = 0
+        for base in bases:
+            final = self._prepare_symbol_payload(base, norm_map[base], existing_map.get(base))
+            if final is None:
+                continue
+            key = DATA_FEED_PREFIX + base
+            alias_key = FEED_ALIAS_PREFIX + base
+            legacy_key = FEED_LEGACY_PREFIX + base
+            _LOCAL_SYMBOLS[key] = final
+            _LOCAL_SYMBOLS[alias_key] = final
+            _LOCAL_SYMBOLS[legacy_key] = final
+            _LOCAL_INDEX.add(base)
+            write_items[key] = final
+            write_items[alias_key] = final
+            write_items[legacy_key] = final
+            written += 1
+
+        if not write_items:
+            return 0
+
+        try:
+            import kv_cache as _kc
+            set_many = getattr(_kc, "set_many", None) or getattr(_kc, "kv_set_many", None)
+            if callable(set_many):
+                set_many(write_items, ttl=ttl)
+            else:
+                logger.warning("kv_cache.set_many missing — falling back to serial sets (slow)")
+                for k, v in write_items.items():
+                    self._set(k, v, ttl=ttl)
+        except Exception as e:
+            logger.warning("put_symbols_bulk: bulk write failed (%s items): %s", len(write_items), e)
+            for k, v in write_items.items():
+                try:
+                    self._set(k, v, ttl=ttl)
+                except Exception:
+                    pass
+
+        # Persist the symbol index ONCE for the whole batch, not per symbol
+        try:
+            self._persist_index(ttl=ttl)
+        except Exception as e:
+            logger.debug("data_feed index persist (bulk): %s", e)
+
+        logger.info("put_symbols_bulk: wrote %s/%s symbols in a batched upsert", written, len(bases))
+        return written
 
     def has_symbol(self, symbol: str) -> bool:
         return self.get_symbol(symbol) is not None
@@ -1506,12 +1596,15 @@ def run_bulk_yahoo_price_feed(
     hit_symbols: list = []
     _progress(0, f"Bulk phase: seeding Neon from bhavcopy ({len(bhav)} market rows)…")
 
-    for i, base in enumerate(bases):
+    # Build all seed payloads in memory first, then write them in ONE batched
+    # upsert instead of one put_symbol() call (1 read + 3 writes + 1 index
+    # persist) per symbol. This is the main fix for "no bulk feeding" slowness.
+    seed_batch: Dict[str, dict] = {}
+    for base in bases:
         rec = bhav.get(base)
         if not rec:
             continue
         try:
-            # Seed RSI / PE / ROCE / sentiment placeholders so health is not 0%
             seed = dict(rec)
             seed.setdefault("rsi", seed.get("rsi") if seed.get("rsi") is not None else 50.0)
             seed.setdefault("pe_ratio", seed.get("pe_ratio") if seed.get("pe_ratio") is not None else None)
@@ -1519,19 +1612,28 @@ def run_bulk_yahoo_price_feed(
             seed.setdefault("sentiment_score", seed.get("sentiment_score") if seed.get("sentiment_score") is not None else 50.0)
             seed["_seed"] = True
             seed["source"] = seed.get("source") or "nse_bhavcopy"
-            store.put_symbol(base, seed)
-            saved += 1
+            seed_batch[base] = seed
             bhav_hits += 1
-            hit_symbols.append(base)
         except Exception as e:
             skipped += 1
-            logger.debug("bhav upsert %s: %s", base, e)
-        if (i + 1) % 25 == 0 or (i + 1) == total:
-            _progress(
-                saved,
-                f"Bhavcopy seed {saved}/{total} (scanned {i+1}/{total})",
-                ok_count=saved,
-            )
+            logger.debug("bhav prep %s: %s", base, e)
+
+    if seed_batch:
+        _progress(0, f"Bulk phase: writing {len(seed_batch)} bhavcopy rows in one batch…")
+        try:
+            saved = store.put_symbols_bulk(seed_batch, ttl=DATA_FEED_TTL)
+            hit_symbols = list(seed_batch.keys())
+        except Exception as e:
+            logger.warning("bhav bulk write failed, falling back to per-symbol: %s", e)
+            for base, seed in seed_batch.items():
+                try:
+                    store.put_symbol(base, seed)
+                    saved += 1
+                    hit_symbols.append(base)
+                except Exception as e2:
+                    skipped += 1
+                    logger.debug("bhav upsert fallback %s: %s", base, e2)
+    _progress(saved, f"Bhavcopy seed {saved}/{total} complete", ok_count=saved)
 
     missed = [b for b in bases if b not in bhav]
     market_open = False
@@ -1586,15 +1688,24 @@ def run_bulk_yahoo_price_feed(
         except Exception as e:
             logger.warning("BULK_PATH /quotes/bulk failed: %s", e)
             prices = {}
-        for base, rec in prices.items():
+        if prices:
             try:
-                store.put_symbol(base, rec)
-                if base not in hit_symbols:
-                    saved += 1
-                    hit_symbols.append(base)
+                store.put_symbols_bulk(prices, ttl=DATA_FEED_TTL)
+                for base in prices:
+                    if base not in hit_symbols:
+                        saved += 1
+                        hit_symbols.append(base)
             except Exception as e:
-                skipped += 1
-                logger.debug("bulk upsert %s: %s", base, e)
+                logger.warning("yahoo bulk write failed, falling back to per-symbol: %s", e)
+                for base, rec in prices.items():
+                    try:
+                        store.put_symbol(base, rec)
+                        if base not in hit_symbols:
+                            saved += 1
+                            hit_symbols.append(base)
+                    except Exception as e2:
+                        skipped += 1
+                        logger.debug("bulk upsert fallback %s: %s", base, e2)
 
     logger.info(
         "BULK_PATH done saved=%s bhav=%s yahoo=%s market_open=%s",

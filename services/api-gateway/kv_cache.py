@@ -408,6 +408,91 @@ def kv_ttl(key: str) -> int:
     return _mem.ttl(key)
 
 
+def kv_set_many(items: dict, ttl: Optional[int] = None) -> None:
+    """
+    Bulk upsert many key/value pairs in as few Neon round-trips as possible.
+    Mirrors kv_get_many. Fixes the data-feed N+1 write storm where a 300-symbol
+    feed run was issuing ~1500-1800 sequential single-row transactions
+    (one put_symbol → up to 3 key writes + 1 index read/write, each its own
+    eng.begin()). This batches everything into a handful of multi-row
+    INSERT ... VALUES ... ON CONFLICT statements inside ONE transaction.
+    """
+    if not items:
+        return
+
+    for k, v in items.items():
+        _mem.set(k, v, ttl=ttl)
+
+    r = _get_redis()
+    if r:
+        for k, v in items.items():
+            try:
+                data = json.dumps(v, default=str)
+                if ttl:
+                    r.setex(k, int(ttl), data)
+                else:
+                    r.set(k, data)
+            except Exception as e:
+                logger.debug("redis set_many %s: %s", k, e)
+
+    durable_items = {k: v for k, v in items.items() if _is_durable(k)}
+    if not durable_items:
+        return
+
+    eng = _get_neon()
+    if not eng:
+        return
+
+    try:
+        from sqlalchemy import text
+        import datetime as _dt
+
+        exp = None
+        if ttl:
+            exp = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=int(ttl))
+
+        rows = [
+            {"k": k, "v": json.dumps(v, default=str), "e": exp}
+            for k, v in durable_items.items()
+        ]
+
+        CHUNK = 200  # keep each statement/param-count reasonable
+        with eng.begin() as conn:
+            for i in range(0, len(rows), CHUNK):
+                chunk = rows[i:i + CHUNK]
+                values_sql = ", ".join(
+                    f"(:k{j}, :v{j}, :e{j}, NOW())" for j in range(len(chunk))
+                )
+                params: dict = {}
+                for j, row in enumerate(chunk):
+                    params[f"k{j}"] = row["k"]
+                    params[f"v{j}"] = row["v"]
+                    params[f"e{j}"] = row["e"]
+                conn.execute(
+                    text(
+                        f"""
+                        INSERT INTO stockky_kv (k, v, expires_at, updated_at)
+                        VALUES {values_sql}
+                        ON CONFLICT (k) DO UPDATE
+                          SET v = EXCLUDED.v,
+                              expires_at = EXCLUDED.expires_at,
+                              updated_at = NOW()
+                        """
+                    ),
+                    params,
+                )
+        logger.info("kv_set_many: upserted %s durable keys in %s statement(s)",
+                    len(rows), (len(rows) + CHUNK - 1) // CHUNK)
+    except Exception as e:
+        logger.warning("neon set_many failed (%s items), falling back to per-key sets: %s",
+                        len(durable_items), e)
+        for k, v in durable_items.items():
+            try:
+                _neon_set(k, v, ttl=ttl)
+            except Exception:
+                pass
+
+
 def kv_get_many(keys: list) -> dict:
     """
     Bulk fetch many keys in as few round-trips as possible.
@@ -508,6 +593,10 @@ def delete(key: str) -> None:
     kv_delete(key)
 
 
+def set_many(items: dict, ttl: Optional[int] = None) -> None:
+    kv_set_many(items, ttl=ttl)
+
+
 def get_many(keys: list) -> dict:
     """Public bulk API — used by full_market_scan to avoid 300 sequential DB hits."""
     return kv_get_many(keys)
@@ -545,7 +634,23 @@ def status() -> dict:
     }
 
 
-def hard_reset_stockky_kv() -> dict:
+# Per-symbol data-feed canonical key prefix (kept in sync with data_feed.py's
+# DATA_FEED_PREFIX — duplicated here rather than imported to avoid a circular
+# import between kv_cache and data_feed).
+_SYM_PREFIX = "stockky:data_feed:sym:"
+
+# Fields that change every tick / every day and should NOT be preserved across
+# a hard-reset — a stale price is worse than no price, so these get dropped.
+_VOLATILE_PRICE_FIELDS = {
+    "price", "close", "cmp", "ltp", "last_price", "current_price",
+    "day_high", "day_low", "day_change_pct", "previous_close", "volume",
+    "prev_close", "price_over_cap", "price_cap",
+}
+# Never carry these across — they'll be re-set on the next write.
+_ALWAYS_DROP_ON_PRESERVE = {"symbol", "updated_at", "source"} | _VOLATILE_PRICE_FIELDS
+
+
+def hard_reset_stockky_kv(preserve_days: int = 7) -> dict:
     """
     Wipe stockky_kv and re-assert uniqueness + index on k.
     Used by the "Feed Fresh Data" flow so a corrupted / bloated
@@ -553,6 +658,14 @@ def hard_reset_stockky_kv() -> dict:
     Primary key already enforces uniqueness; we still DROP/ADD the
     named constraint for compatibility with older schemas and
     re-create the supporting index.
+
+    IMPORTANT: a hard-reset used to TRUNCATE every field for every symbol,
+    including slow-changing / expensive-to-recompute fields (PE ratio, ROCE,
+    sector, technical/fundamental scores, model prediction outputs, etc.)
+    that a rate-limited refill can take ~90 minutes to rebuild. Those fields
+    are only valid/useful for `preserve_days` anyway (default 7, matching the
+    weekly refill cadence), so we now snapshot them before truncating and
+    restore them afterwards — ONLY volatile price/volume fields are dropped.
     """
     eng = _get_neon()
     if eng is None:
@@ -569,6 +682,7 @@ def hard_reset_stockky_kv() -> dict:
         }
 
     from sqlalchemy import text
+    import datetime as _dt
 
     # k is already PRIMARY KEY (unique). We TRUNCATE, ensure a named UNIQUE
     # constraint exists for older schemas, and re-assert supporting indexes.
@@ -576,6 +690,7 @@ def hard_reset_stockky_kv() -> dict:
     # and must survive feed hard-reset. Also snapshot legacy keys from stockky_kv
     # before truncate and restore them into the dedicated tables.
     try:
+        preserved_count = 0
         with eng.begin() as conn:
             # Ensure settings tables exist
             conn.execute(text("""
@@ -612,6 +727,37 @@ def hard_reset_stockky_kv() -> dict:
                 except Exception as mig_e:
                     logger.debug("hard_reset migrate %s: %s", legacy_k, mig_e)
 
+            # ── Snapshot durable/slow per-symbol fields BEFORE truncating ──
+            preserved_rows: list = []
+            try:
+                cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=preserve_days)
+                rows = conn.execute(
+                    text(
+                        "SELECT k, v FROM stockky_kv "
+                        "WHERE k LIKE :prefix AND updated_at >= :cutoff"
+                    ),
+                    {"prefix": _SYM_PREFIX + "%", "cutoff": cutoff},
+                ).fetchall()
+                for k, v in rows:
+                    try:
+                        data = json.loads(v)
+                    except Exception:
+                        continue
+                    if not isinstance(data, dict):
+                        continue
+                    sym = k[len(_SYM_PREFIX):]
+                    keep = {
+                        kk: vv for kk, vv in data.items()
+                        if kk not in _ALWAYS_DROP_ON_PRESERVE and vv is not None
+                    }
+                    if keep:
+                        keep["symbol"] = sym
+                        keep["_preserved_from_reset"] = True
+                        preserved_rows.append((sym, keep))
+            except Exception as snap_e:
+                logger.warning("hard_reset: snapshot of durable fields failed (continuing without preserve): %s", snap_e)
+                preserved_rows = []
+
             # Wipe ONLY stockky_kv (data-feed / scan cache) — never settings tables
             conn.execute(text("TRUNCATE TABLE stockky_kv"))
             try:
@@ -621,6 +767,44 @@ def hard_reset_stockky_kv() -> dict:
                 logger.debug("hard_reset constraint: %s", e)
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_stockky_kv_k ON stockky_kv (k)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS stockky_kv_expires_idx ON stockky_kv (expires_at)"))
+
+            # ── Restore preserved durable fields AFTER truncating ──
+            # These land back under the canonical key so the next put_symbol's
+            # merge-never-wipe logic (merge_feed_payload) treats them as
+            # "existing" data and layers fresh price on top instead of losing
+            # a week's worth of PE/ROCE/model-prediction hydration work.
+            if preserved_rows:
+                try:
+                    exp = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=preserve_days)
+                    CHUNK = 200
+                    for i in range(0, len(preserved_rows), CHUNK):
+                        chunk = preserved_rows[i:i + CHUNK]
+                        values_sql = ", ".join(
+                            f"(:k{j}, :v{j}, :e{j}, NOW())" for j in range(len(chunk))
+                        )
+                        params: dict = {}
+                        for j, (sym, keep) in enumerate(chunk):
+                            params[f"k{j}"] = _SYM_PREFIX + sym
+                            params[f"v{j}"] = json.dumps(keep, default=str)
+                            params[f"e{j}"] = exp
+                        conn.execute(
+                            text(
+                                f"""
+                                INSERT INTO stockky_kv (k, v, expires_at, updated_at)
+                                VALUES {values_sql}
+                                ON CONFLICT (k) DO UPDATE
+                                  SET v = EXCLUDED.v,
+                                      expires_at = EXCLUDED.expires_at,
+                                      updated_at = NOW()
+                                """
+                            ),
+                            params,
+                        )
+                    preserved_count = len(preserved_rows)
+                except Exception as restore_e:
+                    logger.warning("hard_reset: restore of durable fields failed: %s", restore_e)
+                    preserved_count = 0
+
         # Clear process memory EXCEPT protected settings keys
         try:
             protect = {"stockky:notification_config", "stockky:watchlist"}
@@ -630,12 +814,21 @@ def hard_reset_stockky_kv() -> dict:
                         _mem._store.pop(k, None)
         except Exception:
             pass
-        logger.info("hard_reset_stockky_kv: stockky_kv truncated; notification+watchlist tables preserved")
+        logger.info(
+            "hard_reset_stockky_kv: stockky_kv truncated; notification+watchlist tables preserved; "
+            "durable fields restored for %s symbols (preserve_days=%s)",
+            preserved_count, preserve_days,
+        )
         return {
             "status": "success",
-            "message": "Data-feed cache wiped. Notification settings and watchlist preserved.",
+            "message": (
+                f"Data-feed cache wiped. Notification settings and watchlist preserved. "
+                f"Durable fields (PE/ROCE/scores/model predictions) restored for {preserved_count} symbols."
+            ),
             "mode": "neon",
             "preserved": ["stockky_notification", "stockky_watchlist"],
+            "preserved_symbol_fields_count": preserved_count,
+            "preserve_days": preserve_days,
         }
     except Exception as e:
         logger.exception("hard_reset_stockky_kv failed: %s", e)

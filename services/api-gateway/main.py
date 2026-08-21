@@ -8214,7 +8214,9 @@ async def data_feed_run(
 
         # PHASE 1: optional concurrent fund fill (rate-safe). Skip when bulk already
         # covered enough OR DATA_FEED_SKIP_FUNDAMENTALS_AFTER_BULK=1 and any seed exists.
-        _skip_seq = os.getenv("DATA_FEED_SKIP_SEQUENTIAL_FUND", "0").strip().lower() in (
+        # Default ON: after bulk seed, do not sequential /fundamental/analyze (rate-limit storm).
+        # Set DATA_FEED_SKIP_SEQUENTIAL_FUND=0 to force slow fund fill.
+        _skip_seq = os.getenv("DATA_FEED_SKIP_SEQUENTIAL_FUND", "1").strip().lower() in (
             "1", "true", "yes", "on",
         )
         if _skip_seq and ok_n > 0:

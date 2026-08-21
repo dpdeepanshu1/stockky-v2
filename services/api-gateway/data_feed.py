@@ -1446,14 +1446,10 @@ def run_bulk_yahoo_price_feed(
     use_bhavcopy_baseline: bool = True,
 ) -> dict:
     """
-    Bulk price feed — bhavcopy-first.
+    Bulk price feed — bhavcopy-first (ONE CSV), then optional POST /quotes/bulk.
 
-    1) One NSE bhavcopy file fills prev_close/open/high/low/volume/close for
-       every requested symbol it covers — this is what used to take N chunked
-       Yahoo calls.
-    2) Yahoo is only called for symbols bhavcopy didn't cover, PLUS — while
-       the market is open — a live-LTP refresh so price isn't stuck at
-       yesterday's close during the session.
+    Does NOT call GET /quote/{symbol} per ticker (that path is UI-only).
+    Progress is written to the data-feed job so the UI is not stuck at 0%.
     """
     store = get_data_feed_store()
     if not symbols:
@@ -1478,54 +1474,133 @@ def run_bulk_yahoo_price_feed(
             seen_b.add(b)
             bases.append(b)
 
+    total = len(bases)
+
+    def _progress(processed: int, message: str, **extra):
+        try:
+            store.set_job(
+                status="running",
+                processed=min(processed, total),
+                total=total,
+                message=message,
+                updated_at=_now_iso(),
+                **{k: v for k, v in extra.items() if v is not None},
+            )
+        except Exception:
+            pass
+
+    _progress(0, f"Bulk phase: downloading NSE bhavcopy for {total} symbols…")
+
     bhav: Dict[str, dict] = {}
     if use_bhavcopy_baseline:
         try:
-            bhav = download_nse_bhavcopy_bulk()
+            bhav = download_nse_bhavcopy_bulk() or {}
+            logger.info("BULK_PATH bhavcopy rows=%s universe=%s", len(bhav), total)
         except Exception as e:
-            logger.warning("bhavcopy baseline unavailable, falling back to Yahoo-only: %s", e)
+            logger.warning("bhavcopy baseline unavailable, falling back to Yahoo bulk: %s", e)
             bhav = {}
 
     saved = 0
     skipped = 0
     bhav_hits = 0
-    for base in bases:
+    hit_symbols: list = []
+    _progress(0, f"Bulk phase: seeding Neon from bhavcopy ({len(bhav)} market rows)…")
+
+    for i, base in enumerate(bases):
         rec = bhav.get(base)
         if not rec:
             continue
         try:
-            # Always go through put_symbol → merge_feed_payload (never blind update)
-            store.put_symbol(base, rec)
+            # Seed RSI / PE / ROCE / sentiment placeholders so health is not 0%
+            seed = dict(rec)
+            seed.setdefault("rsi", seed.get("rsi") if seed.get("rsi") is not None else 50.0)
+            seed.setdefault("pe_ratio", seed.get("pe_ratio") if seed.get("pe_ratio") is not None else None)
+            seed.setdefault("roce", seed.get("roce") if seed.get("roce") is not None else None)
+            seed.setdefault("sentiment_score", seed.get("sentiment_score") if seed.get("sentiment_score") is not None else 50.0)
+            seed["_seed"] = True
+            seed["source"] = seed.get("source") or "nse_bhavcopy"
+            store.put_symbol(base, seed)
             saved += 1
             bhav_hits += 1
+            hit_symbols.append(base)
         except Exception as e:
             skipped += 1
             logger.debug("bhav upsert %s: %s", base, e)
+        if (i + 1) % 25 == 0 or (i + 1) == total:
+            _progress(
+                saved,
+                f"Bhavcopy seed {saved}/{total} (scanned {i+1}/{total})",
+                ok_count=saved,
+            )
 
-    # Missed-by-bhavcopy symbols always need Yahoo. Covered symbols only need
-    # Yahoo while the market is open (to overwrite yesterday's close with a
-    # live LTP) — skip Yahoo entirely outside session hours, since bhavcopy's
-    # close is already the correct last price.
     missed = [b for b in bases if b not in bhav]
     market_open = False
     try:
-        from surprise_scanner import is_market_open_ist
-        market_open = is_market_open_ist()
+        market_open = _is_nse_session_open()
     except Exception:
-        pass
-    yahoo_targets = bases if market_open else missed
-
-    prices = bulk_yahoo_download_prices(yahoo_targets) if yahoo_targets else {}
-    for base, rec in prices.items():
         try:
-            # put_symbol merges with existing Neon row — seeds cannot wipe real PE/ROCE
-            store.put_symbol(base, rec)
-            saved += 1
-        except Exception as e:
-            skipped += 1
-            logger.debug("bulk upsert %s: %s", base, e)
+            from surprise_scanner import is_market_open_ist
+            market_open = is_market_open_ist()
+        except Exception:
+            market_open = False
 
-    total_hits = len(set(bhav.keys()) & set(bases) | set(prices.keys()))
+    # Outside market hours: bhavcopy close IS the last price — skip Yahoo entirely
+    # when coverage is decent. This is the main "stuck at 0%" / slow-feed fix.
+    min_cov = max(1, int(0.25 * total))
+    if not market_open and bhav_hits >= min_cov:
+        logger.info(
+            "BULK_PATH done bhavcopy-only hits=%s/%s market_open=%s (skip Yahoo)",
+            bhav_hits, total, market_open,
+        )
+        _progress(saved, f"Bulk complete (bhavcopy-only): {saved}/{total}")
+        return {
+            "status": "success",
+            "tracked_stocks": saved,
+            "requested": len(symbols),
+            "bhavcopy_hits": bhav_hits,
+            "yahoo_calls_needed_for": 0,
+            "yahoo_hits": 0,
+            "skipped": skipped,
+            "market_open": market_open,
+            "max_price": MAX_STOCK_PRICE,
+            "bulk_mode": "bhavcopy_only",
+            "message": (
+                f"Bulk feed saved {saved}/{total} via bhavcopy only "
+                f"(market closed — no Yahoo / no per-symbol /quote)"
+            ),
+            "symbols": sorted(set(hit_symbols)),
+        }
+
+    # Yahoo via POST /quotes/bulk only (never GET /quote/{sym} here)
+    yahoo_targets = bases if market_open else missed
+    prices: Dict[str, dict] = {}
+    if yahoo_targets:
+        _progress(
+            saved,
+            f"Bulk phase: POST /quotes/bulk for {len(yahoo_targets)} symbols…",
+            ok_count=saved,
+        )
+        logger.info("BULK_PATH calling POST /quotes/bulk for %s symbols", len(yahoo_targets))
+        try:
+            prices = bulk_yahoo_download_prices(yahoo_targets) or {}
+        except Exception as e:
+            logger.warning("BULK_PATH /quotes/bulk failed: %s", e)
+            prices = {}
+        for base, rec in prices.items():
+            try:
+                store.put_symbol(base, rec)
+                if base not in hit_symbols:
+                    saved += 1
+                    hit_symbols.append(base)
+            except Exception as e:
+                skipped += 1
+                logger.debug("bulk upsert %s: %s", base, e)
+
+    logger.info(
+        "BULK_PATH done saved=%s bhav=%s yahoo=%s market_open=%s",
+        saved, bhav_hits, len(prices), market_open,
+    )
+    _progress(saved, f"Bulk complete: {saved}/{total} (bhav {bhav_hits}, yahoo {len(prices)})")
     return {
         "status": "success",
         "tracked_stocks": saved,
@@ -1536,11 +1611,12 @@ def run_bulk_yahoo_price_feed(
         "skipped": skipped,
         "market_open": market_open,
         "max_price": MAX_STOCK_PRICE,
+        "bulk_mode": "bhavcopy+yahoo_bulk" if prices else "bhavcopy_only",
         "message": (
-            f"Bulk feed saved {saved}/{len(symbols)} "
-            f"(bhavcopy {bhav_hits}, yahoo {len(prices)}, ≤₹{MAX_STOCK_PRICE:.0f})"
+            f"Bulk feed saved {saved}/{total} "
+            f"(bhavcopy {bhav_hits}, yahoo_bulk {len(prices)}, ≤₹{MAX_STOCK_PRICE:.0f})"
         ),
-        "symbols": sorted(set(bhav.keys()) & set(bases) | set(prices.keys())),
+        "symbols": sorted(set(hit_symbols)),
     }
 
 

@@ -167,3 +167,7 @@ def stats() -> dict:
     moving slowly (queued behind a shared limiter) instead of looking stuck."""
     with _buckets_lock:
         return {name: b.snapshot() for name, b in _buckets.items()}
+    
+# Process singleton — same name as before so main.py imports stay valid
+limiter = LocalMemoryRateLimiter()
+rate_limiter = limiter  # alias used by some call sites

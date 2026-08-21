@@ -16,14 +16,23 @@ SELL = "SELL"
 # Horizon weight profiles (must sum ~1.0 across core pillars)
 HORIZON_WEIGHTS = {
     "short": {
-        # Short-term: 70% catalyst (news/events/bulk/results), 30% other
-        "technical": 0.12,
-        "volume_rs": 0.08,
-        "news_events": 0.70,
-        "prediction": 0.04,
-        "fundamental": 0.03,
-        "quality_peers": 0.02,
-        "regime": 0.01,
+        # Fix: news_events at 70% meant a stock with excellent technicals
+        # (RSI/MACD/EMA/Supertrend/volume breakout — the actual "surprise"
+        # signals this project scans for) could not reach BUY NOW (bar=66)
+        # without news_events ALSO scoring high. Since news_score is very
+        # often unavailable/neutral (50) for a given symbol at scan time,
+        # the weighted score capped out around ~56 even for a textbook
+        # technical breakout — PREPARE TO BUY sometimes, BUY NOW almost
+        # never. Rebalanced so technical + volume/RS (the reliably-available
+        # signals) can drive a decision on their own, while news/events still
+        # carries real weight as a catalyst booster rather than a gate.
+        "technical": 0.30,
+        "volume_rs": 0.20,
+        "news_events": 0.30,
+        "prediction": 0.08,
+        "fundamental": 0.05,
+        "quality_peers": 0.04,
+        "regime": 0.03,
     },
     "mid": {
         "technical": 0.26,

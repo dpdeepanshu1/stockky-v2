@@ -2289,6 +2289,19 @@ async def _analyze_one_symbol_ultra(
                         }
                         # Drop None values to keep payload clean
                         eval_payload = {k: v for k, v in eval_payload.items() if v is not None}
+                        # Bottleneck fix: during a scan (this function processes the
+                        # whole universe), a symbol with a partially-filled feed row
+                        # (e.g. news_score missing) previously made decision-service
+                        # fall through to a LIVE per-symbol HTTP fetch (news/events/
+                        # prediction/training) inside /decide/evaluate — that's what
+                        # was slowing down full & lite scans and quietly serializing
+                        # hundreds of upstream calls. skip_http tells decision-service
+                        # to score strictly off what we already have (missing pillars
+                        # default to neutral 50) instead of reaching upstream again.
+                        # Single-stock "Analyse" (get_stock_decision, below) is a
+                        # separate code path and is untouched — it still always does
+                        # one live force=true /decide/{symbol} call.
+                        eval_payload["skip_http"] = True
                         decision_resp = await _cb_post(
                             client,
                             "decision",

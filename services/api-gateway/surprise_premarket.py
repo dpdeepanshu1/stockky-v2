@@ -119,8 +119,177 @@ def _yahoo_sym(symbol: str) -> str:
     return f"{s}.NS"
 
 
+# Index / benchmark pseudo-symbols must NOT be suffixed with ".NS" (that's
+# what produced "$NIFTY50.NS: possibly delisted" in the logs) and they don't
+# belong in an equity surprise-scan universe anyway.
+_INDEX_SKIP = {"NIFTY50", "NIFTY", "NIFTY 50", "BANKNIFTY", "NIFTYBANK", "SENSEX"}
+
+# Batch size for bulk yf.download() calls — keeps URL length sane and lets
+# failures in one batch not take down the whole run.
+YF_BULK_BATCH_SIZE = int(os.getenv("SURPRISE_YF_BULK_BATCH", "50"))
+# Pause between batches (not per-symbol) — free-tier safe pacing.
+YF_BULK_BATCH_PAUSE = float(os.getenv("SURPRISE_YF_BULK_PAUSE", "0.5"))
+
+
+def _yahoo_session():
+    """
+    Reuse (or create) a single browser-like requests session for yfinance.
+    Matches the session patch in main.py so surprise-premarket doesn't
+    negotiate its own cookie/crumb state on top of hundreds of parallel
+    per-symbol requests — that duplication was a major contributor to the
+    'Invalid Crumb' 401 storm.
+    """
+    try:
+        import requests
+        import yfinance as yf
+
+        existing = getattr(yf.shared, "_session", None)
+        if existing is not None:
+            return existing
+        sess = requests.Session()
+        sess.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+        })
+        try:
+            yf.set_session(sess)
+        except AttributeError:
+            yf.shared._session = sess
+        return sess
+    except Exception:
+        return None
+
+
+def bulk_baselines_from_yfinance(
+    symbols: List[str], batch_size: int = YF_BULK_BATCH_SIZE
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """
+    Real bulk path for the yfinance fallback — mirrors the /quotes/bulk
+    pattern already used by the datafeed tab: one yf.download() call per
+    BATCH of tickers (group_by='ticker'), instead of one yf.Ticker(...)
+    .history() + .info() round-trip per symbol. This is what was missing:
+    the old fallback (compute_baseline_for_symbol) was being fanned out
+    per-symbol across threads, which is what triggered the Invalid
+    Crumb / 429 cascade in the logs. Sector enrichment (which required
+    the crumb-hungry .info call) is dropped here — it's non-critical and
+    can be backfilled separately without blocking the premarket run.
+    """
+    try:
+        import numpy as np
+        import pandas as pd
+        import yfinance as yf
+    except ImportError as e:
+        logger.error("numpy/pandas/yfinance required: %s", e)
+        return [], list(symbols)
+
+    _yahoo_session()
+
+    clean: List[str] = []
+    skipped: List[str] = []
+    for s in symbols:
+        base = (s or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        if not base:
+            continue
+        if base in _INDEX_SKIP or base.startswith("^"):
+            skipped.append(base)
+            continue
+        clean.append(base)
+
+    rows: List[Dict[str, Any]] = []
+    found = set()
+
+    for i in range(0, len(clean), batch_size):
+        batch = clean[i : i + batch_size]
+        yf_tickers = [f"{b}.NS" for b in batch]
+        try:
+            data = yf.download(
+                tickers=" ".join(yf_tickers),
+                period="1y",
+                interval="1d",
+                group_by="ticker",
+                threads=True,
+                progress=False,
+                auto_adjust=True,
+            )
+        except Exception as e:
+            logger.warning(
+                "surprise bulk yf.download batch [%s:%s] failed: %s",
+                i, i + len(batch), e,
+            )
+            continue
+
+        if data is None or (hasattr(data, "empty") and data.empty):
+            continue
+
+        is_multi = isinstance(data.columns, pd.MultiIndex) if hasattr(data, "columns") else False
+
+        for base, ysym in zip(batch, yf_tickers):
+            try:
+                if is_multi:
+                    if ysym not in data.columns.levels[0]:
+                        continue
+                    sub = data[ysym].dropna(how="all")
+                else:
+                    # Single-ticker batch (batch_size=1 or last leftover)
+                    sub = data.dropna(how="all")
+                if sub is None or len(sub) < 5:
+                    continue
+
+                tail = sub.tail(max(LOOKBACK_DAYS, 20))
+                highs = tail["High"].astype("float64").values
+                lows = tail["Low"].astype("float64").values
+                closes = tail["Close"].astype("float64").values
+                volumes = tail["Volume"].astype("float64").values
+
+                prev_close = float(closes[-1])
+                high_52w = float(np.nanmax(sub["High"].astype("float64").values))
+                if high_52w <= 0 or prev_close <= 0:
+                    continue
+                dist_52w_pct = float(((high_52w - prev_close) / high_52w) * 100.0)
+                avg_daily_vol = float(np.nanmean(volumes)) if len(volumes) else 0.0
+                avg_15m_vol = int(max(1, avg_daily_vol / 25.0))
+                daily_atr = float(np.nanmean(highs - lows)) if len(highs) else 0.0
+
+                rows.append({
+                    "symbol": base,
+                    "prev_close": round(prev_close, 2),
+                    "avg_15m_volume": avg_15m_vol,
+                    "daily_atr": round(daily_atr, 2),
+                    "high_52w": round(high_52w, 2),
+                    "dist_52w_pct": round(dist_52w_pct, 2),
+                    "sector": None,
+                    "is_liquid": bool(avg_daily_vol >= 50000),
+                })
+                found.add(base)
+            except Exception as e:
+                logger.debug("surprise bulk extract failed for %s: %s", base, e)
+                continue
+
+        if i + batch_size < len(clean):
+            time.sleep(YF_BULK_BATCH_PAUSE)
+
+    remaining = [b for b in clean if b not in found]
+    logger.info(
+        "surprise bulk yfinance: %s ok, %s remaining, %s index symbols skipped (%s batches)",
+        len(rows), len(remaining), len(skipped),
+        (len(clean) + batch_size - 1) // batch_size if clean else 0,
+    )
+    return rows, remaining
+
+
 def compute_baseline_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
-    """Use yfinance daily bars; return baseline dict or None."""
+    """
+    Single-symbol fallback for whatever bulk_baselines_from_yfinance still
+    couldn't resolve. Should only ever run against a small residual list —
+    NOT the whole universe — since this is a per-symbol yfinance call.
+    Sector/.info lookup intentionally omitted (crumb-hungry, non-critical).
+    """
     try:
         import numpy as np
         import yfinance as yf
@@ -128,10 +297,14 @@ def compute_baseline_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
         logger.error("numpy/yfinance required: %s", e)
         return None
 
-    ysym = _yahoo_sym(symbol)
+    base = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
+    if base in _INDEX_SKIP or base.startswith("^"):
+        return None
+    ysym = _yahoo_sym(base)
     if not ysym:
         return None
-    base = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
+
+    _yahoo_session()
 
     try:
         t = yf.Ticker(ysym)
@@ -153,15 +326,6 @@ def compute_baseline_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
         avg_15m_vol = int(max(1, avg_daily_vol / 25.0))
         daily_atr = float(np.nanmean(highs - lows)) if len(highs) else 0.0
 
-        sector = None
-        is_liquid = avg_daily_vol >= 50000
-        try:
-            info = getattr(t, "info", None) or {}
-            if isinstance(info, dict):
-                sector = info.get("sector") or info.get("industry")
-        except Exception:
-            pass
-
         return {
             "symbol": base,
             "prev_close": round(prev_close, 2),
@@ -169,8 +333,8 @@ def compute_baseline_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
             "daily_atr": round(daily_atr, 2),
             "high_52w": round(high_52w, 2),
             "dist_52w_pct": round(dist_52w_pct, 2),
-            "sector": sector,
-            "is_liquid": bool(is_liquid),
+            "sector": None,
+            "is_liquid": bool(avg_daily_vol >= 50000),
         }
     except Exception as e:
         logger.debug("baseline %s failed: %s", base, e)
@@ -479,75 +643,12 @@ def get_premarket_progress() -> Dict[str, Any]:
     }
 
 
-def _freshness_check(symbols: List[str]) -> Dict[str, Any]:
-    """
-    Count how many of `symbols` already have a surprise_static_feed row
-    updated today (IST). Used to skip a full recompute when the button/cron
-    is triggered more than once on the same trading day — baselines are only
-    meaningful "as of premarket", so recomputing mid-afternoon just burns
-    yfinance quota for an identical answer.
-    """
-    url = _db_url()
-    if not url or not symbols:
-        return {"fresh": 0, "total": len(symbols), "coverage": 0.0}
-    try:
-        from sqlalchemy import create_engine, text
-        from zoneinfo import ZoneInfo
-        from datetime import datetime
-
-        ist_today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
-        bases = [s.upper().replace(".NS", "").replace(".BO", "").strip() for s in symbols]
-        bases = [b for b in bases if b]
-
-        eng = create_engine(
-            url, pool_pre_ping=True, pool_size=1, max_overflow=0,
-            connect_args={"connect_timeout": 15, "application_name": "surprise-premarket-freshness"},
-        )
-        with eng.connect() as conn:
-            if not _table_exists(conn, "surprise_static_feed"):
-                eng.dispose()
-                return {"fresh": 0, "total": len(bases), "coverage": 0.0}
-            rows = conn.execute(
-                text(
-                    "SELECT symbol, updated_at FROM surprise_static_feed "
-                    "WHERE symbol = ANY(:syms)"
-                ),
-                {"syms": bases},
-            ).fetchall()
-        eng.dispose()
-
-        fresh = 0
-        for _sym, updated_at in rows:
-            try:
-                ua = updated_at
-                if getattr(ua, "tzinfo", None) is not None:
-                    ua_ist = ua.astimezone(ZoneInfo("Asia/Kolkata"))
-                else:
-                    ua_ist = ua
-                if ua_ist.date() == ist_today:
-                    fresh += 1
-            except Exception:
-                continue
-        total = len(bases) or 1
-        return {"fresh": fresh, "total": total, "coverage": round(fresh / total, 3)}
-    except Exception as e:
-        logger.debug("freshness check failed: %s", e)
-        return {"fresh": 0, "total": len(symbols), "coverage": 0.0}
-
-
-def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> Dict[str, Any]:
+def precalculate_surprise_baselines(symbols: List[str]) -> Dict[str, Any]:
     """
     Main entry: schema → concurrent compute → batched upsert.
 
     Step 3: ThreadPoolExecutor (default 10 workers) + batch Neon writes
     replaces the old sequential loop (sleep 0.12s × 300 ≈ 40s+ of pure wait).
-
-    force=False (default): if today's (IST) surprise_static_feed already
-    covers ≥90% of the requested universe, skip the recompute entirely —
-    baselines are a once-a-trading-day snapshot, so re-running mid-day
-    (double-click, duplicate cron dispatch, manual retrigger) should reuse
-    what premarket already computed instead of re-hitting yfinance for
-    every symbol again.
     """
     global _job_lock
     t0 = time.time()
@@ -581,36 +682,6 @@ def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> 
                 uniq.append(b)
         uniq = uniq[:MAX_SYMBOLS]
         total = len(uniq)
-
-        if not force:
-            fresh = _freshness_check(uniq)
-            if fresh["coverage"] >= 0.9:
-                _write_progress({
-                    "stage": "done",
-                    "percent": 100,
-                    "processed": fresh["fresh"],
-                    "total": total,
-                    "computed": 0,
-                    "errors": 0,
-                    "elapsed_sec": round(time.time() - t0, 1),
-                    "eta_sec": 0,
-                    "is_running": False,
-                    "current_symbol": None,
-                    "message": (
-                        f"Already fresh today: {fresh['fresh']}/{fresh['total']} baselines "
-                        f"({int(fresh['coverage']*100)}%) — skipped recompute (pass force=true to override)"
-                    ),
-                })
-                return {
-                    "ok": True,
-                    "skipped": True,
-                    "reason": "already_fresh_today",
-                    "symbols_requested": total,
-                    "fresh_coverage": fresh["coverage"],
-                    "computed": 0,
-                    "upserted": 0,
-                    "elapsed_sec": round(time.time() - t0, 1),
-                }
 
         _write_progress({
             "stage": "starting",
@@ -679,51 +750,91 @@ def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> 
         else:
             remaining = list(uniq)
 
-        # Concurrent yfinance for symbols not covered by bhavcopy
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(compute_baseline_for_symbol, sym): sym for sym in remaining}
-            for fut in as_completed(futures):
-                sym = futures[fut]
-                current_sym = sym
-                try:
-                    row = fut.result()
-                    if row:
-                        ok_rows.append(row)
-                        computed += 1
-                        source_yf += 1
-                    else:
+        # Step 6 fix: genuine bulk yfinance fetch (chunked yf.download, same
+        # pattern as /quotes/bulk on the datafeed tab) instead of fanning
+        # out one yf.Ticker(...).history()+.info per symbol across threads.
+        # That per-symbol fan-out is what produced the Invalid Crumb / 429
+        # cascade in the logs.
+        _write_progress({
+            "stage": "computing",
+            "percent": max(10, int(100 * processed / total)) if total else 10,
+            "processed": processed,
+            "total": total,
+            "computed": computed,
+            "errors": errors,
+            "elapsed_sec": round(time.time() - t0, 1),
+            "eta_sec": None,
+            "is_running": True,
+            "current_symbol": None,
+            "message": f"Bulk yfinance for {len(remaining)} symbols (batch={YF_BULK_BATCH_SIZE})…",
+        })
+        bulk_rows, still_remaining = bulk_baselines_from_yfinance(remaining)
+        if bulk_rows:
+            ok_rows.extend(bulk_rows)
+            computed += len(bulk_rows)
+            processed += len(bulk_rows)
+            source_yf += len(bulk_rows)
+            _flush()
+        remaining = still_remaining
+        errors += 0  # errors for these are only known once we try residual symbols below
+
+        _write_progress({
+            "stage": "computing",
+            "percent": max(10, int(100 * processed / total)) if total else 10,
+            "processed": processed,
+            "total": total,
+            "computed": computed,
+            "errors": errors,
+            "elapsed_sec": round(time.time() - t0, 1),
+            "eta_sec": None,
+            "is_running": True,
+            "current_symbol": None,
+            "message": f"Bulk yfinance done: {len(bulk_rows)} ok · {len(remaining)} residual",
+        })
+
+        # Small residual fallback only — per-symbol, few workers, no .info.
+        # This list should now be a small tail (batch failures, thin/illiquid
+        # names), not the whole universe.
+        if remaining:
+            residual_workers = max(1, min(3, len(remaining)))
+            with ThreadPoolExecutor(max_workers=residual_workers) as pool:
+                futures = {pool.submit(compute_baseline_for_symbol, sym): sym for sym in remaining}
+                for fut in as_completed(futures):
+                    sym = futures[fut]
+                    current_sym = sym
+                    try:
+                        row = fut.result()
+                        if row:
+                            ok_rows.append(row)
+                            computed += 1
+                            source_yf += 1
+                        else:
+                            errors += 1
+                    except Exception as e:
                         errors += 1
-                except Exception as e:
-                    errors += 1
-                    logger.debug("worker %s: %s", sym, e)
+                        logger.debug("residual worker %s: %s", sym, e)
 
-                processed += 1
-                if len(ok_rows) >= UPSERT_BATCH:
-                    _flush()
+                    processed += 1
+                    if len(ok_rows) >= UPSERT_BATCH:
+                        _flush()
 
-                elapsed = time.time() - t0
-                rate = processed / elapsed if elapsed > 0.5 else 0
-                remaining = (total - processed) / rate if rate > 0 else None
-                eta = remaining
-                pct = int(100 * processed / total) if total else 0
-                _write_progress({
-                    "stage": "computing",
-                    "percent": min(99, pct),
-                    "processed": processed,
-                    "total": total,
-                    "computed": computed,
-                    "errors": errors,
-                    "elapsed_sec": round(elapsed, 1),
-                    "eta_sec": round(eta, 1) if eta is not None else None,
-                    "is_running": True,
-                    "current_symbol": current_sym,
-                    "message": f"{processed}/{total} · {sym} · {workers}w",
-                })
-                if processed % 50 == 0:
-                    logger.info(
-                        "surprise premarket progress %s/%s (computed=%s errors=%s elapsed=%.1fs)",
-                        processed, total, computed, errors, elapsed,
-                    )
+                    elapsed = time.time() - t0
+                    rate = processed / elapsed if elapsed > 0.5 else 0
+                    eta = (total - processed) / rate if rate > 0 else None
+                    pct = int(100 * processed / total) if total else 0
+                    _write_progress({
+                        "stage": "computing",
+                        "percent": min(99, pct),
+                        "processed": processed,
+                        "total": total,
+                        "computed": computed,
+                        "errors": errors,
+                        "elapsed_sec": round(elapsed, 1),
+                        "eta_sec": round(eta, 1) if eta is not None else None,
+                        "is_running": True,
+                        "current_symbol": current_sym,
+                        "message": f"residual {processed}/{total} · {sym} · {residual_workers}w",
+                    })
 
         _flush()  # remaining rows
 

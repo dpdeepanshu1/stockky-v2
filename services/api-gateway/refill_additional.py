@@ -4,12 +4,24 @@ Refill Additional Data — manual + programmatic hydration of slow fields
 
 Runs as a background job on the API gateway so the Data Feed UI button can
 trigger it without blocking. Uses the same merge-never-wipe put_symbol path.
+
+Fix: the previous version processed symbols one at a time with an 18s fixed
+sleep and up to 90s x 3 retries per endpoint. Worst case that's >10 minutes
+per symbol, and even the happy path (~300 symbols x ~20-30s) is 1.5-2+
+hours — long enough that a free-tier dyno idling out (or a restart) kills
+the background thread mid-run, leaving the job stuck at status="running"
+forever with no way to tell it's actually dead. Now uses bounded concurrency
+(ThreadPoolExecutor, matching the pattern the main /data-feed/run fundamentals
+phase already uses successfully) with shorter per-request timeouts and a
+single attempt (fast-fail) instead of blind retries, plus a staleness check
+so the UI can detect and recover from a dead job instead of spinning forever.
 """
 from __future__ import annotations
 
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -24,9 +36,17 @@ FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_AI}/fundamental").rstrip("/")
 TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_AI}/technical").rstrip("/")
 EVENT_URL = os.getenv("EVENT_URL", f"{_AI}/event").rstrip("/")
 
-DELAY_SEC = float(os.getenv("REFILL_DELAY_SEC", os.getenv("HYDRATOR_DELAY_SEC", "18.0")))
-REQUEST_TIMEOUT = float(os.getenv("REFILL_TIMEOUT_SEC", os.getenv("HYDRATOR_TIMEOUT_SEC", "90.0")))
+# Per-request timeout — short and single-attempt so one slow symbol can't
+# stall the whole job. Concurrency (below) is what gives real throughput,
+# not long per-request waits.
+REQUEST_TIMEOUT = float(os.getenv("REFILL_TIMEOUT_SEC", "25.0"))
+# Bounded concurrency — mirrors DATA_FEED_FUND_CONCURRENCY used by the main
+# /data-feed/run fundamentals phase, so we don't cause a fresh 429 storm.
+CONCURRENCY = int(os.getenv("REFILL_CONCURRENCY", "4"))
 MAX_SYMBOLS = int(os.getenv("REFILL_MAX_SYMBOLS", "0") or 0)  # 0 = full universe
+# If a "running" job hasn't updated in this long, treat it as dead (Render
+# free-tier idle-kill or crash) so the UI can recover instead of spinning.
+STALE_AFTER_SEC = float(os.getenv("REFILL_STALE_AFTER_SEC", "300"))
 
 # Process-local job mirror (status also written to data_feed job when available)
 _REFILL_JOB: Dict[str, Any] = {
@@ -41,12 +61,25 @@ _REFILL_JOB: Dict[str, Any] = {
 
 
 def get_refill_job() -> dict:
-    return dict(_REFILL_JOB)
+    job = dict(_REFILL_JOB)
+    if job.get("status") == "running":
+        try:
+            last = job.get("_updated_epoch") or 0
+            if last and (time.time() - last) > STALE_AFTER_SEC:
+                job["status"] = "stalled"
+                job["message"] = (
+                    f"No progress for {int(time.time() - last)}s — job likely died "
+                    f"(dyno idle-kill/restart). Safe to start again."
+                )
+        except Exception:
+            pass
+    return job
 
 
 def _set_job(**kw) -> dict:
     _REFILL_JOB.update(kw)
     _REFILL_JOB["updated_at"] = datetime.now(IST).isoformat()
+    _REFILL_JOB["_updated_epoch"] = time.time()
     # Best-effort mirror into data-feed job store for UI polling compatibility
     try:
         from data_feed import get_data_feed_store
@@ -72,18 +105,20 @@ def _norm(sym: str) -> str:
 
 
 def _get_json(client: httpx.Client, url: str) -> Optional[dict]:
-    for attempt in range(3):
-        try:
+    """Single attempt + one short retry on 429 only. Concurrency (not long
+    per-request retry chains) is what gets us through the universe in a
+    reasonable time — a symbol that fails just falls through to error_count
+    instead of eating minutes of wall-clock."""
+    try:
+        r = client.get(url, timeout=REQUEST_TIMEOUT)
+        if r.status_code == 429:
+            time.sleep(5)
             r = client.get(url, timeout=REQUEST_TIMEOUT)
-            if r.status_code == 429:
-                time.sleep(20 * (attempt + 1))
-                continue
-            if r.status_code == 200 and r.content:
-                data = r.json()
-                return data if isinstance(data, dict) else None
-        except Exception as e:
-            logger.debug("GET %s: %s", url, e)
-            time.sleep(8 * (attempt + 1))
+        if r.status_code == 200 and r.content:
+            data = r.json()
+            return data if isinstance(data, dict) else None
+    except Exception as e:
+        logger.debug("GET %s: %s", url, e)
     return None
 
 
@@ -115,8 +150,22 @@ def _build_payload(sym: str, fund: Optional[dict], tech: Optional[dict], events:
     return row
 
 
+def _hydrate_one(client: httpx.Client, sym: str) -> tuple[str, bool]:
+    fund = _get_json(client, f"{FUNDAMENTAL_URL}/analyze/{sym}?force=true")
+    tech = _get_json(client, f"{TECHNICAL_URL}/analyze/{sym}?force=true")
+    events = _get_json(client, f"{EVENT_URL}/events/{sym}?force=true")
+    row = _build_payload(sym, fund, tech, events)
+    return sym, row
+
+
 def run_refill_additional(symbols: Optional[List[str]] = None) -> dict:
-    """Blocking worker — call from BackgroundTasks or CLI."""
+    """Blocking worker — call from BackgroundTasks or CLI.
+
+    Bounded-concurrency (CONCURRENCY workers) instead of one-symbol-at-a-time
+    with an 18s sleep — that sequential version could take 1.5-2+ hours for a
+    ~300 symbol universe, well past a free-tier dyno's idle-kill window, so
+    the job would die mid-run and get stuck at status="running" forever.
+    """
     from data_feed import get_data_feed_store, data_feed_stop_requested, clear_data_feed_stop
 
     store = get_data_feed_store()
@@ -132,15 +181,18 @@ def run_refill_additional(symbols: Optional[List[str]] = None) -> dict:
         return _set_job(status="error", message="No symbols to refill", processed=0, total=0)
 
     symbols = [_norm(s) for s in symbols if _norm(s)]
+    seen = set()
+    symbols = [s for s in symbols if not (s in seen or seen.add(s))]
     if MAX_SYMBOLS > 0:
         symbols = symbols[:MAX_SYMBOLS]
 
     total = len(symbols)
     ok_n = 0
     err_n = 0
+    processed = 0
     _set_job(
         status="running",
-        message=f"Refill Additional Data: 0/{total}…",
+        message=f"Refill Additional Data: 0/{total} (concurrency={CONCURRENCY})…",
         processed=0,
         total=total,
         ok_count=0,
@@ -149,45 +201,44 @@ def run_refill_additional(symbols: Optional[List[str]] = None) -> dict:
         stop_requested=False,
     )
 
-    with httpx.Client(timeout=REQUEST_TIMEOUT, follow_redirects=True) as client:
-        for i, sym in enumerate(symbols):
-            if data_feed_stop_requested():
-                _set_job(
-                    status="stopped",
-                    message=f"Stopped at {i}/{total}",
-                    processed=i,
-                    ok_count=ok_n,
-                    error_count=err_n,
-                )
-                return get_refill_job()
+    limits = httpx.Limits(max_connections=CONCURRENCY * 2, max_keepalive_connections=CONCURRENCY)
+    with httpx.Client(timeout=REQUEST_TIMEOUT, follow_redirects=True, limits=limits) as client:
+        with ThreadPoolExecutor(max_workers=max(1, CONCURRENCY)) as pool:
+            futures = {pool.submit(_hydrate_one, client, sym): sym for sym in symbols}
+            for fut in as_completed(futures):
+                sym = futures[fut]
+                if data_feed_stop_requested():
+                    for f in futures:
+                        f.cancel()
+                    return _set_job(
+                        status="stopped",
+                        message=f"Stopped at {processed}/{total}",
+                        processed=processed,
+                        ok_count=ok_n,
+                        error_count=err_n,
+                    )
 
-            try:
-                fund = _get_json(client, f"{FUNDAMENTAL_URL}/analyze/{sym}?force=true")
-                tech = _get_json(client, f"{TECHNICAL_URL}/analyze/{sym}?force=true")
-                events = _get_json(client, f"{EVENT_URL}/events/{sym}?force=true")
-                row = _build_payload(sym, fund, tech, events)
-                if len(row) > 2:
-                    store.put_symbol(sym, row)
-                    ok_n += 1
-                else:
+                try:
+                    _, row = fut.result()
+                    if len(row) > 2:
+                        store.put_symbol(sym, row)
+                        ok_n += 1
+                    else:
+                        err_n += 1
+                except Exception as e:
                     err_n += 1
-            except Exception as e:
-                err_n += 1
-                logger.warning("refill %s: %s", sym, e)
+                    logger.warning("refill %s: %s", sym, e)
 
-            processed = i + 1
-            if processed % 3 == 0 or processed == total:
-                _set_job(
-                    status="running",
-                    message=f"Refill Additional Data: {processed}/{total} (ok={ok_n} err={err_n})",
-                    processed=processed,
-                    total=total,
-                    ok_count=ok_n,
-                    error_count=err_n,
-                )
-
-            if i < total - 1:
-                time.sleep(DELAY_SEC)
+                processed += 1
+                if processed % 3 == 0 or processed == total:
+                    _set_job(
+                        status="running",
+                        message=f"Refill Additional Data: {processed}/{total} (ok={ok_n} err={err_n})",
+                        processed=processed,
+                        total=total,
+                        ok_count=ok_n,
+                        error_count=err_n,
+                    )
 
     return _set_job(
         status="done",

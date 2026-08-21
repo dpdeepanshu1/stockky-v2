@@ -17,6 +17,7 @@ import math
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
 import httpx
@@ -30,13 +31,18 @@ FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_AI}/fundamental").rstrip("/")
 TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_AI}/technical").rstrip("/")
 EVENT_URL = os.getenv("EVENT_URL", f"{_AI}/event").rstrip("/")
 
-# Generous free-tier pacing (manual + weekend)
-DELAY_SEC = float(os.getenv("HYDRATOR_DELAY_SEC", "18.0"))
+# Fix: the old sequential loop (one symbol at a time, 18s fixed sleep, up to
+# 2 retries x 90s timeout per endpoint) could take >10 min/symbol in the
+# worst case and 1.5-2+ hours even in the happy path for a few hundred
+# symbols — long past a free/cron worker's realistic run window, so batches
+# routinely never finished. Bounded concurrency (like the API gateway's
+# refill_additional.py) gets the same work done in minutes, not hours.
 BATCH_HOURS = int(os.getenv("HYDRATOR_BATCH_HOURS", "48"))
-REQUEST_TIMEOUT = float(os.getenv("HYDRATOR_TIMEOUT_SEC", "90.0"))
-PERSIST_TIMEOUT = float(os.getenv("HYDRATOR_PERSIST_TIMEOUT_SEC", "30.0"))
-MAX_RETRIES = int(os.getenv("HYDRATOR_MAX_RETRIES", "2"))
-RETRY_BACKOFF = float(os.getenv("HYDRATOR_RETRY_BACKOFF_SEC", "25.0"))
+REQUEST_TIMEOUT = float(os.getenv("HYDRATOR_TIMEOUT_SEC", "25.0"))
+PERSIST_TIMEOUT = float(os.getenv("HYDRATOR_PERSIST_TIMEOUT_SEC", "20.0"))
+CONCURRENCY = int(os.getenv("HYDRATOR_CONCURRENCY", "4"))
+# Kept for backward-compat env overrides; no longer used as a per-symbol sleep.
+DELAY_SEC = float(os.getenv("HYDRATOR_DELAY_SEC", "0"))
 
 
 def _fetch_universe() -> list[str]:
@@ -74,23 +80,18 @@ def _fetch_universe() -> list[str]:
 
 
 def _get_json(client: httpx.Client, url: str) -> Optional[dict]:
-    last_err = None
-    for attempt in range(MAX_RETRIES + 1):
-        try:
+    """Single attempt + one short retry on 429 only — see module docstring
+    comment above for why long retry chains were removed."""
+    try:
+        r = client.get(url, timeout=REQUEST_TIMEOUT)
+        if r.status_code == 429:
+            time.sleep(5)
             r = client.get(url, timeout=REQUEST_TIMEOUT)
-            if r.status_code == 429:
-                logger.warning("429 from %s — backoff %.0fs", url, RETRY_BACKOFF * (attempt + 1))
-                time.sleep(RETRY_BACKOFF * (attempt + 1))
-                last_err = "429"
-                continue
-            if r.status_code == 200 and r.content:
-                data = r.json()
-                return data if isinstance(data, dict) else None
-            last_err = f"HTTP {r.status_code}"
-        except Exception as e:
-            last_err = str(e)[:120]
-            time.sleep(RETRY_BACKOFF * (attempt + 1) * 0.5)
-    logger.debug("GET failed %s: %s", url, last_err)
+        if r.status_code == 200 and r.content:
+            data = r.json()
+            return data if isinstance(data, dict) else None
+    except Exception as e:
+        logger.debug("GET failed %s: %s", url, str(e)[:120])
     return None
 
 
@@ -225,27 +226,28 @@ def hydrate_batch(
     err_count = 0
     rate_limited = False
 
-    with httpx.Client(timeout=REQUEST_TIMEOUT, follow_redirects=True) as client:
-        for i, sym in enumerate(batch):
-            try:
-                r = hydrate_symbol(client, sym)
-                if r.get("ok"):
-                    ok_count += 1
-                    logger.info("[%d/%d] %s OK (%s)", i + 1, len(batch), sym, ",".join(r.get("parts") or []))
-                else:
+    limits = httpx.Limits(max_connections=CONCURRENCY * 2, max_keepalive_connections=CONCURRENCY)
+    with httpx.Client(timeout=REQUEST_TIMEOUT, follow_redirects=True, limits=limits) as client:
+        with ThreadPoolExecutor(max_workers=max(1, CONCURRENCY)) as pool:
+            futures = {pool.submit(hydrate_symbol, client, sym): sym for sym in batch}
+            done_n = 0
+            for fut in as_completed(futures):
+                sym = futures[fut]
+                done_n += 1
+                try:
+                    r = fut.result()
+                    if r.get("ok"):
+                        ok_count += 1
+                        logger.info("[%d/%d] %s OK (%s)", done_n, len(batch), sym, ",".join(r.get("parts") or []))
+                    else:
+                        err_count += 1
+                        logger.warning("[%d/%d] %s no data", done_n, len(batch), sym)
+                except Exception as e:
                     err_count += 1
-                    logger.warning("[%d/%d] %s no data", i + 1, len(batch), sym)
-            except Exception as e:
-                err_count += 1
-                msg = str(e)
-                if "429" in msg:
-                    rate_limited = True
-                    logger.warning("[%d/%d] %s rate-limited — stopping batch", i + 1, len(batch), sym)
-                    break
-                logger.error("[%d/%d] Error %s: %s", i + 1, len(batch), sym, e)
-
-            if i < len(batch) - 1:
-                time.sleep(DELAY_SEC)
+                    msg = str(e)
+                    if "429" in msg:
+                        rate_limited = True
+                    logger.error("[%d/%d] Error %s: %s", done_n, len(batch), sym, e)
 
     result = {
         "ok": True,

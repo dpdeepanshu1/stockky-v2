@@ -167,7 +167,25 @@ def stats() -> dict:
     moving slowly (queued behind a shared limiter) instead of looking stuck."""
     with _buckets_lock:
         return {name: b.snapshot() for name, b in _buckets.items()}
-    
+
+
+# ---------- FIX: define the class that main.py imports ----------
+class LocalMemoryRateLimiter:
+    """
+    Simple wrapper that exposes the module-level functions as methods.
+    This is the singleton that `main.py` expects when it does:
+        from redis_rate_limit import limiter as redis_limiter
+    """
+    def acquire(self, provider: str, weight: float = 1.0, max_wait: float = 60.0) -> float:
+        return acquire(provider, weight, max_wait)
+
+    def suggested_timeout(self, base_timeout: float, provider: str, floor: float = 1.0) -> float:
+        return suggested_timeout(base_timeout, provider, floor)
+
+    def stats(self) -> dict:
+        return stats()
+
+
 # Process singleton — same name as before so main.py imports stay valid
 limiter = LocalMemoryRateLimiter()
 rate_limiter = limiter  # alias used by some call sites

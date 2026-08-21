@@ -122,8 +122,20 @@ def _is_cache_fresh(cached_payload: Dict[str, Any]) -> bool:
 
 
 def _enforce_rate_limit(redis_client) -> None:
-    """Process-local 1 req/sec — no Upstash."""
+    """Shared token-bucket gate (rate_limiter.py, "indianapi" bucket) instead
+    of a plain process-local last-timestamp sleep — this way IndianAPI calls
+    from fundamentals, the refill-additional job, and weekend hydrator all
+    share the same real limit instead of each independently pacing itself
+    at 1 req/sec and collectively exceeding it when more than one runs at
+    once."""
     global _MEM_LAST_TS
+    try:
+        from rate_limiter import acquire as rl_acquire
+        rl_acquire("indianapi", weight=1)
+        return
+    except Exception:
+        pass
+    # Fallback if rate_limiter.py isn't deployed alongside this service yet
     now = time.time()
     wait = MIN_REQUEST_INTERVAL_SECONDS - (now - _MEM_LAST_TS)
     if wait > 0:
@@ -135,12 +147,19 @@ def _fetch_from_indianapi(symbol: str) -> Optional[Dict[str, Any]]:
     if not INDIANAPI_KEY:
         logger.warning("INDIANAPI_KEY not set — cannot use IndianAPI fallback for %s", symbol)
         return None
+    _enforce_rate_limit(None)
+    timeout = REQUEST_TIMEOUT_SECONDS
+    try:
+        from rate_limiter import suggested_timeout as rl_timeout
+        timeout = rl_timeout(REQUEST_TIMEOUT_SECONDS, "indianapi")
+    except Exception:
+        pass
     try:
         response = requests.get(
             f"{INDIANAPI_BASE_URL}/stock",
             params={"name": symbol},
             headers={"x-api-key": INDIANAPI_KEY},
-            timeout=REQUEST_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
         response.raise_for_status()
         return response.json()

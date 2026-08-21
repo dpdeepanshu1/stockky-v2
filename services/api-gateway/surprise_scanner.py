@@ -610,6 +610,10 @@ surprise_engine = SurpriseStockEngine()
 SURPRISE_FEED_CACHE_KEY = "system:surprise_feed"
 SURPRISE_FEED_OPEN_TTL_SEC = int(__import__("os").getenv("SURPRISE_FEED_OPEN_TTL_SEC", "7200"))  # 2h
 SURPRISE_FEED_COOLDOWN_SEC = float(__import__("os").getenv("SURPRISE_FEED_COOLDOWN_SEC", "0.5"))
+# Even when force=true (premarket button), a fresh cache within this window
+# is reused — protects against duplicate button clicks / cron re-dispatch
+# burning a full chunked-yfinance pass for data that's a few seconds old.
+SURPRISE_FEED_MIN_FORCE_INTERVAL_SEC = float(__import__("os").getenv("SURPRISE_FEED_MIN_FORCE_INTERVAL_SEC", "300"))
 
 
 def is_market_open_ist() -> bool:
@@ -672,26 +676,42 @@ async def run_market_aware_surprise_feed(
     import httpx
 
     cached = _read_surprise_feed_cache()
-    if cached and not force:
+    if cached:
         age = time.time() - float(cached.get("timestamp") or 0)
         open_now = is_market_open_ist()
-        if not open_now:
+        if not force:
+            if not open_now:
+                return {
+                    "status": "success",
+                    "source": "cache",
+                    "market_open": False,
+                    "age_sec": int(age),
+                    "data": cached.get("data") or [],
+                    "message": "Market closed — serving durable cache (no API calls)",
+                }
+            if age < SURPRISE_FEED_OPEN_TTL_SEC:
+                return {
+                    "status": "success",
+                    "source": "cache",
+                    "market_open": True,
+                    "age_sec": int(age),
+                    "data": cached.get("data") or [],
+                    "message": f"Cache hit ({int(age)}s old, TTL {SURPRISE_FEED_OPEN_TTL_SEC}s)",
+                }
+        elif age < SURPRISE_FEED_MIN_FORCE_INTERVAL_SEC:
+            # force=true but cache is only seconds/minutes old — this is a
+            # duplicate click / duplicate dispatch, not a genuine new session.
+            # Reuse it instead of re-running the full chunked yfinance pass.
             return {
                 "status": "success",
                 "source": "cache",
-                "market_open": False,
+                "market_open": open_now,
                 "age_sec": int(age),
                 "data": cached.get("data") or [],
-                "message": "Market closed — serving durable cache (no API calls)",
-            }
-        if age < SURPRISE_FEED_OPEN_TTL_SEC:
-            return {
-                "status": "success",
-                "source": "cache",
-                "market_open": True,
-                "age_sec": int(age),
-                "data": cached.get("data") or [],
-                "message": f"Cache hit ({int(age)}s old, TTL {SURPRISE_FEED_OPEN_TTL_SEC}s)",
+                "message": (
+                    f"force=true but cache is only {int(age)}s old "
+                    f"(min interval {int(SURPRISE_FEED_MIN_FORCE_INTERVAL_SEC)}s) — reused, no re-fetch"
+                ),
             }
 
     # Resolve symbol list

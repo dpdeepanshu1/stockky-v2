@@ -479,12 +479,75 @@ def get_premarket_progress() -> Dict[str, Any]:
     }
 
 
-def precalculate_surprise_baselines(symbols: List[str]) -> Dict[str, Any]:
+def _freshness_check(symbols: List[str]) -> Dict[str, Any]:
+    """
+    Count how many of `symbols` already have a surprise_static_feed row
+    updated today (IST). Used to skip a full recompute when the button/cron
+    is triggered more than once on the same trading day — baselines are only
+    meaningful "as of premarket", so recomputing mid-afternoon just burns
+    yfinance quota for an identical answer.
+    """
+    url = _db_url()
+    if not url or not symbols:
+        return {"fresh": 0, "total": len(symbols), "coverage": 0.0}
+    try:
+        from sqlalchemy import create_engine, text
+        from zoneinfo import ZoneInfo
+        from datetime import datetime
+
+        ist_today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+        bases = [s.upper().replace(".NS", "").replace(".BO", "").strip() for s in symbols]
+        bases = [b for b in bases if b]
+
+        eng = create_engine(
+            url, pool_pre_ping=True, pool_size=1, max_overflow=0,
+            connect_args={"connect_timeout": 15, "application_name": "surprise-premarket-freshness"},
+        )
+        with eng.connect() as conn:
+            if not _table_exists(conn, "surprise_static_feed"):
+                eng.dispose()
+                return {"fresh": 0, "total": len(bases), "coverage": 0.0}
+            rows = conn.execute(
+                text(
+                    "SELECT symbol, updated_at FROM surprise_static_feed "
+                    "WHERE symbol = ANY(:syms)"
+                ),
+                {"syms": bases},
+            ).fetchall()
+        eng.dispose()
+
+        fresh = 0
+        for _sym, updated_at in rows:
+            try:
+                ua = updated_at
+                if getattr(ua, "tzinfo", None) is not None:
+                    ua_ist = ua.astimezone(ZoneInfo("Asia/Kolkata"))
+                else:
+                    ua_ist = ua
+                if ua_ist.date() == ist_today:
+                    fresh += 1
+            except Exception:
+                continue
+        total = len(bases) or 1
+        return {"fresh": fresh, "total": total, "coverage": round(fresh / total, 3)}
+    except Exception as e:
+        logger.debug("freshness check failed: %s", e)
+        return {"fresh": 0, "total": len(symbols), "coverage": 0.0}
+
+
+def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> Dict[str, Any]:
     """
     Main entry: schema → concurrent compute → batched upsert.
 
     Step 3: ThreadPoolExecutor (default 10 workers) + batch Neon writes
     replaces the old sequential loop (sleep 0.12s × 300 ≈ 40s+ of pure wait).
+
+    force=False (default): if today's (IST) surprise_static_feed already
+    covers ≥90% of the requested universe, skip the recompute entirely —
+    baselines are a once-a-trading-day snapshot, so re-running mid-day
+    (double-click, duplicate cron dispatch, manual retrigger) should reuse
+    what premarket already computed instead of re-hitting yfinance for
+    every symbol again.
     """
     global _job_lock
     t0 = time.time()
@@ -518,6 +581,36 @@ def precalculate_surprise_baselines(symbols: List[str]) -> Dict[str, Any]:
                 uniq.append(b)
         uniq = uniq[:MAX_SYMBOLS]
         total = len(uniq)
+
+        if not force:
+            fresh = _freshness_check(uniq)
+            if fresh["coverage"] >= 0.9:
+                _write_progress({
+                    "stage": "done",
+                    "percent": 100,
+                    "processed": fresh["fresh"],
+                    "total": total,
+                    "computed": 0,
+                    "errors": 0,
+                    "elapsed_sec": round(time.time() - t0, 1),
+                    "eta_sec": 0,
+                    "is_running": False,
+                    "current_symbol": None,
+                    "message": (
+                        f"Already fresh today: {fresh['fresh']}/{fresh['total']} baselines "
+                        f"({int(fresh['coverage']*100)}%) — skipped recompute (pass force=true to override)"
+                    ),
+                })
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "already_fresh_today",
+                    "symbols_requested": total,
+                    "fresh_coverage": fresh["coverage"],
+                    "computed": 0,
+                    "upserted": 0,
+                    "elapsed_sec": round(time.time() - t0, 1),
+                }
 
         _write_progress({
             "stage": "starting",

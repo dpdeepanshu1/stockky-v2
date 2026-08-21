@@ -6076,6 +6076,7 @@ async def api_surprise_premarket_proxy(request: Request):
     background = str(request.query_params.get("background", "true")).lower() in (
         "1", "true", "yes", ""
     )
+    force = str(request.query_params.get("force", "false")).lower() in ("1", "true", "yes")
 
     from surprise_premarket import (
         precalculate_surprise_baselines,
@@ -6098,9 +6099,9 @@ async def api_surprise_premarket_proxy(request: Request):
         }
 
     if background:
-        def _job(syms=list(symbols)):
+        def _job(syms=list(symbols), force=force):
             try:
-                precalculate_surprise_baselines(syms)
+                precalculate_surprise_baselines(syms, force=force)
             except Exception as e:
                 logger.exception("gateway premarket job: %s", e)
 
@@ -6117,7 +6118,7 @@ async def api_surprise_premarket_proxy(request: Request):
             "schema": schema,
         }
 
-    result = precalculate_surprise_baselines(symbols)
+    result = precalculate_surprise_baselines(symbols, force=force)
     result["runner"] = "api-gateway"
     result["schema"] = schema
     return result

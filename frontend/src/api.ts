@@ -1129,15 +1129,18 @@ export const api = {
     }
   },
 
-  surprisePremarket: () =>
+  surprisePremarket: (force = false) =>
     request<{
       ok?: boolean;
       accepted?: boolean;
       already_running?: boolean;
+      skipped?: boolean;
+      reason?: string;
+      fresh_coverage?: number;
       message?: string;
       symbols?: number;
       progress?: Record<string, unknown>;
-    }>("/surprise/premarket?background=true", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, 1, 30000),
+    }>(`/surprise/premarket?background=true&force=${force}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, 1, 30000),
 
   surprisePremarketStatus: () =>
     request<{

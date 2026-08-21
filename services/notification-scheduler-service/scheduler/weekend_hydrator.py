@@ -81,12 +81,21 @@ def _fetch_universe() -> list[str]:
 
 def _get_json(client: httpx.Client, url: str) -> Optional[dict]:
     """Single attempt + one short retry on 429 only — see module docstring
-    comment above for why long retry chains were removed."""
+    comment above for why long retry chains were removed. Also gated
+    behind the shared rate limiter (rate_limiter.py, shared "analysis"
+    bucket) so this doesn't stack with refill_additional/market-scan hits
+    against the same upstream service."""
     try:
-        r = client.get(url, timeout=REQUEST_TIMEOUT)
+        from rate_limiter import acquire as rl_acquire, suggested_timeout as rl_timeout
+        rl_acquire("analysis", weight=1)
+        timeout = rl_timeout(REQUEST_TIMEOUT, "analysis")
+    except Exception:
+        timeout = REQUEST_TIMEOUT
+    try:
+        r = client.get(url, timeout=timeout)
         if r.status_code == 429:
             time.sleep(5)
-            r = client.get(url, timeout=REQUEST_TIMEOUT)
+            r = client.get(url, timeout=timeout)
         if r.status_code == 200 and r.content:
             data = r.json()
             return data if isinstance(data, dict) else None

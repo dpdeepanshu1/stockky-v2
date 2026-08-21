@@ -1152,6 +1152,13 @@ def get_quotes_bulk(req: BulkQuoteRequest):
         return {"ok": False, "error": "No valid symbols after normalize", "quotes": []}
 
     try:
+        from rate_limiter import acquire as rl_acquire, suggested_timeout as rl_timeout
+        rl_acquire("yfinance", weight=len(yf_tickers))
+        _ = rl_timeout(25.0, "yfinance")  # widened timeout applied via yf's own session below
+    except Exception:
+        pass
+
+    try:
         data = yf.download(
             tickers=" ".join(yf_tickers),
             period="2d",

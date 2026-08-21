@@ -108,12 +108,25 @@ def _get_json(client: httpx.Client, url: str) -> Optional[dict]:
     """Single attempt + one short retry on 429 only. Concurrency (not long
     per-request retry chains) is what gets us through the universe in a
     reasonable time — a symbol that fails just falls through to error_count
-    instead of eating minutes of wall-clock."""
+    instead of eating minutes of wall-clock.
+
+    Also gated behind the shared rate limiter (rate_limiter.py) — refill
+    additional, weekend hydrator, market scan, and repair buttons can all
+    hit analysis-intelligence-service concurrently, so this acquires a
+    slot on a shared "analysis" bucket first, and widens its own timeout
+    if that bucket is already busy (queued behind other jobs) instead of
+    timing out into congestion it can't see."""
     try:
-        r = client.get(url, timeout=REQUEST_TIMEOUT)
+        from rate_limiter import acquire as rl_acquire, suggested_timeout as rl_timeout
+        rl_acquire("analysis", weight=1)
+        timeout = rl_timeout(REQUEST_TIMEOUT, "analysis")
+    except Exception:
+        timeout = REQUEST_TIMEOUT
+    try:
+        r = client.get(url, timeout=timeout)
         if r.status_code == 429:
             time.sleep(5)
-            r = client.get(url, timeout=REQUEST_TIMEOUT)
+            r = client.get(url, timeout=timeout)
         if r.status_code == 200 and r.content:
             data = r.json()
             return data if isinstance(data, dict) else None

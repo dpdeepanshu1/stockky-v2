@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import Pipeline from "./Pipeline";
+import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 
 type Job = {
   status?: string;
@@ -90,6 +91,31 @@ export default function DataFeed() {
     }, 2500);
     return () => window.clearInterval(id);
   }, [job?.status, refresh, running]);
+
+  // Point 1 fix: real-time job updates over the existing /ws hub (channel
+  // "jobs") — the gateway now broadcasts data_feed + refill_additional
+  // progress every ~2s while either is running, plus rate_limits so a slow
+  // run visibly shows it's queued behind the shared upstream limiter
+  // instead of just looking stuck. The 2.5s poll above stays as a fallback
+  // if the socket drops.
+  const [refillJob, setRefillJob] = useState<Job | null>(null);
+  const [yfRateLimit, setYfRateLimit] = useState<{ waiters?: number; throttle_events?: number } | null>(null);
+  const onRealtimeMessage = useCallback((msg: RealtimeMessage) => {
+    if (msg.type !== "jobs_snapshot") return;
+    const df = (msg as any).data_feed;
+    if (df) {
+      setJob(df);
+      setMeta(df.meta || null);
+      const stStatus = String(df.status || "idle");
+      setRunning(stStatus === "running" || stStatus === "stopping");
+      if (df.message) setBanner(String(df.message));
+    }
+    const ra = (msg as any).refill_additional;
+    if (ra) setRefillJob(ra);
+    const rl = (msg as any).rate_limits?.yfinance;
+    if (rl) setYfRateLimit(rl);
+  }, []);
+  const { connected: wsConnected } = useStockkyRealtime(onRealtimeMessage);
 
   const total = job?.total ?? 0;
   const processed = job?.processed ?? job?.checkpoint?.cursor ?? 0;
@@ -303,6 +329,19 @@ export default function DataFeed() {
             >
               {busy === "refill" ? "Refilling…" : "Refill Additional Data"}
             </button>
+            {refillJob?.status && refillJob.status !== "idle" && (
+              <span className="font-mono text-[10px] text-mist/60 self-center">
+                {refillJob.status === "stalled"
+                  ? "⚠ refill stalled — safe to restart"
+                  : `refill: ${refillJob.processed ?? 0}/${refillJob.total ?? "—"} (ok=${refillJob.ok_count ?? 0} err=${refillJob.error_count ?? 0})`}
+                {wsConnected && <span className="text-emerald-400/80 ml-1">● live</span>}
+                {!!yfRateLimit?.waiters && (
+                  <span className="text-amber-400/80 ml-1">
+                    · queued ({yfRateLimit.waiters} waiting on shared rate limit)
+                  </span>
+                )}
+              </span>
+            )}
             <button
               type="button"
               onClick={startFresh}

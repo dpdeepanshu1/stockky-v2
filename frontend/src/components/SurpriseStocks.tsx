@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api"; // all calls use getApiUrl() — never relative /api on separate Render hosts
 import { formatInrPrice, getSafePrice } from "../priceDisplay";
 import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
+import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 
 export interface SurpriseStock {
   symbol: string;
@@ -102,6 +103,32 @@ export default function SurpriseStocks({
   const [batchRepairBusy, setBatchRepairBusy] = useState(false);
   const pollRef = useRef<number | null>(null);
   const scanAbort = useRef<AbortController | null>(null);
+
+  // Point 1 fix: real-time job updates over the existing /ws hub (channel
+  // "jobs") instead of pure polling — the gateway now broadcasts a
+  // surprise_premarket progress snapshot every ~2s while the job is
+  // running (and includes rate_limits so a slow run is visibly "queued
+  // behind the shared yfinance limiter", not just stuck). Polling below is
+  // kept as a fallback in case the socket drops.
+  const onRealtimeMessage = useCallback((msg: RealtimeMessage) => {
+    if (msg.type !== "jobs_snapshot") return;
+    const sp = (msg as any).surprise_premarket;
+    if (sp) {
+      setPmProgress(sp);
+      setPmRunning(!!sp.is_running || sp.status === "running" || sp.stage === "computing");
+      if (sp.stage === "error") {
+        setPmError(sp.error || sp.message || "Premarket failed");
+        setPmRunning(false);
+        stopPmPoll();
+      } else if (!sp.is_running && sp.stage === "done") {
+        stopPmPoll();
+      }
+    }
+    const rl = (msg as any).rate_limits?.yfinance;
+    if (rl) setYfRateLimit(rl);
+  }, []);
+  const { connected: wsConnected } = useStockkyRealtime(onRealtimeMessage);
+  const [yfRateLimit, setYfRateLimit] = useState<{ waiters?: number; throttle_events?: number } | null>(null);
 
   const stopPmPoll = () => {
     if (pollRef.current != null) {
@@ -495,6 +522,12 @@ export default function SurpriseStocks({
           </div>
           <p className="font-mono text-[10px] text-mist/50 mt-1.5">
             {pmPct}% · {pmProgress?.message || "…"}
+            {wsConnected && <span className="text-emerald-400/80 ml-2">● live</span>}
+            {!!yfRateLimit?.waiters && (
+              <span className="text-amber-400/80 ml-2">
+                · queued behind shared rate limit ({yfRateLimit.waiters} waiting)
+              </span>
+            )}
           </p>
         </div>
       )}

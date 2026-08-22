@@ -151,6 +151,55 @@ export interface MarketStock {
   low?: number;
 }
 
+export interface IpoBuySuggestion {
+  symbol: string;
+  action: string;
+  buy_price_range: string;
+  buy_price_low?: number;
+  buy_price_high?: number;
+  entry_time: string;
+  entry_window?: string;
+  target_price: number;
+  stop_loss: number;
+  estimated_profit: string;
+  estimated_profit_pct?: number;
+  holding_duration: string;
+  holding_period?: string;
+  conviction_score: number;
+  price?: number;
+  sector?: string | null;
+  rationale: string;
+  decision?: string;
+}
+
+export interface IpoAnalysis {
+  symbol: string;
+  company_name?: string;
+  issue_price: number;
+  listing_date?: string;
+  source?: string;
+  subscription_times?: number | null;
+  days_since_listing?: number;
+  stage?: "upcoming" | "pre_listing" | "listing_day" | "listed" | "unknown" | "error";
+  message?: string;
+  current_price?: number;
+  listing_day_close?: number;
+  post_listing_high?: number;
+  listing_pop_pct?: number;
+  current_vs_issue_pct?: number;
+  current_vs_high_pct?: number;
+  momentum_5d_pct?: number;
+  volume_trend_ratio?: number;
+  atr_pct?: number;
+  ipo_score?: number;
+  pre_listing_advisory_score?: number;
+  pre_listing_advisory?: string;
+  score_breakdown?: Record<string, number>;
+  decision?: "BUY NOW" | "PREPARE TO BUY" | "HOLD" | "DO NOT BUY" | "SELL";
+  buy_suggestion?: IpoBuySuggestion | null;
+  error?: string;
+}
+
 export interface MarketResponse {
   data: MarketStock[];
   count: number;
@@ -1141,6 +1190,37 @@ export const api = {
       symbols?: number;
       progress?: Record<string, unknown>;
     }>(`/surprise/premarket?background=true&force=${force}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, 1, 30000),
+
+  // Recent IPO scanner — Surprise tab subsection
+  ipoScan: () =>
+    request<{ accepted?: boolean; already_running?: boolean; message?: string }>(
+      "/surprise/ipo/scan?background=true", { method: "POST" }, 1, 30000
+    ),
+  ipoScanStatus: () =>
+    request<{
+      status?: string;
+      message?: string;
+      processed?: number;
+      total?: number;
+      results_count?: number;
+    }>("/surprise/ipo/status", undefined, 2, 15000),
+  ipoList: () =>
+    request<{ results: IpoAnalysis[]; generated_at?: string | null }>(
+      "/surprise/ipo/list", undefined, 2, 20000
+    ),
+  ipoAdd: (payload: {
+    symbol: string;
+    issue_price: number;
+    listing_date: string;
+    company_name?: string;
+    subscription_times?: number;
+  }) =>
+    request<{ accepted?: boolean; entry?: Record<string, unknown> }>(
+      "/surprise/ipo/add",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      1,
+      15000
+    ),
 
   surprisePremarketStatus: () =>
     request<{

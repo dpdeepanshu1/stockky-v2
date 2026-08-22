@@ -26,7 +26,7 @@ except Exception as _rl_e:
     logging.getLogger(__name__).warning("rate_limiter patch skipped: %s", _rl_e)
 
 import feedparser
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -6015,6 +6015,76 @@ async def api_surprise_static(limit: int = 50):
         return {"ok": False, "error": str(e)[:200], "rows": []}
 
 
+@app.post("/surprise/ipo/scan")
+@app.get("/surprise/ipo/scan")
+async def api_ipo_scan(background: bool = Query(True), background_tasks: BackgroundTasks = None):
+    """
+    Recent IPO scanner — Surprise tab subsection. Scores recently-listed
+    (and listing-today) NSE IPOs for a short-term buy/sell decision using
+    ipo_scanner.analyze_ipo(). Runs in the background like the premarket
+    job; poll /surprise/ipo/status, then GET /surprise/ipo/list.
+    """
+    from ipo_scanner import run_ipo_scan, get_ipo_scan_progress
+
+    current = get_ipo_scan_progress()
+    if current.get("status") == "running":
+        return {"accepted": True, "already_running": True, **current}
+
+    if background and background_tasks is not None:
+        background_tasks.add_task(run_ipo_scan)
+        return {"accepted": True, "background": True, "message": "IPO scan started"}
+    result = run_ipo_scan()
+    return {"accepted": True, "background": False, **result}
+
+
+@app.get("/surprise/ipo/status")
+async def api_ipo_scan_status():
+    try:
+        from ipo_scanner import get_ipo_scan_progress
+        return get_ipo_scan_progress()
+    except Exception as e:
+        return {"status": "error", "message": str(e)[:160]}
+
+
+@app.get("/surprise/ipo/list")
+async def api_ipo_list():
+    """Current analyzed IPO list — listing-today/pre-listing first, then by
+    score. Each row includes a ready-to-use `buy_suggestion` (same shape as
+    /api/scan/find-buys) for BUY NOW / PREPARE TO BUY rows so the frontend
+    can open the existing BuySniperModal directly."""
+    try:
+        from ipo_scanner import get_ipo_list
+        return get_ipo_list()
+    except Exception as e:
+        return {"results": [], "generated_at": None, "error": str(e)[:160]}
+
+
+class IpoAddRequest(BaseModel):
+    symbol: str
+    issue_price: float
+    listing_date: str  # YYYY-MM-DD
+    company_name: Optional[str] = None
+    subscription_times: Optional[float] = None
+
+
+@app.post("/surprise/ipo/add")
+async def api_ipo_add(body: IpoAddRequest):
+    """Manually register an IPO — the reliable path since NSE's IPO API
+    blocks cloud-hosted IPs often enough that auto-discovery alone can't be
+    the only path. Use this the moment you know the listing date/issue
+    price (even before listing) so it shows up as 'lists today' the
+    morning of."""
+    from ipo_scanner import add_manual_ipo
+    entry = add_manual_ipo(
+        symbol=body.symbol,
+        issue_price=body.issue_price,
+        listing_date=body.listing_date,
+        company_name=body.company_name,
+        subscription_times=body.subscription_times,
+    )
+    return {"accepted": True, "entry": entry}
+
+
 @app.get("/surprise/premarket/status")
 @app.get("/api/surprise/premarket/status")
 async def api_surprise_premarket_status():
@@ -6751,6 +6821,12 @@ def _collect_job_snapshots() -> dict:
         logger.debug("jobs snapshot surprise_premarket: %s", e)
 
     try:
+        from ipo_scanner import get_ipo_scan_progress
+        out["ipo_scan"] = get_ipo_scan_progress()
+    except Exception as e:
+        logger.debug("jobs snapshot ipo_scan: %s", e)
+
+    try:
         out["rate_limits"] = _rl.stats()
     except Exception as e:
         logger.debug("jobs snapshot rate_limits: %s", e)
@@ -6759,7 +6835,7 @@ def _collect_job_snapshots() -> dict:
 
 
 def _job_is_active(snap: dict) -> bool:
-    for key in ("data_feed", "refill_additional", "surprise_premarket"):
+    for key in ("data_feed", "refill_additional", "surprise_premarket", "ipo_scan"):
         st = (snap.get(key) or {}).get("status")
         if st in ("running", "computing", "started"):
             return True

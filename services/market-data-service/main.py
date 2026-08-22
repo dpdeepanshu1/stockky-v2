@@ -24,6 +24,12 @@ from typing import Optional, List
 
 import requests
 import yfinance as yf
+
+try:
+    import rate_limiter as _rl
+    _rl.patch_yfinance()
+except Exception as _rl_e:
+    logging.getLogger(__name__).warning("rate_limiter patch skipped: %s", _rl_e)
 from upstash_redis import Redis
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware

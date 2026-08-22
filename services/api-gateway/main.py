@@ -18,6 +18,13 @@ from typing import List, Optional, Set, Dict, Union
 
 import httpx
 import yfinance as yf
+
+try:
+    import rate_limiter as _rl
+    _rl.patch_yfinance()
+except Exception as _rl_e:
+    logging.getLogger(__name__).warning("rate_limiter patch skipped: %s", _rl_e)
+
 import feedparser
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -6570,7 +6577,7 @@ async def websocket_endpoint(websocket: WebSocket):
     """Realtime: scan progress, live quotes, market, training.
 
     Client messages (JSON):
-      {"action":"subscribe","channel":"scan:<id>"|"quote:TCS"|"market"|"all"}
+      {"action":"subscribe","channel":"scan:<id>"|"quote:TCS"|"market"|"jobs"|"all"}
       {"action":"subscribe_quotes","symbols":["TCS","INFY"]}
       {"action":"unsubscribe_quotes","symbols":["TCS"]}  # or omit symbols to clear
       {"action":"unsubscribe","channel":"..."}
@@ -6578,15 +6585,18 @@ async def websocket_endpoint(websocket: WebSocket):
     Server:
       {"channel":"quote:TCS","type":"quote","price":...,"as_of":...}
       {"channel":"scan:...","type":"scan_status",...}
+      {"channel":"jobs","type":"jobs_snapshot","data_feed":{...},"refill_additional":{...},
+       "surprise_premarket":{...},"rate_limits":{"yfinance":{...},"analysis":{...}}}
     """
     await ws_manager.connect(websocket)
     _ensure_quote_loop()
+    _ensure_jobs_loop()
     try:
         await websocket.send_text(json.dumps({
             "channel": "system",
             "type": "connected",
             "ts": datetime.now(IST).isoformat(),
-            "features": ["scan", "quotes", "ping"],
+            "features": ["scan", "quotes", "jobs", "ping"],
         }))
         while True:
             raw = await websocket.receive_text()
@@ -6701,6 +6711,89 @@ async def _ws_push_scan(task_id: str, data: dict):
         })
     except Exception as e:
         logger.debug("ws push scan failed: %s", e)
+
+
+# ── Real-time job progress hub ────────────────────────────────────────────
+# Point 1 fix: Market Scan, the Surprise tab (premarket + bulk quote feed),
+# Hot Picks, the Data Feed tab, and every "repair" button all previously
+# only reported progress via polling (client re-fetching a /status endpoint
+# on a timer). This loop pushes the same progress dicts those endpoints
+# already compute over the existing WS hub (channel "jobs"), plus a live
+# snapshot of the shared rate-limiter (rate_limiter.stats()) so the UI can
+# show *why* something is moving slowly — queued behind a shared upstream
+# limit — instead of just looking stuck. Clients subscribe once:
+#   {"action": "subscribe", "channel": "jobs"}
+# and receive a combined snapshot every ~2s while at least one job is
+# running; the loop idles (cheap, no polling of the jobs themselves) when
+# nothing is active.
+_jobs_ws_task = None
+
+
+def _collect_job_snapshots() -> dict:
+    out: Dict[str, Any] = {}
+
+    try:
+        from data_feed import get_data_feed_store
+        out["data_feed"] = get_data_feed_store().job()
+    except Exception as e:
+        logger.debug("jobs snapshot data_feed: %s", e)
+
+    try:
+        from refill_additional import get_refill_job
+        out["refill_additional"] = get_refill_job()
+    except Exception as e:
+        logger.debug("jobs snapshot refill_additional: %s", e)
+
+    try:
+        from surprise_premarket import get_premarket_progress
+        out["surprise_premarket"] = get_premarket_progress()
+    except Exception as e:
+        logger.debug("jobs snapshot surprise_premarket: %s", e)
+
+    try:
+        out["rate_limits"] = _rl.stats()
+    except Exception as e:
+        logger.debug("jobs snapshot rate_limits: %s", e)
+
+    return out
+
+
+def _job_is_active(snap: dict) -> bool:
+    for key in ("data_feed", "refill_additional", "surprise_premarket"):
+        st = (snap.get(key) or {}).get("status")
+        if st in ("running", "computing", "started"):
+            return True
+    return False
+
+
+async def _jobs_broadcast_loop():
+    idle_interval = 15
+    active_interval = 2
+    while True:
+        try:
+            if not getattr(ws_manager, "active", None):
+                await asyncio.sleep(idle_interval)
+                continue
+            snap = await asyncio.to_thread(_collect_job_snapshots)
+            await ws_manager.broadcast("jobs", {
+                "type": "jobs_snapshot",
+                "ts": datetime.now(IST).isoformat(),
+                **snap,
+            })
+            await asyncio.sleep(active_interval if _job_is_active(snap) else idle_interval)
+        except Exception as e:
+            logger.debug("jobs broadcast loop: %s", e)
+            await asyncio.sleep(idle_interval)
+
+
+def _ensure_jobs_loop():
+    global _jobs_ws_task
+    try:
+        loop = asyncio.get_event_loop()
+        if _jobs_ws_task is None or _jobs_ws_task.done():
+            _jobs_ws_task = loop.create_task(_jobs_broadcast_loop())
+    except Exception as e:
+        logger.debug("jobs loop start: %s", e)
 
 
 # ── Startup cache pre-population ──────────────────────────────────────────

@@ -201,7 +201,6 @@ def get_fundamentals_with_fallback(
         logger.info("Using cached IndianAPI data for %s (cached_at=%s)", symbol, cached.get("cached_at"))
         return cached["data"]
 
-    _enforce_rate_limit(redis_client)
     fresh_data = _fetch_from_indianapi(symbol)
     if fresh_data is None:
         if cached is not None:

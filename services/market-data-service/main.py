@@ -923,6 +923,57 @@ def _waterfall_polygon_price(symbol: str) -> Optional[float]:
     return None
 
 
+def _waterfall_nse_direct_price(symbol: str) -> Optional[float]:
+    """NSE's own quote-equity API — no key, no quota, and NOT gated behind
+    Yahoo's crumb/cookie flow, so this keeps working during a yfinance
+    "Invalid Crumb" outage. India-only coverage is exactly what we need here."""
+    if _in_cooldown("nse_direct"):
+        return None
+    base = _waterfall_equity_base(symbol)
+    if not base:
+        return None
+    try:
+        from bhavcopy import _nse_client
+        client = _nse_client()
+        r = client.get(f"https://www.nseindia.com/api/quote-equity?symbol={base}")
+        if r.status_code == 429:
+            _set_cooldown("nse_direct", 90)
+            return None
+        if r.status_code == 200:
+            data = r.json() if r.content else {}
+            price_info = (data or {}).get("priceInfo") or {}
+            px = _safe(price_info.get("lastPrice") or price_info.get("close"))
+            if px is not None and px > 0:
+                logger.info("NSE-direct waterfall hit %s → ₹%.2f", base, px)
+                return float(px)
+    except Exception as e:
+        logger.debug("NSE-direct %s: %s", base, e)
+    return None
+
+
+def _waterfall_bhavcopy_price(symbol: str) -> Optional[float]:
+    """Absolute last resort: official NSE bhavcopy EOD close.
+
+    Not live, but a real yesterday's-close beats leaving price stuck at 0
+    forever when every live source (Yahoo/TwelveData/AlphaVantage/Polygon/
+    NSE-direct) is down or blocked."""
+    if _in_cooldown("bhavcopy"):
+        return None
+    base = _waterfall_equity_base(symbol)
+    if not base:
+        return None
+    try:
+        from bhavcopy import eod_close_from_bhavcopy
+        px = eod_close_from_bhavcopy(base)
+        if px and px > 0:
+            logger.info("Bhavcopy EOD waterfall hit %s → ₹%.2f", base, px)
+            return float(px)
+    except Exception as e:
+        logger.debug("Bhavcopy price %s: %s", base, e)
+        _set_cooldown("bhavcopy", 60)
+    return None
+
+
 def _waterfall_alphavantage_price(symbol: str) -> Optional[float]:
     """Emergency last resort — free tier ~25 req/day. One try only."""
     if _in_cooldown("alphavantage"):
@@ -965,9 +1016,11 @@ def get_realtime_price(symbol: str) -> Optional[float]:
     Priority Waterfall for real-time price discovery.
     Stops executing immediately upon a successful fetch.
       1) Yahoo Finance (0 cost)
-      2) TwelveData (800/day)
-      3) AlphaVantage (25/day — last resort)
-      4) Polygon (sparse India coverage)
+      2) NSE direct quote-equity (0 cost, India-only, survives Yahoo crumb outages)
+      3) TwelveData (800/day)
+      4) AlphaVantage (25/day — last resort)
+      5) Polygon (sparse India coverage)
+      6) NSE bhavcopy EOD close (last resort — not live, but never leaves price=0)
     """
     # 1. Primary: Yahoo
     try:
@@ -983,7 +1036,15 @@ def get_realtime_price(symbol: str) -> Optional[float]:
     except Exception:
         pass
 
-    # 2. TwelveData
+    # 2. NSE direct — free, no key, unaffected by Yahoo's crumb/cookie gate
+    try:
+        px = _waterfall_nse_direct_price(symbol)
+        if px and px > 0:
+            return float(px)
+    except Exception:
+        pass
+
+    # 3. TwelveData
     try:
         px = _waterfall_twelvedata_price(symbol)
         if px and px > 0:
@@ -991,7 +1052,7 @@ def get_realtime_price(symbol: str) -> Optional[float]:
     except Exception:
         pass
 
-    # 3. AlphaVantage (quota-scarce)
+    # 4. AlphaVantage (quota-scarce)
     try:
         px = _waterfall_alphavantage_price(symbol)
         if px and px > 0:
@@ -999,9 +1060,17 @@ def get_realtime_price(symbol: str) -> Optional[float]:
     except Exception:
         pass
 
-    # 4. Polygon
+    # 5. Polygon
     try:
         px = _waterfall_polygon_price(symbol)
+        if px and px > 0:
+            return float(px)
+    except Exception:
+        pass
+
+    # 6. Bhavcopy EOD close — absolute last resort, never leaves price stuck at 0
+    try:
+        px = _waterfall_bhavcopy_price(symbol)
         if px and px > 0:
             return float(px)
     except Exception:
@@ -1125,7 +1194,18 @@ def get_quote(symbol: str):
         # Prefer stale-good over burning TwelveData/AV on bulk feed storms
         if _in_cooldown("yfinance") or _in_cooldown("twelvedata"):
             return _pad_quote_response(sym, soft_cached)
-    if not is_index and not _in_cooldown("yfinance"):
+    if not is_index:
+        # NSE-direct doesn't depend on yfinance/Yahoo cookies at all, so try
+        # it even while yfinance is in cooldown (e.g. "Invalid Crumb" outage)
+        # — it's the fastest way back to a real, live price.
+        try:
+            waterfall_price = _waterfall_nse_direct_price(sym)
+            if waterfall_price and waterfall_price > 0:
+                waterfall_source = "nse_direct"
+        except Exception as e:
+            logger.debug("nse-direct waterfall %s: %s", sym, e)
+
+    if not is_index and not waterfall_price and not _in_cooldown("yfinance"):
         try:
             waterfall_price = _waterfall_twelvedata_price(sym)
             if waterfall_price and waterfall_price > 0:
@@ -1169,6 +1249,31 @@ def get_quote(symbol: str):
     fb = _fallback_get(cache_key)
     if fb and isinstance(fb, dict) and fb.get("price") is not None:
         return _pad_quote_response(sym, fb)
+
+    # ── Absolute last resort: NSE bhavcopy EOD close ─────────────────────────
+    # Every live source failed (common during a yfinance "Invalid Crumb"
+    # outage combined with TwelveData/Polygon having no NSE coverage on the
+    # free tier). A real EOD close still beats leaving the Data Feed Health
+    # repair button stuck at "0 (missing)" forever.
+    if not is_index:
+        try:
+            bhav_px = _waterfall_bhavcopy_price(sym)
+            if bhav_px and bhav_px > 0:
+                result = _pad_quote_response(sym, {
+                    "symbol": sym,
+                    "name": sym,
+                    "price": float(bhav_px),
+                    "cmp": float(bhav_px),
+                    "source": "bhavcopy_eod",
+                    "fetched_at": datetime.utcnow().isoformat(),
+                })
+                result = _sanitize_for_json(result)
+                # Short TTL — this is EOD, not live; let the next live attempt override it soon.
+                _cache_set(cache_key, result, ttl=120)
+                _fallback_set(cache_key, result)
+                return result
+        except Exception as e:
+            logger.debug("bhavcopy last-resort %s: %s", sym, e)
 
     result = _pad_quote_response(sym, {
         "symbol": sym,

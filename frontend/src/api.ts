@@ -995,6 +995,14 @@ export const api = {
       15000
     ),
 
+  wakeAllDatabases: () =>
+    request<{ ok: boolean; at?: string; targets?: Record<string, { ok?: boolean; error?: string; db_backend?: string }> }>(
+      "/ops/wake-db-all",
+      { method: "POST" },
+      1,
+      25000
+    ),
+
   getWatchlist: () => request<{ symbols: string[] }>("/watchlist", undefined, 2, 30000),
 
 
@@ -1631,6 +1639,12 @@ export const api = {
     request<any>(`/api/feed/repair-single/${encodeURIComponent(symbol)}`, { method: "POST" }, 2, 90000),
   repairFeedBatch: (limit: number = 15) =>
     request<any>(`/api/feed/repair-batch?limit=${limit}`, { method: "POST" }, 2, 180000),
+  repairFeedAll: () =>
+    request<any>("/api/feed/repair-all", { method: "POST" }, 1, 30000),
+  repairFeedAllStatus: () =>
+    request<any>("/api/feed/repair-all/status", undefined, 2, 15000),
+  repairFeedAllStop: () =>
+    request<any>("/api/feed/repair-all/stop", { method: "POST" }, 1, 15000),
 
   getStockkyHotStatus: () =>
     request<any>("/stockky-hot/status", undefined, 1, 15000),

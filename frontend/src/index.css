@@ -1941,6 +1941,11 @@ html.light .mobile-drawer-backdrop {
   border-color: rgba(16, 185, 129, 0.4);
   color: #a7f3d0;
 }
+.scan-action-danger {
+  border-color: rgba(244, 63, 94, 0.45);
+  color: #fda4af;
+  background: rgba(159, 18, 57, 0.2);
+}
 .scan-action-violet {
   border-color: rgba(139, 92, 246, 0.45);
   color: #ddd6fe;

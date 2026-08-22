@@ -100,6 +100,24 @@ export default function App() {
     return () => stopSessionKeepAlive();
   }, []);
 
+  // Wake every Neon-backed DB (gateway / training / cache) the instant the
+  // page loads, so the first real query of the session isn't the one paying
+  // Neon's cold-compute latency. Also exposed as a manual "Wake DB" button
+  // (dashboard header + Settings tab) via wakeAllDbs() below.
+  const [dbWakeState, setDbWakeState] = useState<"idle" | "waking" | "ok" | "error">("idle");
+  const wakeAllDbs = useCallback(async () => {
+    setDbWakeState("waking");
+    try {
+      const res = await api.wakeAllDatabases();
+      setDbWakeState(res?.ok ? "ok" : "error");
+    } catch {
+      setDbWakeState("error");
+    }
+  }, []);
+  useEffect(() => {
+    void wakeAllDbs();
+  }, [wakeAllDbs]);
+
   const [systemReady, setSystemReady] = useState(false);
   const [liteScan, setLiteScan] = useState(true);
   const [tab, setTab] = useState<Tab>("dashboard");
@@ -1026,6 +1044,15 @@ export default function App() {
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <BackendStatusDot status={backendUp} onClick={() => setTab("settings")} />
+          <button
+            type="button"
+            className="btn-terminal text-[10px]"
+            onClick={() => void wakeAllDbs()}
+            disabled={dbWakeState === "waking"}
+            title="Wake Neon / training / cache databases"
+          >
+            {dbWakeState === "waking" ? "⏳DB" : dbWakeState === "ok" ? "✅DB" : dbWakeState === "error" ? "⚠️DB" : "🔌DB"}
+          </button>
           <button type="button" className="btn-terminal text-[10px]" onClick={() => setCmdOpen(true)}>
             ⌘K
           </button>
@@ -1131,6 +1158,15 @@ export default function App() {
           title="Service manager"
         >
           SERVICES
+        </button>
+        <button
+          type="button"
+          className={`pill ${dbWakeState === "ok" ? "live" : dbWakeState === "error" ? "pill-danger" : ""}`}
+          onClick={() => void wakeAllDbs()}
+          disabled={dbWakeState === "waking"}
+          title="Wake Neon / training / cache databases"
+        >
+          {dbWakeState === "waking" ? "WAKING DB…" : dbWakeState === "ok" ? "DB AWAKE" : dbWakeState === "error" ? "DB WAKE FAILED" : "WAKE DB"}
         </button>
         <span className="mono text-[10px] text-mist/60 ml-auto status-clock">
           {new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: false })} IST
@@ -1707,6 +1743,24 @@ function SettingsPage({
 }) {
   const [url, setUrl] = useState(getApiUrl());
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [dbWakeState, setDbWakeState] = useState<"idle" | "waking" | "ok" | "error">("idle");
+  const [dbWakeDetail, setDbWakeDetail] = useState<string | null>(null);
+
+  async function wakeDbNow() {
+    setDbWakeState("waking");
+    setDbWakeDetail(null);
+    try {
+      const res = await api.wakeAllDatabases();
+      setDbWakeState(res?.ok ? "ok" : "error");
+      const bits = Object.entries(res?.targets || {}).map(
+        ([k, v]) => `${k}: ${v?.ok ? "up" : "failed"}`
+      );
+      setDbWakeDetail(bits.join(" · ") || null);
+    } catch (e: any) {
+      setDbWakeState("error");
+      setDbWakeDetail(e?.message || "Wake failed");
+    }
+  }
 
   function save() {
     setApiUrl(url);
@@ -1750,6 +1804,32 @@ function SettingsPage({
         <button type="button" className="btn-terminal" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
           Switch to {theme === "dark" ? "light" : "dark"} mode
         </button>
+      </section>
+
+      <section className="terminal-panel">
+        <h3 className="mono text-xs text-mist uppercase tracking-widest mb-2">Databases</h3>
+        <p className="text-mist/70 text-xs mb-3">
+          Wakes Neon (gateway) + training service DB + cache DB together, so the first query of
+          the session doesn't pay Neon's cold-compute latency. Runs automatically on page load —
+          use this to force it again anytime.
+        </p>
+        <button
+          type="button"
+          className="btn-terminal"
+          onClick={() => void wakeDbNow()}
+          disabled={dbWakeState === "waking"}
+        >
+          {dbWakeState === "waking" ? "Waking DB…" : "Wake DB"}
+        </button>
+        {dbWakeDetail && (
+          <p
+            className={`mono text-xs mt-2 mb-0 ${
+              dbWakeState === "ok" ? "text-signal-buy" : "text-signal-sell"
+            }`}
+          >
+            {dbWakeDetail}
+          </p>
+        )}
       </section>
 
       <section className="terminal-panel">

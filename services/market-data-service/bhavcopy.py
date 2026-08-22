@@ -344,7 +344,7 @@ def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
 
     sym_col = col("SYMBOL", "symbol", "TckrSymb", "SECURITY")
     series_col = col("SERIES", "series", "SctySrs")
-    close_col = col("CLOSE", "close", "LAST", "last", "ClsPric", "LastPric")
+    close_col = col("CLOSE", "close", "LAST", "last", "ClsPric", "LastPric", "ClosePrice")
     deliv_pct_col = col(
         "DELIV_PER", "DELIVERY_PER", "DELIV_PERCENTAGE", "DELIV_PERC",
         "DELIVERY_%", "DELIVERY_PERCENT", "DelivPer",
@@ -369,6 +369,7 @@ def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
             if series and series not in ("EQ", "BE", "BZ"):
                 continue
         # Universal ≤ ₹5000 gate when close/last is present
+        close_px = None
         if close_col:
             try:
                 close_raw = str(row.get(close_col) or "").replace(",", "").strip()
@@ -377,7 +378,7 @@ def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
                     if close_px > MAX_STOCK_PRICE:
                         return None  # high-ticket — do not use this row
             except (TypeError, ValueError):
-                pass
+                close_px = None
         pct = None
         if deliv_pct_col and row.get(deliv_pct_col):
             try:
@@ -393,11 +394,16 @@ def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
                 pct = dq / tq * 100.0
             except ValueError:
                 pct = None
-        if pct is None:
+        # Previously this bailed out whenever delivery % couldn't be derived,
+        # which also threw away a perfectly good closing price. Keep the row
+        # if we have EITHER a delivery % OR a close price — callers that only
+        # want EOD price (see eod_close_from_bhavcopy) rely on this.
+        if pct is None and close_px is None:
             continue
         return {
             "symbol": sym,
-            "delivery_pct": round(pct, 2),
+            "delivery_pct": round(pct, 2) if pct is not None else None,
+            "close": close_px,
             "traded_qty": row.get(tq_col) if tq_col else None,
             "delivery_qty": row.get(deliv_qty_col) if deliv_qty_col else None,
             "source": "nse_bhavcopy",
@@ -452,6 +458,60 @@ def delivery_from_bhavcopy(symbol: str) -> Optional[Dict[str, Any]]:
                         continue
     except Exception as e:
         logger.warning("bhavcopy pipeline failed for %s: %s", sym, e)
+    return None
+
+
+def eod_close_from_bhavcopy(symbol: str) -> Optional[float]:
+    """Last-resort EOD close price straight from the official NSE bhavcopy.
+
+    Used as the final rung of the live-price waterfall (see
+    ``_waterfall_bhavcopy_price`` in main.py) when Yahoo/TwelveData/
+    AlphaVantage/Polygon all fail — e.g. during a yfinance "Invalid Crumb"
+    outage. It's end-of-day, not live, but a real EOD close is far better
+    for the Data Feed Health repair flow than leaving a record at price=0
+    forever.
+    """
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    try:
+        client = _nse_client()
+        for d in _candidate_session_dates(12):
+            for url in _bhav_urls_for_date(d):
+                try:
+                    r = client.get(url)
+                    if r.status_code != 200 or not r.content:
+                        continue
+                    content_type = (r.headers.get("content-type") or "").lower()
+                    text = None
+                    body = r.content
+                    if url.endswith(".zip") or "zip" in content_type or body[:2] == b"PK":
+                        try:
+                            with zipfile.ZipFile(io.BytesIO(body)) as zf:
+                                name = next(
+                                    (n for n in zf.namelist() if n.lower().endswith(".csv")),
+                                    None,
+                                )
+                                if not name:
+                                    continue
+                                text = zf.read(name).decode("utf-8", errors="ignore")
+                        except zipfile.BadZipFile:
+                            continue
+                    else:
+                        if "application/json" in content_type:
+                            continue
+                        text = r.text
+                    if not text:
+                        continue
+                    head = text[:800].upper()
+                    if "SYMBOL" not in head and "TCKRSYMB" not in head and "SECURITY" not in head:
+                        continue
+                    parsed = _parse_bhav_csv(text, sym)
+                    if parsed and parsed.get("close"):
+                        return float(parsed["close"])
+                except Exception as e:
+                    logger.debug("eod_close bhav try failed %s %s: %s", d, url, e)
+                    continue
+    except Exception as e:
+        logger.warning("eod_close_from_bhavcopy failed for %s: %s", sym, e)
     return None
 
 

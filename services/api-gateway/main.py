@@ -3323,6 +3323,59 @@ async def ops_neon_keepalive():
     }
 
 
+@app.get("/ops/wake-db-all")
+@app.post("/ops/wake-db-all")
+async def ops_wake_db_all():
+    """
+    One button/one call to wake every Neon-backed database this app talks to:
+      - gateway's own Neon connection (kv_cache / feed store)
+      - training service's DB (TRAINING_DATABASE_URL / DATABASE_URL — via its
+        own /health, which pings the DB on the way through)
+      - training service's separate cache DB, if CACHE_DATABASE_URL is set
+        (kv_cache.py on the training side falls back through
+        TRAINING_DATABASE_URL -> DATABASE_URL -> CACHE_DATABASE_URL -> KV_DATABASE_URL,
+        so hitting /training/health also warms whichever one is actually wired up)
+
+    Called automatically on frontend page load, and available as a manual
+    "Wake DB" button in the Dashboard header and Settings tab so a cold Neon
+    compute doesn't make the first click of the day wait 1-3s per query.
+    """
+    out: dict = {"ok": True, "at": datetime.now(IST).isoformat(), "targets": {}}
+
+    # 1) Gateway's own Neon connection
+    try:
+        gw = _neon_keepalive_ping()
+        out["targets"]["gateway_neon"] = gw
+    except Exception as e:
+        out["targets"]["gateway_neon"] = {"ok": False, "error": str(e)[:200]}
+
+    # 2) Training service DB (+ its cache DB, whichever env var it resolves to)
+    #    /training/health itself performs a DB check on the training side.
+    try:
+        client = _get_http_client()
+        url = (TRAINING_URL or "").rstrip("/")
+        if url:
+            r = await client.get(f"{url}/health", params={"warm": "true"}, timeout=15.0)
+            training_ok = r.status_code == 200
+            data = {}
+            try:
+                data = r.json() if training_ok else {}
+            except Exception:
+                data = {}
+            out["targets"]["training_db"] = {
+                "ok": training_ok,
+                "db_connected": data.get("db_connected"),
+                "db_backend": data.get("db_backend"),
+            }
+        else:
+            out["targets"]["training_db"] = {"ok": False, "error": "TRAINING_URL not configured"}
+    except Exception as e:
+        out["targets"]["training_db"] = {"ok": False, "error": str(e)[:200]}
+
+    out["ok"] = all(bool(t.get("ok")) for t in out["targets"].values())
+    return out
+
+
 @app.post("/ops/idle-tick")
 async def ops_idle_tick():
     """Called by frontend after ~5 min idle during market hours only.
@@ -8228,6 +8281,118 @@ async def repair_batch_missing(limit: int = 10):
         "repaired": repaired,
         "repaired_symbols": [r.get("symbol") for r in repaired],
     }
+
+
+# ── Refill All: one-shot background repair of every incomplete feed record ──
+# (Data Feed Health page — "Auto-Repair Next 15" only ever touches the first
+# 15 rows each click; this walks the WHOLE incomplete list in rate-safe
+# batches so the user doesn't have to click Repair dozens of times.)
+_REFILL_ALL_JOB: dict = {
+    "status": "idle",       # idle | running | done | stopped | error
+    "total": 0,
+    "processed": 0,
+    "ok_count": 0,
+    "started_at": None,
+    "finished_at": None,
+    "message": "Idle",
+    "last_symbol": None,
+    "cancel_requested": False,
+}
+
+
+async def _run_refill_all_job(limit: int):
+    global _REFILL_ALL_JOB
+    try:
+        audit = await audit_missing_feed_data(limit=max(limit, 5000))
+        targets = [item["symbol"] for item in (audit.get("incomplete_stocks") or [])]
+        targets = targets[:limit] if limit else targets
+        _REFILL_ALL_JOB.update({
+            "status": "running",
+            "total": len(targets),
+            "processed": 0,
+            "ok_count": 0,
+            "started_at": datetime.now(IST).isoformat(),
+            "finished_at": None,
+            "message": f"Repairing {len(targets)} symbols…",
+            "cancel_requested": False,
+        })
+        if not targets:
+            _REFILL_ALL_JOB.update({
+                "status": "done",
+                "message": "Nothing to repair — feed already healthy.",
+                "finished_at": datetime.now(IST).isoformat(),
+            })
+            return
+
+        client = _get_http_client()
+        ok_n = 0
+        # Small batches with a short pause between each — keeps us well under
+        # upstream (Yahoo/TwelveData/NSE) rate limits over a long run instead
+        # of hammering everything at once.
+        BATCH = 5
+        for i in range(0, len(targets), BATCH):
+            if _REFILL_ALL_JOB.get("cancel_requested"):
+                _REFILL_ALL_JOB.update({
+                    "status": "stopped",
+                    "message": f"Stopped by user after {_REFILL_ALL_JOB.get('processed', 0)}/{len(targets)}.",
+                    "finished_at": datetime.now(IST).isoformat(),
+                })
+                return
+            chunk = targets[i:i + BATCH]
+            for sym in chunk:
+                try:
+                    res = await _patch_single_stock_feed(sym, client)
+                    if res.get("complete") or res.get("patched_fields"):
+                        ok_n += 1
+                    _REFILL_ALL_JOB["last_symbol"] = sym
+                except Exception as e:
+                    logger.debug("refill-all repair %s: %s", sym, e)
+                _REFILL_ALL_JOB["processed"] = _REFILL_ALL_JOB.get("processed", 0) + 1
+                _REFILL_ALL_JOB["ok_count"] = ok_n
+                _REFILL_ALL_JOB["message"] = (
+                    f"{_REFILL_ALL_JOB['processed']}/{len(targets)} · last: {sym}"
+                )
+                await asyncio.sleep(0.5)
+            # Brief pause between batches so we never sustain a hard hammer
+            await asyncio.sleep(1.0)
+
+        _REFILL_ALL_JOB.update({
+            "status": "done",
+            "message": f"Done — {ok_n}/{len(targets)} improved.",
+            "finished_at": datetime.now(IST).isoformat(),
+        })
+    except Exception as e:
+        logger.exception("refill-all job failed: %s", e)
+        _REFILL_ALL_JOB.update({
+            "status": "error",
+            "message": str(e)[:200],
+            "finished_at": datetime.now(IST).isoformat(),
+        })
+
+
+@app.post("/api/feed/repair-all")
+@app.post("/data-feed/repair-all")
+async def repair_all_missing(background_tasks: BackgroundTasks, limit: int = 5000):
+    """Kick off a background job that repairs EVERY incomplete feed record,
+    not just the next 15. Poll /api/feed/repair-all/status for progress."""
+    if _REFILL_ALL_JOB.get("status") == "running":
+        return {"ok": True, "already_running": True, **_REFILL_ALL_JOB}
+    limit = max(1, min(int(limit or 5000), 5000))
+    background_tasks.add_task(_run_refill_all_job, limit)
+    return {"ok": True, "started": True, "message": "Refill All started in the background."}
+
+
+@app.get("/api/feed/repair-all/status")
+@app.get("/data-feed/repair-all/status")
+async def repair_all_status():
+    return dict(_REFILL_ALL_JOB)
+
+
+@app.post("/api/feed/repair-all/stop")
+@app.post("/data-feed/repair-all/stop")
+async def repair_all_stop():
+    _REFILL_ALL_JOB["cancel_requested"] = True
+    return {"ok": True, "message": "Stop requested — will halt after the current batch."}
 
 
 @app.post("/data-feed/run")

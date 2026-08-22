@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 
 interface IncompleteStock {
@@ -17,6 +17,15 @@ interface AuditStats {
   required_fields?: string[];
 }
 
+interface RefillAllJob {
+  status?: "idle" | "running" | "done" | "stopped" | "error";
+  total?: number;
+  processed?: number;
+  ok_count?: number;
+  message?: string;
+  last_symbol?: string;
+}
+
 export default function DataHealthAudit() {
   const [stats, setStats] = useState<AuditStats | null>(null);
   const [loading, setLoading] = useState(false);
@@ -25,6 +34,8 @@ export default function DataHealthAudit() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [refillJob, setRefillJob] = useState<RefillAllJob | null>(null);
+  const refillPollRef = useRef<number | null>(null);
 
   const fetchAudit = useCallback(async () => {
     setLoading(true);
@@ -42,6 +53,49 @@ export default function DataHealthAudit() {
   useEffect(() => {
     void fetchAudit();
   }, [fetchAudit]);
+
+  const stopRefillPoll = useCallback(() => {
+    if (refillPollRef.current != null) {
+      window.clearInterval(refillPollRef.current);
+      refillPollRef.current = null;
+    }
+  }, []);
+
+  const pollRefillStatus = useCallback(async () => {
+    try {
+      const st = await api.repairFeedAllStatus();
+      setRefillJob(st);
+      if (st?.status !== "running") {
+        stopRefillPoll();
+        await fetchAudit();
+      }
+    } catch (e: any) {
+      console.warn("refill-all status", e);
+    }
+  }, [fetchAudit, stopRefillPoll]);
+
+  useEffect(() => () => stopRefillPoll(), [stopRefillPoll]);
+
+  const handleRefillAll = async () => {
+    setMessage(null);
+    setError(null);
+    try {
+      await api.repairFeedAll();
+      stopRefillPoll();
+      refillPollRef.current = window.setInterval(() => void pollRefillStatus(), 2000);
+      await pollRefillStatus();
+    } catch (e: any) {
+      setError(e?.message || "Refill All failed to start");
+    }
+  };
+
+  const handleRefillAllStop = async () => {
+    try {
+      await api.repairFeedAllStop();
+    } catch (e: any) {
+      setError(e?.message || "Failed to stop Refill All");
+    }
+  };
 
   const handleRepairSingle = async (symbol: string) => {
     setRepairingSym(symbol);
@@ -88,6 +142,10 @@ export default function DataHealthAudit() {
   const healthColor =
     health >= 90 ? "text-emerald-400" : health >= 70 ? "text-amber-300" : "text-rose-400";
 
+  const refillRunning = refillJob?.status === "running";
+  const refillPct =
+    refillJob && refillJob.total ? Math.round(((refillJob.processed || 0) / refillJob.total) * 100) : 0;
+
   return (
     <div className="scan-bento-card space-y-5 mt-6">
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate/40 pb-4">
@@ -111,13 +169,52 @@ export default function DataHealthAudit() {
           <button
             type="button"
             onClick={() => void handleRepairBatch()}
-            disabled={loading || batchBusy || (stats?.incomplete_count ?? 0) === 0}
+            disabled={loading || batchBusy || refillRunning || (stats?.incomplete_count ?? 0) === 0}
             className="scan-action-btn scan-action-trade"
           >
             {batchBusy ? "Repairing…" : "⚡ Auto-Repair Next 15"}
           </button>
+          {refillRunning ? (
+            <button
+              type="button"
+              onClick={() => void handleRefillAllStop()}
+              className="scan-action-btn scan-action-danger"
+            >
+              ⏹ Stop Refill
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void handleRefillAll()}
+              disabled={loading || batchBusy || (stats?.incomplete_count ?? 0) === 0}
+              className="scan-action-btn scan-action-trade"
+              title="Repairs every incomplete record in the background, in rate-safe batches — no need to click Repair repeatedly."
+            >
+              🚀 Refill All ({stats?.incomplete_count ?? 0})
+            </button>
+          )}
         </div>
       </div>
+
+      {refillJob && (refillRunning || refillJob.status === "done" || refillJob.status === "stopped" || refillJob.status === "error") && (
+        <div className="rounded-lg border border-slate/50 bg-graphite/40 p-3 space-y-1.5">
+          <div className="flex items-center justify-between text-[11px] font-mono text-mist/70">
+            <span>Refill All · {refillJob.status}</span>
+            <span>
+              {refillJob.processed ?? 0}/{refillJob.total ?? 0} · {refillJob.ok_count ?? 0} improved
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full bg-slate/40 overflow-hidden">
+            <div
+              className="h-full bg-signal-buy transition-all"
+              style={{ width: `${refillRunning ? refillPct : 100}%` }}
+            />
+          </div>
+          {refillJob.message && (
+            <p className="text-[10px] text-mist/50 font-mono">{refillJob.message}</p>
+          )}
+        </div>
+      )}
 
       {(message || error) && (
         <div className={`mono text-xs ${error ? "text-rose-300" : "text-mist/80"}`}>

@@ -364,11 +364,54 @@ def _parse_date(d: Any) -> Optional[datetime]:
 
 
 def _fetch_history(symbol: str, days: int) -> Optional[Any]:
-    """Bulk-safe single-symbol history pull, routed through the shared
-    yfinance rate limiter (already monkeypatched process-wide by
-    rate_limiter.patch_yfinance() at api-gateway startup — this call gets
-    the same protection as every other yfinance call in the app without
-    needing its own acquire() here)."""
+    """Bulk-safe single-symbol history pull.
+
+    Routed through market-data-service's /history/{symbol} endpoint instead
+    of calling yfinance directly here. That endpoint already has retries,
+    caching and index-fallback candidates, and (as of this patch) will grow
+    the same non-Yahoo waterfall the /quote endpoint has — so IPO analysis
+    stops going straight to "error" the moment Yahoo's crumb/cookie flow
+    hiccups. Falls back to a direct yfinance call only if market-data-service
+    itself is unreachable.
+    """
+    try:
+        # /history only accepts named periods (1mo/3mo/6mo/1y/2y/5y); map the
+        # day-count IPO analysis asks for onto the closest one so the
+        # earlier-days cap in get_history doesn't silently override us.
+        if days <= 30:
+            period = "1mo"
+        elif days <= 90:
+            period = "3mo"
+        elif days <= 180:
+            period = "6mo"
+        else:
+            period = "1y"
+        r = httpx.get(
+            f"{MARKET_DATA_URL}/history/{symbol}",
+            params={"period": period, "interval": "1d"},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            data = r.json() or {}
+            candles = data.get("candles") or data.get("data") or []
+            if candles:
+                import pandas as pd
+                df = pd.DataFrame(candles)
+                # Normalize column names to what analyze_ipo expects (Close/High/Low/Volume)
+                rename = {
+                    "close": "Close", "high": "High", "low": "Low",
+                    "open": "Open", "volume": "Volume", "date": "Date",
+                }
+                df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+                if "Date" in df.columns:
+                    df["Date"] = pd.to_datetime(df["Date"])
+                    df = df.set_index("Date")
+                if not df.empty and "Close" in df.columns:
+                    return df
+    except Exception as e:
+        logger.debug("ipo history via market-data-service %s: %s", symbol, e)
+
+    # Fallback: direct yfinance (only reached if market-data-service is down/unreachable)
     try:
         import yfinance as yf
         t = yf.Ticker(f"{symbol}.NS")
@@ -377,7 +420,7 @@ def _fetch_history(symbol: str, days: int) -> Optional[Any]:
             return None
         return hist
     except Exception as e:
-        logger.debug("ipo history fetch %s: %s", symbol, e)
+        logger.debug("ipo history direct-yfinance fallback %s: %s", symbol, e)
         return None
 
 

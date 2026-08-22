@@ -39,8 +39,7 @@ export default defineConfig(({ mode }) => {
       secure: false,
     };
   }
-
-  return {
+    return {
     plugins: [react()],
     server: {
       host: "0.0.0.0",

@@ -414,6 +414,10 @@ class ModelRegistry:
             else:
                 engine = create_engine(db_url, echo=False)
             Base.metadata.create_all(engine)
+            # Oracle: pre-existing model_artifacts may lack an IDENTITY on id
+            # (ORA-01400 on save_candidate_model / save_production_model).
+            # No-op on Postgres.
+            ensure_oracle_identity(engine)
             session_factory = sessionmaker(bind=engine)
         self._session_factory = session_factory
 

@@ -6237,12 +6237,17 @@ async def api_surprise_premarket_proxy(request: Request):
         logger.warning("gateway ensure_surprise_schema: %s", e)
 
     if not schema.get("ok"):
+        _sb = schema.get("backend") or "postgres"
         return JSONResponse(
             status_code=503,
             content={
                 "ok": False,
                 "error": "schema_failed",
-                "message": "Set DATABASE_URL or CACHE_DATABASE_URL on api-gateway to Neon pooler URL",
+                "message": (
+                    "Set ORACLE_DSN + wallet env on api-gateway (Oracle deployment)"
+                    if _sb == "oracle"
+                    else "Set DATABASE_URL or CACHE_DATABASE_URL on api-gateway to Neon pooler URL"
+                ),
                 "schema": schema,
             },
         )
@@ -6314,7 +6319,11 @@ async def api_surprise_premarket_proxy(request: Request):
             "symbols": len(symbols),
             "universe_injected": len(symbols),
             "runner": "api-gateway",
-            "message": "Premarket started on gateway (Neon) — poll /surprise/premarket/status",
+            "backend": schema.get("backend"),
+            "message": (
+                "Premarket started on gateway (%s) — poll /surprise/premarket/status"
+                % ("Oracle ADB" if schema.get("backend") == "oracle" else "Neon")
+            ),
             "progress": get_premarket_progress(),
             "schema": schema,
         }

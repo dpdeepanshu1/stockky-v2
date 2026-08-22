@@ -59,13 +59,40 @@ def _normalize_db_url(url: str) -> str:
     return url
 
 
+# surprise_schema.py owns backend detection, engine construction and the
+# dialect-specific SQL (shared with surprise_premarket.py). Imported defensively.
+try:
+    import surprise_schema as _ss
+except Exception:  # pragma: no cover
+    _ss = None
+
+
+def _dialect() -> str:
+    """'oracle' on the Oracle Cloud VM, 'postgresql' on Render/Neon."""
+    if _ss is not None:
+        try:
+            return _ss.dialect()
+        except Exception:
+            pass
+    return "oracle" if os.environ.get("ORACLE_DSN") else "postgresql"
+
+
+def _conn_dialect(conn) -> str:
+    try:
+        return (conn.dialect.name or "").lower()
+    except Exception:
+        return _dialect()
+
+
 def _db_url() -> Optional[str]:
-    # Oracle Cloud side: this Postgres-only feature degrades to a clean no-op.
-    # The durable core (kv_cache + models) runs on Oracle via ORACLE_DSN; this
-    # secondary surprise scanner stays Neon-only. On Render/Neon (no ORACLE_DSN
-    # and no oracle:// URL) this guard is False, so behaviour is unchanged.
-    if os.environ.get("ORACLE_DSN"):
-        return None
+    # Both deployments are self-sufficient now: Neon on Render, Oracle ADB on the
+    # Oracle VM. This used to return None whenever ORACLE_DSN was set, which is
+    # what produced "surprise: no DATABASE_URL — static cache empty" there.
+    if _ss is not None:
+        try:
+            return _ss.database_url()
+        except Exception as e:
+            logger.debug("surprise_schema.database_url: %s", e)
     url = (
         os.getenv("CACHE_DATABASE_URL")
         or os.getenv("DATABASE_URL")
@@ -74,6 +101,29 @@ def _db_url() -> Optional[str]:
     if url and url.lower().startswith("oracle"):
         return None
     return _normalize_db_url(url) if url else None
+
+
+def _engine(app_name: str):
+    """Engine for the configured backend, or None. Must not use create_engine on
+    the raw URL: the Postgres connect_args are psycopg2-only."""
+    if _ss is not None:
+        try:
+            return _ss.make_engine(app_name)
+        except Exception as e:
+            logger.debug("surprise_schema.make_engine: %s", e)
+    url = _db_url()
+    if not url:
+        return None
+    from sqlalchemy import create_engine
+
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=1,
+        max_overflow=1,
+        pool_timeout=8,
+        connect_args={"connect_timeout": 8, "application_name": app_name},
+    )
 
 
 class SurpriseStockEngine:
@@ -104,35 +154,36 @@ class SurpriseStockEngine:
             except Exception as se:
                 logger.debug("ensure_surprise_schema: %s", se)
 
-            from sqlalchemy import create_engine, text
+            from sqlalchemy import text
 
-            eng = create_engine(
-                url,
-                pool_pre_ping=True,
-                pool_size=1,
-                max_overflow=1,
-                pool_timeout=8,
-                connect_args={"connect_timeout": 8, "application_name": "stockky-surprise-scan"},
-            )
+            eng = _engine("stockky-surprise-scan")
+            if eng is None:
+                self.static_cache = {}
+                return 0
             with eng.begin() as conn:
-                # Idempotent DDL in case ensure_schema module unavailable
-                conn.execute(
-                    text(
-                        """
-                        CREATE TABLE IF NOT EXISTS surprise_static_feed (
-                            symbol VARCHAR(30) PRIMARY KEY,
-                            prev_close NUMERIC(12, 2) NOT NULL DEFAULT 0,
-                            avg_15m_volume BIGINT NOT NULL DEFAULT 10000,
-                            daily_atr NUMERIC(12, 2) NOT NULL DEFAULT 0.0,
-                            high_52w NUMERIC(12, 2) NOT NULL DEFAULT 0,
-                            dist_52w_pct NUMERIC(8, 2) NOT NULL DEFAULT 100,
-                            sector VARCHAR(80),
-                            is_liquid BOOLEAN DEFAULT TRUE,
-                            updated_at TIMESTAMPTZ DEFAULT NOW()
+                # Idempotent DDL in case ensure_schema module unavailable.
+                # Postgres-only syntax, so it is skipped on Oracle — there the
+                # table is created by surprise_schema.ensure_surprise_schema()
+                # above, and a failed DDL here would abort the whole transaction
+                # and take the SELECT down with it.
+                if _conn_dialect(conn) != "oracle":
+                    conn.execute(
+                        text(
+                            """
+                            CREATE TABLE IF NOT EXISTS surprise_static_feed (
+                                symbol VARCHAR(30) PRIMARY KEY,
+                                prev_close NUMERIC(12, 2) NOT NULL DEFAULT 0,
+                                avg_15m_volume BIGINT NOT NULL DEFAULT 10000,
+                                daily_atr NUMERIC(12, 2) NOT NULL DEFAULT 0.0,
+                                high_52w NUMERIC(12, 2) NOT NULL DEFAULT 0,
+                                dist_52w_pct NUMERIC(8, 2) NOT NULL DEFAULT 100,
+                                sector VARCHAR(80),
+                                is_liquid BOOLEAN DEFAULT TRUE,
+                                updated_at TIMESTAMPTZ DEFAULT NOW()
+                            )
+                            """
                         )
-                        """
                     )
-                )
                 # Sticky Fix Step 4: explicit columns (match surprise_premarket INSERT)
                 rows = conn.execute(
                     text(
@@ -153,6 +204,13 @@ class SurpriseStockEngine:
                         d[k] = float(d[k]) if d.get(k) is not None else 0.0
                     except Exception:
                         d[k] = 0.0
+                # Oracle stores is_liquid as NUMBER(1) (no BOOLEAN type), so it
+                # comes back as 1/0 rather than True/False — normalize both.
+                if "is_liquid" in d and not isinstance(d.get("is_liquid"), bool):
+                    try:
+                        d["is_liquid"] = bool(int(d["is_liquid"]))
+                    except Exception:
+                        d["is_liquid"] = True
                 # avg_15m_volume OR legacy avg_volume
                 try:
                     vol = d.get("avg_15m_volume")
@@ -192,22 +250,23 @@ class SurpriseStockEngine:
         if not url:
             return 0
         try:
-            from sqlalchemy import create_engine, text
+            from sqlalchemy import text
             import json as _json
-            eng = create_engine(
-                url,
-                pool_pre_ping=True,
-                pool_size=1,
-                max_overflow=0,
-                pool_timeout=6,
-                connect_args={"connect_timeout": 6, "application_name": "stockky-surprise-kv"},
-            )
+            eng = _engine("stockky-surprise-kv")
+            if eng is None:
+                return 0
             added = 0
             with eng.connect() as conn:
+                # Oracle has no LIMIT; FETCH FIRST is the 12c+ equivalent.
+                _cap = (
+                    "FETCH FIRST 800 ROWS ONLY"
+                    if _conn_dialect(conn) == "oracle"
+                    else "LIMIT 800"
+                )
                 # Prefer durable feed keys written by data_feed background worker
                 rows = conn.execute(
                     text(
-                        """
+                        f"""
                         SELECT k, v FROM stockky_kv
                         WHERE (k LIKE 'stockky:data_feed:%'
                                OR k LIKE 'feed:%'
@@ -215,7 +274,7 @@ class SurpriseStockEngine:
                           AND k NOT LIKE '%:index'
                           AND k NOT LIKE '%:meta'
                           AND k NOT LIKE '%:job'
-                        LIMIT 800
+                        {_cap}
                         """
                     )
                 ).fetchall()

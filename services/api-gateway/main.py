@@ -6831,6 +6831,13 @@ def _collect_job_snapshots() -> dict:
     except Exception as e:
         logger.debug("jobs snapshot rate_limits: %s", e)
 
+    try:
+        r = httpx.get(f"{MARKET_DATA_URL}/internal/yahoo-ws-status", timeout=3)
+        if r.status_code == 200:
+            out["yahoo_ws_feed"] = r.json()
+    except Exception as e:
+        logger.debug("jobs snapshot yahoo_ws_feed: %s", e)
+
     return out
 
 

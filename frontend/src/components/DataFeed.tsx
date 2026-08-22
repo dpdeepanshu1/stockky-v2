@@ -100,6 +100,7 @@ export default function DataFeed() {
   // if the socket drops.
   const [refillJob, setRefillJob] = useState<Job | null>(null);
   const [yfRateLimit, setYfRateLimit] = useState<{ waiters?: number; throttle_events?: number } | null>(null);
+  const [wsFeed, setWsFeed] = useState<{ connected?: boolean; subscribed_count?: number; live_symbols_count?: number; last_message_age_sec?: number | null } | null>(null);
   const onRealtimeMessage = useCallback((msg: RealtimeMessage) => {
     if (msg.type !== "jobs_snapshot") return;
     const df = (msg as any).data_feed;
@@ -114,6 +115,8 @@ export default function DataFeed() {
     if (ra) setRefillJob(ra);
     const rl = (msg as any).rate_limits?.yfinance;
     if (rl) setYfRateLimit(rl);
+    const wf = (msg as any).yahoo_ws_feed;
+    if (wf) setWsFeed(wf);
   }, []);
   const { connected: wsConnected } = useStockkyRealtime(onRealtimeMessage);
 
@@ -339,6 +342,20 @@ export default function DataFeed() {
                   <span className="text-amber-400/80 ml-1">
                     · queued ({yfRateLimit.waiters} waiting on shared rate limit)
                   </span>
+                )}
+              </span>
+            )}
+            {wsFeed && (
+              <span
+                className="font-mono text-[10px] text-mist/50 self-center"
+                title="Live quotes come from one persistent Yahoo WebSocket connection instead of per-symbol REST calls — this is what stopped the rate-limit cascade."
+              >
+                {wsFeed.connected ? (
+                  <span className="text-emerald-400/80">
+                    ● live quote feed — {wsFeed.subscribed_count ?? 0} symbols subscribed, {wsFeed.live_symbols_count ?? 0} ticking
+                  </span>
+                ) : (
+                  <span className="text-amber-400/80">⚠ live quote feed reconnecting — falling back to REST</span>
                 )}
               </span>
             )}

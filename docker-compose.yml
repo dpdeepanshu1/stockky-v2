@@ -1,33 +1,46 @@
-version: "3.9"
+# Stockky v2 — local / Oracle cloud
+# Requires a .env in this directory with Neon pooler URLs (see .env.example).
+# CRITICAL: without env_file + DATABASE_* below, api-gateway runs memory-only
+# and loses data-feed / trades / training / surprise on every restart.
 
 services:
   market-data-service:
     build: ./services/market-data-service
     ports:
       - "8001:8001"
+    env_file:
+      - .env
     environment:
-      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL}
-      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN}
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
       YFINANCE_MAX_CONCURRENT: ${YFINANCE_MAX_CONCURRENT:-6}
       YFINANCE_MIN_INTERVAL_SEC: ${YFINANCE_MIN_INTERVAL_SEC:-0.08}
-      PORT: 8001
+      USE_REDIS: ${USE_REDIS:-0}
+      PORT: "8001"
+    restart: unless-stopped
 
   analysis-intelligence-service:
     build: ./services/analysis-intelligence-service
     ports:
       - "8002:8000"
+    env_file:
+      - .env
     environment:
       MARKET_DATA_URL: http://market-data-service:8001
-      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL}
-      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN}
-      PORT: 8000
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
+      USE_REDIS: ${USE_REDIS:-0}
+      PORT: "8000"
     depends_on:
       - market-data-service
+    restart: unless-stopped
 
   decision-prediction-service:
     build: ./services/decision-prediction-service
     ports:
       - "8004:8000"
+    env_file:
+      - .env
     environment:
       MARKET_DATA_URL: http://market-data-service:8001
       TECHNICAL_URL: http://analysis-intelligence-service:8000/technical
@@ -36,29 +49,43 @@ services:
       EVENT_URL: http://analysis-intelligence-service:8000/event
       PREDICTION_URL: http://decision-prediction-service:8000/prediction
       TRAINING_SERVICE_URL: http://decision-prediction-service:8000/training
-      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL}
-      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN}
-      PORT: 8000
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
+      # Training / paper trades durable store
+      DATABASE_URL: ${DATABASE_URL:-}
+      TRAINING_DATABASE_URL: ${TRAINING_DATABASE_URL:-${DATABASE_URL:-}}
+      CACHE_DATABASE_URL: ${CACHE_DATABASE_URL:-}
+      USE_REDIS: ${USE_REDIS:-0}
+      PORT: "8000"
     depends_on:
       - market-data-service
       - analysis-intelligence-service
+    restart: unless-stopped
 
   notification-scheduler-service:
     build: ./services/notification-scheduler-service
     ports:
       - "8008:8000"
+    env_file:
+      - .env
     environment:
       API_GATEWAY_URL: http://api-gateway:8000
-      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL}
-      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN}
-      PORT: 8000
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+      CACHE_DATABASE_URL: ${CACHE_DATABASE_URL:-}
+      USE_REDIS: ${USE_REDIS:-0}
+      PORT: "8000"
     depends_on:
       - api-gateway
+    restart: unless-stopped
 
   api-gateway:
     build: ./services/api-gateway
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
       MARKET_DATA_URL: http://market-data-service:8001
       TECHNICAL_URL: http://analysis-intelligence-service:8000/technical
@@ -70,19 +97,27 @@ services:
       PREDICTION_URL: http://decision-prediction-service:8000/prediction
       TRAINING_URL: http://decision-prediction-service:8000/training
       NOTIFICATION_URL: http://notification-scheduler-service:8000/notification
-      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL}
-      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN}
-      PORT: 8000
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
+      # Neon — required for durable data-feed / surprise / watchlist / kv
+      DATABASE_URL: ${DATABASE_URL:-}
+      CACHE_DATABASE_URL: ${CACHE_DATABASE_URL:-}
+      TRAINING_DATABASE_URL: ${TRAINING_DATABASE_URL:-${DATABASE_URL:-}}
+      USE_REDIS: ${USE_REDIS:-0}
+      DISABLE_UPSTASH: ${DISABLE_UPSTASH:-1}
+      PORT: "8000"
     depends_on:
       - market-data-service
       - analysis-intelligence-service
       - decision-prediction-service
+    restart: unless-stopped
 
   frontend:
     build: ./frontend
     ports:
       - "5173:5173"
     environment:
-      VITE_API_URL: http://localhost:8000
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
     depends_on:
       - api-gateway
+    restart: unless-stopped

@@ -257,6 +257,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.on_event("startup")
+async def _start_yahoo_ws_feed():
+    """
+    Point 1 continued: one persistent WebSocket connection to Yahoo's live
+    streaming endpoint (wss://streamer.finance.yahoo.com), subscribed once
+    to the whole scan universe, replaces the vast majority of the
+    per-symbol REST calls that were hitting yfinance/twelvedata/
+    alphavantage/polygon rate limits (see the /quote/{symbol} waterfall —
+    it now checks this feed first). This is a different Yahoo backend from
+    the crumb-protected REST path, so it doesn't share that rate limit.
+    """
+    try:
+        from surprise_premarket import default_universe_from_env
+        import yahoo_ws_feed
+        universe = default_universe_from_env()
+        if universe:
+            yahoo_ws_feed.start_feed_background(universe)
+        else:
+            logger.warning("yahoo_ws_feed: no universe configured (SURPRISE_UNIVERSE/SCAN_UNIVERSE), not starting")
+    except Exception as e:
+        logger.warning("yahoo_ws_feed startup skipped: %s", e)
+
 # ── Root & Health endpoints (fix 404) ────────────────────────────────────────
 @app.get("/")
 async def root():
@@ -266,6 +289,19 @@ async def root():
 async def health():
     # Simple health check; optionally verify dependencies (Redis, etc.)
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/internal/yahoo-ws-status")
+async def yahoo_ws_status():
+    """Live-feed health — connected/subscribed count/last tick age. Polled
+    by api-gateway's /ws jobs channel so the Data Feed / Surprise tabs can
+    show whether quotes are coming from the WS push feed or falling back
+    to REST."""
+    try:
+        import yahoo_ws_feed
+        return yahoo_ws_feed.feed_status()
+    except Exception as e:
+        return {"connected": False, "error": str(e)[:200]}
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
@@ -979,6 +1015,9 @@ def get_quote(symbol: str):
     """
     Short-circuit waterfall quote path (never parallel-fan-out):
 
+    0) Yahoo live WS feed (yahoo_ws_feed.py) — one persistent connection,
+       zero HTTP request, zero rate-limit exposure. Hit rate depends on
+       how long the feed has been subscribed/ticking for this symbol.
     1) Soft / durable cache (if warm)
     2) Yahoo OHLCV (primary, $0)
     3) Yahoo Ticker.info (still $0)
@@ -990,6 +1029,25 @@ def get_quote(symbol: str):
     Each stage stops the chain on the first valid price.
     """
     sym = normalize_symbol(symbol)
+
+    try:
+        import yahoo_ws_feed
+        live = yahoo_ws_feed.get_live_quote(sym)
+        if live and live.get("price"):
+            result = _pad_quote_response(sym, {
+                **live,
+                "name": sym,
+                "fetched_at": datetime.utcnow().isoformat(),
+            })
+            result = _sanitize_for_json(result)
+            result["source"] = "yahoo_ws"
+            cache_key = f"quote:{sym}"
+            _cache_set(cache_key, result)
+            _fallback_set(cache_key, result)
+            return result
+    except Exception as e:
+        logger.debug("yahoo_ws lookup %s: %s", sym, e)
+
     cache_key = f"quote:{sym}"
     cached = _cache_get(cache_key)
 

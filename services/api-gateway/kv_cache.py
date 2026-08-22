@@ -25,6 +25,14 @@ import threading
 import time
 from typing import Any, Optional
 
+# Neon/Postgres ↔ Oracle Autonomous DB portability shim (sits next to this file
+# in every service). Imported defensively: if it is somehow absent the cache
+# simply stays on the Neon/Postgres + memory path (Oracle just won't activate).
+try:
+    import oracle_compat as _oc
+except Exception:  # pragma: no cover
+    _oc = None
+
 logger = logging.getLogger("kv-cache")
 
 USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
@@ -56,6 +64,9 @@ _DURABLE_PREFIXES = (
     "stockky:decide_cache:",  # optional durability for decide (low volume)
     "stockky:batch_result:",  # scan batch cache survives free-tier sleep
     "stockky:rate_limit",  # rate-limit dashboard durable events/stats
+    "stockky:rate_limit_stats",  # cross-service rate-limit dashboard alias
+    "stockky:rate_limit_events_neon",
+    "system:rate_limit",  # plan-compatible alias key (market-data)
 )
 
 
@@ -113,8 +124,14 @@ class MemoryTTLCache:
 _mem = MemoryTTLCache()
 _neon_engine = None
 _neon_init = False
+_neon_dialect = "postgresql"  # set to 'oracle' | 'postgresql' when the engine is built
 _redis = None
 _redis_init = False
+
+
+def _dialect() -> str:
+    """Which SQL flavour the durable engine speaks ('oracle' | 'postgresql')."""
+    return _neon_dialect
 
 
 def _is_durable(key: str) -> bool:
@@ -146,6 +163,12 @@ def _neon_url() -> Optional[str]:
         or os.getenv("DATABASE_URL")
         or os.getenv("TRAINING_DATABASE_URL")
     )
+    # Oracle Autonomous DB (Oracle VM): when ORACLE_DSN is set — or the resolved
+    # URL is an oracle+oracledb:// URL — return it untouched (a scheme-only
+    # sentinel when only discrete ORACLE_* vars are used). The Postgres URL
+    # surgery below assumes psycopg2 and would corrupt an Oracle DSN.
+    if _oc is not None and _oc.oracle_is_configured(url or ""):
+        return url or "oracle+oracledb://"
     if not url:
         return None
     return _normalize_db_url(url)
@@ -154,13 +177,71 @@ def _neon_url() -> Optional[str]:
 _neon_lock = threading.Lock()
 
 
+def _init_durable_schema(eng) -> None:
+    """Create stockky_kv + settings tables & indexes for whichever dialect the
+    engine speaks. DDL is idempotent; on Oracle 'already exists' (ORA-00955 /
+    ORA-01408) is swallowed by oracle_compat.exec_ddl_safe."""
+    if _neon_dialect == "oracle" and _oc is not None:
+        _oc.exec_ddl_safe(eng, _oc.create_table_sql("oracle", "stockky_kv", True), "oracle")
+        _oc.exec_ddl_safe(eng, _oc.create_index_sql("oracle", "stockky_kv_expires_idx", "stockky_kv", "expires_at"), "oracle")
+        _oc.exec_ddl_safe(eng, _oc.create_index_sql("oracle", "idx_stockky_kv_k", "stockky_kv", "k"), "oracle")
+        _oc.exec_ddl_safe(eng, _oc.create_table_sql("oracle", "stockky_notification", False), "oracle")
+        _oc.exec_ddl_safe(eng, _oc.create_table_sql("oracle", "stockky_watchlist", False), "oracle")
+        return
+    # ── Neon / Postgres — original schema, one transaction (unchanged) ──
+    from sqlalchemy import text
+
+    with eng.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS stockky_kv (
+                    k TEXT PRIMARY KEY,
+                    v TEXT NOT NULL,
+                    expires_at TIMESTAMPTZ NULL,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+        )
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS stockky_kv_expires_idx ON stockky_kv (expires_at)")
+        )
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS idx_stockky_kv_k ON stockky_kv (k)")
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS stockky_notification (
+                    k TEXT PRIMARY KEY,
+                    v TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS stockky_watchlist (
+                    k TEXT PRIMARY KEY,
+                    v TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+        )
+
+
 def _get_neon():
     """
-    Strict singleton Neon engine for stockky_kv.
+    Strict singleton durable engine for stockky_kv.
     Double-checked locking prevents concurrent create_engine() storms
-    (Render 512MB + Neon free max connections).
+    (Render 512MB + Neon free max connections). Serves BOTH Neon/Postgres
+    (Render) and Oracle Autonomous DB (Oracle VM) — chosen by env only.
     """
-    global _neon_engine, _neon_init
+    global _neon_engine, _neon_init, _neon_dialect
     if _neon_init:
         return _neon_engine
     with _neon_lock:
@@ -174,6 +255,29 @@ def _get_neon():
         try:
             from sqlalchemy import create_engine, text
 
+            if _oc is not None and _oc.oracle_is_configured(url):
+                # ── Oracle Autonomous DB (Oracle Cloud VM only) ──
+                # Wallet / DSN / creds ride in from the ORACLE_* env vars (see
+                # oracle_compat.py + .env.oracle.example). Small pool for the
+                # cache layer; Oracle ADB tolerates far more than Neon free.
+                eng, _ = _oc.build_oracle_engine(
+                    url,
+                    db_pool_size=os.getenv("CACHE_DB_POOL_SIZE", "2"),
+                    db_max_overflow=os.getenv("CACHE_DB_MAX_OVERFLOW", "1"),
+                    db_pool_recycle=os.getenv("CACHE_DB_POOL_RECYCLE", "300"),
+                    db_pool_timeout=os.getenv("CACHE_DB_POOL_TIMEOUT", "10"),
+                )
+                _neon_dialect = "oracle"
+                _init_durable_schema(eng)
+                _neon_engine = eng
+                logger.info(
+                    "KV durable layer: Oracle Autonomous DB ready "
+                    "(stockky_kv + stockky_notification + stockky_watchlist; redis_disabled=%s)",
+                    not USE_REDIS,
+                )
+                return _neon_engine
+
+            # ── Neon / Postgres (unchanged) ──
             # Free-tier: default pool 1 + overflow 1 (max 2 total). Cap hard at 2.
             # Prefer Neon *pooler* URL (port 6543) in CACHE_DATABASE_URL.
             # With 5 services × max 2 = 10 cluster-wide — stays under Neon free 20.
@@ -192,52 +296,8 @@ def _get_neon():
                     "application_name": "stockky-kv-cache",
                 },
             )
-            with eng.begin() as conn:
-                conn.execute(
-                    text(
-                        """
-                        CREATE TABLE IF NOT EXISTS stockky_kv (
-                            k TEXT PRIMARY KEY,
-                            v TEXT NOT NULL,
-                            expires_at TIMESTAMPTZ NULL,
-                            updated_at TIMESTAMPTZ DEFAULT NOW()
-                        )
-                        """
-                    )
-                )
-                conn.execute(
-                    text(
-                        "CREATE INDEX IF NOT EXISTS stockky_kv_expires_idx ON stockky_kv (expires_at)"
-                    )
-                )
-                conn.execute(
-                    text(
-                        "CREATE INDEX IF NOT EXISTS idx_stockky_kv_k ON stockky_kv (k)"
-                    )
-                )
-                # Durable settings tables — NEVER truncated by hard_reset / data-feed wipe
-                conn.execute(
-                    text(
-                        """
-                        CREATE TABLE IF NOT EXISTS stockky_notification (
-                            k TEXT PRIMARY KEY,
-                            v TEXT NOT NULL,
-                            updated_at TIMESTAMPTZ DEFAULT NOW()
-                        )
-                        """
-                    )
-                )
-                conn.execute(
-                    text(
-                        """
-                        CREATE TABLE IF NOT EXISTS stockky_watchlist (
-                            k TEXT PRIMARY KEY,
-                            v TEXT NOT NULL,
-                            updated_at TIMESTAMPTZ DEFAULT NOW()
-                        )
-                        """
-                    )
-                )
+            _neon_dialect = "postgresql"
+            _init_durable_schema(eng)
             _neon_engine = eng
             logger.info(
                 "KV durable layer: Neon stockky_kv + stockky_notification + stockky_watchlist ready (pool_size=%s max_overflow=%s redis_disabled=%s)",
@@ -246,7 +306,7 @@ def _get_neon():
                 not USE_REDIS,
             )
         except Exception as e:
-            logger.warning("KV Neon unavailable (memory-only): %s", e)
+            logger.warning("KV durable layer unavailable (memory-only): %s", e)
             _neon_engine = None
         return _neon_engine
 
@@ -298,19 +358,25 @@ def _neon_set(key: str, value: Any, ttl: Optional[int] = None) -> None:
         if ttl:
             exp = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=int(ttl))
         with eng.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO stockky_kv (k, v, expires_at, updated_at)
-                    VALUES (:k, :v, :e, NOW())
-                    ON CONFLICT (k) DO UPDATE
-                      SET v = EXCLUDED.v,
-                          expires_at = EXCLUDED.expires_at,
-                          updated_at = NOW()
-                    """
-                ),
-                {"k": key, "v": payload, "e": exp},
-            )
+            if _neon_dialect == "oracle" and _oc is not None:
+                conn.execute(
+                    text(_oc.upsert_sql("oracle", "stockky_kv", True)),
+                    {"k": key, "v": payload, "e": exp},
+                )
+            else:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO stockky_kv (k, v, expires_at, updated_at)
+                        VALUES (:k, :v, :e, NOW())
+                        ON CONFLICT (k) DO UPDATE
+                          SET v = EXCLUDED.v,
+                              expires_at = EXCLUDED.expires_at,
+                              updated_at = NOW()
+                        """
+                    ),
+                    {"k": key, "v": payload, "e": exp},
+                )
     except Exception as e:
         logger.debug("neon set %s: %s", key, e)
 
@@ -456,6 +522,17 @@ def kv_set_many(items: dict, ttl: Optional[int] = None) -> None:
             for k, v in durable_items.items()
         ]
 
+        # Oracle has no multi-row VALUES upsert; MERGE each row in ONE
+        # transaction. Oracle ADB is a full server (not Neon free), so the extra
+        # round-trips are fine and correctness beats the batching micro-opt.
+        if _neon_dialect == "oracle" and _oc is not None:
+            merge = _oc.upsert_sql("oracle", "stockky_kv", True)
+            with eng.begin() as conn:
+                for row in rows:
+                    conn.execute(text(merge), {"k": row["k"], "v": row["v"], "e": row["e"]})
+            logger.info("kv_set_many: merged %s durable keys (oracle)", len(rows))
+            return
+
         CHUNK = 200  # keep each statement/param-count reasonable
         with eng.begin() as conn:
             for i in range(0, len(rows), CHUNK):
@@ -549,12 +626,26 @@ def kv_get_many(keys: list) -> dict:
                 import datetime as _dt
 
                 with eng.connect() as conn:
-                    rows = conn.execute(
-                        text(
-                            "SELECT k, v, expires_at FROM stockky_kv WHERE k = ANY(:keys)"
-                        ),
-                        {"keys": durable_missing},
-                    ).fetchall()
+                    if _neon_dialect == "oracle" and _oc is not None:
+                        # Oracle has no array binding; expand IN and chunk under
+                        # the 1000-element IN-list cap.
+                        from sqlalchemy import bindparam
+
+                        stmt = text(
+                            "SELECT k, v, expires_at FROM stockky_kv WHERE k IN :keys"
+                        ).bindparams(bindparam("keys", expanding=True))
+                        rows = []
+                        _CH = 900
+                        for _i in range(0, len(durable_missing), _CH):
+                            _part = durable_missing[_i:_i + _CH]
+                            rows.extend(conn.execute(stmt, {"keys": _part}).fetchall())
+                    else:
+                        rows = conn.execute(
+                            text(
+                                "SELECT k, v, expires_at FROM stockky_kv WHERE k = ANY(:keys)"
+                            ),
+                            {"keys": durable_missing},
+                        ).fetchall()
                     now = _dt.datetime.now(_dt.timezone.utc)
                     for row in rows:
                         k, v, exp = row[0], row[1], row[2]
@@ -621,7 +712,7 @@ def status() -> dict:
             from sqlalchemy import text
 
             with eng.connect() as conn:
-                conn.execute(text("SELECT 1"))
+                conn.execute(text("SELECT 1 FROM dual" if _neon_dialect == "oracle" else "SELECT 1"))
             neon_ok = True
     except Exception as e:
         neon_err = str(e)[:120]
@@ -631,6 +722,7 @@ def status() -> dict:
         "neon_connected": neon_ok,
         "neon_error": neon_err,
         "cache_database_configured": bool(_neon_url()),
+        "durable_backend": _neon_dialect,  # 'oracle' | 'postgresql'
     }
 
 
@@ -691,18 +783,9 @@ def hard_reset_stockky_kv(preserve_days: int = 7) -> dict:
     # before truncate and restore them into the dedicated tables.
     try:
         preserved_count = 0
+        # Ensure settings tables exist (dialect-aware; runs in its own txn[s]).
+        _init_durable_schema(eng)
         with eng.begin() as conn:
-            # Ensure settings tables exist
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS stockky_notification (
-                    k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """))
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS stockky_watchlist (
-                    k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """))
             # Migrate any legacy keys still sitting in stockky_kv
             for legacy_k, table, dest_k in (
                 ("stockky:notification_config", "stockky_notification", "config"),
@@ -714,16 +797,15 @@ def hard_reset_stockky_kv(preserve_days: int = 7) -> dict:
                         {"k": legacy_k},
                     ).fetchone()
                     if row and row[0]:
-                        conn.execute(
-                            text(
-                                f"""
-                                INSERT INTO {table} (k, v, updated_at)
-                                VALUES (:k, :v, NOW())
-                                ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = NOW()
-                                """
-                            ),
-                            {"k": dest_k, "v": row[0]},
-                        )
+                        if _neon_dialect == "oracle" and _oc is not None:
+                            _msql = _oc.upsert_sql("oracle", table, False)
+                        else:
+                            _msql = (
+                                f"INSERT INTO {table} (k, v, updated_at) "
+                                f"VALUES (:k, :v, NOW()) "
+                                f"ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = NOW()"
+                            )
+                        conn.execute(text(_msql), {"k": dest_k, "v": row[0]})
                 except Exception as mig_e:
                     logger.debug("hard_reset migrate %s: %s", legacy_k, mig_e)
 
@@ -760,13 +842,19 @@ def hard_reset_stockky_kv(preserve_days: int = 7) -> dict:
 
             # Wipe ONLY stockky_kv (data-feed / scan cache) — never settings tables
             conn.execute(text("TRUNCATE TABLE stockky_kv"))
-            try:
-                conn.execute(text("ALTER TABLE stockky_kv DROP CONSTRAINT IF EXISTS uq_stockky_kv_k"))
-                conn.execute(text("ALTER TABLE stockky_kv ADD CONSTRAINT uq_stockky_kv_k UNIQUE (k)"))
-            except Exception as e:
-                logger.debug("hard_reset constraint: %s", e)
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_stockky_kv_k ON stockky_kv (k)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS stockky_kv_expires_idx ON stockky_kv (expires_at)"))
+            if _neon_dialect != "oracle":
+                # Postgres: re-assert the named UNIQUE constraint (older schemas)
+                # and supporting indexes. On Oracle 'k' is already PK-indexed and
+                # ALTER ... DROP CONSTRAINT IF EXISTS / CREATE INDEX IF NOT EXISTS
+                # aren't supported (and the expires index is built at init), so
+                # this whole block is Postgres-only.
+                try:
+                    conn.execute(text("ALTER TABLE stockky_kv DROP CONSTRAINT IF EXISTS uq_stockky_kv_k"))
+                    conn.execute(text("ALTER TABLE stockky_kv ADD CONSTRAINT uq_stockky_kv_k UNIQUE (k)"))
+                except Exception as e:
+                    logger.debug("hard_reset constraint: %s", e)
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_stockky_kv_k ON stockky_kv (k)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS stockky_kv_expires_idx ON stockky_kv (expires_at)"))
 
             # ── Restore preserved durable fields AFTER truncating ──
             # These land back under the canonical key so the next put_symbol's
@@ -776,30 +864,43 @@ def hard_reset_stockky_kv(preserve_days: int = 7) -> dict:
             if preserved_rows:
                 try:
                     exp = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=preserve_days)
-                    CHUNK = 200
-                    for i in range(0, len(preserved_rows), CHUNK):
-                        chunk = preserved_rows[i:i + CHUNK]
-                        values_sql = ", ".join(
-                            f"(:k{j}, :v{j}, :e{j}, NOW())" for j in range(len(chunk))
-                        )
-                        params: dict = {}
-                        for j, (sym, keep) in enumerate(chunk):
-                            params[f"k{j}"] = _SYM_PREFIX + sym
-                            params[f"v{j}"] = json.dumps(keep, default=str)
-                            params[f"e{j}"] = exp
-                        conn.execute(
-                            text(
-                                f"""
-                                INSERT INTO stockky_kv (k, v, expires_at, updated_at)
-                                VALUES {values_sql}
-                                ON CONFLICT (k) DO UPDATE
-                                  SET v = EXCLUDED.v,
-                                      expires_at = EXCLUDED.expires_at,
-                                      updated_at = NOW()
-                                """
-                            ),
-                            params,
-                        )
+                    if _neon_dialect == "oracle" and _oc is not None:
+                        # Oracle has no multi-row VALUES upsert — per-row MERGE.
+                        merge = _oc.upsert_sql("oracle", "stockky_kv", True)
+                        for sym, keep in preserved_rows:
+                            conn.execute(
+                                text(merge),
+                                {
+                                    "k": _SYM_PREFIX + sym,
+                                    "v": json.dumps(keep, default=str),
+                                    "e": exp,
+                                },
+                            )
+                    else:
+                        CHUNK = 200
+                        for i in range(0, len(preserved_rows), CHUNK):
+                            chunk = preserved_rows[i:i + CHUNK]
+                            values_sql = ", ".join(
+                                f"(:k{j}, :v{j}, :e{j}, NOW())" for j in range(len(chunk))
+                            )
+                            params: dict = {}
+                            for j, (sym, keep) in enumerate(chunk):
+                                params[f"k{j}"] = _SYM_PREFIX + sym
+                                params[f"v{j}"] = json.dumps(keep, default=str)
+                                params[f"e{j}"] = exp
+                            conn.execute(
+                                text(
+                                    f"""
+                                    INSERT INTO stockky_kv (k, v, expires_at, updated_at)
+                                    VALUES {values_sql}
+                                    ON CONFLICT (k) DO UPDATE
+                                      SET v = EXCLUDED.v,
+                                          expires_at = EXCLUDED.expires_at,
+                                          updated_at = NOW()
+                                    """
+                                ),
+                                params,
+                            )
                     preserved_count = len(preserved_rows)
                 except Exception as restore_e:
                     logger.warning("hard_reset: restore of durable fields failed: %s", restore_e)
@@ -906,28 +1007,38 @@ def settings_set(table: str, key: str, value: Any) -> bool:
         return True
     try:
         from sqlalchemy import text
-        with eng.begin() as conn:
-            conn.execute(
-                text(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS {table} (
-                        k TEXT PRIMARY KEY,
-                        v TEXT NOT NULL,
-                        updated_at TIMESTAMPTZ DEFAULT NOW()
-                    )
-                    """
+        if _neon_dialect == "oracle" and _oc is not None:
+            # Oracle: DDL auto-commits & can't run IF NOT EXISTS, so create the
+            # table in its own txn (swallowing ORA-00955) then MERGE the row.
+            _oc.exec_ddl_safe(eng, _oc.create_table_sql("oracle", table, False), "oracle")
+            with eng.begin() as conn:
+                conn.execute(
+                    text(_oc.upsert_sql("oracle", table, False)),
+                    {"k": key, "v": payload},
                 )
-            )
-            conn.execute(
-                text(
-                    f"""
-                    INSERT INTO {table} (k, v, updated_at)
-                    VALUES (:k, :v, NOW())
-                    ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = NOW()
-                    """
-                ),
-                {"k": key, "v": payload},
-            )
+        else:
+            with eng.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS {table} (
+                            k TEXT PRIMARY KEY,
+                            v TEXT NOT NULL,
+                            updated_at TIMESTAMPTZ DEFAULT NOW()
+                        )
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        f"""
+                        INSERT INTO {table} (k, v, updated_at)
+                        VALUES (:k, :v, NOW())
+                        ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = NOW()
+                        """
+                    ),
+                    {"k": key, "v": payload},
+                )
         return True
     except Exception as e:
         logger.error("settings_set %s/%s failed: %s", table, key, e)

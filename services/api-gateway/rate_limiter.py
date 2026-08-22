@@ -201,10 +201,18 @@ def patch_yfinance() -> bool:
 
         def _patched_download(*args, **kwargs):
             tickers_arg = kwargs.get("tickers") or (args[0] if args else "")
-            weight = max(1, len(str(tickers_arg).split()))
+            # A batch yf.download("A.NS B.NS C.NS ...") is ONE HTTP request to
+            # Yahoo (yfinance chunks internally), so charging one token per
+            # ticker (weight=len(batch)) catastrophically over-throttled: a
+            # 50-symbol scan "spent" 50 tokens against a 6-token bucket, so the
+            # limiter held the call up to max_wait — the "held download() for
+            # 60.0s (weight=50)" / "max_wait exceeded" stalls in the logs that
+            # made the whole site hang. Count a batch as a small constant.
+            _n = max(1, len(str(tickers_arg).split()))
+            weight = 1 if _n <= 1 else 2
             wait = acquire("yfinance", weight=weight)
             if wait > 1.0:
-                logger.info("yfinance rate-limiter held download() for %.1fs (weight=%s)", wait, weight)
+                logger.info("yfinance rate-limiter held download() for %.1fs (weight=%s, symbols=%s)", wait, weight, _n)
             return _orig_download(*args, **kwargs)
 
         yf.download = _patched_download

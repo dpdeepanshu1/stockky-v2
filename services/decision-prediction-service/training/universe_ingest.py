@@ -52,6 +52,19 @@ class UniverseTrainingSample(Base):
 
 def _get_engine():
     url = os.getenv("TRAINING_DATABASE_URL") or os.getenv("DATABASE_URL") or DATABASE_URL
+    # Oracle Autonomous DB (Oracle Cloud side): build via oracle_compat and skip
+    # ALL the Postgres/Neon URL surgery below (it assumes psycopg2). The ORM
+    # (Base.metadata.create_all + Session) is dialect-portable, so the same code
+    # runs on Neon and Oracle. On Render (no ORACLE_DSN) this branch is skipped.
+    try:
+        import oracle_compat as _oc
+        if _oc.oracle_is_configured(url):
+            eng, _ = _oc.build_oracle_engine(
+                url, db_pool_size="3", db_max_overflow="1"
+            )
+            return eng
+    except Exception:
+        pass
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
     # Neon/Supabase SSL

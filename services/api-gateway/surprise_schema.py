@@ -67,11 +67,19 @@ def _normalize_db_url(url: str) -> str:
 
 
 def database_url() -> Optional[str]:
+    # Oracle Cloud side: the surprise static feed is Postgres-only and degrades
+    # to a clean no-op (ensure_surprise_schema returns ok=False, callers already
+    # handle that). Durable core runs on Oracle via ORACLE_DSN. On Render/Neon
+    # this guard is False so behaviour is unchanged.
+    if os.environ.get("ORACLE_DSN"):
+        return None
     url = (
         os.getenv("CACHE_DATABASE_URL")
         or os.getenv("DATABASE_URL")
         or os.getenv("TRAINING_DATABASE_URL")
     )
+    if url and url.lower().startswith("oracle"):
+        return None
     return _normalize_db_url(url) if url else None
 
 

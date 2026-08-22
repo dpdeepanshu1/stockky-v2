@@ -13,7 +13,13 @@ from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request  # <-- added Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+# NaN/Inf-safe drop-in for JSONResponse. Starlette's JSONResponse renders with
+# allow_nan=False, so any NaN/Inf metric (Sharpe with zero variance, 0/0 return,
+# empty-sample win-rate) raised "Out of range float values are not JSON
+# compliant" -> 500 on the T+1/T+5 evaluate + market-scan endpoints. SafeJSONResponse
+# scrubs non-finite floats to null before dumping. Aliased so every existing
+# `JSONResponse(...)` call site is fixed with no further changes.
+from json_safe import SafeJSONResponse as JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any   # <-- fixed: added Dict, Any
 import joblib
@@ -56,7 +62,7 @@ def ist_now() -> datetime:
     """Return current time as a naive datetime in IST (UTC+5:30)."""
     return datetime.now(IST).replace(tzinfo=None)
 
-app = FastAPI(title="Training Intelligence", version="1.0")
+app = FastAPI(title="Training Intelligence", version="1.0", default_response_class=JSONResponse)
 try:
     from universe_routes import router as universe_router
     app.include_router(universe_router)

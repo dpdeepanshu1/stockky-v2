@@ -1,7 +1,19 @@
-# Stockky v2 — local / Oracle cloud
-# Requires a .env in this directory with Neon pooler URLs (see .env.example).
-# CRITICAL: without env_file + DATABASE_* below, api-gateway runs memory-only
-# and loses data-feed / trades / training / surprise on every restart.
+# Stockky v2 — local / Oracle Cloud VM
+# Requires a .env in this directory (see .env.example for Neon, .env.oracle.example for Oracle).
+#
+# TWO DATABASE MODES, SAME CODE — chosen purely by env, no code changes:
+#   • Neon / Postgres  → set DATABASE_URL / CACHE_DATABASE_URL (Render uses this).
+#   • Oracle Autonomous → set ORACLE_DSN + ORACLE_* (this compose mounts the wallet).
+# When ORACLE_DSN is set, the durable core (data-feed cache, trades, training,
+# predictions, watchlist, notifications) runs on Oracle. The secondary surprise
+# premarket scanner is Postgres-only and safely no-ops on Oracle.
+#
+# CRITICAL: without env_file + DATABASE_* / ORACLE_* below, api-gateway runs
+# memory-only and loses data-feed / trades / training / surprise on every restart.
+#
+# Oracle wallet: unzip the Instance Wallet on the HOST, set ORACLE_WALLET_HOST_DIR
+# in .env to that host path. Inside every container it is mounted read-only at
+# /oracle_wallet, which is what ORACLE_WALLET_DIR / TNS_ADMIN point to below.
 
 services:
   market-data-service:
@@ -17,6 +29,16 @@ services:
       YFINANCE_MIN_INTERVAL_SEC: ${YFINANCE_MIN_INTERVAL_SEC:-0.08}
       USE_REDIS: ${USE_REDIS:-0}
       PORT: "8001"
+      # ── Oracle Autonomous DB (Oracle Cloud side only; empty on Render/Neon) ──
+      ORACLE_DSN: ${ORACLE_DSN:-}
+      ORACLE_USER: ${ORACLE_USER:-ADMIN}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-}
+      ORACLE_WALLET_PASSWORD: ${ORACLE_WALLET_PASSWORD:-}
+      ORACLE_WALLET_DIR: /oracle_wallet
+      TNS_ADMIN: /oracle_wallet
+    volumes:
+      # mTLS wallet (Oracle only). Empty & unused on Neon.
+      - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
     restart: unless-stopped
 
   analysis-intelligence-service:
@@ -31,6 +53,15 @@ services:
       UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
       USE_REDIS: ${USE_REDIS:-0}
       PORT: "8000"
+      # ── Oracle Autonomous DB (Oracle Cloud side only; empty on Render/Neon) ──
+      ORACLE_DSN: ${ORACLE_DSN:-}
+      ORACLE_USER: ${ORACLE_USER:-ADMIN}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-}
+      ORACLE_WALLET_PASSWORD: ${ORACLE_WALLET_PASSWORD:-}
+      ORACLE_WALLET_DIR: /oracle_wallet
+      TNS_ADMIN: /oracle_wallet
+    volumes:
+      - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
     depends_on:
       - market-data-service
     restart: unless-stopped
@@ -57,6 +88,15 @@ services:
       CACHE_DATABASE_URL: ${CACHE_DATABASE_URL:-}
       USE_REDIS: ${USE_REDIS:-0}
       PORT: "8000"
+      # ── Oracle Autonomous DB (Oracle Cloud side only; empty on Render/Neon) ──
+      ORACLE_DSN: ${ORACLE_DSN:-}
+      ORACLE_USER: ${ORACLE_USER:-ADMIN}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-}
+      ORACLE_WALLET_PASSWORD: ${ORACLE_WALLET_PASSWORD:-}
+      ORACLE_WALLET_DIR: /oracle_wallet
+      TNS_ADMIN: /oracle_wallet
+    volumes:
+      - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
     depends_on:
       - market-data-service
       - analysis-intelligence-service
@@ -76,6 +116,15 @@ services:
       CACHE_DATABASE_URL: ${CACHE_DATABASE_URL:-}
       USE_REDIS: ${USE_REDIS:-0}
       PORT: "8000"
+      # ── Oracle Autonomous DB (Oracle Cloud side only; empty on Render/Neon) ──
+      ORACLE_DSN: ${ORACLE_DSN:-}
+      ORACLE_USER: ${ORACLE_USER:-ADMIN}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-}
+      ORACLE_WALLET_PASSWORD: ${ORACLE_WALLET_PASSWORD:-}
+      ORACLE_WALLET_DIR: /oracle_wallet
+      TNS_ADMIN: /oracle_wallet
+    volumes:
+      - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
     depends_on:
       - api-gateway
     restart: unless-stopped
@@ -106,6 +155,15 @@ services:
       USE_REDIS: ${USE_REDIS:-0}
       DISABLE_UPSTASH: ${DISABLE_UPSTASH:-1}
       PORT: "8000"
+      # ── Oracle Autonomous DB (Oracle Cloud side only; empty on Render/Neon) ──
+      ORACLE_DSN: ${ORACLE_DSN:-}
+      ORACLE_USER: ${ORACLE_USER:-ADMIN}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-}
+      ORACLE_WALLET_PASSWORD: ${ORACLE_WALLET_PASSWORD:-}
+      ORACLE_WALLET_DIR: /oracle_wallet
+      TNS_ADMIN: /oracle_wallet
+    volumes:
+      - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
     depends_on:
       - market-data-service
       - analysis-intelligence-service
@@ -113,11 +171,17 @@ services:
     restart: unless-stopped
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        # VITE_API_URL is inlined at BUILD time. Pulled from .env (Docker
+        # Compose auto-loads .env for ${...} substitution). Set
+        # VITE_API_URL=https://stockky.duckdns.org/api in .env on the Oracle VM.
+        VITE_API_URL: ${VITE_API_URL:-/api}
     ports:
       - "5173:5173"
     environment:
-      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+      VITE_API_URL: ${VITE_API_URL:-/api}
     depends_on:
       - api-gateway
     restart: unless-stopped

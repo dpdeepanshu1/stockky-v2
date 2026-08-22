@@ -601,6 +601,63 @@ def _fetch_from_nse_api(endpoint: str, cache_key: str, ttl: int = 21600):
         return cached
     return None
 
+# ---------------------------------------------------------------------------
+# Symbol hygiene — keep index pseudo-tickers and delisted/renamed names out of
+# the yfinance batches. NSE's equity-stock-indices response includes the index
+# itself as a row ("NIFTY 50", "NIFTY MIDCAP 100"), and a few hardcoded fallback
+# names are stale. Sending those to Yahoo produced the endless 404/503 spam
+# ("NIFTY 50.NS", "NIFTY MIDCAP 100.NS", "NIFTYNEXT50.NS", "MOTHERSUMI.NS",
+# "IBULHSGFIN.NS", "WELSPUNIND.NS") and wasted rate-limit budget. Filtered here
+# at the source so every downstream universe/scan is clean.
+_INDEX_PSEUDO_TOKENS = {
+    "NIFTY", "NIFTY50", "NIFTYNEXT50", "NIFTY100", "NIFTY200", "NIFTY500",
+    "NIFTYMIDCAP", "NIFTYMIDCAP50", "NIFTYMIDCAP100", "NIFTYMIDCAP150",
+    "NIFTYSMALLCAP", "NIFTYSMALLCAP50", "NIFTYSMALLCAP100", "NIFTYSMALLCAP250",
+    "BANKNIFTY", "NIFTYBANK", "FINNIFTY", "NIFTYFIN", "NIFTYIT", "NIFTYAUTO",
+    "NIFTYPHARMA", "NIFTYFMCG", "NIFTYMETAL", "NIFTYREALTY", "NIFTYENERGY",
+    "SENSEX", "BANKEX", "INDIAVIX",
+}
+_DELISTED_RENAME = {
+    # stale NSE symbol -> current tradable symbol, or None to drop entirely
+    "MOTHERSUMI": "MOTHERSON",   # Samvardhana Motherson renamed
+    "SRTRANSFIN": "SHRIRAMFIN",  # Shriram Transport merged into Shriram Finance
+    "ADANITRANS": "ADANIENSOL",  # Adani Transmission -> Adani Energy Solutions
+    "IBULHSGFIN": None,          # Indiabulls Housing Finance — delisted/renamed, drop
+    "WELSPUNIND": None,          # Welspun India (now WELSPUNLIV) — drop to be safe
+    "MCDOWELL-N": None,          # legacy alias — drop
+}
+
+
+def _clean_equity_symbol(sym) -> Optional[str]:
+    """Return a tradable NSE equity symbol, or None if it's an index
+    pseudo-ticker or a delisted/renamed name that must not reach yfinance."""
+    if not sym:
+        return None
+    s = str(sym).strip().upper()
+    if not s or s == "-":
+        return None
+    # Real NSE equity tickers never contain a space; index display names do.
+    if " " in s:
+        return None
+    if s in _INDEX_PSEUDO_TOKENS:
+        return None
+    if s in _DELISTED_RENAME:
+        return _DELISTED_RENAME[s]  # may be a renamed ticker or None (drop)
+    return s
+
+
+def _filter_equities(symbols) -> List[str]:
+    """Clean + dedupe a list of raw symbols, dropping index/delisted entries."""
+    out: List[str] = []
+    seen = set()
+    for raw in symbols or []:
+        c = _clean_equity_symbol(raw)
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
 def _get_all_nse_securities() -> List[str]:
     data = _fetch_from_nse_api("equity-stock-indices?index=SECURITIES%20IN%20NSE", "nse:all_securities")
     symbols = []
@@ -644,7 +701,7 @@ def _get_all_nse_securities() -> List[str]:
             "WOCKPHARMA", "ZEEL", "ZYDUSWELL"
         ]
         logger.warning(f"Using enhanced static fallback list with {len(symbols)} symbols")
-    return symbols
+    return _filter_equities(symbols)
 
 def _get_nifty_indices() -> List[str]:
     indices = [
@@ -673,7 +730,7 @@ def _get_nifty_indices() -> List[str]:
         "SHRIRAMFIN", "SUNPHARMA", "TATACONSUM", "TATAMOTORS", "TATASTEEL",
         "TCS", "TRENT", "TITAN", "ULTRACEMCO", "WIPRO"
     ]
-    all_symbols = list(set(all_symbols + fallback))
+    all_symbols = _filter_equities(all_symbols + fallback)
     return all_symbols
 
 def _get_recent_ipos() -> List[str]:
@@ -735,7 +792,8 @@ def _get_momentum_movers() -> List[str]:
                     if not isinstance(item, dict):
                         continue
                     sym = (item.get("symbol") or item.get("symbolName") or "").upper()
-                    if not sym or sym in ("NIFTY", "NIFTY50", "-"):
+                    sym = _clean_equity_symbol(sym)
+                    if not sym:
                         continue
                     # Prefer names with meaningful move when field present
                     chg = item.get("pChange") or item.get("perChange") or item.get("change_pct")

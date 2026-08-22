@@ -283,12 +283,20 @@ class ModelArtifact(Base):
 
 
 class ModelRegistry:
-    """Postgres-backed model store."""
+    """Model store — Neon/Postgres on Render, single Oracle ADB on the Oracle VM."""
     def __init__(self, session_factory=None):
         if session_factory is None:
             import os
             db_url = os.environ.get("DATABASE_URL", "sqlite:///./training.db")
-            engine = create_engine(db_url, echo=False)
+            # Oracle Cloud side (ORACLE_DSN set): route model artifacts to the ONE
+            # Oracle DB via the Oracle-aware, singleton get_engine() — so trained
+            # models, scalers and metrics land in Oracle like the rest of the
+            # durable core. Render/Neon (ORACLE_DSN empty) keeps the exact
+            # original create_engine(DATABASE_URL) path, byte-for-byte unchanged.
+            if _oracle_is_configured(db_url):
+                engine = get_engine()
+            else:
+                engine = create_engine(db_url, echo=False)
             Base.metadata.create_all(engine)
             session_factory = sessionmaker(bind=engine)
         self._session_factory = session_factory
@@ -413,6 +421,15 @@ class ModelRegistry:
 # ---------- Migration helper (fixes missing columns and types) ----------
 def ensure_schema(engine):
     """Add missing columns and fix column types if needed."""
+    # Oracle guard: this function speaks Postgres DDL ("ADD COLUMN",
+    # "ALTER COLUMN ... TYPE ... USING ...::text"), which Oracle rejects. On the
+    # Oracle side create_tables()/create_all already builds every column from
+    # the ORM model, so there is nothing to migrate — skip cleanly.
+    try:
+        if engine.dialect.name == "oracle":
+            return
+    except Exception:
+        pass
     inspector = inspect(engine)
 
     # ---- prediction_snapshots ----
@@ -569,6 +586,48 @@ _ENGINE = None
 _ENGINE_URL = None
 _ENGINE_LOCK = None
 
+def _oracle_is_configured(url: str) -> bool:
+    """True when we should talk to Oracle Autonomous DB instead of Postgres.
+    Enabled if the URL scheme is oracle, or ORACLE_DSN is set in the env. This
+    is what lets the SAME code run on Render (Neon/Postgres) and on the Oracle
+    VM (Oracle ADB) with only environment differences."""
+    import os
+    return url.lower().startswith("oracle") or bool(os.environ.get("ORACLE_DSN"))
+
+
+def _oracle_engine_kwargs(full_url_provided: bool) -> dict:
+    """Build create_engine kwargs for Oracle Autonomous DB via python-oracledb
+    (thin mode) + an mTLS Instance Wallet. Credentials/DSN come from discrete
+    ORACLE_* env vars unless a full oracle+oracledb:// URL was supplied."""
+    import os
+    ca: dict = {}
+    if not full_url_provided:
+        # Empty URL ("oracle+oracledb://") + connect_args — cleanest for wallet
+        # auth and avoids URL-encoding the ADMIN password.
+        ca["user"] = os.environ.get("ORACLE_USER", "ADMIN")
+        pw = os.environ.get("ORACLE_PASSWORD") or os.environ.get("ORACLE_ADMIN_PASSWORD")
+        if pw:
+            ca["password"] = pw
+        ca["dsn"] = os.environ.get("ORACLE_DSN", "")  # TNS alias e.g. stockkydb_high
+    # Wallet location applies to both URL and discrete-var forms.
+    wallet_dir = os.environ.get("ORACLE_WALLET_DIR") or os.environ.get("TNS_ADMIN")
+    wallet_pw = os.environ.get("ORACLE_WALLET_PASSWORD")
+    if wallet_dir:
+        ca["config_dir"] = wallet_dir
+        ca["wallet_location"] = wallet_dir
+    if wallet_pw:
+        ca["wallet_password"] = wallet_pw
+    return {
+        "echo": False,
+        "pool_pre_ping": True,
+        "pool_recycle": int(os.environ.get("DB_POOL_RECYCLE", "300")),
+        "pool_size": int(os.environ.get("DB_POOL_SIZE", "3")),
+        "max_overflow": int(os.environ.get("DB_MAX_OVERFLOW", "2")),
+        "pool_timeout": int(os.environ.get("DB_POOL_TIMEOUT", "30")),
+        "connect_args": ca,
+    }
+
+
 def get_engine(database_url=None):
     """Create (or reuse) SQLAlchemy engine. Neon/Supabase-optimized pooling.
 
@@ -589,10 +648,16 @@ def get_engine(database_url=None):
         _ENGINE_LOCK = threading.Lock()
 
     url = database_url or os.environ.get("TRAINING_DATABASE_URL") or os.environ.get("DATABASE_URL", "sqlite:///./training.db")
-    if url.startswith("postgres://"):
+
+    # Oracle Autonomous DB (Oracle Cloud side only). When enabled, skip ALL the
+    # Postgres/Neon-specific URL surgery below — those transforms assume psycopg2
+    # and would corrupt an Oracle DSN. Render stays on Neon untouched.
+    _is_oracle = _oracle_is_configured(url)
+
+    if (not _is_oracle) and url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
     # Neon dashboard often appends channel_binding=require — psycopg2 can choke
-    if "channel_binding=" in url:
+    if (not _is_oracle) and "channel_binding=" in url:
         url = re.sub(r"([&?])channel_binding=[^&]*", r"\1", url)
         url = url.replace("?&", "?").rstrip("?&")
     # Prefer transaction pooler port 6543
@@ -607,7 +672,18 @@ def get_engine(database_url=None):
             return _ENGINE
 
         kwargs = {"echo": False}
-        if url.startswith("sqlite"):
+        if _is_oracle:
+            _full = url.lower().startswith("oracle")
+            kwargs = _oracle_engine_kwargs(_full)
+            if not _full:
+                # discrete ORACLE_* vars -> empty URL, connect_args carries dsn/creds
+                url = "oracle+oracledb://"
+            _log.info(
+                "Oracle Autonomous DB engine ready (dsn=%s, wallet=%s)",
+                os.environ.get("ORACLE_DSN", "from-url"),
+                os.environ.get("ORACLE_WALLET_DIR") or os.environ.get("TNS_ADMIN") or "none",
+            )
+        elif url.startswith("sqlite"):
             kwargs["connect_args"] = {"check_same_thread": False}
             if not os.environ.get("DATABASE_URL"):
                 _log.warning(

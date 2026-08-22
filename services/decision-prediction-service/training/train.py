@@ -1173,10 +1173,11 @@ if __name__ == '__main__':
     else:
         db_session = None
         if HAS_DB:
-            from sqlalchemy import create_engine
             from sqlalchemy.orm import sessionmaker
             db_url = os.environ.get("DATABASE_URL", "sqlite:///./training.db")
-            engine = create_engine(db_url)
+            # get_engine() picks Oracle (ORACLE_DSN) / Postgres / sqlite from env,
+            # so this CLI path runs unchanged on Neon and on the Oracle VM.
+            engine = db_models.get_engine(db_url)
             db_models.Base.metadata.create_all(engine)
             db_session = sessionmaker(bind=engine)()
         train_model(db_session, os.environ.get("MODEL_STORE_PATH", "./model-store"))

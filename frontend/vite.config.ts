@@ -46,6 +46,25 @@ export default defineConfig(({ mode }) => {
       port: Number(env.VITE_DEV_PORT || 5173),
       allowedHosts: true,
       proxy,
+      // HMR is only used by the dev server. If you ever run `npm run dev`
+      // behind the HTTPS proxy, set VITE_HMR_HOST=stockky.duckdns.org so the
+      // HMR client connects over wss://host:443 instead of ws://host:5173
+      // (which the proxy drops, causing reload loops). Left undefined by
+      // default so plain local dev is unaffected. Production uses `preview`
+      // (below), which has no HMR at all.
+      hmr: env.VITE_HMR_HOST
+        ? { host: env.VITE_HMR_HOST, clientPort: 443, protocol: "wss" }
+        : undefined,
+    },
+    // Production serving: `vite preview` serves the built dist/ as static files
+    // with NO HMR websocket — this is what stops the ~5s reload loop. Behind
+    // nginx the API calls use absolute VITE_API_URL, but we keep the proxy here
+    // too so `vite preview` also works standalone (without nginx) in a pinch.
+    preview: {
+      host: "0.0.0.0",
+      port: Number(env.VITE_PREVIEW_PORT || env.VITE_DEV_PORT || 5173),
+      allowedHosts: true,
+      proxy,
     },
   };
 });

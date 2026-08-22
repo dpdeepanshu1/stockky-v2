@@ -12,3 +12,6 @@ psycopg2-binary==2.9.9
 yfinance==1.5.2
 jinja2==3.1.4
 asyncpg==0.29.0
+# Oracle Autonomous DB driver (thin mode) — used only when ORACLE_* env is set (Oracle Cloud VM).
+# Harmless on Render/Neon: pure-Python, imported lazily, never loaded on the Postgres path.
+oracledb==2.5.1

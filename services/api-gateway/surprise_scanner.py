@@ -60,11 +60,19 @@ def _normalize_db_url(url: str) -> str:
 
 
 def _db_url() -> Optional[str]:
+    # Oracle Cloud side: this Postgres-only feature degrades to a clean no-op.
+    # The durable core (kv_cache + models) runs on Oracle via ORACLE_DSN; this
+    # secondary surprise scanner stays Neon-only. On Render/Neon (no ORACLE_DSN
+    # and no oracle:// URL) this guard is False, so behaviour is unchanged.
+    if os.environ.get("ORACLE_DSN"):
+        return None
     url = (
         os.getenv("CACHE_DATABASE_URL")
         or os.getenv("DATABASE_URL")
         or os.getenv("TRAINING_DATABASE_URL")
     )
+    if url and url.lower().startswith("oracle"):
+        return None
     return _normalize_db_url(url) if url else None
 
 

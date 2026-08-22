@@ -24,6 +24,10 @@ _task: Optional[asyncio.Task] = None
 
 def _select_1() -> dict:
     try:
+        # Neon free-tier keep-alive only; Oracle has no auto-suspend to prevent
+        # and needs "FROM dual", so skip cleanly. Guard is False on Render/Neon.
+        if os.environ.get("ORACLE_DSN"):
+            return {"ok": True, "source": "oracle-skip"}
         url = (
             os.getenv("CACHE_DATABASE_URL")
             or os.getenv("DATABASE_URL")
@@ -31,6 +35,8 @@ def _select_1() -> dict:
         )
         if not url:
             return {"ok": False, "error": "no_database_url"}
+        if url.lower().startswith("oracle"):
+            return {"ok": True, "source": "oracle-skip"}
         if url.startswith("postgres://"):
             url = "postgresql://" + url[len("postgres://") :]
         from sqlalchemy import create_engine, text

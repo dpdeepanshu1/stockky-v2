@@ -779,6 +779,11 @@ _neon_keepalive_task = None
 def _neon_select_1() -> dict:
     """Lightweight SELECT 1 against Neon via shared kv_cache helpers."""
     try:
+        # Neon free-tier keep-alive only. On the Oracle Cloud side there is no
+        # auto-suspend to prevent, so skip cleanly (a bare "SELECT 1" would also
+        # need "FROM dual" on Oracle). Guard is False on Render/Neon.
+        if os.environ.get("ORACLE_DSN"):
+            return {"ok": True, "source": "oracle-skip"}
         if _kv is not None:
             eng = None
             if hasattr(_kv, "_get_neon"):

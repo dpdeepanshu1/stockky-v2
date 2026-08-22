@@ -15,3 +15,6 @@ upstash-redis>=1.0.0
 uvicorn[standard]==0.30.1
 xgboost==2.1.1
 yfinance==1.5.2
+# Oracle Autonomous DB driver (thin mode) — used only when ORACLE_* env is set (Oracle Cloud VM).
+# Harmless on Render/Neon: pure-Python, imported lazily, never loaded on the Postgres path.
+oracledb==2.5.1

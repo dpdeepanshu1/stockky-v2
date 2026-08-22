@@ -10,3 +10,6 @@ python-dotenv==1.0.0
 numpy==1.26.4
 sqlalchemy==2.0.31
 psycopg2-binary==2.9.9
+# Oracle Autonomous DB driver (thin mode) — used only when ORACLE_* env is set (Oracle Cloud VM).
+# Harmless on Render/Neon: pure-Python, imported lazily, never loaded on the Postgres path.
+oracledb==2.5.1

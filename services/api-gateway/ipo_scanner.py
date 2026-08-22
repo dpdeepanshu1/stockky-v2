@@ -86,6 +86,17 @@ IPO_LIST_KEY = "stockky:ipo:list"          # analyzed results (durable, short TT
 IPO_MANUAL_KEY = "stockky:ipo:manual"      # user/admin-added IPO entries (durable, long TTL)
 IPO_JOB_KEY = "stockky:ipo:job"            # scan progress
 
+# ipoalerts.in — a purpose-built Indian IPO data API (symbol, price band,
+# listing date, schedule, GMP on some plans). Confirmed working schema via
+# live fetch during development. Without a key it only ever returns one
+# demo record regardless of the status filter, so this is optional-but-
+# recommended: get a free key at https://ipoalerts.in and set
+# IPOALERTS_API_KEY. When unset, this source is skipped entirely and the
+# pipeline falls back to NSE's unofficial API (best-effort, frequently
+# blocked on cloud IPs) and manual entries — nothing else depends on it.
+IPOALERTS_API_KEY = os.getenv("IPOALERTS_API_KEY", "").strip()
+IPOALERTS_BASE = "https://api.ipoalerts.in/ipos"
+
 _LOCAL_JOB: Dict[str, Any] = {"status": "idle", "message": "Idle", "processed": 0, "total": 0}
 
 
@@ -115,6 +126,80 @@ def get_ipo_scan_progress() -> dict:
 
 
 # ── NSE IPO calendar discovery (best-effort; manual add is the reliable path) ──
+
+def fetch_ipoalerts_calendar() -> List[Dict[str, Any]]:
+    """
+    Primary, reliable IPO discovery source when IPOALERTS_API_KEY is set —
+    confirmed live schema: {symbol, name, type, listingDate, priceRange,
+    startDate, endDate, issueSize, schedule[...]}. priceRange is a band
+    like "95-99"; we take the upper bound as issue_price, matching NSE
+    convention (retail investors pay the cap price on allotment).
+    Queries a few status buckets defensively since the exact vocabulary
+    for "already listed" isn't guaranteed stable — analyze_ipo() stages
+    everything off the parsed listing_date itself, not this status string,
+    so any mismatch here only affects which bucket we bothered to ask for,
+    never the actual pre-listing/listing-day/listed classification.
+    """
+    if not IPOALERTS_API_KEY:
+        return []
+
+    try:
+        from rate_limiter import acquire as rl_acquire
+        rl_acquire("indianapi", weight=1)  # shares the conservative IndianAPI-style bucket
+    except Exception:
+        pass
+
+    out: List[Dict[str, Any]] = []
+    headers = {"X-API-KEY": IPOALERTS_API_KEY, "Accept": "application/json"}
+    for status in ("open", "listed", "upcoming", "closed"):
+        try:
+            r = httpx.get(IPOALERTS_BASE, params={"status": status}, headers=headers, timeout=15)
+            if r.status_code != 200:
+                logger.info("ipoalerts status=%s -> HTTP %s", status, r.status_code)
+                continue
+            data = r.json()
+            for row in data.get("ipos") or []:
+                norm = _normalize_ipoalerts_row(row, status)
+                if norm:
+                    out.append(norm)
+        except Exception as e:
+            logger.info("ipoalerts status=%s fetch failed: %s", status, e)
+
+    # De-dupe by symbol, keep first occurrence
+    seen = set()
+    deduped = []
+    for r in out:
+        if r["symbol"] in seen:
+            continue
+        seen.add(r["symbol"])
+        deduped.append(r)
+    return deduped
+
+
+def _normalize_ipoalerts_row(row: Dict[str, Any], status: str) -> Optional[Dict[str, Any]]:
+    try:
+        symbol = str(row.get("symbol") or "").upper().strip()
+        if not symbol:
+            return None
+        price_range = str(row.get("priceRange") or "")
+        issue_price = None
+        if price_range:
+            try:
+                issue_price = float(price_range.replace(",", "").split("-")[-1].strip())
+            except (TypeError, ValueError):
+                issue_price = None
+        return {
+            "symbol": symbol,
+            "company_name": row.get("name") or symbol,
+            "issue_price": issue_price,
+            "listing_date": row.get("listingDate"),
+            "status": status,
+            "source": "ipoalerts",
+            "subscription_times": row.get("subscriptionTimes") or (row.get("subscription") or {}).get("total"),
+        }
+    except Exception:
+        return None
+
 
 def _nse_session() -> httpx.Client:
     c = httpx.Client(timeout=20, headers=NSE_HEADERS, follow_redirects=True)
@@ -239,12 +324,25 @@ def _manual_ipos() -> List[Dict[str, Any]]:
 
 
 def _merged_ipo_universe() -> List[Dict[str, Any]]:
-    """Manual entries win over auto-discovered ones for the same symbol —
-    they're the ones you deliberately told the system about."""
-    auto = fetch_nse_ipo_calendar()
+    """
+    Merge order, most-trusted-wins on symbol collision:
+      1. manual entries       — you told the system directly, always wins
+      2. ipoalerts.in         — real confirmed schema, needs a free API key
+      3. NSE unofficial API   — best-effort, unverified/frequently blocked
+    """
+    ipoalerts = fetch_ipoalerts_calendar()
+    nse = fetch_nse_ipo_calendar()
     manual = _manual_ipos()
-    manual_syms = {m["symbol"] for m in manual}
-    merged = [a for a in auto if a["symbol"] not in manual_syms] + manual
+
+    by_symbol: Dict[str, Dict[str, Any]] = {}
+    for a in nse:
+        by_symbol[a["symbol"]] = a
+    for a in ipoalerts:
+        by_symbol[a["symbol"]] = a  # ipoalerts overrides NSE guess
+    for m in manual:
+        by_symbol[m["symbol"]] = m  # manual overrides everything
+
+    merged = list(by_symbol.values())
     # Drop anything without a listing date/issue price — can't score it
     return [m for m in merged if m.get("listing_date") and m.get("issue_price")]
 

@@ -7,12 +7,14 @@ Tables:
 - PredictionOutcome: stores T+1 and T+5 evaluation results.
 - TrainingRun: tracks each training pipeline run (for auditing and metrics).
 """
+import json as _json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from sqlalchemy import (
     Column, String, Float, Integer, Boolean, DateTime, JSON, Text, LargeBinary,
     create_engine, inspect, text, desc
 )
+from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import numpy as np
@@ -26,6 +28,79 @@ def ist_now() -> datetime:
 
 # ---------- Base ----------
 Base = declarative_base()
+
+# ---------- Portable JSON column (Neon/Postgres  AND  Oracle Autonomous DB) ----------
+class PortableJSON(TypeDecorator):
+    """A JSON column that renders valid DDL on Postgres *and* Oracle.
+
+    Why this exists
+    ---------------
+    SQLAlchemy's Oracle dialect cannot render the generic ``JSON`` type as DDL —
+    Oracle only gained a native ``JSON`` datatype in 21c, so on an Autonomous DB
+    the compiler raises::
+
+        UnsupportedCompilationError: Compiler <OracleTypeCompiler ...>
+        can't render element of type JSON
+
+    That single DDL-compilation failure aborted ``Base.metadata.create_all()``
+    on the Oracle VM, which meant *none* of the training tables were ever
+    created, which in turn made every later query fail with
+    ``ORA-00942: table or view does not exist`` (portfolio, paper_trades,
+    prediction_snapshots, ...).
+
+    What it does
+    ------------
+    * On **Oracle**: stores the value as ``CLOB`` text and (de)serialises it
+      with ``json.dumps`` / ``json.loads``.
+    * On **every other dialect** (Neon/Postgres on Render, SQLite locally):
+      resolves to the exact same generic ``JSON`` implementation as before and
+      passes values through untouched — so the Render DDL and behaviour are
+      byte-for-byte unchanged. Zero regression risk on the Postgres side.
+    """
+
+    impl = JSON
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        # This is what the DDL compiler renders, and what supplies the
+        # bind/result processors at runtime.
+        if dialect.name == "oracle":
+            return dialect.type_descriptor(Text())
+        return dialect.type_descriptor(JSON())
+
+    def process_bind_param(self, value, dialect):
+        # Postgres/SQLite: leave the value alone — the native JSON impl below
+        # serialises it exactly as it always did.
+        if dialect.name != "oracle":
+            return value
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value  # already-serialised JSON text
+        try:
+            return _json.dumps(value, default=str)
+        except (TypeError, ValueError):
+            return _json.dumps(str(value))
+
+    def process_result_value(self, value, dialect):
+        if dialect.name != "oracle":
+            return value
+        if value is None:
+            return None
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                value = value.decode("utf-8")
+            except Exception:
+                return None
+        if not isinstance(value, str):
+            return value
+        if value.strip() == "":
+            return None
+        try:
+            return _json.loads(value)
+        except (TypeError, ValueError):
+            return None
+
 
 # ---------- Numpy conversion helper ----------
 def convert_numpy_nan_safe(obj):
@@ -121,7 +196,7 @@ class PredictionSnapshot(Base):
     roce = Column(Float, nullable=True)
 
     # Additional feature snapshot as JSON (for flexibility)
-    feature_snapshot = Column(JSON, nullable=True)
+    feature_snapshot = Column(PortableJSON, nullable=True)
 
     # Metadata
     model_version = Column(String(50), nullable=True)
@@ -245,7 +320,7 @@ class TradeBackup(Base):
     created_at = Column(DateTime, nullable=False, index=True, default=ist_now)
     expires_at = Column(DateTime, nullable=False, index=True)
     trade_count = Column(Integer, default=0)
-    payload = Column(JSON, nullable=False)
+    payload = Column(PortableJSON, nullable=False)
     note = Column(Text, nullable=True)
 
 
@@ -255,12 +330,12 @@ class TrainingRun(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     run_timestamp = Column(DateTime, nullable=False, index=True)
-    config = Column(JSON, nullable=False)
+    config = Column(PortableJSON, nullable=False)
     dataset_size = Column(Integer)
     num_symbols = Column(Integer)
     model_version = Column(String(50), nullable=True)
-    walk_forward_metrics = Column(JSON, nullable=True)
-    fold_details = Column(JSON, nullable=True)
+    walk_forward_metrics = Column(PortableJSON, nullable=True)
+    fold_details = Column(PortableJSON, nullable=True)
     created_at = Column(DateTime, default=ist_now)
 
 
@@ -275,9 +350,9 @@ class ModelArtifact(Base):
     status = Column(String(20), nullable=False, default="candidate", index=True)
     model_blob = Column(LargeBinary, nullable=False)
     scaler_blob = Column(LargeBinary, nullable=True)
-    feature_columns = Column(JSON, nullable=True)
-    config = Column(JSON, nullable=True)
-    metrics = Column(JSON, nullable=True)
+    feature_columns = Column(PortableJSON, nullable=True)
+    config = Column(PortableJSON, nullable=True)
+    metrics = Column(PortableJSON, nullable=True)
     created_at = Column(DateTime, default=ist_now, index=True)
     promoted_at = Column(DateTime, nullable=True)
 

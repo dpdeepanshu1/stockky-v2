@@ -46,42 +46,13 @@ def _normalize_db_url(url: str) -> str:
     return url
 
 
-# surprise_schema.py owns backend detection, engine construction and the
-# dialect-specific SQL. Imported defensively so a missing module degrades to the
-# original Neon-only behaviour rather than breaking the service.
-try:
-    import surprise_schema as _ss
-except Exception:  # pragma: no cover
-    _ss = None
-
-
-def _dialect() -> str:
-    """'oracle' on the Oracle Cloud VM, 'postgresql' on Render/Neon."""
-    if _ss is not None:
-        try:
-            return _ss.dialect()
-        except Exception:
-            pass
-    return "oracle" if os.environ.get("ORACLE_DSN") else "postgresql"
-
-
-def _conn_dialect(conn) -> str:
-    """Dialect of an already-open connection (for helpers that receive a conn)."""
-    try:
-        return (conn.dialect.name or "").lower()
-    except Exception:
-        return _dialect()
-
-
 def _db_url() -> Optional[str]:
-    # Both deployments are now self-sufficient: Render/Neon keeps its Postgres
-    # URL, and the Oracle VM gets an Oracle URL instead of the None that used to
-    # make this whole feature a silent no-op there.
-    if _ss is not None:
-        try:
-            return _ss.database_url()
-        except Exception as e:
-            logger.debug("surprise_schema.database_url: %s", e)
+    # Oracle Cloud side: this Postgres-only feature degrades to a clean no-op.
+    # The durable core (kv_cache + models) runs on Oracle via ORACLE_DSN; this
+    # secondary premarket scanner stays Neon-only. On Render/Neon (no ORACLE_DSN
+    # and no oracle:// URL) this guard is False, so behaviour is unchanged.
+    if os.environ.get("ORACLE_DSN"):
+        return None
     url = (
         os.getenv("CACHE_DATABASE_URL")
         or os.getenv("DATABASE_URL")
@@ -90,72 +61,6 @@ def _db_url() -> Optional[str]:
     if url and url.lower().startswith("oracle"):
         return None
     return _normalize_db_url(url) if url else None
-
-
-def _engine(app_name: str, **_ignored):
-    """Engine for the configured backend, or None.
-
-    Postgres connect_args (connect_timeout/application_name) are psycopg2-only
-    and would be rejected by python-oracledb, so engine construction has to go
-    through surprise_schema.make_engine() rather than create_engine(_db_url()).
-    """
-    if _ss is not None:
-        try:
-            return _ss.make_engine(app_name)
-        except Exception as e:
-            logger.debug("surprise_schema.make_engine: %s", e)
-    url = _db_url()
-    if not url:
-        return None
-    from sqlalchemy import create_engine
-
-    return create_engine(
-        url,
-        pool_pre_ping=True,
-        pool_size=1,
-        max_overflow=1,
-        connect_args={"connect_timeout": 20, "application_name": app_name},
-    )
-
-
-def _sym_filter(column: str, param: str, dial: str):
-    """'<col> = ANY(:p)' on Postgres, an expanding IN list on Oracle.
-
-    Returns (sql_fragment, bindparam_or_None). Oracle has no array type for
-    plain binds, so the list has to be expanded into (:p_1, :p_2, ...); its
-    hard limit is 1000 expression list elements, hence chunking by callers.
-    """
-    if dial == "oracle":
-        from sqlalchemy import bindparam
-
-        return f"{column} IN :{param}", bindparam(param, expanding=True)
-    return f"{column} = ANY(:{param})", None
-
-
-_ORACLE_IN_CHUNK = 900  # stay under Oracle's 1000-element expression list cap
-
-
-def _chunks(seq: List[str], size: int) -> List[List[str]]:
-    return [seq[i : i + size] for i in range(0, len(seq), size)]
-
-
-# Last-resort Postgres upsert, used only if surprise_schema.py could not be
-# imported. Identical text to the original inline statement.
-_PG_UPSERT_SQL = """
-    INSERT INTO surprise_static_feed
-        (symbol, prev_close, avg_15m_volume, daily_atr, high_52w, dist_52w_pct, sector, is_liquid, updated_at)
-    VALUES
-        (:symbol, :prev_close, :avg_15m_volume, :daily_atr, :high_52w, :dist_52w_pct, :sector, :is_liquid, NOW())
-    ON CONFLICT (symbol) DO UPDATE SET
-        prev_close = EXCLUDED.prev_close,
-        avg_15m_volume = EXCLUDED.avg_15m_volume,
-        daily_atr = EXCLUDED.daily_atr,
-        high_52w = EXCLUDED.high_52w,
-        dist_52w_pct = EXCLUDED.dist_52w_pct,
-        sector = COALESCE(EXCLUDED.sector, surprise_static_feed.sector),
-        is_liquid = EXCLUDED.is_liquid,
-        updated_at = NOW()
-"""
 
 
 def ensure_schema() -> bool:
@@ -174,16 +79,6 @@ def ensure_schema() -> bool:
         logger.warning(
             "No DATABASE_URL/CACHE_DATABASE_URL — cannot ensure surprise_static_feed. "
             "Set Neon pooler URL on api-gateway env."
-        )
-        return False
-    if _dialect() == "oracle":
-        # The inline DDL below is Postgres-only (NUMERIC/BIGINT/BOOLEAN/
-        # TIMESTAMPTZ/IF NOT EXISTS). Oracle DDL lives solely in
-        # surprise_schema.py, so if we got here the import above failed and
-        # there is nothing safe to fall back to.
-        logger.error(
-            "surprise: Oracle mode but surprise_schema.py unavailable — "
-            "cannot create surprise_static_feed"
         )
         return False
     try:
@@ -232,16 +127,26 @@ def _yahoo_sym(symbol: str) -> str:
     return f"{s}.NS"
 
 
+# Index / benchmark pseudo-symbols must NOT be suffixed with ".NS" (that's
+# what produced "$NIFTY50.NS: possibly delisted" in the logs) and they don't
+# belong in an equity surprise-scan universe anyway.
 _INDEX_SKIP = {"NIFTY50", "NIFTY", "NIFTY 50", "BANKNIFTY", "NIFTYBANK", "SENSEX"}
+
+# Batch size for bulk yf.download() calls — keeps URL length sane and lets
+# failures in one batch not take down the whole run.
 YF_BULK_BATCH_SIZE = int(os.getenv("SURPRISE_YF_BULK_BATCH", "50"))
+# Pause between batches (not per-symbol) — free-tier safe pacing.
 YF_BULK_BATCH_PAUSE = float(os.getenv("SURPRISE_YF_BULK_PAUSE", "0.5"))
 
 
 def _yahoo_session():
-    """Reuse a single browser-like session across all yfinance calls in this
-    process instead of letting each symbol/thread negotiate its own
-    cookie/crumb — that duplication under concurrency is what produced the
-    Invalid Crumb / 429 storm in the logs."""
+    """
+    Reuse (or create) a single browser-like requests session for yfinance.
+    Matches the session patch in main.py so surprise-premarket doesn't
+    negotiate its own cookie/crumb state on top of hundreds of parallel
+    per-symbol requests — that duplication was a major contributor to the
+    'Invalid Crumb' 401 storm.
+    """
     try:
         import requests
         import yfinance as yf
@@ -272,14 +177,17 @@ def _yahoo_session():
 def bulk_baselines_from_yfinance(
     symbols: List[str], batch_size: int = YF_BULK_BATCH_SIZE
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Real bulk path: chunked yf.download() (group_by='ticker') instead of
-    one yf.Ticker(...).history()+.info() round-trip per symbol — this is
-    what the 'gateway premarket job' rate-limit storm in the logs was
-    missing. Also skips index pseudo-symbols (NIFTY50 etc.) that don't take
-    a .NS suffix and were logging as 'possibly delisted'. Optionally paces
-    itself against the shared rate limiter (see rate_limiter.py) so this
-    doesn't stack with other jobs (data-feed, refill-additional, hot-picks)
-    hitting the same upstream providers concurrently."""
+    """
+    Real bulk path for the yfinance fallback — mirrors the /quotes/bulk
+    pattern already used by the datafeed tab: one yf.download() call per
+    BATCH of tickers (group_by='ticker'), instead of one yf.Ticker(...)
+    .history() + .info() round-trip per symbol. This is what was missing:
+    the old fallback (compute_baseline_for_symbol) was being fanned out
+    per-symbol across threads, which is what triggered the Invalid
+    Crumb / 429 cascade in the logs. Sector enrichment (which required
+    the crumb-hungry .info call) is dropped here — it's non-critical and
+    can be backfilled separately without blocking the premarket run.
+    """
     try:
         import numpy as np
         import pandas as pd
@@ -287,11 +195,6 @@ def bulk_baselines_from_yfinance(
     except ImportError as e:
         logger.error("numpy/pandas/yfinance required: %s", e)
         return [], list(symbols)
-
-    try:
-        from rate_limiter import acquire as rl_acquire
-    except Exception:
-        rl_acquire = None
 
     _yahoo_session()
 
@@ -309,6 +212,11 @@ def bulk_baselines_from_yfinance(
     rows: List[Dict[str, Any]] = []
     found = set()
 
+    try:
+        from rate_limiter import acquire as rl_acquire
+    except Exception:
+        rl_acquire = None
+
     for i in range(0, len(clean), batch_size):
         batch = clean[i : i + batch_size]
         yf_tickers = [f"{b}.NS" for b in batch]
@@ -325,7 +233,10 @@ def bulk_baselines_from_yfinance(
                 auto_adjust=True,
             )
         except Exception as e:
-            logger.warning("surprise bulk yf.download batch [%s:%s] failed: %s", i, i + len(batch), e)
+            logger.warning(
+                "surprise bulk yf.download batch [%s:%s] failed: %s",
+                i, i + len(batch), e,
+            )
             continue
 
         if data is None or (hasattr(data, "empty") and data.empty):
@@ -340,6 +251,7 @@ def bulk_baselines_from_yfinance(
                         continue
                     sub = data[ysym].dropna(how="all")
                 else:
+                    # Single-ticker batch (batch_size=1 or last leftover)
                     sub = data.dropna(how="all")
                 if sub is None or len(sub) < 5:
                     continue
@@ -379,18 +291,20 @@ def bulk_baselines_from_yfinance(
 
     remaining = [b for b in clean if b not in found]
     logger.info(
-        "surprise bulk yfinance: %s ok, %s remaining, %s index symbols skipped",
+        "surprise bulk yfinance: %s ok, %s remaining, %s index symbols skipped (%s batches)",
         len(rows), len(remaining), len(skipped),
+        (len(clean) + batch_size - 1) // batch_size if clean else 0,
     )
     return rows, remaining
 
 
 def compute_baseline_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
-    """Single-symbol fallback for whatever bulk_baselines_from_yfinance
-    couldn't resolve — should only run against a small residual list, not
-    the whole universe. Sector/.info lookup dropped (crumb-hungry, non-
-    critical) — the same fix already applied to the market-data-service
-    copy of this file."""
+    """
+    Single-symbol fallback for whatever bulk_baselines_from_yfinance still
+    couldn't resolve. Should only ever run against a small residual list —
+    NOT the whole universe — since this is a per-symbol yfinance call.
+    Sector/.info lookup intentionally omitted (crumb-hungry, non-critical).
+    """
     try:
         import numpy as np
         import yfinance as yf
@@ -457,20 +371,14 @@ def compute_baseline_from_bhavcopy(symbol: str, conn) -> Optional[Dict[str, Any]
         from sqlalchemy import text
 
         base = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
-        # Oracle has no LIMIT; FETCH FIRST n ROWS ONLY is the 12c+ equivalent.
-        _limit = (
-            "FETCH FIRST 20 ROWS ONLY"
-            if _conn_dialect(conn) == "oracle"
-            else "LIMIT 20"
-        )
         rows = conn.execute(
             text(
-                f"""
+                """
                 SELECT high, low, close, volume
                 FROM daily_bhavcopy
                 WHERE symbol = :sym
                 ORDER BY trade_date DESC
-                {_limit}
+                LIMIT 20
                 """
             ),
             {"sym": base},
@@ -511,15 +419,6 @@ def compute_baseline_from_bhavcopy(symbol: str, conn) -> Optional[Dict[str, Any]
 def _table_exists(conn, table_name: str) -> bool:
     try:
         from sqlalchemy import text
-
-        if _conn_dialect(conn) == "oracle":
-            # No information_schema in Oracle; user_tables lists this schema's
-            # tables and stores unquoted names upper-cased.
-            n = conn.execute(
-                text("SELECT COUNT(*) FROM user_tables WHERE table_name = UPPER(:t)"),
-                {"t": table_name},
-            ).scalar()
-            return bool(n)
         row = conn.execute(
             text(
                 """
@@ -547,13 +446,15 @@ def bulk_baselines_from_bhavcopy(symbols: List[str]) -> Tuple[List[Dict[str, Any
         return [], list(symbols)
     try:
         import numpy as np
-        from sqlalchemy import text
+        from sqlalchemy import create_engine, text
 
-        dial = _dialect()
-        eng = _engine("surprise-bhav-bulk")
-        if eng is None:
-            return [], list(symbols)
-        raw: List[Dict[str, Any]] = []
+        eng = create_engine(
+            url,
+            pool_pre_ping=True,
+            pool_size=1,
+            max_overflow=0,
+            connect_args={"connect_timeout": 20, "application_name": "surprise-bhav-bulk"},
+        )
         with eng.connect() as conn:
             if not _table_exists(conn, "daily_bhavcopy"):
                 eng.dispose()
@@ -567,9 +468,8 @@ def bulk_baselines_from_bhavcopy(symbols: List[str]) -> Tuple[List[Dict[str, Any
                 return [], list(symbols)
 
             # Window function: last 20 rows per symbol
-            where, bp = _sym_filter("symbol", "syms", dial)
             sql = text(
-                f"""
+                """
                 WITH ranked AS (
                     SELECT
                         symbol,
@@ -579,7 +479,7 @@ def bulk_baselines_from_bhavcopy(symbols: List[str]) -> Tuple[List[Dict[str, Any
                         volume,
                         ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date DESC) AS rn
                     FROM daily_bhavcopy
-                    WHERE {where}
+                    WHERE symbol = ANY(:syms)
                 )
                 SELECT symbol, high, low, close, volume
                 FROM ranked
@@ -587,16 +487,9 @@ def bulk_baselines_from_bhavcopy(symbols: List[str]) -> Tuple[List[Dict[str, Any
                 ORDER BY symbol, rn
                 """
             )
-            if bp is not None:
-                sql = sql.bindparams(bp)
-            # Oracle caps an expression list at 1000 entries, so run the query
-            # once per chunk and concatenate; Postgres takes the whole array in
-            # a single round-trip exactly as before.
-            batches = _chunks(bases, _ORACLE_IN_CHUNK) if dial == "oracle" else [bases]
             try:
-                for batch in batches:
-                    result = conn.execute(sql, {"syms": batch})
-                    raw.extend(result.mappings().all())
+                result = conn.execute(sql, {"syms": bases})
+                raw = result.mappings().all()
             except Exception as e:
                 # Some Neon/pg versions prefer different array binding
                 logger.debug("bulk bhavcopy query failed: %s", e)
@@ -659,21 +552,33 @@ def upsert_baselines(rows: List[Dict[str, Any]]) -> int:
     url = _db_url()
     if not url:
         return 0
-    # Oracle: MERGE instead of ON CONFLICT, and is_liquid bool -> NUMBER(1) 1/0.
-    # Postgres: the original INSERT ... ON CONFLICT text and untouched rows.
-    dial = _dialect()
-    if _ss is not None:
-        sql_text = _ss.upsert_sql(dial)
-        rows = _ss.adapt_rows(rows, dial)
-    else:
-        sql_text = _PG_UPSERT_SQL
     try:
-        from sqlalchemy import text
+        from sqlalchemy import create_engine, text
 
-        eng = _engine("surprise-premarket-upsert")
-        if eng is None:
-            return 0
-        sql = text(sql_text)
+        eng = create_engine(
+            url,
+            pool_pre_ping=True,
+            pool_size=1,
+            max_overflow=1,
+            connect_args={"connect_timeout": 20, "application_name": "surprise-premarket-upsert"},
+        )
+        sql = text(
+            """
+            INSERT INTO surprise_static_feed
+                (symbol, prev_close, avg_15m_volume, daily_atr, high_52w, dist_52w_pct, sector, is_liquid, updated_at)
+            VALUES
+                (:symbol, :prev_close, :avg_15m_volume, :daily_atr, :high_52w, :dist_52w_pct, :sector, :is_liquid, NOW())
+            ON CONFLICT (symbol) DO UPDATE SET
+                prev_close = EXCLUDED.prev_close,
+                avg_15m_volume = EXCLUDED.avg_15m_volume,
+                daily_atr = EXCLUDED.daily_atr,
+                high_52w = EXCLUDED.high_52w,
+                dist_52w_pct = EXCLUDED.dist_52w_pct,
+                sector = COALESCE(EXCLUDED.sector, surprise_static_feed.sector),
+                is_liquid = EXCLUDED.is_liquid,
+                updated_at = NOW()
+            """
+        )
         with eng.begin() as conn:
             # executemany in one transaction (far fewer Neon round-trips)
             conn.execute(sql, rows)
@@ -684,11 +589,25 @@ def upsert_baselines(rows: List[Dict[str, Any]]) -> int:
         # Fallback: one-by-one so partial success is still stored
         n = 0
         try:
-            from sqlalchemy import text
-            eng = _engine("surprise-premarket-upsert-1by1")
-            if eng is None:
-                return 0
-            sql = text(sql_text)
+            from sqlalchemy import create_engine, text
+            eng = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+            sql = text(
+                """
+                INSERT INTO surprise_static_feed
+                    (symbol, prev_close, avg_15m_volume, daily_atr, high_52w, dist_52w_pct, sector, is_liquid, updated_at)
+                VALUES
+                    (:symbol, :prev_close, :avg_15m_volume, :daily_atr, :high_52w, :dist_52w_pct, :sector, :is_liquid, NOW())
+                ON CONFLICT (symbol) DO UPDATE SET
+                    prev_close = EXCLUDED.prev_close,
+                    avg_15m_volume = EXCLUDED.avg_15m_volume,
+                    daily_atr = EXCLUDED.daily_atr,
+                    high_52w = EXCLUDED.high_52w,
+                    dist_52w_pct = EXCLUDED.dist_52w_pct,
+                    sector = COALESCE(EXCLUDED.sector, surprise_static_feed.sector),
+                    is_liquid = EXCLUDED.is_liquid,
+                    updated_at = NOW()
+                """
+            )
             with eng.begin() as conn:
                 for r in rows:
                     try:
@@ -744,85 +663,12 @@ def get_premarket_progress() -> Dict[str, Any]:
     }
 
 
-def _freshness_check(symbols: List[str]) -> Dict[str, Any]:
-    """
-    Count how many of `symbols` already have a surprise_static_feed row
-    updated today (IST). Used to skip a full recompute when the button/cron
-    is triggered more than once on the same trading day — baselines are only
-    meaningful "as of premarket", so recomputing mid-afternoon just burns
-    yfinance quota for an identical answer.
-    """
-    url = _db_url()
-    if not url or not symbols:
-        return {"fresh": 0, "total": len(symbols), "coverage": 0.0}
-    try:
-        from sqlalchemy import text
-        from zoneinfo import ZoneInfo
-        from datetime import datetime, timezone
-
-        dial = _dialect()
-        ist_today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
-        bases = [s.upper().replace(".NS", "").replace(".BO", "").strip() for s in symbols]
-        bases = [b for b in bases if b]
-
-        eng = _engine("surprise-premarket-freshness")
-        if eng is None:
-            return {"fresh": 0, "total": len(symbols), "coverage": 0.0}
-        rows = []
-        with eng.connect() as conn:
-            if not _table_exists(conn, "surprise_static_feed"):
-                eng.dispose()
-                return {"fresh": 0, "total": len(bases), "coverage": 0.0}
-            where, bp = _sym_filter("symbol", "syms", dial)
-            stmt = text(
-                f"SELECT symbol, updated_at FROM surprise_static_feed WHERE {where}"
-            )
-            if bp is not None:
-                stmt = stmt.bindparams(bp)
-            for batch in (_chunks(bases, _ORACLE_IN_CHUNK) if dial == "oracle" else [bases]):
-                rows.extend(conn.execute(stmt, {"syms": batch}).fetchall())
-        eng.dispose()
-
-        fresh = 0
-        for _sym, updated_at in rows:
-            try:
-                ua = updated_at
-                if getattr(ua, "tzinfo", None) is not None:
-                    ua_ist = ua.astimezone(ZoneInfo("Asia/Kolkata"))
-                elif dial == "oracle":
-                    # Oracle TIMESTAMP is tz-naive and SYSTIMESTAMP on ADB is
-                    # UTC; without this the date would land up to 5h30m early
-                    # and premarket rows written before 05:30 IST would look
-                    # stale, forcing a needless full recompute.
-                    ua_ist = ua.replace(tzinfo=timezone.utc).astimezone(
-                        ZoneInfo("Asia/Kolkata")
-                    )
-                else:
-                    ua_ist = ua
-                if ua_ist.date() == ist_today:
-                    fresh += 1
-            except Exception:
-                continue
-        total = len(bases) or 1
-        return {"fresh": fresh, "total": total, "coverage": round(fresh / total, 3)}
-    except Exception as e:
-        logger.debug("freshness check failed: %s", e)
-        return {"fresh": 0, "total": len(symbols), "coverage": 0.0}
-
-
-def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> Dict[str, Any]:
+def precalculate_surprise_baselines(symbols: List[str]) -> Dict[str, Any]:
     """
     Main entry: schema → concurrent compute → batched upsert.
 
     Step 3: ThreadPoolExecutor (default 10 workers) + batch Neon writes
     replaces the old sequential loop (sleep 0.12s × 300 ≈ 40s+ of pure wait).
-
-    force=False (default): if today's (IST) surprise_static_feed already
-    covers ≥90% of the requested universe, skip the recompute entirely —
-    baselines are a once-a-trading-day snapshot, so re-running mid-day
-    (double-click, duplicate cron dispatch, manual retrigger) should reuse
-    what premarket already computed instead of re-hitting yfinance for
-    every symbol again.
     """
     global _job_lock
     t0 = time.time()
@@ -856,36 +702,6 @@ def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> 
                 uniq.append(b)
         uniq = uniq[:MAX_SYMBOLS]
         total = len(uniq)
-
-        if not force:
-            fresh = _freshness_check(uniq)
-            if fresh["coverage"] >= 0.9:
-                _write_progress({
-                    "stage": "done",
-                    "percent": 100,
-                    "processed": fresh["fresh"],
-                    "total": total,
-                    "computed": 0,
-                    "errors": 0,
-                    "elapsed_sec": round(time.time() - t0, 1),
-                    "eta_sec": 0,
-                    "is_running": False,
-                    "current_symbol": None,
-                    "message": (
-                        f"Already fresh today: {fresh['fresh']}/{fresh['total']} baselines "
-                        f"({int(fresh['coverage']*100)}%) — skipped recompute (pass force=true to override)"
-                    ),
-                })
-                return {
-                    "ok": True,
-                    "skipped": True,
-                    "reason": "already_fresh_today",
-                    "symbols_requested": total,
-                    "fresh_coverage": fresh["coverage"],
-                    "computed": 0,
-                    "upserted": 0,
-                    "elapsed_sec": round(time.time() - t0, 1),
-                }
 
         _write_progress({
             "stage": "starting",
@@ -954,9 +770,11 @@ def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> 
         else:
             remaining = list(uniq)
 
-        # Bulk yfinance for symbols not covered by bhavcopy — replaces the
-        # old per-symbol ThreadPoolExecutor fan-out (was the source of the
-        # Invalid Crumb / 429 storm in the logs).
+        # Step 6 fix: genuine bulk yfinance fetch (chunked yf.download, same
+        # pattern as /quotes/bulk on the datafeed tab) instead of fanning
+        # out one yf.Ticker(...).history()+.info per symbol across threads.
+        # That per-symbol fan-out is what produced the Invalid Crumb / 429
+        # cascade in the logs.
         _write_progress({
             "stage": "computing",
             "percent": max(10, int(100 * processed / total)) if total else 10,
@@ -968,7 +786,7 @@ def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> 
             "eta_sec": None,
             "is_running": True,
             "current_symbol": None,
-            "message": f"Bulk yfinance for {len(remaining)} symbols…",
+            "message": f"Bulk yfinance for {len(remaining)} symbols (batch={YF_BULK_BATCH_SIZE})…",
         })
         bulk_rows, still_remaining = bulk_baselines_from_yfinance(remaining)
         if bulk_rows:
@@ -978,8 +796,25 @@ def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> 
             source_yf += len(bulk_rows)
             _flush()
         remaining = still_remaining
+        errors += 0  # errors for these are only known once we try residual symbols below
 
-        # Small residual fallback only — per-symbol, few workers.
+        _write_progress({
+            "stage": "computing",
+            "percent": max(10, int(100 * processed / total)) if total else 10,
+            "processed": processed,
+            "total": total,
+            "computed": computed,
+            "errors": errors,
+            "elapsed_sec": round(time.time() - t0, 1),
+            "eta_sec": None,
+            "is_running": True,
+            "current_symbol": None,
+            "message": f"Bulk yfinance done: {len(bulk_rows)} ok · {len(remaining)} residual",
+        })
+
+        # Small residual fallback only — per-symbol, few workers, no .info.
+        # This list should now be a small tail (batch failures, thin/illiquid
+        # names), not the whole universe.
         if remaining:
             residual_workers = max(1, min(3, len(remaining)))
             with ThreadPoolExecutor(max_workers=residual_workers) as pool:
@@ -1020,11 +855,6 @@ def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> 
                         "current_symbol": current_sym,
                         "message": f"residual {processed}/{total} · {sym} · {residual_workers}w",
                     })
-                    if processed % 50 == 0:
-                        logger.info(
-                            "surprise premarket progress %s/%s (computed=%s errors=%s elapsed=%.1fs)",
-                            processed, total, computed, errors, elapsed,
-                        )
 
         _flush()  # remaining rows
 

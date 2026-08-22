@@ -46,13 +46,42 @@ def _normalize_db_url(url: str) -> str:
     return url
 
 
+# surprise_schema.py owns backend detection, engine construction and the
+# dialect-specific SQL. Imported defensively so a missing module degrades to the
+# original Neon-only behaviour rather than breaking the service.
+try:
+    import surprise_schema as _ss
+except Exception:  # pragma: no cover
+    _ss = None
+
+
+def _dialect() -> str:
+    """'oracle' on the Oracle Cloud VM, 'postgresql' on Render/Neon."""
+    if _ss is not None:
+        try:
+            return _ss.dialect()
+        except Exception:
+            pass
+    return "oracle" if os.environ.get("ORACLE_DSN") else "postgresql"
+
+
+def _conn_dialect(conn) -> str:
+    """Dialect of an already-open connection (for helpers that receive a conn)."""
+    try:
+        return (conn.dialect.name or "").lower()
+    except Exception:
+        return _dialect()
+
+
 def _db_url() -> Optional[str]:
-    # Oracle Cloud side: this Postgres-only feature degrades to a clean no-op.
-    # The durable core (kv_cache + models) runs on Oracle via ORACLE_DSN; this
-    # secondary premarket scanner stays Neon-only. On Render/Neon (no ORACLE_DSN
-    # and no oracle:// URL) this guard is False, so behaviour is unchanged.
-    if os.environ.get("ORACLE_DSN"):
-        return None
+    # Both deployments are now self-sufficient: Render/Neon keeps its Postgres
+    # URL, and the Oracle VM gets an Oracle URL instead of the None that used to
+    # make this whole feature a silent no-op there.
+    if _ss is not None:
+        try:
+            return _ss.database_url()
+        except Exception as e:
+            logger.debug("surprise_schema.database_url: %s", e)
     url = (
         os.getenv("CACHE_DATABASE_URL")
         or os.getenv("DATABASE_URL")
@@ -61,6 +90,72 @@ def _db_url() -> Optional[str]:
     if url and url.lower().startswith("oracle"):
         return None
     return _normalize_db_url(url) if url else None
+
+
+def _engine(app_name: str, **_ignored):
+    """Engine for the configured backend, or None.
+
+    Postgres connect_args (connect_timeout/application_name) are psycopg2-only
+    and would be rejected by python-oracledb, so engine construction has to go
+    through surprise_schema.make_engine() rather than create_engine(_db_url()).
+    """
+    if _ss is not None:
+        try:
+            return _ss.make_engine(app_name)
+        except Exception as e:
+            logger.debug("surprise_schema.make_engine: %s", e)
+    url = _db_url()
+    if not url:
+        return None
+    from sqlalchemy import create_engine
+
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=1,
+        max_overflow=1,
+        connect_args={"connect_timeout": 20, "application_name": app_name},
+    )
+
+
+def _sym_filter(column: str, param: str, dial: str):
+    """'<col> = ANY(:p)' on Postgres, an expanding IN list on Oracle.
+
+    Returns (sql_fragment, bindparam_or_None). Oracle has no array type for
+    plain binds, so the list has to be expanded into (:p_1, :p_2, ...); its
+    hard limit is 1000 expression list elements, hence chunking by callers.
+    """
+    if dial == "oracle":
+        from sqlalchemy import bindparam
+
+        return f"{column} IN :{param}", bindparam(param, expanding=True)
+    return f"{column} = ANY(:{param})", None
+
+
+_ORACLE_IN_CHUNK = 900  # stay under Oracle's 1000-element expression list cap
+
+
+def _chunks(seq: List[str], size: int) -> List[List[str]]:
+    return [seq[i : i + size] for i in range(0, len(seq), size)]
+
+
+# Last-resort Postgres upsert, used only if surprise_schema.py could not be
+# imported. Identical text to the original inline statement.
+_PG_UPSERT_SQL = """
+    INSERT INTO surprise_static_feed
+        (symbol, prev_close, avg_15m_volume, daily_atr, high_52w, dist_52w_pct, sector, is_liquid, updated_at)
+    VALUES
+        (:symbol, :prev_close, :avg_15m_volume, :daily_atr, :high_52w, :dist_52w_pct, :sector, :is_liquid, NOW())
+    ON CONFLICT (symbol) DO UPDATE SET
+        prev_close = EXCLUDED.prev_close,
+        avg_15m_volume = EXCLUDED.avg_15m_volume,
+        daily_atr = EXCLUDED.daily_atr,
+        high_52w = EXCLUDED.high_52w,
+        dist_52w_pct = EXCLUDED.dist_52w_pct,
+        sector = COALESCE(EXCLUDED.sector, surprise_static_feed.sector),
+        is_liquid = EXCLUDED.is_liquid,
+        updated_at = NOW()
+"""
 
 
 def ensure_schema() -> bool:
@@ -79,6 +174,16 @@ def ensure_schema() -> bool:
         logger.warning(
             "No DATABASE_URL/CACHE_DATABASE_URL — cannot ensure surprise_static_feed. "
             "Set Neon pooler URL on api-gateway env."
+        )
+        return False
+    if _dialect() == "oracle":
+        # The inline DDL below is Postgres-only (NUMERIC/BIGINT/BOOLEAN/
+        # TIMESTAMPTZ/IF NOT EXISTS). Oracle DDL lives solely in
+        # surprise_schema.py, so if we got here the import above failed and
+        # there is nothing safe to fall back to.
+        logger.error(
+            "surprise: Oracle mode but surprise_schema.py unavailable — "
+            "cannot create surprise_static_feed"
         )
         return False
     try:
@@ -352,14 +457,20 @@ def compute_baseline_from_bhavcopy(symbol: str, conn) -> Optional[Dict[str, Any]
         from sqlalchemy import text
 
         base = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
+        # Oracle has no LIMIT; FETCH FIRST n ROWS ONLY is the 12c+ equivalent.
+        _limit = (
+            "FETCH FIRST 20 ROWS ONLY"
+            if _conn_dialect(conn) == "oracle"
+            else "LIMIT 20"
+        )
         rows = conn.execute(
             text(
-                """
+                f"""
                 SELECT high, low, close, volume
                 FROM daily_bhavcopy
                 WHERE symbol = :sym
                 ORDER BY trade_date DESC
-                LIMIT 20
+                {_limit}
                 """
             ),
             {"sym": base},
@@ -400,6 +511,15 @@ def compute_baseline_from_bhavcopy(symbol: str, conn) -> Optional[Dict[str, Any]
 def _table_exists(conn, table_name: str) -> bool:
     try:
         from sqlalchemy import text
+
+        if _conn_dialect(conn) == "oracle":
+            # No information_schema in Oracle; user_tables lists this schema's
+            # tables and stores unquoted names upper-cased.
+            n = conn.execute(
+                text("SELECT COUNT(*) FROM user_tables WHERE table_name = UPPER(:t)"),
+                {"t": table_name},
+            ).scalar()
+            return bool(n)
         row = conn.execute(
             text(
                 """
@@ -427,15 +547,13 @@ def bulk_baselines_from_bhavcopy(symbols: List[str]) -> Tuple[List[Dict[str, Any
         return [], list(symbols)
     try:
         import numpy as np
-        from sqlalchemy import create_engine, text
+        from sqlalchemy import text
 
-        eng = create_engine(
-            url,
-            pool_pre_ping=True,
-            pool_size=1,
-            max_overflow=0,
-            connect_args={"connect_timeout": 20, "application_name": "surprise-bhav-bulk"},
-        )
+        dial = _dialect()
+        eng = _engine("surprise-bhav-bulk")
+        if eng is None:
+            return [], list(symbols)
+        raw: List[Dict[str, Any]] = []
         with eng.connect() as conn:
             if not _table_exists(conn, "daily_bhavcopy"):
                 eng.dispose()
@@ -449,8 +567,9 @@ def bulk_baselines_from_bhavcopy(symbols: List[str]) -> Tuple[List[Dict[str, Any
                 return [], list(symbols)
 
             # Window function: last 20 rows per symbol
+            where, bp = _sym_filter("symbol", "syms", dial)
             sql = text(
-                """
+                f"""
                 WITH ranked AS (
                     SELECT
                         symbol,
@@ -460,7 +579,7 @@ def bulk_baselines_from_bhavcopy(symbols: List[str]) -> Tuple[List[Dict[str, Any
                         volume,
                         ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date DESC) AS rn
                     FROM daily_bhavcopy
-                    WHERE symbol = ANY(:syms)
+                    WHERE {where}
                 )
                 SELECT symbol, high, low, close, volume
                 FROM ranked
@@ -468,9 +587,16 @@ def bulk_baselines_from_bhavcopy(symbols: List[str]) -> Tuple[List[Dict[str, Any
                 ORDER BY symbol, rn
                 """
             )
+            if bp is not None:
+                sql = sql.bindparams(bp)
+            # Oracle caps an expression list at 1000 entries, so run the query
+            # once per chunk and concatenate; Postgres takes the whole array in
+            # a single round-trip exactly as before.
+            batches = _chunks(bases, _ORACLE_IN_CHUNK) if dial == "oracle" else [bases]
             try:
-                result = conn.execute(sql, {"syms": bases})
-                raw = result.mappings().all()
+                for batch in batches:
+                    result = conn.execute(sql, {"syms": batch})
+                    raw.extend(result.mappings().all())
             except Exception as e:
                 # Some Neon/pg versions prefer different array binding
                 logger.debug("bulk bhavcopy query failed: %s", e)
@@ -533,33 +659,21 @@ def upsert_baselines(rows: List[Dict[str, Any]]) -> int:
     url = _db_url()
     if not url:
         return 0
+    # Oracle: MERGE instead of ON CONFLICT, and is_liquid bool -> NUMBER(1) 1/0.
+    # Postgres: the original INSERT ... ON CONFLICT text and untouched rows.
+    dial = _dialect()
+    if _ss is not None:
+        sql_text = _ss.upsert_sql(dial)
+        rows = _ss.adapt_rows(rows, dial)
+    else:
+        sql_text = _PG_UPSERT_SQL
     try:
-        from sqlalchemy import create_engine, text
+        from sqlalchemy import text
 
-        eng = create_engine(
-            url,
-            pool_pre_ping=True,
-            pool_size=1,
-            max_overflow=1,
-            connect_args={"connect_timeout": 20, "application_name": "surprise-premarket-upsert"},
-        )
-        sql = text(
-            """
-            INSERT INTO surprise_static_feed
-                (symbol, prev_close, avg_15m_volume, daily_atr, high_52w, dist_52w_pct, sector, is_liquid, updated_at)
-            VALUES
-                (:symbol, :prev_close, :avg_15m_volume, :daily_atr, :high_52w, :dist_52w_pct, :sector, :is_liquid, NOW())
-            ON CONFLICT (symbol) DO UPDATE SET
-                prev_close = EXCLUDED.prev_close,
-                avg_15m_volume = EXCLUDED.avg_15m_volume,
-                daily_atr = EXCLUDED.daily_atr,
-                high_52w = EXCLUDED.high_52w,
-                dist_52w_pct = EXCLUDED.dist_52w_pct,
-                sector = COALESCE(EXCLUDED.sector, surprise_static_feed.sector),
-                is_liquid = EXCLUDED.is_liquid,
-                updated_at = NOW()
-            """
-        )
+        eng = _engine("surprise-premarket-upsert")
+        if eng is None:
+            return 0
+        sql = text(sql_text)
         with eng.begin() as conn:
             # executemany in one transaction (far fewer Neon round-trips)
             conn.execute(sql, rows)
@@ -570,25 +684,11 @@ def upsert_baselines(rows: List[Dict[str, Any]]) -> int:
         # Fallback: one-by-one so partial success is still stored
         n = 0
         try:
-            from sqlalchemy import create_engine, text
-            eng = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
-            sql = text(
-                """
-                INSERT INTO surprise_static_feed
-                    (symbol, prev_close, avg_15m_volume, daily_atr, high_52w, dist_52w_pct, sector, is_liquid, updated_at)
-                VALUES
-                    (:symbol, :prev_close, :avg_15m_volume, :daily_atr, :high_52w, :dist_52w_pct, :sector, :is_liquid, NOW())
-                ON CONFLICT (symbol) DO UPDATE SET
-                    prev_close = EXCLUDED.prev_close,
-                    avg_15m_volume = EXCLUDED.avg_15m_volume,
-                    daily_atr = EXCLUDED.daily_atr,
-                    high_52w = EXCLUDED.high_52w,
-                    dist_52w_pct = EXCLUDED.dist_52w_pct,
-                    sector = COALESCE(EXCLUDED.sector, surprise_static_feed.sector),
-                    is_liquid = EXCLUDED.is_liquid,
-                    updated_at = NOW()
-                """
-            )
+            from sqlalchemy import text
+            eng = _engine("surprise-premarket-upsert-1by1")
+            if eng is None:
+                return 0
+            sql = text(sql_text)
             with eng.begin() as conn:
                 for r in rows:
                     try:
@@ -656,29 +756,31 @@ def _freshness_check(symbols: List[str]) -> Dict[str, Any]:
     if not url or not symbols:
         return {"fresh": 0, "total": len(symbols), "coverage": 0.0}
     try:
-        from sqlalchemy import create_engine, text
+        from sqlalchemy import text
         from zoneinfo import ZoneInfo
-        from datetime import datetime
+        from datetime import datetime, timezone
 
+        dial = _dialect()
         ist_today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
         bases = [s.upper().replace(".NS", "").replace(".BO", "").strip() for s in symbols]
         bases = [b for b in bases if b]
 
-        eng = create_engine(
-            url, pool_pre_ping=True, pool_size=1, max_overflow=0,
-            connect_args={"connect_timeout": 15, "application_name": "surprise-premarket-freshness"},
-        )
+        eng = _engine("surprise-premarket-freshness")
+        if eng is None:
+            return {"fresh": 0, "total": len(symbols), "coverage": 0.0}
+        rows = []
         with eng.connect() as conn:
             if not _table_exists(conn, "surprise_static_feed"):
                 eng.dispose()
                 return {"fresh": 0, "total": len(bases), "coverage": 0.0}
-            rows = conn.execute(
-                text(
-                    "SELECT symbol, updated_at FROM surprise_static_feed "
-                    "WHERE symbol = ANY(:syms)"
-                ),
-                {"syms": bases},
-            ).fetchall()
+            where, bp = _sym_filter("symbol", "syms", dial)
+            stmt = text(
+                f"SELECT symbol, updated_at FROM surprise_static_feed WHERE {where}"
+            )
+            if bp is not None:
+                stmt = stmt.bindparams(bp)
+            for batch in (_chunks(bases, _ORACLE_IN_CHUNK) if dial == "oracle" else [bases]):
+                rows.extend(conn.execute(stmt, {"syms": batch}).fetchall())
         eng.dispose()
 
         fresh = 0
@@ -687,6 +789,14 @@ def _freshness_check(symbols: List[str]) -> Dict[str, Any]:
                 ua = updated_at
                 if getattr(ua, "tzinfo", None) is not None:
                     ua_ist = ua.astimezone(ZoneInfo("Asia/Kolkata"))
+                elif dial == "oracle":
+                    # Oracle TIMESTAMP is tz-naive and SYSTIMESTAMP on ADB is
+                    # UTC; without this the date would land up to 5h30m early
+                    # and premarket rows written before 05:30 IST would look
+                    # stale, forcing a needless full recompute.
+                    ua_ist = ua.replace(tzinfo=timezone.utc).astimezone(
+                        ZoneInfo("Asia/Kolkata")
+                    )
                 else:
                     ua_ist = ua
                 if ua_ist.date() == ist_today:

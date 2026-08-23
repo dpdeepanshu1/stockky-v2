@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -231,24 +232,37 @@ def fetch_nse_ipo_calendar() -> List[Dict[str, Any]]:
         ("https://www.nseindia.com/api/public-past-issues", "past"),
         ("https://www.nseindia.com/api/all-upcoming-issues?category=ipo", "upcoming"),
     ]
+    # try/finally + manual close instead of `with _nse_session() as c:` —
+    # a `with` block calls __exit__ (closing the client) once; if anything
+    # upstream ever re-enters this same client object (e.g. a retry
+    # wrapper, or this function being invoked twice concurrently on a
+    # cached/shared instance), httpx raises "Cannot open a client instance
+    # more than once". _nse_session() already returns a fresh client per
+    # call so that shouldn't happen here, but try/finally is strictly
+    # safer than `with` for this exact failure mode and costs nothing.
+    c = _nse_session()
     try:
-        with _nse_session() as c:
-            for url, kind in candidates:
-                try:
-                    r = c.get(url, timeout=15)
-                    if r.status_code != 200:
-                        logger.info("NSE IPO calendar %s -> HTTP %s (blocked/unavailable)", kind, r.status_code)
-                        continue
-                    data = r.json()
-                    rows = data if isinstance(data, list) else data.get("data") or []
-                    for row in rows:
-                        norm = _normalize_nse_row(row, kind)
-                        if norm:
-                            out.append(norm)
-                except Exception as e:
-                    logger.info("NSE IPO calendar %s fetch failed: %s", kind, e)
+        for url, kind in candidates:
+            try:
+                r = c.get(url, timeout=15)
+                if r.status_code != 200:
+                    logger.info("NSE IPO calendar %s -> HTTP %s (blocked/unavailable)", kind, r.status_code)
+                    continue
+                data = r.json()
+                rows = data if isinstance(data, list) else data.get("data") or []
+                for row in rows:
+                    norm = _normalize_nse_row(row, kind)
+                    if norm:
+                        out.append(norm)
+            except Exception as e:
+                logger.info("NSE IPO calendar %s fetch failed: %s", kind, e)
     except Exception as e:
         logger.warning("NSE IPO session failed entirely: %s", e)
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
 
     return out
 
@@ -414,7 +428,11 @@ def _fetch_history(symbol: str, days: int) -> Optional[Any]:
     # Fallback: direct yfinance (only reached if market-data-service is down/unreachable)
     try:
         import yfinance as yf
-        t = yf.Ticker(f"{symbol}.NS")
+        from symbol_aliases import resolve_ns_ticker
+        yf_ticker = resolve_ns_ticker(symbol)
+        if not yf_ticker:
+            return None  # known non-NSE / renamed-unresolvable — don't waste the call
+        t = yf.Ticker(yf_ticker)
         hist = t.history(period=f"{max(5, days)}d", interval="1d", auto_adjust=True)
         if hist is None or hist.empty:
             return None
@@ -691,8 +709,28 @@ def _build_ipo_suggestion(
 
 
 # ── Background scan job ────────────────────────────────────────────────────
+_IPO_SCAN_LOCK = threading.Lock()
+
 
 def run_ipo_scan(force: bool = False) -> dict:
+    # Guard against overlapping scans (e.g. the UI's poll + a manual
+    # "Run Premarket Feed" click landing close together, or a page refresh
+    # re-firing the trigger before the previous run finished). Two scans
+    # running at once share no state but do double the NSE/IndianAPI call
+    # volume for no benefit, and made "Cannot open a client instance more
+    # than once"-style races far more likely to surface under load even
+    # though each call site creates its own client. non_blocking acquire:
+    # if a scan is already running, just report that instead of queuing.
+    if not _IPO_SCAN_LOCK.acquire(blocking=False):
+        logger.info("run_ipo_scan: scan already in progress, skipping duplicate trigger")
+        return {**get_ipo_scan_progress(), "skipped": True, "reason": "scan already running"}
+    try:
+        return _run_ipo_scan_locked(force=force)
+    finally:
+        _IPO_SCAN_LOCK.release()
+
+
+def _run_ipo_scan_locked(force: bool = False) -> dict:
     universe = _merged_ipo_universe()
     total = len(universe)
     _set_job(status="running", message=f"Scanning {total} IPO(s)…", processed=0, total=total,

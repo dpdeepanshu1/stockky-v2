@@ -18,6 +18,7 @@ from typing import List, Optional, Set, Dict, Union
 
 import httpx
 import yfinance as yf
+from symbol_aliases import resolve_ns_ticker
 
 try:
     import rate_limiter as _rl
@@ -850,7 +851,10 @@ def _get_momentum_movers() -> List[str]:
         seed = list(dict.fromkeys(_get_nifty_indices() + _get_all_nse_securities()[:120]))[:80]
         for sym in seed:
             try:
-                hist = yf.Ticker(f"{sym}.NS").history(period="5d", interval="1d")
+                yf_ticker = resolve_ns_ticker(sym)
+                if not yf_ticker:
+                    continue  # known non-NSE / delisted — skip, don't burn a call
+                hist = yf.Ticker(yf_ticker).history(period="5d", interval="1d")
                 if hist is None or hist.empty or len(hist) < 2:
                     continue
                 day_chg = (float(hist["Close"].iloc[-1]) - float(hist["Close"].iloc[-2])) / float(hist["Close"].iloc[-2]) * 100
@@ -1093,6 +1097,38 @@ def _get_52w_extreme_symbols() -> List[str]:
 
 # ── ≤ ₹5000 universe pre-filter ─────────────────────────────────────────────
 MAX_UNIVERSE_PRICE = float(os.getenv("MAX_UNIVERSE_PRICE", os.getenv("MAX_STOCK_PRICE", "5000")) or 5000)
+
+
+def _row_price_over_cap(row: dict) -> bool:
+    """
+    True when a feed row's resolved price is a known, positive value that
+    exceeds MAX_UNIVERSE_PRICE. Used by every data-feed WRITE path so a
+    >₹5000 stock can never be persisted (previously only the bulk-Yahoo and
+    repair-price paths enforced this — /api/feed/update, /api/feed/batch and
+    /api/feed/update-batch did not, which is how stocks like BOSCHLTD
+    (₹48,750) ended up sitting in the Database Feed Health audit table with
+    no way for Repair to "fix" them, since they were never supposed to be
+    fed in the first place).
+    Rows with no resolvable price yet (still being built) are allowed
+    through — this only blocks rows that *already* carry a price over cap.
+    """
+    try:
+        for k in ("price", "close", "cmp", "ltp", "last_price", "current_price"):
+            raw = row.get(k)
+            if raw in (None, ""):
+                m = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+                raw = m.get(k)
+            if raw in (None, ""):
+                continue
+            s = str(raw).replace(",", "").replace(" ", "").strip()
+            if not s or s.upper() in ("-", "NA", "N/A", "NONE", "NULL"):
+                continue
+            px = float(s)
+            if px > 0:
+                return px > MAX_UNIVERSE_PRICE
+    except (TypeError, ValueError):
+        pass
+    return False
 
 
 def _filter_symbols_under_max_price(symbols: List[str]) -> List[str]:
@@ -2979,7 +3015,10 @@ def _get_nifty50_data() -> List[dict]:
     data = []
     for sym in nifty_symbols:
         try:
-            ticker = yf.Ticker(f"{sym}.NS")
+            yf_ticker = resolve_ns_ticker(sym)
+            if not yf_ticker:
+                continue
+            ticker = yf.Ticker(yf_ticker)
             hist = ticker.history(period="1d", interval="1m")
             if hist.empty:
                 continue
@@ -3090,7 +3129,10 @@ def proxy_quote(symbol: str):
         logger.warning("quote proxy %s: %s", sym, e)
     # fallback yfinance light
     try:
-        t = yf.Ticker(f"{sym}.NS")
+        yf_ticker = resolve_ns_ticker(sym)
+        if not yf_ticker:
+            raise ValueError(f"{sym} not resolvable on NSE")
+        t = yf.Ticker(yf_ticker)
         info = t.fast_info if hasattr(t, "fast_info") else {}
         price = None
         try:
@@ -3959,9 +4001,55 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
             )
             raise HTTPException(status_code=404, detail=suggestion_text)
         else:
-            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+            # Upstream (decision-prediction-service) returned a real error
+            # response (commonly 500 when it OOMs / crashes on Render's free
+            # tier). Previously this re-raised the same status code, which
+            # the platform edge often surfaces to the user as a raw
+            # "502 Bad Gateway" with no explanation. Degrade gracefully
+            # instead — same pattern as /api/scan/find-buys: a decision
+            # result the UI can render, flagged as low-confidence, beats an
+            # error page.
+            logger.warning(
+                "decision engine HTTP %s for %s: %s",
+                e.response.status_code, symbol_to_use, str(e.response.text)[:200],
+            )
+            return {
+                "ok": True,
+                "symbol": symbol_to_use,
+                "decision": "HOLD",
+                "data_insufficient": True,
+                "error": f"decision engine returned HTTP {e.response.status_code}",
+                "natural_language_summary": (
+                    f"{symbol_to_use}: decision engine is temporarily unavailable "
+                    f"(HTTP {e.response.status_code}) — showing a neutral HOLD until it recovers."
+                ),
+                "data_quality": {
+                    "level": "low",
+                    "flags": ["Decision engine error"],
+                    "note": "Upstream decision-prediction-service returned an error — scores unavailable.",
+                },
+            }
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Decision engine unreachable: {e}")
+        # Connection refused / timeout / DNS failure — service is down or
+        # asleep (Render free-tier cold start), not a client error. Same
+        # graceful-degrade as above instead of bubbling a raw 502.
+        logger.warning("decision engine unreachable for %s: %s", symbol_to_use, e)
+        return {
+            "ok": True,
+            "symbol": symbol_to_use,
+            "decision": "HOLD",
+            "data_insufficient": True,
+            "error": f"decision engine unreachable: {e}",
+            "natural_language_summary": (
+                f"{symbol_to_use}: decision engine is unreachable right now "
+                f"(cold start or outage) — showing a neutral HOLD until it recovers."
+            ),
+            "data_quality": {
+                "level": "low",
+                "flags": ["Decision engine unreachable"],
+                "note": "Could not reach decision-prediction-service — scores unavailable.",
+            },
+        }
 
 
 # ── Legacy sync fallback helpers ──────────────────────────────────────────
@@ -4947,7 +5035,10 @@ def market_trending():
     trending_data = []
     for sym in trending[:10]:
         try:
-            ticker = yf.Ticker(f"{sym}.NS")
+            yf_ticker = resolve_ns_ticker(sym)
+            if not yf_ticker:
+                continue
+            ticker = yf.Ticker(yf_ticker)
             hist = ticker.history(period="1d")
             if not hist.empty:
                 price = round(hist["Close"].iloc[-1], 2)
@@ -6662,7 +6753,10 @@ def _resolve_quote_price(sym: str):
     except Exception as e:
         logger.debug("ws quote market-data %s: %s", sym, e)
     try:
-        t = yf.Ticker(f"{sym}.NS")
+        yf_ticker = resolve_ns_ticker(sym)
+        if not yf_ticker:
+            raise ValueError(f"{sym} not resolvable on NSE")
+        t = yf.Ticker(yf_ticker)
         info = getattr(t, "fast_info", None) or {}
         price = None
         try:
@@ -7770,6 +7864,7 @@ async def audit_missing_feed_data(limit: int = 500):
     symbols = clean
 
     incomplete = []
+    over_cap = []
     complete_count = 0
     total = 0
     for sym in symbols:
@@ -7780,6 +7875,17 @@ async def audit_missing_feed_data(limit: int = 500):
             row = {}
         if not isinstance(row, dict):
             row = {}
+        # Stocks whose price is over the ₹MAX_UNIVERSE_PRICE cap should never
+        # have been fed — they're not "incomplete" (repair can't legally
+        # populate a price under-cap for them), they're stale writes from
+        # before the write-path gate existed. Surface them separately so the
+        # UI can offer Purge instead of an infinite Repair loop.
+        if _row_price_over_cap(row):
+            over_cap.append({
+                "symbol": sym,
+                "current_price": _feed_resolved_price(row),
+            })
+            continue
         missing = _feed_missing_fields(row)
         if missing:
             incomplete.append({
@@ -7803,14 +7909,54 @@ async def audit_missing_feed_data(limit: int = 500):
         "total_universe": total,
         "fully_populated": complete_count,
         "incomplete_count": incomplete_total,
+        "over_cap_count": len(over_cap),
+        "over_cap_stocks": over_cap[:200],
         "health_score": health,
         "incomplete_stocks": incomplete,
         "required_fields": list(_REQUIRED_FEED_FIELDS),
         "message": (
             "No feed symbols tracked yet — run Data Feed first."
             if total == 0
-            else f"Health {health}% · {complete_count}/{total} complete"
+            else (
+                f"Health {health}% · {complete_count}/{total} complete"
+                + (f" · {len(over_cap)} over ₹{MAX_UNIVERSE_PRICE:.0f} cap (use Purge)" if over_cap else "")
+            )
         ),
+    }
+
+
+@app.post("/api/feed/purge-over-cap")
+@app.post("/data-feed/purge-over-cap")
+async def purge_over_cap_feed_symbols():
+    """
+    Delete every feed row whose stored price is above MAX_UNIVERSE_PRICE.
+    These are stale writes from before the price-cap was enforced at every
+    write path (see _row_price_over_cap) — Repair cannot legitimately "fix"
+    them since a real price fetch would also be over cap, so the only
+    correct action is to remove them from the feed store.
+    """
+    store = _feed_store()
+    try:
+        symbols = list(store.list_symbols() or [])
+    except Exception:
+        symbols = []
+    purged = []
+    for sym in symbols:
+        try:
+            row = store.get_symbol(sym) or {}
+        except Exception:
+            row = {}
+        if isinstance(row, dict) and _row_price_over_cap(row):
+            try:
+                store.delete_symbol(sym)
+                purged.append(sym)
+            except Exception as e:
+                logger.warning("purge_over_cap: failed to delete %s: %s", sym, e)
+    return {
+        "ok": True,
+        "purged_count": len(purged),
+        "purged_symbols": purged,
+        "message": f"Removed {len(purged)} symbol(s) above ₹{MAX_UNIVERSE_PRICE:.0f} from the feed.",
     }
 
 
@@ -7853,6 +7999,16 @@ async def data_feed_update_single(request: Request):
         else:
             row = dict(body)
             row["symbol"] = base
+        # Universal ≤ ₹5000 gate — reject at the write boundary, not just at
+        # the bulk-Yahoo seed. Previously this endpoint would happily persist
+        # any price, which is how over-cap symbols entered the feed store.
+        if _row_price_over_cap(row):
+            return {
+                "ok": False,
+                "status": "REJECTED",
+                "symbol": base,
+                "error": f"price above ₹{MAX_UNIVERSE_PRICE:.0f} cap — not saved",
+            }
         save_stock_feed(base, row)
         return {"ok": True, "status": "SUCCESS", "symbol": base}
     except Exception as e:
@@ -7886,15 +8042,21 @@ async def data_feed_update_batch(request: Request):
     try:
         from data_feed import save_stock_feed
         n = 0
+        rejected = 0
         for sym, row in feeds.items():
             if not isinstance(row, dict):
                 continue
             base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
             body = dict(row)
             body["symbol"] = base
+            # Universal ≤ ₹5000 gate (see _row_price_over_cap) — bulk upsert
+            # previously bypassed the cap entirely.
+            if _row_price_over_cap(body):
+                rejected += 1
+                continue
             save_stock_feed(base, body)
             n += 1
-        return {"ok": True, "status": "SUCCESS", "count": n}
+        return {"ok": True, "status": "SUCCESS", "count": n, "rejected_over_cap": rejected}
     except Exception as e:
         logger.exception("data_feed batch failed")
         return {"ok": False, "error": str(e)[:300], "count": 0}
@@ -7962,6 +8124,12 @@ async def data_feed_update_batch_refresh(request: Request):
                 logger.debug("update-batch events %s: %s", base, e)
             if fund or events:
                 row = extract_feed_payload(base, fund, events)
+                # Universal ≤ ₹5000 gate (see _row_price_over_cap) — the
+                # GitHub Action driver previously wrote every price it fetched.
+                if _row_price_over_cap(row):
+                    err_n += 1
+                    results.append({"symbol": base, "ok": False, "error": "price above cap"})
+                    continue
                 store.put_symbol(base, row, ttl=DATA_FEED_TTL)
                 ok_n += 1
                 results.append({"symbol": base, "ok": True})
@@ -8073,6 +8241,25 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
     store = _feed_store()
     base = str(symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
     current = dict(store.get_symbol(base) or {})
+
+    # Over-cap rows can't be "repaired" — a real price fetch would also be
+    # over ₹MAX_UNIVERSE_PRICE, so the Repair button used to sit there doing
+    # nothing useful forever. Purge instead and say so plainly.
+    if current and _row_price_over_cap(current):
+        try:
+            store.delete_symbol(base)
+        except Exception as e:
+            logger.warning("repair: purge over-cap %s failed: %s", base, e)
+        return {
+            "symbol": base,
+            "patched_fields": [],
+            "still_missing": [],
+            "price": _feed_resolved_price(current),
+            "complete": False,
+            "purged": True,
+            "message": f"{base} was above ₹{MAX_UNIVERSE_PRICE:.0f} cap — removed from feed instead of repaired.",
+        }
+
     missing = set(_feed_missing_fields(current))
     patched = []
     cooldown = max(0.1, float(REPAIR_COOLDOWN_SEC))
@@ -8124,8 +8311,10 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
         try:
             from data_feed import compute_rsi_from_closes
             import yfinance as yf
-            hist = await asyncio.to_thread(
-                lambda: yf.Ticker(f"{base}.NS").history(period="1mo")
+            yf_ticker = resolve_ns_ticker(base)
+            hist = (
+                await asyncio.to_thread(lambda: yf.Ticker(yf_ticker).history(period="1mo"))
+                if yf_ticker else None
             )
             if hist is not None and not hist.empty and "Close" in hist.columns:
                 closes = hist["Close"].dropna().values

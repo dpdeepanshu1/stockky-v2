@@ -75,7 +75,7 @@ class _Bucket:
     def __post_init__(self):
         self.tokens = self.capacity
 
-    def acquire(self, weight: float = 1.0, max_wait: float = 60.0) -> float:
+    def acquire(self, weight: float = 1.0, max_wait: float = 20.0) -> float:
         """Blocks until `weight` tokens are available (or max_wait elapses,
         to avoid an unbounded stall if a caller mis-sizes a batch). Returns
         the actual wait time in seconds."""
@@ -134,7 +134,7 @@ def _get_bucket(provider: str) -> _Bucket:
         return b
 
 
-def acquire(provider: str, weight: float = 1.0, max_wait: float = 60.0) -> float:
+def acquire(provider: str, weight: float = 1.0, max_wait: float = 20.0) -> float:
     """Block until it's safe to make `weight` upstream calls to `provider`.
     Call this immediately before the upstream request/batch. Returns the
     wait time incurred (0.0 if no throttling was needed)."""

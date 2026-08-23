@@ -558,6 +558,19 @@ SMART_SYMBOL_MAP = {
     "MOTHERSUMI": "MOTHERSON",
     "CADILAHC": "ZYDUSLIFE",
     "MINDTREE": "LTIM",
+    # ── Reconciled with api-gateway/symbol_aliases.py:SYMBOL_RENAMES ──────────
+    # These five were in api-gateway's rename table but NOT here, so a /quote
+    # asked for PVR or ADANITRANS directly (i.e. not routed through the gateway's
+    # resolver) queried the dead ticker and came back "symbol not found" — one of
+    # the concrete sources of that error class. api-gateway/symbol_aliases.py is
+    # the source of truth for NSE renames; this map is the market-data-service
+    # copy and the two MUST be updated together. Verified once: no key disagrees
+    # on its target between the two files.
+    "PVR": "PVRINOX",
+    "IBULHSGFIN": "SAMMAANCAP",
+    "L&TFH": "LTF",
+    "ADANITRANS": "ADANIENSOL",
+    "NSPIRA": "NSIL",
 }
 
 

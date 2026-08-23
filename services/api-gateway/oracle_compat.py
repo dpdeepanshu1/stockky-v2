@@ -218,7 +218,18 @@ def exec_ddl_safe(engine, sql: str, dialect: str) -> None:
     """Run one DDL statement in its own transaction, swallowing 'already exists'.
 
     Each DDL gets its own begin() so a benign ORA-00955 on one statement cannot
-    poison the others. Oracle auto-commits DDL anyway."""
+    poison the others. Oracle auto-commits DDL anyway.
+
+    Swallowed Oracle codes:
+      ORA-00955  name is already used by an existing object (table/index)
+      ORA-00957  duplicate column name
+      ORA-01408  such column list already indexed
+      ORA-02260  table can have only one primary key
+      ORA-02264  name already used by an existing constraint
+    The last two matter for tables that declare a NAMED table-level constraint
+    (e.g. hotpicks_static_feed's composite PRIMARY KEY), where a re-run can trip
+    on the constraint name rather than the table name.
+    """
     from sqlalchemy import text
 
     try:
@@ -227,7 +238,8 @@ def exec_ddl_safe(engine, sql: str, dialect: str) -> None:
     except Exception as e:  # noqa: BLE001
         m = str(e)
         if dialect == "oracle" and any(
-            code in m for code in ("ORA-00955", "ORA-01408", "ORA-00957")
+            code in m
+            for code in ("ORA-00955", "ORA-01408", "ORA-00957", "ORA-02260", "ORA-02264")
         ):
             return
         if "already exists" in m.lower():

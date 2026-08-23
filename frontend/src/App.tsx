@@ -15,6 +15,7 @@ import RateLimitDashboard from "./components/RateLimitDashboard";
 import Training from "./components/Training";
 import HotStocks from "./components/HotStocks";
 import SurpriseStocks from "./components/SurpriseStocks";
+import IpoTracker from "./components/IpoTracker";
 import DataFeed from "./components/DataFeed";
 import DataHealthAudit from "./components/DataHealthAudit";
 import Trades from "./components/Trades";
@@ -30,7 +31,11 @@ type ViewState =
   | { mode: "scan"; data: ScanResult }
   | { mode: "error"; message: string };
 
-type Tab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "surprise" | "datafeed" | "settings" | "watchlist";
+type Tab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "surprise" | "ipo" | "datafeed" | "settings" | "watchlist";
+
+// The five tabs the mobile bottom bar shows, in order. Explicit so that adding
+// a tab to navItems can never silently displace one of them.
+const MOBILE_BOTTOM_TABS: Tab[] = ["dashboard", "datafeed", "hot", "surprise", "training"];
 
 
 async function powerOffAll() {
@@ -928,6 +933,7 @@ export default function App() {
     { id: "datafeed", label: "Data Feed", group: "Navigate", hint: "tab", run: () => setTab("datafeed") },
     { id: "hot", label: "Stockky Hot Picks", group: "Navigate", hint: "tab", run: () => setTab("hot") },
     { id: "surprise", label: "Surprise Momentum", group: "Navigate", hint: "tab", run: () => setTab("surprise") },
+    { id: "ipo", label: "IPO Tracker", group: "Navigate", hint: "tab", keywords: "ipo listing new issue gmp", run: () => setTab("ipo") },
     { id: "train", label: "Training Lab", group: "Navigate", hint: "tab", run: () => setTab("training") },
 
     { id: "trades", label: "Trades", group: "Navigate", hint: "tab", run: () => setTab("trades") },
@@ -950,6 +956,7 @@ export default function App() {
     { id: "datafeed", label: "Data Feed", short: "Feed", icon: "🗄️" },
     { id: "hot", label: "Hot Picks", short: "Picks", icon: "🔥" },
     { id: "surprise", label: "Surprise", short: "Surp", icon: "⚡" },
+    { id: "ipo", label: "IPO Tracker", short: "IPO", icon: "🆕" },
 
     { id: "training", label: "Training", short: "Train", icon: "◈" },
     { id: "trades", label: "Trades", short: "Trade", icon: "⇄" },
@@ -1260,6 +1267,16 @@ export default function App() {
           <div className="page-terminal">
             <p className="dash-section-title">Surprise Momentum</p>
             <SurpriseStocks
+              onSelect={(s) => {
+                setTab("dashboard");
+                handleSearch(s);
+              }}
+            />
+          </div>
+        ) : tab === "ipo" ? (
+          <div className="page-terminal">
+            <p className="dash-section-title">IPO Tracker</p>
+            <IpoTracker
               onSelect={(s) => {
                 setTab("dashboard");
                 handleSearch(s);
@@ -1595,7 +1612,11 @@ export default function App() {
       
       {/* Mobile bottom navigation */}
       <nav className="terminal-bottom-nav md:hidden" aria-label="Primary">
-        {navItems.filter((i) => i.id !== "settings").slice(0, 5).map((item) => (
+        {/* Pinned to the same five tabs this bar has always shown. Adding
+            "ipo" to navItems would otherwise have silently pushed "training"
+            out of a blind .slice(0, 5); IPO Tracker is reachable from the
+            desktop rail, the ⋯ More drawer and the command palette. */}
+        {navItems.filter((i) => MOBILE_BOTTOM_TABS.includes(i.id)).map((item) => (
           <button
             key={item.id}
             type="button"

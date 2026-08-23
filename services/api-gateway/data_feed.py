@@ -873,12 +873,57 @@ HOT_JOB_KEY = "stockky:hot_job"
 HOT_RESULT_KEY = "stockky:hot_result_db"
 
 
+def _hot_job_recompute(j: dict) -> dict:
+    """Recompute elapsed_sec / estimated_remaining_sec from the wall clock.
+
+    Fixes the "remaining time is wrong" bug in the Hot Picks pipeline UI. Both
+    values used to be written only when hot_job_set() was called, but the scan
+    awaits stockky_hot_stocks() for minutes without touching the job, so
+    /stockky-hot/status kept replaying whatever the numbers were at the last
+    write — a countdown frozen mid-scan (typically "0s remaining" from the very
+    first progress write) that only jumped when the run finished.
+
+    Recomputing on every read makes the ETA a live projection: elapsed comes
+    from started_at, and remaining is elapsed/processed * outstanding. It is
+    deliberately conservative — unknown (None) rather than 0 while processed is
+    still 0, and clamped at >= 0 so a processed count that overshoots total can
+    never print a negative countdown.
+    """
+    if not isinstance(j, dict):
+        return j
+    if j.get("status") != "running" or not j.get("started_at"):
+        return j
+    try:
+        started = datetime.fromisoformat(str(j["started_at"]))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=IST)
+        elapsed = int((datetime.now(IST) - started).total_seconds())
+        j["elapsed_sec"] = max(elapsed, 0)
+        done = int(j.get("processed") or 0)
+        total = int(j.get("total") or 0)
+        if done > 0 and total > 0 and elapsed > 0:
+            remaining_units = max(total - done, 0)
+            j["estimated_remaining_sec"] = max(
+                int((elapsed / done) * remaining_units), 0
+            )
+        elif done <= 0:
+            # No symbol finished yet — an ETA here would be pure invention.
+            j["estimated_remaining_sec"] = None
+    except Exception:
+        pass
+    return j
+
+
 def hot_job_get(redis_get) -> dict:
     try:
         j = redis_get(HOT_JOB_KEY)
     except Exception:
         j = None
-    return j if isinstance(j, dict) else {
+    if isinstance(j, dict):
+        # Recompute on read so /stockky-hot/status is live even while the scan
+        # is inside a long await and nothing is writing to the job.
+        return _hot_job_recompute(dict(j))
+    return {
         "status": "idle",
         "processed": 0,
         "total": 0,
@@ -892,20 +937,12 @@ def hot_job_get(redis_get) -> dict:
 def hot_job_set(redis_set, redis_get, **kwargs) -> dict:
     j = hot_job_get(redis_get)
     j.update(kwargs)
-    if j.get("started_at") and j.get("status") == "running":
-        try:
-            started = datetime.fromisoformat(str(j["started_at"]))
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=IST)
-            j["elapsed_sec"] = int((datetime.now(IST) - started).total_seconds())
-            done = int(j.get("processed") or 0)
-            total = max(int(j.get("total") or 1), 1)
-            if done > 0:
-                j["estimated_remaining_sec"] = int((j["elapsed_sec"] / done) * (total - done))
-        except Exception:
-            pass
+    # Same projection as on read, applied after the caller's update so a fresh
+    # processed/total pair is reflected immediately.
+    _hot_job_recompute(j)
     j["updated_at"] = _now_iso()
-    # Durable: kv_cache routes stockky:hot_job → Neon
+    # Durable: kv_cache routes stockky:hot_job → Neon (or Oracle when ORACLE_DSN
+    # is set — the prefix routing is backend-agnostic).
     try:
         redis_set(HOT_JOB_KEY, j, ttl=7 * 86400)
     except Exception as e:

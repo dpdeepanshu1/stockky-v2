@@ -83,17 +83,6 @@ export default function SurpriseStocks({
   const [pmProgress, setPmProgress] = useState<PremarketProgress | null>(null);
   const [pmError, setPmError] = useState<string | null>(null);
 
-  // Recent IPO scanner (Surprise tab subsection)
-  const [ipoList, setIpoList] = useState<any[]>([]);
-  const [ipoGeneratedAt, setIpoGeneratedAt] = useState<string | null>(null);
-  const [ipoScanning, setIpoScanning] = useState(false);
-  const [ipoProgress, setIpoProgress] = useState<{ processed?: number; total?: number; message?: string } | null>(null);
-  const [ipoError, setIpoError] = useState<string | null>(null);
-  const [ipoAddOpen, setIpoAddOpen] = useState(false);
-  const [ipoForm, setIpoForm] = useState({ symbol: "", issue_price: "", listing_date: "", subscription_times: "", gmp: "" });
-  const [ipoAddBusy, setIpoAddBusy] = useState(false);
-  const ipoPollRef = useRef<number | null>(null);
-
   const [healthData, setHealthData] = useState<{
     health_score?: number;
     total_tracked?: number;
@@ -113,6 +102,7 @@ export default function SurpriseStocks({
   const [quoteFeedBusy, setQuoteFeedBusy] = useState(false);
   const [patchingSymbol, setPatchingSymbol] = useState<string | null>(null);
   const [batchRepairBusy, setBatchRepairBusy] = useState(false);
+  const [stopBusy, setStopBusy] = useState(false);
   const pollRef = useRef<number | null>(null);
   const scanAbort = useRef<AbortController | null>(null);
 
@@ -138,15 +128,6 @@ export default function SurpriseStocks({
     }
     const rl = (msg as any).rate_limits?.yfinance;
     if (rl) setYfRateLimit(rl);
-    const ipoJob = (msg as any).ipo_scan;
-    if (ipoJob) {
-      setIpoScanning(ipoJob.status === "running");
-      setIpoProgress(ipoJob);
-      if (ipoJob.status === "done") {
-        stopIpoPoll();
-        void fetchIpoList();
-      }
-    }
   }, []);
   const { connected: wsConnected } = useStockkyRealtime(onRealtimeMessage);
   const [yfRateLimit, setYfRateLimit] = useState<{ waiters?: number; throttle_events?: number } | null>(null);
@@ -212,90 +193,6 @@ export default function SurpriseStocks({
       stopPmPoll();
     }
   };
-
-  // ── Recent IPO scanner ──────────────────────────────────────────────
-  const stopIpoPoll = () => {
-    if (ipoPollRef.current != null) {
-      window.clearInterval(ipoPollRef.current);
-      ipoPollRef.current = null;
-    }
-  };
-
-  const fetchIpoList = useCallback(async () => {
-    try {
-      const res = await api.ipoList();
-      setIpoList(res?.results || []);
-      setIpoGeneratedAt(res?.generated_at || null);
-    } catch (e: any) {
-      console.warn("ipo list", e);
-    }
-  }, []);
-
-  const pollIpoStatus = useCallback(async () => {
-    try {
-      const st = await api.ipoScanStatus();
-      setIpoProgress(st);
-      const running = st?.status === "running";
-      setIpoScanning(running);
-      if (!running) {
-        stopIpoPoll();
-        await fetchIpoList();
-      }
-    } catch (e: any) {
-      console.warn("ipo status", e);
-    }
-  }, [fetchIpoList]);
-
-  const startIpoScan = async () => {
-    setIpoError(null);
-    setIpoScanning(true);
-    setIpoProgress({ message: "Starting IPO scan…" });
-    try {
-      await api.ipoScan();
-      stopIpoPoll();
-      ipoPollRef.current = window.setInterval(pollIpoStatus, 2000);
-      await pollIpoStatus();
-    } catch (e: any) {
-      setIpoScanning(false);
-      setIpoError(e?.message || "Failed to start IPO scan");
-      stopIpoPoll();
-    }
-  };
-
-  const openIpoSuggestion = (ipo: any) => {
-    if (!ipo?.buy_suggestion) return;
-    setSuggestions([ipo.buy_suggestion]);
-    setSniperError(null);
-    setSniperLoading(false);
-    setSniperOpen(true);
-  };
-
-  const submitIpoAdd = async () => {
-    if (!ipoForm.symbol.trim() || !ipoForm.issue_price || !ipoForm.listing_date) return;
-    setIpoAddBusy(true);
-    try {
-      await api.ipoAdd({
-        symbol: ipoForm.symbol.trim().toUpperCase(),
-        issue_price: Number(ipoForm.issue_price),
-        listing_date: ipoForm.listing_date,
-        subscription_times: ipoForm.subscription_times ? Number(ipoForm.subscription_times) : undefined,
-        gmp: ipoForm.gmp ? Number(ipoForm.gmp) : undefined,
-      });
-      setIpoForm({ symbol: "", issue_price: "", listing_date: "", subscription_times: "", gmp: "" });
-      setIpoAddOpen(false);
-      await startIpoScan();
-    } catch (e: any) {
-      setIpoError(e?.message || "Failed to add IPO");
-    } finally {
-      setIpoAddBusy(false);
-    }
-  };
-
-  useEffect(() => {
-    void fetchIpoList();
-    return () => stopIpoPoll();
-  }, [fetchIpoList]);
-
 
   const handleSearchBuysFromSurprise = async () => {
     setSniperOpen(true);
@@ -485,6 +382,31 @@ export default function SurpriseStocks({
 
   const pmPct = Math.min(100, Math.max(0, Number(pmProgress?.percent ?? 0)));
 
+  // Stop for the Surprise tab. /surprise/stop has existed on the backend but
+  // nothing here ever called it, so a long premarket/waterfall run could only be
+  // waited out. The same flag halts the premarket baseline job and the live
+  // scan's waterfall-fill loop, and anything already computed is kept — so this
+  // is "stop early with partial results", not "cancel and lose the work".
+  const stopSurprise = useCallback(async () => {
+    setStopBusy(true);
+    try {
+      const res = await api.surpriseStop();
+      if (res?.ok === false) setError(res?.error || "Stop request failed");
+      // Abort the SSE stream too: the flag stops the server-side loop, but the
+      // open stream would otherwise sit there until the backend closes it.
+      try {
+        scanAbort.current?.abort();
+      } catch {}
+      await pollPremarket();
+    } catch (err: any) {
+      setError(err?.message || "Stop request failed");
+    } finally {
+      setStopBusy(false);
+    }
+  }, [pollPremarket]);
+
+  const busy = loading || pmRunning || quoteFeedBusy;
+
   const fetchSurpriseHealth = useCallback(async () => {
     setHealthLoading(true);
     try {
@@ -597,6 +519,19 @@ export default function SurpriseStocks({
           </button>
           <button
             type="button"
+            onClick={() => void stopSurprise()}
+            disabled={!busy || stopBusy}
+            title={
+              busy
+                ? "Halt after the current symbol — results already collected are kept"
+                : "Nothing is running"
+            }
+            className="font-mono text-xs px-4 py-2 rounded-lg bg-rose-600/25 text-rose-200 border border-rose-500/40 hover:bg-rose-600/40 transition disabled:opacity-40"
+          >
+            {stopBusy ? "Stopping…" : "⏹ Stop"}
+          </button>
+          <button
+            type="button"
             onClick={handleSearchBuysFromSurprise}
             disabled={stocks.length === 0 || sniperLoading}
             className="font-mono text-xs bg-emerald-600/25 border border-emerald-500/50 text-emerald-200 rounded-lg px-3 py-2 transition hover:bg-emerald-600/35 disabled:opacity-50 shadow-lg shadow-emerald-900/20"
@@ -635,25 +570,6 @@ export default function SurpriseStocks({
           </p>
         </div>
       )}
-
-      {/* ── Recent IPO Listings ── */}
-      <IpoSection
-        ipoList={ipoList}
-        generatedAt={ipoGeneratedAt}
-        scanning={ipoScanning}
-        progress={ipoProgress}
-        error={ipoError}
-        wsConnected={wsConnected}
-        onScan={startIpoScan}
-        onOpenSuggestion={openIpoSuggestion}
-        onSelect={onSelect}
-        addOpen={ipoAddOpen}
-        setAddOpen={setIpoAddOpen}
-        form={ipoForm}
-        setForm={setIpoForm}
-        addBusy={ipoAddBusy}
-        onSubmitAdd={submitIpoAdd}
-      />
 
       {/* Live surprise scan pipeline (same idea as Market Scan) */}
       {(loading || (scanProg && scanProg.total > 0 && scanProg.percent < 100)) && (
@@ -911,208 +827,5 @@ export default function SurpriseStocks({
         onSelectSymbol={onSelect}
       />
     </div>
-  );
-}
-
-// ── Recent IPO Listings subsection ──────────────────────────────────────
-// Scores recently-listed (and listing-today) NSE IPOs for a short-term
-// buy/sell decision. "Prepare to Buy" / "Buy Now" rows open the same
-// BuySniperModal used everywhere else in this tab — the entry/target/stop
-// numbers come straight from ipo_scanner.py's buy_suggestion, computed
-// server-side so this stays fast even the moment a stock lists.
-function decisionBadgeClass(decision?: string): string {
-  const d = (decision || "").toUpperCase();
-  if (d === "BUY NOW") return "bg-signal-buy/20 text-signal-buy border-signal-buy/40";
-  if (d === "PREPARE TO BUY") return "bg-signal-prepare/20 text-signal-prepare border-signal-prepare/40";
-  if (d === "SELL") return "bg-rose-500/20 text-rose-300 border-rose-500/40";
-  if (d === "DO NOT BUY") return "bg-mist/10 text-mist/70 border-slate/50";
-  return "bg-amber-500/10 text-amber-300 border-amber-500/30"; // HOLD
-}
-
-function stageLabel(ipo: any): { text: string; tone: string } {
-  if (ipo.stage === "upcoming") return { text: `Lists ${ipo.listing_date}`, tone: "text-mist/60" };
-  if (ipo.stage === "pre_listing") return { text: "Lists today · pre-open", tone: "text-amber-300" };
-  if (ipo.stage === "listing_day") return { text: "Listing day · live", tone: "text-emerald-300" };
-  if (ipo.stage === "listed") return { text: `Day ${ipo.days_since_listing}`, tone: "text-mist/60" };
-  return { text: ipo.stage || "—", tone: "text-mist/50" };
-}
-
-function IpoSection({
-  ipoList,
-  generatedAt,
-  scanning,
-  progress,
-  error,
-  wsConnected,
-  onScan,
-  onOpenSuggestion,
-  onSelect,
-  addOpen,
-  setAddOpen,
-  form,
-  setForm,
-  addBusy,
-  onSubmitAdd,
-}: {
-  ipoList: any[];
-  generatedAt: string | null;
-  scanning: boolean;
-  progress: { processed?: number; total?: number; message?: string } | null;
-  error: string | null;
-  wsConnected: boolean;
-  onScan: () => void;
-  onOpenSuggestion: (ipo: any) => void;
-  onSelect?: (symbol: string) => void;
-  addOpen: boolean;
-  setAddOpen: (v: boolean) => void;
-  form: { symbol: string; issue_price: string; listing_date: string; subscription_times: string; gmp: string };
-  setForm: (v: any) => void;
-  addBusy: boolean;
-  onSubmitAdd: () => void;
-}) {
-  return (
-    <section className="mb-6 rounded-xl border border-slate/50 bg-ink/40 px-4 py-3">
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-        <div>
-          <p className="font-mono text-sm text-paper">🆕 Recent IPO Listings</p>
-          <p className="font-mono text-[10px] text-mist/50">
-            Short-term buy/sell read on recently-listed &amp; listing-today NSE IPOs
-            {generatedAt && <span> · updated {new Date(generatedAt).toLocaleTimeString("en-IN")}</span>}
-            {wsConnected && <span className="text-emerald-400/80 ml-1">● live</span>}
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => setAddOpen(!addOpen)}
-            className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-slate-500/20 border border-slate-400/40 text-paper hover:bg-slate-500/30"
-          >
-            + Add IPO
-          </button>
-          <button
-            type="button"
-            onClick={onScan}
-            disabled={scanning}
-            className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-violet-500/20 border border-violet-400/40 text-violet-100 hover:bg-violet-500/30 disabled:opacity-40"
-          >
-            {scanning ? "Scanning…" : "Scan IPOs"}
-          </button>
-        </div>
-      </div>
-
-      {addOpen && (
-        <div className="mb-3 rounded-lg border border-slate/50 bg-ink/60 p-3 grid grid-cols-2 gap-2">
-          <input
-            placeholder="Symbol (e.g. XYZLTD)"
-            value={form.symbol}
-            onChange={(e) => setForm({ ...form, symbol: e.target.value })}
-            className="col-span-2 bg-ink/60 border border-slate rounded-lg px-2 py-1.5 font-mono text-xs text-paper placeholder:text-mist/30 outline-none"
-          />
-          <input
-            placeholder="Issue price (₹)"
-            value={form.issue_price}
-            onChange={(e) => setForm({ ...form, issue_price: e.target.value })}
-            className="bg-ink/60 border border-slate rounded-lg px-2 py-1.5 font-mono text-xs text-paper placeholder:text-mist/30 outline-none"
-          />
-          <input
-            type="date"
-            value={form.listing_date}
-            onChange={(e) => setForm({ ...form, listing_date: e.target.value })}
-            className="bg-ink/60 border border-slate rounded-lg px-2 py-1.5 font-mono text-xs text-paper outline-none"
-          />
-          <input
-            placeholder="Subscription (x, optional)"
-            value={form.subscription_times}
-            onChange={(e) => setForm({ ...form, subscription_times: e.target.value })}
-            className="bg-ink/60 border border-slate rounded-lg px-2 py-1.5 font-mono text-xs text-paper placeholder:text-mist/30 outline-none"
-          />
-          <input
-            placeholder="GMP ₹ (optional)"
-            value={form.gmp}
-            onChange={(e) => setForm({ ...form, gmp: e.target.value })}
-            className="bg-ink/60 border border-slate rounded-lg px-2 py-1.5 font-mono text-xs text-paper placeholder:text-mist/30 outline-none"
-          />
-          <button
-            type="button"
-            onClick={onSubmitAdd}
-            disabled={addBusy || !form.symbol || !form.issue_price || !form.listing_date}
-            className="col-span-2 font-mono text-xs px-3 py-2 rounded-lg bg-emerald-500/20 border border-emerald-400/40 text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-40"
-          >
-            {addBusy ? "Adding…" : "Add & Scan"}
-          </button>
-        </div>
-      )}
-
-      {scanning && (
-        <p className="font-mono text-[10px] text-amber-300/80 mb-2">
-          {progress?.processed ?? 0}/{progress?.total ?? "—"} · {progress?.message || "…"}
-        </p>
-      )}
-      {error && <p className="font-mono text-[10px] text-rose-400 mb-2">{error}</p>}
-
-      {ipoList.length === 0 && !scanning ? (
-        <p className="font-mono text-[11px] text-mist/45 py-4 text-center">
-          No IPOs tracked yet — tap "Scan IPOs" for auto-discovery, or "+ Add IPO" if NSE's feed is blocked.
-        </p>
-      ) : (
-        <div className="space-y-2">
-          {ipoList.map((ipo) => {
-            const stage = stageLabel(ipo);
-            const gainPct = ipo.current_vs_issue_pct;
-            return (
-              <div
-                key={ipo.symbol}
-                className="rounded-lg border border-slate/50 bg-ink/50 px-3 py-2.5 flex flex-wrap items-center justify-between gap-2"
-              >
-                <div className="min-w-[140px]">
-                  <button
-                    type="button"
-                    onClick={() => onSelect?.(ipo.symbol)}
-                    className="font-mono text-xs text-paper hover:text-emerald-300 text-left"
-                  >
-                    {ipo.symbol}
-                  </button>
-                  <p className={`font-mono text-[10px] ${stage.tone}`}>{stage.text}</p>
-                </div>
-
-                <div className="font-mono text-[10px] text-mist/60 min-w-[110px]">
-                  <p>Issue ₹{ipo.issue_price}</p>
-                  {ipo.current_price != null && <p>CMP ₹{ipo.current_price}</p>}
-                </div>
-
-                {gainPct != null && (
-                  <p className={`font-mono text-xs min-w-[70px] ${gainPct >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                    {gainPct >= 0 ? "+" : ""}
-                    {gainPct.toFixed(1)}%
-                  </p>
-                )}
-
-                {ipo.ipo_score != null && (
-                  <p className="font-mono text-[10px] text-mist/50 min-w-[70px]">Score {Math.round(ipo.ipo_score)}/100</p>
-                )}
-
-                {ipo.pre_listing_advisory && (
-                  <p className="font-mono text-[10px] text-amber-300/80 max-w-[200px]">{ipo.pre_listing_advisory}</p>
-                )}
-
-                <span className={`font-mono text-[10px] px-2 py-1 rounded-md border ${decisionBadgeClass(ipo.decision)}`}>
-                  {ipo.decision || stage.text}
-                </span>
-
-                {ipo.buy_suggestion && (
-                  <button
-                    type="button"
-                    onClick={() => onOpenSuggestion(ipo)}
-                    className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-signal-buy/20 border border-signal-buy/40 text-signal-buy hover:bg-signal-buy/30"
-                  >
-                    {ipo.decision === "BUY NOW" ? "Buy Now →" : "Prepare to Buy →"}
-                  </button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </section>
   );
 }

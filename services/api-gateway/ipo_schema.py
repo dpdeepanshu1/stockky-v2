@@ -95,6 +95,48 @@ SELECT_COLUMNS = (
     "gmp, source, ipo_score, decision, buy_suggestion_json, updated_at"
 )
 
+# Declared VARCHAR2 byte budgets (Oracle counts BYTES by default, Postgres
+# counts characters) — used by adapt_rows() to clip instead of raising ORA-12899.
+_ORACLE_VARCHAR2_BYTES = {
+    "symbol": 30,
+    "company_name": 160,
+    "issue_start_date": 20,
+    "issue_end_date": 20,
+    "stage": 20,
+    "nse_status": 30,
+    "source": 20,
+    "decision": 30,
+}
+
+# Rows written by an earlier build used this sentinel for "listing date unknown".
+# ensure_ipo_schema() heals them to NULL on Oracle so readers never see a fake
+# 1900 listing. Kept as a constant so there is exactly one definition of the hack
+# being retired.
+_LEGACY_NULL_DATE_SENTINEL = "1900-01-01"
+
+# buy_suggestion_json is TEXT on Postgres and CLOB on Oracle, so the COLUMN has
+# no practical size limit on either backend. The BIND does, and only on Oracle:
+# python-oracledb sends a str as VARCHAR2 up to Oracle's extended-datatype limit
+# of 32767 bytes and escalates to DB_TYPE_LONG beyond it. A LONG bind is legal
+# only as a direct INSERT/UPDATE value into a LONG/CLOB column — NOT as a
+# projected expression in a subquery select list, which is exactly where our
+# MERGE ... USING (SELECT :buy_suggestion_json ... FROM dual) puts it. Oversized
+# suggestions would therefore raise ORA-01461 on the Oracle VM while writing
+# perfectly fine on Render, i.e. a data-dependent, backend-specific failure.
+# Clipping below the ceiling keeps the bind in VARCHAR2 territory; the TO_CLOB()
+# wrapper in upsert_sql() then makes the select-list type explicit.
+CLOB_BIND_MAX_BYTES = int(os.getenv("IPO_JSON_MAX_BYTES", "30000"))
+
+
+def _clip_utf8(value: str, max_bytes: int) -> str:
+    """Trim a str so its UTF-8 encoding fits max_bytes, never splitting a char."""
+    if value is None:
+        return value
+    b = value.encode("utf-8")
+    if len(b) <= max_bytes:
+        return value
+    return b[:max_bytes].decode("utf-8", "ignore")
+
 ROW_KEYS = (
     "symbol", "company_name", "issue_price", "listing_date",
     "listing_date_estimated", "issue_start_date", "issue_end_date", "stage",
@@ -196,7 +238,7 @@ def upsert_sql(dial: Optional[str] = None) -> str:
             USING (
                 SELECT :symbol AS symbol, :company_name AS company_name,
                        :issue_price AS issue_price,
-                       TO_DATE(:listing_date, 'YYYY-MM-DD') AS listing_date,
+                       TO_DATE(SUBSTR(:listing_date, 1, 10), 'YYYY-MM-DD') AS listing_date,
                        :listing_date_estimated AS listing_date_estimated,
                        :issue_start_date AS issue_start_date,
                        :issue_end_date AS issue_end_date,
@@ -204,7 +246,7 @@ def upsert_sql(dial: Optional[str] = None) -> str:
                        :subscription_times AS subscription_times, :gmp AS gmp,
                        :source AS source, :ipo_score AS ipo_score,
                        :decision AS decision,
-                       :buy_suggestion_json AS buy_suggestion_json
+                       TO_CLOB(:buy_suggestion_json) AS buy_suggestion_json
                 FROM dual
             ) s ON (d.symbol = s.symbol)
             WHEN MATCHED THEN UPDATE SET
@@ -266,8 +308,25 @@ def upsert_sql(dial: Optional[str] = None) -> str:
 
 
 def adapt_rows(rows: list, dial: Optional[str] = None) -> list:
-    """Oracle has no BOOLEAN (listing_date_estimated -> NUMBER(1)) and wants
-    NULL rather than '' for an empty listing_date; Postgres path untouched."""
+    """Make bind values safe for the target driver. Postgres path untouched.
+
+    Oracle-only adjustments:
+      * listing_date_estimated -> 1/0 (Oracle has no BOOLEAN; column is NUMBER(1)
+        and python-oracledb refuses to bind a Python bool into it).
+      * listing_date -> a real None when absent, so the MERGE's
+        TO_DATE(SUBSTR(:listing_date,1,10),'YYYY-MM-DD') evaluates to NULL.
+        This replaces an earlier '1900-01-01' sentinel: that wrote a real date
+        into the column, so "no listing date yet" became indistinguishable from
+        a genuine 1900 listing and every reader had to special-case it. Binding
+        None is safe here because the Oracle writer executes row-by-row (see
+        _ipo_db_upsert in ipo_scanner.py), so bind types are re-derived per
+        statement — with executemany, oracledb would size the bind from the
+        first row and a leading None would truncate later real dates.
+      * VARCHAR2 columns are byte-limited, not char-limited. One non-ASCII
+        character in a company name is 3 bytes in AL32UTF8, so a value that fits
+        Postgres VARCHAR(160) can still raise ORA-12899 and kill the row. Trim
+        to the declared byte budget instead of losing the whole IPO.
+    """
     dial = dial or dialect()
     out = []
     for r in rows:
@@ -276,12 +335,50 @@ def adapt_rows(rows: list, dial: Optional[str] = None) -> list:
             if "listing_date_estimated" in r2 and r2["listing_date_estimated"] is not None:
                 r2["listing_date_estimated"] = 1 if r2["listing_date_estimated"] else 0
             if not r2.get("listing_date"):
-                r2["listing_date"] = "1900-01-01"  # TO_DATE requires a value; filtered out on read if needed
+                r2["listing_date"] = None  # -> TO_DATE(NULL, ...) -> NULL
+            # Keep the CLOB bind under Oracle's 32767-byte VARCHAR2 bind ceiling
+            # so python-oracledb never escalates to DB_TYPE_LONG (see
+            # CLOB_BIND_MAX_BYTES). Oracle-branch only: the Postgres path is
+            # already-tested code and TEXT has no equivalent bind limit, so it
+            # stays byte-for-byte as it was.
+            bsj = r2.get("buy_suggestion_json")
+            if isinstance(bsj, str):
+                r2["buy_suggestion_json"] = _clip_utf8(bsj, CLOB_BIND_MAX_BYTES)
+            for col, limit in _ORACLE_VARCHAR2_BYTES.items():
+                v = r2.get(col)
+                if isinstance(v, str):
+                    r2[col] = _clip_utf8(v, limit)
         else:
             if "listing_date_estimated" not in r2:
                 r2["listing_date_estimated"] = False
         out.append(r2)
     return out
+
+
+def _heal_legacy_null_dates(eng) -> None:
+    """Oracle only: rewrite the retired '1900-01-01' sentinel to a real NULL.
+
+    Idempotent and best-effort — runs inside ensure_ipo_schema() (called before
+    every scan), so a backup-production DB that already has sentinel rows heals
+    itself on the next deploy without a manual migration. Never touches Postgres,
+    where NULL was always stored correctly.
+    """
+    try:
+        from sqlalchemy import text
+
+        with eng.begin() as conn:
+            res = conn.execute(
+                text(
+                    "UPDATE ipo_static_feed SET listing_date = NULL "
+                    "WHERE listing_date = TO_DATE(:sentinel, 'YYYY-MM-DD')"
+                ),
+                {"sentinel": _LEGACY_NULL_DATE_SENTINEL},
+            )
+            n = getattr(res, "rowcount", 0) or 0
+        if n:
+            logger.info("ipo_static_feed: healed %s legacy sentinel listing_date row(s)", n)
+    except Exception as e:  # table may not exist yet on a first-ever run
+        logger.debug("ipo listing_date heal skipped: %s", str(e)[:160])
 
 
 def ensure_ipo_schema() -> dict:
@@ -302,6 +399,7 @@ def ensure_ipo_schema() -> dict:
                 s = stmt.strip()
                 if s and _oc is not None:
                     _oc.exec_ddl_safe(eng, s, "oracle")
+            _heal_legacy_null_dates(eng)
         else:
             with eng.begin() as conn:
                 for stmt in ddl_statements(dial):

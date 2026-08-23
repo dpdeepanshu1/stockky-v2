@@ -1250,7 +1250,7 @@ export const api = {
       progress?: Record<string, unknown>;
     }>(`/surprise/premarket?background=true&force=${force}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, 1, 30000),
 
-  // Recent IPO scanner — Surprise tab subsection
+  // IPO Tracker — its own left-nav tab (was a Surprise subsection)
   ipoScan: () =>
     request<{ accepted?: boolean; already_running?: boolean; message?: string }>(
       "/surprise/ipo/scan?background=true", { method: "POST" }, 1, 30000
@@ -1263,9 +1263,30 @@ export const api = {
       total?: number;
       results_count?: number;
     }>("/surprise/ipo/status", undefined, 2, 15000),
-  ipoList: () =>
-    request<{ results: IpoAnalysis[]; generated_at?: string | null }>(
-      "/surprise/ipo/list", undefined, 2, 20000
+  // Halts an in-flight scan after the current symbol; partial results are kept.
+  ipoStop: () =>
+    request<{ ok?: boolean; stopping?: boolean; message?: string }>(
+      "/surprise/ipo/stop", { method: "POST" }, 1, 15000
+    ),
+  // Surprise tab Stop. The backend endpoint has existed for a while but nothing
+  // in the UI called it, so a long premarket/waterfall run could only be waited
+  // out. One flag halts BOTH the premarket baseline job and the live scan's
+  // waterfall-fill loop; work already done is kept, not discarded.
+  surpriseStop: () =>
+    request<{ ok?: boolean; message?: string; error?: string }>(
+      "/surprise/stop", { method: "POST" }, 1, 15000
+    ),
+  // displayDays narrows the stored scan to a window (30 = default, 365 = hard
+  // cap). Omitted -> backend default (IPO_CHECKER_DEFAULT_DISPLAY_DAYS).
+  ipoList: (displayDays?: number) =>
+    request<{
+      results: IpoAnalysis[];
+      generated_at?: string | null;
+      total_scanned?: number;
+      display_days?: number;
+    }>(
+      `/surprise/ipo/list${displayDays ? `?display_days=${displayDays}` : ""}`,
+      undefined, 2, 20000
     ),
   ipoAdd: (payload: {
     symbol: string;
@@ -1704,6 +1725,27 @@ export const api = {
     request<any>("/stockky-hot/result", undefined, 1, 30000),
   runStockkyHot: (force = true) =>
     request<any>(`/stockky-hot/run?force=${force}`, { method: "POST" }, 1, 30000),
+  // Halts an in-flight Hot Picks scan after the current symbol; whatever was
+  // already scored is persisted to hotpicks_static_feed, not thrown away.
+  stopStockkyHot: () =>
+    request<{ ok?: boolean; stopping?: boolean; message?: string }>(
+      "/stockky-hot/stop", { method: "POST" }, 1, 15000
+    ),
+  // Durable 24h table (hotpicks_static_feed) — paints instantly on tab open,
+  // survives restarts/redeploys, and is what makes a repeat visit free.
+  getStockkyHotTable: (hours = 24) =>
+    request<{
+      rows: any[];
+      count: number;
+      hours: number;
+      fresh: boolean;
+      age_hours?: number | null;
+      generated_at?: string | null;
+      backend?: string;
+    }>(`/stockky-hot/table?hours=${hours}`, undefined, 2, 20000),
+  // Hot Picks feed health (row counts, staleness, missing prices per section).
+  getStockkyHotAudit: () =>
+    request<any>("/stockky-hot/audit", undefined, 2, 20000),
 
   getStockkyHot: (force = false) =>
     request<{

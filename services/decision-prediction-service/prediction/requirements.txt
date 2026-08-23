@@ -4,8 +4,16 @@ httpx==0.27.0
 pandas==2.2.2
 ta==0.11.0
 numpy==1.26.4
-xgboost==2.0.3
-scikit-learn==1.5.0
+# Must match services/decision-prediction-service/training/requirements.txt
+# EXACTLY. The training service pickles model.pkl with scikit-learn 1.5.1 +
+# xgboost 2.1.1; this service unpickles it. When the pins disagree you get the
+# XGBoost "model was pickled with an older version" UserWarning and sklearn's
+# InconsistentVersionWarning for _SigmoidCalibration / CalibratedClassifierCV on
+# every cold start — and, worse, silently different predictions, because an
+# unpickled estimator whose attributes changed between versions is not
+# guaranteed to score the same way. Bump these two files together, never one.
+xgboost==2.1.1
+scikit-learn==1.5.1
 joblib==1.4.2
 yfinance==1.5.2
 pydantic==2.11.5

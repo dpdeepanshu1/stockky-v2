@@ -73,6 +73,14 @@ SYMBOL_RENAMES = {
     "SBILIFE": "SBILIFE",           # unchanged, present so alias table stays a superset
     "JETAIRWAYS": "JETAIRWAYS",     # kept explicit — DO NOT auto-map to KNOWN_NOT_ON_NSE
     "NSPIRA": "NSIL",               # placeholder pattern — replace as real changes surface
+    # ── Reconciled with market-data-service/main.py:SMART_SYMBOL_MAP ──────────
+    # Compact, space-stripped company forms that arrive from search boxes and
+    # news text. market-data-service already normalised these; this table did
+    # not, so the same input resolved differently depending on which service saw
+    # it first. Neither file disagreed on a target — these were simply absent.
+    "KFINTECHNOLOGIES": "KFINTECH",
+    "KPITTECHNOLOGIES": "KPITTECH",
+    "ONE97": "PAYTM",               # One97 Communications -> trades as PAYTM
 }
 
 # Symbols that are not NSE-listed at all (foreign tickers, indices sent by

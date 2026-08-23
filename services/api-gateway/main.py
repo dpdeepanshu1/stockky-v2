@@ -20,6 +20,22 @@ import httpx
 import yfinance as yf
 from symbol_aliases import resolve_ns_ticker
 
+# yfinance keeps a small timezone cache on disk. Left to its own defaults it
+# writes under $HOME/.cache, which on Render/containers is often read-only or
+# unset — and because several workers boot at once, they race on the same mkdir
+# and one of them logs "Failed to create TzCache folder ... File exists". Neither
+# is fatal (yfinance falls back to no cache) but it means every Ticker call
+# re-derives the exchange timezone, so it is pure repeated work AND log noise.
+# Creating the directory ourselves with exist_ok=True removes the race, and
+# pointing it at a writable path (env-overridable so the Oracle VM can use a
+# persistent disk instead of /tmp) makes the cache actually stick.
+try:
+    _TZ_CACHE_DIR = os.getenv("YF_TZ_CACHE_DIR", "/tmp/yfinance_tz")
+    os.makedirs(_TZ_CACHE_DIR, exist_ok=True)
+    yf.set_tz_cache_location(_TZ_CACHE_DIR)
+except Exception as _tz_e:  # pragma: no cover
+    logging.getLogger(__name__).debug("yfinance tz cache setup skipped: %s", _tz_e)
+
 try:
     import rate_limiter as _rl
     _rl.patch_yfinance()
@@ -892,7 +908,13 @@ def _get_news_mentioned_symbols() -> List[str]:
                 continue
         text = " ".join(text_parts).upper()
         # Prefer longer tickers first to avoid short false positives (e.g. ITC inside words is ok as whole token)
-        candidates = sorted(set(_get_all_nse_securities()[:400] + _get_nifty_indices()), key=len, reverse=True)
+        # Cover the full scan universe (was a hardcoded 400, stale since
+        # SCAN_UNIVERSE_TARGET went 300 -> 500) or a news mention of a symbol in
+        # slot 401-500 never becomes a momentum mover.
+        candidates = sorted(
+            set(_get_all_nse_securities()[:max(400, SCAN_UNIVERSE_TARGET)] + _get_nifty_indices()),
+            key=len, reverse=True,
+        )
         for sym in candidates:
             if len(sym) < 2:
                 continue
@@ -1369,7 +1391,11 @@ def _get_all_known_symbols() -> Set[str]:
         return set(cached)
     combined = set()
     try:
-        combined.update(_get_all_nse_securities()[:300])
+        # Must cover at least the whole scan universe: this set is what symbol
+        # resolution / search treats as "a real symbol", so a hardcoded 300 here
+        # after SCAN_UNIVERSE_TARGET was raised to 500 meant symbols in slots
+        # 301-500 were scanned by the scanner but rejected as unknown by lookup.
+        combined.update(_get_all_nse_securities()[:max(300, SCAN_UNIVERSE_TARGET)])
     except:
         pass
     combined.update(_get_nifty_indices())
@@ -5712,6 +5738,32 @@ async def _warm_upstream_services(client: Optional[httpx.AsyncClient] = None) ->
                 continue
 
 
+# ── Hot Picks durable store bridge (hotpicks_static_feed) ───────────────────
+# Lazy + never fatal, same convention as the ipo_scanner imports below: if
+# hotpicks_store.py or its DB is unavailable the scan still runs and still
+# serves from kv_cache — it just loses the durable 24h table. Keeping these as
+# module-level shims means the call sites inside stockky_hot_stocks() stay
+# readable and the gateway can never fail to boot over an optional feature.
+def hotpicks_stop_requested() -> bool:
+    """True when the user has asked the running Hot Picks scan to stop."""
+    try:
+        from hotpicks_store import hotpicks_stop_requested as _f
+
+        return bool(_f())
+    except Exception:
+        return False
+
+
+def hotpicks_db_upsert(payload) -> int:
+    """Persist a Hot Picks payload to hotpicks_static_feed; 0 if unavailable."""
+    try:
+        from hotpicks_store import hotpicks_db_upsert as _f
+
+        return int(_f(payload) or 0)
+    except Exception:
+        return 0
+
+
 async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = None, progress_cb=None):
     """Curated list for Stockky 🔥 Stocks (internal; HTTP via /stockky-hot).
 
@@ -5805,11 +5857,28 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
     news_driven: list = []
     results_driven: list = []
     bulk_insider_driven: list = []
+    # Set when the user hits Stop mid-scan: whatever was already scored is kept
+    # and persisted, the payload is marked partial, and its cache TTL is cut
+    # short so a partial result never masquerades as a full one for hours.
+    stopped_early = False
+    processed_symbols = 0
 
     client = _get_http_client()  # shared keepalive pool
 
     if True:
         for i_sym, sym in enumerate(universe):
+            # Stop requested? Break BEFORE doing this symbol's network work, so
+            # Stop feels immediate rather than one full symbol behind.
+            try:
+                if hotpicks_stop_requested():
+                    stopped_early = True
+                    logger.info(
+                        "stockky-hot stop requested at %s/%s — keeping partial results",
+                        i_sym, len(universe),
+                    )
+                    break
+            except Exception:
+                pass
             # Between batches: warm upstreams so free-tier stays awake
             if i_sym > 0 and i_sym % batch_size == 0:
                 logger.info("stockky-hot batch boundary %s/%s — warming services", i_sym, len(universe))
@@ -5828,6 +5897,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                         pass
                 except Exception:
                     pass
+            processed_symbols = i_sym + 1
             try:
                 base = sym.replace(".NS", "").replace(".BO", "").upper()
                 news_data = None
@@ -6007,21 +6077,43 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
         "cache_ttl_seconds": _hot_stocks_ttl(),
         "market_phase": _market_session_phase_ist(),
         "fingerprint": "",
+        "partial": stopped_early,
+        "stopped_early": stopped_early,
+        "processed_symbols": processed_symbols,
         "quality_note": (
             "Ranked by scan BUY/PREPARE, bulk/insider, results first; weak news-only names dropped."
         ),
     }
     payload["fingerprint"] = _hot_payload_fingerprint(payload)
     ttl = int(payload["cache_ttl_seconds"])
+    if stopped_early:
+        # A user-stopped scan is incomplete by definition — keep it just long
+        # enough to paint the tab, then let the next call do a real scan.
+        ttl = min(ttl, int(os.getenv("HOT_PARTIAL_CACHE_TTL", "300")))
+        payload["cache_ttl_seconds"] = ttl
+        payload["quality_note"] = (
+            f"PARTIAL — scan stopped after {processed_symbols}/{len(universe)} symbols. "
+            "Rows shown were fully scored; run again for the rest."
+        )
     _redis_set(HOT_STOCKS_CACHE_KEY, payload, ttl=ttl)
+    # Durable 24h table (Neon on Render, Oracle ADB on the Oracle VM) — this is
+    # what lets the tab paint instantly next time and what survives a redeploy
+    # or a kv TTL expiry. Best-effort: never let a DB hiccup fail the scan.
+    try:
+        stored = hotpicks_db_upsert(payload)
+        if stored:
+            logger.info("stockky-hot persisted %s row(s) to hotpicks_static_feed", stored)
+    except Exception as e:
+        logger.debug("hotpicks persist skipped: %s", e)
     logger.info(
-        "stockky-hot refreshed: news=%s results=%s bulk=%s scan_seed=%s ttl=%ss phase=%s",
+        "stockky-hot refreshed: news=%s results=%s bulk=%s scan_seed=%s ttl=%ss phase=%s partial=%s",
         len(payload["news_driven"]),
         len(payload["results_driven"]),
         len(payload["bulk_insider_driven"]),
         payload["scan_seed_count"],
         ttl,
         payload["market_phase"],
+        stopped_early,
     )
     return payload
 
@@ -6092,10 +6184,17 @@ async def api_surprise_repair_batch(limit: int = 15, symbol: str = None):
 @app.get("/api/surprise/audit")
 @app.get("/surprise/audit")
 async def api_surprise_audit():
-    """Premarket / surprise feed health for the Surprise dashboard."""
+    """Premarket / surprise feed health for the Surprise dashboard.
+
+    Memoised for AUDIT_TTL_SEC — the panel refetches on every tab mount and this
+    walks the whole tracked set, which is the bulk of the tab's load time. See
+    _audit_cache_get for why a short TTL is safe here."""
+    cached = _audit_cache_get("surprise_audit")
+    if cached is not None:
+        return cached
     try:
         from surprise_scanner import audit_surprise_feed
-        return audit_surprise_feed()
+        return _audit_cache_put("surprise_audit", audit_surprise_feed())
     except Exception as e:
         logger.exception("surprise audit: %s", e)
         return {
@@ -7945,15 +8044,60 @@ def data_feed_status():
 
 _REQUIRED_FEED_FIELDS = ("price", "rsi", "pe_ratio", "roce", "sentiment_score")
 
+# ── Short-TTL memo for the DB-health audit endpoints ─────────────────────────
+# Both /surprise/audit and /data-feed/audit-missing walk every tracked symbol and
+# check five fields on each, and both are refetched every single time their tab
+# is mounted — which is why those tabs felt slow to open even when nothing had
+# changed. A 20s memo is safe because the numbers only move when a scan or feed
+# job writes, and those take minutes; the response carries "cached": true so the
+# UI can tell a memoised answer from a fresh one, and any Refresh button that
+# passes cache=False still forces a real recount.
+AUDIT_TTL_SEC = float(os.getenv("AUDIT_TTL_SEC", "20"))
+_AUDIT_MEMO: dict = {}
+_AUDIT_MEMO_LOCK = __import__("threading").Lock()
+
+
+def _audit_cache_get(key: str):
+    """Return the memoised payload for `key`, or None when stale/absent."""
+    if AUDIT_TTL_SEC <= 0:
+        return None
+    with _AUDIT_MEMO_LOCK:
+        hit = _AUDIT_MEMO.get(key)
+    if not hit:
+        return None
+    ts, payload = hit
+    if time.time() - ts >= AUDIT_TTL_SEC:
+        return None
+    if isinstance(payload, dict):
+        return {**payload, "cached": True, "cache_age_sec": round(time.time() - ts, 1)}
+    return payload
+
+
+def _audit_cache_put(key: str, payload):
+    with _AUDIT_MEMO_LOCK:
+        _AUDIT_MEMO[key] = (time.time(), payload)
+    if isinstance(payload, dict):
+        return {**payload, "cached": False}
+    return payload
+
+
 @app.get("/api/feed/audit-missing")
 @app.get("/data-feed/audit-missing")
 @app.get("/api/data-feed/audit-missing")
-async def audit_missing_feed_data(limit: int = 500):
+async def audit_missing_feed_data(limit: int = 500, cache: bool = True):
     """
     Audits data-feed records to calculate the exact DB Health Score.
     MUST be registered BEFORE /api/feed/{symbol} so 'audit-missing' is not
     captured as a symbol path (silent 404 / null → UI 0% and dashes).
+
+    Memoised for AUDIT_TTL_SEC (pass cache=false to force a recount) — this walks
+    every tracked symbol checking five fields each, and the DB Health tab
+    refetches it on every mount, which was most of that tab's load time.
     """
+    if cache:
+        hit = _audit_cache_get(f"feed_audit:{limit}")
+        if hit is not None:
+            return hit
     store = _feed_store()
     symbols: list = []
     try:
@@ -8023,7 +8167,7 @@ async def audit_missing_feed_data(limit: int = 500):
 
     health = round((complete_count / max(total, 1)) * 100, 1) if total > 0 else 0.0
 
-    return {
+    return _audit_cache_put(f"feed_audit:{limit}", {
         "ok": True,
         "total_universe": total,
         "fully_populated": complete_count,
@@ -8041,7 +8185,7 @@ async def audit_missing_feed_data(limit: int = 500):
                 + (f" · {len(over_cap)} over ₹{MAX_UNIVERSE_PRICE:.0f} cap (use Purge)" if over_cap else "")
             )
         ),
-    }
+    })
 
 
 @app.post("/api/feed/purge-over-cap")
@@ -9264,45 +9408,104 @@ def stockky_hot_result():
 
 @app.post("/stockky-hot/run")
 async def stockky_hot_run(background_tasks: BackgroundTasks, force: bool = True):
-    """Start Hot Picks search with progress (pipeline UI polls /stockky-hot/status)."""
+    """Start Hot Picks search with REAL progress (pipeline UI polls /stockky-hot/status).
+
+    Progress used to be faked — total was hard-coded to 100 and processed jumped
+    0 → 10 → 30 → (long silent await) → 90 → 100. Since the ETA is derived from
+    elapsed/processed, a fabricated processed=10 two seconds in projected "a few
+    seconds remaining" for a scan that takes minutes, and then nothing moved at
+    all while stockky_hot_stocks() ran. Now total is the real universe size and
+    processed is the real symbol index, reported from stockky_hot_stocks's
+    existing progress_cb hook, so the countdown means something.
+    """
     job = hot_job_get(_redis_get)
     if job.get("status") == "running":
         return {"ok": True, "already_running": True, **job}
+
+    # Fresh run: drop any stop request left over from a previous scan, and make
+    # sure the durable table exists before we have rows to write into it.
+    try:
+        from hotpicks_store import clear_hotpicks_stop, ensure_hotpicks_schema
+
+        clear_hotpicks_stop()
+        ensure_hotpicks_schema()
+    except Exception as e:
+        logger.debug("hotpicks pre-run setup skipped: %s", e)
 
     hot_job_set(
         _redis_set,
         _redis_get,
         status="running",
         processed=0,
-        total=100,
+        total=0,
         started_at=datetime.now(IST).isoformat(),
         message="Building catalyst universe…",
         estimated_remaining_sec=None,
+        finished_at=None,
+        current_symbol=None,
+        stopped=False,
     )
 
     async def _run_hot():
+        # Throttle: the scan can call back hundreds of times and each write is a
+        # durable kv write. One write per symbol is fine for a ~50-symbol
+        # universe, but cap it so a large universe cannot hammer the DB.
+        state = {"last_write": 0.0, "last_processed": -1}
+        min_interval = float(os.getenv("HOT_PROGRESS_MIN_INTERVAL_SEC", "1.0"))
+
+        def _on_symbol(processed: int, total: int, symbol: str, batch: int = 0):
+            """Called by stockky_hot_stocks before each symbol."""
+            try:
+                now = time.time()
+                is_first = state["last_processed"] < 0
+                is_last = total and processed >= total - 1
+                if not is_first and not is_last and (now - state["last_write"]) < min_interval:
+                    return
+                state["last_write"] = now
+                state["last_processed"] = processed
+                hot_job_set(
+                    _redis_set,
+                    _redis_get,
+                    processed=int(processed),
+                    total=int(total or 0),
+                    current_symbol=str(symbol),
+                    message=f"Scanning {symbol} ({processed + 1}/{total})",
+                )
+            except Exception:
+                pass
+
         try:
-            hot_job_set(_redis_set, _redis_get, message="Scanning news / events / bulk…", processed=10)
             # Clear short cache so force refresh
             try:
                 if _redis:
                     _redis.delete(HOT_STOCKS_CACHE_KEY)
             except Exception:
                 pass
-            hot_job_set(_redis_set, _redis_get, processed=30, message="Evaluating catalyst signals…")
-            result = await stockky_hot_stocks(force=True)
-            hot_job_set(_redis_set, _redis_get, processed=90, message="Ranking & saving…")
+            result = await stockky_hot_stocks(force=True, progress_cb=_on_symbol)
             ts = datetime.now(IST).isoformat()
+            was_stopped = bool(isinstance(result, dict) and result.get("stopped_early"))
+            total = int((result or {}).get("universe_size") or 0)
+            done = int((result or {}).get("processed_symbols") or total)
             if isinstance(result, dict):
                 result = {**result, "generated_at": result.get("generated_at") or ts, "persisted_at": ts}
                 _redis_set(HOT_RESULT_KEY, result, ttl=20 * 3600)
+            picks = sum(
+                len((result or {}).get(k) or [])
+                for k in ("news_driven", "results_driven", "bulk_insider_driven")
+            )
             hot_job_set(
                 _redis_set,
                 _redis_get,
-                status="done",
-                processed=100,
-                total=100,
-                message=f"Hot Picks ready at {ts}",
+                status="stopped" if was_stopped else "done",
+                processed=done,
+                total=total or done,
+                current_symbol=None,
+                stopped=was_stopped,
+                message=(
+                    f"Stopped after {done}/{total} symbols — {picks} pick(s) kept"
+                    if was_stopped
+                    else f"Hot Picks ready at {ts} — {picks} pick(s)"
+                ),
                 finished_at=ts,
                 estimated_remaining_sec=0,
             )
@@ -9312,11 +9515,91 @@ async def stockky_hot_run(background_tasks: BackgroundTasks, force: bool = True)
                 _redis_set,
                 _redis_get,
                 status="error",
+                current_symbol=None,
+                estimated_remaining_sec=None,
                 message=str(e)[:200],
             )
+        finally:
+            # Never leave the flag set — the next run must not stop instantly.
+            try:
+                from hotpicks_store import clear_hotpicks_stop
+
+                clear_hotpicks_stop()
+            except Exception:
+                pass
 
     background_tasks.add_task(_run_hot)
     return {"ok": True, "started": True, "message": "Hot Picks search started"}
+
+
+@app.post("/stockky-hot/stop")
+def stockky_hot_stop():
+    """Halt the running Hot Picks scan after the current symbol.
+
+    Symbols already scored are ranked, cached and written to
+    hotpicks_static_feed, so a stop is a "keep what you have", not a discard —
+    same semantics as /surprise/ipo/stop and the data-feed repair stop.
+    """
+    try:
+        from hotpicks_store import request_hotpicks_stop
+
+        request_hotpicks_stop()
+    except Exception as e:
+        return {"ok": False, "detail": f"stop unavailable: {str(e)[:160]}"}
+    job = hot_job_get(_redis_get)
+    if job.get("status") != "running":
+        return {"ok": True, "stopping": False, "message": "No Hot Picks scan is running", **job}
+    hot_job_set(
+        _redis_set,
+        _redis_get,
+        message="Stop requested — finishing current symbol…",
+        stop_requested=True,
+    )
+    return {"ok": True, "stopping": True, "message": "Stopping after the current symbol"}
+
+
+@app.get("/stockky-hot/table")
+def stockky_hot_table(hours: int = 24):
+    """Hot Picks from the durable table (default: last 24h).
+
+    Serves hotpicks_static_feed directly — Neon on Render, Oracle ADB on the
+    Oracle VM, identical JSON either way. This is what the tab paints instantly
+    on open, before (or instead of) triggering a scan.
+    """
+    try:
+        from hotpicks_store import hotpicks_db_payload, HOTPICKS_TABLE_HOURS
+    except Exception as e:
+        return {"ok": False, "rows": [], "count": 0, "hours": hours, "fresh": False,
+                "detail": f"hotpicks store unavailable: {str(e)[:160]}"}
+    try:
+        window = int(hours or HOTPICKS_TABLE_HOURS)
+    except Exception:
+        window = 24
+    window = max(1, min(window, 24 * 30))
+    payload = hotpicks_db_payload(window)
+    if not payload:
+        return {
+            "ok": True,
+            "rows": [],
+            "count": 0,
+            "hours": window,
+            "fresh": False,
+            "detail": "No stored Hot Picks in this window yet — run a scan.",
+        }
+    rows = []
+    for section in ("news_driven", "results_driven", "bulk_insider_driven"):
+        rows.extend(payload.get(section) or [])
+    return {"ok": True, **payload, "rows": rows}
+
+
+@app.get("/stockky-hot/audit")
+def stockky_hot_audit():
+    """Hot Picks feed health: backend in use, row counts, staleness, gaps."""
+    try:
+        from hotpicks_store import hotpicks_audit
+    except Exception as e:
+        return {"ok": False, "issues": [f"hotpicks store unavailable: {str(e)[:160]}"]}
+    return hotpicks_audit()
 
 
 

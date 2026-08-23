@@ -104,6 +104,34 @@ NSE_HEADERS = {
     "Referer": "https://www.nseindia.com/market-data/all-upcoming-issues-ipo",
 }
 
+# Headers for the two HTML *navigation* requests that bootstrap the cookie jar.
+#
+# This is the fix for the `GET https://www.nseindia.com "HTTP/1.1 403 Forbidden"`
+# line in the logs. The bootstrap was reusing NSE_HEADERS, which declares
+# `Accept: application/json` — but www.nseindia.com is an HTML document, and
+# NSE's WAF rejects a browser-shaped request that claims to accept only JSON.
+# The 403 was NOT harmless: it meant the homepage never issued the real
+# nsit/nseappid session cookies, so the subsequent /api/ calls went out with a
+# weak anonymous cookie set. Those still return 200 for a while, but NSE
+# rate-limits and blocks them far more aggressively — a plausible contributor to
+# the intermittent "not found"/empty-payload behaviour. A real browser sends an
+# HTML Accept plus Sec-Fetch-* navigation hints, so we do the same here and keep
+# the JSON Accept exclusively for the /api/ calls.
+NSE_BOOTSTRAP_HEADERS = {
+    "User-Agent": NSE_HEADERS["User-Agent"],
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+}
+
 IPO_LIST_KEY = "stockky:ipo:list"          # analyzed results (durable, short TTL)
 IPO_MANUAL_KEY = "stockky:ipo:manual"      # user/admin-added IPO entries (durable, long TTL)
 IPO_JOB_KEY = "stockky:ipo:job"            # scan progress
@@ -348,10 +376,44 @@ def _normalize_ipoalerts_row(row: Dict[str, Any], status: str) -> Optional[Dict[
 
 
 def _nse_session() -> httpx.Client:
+    """Open a client that has actually completed NSE's cookie handshake.
+
+    Root cause of the '403 Forbidden' seen on the bootstrap GET: the client was
+    constructed with headers=NSE_HEADERS, which sets Accept: application/json,
+    and then used to request https://www.nseindia.com — an HTML document. NSE
+    sits behind an Akamai WAF that treats "JSON Accept on a document URL, no
+    Sec-Fetch-* navigation hints" as a bot signature and answers 403. A 403 body
+    still carries a Set-Cookie, so nothing raised and nothing looked broken —
+    but the cookies handed back are the weak anonymous pair, not the real
+    nsit/nseappid pair a browser gets. NSE rate-limits that anonymous session far
+    harder, which shows up downstream as intermittently empty /api payloads and
+    'symbol not found' noise. Sending browser-shaped navigation headers for the
+    two HTML hops (and keeping the JSON Accept for the /api/ calls afterwards)
+    is the actual fix, not a cosmetic one.
+    """
     c = httpx.Client(timeout=20, headers=NSE_HEADERS, follow_redirects=True)
     try:
-        c.get("https://www.nseindia.com")
-        c.get("https://www.nseindia.com/market-data/all-upcoming-issues-ipo")
+        # Per-request headers override the client defaults for these two hops only.
+        r1 = c.get("https://www.nseindia.com", headers=NSE_BOOTSTRAP_HEADERS)
+        r2 = c.get(
+            "https://www.nseindia.com/market-data/all-upcoming-issues-ipo",
+            headers=NSE_BOOTSTRAP_HEADERS,
+        )
+        names = {k for k in c.cookies.keys()}
+        if not names:
+            logger.warning(
+                "nse bootstrap got no cookies (status %s/%s) — /api calls will run "
+                "on an anonymous session and may return empty payloads",
+                r1.status_code, r2.status_code,
+            )
+        elif not (names & {"nsit", "nseappid"}):
+            logger.info(
+                "nse bootstrap cookies present but weak (%s; status %s/%s) — "
+                "payloads may be rate-limited",
+                ",".join(sorted(names))[:120], r1.status_code, r2.status_code,
+            )
+        else:
+            logger.debug("nse bootstrap ok (%s)", ",".join(sorted(names))[:120])
     except Exception as e:
         logger.debug("nse session bootstrap: %s", e)
     return c

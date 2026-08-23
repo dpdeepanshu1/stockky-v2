@@ -6267,6 +6267,7 @@ class IpoAddRequest(BaseModel):
     listing_date: str  # YYYY-MM-DD
     company_name: Optional[str] = None
     subscription_times: Optional[float] = None
+    gmp: Optional[float] = None
 
 
 @app.post("/surprise/ipo/add")
@@ -6283,6 +6284,7 @@ async def api_ipo_add(body: IpoAddRequest):
         listing_date=body.listing_date,
         company_name=body.company_name,
         subscription_times=body.subscription_times,
+        gmp=body.gmp,
     )
     return {"accepted": True, "entry": entry}
 
@@ -8280,8 +8282,32 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                     px = _safe_float(cleaned.get(k))
                     if px > 0:
                         if px > MAX_UNIVERSE_PRICE:
-                            logger.info("repair price skip %s — ₹%.2f > cap", base, px)
-                            break
+                            # This symbol was fed with "price" missing (not
+                            # yet known to be over cap), and only now, on
+                            # fetching a live quote, turns out to be over
+                            # cap. Without purging here, every future
+                            # repair cycle would burn another quote call
+                            # re-discovering the exact same fact forever —
+                            # the "price still missing after quote attempt"
+                            # warning below used to fire every single time
+                            # for a stock that will never legitimately have
+                            # a storable price. Purge it now instead.
+                            logger.info(
+                                "repair price over cap %s — ₹%.2f > cap, purging from feed", base, px
+                            )
+                            try:
+                                store.delete_symbol(base)
+                            except Exception as e:
+                                logger.warning("repair: purge over-cap %s failed: %s", base, e)
+                            return {
+                                "symbol": base,
+                                "patched_fields": patched,
+                                "still_missing": [],
+                                "price": px,
+                                "complete": False,
+                                "purged": True,
+                                "message": f"{base} is above ₹{MAX_UNIVERSE_PRICE:.0f} cap — removed from feed.",
+                            }
                         current["price"] = px
                         current.setdefault("close", px)
                         current.setdefault("cmp", px)

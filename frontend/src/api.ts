@@ -197,6 +197,9 @@ export interface IpoAnalysis {
   score_breakdown?: Record<string, number>;
   decision?: "BUY NOW" | "PREPARE TO BUY" | "HOLD" | "DO NOT BUY" | "SELL";
   buy_suggestion?: IpoBuySuggestion | null;
+  gmp?: number | null;
+  gmp_pct_of_issue?: number;
+  fundamentals_snapshot?: Record<string, number | null>;
   error?: string;
 }
 
@@ -1270,6 +1273,7 @@ export const api = {
     listing_date: string;
     company_name?: string;
     subscription_times?: number;
+    gmp?: number;
   }) =>
     request<{ accepted?: boolean; entry?: Record<string, unknown> }>(
       "/surprise/ipo/add",

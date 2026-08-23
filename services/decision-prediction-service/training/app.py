@@ -245,6 +245,19 @@ def acquire_lock():
         return False
 
 def release_lock():
+    # Stop train.py's lock_checker background thread (see that module —
+    # it polls every 2s and logs "Lock file missing – aborting training"
+    # the moment the file disappears) *before* removing the file below.
+    # Without this, every normal, successful training completion also
+    # logged a spurious "aborting training" warning within ~2s of
+    # finishing — harmless (abort_event is cleared again at the start of
+    # the next run, so it never actually cancels anything), but confusing
+    # in the logs and indistinguishable from a real abort at a glance.
+    try:
+        from train import abort_event
+        abort_event.set()
+    except Exception:
+        pass
     if os.path.exists(LOCK_FILE):
         try:
             os.remove(LOCK_FILE)
@@ -322,6 +335,31 @@ def _db_connection_info():
     return info
 
 
+def _load_portable_json(val, default):
+    """Read a PortableJSON column value (see models.py's PortableJSON
+    docstring) safely regardless of backend.
+
+    PortableJSON stores CLOB text + manual json.dumps/loads on Oracle, but
+    passes values through untouched as native JSON on Postgres/SQLite — so
+    on Postgres (the deployed backend) `val` here is ALREADY a dict/list,
+    not a JSON string. Calling json.loads() on it unconditionally (the
+    previous code at both call sites) raised "the JSON object must be str,
+    bytes or bytearray, not dict" on every single status/summary read.
+    Only parse when it's actually still serialized text.
+    """
+    if val is None:
+        return default
+    if isinstance(val, (dict, list)):
+        return val
+    if isinstance(val, (str, bytes, bytearray)):
+        try:
+            return json.loads(val)
+        except (TypeError, ValueError) as e:
+            logger.warning("could not parse stored JSON (%s): %s", type(val).__name__, e)
+            return default
+    return default
+
+
 def get_training_status():
     status = {
         'service_url': SERVICE_URL,
@@ -346,12 +384,9 @@ def get_training_status():
             status['last_training'] = latest_run.run_timestamp.isoformat()
             status['dataset_size'] = latest_run.dataset_size or 0
             status['num_symbols'] = latest_run.num_symbols or 0
-            status['metrics'] = convert_numpy(
-                json.loads(latest_run.walk_forward_metrics) if latest_run.walk_forward_metrics else {}
-            )
-            status['fold_details'] = convert_numpy(
-                json.loads(latest_run.fold_details) if latest_run.fold_details else []
-            )
+
+            status['metrics'] = convert_numpy(_load_portable_json(latest_run.walk_forward_metrics, {}))
+            status['fold_details'] = convert_numpy(_load_portable_json(latest_run.fold_details, []))
             status['model_version'] = latest_run.model_version
         # Live win-rate from evaluated prediction snapshots (closed-loop feedback)
         try:
@@ -436,7 +471,7 @@ def get_summary_metrics():
         latest_run = db.query(TrainingRun).order_by(TrainingRun.run_timestamp.desc()).first()
         if not latest_run:
             return {"error": "No training runs found"}
-        metrics = json.loads(latest_run.walk_forward_metrics) if latest_run.walk_forward_metrics else {}
+        metrics = _load_portable_json(latest_run.walk_forward_metrics, {})
         return {
             "latest_run": {
                 "timestamp": latest_run.run_timestamp.isoformat(),

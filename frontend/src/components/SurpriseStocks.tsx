@@ -90,7 +90,7 @@ export default function SurpriseStocks({
   const [ipoProgress, setIpoProgress] = useState<{ processed?: number; total?: number; message?: string } | null>(null);
   const [ipoError, setIpoError] = useState<string | null>(null);
   const [ipoAddOpen, setIpoAddOpen] = useState(false);
-  const [ipoForm, setIpoForm] = useState({ symbol: "", issue_price: "", listing_date: "", subscription_times: "" });
+  const [ipoForm, setIpoForm] = useState({ symbol: "", issue_price: "", listing_date: "", subscription_times: "", gmp: "" });
   const [ipoAddBusy, setIpoAddBusy] = useState(false);
   const ipoPollRef = useRef<number | null>(null);
 
@@ -279,8 +279,9 @@ export default function SurpriseStocks({
         issue_price: Number(ipoForm.issue_price),
         listing_date: ipoForm.listing_date,
         subscription_times: ipoForm.subscription_times ? Number(ipoForm.subscription_times) : undefined,
+        gmp: ipoForm.gmp ? Number(ipoForm.gmp) : undefined,
       });
-      setIpoForm({ symbol: "", issue_price: "", listing_date: "", subscription_times: "" });
+      setIpoForm({ symbol: "", issue_price: "", listing_date: "", subscription_times: "", gmp: "" });
       setIpoAddOpen(false);
       await startIpoScan();
     } catch (e: any) {
@@ -964,7 +965,7 @@ function IpoSection({
   onSelect?: (symbol: string) => void;
   addOpen: boolean;
   setAddOpen: (v: boolean) => void;
-  form: { symbol: string; issue_price: string; listing_date: string; subscription_times: string };
+  form: { symbol: string; issue_price: string; listing_date: string; subscription_times: string; gmp: string };
   setForm: (v: any) => void;
   addBusy: boolean;
   onSubmitAdd: () => void;
@@ -1023,7 +1024,13 @@ function IpoSection({
             placeholder="Subscription (x, optional)"
             value={form.subscription_times}
             onChange={(e) => setForm({ ...form, subscription_times: e.target.value })}
-            className="col-span-2 bg-ink/60 border border-slate rounded-lg px-2 py-1.5 font-mono text-xs text-paper placeholder:text-mist/30 outline-none"
+            className="bg-ink/60 border border-slate rounded-lg px-2 py-1.5 font-mono text-xs text-paper placeholder:text-mist/30 outline-none"
+          />
+          <input
+            placeholder="GMP ₹ (optional)"
+            value={form.gmp}
+            onChange={(e) => setForm({ ...form, gmp: e.target.value })}
+            className="bg-ink/60 border border-slate rounded-lg px-2 py-1.5 font-mono text-xs text-paper placeholder:text-mist/30 outline-none"
           />
           <button
             type="button"

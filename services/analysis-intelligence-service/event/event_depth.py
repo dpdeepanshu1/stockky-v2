@@ -294,6 +294,17 @@ def enrich_events(events: Dict[str, Any], symbol: str = "") -> Dict[str, Any]:
 
     scored = compute_event_score(out)
     out["event_score"] = scored["event_score"]
+    # event_score_raw_delta is the "natural"/uncompressed score — the signed
+    # sum of every event's recency-decayed impact BEFORE it gets squashed
+    # onto the 0-100/50=neutral scale (see compute_event_score's diminishing-
+    # returns cap + the +50 offset). It was already being computed but never
+    # copied into `out`, so it never reached the API response or the
+    # frontend — the UI only ever saw the post-compression event_score,
+    # which sits at exactly 50 whenever raw is 0 or the events feed is thin,
+    # making it look like "no score was generated" even though a real
+    # breakdown existed underneath. Surfacing it lets the UI show both the
+    # compressed 0-100 score AND the natural/raw delta that produced it.
+    out["event_score_raw_delta"] = scored["event_score_raw_delta"]
     out["event_score_breakdown"] = scored["event_score_breakdown"]
     out["event_risk"] = scored["event_risk"]
     if scored.get("earnings_days_out") is not None:

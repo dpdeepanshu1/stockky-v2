@@ -1098,6 +1098,16 @@ def _get_52w_extreme_symbols() -> List[str]:
 # ── ≤ ₹5000 universe pre-filter ─────────────────────────────────────────────
 MAX_UNIVERSE_PRICE = float(os.getenv("MAX_UNIVERSE_PRICE", os.getenv("MAX_STOCK_PRICE", "5000")) or 5000)
 
+# ── Universe size ────────────────────────────────────────────────────────────
+# SCAN_UNIVERSE_TARGET is how many symbols _build_scan_universe() tries to
+# assemble (raised from 300 -> 500 stocks). SCAN_UNIVERSE_HARD_CAP is a
+# separate, unrelated safety ceiling — an absolute cap on total tracked
+# symbols so a bug in universe assembly (dedup failure, a runaway source,
+# etc.) can never grow the feed unboundedly; it should never actually be hit
+# in normal operation at a 500-symbol target.
+SCAN_UNIVERSE_TARGET = int(os.getenv("SCAN_UNIVERSE_TARGET", "500"))
+SCAN_UNIVERSE_HARD_CAP = int(os.getenv("SCAN_UNIVERSE_HARD_CAP", "5000"))
+
 
 def _row_price_over_cap(row: dict) -> bool:
     """
@@ -1163,9 +1173,23 @@ def _filter_symbols_under_max_price(symbols: List[str]) -> List[str]:
     except Exception:
         resolve_display_price = None  # type: ignore
 
+    try:
+        from symbol_aliases import is_known_high_price
+    except Exception:
+        is_known_high_price = lambda _s: False  # noqa: E731
+
     kept: List[str] = []
     dropped = 0
     for sym in clean:
+        # Known chronically->₹5000 names (MRF, MARUTI, PAGEIND, ...) — skip
+        # immediately, no feed lookup needed. This is what stops them from
+        # sitting in Database Feed Health forever as "price: missing": that
+        # previously only got resolved once a live quote succeeded (which
+        # rate-limiting can prevent indefinitely); a static list needs no
+        # network round trip at all.
+        if is_known_high_price(sym):
+            dropped += 1
+            continue
         feed_item = feeds.get(sym) or {}
         price = 0.0
         if resolve_display_price is not None:
@@ -1207,7 +1231,7 @@ def _build_scan_universe() -> List[str]:
     try:
         all_stocks = _get_all_nse_securities()
         if all_stocks:
-            universe.update(all_stocks[:300])
+            universe.update(all_stocks[:SCAN_UNIVERSE_TARGET])
         else:
             universe.update(_get_nifty_indices())
     except Exception as e:
@@ -1300,13 +1324,22 @@ def _build_scan_universe() -> List[str]:
     rest = [s for s in clean if s not in set(dynamic_priority)]
     ordered = dynamic_priority + rest
 
-    # Target 200–300 names; if live sources thin, pad from liquid NSE list
-    if len(ordered) < 200:
+    # Target ~SCAN_UNIVERSE_TARGET names (default 500); if live sources thin, pad
+    # from the liquid NSE list. Padding floor scales with the target instead of
+    # a fixed 200/220 so the same "thin sources" logic still makes sense at a
+    # larger target size.
+    pad_floor = max(200, int(SCAN_UNIVERSE_TARGET * 0.4))
+    if len(ordered) < pad_floor:
         pad = [s for s in _get_all_nse_securities() if s not in set(ordered)]
-        ordered.extend(pad[: max(0, 220 - len(ordered))])
+        ordered.extend(pad[: max(0, pad_floor + 20 - len(ordered))])
         logger.info("Universe padded to %s symbols (live sources were thin)", len(ordered))
 
-    result = ordered[:300]
+    result = ordered[:SCAN_UNIVERSE_TARGET]
+    # Absolute safety ceiling — should never actually trigger at a 500-symbol
+    # target, but guards against a future dedup/merge bug silently growing
+    # the tracked universe without bound.
+    if len(result) > SCAN_UNIVERSE_HARD_CAP:
+        result = result[:SCAN_UNIVERSE_HARD_CAP]
     # Shorter cache in market hours so movers refresh; longer off-hours
     try:
         from datetime import datetime, timezone, timedelta
@@ -2240,6 +2273,7 @@ async def _analyze_one_symbol_ultra(
     lite: bool = False,
     feed_row: dict = None,
     prefetched_feeds: dict = None,
+    skip_gemini: bool = False,
 ) -> dict:
     """
     Analyse one symbol with parallel internal calls and caching.
@@ -2248,6 +2282,13 @@ async def _analyze_one_symbol_ultra(
     - Prefer data already returned by Decision Engine (avoid duplicate fund/news/event/pred fetches).
     - Optional decide-level Redis cache.
     - lite=True skips Gemini summary + optional enrichment when Decision already filled fields.
+    - skip_gemini=True is a NARROWER switch than lite: it only skips the Gemini
+      natural-language summary (falls back to the free Hinglish template) while
+      still running the full technical/fundamental/news/event/prediction pillars.
+      Run Market Scan passes skip_gemini=True for every symbol (Gemini's RPM
+      limit can't cover 300-500 symbols per scan) while lite stays False so scan
+      quality is unaffected; single-stock Analyse leaves skip_gemini=False so
+      that path keeps the real Gemini summary.
     """
     async with sem:
         for attempt in range(MAX_RETRIES + 1):
@@ -2551,16 +2592,17 @@ async def _analyze_one_symbol_ultra(
                 normalized["holding_period_estimate"] = _estimate_holding_period(
                     entry_price, normalized.get("target"), normalized.get("decision")
                 )
-                # Gemini only when not lite (full enrichment); top-picks can request it later
-                if not lite:
+                # Gemini only when neither lite nor skip_gemini is set — Run Market
+                # Scan passes skip_gemini=True (see call sites) to keep Gemini
+                # reserved for single-stock Analyse; both flags fall back to the
+                # free Hinglish template so the field is never left empty.
+                if not lite and not skip_gemini:
                     normalized["natural_language_summary"] = await _generate_ai_summary(normalized, client)
                 else:
-                    normalized["natural_language_summary"] = _generate_summary(normalized) if "_generate_summary" in dir() else None
-                    if normalized.get("natural_language_summary") is None:
-                        try:
-                            normalized["natural_language_summary"] = _generate_summary(normalized)
-                        except Exception:
-                            normalized["natural_language_summary"] = None
+                    try:
+                        normalized["natural_language_summary"] = _generate_summary(normalized)
+                    except Exception:
+                        normalized["natural_language_summary"] = None
                 return normalized
 
             except CircuitOpenError as e:
@@ -2752,6 +2794,9 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
             lite=lite,
             feed_row=fed,
             prefetched_feeds=prefetched_feeds,
+            # Full-universe Run Market Scan — Gemini reserved for single-stock
+            # Analyse only, see _analyze_one_symbol_ultra docstring.
+            skip_gemini=True,
         )
 
 
@@ -3962,7 +4007,16 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
             result["corrected_from"] = corrected_from
             result["symbol"] = symbol_to_use
 
-        result["natural_language_summary"] = _generate_summary(result)
+        # Single-stock Analyse is the ONLY place Gemini is allowed to run (per
+        # product decision: Gemini is too slow/rate-limited to fire once per
+        # symbol across a 300-500 name Run Market Scan, but firing it once for
+        # a single stock the user is actively looking at is fine). Falls back
+        # to the Hinglish template automatically if GEMINI_API_KEY is unset or
+        # the call fails/times out — see _generate_ai_summary.
+        try:
+            result["natural_language_summary"] = await _generate_ai_summary(result, client)
+        except Exception:
+            result["natural_language_summary"] = _generate_summary(result)
 
         flags = []
         level = "high"
@@ -4244,6 +4298,8 @@ async def scan_batch(request: Request):
                 sem,
                 feed_row=batch_feeds.get(sym),
                 prefetched_feeds=batch_feeds,
+                # Multi-symbol batch — Gemini reserved for single-stock Analyse.
+                skip_gemini=True,
             )
             for sym in symbols
         ]
@@ -4615,6 +4671,14 @@ async def stream_market_scan(
                                 client,
                                 sem,
                                 lite=False,
+                                # Gemini is reserved for single-stock Analyse
+                                # (/stock/{symbol}) — a 300-500 symbol Run Market
+                                # Scan calling Gemini once per stock would blow
+                                # through its RPM limit and slow the whole scan
+                                # down for a summary nobody reads mid-scan. Every
+                                # other pillar still runs at full depth (lite stays
+                                # False) — only the Gemini call is skipped.
+                                skip_gemini=True,
                                 feed_row=fed,
                                 prefetched_feeds=prefetched,
                             ),
@@ -6249,16 +6313,34 @@ async def api_ipo_scan_status():
 
 
 @app.get("/surprise/ipo/list")
-async def api_ipo_list():
+async def api_ipo_list(display_days: Optional[int] = Query(None)):
     """Current analyzed IPO list — listing-today/pre-listing first, then by
     score. Each row includes a ready-to-use `buy_suggestion` (same shape as
     /api/scan/find-buys) for BUY NOW / PREPARE TO BUY rows so the frontend
-    can open the existing BuySniperModal directly."""
+    can open the existing BuySniperModal directly.
+
+    display_days optionally narrows the (up to ~1 year wide) scanned universe
+    down to listings within the last N days for display, without re-scanning
+    — defaults to ~30 days (IPO_CHECKER_DEFAULT_DISPLAY_DAYS). Pass a large
+    value (e.g. 365) to see everything the scan actually found."""
     try:
         from ipo_scanner import get_ipo_list
-        return get_ipo_list()
+        return get_ipo_list(display_days=display_days)
     except Exception as e:
         return {"results": [], "generated_at": None, "error": str(e)[:160]}
+
+
+@app.post("/surprise/ipo/stop")
+async def api_ipo_stop():
+    """Stop an in-progress IPO scan after the current symbol — IPO Checker
+    tab's Stop button. Mirrors /api/data-feed/stop's behaviour: partial
+    results already analyzed are kept, not discarded."""
+    try:
+        from ipo_scanner import request_ipo_stop
+        request_ipo_stop()
+        return {"ok": True, "message": "Stop requested — will halt after the current symbol."}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:160]}
 
 
 class IpoAddRequest(BaseModel):
@@ -6322,12 +6404,33 @@ async def api_surprise_premarket_proxy(request: Request):
     import threading
     import json as _json
 
+    # Cache "schema already confirmed ready" for this process so a second
+    # premarket click (or the frontend's own retry after a timeout) doesn't
+    # re-run ensure_surprise_schema() synchronously on the request path.
+    # ensure_surprise_schema() opens a fresh DB connection (cold Oracle
+    # wallet handshake can take several seconds) BEFORE the background
+    # thread is even spawned — on a slow/cold connection that alone can
+    # exceed Render's/nginx's default proxy timeout and return 504, even
+    # though background=true was requested and would have returned
+    # instantly otherwise. Once schema is confirmed ready once, skip the
+    # live check on every subsequent call (schema doesn't disappear).
+    global _SURPRISE_SCHEMA_CONFIRMED
     try:
-        from surprise_schema import ensure_surprise_schema
-        schema = ensure_surprise_schema()
-    except Exception as e:
-        schema = {"ok": False, "error": str(e)[:200]}
-        logger.warning("gateway ensure_surprise_schema: %s", e)
+        _SURPRISE_SCHEMA_CONFIRMED
+    except NameError:
+        _SURPRISE_SCHEMA_CONFIRMED = False
+
+    if _SURPRISE_SCHEMA_CONFIRMED:
+        schema = {"ok": True, "table": "surprise_static_feed", "cached": True}
+    else:
+        try:
+            from surprise_schema import ensure_surprise_schema
+            schema = ensure_surprise_schema()
+            if schema.get("ok"):
+                _SURPRISE_SCHEMA_CONFIRMED = True
+        except Exception as e:
+            schema = {"ok": False, "error": str(e)[:200]}
+            logger.warning("gateway ensure_surprise_schema: %s", e)
 
     if not schema.get("ok"):
         _sb = schema.get("backend") or "postgres"
@@ -6426,6 +6529,20 @@ async def api_surprise_premarket_proxy(request: Request):
     result["schema"] = schema
     return result
 
+
+@app.post("/surprise/stop")
+@app.post("/api/surprise/stop")
+async def api_surprise_stop():
+    """Stop button for the Surprise tab — halts the premarket baseline job
+    (between symbols) AND the live surprise scan's waterfall-fill loop, since
+    both share the same stop flag (surprise_premarket.premarket_stop_requested).
+    Whatever was already computed/fetched before Stop is kept, not discarded."""
+    try:
+        from surprise_premarket import request_premarket_stop
+        request_premarket_stop()
+        return {"ok": True, "message": "Stop requested — will halt after the current symbol/chunk."}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:160]}
 
 
 @app.get("/stockky-hot")
@@ -8243,6 +8360,31 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
     store = _feed_store()
     base = str(symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
     current = dict(store.get_symbol(base) or {})
+
+    # Known chronically->₹5000 names (static list — MRF, MARUTI, PAGEIND,
+    # ...): purge immediately, no live quote needed. Previously this symbol
+    # would sit as "price: missing" forever if the quote fetch below kept
+    # failing/rate-limiting before it ever got the chance to discover the
+    # price and purge — a static list sidesteps the network round trip
+    # entirely for names we already know the answer for.
+    try:
+        from symbol_aliases import is_known_high_price
+    except Exception:
+        is_known_high_price = lambda _s: False  # noqa: E731
+    if is_known_high_price(base):
+        try:
+            store.delete_symbol(base)
+        except Exception as e:
+            logger.warning("repair: purge known-high-price %s failed: %s", base, e)
+        return {
+            "symbol": base,
+            "patched_fields": [],
+            "still_missing": [],
+            "price": _feed_resolved_price(current),
+            "complete": False,
+            "purged": True,
+            "message": f"{base} is a known ₹{MAX_UNIVERSE_PRICE:.0f}+ stock — removed from feed without a network call.",
+        }
 
     # Over-cap rows can't be "repaired" — a real price fetch would also be
     # over ₹MAX_UNIVERSE_PRICE, so the Repair button used to sit there doing

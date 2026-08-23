@@ -1398,6 +1398,14 @@ function EventScoreBadge({ data }: { data: any }) {
     data?.event_score ?? data?.event_data?.event_score ?? data?.events?.event_score;
   const breakdown: any[] =
     data?.event_score_breakdown ?? data?.event_data?.event_score_breakdown ?? data?.events?.event_score_breakdown ?? [];
+  // "Natural"/uncompressed score — the signed raw delta before it gets
+  // squashed onto the 0-100/50=neutral scale (see event_depth.py
+  // compute_event_score). Was always computed backend-side but wasn't being
+  // forwarded into the API response, so the UI only ever showed the
+  // compressed score (which reads as a flat "50/100" whenever the raw delta
+  // is small or events are thin) with no way to see the underlying signal.
+  const rawDelta: number | undefined =
+    data?.event_score_raw_delta ?? data?.event_data?.event_score_raw_delta ?? data?.events?.event_score_raw_delta;
   if (score == null) return null;
 
   const tone = score >= 65 ? "text-emerald-400 border-emerald-500/40 bg-emerald-500/10"
@@ -1413,6 +1421,15 @@ function EventScoreBadge({ data }: { data: any }) {
       <span className={`font-mono text-[11px] px-2 py-1 rounded-md border ${tone}`}>
         Event Score {Math.round(score)}/100
       </span>
+      {rawDelta != null && (
+        <span
+          className="font-mono text-[10px] px-1.5 py-0.5 rounded border text-mist/70 border-slate/40 bg-graphite/40"
+          title="Natural/raw score before the 0-100 neutral-50 compression — the signed sum of every event's recency-decayed impact"
+        >
+          natural {rawDelta >= 0 ? "+" : ""}
+          {rawDelta}
+        </span>
+      )}
       {top.map((b, i) => (
         <span
           key={i}

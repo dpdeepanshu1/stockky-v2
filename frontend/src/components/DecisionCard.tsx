@@ -215,6 +215,10 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
     ...(data.prediction_score !== null && data.prediction_score !== undefined ? [{ label: "AI Model", value: data.prediction_score }] : []),
     { label: "Market Sentiment", value: data.market_score ?? 50 },
     { label: "Training", value: data.training_score ?? 50 },
+    // Event pillar was computed by the decision engine (nature-based
+    // event_depth.compute_event_score, 0-100) and returned on every decision
+    // response, but never had a row here — add it whenever it's present.
+    ...(data.event_score !== null && data.event_score !== undefined ? [{ label: "Event", value: data.event_score }] : []),
   ];
 
   const metrics = data.fundamental_metrics;

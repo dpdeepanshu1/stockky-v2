@@ -1197,6 +1197,93 @@ def _run_ipo_scan_locked(force: bool = False) -> dict:
                       processed=total, total=total, results_count=len(results))
 
 
+def get_ipo_feed_audit() -> dict:
+    """
+    IPO Tracker's OWN feed-health audit — reads ipo_static_feed (the IPO
+    Tracker's dedicated table), not the general stock universe's
+    stockky_kv feed. Previously the IPO Tracker tab embedded the shared
+    <DataHealthAudit /> frontend component, which calls /api/feed/audit-
+    missing — that endpoint audits the general per-stock data feed
+    (RSI/PE/ROCE/sentiment for the ~300-symbol scan universe), which is why
+    the IPO tab was showing unrelated symbols like AMBER/APOLLOHOSP instead
+    of IPO rows. This function/endpoint gives the IPO tab its own,
+    correctly-scoped health view.
+    """
+    try:
+        import ipo_schema
+        from sqlalchemy import text
+    except Exception as e:
+        return {"ok": False, "error": f"ipo_schema import failed: {e}"[:200], "rows": []}
+
+    url = ipo_schema.database_url()
+    if not url:
+        return {
+            "ok": True,
+            "total_tracked": 0,
+            "fully_scored": 0,
+            "missing_count": 0,
+            "missing_ipos": [],
+            "message": "No IPO database configured — scan results are cache-only.",
+        }
+
+    eng = None
+    try:
+        eng = ipo_schema.make_engine("stockky-ipo-audit")
+        if eng is None:
+            return {"ok": False, "error": "engine unavailable", "rows": []}
+        ipo_schema.ensure_ipo_schema()
+        with eng.connect() as conn:
+            result = conn.execute(text(
+                "SELECT symbol, company_name, issue_price, listing_date, stage, "
+                "nse_status, subscription_times, gmp, ipo_score, decision, updated_at "
+                f"FROM {ipo_schema.TABLE_NAME}"
+            ))
+            rows = [dict(r._mapping) for r in result]
+    except Exception as e:
+        logger.warning("ipo audit query failed: %s", e)
+        return {"ok": False, "error": str(e)[:200], "rows": []}
+    finally:
+        if eng is not None:
+            try:
+                eng.dispose()
+            except Exception:
+                pass
+
+    total = len(rows)
+    fully_scored = 0
+    missing = []
+    for r in rows:
+        missing_fields = [
+            f for f in ("issue_price", "ipo_score", "decision")
+            if r.get(f) in (None, "")
+        ]
+        if missing_fields:
+            missing.append({
+                "symbol": r.get("symbol"),
+                "company_name": r.get("company_name"),
+                "stage": r.get("stage"),
+                "missing_fields": missing_fields,
+                "updated_at": str(r.get("updated_at") or ""),
+            })
+        else:
+            fully_scored += 1
+
+    health = round((fully_scored / max(total, 1)) * 100, 1) if total > 0 else 0.0
+    return {
+        "ok": True,
+        "total_tracked": total,
+        "fully_scored": fully_scored,
+        "missing_count": len(missing),
+        "missing_ipos": missing[:200],
+        "health_score": health,
+        "message": (
+            "No IPO rows tracked yet — run Scan IPOs first."
+            if total == 0
+            else f"IPO feed health {health}% · {fully_scored}/{total} fully scored"
+        ),
+    }
+
+
 def get_ipo_list(display_days: Optional[int] = None) -> dict:
     """
     display_days filters the already-scanned list down to listings within

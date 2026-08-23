@@ -105,6 +105,25 @@ KNOWN_NOT_ON_NSE = {
 KNOWN_HIGH_PRICE_SYMBOLS = {
     "MRF", "PAGEIND", "HONAUTO", "SHREECEM", "3MINDIA", "BOSCHLTD",
     "MARUTI", "ELGIEQUIP", "ABBOTINDIA", "NESCO",
+    # Added from repair-loop logs (2026-08-24 audit): these were NOT on the
+    # static list, so every repair cycle burned a live /quote/{symbol} call
+    # to rediscover "yep, still over cap" and then purge the row — forever,
+    # every cycle, for the same symbols. Confirmed >₹5000 as of the log's
+    # observed quotes (KEI ₹5527.60, LINDEINDIA ₹6672.00, NAVINFLUOR
+    # ₹8206.50, NETWEB ₹5601.00, NEULANDLAB ₹23301.00, PERSISTENT ₹5667.50,
+    # POWERINDIA ₹34190.00, PTCIL ₹20629.00, SOLARINDS ₹19900.00,
+    # ULTRACEMCO ₹11570.00, APARINDS ₹16856.00, BAJAJ-AUTO ₹11700.00,
+    # POLYCAB ₹8966.00).
+    "KEI", "LINDEINDIA", "NAVINFLUOR", "NETWEB", "NEULANDLAB", "PERSISTENT",
+    "POWERINDIA", "PTCIL", "SOLARINDS", "ULTRACEMCO", "APARINDS",
+    "BAJAJ-AUTO", "POLYCAB",
+    # ABB and APOLLOHOSP are not in the pasted log's purge lines, but are
+    # well-established chronically->₹5000 NSE names (ABB India routinely
+    # trades ₹6,000-9,000+; Apollo Hospitals routinely ₹6,000-7,500+) and
+    # were also flagged as "missing" (never-populated) rows in the Database
+    # Feed Health screenshot — same failure mode, listed here so repair
+    # stops retrying them too.
+    "ABB", "APOLLOHOSP",
 }
 
 

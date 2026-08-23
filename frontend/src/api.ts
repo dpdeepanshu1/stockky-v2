@@ -56,6 +56,11 @@ export interface Decision {
   market_sentiment_adjustment: number;
   training_score: number;
   event_risk?: boolean | null;
+  // Decision-engine already computes this (event_depth.compute_event_score,
+  // 0-100, nature-based) and returns it in every /decision/decide response —
+  // it just wasn't surfaced in the frontend's score type, so the Score
+  // Breakdown panel had no Event row despite the pillar being scored.
+  event_score?: number | null;
   entry_range: { low: number | null; high: number | null } | null;
   target: number | null;
   stop_loss: number | null;
@@ -1276,6 +1281,17 @@ export const api = {
     request<{ ok?: boolean; message?: string; error?: string }>(
       "/surprise/stop", { method: "POST" }, 1, 15000
     ),
+  // Manual "send top picks to Telegram" button for the Surprise tab.
+  surpriseNotifyTopPicks: (topN = 5) =>
+    request<{
+      ok: boolean;
+      sent: boolean;
+      count: number;
+      symbols?: string[];
+      message?: string;
+      error?: string;
+      notification_result?: { delivered?: boolean; note?: string };
+    }>(`/surprise/notify-top-picks?top_n=${topN}`, { method: "POST" }, 1, 30000),
   // displayDays narrows the stored scan to a window (30 = default, 365 = hard
   // cap). Omitted -> backend default (IPO_CHECKER_DEFAULT_DISPLAY_DAYS).
   ipoList: (displayDays?: number) =>
@@ -1288,6 +1304,25 @@ export const api = {
       `/surprise/ipo/list${displayDays ? `?display_days=${displayDays}` : ""}`,
       undefined, 2, 20000
     ),
+  // IPO Tracker's OWN feed health — reads ipo_static_feed, NOT the general
+  // stock-universe feed (see /api/feed/audit-missing, which is unrelated).
+  ipoAudit: () =>
+    request<{
+      ok: boolean;
+      total_tracked?: number;
+      fully_scored?: number;
+      missing_count?: number;
+      missing_ipos?: Array<{
+        symbol: string;
+        company_name?: string;
+        stage?: string;
+        missing_fields: string[];
+        updated_at?: string;
+      }>;
+      health_score?: number;
+      message?: string;
+      error?: string;
+    }>("/surprise/ipo/audit", undefined, 2, 20000),
   ipoAdd: (payload: {
     symbol: string;
     issue_price: number;

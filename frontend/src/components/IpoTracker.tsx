@@ -5,9 +5,10 @@
 //
 // Everything IPO-related now lives here: its own state, its own polling, its
 // own Scan / Stop controls, the 30-day ⇄ 1-year display window toggle
-// (backend: GET /surprise/ipo/list?display_days=), and the shared
-// <DataHealthAudit /> panel so feed problems can be diagnosed from the same
-// screen instead of hopping to the Data Feed tab.
+// (backend: GET /surprise/ipo/list?display_days=), and its OWN
+// <IpoFeedHealth /> panel (backend: GET /surprise/ipo/audit) reading
+// ipo_static_feed — NOT the shared <DataHealthAudit /> (which audits the
+// general stock scan universe and was showing unrelated stock symbols here).
 //
 // Backend contract (all of this already exists, nothing new was needed):
 //   POST /surprise/ipo/scan?background=true   start a scan
@@ -19,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type IpoAnalysis } from "../api"; // getApiUrl() based — never relative /api
 import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
-import DataHealthAudit from "./DataHealthAudit";
+import IpoFeedHealth from "./IpoFeedHealth";
 
 type IpoProgress = {
   status?: string;
@@ -472,7 +473,7 @@ export default function IpoTracker({
 
       {/* Generic feed audit — same component the Data Feed tab uses, so a
           missing-price problem behind an IPO row can be diagnosed here. */}
-      <DataHealthAudit />
+      <IpoFeedHealth />
 
       <BuySniperModal
         isOpen={sniperOpen}

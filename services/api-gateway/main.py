@@ -1131,19 +1131,38 @@ SCAN_UNIVERSE_TARGET = int(os.getenv("SCAN_UNIVERSE_TARGET", "500"))
 SCAN_UNIVERSE_HARD_CAP = int(os.getenv("SCAN_UNIVERSE_HARD_CAP", "5000"))
 
 
-def _row_price_over_cap(row: dict) -> bool:
+def _row_price_over_cap(row: dict, symbol: Optional[str] = None) -> bool:
     """
     True when a feed row's resolved price is a known, positive value that
-    exceeds MAX_UNIVERSE_PRICE. Used by every data-feed WRITE path so a
-    >₹5000 stock can never be persisted (previously only the bulk-Yahoo and
-    repair-price paths enforced this — /api/feed/update, /api/feed/batch and
-    /api/feed/update-batch did not, which is how stocks like BOSCHLTD
-    (₹48,750) ended up sitting in the Database Feed Health audit table with
-    no way for Repair to "fix" them, since they were never supposed to be
-    fed in the first place).
-    Rows with no resolvable price yet (still being built) are allowed
-    through — this only blocks rows that *already* carry a price over cap.
+    exceeds MAX_UNIVERSE_PRICE, OR when the row/caller-supplied symbol is on
+    the static KNOWN_HIGH_PRICE_SYMBOLS denylist (symbol_aliases.py). Used
+    by every data-feed WRITE path so a >₹5000 stock can never be persisted
+    (previously only the bulk-Yahoo and repair-price paths enforced this —
+    /api/feed/update, /api/feed/batch and /api/feed/update-batch did not,
+    which is how stocks like BOSCHLTD (₹48,750) ended up sitting in the
+    Database Feed Health audit table with no way for Repair to "fix" them,
+    since they were never supposed to be fed in the first place).
+
+    The by-name check matters for rows that have NO stored price yet (still
+    being built / never successfully fetched): previously those fell
+    through to "unknown, allow it" and were classified as "incomplete" in
+    the audit rather than "over_cap" — so Database Feed Health kept
+    offering a Repair button that could only ever discover (via a live
+    quote burn) what the static denylist already knows for free, every
+    single audit/repair cycle, for the same symbols, forever.
+
+    Rows with no resolvable price AND an unlisted symbol are allowed
+    through — this only blocks rows that already carry a price over cap,
+    or whose symbol is known-expensive by name.
     """
+    sym = symbol or (row.get("symbol") if isinstance(row, dict) else None)
+    if sym:
+        try:
+            from symbol_aliases import is_known_high_price
+            if is_known_high_price(sym):
+                return True
+        except Exception:
+            pass
     try:
         for k in ("price", "close", "cmp", "ltp", "last_price", "current_price"):
             raw = row.get(k)
@@ -6380,6 +6399,85 @@ async def api_surprise_static(limit: int = 50):
         return {"ok": False, "error": str(e)[:200], "rows": []}
 
 
+@app.post("/surprise/notify-top-picks")
+async def api_surprise_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
+    """
+    Manual "send to Telegram" button for the Surprise Momentum tab.
+    Re-uses the exact same surprise_engine.scan() the tab's live scan uses
+    (already sorted by score, high to low), takes the top N, and forwards a
+    formatted message to notification-scheduler-service's /notify with
+    channel="telegram" (falls back to the outbox if Telegram isn't
+    configured — see /notify's own behaviour for that).
+    """
+    try:
+        from surprise_scanner import surprise_engine
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"surprise_scanner import failed: {e}")
+
+    client = _get_http_client()
+    result = await surprise_engine.scan(
+        client=client,
+        market_data_url=MARKET_DATA_URL,
+        symbols=None,
+        force_reload_static=False,
+    )
+    stocks = result.get("stocks") or []
+    if not stocks:
+        return {
+            "ok": False,
+            "sent": False,
+            "count": 0,
+            "message": result.get("error") or "No Surprise Momentum picks available right now.",
+        }
+
+    top = stocks[: max(1, min(int(top_n), 20))]
+    lines = [f"🎯 *Surprise Momentum — Top {len(top)} Picks*"]
+    for i, s in enumerate(top, 1):
+        sym = s.get("symbol")
+        score = s.get("score")
+        tier = str(s.get("tier") or "").upper()
+        price = s.get("price")
+        chg = s.get("change_pct")
+        target = s.get("target_1")
+        stop = s.get("trailing_stop")
+        trig = s.get("trigger_type") or ""
+        try:
+            chg_str = f"{float(chg):+.2f}%"
+        except (TypeError, ValueError):
+            chg_str = "—"
+        lines.append(
+            f"{i}. {sym} — {tier} (score {score}/100)\n"
+            f"   ₹{price} ({chg_str}) · Target ₹{target} · Stop ₹{stop}\n"
+            f"   {trig}"
+        )
+    message = "\n".join(lines)
+
+    try:
+        resp = httpx.post(
+            f"{NOTIFICATION_URL}/notify",
+            json={
+                "title": "Surprise Momentum — Top Picks",
+                "message": message,
+                "channel": "telegram",
+            },
+            timeout=15,
+        )
+        try:
+            detail = resp.json()
+        except Exception:
+            detail = {"status_code": resp.status_code}
+        delivered = bool(isinstance(detail, dict) and detail.get("delivered"))
+        return {
+            "ok": True,
+            "sent": delivered,
+            "count": len(top),
+            "symbols": [s.get("symbol") for s in top],
+            "notification_result": detail,
+        }
+    except Exception as e:
+        return {"ok": False, "sent": False, "count": len(top), "error": str(e)[:300]}
+
+
 @app.post("/surprise/ipo/scan")
 @app.get("/surprise/ipo/scan")
 async def api_ipo_scan(background: bool = Query(True), background_tasks: BackgroundTasks = None):
@@ -6427,6 +6525,22 @@ async def api_ipo_list(display_days: Optional[int] = Query(None)):
         return get_ipo_list(display_days=display_days)
     except Exception as e:
         return {"results": [], "generated_at": None, "error": str(e)[:160]}
+
+
+@app.get("/surprise/ipo/audit")
+async def api_ipo_audit():
+    """
+    IPO Tracker's OWN feed-health audit (reads ipo_static_feed) — NOT the
+    general stock-universe feed. This is what the IPO Tracker tab's
+    Database health widget should call; it previously called the shared
+    /api/feed/audit-missing (general stock feed), which is why the IPO tab
+    showed unrelated stock symbols instead of IPO rows/scores.
+    """
+    try:
+        from ipo_scanner import get_ipo_feed_audit
+        return get_ipo_feed_audit()
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200], "rows": []}
 
 
 @app.post("/surprise/ipo/stop")
@@ -8143,7 +8257,7 @@ async def audit_missing_feed_data(limit: int = 500, cache: bool = True):
         # populate a price under-cap for them), they're stale writes from
         # before the write-path gate existed. Surface them separately so the
         # UI can offer Purge instead of an infinite Repair loop.
-        if _row_price_over_cap(row):
+        if _row_price_over_cap(row, symbol=sym):
             over_cap.append({
                 "symbol": sym,
                 "current_price": _feed_resolved_price(row),
@@ -8209,7 +8323,7 @@ async def purge_over_cap_feed_symbols():
             row = store.get_symbol(sym) or {}
         except Exception:
             row = {}
-        if isinstance(row, dict) and _row_price_over_cap(row):
+        if isinstance(row, dict) and _row_price_over_cap(row, symbol=sym):
             try:
                 store.delete_symbol(sym)
                 purged.append(sym)

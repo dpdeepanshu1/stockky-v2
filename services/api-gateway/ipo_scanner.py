@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -69,13 +70,23 @@ BUY_NOW_BAR = float(os.getenv("IPO_BUY_NOW_BAR", "66"))
 PREPARE_BAR = float(os.getenv("IPO_PREPARE_BAR", "54"))
 DO_NOT_BUY_BAR = float(os.getenv("IPO_DO_NOT_BUY_BAR", "40"))
 FRESH_WINDOW_DAYS = int(os.getenv("IPO_FRESH_WINDOW_DAYS", "30"))
-LOOKBACK_DAYS_MAX = int(os.getenv("IPO_LOOKBACK_DAYS_MAX", "30"))
+# IPO_CHECKER_DEFAULT_DISPLAY_DAYS is the "IPO Checker" tab's default DISPLAY
+# filter (last ~1 month) — but the DISCOVERY/scan window below (LOOKBACK_DAYS_MAX
+# / HARD_CAP) is intentionally much wider (last ~1 year) so the scan itself
+# actually finds every IPO that listed within the last year; the frontend then
+# filters the returned list down to the last IPO_CHECKER_DEFAULT_DISPLAY_DAYS
+# days by default, with the option to widen the filter without re-scanning.
+IPO_CHECKER_DEFAULT_DISPLAY_DAYS = int(os.getenv("IPO_CHECKER_DEFAULT_DISPLAY_DAYS", "30"))
+LOOKBACK_DAYS_MAX = int(os.getenv("IPO_LOOKBACK_DAYS_MAX", "365"))
 # Hard ceiling regardless of IPO_LOOKBACK_DAYS_MAX — "recent IPO" stops
-# meaning anything past 2 months no matter how that env var is set.
-IPO_LOOKBACK_DAYS_HARD_CAP = int(os.getenv("IPO_LOOKBACK_DAYS_HARD_CAP", "60"))
+# meaning anything past a year no matter how that env var is set (previously
+# hard-capped at 60 days, which silently dropped nearly every real-world IPO
+# candidate from ipoalerts/NSE discovery and made the Scan button look broken
+# — it was working, just filtering its own results down to ~nothing).
+IPO_LOOKBACK_DAYS_HARD_CAP = int(os.getenv("IPO_LOOKBACK_DAYS_HARD_CAP", "365"))
 # Not-yet-listed IPOs (listing today/tomorrow/this week) — how far forward
 # to look for those.
-IPO_UPCOMING_WINDOW_DAYS = int(os.getenv("IPO_UPCOMING_WINDOW_DAYS", "7"))
+IPO_UPCOMING_WINDOW_DAYS = int(os.getenv("IPO_UPCOMING_WINDOW_DAYS", "21"))
 
 MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
 FUNDAMENTAL_URL = os.getenv(
@@ -109,6 +120,115 @@ IPOALERTS_API_KEY = os.getenv("IPOALERTS_API_KEY", "").strip()
 IPOALERTS_BASE = "https://api.ipoalerts.in/ipos"
 
 _LOCAL_JOB: Dict[str, Any] = {"status": "idle", "message": "Idle", "processed": 0, "total": 0}
+
+# ── Stop support (mirrors data_feed.py's _DATA_FEED_STOP_FLAG pattern) ──────
+# Lets the IPO Checker tab's Stop button halt an in-progress scan between
+# symbols instead of waiting for the whole (now up-to-a-year-wide) universe
+# to finish.
+_IPO_STOP_FLAG = threading.Event()
+
+
+def request_ipo_stop() -> None:
+    _IPO_STOP_FLAG.set()
+
+
+def clear_ipo_stop() -> None:
+    _IPO_STOP_FLAG.clear()
+
+
+def ipo_stop_requested() -> bool:
+    return _IPO_STOP_FLAG.is_set()
+
+
+def _ipo_db_upsert(rows: List[Dict[str, Any]]) -> int:
+    """Persist raw/scored IPO rows to ipo_static_feed (Neon on Render, Oracle
+    on the Oracle deployment — same ensure_ipo_schema()/dialect() selection
+    as surprise_static_feed). Best-effort: a DB write failure here must never
+    break the scan — kv_cache remains the fast-path source the endpoints
+    actually serve from; this table is the durable "what did we last see"
+    record for debugging + the 24h freshness check."""
+    try:
+        import ipo_schema
+    except Exception:
+        return 0
+    url = ipo_schema.database_url()
+    if not url or not rows:
+        return 0
+    eng = None
+    try:
+        from sqlalchemy import text
+        import json as _json
+
+        dial = ipo_schema.dialect()
+        eng = ipo_schema.make_engine("stockky-ipo-writer")
+        if eng is None:
+            return 0
+        payload = []
+        for r in rows:
+            row = {k: r.get(k) for k in ipo_schema.ROW_KEYS}
+            row["listing_date"] = row.get("listing_date") or ""
+            bs = r.get("buy_suggestion")
+            row["buy_suggestion_json"] = _json.dumps(bs) if bs else None
+            payload.append(row)
+        payload = ipo_schema.adapt_rows(payload, dial)
+        stmt = text(ipo_schema.upsert_sql(dial))
+        n = 0
+        if dial == "oracle":
+            with eng.begin() as conn:
+                for row in payload:
+                    conn.execute(stmt, row)
+                    n += 1
+        else:
+            with eng.begin() as conn:
+                conn.execute(stmt, payload)
+                n = len(payload)
+        return n
+    except Exception as e:
+        logger.warning("ipo db upsert failed (non-fatal, kv cache still served): %s", e)
+        return 0
+    finally:
+        if eng is not None:
+            try:
+                eng.dispose()
+            except Exception:
+                pass
+
+
+def _ipo_db_freshness_hours() -> Optional[float]:
+    """Hours since ipo_static_feed was last written, or None if empty/unavailable.
+    Used the same way surprise_premarket's freshness check is used: a scan
+    within IPO_DB_FRESH_HOURS (default 24) of the last one can reuse the
+    table instead of re-hitting NSE, exactly like the premarket baselines."""
+    try:
+        import ipo_schema
+        from sqlalchemy import text
+
+        eng = ipo_schema.make_engine("stockky-ipo-freshness")
+        if eng is None:
+            return None
+        try:
+            with eng.connect() as conn:
+                dial = ipo_schema.dialect()
+                cnt = conn.execute(text(ipo_schema.table_exists_sql(dial)), {"tbl": "ipo_static_feed"}).scalar()
+                if not cnt:
+                    return None
+                now_expr = "SYSTIMESTAMP" if dial == "oracle" else "NOW()"
+                row = conn.execute(text(f"SELECT MAX(updated_at) AS last_at FROM ipo_static_feed")).fetchone()
+                last_at = row[0] if row else None
+                if last_at is None:
+                    return None
+                from datetime import datetime as _dt, timezone as _tz
+                now = _dt.now(_tz.utc)
+                la = last_at if getattr(last_at, "tzinfo", None) else last_at.replace(tzinfo=_tz.utc)
+                return (now - la).total_seconds() / 3600.0
+        finally:
+            eng.dispose()
+    except Exception as e:
+        logger.debug("ipo db freshness check failed: %s", e)
+        return None
+
+
+IPO_DB_FRESH_HOURS = float(os.getenv("IPO_DB_FRESH_HOURS", "24"))
 
 
 def _kv():
@@ -292,26 +412,80 @@ def fetch_nse_ipo_calendar() -> List[Dict[str, Any]]:
     return out
 
 
+def _extract_price_band_upper(raw: Any) -> Optional[float]:
+    """
+    Extracts the upper bound of an issue-price band regardless of the
+    separator/format NSE's two endpoints use — both of these need to work:
+      - public-past-issues:      "    97"            (plain number, padded)
+      - all-upcoming-issues:     "Rs.750 to Rs.788"  ("Rs." prefix, "to" sep)
+    The previous implementation only handled a bare number or an "X-Y"
+    dash-separated band; it silently produced None (via the ValueError on
+    float("Rs.750 to Rs.788")) for every "Rs.X to Rs.Y" row, which is the
+    only format all-upcoming-issues ever returns — so every currently-open
+    or forthcoming IPO's issue_price came back None and got dropped by
+    _merged_ipo_universe's `and m.get("issue_price")` filter even though
+    the row itself was fetched successfully (this is the "returns the
+    correct record ... but it's not taking it" bug).
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    nums = re.findall(r"[\d,]+(?:\.\d+)?", str(raw))
+    if not nums:
+        return None
+    try:
+        return float(nums[-1].replace(",", ""))
+    except ValueError:
+        return None
+
+
 def _normalize_nse_row(row: Dict[str, Any], kind: str) -> Optional[Dict[str, Any]]:
     try:
         symbol = str(
-            row.get("symbol") or row.get("scriptCode") or row.get("companyName") or ""
+            row.get("symbol") or row.get("scriptCode") or row.get("companyName") or row.get("company") or ""
         ).upper().strip()
         if not symbol:
             return None
-        issue_price = row.get("issuePrice") or row.get("cutOffPrice") or row.get("finalIssuePrice")
-        if isinstance(issue_price, str):
-            issue_price = issue_price.replace(",", "").split("-")[-1].strip()
-        try:
-            issue_price = float(issue_price)
-        except (TypeError, ValueError):
-            issue_price = None
+        issue_price = _extract_price_band_upper(
+            row.get("issuePrice") or row.get("priceRange") or row.get("cutOffPrice") or row.get("finalIssuePrice")
+        )
         listing_date = row.get("listingDate") or row.get("dateOfListing")
+        issue_end = row.get("issueEndDate") or row.get("ipoEndDate")
+        status_raw = str(row.get("status") or "").strip().lower()
+        listing_estimated = False
+        if not listing_date:
+            # all-upcoming-issues never carries a listingDate field at all —
+            # it only exists once the IPO has actually listed (i.e. it would
+            # then show up on public-past-issues instead). Previously this
+            # meant every still-open/forthcoming IPO got silently dropped by
+            # _merged_ipo_universe's "must have listing_date" filter. NSE's
+            # own norm is T+3 listing after the issue closes (T+6 pre-2023);
+            # use issueEndDate + 3 working days as a placeholder so these
+            # rows survive the recency filter and reach the scorer/UI as
+            # "upcoming" instead of vanishing — the estimate is corrected
+            # automatically once the real listingDate appears (the symbol
+            # then also starts showing up on public-past-issues and
+            # overwrites this row via _merged_ipo_universe's by_symbol map).
+            end_dt = _parse_date(issue_end)
+            if end_dt is not None:
+                listing_date = (end_dt + timedelta(days=3)).strftime("%Y-%m-%d")
+                listing_estimated = True
+        stage = (
+            "listed" if (listing_date and not listing_estimated)
+            else "upcoming" if (listing_estimated or status_raw in ("active", "forthcoming") or issue_end)
+            else kind
+        )
         return {
             "symbol": symbol,
-            "company_name": row.get("companyName") or symbol,
+            "company_name": row.get("companyName") or row.get("company") or symbol,
             "issue_price": issue_price,
             "listing_date": listing_date,
+            "listing_date_estimated": listing_estimated,
+            "issue_start_date": row.get("issueStartDate") or row.get("ipoStartDate"),
+            "issue_end_date": issue_end,
+            "nse_status": row.get("status"),
+            "stage": stage,
             "status": kind,
             "source": "nse_auto",
         }
@@ -407,6 +581,14 @@ def _merged_ipo_universe() -> List[Dict[str, Any]]:
     recent: List[Dict[str, Any]] = []
     for m in dated:
         if m["symbol"] in manual_symbols:
+            recent.append(m)
+            continue
+        if m.get("stage") == "upcoming":
+            # Still open/forthcoming per NSE's own status field — always
+            # relevant regardless of the estimated listing date's exact
+            # day-count (see _normalize_nse_row); this is what fixes
+            # "the correct record comes back from NSE but never makes it
+            # into the scan" for every currently-open or forthcoming IPO.
             recent.append(m)
             continue
         dt = _parse_date(m.get("listing_date"))
@@ -857,6 +1039,32 @@ def run_ipo_scan(force: bool = False) -> dict:
 
 
 def _run_ipo_scan_locked(force: bool = False) -> dict:
+    clear_ipo_stop()
+    try:
+        import ipo_schema
+        ipo_schema.ensure_ipo_schema()
+    except Exception as e:
+        logger.info("ipo schema ensure skipped/failed (non-fatal): %s", e)
+
+    if not force:
+        age_h = _ipo_db_freshness_hours()
+        if age_h is not None and age_h < IPO_DB_FRESH_HOURS:
+            cached = None
+            try:
+                cached = _kv().kv_get(IPO_LIST_KEY)
+            except Exception:
+                cached = None
+            if isinstance(cached, dict) and cached.get("results"):
+                return _set_job(
+                    status="skipped_fresh",
+                    message=(
+                        f"ipo_static_feed is {age_h:.1f}h old (< {IPO_DB_FRESH_HOURS:.0f}h) — "
+                        f"reused stored data instead of re-hitting NSE (force=true to override)"
+                    ),
+                    processed=len(cached.get("results") or []),
+                    total=len(cached.get("results") or []),
+                )
+
     universe = _merged_ipo_universe()
     total = len(universe)
     _set_job(status="running", message=f"Scanning {total} IPO(s)…", processed=0, total=total,
@@ -864,7 +1072,12 @@ def _run_ipo_scan_locked(force: bool = False) -> dict:
 
     results: List[Dict[str, Any]] = []
     errors = 0
+    stopped = False
     for i, entry in enumerate(universe):
+        if ipo_stop_requested():
+            stopped = True
+            logger.info("run_ipo_scan: stop requested at %s/%s", i, total)
+            break
         try:
             r = analyze_ipo(entry)
             results.append(r)
@@ -879,6 +1092,23 @@ def _run_ipo_scan_locked(force: bool = False) -> dict:
             message=f"{processed}/{total} · {entry.get('symbol')}",
         )
 
+    if stopped:
+        # Persist whatever was analyzed before Stop was pressed instead of
+        # discarding it — same "partial results are still useful" behaviour
+        # as the Surprise premarket job.
+        try:
+            _kv().kv_set(IPO_LIST_KEY, {"results": results, "generated_at": datetime.now(IST).isoformat()}, ttl=4 * 3600)
+        except Exception as e:
+            logger.warning("could not persist partial ipo list: %s", e)
+        clear_ipo_stop()
+        return _set_job(
+            status="stopped",
+            message=f"Stopped at {len(results)}/{total} — {errors} errors before stop",
+            processed=len(results),
+            total=total,
+            results_count=len(results),
+        )
+
     # Sort: listing today / pre-listing first, then by score desc
     def _sort_key(r: dict):
         stage_rank = {"pre_listing": 0, "listing_day": 1, "upcoming": 2, "listed": 3}.get(r.get("stage"), 4)
@@ -891,15 +1121,53 @@ def _run_ipo_scan_locked(force: bool = False) -> dict:
     except Exception as e:
         logger.warning("could not persist ipo list: %s", e)
 
+    # Durable copy — Neon on Render, Oracle on the Oracle deployment (see
+    # ipo_schema.py). This is what lets the next scan within
+    # IPO_DB_FRESH_HOURS skip re-hitting NSE entirely, and gives Database
+    # Feed Health-style visibility into exactly what the last scan saw.
+    try:
+        n = _ipo_db_upsert(results)
+        logger.info("ipo_static_feed: upserted %s/%s rows", n, len(results))
+    except Exception as e:
+        logger.warning("ipo db persist failed (non-fatal): %s", e)
+
     return _set_job(status="done", message=f"Done: {len(results)} analyzed, {errors} errors",
                       processed=total, total=total, results_count=len(results))
 
 
-def get_ipo_list() -> dict:
+def get_ipo_list(display_days: Optional[int] = None) -> dict:
+    """
+    display_days filters the already-scanned list down to listings within
+    the last N days without re-scanning (default IPO_CHECKER_DEFAULT_DISPLAY_DAYS
+    = ~1 month). Pass display_days=0 or a large number (e.g. 365) to see the
+    full up-to-a-year scan window the backend actually discovered. Pre-listing/
+    listing-day/upcoming entries always pass through regardless of display_days
+    since "days since listing" doesn't apply to them yet.
+    """
     try:
         cached = _kv().kv_get(IPO_LIST_KEY)
-        if isinstance(cached, dict):
-            return cached
     except Exception:
-        pass
-    return {"results": [], "generated_at": None}
+        cached = None
+    if not isinstance(cached, dict):
+        return {"results": [], "generated_at": None, "display_days": display_days}
+
+    results = cached.get("results") or []
+    window = IPO_CHECKER_DEFAULT_DISPLAY_DAYS if display_days is None else int(display_days)
+    if not window or window <= 0 or window >= IPO_LOOKBACK_DAYS_HARD_CAP:
+        return {**cached, "display_days": window}
+
+    now = datetime.now(IST)
+    filtered = []
+    for r in results:
+        if r.get("stage") in ("pre_listing", "listing_day", "upcoming"):
+            filtered.append(r)
+            continue
+        dt = _parse_date(r.get("listing_date"))
+        if dt is None:
+            filtered.append(r)  # can't tell age — don't hide it
+            continue
+        dt = dt.replace(tzinfo=IST) if dt.tzinfo is None else dt
+        if (now - dt).days <= window:
+            filtered.append(r)
+
+    return {**cached, "results": filtered, "display_days": window, "total_scanned": len(results)}

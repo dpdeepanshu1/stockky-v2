@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
@@ -709,6 +710,21 @@ _PROGRESS_PATH = os.getenv(
 )
 _job_lock = False
 
+# ── Stop support — Surprise tab's Stop button ───────────────────────────────
+_PREMARKET_STOP_FLAG = threading.Event()
+
+
+def request_premarket_stop() -> None:
+    _PREMARKET_STOP_FLAG.set()
+
+
+def clear_premarket_stop() -> None:
+    _PREMARKET_STOP_FLAG.clear()
+
+
+def premarket_stop_requested() -> bool:
+    return _PREMARKET_STOP_FLAG.is_set()
+
 
 def _write_progress(data: Dict[str, Any]) -> None:
     try:
@@ -829,6 +845,32 @@ def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> 
     if _job_lock:
         return {"ok": False, "error": "already_running", "progress": get_premarket_progress()}
     _job_lock = True
+    clear_premarket_stop()
+
+    def _stopped_result(processed: int, computed: int, errors: int) -> Dict[str, Any]:
+        elapsed = round(time.time() - t0, 1)
+        _write_progress({
+            "stage": "stopped",
+            "percent": int(100 * processed / total) if total else 0,
+            "processed": processed,
+            "total": total,
+            "computed": computed,
+            "errors": errors,
+            "elapsed_sec": elapsed,
+            "eta_sec": 0,
+            "is_running": False,
+            "current_symbol": None,
+            "message": f"Stopped by user at {processed}/{total} ({computed} baselines saved)",
+        })
+        clear_premarket_stop()
+        return {
+            "ok": True,
+            "stopped": True,
+            "symbols_requested": total,
+            "computed": computed,
+            "errors": errors,
+            "elapsed_sec": elapsed,
+        }
 
     try:
         if not ensure_schema():
@@ -979,12 +1021,20 @@ def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> 
             _flush()
         remaining = still_remaining
 
+        if premarket_stop_requested():
+            return _stopped_result(processed, computed, errors)
+
         # Small residual fallback only — per-symbol, few workers.
         if remaining:
             residual_workers = max(1, min(3, len(remaining)))
             with ThreadPoolExecutor(max_workers=residual_workers) as pool:
                 futures = {pool.submit(compute_baseline_for_symbol, sym): sym for sym in remaining}
                 for fut in as_completed(futures):
+                    if premarket_stop_requested():
+                        for f in futures:
+                            f.cancel()
+                        _flush()
+                        return _stopped_result(processed, computed, errors)
                     sym = futures[fut]
                     current_sym = sym
                     try:

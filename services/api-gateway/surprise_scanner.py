@@ -847,7 +847,15 @@ async def run_market_aware_surprise_feed(
                 clean_syms.append(c)
         syms = clean_syms or syms
 
+        try:
+            from surprise_premarket import premarket_stop_requested
+        except Exception:
+            premarket_stop_requested = lambda: False  # noqa: E731
+
         for i in range(0, len(syms), chunk_size):
+            if premarket_stop_requested():
+                logger.info("run_market_aware_surprise_feed: stop requested at chunk %s/%s", i, len(syms))
+                break
             chunk = syms[i : i + chunk_size]
             ticker_string = " ".join(f"{s}.NS" for s in chunk)
             try:
@@ -922,8 +930,15 @@ async def run_market_aware_surprise_feed(
     misses = [s for s in syms if s not in got]
     md = (market_data_url or "").rstrip("/")
     if misses and md:
+        try:
+            from surprise_premarket import premarket_stop_requested as _stop_check
+        except Exception:
+            _stop_check = lambda: False  # noqa: E731
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
             for sym in misses:
+                if _stop_check():
+                    logger.info("run_market_aware_surprise_feed: stop requested during waterfall fill")
+                    break
                 try:
                     r = await client.get(f"{md}/quote/{sym}")
                     if r.status_code == 200:

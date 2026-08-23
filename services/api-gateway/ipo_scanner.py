@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -68,9 +69,19 @@ BUY_NOW_BAR = float(os.getenv("IPO_BUY_NOW_BAR", "66"))
 PREPARE_BAR = float(os.getenv("IPO_PREPARE_BAR", "54"))
 DO_NOT_BUY_BAR = float(os.getenv("IPO_DO_NOT_BUY_BAR", "40"))
 FRESH_WINDOW_DAYS = int(os.getenv("IPO_FRESH_WINDOW_DAYS", "30"))
-LOOKBACK_DAYS_MAX = int(os.getenv("IPO_LOOKBACK_DAYS_MAX", "45"))
+LOOKBACK_DAYS_MAX = int(os.getenv("IPO_LOOKBACK_DAYS_MAX", "30"))
+# Hard ceiling regardless of IPO_LOOKBACK_DAYS_MAX — "recent IPO" stops
+# meaning anything past 2 months no matter how that env var is set.
+IPO_LOOKBACK_DAYS_HARD_CAP = int(os.getenv("IPO_LOOKBACK_DAYS_HARD_CAP", "60"))
+# Not-yet-listed IPOs (listing today/tomorrow/this week) — how far forward
+# to look for those.
+IPO_UPCOMING_WINDOW_DAYS = int(os.getenv("IPO_UPCOMING_WINDOW_DAYS", "7"))
 
 MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
+FUNDAMENTAL_URL = os.getenv(
+    "FUNDAMENTAL_URL",
+    os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com").rstrip("/") + "/fundamental",
+).rstrip("/")
 
 NSE_HEADERS = {
     "User-Agent": (
@@ -188,6 +199,20 @@ def _normalize_ipoalerts_row(row: Dict[str, Any], status: str) -> Optional[Dict[
                 issue_price = float(price_range.replace(",", "").split("-")[-1].strip())
             except (TypeError, ValueError):
                 issue_price = None
+        # GMP (grey market premium) — only present on ipoalerts' paid plans
+        # per their docs; absent on the free tier, which is fine, this is
+        # opportunistic. Accept a couple of plausible field-name spellings
+        # since their schema for this field specifically isn't confirmed
+        # the way the rest of this row is (see module note above).
+        gmp = row.get("gmp")
+        if gmp is None:
+            gmp = row.get("greyMarketPremium")
+        if isinstance(gmp, dict):
+            gmp = gmp.get("value") or gmp.get("premium")
+        try:
+            gmp = float(gmp) if gmp is not None else None
+        except (TypeError, ValueError):
+            gmp = None
         return {
             "symbol": symbol,
             "company_name": row.get("name") or symbol,
@@ -196,6 +221,7 @@ def _normalize_ipoalerts_row(row: Dict[str, Any], status: str) -> Optional[Dict[
             "status": status,
             "source": "ipoalerts",
             "subscription_times": row.get("subscriptionTimes") or (row.get("subscription") or {}).get("total"),
+            "gmp": gmp,
         }
     except Exception:
         return None
@@ -231,24 +257,37 @@ def fetch_nse_ipo_calendar() -> List[Dict[str, Any]]:
         ("https://www.nseindia.com/api/public-past-issues", "past"),
         ("https://www.nseindia.com/api/all-upcoming-issues?category=ipo", "upcoming"),
     ]
+    # try/finally + manual close instead of `with _nse_session() as c:` —
+    # a `with` block calls __exit__ (closing the client) once; if anything
+    # upstream ever re-enters this same client object (e.g. a retry
+    # wrapper, or this function being invoked twice concurrently on a
+    # cached/shared instance), httpx raises "Cannot open a client instance
+    # more than once". _nse_session() already returns a fresh client per
+    # call so that shouldn't happen here, but try/finally is strictly
+    # safer than `with` for this exact failure mode and costs nothing.
+    c = _nse_session()
     try:
-        with _nse_session() as c:
-            for url, kind in candidates:
-                try:
-                    r = c.get(url, timeout=15)
-                    if r.status_code != 200:
-                        logger.info("NSE IPO calendar %s -> HTTP %s (blocked/unavailable)", kind, r.status_code)
-                        continue
-                    data = r.json()
-                    rows = data if isinstance(data, list) else data.get("data") or []
-                    for row in rows:
-                        norm = _normalize_nse_row(row, kind)
-                        if norm:
-                            out.append(norm)
-                except Exception as e:
-                    logger.info("NSE IPO calendar %s fetch failed: %s", kind, e)
+        for url, kind in candidates:
+            try:
+                r = c.get(url, timeout=15)
+                if r.status_code != 200:
+                    logger.info("NSE IPO calendar %s -> HTTP %s (blocked/unavailable)", kind, r.status_code)
+                    continue
+                data = r.json()
+                rows = data if isinstance(data, list) else data.get("data") or []
+                for row in rows:
+                    norm = _normalize_nse_row(row, kind)
+                    if norm:
+                        out.append(norm)
+            except Exception as e:
+                logger.info("NSE IPO calendar %s fetch failed: %s", kind, e)
     except Exception as e:
         logger.warning("NSE IPO session failed entirely: %s", e)
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
 
     return out
 
@@ -286,6 +325,7 @@ def add_manual_ipo(
     listing_date: str,
     company_name: Optional[str] = None,
     subscription_times: Optional[float] = None,
+    gmp: Optional[float] = None,
 ) -> dict:
     """Register an IPO by hand — the reliable path when NSE's auto-discovery
     is blocked, or to get a symbol in front of the scorer before NSE's own
@@ -297,6 +337,7 @@ def add_manual_ipo(
         "issue_price": float(issue_price),
         "listing_date": listing_date,
         "subscription_times": subscription_times,
+        "gmp": gmp,
         "status": "manual",
         "source": "manual",
         "added_at": datetime.now(IST).isoformat(),
@@ -329,6 +370,20 @@ def _merged_ipo_universe() -> List[Dict[str, Any]]:
       1. manual entries       — you told the system directly, always wins
       2. ipoalerts.in         — real confirmed schema, needs a free API key
       3. NSE unofficial API   — best-effort, unverified/frequently blocked
+
+    Recency filter: ipoalerts' "listed"/"closed" status buckets return
+    every IPO in their database with no date bound — this is why the scan
+    was processing 1000+ candidates (most listed years ago) instead of the
+    handful that are actually "recent". This is a short-term listing-
+    momentum scanner (see module docstring), so anything outside the
+    window below is dropped before analysis even starts:
+      - already listed: keep only the last IPO_LOOKBACK_DAYS_MAX days
+        (default 30, hard-capped at IPO_LOOKBACK_DAYS_HARD_CAP = 60 —
+        "max 2 months")
+      - not yet listed: keep only the next IPO_UPCOMING_WINDOW_DAYS days
+        (default 7) so "listing today/tomorrow" IPOs are still included
+    Manual entries always pass through regardless of date — if you added
+    it by hand, you meant to track it.
     """
     ipoalerts = fetch_ipoalerts_calendar()
     nse = fetch_nse_ipo_calendar()
@@ -339,12 +394,35 @@ def _merged_ipo_universe() -> List[Dict[str, Any]]:
         by_symbol[a["symbol"]] = a
     for a in ipoalerts:
         by_symbol[a["symbol"]] = a  # ipoalerts overrides NSE guess
+    manual_symbols = {m["symbol"] for m in manual if m.get("symbol")}
     for m in manual:
         by_symbol[m["symbol"]] = m  # manual overrides everything
 
     merged = list(by_symbol.values())
     # Drop anything without a listing date/issue price — can't score it
-    return [m for m in merged if m.get("listing_date") and m.get("issue_price")]
+    dated = [m for m in merged if m.get("listing_date") and m.get("issue_price")]
+
+    lookback = min(IPO_LOOKBACK_DAYS_MAX, IPO_LOOKBACK_DAYS_HARD_CAP)
+    now = datetime.now(IST)
+    recent: List[Dict[str, Any]] = []
+    for m in dated:
+        if m["symbol"] in manual_symbols:
+            recent.append(m)
+            continue
+        dt = _parse_date(m.get("listing_date"))
+        if dt is None:
+            continue  # unparseable date — can't tell if it's recent, skip
+        dt = dt.replace(tzinfo=IST) if dt.tzinfo is None else dt
+        age_days = (now - dt).days
+        if -IPO_UPCOMING_WINDOW_DAYS <= age_days <= lookback:
+            recent.append(m)
+
+    if len(dated) != len(recent):
+        logger.info(
+            "ipo universe: %s candidates -> %s within last %sd/next %sd window",
+            len(dated), len(recent), lookback, IPO_UPCOMING_WINDOW_DAYS,
+        )
+    return recent
 
 
 # ── Per-symbol analysis ────────────────────────────────────────────────────
@@ -373,22 +451,21 @@ def _fetch_history(symbol: str, days: int) -> Optional[Any]:
     stops going straight to "error" the moment Yahoo's crumb/cookie flow
     hiccups. Falls back to a direct yfinance call only if market-data-service
     itself is unreachable.
+
+    Passes `days` straight through to /history's exact start=/end= window
+    instead of snapping to a named period bucket (1mo/3mo/6mo/...). A stock
+    that listed 6 days ago asking for a fixed "1mo"/"3mo" period doesn't
+    gain anything — there's no more history to return either way — but it
+    does add unnecessary Yahoo request weight for some tickers, and for
+    tickers Yahoo has thin coverage on (common for NSE SME-platform
+    listings) the exact short window is more likely to come back with
+    *something* than a request shaped for a month of data that doesn't
+    exist yet.
     """
     try:
-        # /history only accepts named periods (1mo/3mo/6mo/1y/2y/5y); map the
-        # day-count IPO analysis asks for onto the closest one so the
-        # earlier-days cap in get_history doesn't silently override us.
-        if days <= 30:
-            period = "1mo"
-        elif days <= 90:
-            period = "3mo"
-        elif days <= 180:
-            period = "6mo"
-        else:
-            period = "1y"
         r = httpx.get(
             f"{MARKET_DATA_URL}/history/{symbol}",
-            params={"period": period, "interval": "1d"},
+            params={"days": max(1, int(days)), "interval": "1d"},
             timeout=15,
         )
         if r.status_code == 200:
@@ -414,7 +491,11 @@ def _fetch_history(symbol: str, days: int) -> Optional[Any]:
     # Fallback: direct yfinance (only reached if market-data-service is down/unreachable)
     try:
         import yfinance as yf
-        t = yf.Ticker(f"{symbol}.NS")
+        from symbol_aliases import resolve_ns_ticker
+        yf_ticker = resolve_ns_ticker(symbol)
+        if not yf_ticker:
+            return None  # known non-NSE / renamed-unresolvable — don't waste the call
+        t = yf.Ticker(yf_ticker)
         hist = t.history(period=f"{max(5, days)}d", interval="1d", auto_adjust=True)
         if hist is None or hist.empty:
             return None
@@ -435,6 +516,45 @@ def _quote_now(symbol: str) -> Optional[float]:
     except Exception as e:
         logger.debug("ipo quote_now %s: %s", symbol, e)
     return None
+
+
+def _fetch_ipo_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    Best-effort profit/loss snapshot for a freshly-listed company, reused
+    from the same analysis-intelligence-service /analyze/{symbol} endpoint
+    the rest of the app already calls (fundamental fill, Data Feed repair).
+    A stock that IPO'd days ago often has thin/no analyst coverage yet, so
+    this frequently comes back empty for very fresh SME listings — that's
+    expected, not an error, and callers should treat a None/empty result
+    as "not available yet" rather than retry aggressively.
+    """
+    try:
+        from rate_limiter import acquire as rl_acquire
+        rl_acquire("analysis", weight=1)
+    except Exception:
+        pass
+    try:
+        r = httpx.get(f"{FUNDAMENTAL_URL}/analyze/{symbol}", timeout=15)
+        if r.status_code != 200:
+            return None
+        data = r.json() or {}
+        metrics = data.get("metrics") if isinstance(data.get("metrics"), dict) else data
+        if not isinstance(metrics, dict):
+            return None
+        # Just the P&L-relevant fields — analyze_ipo doesn't need the full
+        # fundamental blob, and a smaller snapshot keeps the IPO list
+        # payload light (see the /api/scan/find-buys 413 fix for why that
+        # matters).
+        keys = (
+            "revenue", "net_profit", "profit", "pat", "eps",
+            "revenue_growth_pct", "profit_growth_pct", "pe_ratio", "roce",
+            "debt_to_equity",
+        )
+        snapshot = {k: metrics.get(k) for k in keys if metrics.get(k) is not None}
+        return snapshot or None
+    except Exception as e:
+        logger.debug("ipo fundamentals %s: %s", symbol, e)
+        return None
 
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -458,6 +578,7 @@ def analyze_ipo(entry: Dict[str, Any], now: Optional[datetime] = None) -> Dict[s
         "listing_date": entry.get("listing_date"),
         "source": entry.get("source", "manual"),
         "subscription_times": entry.get("subscription_times"),
+        "gmp": entry.get("gmp"),
     }
 
     if listing_dt is None:
@@ -479,15 +600,27 @@ def analyze_ipo(entry: Dict[str, Any], now: Optional[datetime] = None) -> Dict[s
         if current_px is None:
             result["stage"] = "pre_listing"
             result["message"] = "Lists today — no trade printed yet (check again after 10:00 AM IST)."
-            # Early advisory from subscription strength alone, if we have it
+            # Early advisory from subscription strength and/or GMP, if we have them.
             sub = entry.get("subscription_times")
+            gmp = entry.get("gmp")
+            parts = []
             if sub is not None:
                 sub_score = _clamp(50 + min(sub, 50) * 1.0)  # 1x=50 (neutral), 50x+=~100
+                parts.append(sub_score)
+            if gmp is not None and issue_price:
+                # GMP as % of issue price is a rough proxy for expected listing pop —
+                # same 50=neutral / saturating shape as the subscription score above.
+                gmp_pct = (gmp / issue_price) * 100.0
+                gmp_score = _clamp(50 + min(max(gmp_pct, -50), 100) * 0.5)
+                parts.append(gmp_score)
+                result["gmp_pct_of_issue"] = round(gmp_pct, 1)
+            if parts:
+                sub_score = sum(parts) / len(parts)
                 result["pre_listing_advisory_score"] = round(sub_score, 1)
                 result["pre_listing_advisory"] = (
-                    "Strong subscription — historically correlates with a firm listing pop."
+                    "Strong subscription/GMP — historically correlates with a firm listing pop."
                     if sub_score >= 66 else
-                    "Moderate/weak subscription — listing pop uncertain, watch first 15 minutes of trade."
+                    "Moderate/weak subscription/GMP — listing pop uncertain, watch first 15 minutes of trade."
                 )
             return result
         # First trade of the day is in — treat like "listing day, live"
@@ -512,11 +645,22 @@ def analyze_ipo(entry: Dict[str, Any], now: Optional[datetime] = None) -> Dict[s
         return result
 
     # ── Post-listing: we have real history ──
-    hist = _fetch_history(symbol, min(days_since_listing + 5, LOOKBACK_DAYS_MAX))
+    # days_since_listing + 2 (not +5): request only the days that could
+    # actually exist, not a padded window — a 6-day-old listing asking for
+    # 11 days of history gains nothing and is exactly the mismatch that
+    # was producing "possibly delisted" noise for names that simply don't
+    # have that much trading history yet.
+    hist = _fetch_history(symbol, min(days_since_listing + 2, LOOKBACK_DAYS_MAX))
     if hist is None or hist.empty:
         result["stage"] = "error"
         result["message"] = "Could not fetch post-listing price history"
         return result
+
+    # Best-effort P&L snapshot — most freshly-listed names won't have
+    # analyst coverage yet, so this is allowed to come back empty.
+    fundamentals = _fetch_ipo_fundamentals(symbol)
+    if fundamentals:
+        result["fundamentals_snapshot"] = fundamentals
 
     closes = hist["Close"].astype("float64")
     highs = hist["High"].astype("float64")
@@ -691,8 +835,28 @@ def _build_ipo_suggestion(
 
 
 # ── Background scan job ────────────────────────────────────────────────────
+_IPO_SCAN_LOCK = threading.Lock()
+
 
 def run_ipo_scan(force: bool = False) -> dict:
+    # Guard against overlapping scans (e.g. the UI's poll + a manual
+    # "Run Premarket Feed" click landing close together, or a page refresh
+    # re-firing the trigger before the previous run finished). Two scans
+    # running at once share no state but do double the NSE/IndianAPI call
+    # volume for no benefit, and made "Cannot open a client instance more
+    # than once"-style races far more likely to surface under load even
+    # though each call site creates its own client. non_blocking acquire:
+    # if a scan is already running, just report that instead of queuing.
+    if not _IPO_SCAN_LOCK.acquire(blocking=False):
+        logger.info("run_ipo_scan: scan already in progress, skipping duplicate trigger")
+        return {**get_ipo_scan_progress(), "skipped": True, "reason": "scan already running"}
+    try:
+        return _run_ipo_scan_locked(force=force)
+    finally:
+        _IPO_SCAN_LOCK.release()
+
+
+def _run_ipo_scan_locked(force: bool = False) -> dict:
     universe = _merged_ipo_universe()
     total = len(universe)
     _set_job(status="running", message=f"Scanning {total} IPO(s)…", processed=0, total=total,

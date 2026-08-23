@@ -18,7 +18,7 @@ import json
 import logging
 import math
 import random
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional, List
 
@@ -219,11 +219,21 @@ def _sanitize_for_json(obj):
             return None
         return obj
     if isinstance(obj, dict):
-        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+        # json.dumps requires string (or int/float/bool/None) keys — a
+        # pandas Timestamp or numpy scalar used as a dict key (e.g. from
+        # `.to_dict()` on an indexed Series) raises the same
+        # "not JSON serializable" class of error as an unhandled value
+        # would. Stringify anything that isn't already a safe key type.
+        return {
+            (k if isinstance(k, (str, int, float, bool)) or k is None else str(k)): _sanitize_for_json(v)
+            for k, v in obj.items()
+        }
     if isinstance(obj, (list, tuple)):
         return [_sanitize_for_json(v) for v in obj]
     try:
         import numpy as np
+        if isinstance(obj, np.bool_):
+            return bool(obj)
         if isinstance(obj, (np.floating,)):
             f = float(obj)
             return None if (math.isnan(f) or math.isinf(f)) else f
@@ -233,6 +243,19 @@ def _sanitize_for_json(obj):
             return [_sanitize_for_json(x) for x in obj.tolist()]
     except Exception:
         pass
+    try:
+        import pandas as pd
+        if isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        if obj is pd.NaT:
+            return None
+        if isinstance(obj, (pd.Series,)):
+            return _sanitize_for_json(obj.to_dict())
+    except Exception:
+        pass
+    import datetime as _dt
+    if isinstance(obj, (_dt.datetime, _dt.date)):
+        return obj.isoformat()
     return obj
 
 
@@ -1450,6 +1473,20 @@ def get_history(
     period: str = Query("6mo", description="1mo, 3mo, 6mo, 1y, 2y, 5y"),
     interval: str = Query("1d", description="1d, 1wk, 1h"),
     force: bool = Query(False, description="Bypass cache for real-time sniper analysis"),
+    days: Optional[int] = Query(
+        None,
+        description=(
+            "When given, overrides `period` with an exact start=today-days "
+            "window via yfinance's start=/end= instead of a named period "
+            "bucket. For a stock that only listed N days ago, requesting "
+            "period='1mo'/'3mo' asks Yahoo for a month+ of history that "
+            "can't exist — some tickers handle that fine (just return what "
+            "exists), others come back as 'possibly delisted; no price "
+            "data found' instead of a short, valid range. Callers that "
+            "know the real elapsed days (recent-IPO analysis, repair-RSI "
+            "for a newly fed stock) should pass this instead of period."
+        ),
+    ),
 ):
     # Cap long periods on free-tier 512MB dynos
     _period_rank = {"1mo": 1, "3mo": 2, "6mo": 3, "1y": 4, "2y": 5, "5y": 6}
@@ -1471,7 +1508,20 @@ def get_history(
     if "NIFTY" in raw_u and "^NSEI" not in candidates:
         candidates.append("^NSEI")
 
-    cache_key = f"history:{sym}:{period}:{interval}"
+    # `days` (when given) computes an exact start=/end= window instead of
+    # snapping to a named period bucket — see the `days` param docstring
+    # above for why. Clamp so it still respects MAX_HISTORY_PERIOD's byte
+    # budget on free-tier dynos.
+    start_date = None
+    end_date = None
+    if days is not None:
+        _period_days_cap = {"1mo": 31, "3mo": 93, "6mo": 186, "1y": 366, "2y": 732, "5y": 1830}
+        cap = _period_days_cap.get(MAX_HISTORY_PERIOD, 366)
+        days = max(1, min(int(days), cap))
+        end_date = datetime.now(ZoneInfo("Asia/Kolkata")).date() + timedelta(days=1)  # inclusive of today
+        start_date = end_date - timedelta(days=days)
+
+    cache_key = f"history:{sym}:{period}:{interval}:{days or ''}"
     if not force:
         cached = _cache_get(cache_key)
         if cached:
@@ -1485,11 +1535,20 @@ def get_history(
                 ticker._tz = "Asia/Kolkata"
             except Exception:
                 pass
-            df = _with_retry(
-                lambda t=ticker: t.history(period=period, interval=interval, auto_adjust=True),
-                max_retries=3,
-                base_delay=0.8,
-            )
+            if start_date is not None:
+                df = _with_retry(
+                    lambda t=ticker: t.history(
+                        start=start_date, end=end_date, interval=interval, auto_adjust=True
+                    ),
+                    max_retries=3,
+                    base_delay=0.8,
+                )
+            else:
+                df = _with_retry(
+                    lambda t=ticker: t.history(period=period, interval=interval, auto_adjust=True),
+                    max_retries=3,
+                    base_delay=0.8,
+                )
             if df is None or df.empty:
                 last_err = f"empty history for {cand}"
                 logger.info("No history for candidate %s (requested %s)", cand, symbol)
@@ -1556,7 +1615,21 @@ def get_fundamentals_raw(
     force: bool = Query(False, description="Bypass cache for real-time sniper analysis"),
 ):
     try:
-        return _get_fundamentals_inner(symbol, force=force)
+        # _sanitize_for_json wraps EVERY return path here, not just the
+        # early cache-hit/cooldown branches inside _get_fundamentals_inner.
+        # The fresh-computation success path there builds `result` from
+        # raw pandas arithmetic (debt_to_equity, free_cashflow,
+        # profit_margins, opm, current_ratio, interest_coverage, pe_growth
+        # — all computed as numpy.float64/int64, not native Python floats)
+        # and returned it unsanitized. json.dumps has no idea how to
+        # serialize numpy.float64 (it isn't a subclass of float), so any
+        # request that hit a fresh (non-cached) fundamentals fetch for a
+        # well-covered stock crashed Starlette's response.render() —
+        # that's the "must be str, bytes or bytearray" / json.encoder
+        # traceback from NESTLEIND.NS in the logs. Sanitizing once here,
+        # around every path _get_fundamentals_inner can return through,
+        # fixes it regardless of which internal branch produced the result.
+        return _sanitize_for_json(_get_fundamentals_inner(symbol, force=force))
     except Exception as e:
         logger.warning("fundamentals failed for %s: %s", symbol, e)
         return _sanitize_for_json({

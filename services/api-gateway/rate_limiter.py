@@ -75,10 +75,23 @@ class _Bucket:
     def __post_init__(self):
         self.tokens = self.capacity
 
-    def acquire(self, weight: float = 1.0, max_wait: float = 60.0) -> float:
+    def acquire(self, weight: float = 1.0, max_wait: float = 20.0) -> float:
         """Blocks until `weight` tokens are available (or max_wait elapses,
         to avoid an unbounded stall if a caller mis-sizes a batch). Returns
-        the actual wait time in seconds."""
+        the actual wait time in seconds.
+
+        max_wait default lowered from 60s -> 20s: this function is called
+        from plain `def` (sync) FastAPI routes/background jobs, which
+        Starlette runs on a *bounded* thread pool. A single acquire() call
+        blocking a worker thread for up to 60s — multiplied across every
+        chunk of a 297-symbol data feed run, with several features (Data
+        Feed, Training, Surprise scan) triggered concurrently from separate
+        browser tabs — was enough to exhaust that thread pool and made
+        unrelated requests queue for minutes behind it (the "12 stocks in
+        326 minutes" slowdown). 20s still gives the bucket room to refill
+        under normal load without holding a thread hostage for a full
+        minute on every call.
+        """
         start = time.time()
         with self.lock:
             self.waiters += 1
@@ -134,7 +147,7 @@ def _get_bucket(provider: str) -> _Bucket:
         return b
 
 
-def acquire(provider: str, weight: float = 1.0, max_wait: float = 60.0) -> float:
+def acquire(provider: str, weight: float = 1.0, max_wait: float = 20.0) -> float:
     """Block until it's safe to make `weight` upstream calls to `provider`.
     Call this immediately before the upstream request/batch. Returns the
     wait time incurred (0.0 if no throttling was needed)."""

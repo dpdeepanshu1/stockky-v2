@@ -681,6 +681,39 @@ class DataFeedStore:
     def has_symbol(self, symbol: str) -> bool:
         return self.get_symbol(symbol) is not None
 
+    def delete_symbol(self, symbol: str) -> bool:
+        """
+        Remove a symbol from the feed entirely (canonical + alias + legacy
+        keys, local caches, and the durable index). Used to purge stocks
+        that should never have been persisted — e.g. price > MAX_STOCK_PRICE
+        rows written before the write-path price gate existed. Returns True
+        if anything was found/removed.
+        """
+        base = _norm_sym(symbol)
+        if not base:
+            return False
+        found = base in _LOCAL_INDEX or self.has_symbol(base)
+        key = DATA_FEED_PREFIX + base
+        alias_key = FEED_ALIAS_PREFIX + base
+        legacy_key = FEED_LEGACY_PREFIX + base
+        for k in (key, alias_key, legacy_key):
+            _LOCAL_SYMBOLS.pop(k, None)
+        _LOCAL_INDEX.discard(base)
+        try:
+            import kv_cache as _kc
+            for k in (key, alias_key, legacy_key):
+                try:
+                    _kc.kv_delete(k)
+                except Exception as e:
+                    logger.debug("delete_symbol kv_delete %s: %s", k, e)
+        except Exception as e:
+            logger.warning("delete_symbol: kv_cache unavailable for %s: %s", base, e)
+        try:
+            self._persist_index()
+        except Exception as e:
+            logger.debug("delete_symbol index persist: %s", e)
+        return found
+
     def list_symbols(self) -> List[str]:
         """Symbols currently in feed (local ∪ durable index from Neon)."""
         global _INDEX_WARMED
@@ -1426,17 +1459,32 @@ def download_nse_bhavcopy_bulk(force: bool = False) -> Dict[str, dict]:
 
     import csv
     import io as _io
+    import time as _time
     import httpx as _httpx
 
     out: Dict[str, dict] = {}
+    # Wall-clock budget: previously this loop had no time cap and no
+    # stop-flag check, so a run stuck retrying NSE (403s/blocked endpoints)
+    # across 6 candidate dates × several URL patterns each could run for a
+    # very long time with the Stop button unable to interrupt it (this is
+    # the actual worker-thread executing inside asyncio.to_thread() from
+    # data-feed's PHASE 0 — a thread pool call can't be cancelled once
+    # started, so it must check the flag itself). Cap total time here and
+    # bail out to the Yahoo-bulk fallback instead.
+    _deadline = _time.time() + float(os.getenv("BHAV_BULK_MAX_SEC", "45"))
     try:
-        with _httpx.Client(timeout=25, headers=_NSE_BHAV_HEADERS, follow_redirects=True) as client:
+        with _httpx.Client(timeout=15, headers=_NSE_BHAV_HEADERS, follow_redirects=True) as client:
             try:
                 client.get("https://www.nseindia.com")
             except Exception:
                 pass
             for d in _bhav_candidate_dates(6):
+                if data_feed_stop_requested() or __import__("time").time() > _deadline:
+                    logger.info("download_nse_bhavcopy_bulk: stopping early (stop_requested or deadline)")
+                    break
                 for url in _bhav_urls_for_date(d):
+                    if data_feed_stop_requested() or __import__("time").time() > _deadline:
+                        break
                     try:
                         r = client.get(url)
                         if r.status_code != 200 or not r.content:
@@ -1634,6 +1682,20 @@ def run_bulk_yahoo_price_feed(
                     skipped += 1
                     logger.debug("bhav upsert fallback %s: %s", base, e2)
     _progress(saved, f"Bhavcopy seed {saved}/{total} complete", ok_count=saved)
+
+    # Honor Stop between phases — bhavcopy phase above now has its own
+    # deadline/stop-check; this catches the case where a click landed right
+    # as that phase finished, before the (potentially much slower) Yahoo
+    # fallback phase below would otherwise start unconditionally.
+    if data_feed_stop_requested():
+        logger.info("run_bulk_yahoo_price_feed: stop requested after bhavcopy phase, exiting")
+        return {
+            "status": "stopped",
+            "message": f"Stopped after bhavcopy phase — {saved}/{total} seeded",
+            "tracked_stocks": saved,
+            "requested": total,
+            "symbols": hit_symbols,
+        }
 
     missed = [b for b in bases if b not in bhav]
     market_open = False

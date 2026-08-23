@@ -197,6 +197,9 @@ export interface IpoAnalysis {
   score_breakdown?: Record<string, number>;
   decision?: "BUY NOW" | "PREPARE TO BUY" | "HOLD" | "DO NOT BUY" | "SELL";
   buy_suggestion?: IpoBuySuggestion | null;
+  gmp?: number | null;
+  gmp_pct_of_issue?: number;
+  fundamentals_snapshot?: Record<string, number | null>;
   error?: string;
 }
 
@@ -900,6 +903,14 @@ export const api = {
   /**
    * Buy Sniper — 1–4 high-conviction setups from scan rows.
    * POST /api/scan/find-buys
+   *
+   * The scan-result rows callers pass in can carry full nested payloads
+   * (metrics, history, raw upstream blobs) — sending that whole array
+   * straight through easily blows past the platform's request-body limit
+   * once the universe is a few hundred stocks (this was causing
+   * "413 Request Entity Too Large"). buy_sniper.py only ever reads a
+   * small, flat set of fields per row, so trim to just those before
+   * stringifying — same suggestions, a fraction of the bytes.
    */
   findBuys: (payload: {
     stocks?: any[];
@@ -908,8 +919,47 @@ export const api = {
     recommendations?: any[];
     target_count?: number;
     min_conviction?: number;
-  }) =>
-    request<{
+  }) => {
+    const SNIPER_FIELDS = [
+      "symbol",
+      "decision",
+      "signal",
+      "conviction",
+      "combined_score",
+      "conviction_score",
+      "technical_score",
+      "fundamental_score",
+      "price",
+      "cmp",
+      "last_price",
+      "ltp",
+      "close",
+      "current_price",
+      "change_pct",
+      "target",
+      "target_price",
+      "stop_loss",
+      "sector",
+      "holding_period",
+    ] as const;
+    const trim = (rows?: any[]) =>
+      Array.isArray(rows)
+        ? rows.map((r) => {
+            const out: Record<string, any> = {};
+            for (const k of SNIPER_FIELDS) {
+              if (r && r[k] !== undefined) out[k] = r[k];
+            }
+            return out;
+          })
+        : rows;
+    const trimmedPayload = {
+      ...payload,
+      stocks: trim(payload.stocks),
+      all_results: trim(payload.all_results),
+      results: trim(payload.results),
+      recommendations: trim(payload.recommendations),
+    };
+    return request<{
       ok?: boolean;
       count: number;
       suggestions: any[];
@@ -920,11 +970,12 @@ export const api = {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(trimmedPayload),
       },
       1,
       30000
-    ),
+    );
+  },
 
   /**
    * Stream full-market scan as NDJSON (one JSON object per line).
@@ -1222,6 +1273,7 @@ export const api = {
     listing_date: string;
     company_name?: string;
     subscription_times?: number;
+    gmp?: number;
   }) =>
     request<{ accepted?: boolean; entry?: Record<string, unknown> }>(
       "/surprise/ipo/add",

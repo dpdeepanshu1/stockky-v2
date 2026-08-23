@@ -30,6 +30,24 @@ MAX_STOCK_PRICE = 5000.0
 _BHAV_LAST_GOOD_PREFIX: str = ""
 IST = ZoneInfo("Asia/Kolkata")
 
+# Cache of a fully-downloaded-and-parsed bhavcopy CSV for a given session
+# date, shared across every symbol lookup within this process.
+#
+# Why this exists: delivery_from_bhavcopy() used to download AND re-parse
+# the entire market-wide bhavcopy CSV from scratch for every single symbol
+# that called it — one full file (several MB) plus the whole multi-URL
+# 404-cascade (NSE blocks/moves endpoints often enough that 3-5 URLs
+# routinely fail before one succeeds), *per symbol*, even though the file
+# content for a given date never changes. With dozens of symbols needing a
+# delivery-%/EOD-close repair in the same run, this multiplied both the
+# NSE request volume (worse 403-blocking risk) and the wall-clock time by
+# however many symbols were being repaired. Logs showed the exact same
+# cascade (404, 404, 404, 200) appearing twice back-to-back for the same
+# date — that was two different symbols each redoing the full fetch.
+# Caching the parsed dict once per date fixes both.
+_BHAV_DAY_CACHE: Dict[str, Dict[str, dict]] = {}
+_BHAV_DAY_CACHE_MAX_DATES = 3  # only ever need "today" + a couple of fallback sessions
+
 NSE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -325,6 +343,147 @@ def process_bhavcopy_dataframe(df):  # type: ignore[no-untyped-def]
     return out
 
 
+def _parse_bhav_csv_all(text: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Same column-detection logic as _parse_bhav_csv, but parses every EQ/BE/BZ
+    row into a {symbol: row} dict in one pass instead of scanning for a
+    single symbol. This is what makes the per-date cache possible — one
+    parse serves every symbol that needs this date's data.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        return out
+    fields = {f.lower().strip().replace(" ", "_"): f for f in reader.fieldnames}
+
+    def col(*names):
+        for n in names:
+            key = n.lower().strip().replace(" ", "_")
+            if key in fields:
+                return fields[key]
+        return None
+
+    sym_col = col("SYMBOL", "symbol", "TckrSymb", "SECURITY")
+    series_col = col("SERIES", "series", "SctySrs")
+    close_col = col("CLOSE", "close", "LAST", "last", "ClsPric", "LastPric", "ClosePrice")
+    deliv_pct_col = col(
+        "DELIV_PER", "DELIVERY_PER", "DELIV_PERCENTAGE", "DELIV_PERC",
+        "DELIVERY_%", "DELIVERY_PERCENT", "DelivPer",
+    )
+    deliv_qty_col = col(
+        "DELIV_QTY", "DELIVERY_QTY", "DELIV_QUANTITY", "DELIVERY_QUANTITY", "DelivQty",
+    )
+    tq_col = col(
+        "TTL_TRD_QNTY", "TOTAL_TRADES", "TOTTRDQTY", "NO_OF_SHRS", "VOLUME",
+        "TtlTradgVol", "TOT_TRADED_QTY", "TRADED_QTY",
+    )
+    if not sym_col:
+        return out
+
+    for row in reader:
+        row_sym = (row.get(sym_col) or "").strip().upper()
+        if not row_sym:
+            continue
+        if series_col:
+            series = str(row.get(series_col) or "").strip().upper()
+            if series and series not in ("EQ", "BE", "BZ"):
+                continue
+        close_px = None
+        if close_col:
+            try:
+                close_raw = str(row.get(close_col) or "").replace(",", "").strip()
+                if close_raw and close_raw.upper() not in ("-", "NA", "N/A"):
+                    close_px = float(close_raw)
+                    if close_px > MAX_STOCK_PRICE:
+                        continue  # high-ticket — do not cache this row
+            except (TypeError, ValueError):
+                close_px = None
+        pct = None
+        if deliv_pct_col and row.get(deliv_pct_col):
+            try:
+                raw = str(row[deliv_pct_col]).replace(",", "").replace("%", "").strip()
+                if raw and raw.upper() not in ("-", "NA", "N/A"):
+                    pct = float(raw)
+            except ValueError:
+                pct = None
+        if pct is None and deliv_qty_col and tq_col:
+            try:
+                dq = float(str(row[deliv_qty_col]).replace(",", "").strip())
+                tq = float(str(row[tq_col]).replace(",", "").strip()) or 1.0
+                pct = dq / tq * 100.0
+            except ValueError:
+                pct = None
+        if pct is None and close_px is None:
+            continue
+        # Don't overwrite an EQ row already captured with a later BE/BZ dup
+        if row_sym in out and out[row_sym].get("close") is not None:
+            continue
+        out[row_sym] = {
+            "symbol": row_sym,
+            "delivery_pct": round(pct, 2) if pct is not None else None,
+            "close": close_px,
+            "traded_qty": row.get(tq_col) if tq_col else None,
+            "delivery_qty": row.get(deliv_qty_col) if deliv_qty_col else None,
+            "source": "nse_bhavcopy",
+        }
+    return out
+
+
+def _fetch_bhav_day_parsed(client: httpx.Client, d) -> Optional[Dict[str, Dict[str, Any]]]:
+    """
+    Download + parse one session date's bhavcopy once, cached for the rest
+    of this process's lifetime under _BHAV_DAY_CACHE. Every symbol lookup
+    for the same date after the first one is a plain dict lookup — no
+    network call at all.
+    """
+    key = d.isoformat()
+    if key in _BHAV_DAY_CACHE:
+        return _BHAV_DAY_CACHE[key]
+
+    for url in _bhav_urls_for_date(d):
+        try:
+            r = client.get(url)
+            if r.status_code != 200 or not r.content:
+                continue
+            content_type = (r.headers.get("content-type") or "").lower()
+            text = None
+            body = r.content
+            if url.endswith(".zip") or "zip" in content_type or body[:2] == b"PK":
+                try:
+                    with zipfile.ZipFile(io.BytesIO(body)) as zf:
+                        name = next((n for n in zf.namelist() if n.lower().endswith(".csv")), None)
+                        if not name:
+                            continue
+                        text = zf.read(name).decode("utf-8", errors="ignore")
+                except zipfile.BadZipFile:
+                    continue
+            else:
+                if "application/json" in content_type:
+                    continue
+                text = r.text
+            if not text:
+                continue
+            head = text[:800].upper()
+            if "SYMBOL" not in head and "TCKRSYMB" not in head and "SECURITY" not in head:
+                continue
+            parsed = _parse_bhav_csv_all(text)
+            if parsed:
+                # Keep the cache small — only the most recent few dates are
+                # ever asked for in practice (repair loops walk forward from
+                # "today"), so an unbounded cache would just be a slow leak.
+                if len(_BHAV_DAY_CACHE) >= _BHAV_DAY_CACHE_MAX_DATES:
+                    oldest = min(_BHAV_DAY_CACHE.keys())
+                    _BHAV_DAY_CACHE.pop(oldest, None)
+                _BHAV_DAY_CACHE[key] = parsed
+                return parsed
+        except Exception as e:
+            logger.debug("bhav day fetch failed %s %s: %s", d, url, e)
+            continue
+    return None
+
+
 def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     # Normalise possible BOM / whitespace
@@ -413,49 +572,24 @@ def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
 
 
 def delivery_from_bhavcopy(symbol: str) -> Optional[Dict[str, Any]]:
-    """Download recent official bhavcopy / sec_bhavdata and extract delivery %."""
+    """Download recent official bhavcopy / sec_bhavdata and extract delivery %.
+
+    Routed through _fetch_bhav_day_parsed's per-date cache — the first
+    symbol looked up for a given session date pays the download+parse
+    cost, every symbol after that for the same date is a dict lookup.
+    """
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     try:
         client = _nse_client()
         for d in _candidate_session_dates(12):
-                for url in _bhav_urls_for_date(d):
-                    try:
-                        r = client.get(url)
-                        if r.status_code != 200 or not r.content:
-                            continue
-                        content_type = (r.headers.get("content-type") or "").lower()
-                        text = None
-                        body = r.content
-                        if url.endswith(".zip") or "zip" in content_type or body[:2] == b"PK":
-                            try:
-                                with zipfile.ZipFile(io.BytesIO(body)) as zf:
-                                    name = next(
-                                        (n for n in zf.namelist() if n.lower().endswith(".csv")),
-                                        None,
-                                    )
-                                    if not name:
-                                        continue
-                                    text = zf.read(name).decode("utf-8", errors="ignore")
-                            except zipfile.BadZipFile:
-                                continue
-                        else:
-                            # JSON report wrappers sometimes return download links — skip non-CSV
-                            if "application/json" in content_type:
-                                continue
-                            text = r.text
-                        if not text:
-                            continue
-                        head = text[:800].upper()
-                        if "SYMBOL" not in head and "TCKRSYMB" not in head and "SECURITY" not in head:
-                            continue
-                        parsed = _parse_bhav_csv(text, sym)
-                        if parsed:
-                            parsed["session_date"] = d.isoformat()
-                            parsed["source_url"] = url
-                            return parsed
-                    except Exception as e:
-                        logger.debug("bhav try failed %s %s: %s", d, url, e)
-                        continue
+            day = _fetch_bhav_day_parsed(client, d)
+            if not day:
+                continue
+            row = day.get(sym)
+            if row:
+                out = dict(row)
+                out["session_date"] = d.isoformat()
+                return out
     except Exception as e:
         logger.warning("bhavcopy pipeline failed for %s: %s", sym, e)
     return None
@@ -470,46 +604,23 @@ def eod_close_from_bhavcopy(symbol: str) -> Optional[float]:
     outage. It's end-of-day, not live, but a real EOD close is far better
     for the Data Feed Health repair flow than leaving a record at price=0
     forever.
+
+    Routed through _fetch_bhav_day_parsed's per-date cache (same as
+    delivery_from_bhavcopy) — this was previously a second, independent
+    per-symbol full-file download+parse, so any repair run needing both
+    delivery% and EOD close for the same symbol (or EOD close for several
+    symbols) downloaded the identical CSV redundantly, once per call.
     """
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     try:
         client = _nse_client()
         for d in _candidate_session_dates(12):
-            for url in _bhav_urls_for_date(d):
-                try:
-                    r = client.get(url)
-                    if r.status_code != 200 or not r.content:
-                        continue
-                    content_type = (r.headers.get("content-type") or "").lower()
-                    text = None
-                    body = r.content
-                    if url.endswith(".zip") or "zip" in content_type or body[:2] == b"PK":
-                        try:
-                            with zipfile.ZipFile(io.BytesIO(body)) as zf:
-                                name = next(
-                                    (n for n in zf.namelist() if n.lower().endswith(".csv")),
-                                    None,
-                                )
-                                if not name:
-                                    continue
-                                text = zf.read(name).decode("utf-8", errors="ignore")
-                        except zipfile.BadZipFile:
-                            continue
-                    else:
-                        if "application/json" in content_type:
-                            continue
-                        text = r.text
-                    if not text:
-                        continue
-                    head = text[:800].upper()
-                    if "SYMBOL" not in head and "TCKRSYMB" not in head and "SECURITY" not in head:
-                        continue
-                    parsed = _parse_bhav_csv(text, sym)
-                    if parsed and parsed.get("close"):
-                        return float(parsed["close"])
-                except Exception as e:
-                    logger.debug("eod_close bhav try failed %s %s: %s", d, url, e)
-                    continue
+            day = _fetch_bhav_day_parsed(client, d)
+            if not day:
+                continue
+            row = day.get(sym)
+            if row and row.get("close"):
+                return float(row["close"])
     except Exception as e:
         logger.warning("eod_close_from_bhavcopy failed for %s: %s", sym, e)
     return None

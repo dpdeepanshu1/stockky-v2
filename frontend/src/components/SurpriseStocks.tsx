@@ -103,6 +103,8 @@ export default function SurpriseStocks({
   const [patchingSymbol, setPatchingSymbol] = useState<string | null>(null);
   const [batchRepairBusy, setBatchRepairBusy] = useState(false);
   const [stopBusy, setStopBusy] = useState(false);
+  const [notifyBusy, setNotifyBusy] = useState(false);
+  const [notifyMsg, setNotifyMsg] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
   const scanAbort = useRef<AbortController | null>(null);
 
@@ -405,6 +407,32 @@ export default function SurpriseStocks({
     }
   }, [pollPremarket]);
 
+  // Manual "send top 5 picks to Telegram" — re-scans server-side (reusing
+  // cached static/quote data, not a full re-fetch) and forwards the top N
+  // by score to notification-scheduler-service's /notify (channel=telegram).
+  const notifyTopPicks = useCallback(async () => {
+    setNotifyBusy(true);
+    setNotifyMsg(null);
+    try {
+      const res = await api.surpriseNotifyTopPicks(5);
+      if (res?.sent) {
+        setNotifyMsg(`Sent top ${res.count} picks to Telegram ✓`);
+      } else if (res?.count === 0) {
+        setNotifyMsg(res?.message || "No qualifying picks right now.");
+      } else {
+        setNotifyMsg(
+          res?.notification_result?.note ||
+          res?.error ||
+          "Could not deliver — check Telegram is configured under Settings → Notifications."
+        );
+      }
+    } catch (err: any) {
+      setNotifyMsg(err?.message || "Failed to send top picks");
+    } finally {
+      setNotifyBusy(false);
+    }
+  }, []);
+
   const busy = loading || pmRunning || quoteFeedBusy;
 
   const fetchSurpriseHealth = useCallback(async () => {
@@ -538,8 +566,20 @@ export default function SurpriseStocks({
           >
             {sniperLoading ? "Sniping…" : "🎯 Search for Buy Stocks (1-4)"}
           </button>
+          <button
+            type="button"
+            onClick={() => void notifyTopPicks()}
+            disabled={notifyBusy}
+            title="Send the current top 5 Surprise Momentum picks to Telegram"
+            className="font-mono text-xs bg-sky-600/25 border border-sky-500/50 text-sky-200 rounded-lg px-3 py-2 transition hover:bg-sky-600/35 disabled:opacity-50 shadow-lg shadow-sky-900/20"
+          >
+            {notifyBusy ? "Sending…" : "📨 Send Top 5 to Telegram"}
+          </button>
 
         </div>
+        {notifyMsg && (
+          <p className="font-mono text-[11px] text-white/60 mt-2">{notifyMsg}</p>
+        )}
       </div>
 
       {(pmRunning || (pmProgress && pmProgress.stage && pmProgress.stage !== "idle")) && (

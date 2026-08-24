@@ -375,48 +375,80 @@ def _normalize_ipoalerts_row(row: Dict[str, Any], status: str) -> Optional[Dict[
         return None
 
 
-def _nse_session() -> httpx.Client:
-    """Open a client that has actually completed NSE's cookie handshake.
+# NSE's cookie handshake is 2 network round trips (bootstrap root + referer
+# page) before a single payload GET even happens. fetch_nse_ipo_calendar()
+# used to call _nse_session() fresh on every invocation — so a single Scan
+# IPOs click, which calls it once, still cost 2 bootstrap hops + 2 payload
+# hops = 4 requests to nseindia.com; but the log shows Scan IPOs (and the
+# 2s status-poll loop re-checking it) firing in rapid succession, each
+# minting a brand-new session and re-doing the 403-then-200 bootstrap dance
+# from scratch — needless request volume against a host that's already
+# rate-limiting/blocking the anonymous session it hands back (see the
+# 'cookies present but weak' warning below). NSE's own session cookies are
+# typically valid for several minutes; reusing one cached client for a
+# short window cuts the bootstrap-hop count roughly in half across a burst
+# of calls without changing behavior when the cache is empty/expired.
+_NSE_SESSION_CACHE: Dict[str, Any] = {"client": None, "ts": 0.0}
+_NSE_SESSION_TTL_SECONDS = 300  # 5 minutes — comfortably inside NSE's own cookie lifetime
+_NSE_SESSION_LOCK = threading.Lock()
 
-    Root cause of the '403 Forbidden' seen on the bootstrap GET: the client was
-    constructed with headers=NSE_HEADERS, which sets Accept: application/json,
-    and then used to request https://www.nseindia.com — an HTML document. NSE
-    sits behind an Akamai WAF that treats "JSON Accept on a document URL, no
-    Sec-Fetch-* navigation hints" as a bot signature and answers 403. A 403 body
-    still carries a Set-Cookie, so nothing raised and nothing looked broken —
-    but the cookies handed back are the weak anonymous pair, not the real
-    nsit/nseappid pair a browser gets. NSE rate-limits that anonymous session far
-    harder, which shows up downstream as intermittently empty /api payloads and
-    'symbol not found' noise. Sending browser-shaped navigation headers for the
-    two HTML hops (and keeping the JSON Accept for the /api/ calls afterwards)
-    is the actual fix, not a cosmetic one.
+
+def _nse_session(force_new: bool = False) -> httpx.Client:
+    """Return a client that has completed NSE's cookie handshake, reusing a
+    recently-bootstrapped one when available instead of re-doing the 2-hop
+    dance on every call (see module note above). Root cause of the '403
+    Forbidden' seen on the bootstrap GET itself: the client was constructed
+    with headers=NSE_HEADERS, which sets Accept: application/json, and then
+    used to request https://www.nseindia.com — an HTML document. NSE sits
+    behind an Akamai WAF that treats "JSON Accept on a document URL, no
+    Sec-Fetch-* navigation hints" as a bot signature and answers 403. A 403
+    body still carries a Set-Cookie, so nothing raised and nothing looked
+    broken — but the cookies handed back are the weak anonymous pair, not
+    the real nsit/nseappid pair a browser gets. Sending browser-shaped
+    navigation headers for the two HTML hops (and keeping the JSON Accept
+    for the /api/ calls afterwards) is the actual fix, not a cosmetic one.
     """
-    c = httpx.Client(timeout=20, headers=NSE_HEADERS, follow_redirects=True)
-    try:
-        # Per-request headers override the client defaults for these two hops only.
-        r1 = c.get("https://www.nseindia.com", headers=NSE_BOOTSTRAP_HEADERS)
-        r2 = c.get(
-            "https://www.nseindia.com/market-data/all-upcoming-issues-ipo",
-            headers=NSE_BOOTSTRAP_HEADERS,
-        )
-        names = {k for k in c.cookies.keys()}
-        if not names:
-            logger.warning(
-                "nse bootstrap got no cookies (status %s/%s) — /api calls will run "
-                "on an anonymous session and may return empty payloads",
-                r1.status_code, r2.status_code,
+    with _NSE_SESSION_LOCK:
+        cached = _NSE_SESSION_CACHE.get("client")
+        age = time.time() - _NSE_SESSION_CACHE.get("ts", 0.0)
+        if not force_new and cached is not None and age < _NSE_SESSION_TTL_SECONDS:
+            return cached
+
+        c = httpx.Client(timeout=20, headers=NSE_HEADERS, follow_redirects=True)
+        try:
+            # Per-request headers override the client defaults for these two hops only.
+            r1 = c.get("https://www.nseindia.com", headers=NSE_BOOTSTRAP_HEADERS)
+            r2 = c.get(
+                "https://www.nseindia.com/market-data/all-upcoming-issues-ipo",
+                headers=NSE_BOOTSTRAP_HEADERS,
             )
-        elif not (names & {"nsit", "nseappid"}):
-            logger.info(
-                "nse bootstrap cookies present but weak (%s; status %s/%s) — "
-                "payloads may be rate-limited",
-                ",".join(sorted(names))[:120], r1.status_code, r2.status_code,
-            )
-        else:
-            logger.debug("nse bootstrap ok (%s)", ",".join(sorted(names))[:120])
-    except Exception as e:
-        logger.debug("nse session bootstrap: %s", e)
-    return c
+            names = {k for k in c.cookies.keys()}
+            if not names:
+                logger.warning(
+                    "nse bootstrap got no cookies (status %s/%s) — /api calls will run "
+                    "on an anonymous session and may return empty payloads",
+                    r1.status_code, r2.status_code,
+                )
+            elif not (names & {"nsit", "nseappid"}):
+                logger.info(
+                    "nse bootstrap cookies present but weak (%s; status %s/%s) — "
+                    "payloads may be rate-limited",
+                    ",".join(sorted(names))[:120], r1.status_code, r2.status_code,
+                )
+            else:
+                logger.debug("nse bootstrap ok (%s)", ",".join(sorted(names))[:120])
+        except Exception as e:
+            logger.debug("nse session bootstrap: %s", e)
+
+        old = _NSE_SESSION_CACHE.get("client")
+        if old is not None and old is not c:
+            try:
+                old.close()
+            except Exception:
+                pass
+        _NSE_SESSION_CACHE["client"] = c
+        _NSE_SESSION_CACHE["ts"] = time.time()
+        return c
 
 
 def fetch_nse_ipo_calendar() -> List[Dict[str, Any]]:
@@ -439,14 +471,16 @@ def fetch_nse_ipo_calendar() -> List[Dict[str, Any]]:
         ("https://www.nseindia.com/api/public-past-issues", "past"),
         ("https://www.nseindia.com/api/all-upcoming-issues?category=ipo", "upcoming"),
     ]
-    # try/finally + manual close instead of `with _nse_session() as c:` —
-    # a `with` block calls __exit__ (closing the client) once; if anything
-    # upstream ever re-enters this same client object (e.g. a retry
-    # wrapper, or this function being invoked twice concurrently on a
-    # cached/shared instance), httpx raises "Cannot open a client instance
-    # more than once". _nse_session() already returns a fresh client per
-    # call so that shouldn't happen here, but try/finally is strictly
-    # safer than `with` for this exact failure mode and costs nothing.
+    # _nse_session() now returns a short-lived CACHED client shared across
+    # calls (see its docstring) so back-to-back Scan IPOs invocations don't
+    # each pay the 2-hop bootstrap cost. That means this function must NOT
+    # close it — closing a shared client here would force every subsequent
+    # caller straight back into a fresh bootstrap, defeating the cache
+    # entirely (and closing it while genuinely concurrent callers still
+    # hold a reference would break their in-flight requests, which is the
+    # exact failure mode the removed try/finally close was written to
+    # avoid in the first place — the fix is to simply never close a client
+    # this function didn't create for itself alone).
     c = _nse_session()
     try:
         for url, kind in candidates:
@@ -454,6 +488,14 @@ def fetch_nse_ipo_calendar() -> List[Dict[str, Any]]:
                 r = c.get(url, timeout=15)
                 if r.status_code != 200:
                     logger.info("NSE IPO calendar %s -> HTTP %s (blocked/unavailable)", kind, r.status_code)
+                    if r.status_code in (401, 403):
+                        # The cached session itself has gone bad (NSE started
+                        # blocking it mid-TTL) — don't keep handing it out to
+                        # the next N callers for the rest of the 5-minute
+                        # window. Force a fresh bootstrap next call.
+                        with _NSE_SESSION_LOCK:
+                            if _NSE_SESSION_CACHE.get("client") is c:
+                                _NSE_SESSION_CACHE["ts"] = 0.0
                     continue
                 data = r.json()
                 rows = data if isinstance(data, list) else data.get("data") or []
@@ -465,11 +507,6 @@ def fetch_nse_ipo_calendar() -> List[Dict[str, Any]]:
                 logger.info("NSE IPO calendar %s fetch failed: %s", kind, e)
     except Exception as e:
         logger.warning("NSE IPO session failed entirely: %s", e)
-    finally:
-        try:
-            c.close()
-        except Exception:
-            pass
 
     return out
 
@@ -502,6 +539,29 @@ def _extract_price_band_upper(raw: Any) -> Optional[float]:
         return None
 
 
+def _nse_placeholder_none(v: Any) -> Any:
+    """
+    NSE's IPO JSON uses the literal string "-" (and occasionally "--" or
+    "N/A") as a placeholder for "not available yet" on issuePrice and
+    listingDate — e.g. a live public-past-issues row for an IPO whose issue
+    just closed: {"issuePrice": "-", "listingDate": "-", "priceRange":
+    "Rs.342 to Rs.360", ...}. That placeholder is a non-empty STRING, so
+    Python's `or` chain (`row.get("issuePrice") or row.get("priceRange")`)
+    treats it as truthy and never falls through to priceRange — the row
+    silently ends up with issue_price=None / listing_date="-" (unparseable)
+    and gets dropped by _merged_ipo_universe's "must have listing_date and
+    issue_price" filter, even though good data (priceRange) was sitting
+    right there in the same row. This normalizes the placeholder to a real
+    None so the `or` chain behaves as intended.
+    """
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s or s in ("-", "--", "N/A", "NA", "null", "None"):
+        return None
+    return v
+
+
 def _normalize_nse_row(row: Dict[str, Any], kind: str) -> Optional[Dict[str, Any]]:
     try:
         symbol = str(
@@ -510,10 +570,13 @@ def _normalize_nse_row(row: Dict[str, Any], kind: str) -> Optional[Dict[str, Any
         if not symbol:
             return None
         issue_price = _extract_price_band_upper(
-            row.get("issuePrice") or row.get("priceRange") or row.get("cutOffPrice") or row.get("finalIssuePrice")
+            _nse_placeholder_none(row.get("issuePrice"))
+            or _nse_placeholder_none(row.get("priceRange"))
+            or _nse_placeholder_none(row.get("cutOffPrice"))
+            or _nse_placeholder_none(row.get("finalIssuePrice"))
         )
-        listing_date = row.get("listingDate") or row.get("dateOfListing")
-        issue_end = row.get("issueEndDate") or row.get("ipoEndDate")
+        listing_date = _nse_placeholder_none(row.get("listingDate")) or _nse_placeholder_none(row.get("dateOfListing"))
+        issue_end = _nse_placeholder_none(row.get("issueEndDate")) or _nse_placeholder_none(row.get("ipoEndDate"))
         status_raw = str(row.get("status") or "").strip().lower()
         listing_estimated = False
         if not listing_date:

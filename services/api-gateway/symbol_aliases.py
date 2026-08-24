@@ -124,6 +124,15 @@ KNOWN_HIGH_PRICE_SYMBOLS = {
     # Feed Health screenshot — same failure mode, listed here so repair
     # stops retrying them too.
     "ABB", "APOLLOHOSP",
+    # Cross-checked against multiple independent Aug 2026 "most expensive
+    # NSE/BSE shares" sources (Business Standard's Nifty-500 >₹10,000 list,
+    # Tickertape, Samco): each of these is corroborated as chronically
+    # trading many multiples of the ₹5000 cap, with no recent stock split
+    # on record that would have brought it back under the cap.
+    "ELCID",     # Elcid Investments — ~₹1.24 lakh/share
+    "GILLETTE",  # Gillette India — routinely ₹8,000-11,000
+    "OFSS",      # Oracle Financial Services Software — ~₹12,000+
+    "JSWHL",     # JSW Holdings — routinely ₹8,000+, very low float
 }
 
 

@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 import config
 import models
 from auth.admin_auth import (
-    require_admin, verify_admin_password, issue_session_token, AdminAuthError,
+    require_admin, require_admin_if_real, verify_admin_password, issue_session_token, AdminAuthError,
 )
 from auth import dhan_credentials
 from audit.logger import log_action
@@ -74,7 +74,20 @@ def _seed_defaults() -> None:
     try:
         for mode in ("DEMO", "REAL"):
             if not db.query(models.TradeGateState).filter_by(mode=mode).first():
-                db.add(models.TradeGateState(mode=mode))
+                gate_kwargs = {"mode": mode}
+                if mode == "DEMO":
+                    # DEMO is open by design (2026-08-25) — pre-satisfy the
+                    # admin/risk-config gates permanently so /arm/DEMO needs
+                    # nothing beyond the call itself. REAL still starts with
+                    # every gate False, walked in order as before.
+                    gate_kwargs.update(
+                        admin_authenticated=True,
+                        admin_authenticated_at=datetime.now(timezone.utc),
+                        admin_session_expires_at=None,  # never expires for DEMO — see _check_and_expire_gates
+                        risk_config_confirmed=True,
+                        risk_config_confirmed_at=datetime.now(timezone.utc),
+                    )
+                db.add(models.TradeGateState(**gate_kwargs))
             if not db.query(models.TradeRiskConfig).filter_by(mode=mode).first():
                 db.add(models.TradeRiskConfig(
                     mode=mode,
@@ -212,11 +225,14 @@ async def login(body: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid admin credentials")
 
     token, expires_at = issue_session_token(body.username)
-    for mode in ("DEMO", "REAL"):
-        gate = _gate(db, mode)
-        gate.admin_authenticated = True
-        gate.admin_authenticated_at = datetime.now(timezone.utc)
-        gate.admin_session_expires_at = expires_at
+    # REAL only — DEMO's gate is permanently pre-authenticated (see
+    # _seed_defaults) and must never have its admin_session_expires_at
+    # overwritten by a login/logout cycle, or DEMO would start expiring
+    # again the first time someone logs in for REAL.
+    gate = _gate(db, "REAL")
+    gate.admin_authenticated = True
+    gate.admin_authenticated_at = datetime.now(timezone.utc)
+    gate.admin_session_expires_at = expires_at
     db.commit()
     log_action(db, actor=body.username, action="ADMIN_LOGIN")
     return {"token": token, "expires_at": expires_at.isoformat()}
@@ -224,11 +240,12 @@ async def login(body: LoginRequest, db: Session = Depends(get_db)):
 
 @app.post("/auth/logout")
 async def logout(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
-    for mode in ("DEMO", "REAL"):
-        gate = _gate(db, mode)
-        gate.admin_authenticated = False
-        if gate.armed:
-            _disarm(db, mode, "Admin logged out", actor=admin)
+    # REAL only — see the matching note in login(). DEMO has no session to
+    # log out of; logging out of REAL never touches DEMO's always-on gate.
+    gate = _gate(db, "REAL")
+    gate.admin_authenticated = False
+    if gate.armed:
+        _disarm(db, "REAL", "Admin logged out", actor=admin)
     db.commit()
     log_action(db, actor=admin, action="ADMIN_LOGOUT")
     return {"ok": True}
@@ -267,8 +284,12 @@ async def dhan_funds(admin: str = Depends(require_admin), db: Session = Depends(
 
 # ── Routes: risk config (gate 3) ────────────────────────────────────────────
 @app.post("/risk-config")
-async def update_risk_config(body: RiskConfigUpdate, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+async def update_risk_config(body: RiskConfigUpdate, authorization: str = Header(default=""), db: Session = Depends(get_db)):
     mode = body.mode.upper()
+    # mode lives in the request body here, not the path, so it can't be
+    # resolved via Depends(require_admin_if_real) the way the path-mode
+    # routes are — same enforcement, called manually instead.
+    admin = require_admin_if_real(mode, authorization)
     gate = _gate(db, mode)
     if gate.armed:
         raise HTTPException(status_code=409, detail="Cannot change risk config while armed — disarm first.")
@@ -284,15 +305,15 @@ async def update_risk_config(body: RiskConfigUpdate, admin: str = Depends(requir
         val = getattr(body, field)
         if val is not None:
             setattr(risk, field, val)
-    risk.updated_by = admin
+    risk.updated_by = admin or "demo-user"
     risk.updated_at = datetime.now(timezone.utc)
     db.commit()
-    log_action(db, actor=admin, action="RISK_CONFIG_UPDATED", mode=mode, detail=str(body.model_dump(exclude_none=True)))
+    log_action(db, actor=admin or "demo-user", action="RISK_CONFIG_UPDATED", mode=mode, detail=str(body.model_dump(exclude_none=True)))
     return {"ok": True}
 
 
 @app.post("/risk-config/{mode}/confirm")
-async def confirm_risk_config(mode: str, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+async def confirm_risk_config(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     mode = mode.upper()
     gate = _gate(db, mode)
     gate.risk_config_confirmed = True
@@ -304,19 +325,25 @@ async def confirm_risk_config(mode: str, admin: str = Depends(require_admin), db
 
 # ── Routes: arm / disarm (gate 4) ───────────────────────────────────────────
 @app.post("/arm/{mode}")
-async def arm(mode: str, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+async def arm(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     mode = mode.upper()
     if mode not in ("DEMO", "REAL"):
         raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
     gate = _check_and_expire_gates(db, mode)
 
+    # DEMO: no gate checks at all — _seed_defaults() seeds DEMO's
+    # admin_authenticated/risk_config_confirmed as permanently True and
+    # _check_and_expire_gates() never touches DEMO's admin_authenticated
+    # (see that function), so `missing` is guaranteed empty for DEMO. Only
+    # REAL walks the full admin -> dhan -> risk-config sequence.
     missing = []
-    if not gate.admin_authenticated:
-        missing.append("admin_authenticated")
-    if mode == "REAL" and not gate.dhan_connected:
-        missing.append("dhan_connected")
-    if not gate.risk_config_confirmed:
-        missing.append("risk_config_confirmed")
+    if mode == "REAL":
+        if not gate.admin_authenticated:
+            missing.append("admin_authenticated")
+        if not gate.dhan_connected:
+            missing.append("dhan_connected")
+        if not gate.risk_config_confirmed:
+            missing.append("risk_config_confirmed")
     if missing:
         raise HTTPException(status_code=409, detail=f"Cannot arm — missing gates: {', '.join(missing)}")
 
@@ -324,25 +351,31 @@ async def arm(mode: str, admin: str = Depends(require_admin), db: Session = Depe
     gate.armed_at = datetime.now(timezone.utc)
     gate.disarmed_reason = None
     db.commit()
-    log_action(db, actor=admin, action="ARMED", mode=mode)
+    log_action(db, actor=admin or "demo-user", action="ARMED", mode=mode)
     return {"ok": True, "armed": True, "mode": mode}
 
 
 @app.post("/disarm/{mode}")
-async def disarm(mode: str, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+async def disarm(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     mode = mode.upper()
     _disarm(db, mode, "Manual disarm by admin", actor=admin)
     return {"ok": True, "armed": False, "mode": mode}
 
 
 @app.post("/emergency-pause")
-async def emergency_pause(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
-    """Pauses BOTH modes at once — the 🛑 PAUSE NEW TRADES button. Does not
-    touch open positions/pending orders (that's the separate 🚨 EMERGENCY
-    CLOSE ALL action, which is Phase 2 — it requires the exit engine to
-    exist first)."""
+async def emergency_pause(db: Session = Depends(get_db)):
+    """Pauses BOTH modes at once — the 🛑 PAUSE NEW TRADES button.
+    Deliberately UNAUTHENTICATED: a stop/pause action only ever reduces
+    risk, never increases it, so gating it behind admin login would be
+    actively dangerous UX (the one moment you most want to hit this
+    button is exactly the moment you don't want a login screen in the
+    way). Does not touch open positions/pending orders (that's the
+    separate 🚨 EMERGENCY CLOSE ALL action — requires the exit engine,
+    which exists now, but closing everything immediately is a bigger,
+    deliberate action left for a dedicated confirm-gated route rather
+    than folded into this one)."""
     for mode in ("DEMO", "REAL"):
-        _disarm(db, mode, "Emergency pause triggered by admin", actor=admin)
+        _disarm(db, mode, "Emergency pause triggered", actor="anonymous")
     return {"ok": True, "paused": True}
 
 
@@ -358,11 +391,12 @@ class RiskCheckRequest(BaseModel):
 
 
 @app.post("/risk-engine/check")
-async def risk_engine_check(body: RiskCheckRequest, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(default=""), db: Session = Depends(get_db)):
     """Dry-run the risk engine against current account/risk-config state
     for a hypothetical order — lets the admin verify the 9 checks behave
     as expected BEFORE entry_engine exists to call this for real."""
     mode = body.mode.upper()
+    require_admin_if_real(mode, authorization)  # DEMO: open; REAL: admin required
     gate = _check_and_expire_gates(db, mode)
     account_row = db.query(models.TradeAccount).filter_by(mode=mode).first()
     risk_row = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
@@ -410,7 +444,7 @@ async def risk_engine_check(body: RiskCheckRequest, admin: str = Depends(require
 # ── Routes: audit log read ───────────────────────────────────────────────────
 # ── Routes: Phase 2 — DEMO cycle (candidates -> entry -> fills -> exits) ───
 @app.post("/cycle/run/{mode}")
-async def run_cycle(mode: str, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+async def run_cycle(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     """Runs one full evaluation cycle: refresh candidates from api-gateway,
     evaluate entries (risk-checked), check pending order fills, expire
     stale unfilled orders, then evaluate exits on every open position.
@@ -449,7 +483,7 @@ async def run_cycle(mode: str, admin: str = Depends(require_admin), db: Session 
 
 
 @app.get("/positions/{mode}")
-async def list_positions(mode: str, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     mode = mode.upper()
     rows = _pf_open_positions(db, mode)
     return [
@@ -464,7 +498,7 @@ async def list_positions(mode: str, admin: str = Depends(require_admin), db: Ses
 
 
 @app.get("/orders/{mode}")
-async def list_orders(mode: str, limit: int = 50, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+async def list_orders(mode: str, limit: int = 50, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     mode = mode.upper()
     rows = (
         db.query(models.TradeOrder).filter_by(mode=mode)
@@ -482,7 +516,12 @@ async def list_orders(mode: str, limit: int = 50, admin: str = Depends(require_a
 
 
 @app.get("/audit-log")
-async def audit_log(mode: Optional[str] = None, limit: int = 50, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+async def audit_log(mode: Optional[str] = None, limit: int = 50, authorization: str = Header(default=""), db: Session = Depends(get_db)):
+    # mode=None (all modes) or mode=REAL both require admin, since either
+    # could surface REAL-mode activity; only an explicit mode=DEMO query
+    # is open. Manual check (not Depends) since mode is optional here and
+    # "no mode" must still resolve to "treat as REAL for auth purposes".
+    require_admin_if_real(mode or "REAL", authorization)
     q = db.query(models.TradeAuditLog)
     if mode:
         q = q.filter_by(mode=mode.upper())

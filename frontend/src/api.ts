@@ -1308,6 +1308,14 @@ export const api = {
       error?: string;
       notification_result?: { delivered?: boolean; note?: string };
     }>(`/stockky-hot/notify-top-picks?top_n=${topN}`, { method: "POST" }, 1, 30000),
+  hotPicksAudit: () => request<any>("/stockky-hot/audit", undefined, 2, 30000),
+  hotPicksRepairBatch: (limit = 15, symbol?: string) =>
+    request<any>(
+      `/stockky-hot/repair-batch?limit=${limit}${symbol ? `&symbol=${encodeURIComponent(symbol)}` : ""}`,
+      { method: "POST" },
+      1,
+      180000
+    ),
   // displayDays narrows the stored scan to a window (30 = default, 365 = hard
   // cap). Omitted -> backend default (IPO_CHECKER_DEFAULT_DISPLAY_DAYS).
   ipoList: (displayDays?: number) =>

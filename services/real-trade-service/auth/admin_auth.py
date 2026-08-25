@@ -86,3 +86,20 @@ def require_admin(authorization: str = Header(default="")) -> str:
     if not username:
         raise HTTPException(status_code=401, detail="Invalid or expired admin session")
     return username
+
+
+def require_admin_if_real(mode: str, authorization: str = Header(default="")) -> Optional[str]:
+    """2026-08-25: DEMO mode is intentionally open — no login, no gate
+    sequence, nothing to configure before you can start paper-trading.
+    REAL mode keeps the full admin-authenticated requirement, because it's
+    the one that can touch an actual brokerage account. This dependency is
+    the single place that split lives: every mode-parameterized route uses
+    THIS instead of require_admin, so DEMO vs REAL enforcement can never
+    drift route-by-route.
+
+    Returns the admin username for REAL (after verifying it same as
+    require_admin), or None for DEMO (no identity to return — there was no
+    login)."""
+    if mode.upper() != "REAL":
+        return None
+    return require_admin(authorization)

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl,
   getSessionToken, setSessionToken, type GateStatus, type AuditLogRow,
+  type Position, type OrderRow, type CycleResult,
 } from "../realTradeApi";
 
 type Mode = "DEMO" | "REAL";
@@ -28,6 +29,10 @@ export default function RealAutoTrade() {
   const [dhanToken, setDhanToken] = useState("");
 
   const [auditRows, setAuditRows] = useState<AuditLogRow[]>([]);
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [orders, setOrders] = useState<OrderRow[]>([]);
+  const [cycleBusy, setCycleBusy] = useState(false);
+  const [cycleResult, setCycleResult] = useState<CycleResult | null>(null);
 
   const loadStatus = useCallback(async (m: Mode) => {
     try {
@@ -137,6 +142,38 @@ export default function RealAutoTrade() {
     }
   };
 
+  const loadPositionsAndOrders = useCallback(async (m: Mode) => {
+    try {
+      const [p, o] = await Promise.all([realTradeApi.positions(m), realTradeApi.orders(m, 20)]);
+      setPositions(p);
+      setOrders(o);
+    } catch {
+      // Positions/orders panel is best-effort — a stale/unreachable read
+      // here shouldn't block the rest of the page (status, arm/disarm)
+      // from working.
+    }
+  }, []);
+
+  const doRunCycle = async () => {
+    setCycleBusy(true);
+    setError(null);
+    try {
+      const res = await realTradeApi.runCycle(mode);
+      setCycleResult(res);
+      await Promise.all([loadStatus(mode), loadPositionsAndOrders(mode)]);
+    } catch (e: any) {
+      setError(e?.message || "Cycle failed");
+    } finally {
+      setCycleBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (getRealTradeApiUrl() && (mode === "DEMO" || loggedIn)) {
+      void loadPositionsAndOrders(mode);
+    }
+  }, [mode, loggedIn, loadPositionsAndOrders]);
+
   if (!getRealTradeApiUrl()) {
     return (
       <div className="page-terminal max-w-lg">
@@ -163,9 +200,17 @@ export default function RealAutoTrade() {
     <div className="page-terminal max-w-3xl">
       <p className="dash-section-title">🤖 Real Automatic Trade</p>
       <p className="font-mono text-[11px] text-amber-300/80 mb-4">
-        Phase 1: authentication, gate sequence, risk engine, and Dhan connection only.
-        No automated entry/exit logic is wired yet — arming here does not place any order.
+        Phase 2: candidates, risk-checked entries, DEMO fills, and exit
+        management (stop/target/trailing/time-stop) are live for DEMO mode.
+        REAL mode computes and logs identical decisions but does not place
+        live orders yet — that's Phase 3.
       </p>
+      {mode === "DEMO" && (
+        <p className="font-mono text-[11px] text-emerald-300/70 mb-4">
+          DEMO mode is open — no login required. Everything here uses paper
+          capital only.
+        </p>
+      )}
 
       {error && (
         <div className="mb-3 px-3 py-2 rounded bg-rose-950/40 border border-rose-500/40 font-mono text-xs text-rose-200">
@@ -192,7 +237,7 @@ export default function RealAutoTrade() {
         ))}
       </div>
 
-      {!loggedIn ? (
+      {mode === "REAL" && !loggedIn ? (
         <div className="border border-white/10 rounded-lg p-4 mb-4">
           <p className="font-mono text-xs text-paper/70 mb-3">Admin Authentication</p>
           <div className="space-y-2">
@@ -221,11 +266,13 @@ export default function RealAutoTrade() {
         </div>
       ) : (
         <>
-          <div className="flex justify-end mb-2">
-            <button onClick={() => void doLogout()} className="font-mono text-[11px] text-paper/50 underline">
-              Log out
-            </button>
-          </div>
+          {mode === "REAL" && loggedIn && (
+            <div className="flex justify-end mb-2">
+              <button onClick={() => void doLogout()} className="font-mono text-[11px] text-paper/50 underline">
+                Log out
+              </button>
+            </div>
+          )}
 
           {/* Gate status */}
           {status && (
@@ -336,6 +383,77 @@ export default function RealAutoTrade() {
               </div>
             </div>
           )}
+
+          {/* Run cycle — Phase 2: candidates -> entries -> fills -> exits */}
+          {status?.armed && (
+            <div className="border border-white/10 rounded-lg p-4 mb-4">
+              <div className="flex items-center justify-between mb-2">
+                <p className="font-mono text-xs text-paper/70">
+                  AI Trade Pipeline — Candidate → Entry → Risk → {mode === "DEMO" ? "Simulated Fill" : "Execution"} → Position → Exit
+                </p>
+                <button
+                  onClick={() => void doRunCycle()}
+                  disabled={cycleBusy}
+                  className="font-mono text-xs px-3 py-1.5 rounded bg-emerald-600/30 border border-emerald-500/60 disabled:opacity-50"
+                >
+                  {cycleBusy ? "Running…" : "▶ Run Cycle"}
+                </button>
+              </div>
+              {mode === "REAL" && (
+                <p className="font-mono text-[11px] text-amber-300/70 mb-2">
+                  REAL mode computes and risk-checks every decision but does not place live orders yet (Phase 3).
+                </p>
+              )}
+              {cycleResult && (
+                <p className="font-mono text-[11px] text-paper/60">
+                  candidates {cycleResult.new_candidates} · entered {cycleResult.entry.entered} · waited {cycleResult.entry.waited} ·
+                  rejected {cycleResult.entry.rejected} · fills {cycleResult.fills} · expired {cycleResult.expired_orders} ·
+                  held {cycleResult.exit.held} · trailed {cycleResult.exit.trailed} · partial {cycleResult.exit.partial_exits} ·
+                  closed {cycleResult.exit.full_exits} · time-stopped {cycleResult.exit.time_stops}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Open positions */}
+          <div className="border border-white/10 rounded-lg p-4 mb-4">
+            <p className="font-mono text-xs text-paper/70 mb-2">Open Positions ({mode})</p>
+            {positions.length === 0 ? (
+              <p className="font-mono text-[11px] text-paper/40">No open positions.</p>
+            ) : (
+              <div className="space-y-1">
+                {positions.map((p, i) => (
+                  <div key={i} className="font-mono text-[11px] text-paper/70 grid grid-cols-6 gap-1">
+                    <span className="font-bold">{p.symbol}</span>
+                    <span>qty {p.qty_open}</span>
+                    <span>entry ₹{p.avg_entry_price}</span>
+                    <span>SL {p.current_stop ?? "—"}</span>
+                    <span>TGT {p.current_target ?? "—"}</span>
+                    <span className={p.unrealized_pnl >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                      {p.unrealized_pnl >= 0 ? "+" : ""}₹{p.unrealized_pnl}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Recent orders */}
+          <div className="border border-white/10 rounded-lg p-4 mb-4">
+            <p className="font-mono text-xs text-paper/70 mb-2">Recent Orders ({mode})</p>
+            {orders.length === 0 ? (
+              <p className="font-mono text-[11px] text-paper/40">No orders yet.</p>
+            ) : (
+              <div className="space-y-1 max-h-48 overflow-y-auto">
+                {orders.map((o, i) => (
+                  <div key={i} className="font-mono text-[11px] text-paper/60 flex justify-between gap-2">
+                    <span>{o.side} {o.symbol} x{o.qty} @ {o.limit_price ?? "mkt"}</span>
+                    <span className="text-paper/40">{o.status}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           {/* Audit log */}
           <div className="border border-white/10 rounded-lg p-4">

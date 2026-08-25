@@ -5,6 +5,7 @@ import ConvictionCard from "./ConvictionCard";
 import Pipeline from "./Pipeline";
 import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { getSafePrice } from "../priceDisplay";
+import FeedHealthPanel, { type FeedHealthData } from "./FeedHealthPanel";
 
 type HotItem = {
   symbol: string;
@@ -296,6 +297,49 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
   const [healthKey, setHealthKey] = useState(0);
   const [notifyBusy, setNotifyBusy] = useState(false);
   const [notifyMsg, setNotifyMsg] = useState<string | null>(null);
+  const [healthData, setHealthData] = useState<FeedHealthData | null>(null);
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [batchRepairBusy, setBatchRepairBusy] = useState(false);
+  const [patchingSymbol, setPatchingSymbol] = useState<string | null>(null);
+
+  const fetchHotPicksHealth = useCallback(async () => {
+    setHealthLoading(true);
+    try {
+      setHealthData(await api.hotPicksAudit());
+    } catch {
+      // Health panel is best-effort — don't block the rest of the tab.
+    } finally {
+      setHealthLoading(false);
+    }
+  }, []);
+
+  const handleRepairBatchMissing = useCallback(async () => {
+    setBatchRepairBusy(true);
+    try {
+      await api.hotPicksRepairBatch(15);
+      await fetchHotPicksHealth();
+    } catch {
+      /* surfaced via the panel just staying at its last-known state */
+    } finally {
+      setBatchRepairBusy(false);
+    }
+  }, [fetchHotPicksHealth]);
+
+  const handleRepairSingle = useCallback(async (symbol: string) => {
+    setPatchingSymbol(symbol);
+    try {
+      await api.hotPicksRepairBatch(1, symbol);
+      await fetchHotPicksHealth();
+    } catch {
+      /* same as above */
+    } finally {
+      setPatchingSymbol(null);
+    }
+  }, [fetchHotPicksHealth]);
+
+  useEffect(() => {
+    void fetchHotPicksHealth();
+  }, [fetchHotPicksHealth]);
 
   const { quotes: liveQuotes, subscribeQuotes } = useStockkyRealtime();
 
@@ -614,6 +658,18 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
       </div>
 
       <HotFeedHealth refreshKey={healthKey} />
+
+      <FeedHealthPanel
+        title="Hot Picks Feed Health"
+        subtitle="Audit stored Hot Picks (price/decision/score) and repair what's missing."
+        healthData={healthData}
+        healthLoading={healthLoading}
+        onRefreshAudit={fetchHotPicksHealth}
+        onRepairBatch={handleRepairBatchMissing}
+        onRepairSingle={handleRepairSingle}
+        batchRepairBusy={batchRepairBusy}
+        patchingSymbol={patchingSymbol}
+      />
 
       {data && (
         <>

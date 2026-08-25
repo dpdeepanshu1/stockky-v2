@@ -424,7 +424,18 @@ def _hotpicks_audit_uncached() -> Dict[str, Any]:
         "retention_hours": HOTPICKS_RETENTION_HOURS,
         "missing_decision": 0,
         "missing_score": 0,
+        "missing_price": 0,
         "issues": [],
+        # Surprise-panel-shaped aliases — populated for real once the table
+        # query below runs; kept present even in early-return branches
+        # (schema unavailable, not configured, table missing) so the
+        # frontend panel never has to special-case "field doesn't exist
+        # yet" vs "field is legitimately zero".
+        "health_score": 0.0,
+        "total_tracked": 0,
+        "fully_populated": 0,
+        "missing_data": 0,
+        "incomplete_stocks": [],
     }
     try:
         hp = _schema()
@@ -468,6 +479,9 @@ def _hotpicks_audit_uncached() -> Dict[str, Any]:
             by_section: Dict[str, int] = {s: 0 for s in SECTIONS}
             missing_decision = 0
             missing_score = 0
+            missing_price = 0
+            fully_populated = 0
+            incomplete_stocks: list = []
             for row in rows:
                 m = {str(k).lower(): v for k, v in zip(keys, row)}
                 sec = str(m.get("section") or "").lower()
@@ -477,10 +491,48 @@ def _hotpicks_audit_uncached() -> Dict[str, Any]:
                     missing_decision += 1
                 if m.get("score") is None:
                     missing_score += 1
+                # Price only lives inside item_json (no first-class price
+                # column on hotpicks_static_feed — see SELECT_COLUMNS) so
+                # it has to be parsed out per row, same way the frontend
+                # already reads it off the persisted payload.
+                px = 0.0
+                try:
+                    blob = json.loads(m.get("item_json") or "{}")
+                    for k in ("price", "close"):
+                        v = float(blob.get(k) or 0)
+                        if v > 0:
+                            px = v
+                            break
+                except Exception:
+                    pass
+                missing_fields = []
+                if not m.get("decision"):
+                    missing_fields.append("decision")
+                if m.get("score") is None:
+                    missing_fields.append("score")
+                if px <= 0:
+                    missing_fields.append("price")
+                    missing_price += 1
+                if missing_fields:
+                    incomplete_stocks.append({"symbol": m.get("symbol"), "missing_fields": missing_fields})
+                else:
+                    fully_populated += 1
             out["rows_24h"] = len(rows)
             out["by_section"] = by_section
             out["missing_decision"] = missing_decision
             out["missing_score"] = missing_score
+            out["missing_price"] = missing_price
+            # Surprise-panel-shaped aliases (see audit_surprise_feed in
+            # surprise_scanner.py) so the frontend can use ONE
+            # <FeedHealthPanel> component for both tabs instead of two
+            # near-identical ones reading two different response shapes.
+            out["total_tracked"] = out["rows_24h"]
+            out["fully_populated"] = fully_populated
+            out["missing_data"] = len(incomplete_stocks)
+            out["health_score"] = (
+                round((fully_populated / max(out["rows_24h"], 1)) * 100, 1) if out["rows_24h"] > 0 else 0.0
+            )
+            out["incomplete_stocks"] = incomplete_stocks[:200]
             last = conn.execute(
                 text(f"SELECT MAX(updated_at) FROM {hp.TABLE_NAME}")
             ).fetchone()
@@ -512,3 +564,124 @@ def ensure_hotpicks_schema() -> Dict[str, Any]:
         return _schema().ensure_hotpicks_schema()
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}
+
+
+def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_data_url: str = "") -> Dict[str, Any]:
+    """Waterfall price fill for hotpicks_static_feed rows missing a price —
+    mirrors repair_surprise_batch's exact pattern (surprise_scanner.py),
+    adapted for the fact that price here lives inside item_json (see
+    _hotpicks_audit_uncached's note) rather than a first-class column, so
+    the repair is a targeted UPDATE of item_json + updated_at, not a full
+    row upsert. Does NOT attempt to repair missing decision/score — those
+    only come from a fresh scoring pass (a real scan), not a price lookup,
+    so they're reported by the audit but intentionally left for the next
+    'Search Hot Picks Stocks' run rather than faked here.
+    """
+    import httpx
+
+    out: Dict[str, Any] = {"status": "no_data", "repaired": [], "attempted": 0}
+    try:
+        hp = _schema()
+        from sqlalchemy import text
+    except Exception as e:
+        out["status"] = "error"
+        out["error"] = f"hotpicks_schema unavailable: {str(e)[:160]}"
+        return out
+    if not hp.database_url():
+        out["status"] = "not_configured"
+        return out
+
+    force_sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip() or None
+    eng = None
+    try:
+        dial = hp.dialect()
+        eng = hp.shared_engine("stockky-hotpicks-repair")
+        if eng is None:
+            out["status"] = "error"
+            out["error"] = "Could not build a database engine"
+            return out
+
+        targets: list = []  # list of (symbol, section, item_json_dict)
+        with eng.connect() as conn:
+            res = conn.execute(
+                text(f"SELECT symbol, section, item_json FROM {hp.TABLE_NAME} "
+                     "WHERE updated_at >= " + ("SYSTIMESTAMP - NUMTODSINTERVAL(24, 'HOUR')" if dial == "oracle"
+                                                else "NOW() - INTERVAL '24 hours'"))
+            )
+            for row in res.fetchall():
+                sym, section, item_json_raw = row[0], row[1], row[2]
+                if force_sym and sym != force_sym:
+                    continue
+                try:
+                    blob = json.loads(item_json_raw or "{}")
+                except Exception:
+                    blob = {}
+                px = 0.0
+                for k in ("price", "close"):
+                    try:
+                        v = float(blob.get(k) or 0)
+                        if v > 0:
+                            px = v
+                            break
+                    except (TypeError, ValueError):
+                        pass
+                if px <= 0:
+                    targets.append((sym, section, blob))
+
+        if force_sym and not targets:
+            out["status"] = "not_found"
+            out["message"] = f"{force_sym} not in the last 24h of stored Hot Picks."
+            return out
+        targets = targets[: max(1, min(int(limit or 15), 30))]
+        out["attempted"] = len(targets)
+        if not targets:
+            out["status"] = "completed"
+            out["message"] = "Nothing missing a price."
+            return out
+
+        md = (market_data_url or os.getenv("MARKET_DATA_URL") or "").rstrip("/")
+        repaired = []
+        with httpx.Client(timeout=8.0, follow_redirects=True) as client, eng.begin() as conn:
+            for sym, section, blob in targets:
+                try:
+                    r = client.get(f"{md}/quote/{sym}")
+                    if r.status_code != 200:
+                        continue
+                    body = r.json() if isinstance(r.json(), dict) else {}
+                    px = None
+                    for k in ("price", "cmp", "ltp", "close", "last_price"):
+                        try:
+                            v = float(body.get(k) or 0)
+                            if v > 0:
+                                px = v
+                                break
+                        except (TypeError, ValueError):
+                            pass
+                    # Same ≤₹5000 universe gate every other repair path in
+                    # this codebase enforces — a symbol genuinely over cap
+                    # stays "missing price" by design, not a repair failure.
+                    if px is None or px > 5000:
+                        time.sleep(0.5)
+                        continue
+                    blob["price"] = px
+                    blob["close"] = px
+                    conn.execute(
+                        text(f"UPDATE {hp.TABLE_NAME} SET item_json = :item_json, "
+                             f"updated_at = {hp.now_func(dial)} WHERE symbol = :symbol AND section = :section"),
+                        {"item_json": json.dumps(blob)[:15000], "symbol": sym, "section": section},
+                    )
+                    repaired.append(sym)
+                except Exception as e:
+                    logger.debug("hotpicks repair %s failed: %s", sym, e)
+                time.sleep(0.5)
+
+        with _AUDIT_LOCK:
+            _AUDIT_CACHE.pop("v", None)  # force a fresh audit read next call
+        out["status"] = "completed"
+        out["repaired"] = repaired
+        return out
+    except Exception as e:
+        logger.warning("hotpicks_repair_batch failed: %s", e)
+        out["status"] = "error"
+        out["error"] = str(e)[:200]
+        return out

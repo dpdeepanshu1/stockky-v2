@@ -92,6 +92,26 @@ export interface AuditLogRow {
   occurred_at: string;
 }
 
+export interface Position {
+  symbol: string; status: string; qty_open: number; avg_entry_price: number;
+  current_stop: number | null; current_target: number | null;
+  unrealized_pnl: number; realized_pnl: number; opened_at: string;
+}
+
+export interface OrderRow {
+  symbol: string; side: string; qty: number; order_type: string;
+  limit_price: number | null; status: string; valid_until: string | null; created_at: string;
+}
+
+export interface CycleResult {
+  mode: string;
+  new_candidates: number;
+  entry: { evaluated: number; entered: number; waited: number; rejected: number };
+  fills: number;
+  expired_orders: number;
+  exit: { evaluated: number; held: number; trailed: number; partial_exits: number; full_exits: number; time_stops: number };
+}
+
 export const realTradeApi = {
   health: () => rtRequest<{ ok: boolean; service: string; phase: string }>("/health", {}, false),
 
@@ -136,4 +156,13 @@ export const realTradeApi = {
 
   auditLog: (mode?: "DEMO" | "REAL", limit = 50) =>
     rtRequest<AuditLogRow[]>(`/audit-log?limit=${limit}${mode ? `&mode=${mode}` : ""}`),
+
+  runCycle: (mode: "DEMO" | "REAL") =>
+    rtRequest<CycleResult>(`/cycle/run/${mode}`, { method: "POST" }, mode === "REAL"),
+
+  positions: (mode: "DEMO" | "REAL") =>
+    rtRequest<Position[]>(`/positions/${mode}`, {}, mode === "REAL"),
+
+  orders: (mode: "DEMO" | "REAL", limit = 50) =>
+    rtRequest<OrderRow[]>(`/orders/${mode}?limit=${limit}`, {}, mode === "REAL"),
 };

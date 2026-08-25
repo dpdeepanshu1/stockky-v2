@@ -10041,6 +10041,20 @@ def stockky_hot_audit():
     return hotpicks_audit()
 
 
+@app.post("/stockky-hot/repair-batch")
+def stockky_hot_repair_batch(limit: int = Query(15, ge=1, le=30), symbol: Optional[str] = Query(None)):
+    """Price-only repair for hotpicks_static_feed rows — mirrors
+    /api/surprise/repair-batch. Missing decision/score are reported by the
+    audit above but intentionally not faked here; they only come from a
+    fresh scoring pass (see hotpicks_repair_batch's docstring)."""
+    try:
+        from hotpicks_store import hotpicks_repair_batch
+    except Exception as e:
+        return {"status": "error", "error": f"hotpicks store unavailable: {str(e)[:160]}"}
+    market_url = os.getenv("MARKET_DATA_URL", "")
+    return hotpicks_repair_batch(limit=limit, symbol=symbol, market_data_url=market_url)
+
+
 
 
 # ── OS signal hooks (Render deploy / free-tier SIGTERM) ─────────────────────

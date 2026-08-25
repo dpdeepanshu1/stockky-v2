@@ -115,11 +115,31 @@ export default function IpoTracker({
     }
   }, []);
 
+  // 2026-08-26 fix: "click Scan, it flashes then reverts to idle with no
+  // visible progress" — this was a real race, not a rendering bug. The
+  // shared /ws "jobs_snapshot" channel broadcasts periodically regardless
+  // of what this component just did; if a snapshot reflecting the JOB'S
+  // PRE-CLICK state (idle/stopped/done from the last run) was already
+  // in flight the instant the user clicked Scan, it would arrive right
+  // after setIpoScanning(true) and immediately flip it back to false —
+  // before the backend's own background thread had even had a chance to
+  // set status="running" and broadcast a snapshot that reflects it. The
+  // POST itself usually still succeeded; the UI just silently snapped
+  // back to idle and made it look like nothing happened. Guarded with a
+  // short grace window: any "not running" snapshot arriving within
+  // IPO_SCAN_START_GRACE_MS of our own start click is treated as stale
+  // and ignored — a multi-hundred-symbol IPO scan cannot legitimately
+  // finish that fast, so there's no real completion this could be
+  // mistaken for.
+  const IPO_SCAN_START_GRACE_MS = 4000;
+  const ipoScanStartedAtRef = useRef<number>(0);
+
   const pollIpoStatus = useCallback(async () => {
     try {
       const st = await api.ipoScanStatus();
+      const withinGrace = Date.now() - ipoScanStartedAtRef.current < IPO_SCAN_START_GRACE_MS;
+      const running = st?.status === "running" || withinGrace;
       setIpoProgress(st);
-      const running = st?.status === "running";
       setIpoScanning(running);
       if (!running) {
         stopIpoPoll();
@@ -132,15 +152,17 @@ export default function IpoTracker({
   }, [fetchIpoList]);
 
   // Live job updates over the shared /ws hub (channel "jobs"); the 2s poll
-  // below stays as a fallback for when the socket drops.
+  // above stays as a fallback for when the socket drops.
   const onRealtimeMessage = useCallback(
     (msg: RealtimeMessage) => {
       if (msg.type !== "jobs_snapshot") return;
       const ipoJob = (msg as any).ipo_scan;
       if (!ipoJob) return;
-      setIpoScanning(ipoJob.status === "running");
+      const withinGrace = Date.now() - ipoScanStartedAtRef.current < IPO_SCAN_START_GRACE_MS;
+      const running = ipoJob.status === "running" || withinGrace;
+      setIpoScanning(running);
       setIpoProgress(ipoJob);
-      if (ipoJob.status && ipoJob.status !== "running") {
+      if (!running && ipoJob.status && ipoJob.status !== "running") {
         stopIpoPoll();
         setStopBusy(false);
         void fetchIpoList();
@@ -152,6 +174,7 @@ export default function IpoTracker({
 
   const startIpoScan = useCallback(async () => {
     setIpoError(null);
+    ipoScanStartedAtRef.current = Date.now();
     setIpoScanning(true);
     setIpoProgress({ message: "Starting IPO scan…" });
     try {

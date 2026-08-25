@@ -28,6 +28,7 @@ from auth.admin_auth import (
 from auth import dhan_credentials
 from audit.logger import log_action
 from db import get_db, init_schema
+from portfolio.portfolio import open_positions as _pf_open_positions
 from risk_engine.engine import AccountState, OrderIntent, evaluate as risk_evaluate
 
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +45,12 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup() -> None:
+    # Note: no continuous background scheduler (no asyncio.create_task loop)
+    # is started here in Phase 2 — /cycle/run/{mode} is a manual trigger
+    # only. Continuous polling belongs behind its own explicit on/off
+    # control (so "armed" doesn't silently imply "spinning a loop that
+    # burns API calls every N seconds") — that control panel is a Phase 3
+    # UI/ops decision, not something to wire silently into startup.
     errors = config.startup_config_errors()
     if errors:
         # Fail loud, not silent: booting "successfully" without these would
@@ -362,7 +369,7 @@ async def risk_engine_check(body: RiskCheckRequest, admin: str = Depends(require
     if account_row is None or risk_row is None:
         raise HTTPException(status_code=404, detail=f"No account/risk-config for mode={mode}")
 
-    open_positions = db.query(models.TradePosition).filter_by(mode=mode, status="OPEN").all()
+    open_positions = _pf_open_positions(db, mode)
     account_state = AccountState(
         equity=account_row.current_equity,
         risk_per_trade_pct=risk_row.risk_per_trade_pct,
@@ -401,6 +408,79 @@ async def risk_engine_check(body: RiskCheckRequest, admin: str = Depends(require
 
 
 # ── Routes: audit log read ───────────────────────────────────────────────────
+# ── Routes: Phase 2 — DEMO cycle (candidates -> entry -> fills -> exits) ───
+@app.post("/cycle/run/{mode}")
+async def run_cycle(mode: str, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """Runs one full evaluation cycle: refresh candidates from api-gateway,
+    evaluate entries (risk-checked), check pending order fills, expire
+    stale unfilled orders, then evaluate exits on every open position.
+    DEMO mode does all of this end-to-end including simulated fills. REAL
+    mode runs the identical candidate/entry/risk/exit evaluation and logs
+    every decision, but stops short of calling Dhan (Phase 3 — see the
+    TODOs in entry_engine/entry.py and exit_engine/exit.py).
+
+    This is a manual trigger, not a scheduler — see the module note in
+    startup() for why continuous background scheduling isn't wired yet."""
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    gate = _check_and_expire_gates(db, mode)
+    if not gate.armed:
+        raise HTTPException(status_code=409, detail=f"{mode} is not armed — arm it before running a cycle.")
+
+    from candidate_engine.candidates import refresh_candidates
+    from entry_engine.entry import evaluate_mode as entry_evaluate, check_pending_fills, expire_stale_orders
+    from exit_engine.exit import evaluate_mode as exit_evaluate
+
+    new_candidates = await refresh_candidates(db, mode)
+    entry_result = await entry_evaluate(db, mode, gate.armed)
+    fills = await check_pending_fills(db, mode)
+    expired = await expire_stale_orders(db, mode)
+    exit_result = await exit_evaluate(db, mode)
+
+    return {
+        "mode": mode,
+        "new_candidates": new_candidates,
+        "entry": entry_result,
+        "fills": fills,
+        "expired_orders": expired,
+        "exit": exit_result,
+    }
+
+
+@app.get("/positions/{mode}")
+async def list_positions(mode: str, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    mode = mode.upper()
+    rows = _pf_open_positions(db, mode)
+    return [
+        {
+            "symbol": p.symbol, "status": p.status, "qty_open": p.qty_open,
+            "avg_entry_price": p.avg_entry_price, "current_stop": p.current_stop,
+            "current_target": p.current_target, "unrealized_pnl": p.unrealized_pnl,
+            "realized_pnl": p.realized_pnl, "opened_at": p.opened_at.isoformat(),
+        }
+        for p in rows
+    ]
+
+
+@app.get("/orders/{mode}")
+async def list_orders(mode: str, limit: int = 50, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    mode = mode.upper()
+    rows = (
+        db.query(models.TradeOrder).filter_by(mode=mode)
+        .order_by(models.TradeOrder.created_at.desc()).limit(min(max(limit, 1), 200)).all()
+    )
+    return [
+        {
+            "symbol": o.symbol, "side": o.side, "qty": o.qty, "order_type": o.order_type,
+            "limit_price": o.limit_price, "status": o.status,
+            "valid_until": o.valid_until.isoformat() if o.valid_until else None,
+            "created_at": o.created_at.isoformat(),
+        }
+        for o in rows
+    ]
+
+
 @app.get("/audit-log")
 async def audit_log(mode: Optional[str] = None, limit: int = 50, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     q = db.query(models.TradeAuditLog)

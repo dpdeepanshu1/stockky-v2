@@ -511,6 +511,18 @@ def _fetch_bhav_day_parsed(client: httpx.Client, d) -> Optional[Dict[str, Dict[s
             if not text:
                 continue
             head = text[:800].upper()
+            if "WILL BE RIGHT BACK" in head or "ACCESS DENIED" in head or "<HTML" in head[:50]:
+                # NSE sometimes soft-blocks with a 200-status interstitial
+                # page instead of a 403 when a source IP is rate-limited —
+                # same underlying cause as the JSON-API 403s elsewhere in
+                # this pipeline, just a different symptom. Logged
+                # explicitly (not just silently `continue`d) so a burst of
+                # "possibly delisted" failures for obviously-liquid,
+                # definitely-not-delisted names like TATAMOTORS/LTIM is
+                # diagnosable as a rate-limit/IP-reputation issue from logs
+                # alone, rather than looking like a parsing bug.
+                logger.info("bhavcopy %s: NSE returned an interstitial/block page, not CSV data — likely rate-limited", d)
+                continue
             if "SYMBOL" not in head and "TCKRSYMB" not in head and "SECURITY" not in head:
                 continue
             parsed = _parse_bhav_csv_all(text)
@@ -659,13 +671,29 @@ def eod_close_from_bhavcopy(symbol: str) -> Optional[float]:
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     try:
         client = _nse_client()
+        dates_tried = []
         for d in _candidate_session_dates(12):
             day = _fetch_bhav_day_parsed(client, d)
+            dates_tried.append((d.isoformat(), len(day) if day else 0))
             if not day:
                 continue
             row = day.get(sym)
             if row and row.get("close"):
                 return float(row["close"])
+        # 2026-08-25: added after TATAMOTORS/LTIM were seen going through
+        # every waterfall stage (including 10 successful bhavcopy CSV
+        # downloads) and still ending in "price still missing". Both are
+        # large, extremely liquid stocks that are on every single trading
+        # day's official bhavcopy without exception — if this log line
+        # ever shows a day with a nonzero row count where the symbol still
+        # wasn't found, the bug is in symbol-key formatting (e.g. a hidden
+        # whitespace/case mismatch, or the file's SYMBOL column using a
+        # different identifier for these specific names than mapped
+        # columns expect); if it shows 0 rows parsed for every date, the
+        # bug is upstream in _fetch_bhav_day_parsed's CSV/zip parsing, not
+        # in this lookup. Either way, this makes the next occurrence
+        # diagnosable from logs alone instead of requiring another guess.
+        logger.info("eod_close_from_bhavcopy(%s): not found in any of %s", sym, dates_tried)
     except Exception as e:
         logger.warning("eod_close_from_bhavcopy failed for %s: %s", sym, e)
     return None

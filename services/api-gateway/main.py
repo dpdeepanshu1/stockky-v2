@@ -6814,18 +6814,19 @@ async def api_surprise_premarket_proxy(request: Request):
     q = request.query_params.get("symbols")
     if not symbols and q:
         symbols = [x.strip() for x in q.split(",") if x.strip()]
-    if not symbols:
-        try:
-            uni = _build_scan_universe()
-            symbols = [
-                str(s).upper().replace(".NS", "").replace(".BO", "").strip()
-                for s in (uni or [])
-                if s
-            ]
-        except Exception as e:
-            logger.warning("universe inject failed: %s", e)
-            symbols = []
 
+    # 2026-08-25 fix: when no explicit symbol list is given, this used to
+    # call _build_scan_universe() RIGHT HERE — synchronously, on the
+    # request path, before the background thread below even exists. That
+    # function hits the live NSE securities-list API (the same one this
+    # session's NSE-403 fix already had to retry/refresh sessions for),
+    # so on a slow or currently-blocked NSE response this alone can run
+    # past Render's/nginx's proxy timeout and return 504 — even though
+    # background=true was requested and the docstring promises an
+    # immediate return. Universe resolution now happens INSIDE the
+    # background thread (see _job() below) when background=true; it only
+    # stays synchronous here for the non-background call, where blocking
+    # is already an accepted part of that code path's contract.
     background = str(request.query_params.get("background", "true")).lower() in (
         "1", "true", "yes", ""
     )
@@ -6837,8 +6838,21 @@ async def api_surprise_premarket_proxy(request: Request):
         default_universe_from_env,
     )
 
-    if not symbols:
-        symbols = default_universe_from_env()
+    explicit_symbols = bool(symbols)
+    if not symbols and not background:
+        # Synchronous path only: resolve the universe now, same as before.
+        try:
+            uni = _build_scan_universe()
+            symbols = [
+                str(s).upper().replace(".NS", "").replace(".BO", "").strip()
+                for s in (uni or [])
+                if s
+            ]
+        except Exception as e:
+            logger.warning("universe inject failed: %s", e)
+            symbols = []
+        if not symbols:
+            symbols = default_universe_from_env()
 
     prog = get_premarket_progress()
     if prog.get("is_running"):
@@ -6852,8 +6866,25 @@ async def api_surprise_premarket_proxy(request: Request):
         }
 
     if background:
-        def _job(syms=list(symbols), force=force):
+        def _job(explicit_syms=(list(symbols) if explicit_symbols else None), force=force):
             try:
+                syms = explicit_syms
+                if not syms:
+                    # Universe resolution deferred to here (see fix note
+                    # above) — this thread can take as long as it needs;
+                    # it no longer holds the HTTP response open.
+                    try:
+                        uni = _build_scan_universe()
+                        syms = [
+                            str(s).upper().replace(".NS", "").replace(".BO", "").strip()
+                            for s in (uni or [])
+                            if s
+                        ]
+                    except Exception as e:
+                        logger.warning("gateway premarket job: universe inject failed: %s", e)
+                        syms = []
+                    if not syms:
+                        syms = default_universe_from_env()
                 precalculate_surprise_baselines(syms, force=force)
             except Exception as e:
                 logger.exception("gateway premarket job: %s", e)
@@ -6863,8 +6894,8 @@ async def api_surprise_premarket_proxy(request: Request):
             "ok": True,
             "accepted": True,
             "background": True,
-            "symbols": len(symbols),
-            "universe_injected": len(symbols),
+            "symbols": len(symbols) if explicit_symbols else None,
+            "universe_injected": "resolving in background" if not explicit_symbols else len(symbols),
             "runner": "api-gateway",
             "backend": schema.get("backend"),
             "message": (

@@ -24,6 +24,54 @@ DEFAULT_TARGET_COUNT = 4
 EST_PROFIT_PCT = 6.5
 STOP_LOSS_PCT = 3.2
 
+# 2026-08-24: volatility-aware fallback target/stop.
+#
+# These are ONLY used when the decision-prediction-service (the trained
+# model) didn't already return its own target/stop_loss for a row — see
+# build_suggestion() below, which always prefers the model's numbers when
+# present. This is a fallback-of-a-fallback, not a replacement for the
+# model, and it is NOT a claim of a validated trading edge — it's a
+# standard, well-established risk-management adjustment (ATR-scaled
+# stop/target instead of one flat percentage for every stock).
+#
+# Why this matters right now: trailing-year NSE data (to 2026-08-14) shows
+# Nifty 50/Sensex roughly flat-to-down (-1% to -3%) while Nifty Midcap 100
+# was +12.88% and Smallcap 100 +12.49% — i.e. return AND realized
+# volatility have diverged sharply between large caps and the small/mid-cap
+# names that make up most of this app's ≤₹5000 universe. A flat 3.2%
+# stop-loss that's appropriate for a large, low-beta stock is frequently
+# too tight for a higher-ATR small-cap (stopped out on normal noise) and
+# too loose for a genuinely low-volatility one (gives back more than the
+# setup's actual risk). Scaling by the stock's own recent ATR% addresses
+# that without inventing any new directional signal.
+ATR_STOP_MULTIPLIER = 1.5   # stop ≈ 1.5x daily ATR%, a conventional default
+ATR_TARGET_MULTIPLIER = 3.0  # ~2:1 reward:risk vs the ATR-based stop
+MIN_STOP_PCT = 2.0    # floor: never tighter than 2% (avoid noise stop-outs)
+MAX_STOP_PCT = 6.0    # ceiling: never looser than 6% on a ≤₹5000 setup
+MIN_TARGET_PCT = 4.0
+MAX_TARGET_PCT = 12.0
+
+
+def _atr_pct(s: Dict[str, Any], price: float) -> Optional[float]:
+    """ATR as a % of price, if the feed store had a usable atr/daily_atr
+    field for this symbol. Returns None (caller falls back to the flat
+    EST_PROFIT_PCT/STOP_LOSS_PCT constants) when no ATR is available —
+    this never fabricates a volatility number that wasn't actually
+    measured."""
+    if price <= 0:
+        return None
+    for key in ("atr", "daily_atr"):
+        raw = s.get(key)
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            pct = (v / price) * 100.0
+            if 0.1 <= pct <= 25.0:  # sanity bounds — reject bad/stale feed data
+                return pct
+    return None
+
 
 def _num(val: Any, default: float = 0.0) -> float:
     try:
@@ -118,17 +166,29 @@ def build_suggestion(s: Dict[str, Any], est_profit_pct: float = EST_PROFIT_PCT) 
     action = _action_for(s)
     tech = int(_num(s.get("technical_score")) or 70)
     fund = int(_num(s.get("fundamental_score")) or 70)
-    # Prefer scanner target/stop when present and sensible
+    # Prefer scanner target/stop when present and sensible — this is the
+    # decision-prediction-service's own model output and always wins.
     target = _num(s.get("target") or s.get("target_price"))
     stop = _num(s.get("stop_loss"))
+    atr_pct = _atr_pct(s, px)
     if target <= 0:
-        target = round(px * (1 + est_profit_pct / 100.0), 2)
+        if atr_pct is not None:
+            eff_target_pct = max(MIN_TARGET_PCT, min(atr_pct * ATR_TARGET_MULTIPLIER, MAX_TARGET_PCT))
+        else:
+            eff_target_pct = est_profit_pct
+        target = round(px * (1 + eff_target_pct / 100.0), 2)
+    else:
+        eff_target_pct = round((target / px - 1) * 100.0, 2) if px > 0 else est_profit_pct
     if stop <= 0:
-        stop = round(px * (1 - STOP_LOSS_PCT / 100.0), 2)
+        if atr_pct is not None:
+            eff_stop_pct = max(MIN_STOP_PCT, min(atr_pct * ATR_STOP_MULTIPLIER, MAX_STOP_PCT))
+        else:
+            eff_stop_pct = STOP_LOSS_PCT
+        stop = round(px * (1 - eff_stop_pct / 100.0), 2)
 
     buy_low = round(px * 0.995, 2)
     buy_high = round(px * 1.008, 2)
-    profit_abs = round(px * (est_profit_pct / 100.0), 2)
+    profit_abs = round(px * (eff_target_pct / 100.0), 2)
 
     return {
         "symbol": str(s.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip(),
@@ -140,8 +200,8 @@ def build_suggestion(s: Dict[str, Any], est_profit_pct: float = EST_PROFIT_PCT) 
         "entry_window": "09:25 AM - 09:45 AM IST",
         "target_price": round(target, 2),
         "stop_loss": round(stop, 2),
-        "estimated_profit": f"+{est_profit_pct}% (₹{profit_abs}/share)",
-        "estimated_profit_pct": est_profit_pct,
+        "estimated_profit": f"+{eff_target_pct:.1f}% (₹{profit_abs}/share)",
+        "estimated_profit_pct": eff_target_pct,
         "holding_duration": "2 to 5 Trading Days",
         "holding_period": s.get("holding_period") or "2-5 Days",
         "conviction_score": int(round(conv)),

@@ -1255,10 +1255,14 @@ export const api = {
       progress?: Record<string, unknown>;
     }>(`/surprise/premarket?background=true&force=${force}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, 1, 30000),
 
-  // IPO Tracker — its own left-nav tab (was a Surprise subsection)
-  ipoScan: () =>
+  // IPO Tracker — its own left-nav tab (was a Surprise subsection).
+  // force defaults true: an explicit "Scan IPOs" click should always
+  // re-scan, not silently get skipped by the 24h ipo_static_feed
+  // freshness cache (that cache exists for automatic callers, and there
+  // aren't any yet — see the backend endpoint's own docstring).
+  ipoScan: (force = true) =>
     request<{ accepted?: boolean; already_running?: boolean; message?: string }>(
-      "/surprise/ipo/scan?background=true", { method: "POST" }, 1, 30000
+      `/surprise/ipo/scan?background=true&force=${force}`, { method: "POST" }, 1, 30000
     ),
   ipoScanStatus: () =>
     request<{
@@ -1292,6 +1296,18 @@ export const api = {
       error?: string;
       notification_result?: { delivered?: boolean; note?: string };
     }>(`/surprise/notify-top-picks?top_n=${topN}`, { method: "POST" }, 1, 30000),
+  // Manual "Send Top 5 to Telegram" button for the Hot Picks tab (same
+  // pattern as surpriseNotifyTopPicks above — Hot Picks was missing it).
+  hotPicksNotifyTopPicks: (topN = 5) =>
+    request<{
+      ok: boolean;
+      sent: boolean;
+      count: number;
+      symbols?: string[];
+      message?: string;
+      error?: string;
+      notification_result?: { delivered?: boolean; note?: string };
+    }>(`/stockky-hot/notify-top-picks?top_n=${topN}`, { method: "POST" }, 1, 30000),
   // displayDays narrows the stored scan to a window (30 = default, 365 = hard
   // cap). Omitted -> backend default (IPO_CHECKER_DEFAULT_DISPLAY_DAYS).
   ipoList: (displayDays?: number) =>

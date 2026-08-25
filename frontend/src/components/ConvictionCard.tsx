@@ -167,7 +167,18 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
         </div>
         <div className="cc-metric">
           <span className="cc-label">Price</span>
-          <span className="cc-value">₹{fmt(resolveDisplayPrice(data, data.live_price))}</span>
+          <span className="cc-value">
+            {(() => {
+              const px = resolveDisplayPrice(data, data.live_price);
+              // px === 0 means "no positive price found under any known
+              // key" (see priceDisplay.ts), not "the stock is worth ₹0" —
+              // rendering "₹0" here was the literal bug (Hot Picks
+              // Results/Earnings cards for symbols outside the feed
+              // store, e.g. purged over-₹5000-cap names, showed "₹0"
+              // instead of an honest "no price").
+              return px > 0 ? `₹${fmt(px)}` : "₹—";
+            })()}
+          </span>
         </div>
         {data.confidence && (
           <div className="cc-metric">

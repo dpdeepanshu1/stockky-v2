@@ -81,6 +81,14 @@ SYMBOL_RENAMES = {
     "KFINTECHNOLOGIES": "KFINTECH",
     "KPITTECHNOLOGIES": "KPITTECH",
     "ONE97": "PAYTM",               # One97 Communications -> trades as PAYTM
+    # ── Added 2026-08-24 (Database Feed Health repair-loop audit) ──────────
+    # "JUBILANT" is not, and never was, a real NSE ticker — it was a bad/
+    # truncated entry sitting alongside the correct "JUBLFOOD" in main.py's
+    # static universe fallback list. yfinance correctly reports it
+    # "possibly delisted" every single repair cycle because there is
+    # nothing to find. Map it to the real ticker (Jubilant FoodWorks)
+    # instead of leaving it to burn a network call and fail forever.
+    "JUBILANT": "JUBLFOOD",
 }
 
 # Symbols that are not NSE-listed at all (foreign tickers, indices sent by
@@ -91,6 +99,30 @@ KNOWN_NOT_ON_NSE = {
     "CISCO", "CSCO", "GOOGL", "GOOG", "AAPL", "MSFT", "AMZN", "META", "TSLA",
     "NVDA", "NFLX", "INTC", "AMD", "IBM", "ORCL",
 }
+
+# Genuinely delisted/merged-away symbols — NOT a rename. A rename means
+# "same company, new ticker, 1:1" (safe to substitute in resolve_ns_ticker).
+# These are cap-structure mergers/cancellations where the old ticker simply
+# stops existing and converts into a DIFFERENT share count of another
+# ticker (a straight symbol swap here would silently mis-price/mis-quote
+# the surviving instrument), so they get their own skip-list instead of
+# living in SYMBOL_RENAMES.
+KNOWN_DELISTED = {
+    # Tata Motors 'A' Ordinary (DVR) shares — suspended from trading
+    # 2024-08-30 under a Scheme of Arrangement; holders received 7 ordinary
+    # TATAMOTORS shares for every 10 TATAMTRDVR shares held (not a 1:1
+    # rename). Confirmed via NSE/Zerodha bulletin. Kept out of
+    # SYMBOL_RENAMES on purpose — see module note above.
+    "TATAMTRDVR": "merged into TATAMOTORS 2024-08-30 (7:10 ratio, not 1:1)",
+}
+
+
+def is_known_delisted(symbol: str) -> bool:
+    """True when `symbol` is a confirmed genuine delisting/merger (not a
+    simple rename) — callers should stop tracking/repairing it and purge
+    any stale feed row instead of retrying forever."""
+    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    return base in KNOWN_DELISTED
 
 # Chronically-over-₹5000 NSE names. This is deliberately a SHORT, high-
 # confidence static list (not an attempt to track every high-priced stock
@@ -154,7 +186,7 @@ def resolve_ns_ticker(symbol: str) -> Optional[str]:
     base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
     if not base:
         return None
-    if base in KNOWN_NOT_ON_NSE:
+    if base in KNOWN_NOT_ON_NSE or base in KNOWN_DELISTED:
         return None
     base = _apply_all_renames(base)
     return f"{base}.NS"
@@ -162,11 +194,12 @@ def resolve_ns_ticker(symbol: str) -> Optional[str]:
 
 def resolve_base_symbol(symbol: str) -> Optional[str]:
     """Same resolution as resolve_ns_ticker but returns the bare symbol
-    (no .NS suffix), or None if it's a known non-NSE name."""
+    (no .NS suffix), or None if it's a known non-NSE / genuinely-delisted
+    name."""
     base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
     if not base:
         return None
-    if base in KNOWN_NOT_ON_NSE:
+    if base in KNOWN_NOT_ON_NSE or base in KNOWN_DELISTED:
         return None
     return _apply_all_renames(base)
 
@@ -402,6 +435,8 @@ def resolve_with_fallback(symbol: str) -> Tuple[Optional[str], Dict[str, Any]]:
         return None, {"resolution": "empty"}
     if base in KNOWN_NOT_ON_NSE:
         return None, {"resolution": "skip_not_nse"}
+    if base in KNOWN_DELISTED:
+        return None, {"resolution": "skip_delisted_merged", "detail": KNOWN_DELISTED[base]}
     if is_learned_delisted(base):
         return None, {"resolution": "skip_delisted"}
 

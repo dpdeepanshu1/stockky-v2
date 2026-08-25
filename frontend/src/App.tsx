@@ -16,6 +16,7 @@ import Training from "./components/Training";
 import HotStocks from "./components/HotStocks";
 import SurpriseStocks from "./components/SurpriseStocks";
 import IpoTracker from "./components/IpoTracker";
+import RealAutoTrade from "./components/RealAutoTrade";
 import DataFeed from "./components/DataFeed";
 import DataHealthAudit from "./components/DataHealthAudit";
 import Trades from "./components/Trades";
@@ -31,7 +32,7 @@ type ViewState =
   | { mode: "scan"; data: ScanResult }
   | { mode: "error"; message: string };
 
-type Tab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "surprise" | "ipo" | "datafeed" | "settings" | "watchlist";
+type Tab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "surprise" | "ipo" | "datafeed" | "settings" | "watchlist" | "realtrade";
 
 // The five tabs the mobile bottom bar shows, in order. Explicit so that adding
 // a tab to navItems can never silently displace one of them.
@@ -957,6 +958,7 @@ export default function App() {
     { id: "hot", label: "Hot Picks", short: "Picks", icon: "🔥" },
     { id: "surprise", label: "Surprise", short: "Surp", icon: "⚡" },
     { id: "ipo", label: "IPO Tracker", short: "IPO", icon: "🆕" },
+    { id: "realtrade", label: "Real Automatic Trade", short: "AutoTrade", icon: "🤖" },
 
     { id: "training", label: "Training", short: "Train", icon: "◈" },
     { id: "trades", label: "Trades", short: "Trade", icon: "⇄" },
@@ -1283,6 +1285,8 @@ export default function App() {
               }}
             />
           </div>
+        ) : tab === "realtrade" ? (
+          <RealAutoTrade />
         ) : tab === "settings" ? (
           <SettingsPage
             backendUp={backendUp}

@@ -294,6 +294,22 @@ def bulk_baselines_from_yfinance(
     except Exception:
         rl_acquire = None
 
+    # 2026-08-24 fix: this loop used to build "<bare_symbol>.NS" directly
+    # with zero rename/delisting resolution — exactly the "~9 bare-symbol
+    # call sites that never went through the alias map" gap documented in
+    # symbol_aliases.py's own module docstring. That's the direct cause of
+    # the repeated "$JUBILANT.NS / $TATAMTRDVR.NS: possibly delisted"
+    # spam during premarket runs: JUBILANT should have resolved to
+    # JUBLFOOD, and TATAMTRDVR is a genuine 2024 merger that should never
+    # be queried at all. Both now get handled below instead of silently
+    # eating an error (and a slot in `remaining`, which then gets retried
+    # again via compute_baseline_for_symbol) every single run.
+    try:
+        from symbol_aliases import resolve_base_symbol, is_known_delisted
+    except Exception:
+        resolve_base_symbol = None
+        is_known_delisted = lambda _s: False  # noqa: E731
+
     _yahoo_session()
 
     clean: List[str] = []
@@ -305,6 +321,17 @@ def bulk_baselines_from_yfinance(
         if base in _INDEX_SKIP or base.startswith("^"):
             skipped.append(base)
             continue
+        if is_known_delisted(base):
+            skipped.append(base)
+            continue
+        if resolve_base_symbol is not None:
+            resolved = resolve_base_symbol(base)
+            if resolved is None:
+                # Known non-NSE ticker (e.g. a US symbol that slipped into
+                # the universe) — skip outright, never worth a .NS query.
+                skipped.append(base)
+                continue
+            base = resolved
         clean.append(base)
 
     rows: List[Dict[str, Any]] = []

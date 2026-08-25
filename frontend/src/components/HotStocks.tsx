@@ -294,6 +294,8 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
   const [sniperError, setSniperError] = useState<string | null>(null);
   const [stopBusy, setStopBusy] = useState(false);
   const [healthKey, setHealthKey] = useState(0);
+  const [notifyBusy, setNotifyBusy] = useState(false);
+  const [notifyMsg, setNotifyMsg] = useState<string | null>(null);
 
   const { quotes: liveQuotes, subscribeQuotes } = useStockkyRealtime();
 
@@ -504,6 +506,32 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
     }
   };
 
+  // Manual "Send Top 5 to Telegram" — same pattern as the Surprise Momentum
+  // tab's notifyTopPicks(). Uses whatever is already loaded/cached; does
+  // not trigger a fresh scan.
+  const notifyTopPicks = useCallback(async () => {
+    setNotifyBusy(true);
+    setNotifyMsg(null);
+    try {
+      const res = await api.hotPicksNotifyTopPicks(5);
+      if (res?.sent) {
+        setNotifyMsg(`Sent top ${res.count} picks to Telegram ✓`);
+      } else if (res?.count === 0) {
+        setNotifyMsg(res?.message || "No qualifying picks right now.");
+      } else {
+        setNotifyMsg(
+          res?.notification_result?.note ||
+          res?.error ||
+          "Could not deliver — check Telegram is configured under Settings → Notifications."
+        );
+      }
+    } catch (err: any) {
+      setNotifyMsg(err?.message || "Failed to send top picks");
+    } finally {
+      setNotifyBusy(false);
+    }
+  }, []);
+
   const storedFromTable = data?.source === "hotpicks_static_feed";
 
   return (
@@ -543,7 +571,19 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
           >
             {sniperLoading ? "Sniping…" : "🎯 Search for Buy Stocks (1-4)"}
           </button>
+          <button
+            type="button"
+            onClick={() => void notifyTopPicks()}
+            disabled={notifyBusy || !data}
+            title="Send the current top 5 Hot Picks to Telegram"
+            className="font-mono text-xs px-4 py-2 rounded-lg bg-sky-600/25 border border-sky-500/50 text-sky-200 hover:bg-sky-600/35 disabled:opacity-50 shadow-lg shadow-sky-900/20"
+          >
+            {notifyBusy ? "Sending…" : "📨 Send Top 5 to Telegram"}
+          </button>
         </div>
+        {notifyMsg && (
+          <p className="mt-2 font-mono text-[11px] text-sky-200/80">{notifyMsg}</p>
+        )}
 
         {loading && (
           <div className="mt-4 space-y-3">

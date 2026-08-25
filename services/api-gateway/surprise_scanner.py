@@ -834,6 +834,28 @@ async def run_market_aware_surprise_feed(
             return _map[u]
         u = u.replace(" TECHNOLOGIES", "TECH").replace(" TECHNOLOGY", "TECH")
         u = u.replace(" LIMITED", "").replace(" LTD", "").replace(" ", "")
+        # 2026-08-24 fix: same bare-symbol-never-resolved gap as
+        # surprise_premarket.py's bulk_baselines_from_yfinance — this is a
+        # second, independent path that builds ".NS" tickers straight from
+        # whatever's in the universe, so it needs the same alias/delisted
+        # check or it reproduces the exact same "possibly delisted" spam
+        # for JUBILANT/TATAMTRDVR on every live quote pass.
+        try:
+            from symbol_aliases import resolve_base_symbol, is_known_delisted
+            if is_known_delisted(u):
+                return ""
+            resolved = resolve_base_symbol(u)
+            if resolved is None:
+                # Known non-NSE ticker (e.g. a US symbol) — resolve_base_
+                # symbol() returning None means "don't query this at all",
+                # not "leave it as-is". Missing this check was the same
+                # class of bug as the delisted case just above: silently
+                # falling through to `return u` here would still hand a
+                # confirmed-unresolvable symbol to yfinance every pass.
+                return ""
+            u = resolved
+        except Exception:
+            pass
         return u
 
     try:

@@ -581,20 +581,78 @@ def _add_searched(symbol: str):
         _redis_set(SEARCHED_KEY, searched[-200:])
 
 # ── Dynamic Universe Sources ──────────────────────────────────────────────────
-_nse_client = None
+# 2026-08-24: root cause of the recurring "GET https://www.nseindia.com
+# HTTP/1.1 403 Forbidden" log line. Two separate bugs, same fix pattern
+# ipo_scanner.py already uses for its own NSE session (_nse_session() /
+# NSE_BOOTSTRAP_HEADERS there):
+#   1. The client's default headers declared Accept: "application/json,
+#      text/plain, */*" and were reused for the bootstrap GET to
+#      https://www.nseindia.com — an HTML document. NSE's Akamai WAF treats
+#      a JSON-Accept request with no Sec-Fetch-* navigation hints hitting an
+#      HTML URL as a bot signature and returns 403. The 403 body still sets
+#      cookies, so nothing raised/looked broken, but the session only ever
+#      got the weak anonymous cookie pair, not the real nsit/nseappid pair —
+#      every subsequent /api/ call rode on that weak session and got
+#      rate-limited/blocked far more aggressively.
+#   2. _nse_client was a permanent, never-refreshed module singleton: once
+#      bootstrapped (well or badly), it was reused for the lifetime of the
+#      process with no retry and no TTL, so a bad bootstrap at startup
+#      poisoned every NSE call until the next deploy.
+_nse_client: Optional[httpx.Client] = None
+_nse_client_ts: float = 0.0
+_NSE_CLIENT_TTL_SECONDS = 300  # matches ipo_scanner.py's _NSE_SESSION_TTL_SECONDS
 
-def _get_nse_client() -> httpx.Client:
-    global _nse_client
-    if _nse_client is None:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.nseindia.com/",
-            "DNT": "1",
-        }
-        _nse_client = httpx.Client(headers=headers, timeout=15)
-        _nse_client.get("https://www.nseindia.com")
+_NSE_CLIENT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/",
+    "DNT": "1",
+}
+# Browser-navigation headers for the bootstrap HTML hop ONLY (see note 1
+# above) — kept separate from _NSE_CLIENT_HEADERS so the subsequent /api/
+# JSON calls keep declaring Accept: application/json as before.
+_NSE_CLIENT_BOOTSTRAP_HEADERS = {
+    "User-Agent": _NSE_CLIENT_HEADERS["User-Agent"],
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+}
+
+
+def _get_nse_client(force_new: bool = False) -> httpx.Client:
+    global _nse_client, _nse_client_ts
+    age = time.time() - _nse_client_ts
+    if not force_new and _nse_client is not None and age < _NSE_CLIENT_TTL_SECONDS:
+        return _nse_client
+    old = _nse_client
+    c = httpx.Client(headers=_NSE_CLIENT_HEADERS, timeout=15, follow_redirects=True)
+    try:
+        r = c.get("https://www.nseindia.com", headers=_NSE_CLIENT_BOOTSTRAP_HEADERS)
+        names = set(c.cookies.keys())
+        if not (names & {"nsit", "nseappid"}):
+            logger.info(
+                "main._get_nse_client: bootstrap cookies weak (%s; status %s) — "
+                "payloads may be rate-limited",
+                ",".join(sorted(names))[:120], r.status_code,
+            )
+    except Exception as e:
+        logger.debug("main._get_nse_client bootstrap failed: %s", e)
+    _nse_client = c
+    _nse_client_ts = time.time()
+    if old is not None and old is not c:
+        try:
+            old.close()
+        except Exception:
+            pass
     return _nse_client
 
 def _fetch_from_nse_api(endpoint: str, cache_key: str, ttl: int = 21600):
@@ -605,6 +663,13 @@ def _fetch_from_nse_api(endpoint: str, cache_key: str, ttl: int = 21600):
         client = _get_nse_client()
         url = f"https://www.nseindia.com/api/{endpoint}"
         resp = client.get(url)
+        if resp.status_code in (401, 403):
+            # Session's gone bad mid-TTL (NSE started blocking it) — don't
+            # keep handing the same poisoned client to every caller for the
+            # rest of the window. Force one fresh bootstrap and retry once.
+            logger.info("NSE API %s -> HTTP %s, forcing session refresh", endpoint, resp.status_code)
+            client = _get_nse_client(force_new=True)
+            resp = client.get(url)
         if resp.status_code == 200:
             data = resp.json()
             if isinstance(data, dict):
@@ -634,6 +699,17 @@ _INDEX_PSEUDO_TOKENS = {
     "NIFTYPHARMA", "NIFTYFMCG", "NIFTYMETAL", "NIFTYREALTY", "NIFTYENERGY",
     "SENSEX", "BANKEX", "INDIAVIX",
 }
+# 2026-08-24: this dict used to be its OWN independently-maintained rename
+# table — a 3rd/4th copy alongside symbol_aliases.py's SYMBOL_RENAMES and
+# market-data-service's SMART_SYMBOL_MAP, none of which synced with each
+# other (that drift is exactly how "JUBILANT" ended up in one static list
+# but no rename table at all). Kept as a small LOCAL fast-path only (this
+# function runs over the entire NSE securities list on every universe
+# refresh, so a dict lookup here avoids importing symbol_aliases per-symbol
+# for the common cases) but symbol_aliases.py is now the single source of
+# truth: _clean_equity_symbol() below falls through to it for anything not
+# in this fast-path, so a new rename/delisting only ever needs to be added
+# in ONE place going forward.
 _DELISTED_RENAME = {
     # stale NSE symbol -> current tradable symbol, or None to drop entirely
     "MOTHERSUMI": "MOTHERSON",   # Samvardhana Motherson renamed
@@ -642,12 +718,22 @@ _DELISTED_RENAME = {
     "IBULHSGFIN": None,          # Indiabulls Housing Finance — delisted/renamed, drop
     "WELSPUNIND": None,          # Welspun India (now WELSPUNLIV) — drop to be safe
     "MCDOWELL-N": None,          # legacy alias — drop
+    "JUBILANT": "JUBLFOOD",      # was never a real ticker; see symbol_aliases.py
+    "TATAMTRDVR": None,          # genuine 2024 merger into TATAMOTORS, not a rename
 }
 
 
 def _clean_equity_symbol(sym) -> Optional[str]:
     """Return a tradable NSE equity symbol, or None if it's an index
-    pseudo-ticker or a delisted/renamed name that must not reach yfinance."""
+    pseudo-ticker or a delisted/renamed name that must not reach yfinance.
+
+    Checks the small local fast-path table first, then falls through to
+    symbol_aliases.py (the durable, KV-backed, learned-rename source of
+    truth shared with the repair/premarket paths) so this universe builder
+    can never again silently miss a rename that's already been solved
+    elsewhere in the app — closing the exact gap that let JUBILANT sit in
+    the universe with zero rename entry anywhere.
+    """
     if not sym:
         return None
     s = str(sym).strip().upper()
@@ -660,7 +746,14 @@ def _clean_equity_symbol(sym) -> Optional[str]:
         return None
     if s in _DELISTED_RENAME:
         return _DELISTED_RENAME[s]  # may be a renamed ticker or None (drop)
-    return s
+    try:
+        from symbol_aliases import resolve_base_symbol, is_known_delisted
+        if is_known_delisted(s):
+            return None
+        resolved = resolve_base_symbol(s)
+        return resolved  # None => known non-NSE / confirmed delisted, drop
+    except Exception:
+        return s
 
 
 def _filter_equities(symbols) -> List[str]:
@@ -6070,6 +6163,35 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
             except Exception as e:
                 logger.warning("stockky-hot skip %s: %s", sym, e)
 
+    # ── Price enrichment ────────────────────────────────────────────────
+    # news_driven/results_driven/bulk_insider_driven items were built purely
+    # from news_data/event_data — no price field was ever attached, so the
+    # frontend's resolveDisplayPrice() found nothing and rendered "₹0"
+    # (Price metric on every Hot Picks card, incl. the Results/Earnings
+    # section). The ≤₹5000 universe's feed store already has a live/last
+    # price for every symbol that's actually in-universe, so look it up
+    # here — one cheap in-memory/KV read per symbol, no network calls —
+    # instead of leaving the card with nothing to show. Symbols that are
+    # over the ₹5000 cap (or otherwise purged from the feed store, e.g.
+    # PERSISTENT/SOLARINDS surfaced purely because they were in the news)
+    # legitimately have no price to show here; the frontend now renders
+    # "₹—" for those instead of a misleading "₹0" (see ConvictionCard.tsx).
+    try:
+        _hot_store = _feed_store()
+    except Exception:
+        _hot_store = None
+    if _hot_store is not None:
+        for _bucket in (news_driven, results_driven, bulk_insider_driven):
+            for _item in _bucket:
+                try:
+                    _row = _hot_store.get_symbol(_item.get("symbol") or "")
+                    _px = _feed_resolved_price(_row) if _row else 0.0
+                    if _px > 0:
+                        _item["price"] = _px
+                        _item["close"] = _px
+                except Exception:
+                    pass
+
     def _rank(items: list) -> list:
         order = {"BUY NOW": 0, "PREPARE TO BUY": 1, "DO NOT BUY": 2, "SELL": 3}
         strength = {"high": 0, "medium": 1, "low": 2}
@@ -6480,7 +6602,23 @@ async def api_surprise_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
 
 @app.post("/surprise/ipo/scan")
 @app.get("/surprise/ipo/scan")
-async def api_ipo_scan(background: bool = Query(True), background_tasks: BackgroundTasks = None):
+async def api_ipo_scan(
+    background: bool = Query(True),
+    force: bool = Query(
+        True,
+        description=(
+            "Bypass the ipo_static_feed 24h freshness cache. Defaults to "
+            "True because this endpoint is only ever hit by an explicit "
+            "user action (the 'Scan IPOs' button) — there is no automatic/"
+            "scheduled caller of this route, so gating a deliberate click "
+            "behind a staleness check just makes the button look broken "
+            "(same bug class /surprise/premarket already avoids via its "
+            "own force= param). Pass force=false explicitly if a future "
+            "scheduled caller wants the cache-reuse behaviour back."
+        ),
+    ),
+    background_tasks: BackgroundTasks = None,
+):
     """
     Recent IPO scanner — Surprise tab subsection. Scores recently-listed
     (and listing-today) NSE IPOs for a short-term buy/sell decision using
@@ -6494,9 +6632,9 @@ async def api_ipo_scan(background: bool = Query(True), background_tasks: Backgro
         return {"accepted": True, "already_running": True, **current}
 
     if background and background_tasks is not None:
-        background_tasks.add_task(run_ipo_scan)
-        return {"accepted": True, "background": True, "message": "IPO scan started"}
-    result = run_ipo_scan()
+        background_tasks.add_task(run_ipo_scan, force=force)
+        return {"accepted": True, "background": True, "force": force, "message": "IPO scan started"}
+    result = run_ipo_scan(force=force)
     return {"accepted": True, "background": False, **result}
 
 
@@ -8671,9 +8809,87 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
     fundamental_url = (os.getenv("FUNDAMENTAL_URL") or FUNDAMENTAL_URL or "").rstrip("/")
     news_url = (os.getenv("NEWS_URL") or NEWS_URL or "").rstrip("/")
 
+    # Genuinely delisted/merged symbols (TATAMTRDVR etc.) and known non-NSE
+    # tickers: purge immediately instead of burning a /quote round trip that
+    # can only ever fail — same rationale as the known-high-price short
+    # circuit above. This is checked before the "price" fetch below so a
+    # symbol like TATAMTRDVR never even reaches market-data-service.
+    try:
+        from symbol_aliases import is_known_delisted as _is_known_delisted
+        from symbol_aliases import resolve_with_fallback as _resolve_with_fallback
+    except Exception:
+        _is_known_delisted = lambda _s: False  # noqa: E731
+        _resolve_with_fallback = None
+    if _is_known_delisted(base):
+        try:
+            store.delete_symbol(base)
+        except Exception as e:
+            logger.warning("repair: purge known-delisted %s failed: %s", base, e)
+        return {
+            "symbol": base,
+            "patched_fields": [],
+            "still_missing": [],
+            "price": _feed_resolved_price(current),
+            "complete": False,
+            "purged": True,
+            "message": f"{base} is delisted/merged (not a rename) — removed from feed without a network call.",
+        }
+
     if "price" in missing and market_url:
         try:
             r = await client.get(f"{market_url}/quote/{base}", timeout=8.0)
+            # market-data-service's /quote/{symbol} does NOT return 404 for
+            # a genuine "possibly delisted / all sources failed" miss — it
+            # returns HTTP 200 with {"price": None, "source": "failed"}
+            # (see its last-resort fallback block). The one exception is
+            # our own new is_known_delisted() short-circuit above, which
+            # does raise a real 404. So both shapes have to be treated as
+            # "needs fallback resolution" here, or the self-heal path below
+            # would simply never fire for the failure mode that's actually
+            # in the logs (JUBILANT/TATAMTRDVR before their alias-table
+            # entries existed, and any future unmapped rename).
+            body_failed = False
+            if r.status_code == 200:
+                try:
+                    _body = r.json()
+                    if isinstance(_body, dict) and (
+                        _body.get("source") == "failed" or not _body.get("price")
+                    ):
+                        body_failed = True
+                except Exception:
+                    body_failed = True
+            needs_fallback = r.status_code == 404 or body_failed
+            if needs_fallback and _resolve_with_fallback is not None:
+                # Miss on the plain symbol: this may be an unresolved rename
+                # or a freshly-learned delisting rather than a transient
+                # blip. Try to self-heal once before giving up — this is
+                # exactly the recovery path symbol_aliases.resolve_with_
+                # fallback() exists for, but repair previously never
+                # called it at all.
+                fallback_ticker, info = _resolve_with_fallback(base)
+                if fallback_ticker is None:
+                    # Confirmed non-NSE / genuinely delisted — purge instead
+                    # of leaving this stuck as "price: missing" forever.
+                    try:
+                        store.delete_symbol(base)
+                    except Exception as e:
+                        logger.warning("repair: purge unresolved %s failed: %s", base, e)
+                    return {
+                        "symbol": base,
+                        "patched_fields": patched,
+                        "still_missing": [],
+                        "price": 0.0,
+                        "complete": False,
+                        "purged": True,
+                        "message": f"{base}: {info.get('resolution', 'unresolved')} — removed from feed.",
+                    }
+                new_base = fallback_ticker.replace(".NS", "").replace(".BO", "")
+                if new_base != base:
+                    logger.info(
+                        "repair price %s: retrying as %s (%s)",
+                        base, new_base, info.get("resolution"),
+                    )
+                    r = await client.get(f"{market_url}/quote/{new_base}", timeout=8.0)
             if r.status_code == 200:
                 q = r.json() if isinstance(r.json(), dict) else {}
                 # Only merge non-None quote fields — never write pe_ratio=0 / volume=0 poison
@@ -9704,6 +9920,84 @@ def stockky_hot_table(hours: int = 24):
     for section in ("news_driven", "results_driven", "bulk_insider_driven"):
         rows.extend(payload.get(section) or [])
     return {"ok": True, **payload, "rows": rows}
+
+
+@app.post("/stockky-hot/notify-top-picks")
+async def api_hotpicks_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
+    """
+    Manual "Send Top 5 to Telegram" button for the Hot Picks tab — same
+    pattern as /surprise/notify-top-picks (Surprise Momentum tab already
+    had this; Hot Picks did not). Reuses whatever is currently cached
+    (live scan result or the durable hotpicks_static_feed fallback) rather
+    than triggering a fresh scan, so this responds instantly.
+    """
+    cached = _redis_get(HOT_STOCKS_CACHE_KEY)
+    if not cached:
+        try:
+            from hotpicks_store import hotpicks_db_payload
+            cached = hotpicks_db_payload()
+        except Exception:
+            cached = None
+
+    def _has_picks(p) -> bool:
+        if not isinstance(p, dict):
+            return False
+        return bool(
+            (p.get("news_driven") or [])
+            or (p.get("results_driven") or [])
+            or (p.get("bulk_insider_driven") or [])
+        )
+
+    if not _has_picks(cached):
+        return {
+            "ok": False,
+            "sent": False,
+            "count": 0,
+            "message": "No Hot Picks available right now — run a scan first.",
+        }
+
+    merged = (
+        list(cached.get("bulk_insider_driven") or [])
+        + list(cached.get("results_driven") or [])
+        + list(cached.get("news_driven") or [])
+    )
+    order = {"BUY NOW": 0, "PREPARE TO BUY": 1, "DO NOT BUY": 2, "SELL": 3}
+    merged.sort(key=lambda x: (order.get((x.get("decision") or "").upper(), 9), -(x.get("score") or 0)))
+    top = merged[: max(1, min(int(top_n), 20))]
+    if not top:
+        return {"ok": False, "sent": False, "count": 0, "message": "No Hot Picks available right now."}
+
+    lines = [f"🔥 *Stockky Hot Picks — Top {len(top)}*"]
+    for i, s in enumerate(top, 1):
+        sym = s.get("symbol")
+        decision = s.get("decision") or "—"
+        score = s.get("score")
+        price = s.get("price") or s.get("close")
+        section = (s.get("section") or "").replace("_", " ")
+        price_str = f"₹{price}" if price else "price n/a"
+        lines.append(f"{i}. {sym} — {decision} (score {score if score is not None else '—'}/100)\n   {price_str} · {section}")
+    message = "\n".join(lines)
+
+    try:
+        resp = httpx.post(
+            f"{NOTIFICATION_URL}/notify",
+            json={"title": "Stockky Hot Picks — Top Picks", "message": message, "channel": "telegram"},
+            timeout=15,
+        )
+        try:
+            detail = resp.json()
+        except Exception:
+            detail = {"status_code": resp.status_code}
+        delivered = bool(isinstance(detail, dict) and detail.get("delivered"))
+        return {
+            "ok": True,
+            "sent": delivered,
+            "count": len(top),
+            "symbols": [s.get("symbol") for s in top],
+            "notification_result": detail,
+        }
+    except Exception as e:
+        return {"ok": False, "sent": False, "count": len(top), "error": str(e)[:300]}
 
 
 @app.get("/stockky-hot/audit")

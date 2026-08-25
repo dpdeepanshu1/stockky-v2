@@ -14,6 +14,8 @@ import gc
 import csv
 import io
 import logging
+import threading
+import time
 import zipfile
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
@@ -59,16 +61,59 @@ NSE_HEADERS = {
     "Connection": "keep-alive",
 }
 
+# Browser-navigation headers for the 3 bootstrap HTML hops only (matches the
+# fix already applied in api-gateway/ipo_scanner.py and api-gateway/main.py
+# _get_nse_client — see those for the full "Accept: application/json on an
+# HTML doc triggers Akamai 403" explanation).
+_NSE_BOOTSTRAP_HEADERS = {
+    "User-Agent": NSE_HEADERS["User-Agent"],
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+}
 
-def _nse_client() -> httpx.Client:
-    c = httpx.Client(timeout=25, headers=NSE_HEADERS, follow_redirects=True)
-    try:
-        c.get("https://www.nseindia.com")
-        c.get("https://www.nseindia.com/market-data/securities-available-for-trading")
-        c.get("https://www.nseindia.com/all-reports")
-    except Exception:
-        pass
-    return c
+# 2026-08-24 fix: _nse_client() used to build a BRAND NEW httpx.Client and
+# redo the full 3-hop cookie bootstrap on every single call — every
+# delivery-%/EOD-close/quote lookup for every symbol during a repair batch,
+# instead of once. That multiplied NSE request volume several-fold and made
+# the "403 Forbidden" blocking worse, not better (this is the same class of
+# bug ipo_scanner.py's module docstring already documents and fixed for
+# itself with a cached, short-TTL session). Cache and reuse one session for
+# a few minutes instead.
+_NSE_SESSION_CACHE: Dict[str, Any] = {"client": None, "ts": 0.0}
+_NSE_SESSION_TTL_SECONDS = 300  # 5 minutes
+_NSE_SESSION_LOCK = threading.Lock()
+
+
+def _nse_client(force_new: bool = False) -> httpx.Client:
+    with _NSE_SESSION_LOCK:
+        cached = _NSE_SESSION_CACHE.get("client")
+        age = time.time() - _NSE_SESSION_CACHE.get("ts", 0.0)
+        if not force_new and cached is not None and age < _NSE_SESSION_TTL_SECONDS:
+            return cached
+
+        c = httpx.Client(timeout=25, headers=NSE_HEADERS, follow_redirects=True)
+        try:
+            c.get("https://www.nseindia.com", headers=_NSE_BOOTSTRAP_HEADERS)
+            c.get("https://www.nseindia.com/market-data/securities-available-for-trading", headers=_NSE_BOOTSTRAP_HEADERS)
+            c.get("https://www.nseindia.com/all-reports", headers=_NSE_BOOTSTRAP_HEADERS)
+        except Exception:
+            pass
+
+        old = _NSE_SESSION_CACHE.get("client")
+        if old is not None and old is not c:
+            try:
+                old.close()
+            except Exception:
+                pass
+        _NSE_SESSION_CACHE["client"] = c
+        _NSE_SESSION_CACHE["ts"] = time.time()
+        return c
 
 
 def delivery_from_quote(symbol: str) -> Optional[Dict[str, Any]]:

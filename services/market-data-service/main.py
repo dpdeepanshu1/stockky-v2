@@ -571,7 +571,28 @@ SMART_SYMBOL_MAP = {
     "L&TFH": "LTF",
     "ADANITRANS": "ADANIENSOL",
     "NSPIRA": "NSIL",
+    # 2026-08-24: added to api-gateway/symbol_aliases.py — reconciled here
+    # too so a /quote/JUBILANT call resolves the same way whether it comes
+    # through the gateway's resolver or hits this service directly.
+    # "JUBILANT" was never a real NSE ticker (JUBLFOOD is).
+    "JUBILANT": "JUBLFOOD",
 }
+
+# Genuinely delisted/merged-away symbols (NOT a rename — see
+# api-gateway/symbol_aliases.py:KNOWN_DELISTED for the full explanation).
+# A straight SMART_SYMBOL_MAP substitution would be wrong here because the
+# conversion ratio isn't 1:1, so these get a hard skip instead of a mapped
+# ticker: normalize_symbol() still returns "<SYM>.NS" for logging purposes,
+# but callers that check is_known_delisted() first can avoid the network
+# round-trip entirely and purge the row instead of "repairing" it forever.
+KNOWN_DELISTED_SYMBOLS = {
+    "TATAMTRDVR",  # merged into TATAMOTORS 2024-08-30 (7 ordinary : 10 DVR)
+}
+
+
+def is_known_delisted(symbol: str) -> bool:
+    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    return base in KNOWN_DELISTED_SYMBOLS
 
 
 def sanitize_symbol(raw_symbol: str) -> str:
@@ -1133,6 +1154,18 @@ def get_quote(symbol: str):
 
     Each stage stops the chain on the first valid price.
     """
+    # Genuinely delisted/merged symbols (e.g. TATAMTRDVR, cancelled and
+    # converted into TATAMOTORS 2024-08-30): fail fast with a clean 404
+    # instead of burning the whole waterfall (yfinance -> TwelveData ->
+    # AlphaVantage -> Polygon) only to fail every stage the same way, every
+    # single repair cycle, forever. See KNOWN_DELISTED_SYMBOLS above.
+    base_check = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    if is_known_delisted(base_check):
+        raise HTTPException(
+            status_code=404,
+            detail=f"{base_check} is delisted/merged — not a live NSE symbol (see symbol_aliases/KNOWN_DELISTED_SYMBOLS)",
+        )
+
     sym = normalize_symbol(symbol)
 
     try:

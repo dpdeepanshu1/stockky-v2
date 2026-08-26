@@ -225,7 +225,16 @@ export default function SurpriseStocks({
       const data = await api.findBuys({
         stocks: mapped,
         target_count: 4,
-        min_conviction: 55,
+        // Surprise's own tiering already gates what reaches this tab: the
+        // "building" tier (early, pre-breakout setups — the whole point of
+        // this tab) can score as low as SURPRISE_BUILDING_MIN_SCORE=30 on
+        // the momentum scale, well under buy_sniper's default 55+
+        // conviction floor (which is calibrated for Hot Picks' blended
+        // technical+fundamental score, a different scale). Re-applying
+        // that flat 55 here silently rejected almost every building-tier
+        // row — the sniper always came back empty even on a tab full of
+        // real picks. Match Surprise's own floor instead of a borrowed one.
+        min_conviction: 30,
       });
       setSuggestions((data?.suggestions || []) as BuySuggestion[]);
       if (data?.error) setSniperError(String(data.error));

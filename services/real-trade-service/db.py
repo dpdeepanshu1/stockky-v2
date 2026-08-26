@@ -171,12 +171,24 @@ def _ensure_oracle_autoincrement(engine, base) -> None:
             )
             try:
                 with engine.begin() as trg_conn:
-                    trg_conn.execute(text(
+                    # exec_driver_sql — NOT text() — is required here: this
+                    # DDL contains literal Oracle trigger correlation syntax
+                    # (:NEW.id) that SQLAlchemy's text() would otherwise
+                    # misparse as ITS OWN bind parameter named "NEW" and
+                    # then fail with "a value is required for bind
+                    # parameter 'NEW'" (exactly the warning that showed up
+                    # in production logs — the trigger was silently never
+                    # created on any table, so the ORA-01400 crash kept
+                    # happening even after this fix first shipped).
+                    # exec_driver_sql sends the string straight to the
+                    # oracledb driver with no SQLAlchemy-side parameter
+                    # parsing at all, so :NEW.id reaches Oracle untouched.
+                    trg_conn.exec_driver_sql(
                         f"CREATE OR REPLACE TRIGGER {trg_name} "
                         f"BEFORE INSERT ON {table} FOR EACH ROW "
                         f"WHEN (NEW.id IS NULL) "
                         f"BEGIN SELECT {seq_name}.NEXTVAL INTO :NEW.id FROM dual; END;"
-                    ))
+                    )
                 logger.info(
                     "real-trade-db: attached %s / %s to %s (backfill autoincrement)",
                     seq_name, trg_name, table,

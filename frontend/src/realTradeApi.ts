@@ -126,12 +126,12 @@ export const realTradeApi = {
   logout: () => rtRequest<{ ok: boolean }>("/auth/logout", { method: "POST" }),
 
   connectDhan: (client_id: string, access_token: string) =>
-    rtRequest<{ connected: boolean; client_id_masked: string | null; token_expires_at: string | null; token_valid: boolean }>(
+    rtRequest<{ connected: boolean; client_id_masked: string | null; token_expires_at: string | null; token_valid: boolean; days_remaining: number | null }>(
       "/dhan/connect", { method: "POST", body: JSON.stringify({ client_id, access_token }) }
     ),
 
   dhanStatus: () =>
-    rtRequest<{ connected: boolean; client_id_masked: string | null; token_expires_at: string | null; token_valid: boolean }>(
+    rtRequest<{ connected: boolean; client_id_masked: string | null; token_expires_at: string | null; token_valid: boolean; days_remaining: number | null }>(
       "/dhan/status"
     ),
 

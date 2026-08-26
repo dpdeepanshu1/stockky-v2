@@ -200,6 +200,13 @@ services:
       DHAN_CREDENTIAL_ENC_KEY: ${DHAN_CREDENTIAL_ENC_KEY:-}
       DHAN_ENV: ${DHAN_ENV:-sandbox}
       DHAN_TOTP_ENABLED: ${DHAN_TOTP_ENABLED:-false}
+      # How many days a pasted Dhan access token is valid for before the
+      # gate auto-disarms REAL trading and asks for a fresh one. Default 30
+      # matches Dhan's current typical API-plan expiry — check your own
+      # Dhan developer console if yours differs (some accounts still issue
+      # 24h tokens) and set this to match, so the countdown shown in the
+      # admin UI (Real Automatic Trade tab) is accurate.
+      DHAN_TOKEN_LIFETIME_DAYS: ${DHAN_TOKEN_LIFETIME_DAYS:-30}
       # Neon — same instance every other service uses (set DATABASE_URL in
       # .env if running Postgres/Neon mode instead of Oracle)
       DATABASE_URL: ${DATABASE_URL:-}

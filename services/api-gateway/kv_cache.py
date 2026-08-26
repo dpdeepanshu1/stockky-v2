@@ -55,6 +55,15 @@ _DURABLE_PREFIXES = (
     "data_feed:",  # legacy mistaken prefix
     "stockky:hot_job",
     "stockky:hot_result",
+    "stockky:hot_premarket_job",  # Hot Picks premarket bulk-feed job — must
+                                  # survive a restart mid-run just like hot_job
+    "stockky:ipo:",   # IPO_LIST_KEY / IPO_MANUAL_KEY / IPO_JOB_KEY — manually
+                       # added IPOs in particular MUST survive a restart; they
+                       # were silently memory-only (and lost on every Render
+                       # redeploy) before this prefix was added
+    "stockky:ipoalerts:",  # ipoalerts.in response cache + daily quota counter
+                            # — must be durable or a restart silently resets
+                            # the quota tracking and defeats the 25/day budget
     "stockky:last_full_scan",
     "stockky:lock:",
     "stockky:notification_config",

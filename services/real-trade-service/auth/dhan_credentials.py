@@ -27,7 +27,7 @@ import models
 
 logger = logging.getLogger("real-trade-dhan-auth")
 
-DHAN_TOKEN_LIFETIME_HOURS = 24  # Dhan access tokens always expire 24h after issue
+DHAN_TOKEN_LIFETIME_HOURS = config.DHAN_TOKEN_LIFETIME_DAYS * 24  # see config.py
 
 
 def _fernet() -> Fernet:
@@ -91,12 +91,23 @@ def connection_status(db: Session) -> dict:
     credential info that should ever cross the API boundary."""
     row = db.query(models.TradeCredential).first()
     if row is None or not row.access_token_encrypted:
-        return {"connected": False, "client_id_masked": None, "token_expires_at": None, "token_valid": False}
+        return {
+            "connected": False,
+            "client_id_masked": None,
+            "token_expires_at": None,
+            "token_valid": False,
+            "days_remaining": None,
+        }
+    days_remaining = None
+    if row.token_expires_at:
+        delta = row.token_expires_at - datetime.now(timezone.utc)
+        days_remaining = round(delta.total_seconds() / 86400, 1)
     return {
         "connected": True,
         "client_id_masked": row.dhan_client_id_masked,
         "token_expires_at": row.token_expires_at.isoformat() if row.token_expires_at else None,
         "token_valid": is_token_valid(row),
+        "days_remaining": days_remaining,
     }
 
 

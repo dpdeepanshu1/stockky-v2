@@ -27,6 +27,12 @@ export default function RealAutoTrade() {
 
   const [dhanClientId, setDhanClientId] = useState("");
   const [dhanToken, setDhanToken] = useState("");
+  const [dhanDetail, setDhanDetail] = useState<{
+    client_id_masked: string | null;
+    token_expires_at: string | null;
+    days_remaining: number | null;
+  } | null>(null);
+  const [showDhanForm, setShowDhanForm] = useState(false);
 
   const [auditRows, setAuditRows] = useState<AuditLogRow[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
@@ -38,6 +44,20 @@ export default function RealAutoTrade() {
     try {
       const s = await realTradeApi.gateStatus(m);
       setStatus(s);
+      // Detailed Dhan status (masked client id + expiry countdown) is its
+      // own admin-only endpoint — only worth calling in REAL mode, and
+      // only once logged in (it 401s otherwise, which loadStatus already
+      // handles by dropping the session token).
+      if (m === "REAL" && getSessionToken()) {
+        try {
+          const d = await realTradeApi.dhanStatus();
+          setDhanDetail(d.connected ? d : null);
+        } catch {
+          setDhanDetail(null);
+        }
+      } else {
+        setDhanDetail(null);
+      }
     } catch (e: any) {
       setError(e?.message || "Failed to load status");
     }
@@ -85,6 +105,8 @@ export default function RealAutoTrade() {
     try {
       await realTradeApi.connectDhan(dhanClientId, dhanToken);
       setDhanToken(""); // never keep the pasted token in component state after sending
+      setDhanClientId("");
+      setShowDhanForm(false);
       await loadStatus(mode);
     } catch (e: any) {
       setError(e?.message || "Failed to connect Dhan");
@@ -287,6 +309,24 @@ export default function RealAutoTrade() {
                   <span>{status.dhan_connected ? "🟢" : "🔴"}</span>
                 </div>
               )}
+              {mode === "REAL" && status.dhan_connected && dhanDetail?.days_remaining != null && (
+                <div className="flex justify-between">
+                  <span>Dhan token expires</span>
+                  <span
+                    className={
+                      dhanDetail.days_remaining <= 3
+                        ? "text-red-400"
+                        : dhanDetail.days_remaining <= 7
+                        ? "text-amber-300"
+                        : "text-emerald-300"
+                    }
+                  >
+                    {dhanDetail.days_remaining <= 0
+                      ? "expired"
+                      : `${Math.floor(dhanDetail.days_remaining)}d left (${dhanDetail.client_id_masked})`}
+                  </span>
+                </div>
+              )}
               <div className="flex justify-between">
                 <span>Risk config confirmed</span>
                 <span>{status.risk_config_confirmed ? "🟢" : "🔴"}</span>
@@ -301,10 +341,14 @@ export default function RealAutoTrade() {
             </div>
           )}
 
-          {/* Dhan connect (REAL only) */}
-          {mode === "REAL" && status && !status.dhan_connected && (
+          {/* Dhan connect / rotate (REAL only) — always reachable, not just
+              on first connect, since a 30-day token needs re-pasting well
+              before the hard expiry disarms live trading. */}
+          {mode === "REAL" && status && (!status.dhan_connected || showDhanForm) && (
             <div className="border border-white/10 rounded-lg p-4 mb-4">
-              <p className="font-mono text-xs text-paper/70 mb-3">Connect Dhan Account</p>
+              <p className="font-mono text-xs text-paper/70 mb-3">
+                {status.dhan_connected ? "Rotate Dhan Token" : "Connect Dhan Account"}
+              </p>
               <div className="space-y-2">
                 <input
                   className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs"
@@ -315,7 +359,7 @@ export default function RealAutoTrade() {
                 <input
                   type="password"
                   className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs"
-                  placeholder="Dhan Access Token (regenerate daily from web.dhan.co unless TOTP is enabled)"
+                  placeholder="Dhan Access Token (generate from web.dhan.co → DhanHQ Trading APIs; valid up to 30 days unless TOTP is enabled)"
                   value={dhanToken}
                   onChange={(e) => setDhanToken(e.target.value)}
                 />
@@ -324,9 +368,27 @@ export default function RealAutoTrade() {
                   disabled={loading || !dhanClientId || !dhanToken}
                   className="w-full px-4 py-2 rounded bg-sky-600/30 border border-sky-500/60 font-mono text-xs disabled:opacity-50"
                 >
-                  {loading ? "Connecting…" : "Connect Dhan"}
+                  {loading ? "Connecting…" : status.dhan_connected ? "Save New Token" : "Connect Dhan"}
                 </button>
+                {status.dhan_connected && (
+                  <button
+                    onClick={() => setShowDhanForm(false)}
+                    className="w-full px-4 py-2 rounded border border-white/10 font-mono text-xs text-paper/60"
+                  >
+                    Cancel
+                  </button>
+                )}
               </div>
+            </div>
+          )}
+          {mode === "REAL" && status?.dhan_connected && !showDhanForm && (
+            <div className="flex justify-end mb-4">
+              <button
+                onClick={() => setShowDhanForm(true)}
+                className="font-mono text-[11px] text-paper/50 underline"
+              >
+                Rotate Dhan token
+              </button>
             </div>
           )}
 

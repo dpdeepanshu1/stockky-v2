@@ -81,12 +81,20 @@ SESSION_IDLE_TIMEOUT_MINUTES = int(os.getenv("SESSION_IDLE_TIMEOUT_MINUTES", "30
 # Generate once with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 DHAN_CREDENTIAL_ENC_KEY = os.getenv("DHAN_CREDENTIAL_ENC_KEY", "")
 
-# Decision 4: manual token paste by default. Dhan access tokens expire every
-# 24h; with this False, the service surfaces "🔴 Token expired — reauthenticate"
-# and auto-disarms rather than silently failing orders (see
-# auth/dhan_credentials.py:is_token_valid / gate state machine in main.py).
-# Flip to true + set DHAN_TOTP_SECRET once TOTP is enabled on the Dhan
-# account, and the same background refresh job self-heals the token instead.
+# Decision 4: manual token paste by default. Dhan access tokens are
+# generated from the Dhan developer console (web.dhan.co → DhanHQ Trading
+# APIs → generate access token) and are valid for DHAN_TOKEN_LIFETIME_DAYS
+# (Dhan's own docs and issued tokens vary — some accounts see 24h, most API
+# plans currently issue tokens valid up to 30 days; set this to whatever
+# your own token's actual expiry is so the countdown below is accurate).
+# With DHAN_TOTP_ENABLED=False, the service surfaces "🔴 Token expired —
+# reauthenticate" and auto-disarms rather than silently failing orders
+# (see auth/dhan_credentials.py:is_token_valid / gate state machine in
+# main.py).
+# Flip DHAN_TOTP_ENABLED to true + set DHAN_TOTP_SECRET once TOTP is
+# enabled on the Dhan account, and the same background refresh job
+# self-heals the token instead.
+DHAN_TOKEN_LIFETIME_DAYS = float(os.getenv("DHAN_TOKEN_LIFETIME_DAYS", "30") or 30)
 DHAN_TOTP_ENABLED = os.getenv("DHAN_TOTP_ENABLED", "false").lower() == "true"
 DHAN_TOTP_SECRET = os.getenv("DHAN_TOTP_SECRET", "")  # only read when the above is true
 

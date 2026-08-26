@@ -4,6 +4,11 @@ httpx==0.25.2
 python-dotenv==1.0.0
 pydantic==2.5.3
 sqlalchemy==2.0.23
+# Postgres/Neon driver — every other Stockky service pins this; real-trade-service
+# needs it too now that DATABASE_URL (Neon) is a supported backend alongside
+# Oracle. Missing this is exactly what "ModuleNotFoundError: No module named
+# 'psycopg2'" at get_engine()/create_engine() on boot means.
+psycopg2-binary==2.9.9
 argon2-cffi==23.1.0
 cryptography==41.0.7
 pyjwt==2.8.0

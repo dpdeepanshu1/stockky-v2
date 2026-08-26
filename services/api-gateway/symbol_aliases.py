@@ -89,6 +89,20 @@ SYMBOL_RENAMES = {
     # nothing to find. Map it to the real ticker (Jubilant FoodWorks)
     # instead of leaving it to burn a network call and fail forever.
     "JUBILANT": "JUBLFOOD",
+    # ── Added 2026-08-26 (persistent "TATAMOTORS"/"LTIM": missing price in
+    #    Data Feed Health, seen across every audit since the demerger/rebrand
+    #    actually happened — verified via NSE circulars, not assumed) ────────
+    # Tata Motors demerger: NSE circular dated 2025-10-16, effective
+    # 2025-10-24 — Tata Motors Limited (TATAMOTORS) renamed to Tata Motors
+    # Passenger Vehicles Limited, ticker TMPV. The demerged commercial-vehicle
+    # arm listed separately as TMCV in Nov 2025 — that's a NEW instrument
+    # (1:1 share entitlement, not a rename of the old ticker), so it does NOT
+    # belong in this table; only the TATAMOTORS -> TMPV identity change does.
+    "TATAMOTORS": "TMPV",
+    # LTIMindtree brand/name transition to "LTM": trading symbol changed on
+    # NSE/BSE from LTIM to LTM effective 2026-02-27 (board approved the name
+    # change 2026-02-11, completed 2026-03-17).
+    "LTIM": "LTM",
 }
 
 # Symbols that are not NSE-listed at all (foreign tickers, indices sent by
@@ -209,7 +223,19 @@ def _apply_all_renames(base: str) -> str:
     entry = learned.get(base)
     if isinstance(entry, dict) and entry.get("to"):
         base = entry["to"]
-    return SYMBOL_RENAMES.get(base, base)
+    # Chase multi-hop renames (e.g. MINDTREE -> LTIM -> LTM, both real,
+    # years apart) instead of stopping after one substitution — a single
+    # lookup here would silently leave a symbol pointed at an
+    # already-superseded ticker. Cycle-guarded since these are static/
+    # learned data, not meant to loop, but a bad entry should never hang.
+    seen = {base}
+    for _ in range(len(SYMBOL_RENAMES) + 1):
+        nxt = SYMBOL_RENAMES.get(base)
+        if not nxt or nxt == base or nxt in seen:
+            break
+        base = nxt
+        seen.add(base)
+    return base
 
 
 # ── Dynamic durable rename learning ─────────────────────────────────────────

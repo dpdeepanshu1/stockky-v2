@@ -379,7 +379,18 @@ def fetch_ipoalerts_calendar(_bypass_cache: bool = False) -> List[Dict[str, Any]
             r = httpx.get(IPOALERTS_BASE, params={"status": status}, headers=headers, timeout=15)
             spent += 1
             if r.status_code != 200:
-                logger.info("ipoalerts status=%s -> HTTP %s", status, r.status_code)
+                # Log the response body too, not just the code — a 400 here
+                # usually means this account's plan doesn't accept this
+                # status value (ipoalerts' valid enum isn't publicly
+                # documented and can vary by plan), and the body normally
+                # says exactly which. Confirmed real case: "listed" -> 400
+                # on at least one account while "open" -> 200 on the same
+                # key, so IPOALERTS_STATUSES may need trimming per-account;
+                # this makes that visible in logs instead of guessing.
+                logger.info(
+                    "ipoalerts status=%s -> HTTP %s: %s",
+                    status, r.status_code, r.text[:300],
+                )
                 continue
             data = r.json()
             for row in data.get("ipos") or []:

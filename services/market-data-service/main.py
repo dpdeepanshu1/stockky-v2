@@ -558,6 +558,10 @@ SMART_SYMBOL_MAP = {
     "MOTHERSUMI": "MOTHERSON",
     "CADILAHC": "ZYDUSLIFE",
     "MINDTREE": "LTIM",
+    # ── Added 2026-08-26, kept in sync with api-gateway/symbol_aliases.py ──
+    # (see that file's comment for the verified NSE circular dates)
+    "TATAMOTORS": "TMPV",
+    "LTIM": "LTM",
     # ── Reconciled with api-gateway/symbol_aliases.py:SYMBOL_RENAMES ──────────
     # These five were in api-gateway's rename table but NOT here, so a /quote
     # asked for PVR or ADANITRANS directly (i.e. not routed through the gateway's

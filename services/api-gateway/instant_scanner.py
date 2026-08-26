@@ -17,8 +17,19 @@ from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger("instant-scanner")
 
-# Universal soft-cap: never score / surface stocks above this LTP (₹).
-MAX_STOCK_PRICE = 5000.0
+# Universal price gate — OFF by default (full universe). Set MAX_STOCK_PRICE
+# in the environment to a positive number to re-enable an upper cap; 0/unset
+# means "no cap, show every eligible stock". VALUE_BUY_THRESHOLD is a
+# display/tagging hint only ("value buy" badge) — it never excludes a stock.
+import os as _os
+MAX_STOCK_PRICE = float(_os.getenv("MAX_STOCK_PRICE", "0") or 0)
+VALUE_BUY_THRESHOLD = float(_os.getenv("VALUE_BUY_THRESHOLD", "2000") or 2000)
+
+
+def _price_capped(price: float) -> bool:
+    """True only when a cap is configured AND price exceeds it. With no
+    MAX_STOCK_PRICE configured this always returns False — full universe."""
+    return MAX_STOCK_PRICE > 0 and price > MAX_STOCK_PRICE
 
 # Neutral-but-not-zero baselines so sparse feeds still produce differentiated
 # scores once a live price is available (avoids every symbol = 40 HOLD).
@@ -61,7 +72,7 @@ def _avoid_payload(symbol: str, price: float = 0.0, reason: str = "PRICE > 5000 
         "confidence": "Low",
         "change_pct": 0.0,
         "status": "AVOID",
-        "skipped_high_price": px > MAX_STOCK_PRICE,
+        "skipped_high_price": _price_capped(px),
         "data_insufficient": px <= 0,
         "max_stock_price": MAX_STOCK_PRICE,
         "lite_fastpath": True,
@@ -325,8 +336,8 @@ def compute_instant_scores(
     if prev_close <= 0 and price > 0:
         prev_close = price
 
-    # Universal ≤ ₹5000 gate — definitive AVOID (not SKIP) so UI never spins
-    if price > MAX_STOCK_PRICE:
+    # Optional price gate — disabled unless MAX_STOCK_PRICE is set (see above)
+    if _price_capped(price):
         return _avoid_payload(
             base,
             price,
@@ -412,6 +423,9 @@ def compute_instant_scores(
         "from_data_feed": has_feed,
         "data_insufficient": (price <= 0),
         "provisional_defaults": (not has_feed and price > 0),
+        # Display-only tag — never used to exclude a stock, just lets the UI
+        # badge/sort "value buys" (price under VALUE_BUY_THRESHOLD, default ₹2000).
+        "value_buy": bool(0 < price <= VALUE_BUY_THRESHOLD),
         "lite_fastpath": True,
         "instant_scanner": True,
         "status": status,
@@ -474,11 +488,11 @@ async def process_single_stock(
         except Exception:
             cached_price = _extract_price(sym_clean, feed_item, None)
 
-        # 2. STRICT GUARD: AVOID if missing or > Rs 5000
-        if cached_price <= 0 or cached_price > MAX_STOCK_PRICE:
+        # 2. GUARD: AVOID if missing entirely, or over an *explicitly configured* cap
+        if cached_price <= 0 or _price_capped(cached_price):
             reason = (
                 f"PRICE > ₹{MAX_STOCK_PRICE:.0f} FILTER (₹{cached_price:.2f})"
-                if cached_price > MAX_STOCK_PRICE
+                if _price_capped(cached_price)
                 else "NO DATA / MISSING FROM FEED"
             )
             return _avoid_payload(sym_clean, cached_price, reason)

@@ -25,8 +25,12 @@ import httpx
 
 logger = logging.getLogger("market-data-bhavcopy")
 
-# Universal ≤ ₹5000 gate — drop high-ticket equities at the bhavcopy root
-MAX_STOCK_PRICE = 5000.0
+# Price gate — OFF by default (0 = no cap; full universe passes through).
+# Set MAX_STOCK_PRICE in the environment to re-enable an explicit cap.
+import os as _os
+MAX_STOCK_PRICE = float(_os.getenv("MAX_STOCK_PRICE", "0") or 0)
+# Display-only "value buy" tag threshold — never excludes a stock.
+VALUE_BUY_THRESHOLD = float(_os.getenv("VALUE_BUY_THRESHOLD", "2000") or 2000)
 
 # Remember which URL class worked last (process-local)
 _BHAV_LAST_GOOD_PREFIX: str = ""
@@ -236,8 +240,8 @@ def process_bhavcopy_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     break
             except (TypeError, ValueError):
                 close = None
-        # Strict: known close > ₹5000 → drop.
-        if close is not None and close > MAX_STOCK_PRICE:
+        # Optional: known close over an *explicitly configured* cap → drop.
+        if close is not None and MAX_STOCK_PRICE > 0 and close > MAX_STOCK_PRICE:
             dropped_price += 1
             continue
         out.append(row)
@@ -366,13 +370,13 @@ def process_bhavcopy_dataframe(df):  # type: ignore[no-untyped-def]
 
     # Strict <= 5000 filter (NaN after coerce is dropped — prevents string-trap survivors)
     if "CLOSE" in work.columns:
-        work = work[work["CLOSE"].notna() & (work["CLOSE"] > 0) & (work["CLOSE"] <= MAX_STOCK_PRICE)]
+        work = work[work["CLOSE"].notna() & (work["CLOSE"] > 0) & ((MAX_STOCK_PRICE <= 0) | (work["CLOSE"] <= MAX_STOCK_PRICE))]
     elif "close" in work.columns:
-        work = work[work["close"].notna() & (work["close"] > 0) & (work["close"] <= MAX_STOCK_PRICE)]
+        work = work[work["close"].notna() & (work["close"] > 0) & ((MAX_STOCK_PRICE <= 0) | (work["close"] <= MAX_STOCK_PRICE))]
     elif "LAST" in work.columns:
-        work = work[work["LAST"].notna() & (work["LAST"] > 0) & (work["LAST"] <= MAX_STOCK_PRICE)]
+        work = work[work["LAST"].notna() & (work["LAST"] > 0) & ((MAX_STOCK_PRICE <= 0) | (work["LAST"] <= MAX_STOCK_PRICE))]
     elif "last" in work.columns:
-        work = work[work["last"].notna() & (work["last"] > 0) & (work["last"] <= MAX_STOCK_PRICE)]
+        work = work[work["last"].notna() & (work["last"] > 0) & ((MAX_STOCK_PRICE <= 0) | (work["last"] <= MAX_STOCK_PRICE))]
 
     logger.info(
         "process_bhavcopy_dataframe: %s → %s rows (strict max_price=%.0f, commas stripped)",
@@ -441,8 +445,8 @@ def _parse_bhav_csv_all(text: str) -> Dict[str, Dict[str, Any]]:
                 close_raw = str(row.get(close_col) or "").replace(",", "").strip()
                 if close_raw and close_raw.upper() not in ("-", "NA", "N/A"):
                     close_px = float(close_raw)
-                    if close_px > MAX_STOCK_PRICE:
-                        continue  # high-ticket — do not cache this row
+                    if MAX_STOCK_PRICE > 0 and close_px > MAX_STOCK_PRICE:
+                        continue  # over the configured cap — do not cache this row
             except (TypeError, ValueError):
                 close_px = None
         pct = None
@@ -584,15 +588,16 @@ def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
             series = str(row.get(series_col) or "").strip().upper()
             if series and series not in ("EQ", "BE", "BZ"):
                 continue
-        # Universal ≤ ₹5000 gate when close/last is present
+        # Optional price gate when close/last is present (only enforced if
+        # MAX_STOCK_PRICE is explicitly configured)
         close_px = None
         if close_col:
             try:
                 close_raw = str(row.get(close_col) or "").replace(",", "").strip()
                 if close_raw and close_raw.upper() not in ("-", "NA", "N/A"):
                     close_px = float(close_raw)
-                    if close_px > MAX_STOCK_PRICE:
-                        return None  # high-ticket — do not use this row
+                    if MAX_STOCK_PRICE > 0 and close_px > MAX_STOCK_PRICE:
+                        return None  # over the configured cap — do not use this row
             except (TypeError, ValueError):
                 close_px = None
         pct = None

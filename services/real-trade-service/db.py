@@ -111,3 +111,75 @@ def init_schema() -> None:
         raise RuntimeError("real-trade-service: cannot init schema, no database configured.")
     models.Base.metadata.create_all(eng, checkfirst=True)
     logger.info("real-trade-service: schema ready (dialect=%s)", dialect())
+
+    if dialect() == "oracle":
+        _ensure_oracle_autoincrement(eng, models.Base)
+
+
+# Every trade_* model uses `id = Column(Integer, primary_key=True,
+# autoincrement=True)`. On Postgres that's always backed by a real serial/
+# identity sequence. On Oracle, SQLAlchemy's create_all() only emits a
+# GENERATED ... AS IDENTITY clause the FIRST time it creates a table — if a
+# trade_* table already existed from an earlier deploy (e.g. created by an
+# older SQLAlchemy version, or before this service had any tables to diff
+# against), checkfirst=True sees the table already exists and never adds an
+# identity/sequence to it. Every subsequent INSERT then sends id=NULL and
+# Oracle rejects it with ORA-01400 ("cannot insert NULL into ID") — this is
+# exactly the crash-loop seen in the 26/8 deploy logs, starting with the
+# very first _seed_defaults() insert into trade_accounts.
+#
+# Fix: for every trade_* table, if it has no identity column on `id`,
+# attach a sequence + BEFORE INSERT trigger that fills `id` from the
+# sequence whenever a row arrives with id IS NULL. This is idempotent,
+# additive (never touches existing data), and works whether or not the
+# table has a "real" IDENTITY column — the trigger only fires on the null
+# case, so a table that DOES already have working identity is unaffected.
+def _ensure_oracle_autoincrement(engine, base) -> None:
+    from sqlalchemy import text
+
+    tables = [t.name for t in base.metadata.sorted_tables]
+    with engine.connect() as conn:
+        for table in tables:
+            try:
+                has_identity = conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM user_tab_identity_cols "
+                        "WHERE table_name = UPPER(:t) AND column_name = 'ID'"
+                    ),
+                    {"t": table},
+                ).scalar()
+            except Exception as e:
+                logger.warning("oracle identity check failed for %s: %s", table, e)
+                continue
+            if has_identity:
+                continue  # real IDENTITY column already present — nothing to do
+
+            seq_name = f"{table}_id_seq"
+            trg_name = f"trg_{table}_bi"
+            try:
+                start_at = conn.execute(
+                    text(f"SELECT NVL(MAX(id), 0) + 1 FROM {table}")  # noqa: S608 - table name from trusted metadata
+                ).scalar() or 1
+            except Exception:
+                start_at = 1
+
+            _oc.exec_ddl_safe(
+                engine,
+                f"CREATE SEQUENCE {seq_name} START WITH {int(start_at)} "
+                f"INCREMENT BY 1 NOCACHE NOCYCLE",
+                "oracle",
+            )
+            try:
+                with engine.begin() as trg_conn:
+                    trg_conn.execute(text(
+                        f"CREATE OR REPLACE TRIGGER {trg_name} "
+                        f"BEFORE INSERT ON {table} FOR EACH ROW "
+                        f"WHEN (NEW.id IS NULL) "
+                        f"BEGIN SELECT {seq_name}.NEXTVAL INTO :NEW.id FROM dual; END;"
+                    ))
+                logger.info(
+                    "real-trade-db: attached %s / %s to %s (backfill autoincrement)",
+                    seq_name, trg_name, table,
+                )
+            except Exception as e:
+                logger.warning("real-trade-db: could not attach autoincrement trigger to %s: %s", table, e)

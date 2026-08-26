@@ -30,8 +30,11 @@ MIN_SCORE = int(os.getenv("SURPRISE_MIN_SCORE", "60"))
 MIN_CHANGE_PCT = float(os.getenv("SURPRISE_MIN_CHANGE_PCT", "1.0"))
 CONCURRENCY = int(os.getenv("SURPRISE_SCAN_CONCURRENCY", "20"))
 QUOTE_TIMEOUT = float(os.getenv("SURPRISE_QUOTE_TIMEOUT", "3"))
-# Universal ≤ ₹5000 gate (root filter also applied in data_feed / bhavcopy)
-MAX_STOCK_PRICE = float(os.getenv("MAX_STOCK_PRICE", "5000"))
+# Price gate — OFF by default (0 = no cap; full universe eligible). Set
+# MAX_STOCK_PRICE in the environment to re-enable an explicit cap.
+MAX_STOCK_PRICE = float(os.getenv("MAX_STOCK_PRICE", "0") or 0)
+# Display-only "value buy" tag threshold — never excludes a stock.
+VALUE_BUY_THRESHOLD = float(os.getenv("VALUE_BUY_THRESHOLD", "2000") or 2000)
 
 # ── Early-detection tuning ───────────────────────────────────────────────
 # "Building" tier: volume/imbalance arriving BEFORE price confirms breakout.
@@ -302,7 +305,7 @@ class SurpriseStockEngine:
                         price = float(payload.get("price") or payload.get("cmp") or 0)
                     except Exception:
                         price = 0.0
-                    if price <= 0 or price > MAX_STOCK_PRICE:
+                    if price <= 0 or (MAX_STOCK_PRICE > 0 and price > MAX_STOCK_PRICE):
                         continue
                     try:
                         prev = float(payload.get("previous_close") or price)
@@ -444,8 +447,8 @@ class SurpriseStockEngine:
                 trigger_type = "Range Expansion"
 
         px = round(current_price, 2)
-        # Universal ≤ ₹5000 gate — never surface high-ticket surprises
-        if px > MAX_STOCK_PRICE:
+        # Optional price gate — disabled unless MAX_STOCK_PRICE is set
+        if MAX_STOCK_PRICE > 0 and px > MAX_STOCK_PRICE:
             return None
 
         # Breakout tier: existing behaviour, unchanged threshold.
@@ -906,7 +909,7 @@ async def run_market_aware_surprise_feed(
                         if series.empty:
                             continue
                         px = float(series.iloc[-1])
-                        if px <= 0 or px > 5000:
+                        if px <= 0 or (MAX_STOCK_PRICE > 0 and px > MAX_STOCK_PRICE):
                             continue
                         prev = px
                         if len(series) >= 2:
@@ -974,7 +977,7 @@ async def run_market_aware_surprise_feed(
                                     break
                             except (TypeError, ValueError):
                                 pass
-                        if px is not None and 0 < px <= 5000:
+                        if px is not None and px > 0 and not (MAX_STOCK_PRICE > 0 and px > MAX_STOCK_PRICE):
                             results.append({"symbol": sym, "price": px, "cmp": px, "source": body.get("source") or "waterfall"})
                             got.add(sym)
                     elif r.status_code in (401, 429):
@@ -1108,7 +1111,7 @@ def repair_surprise_batch(
                                     break
                             except (TypeError, ValueError):
                                 pass
-                        if px is None or px > 5000:
+                        if px is None or (MAX_STOCK_PRICE > 0 and px > MAX_STOCK_PRICE):
                             time.sleep(SURPRISE_FEED_COOLDOWN_SEC)
                             continue
                         for item in data_list:

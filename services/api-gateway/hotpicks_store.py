@@ -657,10 +657,12 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
                                 break
                         except (TypeError, ValueError):
                             pass
-                    # Same ≤₹5000 universe gate every other repair path in
-                    # this codebase enforces — a symbol genuinely over cap
-                    # stays "missing price" by design, not a repair failure.
-                    if px is None or px > 5000:
+                    # Same universe price gate every other repair path in this
+                    # codebase enforces — OFF by default (MAX_STOCK_PRICE unset
+                    # or 0 means no cap; a symbol only stays "missing price"
+                    # here if a cap is explicitly configured and it's over it).
+                    _max_px = float(os.getenv("MAX_STOCK_PRICE", "0") or 0)
+                    if px is None or (_max_px > 0 and px > _max_px):
                         time.sleep(0.5)
                         continue
                     blob["price"] = px

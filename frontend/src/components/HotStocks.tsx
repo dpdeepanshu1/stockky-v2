@@ -301,6 +301,9 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
   const [healthLoading, setHealthLoading] = useState(false);
   const [batchRepairBusy, setBatchRepairBusy] = useState(false);
   const [patchingSymbol, setPatchingSymbol] = useState<string | null>(null);
+  const [premarketBusy, setPremarketBusy] = useState(false);
+  const [premarketMsg, setPremarketMsg] = useState<string | null>(null);
+  const premarketPollRef = useRef<number | null>(null);
 
   const fetchHotPicksHealth = useCallback(async () => {
     setHealthLoading(true);
@@ -553,6 +556,58 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
   // Manual "Send Top 5 to Telegram" — same pattern as the Surprise Momentum
   // tab's notifyTopPicks(). Uses whatever is already loaded/cached; does
   // not trigger a fresh scan.
+  // Premarket bulk price pre-feed — separate job/progress from the main
+  // Search Hot Picks Stocks scan (see /stockky-hot/premarket in main.py).
+  const stopPremarketPoll = () => {
+    if (premarketPollRef.current != null) {
+      window.clearInterval(premarketPollRef.current);
+      premarketPollRef.current = null;
+    }
+  };
+
+  const pollPremarketJob = useCallback(async () => {
+    try {
+      const st = await api.getStockkyHotPremarketStatus();
+      const total = st?.total || 0;
+      const processed = st?.processed || 0;
+      setPremarketMsg(
+        st?.message ||
+        (total ? `Pre-feeding ${processed}/${total}…` : "Pre-feeding…")
+      );
+      if (st?.status !== "running") {
+        stopPremarketPoll();
+        setPremarketBusy(false);
+      }
+    } catch (e: any) {
+      // Best-effort — a failed poll doesn't need to surface as an error banner.
+    }
+  }, []);
+
+  const startPremarket = async () => {
+    setPremarketBusy(true);
+    setPremarketMsg("Starting premarket pre-feed…");
+    try {
+      const res = await api.runStockkyHotPremarket();
+      if (!res?.ok) {
+        setPremarketMsg(res?.error || "Could not start premarket pre-feed");
+        setPremarketBusy(false);
+        return;
+      }
+      if (res.already_running) {
+        setPremarketMsg("Premarket pre-feed is already running…");
+      } else {
+        setPremarketMsg(res?.message || `Pre-feeding ${res?.total || 0} eligible stocks…`);
+      }
+      stopPremarketPoll();
+      premarketPollRef.current = window.setInterval(pollPremarketJob, 3000);
+    } catch (e: any) {
+      setPremarketMsg(e?.message || "Failed to start premarket pre-feed");
+      setPremarketBusy(false);
+    }
+  };
+
+  useEffect(() => stopPremarketPoll, []);
+
   const notifyTopPicks = useCallback(async () => {
     setNotifyBusy(true);
     setNotifyMsg(null);
@@ -591,6 +646,15 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
           </div>
           <button
             type="button"
+            onClick={startPremarket}
+            disabled={premarketBusy || loading}
+            title="Bulk pre-feeds prices for every eligible stock before you search — makes the search below instant instead of showing ₹— on cold symbols"
+            className="font-mono text-xs px-4 py-2 rounded-lg bg-sky-500/20 border border-sky-500/40 text-sky-100 hover:bg-sky-500/30 disabled:opacity-50"
+          >
+            {premarketBusy ? "Pre-feeding…" : "☀ Premarket"}
+          </button>
+          <button
+            type="button"
             onClick={startSearch}
             disabled={loading}
             className="font-mono text-xs px-4 py-2 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-100 hover:bg-rose-500/30 disabled:opacity-50"
@@ -606,6 +670,9 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
             >
               {stopBusy ? "Stopping…" : "■ Stop"}
             </button>
+          )}
+          {premarketBusy && premarketMsg && (
+            <span className="font-mono text-[11px] text-sky-200/80 self-center">{premarketMsg}</span>
           )}
           <button
             type="button"

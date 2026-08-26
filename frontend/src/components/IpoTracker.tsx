@@ -31,17 +31,15 @@ type IpoProgress = {
 };
 
 type IpoForm = {
-  symbol: string;
-  issue_price: string;
-  listing_date: string;
-  subscription_times: string;
-  gmp: string;
+  company_name: string;
 };
 
 // Display window presets. The backend scan itself always walks the full
 // IPO_LOOKBACK_DAYS_HARD_CAP (~365d) universe; display_days only narrows what
 // the list endpoint returns, so switching these never triggers a re-scan.
 const WINDOW_RECENT = 30;
+const WINDOW_3M = 90;
+const WINDOW_6M = 180;
 const WINDOW_WIDE = 365;
 
 function decisionBadgeClass(decision?: string): string {
@@ -73,13 +71,10 @@ export default function IpoTracker({
   const [ipoError, setIpoError] = useState<string | null>(null);
   const [ipoAddOpen, setIpoAddOpen] = useState(false);
   const [ipoForm, setIpoForm] = useState<IpoForm>({
-    symbol: "",
-    issue_price: "",
-    listing_date: "",
-    subscription_times: "",
-    gmp: "",
+    company_name: "",
   });
   const [ipoAddBusy, setIpoAddBusy] = useState(false);
+  const [ipoAddNotice, setIpoAddNotice] = useState<{ message: string; suggestions: string[] } | null>(null);
   const [stopBusy, setStopBusy] = useState(false);
   const [displayDays, setDisplayDays] = useState<number>(WINDOW_RECENT);
   const [totalScanned, setTotalScanned] = useState<number | null>(null);
@@ -172,13 +167,17 @@ export default function IpoTracker({
   );
   const { connected: wsConnected } = useStockkyRealtime(onRealtimeMessage);
 
-  const startIpoScan = useCallback(async () => {
+  const startIpoScan = useCallback(async (force = false) => {
     setIpoError(null);
     ipoScanStartedAtRef.current = Date.now();
     setIpoScanning(true);
-    setIpoProgress({ message: "Starting IPO scan…" });
+    setIpoProgress({ message: force ? "Starting full re-scan…" : "Starting IPO scan…" });
     try {
-      await api.ipoScan();
+      if (force) {
+        await api.forceIpoScan();
+      } else {
+        await api.ipoScan();
+      }
       stopIpoPoll();
       ipoPollRef.current = window.setInterval(pollIpoStatus, 2000);
       await pollIpoStatus();
@@ -210,17 +209,19 @@ export default function IpoTracker({
   };
 
   const submitIpoAdd = async () => {
-    if (!ipoForm.symbol.trim() || !ipoForm.issue_price || !ipoForm.listing_date) return;
+    if (!ipoForm.company_name.trim()) return;
     setIpoAddBusy(true);
+    setIpoAddNotice(null);
     try {
-      await api.ipoAdd({
-        symbol: ipoForm.symbol.trim().toUpperCase(),
-        issue_price: Number(ipoForm.issue_price),
-        listing_date: ipoForm.listing_date,
-        subscription_times: ipoForm.subscription_times ? Number(ipoForm.subscription_times) : undefined,
-        gmp: ipoForm.gmp ? Number(ipoForm.gmp) : undefined,
-      });
-      setIpoForm({ symbol: "", issue_price: "", listing_date: "", subscription_times: "", gmp: "" });
+      const res = await api.ipoAdd({ company_name: ipoForm.company_name.trim() });
+      if (!res?.accepted) {
+        setIpoAddNotice({
+          message: res?.message || "Could not resolve that company name.",
+          suggestions: res?.suggestions || [],
+        });
+        return;
+      }
+      setIpoForm({ company_name: "" });
       setIpoAddOpen(false);
       await startIpoScan();
     } catch (e: any) {
@@ -284,7 +285,10 @@ export default function IpoTracker({
           </div>
 
           <div className="flex flex-wrap gap-2">
-            {/* Display window — 30d default, widen to 1y without re-scanning */}
+            {/* Display window — 30d default, widen up to 1y without re-scanning.
+                The backend scan itself always walks the full ~1y universe
+                (see WINDOW_RECENT/WINDOW_3M/WINDOW_6M/WINDOW_WIDE above); these
+                buttons only change which already-scanned rows are shown. */}
             <div className="inline-flex rounded-lg border border-slate/60 overflow-hidden">
               <button
                 type="button"
@@ -296,6 +300,28 @@ export default function IpoTracker({
                 }`}
               >
                 Last 30d
+              </button>
+              <button
+                type="button"
+                onClick={() => setDisplayDays(WINDOW_3M)}
+                className={`font-mono text-[11px] px-3 py-1.5 border-l border-slate/60 transition ${
+                  displayDays === WINDOW_3M
+                    ? "bg-violet-500/25 text-violet-100"
+                    : "bg-transparent text-mist/60 hover:bg-slate/30"
+                }`}
+              >
+                Last 3m
+              </button>
+              <button
+                type="button"
+                onClick={() => setDisplayDays(WINDOW_6M)}
+                className={`font-mono text-[11px] px-3 py-1.5 border-l border-slate/60 transition ${
+                  displayDays === WINDOW_6M
+                    ? "bg-violet-500/25 text-violet-100"
+                    : "bg-transparent text-mist/60 hover:bg-slate/30"
+                }`}
+              >
+                Last 6m
               </button>
               <button
                 type="button"
@@ -319,11 +345,21 @@ export default function IpoTracker({
             </button>
             <button
               type="button"
-              onClick={() => void startIpoScan()}
+              onClick={() => void startIpoScan(false)}
               disabled={ipoScanning}
+              title="Reads the premarket-refreshed table if it's fresh, otherwise does a full scan"
               className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-violet-500/20 border border-violet-400/40 text-violet-100 hover:bg-violet-500/30 disabled:opacity-40"
             >
               {ipoScanning ? "Scanning…" : "Scan IPOs"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void startIpoScan(true)}
+              disabled={ipoScanning}
+              title="Ignore the freshness cache and re-scan every IPO from scratch"
+              className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-violet-500/10 border border-violet-400/30 text-violet-200/80 hover:bg-violet-500/20 disabled:opacity-40"
+            >
+              Force Rescan
             </button>
             <button
               type="button"
@@ -337,44 +373,46 @@ export default function IpoTracker({
         </div>
 
         {ipoAddOpen && (
-          <div className="mb-4 rounded-lg border border-slate/50 bg-ink/60 p-3 grid grid-cols-2 gap-2">
+          <div className="mb-4 rounded-lg border border-slate/50 bg-ink/60 p-3 flex flex-col gap-2">
             <input
-              placeholder="Symbol (e.g. XYZLTD)"
-              value={ipoForm.symbol}
-              onChange={(e) => setIpoForm({ ...ipoForm, symbol: e.target.value })}
-              className="col-span-2 bg-ink/60 border border-slate rounded-lg px-2 py-1.5 font-mono text-xs text-paper placeholder:text-mist/30 outline-none"
-            />
-            <input
-              placeholder="Issue price (₹)"
-              value={ipoForm.issue_price}
-              onChange={(e) => setIpoForm({ ...ipoForm, issue_price: e.target.value })}
+              placeholder="Exact company name (e.g. Tempsens Instruments (India) Limited)"
+              value={ipoForm.company_name}
+              onChange={(e) => setIpoForm({ company_name: e.target.value })}
+              onKeyDown={(e) => e.key === "Enter" && void submitIpoAdd()}
               className="bg-ink/60 border border-slate rounded-lg px-2 py-1.5 font-mono text-xs text-paper placeholder:text-mist/30 outline-none"
             />
-            <input
-              type="date"
-              value={ipoForm.listing_date}
-              onChange={(e) => setIpoForm({ ...ipoForm, listing_date: e.target.value })}
-              className="bg-ink/60 border border-slate rounded-lg px-2 py-1.5 font-mono text-xs text-paper outline-none"
-            />
-            <input
-              placeholder="Subscription (x, optional)"
-              value={ipoForm.subscription_times}
-              onChange={(e) => setIpoForm({ ...ipoForm, subscription_times: e.target.value })}
-              className="bg-ink/60 border border-slate rounded-lg px-2 py-1.5 font-mono text-xs text-paper placeholder:text-mist/30 outline-none"
-            />
-            <input
-              placeholder="GMP ₹ (optional)"
-              value={ipoForm.gmp}
-              onChange={(e) => setIpoForm({ ...ipoForm, gmp: e.target.value })}
-              className="bg-ink/60 border border-slate rounded-lg px-2 py-1.5 font-mono text-xs text-paper placeholder:text-mist/30 outline-none"
-            />
+            <p className="font-mono text-[10px] text-mist/50">
+              Just the name — symbol, issue price, and listing date are looked up automatically.
+            </p>
+            {ipoAddNotice && (
+              <div className="rounded-lg border border-amber-400/30 bg-amber-500/5 px-2 py-1.5 font-mono text-[11px] text-amber-200/90">
+                {ipoAddNotice.message}
+                {ipoAddNotice.suggestions.length > 0 && (
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {ipoAddNotice.suggestions.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => {
+                          setIpoForm({ company_name: s });
+                          setIpoAddNotice(null);
+                        }}
+                        className="rounded border border-amber-400/40 px-1.5 py-0.5 text-amber-100 hover:bg-amber-500/20"
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             <button
               type="button"
               onClick={() => void submitIpoAdd()}
-              disabled={ipoAddBusy || !ipoForm.symbol || !ipoForm.issue_price || !ipoForm.listing_date}
-              className="col-span-2 font-mono text-xs px-3 py-2 rounded-lg bg-emerald-500/20 border border-emerald-400/40 text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-40"
+              disabled={ipoAddBusy || !ipoForm.company_name.trim()}
+              className="font-mono text-xs px-3 py-2 rounded-lg bg-emerald-500/20 border border-emerald-400/40 text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-40"
             >
-              {ipoAddBusy ? "Adding…" : "Add & Scan"}
+              {ipoAddBusy ? "Looking it up…" : "Add & Scan"}
             </button>
           </div>
         )}

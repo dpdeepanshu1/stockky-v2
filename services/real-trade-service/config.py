@@ -44,7 +44,30 @@ API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "https://stockky-api-gateway.onre
 # and paste the hash (never the plaintext) into Render's env. If unset, the
 # service refuses to boot into a usable state (see main.py startup check) —
 # there is no default password.
-ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
+#
+# IMPORTANT — the hash looks like $argon2id$v=19$m=65536,t=3,p=4$....
+# The leading `$argon2id`, `$v=19`, `$m=...` segments are NOT dollar-sign
+# escapes for you to strip; they're part of the hash. BUT if you put that
+# raw string in a local .env file that docker-compose loads (not Render's
+# own env UI), docker-compose's own variable interpolation will try to
+# expand $argon2id / $v / $m / ... as if THEY were variables — which is
+# exactly the "variable is not set. Defaulting to a blank string" warnings
+# and the resulting auth failures. Two ways to avoid that entirely:
+#   1. In .env (docker-compose only — never needed on Render), double every
+#      literal $ as $$:  ADMIN_PASSWORD_HASH=$$argon2id$$v=19$$m=65536,...
+#   2. Or set ADMIN_PASSWORD_HASH_B64 instead (base64 of the raw hash) —
+#      no $ characters, so no interpolation problem, on either platform:
+#        python -c "import base64; print(base64.b64encode(b'<hash>').decode())"
+# Either input is accepted; ADMIN_PASSWORD_HASH takes priority if both are set.
+_ADMIN_HASH_B64 = os.getenv("ADMIN_PASSWORD_HASH_B64", "")
+if _ADMIN_HASH_B64 and not os.getenv("ADMIN_PASSWORD_HASH"):
+    try:
+        import base64 as _b64
+        ADMIN_PASSWORD_HASH = _b64.b64decode(_ADMIN_HASH_B64).decode("utf-8").strip()
+    except Exception:
+        ADMIN_PASSWORD_HASH = ""
+else:
+    ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 
 # Session token signing secret + lifetime. Idle timeout is intentionally

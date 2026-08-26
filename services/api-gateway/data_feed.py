@@ -87,8 +87,11 @@ def _norm_sym(symbol: str) -> str:
     return (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
 
 
-# Universal ≤ ₹5000 gate — refuse to persist high-ticket stocks into the feed cache
-MAX_STOCK_PRICE = float(os.getenv("MAX_STOCK_PRICE", "5000") or 5000)
+# Price gate — OFF by default (0 = no cap; every eligible stock is kept and
+# persisted). Set MAX_STOCK_PRICE in the environment for an explicit cap.
+MAX_STOCK_PRICE = float(os.getenv("MAX_STOCK_PRICE", "0") or 0)
+# Display-only "value buy" tag threshold — never excludes/strips a stock.
+VALUE_BUY_THRESHOLD = float(os.getenv("VALUE_BUY_THRESHOLD", "2000") or 2000)
 
 
 def _coerce_price(val) -> float:
@@ -539,7 +542,7 @@ class DataFeedStore:
         # price fields are stripped so the universe price-filter does not
         # re-admit them via a cached over-cap LTP.
         px = _payload_price(payload)
-        if px > MAX_STOCK_PRICE:
+        if MAX_STOCK_PRICE > 0 and px > MAX_STOCK_PRICE:
             for drop_k in (
                 "price", "close", "cmp", "ltp", "last_price", "current_price",
                 "day_high", "day_low", "day_change_pct", "previous_close", "volume",
@@ -871,6 +874,11 @@ class DataFeedStore:
 # ── Hot-picks job (on-demand) — Neon durable via kv_cache prefixes ─────────
 HOT_JOB_KEY = "stockky:hot_job"
 HOT_RESULT_KEY = "stockky:hot_result_db"
+# Separate job key for the Hot Picks "Premarket" bulk price pre-feed (see
+# main.py's /stockky-hot/premarket) — kept distinct from HOT_JOB_KEY so a
+# premarket bulk-feed run and a "Search Hot Picks Stocks" run never stomp
+# on each other's progress bar.
+HOT_PREMARKET_JOB_KEY = "stockky:hot_premarket_job"
 
 
 def _hot_job_recompute(j: dict) -> dict:
@@ -947,6 +955,38 @@ def hot_job_set(redis_set, redis_get, **kwargs) -> dict:
         redis_set(HOT_JOB_KEY, j, ttl=7 * 86400)
     except Exception as e:
         logger.warning("hot_job_set durable fail: %s", e)
+    return j
+
+
+def hot_premarket_job_get(redis_get) -> dict:
+    """Same shape/semantics as hot_job_get, but for the Hot Picks
+    'Premarket' bulk price pre-feed job — see HOT_PREMARKET_JOB_KEY."""
+    try:
+        j = redis_get(HOT_PREMARKET_JOB_KEY)
+    except Exception:
+        j = None
+    if isinstance(j, dict):
+        return _hot_job_recompute(dict(j))
+    return {
+        "status": "idle",
+        "processed": 0,
+        "total": 0,
+        "started_at": None,
+        "elapsed_sec": 0,
+        "estimated_remaining_sec": None,
+        "message": "Idle — click Premarket to pre-feed prices for every eligible stock",
+    }
+
+
+def hot_premarket_job_set(redis_set, redis_get, **kwargs) -> dict:
+    j = hot_premarket_job_get(redis_get)
+    j.update(kwargs)
+    _hot_job_recompute(j)
+    j["updated_at"] = _now_iso()
+    try:
+        redis_set(HOT_PREMARKET_JOB_KEY, j, ttl=7 * 86400)
+    except Exception as e:
+        logger.warning("hot_premarket_job_set durable fail: %s", e)
     return j
 
 
@@ -1196,7 +1236,7 @@ def patch_feed_price(symbol: str, live_price: float) -> bool:
         return False
     if px <= 0:
         return False
-    if px > MAX_STOCK_PRICE:
+    if MAX_STOCK_PRICE > 0 and px > MAX_STOCK_PRICE:
         logger.info("patch_feed_price skip %s — ₹%.2f > cap", base, px)
         return False
 
@@ -1377,7 +1417,7 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
                     px = 0.0
                 if px <= 0:
                     continue
-                if px > MAX_STOCK_PRICE:
+                if MAX_STOCK_PRICE > 0 and px > MAX_STOCK_PRICE:
                     logger.debug("bulk_yahoo skip %s — ₹%.2f > cap", base, px)
                     continue
 
@@ -1571,7 +1611,7 @@ def download_nse_bhavcopy_bulk(force: bool = False) -> Dict[str, dict]:
                             if not base:
                                 continue
                             close = _num(row, close_c)
-                            if close is None or close <= 0 or close > MAX_STOCK_PRICE:
+                            if close is None or close <= 0 or (MAX_STOCK_PRICE > 0 and close > MAX_STOCK_PRICE):
                                 continue
                             prev = _num(row, prev_c) or close
                             rec = {
@@ -1875,6 +1915,7 @@ def list_feed_symbols_from_neon_under_max_price(max_price: float = None) -> List
     Keeps symbols with unknown price (0) or price <= max_price.
     """
     cap = float(max_price if max_price is not None else MAX_STOCK_PRICE)
+    # cap <= 0 means "no cap configured" — universe is unrestricted by price
     store = get_data_feed_store()
     try:
         symbols = store.list_symbols() or []
@@ -1894,7 +1935,7 @@ def list_feed_symbols_from_neon_under_max_price(max_price: float = None) -> List
             continue
         data = feeds.get(base) or {}
         px = _payload_price(data) if isinstance(data, dict) else 0.0
-        if px <= 0 or px <= cap:
+        if px <= 0 or cap <= 0 or px <= cap:
             kept.append(base)
     return kept
 

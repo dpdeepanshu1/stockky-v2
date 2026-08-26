@@ -18,8 +18,12 @@ logger = logging.getLogger("buy-sniper")
 # Default thresholds (override via kwargs if needed)
 MIN_CONVICTION = 58
 MIN_PRICE = 5.0
-# Universal ≤ ₹5000 gate (align with instant_scanner / data_feed / bhavcopy)
-MAX_PRICE = 5000.0
+# Price gate — OFF by default (0 = no upper cap; full universe is eligible).
+# Set MAX_PRICE in the environment for an explicit cap if you ever want one.
+import os as _os
+MAX_PRICE = float(_os.getenv("MAX_PRICE", "0") or 0)
+# Display-only "value buy" tag threshold — never excludes a stock.
+VALUE_BUY_THRESHOLD = float(_os.getenv("VALUE_BUY_THRESHOLD", "2000") or 2000)
 DEFAULT_TARGET_COUNT = 4
 EST_PROFIT_PCT = 6.5
 STOP_LOSS_PCT = 3.2
@@ -112,7 +116,7 @@ def _is_buy_candidate(s: Dict[str, Any], min_conviction: float = MIN_CONVICTION)
     if not isinstance(s, dict):
         return False
     px = _price(s)
-    if px < MIN_PRICE or px > MAX_PRICE:
+    if px < MIN_PRICE or (MAX_PRICE > 0 and px > MAX_PRICE):
         return False
     conv = _conviction(s)
     if conv < min_conviction:
@@ -212,6 +216,8 @@ def build_suggestion(s: Dict[str, Any], est_profit_pct: float = EST_PROFIT_PCT) 
         "sector": s.get("sector"),
         "rationale": _rationale(s, action, conv),
         "decision": _decision_label(s) or action,
+        # Display-only — never excludes a stock, just badges cheap setups
+        "value_buy": bool(0 < px <= VALUE_BUY_THRESHOLD),
     }
 
 

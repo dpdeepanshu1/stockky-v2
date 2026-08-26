@@ -52,6 +52,7 @@ from pydantic import BaseModel
 from data_feed import (
     DataFeedStore, extract_feed_payload, DATA_FEED_TTL,
     hot_job_get, hot_job_set, HOT_RESULT_KEY,
+    hot_premarket_job_get, hot_premarket_job_set,
     try_refresh_lock, release_refresh_lock, soft_ttl_should_refresh,
     request_data_feed_stop, clear_data_feed_stop, data_feed_stop_requested,
 )
@@ -1210,8 +1211,11 @@ def _get_52w_extreme_symbols() -> List[str]:
     return out[:80]
 
 
-# ── ≤ ₹5000 universe pre-filter ─────────────────────────────────────────────
-MAX_UNIVERSE_PRICE = float(os.getenv("MAX_UNIVERSE_PRICE", os.getenv("MAX_STOCK_PRICE", "5000")) or 5000)
+# ── Universe price gate — OFF by default (0 = no cap; full universe) ───────
+# Set MAX_UNIVERSE_PRICE (or MAX_STOCK_PRICE) in the environment to re-enable
+# an explicit cap. VALUE_BUY_THRESHOLD is a display/tag-only hint.
+MAX_UNIVERSE_PRICE = float(os.getenv("MAX_UNIVERSE_PRICE", os.getenv("MAX_STOCK_PRICE", "0")) or 0)
+VALUE_BUY_THRESHOLD = float(os.getenv("VALUE_BUY_THRESHOLD", "2000") or 2000)
 
 # ── Universe size ────────────────────────────────────────────────────────────
 # SCAN_UNIVERSE_TARGET is how many symbols _build_scan_universe() tries to
@@ -1248,6 +1252,8 @@ def _row_price_over_cap(row: dict, symbol: Optional[str] = None) -> bool:
     through — this only blocks rows that already carry a price over cap,
     or whose symbol is known-expensive by name.
     """
+    if MAX_UNIVERSE_PRICE <= 0:
+        return False  # no cap configured — every eligible stock passes
     sym = symbol or (row.get("symbol") if isinstance(row, dict) else None)
     if sym:
         try:
@@ -1315,13 +1321,9 @@ def _filter_symbols_under_max_price(symbols: List[str]) -> List[str]:
     kept: List[str] = []
     dropped = 0
     for sym in clean:
-        # Known chronically->₹5000 names (MRF, MARUTI, PAGEIND, ...) — skip
-        # immediately, no feed lookup needed. This is what stops them from
-        # sitting in Database Feed Health forever as "price: missing": that
-        # previously only got resolved once a live quote succeeded (which
-        # rate-limiting can prevent indefinitely); a static list needs no
-        # network round trip at all.
-        if is_known_high_price(sym):
+        # Static denylist only applies when a cap is actually configured —
+        # with no cap, no symbol is excluded by price, known-expensive or not.
+        if MAX_UNIVERSE_PRICE > 0 and is_known_high_price(sym):
             dropped += 1
             continue
         feed_item = feeds.get(sym) or {}
@@ -1340,8 +1342,9 @@ def _filter_symbols_under_max_price(symbols: List[str]) -> List[str]:
                         break
                 except (TypeError, ValueError):
                     pass
-        # Keep if unknown (0) OR <= 5000
-        if price <= 0 or price <= MAX_UNIVERSE_PRICE:
+        # Keep if unknown (0), or price is within the configured cap, or no
+        # cap is configured at all (MAX_UNIVERSE_PRICE <= 0 => unrestricted)
+        if price <= 0 or MAX_UNIVERSE_PRICE <= 0 or price <= MAX_UNIVERSE_PRICE:
             kept.append(sym)
         else:
             dropped += 1
@@ -6605,16 +6608,17 @@ async def api_surprise_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
 async def api_ipo_scan(
     background: bool = Query(True),
     force: bool = Query(
-        True,
+        False,
         description=(
             "Bypass the ipo_static_feed 24h freshness cache. Defaults to "
-            "True because this endpoint is only ever hit by an explicit "
-            "user action (the 'Scan IPOs' button) — there is no automatic/"
-            "scheduled caller of this route, so gating a deliberate click "
-            "behind a staleness check just makes the button look broken "
-            "(same bug class /surprise/premarket already avoids via its "
-            "own force= param). Pass force=false explicitly if a future "
-            "scheduled caller wants the cache-reuse behaviour back."
+            "False: the 'IPO Premarket Refresh' GitHub Action "
+            "(.github/workflows/ipo-premarket.yml) runs a full discovery + "
+            "scoring pass every trading morning before the session opens, "
+            "so a normal 'Scan IPOs' click should read that already-fresh "
+            "table (near-instant) rather than re-discovering NSE + "
+            "re-pulling yfinance history for the whole universe in front "
+            "of the user. The frontend's 'Force Rescan' button passes "
+            "force=true explicitly when a real on-demand re-scan is wanted."
         ),
     ),
     background_tasks: BackgroundTasks = None,
@@ -6695,31 +6699,28 @@ async def api_ipo_stop():
 
 
 class IpoAddRequest(BaseModel):
-    symbol: str
-    issue_price: float
-    listing_date: str  # YYYY-MM-DD
-    company_name: Optional[str] = None
-    subscription_times: Optional[float] = None
-    gmp: Optional[float] = None
+    company_name: str
 
 
 @app.post("/surprise/ipo/add")
 async def api_ipo_add(body: IpoAddRequest):
-    """Manually register an IPO — the reliable path since NSE's IPO API
-    blocks cloud-hosted IPs often enough that auto-discovery alone can't be
-    the only path. Use this the moment you know the listing date/issue
-    price (even before listing) so it shows up as 'lists today' the
-    morning of."""
-    from ipo_scanner import add_manual_ipo
-    entry = add_manual_ipo(
-        symbol=body.symbol,
-        issue_price=body.issue_price,
-        listing_date=body.listing_date,
-        company_name=body.company_name,
-        subscription_times=body.subscription_times,
-        gmp=body.gmp,
-    )
-    return {"accepted": True, "entry": entry}
+    """Manually register an IPO by NAME ONLY — the reliable path since
+    NSE's IPO API blocks cloud-hosted IPs often enough that auto-discovery
+    alone can't be the only path. Resolves symbol/issue price/listing date
+    automatically (see ipo_scanner.add_manual_ipo_by_name) against NSE's
+    calendar and, as a fallback, ipoalerts — the user never has to look up
+    or type those themselves. A resolved entry is persisted as a manual
+    IPO and included in every subsequent scan/list the same way any other
+    manual entry is."""
+    from ipo_scanner import add_manual_ipo_by_name
+    result = add_manual_ipo_by_name(body.company_name)
+    if not result.get("resolved"):
+        return {
+            "accepted": False,
+            "message": result.get("message"),
+            "suggestions": result.get("suggestions") or [],
+        }
+    return {"accepted": True, "entry": result.get("entry")}
 
 
 @app.get("/surprise/premarket/status")
@@ -8798,7 +8799,7 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
         from symbol_aliases import is_known_high_price
     except Exception:
         is_known_high_price = lambda _s: False  # noqa: E731
-    if is_known_high_price(base):
+    if MAX_UNIVERSE_PRICE > 0 and is_known_high_price(base):
         try:
             store.delete_symbol(base)
         except Exception as e:
@@ -8928,7 +8929,7 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                 for k in ("price", "cmp", "ltp", "close", "last_price", "regularMarketPrice"):
                     px = _safe_float(cleaned.get(k))
                     if px > 0:
-                        if px > MAX_UNIVERSE_PRICE:
+                        if MAX_UNIVERSE_PRICE > 0 and px > MAX_UNIVERSE_PRICE:
                             # This symbol was fed with "price" missing (not
                             # yet known to be over cap), and only now, on
                             # fetching a live quote, turns out to be over
@@ -9765,6 +9766,92 @@ def stockky_hot_result():
     if not cached:
         return {"ok": False, "detail": "No Hot Picks result yet — run Search Hot Picks Stocks"}
     return {**cached, "ok": True, "cached": True}
+
+
+@app.get("/stockky-hot/premarket/status")
+def stockky_hot_premarket_status():
+    """Progress of the Hot Picks 'Premarket' bulk price pre-feed job."""
+    job = hot_premarket_job_get(_redis_get)
+    return {"ok": True, **job}
+
+
+@app.post("/stockky-hot/premarket")
+async def stockky_hot_premarket(background_tasks: BackgroundTasks):
+    """Pre-feed prices for EVERY eligible stock in ONE bulk call, before
+    running Search Hot Picks Stocks.
+
+    Today, Hot Picks' own price-enrichment step (see stockky_hot_stocks's
+    "Price enrichment" block) only ever READS from the shared data-feed
+    store — it never fetches over the network — so any symbol whose feed
+    row is stale/missing shows "₹—" on its card. This endpoint is the fix:
+    it builds the full eligible universe the same way the main market scan
+    does (_build_scan_universe — every eligible stock, not just Hot Picks'
+    ~285-symbol catalyst-seeded shortlist) and pre-feeds it via the SAME
+    bulk pipeline the Data Feed tab uses (run_bulk_yahoo_price_feed —
+    bhavcopy first, then ONE POST /quotes/bulk call for whatever's left,
+    never one symbol at a time), writing into the same store (Neon on
+    Render, Oracle ADB on the Oracle deployment — store dialect-detects
+    automatically). Once this finishes, click 'Search Hot Picks Stocks' —
+    its price lookups will already be warm.
+    """
+    job = hot_premarket_job_get(_redis_get)
+    if job.get("status") == "running":
+        return {"ok": True, "already_running": True, **job}
+
+    try:
+        universe = _build_scan_universe()
+    except Exception as e:
+        return {"ok": False, "error": f"could not build universe: {str(e)[:160]}"}
+
+    if not universe:
+        return {"ok": False, "error": "scan universe is empty — nothing to pre-feed"}
+
+    hot_premarket_job_set(
+        _redis_set,
+        _redis_get,
+        status="running",
+        processed=0,
+        total=len(universe),
+        started_at=datetime.now(IST).isoformat(),
+        message=f"Pre-feeding {len(universe)} eligible stocks (bulk)…",
+        finished_at=None,
+    )
+
+    def _run_premarket(syms: list):
+        """Runs entirely outside the HTTP request — a full-universe bulk
+        feed can take a while; background=true semantics match every
+        other premarket job in this app (IPO, Surprise)."""
+        try:
+            from data_feed import run_bulk_yahoo_price_feed
+            result = run_bulk_yahoo_price_feed(syms, merge_existing=True) or {}
+            n = int(result.get("tracked_stocks") or 0)
+            ts = datetime.now(IST).isoformat()
+            hot_premarket_job_set(
+                _redis_set,
+                _redis_get,
+                status="done",
+                processed=n,
+                total=len(syms),
+                message=result.get("message") or f"Pre-fed {n}/{len(syms)} stocks",
+                finished_at=ts,
+            )
+        except Exception as e:
+            logger.exception("hot premarket bulk-feed failed")
+            hot_premarket_job_set(
+                _redis_set,
+                _redis_get,
+                status="error",
+                message=str(e)[:200],
+                finished_at=datetime.now(IST).isoformat(),
+            )
+
+    background_tasks.add_task(_run_premarket, universe)
+    return {
+        "ok": True,
+        "started": True,
+        "total": len(universe),
+        "message": f"Premarket bulk pre-feed started for {len(universe)} eligible stocks",
+    }
 
 
 @app.post("/stockky-hot/run")

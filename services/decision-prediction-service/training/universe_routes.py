@@ -27,8 +27,9 @@ from universe_ingest import (
 logger = logging.getLogger("universe_routes")
 router = APIRouter(prefix="/api/universe", tags=["universe-training"])
 
-# Universal ≤ ₹5000 gate for training samples that carry a known price
-MAX_STOCK_PRICE = 5000.0
+# Price gate — OFF by default (0 = no cap; every eligible sample is kept).
+import os as _os
+MAX_STOCK_PRICE = float(_os.getenv("MAX_STOCK_PRICE", "0") or 0)
 
 
 def get_filtered_universe(
@@ -57,7 +58,7 @@ def get_filtered_universe(
                         break
                 except (TypeError, ValueError):
                     pass
-        if px > MAX_STOCK_PRICE:
+        if MAX_STOCK_PRICE > 0 and px > MAX_STOCK_PRICE:
             continue
         out.append(base)
     return out

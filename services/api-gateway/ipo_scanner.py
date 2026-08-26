@@ -147,6 +147,44 @@ IPO_JOB_KEY = "stockky:ipo:job"            # scan progress
 IPOALERTS_API_KEY = os.getenv("IPOALERTS_API_KEY", "").strip()
 IPOALERTS_BASE = "https://api.ipoalerts.in/ipos"
 
+# ── ipoalerts quota management ──────────────────────────────────────────────
+# The free ipoalerts.in tier is capped at 25 requests/day. We budget well
+# under that (default 20, leaving headroom for manual testing) and spend it
+# on the smallest useful slice: only "open" (currently subscribing — always
+# genuinely current) and "listed" (filtered down to the last
+# IPOALERTS_RECENT_WINDOW_DAYS days below) — never "upcoming"/"closed",
+# which NSE's own free unofficial API already covers for the wider window.
+# A successful fetch is cached for IPOALERTS_CACHE_HOURS so repeated Scan
+# IPOs clicks (or the daily premarket job on a day nothing changed) reuse it
+# instead of re-spending quota; only a cache MISS counts against the quota.
+IPOALERTS_DAILY_LIMIT = int(os.getenv("IPOALERTS_DAILY_LIMIT", "20") or 20)
+IPOALERTS_RECENT_WINDOW_DAYS = int(os.getenv("IPOALERTS_RECENT_WINDOW_DAYS", "7") or 7)
+IPOALERTS_CACHE_HOURS = float(os.getenv("IPOALERTS_CACHE_HOURS", "6") or 6)
+IPOALERTS_STATUSES = ("open", "listed")  # NOT "upcoming"/"closed" — see above
+IPOALERTS_CACHE_KEY = "stockky:ipoalerts:cache"
+
+
+def _ipoalerts_quota_key() -> str:
+    return f"stockky:ipoalerts:quota:{datetime.now(IST).strftime('%Y-%m-%d')}"
+
+
+def _ipoalerts_quota_used() -> int:
+    try:
+        n = _kv().kv_get(_ipoalerts_quota_key())
+        return int(n) if n else 0
+    except Exception:
+        return 0
+
+
+def _ipoalerts_quota_spend(n: int) -> None:
+    try:
+        used = _ipoalerts_quota_used() + n
+        # TTL a little over 24h so a slow day doesn't get stuck with a
+        # stale non-zero counter if kv_cache's clock drifts slightly.
+        _kv().kv_set(_ipoalerts_quota_key(), used, ttl=90000)
+    except Exception:
+        pass
+
 _LOCAL_JOB: Dict[str, Any] = {"status": "idle", "message": "Idle", "processed": 0, "total": 0}
 
 # ── Stop support (mirrors data_feed.py's _DATA_FEED_STOP_FLAG pattern) ──────
@@ -286,21 +324,46 @@ def get_ipo_scan_progress() -> dict:
 
 # ── NSE IPO calendar discovery (best-effort; manual add is the reliable path) ──
 
-def fetch_ipoalerts_calendar() -> List[Dict[str, Any]]:
+def fetch_ipoalerts_calendar(_bypass_cache: bool = False) -> List[Dict[str, Any]]:
     """
-    Primary, reliable IPO discovery source when IPOALERTS_API_KEY is set —
+    Discovery source for VERY RECENT IPOs when IPOALERTS_API_KEY is set —
     confirmed live schema: {symbol, name, type, listingDate, priceRange,
     startDate, endDate, issueSize, schedule[...]}. priceRange is a band
     like "95-99"; we take the upper bound as issue_price, matching NSE
     convention (retail investors pay the cap price on allotment).
-    Queries a few status buckets defensively since the exact vocabulary
-    for "already listed" isn't guaranteed stable — analyze_ipo() stages
-    everything off the parsed listing_date itself, not this status string,
-    so any mismatch here only affects which bucket we bothered to ask for,
-    never the actual pre-listing/listing-day/listed classification.
+
+    Quota-aware by design (free tier = 25 req/day, see IPOALERTS_DAILY_LIMIT
+    above): only queries "open" and "listed" (2 requests, not 4), caches the
+    combined result for IPOALERTS_CACHE_HOURS, and — since this account is
+    meant for VERY RECENT listings only — drops any "listed" row older than
+    IPOALERTS_RECENT_WINDOW_DAYS (default 7). "open" rows are inherently
+    current (a currently-subscribing issue) so they pass through unfiltered.
+    Anything older than that window is NSE's unofficial-API's job instead
+    (free, unlimited, already covers the full IPO_LOOKBACK_DAYS_MAX window).
     """
     if not IPOALERTS_API_KEY:
         return []
+
+    if not _bypass_cache:
+        try:
+            cached = _kv().kv_get(IPOALERTS_CACHE_KEY)
+            if isinstance(cached, list):
+                return cached
+        except Exception:
+            pass
+
+    used = _ipoalerts_quota_used()
+    if used + len(IPOALERTS_STATUSES) > IPOALERTS_DAILY_LIMIT:
+        logger.warning(
+            "ipoalerts: daily quota reached (%s/%s used) — skipping fetch, "
+            "reusing whatever's cached (or NSE-only for this scan)",
+            used, IPOALERTS_DAILY_LIMIT,
+        )
+        try:
+            cached = _kv().kv_get(IPOALERTS_CACHE_KEY)
+            return cached if isinstance(cached, list) else []
+        except Exception:
+            return []
 
     try:
         from rate_limiter import acquire as rl_acquire
@@ -310,9 +373,11 @@ def fetch_ipoalerts_calendar() -> List[Dict[str, Any]]:
 
     out: List[Dict[str, Any]] = []
     headers = {"X-API-KEY": IPOALERTS_API_KEY, "Accept": "application/json"}
-    for status in ("open", "listed", "upcoming", "closed"):
+    spent = 0
+    for status in IPOALERTS_STATUSES:
         try:
             r = httpx.get(IPOALERTS_BASE, params={"status": status}, headers=headers, timeout=15)
+            spent += 1
             if r.status_code != 200:
                 logger.info("ipoalerts status=%s -> HTTP %s", status, r.status_code)
                 continue
@@ -322,16 +387,38 @@ def fetch_ipoalerts_calendar() -> List[Dict[str, Any]]:
                 if norm:
                     out.append(norm)
         except Exception as e:
+            spent += 1
             logger.info("ipoalerts status=%s fetch failed: %s", status, e)
+    _ipoalerts_quota_spend(spent)
+
+    # Recency filter — "listed" only for the last IPOALERTS_RECENT_WINDOW_DAYS
+    # days (today/yesterday through ~1 week back); "open" passes through as-is.
+    now = datetime.now(IST)
+    filtered: List[Dict[str, Any]] = []
+    for r in out:
+        if r.get("status") != "listed":
+            filtered.append(r)
+            continue
+        dt = _parse_date(r.get("listing_date"))
+        if dt is None:
+            continue
+        dt = dt.replace(tzinfo=IST) if dt.tzinfo is None else dt
+        if 0 <= (now - dt).days <= IPOALERTS_RECENT_WINDOW_DAYS:
+            filtered.append(r)
 
     # De-dupe by symbol, keep first occurrence
     seen = set()
     deduped = []
-    for r in out:
+    for r in filtered:
         if r["symbol"] in seen:
             continue
         seen.add(r["symbol"])
         deduped.append(r)
+
+    try:
+        _kv().kv_set(IPOALERTS_CACHE_KEY, deduped, ttl=int(IPOALERTS_CACHE_HOURS * 3600))
+    except Exception:
+        pass
     return deduped
 
 
@@ -626,9 +713,10 @@ def add_manual_ipo(
     subscription_times: Optional[float] = None,
     gmp: Optional[float] = None,
 ) -> dict:
-    """Register an IPO by hand — the reliable path when NSE's auto-discovery
-    is blocked, or to get a symbol in front of the scorer before NSE's own
-    listing feed updates. listing_date format: YYYY-MM-DD."""
+    """Register an IPO by hand with every field known already. Kept for any
+    caller that already has the full record; the '+ Add IPO' UI itself now
+    only asks for a company name and resolves the rest — see
+    add_manual_ipo_by_name below."""
     sym = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
     entry = {
         "symbol": sym,
@@ -655,6 +743,122 @@ def add_manual_ipo(
     return entry
 
 
+def _name_match_score(query: str, candidate: str) -> float:
+    """Fuzzy-ish match for 'the user typed a company name by hand' against
+    a candidate's company_name/symbol — deliberately simple (no external
+    fuzzy-match dependency): exact match, substring either direction, then
+    token overlap. Good enough to tell 'Tempsens Instruments (India)
+    Limited' apart from 'Tempsens' vs a totally unrelated name; not meant
+    to be bulletproof against typos beyond that."""
+    q = re.sub(r"[^a-z0-9]+", " ", (query or "").lower()).strip()
+    c = re.sub(r"[^a-z0-9]+", " ", (candidate or "").lower()).strip()
+    if not q or not c:
+        return 0.0
+    if q == c:
+        return 1.0
+    if q in c or c in q:
+        return 0.9
+    q_tokens = set(q.split())
+    c_tokens = set(c.split())
+    if not q_tokens or not c_tokens:
+        return 0.0
+    overlap = len(q_tokens & c_tokens)
+    return (overlap / max(len(q_tokens), 1)) * 0.8
+
+
+def resolve_ipo_by_name(company_name: str) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Find the best-matching IPO for a hand-typed company name.
+
+    Checks NSE's calendar first (free, unlimited, already fetched for every
+    scan) before ever touching ipoalerts — a hand-typed lookup is rare
+    enough not to matter for the daily quota, but there's no reason to
+    spend it when NSE already has the answer. Returns (best_match,
+    near_misses) — near_misses (score >= 0.35 but below the accept
+    threshold) let the caller say 'did you mean X?' instead of a bare
+    'not found' when the name almost-but-not-quite matched.
+    """
+    name = (company_name or "").strip()
+    if not name:
+        return None, []
+
+    candidates = list(fetch_nse_ipo_calendar())
+    scored = [
+        (c, max(
+            _name_match_score(name, c.get("company_name") or ""),
+            _name_match_score(name, c.get("symbol") or ""),
+        ))
+        for c in candidates
+    ]
+
+    best, best_score = None, 0.0
+    for c, score in scored:
+        if score > best_score:
+            best, best_score = c, score
+
+    if best_score < 0.7 and IPOALERTS_API_KEY:
+        # NSE had nothing confident — spend one ipoalerts round-trip as a
+        # last resort (still quota-gated inside fetch_ipoalerts_calendar).
+        ia_candidates = list(fetch_ipoalerts_calendar())
+        for c in ia_candidates:
+            score = max(
+                _name_match_score(name, c.get("company_name") or ""),
+                _name_match_score(name, c.get("symbol") or ""),
+            )
+            scored.append((c, score))
+            if score > best_score:
+                best, best_score = c, score
+
+    if best is not None and best_score >= 0.7:
+        return best, []
+
+    near_misses = sorted(
+        (c for c, score in scored if 0.35 <= score < 0.7),
+        key=lambda c: -max(
+            _name_match_score(name, c.get("company_name") or ""),
+            _name_match_score(name, c.get("symbol") or ""),
+        ),
+    )[:5]
+    return None, near_misses
+
+
+def add_manual_ipo_by_name(company_name: str) -> Dict[str, Any]:
+    """The '+ Add IPO' entry point — name only. Resolves symbol, issue
+    price, and listing date automatically against NSE's calendar (and
+    ipoalerts as a fallback) and persists a manual entry exactly like
+    add_manual_ipo, so the result shows up in the upcoming/recent list the
+    same way and via the same code path.
+
+    Returns {"resolved": True, "entry": {...}} on success, or
+    {"resolved": False, "message": ..., "suggestions": [...]} when no
+    confident match was found (the message tells the user what to try;
+    suggestions are near-miss company names, if any, so they can correct
+    the spelling instead of guessing blind)."""
+    name = (company_name or "").strip()
+    if not name:
+        return {"resolved": False, "message": "Company name is required.", "suggestions": []}
+
+    match, near_misses = resolve_ipo_by_name(name)
+    if match is None:
+        suggestions = [m.get("company_name") for m in near_misses if m.get("company_name")]
+        msg = (
+            f"No IPO found matching \"{name}\" in NSE's calendar"
+            + (" or ipoalerts" if IPOALERTS_API_KEY else "")
+            + ". Use the exact registered company name (e.g. \"Tempsens "
+              "Instruments (India) Limited\", not \"Tempsens\")."
+        )
+        return {"resolved": False, "message": msg, "suggestions": suggestions}
+
+    entry = add_manual_ipo(
+        symbol=match["symbol"],
+        issue_price=float(match["issue_price"]),
+        listing_date=match["listing_date"],
+        company_name=match.get("company_name") or match["symbol"],
+        subscription_times=match.get("subscription_times"),
+        gmp=match.get("gmp"),
+    )
+    return {"resolved": True, "entry": entry}
+
+
 def _manual_ipos() -> List[Dict[str, Any]]:
     try:
         existing = _kv().kv_get(IPO_MANUAL_KEY)
@@ -663,11 +867,12 @@ def _manual_ipos() -> List[Dict[str, Any]]:
         return []
 
 
-def _merged_ipo_universe() -> List[Dict[str, Any]]:
+def _merged_ipo_universe() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Merge order, most-trusted-wins on symbol collision:
       1. manual entries       — you told the system directly, always wins
-      2. ipoalerts.in         — real confirmed schema, needs a free API key
+      2. ipoalerts.in         — real confirmed schema, needs a free API key,
+                                 VERY RECENT only (see fetch_ipoalerts_calendar)
       3. NSE unofficial API   — best-effort, unverified/frequently blocked
 
     Recency filter: ipoalerts' "listed"/"closed" status buckets return
@@ -677,16 +882,28 @@ def _merged_ipo_universe() -> List[Dict[str, Any]]:
     momentum scanner (see module docstring), so anything outside the
     window below is dropped before analysis even starts:
       - already listed: keep only the last IPO_LOOKBACK_DAYS_MAX days
-        (default 30, hard-capped at IPO_LOOKBACK_DAYS_HARD_CAP = 60 —
-        "max 2 months")
+        (default 365, hard-capped at IPO_LOOKBACK_DAYS_HARD_CAP)
       - not yet listed: keep only the next IPO_UPCOMING_WINDOW_DAYS days
-        (default 7) so "listing today/tomorrow" IPOs are still included
+        (default 21) so "listing today/tomorrow" IPOs are still included
     Manual entries always pass through regardless of date — if you added
     it by hand, you meant to track it.
+
+    Returns (candidates, diagnostics) — diagnostics records how many rows
+    each source actually returned, so a 0-candidate scan can say WHY
+    instead of just silently finishing with nothing (NSE blocked, no
+    ipoalerts key, no manual entries — the three most common causes)
+    instead of looking like the click did nothing at all.
     """
     ipoalerts = fetch_ipoalerts_calendar()
     nse = fetch_nse_ipo_calendar()
     manual = _manual_ipos()
+
+    diag = {
+        "nse_candidates": len(nse),
+        "ipoalerts_candidates": len(ipoalerts),
+        "ipoalerts_configured": bool(IPOALERTS_API_KEY),
+        "manual_candidates": len(manual),
+    }
 
     by_symbol: Dict[str, Dict[str, Any]] = {}
     for a in nse:
@@ -700,6 +917,8 @@ def _merged_ipo_universe() -> List[Dict[str, Any]]:
     merged = list(by_symbol.values())
     # Drop anything without a listing date/issue price — can't score it
     dated = [m for m in merged if m.get("listing_date") and m.get("issue_price")]
+    diag["merged_total"] = len(merged)
+    diag["merged_dated"] = len(dated)
 
     lookback = min(IPO_LOOKBACK_DAYS_MAX, IPO_LOOKBACK_DAYS_HARD_CAP)
     now = datetime.now(IST)
@@ -729,7 +948,8 @@ def _merged_ipo_universe() -> List[Dict[str, Any]]:
             "ipo universe: %s candidates -> %s within last %sd/next %sd window",
             len(dated), len(recent), lookback, IPO_UPCOMING_WINDOW_DAYS,
         )
-    return recent
+    diag["recent_after_window"] = len(recent)
+    return recent, diag
 
 
 # ── Per-symbol analysis ────────────────────────────────────────────────────
@@ -1190,8 +1410,36 @@ def _run_ipo_scan_locked(force: bool = False) -> dict:
                     total=len(cached.get("results") or []),
                 )
 
-    universe = _merged_ipo_universe()
+    universe, diag = _merged_ipo_universe()
     total = len(universe)
+
+    if total == 0:
+        # Silent-zero is exactly the "click Scan, nothing happens" bug
+        # report — make the actual cause visible instead of just finishing
+        # instantly with an empty list. The three real causes, in the
+        # order they're actually hit: NSE blocked this deployment's IP
+        # (very common on Render/AWS), IPOALERTS_API_KEY isn't set (or its
+        # daily quota is exhausted), and there are no manual entries.
+        reasons = []
+        if diag["nse_candidates"] == 0:
+            reasons.append("NSE returned 0 (likely IP-blocked from this deployment)")
+        if not diag["ipoalerts_configured"]:
+            reasons.append("IPOALERTS_API_KEY not set")
+        elif diag["ipoalerts_candidates"] == 0:
+            reasons.append("ipoalerts returned 0 (quota exhausted or no very-recent listings)")
+        if diag["manual_candidates"] == 0:
+            reasons.append("no manual entries")
+        why = "; ".join(reasons) if reasons else "all sources returned candidates, but none had both a listing date and issue price"
+        logger.warning("ipo scan: 0 candidates — %s (diag=%s)", why, diag)
+        return _set_job(
+            status="done",
+            message=f"0 IPOs found — {why}. Use '+ Add IPO' to add one by name.",
+            processed=0,
+            total=0,
+            results_count=0,
+            diagnostics=diag,
+        )
+
     _set_job(status="running", message=f"Scanning {total} IPO(s)…", processed=0, total=total,
               started_at=datetime.now(IST).isoformat())
 

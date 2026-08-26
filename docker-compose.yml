@@ -192,6 +192,10 @@ services:
       PORT: "8005"
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
+      # Alternative to ADMIN_PASSWORD_HASH above — base64 of the same hash,
+      # so the $ characters in a raw Argon2id hash never hit docker-compose's
+      # own variable interpolation. See config.py for the encode command.
+      ADMIN_PASSWORD_HASH_B64: ${ADMIN_PASSWORD_HASH_B64:-}
       SESSION_SECRET: ${SESSION_SECRET:-}
       DHAN_CREDENTIAL_ENC_KEY: ${DHAN_CREDENTIAL_ENC_KEY:-}
       DHAN_ENV: ${DHAN_ENV:-sandbox}

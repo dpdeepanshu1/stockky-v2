@@ -1256,13 +1256,21 @@ export const api = {
     }>(`/surprise/premarket?background=true&force=${force}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, 1, 30000),
 
   // IPO Tracker — its own left-nav tab (was a Surprise subsection).
-  // force defaults true: an explicit "Scan IPOs" click should always
-  // re-scan, not silently get skipped by the 24h ipo_static_feed
-  // freshness cache (that cache exists for automatic callers, and there
-  // aren't any yet — see the backend endpoint's own docstring).
-  ipoScan: (force = true) =>
+  // force defaults FALSE: the "IPO Premarket Refresh" GitHub Action (see
+  // .github/workflows/ipo-premarket.yml) already runs a full discovery +
+  // scoring pass every trading morning ~08:50 IST and upserts
+  // ipo_static_feed, so a normal "Scan IPOs" click should read that
+  // already-fresh table (near-instant) instead of re-discovering NSE +
+  // re-pulling yfinance history for the whole universe in front of the
+  // user. Pass force=true explicitly (see forceIpoScan below) to bypass
+  // the freshness cache and do a real re-scan on demand.
+  ipoScan: (force = false) =>
     request<{ accepted?: boolean; already_running?: boolean; message?: string }>(
       `/surprise/ipo/scan?background=true&force=${force}`, { method: "POST" }, 1, 30000
+    ),
+  forceIpoScan: () =>
+    request<{ accepted?: boolean; already_running?: boolean; message?: string }>(
+      `/surprise/ipo/scan?background=true&force=true`, { method: "POST" }, 1, 30000
     ),
   ipoScanStatus: () =>
     request<{
@@ -1347,19 +1355,20 @@ export const api = {
       message?: string;
       error?: string;
     }>("/surprise/ipo/audit", undefined, 2, 20000),
-  ipoAdd: (payload: {
-    symbol: string;
-    issue_price: number;
-    listing_date: string;
-    company_name?: string;
-    subscription_times?: number;
-    gmp?: number;
-  }) =>
-    request<{ accepted?: boolean; entry?: Record<string, unknown> }>(
+  // Name-only — the backend resolves symbol/issue price/listing date
+  // automatically (NSE calendar, ipoalerts as fallback). See
+  // ipo_scanner.add_manual_ipo_by_name.
+  ipoAdd: (payload: { company_name: string }) =>
+    request<{
+      accepted?: boolean;
+      entry?: Record<string, unknown>;
+      message?: string;
+      suggestions?: string[];
+    }>(
       "/surprise/ipo/add",
       { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
       1,
-      15000
+      20000
     ),
 
   surprisePremarketStatus: () =>
@@ -1784,6 +1793,22 @@ export const api = {
     request<any>("/stockky-hot/result", undefined, 1, 30000),
   runStockkyHot: (force = true) =>
     request<any>(`/stockky-hot/run?force=${force}`, { method: "POST" }, 1, 30000),
+  // Bulk pre-feeds prices for every eligible stock (not the ~285-symbol
+  // catalyst shortlist) in ONE call before a Search Hot Picks Stocks run,
+  // so its price-enrichment step finds fresh data instead of "₹—".
+  runStockkyHotPremarket: () =>
+    request<{ ok?: boolean; started?: boolean; already_running?: boolean; total?: number; message?: string; error?: string }>(
+      "/stockky-hot/premarket", { method: "POST" }, 1, 30000
+    ),
+  getStockkyHotPremarketStatus: () =>
+    request<{
+      status?: string;
+      processed?: number;
+      total?: number;
+      message?: string;
+      elapsed_sec?: number;
+      estimated_remaining_sec?: number | null;
+    }>("/stockky-hot/premarket/status", undefined, 1, 15000),
   // Halts an in-flight Hot Picks scan after the current symbol; whatever was
   // already scored is persisted to hotpicks_static_feed, not thrown away.
   stopStockkyHot: () =>

@@ -157,6 +157,16 @@ export const realTradeApi = {
   auditLog: (mode?: "DEMO" | "REAL", limit = 50) =>
     rtRequest<AuditLogRow[]>(`/audit-log?limit=${limit}${mode ? `&mode=${mode}` : ""}`),
 
+  sendManualCandidate: (
+    mode: "DEMO" | "REAL",
+    body: { symbol: string; decision_label?: string; conviction_score?: number; signal_price?: number }
+  ) =>
+    rtRequest<{ ok: boolean; mode: string; symbol: string; queued: boolean }>(
+      `/candidates/manual/${mode}`,
+      { method: "POST", body: JSON.stringify(body) },
+      mode === "REAL"
+    ),
+
   runCycle: (mode: "DEMO" | "REAL") =>
     rtRequest<CycleResult>(`/cycle/run/${mode}`, { method: "POST" }, mode === "REAL"),
 

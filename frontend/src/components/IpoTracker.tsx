@@ -82,6 +82,9 @@ export default function IpoTracker({
 
   const [sniperOpen, setSniperOpen] = useState(false);
   const [suggestions, setSuggestions] = useState<BuySuggestion[]>([]);
+  const [sniperLoading, setSniperLoading] = useState(false);
+  const [sniperError, setSniperError] = useState<string | null>(null);
+  const [sniperBusySymbol, setSniperBusySymbol] = useState<string | null>(null);
 
   // Keep the current window in a ref so the poll/socket callbacks can refetch
   // with the right display_days without being re-created on every toggle.
@@ -202,10 +205,64 @@ export default function IpoTracker({
     }
   }, [pollIpoStatus]);
 
-  const openIpoSuggestion = (ipo: IpoAnalysis) => {
-    if (!ipo?.buy_suggestion) return;
-    setSuggestions([ipo.buy_suggestion as unknown as BuySuggestion]);
+  // Prefer the precomputed buy_suggestion (already scored by the IPO
+  // pipeline) when the row has one. Otherwise fall back to an on-demand
+  // scan through the same Buy Sniper the Hot Picks / Surprise tabs use,
+  // built from this row's own fields — so a row with a real price but no
+  // stored suggestion (e.g. HOLD-tier or not yet re-scored) still gets an
+  // actionable answer instead of a dead button.
+  const openIpoSuggestion = async (ipo: IpoAnalysis) => {
     setSniperOpen(true);
+    setSniperError(null);
+
+    if (ipo?.buy_suggestion) {
+      setSuggestions([ipo.buy_suggestion as unknown as BuySuggestion]);
+      return;
+    }
+
+    const price = Number(ipo?.current_price) || 0;
+    if (!ipo?.symbol || price <= 0) {
+      setSuggestions([]);
+      setSniperError("No live price for this IPO yet — can't evaluate a buy setup.");
+      return;
+    }
+
+    setSuggestions([]);
+    setSniperLoading(true);
+    setSniperBusySymbol(ipo.symbol);
+    try {
+      const data = await api.findBuys({
+        stocks: [
+          {
+            symbol: ipo.symbol,
+            decision: ipo.decision || "HOLD",
+            combined_score: ipo.ipo_score || ipo.pre_listing_advisory_score || 60,
+            conviction: ipo.ipo_score || ipo.pre_listing_advisory_score || 60,
+            price,
+            cmp: price,
+            change_pct: ipo.momentum_5d_pct,
+            atr: ipo.atr_pct ? (ipo.atr_pct / 100) * price : undefined,
+            technical_score: ipo.ipo_score || 60,
+            fundamental_score: ipo.pre_listing_advisory_score || 60,
+            sector: "IPO",
+          },
+        ],
+        target_count: 1,
+        min_conviction: 50, // relaxed — this is one specific row the user asked about directly
+      });
+      const found = (data?.suggestions || []) as BuySuggestion[];
+      setSuggestions(found);
+      if (!found.length) {
+        setSniperError(
+          data?.error || "No actionable buy setup for this IPO right now — score/momentum too weak."
+        );
+      }
+    } catch (err: any) {
+      setSniperError(err?.message || "Failed to evaluate buy setup");
+    } finally {
+      setSniperLoading(false);
+      setSniperBusySymbol(null);
+    }
   };
 
   const submitIpoAdd = async () => {
@@ -516,13 +573,25 @@ export default function IpoTracker({
                     {ipo.decision || stage.text}
                   </span>
 
-                  {ipo.buy_suggestion && (
+                  {(ipo.buy_suggestion || Number(ipo.current_price) > 0) && (
                     <button
                       type="button"
-                      onClick={() => openIpoSuggestion(ipo)}
-                      className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-signal-buy/20 border border-signal-buy/40 text-signal-buy hover:bg-signal-buy/30"
+                      onClick={() => void openIpoSuggestion(ipo)}
+                      disabled={sniperLoading && sniperBusySymbol === ipo.symbol}
+                      title={
+                        ipo.buy_suggestion
+                          ? "Show the stored buy setup"
+                          : "No stored setup yet — scan live for one"
+                      }
+                      className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-signal-buy/20 border border-signal-buy/40 text-signal-buy hover:bg-signal-buy/30 disabled:opacity-50"
                     >
-                      {ipo.decision === "BUY NOW" ? "Buy Now →" : "Prepare to Buy →"}
+                      {sniperLoading && sniperBusySymbol === ipo.symbol
+                        ? "Scanning…"
+                        : ipo.buy_suggestion
+                        ? ipo.decision === "BUY NOW"
+                          ? "Buy Now →"
+                          : "Prepare to Buy →"
+                        : "🎯 Scan for Buy →"}
                     </button>
                   )}
                 </div>
@@ -540,8 +609,8 @@ export default function IpoTracker({
         isOpen={sniperOpen}
         onClose={() => setSniperOpen(false)}
         suggestions={suggestions}
-        loading={false}
-        error={null}
+        loading={sniperLoading}
+        error={sniperError}
         onSelectSymbol={onSelect}
       />
     </div>

@@ -466,13 +466,34 @@ export default function RealAutoTrade() {
                   REAL mode computes and risk-checks every decision but does not place live orders yet (Phase 3).
                 </p>
               )}
-              {cycleResult && (
-                <p className="font-mono text-[11px] text-paper/60">
-                  candidates {cycleResult.new_candidates} · entered {cycleResult.entry.entered} · waited {cycleResult.entry.waited} ·
-                  rejected {cycleResult.entry.rejected} · fills {cycleResult.fills} · expired {cycleResult.expired_orders} ·
-                  held {cycleResult.exit.held} · trailed {cycleResult.exit.trailed} · partial {cycleResult.exit.partial_exits} ·
-                  closed {cycleResult.exit.full_exits} · time-stopped {cycleResult.exit.time_stops}
-                </p>
+              {(cycleBusy || cycleResult) && (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2 mt-1">
+                  {[
+                    { label: "Candidates", value: cycleResult?.new_candidates, color: "text-sky-300" },
+                    { label: "Entered", value: cycleResult?.entry.entered, color: "text-emerald-300" },
+                    { label: "Waited", value: cycleResult?.entry.waited, color: "text-amber-300" },
+                    { label: "Rejected", value: cycleResult?.entry.rejected, color: "text-rose-300" },
+                    { label: "Fills", value: cycleResult?.fills, color: "text-emerald-300" },
+                    { label: "Expired", value: cycleResult?.expired_orders, color: "text-paper/50" },
+                    { label: "Held", value: cycleResult?.exit.held, color: "text-paper/70" },
+                    { label: "Trailed", value: cycleResult?.exit.trailed, color: "text-sky-300" },
+                    { label: "Partial Exit", value: cycleResult?.exit.partial_exits, color: "text-amber-300" },
+                    { label: "Closed", value: cycleResult?.exit.full_exits, color: "text-emerald-300" },
+                    { label: "Time-stopped", value: cycleResult?.exit.time_stops, color: "text-rose-300" },
+                  ].map((stage) => (
+                    <div key={stage.label} className="border border-white/10 rounded-lg px-2 py-1.5 bg-graphite/40">
+                      <p className="font-mono text-[9px] text-paper/40 uppercase tracking-wide">{stage.label}</p>
+                      <p className={`font-mono text-sm font-bold ${cycleBusy && stage.value == null ? "text-paper/20 animate-pulse" : stage.color}`}>
+                        {cycleBusy && stage.value == null ? "…" : stage.value ?? 0}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {cycleBusy && (
+                <div className="mt-2 h-1 w-full bg-white/5 rounded-full overflow-hidden">
+                  <div className="h-full w-1/3 bg-emerald-500/60 animate-[pulse_1.2s_ease-in-out_infinite] rounded-full" />
+                </div>
               )}
             </div>
           )}

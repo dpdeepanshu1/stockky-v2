@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 import config
 import models
+from tz_utils import as_aware
 
 logger = logging.getLogger("real-trade-dhan-auth")
 
@@ -100,7 +101,7 @@ def connection_status(db: Session) -> dict:
         }
     days_remaining = None
     if row.token_expires_at:
-        delta = row.token_expires_at - datetime.now(timezone.utc)
+        delta = as_aware(row.token_expires_at) - datetime.now(timezone.utc)
         days_remaining = round(delta.total_seconds() / 86400, 1)
     return {
         "connected": True,
@@ -114,7 +115,7 @@ def connection_status(db: Session) -> dict:
 def is_token_valid(row: models.TradeCredential) -> bool:
     if row is None or not row.token_expires_at:
         return False
-    return datetime.now(timezone.utc) < row.token_expires_at
+    return datetime.now(timezone.utc) < as_aware(row.token_expires_at)
 
 
 def refresh_if_totp_enabled(db: Session) -> bool:

@@ -6,6 +6,7 @@ import { sendStockUniverseForTraining, buildUniversePayloadFromScan } from "../a
 import { useStockkyRealtime } from "../useRealtime";
 import { decisionStyle } from "../decisionStyle";
 import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
+import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
 
 interface Props {
   result: ScanResult;
@@ -108,6 +109,32 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   const [sniperError, setSniperError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
+  const [sendingToTrade, setSendingToTrade] = useState<string | null>(null); // "SYMBOL:DEMO" | "SYMBOL:REAL"
+  const [sendTradeMsg, setSendTradeMsg] = useState<{ symbol: string; text: string; ok: boolean } | null>(null);
+
+  const sendToRealTrade = async (r: Decision, mode: "DEMO" | "REAL") => {
+    if (!getRealTradeApiUrl()) {
+      setSendTradeMsg({ symbol: r.symbol, ok: false, text: "Set the Real Trade service URL first (Real Automatic Trade tab)." });
+      return;
+    }
+    const key = `${r.symbol}:${mode}`;
+    setSendingToTrade(key);
+    setSendTradeMsg(null);
+    try {
+      const price = resolveDisplayPrice(r, liveQuotes[r.symbol]?.price) || r.close;
+      await realTradeApi.sendManualCandidate(mode, {
+        symbol: r.symbol,
+        decision_label: r.decision,
+        conviction_score: r.combined_score,
+        signal_price: price,
+      });
+      setSendTradeMsg({ symbol: r.symbol, ok: true, text: `Queued ${r.symbol} for ${mode} — will be evaluated on the next Run Cycle.` });
+    } catch (e: any) {
+      setSendTradeMsg({ symbol: r.symbol, ok: false, text: e?.message || `Failed to send ${r.symbol} to ${mode}` });
+    } finally {
+      setSendingToTrade(null);
+    }
+  };
   const { connected: quoteWs, subscribeQuotes, quotes: liveQuotes } = useStockkyRealtime();
 
   /** Keep first occurrence of each symbol (normalized). Prevents the same stock
@@ -771,12 +798,39 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
                     <td className="px-4 py-3 text-right text-mist hidden md:table-cell">{r.technical_score}</td>
                     <td className="px-4 py-3 text-right text-mist hidden md:table-cell">{r.fundamental_score}</td>
                     <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => onSelect(r.symbol)}
-                        className="text-[10px] text-signal-prepare hover:text-paper transition uppercase tracking-wide"
-                      >
-                        View →
-                      </button>
+                      <div className="flex items-center justify-end gap-2 flex-wrap">
+                        {(r.decision === "BUY NOW" || r.decision === "PREPARE TO BUY") && (
+                          <>
+                            <button
+                              onClick={() => void sendToRealTrade(r, "DEMO")}
+                              disabled={sendingToTrade === `${r.symbol}:DEMO`}
+                              title="Queue this stock for the Real Automatic Trade DEMO cycle"
+                              className="text-[10px] text-emerald-300 hover:text-emerald-200 transition uppercase tracking-wide disabled:opacity-50"
+                            >
+                              {sendingToTrade === `${r.symbol}:DEMO` ? "…" : "→ DEMO"}
+                            </button>
+                            <button
+                              onClick={() => void sendToRealTrade(r, "REAL")}
+                              disabled={sendingToTrade === `${r.symbol}:REAL`}
+                              title="Queue this stock for the Real Automatic Trade REAL cycle (requires admin login + armed)"
+                              className="text-[10px] text-rose-300 hover:text-rose-200 transition uppercase tracking-wide disabled:opacity-50"
+                            >
+                              {sendingToTrade === `${r.symbol}:REAL` ? "…" : "→ REAL"}
+                            </button>
+                          </>
+                        )}
+                        <button
+                          onClick={() => onSelect(r.symbol)}
+                          className="text-[10px] text-signal-prepare hover:text-paper transition uppercase tracking-wide"
+                        >
+                          View →
+                        </button>
+                      </div>
+                      {sendTradeMsg && sendTradeMsg.symbol === r.symbol && (
+                        <p className={`text-[9px] mt-1 ${sendTradeMsg.ok ? "text-emerald-300/80" : "text-rose-300/80"}`}>
+                          {sendTradeMsg.text}
+                        </p>
+                      )}
                     </td>
                   </tr>
                 );

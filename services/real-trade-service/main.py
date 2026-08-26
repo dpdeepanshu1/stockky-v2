@@ -28,6 +28,7 @@ from auth.admin_auth import (
 from auth import dhan_credentials
 from audit.logger import log_action
 from db import get_db, init_schema
+from tz_utils import as_aware
 from portfolio.portfolio import open_positions as _pf_open_positions
 from risk_engine.engine import AccountState, OrderIntent, evaluate as risk_evaluate
 
@@ -157,7 +158,7 @@ def _check_and_expire_gates(db: Session, mode: str) -> models.TradeGateState:
     gate = _gate(db, mode)
     now = datetime.now(timezone.utc)
 
-    if gate.admin_authenticated and gate.admin_session_expires_at and now > gate.admin_session_expires_at:
+    if gate.admin_authenticated and gate.admin_session_expires_at and now > as_aware(gate.admin_session_expires_at):
         gate.admin_authenticated = False
         if gate.armed:
             _disarm(db, mode, "Admin session expired")
@@ -439,6 +440,53 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
         "reason": result.reason,
         "approved_qty": result.approved_qty,
     }
+
+
+class ManualCandidateRequest(BaseModel):
+    symbol: str
+    decision_label: Optional[str] = None
+    conviction_score: Optional[float] = None
+    signal_price: Optional[float] = None
+
+
+# ── Routes: manual candidate injection from the Scan Market page ───────────
+@app.post("/candidates/manual/{mode}")
+async def add_manual_candidate(
+    mode: str,
+    body: ManualCandidateRequest,
+    admin: Optional[str] = Depends(require_admin_if_real),
+    db: Session = Depends(get_db),
+):
+    """Lets the main Scan Market page push one specific stock straight into
+    this mode's candidate queue — same table entry_engine already reads
+    from (source_tab='market_scan'), so the very next Run Cycle (or the
+    one already in flight) evaluates it exactly like an auto-fed Hot
+    Picks/IPO candidate. Does not place an order itself — only queues the
+    candidate for the normal risk-checked entry path."""
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    gate = _check_and_expire_gates(db, mode)
+    if not gate.armed:
+        raise HTTPException(status_code=409, detail=f"{mode} is not armed — arm it before sending candidates.")
+
+    symbol = (body.symbol or "").upper().strip().replace(".NS", "").replace(".BO", "")
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    row = models.TradeCandidate(
+        mode=mode,
+        symbol=symbol,
+        source_tab="market_scan",
+        decision_label=body.decision_label,
+        conviction_score=body.conviction_score,
+        signal_price=body.signal_price,
+    )
+    db.add(row)
+    db.commit()
+    log_action(db, actor=admin or "admin", action="MANUAL_CANDIDATE", mode=mode,
+               detail=f"{symbol} queued from Scan Market page")
+    return {"ok": True, "mode": mode, "symbol": symbol, "queued": True}
 
 
 # ── Routes: audit log read ───────────────────────────────────────────────────

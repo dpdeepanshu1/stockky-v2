@@ -931,7 +931,7 @@ def _merged_ipo_universe() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     diag["merged_total"] = len(merged)
     diag["merged_dated"] = len(dated)
 
-    lookback = min(IPO_LOOKBACK_DAYS_MAX, IPO_LOOKBACK_DAYS_HARD_CAP)
+    lookback = min(LOOKBACK_DAYS_MAX, IPO_LOOKBACK_DAYS_HARD_CAP)
     now = datetime.now(IST)
     recent: List[Dict[str, Any]] = []
     for m in dated:

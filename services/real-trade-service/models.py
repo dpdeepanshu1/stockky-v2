@@ -158,6 +158,16 @@ class TradeOrder(Base):
     valid_until = Column(DateTime, nullable=True)          # time-boxed entry window (decision 1)
     status = Column(String(16), nullable=False, default="PENDING")  # PENDING/PLACED/FILLED/PARTIAL/CANCELLED/REJECTED/EXPIRED
     dhan_order_id = Column(String(64), nullable=True)      # null in DEMO mode
+    # Who/what originated this order — lets the dashboard (and later,
+    # Training) answer "manual vs automatic" without inferring it from
+    # decision_id being null. "AUTO" is the default so every existing row
+    # and every entry_engine/exit_engine-created order keeps its original
+    # meaning with zero migration risk; only manual_engine.py ever writes
+    # "MANUAL". See db.py's _ensure_manual_order_columns for the additive
+    # migration that adds this column to an already-deployed table.
+    execution_source = Column(String(16), nullable=False, default="AUTO")  # "AUTO" | "MANUAL" | "EXIT"
+    confirmed_by = Column(String(64), nullable=True)   # admin username who hit "Confirm" (MANUAL real-money orders only)
+    confirmed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 

@@ -60,14 +60,24 @@ def _has_pending_real_sell(db: Session, symbol: str) -> bool:
     )
 
 
-def _send_real_sell(db: Session, position: models.TradePosition, qty: int, reason: str, full: bool = True) -> bool:
+def _send_real_sell(
+    db: Session, position: models.TradePosition, qty: int, reason: str, full: bool = True,
+    execution_source: str = "AUTO", confirmed_by: str | None = None,
+) -> bool:
     """Places a MARKET SELL at Dhan for `qty` shares of an open REAL
     position. MARKET, not LIMIT — an exit's whole purpose is capital
     protection or locking in profit; a limit sell that never fills would
     defeat that. Returns True and marks the position PENDING_EXIT only if
     Dhan actually accepted the order; on any failure the position is left
     untouched so exit_engine tries again next cycle rather than silently
-    giving up on a stop that needs to fire."""
+    giving up on a stop that needs to fire.
+
+    execution_source/confirmed_by: passed through by manual_engine.py when
+    a human clicked SELL (source="MANUAL", confirmed_by=admin username);
+    every other caller (exit_engine's own stop/target/time-stop cycle,
+    main.py's existing "Close" button) leaves these at the AUTO default —
+    the point is only to distinguish a human-initiated sell from the
+    automatic exit cycle in the audit trail, not to change behavior."""
     try:
         security_id = dhan_client.get_security_id(db, position.symbol)
         result = dhan_client.place_order(
@@ -86,6 +96,9 @@ def _send_real_sell(db: Session, position: models.TradePosition, qty: int, reaso
         order = models.TradeOrder(
             mode="REAL", symbol=position.symbol, side="SELL", order_type="MARKET",
             qty=qty, status="PLACED", dhan_order_id=dhan_order_id,
+            execution_source=execution_source,
+            confirmed_by=confirmed_by,
+            confirmed_at=datetime.now(timezone.utc) if confirmed_by else None,
         )
         db.add(order)
         db.flush()

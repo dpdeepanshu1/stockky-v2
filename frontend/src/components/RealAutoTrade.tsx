@@ -4,6 +4,7 @@ import {
   getSessionToken, setSessionToken, type GateStatus, type AuditLogRow,
   type Position, type OrderRow, type CycleResult, type DhanStatus,
 } from "../realTradeApi";
+import ManualTradeTicket from "./trading/ManualTradeTicket";
 
 type Mode = "DEMO" | "REAL";
 
@@ -610,6 +611,18 @@ export default function RealAutoTrade() {
                 <span>Realized P&amp;L today</span><span>₹{status.account.realized_pnl_today ?? "—"}</span>
               </div>
             </div>
+          )}
+
+          {/* Manual Trade Ticket — the "MANUAL" leg of DEMO/MANUAL/AUTO.
+              DEMO needs no arming (matches the rest of DEMO's always-open
+              policy); REAL still requires the same admin+Dhan+risk-config
+              gate sequence above, enforced again server-side either way. */}
+          {(mode === "DEMO" || status?.admin_authenticated) && (
+            <ManualTradeTicket
+              mode={mode}
+              armed={!!status?.armed}
+              onOrderComplete={() => { void loadPositionsAndOrders(mode); void loadStatus(mode); }}
+            />
           )}
 
           {/* Run cycle — Phase 2: candidates -> entries -> fills -> exits */}

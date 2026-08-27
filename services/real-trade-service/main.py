@@ -463,6 +463,59 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
     }
 
 
+class ManualOrderRequest(BaseModel):
+    symbol: str
+    side: str                              # "BUY" | "SELL"
+    qty: int
+    order_type: str = "LIMIT"              # "LIMIT" | "MARKET"
+    limit_price: Optional[float] = None    # required for LIMIT; ignored for MARKET (priced off the live tick)
+    product_type: str = "CNC"              # "CNC" | "MIS"
+    stop_price: Optional[float] = None     # BUY only; a conservative flat default is used if omitted
+    target_price: Optional[float] = None   # BUY only; same
+    position_id: Optional[int] = None      # SELL only; if omitted, resolves the open position by symbol
+
+
+# ── Routes: Manual Execution Gateway (Stockky Trade ticket) ────────────────
+# Two-step by design — see manual_engine.py's module docstring. The
+# frontend's "Review Order" screen calls /preview (no DB writes); the
+# "Confirm BUY/SELL" button calls /confirm, which re-derives everything
+# from current state rather than trusting the preview response. Both
+# routes share the exact same gate/risk path DEMO and REAL orders always
+# have — a manual mistake (fat-fingered qty, stale stop) is blocked by the
+# same risk engine an automatic candidate would be.
+@app.post("/manual-order/{mode}/preview")
+async def manual_order_preview(
+    mode: str, body: ManualOrderRequest,
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    gate = _check_and_expire_gates(db, mode)
+    from manual_engine import evaluate_manual_order
+    return await evaluate_manual_order(db, mode, gate.armed, body, confirm=False, admin=admin)
+
+
+@app.post("/manual-order/{mode}/confirm")
+async def manual_order_confirm(
+    mode: str, body: ManualOrderRequest,
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    gate = _check_and_expire_gates(db, mode)
+    if body.side.upper() == "BUY" and not gate.armed:
+        # SELL is intentionally exempt (see manual_engine.py) — exiting a
+        # position must never be blocked by "not armed", same policy as
+        # the existing manual-close endpoint. A BUY, however, is new
+        # risk-taking and must go through the same "armed" gate as
+        # everything else that can open a position.
+        raise HTTPException(status_code=409, detail=f"{mode} is not armed — arm it before sending a manual BUY.")
+    from manual_engine import evaluate_manual_order
+    return await evaluate_manual_order(db, mode, gate.armed, body, confirm=True, admin=admin)
+
+
 class ManualCandidateRequest(BaseModel):
     symbol: str
     decision_label: Optional[str] = None

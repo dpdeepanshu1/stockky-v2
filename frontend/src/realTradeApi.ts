@@ -122,6 +122,49 @@ export interface CycleResult {
   exit: { evaluated: number; held: number; trailed: number; partial_exits: number; full_exits: number; time_stops: number };
 }
 
+export interface ManualOrderRequest {
+  symbol: string;
+  side: "BUY" | "SELL";
+  qty: number;
+  order_type?: "LIMIT" | "MARKET";
+  limit_price?: number | null;
+  product_type?: "CNC" | "MIS";
+  stop_price?: number | null;
+  target_price?: number | null;
+  position_id?: number | null;
+}
+
+export interface ManualOrderResult {
+  ok: boolean;
+  mode?: string;
+  symbol?: string;
+  side?: "BUY" | "SELL";
+  order_type?: string;
+  product_type?: string;
+  entry_price?: number;
+  stop_price?: number;
+  target_price?: number;
+  qty_requested?: number;
+  approved_qty?: number;
+  risk_amount?: number;
+  estimated_value?: number;
+  risk_reward?: number | null;
+  verdict?: string;
+  check_name?: string;
+  reason?: string;
+  detail?: string;
+  status?: string;
+  filled?: boolean;
+  order_id?: number;
+  decision_id?: number;
+  dhan_order_id?: string;
+  position_id?: number;
+  qty_available?: number;
+  exit_price_estimate?: number;
+  estimated_pnl?: number;
+  pnl?: number;
+}
+
 export const realTradeApi = {
   health: () => rtRequest<{ ok: boolean; service: string; phase: string }>("/health", {}, false),
 
@@ -201,4 +244,15 @@ export const realTradeApi = {
     rtRequest<{ ok: boolean; checked?: number; entries_filled?: number; exits_confirmed?: number; dead_orders?: number; errors?: number; note?: string }>(
       `/reconcile/${mode}`, { method: "POST" }, mode === "REAL"
     ),
+
+  // Manual Execution Gateway — see manual_engine.py. previewManualOrder
+  // never writes anything server-side (safe to call on every ticket
+  // change); confirmManualOrder is the one that actually places/fills
+  // the order, so only ever call it from the ticket's Confirm button,
+  // after the person has seen the preview.
+  previewManualOrder: (mode: "DEMO" | "REAL", body: ManualOrderRequest) =>
+    rtRequest<ManualOrderResult>(`/manual-order/${mode}/preview`, { method: "POST", body: JSON.stringify(body) }, mode === "REAL"),
+
+  confirmManualOrder: (mode: "DEMO" | "REAL", body: ManualOrderRequest) =>
+    rtRequest<ManualOrderResult>(`/manual-order/${mode}/confirm`, { method: "POST", body: JSON.stringify(body) }, mode === "REAL"),
 };

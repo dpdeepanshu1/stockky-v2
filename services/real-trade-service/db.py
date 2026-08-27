@@ -115,6 +115,54 @@ def init_schema() -> None:
     if dialect() == "oracle":
         _ensure_oracle_autoincrement(eng, models.Base)
 
+    _ensure_manual_order_columns(eng, dialect())
+
+
+# create_all(checkfirst=True) only creates MISSING TABLES — it never adds a
+# column to a table that already exists (see SQLAlchemy docs: it diffs
+# table names, not column sets). trade_orders existed before
+# execution_source/confirmed_by/confirmed_at were added to models.py, so on
+# any already-deployed DB those three columns must be added by hand, once,
+# additively — same idiom decision-prediction-service/training/models.py
+# already uses for its own schema drift. Safe to call on every boot: each
+# ALTER is wrapped so "column already exists" (Postgres) / ORA-01430
+# (Oracle) is swallowed exactly like exec_ddl_safe does for "table already
+# exists" elsewhere in this file.
+def _ensure_manual_order_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        existing = {c["name"] for c in inspect(engine).get_columns("trade_orders")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect trade_orders columns: %s", e)
+        return
+
+    if dialect_name == "oracle":
+        adds = [
+            ("execution_source", "ALTER TABLE trade_orders ADD (execution_source VARCHAR2(16) DEFAULT 'AUTO' NOT NULL)"),
+            ("confirmed_by", "ALTER TABLE trade_orders ADD (confirmed_by VARCHAR2(64))"),
+            ("confirmed_at", "ALTER TABLE trade_orders ADD (confirmed_at TIMESTAMP)"),
+        ]
+    else:
+        adds = [
+            ("execution_source", "ALTER TABLE trade_orders ADD COLUMN execution_source VARCHAR(16) DEFAULT 'AUTO' NOT NULL"),
+            ("confirmed_by", "ALTER TABLE trade_orders ADD COLUMN confirmed_by VARCHAR(64)"),
+            ("confirmed_at", "ALTER TABLE trade_orders ADD COLUMN confirmed_at TIMESTAMP"),
+        ]
+
+    for col_name, sql in adds:
+        if col_name in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added trade_orders.%s", col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add trade_orders.%s: %s", col_name, e)
+
 
 # Every trade_* model uses `id = Column(Integer, primary_key=True,
 # autoincrement=True)`. On Postgres that's always backed by a real serial/

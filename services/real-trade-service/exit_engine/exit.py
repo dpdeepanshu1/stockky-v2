@@ -14,8 +14,11 @@ the plan's "never a single fixed target" exit design:
 
 Every evaluation — including HOLD — writes a TradeExitDecision row (per
 the plan's audit principle: "every consequential action gets logged").
-REAL-mode exits are NOT wired to Dhan yet (Phase 3) — see the TODO in
-evaluate_mode(), mirroring entry_engine's same gap.
+REAL-mode exits ARE wired to Dhan (Phase 3, execution/dhan_client.py via
+_send_real_sell below) — stop/target/time-stop all send a MARKET SELL.
+A sent-not-yet-confirmed exit is tracked via the TradeOrder row itself
+(_has_pending_real_sell), not by removing the position from evaluation,
+so a partial exit's remainder still gets trailed/evaluated every cycle.
 """
 from __future__ import annotations
 
@@ -26,8 +29,9 @@ from sqlalchemy.orm import Session
 
 import models
 from audit.logger import log_action
+from execution import dhan_client
 from market_feed.feed import get_quotes
-from portfolio.portfolio import close_position, open_positions, refresh_unrealized
+from portfolio.portfolio import close_position, open_positions, refresh_unrealized, record_real_exit_sent
 
 logger = logging.getLogger("real-trade-exit")
 
@@ -40,6 +44,57 @@ def _write_exit_decision(db: Session, position: models.TradePosition, action: st
     db.add(models.TradeExitDecision(
         position_id=position.id, action=action, reasoning=reasoning, ltp_at_decision=ltp,
     ))
+
+
+def _has_pending_real_sell(db: Session, symbol: str) -> bool:
+    """True if a REAL SELL for this symbol is already sent and awaiting
+    broker confirmation — the guard against sending a second SELL for the
+    same shares before reconcile_real_orders() has confirmed the first
+    one (see record_real_exit_sent's full=False docstring)."""
+    return (
+        db.query(models.TradeOrder)
+        .filter_by(mode="REAL", symbol=symbol, side="SELL", status="PLACED")
+        .first()
+        is not None
+    )
+
+
+def _send_real_sell(db: Session, position: models.TradePosition, qty: int, reason: str, full: bool = True) -> bool:
+    """Places a MARKET SELL at Dhan for `qty` shares of an open REAL
+    position. MARKET, not LIMIT — an exit's whole purpose is capital
+    protection or locking in profit; a limit sell that never fills would
+    defeat that. Returns True and marks the position PENDING_EXIT only if
+    Dhan actually accepted the order; on any failure the position is left
+    untouched so exit_engine tries again next cycle rather than silently
+    giving up on a stop that needs to fire."""
+    try:
+        security_id = dhan_client.get_security_id(db, position.symbol)
+        result = dhan_client.place_order(
+            db, is_armed=True,  # exits are always allowed — see dhan_client.cancel_order's same policy
+            security_id=security_id,
+            exchange_segment=dhan_client.NSE_EQ_SEGMENT,
+            transaction_type="SELL",
+            quantity=qty,
+            order_type="MARKET",
+            price=0,
+        )
+        dhan_order_id = str(result.get("orderId") or result.get("order_id") or "")
+        if not dhan_order_id:
+            raise RuntimeError(f"Dhan accepted the SELL but returned no order id: {result}")
+
+        order = models.TradeOrder(
+            mode="REAL", symbol=position.symbol, side="SELL", order_type="MARKET",
+            qty=qty, status="PLACED", dhan_order_id=dhan_order_id,
+        )
+        db.add(order)
+        db.flush()
+        db.add(models.TradeOrderEvent(order_id=order.id, event_type="PLACED",
+                                       detail=f"{reason}: MARKET SELL {qty} sent to Dhan"))
+        record_real_exit_sent(db, position, dhan_order_id, qty, reason, full=full)
+        return True
+    except Exception as e:  # noqa: BLE001 — must never crash the whole exit cycle
+        logger.error("REAL exit SELL failed for %s (%s): %s", position.symbol, reason, e)
+        return False
 
 
 async def evaluate_mode(db: Session, mode: str) -> dict:
@@ -68,17 +123,28 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
             continue
         ltp = tick.price
 
+        # REAL only: a SELL already sent to Dhan for this symbol is still
+        # awaiting broker confirmation — don't re-evaluate stop/target/
+        # time-stop against it again until reconcile_real_orders() has
+        # confirmed or rejected that order. DEMO has no such in-flight
+        # state (close_position is synchronous), so this never applies to it.
+        if mode == "REAL" and _has_pending_real_sell(db, position.symbol):
+            _write_exit_decision(db, position, "HOLD", "Exit already sent to Dhan, awaiting confirmation.", ltp)
+            held += 1
+            continue
+
         # 1. Stop hit — capital protection always wins, checked first.
         if position.current_stop is not None and ltp <= position.current_stop:
             reasoning = f"Stop {position.current_stop} hit at LTP {ltp}."
             _write_exit_decision(db, position, "FULL_EXIT", reasoning, ltp)
             if mode == "DEMO":
                 close_position(db, position, tick, position.qty_open, "stop_hit")
+                full_exits += 1
             else:
-                # TODO (Phase 3): execution/dhan_client.place_order(side="SELL", ...)
-                # for the REAL position's full qty. Not wired yet.
-                logger.warning("REAL exit needed for %s (stop hit) but execution is not wired — Phase 3.", position.symbol)
-            full_exits += 1
+                if _send_real_sell(db, position, position.qty_open, "stop_hit"):
+                    full_exits += 1
+                else:
+                    held += 1  # placement failed — still open, retry next cycle
             continue
 
         # 2. First target hit — partial exit, not a full close.
@@ -94,9 +160,12 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                 if position.qty_open > 0:
                     position.current_stop = max(position.current_stop or 0, position.avg_entry_price)
                     db.commit()
+                partial_exits += 1
             else:
-                logger.warning("REAL partial exit needed for %s but execution is not wired — Phase 3.", position.symbol)
-            partial_exits += 1
+                if _send_real_sell(db, position, qty_to_close, "target_hit_partial", full=False):
+                    partial_exits += 1
+                else:
+                    held += 1
             continue
 
         # 3. Time stop — capital shouldn't sit dead in a non-performing name.
@@ -106,9 +175,12 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
             _write_exit_decision(db, position, "EMERGENCY_EXIT", reasoning, ltp)
             if mode == "DEMO":
                 close_position(db, position, tick, position.qty_open, "time_stop")
+                time_stops += 1
             else:
-                logger.warning("REAL time-stop exit needed for %s but execution is not wired — Phase 3.", position.symbol)
-            time_stops += 1
+                if _send_real_sell(db, position, position.qty_open, "time_stop"):
+                    time_stops += 1
+                else:
+                    held += 1
             continue
 
         # 4. Trailing stop — ATR-based, only ever tightens (never loosens).

@@ -174,6 +174,117 @@ def close_position(
     return pnl
 
 
+def record_real_order_sent(db: Session, order: models.TradeOrder, dhan_order_id: str) -> None:
+    """REAL-only. Marks a TradeOrder as sent to the broker. Does NOT open a
+    position or touch account cash — a REAL fill is never assumed just
+    because the order was accepted; only reconcile_real_orders() (which
+    reads Dhan's own order/trade state) is allowed to do that."""
+    order.status = "PLACED"
+    order.dhan_order_id = dhan_order_id
+    order.updated_at = datetime.now(timezone.utc)
+    db.add(models.TradeOrderEvent(order_id=order.id, event_type="PLACED",
+                                   detail=f"Sent to Dhan, broker order_id={dhan_order_id}"))
+    db.commit()
+
+
+def record_real_fill(db: Session, order: models.TradeOrder, fill_price: float, filled_qty: int,
+                      stop_price: float, target_price: float) -> None:
+    """REAL-only equivalent of try_fill_entry's position-opening half, but
+    driven by a CONFIRMED fill from Dhan (reconcile_real_orders), never by
+    a simulated price check. Mirrors try_fill_entry's pyramiding/average
+    logic so both modes produce the same TradePosition shape."""
+    now = datetime.now(timezone.utc)
+    order.status = "FILLED"
+    order.updated_at = now
+    db.add(models.TradeOrderEvent(order_id=order.id, event_type="FILLED",
+                                   detail=f"Broker-confirmed fill @ {fill_price} x{filled_qty}"))
+    db.add(models.TradeFill(order_id=order.id, qty=filled_qty, price=fill_price, filled_at=now))
+
+    position = db.query(models.TradePosition).filter_by(mode="REAL", symbol=order.symbol, status="OPEN").first()
+    if position is None:
+        position = models.TradePosition(
+            mode="REAL", symbol=order.symbol, status="OPEN",
+            qty_open=filled_qty, avg_entry_price=fill_price, opened_at=now,
+            current_stop=stop_price, current_target=target_price,
+        )
+        db.add(position)
+        db.flush()
+        db.add(models.TradePositionEvent(position_id=position.id, event_type="OPENED",
+                                          detail=f"{filled_qty} @ {fill_price}, stop {stop_price}, target {target_price} (broker-confirmed)"))
+    else:
+        total_cost = position.avg_entry_price * position.qty_open + fill_price * filled_qty
+        position.qty_open += filled_qty
+        position.avg_entry_price = round(total_cost / position.qty_open, 4)
+        db.add(models.TradePositionEvent(position_id=position.id, event_type="ADDED",
+                                          detail=f"+{filled_qty} @ {fill_price} (broker-confirmed)"))
+
+    account = get_account(db, "REAL")
+    account.cash_available -= fill_price * filled_qty
+    account.updated_at = now
+    db.commit()
+    log_action(db, actor="system", action="ORDER_FILLED", mode="REAL",
+               detail=f"{order.symbol} BUY {filled_qty} @ {fill_price} (broker-confirmed)")
+
+
+def record_real_exit_sent(db: Session, position: models.TradePosition, dhan_order_id: str,
+                           qty: int, reason: str, full: bool = True) -> None:
+    """REAL-only. A SELL was sent to Dhan for this position but is not yet
+    confirmed filled. `full=True` (stop hit / time stop — the whole open
+    qty) marks the position PENDING_EXIT so exit_engine stops evaluating
+    it until reconcile_real_orders() confirms the fill. `full=False`
+    (a partial target exit) leaves the position's status untouched — the
+    remainder is still a live, OPEN position that still needs stop
+    trailing and further exit evaluation every cycle; only the specific
+    in-flight SELL is tracked, via the TradeOrder row itself, so exit_engine's
+    own duplicate-send guard (_has_pending_real_sell) is what prevents a
+    second SELL before this one confirms — not the position status."""
+    if full:
+        position.status = "PENDING_EXIT"
+    db.add(models.TradePositionEvent(
+        position_id=position.id, event_type="EXIT_SENT",
+        detail=f"{reason}: SELL {qty} sent to Dhan, broker order_id={dhan_order_id}",
+    ))
+    db.commit()
+
+
+def record_real_exit_fill(db: Session, position: models.TradePosition, exit_price: float,
+                           qty_closed: int, reason: str) -> float:
+    """REAL-only. Confirmed by reconcile_real_orders() against Dhan's own
+    trade book — never called speculatively. Books realized P&L exactly
+    like close_position() does for DEMO, so both modes report P&L the
+    same way."""
+    now = datetime.now(timezone.utc)
+    qty_closed = min(qty_closed, position.qty_open)
+    pnl = round((exit_price - position.avg_entry_price) * qty_closed, 2)
+
+    position.qty_open -= qty_closed
+    position.realized_pnl += pnl
+    if position.qty_open <= 0:
+        position.status = "CLOSED"
+        position.closed_at = now
+    else:
+        position.status = "OPEN"  # still-open remainder resumes normal exit evaluation next cycle
+
+    db.add(models.TradePositionEvent(
+        position_id=position.id,
+        event_type="CLOSED" if position.status == "CLOSED" else "PARTIAL_EXIT",
+        detail=f"{reason}: {qty_closed} @ {exit_price} (pnl {pnl:+.2f}, broker-confirmed)",
+    ))
+    db.flush()
+
+    account = get_account(db, "REAL")
+    account.cash_available += exit_price * qty_closed
+    account.realized_pnl_today += pnl
+    account.realized_pnl_total += pnl
+    account.current_equity = account.cash_available + _open_positions_market_value(db, "REAL")
+    account.updated_at = now
+    db.commit()
+    log_action(db, actor="system",
+               action="POSITION_CLOSED" if position.status == "CLOSED" else "POSITION_PARTIAL_EXIT",
+               mode="REAL", detail=f"{position.symbol} {reason} qty={qty_closed} pnl={pnl:+.2f} (broker-confirmed)")
+    return pnl
+
+
 def _open_positions_market_value(db: Session, mode: str) -> float:
     """Best-effort mark-to-market using each position's last known price
     (avg_entry_price as a floor when no fresher tick has been recorded

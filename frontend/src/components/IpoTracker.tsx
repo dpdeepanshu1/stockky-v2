@@ -85,6 +85,7 @@ export default function IpoTracker({
   const [sniperLoading, setSniperLoading] = useState(false);
   const [sniperError, setSniperError] = useState<string | null>(null);
   const [sniperBusySymbol, setSniperBusySymbol] = useState<string | null>(null);
+  const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
 
   // Keep the current window in a ref so the poll/socket callbacks can refetch
   // with the right display_days without being re-created on every toggle.
@@ -524,8 +525,9 @@ export default function IpoTracker({
               return (
                 <div
                   key={ipo.symbol}
-                  className="rounded-lg border border-slate/50 bg-ink/50 px-3 py-2.5 flex flex-wrap items-center justify-between gap-2"
+                  className="rounded-lg border border-slate/50 bg-ink/50 px-3 py-2.5"
                 >
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="min-w-[140px]">
                     <button
                       type="button"
@@ -594,6 +596,82 @@ export default function IpoTracker({
                         : "🎯 Scan for Buy →"}
                     </button>
                   )}
+
+                  <button
+                    type="button"
+                    onClick={() => setExpandedSymbol((cur) => (cur === ipo.symbol ? null : ipo.symbol))}
+                    className="font-mono text-[10px] text-mist/50 hover:text-paper transition uppercase tracking-wide"
+                  >
+                    {expandedSymbol === ipo.symbol ? "Hide detail ▴" : "Detail ▾"}
+                  </button>
+                </div>
+
+                {expandedSymbol === ipo.symbol && (
+                  <div className="mt-2.5 pt-2.5 border-t border-slate/40 grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2">
+                    <div>
+                      <p className="font-mono text-[9px] text-mist/40 uppercase tracking-wide mb-1">Listing</p>
+                      <div className="font-mono text-[10px] text-mist/70 space-y-0.5">
+                        {ipo.listing_date && <p>Listed {ipo.listing_date}</p>}
+                        {ipo.days_since_listing != null && <p>{ipo.days_since_listing}d since listing</p>}
+                        {ipo.listing_day_close != null && <p>Day-1 close ₹{ipo.listing_day_close}</p>}
+                        {ipo.listing_pop_pct != null && <p>Listing pop {ipo.listing_pop_pct.toFixed(1)}%</p>}
+                        {ipo.post_listing_high != null && <p>Post-listing high ₹{ipo.post_listing_high}</p>}
+                        {ipo.current_vs_high_pct != null && <p>vs high {ipo.current_vs_high_pct.toFixed(1)}%</p>}
+                        {ipo.subscription_times != null && <p>Subscribed {ipo.subscription_times}x</p>}
+                        {ipo.source && <p>Source: {ipo.source}</p>}
+                      </div>
+                    </div>
+
+                    <div>
+                      <p className="font-mono text-[9px] text-mist/40 uppercase tracking-wide mb-1">Momentum</p>
+                      <div className="font-mono text-[10px] text-mist/70 space-y-0.5">
+                        {ipo.momentum_5d_pct != null && <p>5d momentum {ipo.momentum_5d_pct.toFixed(1)}%</p>}
+                        {ipo.volume_trend_ratio != null && <p>Volume trend {ipo.volume_trend_ratio.toFixed(2)}x</p>}
+                        {ipo.atr_pct != null && <p>ATR {ipo.atr_pct.toFixed(1)}%</p>}
+                        {ipo.gmp != null && <p>GMP ₹{ipo.gmp}</p>}
+                        {ipo.gmp_pct_of_issue != null && <p>GMP {ipo.gmp_pct_of_issue.toFixed(1)}% of issue</p>}
+                        {ipo.momentum_5d_pct == null &&
+                          ipo.volume_trend_ratio == null &&
+                          ipo.atr_pct == null &&
+                          ipo.gmp == null && <p className="text-mist/40">Not available yet</p>}
+                      </div>
+                    </div>
+
+                    {ipo.score_breakdown && Object.keys(ipo.score_breakdown).length > 0 && (
+                      <div>
+                        <p className="font-mono text-[9px] text-mist/40 uppercase tracking-wide mb-1">Score Breakdown</p>
+                        <div className="font-mono text-[10px] text-mist/70 space-y-0.5">
+                          {Object.entries(ipo.score_breakdown).map(([k, v]) => (
+                            <p key={k} className="flex justify-between gap-2">
+                              <span className="text-mist/50">{k.replace(/_/g, " ")}</span>
+                              <span>{typeof v === "number" ? v.toFixed(1) : String(v)}</span>
+                            </p>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {ipo.fundamentals_snapshot && Object.keys(ipo.fundamentals_snapshot).length > 0 && (
+                      <div>
+                        <p className="font-mono text-[9px] text-mist/40 uppercase tracking-wide mb-1">Fundamentals</p>
+                        <div className="font-mono text-[10px] text-mist/70 space-y-0.5">
+                          {Object.entries(ipo.fundamentals_snapshot).map(([k, v]) => (
+                            <p key={k} className="flex justify-between gap-2">
+                              <span className="text-mist/50">{k.replace(/_/g, " ")}</span>
+                              <span>{v == null ? "—" : typeof v === "number" ? v.toFixed(2) : String(v)}</span>
+                            </p>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {ipo.message && (
+                      <div className="col-span-full">
+                        <p className="font-mono text-[10px] text-mist/50">{ipo.message}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
                 </div>
               );
             })}

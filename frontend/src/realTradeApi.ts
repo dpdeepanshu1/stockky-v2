@@ -93,13 +93,13 @@ export interface AuditLogRow {
 }
 
 export interface Position {
-  symbol: string; status: string; qty_open: number; avg_entry_price: number;
+  id: number; symbol: string; status: string; qty_open: number; avg_entry_price: number;
   current_stop: number | null; current_target: number | null;
   unrealized_pnl: number; realized_pnl: number; opened_at: string;
 }
 
 export interface OrderRow {
-  symbol: string; side: string; qty: number; order_type: string;
+  id: number; symbol: string; side: string; qty: number; order_type: string;
   limit_price: number | null; status: string; valid_until: string | null; created_at: string;
 }
 
@@ -175,4 +175,21 @@ export const realTradeApi = {
 
   orders: (mode: "DEMO" | "REAL", limit = 50) =>
     rtRequest<OrderRow[]>(`/orders/${mode}?limit=${limit}`, {}, mode === "REAL"),
+
+  closePosition: (mode: "DEMO" | "REAL", positionId: number, qty?: number) =>
+    rtRequest<{ ok: boolean; symbol: string; qty_closed?: number; qty_sent?: number; pnl?: number; status?: string }>(
+      `/positions/${mode}/${positionId}/close`,
+      { method: "POST", body: JSON.stringify({ qty: qty ?? null }) },
+      mode === "REAL"
+    ),
+
+  cancelOrder: (mode: "DEMO" | "REAL", orderId: number) =>
+    rtRequest<{ ok: boolean; order_id: number; status: string }>(
+      `/orders/${mode}/${orderId}/cancel`, { method: "POST" }, mode === "REAL"
+    ),
+
+  reconcile: (mode: "DEMO" | "REAL") =>
+    rtRequest<{ ok: boolean; checked?: number; entries_filled?: number; exits_confirmed?: number; dead_orders?: number; errors?: number; note?: string }>(
+      `/reconcile/${mode}`, { method: "POST" }, mode === "REAL"
+    ),
 };

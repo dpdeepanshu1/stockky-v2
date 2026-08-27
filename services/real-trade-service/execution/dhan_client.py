@@ -22,14 +22,105 @@ zero Dhan account linked.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
+import httpx
 from sqlalchemy.orm import Session
 
 import config
 from auth import dhan_credentials
 
 logger = logging.getLogger("real-trade-dhan-client")
+
+# ── Security master cache (symbol -> Dhan security_id) ─────────────────────
+# Dhan's order APIs take a numeric security_id, not the NSE trading symbol —
+# there is no way to place an order from a symbol string alone. This caches
+# the daily-published NSE equity instrument list so entry/exit never guess:
+# an unresolved symbol means the order is refused, never sent with a
+# fabricated ID. Cache is in-process and refreshed once per
+# _SECURITY_CACHE_TTL_SECONDS — same one-process assumption already
+# documented in hotpicks_store.py's stop flag; this service runs single
+# worker (see docker-compose, no --workers flag), so that's safe here too.
+_SECURITY_CACHE_TTL_SECONDS = 24 * 60 * 60
+_security_cache: dict[str, str] = {}   # SYMBOL -> security_id (NSE_EQ only)
+_security_cache_loaded_at: float = 0.0
+
+NSE_EQ_SEGMENT = "NSE_EQ"
+
+
+class SecurityNotResolvedError(Exception):
+    pass
+
+
+def _load_security_cache(db: Session) -> None:
+    """Pulls Dhan's official NSE equity instrument list (v2 instrument API,
+    requires the same access token already stored for trading) and keeps
+    only main-board equity rows (SEM_EXM_EXCH_ID=NSE, SEM_INSTRUMENT_NAME=
+    EQUITY, SEM_SERIES=EQ) — excludes SME/ETF/debt/etc, which share trading
+    symbols with main-board names often enough to be a real mismatch risk
+    if not filtered out."""
+    global _security_cache, _security_cache_loaded_at
+    creds = dhan_credentials.get_decrypted_credentials(db)
+    if creds is None:
+        raise DhanNotConnectedError("No Dhan credentials stored — connect Dhan first.")
+    _client_id, access_token = creds
+
+    resp = httpx.get(
+        f"https://api.dhan.co/v2/instrument/{NSE_EQ_SEGMENT}",
+        headers={"access-token": access_token},
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+
+    import csv
+    import io
+
+    reader = csv.DictReader(io.StringIO(resp.text))
+    fresh: dict[str, str] = {}
+    for row in reader:
+        try:
+            if row.get("SEM_EXM_EXCH_ID") != "NSE":
+                continue
+            if row.get("SEM_INSTRUMENT_NAME") != "EQUITY":
+                continue
+            if row.get("SEM_SERIES") not in (None, "", "EQ"):
+                continue
+            sym = (row.get("SEM_TRADING_SYMBOL") or "").strip().upper()
+            sec_id = (row.get("SEM_SMST_SECURITY_ID") or "").strip()
+            if sym and sec_id:
+                fresh[sym] = sec_id
+        except Exception:  # noqa: BLE001 — one malformed row must never abort the whole load
+            continue
+
+    if not fresh:
+        # Never swap in an empty cache over a good one — a parsing/format
+        # change upstream should surface as "still using yesterday's list",
+        # not "every symbol is suddenly unresolved".
+        logger.error("Dhan instrument list fetch returned 0 usable rows — keeping existing cache.")
+        return
+
+    _security_cache = fresh
+    _security_cache_loaded_at = time.time()
+    logger.info("real-trade: loaded %d NSE equity security IDs from Dhan", len(fresh))
+
+
+def get_security_id(db: Session, symbol: str) -> str:
+    """Returns the Dhan security_id for an NSE-listed symbol. Raises
+    SecurityNotResolvedError rather than returning None/guessing — callers
+    (entry_engine/exit_engine) must treat that as 'cannot act on this
+    symbol right now', the same way they already treat a missing price
+    tick, never as a reason to fall back to any placeholder ID."""
+    global _security_cache_loaded_at
+    now = time.time()
+    if not _security_cache or (now - _security_cache_loaded_at) > _SECURITY_CACHE_TTL_SECONDS:
+        _load_security_cache(db)
+
+    sym = symbol.strip().upper().replace(".NS", "").replace(".BO", "")
+    sec_id = _security_cache.get(sym)
+    if sec_id is None:
+        raise SecurityNotResolvedError(f"No Dhan NSE_EQ security_id found for '{sym}'.")
+    return sec_id
 
 
 class DhanNotConnectedError(Exception):

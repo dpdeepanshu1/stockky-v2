@@ -29,7 +29,8 @@ from auth import dhan_credentials
 from audit.logger import log_action
 from db import get_db, init_schema
 from tz_utils import as_aware
-from portfolio.portfolio import open_positions as _pf_open_positions
+from portfolio.portfolio import open_positions as _pf_open_positions, close_position as _pf_close_position
+from execution import dhan_client
 from risk_engine.engine import AccountState, OrderIntent, evaluate as risk_evaluate
 
 logging.basicConfig(level=logging.INFO)
@@ -497,9 +498,10 @@ async def run_cycle(mode: str, admin: Optional[str] = Depends(require_admin_if_r
     evaluate entries (risk-checked), check pending order fills, expire
     stale unfilled orders, then evaluate exits on every open position.
     DEMO mode does all of this end-to-end including simulated fills. REAL
-    mode runs the identical candidate/entry/risk/exit evaluation and logs
-    every decision, but stops short of calling Dhan (Phase 3 — see the
-    TODOs in entry_engine/entry.py and exit_engine/exit.py).
+    mode places/exits real orders through Dhan (Phase 3,
+    execution/dhan_client.py) and reconciles confirmed fills via
+    execution/reconcile.py — reconciliation runs every REAL cycle right
+    alongside DEMO's check_pending_fills, in the same slot.
 
     This is a manual trigger, not a scheduler — see the module note in
     startup() for why continuous background scheduling isn't wired yet."""
@@ -520,6 +522,12 @@ async def run_cycle(mode: str, admin: Optional[str] = Depends(require_admin_if_r
     expired = await expire_stale_orders(db, mode)
     exit_result = await exit_evaluate(db, mode)
 
+    reconcile_result = None
+    if mode == "REAL":
+        from execution.reconcile import reconcile_real_orders
+        reconcile_result = await reconcile_real_orders(db)
+        fills = reconcile_result["entries_filled"]  # REAL "fills" only ever means broker-confirmed, never sent-only
+
     return {
         "mode": mode,
         "new_candidates": new_candidates,
@@ -527,16 +535,23 @@ async def run_cycle(mode: str, admin: Optional[str] = Depends(require_admin_if_r
         "fills": fills,
         "expired_orders": expired,
         "exit": exit_result,
+        "reconcile": reconcile_result,
     }
 
 
 @app.get("/positions/{mode}")
 async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     mode = mode.upper()
-    rows = _pf_open_positions(db, mode)
+    rows = (
+        db.query(models.TradePosition)
+        .filter(models.TradePosition.mode == mode,
+                models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED", "PENDING_EXIT")))
+        .all()
+    )  # includes PENDING_EXIT (a REAL exit already sent to Dhan, awaiting confirmation) — the DEMO/entry-cycle
+       # open_positions() helper deliberately excludes it from re-evaluation; this endpoint should still show it.
     return [
         {
-            "symbol": p.symbol, "status": p.status, "qty_open": p.qty_open,
+            "id": p.id, "symbol": p.symbol, "status": p.status, "qty_open": p.qty_open,
             "avg_entry_price": p.avg_entry_price, "current_stop": p.current_stop,
             "current_target": p.current_target, "unrealized_pnl": p.unrealized_pnl,
             "realized_pnl": p.realized_pnl, "opened_at": p.opened_at.isoformat(),
@@ -554,13 +569,102 @@ async def list_orders(mode: str, limit: int = 50, admin: Optional[str] = Depends
     )
     return [
         {
-            "symbol": o.symbol, "side": o.side, "qty": o.qty, "order_type": o.order_type,
+            "id": o.id, "symbol": o.symbol, "side": o.side, "qty": o.qty, "order_type": o.order_type,
             "limit_price": o.limit_price, "status": o.status,
             "valid_until": o.valid_until.isoformat() if o.valid_until else None,
             "created_at": o.created_at.isoformat(),
         }
         for o in rows
     ]
+
+
+class ManualCloseRequest(BaseModel):
+    qty: Optional[int] = None  # None = close the whole open qty
+
+
+@app.post("/positions/{mode}/{position_id}/close")
+async def manual_close_position(
+    mode: str, position_id: int, body: ManualCloseRequest = ManualCloseRequest(),
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """Manual override — close a position right now, independent of
+    whether the automatic exit cycle would currently trigger on it.
+    Always allowed regardless of armed state, same policy as
+    dhan_client.cancel_order: exiting a position is never something the
+    system should refuse just because trading is disarmed."""
+    mode = mode.upper()
+    position = db.query(models.TradePosition).filter_by(id=position_id, mode=mode).first()
+    if position is None:
+        raise HTTPException(status_code=404, detail="Position not found")
+    if position.status not in ("OPEN", "PARTIALLY_CLOSED"):
+        raise HTTPException(status_code=409, detail=f"Position is {position.status} — nothing to close.")
+
+    qty = body.qty or position.qty_open
+    qty = min(qty, position.qty_open)
+    if qty <= 0:
+        raise HTTPException(status_code=400, detail="qty must be positive")
+
+    if mode == "DEMO":
+        from market_feed.feed import get_quotes
+        ticks = await get_quotes([position.symbol])
+        tick = ticks.get(position.symbol)
+        if tick is None:
+            raise HTTPException(status_code=503, detail=f"No current price available for {position.symbol} — try again shortly.")
+        pnl = _pf_close_position(db, position, tick, qty, "manual_close")
+        log_action(db, actor=admin or "admin", action="MANUAL_CLOSE", mode=mode,
+                   detail=f"{position.symbol} qty={qty} pnl={pnl:+.2f}")
+        return {"ok": True, "mode": mode, "symbol": position.symbol, "qty_closed": qty, "pnl": pnl}
+    else:
+        from exit_engine.exit import _send_real_sell
+        full = qty >= position.qty_open
+        if not _send_real_sell(db, position, qty, "manual_close", full=full):
+            raise HTTPException(status_code=502, detail="Dhan rejected the manual close order — see server logs.")
+        log_action(db, actor=admin or "admin", action="MANUAL_CLOSE_SENT", mode=mode,
+                   detail=f"{position.symbol} qty={qty} sent to Dhan, awaiting confirmation")
+        return {"ok": True, "mode": mode, "symbol": position.symbol, "qty_sent": qty, "status": "pending_broker_confirmation"}
+
+
+@app.post("/orders/{mode}/{order_id}/cancel")
+async def manual_cancel_order(
+    mode: str, order_id: int,
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """Manual override — cancel a still-PLACED order. Always allowed
+    regardless of armed state (matches dhan_client.cancel_order's own
+    policy: backing out of a pending order is never gated by arming)."""
+    mode = mode.upper()
+    order = db.query(models.TradeOrder).filter_by(id=order_id, mode=mode).first()
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.status != "PLACED":
+        raise HTTPException(status_code=409, detail=f"Order is {order.status} — nothing to cancel.")
+
+    if mode == "REAL" and order.dhan_order_id:
+        try:
+            dhan_client.cancel_order(db, is_armed=True, dhan_order_id=order.dhan_order_id)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Dhan rejected the cancel: {e}")
+
+    order.status = "CANCELLED"
+    order.updated_at = datetime.now(timezone.utc)
+    db.add(models.TradeOrderEvent(order_id=order.id, event_type="CANCELLED", detail="Manually cancelled by admin"))
+    db.commit()
+    log_action(db, actor=admin or "admin", action="MANUAL_CANCEL", mode=mode, detail=f"order {order.id} ({order.symbol})")
+    return {"ok": True, "mode": mode, "order_id": order.id, "status": "CANCELLED"}
+
+
+@app.post("/reconcile/{mode}")
+async def manual_reconcile(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+    """Manual trigger for the same broker reconciliation that also runs
+    automatically at the end of every REAL Run Cycle — exposed on its own
+    so a stuck/PLACED order can be re-checked against Dhan without waiting
+    for (or re-running) a full cycle."""
+    mode = mode.upper()
+    if mode != "REAL":
+        return {"ok": True, "mode": mode, "note": "DEMO has nothing to reconcile — fills are simulated, not broker-confirmed."}
+    from execution.reconcile import reconcile_real_orders
+    result = await reconcile_real_orders(db)
+    return {"ok": True, "mode": mode, **result}
 
 
 @app.get("/audit-log")

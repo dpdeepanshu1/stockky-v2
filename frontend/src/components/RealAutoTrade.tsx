@@ -8,11 +8,11 @@ import {
 type Mode = "DEMO" | "REAL";
 
 /**
- * Phase 1 UI: everything up through ARM/DISARM and the audit trail. There
- * is deliberately no "place order" control anywhere in this component —
- * entry_engine/exit_engine don't exist yet (Phase 2), so arming today
- * only proves the gate sequence and risk engine work; it does not cause
- * any order to be sent anywhere.
+ * Real Automatic Trade UI — gate sequence (login → Dhan connect → risk
+ * confirm → arm), manual Run Cycle trigger, live positions/orders, and a
+ * manual override for every automatic action (close a position, cancel an
+ * order, reconcile broker fills) — Phase 3: REAL places and exits real
+ * orders through Dhan (see execution/dhan_client.py, exit_engine/exit.py).
  */
 export default function RealAutoTrade() {
   const [mode, setMode] = useState<Mode>("DEMO");
@@ -176,6 +176,58 @@ export default function RealAutoTrade() {
     }
   }, []);
 
+  const [actionBusy, setActionBusy] = useState<string | null>(null); // "close:5" | "cancel:9" | "reconcile"
+  const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const doClosePosition = async (p: Position) => {
+    const key = `close:${p.id}`;
+    setActionBusy(key);
+    setActionMsg(null);
+    try {
+      const res = await realTradeApi.closePosition(mode, p.id);
+      setActionMsg({ ok: true, text: res.status === "pending_broker_confirmation"
+        ? `${p.symbol} close sent to Dhan — awaiting confirmation.`
+        : `${p.symbol} closed (pnl ${res.pnl?.toFixed(2)}).` });
+      await loadPositionsAndOrders(mode);
+    } catch (e: any) {
+      setActionMsg({ ok: false, text: e?.message || `Failed to close ${p.symbol}` });
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  const doCancelOrder = async (o: OrderRow) => {
+    const key = `cancel:${o.id}`;
+    setActionBusy(key);
+    setActionMsg(null);
+    try {
+      await realTradeApi.cancelOrder(mode, o.id);
+      setActionMsg({ ok: true, text: `${o.symbol} order cancelled.` });
+      await loadPositionsAndOrders(mode);
+    } catch (e: any) {
+      setActionMsg({ ok: false, text: e?.message || `Failed to cancel ${o.symbol} order` });
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  const doReconcile = async () => {
+    setActionBusy("reconcile");
+    setActionMsg(null);
+    try {
+      const res = await realTradeApi.reconcile(mode);
+      setActionMsg({
+        ok: true,
+        text: res.note || `Checked ${res.checked ?? 0} · filled ${res.entries_filled ?? 0} · exits confirmed ${res.exits_confirmed ?? 0} · dead ${res.dead_orders ?? 0}`,
+      });
+      await loadPositionsAndOrders(mode);
+    } catch (e: any) {
+      setActionMsg({ ok: false, text: e?.message || "Reconcile failed" });
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
   const doRunCycle = async () => {
     setCycleBusy(true);
     setError(null);
@@ -289,8 +341,12 @@ export default function RealAutoTrade() {
       ) : (
         <>
           {mode === "REAL" && loggedIn && (
-            <div className="flex justify-end mb-2">
-              <button onClick={() => void doLogout()} className="font-mono text-[11px] text-paper/50 underline">
+            <div className="flex items-center justify-between mb-2 px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30">
+              <span className="font-mono text-[11px] text-emerald-200">🟢 Admin session active ({username})</span>
+              <button
+                onClick={() => void doLogout()}
+                className="font-mono text-[11px] px-3 py-1.5 rounded bg-rose-600/30 border border-rose-500/60 text-rose-100 hover:bg-rose-600/50"
+              >
                 Log out
               </button>
             </div>
@@ -463,7 +519,7 @@ export default function RealAutoTrade() {
               </div>
               {mode === "REAL" && (
                 <p className="font-mono text-[11px] text-amber-300/70 mb-2">
-                  REAL mode computes and risk-checks every decision but does not place live orders yet (Phase 3).
+                  REAL mode places live orders through Dhan and reconciles fills automatically at the end of every cycle.
                 </p>
               )}
               {(cycleBusy || cycleResult) && (
@@ -498,6 +554,27 @@ export default function RealAutoTrade() {
             </div>
           )}
 
+          {/* Manual controls — every automatic action here has a manual
+              equivalent: reconcile broker fills on demand instead of
+              waiting for the next cycle. */}
+          {status?.armed && (
+            <div className="flex items-center justify-between mb-2">
+              <button
+                onClick={() => void doReconcile()}
+                disabled={actionBusy === "reconcile"}
+                className="font-mono text-[11px] px-3 py-1.5 rounded bg-sky-600/20 border border-sky-500/50 text-sky-200 disabled:opacity-50"
+                title={mode === "REAL" ? "Re-check Dhan for fills on any PLACED order right now" : "DEMO has nothing to reconcile"}
+              >
+                {actionBusy === "reconcile" ? "Checking…" : "🔄 Reconcile now"}
+              </button>
+              {actionMsg && (
+                <p className={`font-mono text-[10px] ${actionMsg.ok ? "text-emerald-300/80" : "text-rose-300/80"}`}>
+                  {actionMsg.text}
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Open positions */}
           <div className="border border-white/10 rounded-lg p-4 mb-4">
             <p className="font-mono text-xs text-paper/70 mb-2">Open Positions ({mode})</p>
@@ -505,8 +582,8 @@ export default function RealAutoTrade() {
               <p className="font-mono text-[11px] text-paper/40">No open positions.</p>
             ) : (
               <div className="space-y-1">
-                {positions.map((p, i) => (
-                  <div key={i} className="font-mono text-[11px] text-paper/70 grid grid-cols-6 gap-1">
+                {positions.map((p) => (
+                  <div key={p.id} className="font-mono text-[11px] text-paper/70 grid grid-cols-7 gap-1 items-center">
                     <span className="font-bold">{p.symbol}</span>
                     <span>qty {p.qty_open}</span>
                     <span>entry ₹{p.avg_entry_price}</span>
@@ -515,6 +592,17 @@ export default function RealAutoTrade() {
                     <span className={p.unrealized_pnl >= 0 ? "text-emerald-400" : "text-rose-400"}>
                       {p.unrealized_pnl >= 0 ? "+" : ""}₹{p.unrealized_pnl}
                     </span>
+                    {p.status === "PENDING_EXIT" ? (
+                      <span className="text-amber-300/80">pending…</span>
+                    ) : (
+                      <button
+                        onClick={() => void doClosePosition(p)}
+                        disabled={actionBusy === `close:${p.id}`}
+                        className="text-rose-300 hover:text-rose-200 disabled:opacity-50 text-left"
+                      >
+                        {actionBusy === `close:${p.id}` ? "…" : "✕ Close"}
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -528,10 +616,21 @@ export default function RealAutoTrade() {
               <p className="font-mono text-[11px] text-paper/40">No orders yet.</p>
             ) : (
               <div className="space-y-1 max-h-48 overflow-y-auto">
-                {orders.map((o, i) => (
-                  <div key={i} className="font-mono text-[11px] text-paper/60 flex justify-between gap-2">
+                {orders.map((o) => (
+                  <div key={o.id} className="font-mono text-[11px] text-paper/60 flex justify-between gap-2 items-center">
                     <span>{o.side} {o.symbol} x{o.qty} @ {o.limit_price ?? "mkt"}</span>
-                    <span className="text-paper/40">{o.status}</span>
+                    <span className="flex items-center gap-2">
+                      <span className="text-paper/40">{o.status}</span>
+                      {o.status === "PLACED" && (
+                        <button
+                          onClick={() => void doCancelOrder(o)}
+                          disabled={actionBusy === `cancel:${o.id}`}
+                          className="text-rose-300/80 hover:text-rose-200 disabled:opacity-50"
+                        >
+                          {actionBusy === `cancel:${o.id}` ? "…" : "✕ Cancel"}
+                        </button>
+                      )}
+                    </span>
                   </div>
                 ))}
               </div>

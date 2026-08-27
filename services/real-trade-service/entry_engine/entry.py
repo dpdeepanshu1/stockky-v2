@@ -10,11 +10,11 @@ deploy) — the constants here are the same values, kept in sync by hand
 since duplicating a whole scoring module across two microservices for a
 handful of numbers isn't worth the coupling.
 
-REAL-mode order placement is NOT wired here yet (Phase 3) — evaluate_mode()
-computes and risk-checks a REAL order intent identically to DEMO, logs the
-decision, but stops short of calling execution/dhan_client.place_order.
-That's a deliberate, visible gap (see the TODO in evaluate_mode), not a
-silent one.
+REAL-mode order placement IS wired (Phase 3, execution/dhan_client.py) —
+a risk-approved REAL entry reaches Dhan the same cycle. It is NOT the same
+as a confirmed fill: execution/reconcile.py is what turns a broker-accepted
+order into an open TradePosition, via Dhan's own order status, never a
+simulated price check.
 """
 from __future__ import annotations
 
@@ -26,8 +26,9 @@ from sqlalchemy.orm import Session
 import config
 import models
 from audit.logger import log_action
+from execution import dhan_client
 from market_feed.feed import get_quotes
-from portfolio.portfolio import get_account, open_positions
+from portfolio.portfolio import get_account, open_positions, record_real_order_sent
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
 
 logger = logging.getLogger("real-trade-entry")
@@ -176,13 +177,41 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                         db.add(models.TradeOrderEvent(order_id=order.id, event_type="PLACED",
                                                        detail=f"DEMO limit {entry_price}, valid {config.ENTRY_VALIDITY_MINUTES}m"))
 
-                        # TODO (Phase 3): for mode == "REAL", this is where
-                        # execution/dhan_client.place_order(..., is_armed=gate_armed)
-                        # gets called instead of just recording a DEMO order
-                        # row. Deliberately not wired yet — see module
-                        # docstring. A REAL order intent is fully computed
-                        # and risk-approved above; only the actual broker
-                        # call is missing.
+                        # For REAL, this is where the order actually reaches
+                        # Dhan. A resolution/placement failure here must
+                        # WAIT, never silently look like a normal DEMO
+                        # PLACED order — the whole point of the gap this
+                        # code closes is that "recorded a PLACED row" and
+                        # "an order actually exists at the broker" were
+                        # conflatable before this.
+                        if mode == "REAL":
+                            try:
+                                security_id = dhan_client.get_security_id(db, cand.symbol)
+                                broker_result = dhan_client.place_order(
+                                    db, is_armed=gate_armed,
+                                    security_id=security_id,
+                                    exchange_segment=dhan_client.NSE_EQ_SEGMENT,
+                                    transaction_type="BUY",
+                                    quantity=decision.proposed_qty,
+                                    order_type=config.ENTRY_ORDER_TYPE,
+                                    price=entry_price,
+                                )
+                                dhan_order_id = str(
+                                    broker_result.get("orderId") or broker_result.get("order_id") or ""
+                                )
+                                if not dhan_order_id:
+                                    raise RuntimeError(f"Dhan accepted the order but returned no order id: {broker_result}")
+                                record_real_order_sent(db, order, dhan_order_id)
+                            except Exception as e:  # noqa: BLE001 — must never let a broker/API error crash the cycle
+                                logger.error("REAL order placement failed for %s: %s", cand.symbol, e)
+                                order.status = "REJECTED"
+                                db.add(models.TradeOrderEvent(order_id=order.id, event_type="REJECTED",
+                                                               detail=f"Dhan placement failed: {e}"))
+                                decision.action = "WAIT"
+                                decision.reasoning = f"Risk-approved but Dhan placement failed: {e}"
+                                entered -= 1
+                                waited += 1
+                                db.commit()
 
         db.add(decision)  # safe even if already added above (ENTER path) — SQLAlchemy add() is idempotent
 

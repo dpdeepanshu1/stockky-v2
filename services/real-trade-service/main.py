@@ -284,6 +284,26 @@ async def dhan_funds(admin: str = Depends(require_admin), db: Session = Depends(
         raise HTTPException(status_code=502, detail=f"Dhan API error: {e}")
 
 
+@app.get("/dhan/account")
+async def dhan_account(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """One call for the dashboard's Dhan Account card: connection/token
+    state (always available, DB-only) plus a live funds call (proves the
+    token actually still works against Dhan right now, not just that it
+    hasn't expired on paper). Funds failing doesn't hide the connection
+    state — a dashboard should be able to show 'connected but Dhan call
+    failed: <reason>' rather than going blank."""
+    from execution import dhan_client
+    status = dhan_credentials.connection_status(db)
+    funds = None
+    funds_error = None
+    if status["connected"]:
+        try:
+            funds = dhan_client.get_funds(db)
+        except Exception as e:
+            funds_error = str(e)[:300]
+    return {**status, "funds": funds, "funds_error": funds_error}
+
+
 # ── Routes: risk config (gate 3) ────────────────────────────────────────────
 @app.post("/risk-config")
 async def update_risk_config(body: RiskConfigUpdate, authorization: str = Header(default=""), db: Session = Depends(get_db)):

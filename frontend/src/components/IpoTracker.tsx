@@ -403,6 +403,15 @@ export default function IpoTracker({
             </button>
             <button
               type="button"
+              onClick={() => void startIpoScan(true)}
+              disabled={ipoScanning}
+              title="Bulk-seeds ipo_static_feed for every tracked IPO in one background pass — the same job the morning 'IPO Premarket Refresh' GitHub Action runs on a schedule, triggered here on demand instead of waiting for it."
+              className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-amber-500/20 border border-amber-400/40 text-amber-100 hover:bg-amber-500/30 disabled:opacity-40"
+            >
+              {ipoScanning ? "Feeding…" : "📥 Premarket Feed"}
+            </button>
+            <button
+              type="button"
               onClick={() => void startIpoScan(false)}
               disabled={ipoScanning}
               title="Reads the premarket-refreshed table if it's fresh, otherwise does a full scan"
@@ -414,7 +423,7 @@ export default function IpoTracker({
               type="button"
               onClick={() => void startIpoScan(true)}
               disabled={ipoScanning}
-              title="Ignore the freshness cache and re-scan every IPO from scratch"
+              title="Ignore the freshness cache and re-scan every IPO from scratch, straight from upstream (NSE + yfinance) — same underlying action as Premarket Feed, exposed here for a one-off refresh mid-session"
               className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-violet-500/10 border border-violet-400/30 text-violet-200/80 hover:bg-violet-500/20 disabled:opacity-40"
             >
               Force Rescan

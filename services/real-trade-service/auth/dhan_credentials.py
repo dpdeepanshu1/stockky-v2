@@ -98,17 +98,25 @@ def connection_status(db: Session) -> dict:
             "token_expires_at": None,
             "token_valid": False,
             "days_remaining": None,
+            "hours_remaining": None,
+            "seconds_remaining": None,
         }
     days_remaining = None
+    hours_remaining = None
+    seconds_remaining = None
     if row.token_expires_at:
         delta = as_aware(row.token_expires_at) - datetime.now(timezone.utc)
+        seconds_remaining = max(0, round(delta.total_seconds()))
         days_remaining = round(delta.total_seconds() / 86400, 1)
+        hours_remaining = round(delta.total_seconds() / 3600, 1)
     return {
         "connected": True,
         "client_id_masked": row.dhan_client_id_masked,
         "token_expires_at": row.token_expires_at.isoformat() if row.token_expires_at else None,
         "token_valid": is_token_valid(row),
         "days_remaining": days_remaining,
+        "hours_remaining": hours_remaining,
+        "seconds_remaining": seconds_remaining,  # frontend ticks this down live, same as Dhan's own "Xh Ym" display
     }
 
 

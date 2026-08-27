@@ -2,10 +2,34 @@ import { useCallback, useEffect, useState } from "react";
 import {
   realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl,
   getSessionToken, setSessionToken, type GateStatus, type AuditLogRow,
-  type Position, type OrderRow, type CycleResult,
+  type Position, type OrderRow, type CycleResult, type DhanStatus,
 } from "../realTradeApi";
 
 type Mode = "DEMO" | "REAL";
+
+function formatHms(totalSeconds: number): string {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m left` : `${m}m left`;
+}
+
+function fmtInr(n: number | null | undefined): string {
+  if (n == null || Number.isNaN(n)) return "—";
+  return `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+}
+
+// Dhan's fund-limits response field names aren't fully pinned down here
+// (not verified against a live sandbox this session) — check a few
+// plausible casings/spellings per field (Dhan's own docs have a known
+// "availabelBalance" typo) rather than assume one and silently show "—".
+function pickNum(obj: any, ...keys: string[]): number | null {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (typeof v === "number") return v;
+    if (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v))) return Number(v);
+  }
+  return null;
+}
 
 /**
  * Real Automatic Trade UI — gate sequence (login → Dhan connect → risk
@@ -27,12 +51,23 @@ export default function RealAutoTrade() {
 
   const [dhanClientId, setDhanClientId] = useState("");
   const [dhanToken, setDhanToken] = useState("");
-  const [dhanDetail, setDhanDetail] = useState<{
-    client_id_masked: string | null;
-    token_expires_at: string | null;
-    days_remaining: number | null;
-  } | null>(null);
+  const [dhanAccount, setDhanAccount] = useState<
+    (DhanStatus & { funds: any | null; funds_error: string | null }) | null
+  >(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const [showDhanForm, setShowDhanForm] = useState(false);
+
+  // Ticks once a second purely to re-render the token countdown between
+  // /dhan/account polls — the countdown itself is derived from the last
+  // fetched token_expires_at, never re-fetched every second.
+  useEffect(() => {
+    const id = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const secondsRemaining = dhanAccount?.token_expires_at
+    ? Math.max(0, Math.floor((new Date(dhanAccount.token_expires_at).getTime() - nowTick) / 1000))
+    : null;
 
   const [auditRows, setAuditRows] = useState<AuditLogRow[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
@@ -44,19 +79,19 @@ export default function RealAutoTrade() {
     try {
       const s = await realTradeApi.gateStatus(m);
       setStatus(s);
-      // Detailed Dhan status (masked client id + expiry countdown) is its
-      // own admin-only endpoint — only worth calling in REAL mode, and
-      // only once logged in (it 401s otherwise, which loadStatus already
-      // handles by dropping the session token).
+      // The full account card (masked client id, expiry countdown, live
+      // funds/margin) is its own admin-only endpoint — only worth calling
+      // in REAL mode, and only once logged in (it 401s otherwise, which
+      // loadStatus already handles by dropping the session token).
       if (m === "REAL" && getSessionToken()) {
         try {
-          const d = await realTradeApi.dhanStatus();
-          setDhanDetail(d.connected ? d : null);
+          const d = await realTradeApi.dhanAccount();
+          setDhanAccount(d.connected ? d : null);
         } catch {
-          setDhanDetail(null);
+          setDhanAccount(null);
         }
       } else {
-        setDhanDetail(null);
+        setDhanAccount(null);
       }
     } catch (e: any) {
       setError(e?.message || "Failed to load status");
@@ -365,21 +400,21 @@ export default function RealAutoTrade() {
                   <span>{status.dhan_connected ? "🟢" : "🔴"}</span>
                 </div>
               )}
-              {mode === "REAL" && status.dhan_connected && dhanDetail?.days_remaining != null && (
+              {mode === "REAL" && status.dhan_connected && secondsRemaining != null && (
                 <div className="flex justify-between">
                   <span>Dhan token expires</span>
                   <span
                     className={
-                      dhanDetail.days_remaining <= 3
+                      secondsRemaining <= 0
                         ? "text-red-400"
-                        : dhanDetail.days_remaining <= 7
+                        : secondsRemaining <= 2 * 3600
+                        ? "text-red-400"
+                        : secondsRemaining <= 6 * 3600
                         ? "text-amber-300"
                         : "text-emerald-300"
                     }
                   >
-                    {dhanDetail.days_remaining <= 0
-                      ? "expired"
-                      : `${Math.floor(dhanDetail.days_remaining)}d left (${dhanDetail.client_id_masked})`}
+                    {secondsRemaining <= 0 ? "expired — reconnect" : formatHms(secondsRemaining)}
                   </span>
                 </div>
               )}
@@ -393,6 +428,81 @@ export default function RealAutoTrade() {
               </div>
               {status.disarmed_reason && (
                 <p className="text-amber-300/80 text-[11px]">Last disarm reason: {status.disarmed_reason}</p>
+              )}
+            </div>
+          )}
+
+          {/* Dhan Account dashboard — proves the connection actually works
+              (a live funds call, not just "token not expired on paper")
+              and surfaces balance/margin plus a live-ticking expiry
+              countdown, since Dhan tokens are short-lived (~24h, not the
+              30-day figure this UI used to assume). */}
+          {mode === "REAL" && (
+            <div className="border border-white/10 rounded-lg p-4 mb-4">
+              <div className="flex items-center justify-between mb-2">
+                <p className="font-mono text-xs text-paper/70">Dhan Account</p>
+                <span className={`font-mono text-[10px] px-2 py-0.5 rounded ${
+                  dhanAccount?.connected ? "bg-emerald-500/20 text-emerald-300" : "bg-rose-500/20 text-rose-300"
+                }`}>
+                  {dhanAccount?.connected ? "🟢 Connected" : "🔴 Not connected"}
+                </span>
+              </div>
+
+              {!dhanAccount?.connected && (
+                <p className="font-mono text-[11px] text-paper/40">
+                  Connect Dhan below to verify the account and see live balance/margin.
+                </p>
+              )}
+
+              {dhanAccount?.connected && (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 gap-2 font-mono text-[11px] text-paper/70">
+                    <div className="flex justify-between border-b border-white/5 pb-1">
+                      <span className="text-paper/40">Client ID</span>
+                      <span>{dhanAccount.client_id_masked}</span>
+                    </div>
+                    <div className="flex justify-between border-b border-white/5 pb-1">
+                      <span className="text-paper/40">Token expires</span>
+                      <span className={
+                        (secondsRemaining ?? 0) <= 2 * 3600 ? "text-red-400"
+                          : (secondsRemaining ?? 0) <= 6 * 3600 ? "text-amber-300" : "text-emerald-300"
+                      }>
+                        {secondsRemaining != null ? (secondsRemaining <= 0 ? "expired" : formatHms(secondsRemaining)) : "—"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {dhanAccount.funds_error && (
+                    <p className="font-mono text-[11px] text-rose-300/80">
+                      Connected, but the live funds check failed: {dhanAccount.funds_error}
+                    </p>
+                  )}
+
+                  {dhanAccount.funds && (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {[
+                        { label: "Available Balance", value: pickNum(dhanAccount.funds, "availabelBalance", "availableBalance", "availableCash") },
+                        { label: "Utilized Margin", value: pickNum(dhanAccount.funds, "utilizedAmount", "utilisedAmount") },
+                        { label: "Withdrawable", value: pickNum(dhanAccount.funds, "withdrawableBalance") },
+                        { label: "SOD Limit", value: pickNum(dhanAccount.funds, "sodLimit") },
+                        { label: "Collateral", value: pickNum(dhanAccount.funds, "collateralAmount") },
+                        { label: "Blocked Payout", value: pickNum(dhanAccount.funds, "blockedPayoutAmount") },
+                      ].map((f) => (
+                        <div key={f.label} className="border border-white/10 rounded-lg px-2 py-1.5 bg-graphite/40">
+                          <p className="font-mono text-[9px] text-paper/40 uppercase tracking-wide">{f.label}</p>
+                          <p className="font-mono text-sm font-bold text-paper/90">{fmtInr(f.value)}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => void loadStatus(mode)}
+                    className="font-mono text-[10px] text-sky-300 hover:text-sky-200"
+                  >
+                    ↻ Refresh account
+                  </button>
+                </div>
               )}
             </div>
           )}
@@ -415,7 +525,7 @@ export default function RealAutoTrade() {
                 <input
                   type="password"
                   className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs"
-                  placeholder="Dhan Access Token (generate from web.dhan.co → DhanHQ Trading APIs; valid up to 30 days unless TOTP is enabled)"
+                  placeholder="Dhan Access Token (generate from web.dhan.co → DhanHQ Trading APIs; expires in ~24h — you'll need to paste a fresh one daily)"
                   value={dhanToken}
                   onChange={(e) => setDhanToken(e.target.value)}
                 />

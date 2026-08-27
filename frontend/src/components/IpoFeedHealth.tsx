@@ -36,6 +36,8 @@ export default function IpoFeedHealth() {
   const [stats, setStats] = useState<IpoAuditStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rescanBusy, setRescanBusy] = useState(false);
+  const [rescanMsg, setRescanMsg] = useState<string | null>(null);
 
   const fetchAudit = useCallback(async () => {
     setLoading(true);
@@ -54,6 +56,29 @@ export default function IpoFeedHealth() {
     void fetchAudit();
   }, [fetchAudit]);
 
+  // There's no per-symbol IPO repair pipeline (unlike Hot Picks/Surprise's
+  // price-only repair) — missing IPO fields only ever fill in via a real
+  // re-scan (ipo_scanner.analyze_ipo). This button makes that one click
+  // from the health panel itself instead of just telling you to go run
+  // "Scan IPOs" above.
+  const forceRescan = useCallback(async () => {
+    setRescanBusy(true);
+    setRescanMsg(null);
+    try {
+      const res = await api.forceIpoScan();
+      setRescanMsg(
+        res?.already_running
+          ? "A scan is already running — check Scan IPOs above for progress."
+          : res?.message || "Re-scan started — missing fields will fill in as it completes."
+      );
+    } catch (e: any) {
+      setRescanMsg(null);
+      setError(e?.message || "Failed to start re-scan");
+    } finally {
+      setRescanBusy(false);
+    }
+  }, []);
+
   const total = stats?.total_tracked ?? 0;
   const scored = stats?.fully_scored ?? 0;
   const missing = stats?.missing_count ?? 0;
@@ -68,16 +93,30 @@ export default function IpoFeedHealth() {
             Tracks ipo_static_feed only — the IPO Tracker's own table, separate from the stock scan universe.
           </p>
         </div>
-        <button
-          className="text-xs px-3 py-1.5 rounded border border-white/15 bg-white/5 hover:bg-white/10"
-          onClick={() => void fetchAudit()}
-          disabled={loading}
-        >
-          {loading ? "Auditing…" : "🔄 Refresh Audit"}
-        </button>
+        <div className="flex items-center gap-2">
+          {missing > 0 && (
+            <button
+              className="text-xs px-3 py-1.5 rounded border border-rose-500/40 bg-rose-600/20 text-rose-200 hover:bg-rose-600/35 disabled:opacity-50"
+              onClick={() => void forceRescan()}
+              disabled={rescanBusy}
+              title="Missing IPO fields only fill in via a real re-scan, not a price-only repair"
+            >
+              {rescanBusy ? "Starting…" : "⚡ Re-scan Missing"}
+            </button>
+          )}
+          <button
+            className="text-xs px-3 py-1.5 rounded border border-white/15 bg-white/5 hover:bg-white/10"
+            onClick={() => void fetchAudit()}
+            disabled={loading}
+          >
+            {loading ? "Auditing…" : "🔄 Refresh Audit"}
+          </button>
+        </div>
       </div>
 
       {error && <p className="text-xs text-rose-400 mt-2">{error}</p>}
+      {rescanMsg && <p className="text-xs text-emerald-400 mt-2">{rescanMsg}</p>}
+
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
         <div className="rounded border border-white/10 p-3">

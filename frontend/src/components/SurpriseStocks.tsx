@@ -102,6 +102,7 @@ export default function SurpriseStocks({
   const [quoteFeedBusy, setQuoteFeedBusy] = useState(false);
   const [patchingSymbol, setPatchingSymbol] = useState<string | null>(null);
   const [batchRepairBusy, setBatchRepairBusy] = useState(false);
+  const [repairMsg, setRepairMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [stopBusy, setStopBusy] = useState(false);
   const [notifyBusy, setNotifyBusy] = useState(false);
   const [notifyMsg, setNotifyMsg] = useState<string | null>(null);
@@ -465,11 +466,19 @@ export default function SurpriseStocks({
   const handleRepairSingle = useCallback(
     async (symbol: string) => {
       setPatchingSymbol(symbol);
+      setRepairMsg(null);
       try {
-        await api.surpriseRepairBatch(1, symbol);
+        const res = await api.surpriseRepairBatch(1, symbol);
+        if (res?.status === "error" || res?.status === "not_found") {
+          setRepairMsg({ ok: false, text: res.error || res.message || `Could not repair ${symbol}.` });
+        } else if ((res?.repaired || []).length > 0) {
+          setRepairMsg({ ok: true, text: `Repaired ${symbol}.` });
+        } else {
+          setRepairMsg({ ok: true, text: res?.message || `${symbol} already has a price — nothing to repair.` });
+        }
         await fetchSurpriseHealth();
       } catch (e: any) {
-        setPmError(e?.message || `Repair failed for ${symbol}`);
+        setRepairMsg({ ok: false, text: e?.message || `Repair failed for ${symbol}` });
       } finally {
         setPatchingSymbol(null);
       }
@@ -479,11 +488,20 @@ export default function SurpriseStocks({
 
   const handleRepairBatchMissing = useCallback(async () => {
     setBatchRepairBusy(true);
+    setRepairMsg(null);
     try {
-      await api.surpriseRepairBatch(15);
+      const res = await api.surpriseRepairBatch(15);
+      const repaired: string[] = res?.repaired || [];
+      if (res?.status === "error") {
+        setRepairMsg({ ok: false, text: res.error || "Batch repair failed" });
+      } else if (repaired.length > 0) {
+        setRepairMsg({ ok: true, text: `Repaired ${repaired.length} symbol(s): ${repaired.join(", ")}` });
+      } else {
+        setRepairMsg({ ok: true, text: res?.message || "Nothing needed repair." });
+      }
       await fetchSurpriseHealth();
     } catch (e: any) {
-      setPmError(e?.message || "Batch repair failed");
+      setRepairMsg({ ok: false, text: e?.message || "Batch repair failed" });
     } finally {
       setBatchRepairBusy(false);
     }
@@ -731,6 +749,11 @@ export default function SurpriseStocks({
             {batchRepairBusy ? "Repairing…" : "⚡ Auto-Repair Missing (15)"}
           </button>
         </div>
+        {repairMsg && (
+          <p className={`font-mono text-[11px] mt-2 ${repairMsg.ok ? "text-emerald-300/80" : "text-rose-300/80"}`}>
+            {repairMsg.text}
+          </p>
+        )}
 
         {(healthData?.incomplete_stocks?.length ?? 0) > 0 && (
           <div className="mt-4 overflow-x-auto rounded-lg border border-slate/60">

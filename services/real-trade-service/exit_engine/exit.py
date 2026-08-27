@@ -32,6 +32,7 @@ from audit.logger import log_action
 from execution import dhan_client
 from market_feed.feed import get_quotes
 from portfolio.portfolio import close_position, open_positions, refresh_unrealized, record_real_exit_sent
+from tz_utils import as_aware
 
 logger = logging.getLogger("real-trade-exit")
 
@@ -169,7 +170,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
             continue
 
         # 3. Time stop — capital shouldn't sit dead in a non-performing name.
-        held_days = (now - position.opened_at).days
+        held_days = (now - as_aware(position.opened_at)).days
         if held_days >= MAX_HOLD_DAYS and ltp <= position.avg_entry_price * 1.01:
             reasoning = f"Held {held_days}d with no meaningful favorable move (LTP {ltp} vs entry {position.avg_entry_price})."
             _write_exit_decision(db, position, "EMERGENCY_EXIT", reasoning, ltp)

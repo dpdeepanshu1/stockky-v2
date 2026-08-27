@@ -301,6 +301,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
   const [healthLoading, setHealthLoading] = useState(false);
   const [batchRepairBusy, setBatchRepairBusy] = useState(false);
   const [patchingSymbol, setPatchingSymbol] = useState<string | null>(null);
+  const [repairMsg, setRepairMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [premarketBusy, setPremarketBusy] = useState(false);
   const [premarketMsg, setPremarketMsg] = useState<string | null>(null);
   const premarketPollRef = useRef<number | null>(null);
@@ -318,11 +319,20 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
 
   const handleRepairBatchMissing = useCallback(async () => {
     setBatchRepairBusy(true);
+    setRepairMsg(null);
     try {
-      await api.hotPicksRepairBatch(15);
+      const res = await api.hotPicksRepairBatch(15);
+      const repaired: string[] = res?.repaired || [];
+      if (res?.status === "error") {
+        setRepairMsg({ ok: false, text: res.error || "Repair failed." });
+      } else if (repaired.length > 0) {
+        setRepairMsg({ ok: true, text: `Repaired ${repaired.length} symbol(s): ${repaired.join(", ")}` });
+      } else {
+        setRepairMsg({ ok: true, text: res?.message || "Nothing needed repair (all recent Hot Picks already have a price)." });
+      }
       await fetchHotPicksHealth();
-    } catch {
-      /* surfaced via the panel just staying at its last-known state */
+    } catch (e: any) {
+      setRepairMsg({ ok: false, text: e?.message || "Repair request failed — check the service is reachable." });
     } finally {
       setBatchRepairBusy(false);
     }
@@ -330,11 +340,19 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
 
   const handleRepairSingle = useCallback(async (symbol: string) => {
     setPatchingSymbol(symbol);
+    setRepairMsg(null);
     try {
-      await api.hotPicksRepairBatch(1, symbol);
+      const res = await api.hotPicksRepairBatch(1, symbol);
+      if (res?.status === "error" || res?.status === "not_found") {
+        setRepairMsg({ ok: false, text: res.error || res.message || `Could not repair ${symbol}.` });
+      } else if ((res?.repaired || []).length > 0) {
+        setRepairMsg({ ok: true, text: `Repaired ${symbol}.` });
+      } else {
+        setRepairMsg({ ok: true, text: res?.message || `${symbol} already has a price — nothing to repair.` });
+      }
       await fetchHotPicksHealth();
-    } catch {
-      /* same as above */
+    } catch (e: any) {
+      setRepairMsg({ ok: false, text: e?.message || `Failed to repair ${symbol}.` });
     } finally {
       setPatchingSymbol(null);
     }
@@ -737,6 +755,11 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
         batchRepairBusy={batchRepairBusy}
         patchingSymbol={patchingSymbol}
       />
+      {repairMsg && (
+        <p className={`font-mono text-[11px] mt-1 ${repairMsg.ok ? "text-emerald-300/80" : "text-rose-300/80"}`}>
+          {repairMsg.text}
+        </p>
+      )}
 
       {data && (
         <>

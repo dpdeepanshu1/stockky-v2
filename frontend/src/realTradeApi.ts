@@ -92,6 +92,16 @@ export interface AuditLogRow {
   occurred_at: string;
 }
 
+export interface DhanStatus {
+  connected: boolean;
+  client_id_masked: string | null;
+  token_expires_at: string | null;
+  token_valid: boolean;
+  days_remaining: number | null;
+  hours_remaining: number | null;
+  seconds_remaining: number | null;
+}
+
 export interface Position {
   id: number; symbol: string; status: string; qty_open: number; avg_entry_price: number;
   current_stop: number | null; current_target: number | null;
@@ -126,16 +136,15 @@ export const realTradeApi = {
   logout: () => rtRequest<{ ok: boolean }>("/auth/logout", { method: "POST" }),
 
   connectDhan: (client_id: string, access_token: string) =>
-    rtRequest<{ connected: boolean; client_id_masked: string | null; token_expires_at: string | null; token_valid: boolean; days_remaining: number | null }>(
+    rtRequest<DhanStatus>(
       "/dhan/connect", { method: "POST", body: JSON.stringify({ client_id, access_token }) }
     ),
 
-  dhanStatus: () =>
-    rtRequest<{ connected: boolean; client_id_masked: string | null; token_expires_at: string | null; token_valid: boolean; days_remaining: number | null }>(
-      "/dhan/status"
-    ),
+  dhanStatus: () => rtRequest<DhanStatus>("/dhan/status"),
 
   dhanFunds: () => rtRequest<any>("/dhan/funds"),
+
+  dhanAccount: () => rtRequest<DhanStatus & { funds: any | null; funds_error: string | null }>("/dhan/account"),
 
   updateRiskConfig: (mode: "DEMO" | "REAL", patch: Record<string, number | boolean>) =>
     rtRequest<{ ok: boolean }>("/risk-config", { method: "POST", body: JSON.stringify({ mode, ...patch }) }),

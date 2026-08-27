@@ -83,10 +83,10 @@ DHAN_CREDENTIAL_ENC_KEY = os.getenv("DHAN_CREDENTIAL_ENC_KEY", "")
 
 # Decision 4: manual token paste by default. Dhan access tokens are
 # generated from the Dhan developer console (web.dhan.co → DhanHQ Trading
-# APIs → generate access token) and are valid for DHAN_TOKEN_LIFETIME_DAYS
-# (Dhan's own docs and issued tokens vary — some accounts see 24h, most API
-# plans currently issue tokens valid up to 30 days; set this to whatever
-# your own token's actual expiry is so the countdown below is accurate).
+# APIs → generate access token) and are valid for DHAN_TOKEN_LIFETIME_DAYS.
+# Confirmed directly against this account's own Dhan dashboard: manual
+# (non-TOTP) tokens here expire in ~24h — default set to 1 day accordingly.
+# Override via env if a different plan/account issues longer-lived tokens.
 # With DHAN_TOTP_ENABLED=False, the service surfaces "🔴 Token expired —
 # reauthenticate" and auto-disarms rather than silently failing orders
 # (see auth/dhan_credentials.py:is_token_valid / gate state machine in
@@ -94,7 +94,7 @@ DHAN_CREDENTIAL_ENC_KEY = os.getenv("DHAN_CREDENTIAL_ENC_KEY", "")
 # Flip DHAN_TOTP_ENABLED to true + set DHAN_TOTP_SECRET once TOTP is
 # enabled on the Dhan account, and the same background refresh job
 # self-heals the token instead.
-DHAN_TOKEN_LIFETIME_DAYS = float(os.getenv("DHAN_TOKEN_LIFETIME_DAYS", "30") or 30)
+DHAN_TOKEN_LIFETIME_DAYS = float(os.getenv("DHAN_TOKEN_LIFETIME_DAYS", "1") or 1)
 DHAN_TOTP_ENABLED = os.getenv("DHAN_TOTP_ENABLED", "false").lower() == "true"
 DHAN_TOTP_SECRET = os.getenv("DHAN_TOTP_SECRET", "")  # only read when the above is true
 

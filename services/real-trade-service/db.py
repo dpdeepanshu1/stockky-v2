@@ -116,6 +116,7 @@ def init_schema() -> None:
         _ensure_oracle_autoincrement(eng, models.Base)
 
     _ensure_manual_order_columns(eng, dialect())
+    _ensure_gate_state_columns(eng, dialect())
 
 
 # create_all(checkfirst=True) only creates MISSING TABLES — it never adds a
@@ -162,6 +163,44 @@ def _ensure_manual_order_columns(engine, dialect_name: str) -> None:
             if "already exists" in m.lower() or "ORA-01430" in m:
                 continue
             logger.warning("real-trade-db: could not add trade_orders.%s: %s", col_name, e)
+
+
+# Same additive-migration idiom as _ensure_manual_order_columns above —
+# trade_gate_state existed before auto_pilot_enabled/auto_pilot_enabled_at
+# were added to models.py (2026-08-27, Auto-Pilot feature), so on any
+# already-deployed DB these two columns must be added by hand, once.
+def _ensure_gate_state_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        existing = {c["name"] for c in inspect(engine).get_columns("trade_gate_state")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect trade_gate_state columns: %s", e)
+        return
+
+    if dialect_name == "oracle":
+        adds = [
+            ("auto_pilot_enabled", "ALTER TABLE trade_gate_state ADD (auto_pilot_enabled NUMBER(1) DEFAULT 0 NOT NULL)"),
+            ("auto_pilot_enabled_at", "ALTER TABLE trade_gate_state ADD (auto_pilot_enabled_at TIMESTAMP)"),
+        ]
+    else:
+        adds = [
+            ("auto_pilot_enabled", "ALTER TABLE trade_gate_state ADD COLUMN auto_pilot_enabled BOOLEAN DEFAULT FALSE NOT NULL"),
+            ("auto_pilot_enabled_at", "ALTER TABLE trade_gate_state ADD COLUMN auto_pilot_enabled_at TIMESTAMP"),
+        ]
+
+    for col_name, sql in adds:
+        if col_name in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added trade_gate_state.%s", col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add trade_gate_state.%s: %s", col_name, e)
 
 
 # Every trade_* model uses `id = Column(Integer, primary_key=True,

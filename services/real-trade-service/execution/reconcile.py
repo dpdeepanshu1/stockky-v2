@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 import models
 from execution import dhan_client
+from notifier import notify_async
 from portfolio.portfolio import record_real_fill, record_real_exit_fill
 
 logger = logging.getLogger("real-trade-reconcile")
@@ -95,14 +96,26 @@ async def reconcile_real_orders(db: Session) -> dict:
         if order.side == "BUY":
             record_real_fill(db, order, float(fill_price), int(fill_qty), stop_price, target_price)
             tally["entries_filled"] += 1
+            await notify_async(
+                f"✅ *BUY filled* — {order.symbol}\n"
+                f"{int(fill_qty)} shares @ ₹{float(fill_price):.2f} "
+                f"(₹{float(fill_price) * int(fill_qty):,.2f})\n"
+                f"Stop ₹{stop_price:.2f} · Target ₹{target_price:.2f}"
+            )
         else:
             position = db.query(models.TradePosition).filter_by(
                 mode="REAL", symbol=order.symbol, status="PENDING_EXIT"
             ).first()
             if position is not None:
                 reason = _get(broker_row, "remarks", default="exit")
-                record_real_exit_fill(db, position, float(fill_price), int(fill_qty), str(reason) or "exit")
+                pnl = record_real_exit_fill(db, position, float(fill_price), int(fill_qty), str(reason) or "exit")
                 tally["exits_confirmed"] += 1
+                pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+                await notify_async(
+                    f"{pnl_emoji} *SELL filled* — {order.symbol}\n"
+                    f"{int(fill_qty)} shares @ ₹{float(fill_price):.2f}\n"
+                    f"P&L: ₹{pnl:+,.2f}"
+                )
             order.status = "FILLED"
             db.commit()
 

@@ -70,6 +70,7 @@ export interface GateStatus {
   risk_config_confirmed: boolean;
   armed: boolean;
   disarmed_reason: string | null;
+  auto_pilot_enabled: boolean;
   account: {
     starting_capital: number | null;
     current_equity: number | null;
@@ -198,6 +199,12 @@ export const realTradeApi = {
   arm: (mode: "DEMO" | "REAL") => rtRequest<{ ok: boolean; armed: boolean; mode: string }>(`/arm/${mode}`, { method: "POST" }),
 
   disarm: (mode: "DEMO" | "REAL") => rtRequest<{ ok: boolean; armed: boolean; mode: string }>(`/disarm/${mode}`, { method: "POST" }),
+
+  enableAutoPilot: (mode: "DEMO" | "REAL") =>
+    rtRequest<{ ok: boolean; mode: string; auto_pilot_enabled: boolean }>(`/autopilot/${mode}/enable`, { method: "POST" }),
+
+  disableAutoPilot: (mode: "DEMO" | "REAL") =>
+    rtRequest<{ ok: boolean; mode: string; auto_pilot_enabled: boolean }>(`/autopilot/${mode}/disable`, { method: "POST" }),
 
   emergencyPause: () => rtRequest<{ ok: boolean; paused: boolean }>("/emergency-pause", { method: "POST" }),
 

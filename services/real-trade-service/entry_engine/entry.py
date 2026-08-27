@@ -28,8 +28,10 @@ import models
 from audit.logger import log_action
 from execution import dhan_client
 from market_feed.feed import get_quotes
+from notifier import notify_async
 from portfolio.portfolio import get_account, open_positions, record_real_order_sent
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
+from tz_utils import is_market_open_ist
 
 logger = logging.getLogger("real-trade-entry")
 
@@ -56,6 +58,15 @@ def _atr_stop_target_pct(atr_pct: float | None) -> tuple[float, float]:
 
 
 def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
+    if mode == "REAL":
+        # Refreshes cash_available/current_equity from Dhan's live balance
+        # before sizing anything — see execution/equity_sync.py's module
+        # docstring for why this was the actual reason REAL never approved
+        # a BUY (equity stuck at 0, not "balance too small"). Best-effort:
+        # if this fails, we fall through and use whatever equity value is
+        # already on the account row.
+        from execution.equity_sync import sync_real_equity
+        sync_real_equity(db)
     account = get_account(db, mode)
     risk = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
     positions = open_positions(db, mode)
@@ -75,7 +86,7 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
             abs(p.avg_entry_price - (p.current_stop or p.avg_entry_price)) * p.qty_open for p in positions
         ),
         trading_globally_paused=not gate_armed,
-        market_is_open=True,  # Phase 3: real market-hours check via market_feed
+        market_is_open=is_market_open_ist(),
     )
 
 
@@ -202,6 +213,12 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                 if not dhan_order_id:
                                     raise RuntimeError(f"Dhan accepted the order but returned no order id: {broker_result}")
                                 record_real_order_sent(db, order, dhan_order_id)
+                                await notify_async(
+                                    f"📤 *BUY sent (auto)* — {cand.symbol}\n"
+                                    f"{decision.proposed_qty} @ ₹{entry_price:.2f} · "
+                                    f"stop ₹{stop_price:.2f} · target ₹{target_price:.2f}\n"
+                                    f"Awaiting broker fill confirmation."
+                                )
                             except Exception as e:  # noqa: BLE001 — must never let a broker/API error crash the cycle
                                 logger.error("REAL order placement failed for %s: %s", cand.symbol, e)
                                 order.status = "REJECTED"
@@ -212,6 +229,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                 entered -= 1
                                 waited += 1
                                 db.commit()
+                                await notify_async(
+                                    f"⚠️ *Auto BUY rejected by Dhan* — {cand.symbol}\n{str(e)[:300]}"
+                                )
 
         db.add(decision)  # safe even if already added above (ENTER path) — SQLAlchemy add() is idempotent
 

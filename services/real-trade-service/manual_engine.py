@@ -65,6 +65,12 @@ _FALLBACK_TARGET_PCT = 6.5
 
 
 def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
+    if mode == "REAL":
+        # Same fix as entry_engine/entry.py — see execution/equity_sync.py.
+        # Without this, a manual Review always saw equity=0 and came back
+        # not-ok, which is why the Confirm BUY button never appeared.
+        from execution.equity_sync import sync_real_equity
+        sync_real_equity(db)
     account = get_account(db, mode)
     risk = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
     positions = open_positions(db, mode)

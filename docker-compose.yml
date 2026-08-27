@@ -207,6 +207,16 @@ services:
       # 24h tokens) and set this to match, so the countdown shown in the
       # admin UI (Real Automatic Trade tab) is accurate.
       DHAN_TOKEN_LIFETIME_DAYS: ${DHAN_TOKEN_LIFETIME_DAYS:-30}
+      # Auto-Pilot (2026-08-27) — background loop that runs the same cycle
+      # Run Cycle runs, on a timer, so armed trading keeps working with the
+      # dashboard closed. Off per-mode by default (toggle in the Pipeline
+      # tab); these only control timing/notifications once turned on.
+      # Reuses the same TELEGRAM_BOT_TOKEN/CHAT_ID as the scan-notification
+      # scheduler below — set them once, both services pick them up.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      AUTO_PILOT_INTERVAL_SECONDS: ${AUTO_PILOT_INTERVAL_SECONDS:-180}
+      AUTO_PILOT_NOTIFY_HEARTBEAT: ${AUTO_PILOT_NOTIFY_HEARTBEAT:-false}
       # Neon — same instance every other service uses (set DATABASE_URL in
       # .env if running Postgres/Neon mode instead of Oracle)
       DATABASE_URL: ${DATABASE_URL:-}

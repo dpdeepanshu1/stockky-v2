@@ -220,6 +220,7 @@ export default function RealAutoTrade() {
 
   const [auditRows, setAuditRows] = useState<AuditLogRow[]>([]);
   const [cycleBusy, setCycleBusy] = useState(false);
+  const [autoPilotBusy, setAutoPilotBusy] = useState(false);
   const [cycleResult, setCycleResult] = useState<CycleResult | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -395,6 +396,19 @@ export default function RealAutoTrade() {
       await Promise.all([loadStatus(mode), loadPositionsAndOrders(mode)]);
     } catch (e: any) { setError(e?.message || "Cycle failed"); }
     finally { setCycleBusy(false); }
+  };
+
+  const doToggleAutoPilot = async () => {
+    setAutoPilotBusy(true); setError(null);
+    try {
+      if (status?.auto_pilot_enabled) {
+        await realTradeApi.disableAutoPilot(mode);
+      } else {
+        await realTradeApi.enableAutoPilot(mode);
+      }
+      await loadStatus(mode);
+    } catch (e: any) { setError(e?.message || "Auto-Pilot toggle failed"); }
+    finally { setAutoPilotBusy(false); }
   };
 
   // ── No URL configured ────────────────────────────────────────────────────
@@ -1009,6 +1023,39 @@ export default function RealAutoTrade() {
                   <p className="font-mono text-[10px] text-amber-400/70 mb-3 bg-amber-500/5 rounded-lg px-3 py-2 border border-amber-500/20">
                     REAL mode: orders placed live at Dhan. Reconcile runs automatically at end of each cycle.
                   </p>
+                )}
+
+                {/* Auto-Pilot — runs this same cycle on a server-side timer
+                    (market hours only) so it keeps working with this page
+                    closed. Telegram must be configured on the backend
+                    (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID) to get notified. */}
+                <div className={`flex items-center justify-between mb-3 px-3 py-2 rounded-lg border ${
+                  status?.auto_pilot_enabled ? "bg-emerald-500/5 border-emerald-500/20" : "bg-zinc-950 border-zinc-800"
+                }`}>
+                  <div>
+                    <p className="font-mono text-[11px] text-zinc-300">
+                      🤖 Auto-Pilot {status?.auto_pilot_enabled ? <span className="text-emerald-400">ON</span> : <span className="text-zinc-600">OFF</span>}
+                    </p>
+                    <p className="font-mono text-[9px] text-zinc-600">
+                      {status?.auto_pilot_enabled
+                        ? "Running this cycle automatically during market hours — Telegram notifies you of every action."
+                        : "Off — Run Cycle only fires when you click it here."}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => void doToggleAutoPilot()}
+                    disabled={!armed || autoPilotBusy}
+                    className={`px-4 py-2 rounded-lg font-mono text-xs disabled:opacity-40 ${
+                      status?.auto_pilot_enabled
+                        ? "bg-rose-500/10 border border-rose-500/30 text-rose-300"
+                        : "bg-emerald-500/10 border border-emerald-500/30 text-emerald-300"
+                    }`}
+                  >
+                    {autoPilotBusy ? "…" : status?.auto_pilot_enabled ? "Turn Off" : "Turn On"}
+                  </button>
+                </div>
+                {!armed && (
+                  <p className="font-mono text-[10px] text-zinc-600 mb-3">Arm {mode} first to enable Auto-Pilot.</p>
                 )}
 
                 {cycleBusy && (

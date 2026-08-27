@@ -133,6 +133,27 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 # ── Paper-mode default capital (DEMO account seed, admin-editable) ─────────
 DEFAULT_DEMO_CAPITAL = float(os.getenv("DEFAULT_DEMO_CAPITAL", "100000"))
 
+# ── Auto-Pilot (2026-08-27) — runs /cycle/run/{mode} on a server-side timer
+#    so armed trading keeps working with the dashboard closed. Off by
+#    default per mode (see models.TradeGateState.auto_pilot_enabled) —
+#    this only controls HOW OFTEN it ticks once an admin turns it on for
+#    a given mode; it never arms anything by itself. ──────────────────────
+AUTO_PILOT_INTERVAL_SECONDS = max(30, int(os.getenv("AUTO_PILOT_INTERVAL_SECONDS", "180")))
+# If true, sends a Telegram message on every tick even when nothing
+# happened (useful to confirm the loop is alive); default is quiet —
+# only notify when a cycle actually entered/filled/exited something.
+AUTO_PILOT_NOTIFY_HEARTBEAT = os.getenv("AUTO_PILOT_NOTIFY_HEARTBEAT", "false").lower() == "true"
+
+# ── Telegram — direct bot notifications for fills/exits/auto-pilot ticks.
+#    Separate from notification-scheduler-service's own Telegram config on
+#    purpose: that service notifies about SCAN opportunities (candidates
+#    found), this one notifies about actual REAL-money order/position
+#    events, so a token/chat can be shared or split independently.
+#    Create a bot via @BotFather, then message it once and open
+#    https://api.telegram.org/bot<token>/getUpdates to read your chat_id.
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
 
 def startup_config_errors() -> list[str]:
     """Real, blocking config problems — checked once at boot (main.py) so a

@@ -1,13 +1,10 @@
 """
-real-trade-service — Phase 1: skeleton, admin auth, DB schema, gate/arming
-state machine, risk engine (callable, not yet wired to real order flow),
-Dhan credential storage, and read-only Dhan account status.
-
-Deliberately NOT in this phase: entry_engine, exit_engine, and any route
-that actually places a live order. Those are Phase 2+, built and demo-mode
-tested before REAL mode ever gets a real order path — see the phased plan.
-`execution/dhan_client.place_order` exists and is real, but nothing in this
-file calls it yet.
+real-trade-service — admin auth, DB schema, gate/arming state machine,
+risk engine, Dhan credential storage, live Dhan account status, manual
+trade ticket, automatic entry/exit cycle, and Auto-Pilot (a background
+loop that runs that cycle on a timer so armed trading keeps working with
+the dashboard closed — see execution/auto_pilot.py). Off by default per
+mode; arming alone never causes it to run.
 """
 from __future__ import annotations
 
@@ -47,12 +44,13 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup() -> None:
-    # Note: no continuous background scheduler (no asyncio.create_task loop)
-    # is started here in Phase 2 — /cycle/run/{mode} is a manual trigger
-    # only. Continuous polling belongs behind its own explicit on/off
-    # control (so "armed" doesn't silently imply "spinning a loop that
-    # burns API calls every N seconds") — that control panel is a Phase 3
-    # UI/ops decision, not something to wire silently into startup.
+    # Auto-Pilot (2026-08-27): a single asyncio background task IS started
+    # here — execution/auto_pilot.py — but it is inert by default. It only
+    # ever acts on a mode that is BOTH armed AND has auto_pilot_enabled=True
+    # (off by default for every mode, see models.TradeGateState), so simply
+    # booting this service does not cause anything to trade on its own.
+    # /cycle/run/{mode} remains available as a manual trigger regardless of
+    # whether auto-pilot is on for that mode.
     errors = config.startup_config_errors()
     if errors:
         # Fail loud, not silent: booting "successfully" without these would
@@ -63,6 +61,8 @@ async def startup() -> None:
         raise RuntimeError(f"real-trade-service refusing to start: {'; '.join(errors)}")
     init_schema()
     _seed_defaults()
+    from execution import auto_pilot
+    auto_pilot.start()
     logger.info("real-trade-service ready (Phase 1 — demo skeleton, no live order path wired)")
 
 
@@ -200,6 +200,7 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
         "risk_config_confirmed": gate.risk_config_confirmed,
         "armed": gate.armed,
         "disarmed_reason": gate.disarmed_reason,
+        "auto_pilot_enabled": gate.auto_pilot_enabled,
         "account": {
             "starting_capital": account.starting_capital if account else None,
             "current_equity": account.current_equity if account else None,
@@ -585,31 +586,40 @@ async def run_cycle(mode: str, admin: Optional[str] = Depends(require_admin_if_r
     if not gate.armed:
         raise HTTPException(status_code=409, detail=f"{mode} is not armed — arm it before running a cycle.")
 
-    from candidate_engine.candidates import refresh_candidates
-    from entry_engine.entry import evaluate_mode as entry_evaluate, check_pending_fills, expire_stale_orders
-    from exit_engine.exit import evaluate_mode as exit_evaluate
+    from cycle_runner import run_cycle_core
+    return await run_cycle_core(db, mode, gate.armed)
 
-    new_candidates = await refresh_candidates(db, mode)
-    entry_result = await entry_evaluate(db, mode, gate.armed)
-    fills = await check_pending_fills(db, mode)
-    expired = await expire_stale_orders(db, mode)
-    exit_result = await exit_evaluate(db, mode)
 
-    reconcile_result = None
-    if mode == "REAL":
-        from execution.reconcile import reconcile_real_orders
-        reconcile_result = await reconcile_real_orders(db)
-        fills = reconcile_result["entries_filled"]  # REAL "fills" only ever means broker-confirmed, never sent-only
+# ── Routes: Auto-Pilot (2026-08-27) ──────────────────────────────────────────
+# Toggle only — the actual loop lives in execution/auto_pilot.py, started
+# once at app startup and running for the lifetime of the process. Turning
+# this on does NOT bypass arming: the loop re-checks `armed` (and
+# auto_pilot_enabled) fresh from the DB on every tick, so an auto-disarm
+# (session/token expiry, daily loss cap, emergency pause) stops it exactly
+# like it stops a manual Run Cycle click.
+@app.post("/autopilot/{mode}/enable")
+async def autopilot_enable(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    gate = _gate(db, mode)
+    gate.auto_pilot_enabled = True
+    gate.auto_pilot_enabled_at = datetime.now(timezone.utc)
+    db.commit()
+    log_action(db, actor=admin or "demo-user", action="AUTOPILOT_ENABLED", mode=mode)
+    return {"ok": True, "mode": mode, "auto_pilot_enabled": True}
 
-    return {
-        "mode": mode,
-        "new_candidates": new_candidates,
-        "entry": entry_result,
-        "fills": fills,
-        "expired_orders": expired,
-        "exit": exit_result,
-        "reconcile": reconcile_result,
-    }
+
+@app.post("/autopilot/{mode}/disable")
+async def autopilot_disable(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    gate = _gate(db, mode)
+    gate.auto_pilot_enabled = False
+    db.commit()
+    log_action(db, actor=admin or "demo-user", action="AUTOPILOT_DISABLED", mode=mode)
+    return {"ok": True, "mode": mode, "auto_pilot_enabled": False}
 
 
 @app.get("/positions/{mode}")

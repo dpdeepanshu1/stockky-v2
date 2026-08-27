@@ -31,6 +31,7 @@ import models
 from audit.logger import log_action
 from execution import dhan_client
 from market_feed.feed import get_quotes
+from notifier import notify_sync
 from portfolio.portfolio import close_position, open_positions, refresh_unrealized, record_real_exit_sent
 from tz_utils import as_aware
 
@@ -105,9 +106,11 @@ def _send_real_sell(
         db.add(models.TradeOrderEvent(order_id=order.id, event_type="PLACED",
                                        detail=f"{reason}: MARKET SELL {qty} sent to Dhan"))
         record_real_exit_sent(db, position, dhan_order_id, qty, reason, full=full)
+        notify_sync(f"📤 *SELL sent* — {position.symbol} x{qty} ({reason})\nAwaiting broker fill confirmation.")
         return True
     except Exception as e:  # noqa: BLE001 — must never crash the whole exit cycle
         logger.error("REAL exit SELL failed for %s (%s): %s", position.symbol, reason, e)
+        notify_sync(f"⚠️ *SELL rejected by Dhan* — {position.symbol} x{qty} ({reason})\n{str(e)[:300]}")
         return False
 
 

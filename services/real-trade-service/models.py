@@ -53,6 +53,17 @@ class TradeGateState(Base):
     armed_at = Column(DateTime, nullable=True)
     disarmed_reason = Column(String(255), nullable=True)  # last disarm cause, for the UI
 
+    # Auto-Pilot (2026-08-27) — independent of `armed`. Arming only means
+    # "this mode is allowed to trade right now if something triggers it"
+    # (a manual Run Cycle click, or auto-pilot). auto_pilot_enabled is the
+    # separate "keep running cycles on a timer, unattended" switch — never
+    # implied by armed, and always re-checked against armed at tick time,
+    # so disarming (including an automatic disarm on token/session expiry)
+    # always stops auto-pilot from placing anything, even if the toggle
+    # itself is left on.
+    auto_pilot_enabled = Column(Boolean, nullable=False, default=False)
+    auto_pilot_enabled_at = Column(DateTime, nullable=True)
+
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 

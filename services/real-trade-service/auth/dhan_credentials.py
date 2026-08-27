@@ -126,6 +126,50 @@ def is_token_valid(row: models.TradeCredential) -> bool:
     return datetime.now(timezone.utc) < as_aware(row.token_expires_at)
 
 
+def enforce_live_token(db: Session, mode: str = "REAL") -> tuple[bool, Optional[str]]:
+    """Real-time counterpart to is_token_valid()'s local-clock math: actually
+    asks Dhan whether the token still works right now, and disarms
+    immediately if Dhan itself rejects it — not just when our own
+    issued_at + DHAN_TOKEN_LIFETIME_DAYS countdown runs out.
+
+    Why both checks exist: the local timer is correct (Dhan tokens are a
+    strict 24h) but can't see the cases where Dhan invalidates a token
+    EARLY — the admin generating a new token from Dhan Web immediately
+    kills the old one, clock drift, or a Dhan-side revocation. Without
+    this, entry_engine/exit_engine would keep trying to place REAL orders
+    with a dead token every cycle, each one failing silently into a log
+    line, while the dashboard still shows 🟢 armed.
+
+    A generic/transient Dhan error (rate limit, brief outage) is
+    deliberately NOT treated as a dead token here — only a message
+    matching dhan_client.is_auth_error() disarms, so a bad second from
+    Dhan's side never gets mistaken for an actually-expired credential.
+
+    Local import of execution.dhan_client to avoid a circular import
+    (dhan_client already imports this module for credentials)."""
+    from execution import dhan_client  # noqa: PLC0415 — see docstring
+
+    import models  # noqa: PLC0415
+
+    ok, err = dhan_client.verify_token_live(db)
+    if ok:
+        return True, None
+    if not dhan_client.is_auth_error(err or ""):
+        return True, None  # transient/unknown Dhan error — don't disarm on a guess
+
+    gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
+    if gate is not None:
+        gate.dhan_connected = False
+        was_armed = gate.armed
+        gate.armed = False
+        gate.disarmed_reason = f"Dhan rejected the token on a live check: {(err or '')[:200]}"
+        gate.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        if was_armed:
+            logger.warning("REAL auto-disarmed — Dhan live check rejected the token: %s", err)
+    return False, err
+
+
 def refresh_if_totp_enabled(db: Session) -> bool:
     """Opt-in auto-refresh path (decision 4). No-ops and returns False
     unless config.DHAN_TOTP_ENABLED is set — in the default manual-paste

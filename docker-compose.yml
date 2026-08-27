@@ -201,12 +201,14 @@ services:
       DHAN_ENV: ${DHAN_ENV:-sandbox}
       DHAN_TOTP_ENABLED: ${DHAN_TOTP_ENABLED:-false}
       # How many days a pasted Dhan access token is valid for before the
-      # gate auto-disarms REAL trading and asks for a fresh one. Default 30
-      # matches Dhan's current typical API-plan expiry — check your own
-      # Dhan developer console if yours differs (some accounts still issue
-      # 24h tokens) and set this to match, so the countdown shown in the
-      # admin UI (Real Automatic Trade tab) is accurate.
-      DHAN_TOKEN_LIFETIME_DAYS: ${DHAN_TOKEN_LIFETIME_DAYS:-30}
+      # gate auto-disarms REAL trading and asks for a fresh one. Dhan
+      # access tokens are valid for exactly 24 hours for every account
+      # (SEBI/exchange-mandated — confirmed on Dhan's own docs/support
+      # pages) — keep this at 1. Setting it higher makes the admin UI
+      # countdown lie and lets the gate stay "armed" long after Dhan has
+      # actually rejected the token, so REAL orders fail silently instead
+      # of auto-disarming.
+      DHAN_TOKEN_LIFETIME_DAYS: ${DHAN_TOKEN_LIFETIME_DAYS:-1}
       # Auto-Pilot (2026-08-27) — background loop that runs the same cycle
       # Run Cycle runs, on a timer, so armed trading keeps working with the
       # dashboard closed. Off per-mode by default (toggle in the Pipeline

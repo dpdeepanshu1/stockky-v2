@@ -22,6 +22,20 @@ async def run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
     mode = mode.upper()
 
     if mode == "REAL":
+        # Real-time token check FIRST, before spending any Dhan calls or
+        # doing any sizing this cycle: our local 24h countdown is correct
+        # but can't see a token Dhan invalidated early (new token generated
+        # elsewhere, clock drift, revocation). If Dhan itself rejects the
+        # token, auto-disarm right here rather than proceeding to size and
+        # attempt orders that will just fail auth one by one.
+        from auth.dhan_credentials import enforce_live_token
+        token_ok, token_err = enforce_live_token(db, mode)
+        if not token_ok:
+            return {
+                "mode": mode, "new_candidates": 0, "entry": {"evaluated": 0, "entered": 0, "waited": 0, "rejected": 0},
+                "fills": 0, "expired_orders": 0, "exit": {}, "reconcile": None,
+                "auto_disarmed": f"Dhan token rejected: {token_err}",
+            }
         # Refresh cash_available/current_equity from Dhan's live balance
         # once at the top of the cycle (entry_engine also does this per
         # candidate, but doing it here too means /status and the exit

@@ -67,6 +67,7 @@ class AccountState:
     open_positions_total_risk: float   # sum of (entry-stop distance * qty) across all open positions
     trading_globally_paused: bool
     market_is_open: bool
+    cash_available: float = 0.0  # actual spendable cash right now — see check 4b below
 
 
 @dataclass
@@ -108,24 +109,54 @@ def evaluate(intent: OrderIntent, account: AccountState, now: Optional[datetime]
                            f"{account.open_position_count} positions already open "
                            f"(cap {account.max_concurrent_positions}).")
 
-    # 4. Per-trade risk cap
+    # 4. Per-trade risk cap. Down-sizes (never rejects outright, unless even
+    # 1 share doesn't fit) when the entry/stop distance itself is sound and
+    # only the quantity is too large. final_qty carries the still-provisional
+    # size into every later check — a downsize here is not the final answer
+    # until 4b and 5-9 have all also passed at that smaller size.
     order_risk = _order_risk_amount(intent)
     max_trade_risk = account.equity * (account.risk_per_trade_pct / 100.0)
+    final_qty = intent.qty
+    downsize_reason: Optional[str] = None
     if intent.side == "BUY" and order_risk > max_trade_risk:
-        # Down-size instead of an outright reject when the entry/stop
-        # distance itself is sound — only the quantity is too large.
         per_share_risk = abs(intent.entry_price - intent.stop_price)
         if per_share_risk <= 0:
             return RiskResult(RiskVerdict.REJECTED, "per_trade_risk_cap",
                                "Stop price equals entry price — cannot size a valid risk amount.")
-        safe_qty = int(max_trade_risk // per_share_risk)
-        if safe_qty <= 0:
+        final_qty = int(max_trade_risk // per_share_risk)
+        if final_qty <= 0:
             return RiskResult(RiskVerdict.REJECTED, "per_trade_risk_cap",
                                f"Even 1 share risks more than the {account.risk_per_trade_pct:.2f}% per-trade cap.")
-        return RiskResult(RiskVerdict.APPROVED, "per_trade_risk_cap",
-                           f"Qty down-sized from {intent.qty} to {safe_qty} to respect "
-                           f"{account.risk_per_trade_pct:.2f}% per-trade risk cap.",
-                           approved_qty=safe_qty)
+        downsize_reason = (
+            f"Qty down-sized from {intent.qty} to {final_qty} to respect "
+            f"{account.risk_per_trade_pct:.2f}% per-trade risk cap."
+        )
+
+    # 4b. Cash-available cap — check 4 above bounds how much you can afford
+    # to LOSE on this trade, but never checked whether you can afford to
+    # BUY it at all. On a small account (e.g. ~₹1000) with a tight stop, a
+    # risk-approved qty's actual cost (qty * entry_price) can still exceed
+    # the cash actually sitting in the account — especially with several
+    # candidates approved in the same cycle before any of them has filled
+    # and reduced cash_available yet. entry_engine passes an
+    # already-reserved-this-cycle-adjusted cash_available for exactly that
+    # reason — see its module docstring.
+    if intent.side == "BUY":
+        order_cost = intent.entry_price * final_qty
+        if order_cost > account.cash_available:
+            cash_qty = int(account.cash_available // intent.entry_price) if intent.entry_price > 0 else 0
+            if cash_qty <= 0:
+                return RiskResult(RiskVerdict.REJECTED, "cash_available_cap",
+                                   f"₹{account.cash_available:.2f} available isn't enough for even 1 share "
+                                   f"at ₹{intent.entry_price:.2f}.")
+            final_qty = cash_qty
+            downsize_reason = (
+                f"Qty down-sized to {final_qty} — ₹{account.cash_available:.2f} cash available "
+                f"doesn't cover the full risk-approved size at ₹{intent.entry_price:.2f}/share."
+            )
+        # Risk amount for check 5 must reflect whatever qty survived 4+4b,
+        # never the original (possibly larger) proposed qty.
+        order_risk = abs(intent.entry_price - intent.stop_price) * final_qty
 
     # 5. Portfolio-level risk cap
     if intent.side == "BUY":
@@ -163,4 +194,6 @@ def evaluate(intent: OrderIntent, account: AccountState, now: Optional[datetime]
         return RiskResult(RiskVerdict.REJECTED, "market_closed",
                            "Market is not open — no order can be placed right now.")
 
-    return RiskResult(RiskVerdict.APPROVED, "all_checks_passed", "All risk checks passed.", approved_qty=intent.qty)
+    if downsize_reason:
+        return RiskResult(RiskVerdict.APPROVED, "sized_down", downsize_reason, approved_qty=final_qty)
+    return RiskResult(RiskVerdict.APPROVED, "all_checks_passed", "All risk checks passed.", approved_qty=final_qty)

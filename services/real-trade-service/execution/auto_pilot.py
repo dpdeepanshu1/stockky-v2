@@ -91,6 +91,12 @@ async def _tick(mode: str) -> None:
 
         from cycle_runner import run_cycle_core
         result = await run_cycle_core(db, mode, gate.armed)
+        if result.get("auto_disarmed"):
+            await notify_async(
+                f"🔴 *Auto-Pilot disarmed — {mode}*\n{result['auto_disarmed']}\n"
+                f"Re-authenticate with a fresh Dhan token to resume."
+            )
+            return
         message, activity = _summarize(mode, result)
         if activity or config.AUTO_PILOT_NOTIFY_HEARTBEAT:
             await notify_async(message)

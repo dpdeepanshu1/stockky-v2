@@ -176,6 +176,9 @@ def _check_and_expire_gates(db: Session, mode: str) -> models.TradeGateState:
     return gate
 
 
+
+
+
 # ── Routes: health / status ─────────────────────────────────────────────────
 @app.get("/health")
 async def health():

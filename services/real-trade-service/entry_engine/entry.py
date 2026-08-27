@@ -57,7 +57,16 @@ def _atr_stop_target_pct(atr_pct: float | None) -> tuple[float, float]:
     return round(stop_pct, 2), round(target_pct, 2)
 
 
-def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
+def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: float = 0.0) -> AccountState:
+    """reserved_cash: capital already committed to earlier-approved
+    candidates THIS SAME CYCLE, that hasn't hit the DB as a real fill/cash
+    deduction yet (a DEMO fill only happens later in check_pending_fills;
+    a REAL fill only happens later still, once Dhan confirms it via
+    reconcile). Without this, approving candidate #1 for ₹600 of a ₹1000
+    account and then evaluating candidate #2 in the same loop would still
+    see the full ₹1000 as available and could approve another ₹600 order —
+    ₹1200 committed against ₹1000 actually available. Subtracting it here
+    makes each candidate see what's realistically still spendable."""
     if mode == "REAL":
         # Refreshes cash_available/current_equity from Dhan's live balance
         # before sizing anything — see execution/equity_sync.py's module
@@ -87,6 +96,7 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
         ),
         trading_globally_paused=not gate_armed,
         market_is_open=is_market_open_ist(),
+        cash_available=max(0.0, account.cash_available - reserved_cash),
     )
 
 
@@ -110,6 +120,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     ticks = await get_quotes(symbols)
 
     entered = waited = rejected = 0
+    reserved_cash = 0.0  # capital committed to earlier candidates THIS cycle — see _account_state's docstring
     for cand in candidates:
         cand.consumed = True
         tick = ticks.get(cand.symbol)
@@ -133,7 +144,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             stop_price = round(tick.price * (1 - stop_pct / 100.0), 2)
             target_price = round(tick.price * (1 + target_pct / 100.0), 2)
 
-            account_state = _account_state(db, mode, gate_armed)
+            account_state = _account_state(db, mode, gate_armed, reserved_cash)
             per_share_risk = entry_price - stop_price
             if per_share_risk <= 0:
                 decision.action = "WAIT"
@@ -173,6 +184,17 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     else:
                         decision.action = "ENTER"
                         entered += 1
+                        # Reserve this qty's cost against cash_available for
+                        # every remaining candidate in THIS cycle — a real
+                        # fill/cash deduction won't land in the DB until
+                        # later (DEMO: check_pending_fills; REAL: broker
+                        # reconciliation), so without this the next
+                        # candidate would still see the full un-committed
+                        # cash figure and could over-approve on a small
+                        # account. Reserved even before REAL placement is
+                        # confirmed — the safe direction if placement later
+                        # fails is "stayed conservative", never the reverse.
+                        reserved_cash += decision.proposed_qty * entry_price
                         db.add(decision)
                         db.flush()  # need decision.id for the order FK below
 

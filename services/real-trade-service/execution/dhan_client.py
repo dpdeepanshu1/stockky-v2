@@ -163,6 +163,42 @@ def get_security_id(db: Session, symbol: str) -> str:
     return sec_id
 
 
+# Substrings Dhan's own error remarks use for an actually-invalid/expired
+# token, as opposed to some other transient API problem (rate limit,
+# maintenance, network blip). Used by verify_token_live() below so a
+# real-time check can tell "the token is genuinely dead" apart from
+# "Dhan had a bad second" — only the former should auto-disarm trading.
+_AUTH_ERROR_MARKERS = (
+    "invalid access token", "invalid token", "dh-901", "dh-902", "dh-905",
+    "token expired", "token has expired", "unauthorized", "authentication failed",
+)
+
+
+def is_auth_error(message: str) -> bool:
+    m = (message or "").lower()
+    return any(marker in m for marker in _AUTH_ERROR_MARKERS)
+
+
+def verify_token_live(db: Session) -> tuple[bool, Optional[str]]:
+    """Real-time check against Dhan itself, not just our own locally-computed
+    expiry timer. The 24h validity window is exact per Dhan's docs, but this
+    still exists to catch the cases the local clock can't: the admin
+    generated a NEW token from Dhan Web (which invalidates the old one
+    immediately, before its 24h is up), clock drift between this server and
+    Dhan, or Dhan-side revocation. Returns (ok, error_message).
+
+    Cheap and read-only (get_fund_limits) — safe to call frequently, e.g.
+    once per auto-pilot tick, without it ever touching an order.
+    """
+    try:
+        get_funds(db)
+        return True, None
+    except DhanNotConnectedError as e:
+        return False, str(e)
+    except Exception as e:
+        return False, str(e)
+
+
 def get_funds(db: Session) -> dict:
     """Read-only — no arm check. Returns the fund limits data dict.
     SDK returns {status, data: {availabelBalance, ...}}"""
@@ -175,20 +211,41 @@ def get_funds(db: Session) -> dict:
 
 
 def get_positions(db: Session) -> list:
-    """Read-only — no arm check. Returns list of open intraday/CNC positions."""
+    """Read-only — no arm check. Returns list of open intraday/CNC positions.
+    Same "no X available" benign-empty handling as get_holdings() below —
+    Dhan reports zero open positions the same way (status=failure)."""
     client = _get_sdk_client(db)
     resp = client.get_positions()
-    data = _extract_data(resp)
+    try:
+        data = _extract_data(resp)
+    except RuntimeError as e:
+        if "no positions" in str(e).lower():
+            return []
+        raise
     if isinstance(data, list):
         return data
     return []
 
 
 def get_holdings(db: Session) -> list:
-    """Read-only — no arm check. Returns demat holdings."""
+    """Read-only — no arm check. Returns demat holdings.
+
+    FIX (2026-08-27): Dhan's SDK returns {status: "failure", remarks:
+    "No holdings available"} — not an empty list — when the account
+    simply has zero holdings (completely normal for a fresh/small
+    account, or one that's currently all-cash). _extract_data() treats
+    ANY status="failure" as an error, so without this special case every
+    single poll logged a scary-looking "Dhan API error" warning for a
+    perfectly normal state. Only THIS specific benign message is
+    swallowed into an empty list; any other failure still raises."""
     client = _get_sdk_client(db)
     resp = client.get_holdings()
-    data = _extract_data(resp)
+    try:
+        data = _extract_data(resp)
+    except RuntimeError as e:
+        if "no holdings" in str(e).lower():
+            return []
+        raise
     if isinstance(data, list):
         return data
     return []

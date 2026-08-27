@@ -2,22 +2,20 @@
 execution/dhan_client.py — THE ONLY module in this service allowed to hold
 a decrypted Dhan credential or make a request to Dhan's API.
 
-Every other module (risk_engine, candidate_engine, entry/exit engines once
-built) must go through here. Two defense-in-depth layers on top of the
-4-gate arming sequence already enforced in main.py's route dependencies:
+FIX (2026-08-27): dhanhq 2.0.2 constructor is dhanhq(client_id, access_token)
+— DhanContext does NOT exist in this version. All SDK responses follow the
+shape {status, remarks, data} — callers extract .get('data', {}) or
+.get('data', []).
+
+Every other module (risk_engine, candidate_engine, entry/exit engines) must
+go through here. Two defense-in-depth layers on top of the 4-gate arming
+sequence already enforced in main.py's route dependencies:
 
   1. Every mutating call (place_order, modify_order, cancel_order) re-checks
-     `is_armed` itself — it does not trust the caller to have checked. If
-     main.py's gate check ever has a bug, this is the second lock.
+     `is_armed` itself — it does not trust the caller to have checked.
   2. Read-only calls (funds, positions, holdings, order list) are NOT gated
      by arming — reconciliation and the dashboard need to read live account
      state even when trading is intentionally disarmed.
-
-Uses the official `dhanhq` Python SDK. DEMO mode never reaches this file at
-all — the paper-trading fill simulator (portfolio/ in Phase 2) is a
-completely separate code path that only *reads* live prices, and even that
-goes through market_feed/, not this client, since DEMO mode must work with
-zero Dhan account linked.
 """
 from __future__ import annotations
 
@@ -34,16 +32,8 @@ from auth import dhan_credentials
 logger = logging.getLogger("real-trade-dhan-client")
 
 # ── Security master cache (symbol -> Dhan security_id) ─────────────────────
-# Dhan's order APIs take a numeric security_id, not the NSE trading symbol —
-# there is no way to place an order from a symbol string alone. This caches
-# the daily-published NSE equity instrument list so entry/exit never guess:
-# an unresolved symbol means the order is refused, never sent with a
-# fabricated ID. Cache is in-process and refreshed once per
-# _SECURITY_CACHE_TTL_SECONDS — same one-process assumption already
-# documented in hotpicks_store.py's stop flag; this service runs single
-# worker (see docker-compose, no --workers flag), so that's safe here too.
 _SECURITY_CACHE_TTL_SECONDS = 24 * 60 * 60
-_security_cache: dict[str, str] = {}   # SYMBOL -> security_id (NSE_EQ only)
+_security_cache: dict[str, str] = {}
 _security_cache_loaded_at: float = 0.0
 
 NSE_EQ_SEGMENT = "NSE_EQ"
@@ -53,50 +43,103 @@ class SecurityNotResolvedError(Exception):
     pass
 
 
-def _load_security_cache(db: Session) -> None:
-    """Pulls Dhan's official NSE equity instrument list (v2 instrument API,
-    requires the same access token already stored for trading) and keeps
-    only main-board equity rows (SEM_EXM_EXCH_ID=NSE, SEM_INSTRUMENT_NAME=
-    EQUITY, SEM_SERIES=EQ) — excludes SME/ETF/debt/etc, which share trading
-    symbols with main-board names often enough to be a real mismatch risk
-    if not filtered out."""
-    global _security_cache, _security_cache_loaded_at
+class DhanNotConnectedError(Exception):
+    pass
+
+
+class DhanNotArmedError(Exception):
+    pass
+
+
+def _get_sdk_client(db: Session):
+    """Build a fresh dhanhq 2.0.2 SDK client from stored credentials.
+    dhanhq 2.0.2 constructor: dhanhq(client_id, access_token)
+    DhanContext was removed in 2.0 — do NOT use it."""
     creds = dhan_credentials.get_decrypted_credentials(db)
     if creds is None:
         raise DhanNotConnectedError("No Dhan credentials stored — connect Dhan first.")
-    _client_id, access_token = creds
+    client_id, access_token = creds
+    try:
+        from dhanhq import dhanhq  # noqa: PLC0415
+    except ImportError as e:
+        raise RuntimeError("dhanhq SDK not installed — check requirements.txt") from e
+    # dhanhq 2.0.2: direct positional args, no DhanContext wrapper
+    return dhanhq(client_id, access_token)
 
-    resp = httpx.get(
-        f"https://api.dhan.co/v2/instrument/{NSE_EQ_SEGMENT}",
-        headers={"access-token": access_token},
-        timeout=30.0,
-    )
-    resp.raise_for_status()
 
-    import csv
-    import io
+def _extract_data(response: dict, key: str = "data") -> any:
+    """Safely extract data from Dhan SDK response envelope {status, remarks, data}.
+    Returns None if status is failure or data is missing."""
+    if not isinstance(response, dict):
+        return response  # already unwrapped (shouldn't happen, but safe)
+    if response.get("status") == "failure":
+        remarks = response.get("remarks", "")
+        if isinstance(remarks, dict):
+            msg = remarks.get("error_message", str(remarks))
+        else:
+            msg = str(remarks)
+        raise RuntimeError(f"Dhan API error: {msg}")
+    return response.get(key)
 
-    reader = csv.DictReader(io.StringIO(resp.text))
+
+def _load_security_cache(db: Session) -> None:
+    """Loads NSE equity security IDs using dhanhq.fetch_security_list().
+    Falls back to direct CSV download if SDK method fails.
+    Only keeps main-board equity rows (SEM_SERIES=EQ, SEM_INSTRUMENT_NAME=EQUITY)."""
+    global _security_cache, _security_cache_loaded_at
+    client = _get_sdk_client(db)
+
     fresh: dict[str, str] = {}
-    for row in reader:
+    try:
+        import pandas as pd
+        df = client.fetch_security_list(mode='compact')
+        if df is not None and not df.empty:
+            for _, row in df.iterrows():
+                try:
+                    # Compact CSV columns vary — try common column names
+                    exch = str(row.get("SEM_EXM_EXCH_ID", row.get("EXCH_ID", ""))).strip()
+                    instrument = str(row.get("SEM_INSTRUMENT_NAME", row.get("INSTRUMENT_NAME", ""))).strip()
+                    series = str(row.get("SEM_SERIES", row.get("SERIES", ""))).strip()
+                    sym = str(row.get("SEM_TRADING_SYMBOL", row.get("TRADING_SYMBOL", ""))).strip().upper()
+                    sec_id = str(row.get("SEM_SMST_SECURITY_ID", row.get("SECURITY_ID", ""))).strip()
+                    if exch == "NSE" and instrument == "EQUITY" and series in ("EQ", "") and sym and sec_id:
+                        fresh[sym] = sec_id
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.warning("fetch_security_list failed (%s) — falling back to direct CSV download", e)
+        # Fallback: direct CSV download with auth header
+        creds = dhan_credentials.get_decrypted_credentials(db)
+        if creds is None:
+            raise DhanNotConnectedError("No Dhan credentials stored.")
+        _client_id, access_token = creds
         try:
-            if row.get("SEM_EXM_EXCH_ID") != "NSE":
-                continue
-            if row.get("SEM_INSTRUMENT_NAME") != "EQUITY":
-                continue
-            if row.get("SEM_SERIES") not in (None, "", "EQ"):
-                continue
-            sym = (row.get("SEM_TRADING_SYMBOL") or "").strip().upper()
-            sec_id = (row.get("SEM_SMST_SECURITY_ID") or "").strip()
-            if sym and sec_id:
-                fresh[sym] = sec_id
-        except Exception:  # noqa: BLE001 — one malformed row must never abort the whole load
-            continue
+            resp = httpx.get(
+                "https://images.dhan.co/api-data/api-scrip-master.csv",
+                headers={"access-token": access_token},
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+            import csv, io
+            reader = csv.DictReader(io.StringIO(resp.text))
+            for row in reader:
+                try:
+                    if row.get("SEM_EXM_EXCH_ID") != "NSE":
+                        continue
+                    if row.get("SEM_INSTRUMENT_NAME") != "EQUITY":
+                        continue
+                    if row.get("SEM_SERIES") not in (None, "", "EQ"):
+                        continue
+                    sym = (row.get("SEM_TRADING_SYMBOL") or "").strip().upper()
+                    sec_id = (row.get("SEM_SMST_SECURITY_ID") or "").strip()
+                    if sym and sec_id:
+                        fresh[sym] = sec_id
+                except Exception:
+                    continue
+        except Exception as e2:
+            logger.error("Security list download also failed: %s", e2)
 
     if not fresh:
-        # Never swap in an empty cache over a good one — a parsing/format
-        # change upstream should surface as "still using yesterday's list",
-        # not "every symbol is suddenly unresolved".
         logger.error("Dhan instrument list fetch returned 0 usable rows — keeping existing cache.")
         return
 
@@ -107,10 +150,7 @@ def _load_security_cache(db: Session) -> None:
 
 def get_security_id(db: Session, symbol: str) -> str:
     """Returns the Dhan security_id for an NSE-listed symbol. Raises
-    SecurityNotResolvedError rather than returning None/guessing — callers
-    (entry_engine/exit_engine) must treat that as 'cannot act on this
-    symbol right now', the same way they already treat a missing price
-    tick, never as a reason to fall back to any placeholder ID."""
+    SecurityNotResolvedError rather than returning None/guessing."""
     global _security_cache_loaded_at
     now = time.time()
     if not _security_cache or (now - _security_cache_loaded_at) > _SECURITY_CACHE_TTL_SECONDS:
@@ -123,62 +163,45 @@ def get_security_id(db: Session, symbol: str) -> str:
     return sec_id
 
 
-class DhanNotConnectedError(Exception):
-    pass
-
-
-class DhanNotArmedError(Exception):
-    pass
-
-
-def _get_sdk_client(db: Session):
-    """Build a fresh dhanhq SDK client from the currently-stored,
-    decrypted credentials. Not cached across calls on purpose — a token
-    refresh (manual re-paste, or future TOTP auto-refresh) must take
-    effect on the very next call, not after some arbitrary cache TTL.
-
-    NOTE: the DhanContext(client_id, access_token) constructor pattern
-    below matches the dhanhq>=2.0 SDK's documented usage as of this
-    writing (requirements.txt pins dhanhq==2.0.2). SDK APIs do change
-    between versions — before Phase 2 wires this into a real order path,
-    re-verify this constructor signature and the method names below
-    (get_fund_limits/get_positions/get_holdings/get_order_list/
-    place_order/cancel_order) against whatever dhanhq version actually
-    installs, ideally against the sandbox environment first."""
-    creds = dhan_credentials.get_decrypted_credentials(db)
-    if creds is None:
-        raise DhanNotConnectedError("No Dhan credentials stored — connect Dhan first.")
-    client_id, access_token = creds
-    try:
-        from dhanhq import DhanContext, dhanhq
-    except ImportError as e:  # pragma: no cover — dependency install issue
-        raise RuntimeError("dhanhq SDK not installed — check requirements.txt") from e
-    ctx = DhanContext(client_id, access_token)
-    return dhanhq(ctx)
-
-
 def get_funds(db: Session) -> dict:
-    """Read-only — no arm check. Used by the dashboard and reconciliation."""
+    """Read-only — no arm check. Returns the fund limits data dict.
+    SDK returns {status, data: {availabelBalance, ...}}"""
     client = _get_sdk_client(db)
-    return client.get_fund_limits()
+    resp = client.get_fund_limits()
+    data = _extract_data(resp)
+    if not isinstance(data, dict):
+        return {}
+    return data
 
 
 def get_positions(db: Session) -> list:
-    """Read-only — no arm check."""
+    """Read-only — no arm check. Returns list of open intraday/CNC positions."""
     client = _get_sdk_client(db)
-    return client.get_positions()
+    resp = client.get_positions()
+    data = _extract_data(resp)
+    if isinstance(data, list):
+        return data
+    return []
 
 
 def get_holdings(db: Session) -> list:
-    """Read-only — no arm check."""
+    """Read-only — no arm check. Returns demat holdings."""
     client = _get_sdk_client(db)
-    return client.get_holdings()
+    resp = client.get_holdings()
+    data = _extract_data(resp)
+    if isinstance(data, list):
+        return data
+    return []
 
 
 def get_order_list(db: Session) -> list:
-    """Read-only — no arm check."""
+    """Read-only — no arm check. Returns all orders for the day."""
     client = _get_sdk_client(db)
-    return client.get_order_list()
+    resp = client.get_order_list()
+    data = _extract_data(resp)
+    if isinstance(data, list):
+        return data
+    return []
 
 
 def place_order(
@@ -187,18 +210,15 @@ def place_order(
     is_armed: bool,
     security_id: str,
     exchange_segment: str,
-    transaction_type: str,   # "BUY" | "SELL"
+    transaction_type: str,
     quantity: int,
-    order_type: str,         # "LIMIT" per decision 1 (config.ENTRY_ORDER_TYPE)
+    order_type: str,
     price: float,
-    product_type: str = "CNC",   # delivery, not intraday leverage, unless explicitly changed
+    product_type: str = "CNC",
     validity: str = "DAY",
+    tag: Optional[str] = None,
 ) -> dict:
-    """Places a REAL order on the connected Dhan account. `is_armed` MUST be
-    passed explicitly by the caller (main.py resolves it from
-    trade_gate_state right before calling this) — this function does not
-    look it up itself, so a stale/cached armed-flag can never be the
-    reason an order slips through. Second lock, per the module docstring."""
+    """Places a REAL order. is_armed MUST be True — second lock per module docstring."""
     if not is_armed:
         raise DhanNotArmedError("Real trading is not armed — refusing to place order.")
     client = _get_sdk_client(db)
@@ -206,7 +226,7 @@ def place_order(
         "Placing REAL order: %s %s x%s @ %s (%s, %s)",
         transaction_type, security_id, quantity, price, order_type, product_type,
     )
-    return client.place_order(
+    resp = client.place_order(
         security_id=security_id,
         exchange_segment=exchange_segment,
         transaction_type=transaction_type,
@@ -215,14 +235,14 @@ def place_order(
         product_type=product_type,
         price=price,
         validity=validity,
+        tag=tag,
     )
+    return _extract_data(resp) or {}
 
 
 def cancel_order(db: Session, *, is_armed: bool, dhan_order_id: str) -> dict:
-    """Cancelling is always allowed even when NOT armed — arming only gates
-    NEW risk-taking (placing orders), never the ability to back out of a
-    pending one. This intentionally does NOT check is_armed the way
-    place_order does."""
+    """Cancel a pending order. Cancelling is always allowed even when NOT armed."""
     client = _get_sdk_client(db)
     logger.info("Cancelling REAL order %s", dhan_order_id)
-    return client.cancel_order(dhan_order_id)
+    resp = client.cancel_order(dhan_order_id)
+    return _extract_data(resp) or {}

@@ -1,28 +1,39 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl,
-  getSessionToken, setSessionToken, type GateStatus, type AuditLogRow,
-  type Position, type OrderRow, type CycleResult, type DhanStatus,
+  getSessionToken, setSessionToken,
+  type GateStatus, type AuditLogRow, type Position, type OrderRow, type CycleResult, type DhanStatus,
 } from "../realTradeApi";
 import ManualTradeTicket from "./trading/ManualTradeTicket";
 
 type Mode = "DEMO" | "REAL";
+type Tab = "overview" | "live" | "positions" | "orders" | "pipeline" | "log";
 
-function formatHms(totalSeconds: number): string {
+// ── Formatting helpers ───────────────────────────────────────────────────────
+function fmtInr(n: number | null | undefined, decimals = 0): string {
+  if (n == null || Number.isNaN(n)) return "—";
+  const abs = Math.abs(n);
+  const sign = n < 0 ? "-" : "";
+  if (abs >= 1_00_00_000) return `${sign}₹${(abs / 1_00_00_000).toFixed(1)}Cr`;
+  if (abs >= 1_00_000) return `${sign}₹${(abs / 1_00_000).toFixed(1)}L`;
+  return `${sign}₹${abs.toLocaleString("en-IN", { maximumFractionDigits: decimals })}`;
+}
+
+function fmtHms(totalSeconds: number): string {
   const h = Math.floor(totalSeconds / 3600);
   const m = Math.floor((totalSeconds % 3600) / 60);
-  return h > 0 ? `${h}h ${m}m left` : `${m}m left`;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
-function fmtInr(n: number | null | undefined): string {
-  if (n == null || Number.isNaN(n)) return "—";
-  return `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+function fmtTime(iso: string): string {
+  try { return new Date(iso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }); } catch { return iso; }
 }
 
-// Dhan's fund-limits response field names aren't fully pinned down here
-// (not verified against a live sandbox this session) — check a few
-// plausible casings/spellings per field (Dhan's own docs have a known
-// "availabelBalance" typo) rather than assume one and silently show "—".
+function fmtDate(iso: string): string {
+  try { return new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short" }); } catch { return iso; }
+}
+
+// Safe number extraction from Dhan SDK fund object (handles typos and casing)
 function pickNum(obj: any, ...keys: string[]): number | null {
   for (const k of keys) {
     const v = obj?.[k];
@@ -32,16 +43,156 @@ function pickNum(obj: any, ...keys: string[]): number | null {
   return null;
 }
 
-/**
- * Real Automatic Trade UI — gate sequence (login → Dhan connect → risk
- * confirm → arm), manual Run Cycle trigger, live positions/orders, and a
- * manual override for every automatic action (close a position, cancel an
- * order, reconcile broker fills) — Phase 3: REAL places and exits real
- * orders through Dhan (see execution/dhan_client.py, exit_engine/exit.py).
- */
+function pnlColor(n: number | null | undefined): string {
+  if (n == null) return "text-zinc-500";
+  return n >= 0 ? "text-emerald-400" : "text-rose-400";
+}
+
+// ── Status dot ──────────────────────────────────────────────────────────────
+function Dot({ on, pulse }: { on: boolean; pulse?: boolean }) {
+  return (
+    <span className={`inline-block w-2 h-2 rounded-full ${on ? "bg-emerald-400" : "bg-red-500"} ${pulse && on ? "animate-pulse" : ""}`} />
+  );
+}
+
+// ── Tiny stat card ──────────────────────────────────────────────────────────
+function StatCard({ label, value, sub, color }: { label: string; value: React.ReactNode; sub?: string; color?: string }) {
+  return (
+    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 flex flex-col gap-0.5">
+      <p className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">{label}</p>
+      <p className={`text-lg font-bold font-mono ${color ?? "text-zinc-100"}`}>{value}</p>
+      {sub && <p className="text-[10px] font-mono text-zinc-600">{sub}</p>}
+    </div>
+  );
+}
+
+// ── Section header ───────────────────────────────────────────────────────────
+function SectionHdr({ children }: { children: React.ReactNode }) {
+  return <p className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 mb-2">{children}</p>;
+}
+
+// ── Order flow diagram (how a trade executes) ────────────────────────────────
+function OrderFlowDiagram({ mode }: { mode: Mode }) {
+  const steps = [
+    { id: "candidate", label: "Candidate", desc: "Hot Picks / IPO / Scan" },
+    { id: "risk", label: "Risk Check", desc: "9 engine checks" },
+    { id: "order", label: "Place Order", desc: mode === "REAL" ? "Dhan API (LIMIT)" : "Paper trade" },
+    { id: "fill", label: "Fill", desc: mode === "REAL" ? "Reconcile w/ Dhan" : "Simulated price" },
+    { id: "position", label: "Position Open", desc: "Stop + Target set" },
+    { id: "exit", label: "Exit", desc: "Stop / Target / Trail / Time" },
+  ];
+  return (
+    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 mb-4">
+      <SectionHdr>How a trade executes — {mode} mode</SectionHdr>
+      <div className="flex items-center gap-0 overflow-x-auto pb-1">
+        {steps.map((s, i) => (
+          <div key={s.id} className="flex items-center flex-shrink-0">
+            <div className="flex flex-col items-center gap-1 min-w-[80px]">
+              <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold border ${
+                mode === "REAL"
+                  ? "bg-amber-500/10 border-amber-500/40 text-amber-400"
+                  : "bg-emerald-500/10 border-emerald-500/40 text-emerald-400"
+              }`}>{i + 1}</div>
+              <p className="text-[10px] font-mono font-bold text-zinc-200 text-center leading-tight">{s.label}</p>
+              <p className="text-[9px] font-mono text-zinc-600 text-center leading-tight">{s.desc}</p>
+            </div>
+            {i < steps.length - 1 && (
+              <div className="w-6 flex-shrink-0 flex items-center justify-center mb-6">
+                <div className="h-px w-full bg-zinc-700" />
+                <span className="text-zinc-600 text-[9px] -ml-1">›</span>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Balance allocation bar ───────────────────────────────────────────────────
+function BalanceAllocation({ funds, positions }: { funds: any; positions: any[] }) {
+  const available = pickNum(funds, "availabelBalance", "availableBalance", "availableCash") ?? 0;
+  const utilized = pickNum(funds, "utilizedAmount", "utilisedAmount") ?? 0;
+  const collateral = pickNum(funds, "collateralAmount") ?? 0;
+  const total = available + utilized + (collateral > 0 ? collateral : 0);
+  const pct = (v: number) => total > 0 ? Math.round((v / total) * 100) : 0;
+
+  // Per-position allocation from broker positions array
+  const positionsValue = positions.reduce((sum, p) => {
+    const qty = Number(p.buyQty || p.netQty || 0);
+    const avg = Number(p.averageBuyPrice || p.costPrice || 0);
+    return sum + qty * avg;
+  }, 0);
+
+  return (
+    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 mb-4">
+      <SectionHdr>Balance allocation</SectionHdr>
+      <div className="space-y-3">
+        {/* Bar */}
+        <div className="h-3 rounded-full bg-zinc-800 flex overflow-hidden">
+          <div className="bg-emerald-500/70 transition-all" style={{ width: `${pct(available)}%` }} />
+          <div className="bg-amber-500/70 transition-all" style={{ width: `${pct(utilized)}%` }} />
+          {collateral > 0 && <div className="bg-sky-500/70 transition-all" style={{ width: `${pct(collateral)}%` }} />}
+        </div>
+        <div className="grid grid-cols-3 gap-2 text-[10px] font-mono">
+          <div><span className="inline-block w-2 h-2 rounded-sm bg-emerald-500/70 mr-1" />Available<br/><span className="text-zinc-200 font-bold">{fmtInr(available, 0)}</span></div>
+          <div><span className="inline-block w-2 h-2 rounded-sm bg-amber-500/70 mr-1" />Utilized<br/><span className="text-zinc-200 font-bold">{fmtInr(utilized, 0)}</span></div>
+          {collateral > 0 && <div><span className="inline-block w-2 h-2 rounded-sm bg-sky-500/70 mr-1" />Collateral<br/><span className="text-zinc-200 font-bold">{fmtInr(collateral, 0)}</span></div>}
+        </div>
+        {positions.length > 0 && (
+          <div className="border-t border-zinc-800 pt-2">
+            <p className="text-[9px] font-mono text-zinc-600 mb-1">OPEN BROKER POSITIONS</p>
+            <div className="space-y-1">
+              {positions.slice(0, 6).map((p, i) => {
+                const sym = p.tradingSymbol || p.symbol || "—";
+                const qty = Number(p.buyQty || p.netQty || 0);
+                const avg = Number(p.averageBuyPrice || p.costPrice || 0);
+                const val = qty * avg;
+                const pnl = Number(p.unrealizedProfit || p.dayBuyValue || 0);
+                const valPct = total > 0 ? Math.round((val / total) * 100) : 0;
+                return (
+                  <div key={i} className="flex items-center gap-2">
+                    <div className="w-24 font-mono text-[10px] text-zinc-300 truncate">{sym}</div>
+                    <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                      <div className="h-full bg-amber-500/60 rounded-full" style={{ width: `${valPct}%` }} />
+                    </div>
+                    <div className="w-16 text-right font-mono text-[10px] text-zinc-400">{fmtInr(val, 0)}</div>
+                    <div className={`w-14 text-right font-mono text-[10px] ${pnlColor(pnl)}`}>{pnl >= 0 ? "+" : ""}{fmtInr(pnl, 0)}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Gate sequence steps ──────────────────────────────────────────────────────
+function GateStep({ n, label, done, active }: { n: number; label: string; done: boolean; active: boolean }) {
+  return (
+    <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
+      done ? "bg-emerald-500/5 border-emerald-500/20" :
+      active ? "bg-amber-500/10 border-amber-500/30 animate-pulse" :
+      "bg-zinc-900 border-zinc-800"
+    }`}>
+      <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${
+        done ? "bg-emerald-500/20 text-emerald-400" :
+        active ? "bg-amber-500/20 text-amber-400" :
+        "bg-zinc-800 text-zinc-600"
+      }`}>{done ? "✓" : n}</div>
+      <span className={`text-[11px] font-mono ${done ? "text-emerald-300" : active ? "text-amber-300" : "text-zinc-600"}`}>{label}</span>
+    </div>
+  );
+}
+
+// ── Main component ───────────────────────────────────────────────────────────
 export default function RealAutoTrade() {
   const [mode, setMode] = useState<Mode>("DEMO");
+  const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [apiUrlInput, setApiUrlInput] = useState(getRealTradeApiUrl());
+
   const [status, setStatus] = useState<GateStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -52,15 +203,28 @@ export default function RealAutoTrade() {
 
   const [dhanClientId, setDhanClientId] = useState("");
   const [dhanToken, setDhanToken] = useState("");
-  const [dhanAccount, setDhanAccount] = useState<
-    (DhanStatus & { funds: any | null; funds_error: string | null }) | null
-  >(null);
-  const [nowTick, setNowTick] = useState(() => Date.now());
+  const [dhanAccount, setDhanAccount] = useState<(DhanStatus & { funds: any; funds_error: string | null }) | null>(null);
   const [showDhanForm, setShowDhanForm] = useState(false);
+  const [nowTick, setNowTick] = useState(() => Date.now());
 
-  // Ticks once a second purely to re-render the token countdown between
-  // /dhan/account polls — the countdown itself is derived from the last
-  // fetched token_expires_at, never re-fetched every second.
+  // Live Dhan data
+  const [livePositions, setLivePositions] = useState<any[]>([]);
+  const [liveHoldings, setLiveHoldings] = useState<any[]>([]);
+  const [liveDhanOrders, setLiveDhanOrders] = useState<any[]>([]);
+  const [liveLoading, setLiveLoading] = useState(false);
+  const [liveError, setLiveError] = useState<string | null>(null);
+
+  // Service positions/orders
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [orders, setOrders] = useState<OrderRow[]>([]);
+
+  const [auditRows, setAuditRows] = useState<AuditLogRow[]>([]);
+  const [cycleBusy, setCycleBusy] = useState(false);
+  const [cycleResult, setCycleResult] = useState<CycleResult | null>(null);
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Tick for countdown
   useEffect(() => {
     const id = window.setInterval(() => setNowTick(Date.now()), 1000);
     return () => window.clearInterval(id);
@@ -70,27 +234,15 @@ export default function RealAutoTrade() {
     ? Math.max(0, Math.floor((new Date(dhanAccount.token_expires_at).getTime() - nowTick) / 1000))
     : null;
 
-  const [auditRows, setAuditRows] = useState<AuditLogRow[]>([]);
-  const [positions, setPositions] = useState<Position[]>([]);
-  const [orders, setOrders] = useState<OrderRow[]>([]);
-  const [cycleBusy, setCycleBusy] = useState(false);
-  const [cycleResult, setCycleResult] = useState<CycleResult | null>(null);
-
   const loadStatus = useCallback(async (m: Mode) => {
     try {
       const s = await realTradeApi.gateStatus(m);
       setStatus(s);
-      // The full account card (masked client id, expiry countdown, live
-      // funds/margin) is its own admin-only endpoint — only worth calling
-      // in REAL mode, and only once logged in (it 401s otherwise, which
-      // loadStatus already handles by dropping the session token).
       if (m === "REAL" && getSessionToken()) {
         try {
           const d = await realTradeApi.dhanAccount();
           setDhanAccount(d.connected ? d : null);
-        } catch {
-          setDhanAccount(null);
-        }
+        } catch { setDhanAccount(null); }
       } else {
         setDhanAccount(null);
       }
@@ -99,184 +251,40 @@ export default function RealAutoTrade() {
     }
   }, []);
 
-  useEffect(() => {
-    if (getRealTradeApiUrl()) void loadStatus(mode);
-  }, [mode, loadStatus]);
-
-  const saveApiUrl = () => {
-    setRealTradeApiUrl(apiUrlInput);
-    void loadStatus(mode);
-  };
-
-  const doLogin = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await realTradeApi.login(username, password);
-      setSessionToken(res.token);
-      setLoggedIn(true);
-      setPassword("");
-      await loadStatus(mode);
-    } catch (e: any) {
-      setError(e?.message || "Login failed");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const doLogout = async () => {
-    try {
-      await realTradeApi.logout();
-    } catch {
-      /* token may already be invalid — clear locally regardless */
-    }
-    setSessionToken(null);
-    setLoggedIn(false);
-    void loadStatus(mode);
-  };
-
-  const doConnectDhan = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      await realTradeApi.connectDhan(dhanClientId, dhanToken);
-      setDhanToken(""); // never keep the pasted token in component state after sending
-      setDhanClientId("");
-      setShowDhanForm(false);
-      await loadStatus(mode);
-    } catch (e: any) {
-      setError(e?.message || "Failed to connect Dhan");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const doConfirmRisk = async () => {
-    try {
-      await realTradeApi.confirmRiskConfig(mode);
-      await loadStatus(mode);
-    } catch (e: any) {
-      setError(e?.message || "Failed to confirm risk config");
-    }
-  };
-
-  const doArm = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      await realTradeApi.arm(mode);
-      await loadStatus(mode);
-    } catch (e: any) {
-      setError(e?.message || "Failed to arm");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const doDisarm = async () => {
-    try {
-      await realTradeApi.disarm(mode);
-      await loadStatus(mode);
-    } catch (e: any) {
-      setError(e?.message || "Failed to disarm");
-    }
-  };
-
-  const doEmergencyPause = async () => {
-    if (!window.confirm("Pause ALL trading (DEMO and REAL)? This disarms both modes immediately.")) return;
-    try {
-      await realTradeApi.emergencyPause();
-      await loadStatus(mode);
-    } catch (e: any) {
-      setError(e?.message || "Failed to pause");
-    }
-  };
-
-  const loadAudit = async () => {
-    try {
-      setAuditRows(await realTradeApi.auditLog(mode, 30));
-    } catch (e: any) {
-      setError(e?.message || "Failed to load audit log");
-    }
-  };
-
   const loadPositionsAndOrders = useCallback(async (m: Mode) => {
     try {
       const [p, o] = await Promise.all([realTradeApi.positions(m), realTradeApi.orders(m, 20)]);
       setPositions(p);
       setOrders(o);
-    } catch {
-      // Positions/orders panel is best-effort — a stale/unreachable read
-      // here shouldn't block the rest of the page (status, arm/disarm)
-      // from working.
-    }
+    } catch { /* best-effort */ }
   }, []);
 
-  const [actionBusy, setActionBusy] = useState<string | null>(null); // "close:5" | "cancel:9" | "reconcile"
-  const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
-
-  const doClosePosition = async (p: Position) => {
-    const key = `close:${p.id}`;
-    setActionBusy(key);
-    setActionMsg(null);
+  const loadLiveDhanData = async () => {
+    if (!getSessionToken() || mode !== "REAL") return;
+    setLiveLoading(true);
+    setLiveError(null);
     try {
-      const res = await realTradeApi.closePosition(mode, p.id);
-      setActionMsg({ ok: true, text: res.status === "pending_broker_confirmation"
-        ? `${p.symbol} close sent to Dhan — awaiting confirmation.`
-        : `${p.symbol} closed (pnl ${res.pnl?.toFixed(2)}).` });
-      await loadPositionsAndOrders(mode);
+      const base = getRealTradeApiUrl();
+      const token = getSessionToken();
+      const h = { "Content-Type": "application/json", "Authorization": `Bearer ${token}` };
+      const [posRes, holdRes, ordRes] = await Promise.all([
+        fetch(`${base}/dhan/positions`, { headers: h }).then(r => r.json()),
+        fetch(`${base}/dhan/holdings`, { headers: h }).then(r => r.json()),
+        fetch(`${base}/dhan/orders`, { headers: h }).then(r => r.json()),
+      ]);
+      setLivePositions(posRes.positions || []);
+      setLiveHoldings(holdRes.holdings || []);
+      setLiveDhanOrders(ordRes.orders || []);
     } catch (e: any) {
-      setActionMsg({ ok: false, text: e?.message || `Failed to close ${p.symbol}` });
+      setLiveError(e?.message || "Failed to load live Dhan data");
     } finally {
-      setActionBusy(null);
+      setLiveLoading(false);
     }
   };
 
-  const doCancelOrder = async (o: OrderRow) => {
-    const key = `cancel:${o.id}`;
-    setActionBusy(key);
-    setActionMsg(null);
-    try {
-      await realTradeApi.cancelOrder(mode, o.id);
-      setActionMsg({ ok: true, text: `${o.symbol} order cancelled.` });
-      await loadPositionsAndOrders(mode);
-    } catch (e: any) {
-      setActionMsg({ ok: false, text: e?.message || `Failed to cancel ${o.symbol} order` });
-    } finally {
-      setActionBusy(null);
-    }
-  };
-
-  const doReconcile = async () => {
-    setActionBusy("reconcile");
-    setActionMsg(null);
-    try {
-      const res = await realTradeApi.reconcile(mode);
-      setActionMsg({
-        ok: true,
-        text: res.note || `Checked ${res.checked ?? 0} · filled ${res.entries_filled ?? 0} · exits confirmed ${res.exits_confirmed ?? 0} · dead ${res.dead_orders ?? 0}`,
-      });
-      await loadPositionsAndOrders(mode);
-    } catch (e: any) {
-      setActionMsg({ ok: false, text: e?.message || "Reconcile failed" });
-    } finally {
-      setActionBusy(null);
-    }
-  };
-
-  const doRunCycle = async () => {
-    setCycleBusy(true);
-    setError(null);
-    try {
-      const res = await realTradeApi.runCycle(mode);
-      setCycleResult(res);
-      await Promise.all([loadStatus(mode), loadPositionsAndOrders(mode)]);
-    } catch (e: any) {
-      setError(e?.message || "Cycle failed");
-    } finally {
-      setCycleBusy(false);
-    }
-  };
+  useEffect(() => {
+    if (getRealTradeApiUrl()) void loadStatus(mode);
+  }, [mode, loadStatus]);
 
   useEffect(() => {
     if (getRealTradeApiUrl() && (mode === "DEMO" || loggedIn)) {
@@ -284,500 +292,800 @@ export default function RealAutoTrade() {
     }
   }, [mode, loggedIn, loadPositionsAndOrders]);
 
+  useEffect(() => {
+    if (activeTab === "live" && mode === "REAL" && loggedIn) {
+      void loadLiveDhanData();
+    }
+    if (activeTab === "log") void loadAudit();
+  }, [activeTab, mode, loggedIn]);
+
+  const saveApiUrl = () => { setRealTradeApiUrl(apiUrlInput); void loadStatus(mode); };
+
+  const doLogin = async () => {
+    setLoading(true); setError(null);
+    try {
+      const res = await realTradeApi.login(username, password);
+      setSessionToken(res.token); setLoggedIn(true); setPassword("");
+      await loadStatus(mode);
+    } catch (e: any) { setError(e?.message || "Login failed"); }
+    finally { setLoading(false); }
+  };
+
+  const doLogout = async () => {
+    try { await realTradeApi.logout(); } catch { }
+    setSessionToken(null); setLoggedIn(false); void loadStatus(mode);
+  };
+
+  const doConnectDhan = async () => {
+    setLoading(true); setError(null);
+    try {
+      await realTradeApi.connectDhan(dhanClientId, dhanToken);
+      setDhanToken(""); setDhanClientId(""); setShowDhanForm(false);
+      await loadStatus(mode);
+    } catch (e: any) { setError(e?.message || "Failed to connect Dhan"); }
+    finally { setLoading(false); }
+  };
+
+  const doArm = async () => {
+    setLoading(true); setError(null);
+    try { await realTradeApi.arm(mode); await loadStatus(mode); }
+    catch (e: any) { setError(e?.message || "Failed to arm"); }
+    finally { setLoading(false); }
+  };
+
+  const doDisarm = async () => {
+    try { await realTradeApi.disarm(mode); await loadStatus(mode); }
+    catch (e: any) { setError(e?.message || "Failed to disarm"); }
+  };
+
+  const doEmergencyPause = async () => {
+    if (!window.confirm("Pause ALL trading (DEMO + REAL)? Disarms both modes immediately.")) return;
+    try { await realTradeApi.emergencyPause(); await loadStatus(mode); }
+    catch (e: any) { setError(e?.message || "Failed to pause"); }
+  };
+
+  const doConfirmRisk = async () => {
+    try { await realTradeApi.confirmRiskConfig(mode); await loadStatus(mode); }
+    catch (e: any) { setError(e?.message || "Failed to confirm risk config"); }
+  };
+
+  const loadAudit = async () => {
+    try { setAuditRows(await realTradeApi.auditLog(mode, 30)); } catch { }
+  };
+
+  const doClosePosition = async (p: Position) => {
+    const key = `close:${p.id}`;
+    setActionBusy(key); setActionMsg(null);
+    try {
+      const res = await realTradeApi.closePosition(mode, p.id);
+      setActionMsg({ ok: true, text: res.status === "pending_broker_confirmation"
+        ? `${p.symbol} close sent to Dhan.`
+        : `${p.symbol} closed (P&L ${res.pnl?.toFixed(2)}).` });
+      await loadPositionsAndOrders(mode);
+    } catch (e: any) { setActionMsg({ ok: false, text: e?.message || `Failed to close ${p.symbol}` }); }
+    finally { setActionBusy(null); }
+  };
+
+  const doCancelOrder = async (o: OrderRow) => {
+    const key = `cancel:${o.id}`;
+    setActionBusy(key); setActionMsg(null);
+    try {
+      await realTradeApi.cancelOrder(mode, o.id);
+      setActionMsg({ ok: true, text: `${o.symbol} order cancelled.` });
+      await loadPositionsAndOrders(mode);
+    } catch (e: any) { setActionMsg({ ok: false, text: e?.message || `Failed to cancel` }); }
+    finally { setActionBusy(null); }
+  };
+
+  const doReconcile = async () => {
+    setActionBusy("reconcile"); setActionMsg(null);
+    try {
+      const res = await realTradeApi.reconcile(mode);
+      setActionMsg({ ok: true, text: res.note || `Checked ${res.checked ?? 0} · filled ${res.entries_filled ?? 0} · exits ${res.exits_confirmed ?? 0}` });
+      await loadPositionsAndOrders(mode);
+    } catch (e: any) { setActionMsg({ ok: false, text: e?.message || "Reconcile failed" }); }
+    finally { setActionBusy(null); }
+  };
+
+  const doRunCycle = async () => {
+    setCycleBusy(true); setError(null);
+    try {
+      const res = await realTradeApi.runCycle(mode);
+      setCycleResult(res);
+      await Promise.all([loadStatus(mode), loadPositionsAndOrders(mode)]);
+    } catch (e: any) { setError(e?.message || "Cycle failed"); }
+    finally { setCycleBusy(false); }
+  };
+
+  // ── No URL configured ────────────────────────────────────────────────────
   if (!getRealTradeApiUrl()) {
     return (
-      <div className="page-terminal max-w-lg">
-        <p className="dash-section-title">Real Automatic Trade — Setup</p>
-        <p className="font-mono text-xs text-paper/60 mb-3">
-          Enter the real-trade-service URL (its own Render deploy, separate from the main API Gateway).
-        </p>
+      <div className="p-4 max-w-lg mx-auto">
+        <p className="font-mono text-xs text-zinc-400 mb-1 uppercase tracking-widest">Real Trade Service URL</p>
+        <p className="font-mono text-[11px] text-zinc-600 mb-3">Paste your real-trade-service URL (separate Render deploy from api-gateway).</p>
         <div className="flex gap-2">
           <input
-            className="flex-1 bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs"
+            className="flex-1 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 font-mono text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
             placeholder="https://stockky-real-trade.onrender.com"
             value={apiUrlInput}
-            onChange={(e) => setApiUrlInput(e.target.value)}
+            onChange={e => setApiUrlInput(e.target.value)}
           />
-          <button onClick={saveApiUrl} className="px-4 py-2 rounded bg-emerald-600/30 border border-emerald-500/50 font-mono text-xs">
-            Save
-          </button>
+          <button onClick={saveApiUrl} className="px-4 py-2 rounded-lg bg-emerald-600/20 border border-emerald-500/40 font-mono text-xs text-emerald-300">Save</button>
         </div>
       </div>
     );
   }
 
-  return (
-    <div className="page-terminal max-w-3xl">
-      <p className="dash-section-title">🤖 Real Automatic Trade</p>
-      <p className="font-mono text-[11px] text-amber-300/80 mb-4">
-        Phase 2: candidates, risk-checked entries, DEMO fills, and exit
-        management (stop/target/trailing/time-stop) are live for DEMO mode.
-        REAL mode computes and logs identical decisions but does not place
-        live orders yet — that's Phase 3.
-      </p>
-      {mode === "DEMO" && (
-        <p className="font-mono text-[11px] text-emerald-300/70 mb-4">
-          DEMO mode is open — no login required. Everything here uses paper
-          capital only.
-        </p>
-      )}
+  // ── Gate computation ─────────────────────────────────────────────────────
+  const gate1 = status?.admin_authenticated ?? false;
+  const gate2 = mode === "DEMO" ? true : (status?.dhan_connected ?? false);
+  const gate3 = status?.risk_config_confirmed ?? false;
+  const armed = status?.armed ?? false;
 
+  const nextGateNeeded = !gate1 ? 1 : !gate2 ? 2 : !gate3 ? 3 : armed ? null : 4;
+
+  const tabs: { id: Tab; label: string }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "live", label: "Live Dhan" },
+    { id: "positions", label: `Positions (${positions.length})` },
+    { id: "orders", label: `Orders (${orders.length})` },
+    { id: "pipeline", label: "Pipeline" },
+    { id: "log", label: "Activity" },
+  ];
+
+  return (
+    <div className="max-w-3xl mx-auto pb-8">
+      {/* ── Header bar ───────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between mb-1 px-1">
+        <div className="flex items-center gap-2">
+          <span className="text-base">🤖</span>
+          <span className="font-mono text-sm font-bold text-zinc-100">Real Auto Trade</span>
+          {armed && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 animate-pulse">ARMED</span>}
+        </div>
+        <div className="flex gap-1.5">
+          {(["DEMO", "REAL"] as Mode[]).map(m => (
+            <button key={m} onClick={() => setMode(m)} className={`px-3 py-1 rounded-lg font-mono text-[11px] border transition-colors ${
+              mode === m
+                ? m === "DEMO" ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-300" : "bg-rose-500/15 border-rose-500/30 text-rose-300"
+                : "bg-zinc-900 border-zinc-800 text-zinc-600"
+            }`}>
+              <Dot on={mode === m && armed} pulse /> {m}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Phase notice */}
+      <p className="font-mono text-[10px] text-amber-400/70 mb-3 px-1">
+        Phase 2 active — DEMO fully wired (candidates→risk→fill→exit). REAL places live Dhan orders & reconciles fills.
+      </p>
+
+      {/* Error banner */}
       {error && (
-        <div className="mb-3 px-3 py-2 rounded bg-rose-950/40 border border-rose-500/40 font-mono text-xs text-rose-200">
-          {error}
+        <div className="mb-3 px-3 py-2 rounded-lg bg-rose-950/40 border border-rose-500/30 font-mono text-xs text-rose-300 flex items-start justify-between gap-2">
+          <span>{error}</span>
+          <button onClick={() => setError(null)} className="text-rose-500 hover:text-rose-300 flex-shrink-0">✕</button>
         </div>
       )}
 
-      {/* Mode toggle */}
-      <div className="flex gap-2 mb-4">
-        {(["DEMO", "REAL"] as Mode[]).map((m) => (
-          <button
-            key={m}
-            onClick={() => setMode(m)}
-            className={`px-4 py-2 rounded-lg font-mono text-xs border ${
-              mode === m
-                ? m === "DEMO"
-                  ? "bg-emerald-600/30 border-emerald-500/60 text-emerald-200"
-                  : "bg-rose-600/30 border-rose-500/60 text-rose-200"
-                : "bg-graphite border-white/10 text-paper/50"
-            }`}
-          >
-            {m === "DEMO" ? "🟢 DEMO / TRAINING" : "🔴 REAL TRADE"}
-          </button>
-        ))}
-      </div>
-
+      {/* ── Auth / session bar (REAL only) ──────────────────────────────── */}
       {mode === "REAL" && !loggedIn ? (
-        <div className="border border-white/10 rounded-lg p-4 mb-4">
-          <p className="font-mono text-xs text-paper/70 mb-3">Admin Authentication</p>
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 mb-4">
+          <SectionHdr>Admin login required for REAL mode</SectionHdr>
           <div className="space-y-2">
-            <input
-              className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs"
-              placeholder="Admin ID"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-            />
-            <input
-              type="password"
-              className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs"
-              placeholder="Password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && void doLogin()}
-            />
-            <button
-              onClick={() => void doLogin()}
-              disabled={loading || !password}
-              className="w-full px-4 py-2 rounded bg-sky-600/30 border border-sky-500/60 font-mono text-xs disabled:opacity-50"
-            >
+            <input className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 font-mono text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+              placeholder="Admin username" value={username} onChange={e => setUsername(e.target.value)} />
+            <input type="password" className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 font-mono text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+              placeholder="Password" value={password} onChange={e => setPassword(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && void doLogin()} />
+            <button onClick={() => void doLogin()} disabled={loading || !password}
+              className="w-full py-2 rounded-lg bg-sky-500/15 border border-sky-500/30 font-mono text-xs text-sky-300 disabled:opacity-40">
               {loading ? "Authenticating…" : "Authenticate"}
             </button>
           </div>
         </div>
       ) : (
         <>
-          {mode === "REAL" && loggedIn && (
-            <div className="flex items-center justify-between mb-2 px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30">
-              <span className="font-mono text-[11px] text-emerald-200">🟢 Admin session active ({username})</span>
-              <button
-                onClick={() => void doLogout()}
-                className="font-mono text-[11px] px-3 py-1.5 rounded bg-rose-600/30 border border-rose-500/60 text-rose-100 hover:bg-rose-600/50"
-              >
+          {mode === "REAL" && (
+            <div className="flex items-center justify-between mb-3 px-3 py-1.5 rounded-lg bg-emerald-500/5 border border-emerald-500/20">
+              <span className="font-mono text-[11px] text-emerald-400 flex items-center gap-1.5">
+                <Dot on={true} /> Admin session active ({username})
+              </span>
+              <button onClick={() => void doLogout()} className="font-mono text-[10px] px-2 py-1 rounded bg-rose-500/10 border border-rose-500/20 text-rose-400">
                 Log out
               </button>
             </div>
           )}
 
-          {/* Gate status */}
-          {status && (
-            <div className="border border-white/10 rounded-lg p-4 mb-4 space-y-2 font-mono text-xs">
-              <div className="flex justify-between">
-                <span>Admin authenticated</span>
-                <span>{status.admin_authenticated ? "🟢" : "🔴"}</span>
-              </div>
-              {mode === "REAL" && (
-                <div className="flex justify-between">
-                  <span>Dhan connected</span>
-                  <span>{status.dhan_connected ? "🟢" : "🔴"}</span>
-                </div>
-              )}
-              {mode === "REAL" && status.dhan_connected && secondsRemaining != null && (
-                <div className="flex justify-between">
-                  <span>Dhan token expires</span>
-                  <span
-                    className={
-                      secondsRemaining <= 0
-                        ? "text-red-400"
-                        : secondsRemaining <= 2 * 3600
-                        ? "text-red-400"
-                        : secondsRemaining <= 6 * 3600
-                        ? "text-amber-300"
-                        : "text-emerald-300"
-                    }
-                  >
-                    {secondsRemaining <= 0 ? "expired — reconnect" : formatHms(secondsRemaining)}
-                  </span>
-                </div>
-              )}
-              <div className="flex justify-between">
-                <span>Risk config confirmed</span>
-                <span>{status.risk_config_confirmed ? "🟢" : "🔴"}</span>
-              </div>
-              <div className="flex justify-between font-bold">
-                <span>Armed</span>
-                <span>{status.armed ? "🟢 ACTIVE" : "🔴 OFF"}</span>
-              </div>
-              {status.disarmed_reason && (
-                <p className="text-amber-300/80 text-[11px]">Last disarm reason: {status.disarmed_reason}</p>
-              )}
-            </div>
-          )}
-
-          {/* Dhan Account dashboard — proves the connection actually works
-              (a live funds call, not just "token not expired on paper")
-              and surfaces balance/margin plus a live-ticking expiry
-              countdown, since Dhan tokens are short-lived (~24h, not the
-              30-day figure this UI used to assume). */}
-          {mode === "REAL" && (
-            <div className="border border-white/10 rounded-lg p-4 mb-4">
-              <div className="flex items-center justify-between mb-2">
-                <p className="font-mono text-xs text-paper/70">Dhan Account</p>
-                <span className={`font-mono text-[10px] px-2 py-0.5 rounded ${
-                  dhanAccount?.connected ? "bg-emerald-500/20 text-emerald-300" : "bg-rose-500/20 text-rose-300"
+          {/* ── Tab bar ─────────────────────────────────────────────────── */}
+          <div className="flex gap-1 mb-4 overflow-x-auto pb-1">
+            {tabs.map(t => (
+              <button key={t.id} onClick={() => setActiveTab(t.id)}
+                className={`px-3 py-1.5 rounded-lg font-mono text-[11px] whitespace-nowrap border transition-colors flex-shrink-0 ${
+                  activeTab === t.id
+                    ? "bg-zinc-700 border-zinc-600 text-zinc-100"
+                    : "bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300"
                 }`}>
-                  {dhanAccount?.connected ? "🟢 Connected" : "🔴 Not connected"}
-                </span>
-              </div>
-
-              {!dhanAccount?.connected && (
-                <p className="font-mono text-[11px] text-paper/40">
-                  Connect Dhan below to verify the account and see live balance/margin.
-                </p>
-              )}
-
-              {dhanAccount?.connected && (
-                <div className="space-y-2">
-                  <div className="grid grid-cols-2 gap-2 font-mono text-[11px] text-paper/70">
-                    <div className="flex justify-between border-b border-white/5 pb-1">
-                      <span className="text-paper/40">Client ID</span>
-                      <span>{dhanAccount.client_id_masked}</span>
-                    </div>
-                    <div className="flex justify-between border-b border-white/5 pb-1">
-                      <span className="text-paper/40">Token expires</span>
-                      <span className={
-                        (secondsRemaining ?? 0) <= 2 * 3600 ? "text-red-400"
-                          : (secondsRemaining ?? 0) <= 6 * 3600 ? "text-amber-300" : "text-emerald-300"
-                      }>
-                        {secondsRemaining != null ? (secondsRemaining <= 0 ? "expired" : formatHms(secondsRemaining)) : "—"}
-                      </span>
-                    </div>
-                  </div>
-
-                  {dhanAccount.funds_error && (
-                    <p className="font-mono text-[11px] text-rose-300/80">
-                      Connected, but the live funds check failed: {dhanAccount.funds_error}
-                    </p>
-                  )}
-
-                  {dhanAccount.funds && (
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                      {[
-                        { label: "Available Balance", value: pickNum(dhanAccount.funds, "availabelBalance", "availableBalance", "availableCash") },
-                        { label: "Utilized Margin", value: pickNum(dhanAccount.funds, "utilizedAmount", "utilisedAmount") },
-                        { label: "Withdrawable", value: pickNum(dhanAccount.funds, "withdrawableBalance") },
-                        { label: "SOD Limit", value: pickNum(dhanAccount.funds, "sodLimit") },
-                        { label: "Collateral", value: pickNum(dhanAccount.funds, "collateralAmount") },
-                        { label: "Blocked Payout", value: pickNum(dhanAccount.funds, "blockedPayoutAmount") },
-                      ].map((f) => (
-                        <div key={f.label} className="border border-white/10 rounded-lg px-2 py-1.5 bg-graphite/40">
-                          <p className="font-mono text-[9px] text-paper/40 uppercase tracking-wide">{f.label}</p>
-                          <p className="font-mono text-sm font-bold text-paper/90">{fmtInr(f.value)}</p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  <button
-                    onClick={() => void loadStatus(mode)}
-                    className="font-mono text-[10px] text-sky-300 hover:text-sky-200"
-                  >
-                    ↻ Refresh account
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Dhan connect / rotate (REAL only) — always reachable, not just
-              on first connect, since a 30-day token needs re-pasting well
-              before the hard expiry disarms live trading. */}
-          {mode === "REAL" && status && (!status.dhan_connected || showDhanForm) && (
-            <div className="border border-white/10 rounded-lg p-4 mb-4">
-              <p className="font-mono text-xs text-paper/70 mb-3">
-                {status.dhan_connected ? "Rotate Dhan Token" : "Connect Dhan Account"}
-              </p>
-              <div className="space-y-2">
-                <input
-                  className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs"
-                  placeholder="Dhan Client ID"
-                  value={dhanClientId}
-                  onChange={(e) => setDhanClientId(e.target.value)}
-                />
-                <input
-                  type="password"
-                  className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs"
-                  placeholder="Dhan Access Token (generate from web.dhan.co → DhanHQ Trading APIs; expires in ~24h — you'll need to paste a fresh one daily)"
-                  value={dhanToken}
-                  onChange={(e) => setDhanToken(e.target.value)}
-                />
-                <button
-                  onClick={() => void doConnectDhan()}
-                  disabled={loading || !dhanClientId || !dhanToken}
-                  className="w-full px-4 py-2 rounded bg-sky-600/30 border border-sky-500/60 font-mono text-xs disabled:opacity-50"
-                >
-                  {loading ? "Connecting…" : status.dhan_connected ? "Save New Token" : "Connect Dhan"}
-                </button>
-                {status.dhan_connected && (
-                  <button
-                    onClick={() => setShowDhanForm(false)}
-                    className="w-full px-4 py-2 rounded border border-white/10 font-mono text-xs text-paper/60"
-                  >
-                    Cancel
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-          {mode === "REAL" && status?.dhan_connected && !showDhanForm && (
-            <div className="flex justify-end mb-4">
-              <button
-                onClick={() => setShowDhanForm(true)}
-                className="font-mono text-[11px] text-paper/50 underline"
-              >
-                Rotate Dhan token
+                {t.label}
               </button>
-            </div>
-          )}
-
-          {/* Risk config summary + confirm */}
-          {status?.risk_config && (
-            <div className="border border-white/10 rounded-lg p-4 mb-4 font-mono text-xs">
-              <p className="text-paper/70 mb-2">Risk Configuration ({mode})</p>
-              <div className="grid grid-cols-2 gap-2 text-paper/80">
-                <span>Risk per trade</span><span>{status.risk_config.risk_per_trade_pct}%</span>
-                <span>Max daily loss</span><span>{status.risk_config.max_daily_loss_pct}%</span>
-                <span>Max concurrent positions</span><span>{status.risk_config.max_concurrent_positions}</span>
-                <span>Max portfolio risk</span><span>{status.risk_config.max_portfolio_risk_pct}%</span>
-              </div>
-              {!status.risk_config_confirmed && (
-                <button
-                  onClick={() => void doConfirmRisk()}
-                  className="mt-3 w-full px-4 py-2 rounded bg-amber-600/30 border border-amber-500/60 text-xs"
-                >
-                  Confirm Risk Configuration
-                </button>
-              )}
-            </div>
-          )}
-
-          {/* Arm / Disarm */}
-          <div className="flex gap-2 mb-4">
-            {status?.armed ? (
-              <button onClick={() => void doDisarm()} className="flex-1 px-4 py-3 rounded-lg bg-rose-600/30 border border-rose-500/60 font-mono text-xs">
-                🛑 DISARM
-              </button>
-            ) : (
-              <button
-                onClick={() => void doArm()}
-                disabled={loading}
-                className="flex-1 px-4 py-3 rounded-lg bg-emerald-600/30 border border-emerald-500/60 font-mono text-xs disabled:opacity-50"
-              >
-                {loading ? "Arming…" : "⚡ ARM"}
-              </button>
-            )}
-            <button onClick={() => void doEmergencyPause()} className="px-4 py-3 rounded-lg bg-rose-900/50 border border-rose-500/70 font-mono text-xs">
-              🚨 PAUSE ALL
-            </button>
+            ))}
           </div>
 
-          {/* Account snapshot */}
-          {status?.account && (
-            <div className="border border-white/10 rounded-lg p-4 mb-4 font-mono text-xs">
-              <p className="text-paper/70 mb-2">Account ({mode})</p>
-              <div className="grid grid-cols-2 gap-2 text-paper/80">
-                <span>Starting capital</span><span>₹{status.account.starting_capital ?? "—"}</span>
-                <span>Current equity</span><span>₹{status.account.current_equity ?? "—"}</span>
-                <span>Cash available</span><span>₹{status.account.cash_available ?? "—"}</span>
-                <span>Realized P&amp;L today</span><span>₹{status.account.realized_pnl_today ?? "—"}</span>
+          {/* ═══════════════════════════════════════════════════════════════
+              TAB: OVERVIEW
+          ═══════════════════════════════════════════════════════════════ */}
+          {activeTab === "overview" && (
+            <div className="space-y-4">
+              {/* Gate sequence */}
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                <SectionHdr>Arming sequence — {mode} mode</SectionHdr>
+                <div className="grid grid-cols-2 gap-2 mb-4">
+                  <GateStep n={1} label="Admin authenticated" done={gate1} active={nextGateNeeded === 1} />
+                  <GateStep n={2} label={mode === "DEMO" ? "Dhan (not required)" : "Dhan connected"} done={gate2} active={nextGateNeeded === 2} />
+                  <GateStep n={3} label="Risk config confirmed" done={gate3} active={nextGateNeeded === 3} />
+                  <GateStep n={4} label="Armed" done={armed} active={nextGateNeeded === 4} />
+                </div>
+
+                {/* Login form already shown above when not logged in; here only if
+                    logged in but gate not met */}
+                {status && !gate3 && mode === "REAL" && gate1 && gate2 && (
+                  <button onClick={() => void doConfirmRisk()}
+                    className="w-full py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 font-mono text-xs text-amber-300">
+                    Confirm risk configuration
+                  </button>
+                )}
+                {status && !gate3 && mode === "DEMO" && (
+                  <button onClick={() => void doConfirmRisk()}
+                    className="w-full py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 font-mono text-xs text-amber-300">
+                    Confirm risk configuration
+                  </button>
+                )}
+
+                <div className="flex gap-2 mt-2">
+                  {armed ? (
+                    <button onClick={() => void doDisarm()} className="flex-1 py-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 font-mono text-xs text-rose-300">
+                      🛑 DISARM
+                    </button>
+                  ) : (
+                    <button onClick={() => void doArm()} disabled={loading || !gate1 || !gate2 || !gate3}
+                      className="flex-1 py-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 font-mono text-xs text-emerald-300 disabled:opacity-30">
+                      {loading ? "Arming…" : "⚡ ARM"}
+                    </button>
+                  )}
+                  <button onClick={() => void doEmergencyPause()} className="px-4 py-2.5 rounded-lg bg-red-900/30 border border-red-500/40 font-mono text-xs text-red-300">
+                    🚨 PAUSE ALL
+                  </button>
+                </div>
+                {status?.disarmed_reason && (
+                  <p className="font-mono text-[10px] text-amber-400/60 mt-2">Last disarm: {status.disarmed_reason}</p>
+                )}
               </div>
+
+              {/* REAL: Dhan account card */}
+              {mode === "REAL" && (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <SectionHdr>Dhan account</SectionHdr>
+                    <span className={`font-mono text-[10px] px-2 py-0.5 rounded-full border ${
+                      dhanAccount?.connected ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" : "bg-rose-500/10 border-rose-500/30 text-rose-400"
+                    }`}>
+                      {dhanAccount?.connected ? "🟢 Connected" : "🔴 Disconnected"}
+                    </span>
+                  </div>
+
+                  {dhanAccount?.connected ? (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-zinc-500">
+                        <div>Client ID <span className="text-zinc-200 ml-1">{dhanAccount.client_id_masked}</span></div>
+                        <div>Token <span className={`ml-1 ${(secondsRemaining ?? 0) < 7200 ? "text-rose-400" : "text-emerald-400"}`}>
+                          {secondsRemaining != null ? (secondsRemaining <= 0 ? "expired" : fmtHms(secondsRemaining) + " left") : "—"}
+                        </span></div>
+                      </div>
+
+                      {dhanAccount.funds_error ? (
+                        <p className="font-mono text-[11px] text-rose-300 bg-rose-500/5 rounded-lg px-3 py-2 border border-rose-500/20">
+                          ⚠ Live funds check failed: {dhanAccount.funds_error}
+                        </p>
+                      ) : dhanAccount.funds ? (
+                        <div className="grid grid-cols-3 gap-2">
+                          {[
+                            { label: "Available", keys: ["availabelBalance", "availableBalance", "availableCash"] },
+                            { label: "Utilized", keys: ["utilizedAmount", "utilisedAmount"] },
+                            { label: "Withdrawable", keys: ["withdrawableBalance"] },
+                            { label: "SOD Limit", keys: ["sodLimit"] },
+                            { label: "Collateral", keys: ["collateralAmount"] },
+                            { label: "Blocked", keys: ["blockedPayoutAmount"] },
+                          ].map(f => {
+                            const v = pickNum(dhanAccount.funds, ...f.keys);
+                            return (
+                              <div key={f.label} className="bg-zinc-950 border border-zinc-800 rounded-lg p-2">
+                                <p className="font-mono text-[9px] uppercase tracking-widest text-zinc-600">{f.label}</p>
+                                <p className="font-mono text-sm font-bold text-zinc-100 mt-0.5">{fmtInr(v, 0)}</p>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+
+                      <div className="flex gap-2">
+                        <button onClick={() => void loadStatus(mode)} className="font-mono text-[10px] text-sky-400 hover:text-sky-300">
+                          ↻ Refresh
+                        </button>
+                        <button onClick={() => setShowDhanForm(!showDhanForm)} className="font-mono text-[10px] text-zinc-500 hover:text-zinc-300">
+                          Rotate token
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="font-mono text-[11px] text-zinc-600">Connect Dhan below to enable REAL trading and see live balance.</p>
+                  )}
+
+                  {/* Dhan connect form */}
+                  {(!dhanAccount?.connected || showDhanForm) && (
+                    <div className="mt-3 space-y-2 border-t border-zinc-800 pt-3">
+                      <p className="font-mono text-[10px] text-zinc-500">{dhanAccount?.connected ? "Paste a fresh access token to rotate" : "Connect your Dhan account"}</p>
+                      <input className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 font-mono text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+                        placeholder="Dhan Client ID" value={dhanClientId} onChange={e => setDhanClientId(e.target.value)} />
+                      <input type="password" className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 font-mono text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+                        placeholder="Access Token (generate at web.dhan.co → DhanHQ APIs)" value={dhanToken} onChange={e => setDhanToken(e.target.value)} />
+                      <div className="flex gap-2">
+                        <button onClick={() => void doConnectDhan()} disabled={loading || !dhanClientId || !dhanToken}
+                          className="flex-1 py-2 rounded-lg bg-sky-500/10 border border-sky-500/30 font-mono text-xs text-sky-300 disabled:opacity-40">
+                          {loading ? "Connecting…" : dhanAccount?.connected ? "Save new token" : "Connect Dhan"}
+                        </button>
+                        {dhanAccount?.connected && (
+                          <button onClick={() => setShowDhanForm(false)}
+                            className="px-3 py-2 rounded-lg border border-zinc-700 font-mono text-xs text-zinc-500">
+                            Cancel
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Risk config */}
+              {status?.risk_config && (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                  <SectionHdr>Risk configuration — {mode}</SectionHdr>
+                  <div className="grid grid-cols-2 gap-3">
+                    {[
+                      { label: "Risk / trade", value: `${status.risk_config.risk_per_trade_pct}%` },
+                      { label: "Max daily loss", value: `${status.risk_config.max_daily_loss_pct}%` },
+                      { label: "Max positions", value: status.risk_config.max_concurrent_positions },
+                      { label: "Portfolio risk cap", value: `${status.risk_config.max_portfolio_risk_pct}%` },
+                    ].map(f => (
+                      <div key={f.label} className="bg-zinc-950 border border-zinc-800 rounded-lg p-2">
+                        <p className="font-mono text-[9px] uppercase tracking-widest text-zinc-600">{f.label}</p>
+                        <p className="font-mono text-sm font-bold text-zinc-100 mt-0.5">{f.value ?? "—"}</p>
+                      </div>
+                    ))}
+                  </div>
+                  {!gate3 && (
+                    <button onClick={() => void doConfirmRisk()} className="mt-3 w-full py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 font-mono text-xs text-amber-300">
+                      Confirm this risk configuration
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Stockky account snapshot */}
+              {status?.account && (
+                <div className="grid grid-cols-2 gap-2">
+                  <StatCard label="Starting capital" value={fmtInr(status.account.starting_capital)} />
+                  <StatCard label="Current equity" value={fmtInr(status.account.current_equity)} />
+                  <StatCard label="Cash available" value={fmtInr(status.account.cash_available)} />
+                  <StatCard
+                    label="P&L today"
+                    value={fmtInr(status.account.realized_pnl_today, 0)}
+                    color={pnlColor(status.account.realized_pnl_today)}
+                  />
+                </div>
+              )}
+
+              {/* Order flow diagram */}
+              <OrderFlowDiagram mode={mode} />
+
+              {/* Manual trade ticket */}
+              {(mode === "DEMO" || gate1) && (
+                <ManualTradeTicket
+                  mode={mode}
+                  armed={armed}
+                  onOrderComplete={() => { void loadPositionsAndOrders(mode); void loadStatus(mode); }}
+                />
+              )}
             </div>
           )}
 
-          {/* Manual Trade Ticket — the "MANUAL" leg of DEMO/MANUAL/AUTO.
-              DEMO needs no arming (matches the rest of DEMO's always-open
-              policy); REAL still requires the same admin+Dhan+risk-config
-              gate sequence above, enforced again server-side either way. */}
-          {(mode === "DEMO" || status?.admin_authenticated) && (
-            <ManualTradeTicket
-              mode={mode}
-              armed={!!status?.armed}
-              onOrderComplete={() => { void loadPositionsAndOrders(mode); void loadStatus(mode); }}
-            />
+          {/* ═══════════════════════════════════════════════════════════════
+              TAB: LIVE DHAN DATA
+          ═══════════════════════════════════════════════════════════════ */}
+          {activeTab === "live" && (
+            <div className="space-y-4">
+              {mode !== "REAL" ? (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 text-center">
+                  <p className="font-mono text-sm text-zinc-500">Switch to REAL mode and log in to see live Dhan account data.</p>
+                </div>
+              ) : !loggedIn ? (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 text-center">
+                  <p className="font-mono text-sm text-zinc-500">Log in to view live Dhan data.</p>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between">
+                    <SectionHdr>Live data from Dhan broker</SectionHdr>
+                    <button onClick={() => void loadLiveDhanData()} disabled={liveLoading}
+                      className="font-mono text-[10px] px-3 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-400 disabled:opacity-40">
+                      {liveLoading ? "Loading…" : "↻ Refresh all"}
+                    </button>
+                  </div>
+
+                  {liveError && (
+                    <div className="px-3 py-2 rounded-lg bg-rose-950/40 border border-rose-500/30 font-mono text-xs text-rose-300">{liveError}</div>
+                  )}
+
+                  {/* Balance allocation */}
+                  {dhanAccount?.funds && (
+                    <BalanceAllocation funds={dhanAccount.funds} positions={livePositions} />
+                  )}
+
+                  {/* Live positions */}
+                  <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                    <SectionHdr>Open positions at Dhan ({livePositions.length})</SectionHdr>
+                    {livePositions.length === 0 ? (
+                      <p className="font-mono text-[11px] text-zinc-600">No open positions at broker.</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {livePositions.map((p, i) => {
+                          const sym = p.tradingSymbol || p.symbol || "—";
+                          const qty = Number(p.netQty || p.buyQty || 0);
+                          const avg = Number(p.averageBuyPrice || p.costPrice || 0);
+                          const ltp = Number(p.lastTradedPrice || p.ltp || 0);
+                          const pnl = Number(p.unrealizedProfit || p.dayBuyValue || 0);
+                          const product = p.positionType || p.productType || "";
+                          return (
+                            <div key={i} className="bg-zinc-950 rounded-lg px-3 py-2 border border-zinc-800">
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <span className="font-mono text-sm font-bold text-zinc-100">{sym}</span>
+                                  <span className="font-mono text-[10px] text-zinc-600 ml-2">{product}</span>
+                                </div>
+                                <span className={`font-mono text-sm font-bold ${pnlColor(pnl)}`}>
+                                  {pnl >= 0 ? "+" : ""}{fmtInr(pnl, 2)}
+                                </span>
+                              </div>
+                              <div className="flex gap-4 mt-1 font-mono text-[10px] text-zinc-500">
+                                <span>Qty <span className="text-zinc-300">{qty}</span></span>
+                                <span>Avg <span className="text-zinc-300">₹{avg.toFixed(2)}</span></span>
+                                <span>LTP <span className="text-zinc-300">₹{ltp.toFixed(2)}</span></span>
+                                <span>Val <span className="text-zinc-300">{fmtInr(qty * avg, 0)}</span></span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Live holdings */}
+                  <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                    <SectionHdr>Demat holdings ({liveHoldings.length})</SectionHdr>
+                    {liveHoldings.length === 0 ? (
+                      <p className="font-mono text-[11px] text-zinc-600">No holdings in demat.</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full font-mono text-[11px]">
+                          <thead>
+                            <tr className="text-zinc-600 border-b border-zinc-800">
+                              <th className="text-left py-1 pr-3">Symbol</th>
+                              <th className="text-right pr-3">Qty</th>
+                              <th className="text-right pr-3">Avg Cost</th>
+                              <th className="text-right pr-3">LTP</th>
+                              <th className="text-right">P&L</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {liveHoldings.map((h, i) => {
+                              const sym = h.tradingSymbol || h.symbol || "—";
+                              const qty = Number(h.totalQty || h.quantity || 0);
+                              const avg = Number(h.avgCostPrice || h.averageBuyPrice || 0);
+                              const ltp = Number(h.lastTradedPrice || h.ltp || 0);
+                              const pnl = (ltp - avg) * qty;
+                              return (
+                                <tr key={i} className="border-b border-zinc-900 hover:bg-zinc-950">
+                                  <td className="py-1.5 pr-3 text-zinc-200 font-bold">{sym}</td>
+                                  <td className="text-right pr-3 text-zinc-400">{qty}</td>
+                                  <td className="text-right pr-3 text-zinc-400">₹{avg.toFixed(2)}</td>
+                                  <td className="text-right pr-3 text-zinc-400">₹{ltp.toFixed(2)}</td>
+                                  <td className={`text-right ${pnlColor(pnl)}`}>{pnl >= 0 ? "+" : ""}{fmtInr(pnl, 0)}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Live orders from Dhan */}
+                  <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                    <SectionHdr>Today's orders at Dhan ({liveDhanOrders.length})</SectionHdr>
+                    {liveDhanOrders.length === 0 ? (
+                      <p className="font-mono text-[11px] text-zinc-600">No orders placed today.</p>
+                    ) : (
+                      <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                        {liveDhanOrders.map((o, i) => {
+                          const sym = o.tradingSymbol || o.symbol || "—";
+                          const side = o.transactionType || o.side || "";
+                          const qty = Number(o.quantity || 0);
+                          const price = Number(o.price || o.averageTradedPrice || 0);
+                          const status = (o.orderStatus || o.status || "").toUpperCase();
+                          const statusColor = status === "TRADED" || status === "FILLED" ? "text-emerald-400"
+                            : status === "REJECTED" || status === "CANCELLED" ? "text-rose-400"
+                            : "text-amber-400";
+                          return (
+                            <div key={i} className="flex items-center justify-between bg-zinc-950 rounded-lg px-3 py-1.5 border border-zinc-800">
+                              <div className="flex items-center gap-2 font-mono text-[11px]">
+                                <span className={`font-bold ${side === "BUY" ? "text-emerald-400" : "text-rose-400"}`}>{side}</span>
+                                <span className="text-zinc-200">{sym}</span>
+                                <span className="text-zinc-500">×{qty}</span>
+                                {price > 0 && <span className="text-zinc-500">@ ₹{price.toFixed(2)}</span>}
+                              </div>
+                              <span className={`font-mono text-[10px] ${statusColor}`}>{status}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
           )}
 
-          {/* Run cycle — Phase 2: candidates -> entries -> fills -> exits */}
-          {status?.armed && (
-            <div className="border border-white/10 rounded-lg p-4 mb-4">
-              <div className="flex items-center justify-between mb-2">
-                <p className="font-mono text-xs text-paper/70">
-                  AI Trade Pipeline — Candidate → Entry → Risk → {mode === "DEMO" ? "Simulated Fill" : "Execution"} → Position → Exit
-                </p>
-                <button
-                  onClick={() => void doRunCycle()}
-                  disabled={cycleBusy}
-                  className="font-mono text-xs px-3 py-1.5 rounded bg-emerald-600/30 border border-emerald-500/60 disabled:opacity-50"
-                >
-                  {cycleBusy ? "Running…" : "▶ Run Cycle"}
-                </button>
+          {/* ═══════════════════════════════════════════════════════════════
+              TAB: POSITIONS (Stockky service DB)
+          ═══════════════════════════════════════════════════════════════ */}
+          {activeTab === "positions" && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <SectionHdr>Open positions — {mode} ({positions.length})</SectionHdr>
+                <div className="flex gap-2">
+                  {armed && (
+                    <button onClick={() => void doReconcile()} disabled={actionBusy === "reconcile"}
+                      className="font-mono text-[10px] px-3 py-1 rounded-lg bg-sky-500/10 border border-sky-500/30 text-sky-400 disabled:opacity-40">
+                      {actionBusy === "reconcile" ? "Checking…" : "🔄 Reconcile"}
+                    </button>
+                  )}
+                  <button onClick={() => void loadPositionsAndOrders(mode)}
+                    className="font-mono text-[10px] px-3 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-400">
+                    ↻
+                  </button>
+                </div>
               </div>
-              {mode === "REAL" && (
-                <p className="font-mono text-[11px] text-amber-300/70 mb-2">
-                  REAL mode places live orders through Dhan and reconciles fills automatically at the end of every cycle.
-                </p>
+
+              {actionMsg && (
+                <div className={`px-3 py-2 rounded-lg border font-mono text-xs ${actionMsg.ok ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-300" : "bg-rose-500/5 border-rose-500/20 text-rose-300"}`}>
+                  {actionMsg.text}
+                </div>
               )}
-              {(cycleBusy || cycleResult) && (
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2 mt-1">
-                  {[
-                    { label: "Candidates", value: cycleResult?.new_candidates, color: "text-sky-300" },
-                    { label: "Entered", value: cycleResult?.entry.entered, color: "text-emerald-300" },
-                    { label: "Waited", value: cycleResult?.entry.waited, color: "text-amber-300" },
-                    { label: "Rejected", value: cycleResult?.entry.rejected, color: "text-rose-300" },
-                    { label: "Fills", value: cycleResult?.fills, color: "text-emerald-300" },
-                    { label: "Expired", value: cycleResult?.expired_orders, color: "text-paper/50" },
-                    { label: "Held", value: cycleResult?.exit.held, color: "text-paper/70" },
-                    { label: "Trailed", value: cycleResult?.exit.trailed, color: "text-sky-300" },
-                    { label: "Partial Exit", value: cycleResult?.exit.partial_exits, color: "text-amber-300" },
-                    { label: "Closed", value: cycleResult?.exit.full_exits, color: "text-emerald-300" },
-                    { label: "Time-stopped", value: cycleResult?.exit.time_stops, color: "text-rose-300" },
-                  ].map((stage) => (
-                    <div key={stage.label} className="border border-white/10 rounded-lg px-2 py-1.5 bg-graphite/40">
-                      <p className="font-mono text-[9px] text-paper/40 uppercase tracking-wide">{stage.label}</p>
-                      <p className={`font-mono text-sm font-bold ${cycleBusy && stage.value == null ? "text-paper/20 animate-pulse" : stage.color}`}>
-                        {cycleBusy && stage.value == null ? "…" : stage.value ?? 0}
-                      </p>
+
+              {positions.length === 0 ? (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 text-center">
+                  <p className="font-mono text-sm text-zinc-600">No open positions.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {positions.map(p => (
+                    <div key={p.id} className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                      <div className="flex items-start justify-between mb-2">
+                        <div>
+                          <span className="font-mono text-base font-bold text-zinc-100">{p.symbol}</span>
+                          <span className="font-mono text-[10px] text-zinc-600 ml-2">{p.status}</span>
+                        </div>
+                        <span className={`font-mono text-base font-bold ${pnlColor(p.unrealized_pnl)}`}>
+                          {p.unrealized_pnl >= 0 ? "+" : ""}{fmtInr(p.unrealized_pnl, 2)}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-4 gap-2 font-mono text-[10px] text-zinc-500 mb-3">
+                        <div>Qty<br/><span className="text-zinc-200 font-bold">{p.qty_open}</span></div>
+                        <div>Entry<br/><span className="text-zinc-200 font-bold">₹{p.avg_entry_price}</span></div>
+                        <div>Stop<br/><span className="text-rose-400 font-bold">{p.current_stop ? `₹${p.current_stop}` : "—"}</span></div>
+                        <div>Target<br/><span className="text-emerald-400 font-bold">{p.current_target ? `₹${p.current_target}` : "—"}</span></div>
+                      </div>
+                      {/* Risk:reward bar */}
+                      {p.current_stop && p.current_target && (
+                        <div className="h-1.5 rounded-full bg-zinc-800 flex overflow-hidden mb-2">
+                          <div className="bg-rose-500/50" style={{ width: "33%" }} />
+                          <div className="bg-zinc-700" style={{ width: "1px" }} />
+                          <div className="bg-emerald-500/50" style={{ width: "67%" }} />
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono text-[10px] text-zinc-600">{fmtDate(p.opened_at)} {fmtTime(p.opened_at)}</span>
+                        {p.status === "PENDING_EXIT" ? (
+                          <span className="font-mono text-[10px] text-amber-400">pending exit…</span>
+                        ) : (
+                          <button onClick={() => void doClosePosition(p)} disabled={actionBusy === `close:${p.id}`}
+                            className="font-mono text-[10px] px-2 py-1 rounded bg-rose-500/10 border border-rose-500/20 text-rose-400 disabled:opacity-40">
+                            {actionBusy === `close:${p.id}` ? "Closing…" : "Close position"}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
               )}
-              {cycleBusy && (
-                <div className="mt-2 h-1 w-full bg-white/5 rounded-full overflow-hidden">
-                  <div className="h-full w-1/3 bg-emerald-500/60 animate-[pulse_1.2s_ease-in-out_infinite] rounded-full" />
+            </div>
+          )}
+
+          {/* ═══════════════════════════════════════════════════════════════
+              TAB: ORDERS
+          ═══════════════════════════════════════════════════════════════ */}
+          {activeTab === "orders" && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <SectionHdr>Recent orders — {mode}</SectionHdr>
+                <button onClick={() => void loadPositionsAndOrders(mode)}
+                  className="font-mono text-[10px] px-3 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-400">
+                  ↻
+                </button>
+              </div>
+              {orders.length === 0 ? (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 text-center">
+                  <p className="font-mono text-sm text-zinc-600">No orders yet.</p>
+                </div>
+              ) : (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+                  <table className="w-full font-mono text-[11px]">
+                    <thead className="border-b border-zinc-800">
+                      <tr className="text-zinc-600">
+                        <th className="text-left p-3">Symbol</th>
+                        <th className="text-left p-3">Side</th>
+                        <th className="text-right p-3">Qty</th>
+                        <th className="text-right p-3">Price</th>
+                        <th className="text-center p-3">Status</th>
+                        <th className="text-right p-3">Time</th>
+                        <th className="p-3" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {orders.map(o => {
+                        const sc = o.status === "FILLED" ? "text-emerald-400"
+                          : o.status === "CANCELLED" || o.status === "REJECTED" ? "text-rose-400"
+                          : o.status === "PLACED" ? "text-amber-400"
+                          : "text-zinc-500";
+                        return (
+                          <tr key={o.id} className="border-b border-zinc-900 hover:bg-zinc-950">
+                            <td className="p-3 font-bold text-zinc-100">{o.symbol}</td>
+                            <td className={`p-3 font-bold ${o.side === "BUY" ? "text-emerald-400" : "text-rose-400"}`}>{o.side}</td>
+                            <td className="p-3 text-right text-zinc-400">{o.qty}</td>
+                            <td className="p-3 text-right text-zinc-400">{o.limit_price ? `₹${o.limit_price}` : "MKT"}</td>
+                            <td className={`p-3 text-center ${sc}`}>{o.status}</td>
+                            <td className="p-3 text-right text-zinc-600">{fmtTime(o.created_at)}</td>
+                            <td className="p-3 text-right">
+                              {o.status === "PLACED" && (
+                                <button onClick={() => void doCancelOrder(o)} disabled={actionBusy === `cancel:${o.id}`}
+                                  className="text-rose-400 hover:text-rose-300 disabled:opacity-40">
+                                  {actionBusy === `cancel:${o.id}` ? "…" : "✕"}
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </div>
           )}
 
-          {/* Manual controls — every automatic action here has a manual
-              equivalent: reconcile broker fills on demand instead of
-              waiting for the next cycle. */}
-          {status?.armed && (
-            <div className="flex items-center justify-between mb-2">
-              <button
-                onClick={() => void doReconcile()}
-                disabled={actionBusy === "reconcile"}
-                className="font-mono text-[11px] px-3 py-1.5 rounded bg-sky-600/20 border border-sky-500/50 text-sky-200 disabled:opacity-50"
-                title={mode === "REAL" ? "Re-check Dhan for fills on any PLACED order right now" : "DEMO has nothing to reconcile"}
-              >
-                {actionBusy === "reconcile" ? "Checking…" : "🔄 Reconcile now"}
-              </button>
-              {actionMsg && (
-                <p className={`font-mono text-[10px] ${actionMsg.ok ? "text-emerald-300/80" : "text-rose-300/80"}`}>
-                  {actionMsg.text}
-                </p>
+          {/* ═══════════════════════════════════════════════════════════════
+              TAB: PIPELINE (Run Cycle)
+          ═══════════════════════════════════════════════════════════════ */}
+          {activeTab === "pipeline" && (
+            <div className="space-y-4">
+              <OrderFlowDiagram mode={mode} />
+
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <SectionHdr>AI Trade pipeline — {mode}</SectionHdr>
+                    <p className="font-mono text-[10px] text-zinc-600">Candidate → Risk → {mode === "REAL" ? "Dhan Order" : "Simulated Fill"} → Position → Exit</p>
+                  </div>
+                  {armed ? (
+                    <button onClick={() => void doRunCycle()} disabled={cycleBusy}
+                      className="px-4 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 font-mono text-xs text-emerald-300 disabled:opacity-40">
+                      {cycleBusy ? "Running…" : "▶ Run Cycle"}
+                    </button>
+                  ) : (
+                    <span className="font-mono text-[10px] text-zinc-600">Arm first to run cycles</span>
+                  )}
+                </div>
+
+                {mode === "REAL" && (
+                  <p className="font-mono text-[10px] text-amber-400/70 mb-3 bg-amber-500/5 rounded-lg px-3 py-2 border border-amber-500/20">
+                    REAL mode: orders placed live at Dhan. Reconcile runs automatically at end of each cycle.
+                  </p>
+                )}
+
+                {cycleBusy && (
+                  <div className="h-1 w-full bg-zinc-800 rounded-full overflow-hidden mb-3">
+                    <div className="h-full w-1/3 bg-emerald-500/60 animate-pulse rounded-full" />
+                  </div>
+                )}
+
+                {(cycleResult || cycleBusy) && (
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { label: "Candidates", value: cycleResult?.new_candidates, color: "text-sky-400" },
+                      { label: "Entered", value: cycleResult?.entry.entered, color: "text-emerald-400" },
+                      { label: "Waited", value: cycleResult?.entry.waited, color: "text-amber-400" },
+                      { label: "Rejected", value: cycleResult?.entry.rejected, color: "text-rose-400" },
+                      { label: "Fills", value: cycleResult?.fills, color: "text-emerald-400" },
+                      { label: "Expired", value: cycleResult?.expired_orders, color: "text-zinc-500" },
+                      { label: "Held", value: cycleResult?.exit.held, color: "text-zinc-400" },
+                      { label: "Trailed", value: cycleResult?.exit.trailed, color: "text-sky-400" },
+                      { label: "Part. exit", value: cycleResult?.exit.partial_exits, color: "text-amber-400" },
+                      { label: "Closed", value: cycleResult?.exit.full_exits, color: "text-emerald-400" },
+                      { label: "Time-stop", value: cycleResult?.exit.time_stops, color: "text-rose-400" },
+                    ].map(s => (
+                      <StatCard key={s.label} label={s.label}
+                        value={cycleBusy && s.value == null ? "…" : (s.value ?? 0)}
+                        color={cycleBusy && s.value == null ? "text-zinc-700 animate-pulse" : s.color} />
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Manual trade ticket */}
+              {(mode === "DEMO" || gate1) && (
+                <ManualTradeTicket mode={mode} armed={armed}
+                  onOrderComplete={() => { void loadPositionsAndOrders(mode); void loadStatus(mode); }} />
               )}
             </div>
           )}
 
-          {/* Open positions */}
-          <div className="border border-white/10 rounded-lg p-4 mb-4">
-            <p className="font-mono text-xs text-paper/70 mb-2">Open Positions ({mode})</p>
-            {positions.length === 0 ? (
-              <p className="font-mono text-[11px] text-paper/40">No open positions.</p>
-            ) : (
-              <div className="space-y-1">
-                {positions.map((p) => (
-                  <div key={p.id} className="font-mono text-[11px] text-paper/70 grid grid-cols-7 gap-1 items-center">
-                    <span className="font-bold">{p.symbol}</span>
-                    <span>qty {p.qty_open}</span>
-                    <span>entry ₹{p.avg_entry_price}</span>
-                    <span>SL {p.current_stop ?? "—"}</span>
-                    <span>TGT {p.current_target ?? "—"}</span>
-                    <span className={p.unrealized_pnl >= 0 ? "text-emerald-400" : "text-rose-400"}>
-                      {p.unrealized_pnl >= 0 ? "+" : ""}₹{p.unrealized_pnl}
-                    </span>
-                    {p.status === "PENDING_EXIT" ? (
-                      <span className="text-amber-300/80">pending…</span>
-                    ) : (
-                      <button
-                        onClick={() => void doClosePosition(p)}
-                        disabled={actionBusy === `close:${p.id}`}
-                        className="text-rose-300 hover:text-rose-200 disabled:opacity-50 text-left"
-                      >
-                        {actionBusy === `close:${p.id}` ? "…" : "✕ Close"}
-                      </button>
-                    )}
-                  </div>
-                ))}
+          {/* ═══════════════════════════════════════════════════════════════
+              TAB: ACTIVITY LOG
+          ═══════════════════════════════════════════════════════════════ */}
+          {activeTab === "log" && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <SectionHdr>Recent activity — {mode}</SectionHdr>
+                <button onClick={() => void loadAudit()}
+                  className="font-mono text-[10px] px-3 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-400">
+                  ↻ Refresh
+                </button>
               </div>
-            )}
-          </div>
-
-          {/* Recent orders */}
-          <div className="border border-white/10 rounded-lg p-4 mb-4">
-            <p className="font-mono text-xs text-paper/70 mb-2">Recent Orders ({mode})</p>
-            {orders.length === 0 ? (
-              <p className="font-mono text-[11px] text-paper/40">No orders yet.</p>
-            ) : (
-              <div className="space-y-1 max-h-48 overflow-y-auto">
-                {orders.map((o) => (
-                  <div key={o.id} className="font-mono text-[11px] text-paper/60 flex justify-between gap-2 items-center">
-                    <span>{o.side} {o.symbol} x{o.qty} @ {o.limit_price ?? "mkt"}</span>
-                    <span className="flex items-center gap-2">
-                      <span className="text-paper/40">{o.status}</span>
-                      {o.status === "PLACED" && (
-                        <button
-                          onClick={() => void doCancelOrder(o)}
-                          disabled={actionBusy === `cancel:${o.id}`}
-                          className="text-rose-300/80 hover:text-rose-200 disabled:opacity-50"
-                        >
-                          {actionBusy === `cancel:${o.id}` ? "…" : "✕ Cancel"}
-                        </button>
-                      )}
-                    </span>
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+                {auditRows.length === 0 ? (
+                  <p className="font-mono text-[11px] text-zinc-600 p-4">No activity yet — click Refresh.</p>
+                ) : (
+                  <div className="divide-y divide-zinc-900">
+                    {auditRows.map((r, i) => {
+                      const isPositive = ["ARMED", "ADMIN_LOGIN", "DHAN_CONNECTED", "MANUAL_CLOSE", "RISK_CONFIG_CONFIRMED"].includes(r.action);
+                      const isNegative = ["DISARMED", "ADMIN_LOGOUT", "MANUAL_CANCEL"].includes(r.action);
+                      return (
+                        <div key={i} className="flex items-start justify-between gap-3 px-4 py-2 hover:bg-zinc-950">
+                          <div className="flex items-start gap-2 min-w-0">
+                            <span className={`flex-shrink-0 mt-0.5 ${isPositive ? "text-emerald-500" : isNegative ? "text-rose-500" : "text-zinc-600"}`}>●</span>
+                            <div className="min-w-0">
+                              <span className="font-mono text-[11px] text-zinc-200 font-bold">{r.action}</span>
+                              {r.detail && <span className="font-mono text-[10px] text-zinc-500 ml-2 truncate">{r.detail}</span>}
+                            </div>
+                          </div>
+                          <span className="font-mono text-[10px] text-zinc-700 whitespace-nowrap flex-shrink-0">{fmtTime(r.occurred_at)}</span>
+                        </div>
+                      );
+                    })}
                   </div>
-                ))}
+                )}
               </div>
-            )}
-          </div>
-
-          {/* Audit log */}
-          <div className="border border-white/10 rounded-lg p-4">
-            <div className="flex justify-between items-center mb-2">
-              <p className="font-mono text-xs text-paper/70">Recent Activity</p>
-              <button onClick={() => void loadAudit()} className="font-mono text-[11px] underline text-paper/50">
-                Refresh
-              </button>
             </div>
-            <div className="space-y-1 max-h-64 overflow-y-auto">
-              {auditRows.map((r, i) => (
-                <div key={i} className="font-mono text-[11px] text-paper/60 flex justify-between gap-2">
-                  <span>{r.action} {r.detail ? `— ${r.detail}` : ""}</span>
-                  <span className="text-paper/30 whitespace-nowrap">{new Date(r.occurred_at).toLocaleTimeString()}</span>
-                </div>
-              ))}
-              {auditRows.length === 0 && <p className="font-mono text-[11px] text-paper/40">No activity loaded yet — click Refresh.</p>}
-            </div>
-          </div>
+          )}
         </>
       )}
     </div>

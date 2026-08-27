@@ -255,4 +255,14 @@ export const realTradeApi = {
 
   confirmManualOrder: (mode: "DEMO" | "REAL", body: ManualOrderRequest) =>
     rtRequest<ManualOrderResult>(`/manual-order/${mode}/confirm`, { method: "POST", body: JSON.stringify(body) }, mode === "REAL"),
+  // Live Dhan broker data — require admin auth, REAL mode only
+  dhanLivePositions: () =>
+    rtRequest<{ ok: boolean; positions: any[] }>("/dhan/positions"),
+
+  dhanLiveHoldings: () =>
+    rtRequest<{ ok: boolean; holdings: any[] }>("/dhan/holdings"),
+
+  dhanLiveOrders: () =>
+    rtRequest<{ ok: boolean; orders: any[] }>("/dhan/orders"),
+
 };

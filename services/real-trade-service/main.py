@@ -755,3 +755,46 @@ async def audit_log(mode: Optional[str] = None, limit: int = 50, authorization: 
         {"actor": r.actor, "action": r.action, "detail": r.detail, "mode": r.mode, "occurred_at": r.occurred_at.isoformat()}
         for r in rows
     ]
+
+
+# ── Routes: Live Dhan account data (read-only, admin-gated) ─────────────────
+
+@app.get("/dhan/positions")
+async def dhan_live_positions(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """Live intraday + CNC positions from Dhan broker — not the service's own
+    trade_positions table. Used by the dashboard to show what's actually
+    open at the broker level, independent of reconciliation state."""
+    try:
+        positions = dhan_client.get_positions(db)
+        return {"ok": True, "positions": positions}
+    except dhan_client.DhanNotConnectedError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        logger.warning("dhan get_positions failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"Dhan API error: {e}")
+
+
+@app.get("/dhan/holdings")
+async def dhan_live_holdings(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """Live demat holdings from Dhan."""
+    try:
+        holdings = dhan_client.get_holdings(db)
+        return {"ok": True, "holdings": holdings}
+    except dhan_client.DhanNotConnectedError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        logger.warning("dhan get_holdings failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"Dhan API error: {e}")
+
+
+@app.get("/dhan/orders")
+async def dhan_live_orders(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """Live today's order list from Dhan broker."""
+    try:
+        orders = dhan_client.get_order_list(db)
+        return {"ok": True, "orders": orders}
+    except dhan_client.DhanNotConnectedError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        logger.warning("dhan get_order_list failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"Dhan API error: {e}")

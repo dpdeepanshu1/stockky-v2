@@ -100,6 +100,7 @@ def _send_real_sell(
             execution_source=execution_source,
             confirmed_by=confirmed_by,
             confirmed_at=datetime.now(timezone.utc) if confirmed_by else None,
+            exit_reason=reason,
         )
         db.add(order)
         db.flush()
@@ -132,7 +133,12 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
     held = trailed = partial_exits = full_exits = time_stops = 0
     now = datetime.now(timezone.utc)
 
-    for position in positions:
+    for idx, position in enumerate(positions):
+        try:
+            import pipeline_status as pstat
+            pstat.set_symbol_progress(mode, position.symbol, idx, len(positions))
+        except Exception:
+            pass
         tick = ticks.get(position.symbol)
         if tick is None:
             _write_exit_decision(db, position, "HOLD", "No current price available this cycle.", 0.0)

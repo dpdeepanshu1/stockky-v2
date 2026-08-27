@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 import config
 import models
+import pipeline_status as pstat
 
 logger = logging.getLogger("real-trade-candidates")
 
@@ -109,9 +110,17 @@ async def refresh_candidates(db: Session, mode: str) -> int:
     Returns the number of rows inserted."""
     rows: list[dict] = []
     async with httpx.AsyncClient() as client:
+        try:
+            pstat.set_source(mode, "hot_picks")
+        except Exception:
+            pass
         hot = await _fetch(client, _SOURCES["hot_picks"])
         rows += _rows_from_hot_picks(hot or {})
 
+        try:
+            pstat.set_source(mode, "ipo")
+        except Exception:
+            pass
         ipo = await _fetch(client, _SOURCES["ipo"])
         rows += _rows_from_ipo(ipo)
 

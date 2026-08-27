@@ -17,10 +17,31 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+import pipeline_status as pstat
 
-async def run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
+
+async def run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str = "manual") -> dict:
     mode = mode.upper()
 
+    # Best-effort status tracking for the dashboard. Every call is guarded
+    # so a bug here can NEVER affect the actual cycle (see pipeline_status.py
+    # docstring) — worst case the dashboard shows stale/no progress.
+    try:
+        pstat.start_cycle(mode, trigger)
+    except Exception:
+        pass
+
+    try:
+        return await _run_cycle_core(db, mode, gate_armed)
+    except Exception as e:
+        try:
+            pstat.end_cycle(mode, {}, error=f"{type(e).__name__}: {e}")
+        except Exception:
+            pass
+        raise
+
+
+async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
     if mode == "REAL":
         # Real-time token check FIRST, before spending any Dhan calls or
         # doing any sizing this cycle: our local 24h countdown is correct
@@ -31,11 +52,16 @@ async def run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
         from auth.dhan_credentials import enforce_live_token
         token_ok, token_err = enforce_live_token(db, mode)
         if not token_ok:
-            return {
+            early_result = {
                 "mode": mode, "new_candidates": 0, "entry": {"evaluated": 0, "entered": 0, "waited": 0, "rejected": 0},
                 "fills": 0, "expired_orders": 0, "exit": {}, "reconcile": None,
                 "auto_disarmed": f"Dhan token rejected: {token_err}",
             }
+            try:
+                pstat.end_cycle(mode, early_result)
+            except Exception:
+                pass
+            return early_result
         # Refresh cash_available/current_equity from Dhan's live balance
         # once at the top of the cycle (entry_engine also does this per
         # candidate, but doing it here too means /status and the exit
@@ -48,19 +74,31 @@ async def run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
     from entry_engine.entry import evaluate_mode as entry_evaluate, check_pending_fills, expire_stale_orders
     from exit_engine.exit import evaluate_mode as exit_evaluate
 
+    def _stage(name: str) -> None:
+        try:
+            pstat.set_stage(mode, name)
+        except Exception:
+            pass
+
+    _stage("candidates")
     new_candidates = await refresh_candidates(db, mode)
+    _stage("entry")
     entry_result = await entry_evaluate(db, mode, gate_armed)
+    _stage("fills")
     fills = await check_pending_fills(db, mode)
+    _stage("expire")
     expired = await expire_stale_orders(db, mode)
+    _stage("exit")
     exit_result = await exit_evaluate(db, mode)
 
     reconcile_result = None
     if mode == "REAL":
+        _stage("reconcile")
         from execution.reconcile import reconcile_real_orders
         reconcile_result = await reconcile_real_orders(db)
         fills = reconcile_result["entries_filled"]  # REAL "fills" only ever means broker-confirmed, never sent-only
 
-    return {
+    result = {
         "mode": mode,
         "new_candidates": new_candidates,
         "entry": entry_result,
@@ -69,3 +107,8 @@ async def run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
         "exit": exit_result,
         "reconcile": reconcile_result,
     }
+    try:
+        pstat.end_cycle(mode, result)
+    except Exception:
+        pass
+    return result

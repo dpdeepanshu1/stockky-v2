@@ -143,12 +143,14 @@ def _ensure_manual_order_columns(engine, dialect_name: str) -> None:
             ("execution_source", "ALTER TABLE trade_orders ADD (execution_source VARCHAR2(16) DEFAULT 'AUTO' NOT NULL)"),
             ("confirmed_by", "ALTER TABLE trade_orders ADD (confirmed_by VARCHAR2(64))"),
             ("confirmed_at", "ALTER TABLE trade_orders ADD (confirmed_at TIMESTAMP)"),
+            ("exit_reason", "ALTER TABLE trade_orders ADD (exit_reason VARCHAR2(32))"),
         ]
     else:
         adds = [
             ("execution_source", "ALTER TABLE trade_orders ADD COLUMN execution_source VARCHAR(16) DEFAULT 'AUTO' NOT NULL"),
             ("confirmed_by", "ALTER TABLE trade_orders ADD COLUMN confirmed_by VARCHAR(64)"),
             ("confirmed_at", "ALTER TABLE trade_orders ADD COLUMN confirmed_at TIMESTAMP"),
+            ("exit_reason", "ALTER TABLE trade_orders ADD COLUMN exit_reason VARCHAR(32)"),
         ]
 
     for col_name, sql in adds:

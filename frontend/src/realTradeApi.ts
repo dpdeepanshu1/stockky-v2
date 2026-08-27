@@ -123,6 +123,42 @@ export interface CycleResult {
   exit: { evaluated: number; held: number; trailed: number; partial_exits: number; full_exits: number; time_stops: number };
 }
 
+export interface PipelineCycleRecord {
+  trigger: "manual" | "autopilot";
+  started_at: string;
+  ended_at: string;
+  duration_ms: number;
+  stage_timings_ms: Record<string, number>;
+  new_candidates: number | null;
+  entered: number | null;
+  waited: number | null;
+  rejected: number | null;
+  fills: number | null;
+  expired_orders: number | null;
+  full_exits: number | null;
+  partial_exits: number | null;
+  auto_disarmed: string | null;
+  error: string | null;
+}
+
+export interface PipelineStatus {
+  mode: string;
+  running: boolean;
+  trigger?: "manual" | "autopilot";
+  started_at?: string;
+  stage?: string;
+  stages?: string[];
+  stage_elapsed_ms?: number;
+  total_elapsed_ms?: number;
+  current_symbol?: string | null;
+  current_source?: string | null;
+  symbols_done?: number;
+  symbols_total?: number;
+  stage_timings_ms?: Record<string, number>;
+  last_cycle: PipelineCycleRecord | null;
+  history: PipelineCycleRecord[];
+}
+
 export interface ManualOrderRequest {
   symbol: string;
   side: "BUY" | "SELL";
@@ -228,6 +264,9 @@ export const realTradeApi = {
 
   runCycle: (mode: "DEMO" | "REAL") =>
     rtRequest<CycleResult>(`/cycle/run/${mode}`, { method: "POST" }, mode === "REAL"),
+
+  pipelineStatus: (mode: "DEMO" | "REAL") =>
+    rtRequest<PipelineStatus>(`/pipeline/status/${mode}`, {}, mode === "REAL"),
 
   positions: (mode: "DEMO" | "REAL") =>
     rtRequest<Position[]>(`/positions/${mode}`, {}, mode === "REAL"),

@@ -590,7 +590,22 @@ async def run_cycle(mode: str, admin: Optional[str] = Depends(require_admin_if_r
         raise HTTPException(status_code=409, detail=f"{mode} is not armed — arm it before running a cycle.")
 
     from cycle_runner import run_cycle_core
-    return await run_cycle_core(db, mode, gate.armed)
+    return await run_cycle_core(db, mode, gate.armed, trigger="manual")
+
+
+# ── Routes: Pipeline dashboard (2026-08-27) ──────────────────────────────────
+# Read-only status for the Pipeline tab: what stage the current cycle (manual
+# OR auto-pilot) is in right now, which symbol/source it's on, per-stage
+# timing, and a short history of recent cycles. Backed entirely by
+# pipeline_status.py's in-memory tracker — never touches trading state, so
+# this is safe to poll as often as the dashboard wants.
+@app.get("/pipeline/status/{mode}")
+async def pipeline_status_route(mode: str, admin: Optional[str] = Depends(require_admin_if_real)):
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    import pipeline_status as pstat
+    return pstat.get_status(mode)
 
 
 # ── Routes: Auto-Pilot (2026-08-27) ──────────────────────────────────────────

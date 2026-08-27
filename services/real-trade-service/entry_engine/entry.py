@@ -32,6 +32,7 @@ from notifier import notify_async
 from portfolio.portfolio import get_account, open_positions, record_real_order_sent
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
 from tz_utils import is_market_open_ist
+import pipeline_status as pstat
 
 logger = logging.getLogger("real-trade-entry")
 
@@ -121,7 +122,11 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
 
     entered = waited = rejected = 0
     reserved_cash = 0.0  # capital committed to earlier candidates THIS cycle — see _account_state's docstring
-    for cand in candidates:
+    for idx, cand in enumerate(candidates):
+        try:
+            pstat.set_symbol_progress(mode, cand.symbol, idx, len(candidates))
+        except Exception:
+            pass
         cand.consumed = True
         tick = ticks.get(cand.symbol)
         decision = models.TradeDecision(

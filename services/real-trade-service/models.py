@@ -179,6 +179,14 @@ class TradeOrder(Base):
     execution_source = Column(String(16), nullable=False, default="AUTO")  # "AUTO" | "MANUAL" | "EXIT"
     confirmed_by = Column(String(64), nullable=True)   # admin username who hit "Confirm" (MANUAL real-money orders only)
     confirmed_at = Column(DateTime, nullable=True)
+    # Our OWN reason for a SELL ("stop_hit" | "target_hit_partial" | "time_stop"
+    # | "emergency_exit" | "manual"), set at send time in exit_engine._send_real_sell.
+    # NOT the broker's remarks field — reconcile.py previously read Dhan's own
+    # `remarks` as the "reason" for a confirmed exit fill, which is broker
+    # text (often blank or unrelated), not our trading logic's reason. This
+    # column is what record_real_exit_fill and the partial-exit
+    # breakeven-stop logic key off of instead (see reconcile.py, 2026-08-27).
+    exit_reason = Column(String(32), nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 

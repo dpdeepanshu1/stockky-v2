@@ -90,7 +90,7 @@ async def _tick(mode: str) -> None:
             return
 
         from cycle_runner import run_cycle_core
-        result = await run_cycle_core(db, mode, gate.armed)
+        result = await run_cycle_core(db, mode, gate.armed, trigger="autopilot")
         if result.get("auto_disarmed"):
             await notify_async(
                 f"🔴 *Auto-Pilot disarmed — {mode}*\n{result['auto_disarmed']}\n"

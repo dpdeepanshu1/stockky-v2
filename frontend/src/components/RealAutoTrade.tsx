@@ -3,6 +3,7 @@ import {
   realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl,
   getSessionToken, setSessionToken,
   type GateStatus, type AuditLogRow, type Position, type OrderRow, type CycleResult, type DhanStatus,
+  type PipelineStatus,
 } from "../realTradeApi";
 import ManualTradeTicket from "./trading/ManualTradeTicket";
 
@@ -69,6 +70,152 @@ function StatCard({ label, value, sub, color }: { label: string; value: React.Re
 // ── Section header ───────────────────────────────────────────────────────────
 function SectionHdr({ children }: { children: React.ReactNode }) {
   return <p className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 mb-2">{children}</p>;
+}
+
+// ── Live pipeline status (2026-08-27) — what the cycle is doing RIGHT NOW,
+// whether triggered by the Run Cycle button or by Auto-Pilot in the
+// background, plus recent-cycle history with per-stage timing. Purely a
+// display of pipeline_status.py's in-memory snapshot — never triggers
+// anything itself. ───────────────────────────────────────────────────────────
+const STAGE_LABELS: Record<string, string> = {
+  starting: "Starting…",
+  candidates: "Fetching candidates",
+  entry: "Evaluating entries",
+  fills: "Checking fills",
+  expire: "Expiring stale orders",
+  exit: "Evaluating exits",
+  reconcile: "Reconciling with Dhan",
+};
+
+const SOURCE_LABELS: Record<string, string> = {
+  hot_picks: "Hot Picks",
+  ipo: "IPO watchlist",
+};
+
+function msFmt(ms: number | null | undefined): string {
+  if (ms == null) return "—";
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+}
+
+function PipelineLiveStatus({ pipeline, mode }: { pipeline: PipelineStatus | null; mode: Mode }) {
+  if (!pipeline) {
+    return (
+      <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+        <SectionHdr>Live cycle status — {mode}</SectionHdr>
+        <p className="font-mono text-[11px] text-zinc-600">Loading…</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <SectionHdr>Live cycle status — {mode}</SectionHdr>
+        {pipeline.running ? (
+          <span className="font-mono text-[10px] text-emerald-400 flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            {pipeline.trigger === "autopilot" ? "Auto-Pilot cycle running" : "Cycle running"}
+          </span>
+        ) : (
+          <span className="font-mono text-[10px] text-zinc-600">Idle — no cycle running</span>
+        )}
+      </div>
+
+      {pipeline.running && (
+        <div className="bg-zinc-950 border border-zinc-800 rounded-lg p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="font-mono text-xs text-zinc-200">
+              {STAGE_LABELS[pipeline.stage || ""] || pipeline.stage}
+            </p>
+            <p className="font-mono text-[10px] text-zinc-500">
+              stage {msFmt(pipeline.stage_elapsed_ms)} · total {msFmt(pipeline.total_elapsed_ms)}
+            </p>
+          </div>
+          {/* stage progress dots */}
+          <div className="flex items-center gap-1">
+            {(pipeline.stages || []).map(s => (
+              <div key={s} className={`h-1.5 flex-1 rounded-full ${
+                s === pipeline.stage ? "bg-emerald-500 animate-pulse"
+                : (pipeline.stage_timings_ms && s in pipeline.stage_timings_ms) ? "bg-emerald-800"
+                : "bg-zinc-800"
+              }`} title={STAGE_LABELS[s] || s} />
+            ))}
+          </div>
+          {pipeline.current_source && (
+            <p className="font-mono text-[10px] text-sky-400">
+              Source: {SOURCE_LABELS[pipeline.current_source] || pipeline.current_source}
+            </p>
+          )}
+          {pipeline.current_symbol && (
+            <p className="font-mono text-[10px] text-amber-300">
+              Symbol: {pipeline.current_symbol}
+              {!!pipeline.symbols_total && (
+                <span className="text-zinc-600"> ({(pipeline.symbols_done ?? 0) + 1}/{pipeline.symbols_total})</span>
+              )}
+            </p>
+          )}
+        </div>
+      )}
+
+      {pipeline.last_cycle && (
+        <div>
+          <p className="font-mono text-[10px] text-zinc-500 mb-1">
+            Last cycle — {pipeline.last_cycle.trigger === "autopilot" ? "🤖 Auto-Pilot" : "▶ Manual"} ·{" "}
+            {fmtTime(pipeline.last_cycle.ended_at)} · took {msFmt(pipeline.last_cycle.duration_ms)}
+          </p>
+          {pipeline.last_cycle.error ? (
+            <p className="font-mono text-[10px] text-rose-400">Error: {pipeline.last_cycle.error}</p>
+          ) : pipeline.last_cycle.auto_disarmed ? (
+            <p className="font-mono text-[10px] text-rose-400">Auto-disarmed: {pipeline.last_cycle.auto_disarmed}</p>
+          ) : (
+            <p className="font-mono text-[10px] text-zinc-400">
+              {pipeline.last_cycle.new_candidates ?? 0} candidates · {pipeline.last_cycle.entered ?? 0} entered ·{" "}
+              {pipeline.last_cycle.waited ?? 0} waited · {pipeline.last_cycle.rejected ?? 0} rejected ·{" "}
+              {pipeline.last_cycle.full_exits ?? 0} closed
+            </p>
+          )}
+        </div>
+      )}
+
+      {pipeline.history && pipeline.history.length > 1 && (
+        <details className="group">
+          <summary className="font-mono text-[10px] text-zinc-500 cursor-pointer select-none">
+            Recent cycles ({pipeline.history.length}) — includes Auto-Pilot ticks even when this tab was closed
+          </summary>
+          <div className="mt-2 overflow-x-auto">
+            <table className="w-full font-mono text-[10px]">
+              <thead>
+                <tr className="text-zinc-600 text-left">
+                  <th className="py-1 pr-3">Time</th>
+                  <th className="py-1 pr-3">Trigger</th>
+                  <th className="py-1 pr-3">Duration</th>
+                  <th className="py-1 pr-3">Candidates</th>
+                  <th className="py-1 pr-3">Entered</th>
+                  <th className="py-1 pr-3">Rejected</th>
+                  <th className="py-1 pr-3">Closed</th>
+                  <th className="py-1">Note</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pipeline.history.map((c, i) => (
+                  <tr key={i} className="border-t border-zinc-900 text-zinc-400">
+                    <td className="py-1 pr-3">{fmtTime(c.ended_at)}</td>
+                    <td className="py-1 pr-3">{c.trigger === "autopilot" ? "🤖 auto" : "▶ manual"}</td>
+                    <td className="py-1 pr-3">{msFmt(c.duration_ms)}</td>
+                    <td className="py-1 pr-3">{c.new_candidates ?? "—"}</td>
+                    <td className="py-1 pr-3 text-emerald-400">{c.entered ?? "—"}</td>
+                    <td className="py-1 pr-3 text-rose-400">{c.rejected ?? "—"}</td>
+                    <td className="py-1 pr-3">{c.full_exits ?? "—"}</td>
+                    <td className="py-1 text-rose-400">{c.error || c.auto_disarmed || ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
+    </div>
+  );
 }
 
 // ── Order flow diagram (how a trade executes) ────────────────────────────────
@@ -222,6 +369,7 @@ export default function RealAutoTrade() {
   const [cycleBusy, setCycleBusy] = useState(false);
   const [autoPilotBusy, setAutoPilotBusy] = useState(false);
   const [cycleResult, setCycleResult] = useState<CycleResult | null>(null);
+  const [pipeline, setPipeline] = useState<PipelineStatus | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
@@ -298,6 +446,27 @@ export default function RealAutoTrade() {
       void loadLiveDhanData();
     }
     if (activeTab === "log") void loadAudit();
+  }, [activeTab, mode, loggedIn]);
+
+  // Live pipeline polling — shows what the cycle (manual OR Auto-Pilot,
+  // even if triggered while this tab wasn't open) is doing right now: which
+  // stage, which symbol, how long each stage took, plus recent history.
+  // Polls every 2s while the Pipeline tab is open; stops the moment it
+  // isn't, so this never runs up requests in the background.
+  useEffect(() => {
+    if (activeTab !== "pipeline" || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn)) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const p = await realTradeApi.pipelineStatus(mode);
+        if (!cancelled) setPipeline(p);
+      } catch {
+        // best-effort — a failed poll just leaves the last known status showing
+      }
+    };
+    void poll();
+    const id = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(id); };
   }, [activeTab, mode, loggedIn]);
 
   const saveApiUrl = () => { setRealTradeApiUrl(apiUrlInput); void loadStatus(mode); };
@@ -1002,6 +1171,8 @@ export default function RealAutoTrade() {
           {activeTab === "pipeline" && (
             <div className="space-y-4">
               <OrderFlowDiagram mode={mode} />
+
+              <PipelineLiveStatus pipeline={pipeline} mode={mode} />
 
               <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
                 <div className="flex items-center justify-between mb-3">

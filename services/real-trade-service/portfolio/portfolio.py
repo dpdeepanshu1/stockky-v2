@@ -252,7 +252,19 @@ def record_real_exit_fill(db: Session, position: models.TradePosition, exit_pric
     """REAL-only. Confirmed by reconcile_real_orders() against Dhan's own
     trade book — never called speculatively. Books realized P&L exactly
     like close_position() does for DEMO, so both modes report P&L the
-    same way."""
+    same way.
+
+    BUG FIX (2026-08-27): a still-open remainder used to be left at status
+    "OPEN" (not "PARTIALLY_CLOSED", unlike close_position()'s DEMO
+    equivalent). exit_engine's target-hit check guards against firing a
+    second partial exit at the same target with `position.status ==
+    "OPEN"` — so a REAL position that stayed at "OPEN" after its first
+    partial exit could get partial-exited AGAIN next cycle if price was
+    still above target, instead of moving on to trailing-stop management
+    of the remainder like the module docstring describes. Now matches
+    DEMO: status becomes "PARTIALLY_CLOSED", and (for a target-hit partial
+    specifically) the stop is moved to breakeven on the remainder, exactly
+    like close_position()'s DEMO caller does inline."""
     now = datetime.now(timezone.utc)
     qty_closed = min(qty_closed, position.qty_open)
     pnl = round((exit_price - position.avg_entry_price) * qty_closed, 2)
@@ -263,7 +275,12 @@ def record_real_exit_fill(db: Session, position: models.TradePosition, exit_pric
         position.status = "CLOSED"
         position.closed_at = now
     else:
-        position.status = "OPEN"  # still-open remainder resumes normal exit evaluation next cycle
+        position.status = "PARTIALLY_CLOSED"
+        if reason == "target_hit_partial":
+            # De-risk the remainder the same way DEMO does — move the stop
+            # up to breakeven rather than leaving it at the original,
+            # wider stop distance now that some profit is locked in.
+            position.current_stop = max(position.current_stop or 0, position.avg_entry_price)
 
     db.add(models.TradePositionEvent(
         position_id=position.id,

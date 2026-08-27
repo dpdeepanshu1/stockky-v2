@@ -106,8 +106,22 @@ async def reconcile_real_orders(db: Session) -> dict:
             position = db.query(models.TradePosition).filter_by(
                 mode="REAL", symbol=order.symbol, status="PENDING_EXIT"
             ).first()
+            if position is None:
+                # Partial exits never set PENDING_EXIT (see
+                # record_real_exit_sent's full=False docstring) — the
+                # remainder stays OPEN/PARTIALLY_CLOSED, so look it up by
+                # symbol among live positions instead.
+                position = db.query(models.TradePosition).filter(
+                    models.TradePosition.mode == "REAL",
+                    models.TradePosition.symbol == order.symbol,
+                    models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")),
+                ).first()
             if position is not None:
-                reason = _get(broker_row, "remarks", default="exit")
+                # BUG FIX (2026-08-27): this used to read Dhan's own
+                # `remarks` field as "the reason" — broker text, not our
+                # trading logic's reason (stop_hit/target_hit_partial/
+                # time_stop). Use what exit_engine actually sent instead.
+                reason = order.exit_reason or _get(broker_row, "remarks", default="exit")
                 pnl = record_real_exit_fill(db, position, float(fill_price), int(fill_qty), str(reason) or "exit")
                 tally["exits_confirmed"] += 1
                 pnl_emoji = "🟢" if pnl >= 0 else "🔴"

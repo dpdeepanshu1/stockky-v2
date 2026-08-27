@@ -121,7 +121,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
     setSendingToTrade(key);
     setSendTradeMsg(null);
     try {
-      const price = resolveDisplayPrice(r, liveQuotes[r.symbol]?.price) || r.close;
+      const price = (resolveDisplayPrice(r, liveQuotes[r.symbol]?.price) || r.close) ?? undefined;
       await realTradeApi.sendManualCandidate(mode, {
         symbol: r.symbol,
         decision_label: r.decision,

@@ -46,12 +46,21 @@ _SOURCES = {
 
 
 async def _fetch(client: httpx.AsyncClient, path: str) -> Any:
+    url = f"{config.API_GATEWAY_URL}{path}"
     try:
-        r = await client.get(f"{config.API_GATEWAY_URL}{path}", timeout=15.0)
+        r = await client.get(url, timeout=25.0)  # api-gateway can block briefly on a
+        # synchronous NSE scrape (see its own market-movers logs) — 15s was
+        # tight enough to time out on nothing more than bad luck; 25s gives
+        # it room without hanging a whole REAL cycle indefinitely.
         if r.status_code == 200:
             return r.json()
+        logger.warning("candidate fetch %s -> HTTP %s: %s", url, r.status_code, r.text[:200])
     except Exception as e:
-        logger.warning("candidate fetch %s failed: %s", path, e)
+        # httpx's own timeout/connect exceptions frequently stringify to ""
+        # (a known httpx quirk) — always include the exception TYPE too, or
+        # a bare "failed: " tells you nothing about whether this was a DNS
+        # failure, a connection refusal, or api-gateway just being slow.
+        logger.warning("candidate fetch %s failed: %s: %s", url, type(e).__name__, e)
     return None
 
 

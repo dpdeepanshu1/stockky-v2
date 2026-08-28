@@ -296,6 +296,17 @@ def _ipo_db_freshness_hours() -> Optional[float]:
 
 IPO_DB_FRESH_HOURS = float(os.getenv("IPO_DB_FRESH_HOURS", "24"))
 
+# The KV cache backing IPO_LIST_KEY used to live for a flat 4h regardless of
+# IPO_DB_FRESH_HOURS (default 24h). That mismatch was the actual cause of
+# "Scan IPOs" silently hitting NSE/ipoalerts far more than intended: once
+# the 4h KV entry expired but the durable ipo_static_feed table was still
+# within its 24h freshness window, _run_ipo_scan_locked's "is it fresh?"
+# check would say yes (age_h < IPO_DB_FRESH_HOURS) but then find no cached
+# results to actually return, fall through, and run a real upstream scan
+# anyway — for up to 20 of every 24 hours. The cache now always outlives
+# the freshness window it's guarding.
+IPO_LIST_CACHE_TTL_SEC = max(4 * 3600, int(IPO_DB_FRESH_HOURS * 3600) + 3600)
+
 
 def _kv():
     import kv_cache
@@ -1481,7 +1492,7 @@ def _run_ipo_scan_locked(force: bool = False) -> dict:
         # discarding it — same "partial results are still useful" behaviour
         # as the Surprise premarket job.
         try:
-            _kv().kv_set(IPO_LIST_KEY, {"results": results, "generated_at": datetime.now(IST).isoformat()}, ttl=4 * 3600)
+            _kv().kv_set(IPO_LIST_KEY, {"results": results, "generated_at": datetime.now(IST).isoformat()}, ttl=IPO_LIST_CACHE_TTL_SEC)
         except Exception as e:
             logger.warning("could not persist partial ipo list: %s", e)
         clear_ipo_stop()
@@ -1501,7 +1512,7 @@ def _run_ipo_scan_locked(force: bool = False) -> dict:
     results.sort(key=_sort_key)
 
     try:
-        _kv().kv_set(IPO_LIST_KEY, {"results": results, "generated_at": datetime.now(IST).isoformat()}, ttl=4 * 3600)
+        _kv().kv_set(IPO_LIST_KEY, {"results": results, "generated_at": datetime.now(IST).isoformat()}, ttl=IPO_LIST_CACHE_TTL_SEC)
     except Exception as e:
         logger.warning("could not persist ipo list: %s", e)
 
@@ -1517,6 +1528,93 @@ def _run_ipo_scan_locked(force: bool = False) -> dict:
 
     return _set_job(status="done", message=f"Done: {len(results)} analyzed, {errors} errors",
                       processed=total, total=total, results_count=len(results))
+
+
+def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str, Any]:
+    """Targeted repair for ipo_static_feed rows missing issue_price/ipo_score/
+    decision — re-runs analyze_ipo() ONLY for the specific missing symbols
+    (bounded by `limit`), not a full-universe re-scan. Mirrors
+    hotpicks_repair_batch/repair_surprise_batch's "small bounded batch, not
+    a blanket re-scan" shape and its /repair-batch route naming; the
+    underlying fix has to be a real analyze_ipo() call rather than a
+    price-only patch because an IPO's price/GMP/decision all come from ONE
+    upstream analysis pass, not a separate quote endpoint the way a listed
+    stock's price does (there is no standalone 'price' column on
+    ipo_static_feed to patch — see ipo_schema.SELECT_COLUMNS).
+    """
+    out: Dict[str, Any] = {"status": "no_data", "repaired": [], "attempted": 0}
+    audit = get_ipo_feed_audit()
+    if not audit.get("ok"):
+        out["status"] = "error"
+        out["error"] = audit.get("error") or "audit failed"
+        return out
+
+    missing = audit.get("missing_ipos") or []
+    force_sym = (symbol or "").upper().strip() or None
+    if force_sym:
+        missing = [m for m in missing if str(m.get("symbol") or "").upper() == force_sym]
+        if not missing:
+            out["status"] = "not_found"
+            out["message"] = f"{force_sym} is not currently missing any fields."
+            return out
+    missing = missing[: max(1, min(int(limit or 15), 30))]
+    if not missing:
+        out["status"] = "completed"
+        out["message"] = "Nothing missing — every tracked IPO is fully scored."
+        return out
+    out["attempted"] = len(missing)
+
+    universe, _diag = _merged_ipo_universe()
+    by_symbol = {u.get("symbol"): u for u in universe if u.get("symbol")}
+    manual_by_symbol = {m.get("symbol"): m for m in _manual_ipos() if m.get("symbol")}
+
+    repaired: List[str] = []
+    results: List[Dict[str, Any]] = []
+    for m in missing:
+        sym = m.get("symbol")
+        # Prefer the live upstream universe entry (freshest listing/issue
+        # data); fall back to the manual-entry record so a hand-added IPO
+        # can still be repaired even after it ages out of the
+        # auto-discovered NSE/ipoalerts window.
+        entry = by_symbol.get(sym) or manual_by_symbol.get(sym)
+        if entry is None:
+            continue
+        try:
+            r = analyze_ipo(entry)
+            results.append(r)
+            repaired.append(sym)
+        except Exception as e:
+            logger.warning("ipo_repair_batch: analyze failed for %s: %s", sym, e)
+        time.sleep(0.3)  # same cooldown discipline as every other waterfall repair in this codebase
+
+    if results:
+        try:
+            n = _ipo_db_upsert(results)
+            logger.info("ipo_repair_batch: upserted %s/%s row(s)", n, len(results))
+        except Exception as e:
+            logger.warning("ipo_repair_batch: db persist failed (non-fatal): %s", e)
+        # Fold the repaired rows into the cached list too, so the tab's
+        # table reflects the repair immediately instead of waiting for the
+        # next scheduled/manual scan to overwrite it.
+        try:
+            cached = _kv().kv_get(IPO_LIST_KEY)
+            cached = cached if isinstance(cached, dict) else {}
+            existing = list(cached.get("results") or [])
+            by_sym_repaired = {r.get("symbol"): r for r in results}
+            merged = [by_sym_repaired.pop(r.get("symbol"), r) for r in existing]
+            merged.extend(by_sym_repaired.values())  # any repaired symbol not already in the cached list
+            cached["results"] = merged
+            cached["generated_at"] = cached.get("generated_at") or datetime.now(IST).isoformat()
+            _kv().kv_set(IPO_LIST_KEY, cached, ttl=IPO_LIST_CACHE_TTL_SEC)
+        except Exception as e:
+            logger.debug("ipo_repair_batch: cache sync skipped: %s", e)
+
+    out["status"] = "completed"
+    out["repaired"] = repaired
+    if len(repaired) < len(missing):
+        skipped = len(missing) - len(repaired)
+        out["message"] = f"Repaired {len(repaired)}/{len(missing)} — {skipped} symbol(s) no longer found upstream."
+    return out
 
 
 def get_ipo_feed_audit() -> dict:

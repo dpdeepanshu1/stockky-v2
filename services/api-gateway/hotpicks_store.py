@@ -526,9 +526,22 @@ def _hotpicks_audit_uncached() -> Dict[str, Any]:
             # surprise_scanner.py) so the frontend can use ONE
             # <FeedHealthPanel> component for both tabs instead of two
             # near-identical ones reading two different response shapes.
+            #
+            # IMPORTANT: missing_data / incomplete_stocks here are PRICE-ONLY
+            # (matching audit_surprise_feed exactly) even though
+            # incomplete_stocks' missing_fields lists decision/score too for
+            # display. hotpicks_repair_batch (below) can only ever fix
+            # price — it deliberately does not fake a decision/score, those
+            # need a real scoring pass. Previously this counted rows missing
+            # ONLY decision/score as "missing_data" too, which enabled the
+            # Auto-Repair button and inflated its count for something the
+            # button could never actually fix — repeatedly reporting "0
+            # repaired" and looking broken. missing_decision/missing_score
+            # above still surface that gap; they just don't drive the
+            # repair button's enabled state or count anymore.
             out["total_tracked"] = out["rows_24h"]
             out["fully_populated"] = fully_populated
-            out["missing_data"] = len(incomplete_stocks)
+            out["missing_data"] = missing_price
             out["health_score"] = (
                 round((fully_populated / max(out["rows_24h"], 1)) * 100, 1) if out["rows_24h"] > 0 else 0.0
             )

@@ -3,12 +3,12 @@ import {
   realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl,
   getSessionToken, setSessionToken,
   type GateStatus, type AuditLogRow, type Position, type OrderRow, type CycleResult, type DhanStatus,
-  type PipelineStatus,
+  type PipelineStatus, type CandidateRow,
 } from "../realTradeApi";
 import ManualTradeTicket from "./trading/ManualTradeTicket";
 
 type Mode = "DEMO" | "REAL";
-type Tab = "overview" | "live" | "positions" | "orders" | "pipeline" | "log";
+type Tab = "overview" | "live" | "positions" | "orders" | "watchlist" | "pipeline" | "log";
 
 // ── Formatting helpers ───────────────────────────────────────────────────────
 function fmtInr(n: number | null | undefined, decimals = 0): string {
@@ -372,6 +372,20 @@ export default function RealAutoTrade() {
   const [pipeline, setPipeline] = useState<PipelineStatus | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [candidates, setCandidates] = useState<CandidateRow[]>([]);
+  const [candidatesLoading, setCandidatesLoading] = useState(false);
+
+  // Editable risk configuration form — separate from `status.risk_config`
+  // (the last-saved server value) so typing doesn't fight a background
+  // status poll; only synced FROM the server on load/mode-change/save, and
+  // only ever sent back on an explicit Save click.
+  const [riskForm, setRiskForm] = useState<{
+    risk_per_trade_pct: string; max_daily_loss_pct: string; max_concurrent_positions: string;
+    max_portfolio_risk_pct: string; stale_data_seconds: string; max_tick_volatility_mult: string;
+    allow_pyramiding: boolean;
+  } | null>(null);
+  const [riskSaving, setRiskSaving] = useState(false);
+  const [riskMsg, setRiskMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Tick for countdown
   useEffect(() => {
@@ -387,6 +401,17 @@ export default function RealAutoTrade() {
     try {
       const s = await realTradeApi.gateStatus(m);
       setStatus(s);
+      if (s.risk_config) {
+        setRiskForm({
+          risk_per_trade_pct: String(s.risk_config.risk_per_trade_pct ?? ""),
+          max_daily_loss_pct: String(s.risk_config.max_daily_loss_pct ?? ""),
+          max_concurrent_positions: String(s.risk_config.max_concurrent_positions ?? ""),
+          max_portfolio_risk_pct: String(s.risk_config.max_portfolio_risk_pct ?? ""),
+          stale_data_seconds: String(s.risk_config.stale_data_seconds ?? ""),
+          max_tick_volatility_mult: String(s.risk_config.max_tick_volatility_mult ?? ""),
+          allow_pyramiding: !!s.risk_config.allow_pyramiding,
+        });
+      }
       if (m === "REAL" && getSessionToken()) {
         try {
           const d = await realTradeApi.dhanAccount();
@@ -406,6 +431,18 @@ export default function RealAutoTrade() {
       setPositions(p);
       setOrders(o);
     } catch { /* best-effort */ }
+  }, []);
+
+  // Watchlist tab — what the engine has fetched/evaluated recently, with a
+  // live price alongside whatever it's waiting on. The tab itself polls
+  // every 5s while open (see effect below); this is the one-shot loader
+  // also used just to populate the tab count badge on mode change.
+  const loadCandidates = useCallback(async (m: Mode) => {
+    setCandidatesLoading(true);
+    try {
+      setCandidates(await realTradeApi.candidates(m, 40));
+    } catch { /* best-effort */ }
+    finally { setCandidatesLoading(false); }
   }, []);
 
   const loadLiveDhanData = async () => {
@@ -438,8 +475,9 @@ export default function RealAutoTrade() {
   useEffect(() => {
     if (getRealTradeApiUrl() && (mode === "DEMO" || loggedIn)) {
       void loadPositionsAndOrders(mode);
+      void loadCandidates(mode); // one-shot, just for the tab count badge — the watchlist tab itself polls
     }
-  }, [mode, loggedIn, loadPositionsAndOrders]);
+  }, [mode, loggedIn, loadPositionsAndOrders, loadCandidates]);
 
   useEffect(() => {
     if (activeTab === "live" && mode === "REAL" && loggedIn) {
@@ -466,6 +504,20 @@ export default function RealAutoTrade() {
     };
     void poll();
     const id = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [activeTab, mode, loggedIn]);
+
+  useEffect(() => {
+    if (activeTab !== "watchlist" || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn)) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const c = await realTradeApi.candidates(mode, 40);
+        if (!cancelled) setCandidates(c);
+      } catch { /* best-effort */ }
+    };
+    void poll();
+    const id = setInterval(poll, 5000);
     return () => { cancelled = true; clearInterval(id); };
   }, [activeTab, mode, loggedIn]);
 
@@ -517,6 +569,26 @@ export default function RealAutoTrade() {
   const doConfirmRisk = async () => {
     try { await realTradeApi.confirmRiskConfig(mode); await loadStatus(mode); }
     catch (e: any) { setError(e?.message || "Failed to confirm risk config"); }
+  };
+
+  const doSaveRiskConfig = async () => {
+    if (!riskForm) return;
+    setRiskSaving(true); setRiskMsg(null);
+    try {
+      await realTradeApi.updateRiskConfig(mode, {
+        risk_per_trade_pct: Number(riskForm.risk_per_trade_pct),
+        max_daily_loss_pct: Number(riskForm.max_daily_loss_pct),
+        max_concurrent_positions: Number(riskForm.max_concurrent_positions),
+        max_portfolio_risk_pct: Number(riskForm.max_portfolio_risk_pct),
+        stale_data_seconds: Number(riskForm.stale_data_seconds),
+        max_tick_volatility_mult: Number(riskForm.max_tick_volatility_mult),
+        allow_pyramiding: riskForm.allow_pyramiding,
+      });
+      setRiskMsg({ ok: true, text: "Risk configuration saved." });
+      await loadStatus(mode);
+    } catch (e: any) {
+      setRiskMsg({ ok: false, text: e?.message || "Failed to save risk configuration" });
+    } finally { setRiskSaving(false); }
   };
 
   const loadAudit = async () => {
@@ -612,6 +684,7 @@ export default function RealAutoTrade() {
     { id: "live", label: "Live Dhan" },
     { id: "positions", label: `Positions (${positions.length})` },
     { id: "orders", label: `Orders (${orders.length})` },
+    { id: "watchlist", label: `Watchlist (${candidates.length})` },
     { id: "pipeline", label: "Pipeline" },
     { id: "log", label: "Activity" },
   ];
@@ -764,6 +837,10 @@ export default function RealAutoTrade() {
                           {secondsRemaining != null ? (secondsRemaining <= 0 ? "expired" : fmtHms(secondsRemaining) + " left") : "—"}
                         </span></div>
                       </div>
+                      <p className="font-mono text-[9px] text-zinc-700 -mt-2">
+                        {dhanAccount.token_issued_at && `Issued ${fmtDate(dhanAccount.token_issued_at)} ${fmtTime(dhanAccount.token_issued_at)} · `}
+                        Dhan hard-caps every token at {dhanAccount.token_hard_cap_hours ?? 24}h regardless of when it was generated.
+                      </p>
 
                       {dhanAccount.funds_error ? (
                         <p className="font-mono text-[11px] text-rose-300 bg-rose-500/5 rounded-lg px-3 py-2 border border-rose-500/20">
@@ -828,25 +905,60 @@ export default function RealAutoTrade() {
                 </div>
               )}
 
-              {/* Risk config */}
+              {/* Risk config — editable while disarmed, read-only snapshot while armed
+                  (backend enforces the same rule and 409s otherwise, so the UI just
+                  mirrors it instead of letting someone submit a doomed request). */}
               {status?.risk_config && (
                 <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-                  <SectionHdr>Risk configuration — {mode}</SectionHdr>
-                  <div className="grid grid-cols-2 gap-3">
-                    {[
-                      { label: "Risk / trade", value: `${status.risk_config.risk_per_trade_pct}%` },
-                      { label: "Max daily loss", value: `${status.risk_config.max_daily_loss_pct}%` },
-                      { label: "Max positions", value: status.risk_config.max_concurrent_positions },
-                      { label: "Portfolio risk cap", value: `${status.risk_config.max_portfolio_risk_pct}%` },
-                    ].map(f => (
-                      <div key={f.label} className="bg-zinc-950 border border-zinc-800 rounded-lg p-2">
-                        <p className="font-mono text-[9px] uppercase tracking-widest text-zinc-600">{f.label}</p>
-                        <p className="font-mono text-sm font-bold text-zinc-100 mt-0.5">{f.value ?? "—"}</p>
-                      </div>
-                    ))}
+                  <div className="flex items-center justify-between mb-1">
+                    <SectionHdr>Risk configuration — {mode}</SectionHdr>
+                    {armed && <span className="font-mono text-[9px] text-amber-400 uppercase">locked while armed</span>}
                   </div>
+                  {riskForm && (
+                    <div className="grid grid-cols-2 gap-3">
+                      {([
+                        ["risk_per_trade_pct", "Risk / trade (%)"],
+                        ["max_daily_loss_pct", "Max daily loss (%)"],
+                        ["max_concurrent_positions", "Max positions"],
+                        ["max_portfolio_risk_pct", "Portfolio risk cap (%)"],
+                        ["stale_data_seconds", "Stale data cutoff (s)"],
+                        ["max_tick_volatility_mult", "Max tick volatility ×"],
+                      ] as const).map(([key, label]) => (
+                        <div key={key} className="bg-zinc-950 border border-zinc-800 rounded-lg p-2">
+                          <p className="font-mono text-[9px] uppercase tracking-widest text-zinc-600">{label}</p>
+                          <input
+                            type="number" inputMode="decimal" disabled={armed}
+                            value={riskForm[key]}
+                            onChange={e => setRiskForm(f => f && { ...f, [key]: e.target.value })}
+                            className="w-full bg-transparent font-mono text-sm font-bold text-zinc-100 mt-0.5 focus:outline-none disabled:opacity-60"
+                          />
+                        </div>
+                      ))}
+                      <label className="col-span-2 flex items-center gap-2 bg-zinc-950 border border-zinc-800 rounded-lg p-2 cursor-pointer">
+                        <input type="checkbox" disabled={armed} checked={riskForm.allow_pyramiding}
+                          onChange={e => setRiskForm(f => f && { ...f, allow_pyramiding: e.target.checked })}
+                          className="accent-sky-500" />
+                        <span className="font-mono text-[10px] text-zinc-400">Allow pyramiding (add to an existing open position)</span>
+                      </label>
+                    </div>
+                  )}
+                  {riskMsg && (
+                    <p className={`font-mono text-[10px] mt-2 ${riskMsg.ok ? "text-emerald-400" : "text-rose-400"}`}>{riskMsg.text}</p>
+                  )}
+                  {status.risk_config.updated_at && (
+                    <p className="font-mono text-[9px] text-zinc-700 mt-2">
+                      Last saved {fmtDate(status.risk_config.updated_at)} {fmtTime(status.risk_config.updated_at)}
+                      {status.risk_config.updated_by ? ` by ${status.risk_config.updated_by}` : ""}
+                    </p>
+                  )}
+                  {!armed && (
+                    <button onClick={() => void doSaveRiskConfig()} disabled={riskSaving}
+                      className="mt-3 w-full py-2 rounded-lg bg-sky-500/10 border border-sky-500/30 font-mono text-xs text-sky-300 disabled:opacity-40">
+                      {riskSaving ? "Saving…" : "Save changes"}
+                    </button>
+                  )}
                   {!gate3 && (
-                    <button onClick={() => void doConfirmRisk()} className="mt-3 w-full py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 font-mono text-xs text-amber-300">
+                    <button onClick={() => void doConfirmRisk()} className="mt-2 w-full py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 font-mono text-xs text-amber-300">
                       Confirm this risk configuration
                     </button>
                   )}
@@ -1067,22 +1179,45 @@ export default function RealAutoTrade() {
                           <span className="font-mono text-base font-bold text-zinc-100">{p.symbol}</span>
                           <span className="font-mono text-[10px] text-zinc-600 ml-2">{p.status}</span>
                         </div>
-                        <span className={`font-mono text-base font-bold ${pnlColor(p.unrealized_pnl)}`}>
-                          {p.unrealized_pnl >= 0 ? "+" : ""}{fmtInr(p.unrealized_pnl, 2)}
-                        </span>
+                        <div className="text-right">
+                          <span className={`font-mono text-base font-bold ${pnlColor(p.unrealized_pnl)}`}>
+                            {p.unrealized_pnl >= 0 ? "+" : ""}{fmtInr(p.unrealized_pnl, 2)}
+                          </span>
+                          {p.pnl_pct != null && (
+                            <span className={`font-mono text-[10px] ml-1 ${pnlColor(p.pnl_pct)}`}>
+                              ({p.pnl_pct >= 0 ? "+" : ""}{p.pnl_pct}%)
+                            </span>
+                          )}
+                        </div>
                       </div>
-                      <div className="grid grid-cols-4 gap-2 font-mono text-[10px] text-zinc-500 mb-3">
+                      <div className="grid grid-cols-5 gap-2 font-mono text-[10px] text-zinc-500 mb-3">
                         <div>Qty<br/><span className="text-zinc-200 font-bold">{p.qty_open}</span></div>
                         <div>Entry<br/><span className="text-zinc-200 font-bold">₹{p.avg_entry_price}</span></div>
-                        <div>Stop<br/><span className="text-rose-400 font-bold">{p.current_stop ? `₹${p.current_stop}` : "—"}</span></div>
-                        <div>Target<br/><span className="text-emerald-400 font-bold">{p.current_target ? `₹${p.current_target}` : "—"}</span></div>
+                        <div>Current<br/><span className="text-sky-400 font-bold">{p.current_price != null ? `₹${p.current_price.toFixed(2)}` : "—"}</span></div>
+                        <div>
+                          Stop
+                          {p.stop_distance_pct != null && <span className="text-zinc-700"> ({p.stop_distance_pct}%)</span>}
+                          <br/><span className="text-rose-400 font-bold">{p.current_stop ? `₹${p.current_stop}` : "—"}</span>
+                        </div>
+                        <div>
+                          Target
+                          {p.target_distance_pct != null && <span className="text-zinc-700"> ({p.target_distance_pct}%)</span>}
+                          <br/><span className="text-emerald-400 font-bold">{p.current_target ? `₹${p.current_target}` : "—"}</span>
+                        </div>
                       </div>
-                      {/* Risk:reward bar */}
+                      {/* Risk:reward bar with a live marker for where current price sits between stop and target */}
                       {p.current_stop && p.current_target && (
-                        <div className="h-1.5 rounded-full bg-zinc-800 flex overflow-hidden mb-2">
-                          <div className="bg-rose-500/50" style={{ width: "33%" }} />
-                          <div className="bg-zinc-700" style={{ width: "1px" }} />
-                          <div className="bg-emerald-500/50" style={{ width: "67%" }} />
+                        <div className="relative h-1.5 rounded-full bg-zinc-800 flex overflow-hidden mb-2">
+                          <div className="bg-rose-500/50" style={{ width: "50%" }} />
+                          <div className="bg-emerald-500/50" style={{ width: "50%" }} />
+                          {p.current_price != null && p.current_target > p.current_stop && (
+                            <div
+                              className="absolute top-[-2px] w-[3px] h-[9px] bg-white rounded-full"
+                              style={{
+                                left: `${Math.min(100, Math.max(0, ((p.current_price - p.current_stop) / (p.current_target - p.current_stop)) * 100))}%`,
+                              }}
+                            />
+                          )}
                         </div>
                       )}
                       <div className="flex items-center justify-between">
@@ -1127,7 +1262,8 @@ export default function RealAutoTrade() {
                         <th className="text-left p-3">Symbol</th>
                         <th className="text-left p-3">Side</th>
                         <th className="text-right p-3">Qty</th>
-                        <th className="text-right p-3">Price</th>
+                        <th className="text-right p-3">Limit</th>
+                        <th className="text-right p-3">Current</th>
                         <th className="text-center p-3">Status</th>
                         <th className="text-right p-3">Time</th>
                         <th className="p-3" />
@@ -1139,12 +1275,30 @@ export default function RealAutoTrade() {
                           : o.status === "CANCELLED" || o.status === "REJECTED" ? "text-rose-400"
                           : o.status === "PLACED" ? "text-amber-400"
                           : "text-zinc-500";
+                        const waiting = o.status === "PENDING" || o.status === "PLACED";
                         return (
                           <tr key={o.id} className="border-b border-zinc-900 hover:bg-zinc-950">
-                            <td className="p-3 font-bold text-zinc-100">{o.symbol}</td>
+                            <td className="p-3 font-bold text-zinc-100">
+                              {o.symbol}
+                              {o.execution_source === "MANUAL" && (
+                                <span className="ml-1.5 font-mono text-[9px] text-sky-400 align-middle">MANUAL</span>
+                              )}
+                            </td>
                             <td className={`p-3 font-bold ${o.side === "BUY" ? "text-emerald-400" : "text-rose-400"}`}>{o.side}</td>
                             <td className="p-3 text-right text-zinc-400">{o.qty}</td>
                             <td className="p-3 text-right text-zinc-400">{o.limit_price ? `₹${o.limit_price}` : "MKT"}</td>
+                            <td className="p-3 text-right">
+                              {waiting && o.current_price != null ? (
+                                <span className={o.limit_distance_pct != null && o.limit_distance_pct <= 0 ? "text-emerald-400" : "text-zinc-400"}>
+                                  ₹{o.current_price.toFixed(2)}
+                                  {o.limit_distance_pct != null && (
+                                    <span className="text-[9px] text-zinc-600 ml-1">
+                                      ({o.limit_distance_pct > 0 ? "+" : ""}{o.limit_distance_pct}%)
+                                    </span>
+                                  )}
+                                </span>
+                              ) : <span className="text-zinc-700">—</span>}
+                            </td>
                             <td className={`p-3 text-center ${sc}`}>{o.status}</td>
                             <td className="p-3 text-right text-zinc-600">{fmtTime(o.created_at)}</td>
                             <td className="p-3 text-right">
@@ -1160,6 +1314,101 @@ export default function RealAutoTrade() {
                       })}
                     </tbody>
                   </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ═══════════════════════════════════════════════════════════════
+              TAB: WATCHLIST — every candidate the engine has recently
+              fetched/evaluated, its latest WAIT/ENTER verdict, the limit
+              price it's waiting on (if any), and a live price alongside it.
+              This is the piece that used to be invisible between a cycle
+              running and an order showing up in Orders/Positions.
+          ═══════════════════════════════════════════════════════════════ */}
+          {activeTab === "watchlist" && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <SectionHdr>Candidate watchlist — {mode}</SectionHdr>
+                <button onClick={() => void loadCandidates(mode)} disabled={candidatesLoading}
+                  className="font-mono text-[10px] px-3 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-400 disabled:opacity-40">
+                  {candidatesLoading ? "…" : "↻"}
+                </button>
+              </div>
+              <p className="font-mono text-[10px] text-zinc-600 -mt-2">
+                Stocks pulled from Hot Picks / IPO / market scan, evaluated by the risk engine each cycle.
+              </p>
+
+              {candidates.length === 0 ? (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 text-center">
+                  <p className="font-mono text-sm text-zinc-600">
+                    {candidatesLoading ? "Loading…" : "No candidates fetched yet — run a cycle or wait for Auto-Pilot."}
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {candidates.map(c => {
+                    const d = c.latest_decision;
+                    const actionColor = d?.action === "ENTER" ? "text-emerald-400"
+                      : d?.action === "WAIT" ? "text-amber-400"
+                      : d?.risk_verdict === "REJECTED" || d?.risk_verdict === "BLOCKED_GLOBAL" ? "text-rose-400"
+                      : "text-zinc-500";
+                    return (
+                      <div key={c.id} className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                        <div className="flex items-start justify-between mb-2">
+                          <div>
+                            <span className="font-mono text-base font-bold text-zinc-100">{c.symbol}</span>
+                            {c.source_tab && (
+                              <span className="font-mono text-[9px] text-zinc-600 ml-2 uppercase">{SOURCE_LABELS[c.source_tab] || c.source_tab}</span>
+                            )}
+                            {c.decision_label && (
+                              <span className="font-mono text-[9px] text-sky-400 ml-2">{c.decision_label}</span>
+                            )}
+                          </div>
+                          <span className={`font-mono text-[11px] font-bold ${actionColor}`}>
+                            {d ? d.action : "not yet evaluated"}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-4 gap-2 font-mono text-[10px] text-zinc-500 mb-2">
+                          <div>Signal<br/><span className="text-zinc-300 font-bold">{c.signal_price ? `₹${c.signal_price}` : "—"}</span></div>
+                          <div>
+                            {d?.action === "WAIT" ? "Waiting at" : "Entry limit"}
+                            <br/>
+                            <span className="text-amber-400 font-bold">{d?.proposed_price ? `₹${d.proposed_price}` : "—"}</span>
+                          </div>
+                          <div>
+                            Current
+                            <br/>
+                            <span className="text-zinc-100 font-bold">
+                              {c.current_price != null ? `₹${c.current_price.toFixed(2)}` : "—"}
+                              {d?.limit_distance_pct != null && (
+                                <span className={`ml-1 text-[9px] ${d.limit_distance_pct <= 0 ? "text-emerald-400" : "text-zinc-600"}`}>
+                                  ({d.limit_distance_pct > 0 ? "+" : ""}{d.limit_distance_pct}%)
+                                </span>
+                              )}
+                            </span>
+                          </div>
+                          <div>Stop loss<br/><span className="text-rose-400 font-bold">{d?.proposed_stop ? `₹${d.proposed_stop}` : "—"}</span></div>
+                        </div>
+
+                        {d?.reasoning && (
+                          <p className="font-mono text-[10px] text-zinc-600 border-t border-zinc-800 pt-2 mt-1">
+                            {d.risk_verdict && <span className={`font-bold mr-1 ${d.risk_verdict === "APPROVED" ? "text-emerald-500" : "text-rose-500"}`}>[{d.risk_verdict}]</span>}
+                            {d.reasoning}
+                          </p>
+                        )}
+
+                        <div className="flex items-center justify-between mt-2">
+                          <span className="font-mono text-[9px] text-zinc-700">
+                            Fetched {fmtDate(c.received_at)} {fmtTime(c.received_at)}
+                            {c.consumed ? "" : " · not yet evaluated"}
+                          </span>
+                          {d && <span className="font-mono text-[9px] text-zinc-700">Evaluated {fmtTime(d.evaluated_at)}</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

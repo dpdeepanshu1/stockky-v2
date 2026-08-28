@@ -1177,9 +1177,7 @@ export default function App() {
         >
           {dbWakeState === "waking" ? "WAKING DB…" : dbWakeState === "ok" ? "DB AWAKE" : dbWakeState === "error" ? "DB WAKE FAILED" : "WAKE DB"}
         </button>
-        <span className="mono text-[10px] text-mist/60 ml-auto status-clock">
-          {new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: false })} IST
-        </span>
+        <StatusClock />
       </div>
 
       {showServiceManager && (
@@ -1694,6 +1692,24 @@ function BackendStatusDot({
 }
 
 
+
+// The header status strip previously rendered `new Date()` inline in the
+// App component's own JSX, so the clock only advanced whenever something
+// else in App re-rendered (a poll tick, a state change, etc.) — it would
+// visibly freeze for stretches and then jump, which read as "wrong". This
+// self-ticks on its own 1s interval, isolated from App's render cycle.
+function StatusClock() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  return (
+    <span className="mono text-[10px] text-mist/60 ml-auto status-clock">
+      {now.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: false })} IST
+    </span>
+  );
+}
 
 function MarketClock() {
   const [now, setNow] = useState(() => new Date());

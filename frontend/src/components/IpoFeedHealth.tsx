@@ -1,15 +1,18 @@
 // frontend/src/components/IpoFeedHealth.tsx
 //
 // IPO Tracker's OWN feed-health panel — reads ipo_static_feed via
-// GET /surprise/ipo/audit. This replaces the previous (incorrect) use of
+// GET /ipo/audit. This replaces the previous (incorrect) use of
 // <DataHealthAudit /> inside IpoTracker.tsx, which called the SHARED
 // /api/feed/audit-missing endpoint — that audits the general ~300-symbol
 // stock scan universe (stockky_kv), which is why the IPO Tracker tab was
 // showing unrelated stock symbols (AMBER, APOLLOHOSP, 3MINDIA, ...) instead
-// of IPO rows. There is no "Repair" action here on purpose: IPO rows are
-// populated by the Scan IPOs pipeline (ipo_scanner.analyze_ipo), not by the
-// per-symbol technical/fundamental repair pipeline the stock feed uses — if
-// an IPO row is missing fields, the fix is re-running Scan, not Repair.
+// of IPO rows.
+//
+// Auto-Repair here (POST /ipo/repair-batch) re-runs analyze_ipo() only for
+// the specific symbols missing a field — a bounded, targeted batch, same
+// shape as Hot Picks'/Surprise's repair-batch — NOT the "re-scan the whole
+// universe" full scan this panel used to trigger instead (kept below as a
+// fallback "Full Re-scan" action for when you actually want that).
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 
@@ -36,6 +39,8 @@ export default function IpoFeedHealth() {
   const [stats, setStats] = useState<IpoAuditStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [repairBusy, setRepairBusy] = useState(false);
+  const [repairMsg, setRepairMsg] = useState<string | null>(null);
   const [rescanBusy, setRescanBusy] = useState(false);
   const [rescanMsg, setRescanMsg] = useState<string | null>(null);
 
@@ -56,11 +61,36 @@ export default function IpoFeedHealth() {
     void fetchAudit();
   }, [fetchAudit]);
 
-  // There's no per-symbol IPO repair pipeline (unlike Hot Picks/Surprise's
-  // price-only repair) — missing IPO fields only ever fill in via a real
-  // re-scan (ipo_scanner.analyze_ipo). This button makes that one click
-  // from the health panel itself instead of just telling you to go run
-  // "Scan IPOs" above.
+  // Targeted repair — bounded to the symbols actually missing a field
+  // (up to 20 per click), not a blanket re-scan of everything tracked.
+  const autoRepairAll = useCallback(async () => {
+    setRepairBusy(true);
+    setRepairMsg(null);
+    setError(null);
+    try {
+      const res = await api.ipoRepairBatch(20);
+      if (res.status === "completed") {
+        const n = res.repaired?.length ?? 0;
+        setRepairMsg(
+          n > 0
+            ? `Repaired ${n} symbol(s): ${(res.repaired || []).join(", ")}`
+            : res.message || "Nothing needed repair."
+        );
+      } else {
+        setRepairMsg(res.message || res.error || "Repair did not complete.");
+      }
+      await fetchAudit();
+    } catch (e: any) {
+      setRepairMsg(null);
+      setError(e?.message || "Failed to run Auto-Repair");
+    } finally {
+      setRepairBusy(false);
+    }
+  }, [fetchAudit]);
+
+  // Kept as a secondary action for when a targeted repair isn't enough
+  // (e.g. NSE/ipoalerts discovery itself needs refreshing, not just
+  // scoring for symbols already known).
   const forceRescan = useCallback(async () => {
     setRescanBusy(true);
     setRescanMsg(null);
@@ -69,7 +99,7 @@ export default function IpoFeedHealth() {
       setRescanMsg(
         res?.already_running
           ? "A scan is already running — check Scan IPOs above for progress."
-          : res?.message || "Re-scan started — missing fields will fill in as it completes."
+          : res?.message || "Full re-scan started — missing fields will fill in as it completes."
       );
     } catch (e: any) {
       setRescanMsg(null);
@@ -93,15 +123,25 @@ export default function IpoFeedHealth() {
             Tracks ipo_static_feed only — the IPO Tracker's own table, separate from the stock scan universe.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {missing > 0 && (
+            <button
+              className="text-xs px-3 py-1.5 rounded border border-emerald-500/40 bg-emerald-600/20 text-emerald-200 hover:bg-emerald-600/35 disabled:opacity-50"
+              onClick={() => void autoRepairAll()}
+              disabled={repairBusy}
+              title="Re-runs the analysis only for symbols currently missing a field (bounded batch), not a full re-scan"
+            >
+              {repairBusy ? "Repairing…" : "🛠 Auto-Repair All"}
+            </button>
+          )}
           {missing > 0 && (
             <button
               className="text-xs px-3 py-1.5 rounded border border-rose-500/40 bg-rose-600/20 text-rose-200 hover:bg-rose-600/35 disabled:opacity-50"
               onClick={() => void forceRescan()}
               disabled={rescanBusy}
-              title="Missing IPO fields only fill in via a real re-scan, not a price-only repair"
+              title="Full universe re-scan from upstream — use if Auto-Repair isn't enough (e.g. discovery itself is stale)"
             >
-              {rescanBusy ? "Starting…" : "⚡ Re-scan Missing"}
+              {rescanBusy ? "Starting…" : "⚡ Full Re-scan"}
             </button>
           )}
           <button
@@ -115,7 +155,9 @@ export default function IpoFeedHealth() {
       </div>
 
       {error && <p className="text-xs text-rose-400 mt-2">{error}</p>}
+      {repairMsg && <p className="text-xs text-emerald-400 mt-2">{repairMsg}</p>}
       {rescanMsg && <p className="text-xs text-emerald-400 mt-2">{rescanMsg}</p>}
+
 
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
@@ -171,7 +213,7 @@ export default function IpoFeedHealth() {
             </tbody>
           </table>
           <p className="text-[11px] text-white/40 mt-2">
-            Missing fields fill in via "Scan IPOs" (re-run the scan), not the stock Repair pipeline.
+            Auto-Repair re-scores just these symbols; Full Re-scan re-discovers the whole universe from upstream.
           </p>
         </div>
       ) : (

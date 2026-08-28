@@ -215,6 +215,15 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
             "max_daily_loss_pct": risk.max_daily_loss_pct if risk else None,
             "max_concurrent_positions": risk.max_concurrent_positions if risk else None,
             "max_portfolio_risk_pct": risk.max_portfolio_risk_pct if risk else None,
+            # Previously computed server-side but never sent to the frontend,
+            # so these three were configurable only via a raw API call —
+            # exposing them here lets the dashboard show/edit every field
+            # POST /risk-config accepts instead of a fixed subset.
+            "stale_data_seconds": risk.stale_data_seconds if risk else None,
+            "max_tick_volatility_mult": risk.max_tick_volatility_mult if risk else None,
+            "allow_pyramiding": risk.allow_pyramiding if risk else None,
+            "updated_at": risk.updated_at.isoformat() if risk and risk.updated_at else None,
+            "updated_by": risk.updated_by if risk else None,
         } if risk else None,
     }
 
@@ -640,6 +649,23 @@ async def autopilot_disable(mode: str, admin: Optional[str] = Depends(require_ad
     return {"ok": True, "mode": mode, "auto_pilot_enabled": False}
 
 
+async def _live_prices(symbols: list[str]) -> dict[str, float]:
+    """Best-effort LTP lookup for dashboard display only — NEVER used to
+    size, price, or evaluate an actual order (entry_engine/exit_engine call
+    market_feed/dhan_client directly for that). A quote failing here just
+    means the dashboard shows '—' for current price; it must never raise
+    and never block the positions/orders/candidates list from returning."""
+    if not symbols:
+        return {}
+    try:
+        from market_feed.feed import get_quotes
+        ticks = await get_quotes(list(dict.fromkeys(symbols)))  # de-dupe, preserve order
+        return {sym: t.price for sym, t in ticks.items() if t is not None}
+    except Exception as e:
+        logger.warning("live price lookup failed (display-only, non-fatal): %s", e)
+        return {}
+
+
 @app.get("/positions/{mode}")
 async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     mode = mode.upper()
@@ -650,15 +676,33 @@ async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin
         .all()
     )  # includes PENDING_EXIT (a REAL exit already sent to Dhan, awaiting confirmation) — the DEMO/entry-cycle
        # open_positions() helper deliberately excludes it from re-evaluation; this endpoint should still show it.
-    return [
-        {
+    prices = await _live_prices([p.symbol for p in rows])
+    out = []
+    for p in rows:
+        ltp = prices.get(p.symbol)
+        pnl_pct = None
+        stop_distance_pct = None
+        target_distance_pct = None
+        if ltp is not None and p.avg_entry_price:
+            pnl_pct = round((ltp - p.avg_entry_price) / p.avg_entry_price * 100.0, 2)
+        if ltp is not None and p.current_stop:
+            stop_distance_pct = round((ltp - p.current_stop) / ltp * 100.0, 2)
+        if ltp is not None and p.current_target:
+            target_distance_pct = round((p.current_target - ltp) / ltp * 100.0, 2)
+        out.append({
             "id": p.id, "symbol": p.symbol, "status": p.status, "qty_open": p.qty_open,
             "avg_entry_price": p.avg_entry_price, "current_stop": p.current_stop,
             "current_target": p.current_target, "unrealized_pnl": p.unrealized_pnl,
             "realized_pnl": p.realized_pnl, "opened_at": p.opened_at.isoformat(),
-        }
-        for p in rows
-    ]
+            "current_price": ltp,
+            "pnl_pct": pnl_pct,
+            # How close LTP is to knocking the stop/target, as a % of current price —
+            # lets the dashboard show a live "X% above stop / Y% below target" readout
+            # instead of just the raw levels, without duplicating exit_engine's own logic.
+            "stop_distance_pct": stop_distance_pct,
+            "target_distance_pct": target_distance_pct,
+        })
+    return out
 
 
 @app.get("/orders/{mode}")
@@ -668,15 +712,97 @@ async def list_orders(mode: str, limit: int = 50, admin: Optional[str] = Depends
         db.query(models.TradeOrder).filter_by(mode=mode)
         .order_by(models.TradeOrder.created_at.desc()).limit(min(max(limit, 1), 200)).all()
     )
-    return [
-        {
+    # Only bother pricing orders still "in flight" (waiting on a limit fill) —
+    # a FILLED/CANCELLED/REJECTED/EXPIRED order's current price is irrelevant
+    # dashboard noise, and skipping them keeps the live-price call small.
+    live_symbols = [o.symbol for o in rows if o.status in ("PENDING", "PLACED")]
+    prices = await _live_prices(live_symbols)
+    out = []
+    for o in rows:
+        ltp = prices.get(o.symbol)
+        limit_distance_pct = None
+        if ltp is not None and o.limit_price and o.status in ("PENDING", "PLACED"):
+            # Positive = LTP still above the BUY limit (waiting for price to
+            # come down to fill); negative = LTP has already crossed it.
+            limit_distance_pct = round((ltp - o.limit_price) / o.limit_price * 100.0, 2)
+        out.append({
             "id": o.id, "symbol": o.symbol, "side": o.side, "qty": o.qty, "order_type": o.order_type,
             "limit_price": o.limit_price, "status": o.status,
             "valid_until": o.valid_until.isoformat() if o.valid_until else None,
             "created_at": o.created_at.isoformat(),
-        }
-        for o in rows
-    ]
+            "execution_source": o.execution_source,
+            "current_price": ltp,
+            "limit_distance_pct": limit_distance_pct,
+        })
+    return out
+
+
+@app.get("/candidates/{mode}")
+async def list_candidates(
+    mode: str, limit: int = 40,
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """Dashboard visibility into 'what the engine is actually looking at' —
+    the piece that was previously invisible between a cycle running and an
+    order appearing. Shows every recently-fetched candidate joined with
+    entry_engine's latest ENTRY decision for that same (mode, symbol) pair
+    (if any yet), plus a live price so 'waiting at limit ₹X, currently ₹Y'
+    is visible without cross-referencing the Orders tab. Read-only —
+    exactly like /pipeline/status, this never influences entry_engine's own
+    evaluation, which reads trade_candidates itself, not this endpoint."""
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+
+    candidates = (
+        db.query(models.TradeCandidate).filter_by(mode=mode)
+        .order_by(models.TradeCandidate.received_at.desc())
+        .limit(min(max(limit, 1), 200)).all()
+    )
+    symbols = [c.symbol for c in candidates]
+    prices = await _live_prices(symbols)
+
+    # Latest ENTRY decision per symbol (one query, not N+1) — gives each
+    # candidate its most recent WAIT/ENTER verdict + reasoning + the
+    # limit/stop/target the risk engine proposed for it, if it has been
+    # evaluated at least once.
+    latest_decisions: dict[str, models.TradeDecision] = {}
+    if symbols:
+        decision_rows = (
+            db.query(models.TradeDecision)
+            .filter(models.TradeDecision.mode == mode,
+                    models.TradeDecision.decision_type == "ENTRY",
+                    models.TradeDecision.symbol.in_(set(symbols)))
+            .order_by(models.TradeDecision.created_at.desc())
+            .all()
+        )
+        for d in decision_rows:
+            if d.symbol not in latest_decisions:
+                latest_decisions[d.symbol] = d  # first hit per symbol = most recent (already ordered desc)
+
+    out = []
+    for c in candidates:
+        d = latest_decisions.get(c.symbol)
+        ltp = prices.get(c.symbol)
+        limit_distance_pct = None
+        if ltp is not None and d and d.proposed_price and d.action == "WAIT":
+            limit_distance_pct = round((ltp - d.proposed_price) / d.proposed_price * 100.0, 2)
+        out.append({
+            "id": c.id, "symbol": c.symbol, "source_tab": c.source_tab,
+            "decision_label": c.decision_label, "conviction_score": c.conviction_score,
+            "signal_price": c.signal_price, "received_at": c.received_at.isoformat(),
+            "consumed": c.consumed,
+            "current_price": ltp,
+            "latest_decision": {
+                "action": d.action, "reasoning": d.reasoning,
+                "proposed_qty": d.proposed_qty, "proposed_price": d.proposed_price,
+                "proposed_stop": d.proposed_stop, "proposed_target": d.proposed_target,
+                "risk_verdict": d.risk_verdict, "risk_verdict_reason": d.risk_verdict_reason,
+                "evaluated_at": d.created_at.isoformat(),
+                "limit_distance_pct": limit_distance_pct,
+            } if d else None,
+        })
+    return out
 
 
 class ManualCloseRequest(BaseModel):

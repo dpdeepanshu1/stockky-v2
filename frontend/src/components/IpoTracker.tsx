@@ -79,6 +79,9 @@ export default function IpoTracker({
   const [displayDays, setDisplayDays] = useState<number>(WINDOW_RECENT);
   const [totalScanned, setTotalScanned] = useState<number | null>(null);
   const ipoPollRef = useRef<number | null>(null);
+  const [dbLoadBusy, setDbLoadBusy] = useState(false);
+  const [notifyBusy, setNotifyBusy] = useState(false);
+  const [notifyMsg, setNotifyMsg] = useState<string | null>(null);
 
   const [sniperOpen, setSniperOpen] = useState(false);
   const [suggestions, setSuggestions] = useState<BuySuggestion[]>([]);
@@ -205,6 +208,42 @@ export default function IpoTracker({
       setStopBusy(false);
     }
   }, [pollIpoStatus]);
+
+  // "Scan IPOs" — a pure DB/cache read (GET /ipo/list), never an upstream
+  // call. This used to POST /ipo/scan?force=false, which silently fell
+  // through to a real NSE/yfinance scan whenever the results cache had
+  // expired even though ipo_static_feed itself was still fresh (fixed
+  // separately by widening the cache TTL) — but a "Scan" button should
+  // never be able to trigger upstream traffic at all, by construction, not
+  // just "rarely now." Use Premarket Feed / Force Rescan for that.
+  const loadFromDb = useCallback(async () => {
+    setDbLoadBusy(true);
+    setIpoError(null);
+    try {
+      await fetchIpoList();
+    } catch (e: any) {
+      setIpoError(e?.message || "Failed to load IPO Tracker data");
+    } finally {
+      setDbLoadBusy(false);
+    }
+  }, [fetchIpoList]);
+
+  const notifyTop5 = useCallback(async (topN = 5) => {
+    setNotifyBusy(true);
+    setNotifyMsg(null);
+    try {
+      const res = await api.ipoNotifyTopPicks(topN);
+      if (res.sent) {
+        setNotifyMsg(`Sent top ${res.count ?? topN} to Telegram.`);
+      } else {
+        setNotifyMsg(res.message || res.error || "Telegram didn't confirm delivery — check notification settings.");
+      }
+    } catch (e: any) {
+      setNotifyMsg(e?.message || "Failed to send to Telegram");
+    } finally {
+      setNotifyBusy(false);
+    }
+  }, []);
 
   // Prefer the precomputed buy_suggestion (already scored by the IPO
   // pipeline) when the row has one. Otherwise fall back to an on-demand
@@ -412,12 +451,12 @@ export default function IpoTracker({
             </button>
             <button
               type="button"
-              onClick={() => void startIpoScan(false)}
-              disabled={ipoScanning}
-              title="Reads the premarket-refreshed table if it's fresh, otherwise does a full scan"
+              onClick={() => void loadFromDb()}
+              disabled={dbLoadBusy}
+              title="Reads ipo_static_feed / the cached list only — never calls NSE/yfinance. Use Force Rescan for that."
               className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-violet-500/20 border border-violet-400/40 text-violet-100 hover:bg-violet-500/30 disabled:opacity-40"
             >
-              {ipoScanning ? "Scanning…" : "Scan IPOs"}
+              {dbLoadBusy ? "Loading…" : "↻ Scan IPOs (DB)"}
             </button>
             <button
               type="button"
@@ -426,7 +465,7 @@ export default function IpoTracker({
               title="Ignore the freshness cache and re-scan every IPO from scratch, straight from upstream (NSE + yfinance) — same underlying action as Premarket Feed, exposed here for a one-off refresh mid-session"
               className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-violet-500/10 border border-violet-400/30 text-violet-200/80 hover:bg-violet-500/20 disabled:opacity-40"
             >
-              Force Rescan
+              {ipoScanning ? "Scanning…" : "Force Scan (upstream)"}
             </button>
             <button
               type="button"
@@ -436,7 +475,19 @@ export default function IpoTracker({
             >
               {stopBusy ? "Stopping…" : "■ Stop"}
             </button>
+            <button
+              type="button"
+              onClick={() => void notifyTop5(5)}
+              disabled={notifyBusy || ipoList.length === 0}
+              title="Send the top 5 IPO Tracker picks to Telegram (uses the same notification channel configured in Settings)"
+              className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-sky-500/20 border border-sky-400/40 text-sky-100 hover:bg-sky-500/30 disabled:opacity-40"
+            >
+              {notifyBusy ? "Sending…" : "📨 Send Top 5 to Telegram"}
+            </button>
           </div>
+          {notifyMsg && (
+            <p className="font-mono text-[10px] text-zinc-500 mt-1">{notifyMsg}</p>
+          )}
         </div>
 
         {ipoAddOpen && (

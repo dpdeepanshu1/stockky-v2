@@ -6603,6 +6603,8 @@ async def api_surprise_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
         return {"ok": False, "sent": False, "count": len(top), "error": str(e)[:300]}
 
 
+@app.post("/ipo/scan")
+@app.get("/ipo/scan")
 @app.post("/surprise/ipo/scan")
 @app.get("/surprise/ipo/scan")
 async def api_ipo_scan(
@@ -6642,6 +6644,7 @@ async def api_ipo_scan(
     return {"accepted": True, "background": False, **result}
 
 
+@app.get("/ipo/status")
 @app.get("/surprise/ipo/status")
 async def api_ipo_scan_status():
     try:
@@ -6651,6 +6654,7 @@ async def api_ipo_scan_status():
         return {"status": "error", "message": str(e)[:160]}
 
 
+@app.get("/ipo/list")
 @app.get("/surprise/ipo/list")
 async def api_ipo_list(display_days: Optional[int] = Query(None)):
     """Current analyzed IPO list — listing-today/pre-listing first, then by
@@ -6669,6 +6673,7 @@ async def api_ipo_list(display_days: Optional[int] = Query(None)):
         return {"results": [], "generated_at": None, "error": str(e)[:160]}
 
 
+@app.get("/ipo/audit")
 @app.get("/surprise/ipo/audit")
 async def api_ipo_audit():
     """
@@ -6685,6 +6690,7 @@ async def api_ipo_audit():
         return {"ok": False, "error": str(e)[:200], "rows": []}
 
 
+@app.post("/ipo/stop")
 @app.post("/surprise/ipo/stop")
 async def api_ipo_stop():
     """Stop an in-progress IPO scan after the current symbol — IPO Checker
@@ -6702,6 +6708,7 @@ class IpoAddRequest(BaseModel):
     company_name: str
 
 
+@app.post("/ipo/add")
 @app.post("/surprise/ipo/add")
 async def api_ipo_add(body: IpoAddRequest):
     """Manually register an IPO by NAME ONLY — the reliable path since
@@ -6721,6 +6728,83 @@ async def api_ipo_add(body: IpoAddRequest):
             "suggestions": result.get("suggestions") or [],
         }
     return {"accepted": True, "entry": result.get("entry")}
+
+
+@app.post("/ipo/repair-batch")
+@app.post("/surprise/ipo/repair-batch")
+async def api_ipo_repair_batch(limit: int = Query(15, ge=1, le=30), symbol: Optional[str] = Query(None)):
+    """Targeted repair for ipo_static_feed rows missing price/score/decision
+    — re-runs analyze_ipo() only for the specific missing symbols (bounded
+    by `limit`), not a full-universe re-scan. Mirrors /stockky-hot/repair-batch
+    and /api/surprise/repair-batch's naming and shape; backs the IPO Tracker
+    health tab's Auto-Repair button."""
+    try:
+        from ipo_scanner import ipo_repair_batch
+    except Exception as e:
+        return {"status": "error", "error": f"ipo_scanner unavailable: {str(e)[:160]}"}
+    return ipo_repair_batch(limit=limit, symbol=symbol)
+
+
+@app.post("/ipo/notify-top-picks")
+@app.post("/surprise/ipo/notify-top-picks")
+async def api_ipo_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
+    """Manual 'send to Telegram' button for the IPO Tracker tab — mirrors
+    /surprise/notify-top-picks and /stockky-hot/notify-top-picks exactly
+    (same notification-scheduler-service /notify call, channel='telegram'),
+    just sourced from the IPO list (best score first, pre-listing/listing-
+    day/upcoming stages first — same ordering run_ipo_scan already sorts
+    the stored list into) instead of Surprise Momentum's or Hot Picks' own
+    scan results."""
+    try:
+        from ipo_scanner import get_ipo_list
+        listing = get_ipo_list(display_days=None)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ipo_scanner import failed: {e}")
+
+    results = listing.get("results") or []
+    if not results:
+        return {"ok": False, "sent": False, "count": 0, "message": "No IPO Tracker results available right now — run Scan IPOs first."}
+
+    top = results[: max(1, min(int(top_n), 20))]
+    lines = [f"🆕 *IPO Tracker — Top {len(top)}*"]
+    for i, r in enumerate(top, 1):
+        sym = r.get("symbol")
+        decision = r.get("decision") or "—"
+        score = r.get("ipo_score") or r.get("pre_listing_advisory_score")
+        stage = str(r.get("stage") or "").replace("_", " ")
+        issue_px = r.get("issue_price")
+        cur_px = r.get("current_price")
+        chg = r.get("current_vs_issue_pct")
+        try:
+            chg_str = f"{float(chg):+.2f}%" if chg is not None else "—"
+        except (TypeError, ValueError):
+            chg_str = "—"
+        lines.append(
+            f"{i}. {sym} — {decision} (score {score if score is not None else '—'}/100, {stage})\n"
+            f"   Issue ₹{issue_px} → Current ₹{cur_px if cur_px is not None else '—'} ({chg_str})"
+        )
+    message = "\n".join(lines)
+
+    try:
+        resp = httpx.post(
+            f"{NOTIFICATION_URL}/notify",
+            json={"title": "IPO Tracker — Top Picks", "message": message, "channel": "telegram"},
+            timeout=15,
+        )
+        try:
+            detail = resp.json()
+        except Exception:
+            detail = {"status_code": resp.status_code}
+        delivered = bool(isinstance(detail, dict) and detail.get("delivered"))
+        return {
+            "ok": True,
+            "sent": delivered,
+            "count": len(top),
+            "symbols": [r.get("symbol") for r in top],
+            "notification_result": detail,
+        }
+    except Exception as e:
+        return {"ok": False, "sent": False, "count": len(top), "error": str(e)[:300]}
 
 
 @app.get("/surprise/premarket/status")

@@ -117,6 +117,41 @@ def init_schema() -> None:
 
     _ensure_manual_order_columns(eng, dialect())
     _ensure_gate_state_columns(eng, dialect())
+    _fix_stale_dhan_token_expiry(eng)
+
+
+# 2026-08-27 data fixup: docker-compose.yml/.env.example/.env.oracle.example
+# used to override DHAN_TOKEN_LIFETIME_DAYS to 30 even though Dhan hard-caps
+# every access token at 24h (see CHANGES_2026-08-27_REVIEW.md #2). Any
+# trade_credentials row saved while that misconfiguration was live has a
+# token_expires_at up to ~29 days past what Dhan will actually honor —
+# auth/dhan_credentials.py now clamps this defensively on every read, but
+# fixing the stored value too means the dashboard, DB, and any other
+# consumer all agree instead of relying on every caller to remember to
+# clamp. Idempotent — once a row is capped it stays capped since capping
+# again is a no-op comparison, not an unconditional overwrite.
+def _fix_stale_dhan_token_expiry(engine) -> None:
+    from sqlalchemy import text
+
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text(
+                "UPDATE trade_credentials "
+                "SET token_expires_at = token_issued_at + INTERVAL '24 hours' "
+                "WHERE token_issued_at IS NOT NULL "
+                "AND token_expires_at IS NOT NULL "
+                "AND token_expires_at > token_issued_at + INTERVAL '24 hours'"
+            ) if dialect() != "oracle" else text(
+                "UPDATE trade_credentials "
+                "SET token_expires_at = token_issued_at + INTERVAL '24' HOUR "
+                "WHERE token_issued_at IS NOT NULL "
+                "AND token_expires_at IS NOT NULL "
+                "AND token_expires_at > token_issued_at + INTERVAL '24' HOUR"
+            ))
+            if result.rowcount:
+                logger.info("real-trade-db: capped %s stale trade_credentials.token_expires_at row(s) to 24h", result.rowcount)
+    except Exception as e:
+        logger.warning("real-trade-db: could not check/fix stale token_expires_at: %s", e)
 
 
 # create_all(checkfirst=True) only creates MISSING TABLES — it never adds a

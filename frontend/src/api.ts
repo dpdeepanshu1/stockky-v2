@@ -1256,8 +1256,13 @@ export const api = {
     }>(`/surprise/premarket?background=true&force=${force}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, 1, 30000),
 
   // IPO Tracker — its own left-nav tab (was a Surprise subsection).
-  // force defaults FALSE: the "IPO Premarket Refresh" GitHub Action (see
-  // .github/workflows/ipo-premarket.yml) already runs a full discovery +
+  // NOTE: canonical path is /ipo/... (a peer of /stockky-hot/... and
+  // /surprise/... — the IPO Tracker is its own tab, not a Surprise
+  // subsection). /surprise/ipo/... still works server-side as a back-compat
+  // alias (older bookmarks, the IPO Premarket Refresh GitHub Action before
+  // it was updated), but this client always calls the canonical path.
+  //
+  // .github/workflows/ipo-premarket.yml already runs a full discovery +
   // scoring pass every trading morning ~08:50 IST and upserts
   // ipo_static_feed, so a normal "Scan IPOs" click should read that
   // already-fresh table (near-instant) instead of re-discovering NSE +
@@ -1266,11 +1271,11 @@ export const api = {
   // the freshness cache and do a real re-scan on demand.
   ipoScan: (force = false) =>
     request<{ accepted?: boolean; already_running?: boolean; message?: string }>(
-      `/surprise/ipo/scan?background=true&force=${force}`, { method: "POST" }, 1, 30000
+      `/ipo/scan?background=true&force=${force}`, { method: "POST" }, 1, 30000
     ),
   forceIpoScan: () =>
     request<{ accepted?: boolean; already_running?: boolean; message?: string }>(
-      `/surprise/ipo/scan?background=true&force=true`, { method: "POST" }, 1, 30000
+      `/ipo/scan?background=true&force=true`, { method: "POST" }, 1, 30000
     ),
   ipoScanStatus: () =>
     request<{
@@ -1279,11 +1284,11 @@ export const api = {
       processed?: number;
       total?: number;
       results_count?: number;
-    }>("/surprise/ipo/status", undefined, 2, 15000),
+    }>("/ipo/status", undefined, 2, 15000),
   // Halts an in-flight scan after the current symbol; partial results are kept.
   ipoStop: () =>
     request<{ ok?: boolean; stopping?: boolean; message?: string }>(
-      "/surprise/ipo/stop", { method: "POST" }, 1, 15000
+      "/ipo/stop", { method: "POST" }, 1, 15000
     ),
   // Surprise tab Stop. The backend endpoint has existed for a while but nothing
   // in the UI called it, so a long premarket/waterfall run could only be waited
@@ -1333,7 +1338,7 @@ export const api = {
       total_scanned?: number;
       display_days?: number;
     }>(
-      `/surprise/ipo/list${displayDays ? `?display_days=${displayDays}` : ""}`,
+      `/ipo/list${displayDays ? `?display_days=${displayDays}` : ""}`,
       undefined, 2, 20000
     ),
   // IPO Tracker's OWN feed health — reads ipo_static_feed, NOT the general
@@ -1354,7 +1359,29 @@ export const api = {
       health_score?: number;
       message?: string;
       error?: string;
-    }>("/surprise/ipo/audit", undefined, 2, 20000),
+    }>("/ipo/audit", undefined, 2, 20000),
+  // Targeted repair — re-runs analyze_ipo() only for symbols missing a
+  // field, not a full universe re-scan. Backs the IPO health tab's
+  // Auto-Repair button (mirrors hotPicksRepairBatch above).
+  ipoRepairBatch: (limit = 15, symbol?: string) =>
+    request<{ status: string; repaired?: string[]; attempted?: number; message?: string; error?: string }>(
+      `/ipo/repair-batch?limit=${limit}${symbol ? `&symbol=${encodeURIComponent(symbol)}` : ""}`,
+      { method: "POST" },
+      1,
+      120000
+    ),
+  // Manual "Send Top 5 to Telegram" button for the IPO Tracker tab (same
+  // pattern as surpriseNotifyTopPicks / hotPicksNotifyTopPicks above).
+  ipoNotifyTopPicks: (topN = 5) =>
+    request<{
+      ok: boolean;
+      sent: boolean;
+      count: number;
+      symbols?: string[];
+      message?: string;
+      error?: string;
+      notification_result?: { delivered?: boolean; note?: string };
+    }>(`/ipo/notify-top-picks?top_n=${topN}`, { method: "POST" }, 1, 30000),
   // Name-only — the backend resolves symbol/issue price/listing date
   // automatically (NSE calendar, ipoalerts as fallback). See
   // ipo_scanner.add_manual_ipo_by_name.
@@ -1365,7 +1392,7 @@ export const api = {
       message?: string;
       suggestions?: string[];
     }>(
-      "/surprise/ipo/add",
+      "/ipo/add",
       { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
       1,
       20000

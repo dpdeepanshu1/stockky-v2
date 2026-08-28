@@ -82,6 +82,11 @@ export interface GateStatus {
     max_daily_loss_pct: number | null;
     max_concurrent_positions: number | null;
     max_portfolio_risk_pct: number | null;
+    stale_data_seconds: number | null;
+    max_tick_volatility_mult: number | null;
+    allow_pyramiding: boolean | null;
+    updated_at: string | null;
+    updated_by: string | null;
   } | null;
 }
 
@@ -96,8 +101,10 @@ export interface AuditLogRow {
 export interface DhanStatus {
   connected: boolean;
   client_id_masked: string | null;
+  token_issued_at: string | null;
   token_expires_at: string | null;
   token_valid: boolean;
+  token_hard_cap_hours: number | null;
   days_remaining: number | null;
   hours_remaining: number | null;
   seconds_remaining: number | null;
@@ -107,11 +114,44 @@ export interface Position {
   id: number; symbol: string; status: string; qty_open: number; avg_entry_price: number;
   current_stop: number | null; current_target: number | null;
   unrealized_pnl: number; realized_pnl: number; opened_at: string;
+  current_price: number | null;
+  pnl_pct: number | null;
+  stop_distance_pct: number | null;
+  target_distance_pct: number | null;
 }
 
 export interface OrderRow {
   id: number; symbol: string; side: string; qty: number; order_type: string;
   limit_price: number | null; status: string; valid_until: string | null; created_at: string;
+  execution_source?: string;
+  current_price: number | null;
+  limit_distance_pct: number | null;
+}
+
+export interface CandidateDecision {
+  action: string;
+  reasoning: string | null;
+  proposed_qty: number | null;
+  proposed_price: number | null;
+  proposed_stop: number | null;
+  proposed_target: number | null;
+  risk_verdict: string | null;
+  risk_verdict_reason: string | null;
+  evaluated_at: string;
+  limit_distance_pct: number | null;
+}
+
+export interface CandidateRow {
+  id: number;
+  symbol: string;
+  source_tab: string | null;
+  decision_label: string | null;
+  conviction_score: number | null;
+  signal_price: number | null;
+  received_at: string;
+  consumed: boolean;
+  current_price: number | null;
+  latest_decision: CandidateDecision | null;
 }
 
 export interface CycleResult {
@@ -273,6 +313,9 @@ export const realTradeApi = {
 
   orders: (mode: "DEMO" | "REAL", limit = 50) =>
     rtRequest<OrderRow[]>(`/orders/${mode}?limit=${limit}`, {}, mode === "REAL"),
+
+  candidates: (mode: "DEMO" | "REAL", limit = 40) =>
+    rtRequest<CandidateRow[]>(`/candidates/${mode}?limit=${limit}`, {}, mode === "REAL"),
 
   closePosition: (mode: "DEMO" | "REAL", positionId: number, qty?: number) =>
     rtRequest<{ ok: boolean; symbol: string; qty_closed?: number; qty_sent?: number; pnl?: number; status?: string }>(

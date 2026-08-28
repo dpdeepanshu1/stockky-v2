@@ -30,6 +30,26 @@ logger = logging.getLogger("real-trade-dhan-auth")
 
 DHAN_TOKEN_LIFETIME_HOURS = config.DHAN_TOKEN_LIFETIME_DAYS * 24  # see config.py
 
+# Dhan access tokens are HARD-CAPPED at 24h by Dhan/SEBI for every account —
+# this is not configurable on Dhan's side no matter what
+# DHAN_TOKEN_LIFETIME_DAYS is set to in this deploy's env. Every place that
+# reads/derives an expiry from the DB clamps to this ceiling so a stale row
+# (saved back when a misconfigured env had DHAN_TOKEN_LIFETIME_DAYS=30 — see
+# CHANGES_2026-08-27_REVIEW.md #2) or a future misconfiguration can never
+# show/enforce a countdown longer than Dhan itself will actually honor.
+DHAN_HARD_CAP_HOURS = 24.0
+
+
+def _effective_expiry(row: "models.TradeCredential"):
+    """token_expires_at, clamped to issued_at + DHAN_HARD_CAP_HOURS. Falls
+    back to the stored value if issued_at is missing (very old row)."""
+    if row.token_expires_at is None:
+        return None
+    if row.token_issued_at is None:
+        return as_aware(row.token_expires_at)
+    hard_cap = as_aware(row.token_issued_at) + timedelta(hours=DHAN_HARD_CAP_HOURS)
+    return min(as_aware(row.token_expires_at), hard_cap)
+
 
 def _fernet() -> Fernet:
     if not config.DHAN_CREDENTIAL_ENC_KEY:
@@ -104,16 +124,19 @@ def connection_status(db: Session) -> dict:
     days_remaining = None
     hours_remaining = None
     seconds_remaining = None
-    if row.token_expires_at:
-        delta = as_aware(row.token_expires_at) - datetime.now(timezone.utc)
+    effective_expiry = _effective_expiry(row)
+    if effective_expiry:
+        delta = effective_expiry - datetime.now(timezone.utc)
         seconds_remaining = max(0, round(delta.total_seconds()))
         days_remaining = round(delta.total_seconds() / 86400, 1)
         hours_remaining = round(delta.total_seconds() / 3600, 1)
     return {
         "connected": True,
         "client_id_masked": row.dhan_client_id_masked,
-        "token_expires_at": row.token_expires_at.isoformat() if row.token_expires_at else None,
+        "token_issued_at": row.token_issued_at.isoformat() if row.token_issued_at else None,
+        "token_expires_at": effective_expiry.isoformat() if effective_expiry else None,
         "token_valid": is_token_valid(row),
+        "token_hard_cap_hours": DHAN_HARD_CAP_HOURS,
         "days_remaining": days_remaining,
         "hours_remaining": hours_remaining,
         "seconds_remaining": seconds_remaining,  # frontend ticks this down live, same as Dhan's own "Xh Ym" display
@@ -123,7 +146,8 @@ def connection_status(db: Session) -> dict:
 def is_token_valid(row: models.TradeCredential) -> bool:
     if row is None or not row.token_expires_at:
         return False
-    return datetime.now(timezone.utc) < as_aware(row.token_expires_at)
+    effective_expiry = _effective_expiry(row)
+    return effective_expiry is not None and datetime.now(timezone.utc) < effective_expiry
 
 
 def enforce_live_token(db: Session, mode: str = "REAL") -> tuple[bool, Optional[str]]:

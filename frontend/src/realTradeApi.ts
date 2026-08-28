@@ -265,6 +265,8 @@ export const realTradeApi = {
   dhanFunds: () => rtRequest<any>("/dhan/funds"),
 
   dhanAccount: () => rtRequest<DhanStatus & { funds: any | null; funds_error: string | null }>("/dhan/account"),
+  dhanNetworkCheck: () =>
+    rtRequest<{ outbound_ip: string | null; checked_at: string; note: string }>("/dhan/network-check"),
 
   updateRiskConfig: (mode: "DEMO" | "REAL", patch: Record<string, number | boolean>) =>
     rtRequest<{ ok: boolean }>("/risk-config", { method: "POST", body: JSON.stringify({ mode, ...patch }) }),

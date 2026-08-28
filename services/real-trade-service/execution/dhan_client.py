@@ -179,6 +179,46 @@ def is_auth_error(message: str) -> bool:
     return any(marker in m for marker in _AUTH_ERROR_MARKERS)
 
 
+# Dhan's order-placement APIs (place/modify/cancel) enforce a SEPARATE
+# security control from the access token itself: the request's source IP
+# must be on an allowlist configured in the Dhan developer console. This is
+# NOT the same failure as an expired/invalid token — read-only calls
+# (funds, positions, holdings, order list) are NOT IP-gated, which is why
+# verify_token_live()/get_funds() above can succeed while place_order still
+# fails here. A cloud host's outbound IP (Render et al.) is drawn from a
+# shared, non-static pool by default, so this fires whenever the platform
+# happens to route the request through an IP that was never whitelisted —
+# and every subsequent order will fail identically until either (a) the
+# host is given a static outbound IP and that IP is whitelisted in Dhan, or
+# (b) the request is routed through a static-IP proxy that is whitelisted.
+# See get_outbound_ip() below and GET /dhan/network-check in main.py.
+_INVALID_IP_MARKERS = (
+    "invalid ip", "ip not whitelisted", "ip address not allowed",
+    "unauthorized ip", "dh-907", "dh-908",
+)
+
+
+def is_invalid_ip_error(message: str) -> bool:
+    m = (message or "").lower()
+    return any(marker in m for marker in _INVALID_IP_MARKERS)
+
+
+def get_outbound_ip() -> Optional[str]:
+    """Best-effort: what IP is this service ACTUALLY sending Dhan requests
+    from right now? Answers the question an Invalid IP error can't on its
+    own ("ok, but which IP do I even put in Dhan's console?"). Uses a
+    public IP-echo service since Dhan's own error message never includes
+    the rejected IP. Read-only, no credentials involved — safe to call
+    anonymously and often."""
+    try:
+        resp = httpx.get("https://api.ipify.org?format=json", timeout=6.0)
+        resp.raise_for_status()
+        return resp.json().get("ip")
+    except Exception as e:
+        logger.warning("get_outbound_ip: lookup failed: %s", e)
+        return None
+
+
 def verify_token_live(db: Session) -> tuple[bool, Optional[str]]:
     """Real-time check against Dhan itself, not just our own locally-computed
     expiry timer. The 24h validity window is exact per Dhan's docs, but this

@@ -351,6 +351,8 @@ export default function RealAutoTrade() {
   const [dhanClientId, setDhanClientId] = useState("");
   const [dhanToken, setDhanToken] = useState("");
   const [dhanAccount, setDhanAccount] = useState<(DhanStatus & { funds: any; funds_error: string | null }) | null>(null);
+  const [networkCheck, setNetworkCheck] = useState<{ outbound_ip: string | null; note: string } | null>(null);
+  const [networkCheckBusy, setNetworkCheckBusy] = useState(false);
   const [showDhanForm, setShowDhanForm] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
 
@@ -569,6 +571,13 @@ export default function RealAutoTrade() {
   const doConfirmRisk = async () => {
     try { await realTradeApi.confirmRiskConfig(mode); await loadStatus(mode); }
     catch (e: any) { setError(e?.message || "Failed to confirm risk config"); }
+  };
+
+  const doNetworkCheck = async () => {
+    setNetworkCheckBusy(true);
+    try { setNetworkCheck(await realTradeApi.dhanNetworkCheck()); }
+    catch (e: any) { setNetworkCheck({ outbound_ip: null, note: e?.message || "Lookup failed" }); }
+    finally { setNetworkCheckBusy(false); }
   };
 
   const doSaveRiskConfig = async () => {
@@ -813,7 +822,35 @@ export default function RealAutoTrade() {
                   </button>
                 </div>
                 {status?.disarmed_reason && (
-                  <p className="font-mono text-[10px] text-amber-400/60 mt-2">Last disarm: {status.disarmed_reason}</p>
+                  /outbound IP|invalid ip|not whitelisted/i.test(status.disarmed_reason) ? (
+                    <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+                      <p className="font-mono text-[10px] text-amber-300">
+                        🚨 Auto-paused: Dhan rejected an order because this service's outbound IP isn't whitelisted.
+                      </p>
+                      <p className="font-mono text-[9px] text-zinc-500 mt-1">
+                        Reads (funds/positions) still work — only order placement is IP-gated by Dhan, which is
+                        why the account shows connected while this happens.
+                      </p>
+                      <div className="flex items-center gap-2 mt-2">
+                        <button onClick={() => void doNetworkCheck()} disabled={networkCheckBusy}
+                          className="font-mono text-[10px] px-3 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 disabled:opacity-40">
+                          {networkCheckBusy ? "Checking…" : "Check outbound IP"}
+                        </button>
+                        {networkCheck?.outbound_ip && (
+                          <code className="font-mono text-[10px] text-zinc-200 bg-zinc-950 px-2 py-1 rounded">{networkCheck.outbound_ip}</code>
+                        )}
+                      </div>
+                      {networkCheck && (
+                        <p className="font-mono text-[9px] text-zinc-600 mt-1">{networkCheck.note}</p>
+                      )}
+                      <p className="font-mono text-[9px] text-zinc-600 mt-1">
+                        Add that IP under Dhan Web → My Profile → API Access → IP Whitelisting, then re-arm.
+                        A non-static host IP can change on redeploy — re-check if this recurs.
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="font-mono text-[10px] text-amber-400/60 mt-2">Last disarm: {status.disarmed_reason}</p>
+                  )
                 )}
               </div>
 

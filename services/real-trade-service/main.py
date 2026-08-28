@@ -283,6 +283,38 @@ async def dhan_status(admin: str = Depends(require_admin), db: Session = Depends
     return dhan_credentials.connection_status(db)
 
 
+@app.get("/dhan/network-check")
+async def dhan_network_check(admin: str = Depends(require_admin)):
+    """Answers the question a Dhan 'Invalid IP' rejection can't on its own:
+    which IP is this service ACTUALLY sending requests from right now?
+    Dhan's order-placement APIs (place/modify/cancel — NOT reads like
+    funds/positions) enforce an IP allowlist configured in Dhan Web; a
+    cloud host's outbound IP is drawn from a shared, non-static pool by
+    default, so this fires whenever the platform happens to route through
+    an IP that was never added there. Fix is one of:
+      1. Give this service a static outbound IP (e.g. Render's Static
+         Outbound IP add-on) and whitelist that exact IP in Dhan Web ->
+         My Profile -> API Access -> IP Whitelisting, or
+      2. Route outbound traffic through a static-IP proxy (e.g. a
+         QuotaGuard/Fixie-style add-on) and whitelist the proxy's IP
+         instead.
+    Read-only, no credentials touched — safe to call anytime, armed or not.
+    """
+    from execution import dhan_client
+    ip = dhan_client.get_outbound_ip()
+    return {
+        "outbound_ip": ip,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "note": (
+            "Whitelist this exact IP in Dhan Web -> My Profile -> API Access -> "
+            "IP Whitelisting if order placement is failing with 'Invalid IP'. "
+            "Re-check after any redeploy/restart — a non-static host IP can change."
+            if ip else
+            "Could not determine the outbound IP right now (lookup service unreachable) — try again shortly."
+        ),
+    }
+
+
 @app.get("/dhan/funds")
 async def dhan_funds(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Read-only passthrough — proves the connection actually works before

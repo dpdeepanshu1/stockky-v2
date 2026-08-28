@@ -252,6 +252,34 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                 db.add(models.TradeOrderEvent(order_id=order.id, event_type="REJECTED",
                                                                detail=f"Dhan placement failed: {e}"))
                                 decision.action = "WAIT"
+                                if dhan_client.is_invalid_ip_error(str(e)):
+                                    # Persistent infra-config failure, not a
+                                    # per-symbol issue — every remaining
+                                    # candidate this cycle would fail the
+                                    # exact same way. Disarm once, alert
+                                    # loudly and distinctly, and stop
+                                    # burning through the rest of the
+                                    # batch instead of repeating the same
+                                    # doomed call for every candidate.
+                                    decision.reasoning = (
+                                        "Risk-approved but blocked: Dhan rejected this order because the "
+                                        "service's outbound IP isn't whitelisted for trading. Auto-paused REAL "
+                                        "— see Dhan Account card or GET /dhan/network-check for the IP to add."
+                                    )
+                                    entered -= 1
+                                    waited += 1
+                                    db.commit()
+                                    from auth.dhan_credentials import disarm_on_invalid_ip
+                                    just_disarmed = disarm_on_invalid_ip(db, mode, str(e))
+                                    if just_disarmed:
+                                        await notify_async(
+                                            "🚨 *REAL trading auto-paused* — Dhan is rejecting orders because "
+                                            "this service's outbound IP isn't whitelisted. Every other candidate "
+                                            "this cycle would fail identically, so REAL has been disarmed rather "
+                                            "than retried. Check GET /dhan/network-check for the IP to whitelist."
+                                        )
+                                    return {"evaluated": len(candidates), "entered": entered, "waited": waited,
+                                            "rejected": rejected, "auto_disarmed": "invalid_ip"}
                                 decision.reasoning = f"Risk-approved but Dhan placement failed: {e}"
                                 entered -= 1
                                 waited += 1

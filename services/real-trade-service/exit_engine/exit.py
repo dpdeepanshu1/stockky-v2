@@ -111,7 +111,27 @@ def _send_real_sell(
         return True
     except Exception as e:  # noqa: BLE001 — must never crash the whole exit cycle
         logger.error("REAL exit SELL failed for %s (%s): %s", position.symbol, reason, e)
-        notify_sync(f"⚠️ *SELL rejected by Dhan* — {position.symbol} x{qty} ({reason})\n{str(e)[:300]}")
+        if dhan_client.is_invalid_ip_error(str(e)):
+            # A blocked EXIT is the worst version of this failure — a stop
+            # or target that should have fired is instead silently retried
+            # next cycle while the position sits there exposed. Disarm
+            # immediately (stops entry_engine from adding MORE exposure
+            # on top of a broker that's currently rejecting every order)
+            # and alert with distinct, urgent wording — this is not a
+            # routine "Dhan said no to one order" case.
+            from auth.dhan_credentials import disarm_on_invalid_ip
+            just_disarmed = disarm_on_invalid_ip(db, "REAL", str(e))
+            notify_sync(
+                f"🚨 *EXIT BLOCKED — outbound IP not whitelisted* — {position.symbol} x{qty} ({reason})\n"
+                f"Dhan rejected this SELL. The position is still open and exposed. "
+                f"REAL has been auto-paused so no new entries add to it. "
+                f"Check GET /dhan/network-check for the IP to whitelist, then fix it in Dhan Web "
+                f"and re-arm — this exit will be retried next cycle once orders can go through again."
+                if just_disarmed else
+                f"⚠️ *EXIT still blocked (IP)* — {position.symbol} x{qty} ({reason}) — position remains open."
+            )
+        else:
+            notify_sync(f"⚠️ *SELL rejected by Dhan* — {position.symbol} x{qty} ({reason})\n{str(e)[:300]}")
         return False
 
 

@@ -232,8 +232,24 @@ async def evaluate_manual_order(
                            detail=f"{symbol} BUY x{approved_qty}: Dhan placement failed: {e}")
                 preview["ok"] = False
                 preview["status"] = "REJECTED"
-                preview["reason"] = "dhan_error"
                 preview["detail"] = str(e)
+                if dhan_client.is_invalid_ip_error(str(e)):
+                    # Same persistent infra-config failure as the auto
+                    # entry/exit paths — auto-disarm so a manual retry
+                    # click doesn't just hit the same wall, and tell the
+                    # admin exactly what's wrong instead of a generic
+                    # "dhan_error" the UI has no special handling for.
+                    from auth.dhan_credentials import disarm_on_invalid_ip
+                    disarm_on_invalid_ip(db, mode, str(e))
+                    preview["reason"] = "invalid_ip"
+                    preview["detail"] = (
+                        "Dhan rejected this order — the service's outbound IP isn't whitelisted for "
+                        "trading. REAL has been auto-paused. Check GET /dhan/network-check for the "
+                        "current IP, add it under Dhan Web → My Profile → API Access → IP Whitelisting, "
+                        "then re-arm."
+                    )
+                else:
+                    preview["reason"] = "dhan_error"
         return preview
 
     # ── SELL: reduce an existing position — no global-pause gate, matches

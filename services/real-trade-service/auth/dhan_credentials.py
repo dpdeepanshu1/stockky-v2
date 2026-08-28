@@ -194,6 +194,46 @@ def enforce_live_token(db: Session, mode: str = "REAL") -> tuple[bool, Optional[
     return False, err
 
 
+def disarm_on_invalid_ip(db: Session, mode: str, err: str) -> bool:
+    """Companion to enforce_live_token, for the OTHER category of
+    persistent (not transient) Dhan rejection: the host's outbound IP
+    isn't on Dhan's order-placement allowlist (see
+    execution.dhan_client.is_invalid_ip_error's docstring for why this is
+    a separate failure mode from an expired token — reads still work,
+    only place/modify/cancel are IP-gated).
+
+    Called from entry_engine/exit_engine/manual_engine's own except blocks
+    the moment a placement fails with this specific error — waiting for
+    the next cycle's enforce_live_token wouldn't catch it (that check uses
+    a read-only call, which isn't IP-gated and will keep reporting "token
+    ok"). Every order this cycle and every cycle after would otherwise
+    fail identically until a human fixes the IP allowlist, so this stops
+    the bleeding immediately rather than retrying a doomed request
+    candidate-by-candidate, cycle after cycle.
+
+    Returns True if it actually disarmed (was armed before this call) —
+    callers use this to decide whether the loud "auto-paused" alert is
+    warranted or whether this is just confirming an already-disarmed state.
+    """
+    import models  # noqa: PLC0415
+
+    gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
+    if gate is None:
+        return False
+    was_armed = gate.armed
+    gate.armed = False
+    gate.disarmed_reason = (
+        f"Dhan rejected the order — outbound IP not whitelisted: {(err or '')[:200]} "
+        f"(check GET /dhan/network-check for this service's current outbound IP, "
+        f"then add it under Dhan Web → My Profile → API Access → IP Whitelisting)"
+    )
+    gate.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    if was_armed:
+        logger.warning("REAL auto-disarmed — Dhan rejected an order for an unwhitelisted IP: %s", err)
+    return was_armed
+
+
 def refresh_if_totp_enabled(db: Session) -> bool:
     """Opt-in auto-refresh path (decision 4). No-ops and returns False
     unless config.DHAN_TOTP_ENABLED is set — in the default manual-paste

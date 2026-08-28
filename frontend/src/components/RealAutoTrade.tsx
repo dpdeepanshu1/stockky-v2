@@ -168,11 +168,29 @@ function PipelineLiveStatus({ pipeline, mode }: { pipeline: PipelineStatus | nul
           ) : pipeline.last_cycle.auto_disarmed ? (
             <p className="font-mono text-[10px] text-rose-400">Auto-disarmed: {pipeline.last_cycle.auto_disarmed}</p>
           ) : (
-            <p className="font-mono text-[10px] text-zinc-400">
-              {pipeline.last_cycle.new_candidates ?? 0} candidates · {pipeline.last_cycle.entered ?? 0} entered ·{" "}
-              {pipeline.last_cycle.waited ?? 0} waited · {pipeline.last_cycle.rejected ?? 0} rejected ·{" "}
-              {pipeline.last_cycle.full_exits ?? 0} closed
-            </p>
+            <>
+              <p className="font-mono text-[10px] text-zinc-400">
+                {pipeline.last_cycle.new_candidates ?? 0} candidates · {pipeline.last_cycle.entered ?? 0} entered ·{" "}
+                {pipeline.last_cycle.waited ?? 0} waited · {pipeline.last_cycle.rejected ?? 0} rejected ·{" "}
+                {pipeline.last_cycle.full_exits ?? 0} closed
+              </p>
+              {!!pipeline.last_cycle.entry_details?.length && (
+                <div className="mt-2 space-y-1 border-t border-zinc-800 pt-2">
+                  {pipeline.last_cycle.entry_details.map((row, i) => {
+                    const color = row.action === "ENTER" ? "text-emerald-400"
+                      : row.risk_verdict === "REJECTED" || row.risk_verdict === "BLOCKED_GLOBAL" ? "text-rose-400"
+                      : "text-amber-400";
+                    return (
+                      <p key={i} className="font-mono text-[10px] text-zinc-500">
+                        <span className={`font-bold ${color}`}>{row.action}</span>{" "}
+                        <span className="text-zinc-300">{row.symbol}</span>
+                        {row.reasoning && <span className="text-zinc-600"> — {row.reasoning}</span>}
+                      </p>
+                    );
+                  })}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -404,6 +422,14 @@ export default function RealAutoTrade() {
     try {
       const s = await realTradeApi.gateStatus(m);
       setStatus(s);
+      // A "not armed" error (from a Run Cycle / manual-BUY attempt made
+      // before arming) is a snapshot of that moment, not a live-bound
+      // banner — it doesn't re-check itself against current state, so it
+      // can keep showing after the user goes on to arm successfully. Every
+      // successful status poll is a fresher truth than that old toast, so
+      // once the gate now says armed, clear it rather than leaving a
+      // contradictory "not armed" message next to a green ARMED badge.
+      setError(prev => (prev && s.armed && /not armed/i.test(prev)) ? null : prev);
       if (s.risk_config) {
         setRiskForm({
           risk_per_trade_pct: String(s.risk_config.risk_per_trade_pct ?? ""),

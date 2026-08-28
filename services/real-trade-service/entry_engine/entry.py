@@ -115,12 +115,14 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         .all()
     )
     if not candidates:
-        return {"evaluated": 0, "entered": 0, "waited": 0, "rejected": 0}
+        return {"evaluated": 0, "entered": 0, "waited": 0, "rejected": 0, "entry_details": []}
 
     symbols = list({c.symbol for c in candidates})
     ticks = await get_quotes(symbols)
 
     entered = waited = rejected = 0
+    entry_details: list[dict] = []  # per-symbol outcome this cycle, for the dashboard's Live Cycle Status card —
+                                     # see pipeline_status.py; purely observability, never read back into trading logic.
     reserved_cash = 0.0  # capital committed to earlier candidates THIS cycle — see _account_state's docstring
     for idx, cand in enumerate(candidates):
         try:
@@ -268,6 +270,10 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                     )
                                     entered -= 1
                                     waited += 1
+                                    entry_details.append({
+                                        "symbol": cand.symbol, "action": decision.action,
+                                        "reasoning": decision.reasoning, "risk_verdict": decision.risk_verdict,
+                                    })
                                     db.commit()
                                     from auth.dhan_credentials import disarm_on_invalid_ip
                                     just_disarmed = disarm_on_invalid_ip(db, mode, str(e))
@@ -279,7 +285,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                             "than retried. Check GET /dhan/network-check for the IP to whitelist."
                                         )
                                     return {"evaluated": len(candidates), "entered": entered, "waited": waited,
-                                            "rejected": rejected, "auto_disarmed": "invalid_ip"}
+                                            "rejected": rejected, "auto_disarmed": "invalid_ip",
+                                            "entry_details": entry_details}
                                 decision.reasoning = f"Risk-approved but Dhan placement failed: {e}"
                                 entered -= 1
                                 waited += 1
@@ -289,11 +296,16 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                 )
 
         db.add(decision)  # safe even if already added above (ENTER path) — SQLAlchemy add() is idempotent
+        entry_details.append({
+            "symbol": cand.symbol, "action": decision.action,
+            "reasoning": decision.reasoning, "risk_verdict": decision.risk_verdict,
+        })
 
     db.commit()
     log_action(db, actor="system", action="ENTRY_CYCLE", mode=mode,
                detail=f"evaluated={len(candidates)} entered={entered} waited={waited} rejected={rejected}")
-    return {"evaluated": len(candidates), "entered": entered, "waited": waited, "rejected": rejected}
+    return {"evaluated": len(candidates), "entered": entered, "waited": waited, "rejected": rejected,
+            "entry_details": entry_details}
 
 
 async def check_pending_fills(db: Session, mode: str) -> int:

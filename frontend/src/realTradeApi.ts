@@ -163,6 +163,13 @@ export interface CycleResult {
   exit: { evaluated: number; held: number; trailed: number; partial_exits: number; full_exits: number; time_stops: number };
 }
 
+export interface EntryDetailRow {
+  symbol: string;
+  action: string;
+  reasoning: string | null;
+  risk_verdict: string | null;
+}
+
 export interface PipelineCycleRecord {
   trigger: "manual" | "autopilot";
   started_at: string;
@@ -173,6 +180,7 @@ export interface PipelineCycleRecord {
   entered: number | null;
   waited: number | null;
   rejected: number | null;
+  entry_details: EntryDetailRow[];
   fills: number | null;
   expired_orders: number | null;
   full_exits: number | null;

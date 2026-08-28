@@ -119,6 +119,10 @@ def end_cycle(mode: str, result: dict, error: Optional[str] = None) -> None:
         total_ms = round((now - st["started_at"]) * 1000, 1)
         entry = result.get("entry") or {} if result else {}
         exit_ = result.get("exit") or {} if result else {}
+        # Cap to 20 rows — one evaluate_mode() call already bounds itself to
+        # 20 candidates (see entry_engine/entry.py), so this is a belt-and-
+        # braces limit, not a truncation of real data.
+        entry_details = (entry.get("entry_details") or [])[:20]
         record = {
             "trigger": st["trigger"],
             "started_at": st["started_at_iso"],
@@ -129,6 +133,7 @@ def end_cycle(mode: str, result: dict, error: Optional[str] = None) -> None:
             "entered": entry.get("entered"),
             "waited": entry.get("waited"),
             "rejected": entry.get("rejected"),
+            "entry_details": entry_details,
             "fills": (result or {}).get("fills"),
             "expired_orders": (result or {}).get("expired_orders"),
             "full_exits": exit_.get("full_exits"),

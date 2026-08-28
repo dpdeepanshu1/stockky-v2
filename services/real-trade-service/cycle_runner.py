@@ -53,7 +53,7 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
         token_ok, token_err = enforce_live_token(db, mode)
         if not token_ok:
             early_result = {
-                "mode": mode, "new_candidates": 0, "entry": {"evaluated": 0, "entered": 0, "waited": 0, "rejected": 0},
+                "mode": mode, "new_candidates": 0, "entry": {"evaluated": 0, "entered": 0, "waited": 0, "rejected": 0, "entry_details": []},
                 "fills": 0, "expired_orders": 0, "exit": {}, "reconcile": None,
                 "auto_disarmed": f"Dhan token rejected: {token_err}",
             }

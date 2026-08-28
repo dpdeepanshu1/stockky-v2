@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 import config
 import models
-from tz_utils import as_aware
+from tz_utils import as_aware, iso_utc
 
 logger = logging.getLogger("real-trade-dhan-auth")
 
@@ -133,7 +133,7 @@ def connection_status(db: Session) -> dict:
     return {
         "connected": True,
         "client_id_masked": row.dhan_client_id_masked,
-        "token_issued_at": row.token_issued_at.isoformat() if row.token_issued_at else None,
+        "token_issued_at": iso_utc(row.token_issued_at) if row.token_issued_at else None,
         "token_expires_at": effective_expiry.isoformat() if effective_expiry else None,
         "token_valid": is_token_valid(row),
         "token_hard_cap_hours": DHAN_HARD_CAP_HOURS,

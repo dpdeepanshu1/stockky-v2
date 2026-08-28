@@ -189,6 +189,7 @@ services:
       #     http://real-trade-service:8005
       API_GATEWAY_URL: http://api-gateway:8000
       MARKET_DATA_URL: http://market-data-service:8001
+      NOTIFICATION_SERVICE_URL: http://notification-scheduler-service:8000/notification
       PORT: "8005"
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
@@ -234,6 +235,7 @@ services:
     depends_on:
       - api-gateway
       - market-data-service
+      - notification-scheduler-service
     restart: unless-stopped
 
   frontend:

@@ -502,11 +502,13 @@ export default function RealAutoTrade() {
   }, [mode, loadStatus]);
 
   useEffect(() => {
-    if (getRealTradeApiUrl() && (mode === "DEMO" || loggedIn)) {
+    // Load read-only data when armed even without an active admin session —
+    // auto-pilot runs through market hours with dashboard closed/logged-out.
+    if (getRealTradeApiUrl() && (mode === "DEMO" || loggedIn || status?.armed)) {
       void loadPositionsAndOrders(mode);
       void loadCandidates(mode); // one-shot, just for the tab count badge — the watchlist tab itself polls
     }
-  }, [mode, loggedIn, loadPositionsAndOrders, loadCandidates]);
+  }, [mode, loggedIn, status?.armed, loadPositionsAndOrders, loadCandidates]);
 
   useEffect(() => {
     if (activeTab === "live" && mode === "REAL" && loggedIn) {
@@ -521,7 +523,8 @@ export default function RealAutoTrade() {
   // Polls every 2s while the Pipeline tab is open; stops the moment it
   // isn't, so this never runs up requests in the background.
   useEffect(() => {
-    if (activeTab !== "pipeline" || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn)) return;
+    // Pipeline tab is readable when armed even without login session
+    if (activeTab !== "pipeline" || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn && !status?.armed)) return;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -537,7 +540,7 @@ export default function RealAutoTrade() {
   }, [activeTab, mode, loggedIn]);
 
   useEffect(() => {
-    if (activeTab !== "watchlist" || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn)) return;
+    if (activeTab !== "watchlist" || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn && !status?.armed)) return;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -761,7 +764,7 @@ export default function RealAutoTrade() {
       )}
 
       {/* ── Auth / session bar (REAL only) ──────────────────────────────── */}
-      {mode === "REAL" && !loggedIn ? (
+      {mode === "REAL" && !loggedIn && !status?.armed ? (
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 mb-4">
           <SectionHdr>Admin login required for REAL mode</SectionHdr>
           <div className="space-y-2">
@@ -779,14 +782,25 @@ export default function RealAutoTrade() {
       ) : (
         <>
           {mode === "REAL" && (
-            <div className="flex items-center justify-between mb-3 px-3 py-1.5 rounded-lg bg-emerald-500/5 border border-emerald-500/20">
-              <span className="font-mono text-[11px] text-emerald-400 flex items-center gap-1.5">
-                <Dot on={true} /> Admin session active ({username})
-              </span>
-              <button onClick={() => void doLogout()} className="font-mono text-[10px] px-2 py-1 rounded bg-rose-500/10 border border-rose-500/20 text-rose-400">
-                Log out
-              </button>
-            </div>
+            loggedIn ? (
+              <div className="flex items-center justify-between mb-3 px-3 py-1.5 rounded-lg bg-emerald-500/5 border border-emerald-500/20">
+                <span className="font-mono text-[11px] text-emerald-400 flex items-center gap-1.5">
+                  <Dot on={true} /> Admin session active ({username})
+                </span>
+                <button onClick={() => void doLogout()} className="font-mono text-[10px] px-2 py-1 rounded bg-rose-500/10 border border-rose-500/20 text-rose-400">
+                  Log out
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between mb-3 px-3 py-1.5 rounded-lg bg-amber-500/5 border border-amber-500/20">
+                <span className="font-mono text-[11px] text-amber-400">
+                  Session expired — auto-pilot still running. Log in to make changes.
+                </span>
+                <button onClick={() => setActiveTab("overview")} className="font-mono text-[10px] px-2 py-1 rounded bg-sky-500/10 border border-sky-500/20 text-sky-400">
+                  Log in
+                </button>
+              </div>
+            )
           )}
 
           {/* ── Tab bar ─────────────────────────────────────────────────── */}
@@ -817,6 +831,25 @@ export default function RealAutoTrade() {
                   <GateStep n={3} label="Risk config confirmed" done={gate3} active={nextGateNeeded === 3} />
                   <GateStep n={4} label="Armed" done={armed} active={nextGateNeeded === 4} />
                 </div>
+
+                {/* Inline login form when armed but session expired —
+                    don't block the full page, just gate the mutating actions */}
+                {mode === "REAL" && !loggedIn && armed && (
+                  <div className="mb-3 p-3 rounded-lg border border-amber-500/20 bg-amber-500/5 space-y-2">
+                    <p className="font-mono text-[10px] text-amber-400">Session expired — log in to disarm or change config. Auto-pilot keeps running.</p>
+                    <div className="flex gap-2">
+                      <input className="flex-1 bg-zinc-950 border border-zinc-700 rounded px-2 py-1 font-mono text-xs text-zinc-200 focus:outline-none"
+                        placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} />
+                      <input type="password" className="flex-1 bg-zinc-950 border border-zinc-700 rounded px-2 py-1 font-mono text-xs text-zinc-200 focus:outline-none"
+                        placeholder="Password" value={password} onChange={e => setPassword(e.target.value)}
+                        onKeyDown={e => e.key === "Enter" && void doLogin()} />
+                      <button onClick={() => void doLogin()} disabled={loading || !password}
+                        className="px-3 py-1 rounded bg-sky-500/15 border border-sky-500/30 font-mono text-xs text-sky-300 disabled:opacity-40">
+                        {loading ? "…" : "Login"}
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {/* Login form already shown above when not logged in; here only if
                     logged in but gate not met */}

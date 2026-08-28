@@ -376,6 +376,7 @@ export default function RealAutoTrade() {
   const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [candidates, setCandidates] = useState<CandidateRow[]>([]);
   const [candidatesLoading, setCandidatesLoading] = useState(false);
+  const [expandedCandidateId, setExpandedCandidateId] = useState<number | null>(null);
 
   // Editable risk configuration form — separate from `status.risk_config`
   // (the last-saved server value) so typing doesn't fight a background
@@ -1390,9 +1391,13 @@ export default function RealAutoTrade() {
                       : d?.action === "WAIT" ? "text-amber-400"
                       : d?.risk_verdict === "REJECTED" || d?.risk_verdict === "BLOCKED_GLOBAL" ? "text-rose-400"
                       : "text-zinc-500";
+                    const expanded = expandedCandidateId === c.id;
                     return (
                       <div key={c.id} className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-                        <div className="flex items-start justify-between mb-2">
+                        <button
+                          onClick={() => setExpandedCandidateId(expanded ? null : c.id)}
+                          className="flex items-start justify-between mb-2 w-full text-left"
+                        >
                           <div>
                             <span className="font-mono text-base font-bold text-zinc-100">{c.symbol}</span>
                             {c.source_tab && (
@@ -1402,10 +1407,13 @@ export default function RealAutoTrade() {
                               <span className="font-mono text-[9px] text-sky-400 ml-2">{c.decision_label}</span>
                             )}
                           </div>
-                          <span className={`font-mono text-[11px] font-bold ${actionColor}`}>
-                            {d ? d.action : "not yet evaluated"}
+                          <span className="flex items-center gap-2">
+                            <span className={`font-mono text-[11px] font-bold ${actionColor}`}>
+                              {d ? d.action : "not yet evaluated"}
+                            </span>
+                            <span className="font-mono text-[9px] text-zinc-600">{expanded ? "▲" : "▼"}</span>
                           </span>
-                        </div>
+                        </button>
 
                         <div className="grid grid-cols-4 gap-2 font-mono text-[10px] text-zinc-500 mb-2">
                           <div>Signal<br/><span className="text-zinc-300 font-bold">{c.signal_price ? `₹${c.signal_price}` : "—"}</span></div>
@@ -1434,6 +1442,22 @@ export default function RealAutoTrade() {
                             {d.risk_verdict && <span className={`font-bold mr-1 ${d.risk_verdict === "APPROVED" ? "text-emerald-500" : "text-rose-500"}`}>[{d.risk_verdict}]</span>}
                             {d.reasoning}
                           </p>
+                        )}
+
+                        {expanded && (
+                          <div className="border-t border-zinc-800 pt-2 mt-2 space-y-2">
+                            <div className="grid grid-cols-3 gap-2 font-mono text-[10px] text-zinc-500">
+                              <div>Conviction<br/><span className="text-zinc-200 font-bold">{c.conviction_score != null ? c.conviction_score.toFixed(1) : "—"}</span></div>
+                              <div>Proposed qty<br/><span className="text-zinc-200 font-bold">{d?.proposed_qty ?? "—"}</span></div>
+                              <div>Target<br/><span className="text-emerald-400 font-bold">{d?.proposed_target ? `₹${d.proposed_target}` : "—"}</span></div>
+                            </div>
+                            {d?.risk_verdict_reason && d.risk_verdict_reason !== d.reasoning && (
+                              <p className="font-mono text-[10px] text-zinc-500">
+                                <span className="text-zinc-600">Risk engine verdict — </span>{d.risk_verdict_reason}
+                              </p>
+                            )}
+                            <p className="font-mono text-[9px] text-zinc-700">Candidate #{c.id}{d ? " · has been evaluated" : " · awaiting first evaluation"}</p>
+                          </div>
                         )}
 
                         <div className="flex items-center justify-between mt-2">

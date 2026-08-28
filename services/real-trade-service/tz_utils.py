@@ -55,3 +55,21 @@ def as_aware(dt: Optional[datetime]) -> Optional[datetime]:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def iso_utc(dt: Optional[datetime]) -> Optional[str]:
+    """Every JSON timestamp this service sends to the frontend MUST go
+    through this, not a bare `.isoformat()`. Root cause (see module
+    docstring above): a DB-sourced datetime almost always comes back
+    *naive* even though it was written as UTC, so `.isoformat()` on it
+    prints no offset/Z suffix at all — e.g. "2026-08-28T04:07:00"
+    instead of "2026-08-28T04:07:00+00:00". `new Date(...)` in the
+    browser then parses that offset-less string as LOCAL time, not UTC,
+    so every timestamp rendered in the dashboard (Activity log, Orders,
+    Watchlist "Fetched"/"Evaluated", position opened_at, etc.) shows the
+    raw UTC clock digits mislabeled as if they were already IST — off by
+    exactly the IST offset (+5:30). Wrapping with as_aware() first
+    guarantees the string always carries an explicit UTC offset, so the
+    browser converts it to the viewer's local time correctly."""
+    aware = as_aware(dt)
+    return aware.isoformat() if aware else None

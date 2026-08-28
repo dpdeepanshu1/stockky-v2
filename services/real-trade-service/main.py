@@ -25,7 +25,7 @@ from auth.admin_auth import (
 from auth import dhan_credentials
 from audit.logger import log_action
 from db import get_db, init_schema
-from tz_utils import as_aware
+from tz_utils import as_aware, iso_utc
 from portfolio.portfolio import open_positions as _pf_open_positions, close_position as _pf_close_position
 from execution import dhan_client
 from risk_engine.engine import AccountState, OrderIntent, evaluate as risk_evaluate
@@ -155,14 +155,25 @@ def _check_and_expire_gates(db: Session, mode: str) -> models.TradeGateState:
     """Called at the top of every gate-status read — expires the admin
     session gate and the Dhan token gate independently, per the plan's
     'each gate can expire on its own' design. Never re-arms anything; only
-    ever tightens state."""
+    ever tightens state.
+
+    2026-08-28: admin-session expiry (dashboard tab idle/backgrounded past
+    SESSION_IDLE_TIMEOUT_MINUTES, or closed) no longer disarms. Auto-Pilot
+    is meant to keep trading through market hours with nobody watching the
+    dashboard — see execution/auto_pilot.py's docstring — so tying `armed`
+    to a UI login session directly worked against that. admin_authenticated
+    still expires here (so arming, risk-config changes, and other mutating
+    admin routes still require a fresh login), it just no longer drags
+    `armed` down with it. The Dhan-token-expiry branch below still disarms:
+    that one is load-bearing — an actually-expired Dhan token means the
+    next order placement WILL fail at the broker, so continuing to run a
+    cycle against it isn't "unattended trading", it's "guaranteed rejected
+    orders", which is what the REJECTED rows on the Orders tab were."""
     gate = _gate(db, mode)
     now = datetime.now(timezone.utc)
 
     if gate.admin_authenticated and gate.admin_session_expires_at and now > as_aware(gate.admin_session_expires_at):
         gate.admin_authenticated = False
-        if gate.armed:
-            _disarm(db, mode, "Admin session expired")
         db.commit()
 
     if mode == "REAL" and gate.dhan_connected:
@@ -222,7 +233,7 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
             "stale_data_seconds": risk.stale_data_seconds if risk else None,
             "max_tick_volatility_mult": risk.max_tick_volatility_mult if risk else None,
             "allow_pyramiding": risk.allow_pyramiding if risk else None,
-            "updated_at": risk.updated_at.isoformat() if risk and risk.updated_at else None,
+            "updated_at": iso_utc(risk.updated_at) if risk else None,
             "updated_by": risk.updated_by if risk else None,
         } if risk else None,
     }
@@ -257,10 +268,14 @@ async def login(body: LoginRequest, db: Session = Depends(get_db)):
 async def logout(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     # REAL only — see the matching note in login(). DEMO has no session to
     # log out of; logging out of REAL never touches DEMO's always-on gate.
+    # 2026-08-28: logging out no longer disarms — same reasoning as the
+    # admin-session-expiry branch in _check_and_expire_gates() above.
+    # Logging out just ends the dashboard's own admin session (arming,
+    # risk-config changes, etc. need a fresh login again); it must not be
+    # able to stop an already-armed Auto-Pilot that's meant to keep
+    # running through market hours with the dashboard closed.
     gate = _gate(db, "REAL")
     gate.admin_authenticated = False
-    if gate.armed:
-        _disarm(db, "REAL", "Admin logged out", actor=admin)
     db.commit()
     log_action(db, actor=admin, action="ADMIN_LOGOUT")
     return {"ok": True}
@@ -725,7 +740,7 @@ async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin
             "id": p.id, "symbol": p.symbol, "status": p.status, "qty_open": p.qty_open,
             "avg_entry_price": p.avg_entry_price, "current_stop": p.current_stop,
             "current_target": p.current_target, "unrealized_pnl": p.unrealized_pnl,
-            "realized_pnl": p.realized_pnl, "opened_at": p.opened_at.isoformat(),
+            "realized_pnl": p.realized_pnl, "opened_at": iso_utc(p.opened_at),
             "current_price": ltp,
             "pnl_pct": pnl_pct,
             # How close LTP is to knocking the stop/target, as a % of current price —
@@ -760,8 +775,8 @@ async def list_orders(mode: str, limit: int = 50, admin: Optional[str] = Depends
         out.append({
             "id": o.id, "symbol": o.symbol, "side": o.side, "qty": o.qty, "order_type": o.order_type,
             "limit_price": o.limit_price, "status": o.status,
-            "valid_until": o.valid_until.isoformat() if o.valid_until else None,
-            "created_at": o.created_at.isoformat(),
+            "valid_until": iso_utc(o.valid_until),
+            "created_at": iso_utc(o.created_at),
             "execution_source": o.execution_source,
             "current_price": ltp,
             "limit_distance_pct": limit_distance_pct,
@@ -822,7 +837,7 @@ async def list_candidates(
         out.append({
             "id": c.id, "symbol": c.symbol, "source_tab": c.source_tab,
             "decision_label": c.decision_label, "conviction_score": c.conviction_score,
-            "signal_price": c.signal_price, "received_at": c.received_at.isoformat(),
+            "signal_price": c.signal_price, "received_at": iso_utc(c.received_at),
             "consumed": c.consumed,
             "current_price": ltp,
             "latest_decision": {
@@ -830,7 +845,7 @@ async def list_candidates(
                 "proposed_qty": d.proposed_qty, "proposed_price": d.proposed_price,
                 "proposed_stop": d.proposed_stop, "proposed_target": d.proposed_target,
                 "risk_verdict": d.risk_verdict, "risk_verdict_reason": d.risk_verdict_reason,
-                "evaluated_at": d.created_at.isoformat(),
+                "evaluated_at": iso_utc(d.created_at),
                 "limit_distance_pct": limit_distance_pct,
             } if d else None,
         })
@@ -938,7 +953,7 @@ async def audit_log(mode: Optional[str] = None, limit: int = 50, authorization: 
         q = q.filter_by(mode=mode.upper())
     rows = q.order_by(models.TradeAuditLog.occurred_at.desc()).limit(min(max(limit, 1), 200)).all()
     return [
-        {"actor": r.actor, "action": r.action, "detail": r.detail, "mode": r.mode, "occurred_at": r.occurred_at.isoformat()}
+        {"actor": r.actor, "action": r.action, "detail": r.detail, "mode": r.mode, "occurred_at": iso_utc(r.occurred_at)}
         for r in rows
     ]
 

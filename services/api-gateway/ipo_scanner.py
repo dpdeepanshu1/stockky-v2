@@ -206,13 +206,47 @@ def ipo_stop_requested() -> bool:
     return _IPO_STOP_FLAG.is_set()
 
 
+def _iso_listing_date(d: Any) -> Optional[str]:
+    """Defense-in-depth normalization to ISO (YYYY-MM-DD), applied right at
+    the DB-write choke point regardless of which source the row came from
+    (NSE auto-scan already normalizes in _normalize_nse_row; this covers
+    ipoalerts rows and hand-typed add_manual_ipo() callers too, so the DB
+    writer never sees a non-ISO date no matter the source)."""
+    if not d:
+        return None
+    s = str(d).strip()
+    if not s:
+        return None
+    if re.match(r"^\d{4}-\d{2}-\d{2}", s):
+        return s[:10]  # already ISO — fast path, no reparse needed
+    dt = _parse_date(s)
+    return dt.strftime("%Y-%m-%d") if dt is not None else None
+
+
 def _ipo_db_upsert(rows: List[Dict[str, Any]]) -> int:
     """Persist raw/scored IPO rows to ipo_static_feed (Neon on Render, Oracle
     on the Oracle deployment — same ensure_ipo_schema()/dialect() selection
     as surprise_static_feed). Best-effort: a DB write failure here must never
     break the scan — kv_cache remains the fast-path source the endpoints
     actually serve from; this table is the durable "what did we last see"
-    record for debugging + the 24h freshness check."""
+    record for debugging + the 24h freshness check.
+
+    Fix (ipo tracker "always shows 0 in DB" bug): two things were wrong
+    together here.
+      1. `listing_date` could reach this function in NSE's raw, non-ISO
+         format (e.g. "06-AUG-2026"). The Oracle upsert's
+         TO_DATE(SUBSTR(:listing_date,1,10),'YYYY-MM-DD') requires ISO and
+         raised ORA-01858 on anything else (see _iso_listing_date() above —
+         also applied at the source in _normalize_nse_row, this is the
+         defensive second layer for ipoalerts/manual-entry rows).
+      2. The Oracle branch executed every row inside ONE shared
+         `eng.begin()` transaction, so a single bad row's exception
+         propagated out of the loop and rolled back the ENTIRE batch —
+         exactly matching the production log "ipo_static_feed: upserted
+         0/278 rows" and the DB Feed Health panel's permanent 0/0%. Each
+         row now gets its own transaction so one bad row can never zero
+         out the rest of a scan again.
+    """
     try:
         import ipo_schema
     except Exception:
@@ -232,7 +266,7 @@ def _ipo_db_upsert(rows: List[Dict[str, Any]]) -> int:
         payload = []
         for r in rows:
             row = {k: r.get(k) for k in ipo_schema.ROW_KEYS}
-            row["listing_date"] = row.get("listing_date") or ""
+            row["listing_date"] = _iso_listing_date(row.get("listing_date")) or ""
             bs = r.get("buy_suggestion")
             row["buy_suggestion_json"] = _json.dumps(bs) if bs else None
             payload.append(row)
@@ -240,10 +274,19 @@ def _ipo_db_upsert(rows: List[Dict[str, Any]]) -> int:
         stmt = text(ipo_schema.upsert_sql(dial))
         n = 0
         if dial == "oracle":
-            with eng.begin() as conn:
-                for row in payload:
-                    conn.execute(stmt, row)
+            # One transaction PER ROW — a bad row must never roll back rows
+            # that already succeeded (see docstring fix #2 above).
+            for row in payload:
+                try:
+                    with eng.begin() as conn:
+                        conn.execute(stmt, row)
                     n += 1
+                except Exception as e:
+                    logger.warning(
+                        "ipo db upsert: row for %s failed (skipped, other "
+                        "rows unaffected): %s",
+                        row.get("symbol"), str(e)[:200],
+                    )
         else:
             with eng.begin() as conn:
                 conn.execute(stmt, payload)
@@ -686,6 +729,23 @@ def _normalize_nse_row(row: Dict[str, Any], kind: str) -> Optional[Dict[str, Any
         )
         listing_date = _nse_placeholder_none(row.get("listingDate")) or _nse_placeholder_none(row.get("dateOfListing"))
         issue_end = _nse_placeholder_none(row.get("issueEndDate")) or _nse_placeholder_none(row.get("ipoEndDate"))
+        # ── Fix: normalize to ISO (YYYY-MM-DD) here, at the source ─────────────
+        # NSE returns listingDate in its own raw format (commonly "06-Aug-2026"
+        # / "06-AUG-2026", sometimes "06-08-2026"), NOT ISO. That raw string
+        # used to flow straight through to the DB layer, where the Oracle
+        # writer's TO_DATE(SUBSTR(:listing_date,1,10),'YYYY-MM-DD') strictly
+        # expects YYYY-MM-DD and raises ORA-01858 on anything else — and
+        # because _ipo_db_upsert() writes the whole batch in one Oracle
+        # transaction, a single bad date used to zero out the ENTIRE scan
+        # (confirmed in production logs: "ipo_static_feed: upserted 0/278
+        # rows"), which is exactly why the IPO Tracker's DB Feed Health panel
+        # always showed 0 tracked / 0% health. _parse_date() already handles
+        # every format NSE uses, so normalize once, right here, and every
+        # downstream consumer (DB writer on both dialects, the UI, the
+        # freshness/estimate logic below) can assume ISO from this point on.
+        if listing_date:
+            _dt = _parse_date(listing_date)
+            listing_date = _dt.strftime("%Y-%m-%d") if _dt is not None else None
         status_raw = str(row.get("status") or "").strip().lower()
         listing_estimated = False
         if not listing_date:

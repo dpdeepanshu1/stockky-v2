@@ -28,7 +28,10 @@ Risk engine improvements from independent market analysis:
   5. DETAILED DOWNSIZE MESSAGES: every downsize logs exactly which cap
      triggered it and by how much, for dashboard audit.
 
-All 9 original checks are preserved. SELL side bypasses checks 3,4,4b,4c,5,6,8.
+All 9 original checks are preserved. SELL side bypasses checks 1, 3, 4,
+4a, 4b, 4c, 5, 5b, 5c, 6, 7, 8. The only checks that still apply to a SELL
+are #2 (market hours — the exchange itself isn't open) and #9 (abnormal
+single-tick volatility — catch bad data even on exits).
 """
 from __future__ import annotations
 
@@ -126,14 +129,18 @@ def evaluate(
     All checks in optimized order. Returns on the FIRST failure — the reason
     reported is always the actual blocking cause, not a coincidentally-later one.
 
-    SELL-side orders bypass: concurrent_positions, per_trade_risk,
-    cash_available, concentration, portfolio_risk, pyramiding.
-    Exits must never be blocked by entry-sizing checks.
+    SELL-side orders bypass: global_pause, daily_loss_limit,
+    concurrent_positions, per_trade_risk, cash_available, concentration,
+    portfolio_risk, pyramiding, stale_market_data.
+    Exits must never be blocked by entry-sizing or entry-timing checks —
+    only #2 (market hours) and #9 (abnormal volatility) still apply to a SELL.
     """
     now = now or datetime.now(timezone.utc)
 
-    # ── 1. Global pause / disarmed ────────────────────────────────────────────
-    if account.trading_globally_paused:
+    # ── 1. Global pause / disarmed (BUY only — closing a position must
+    #    never be blocked by "not armed", same policy as everywhere else
+    #    in this codebase) ─────────────────────────────────────────────────
+    if intent.side == "BUY" and account.trading_globally_paused:
         return RiskResult(
             RiskVerdict.BLOCKED_GLOBAL, "global_pause",
             "Trading is paused/disarmed account-wide — no new orders.",
@@ -147,18 +154,20 @@ def evaluate(
             "Market is not open — no order can be placed right now.",
         )
 
-    # ── 3. Daily loss limit ───────────────────────────────────────────────────
-    daily_loss_pct = (
-        (-account.realized_pnl_today / account.equity * 100.0)
-        if account.equity > 0 else 0.0
-    )
-    if daily_loss_pct >= account.max_daily_loss_pct:
-        return RiskResult(
-            RiskVerdict.BLOCKED_GLOBAL, "daily_loss_limit",
-            f"Daily loss {daily_loss_pct:.2f}% has reached the "
-            f"{account.max_daily_loss_pct:.2f}% cap. "
-            "No new trades for the rest of this trading day.",
+    # ── 3. Daily loss limit (BUY only — after the daily cap is hit you
+    #    must still be able to exit a losing position, not be trapped in it) ──
+    if intent.side == "BUY":
+        daily_loss_pct = (
+            (-account.realized_pnl_today / account.equity * 100.0)
+            if account.equity > 0 else 0.0
         )
+        if daily_loss_pct >= account.max_daily_loss_pct:
+            return RiskResult(
+                RiskVerdict.BLOCKED_GLOBAL, "daily_loss_limit",
+                f"Daily loss {daily_loss_pct:.2f}% has reached the "
+                f"{account.max_daily_loss_pct:.2f}% cap. "
+                "No new trades for the rest of this trading day.",
+            )
 
     # ── 4. Max concurrent positions (BUY only) ────────────────────────────────
     if intent.side == "BUY" and account.open_position_count >= account.max_concurrent_positions:
@@ -290,8 +299,10 @@ def evaluate(
             "The existing position must close before re-entering.",
         )
 
-    # ── 8. Stale market data ──────────────────────────────────────────────────
-    if intent.market_data_timestamp is not None:
+    # ── 8. Stale market data (BUY only — a stale price on a SELL still
+    #    lets you exit; holding a position on bad data is worse than
+    #    exiting on it) ───────────────────────────────────────────────────
+    if intent.side == "BUY" and intent.market_data_timestamp is not None:
         age_s = (now - intent.market_data_timestamp).total_seconds()
         if age_s > account.stale_data_seconds:
             return RiskResult(

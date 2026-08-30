@@ -128,7 +128,33 @@ _SOURCES = {
     # api-gateway already serves /surprise/scan?cached=true which returns
     # the last scored result without triggering a new full scan cycle.
     "surprise":  "/surprise/scan?cached=true&limit=20",
+    # ── Issue 1 fix (Option A) — momentum-breakout track ────────────────────
+    # Raw candidate symbols only (no score/decision on this endpoint's
+    # payload) — quality gating for this track happens entirely inside
+    # _volume_shock_analysis() below, not via a source-provided score.
+    "volume_shock": "/scan/universe",
 }
+
+# ── Option A (Issue 1 fix) — momentum-breakout track thresholds ─────────────
+# Real backtest against the 30-Aug-2026 NSE "volume shocker" session showed
+# the standard _multi_tf_analysis() waterfall above (6m_downtrend +
+# weighted-MTF, calibrated for a choppy/weak large-cap market) is — by
+# design — very good at rejecting exactly the single/multi-day breakout move
+# that most real volume-shocker days consist of: even using the day's own
+# post-move close, only 3/17 backtested movers passed. Rather than loosen
+# the existing, presumably-tested conservative filter for every candidate
+# (Option B), this adds a second, fully independent track that skips
+# 6m_downtrend/weak_MTF entirely and instead requires a genuine volume shock
+# (today's volume far above its 20-day average) plus a genuine breakout
+# return. It still enforces the two checks that are about position safety
+# rather than a market-view judgment (price floor, ATR cap) — those aren't
+# opinions about market regime, they protect against bad fills regardless of
+# strategy. The liquidity floor is enforced later anyway, downstream, by
+# risk_engine's own hard_floor_liquidity check at order time, so it isn't
+# duplicated here. See STOCKKY_ISSUE_LOG_AND_FIXES.md Issue 1 for the full
+# backtest evidence and the two alternative options that were not taken.
+VOLUME_SHOCK_MULTIPLIER = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MULTIPLIER", "3.0"))
+VOLUME_SHOCK_MIN_RETURN_PCT = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MIN_RETURN_PCT", "5.0"))
 
 
 # ── Fetch helpers ─────────────────────────────────────────────────────────────
@@ -426,6 +452,138 @@ def _rows_from_ipo(payload: Any) -> list[dict]:
     return out
 
 
+def _rows_from_volume_shock(payload: Any) -> list[dict]:
+    """Option A (Issue 1 fix) — momentum-breakout track raw candidate list.
+
+    /scan/universe's `momentum_movers` field is api-gateway's already-computed
+    NSE gainers/losers/volume-gainers list (see _get_momentum_movers()).
+    There is no conviction score on this payload the way hot_picks/ipo/
+    surprise have one, so every row gets a nominal placeholder score here —
+    the REAL quality gate for this track is _volume_shock_analysis()'s
+    volume-shock + return-shock checks, run later, not this score."""
+    if not isinstance(payload, dict):
+        return []
+    symbols = payload.get("momentum_movers") or []
+    out = []
+    for sym in symbols:
+        if not sym or not isinstance(sym, str):
+            continue
+        clean = sym.upper().strip()
+        if not clean:
+            continue
+        out.append({
+            "symbol":           clean,
+            "source_tab":       "volume_shock",
+            "decision_label":   "VOLUME_SHOCK",
+            "conviction_score": MIN_CONVICTION,  # nominal — see docstring
+            "signal_price":     None,
+            "raw_payload":      {"symbol": clean, "source": "momentum_movers"},
+        })
+    return out
+
+
+async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
+    """
+    Option A (Issue 1 fix) — momentum-breakout quality gate.
+
+    Deliberately does NOT run _multi_tf_analysis()'s 6m_downtrend or
+    weighted-MTF checks — those are exactly what the 30-Aug-2026 backtest
+    showed reject most real single/multi-day volume-shocker moves. Instead
+    requires a genuine volume shock (today's volume >= VOLUME_SHOCK_MULTIPLIER
+    x the 20-day average — a real volume-shock definition, distinct from the
+    standard track's 5d-vs-20d "volume health" ratio) AND a genuine breakout
+    return (today's return >= VOLUME_SHOCK_MIN_RETURN_PCT). Still enforces
+    the position-safety checks that apply regardless of market view: minimum
+    price floor and ATR volatility cap (same thresholds as the standard
+    track). Liquidity is enforced downstream by risk_engine's own hard
+    liquidity floor at order time, so it is not duplicated here.
+    """
+    quote_task = asyncio.create_task(_fetch_quote(client, symbol))
+    hist_task = asyncio.create_task(_fetch_history(client, symbol, "1mo", "1d"))
+    quote, candles = await asyncio.gather(quote_task, hist_task, return_exceptions=True)
+
+    if isinstance(quote, Exception) or not quote:
+        return {"reject_reason": "No quote available for volume-shock check.", "atr_pct": None}
+    if isinstance(candles, Exception) or not isinstance(candles, list) or len(candles) < 6:
+        return {"reject_reason": "Insufficient daily history for volume-shock check.", "atr_pct": None}
+
+    current_price = float(quote.get("price") or quote.get("cmp") or 0)
+
+    # ── Position-safety check: minimum price floor (kept — see module docstring) ──
+    if current_price > 0 and current_price < MIN_STOCK_PRICE:
+        return {
+            "reject_reason": (
+                f"Price ₹{current_price:.2f} is below ₹{MIN_STOCK_PRICE} minimum. "
+                "Sub-₹20 stocks in India have operator activity risk, "
+                "very wide bid-ask spreads, and illiquid exits. Skip."
+            ),
+            "atr_pct": None,
+        }
+
+    # ── Genuine breakout return check ─────────────────────────────────────────
+    prior_close = float(candles[-2].get("close") or 0)
+    today_close = float(candles[-1].get("close") or current_price or 0)
+    if prior_close <= 0 or today_close <= 0:
+        return {"reject_reason": "Could not compute today's return for volume-shock check.", "atr_pct": None}
+    today_return_pct = round((today_close / prior_close - 1) * 100, 2)
+    if today_return_pct < VOLUME_SHOCK_MIN_RETURN_PCT:
+        return {
+            "reject_reason": (
+                f"Today's return {today_return_pct:.1f}% < "
+                f"{VOLUME_SHOCK_MIN_RETURN_PCT}% volume-shock breakout threshold."
+            ),
+            "atr_pct": None,
+        }
+
+    # ── Genuine volume-shock check (today's vol vs 20-day average) ────────────
+    vols = [float(c.get("volume", 0)) for c in candles if c.get("volume")]
+    if len(vols) < 6:
+        return {"reject_reason": "Insufficient volume history for volume-shock check.", "atr_pct": None}
+    today_vol = vols[-1]
+    prior_vols = vols[-21:-1] if len(vols) > 1 else []
+    avg20 = sum(prior_vols) / len(prior_vols) if prior_vols else 0
+    if avg20 <= 0:
+        return {"reject_reason": "No 20-day average volume available for volume-shock check.", "atr_pct": None}
+    vol_multiple = today_vol / avg20
+    if vol_multiple < VOLUME_SHOCK_MULTIPLIER:
+        return {
+            "reject_reason": (
+                f"Today's volume {vol_multiple:.1f}x 20-day average < "
+                f"{VOLUME_SHOCK_MULTIPLIER}x volume-shock threshold."
+            ),
+            "atr_pct": None,
+        }
+
+    # ── Position-safety check: ATR volatility cap (kept — see module docstring) ──
+    atr_pct: Optional[float] = None
+    atr = quote.get("atr")
+    if atr and current_price > 0:
+        atr_pct = round(float(atr) / current_price * 100, 2)
+        if atr_pct > MAX_ATR_PCT:
+            return {
+                "reject_reason": (
+                    f"ATR {atr_pct:.1f}% > cap {MAX_ATR_PCT}%. "
+                    "Too volatile to produce a safe position size within the "
+                    "1% per-trade risk cap."
+                ),
+                "atr_pct": atr_pct,
+            }
+
+    return {
+        "reject_reason":     None,
+        "today_return_pct":  today_return_pct,
+        "vol_multiple":      round(vol_multiple, 2),
+        "atr_pct":           atr_pct,
+        "current_price":     current_price,
+    }
+
+
+async def _fetch_volume_shock_universe(client: httpx.AsyncClient) -> list[str]:
+    """Fetch api-gateway's /scan/universe and pull out its momentum_movers list."""
+    payload = await _fetch(client, _SOURCES["volume_shock"])
+    return [r["symbol"] for r in _rows_from_volume_shock(payload)]
+
+
 def _rows_from_surprise(payload: Any) -> list[dict]:
     """Normalize /surprise/scan?cached=true response."""
     if not payload:
@@ -457,14 +615,13 @@ def _rows_from_surprise(payload: Any) -> list[dict]:
 
 # ── Main refresh ──────────────────────────────────────────────────────────────
 
-async def refresh_candidates(db: Session, mode: str) -> int:
-    """
-    Fetch every source → score-filter → deduplicate by symbol (keep
-    highest conviction) → drop already-open positions → run concurrent
-    multi-timeframe + quality analysis → insert only passing rows.
-
-    Returns number of candidate rows inserted.
-    """
+async def _refresh_standard_candidates(db: Session, mode: str, open_syms: set) -> tuple[int, set]:
+    """The original MANUAL/AUTO candidate flow — untouched by the Issue 1
+    fix (see module docstring / _volume_shock_analysis for the new,
+    fully-independent track). Returns (inserted_count, handled_symbols) —
+    handled_symbols covers every symbol this track saw, whether it was
+    inserted or rejected, so the volume_shock phase never re-proposes one
+    of them under a different source_tab in the same cycle."""
     rows: list[dict] = []
 
     async with httpx.AsyncClient() as client:
@@ -491,7 +648,7 @@ async def refresh_candidates(db: Session, mode: str) -> int:
 
     if not rows:
         logger.info("candidate_engine: no actionable source rows (mode=%s)", mode)
-        return 0
+        return 0, set()
 
     # Deduplicate by symbol — keep highest-conviction row per symbol across
     # all three sources. This avoids evaluating the same stock twice and
@@ -503,10 +660,10 @@ async def refresh_candidates(db: Session, mode: str) -> int:
         if (r.get("conviction_score") or 0) > existing_score:
             by_symbol[sym] = r
     rows = list(by_symbol.values())
+    seen_symbols = {r["symbol"] for r in rows}
 
     # Drop symbols already in open positions — risk_engine would also catch
     # this via no_pyramiding, but skipping MTF fetches for them saves time.
-    open_syms = {p.symbol for p in open_positions(db, mode)}
     rows = [r for r in rows if r["symbol"] not in open_syms]
 
     if not rows:
@@ -514,7 +671,7 @@ async def refresh_candidates(db: Session, mode: str) -> int:
             "candidate_engine: all %d candidates already have open positions (mode=%s)",
             len(by_symbol), mode,
         )
-        return 0
+        return 0, seen_symbols
 
     # Run multi-timeframe analysis for all remaining symbols concurrently —
     # one shared client, all symbols in parallel, not sequentially.
@@ -573,4 +730,100 @@ async def refresh_candidates(db: Session, mode: str) -> int:
         "candidate_engine: inserted=%d skipped=%d (quality+MTF filter) mode=%s",
         inserted, skipped, mode,
     )
+    return inserted, seen_symbols
+
+
+async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbols: set) -> int:
+    """Option A (Issue 1 fix) — the new, fully-independent momentum-breakout
+    track. Never touches _multi_tf_analysis(), the standard rows list, or
+    its dedup — a symbol already handled (inserted OR rejected) by the
+    standard track this cycle is skipped here so it's never proposed twice
+    under two different source_tabs in one cycle."""
+    try:
+        pstat.set_source(mode, "volume_shock")
+    except Exception:
+        pass
+
+    async with httpx.AsyncClient() as client:
+        candidates = await _fetch_volume_shock_universe(client)
+        candidates = [s for s in candidates if s not in exclude_symbols]
+        if not candidates:
+            return 0
+
+        vs_tasks = {
+            sym: asyncio.create_task(_volume_shock_analysis(client, sym))
+            for sym in candidates
+        }
+        vs_results = await asyncio.gather(*vs_tasks.values(), return_exceptions=True)
+
+    inserted = 0
+    skipped  = 0
+    for sym, result in zip(vs_tasks.keys(), vs_results):
+        if isinstance(result, Exception):
+            logger.warning("volume_shock analysis error for %s: %s", sym, result)
+            skipped += 1
+            continue
+
+        reject = result.get("reject_reason")
+        if reject:
+            logger.info(
+                "VOLUME_SHOCK CANDIDATE REJECTED %s (mode=%s) | %s", sym, mode, reject[:150]
+            )
+            skipped += 1
+            continue
+
+        payload = {
+            "symbol": sym,
+            "source": "momentum_movers",
+            "_mtf": {
+                "today_return_pct": result.get("today_return_pct"),
+                "vol_multiple":     result.get("vol_multiple"),
+                "atr_pct":          result.get("atr_pct"),
+                "market_note":      "Option A momentum-breakout track (Issue 1 fix)",
+            },
+        }
+        db.add(models.TradeCandidate(
+            mode=mode,
+            symbol=sym,
+            source_tab="volume_shock",
+            decision_label="VOLUME_SHOCK",
+            conviction_score=MIN_CONVICTION,
+            signal_price=result.get("current_price"),
+            raw_payload=json.dumps(payload),
+        ))
+        inserted += 1
+
+    if inserted:
+        db.commit()
+
+    logger.info(
+        "candidate_engine: volume_shock inserted=%d skipped=%d mode=%s",
+        inserted, skipped, mode,
+    )
     return inserted
+
+
+async def refresh_candidates(db: Session, mode: str) -> int:
+    """
+    Fetch every source → score-filter → deduplicate by symbol (keep
+    highest conviction) → drop already-open positions → run concurrent
+    multi-timeframe + quality analysis → insert only passing rows.
+
+    Runs TWO independent tracks (Issue 1 fix, Option A):
+      1. The original MANUAL/AUTO flow (_refresh_standard_candidates),
+         completely unchanged.
+      2. A new momentum-breakout track (_refresh_volume_shock_candidates)
+         that skips the 6m_downtrend/weak_MTF checks and instead requires a
+         genuine volume + return shock. See module-level comment above
+         VOLUME_SHOCK_MULTIPLIER for why.
+
+    Returns the total number of candidate rows inserted across both tracks.
+    """
+    open_syms = {p.symbol for p in open_positions(db, mode)}
+
+    standard_inserted, standard_seen = await _refresh_standard_candidates(db, mode, open_syms)
+    shock_inserted = await _refresh_volume_shock_candidates(
+        db, mode, exclude_symbols=open_syms | standard_seen
+    )
+
+    return standard_inserted + shock_inserted

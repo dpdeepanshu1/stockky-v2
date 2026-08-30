@@ -16,6 +16,16 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 
+// Same small spinner pattern used elsewhere in the app (ScanPanel,
+// DecisionCard, BuySniperModal, StockChart, and now IpoTracker.tsx).
+function BusySpinner({ className = "" }: { className?: string }) {
+  return (
+    <span
+      className={`inline-block w-3 h-3 rounded-full border-2 border-t-transparent animate-spin ${className}`}
+    />
+  );
+}
+
 interface MissingIpo {
   symbol: string;
   company_name?: string;
@@ -131,7 +141,13 @@ export default function IpoFeedHealth() {
               disabled={repairBusy}
               title="Re-runs the analysis only for symbols currently missing a field (bounded batch), not a full re-scan"
             >
-              {repairBusy ? "Repairing…" : "🛠 Auto-Repair All"}
+              {repairBusy ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <BusySpinner className="border-emerald-200" /> Repairing…
+                </span>
+              ) : (
+                "🛠 Auto-Repair All"
+              )}
             </button>
           )}
           {missing > 0 && (
@@ -141,7 +157,13 @@ export default function IpoFeedHealth() {
               disabled={rescanBusy}
               title="Full universe re-scan from upstream — use if Auto-Repair isn't enough (e.g. discovery itself is stale)"
             >
-              {rescanBusy ? "Starting…" : "⚡ Full Re-scan"}
+              {rescanBusy ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <BusySpinner className="border-rose-200" /> Starting…
+                </span>
+              ) : (
+                "⚡ Full Re-scan"
+              )}
             </button>
           )}
           <button
@@ -149,7 +171,13 @@ export default function IpoFeedHealth() {
             onClick={() => void fetchAudit()}
             disabled={loading}
           >
-            {loading ? "Auditing…" : "🔄 Refresh Audit"}
+            {loading ? (
+              <span className="inline-flex items-center gap-1.5">
+                <BusySpinner className="border-white/60" /> Auditing…
+              </span>
+            ) : (
+              "🔄 Refresh Audit"
+            )}
           </button>
         </div>
       </div>

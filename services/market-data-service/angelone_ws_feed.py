@@ -312,3 +312,21 @@ def start_feed_background(symbols: list) -> None:
     _thread = threading.Thread(target=_run, daemon=True, name="angelone-ws-feed")
     _thread.start()
     logger.info("AngelOne feed background thread started (%d symbols requested)", len(symbols))
+
+
+def stop_feed_background(timeout: float = 10.0) -> None:
+    """Signal the polling loop to stop and block until the thread has
+    actually exited (or `timeout` elapses). Always call this before a
+    subsequent start_feed_background() with a different symbol list —
+    calling start_feed_background() again while the old thread is still
+    winding down races on the `_running` flag (the old thread's
+    `finally: _running = False` would stomp a freshly-started new thread's
+    state)."""
+    global _running
+    _running = False
+    if _thread is not None:
+        _thread.join(timeout=timeout)
+        if _thread.is_alive():
+            logger.warning(
+                "AngelOne feed: thread did not stop within %.1fs", timeout
+            )

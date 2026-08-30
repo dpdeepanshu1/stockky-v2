@@ -59,6 +59,18 @@ function stageLabel(ipo: IpoAnalysis): { text: string; tone: string } {
   return { text: ipo.stage || "—", tone: "text-mist/50" };
 }
 
+// Same small spinner pattern used everywhere else in the app (ScanPanel,
+// DecisionCard, BuySniperModal, StockChart) — IpoTracker's busy buttons
+// previously only changed their label text with no spinner at all, the
+// one visible inconsistency reported against this page.
+function BusySpinner({ className = "" }: { className?: string }) {
+  return (
+    <span
+      className={`inline-block w-3 h-3 rounded-full border-2 border-t-transparent animate-spin ${className}`}
+    />
+  );
+}
+
 export default function IpoTracker({
   onSelect,
 }: {
@@ -447,7 +459,13 @@ export default function IpoTracker({
               title="Bulk-seeds ipo_static_feed for every tracked IPO in one background pass — the same job the morning 'IPO Premarket Refresh' GitHub Action runs on a schedule, triggered here on demand instead of waiting for it."
               className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-amber-500/20 border border-amber-400/40 text-amber-100 hover:bg-amber-500/30 disabled:opacity-40"
             >
-              {ipoScanning ? "Feeding…" : "📥 Premarket Feed"}
+              {ipoScanning ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <BusySpinner className="border-amber-200" /> Feeding…
+                </span>
+              ) : (
+                "📥 Premarket Feed"
+              )}
             </button>
             <button
               type="button"
@@ -456,7 +474,13 @@ export default function IpoTracker({
               title="Reads ipo_static_feed / the cached list only — never calls NSE/yfinance. Use Force Rescan for that."
               className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-violet-500/20 border border-violet-400/40 text-violet-100 hover:bg-violet-500/30 disabled:opacity-40"
             >
-              {dbLoadBusy ? "Loading…" : "↻ Scan IPOs (DB)"}
+              {dbLoadBusy ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <BusySpinner className="border-violet-200" /> Loading…
+                </span>
+              ) : (
+                "↻ Scan IPOs (DB)"
+              )}
             </button>
             <button
               type="button"
@@ -465,7 +489,13 @@ export default function IpoTracker({
               title="Ignore the freshness cache and re-scan every IPO from scratch, straight from upstream (NSE + yfinance) — same underlying action as Premarket Feed, exposed here for a one-off refresh mid-session"
               className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-violet-500/10 border border-violet-400/30 text-violet-200/80 hover:bg-violet-500/20 disabled:opacity-40"
             >
-              {ipoScanning ? "Scanning…" : "Force Scan (upstream)"}
+              {ipoScanning ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <BusySpinner className="border-violet-200" /> Scanning…
+                </span>
+              ) : (
+                "Force Scan (upstream)"
+              )}
             </button>
             <button
               type="button"
@@ -647,13 +677,19 @@ export default function IpoTracker({
                       }
                       className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-signal-buy/20 border border-signal-buy/40 text-signal-buy hover:bg-signal-buy/30 disabled:opacity-50"
                     >
-                      {sniperLoading && sniperBusySymbol === ipo.symbol
-                        ? "Scanning…"
-                        : ipo.buy_suggestion
-                        ? ipo.decision === "BUY NOW"
-                          ? "Buy Now →"
-                          : "Prepare to Buy →"
-                        : "🎯 Scan for Buy →"}
+                      {sniperLoading && sniperBusySymbol === ipo.symbol ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <BusySpinner className="border-signal-buy" /> Scanning…
+                        </span>
+                      ) : ipo.buy_suggestion ? (
+                        ipo.decision === "BUY NOW" ? (
+                          "Buy Now →"
+                        ) : (
+                          "Prepare to Buy →"
+                        )
+                      ) : (
+                        "🎯 Scan for Buy →"
+                      )}
                     </button>
                   )}
 

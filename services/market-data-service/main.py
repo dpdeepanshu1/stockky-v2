@@ -12,6 +12,7 @@ v2.2 – reduced retries and timeouts for faster responses.
 """
 import os
 import re
+import asyncio
 import urllib.parse
 import time
 import json
@@ -331,6 +332,76 @@ async def _start_yahoo_ws_feed():
             logger.warning("yahoo_ws_feed: no universe configured (SURPRISE_UNIVERSE/SCAN_UNIVERSE), not starting")
     except Exception as e:
         logger.warning("yahoo_ws_feed startup skipped: %s", e)
+
+
+# ── Issue 2 fix: keep both WS feeds pointed at the REAL candidate universe ──
+# Without this, angelone_ws_feed/yahoo_ws_feed stay locked forever to whatever
+# default_universe_from_env() returned once at boot (a static 14-mega-cap
+# fallback when SURPRISE_UNIVERSE/SCAN_UNIVERSE isn't set) and never see the
+# ~300 symbols candidate_engine actually evaluates — every quote for a real
+# candidate then pays full REST-waterfall latency instead of hitting the
+# live-feed cache. This periodically re-points both feeds at api-gateway's
+# live /scan/universe (movers/bulk-deals/52w/news/watchlist — the same set
+# candidate_engine trades from).
+UNIVERSE_REFRESH_INTERVAL_S = float(os.getenv("FEED_UNIVERSE_REFRESH_INTERVAL_S", "900"))
+
+_current_feed_universe: list = []
+
+
+async def _refresh_feed_universe_loop():
+    """Every UNIVERSE_REFRESH_INTERVAL_S (default 15 min), pull the live
+    scan universe from api-gateway (GET /scan/universe — movers/bulk-deals/
+    52w/news/watchlist, the same set candidate_engine actually trades from)
+    and re-point both WS feeds at it. A fetch failure or empty result leaves
+    the existing feed running untouched — never tear down a working feed
+    because one refresh call failed."""
+    global _current_feed_universe
+    gw = os.environ.get("API_GATEWAY_URL", "").rstrip("/")
+    if not gw:
+        logger.warning("feed universe refresh: API_GATEWAY_URL not set, skipping")
+        return
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        while True:
+            await asyncio.sleep(UNIVERSE_REFRESH_INTERVAL_S)
+            try:
+                r = await client.get(f"{gw}/scan/universe")
+                r.raise_for_status()
+                symbols = r.json().get("symbols") or []
+                symbols = [
+                    str(s).upper().replace(".NS", "").replace(".BO", "")
+                    for s in symbols if s
+                ]
+            except Exception as e:
+                logger.warning(
+                    "feed universe refresh: fetch failed, keeping existing feed: %s", e
+                )
+                continue
+
+            if not symbols or set(symbols) == set(_current_feed_universe):
+                continue
+            _current_feed_universe = symbols
+
+            try:
+                import yahoo_ws_feed
+                yahoo_ws_feed.ensure_subscribed(symbols)
+            except Exception as e:
+                logger.warning("feed universe refresh: yahoo ensure_subscribed failed: %s", e)
+
+            try:
+                from angelone_client import get_session
+                if get_session().is_configured():
+                    import angelone_ws_feed
+                    angelone_ws_feed.stop_feed_background()
+                    angelone_ws_feed.start_feed_background(symbols)
+            except Exception as e:
+                logger.warning("feed universe refresh: angelone restart failed: %s", e)
+
+            logger.info("feed universe refreshed: %d symbols", len(symbols))
+
+
+@app.on_event("startup")
+async def _start_feed_universe_refresh():
+    asyncio.create_task(_refresh_feed_universe_loop())
 
 # ── Root & Health endpoints (fix 404) ────────────────────────────────────────
 @app.get("/")

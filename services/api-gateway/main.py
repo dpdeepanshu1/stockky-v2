@@ -12,7 +12,7 @@ import gc
 import logging
 import difflib
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 from typing import List, Optional, Set, Dict, Union
@@ -5075,7 +5075,24 @@ def scan_watchlist():
     # already used by refill_additional.py / weekend_hydrator.py) turns
     # O(N × per-symbol time) into O(N / WATCHLIST_SCAN_CONCURRENCY ×
     # per-symbol time) instead, without changing per-symbol behavior at all.
-    _SCAN_CONCURRENCY = int(os.getenv("WATCHLIST_SCAN_CONCURRENCY", "4"))
+    #
+    # Fix (30 Aug 2026, round 2): concurrency alone still isn't a hard
+    # guarantee — test_20260830_131556.log shows /scan/watchlist itself
+    # timing out at 25.00s (status 000, i.e. the *client* gave up, not the
+    # server). With 4-way concurrency and a cold cache, N watchlist symbols
+    # take ceil(N/4) batches at up to ~5-6s/batch (fundamentals is the
+    # slowest single upstream call — see fundamental/analyze/RELIANCE at
+    # 5.43s in the same run), so anything past ~16-20 symbols was already
+    # over budget before any single call misbehaved. Two changes below:
+    # raise the default fan-out (analysis-intelligence-service is stateless
+    # and takes the extra load fine) and, more importantly, put a hard wall
+    # -clock deadline on the whole endpoint so it always responds inside
+    # that budget regardless of watchlist size — any symbol still running
+    # past the deadline is reported as skipped instead of blocking the
+    # response, and its inner jobs still populate the redis/kv caches they
+    # already write to, so the next call picks it up warm.
+    _SCAN_CONCURRENCY = int(os.getenv("WATCHLIST_SCAN_CONCURRENCY", "8"))
+    _SCAN_DEADLINE_SECONDS = float(os.getenv("WATCHLIST_SCAN_TIMEOUT_SECONDS", "20"))
 
     def _scan_one_symbol(client: httpx.Client, symbol: str):
         resp = client.get(f"{DECISION_URL}/decide/{symbol}")
@@ -5190,17 +5207,47 @@ def scan_watchlist():
         normalized["natural_language_summary"] = _generate_summary(normalized)
         return normalized
 
+    # timeout=30 (was 180): 180s per HTTP call was never the intent, it was
+    # just "big enough to not be the thing that times out" from before the
+    # deadline below existed. Now that the endpoint has its own explicit
+    # wall-clock budget, a single upstream call hanging for 180s is exactly
+    # the failure mode we need to bound, not paper over.
     limits = httpx.Limits(max_connections=_SCAN_CONCURRENCY * 2, max_keepalive_connections=_SCAN_CONCURRENCY)
-    with httpx.Client(timeout=180, limits=limits) as client:
-        with ThreadPoolExecutor(max_workers=max(1, _SCAN_CONCURRENCY)) as pool:
-            futures = {pool.submit(_scan_one_symbol, client, symbol): symbol for symbol in watchlist}
-            for fut in as_completed(futures):
-                symbol = futures[fut]
-                try:
-                    results.append(fut.result())
-                except httpx.HTTPError as e:
-                    logger.warning("Watchlist scan skipped %s: %s", symbol, e)
-                    errors.append({"symbol": symbol, "error": str(e)})
+    client = httpx.Client(timeout=30, limits=limits)
+    pool = ThreadPoolExecutor(max_workers=max(1, _SCAN_CONCURRENCY))
+    try:
+        futures = {pool.submit(_scan_one_symbol, client, symbol): symbol for symbol in watchlist}
+        done, not_done = wait(futures.keys(), timeout=_SCAN_DEADLINE_SECONDS)
+        for fut in done:
+            symbol = futures[fut]
+            try:
+                results.append(fut.result())
+            except httpx.HTTPError as e:
+                logger.warning("Watchlist scan skipped %s: %s", symbol, e)
+                errors.append({"symbol": symbol, "error": str(e)})
+            except Exception as e:
+                logger.warning("Watchlist scan failed for %s: %s", symbol, e)
+                errors.append({"symbol": symbol, "error": str(e)})
+        for fut in not_done:
+            symbol = futures[fut]
+            logger.warning(
+                "Watchlist scan deadline (%.0fs) hit before %s completed — "
+                "returning partial results instead of blocking the response.",
+                _SCAN_DEADLINE_SECONDS, symbol,
+            )
+            errors.append({
+                "symbol": symbol,
+                "error": f"scan deadline ({_SCAN_DEADLINE_SECONDS:.0f}s) exceeded, skipped this run",
+            })
+    finally:
+        # wait=False + cancel_futures: don't let the still-running
+        # stragglers (or ones that never got a worker slot) hold the HTTP
+        # response hostage past the deadline above. cancel_futures drops
+        # anything not yet started; anything mid-flight simply finishes in
+        # the background — harmless since _scan_one_symbol's own jobs only
+        # write to caches, nothing here mutates `results`/`errors` after
+        # this point.
+        pool.shutdown(wait=False, cancel_futures=True)
 
     results.sort(key=lambda r: r.get("combined_score", 0), reverse=True)
     actionable = [r for r in results if r.get("decision") in ("BUY NOW", "PREPARE TO BUY")]
@@ -5288,6 +5335,11 @@ def scan_watchlist():
         },
         "all_results": results,
         "errors": errors,
+        # True whenever the deadline above cut the run short (fewer results
+        # than watchlist entries and at least one "deadline exceeded" error)
+        # — lets callers/UI show "partial results, retry for the rest"
+        # instead of silently looking like a smaller watchlist.
+        "partial": len(results) < len(watchlist) and any("deadline" in e.get("error", "") for e in errors),
     }
 
     _send_scan_notification(result.get("recommendations", []), result["verdict"], result["scanned"], result["universe_size"])

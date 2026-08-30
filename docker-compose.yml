@@ -167,7 +167,19 @@ services:
       # sequentially (see api-gateway/main.py _scan_one_symbol). This
       # controls how many watchlist symbols are scanned in parallel — kept
       # explicit here so it's tunable without a code change/redeploy.
-      WATCHLIST_SCAN_CONCURRENCY: ${WATCHLIST_SCAN_CONCURRENCY:-4}
+      # Raised 4 -> 8 (round 2, same date): with 4-way fan-out, watchlists
+      # past ~16-20 symbols on a cold cache still cleared 25s end-to-end
+      # (see test_20260830_131556.log — scan/watchlist FAILed at exactly
+      # 25.00s). analysis-intelligence-service is stateless and handles the
+      # extra concurrent load fine.
+      WATCHLIST_SCAN_CONCURRENCY: ${WATCHLIST_SCAN_CONCURRENCY:-8}
+      # New: hard wall-clock budget for the whole /scan/watchlist request,
+      # regardless of watchlist size or concurrency. Anything still running
+      # past this is reported back as a skipped/"deadline exceeded" entry
+      # instead of blocking the HTTP response — see api-gateway/main.py
+      # scan_watchlist(). Keep this comfortably under whatever proxy/client
+      # timeout calls this endpoint (test harness here uses 25s).
+      WATCHLIST_SCAN_TIMEOUT_SECONDS: ${WATCHLIST_SCAN_TIMEOUT_SECONDS:-20}
       # ── Oracle Autonomous DB (Oracle Cloud side only; empty on Render/Neon) ──
       ORACLE_DSN: ${ORACLE_DSN:-}
       ORACLE_USER: ${ORACLE_USER:-ADMIN}

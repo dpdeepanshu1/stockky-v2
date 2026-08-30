@@ -12,6 +12,7 @@ import gc
 import logging
 import difflib
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 from typing import List, Optional, Set, Dict, Union
@@ -5064,73 +5065,92 @@ def scan_watchlist():
     results = []
     errors = []
 
-    with httpx.Client(timeout=180) as client:
-        for symbol in watchlist:
+    # Fix: this used to loop over the watchlist sequentially, and each
+    # symbol already does its own chain of upstream calls (decide, quote
+    # fallback, fundamentals merge, news, events, prediction) — several
+    # seconds each in the warm case, tens of seconds in the cold case (see
+    # the decision/decide/RELIANCE timeout in the same test run). Serialized
+    # across even a handful of watchlist symbols, that easily blows past any
+    # normal client/proxy timeout. Bounded concurrency (mirrors the pattern
+    # already used by refill_additional.py / weekend_hydrator.py) turns
+    # O(N × per-symbol time) into O(N / WATCHLIST_SCAN_CONCURRENCY ×
+    # per-symbol time) instead, without changing per-symbol behavior at all.
+    _SCAN_CONCURRENCY = int(os.getenv("WATCHLIST_SCAN_CONCURRENCY", "4"))
+
+    def _scan_one_symbol(client: httpx.Client, symbol: str):
+        resp = client.get(f"{DECISION_URL}/decide/{symbol}")
+        resp.raise_for_status()
+        raw = resp.json()
+        normalized = _normalize_decision_response(raw, symbol)
+
+        if normalized.get("close") is None:
+            price = _fetch_price_from_quote(symbol)
+            if price is not None:
+                normalized["close"] = price
+                if normalized.get("support") is None:
+                    normalized["support"] = round(price * 0.95, 2)
+                if normalized.get("resistance") is None:
+                    normalized["resistance"] = round(price * 1.05, 2)
+
+        _merge_fundamentals(normalized, symbol)
+
+        if normalized.get("news_score") is None:
+            news = _fetch_news(symbol)
+            if news:
+                normalized["news_score"] = news.get("news_score")
+                reasons = normalized.get("reasons", {})
+                if news.get("reasons"):
+                    reasons["news"] = news["reasons"]
+                    normalized["reasons"] = reasons
+
+        if normalized.get("event_risk") is False and not normalized.get("reasons", {}).get("event"):
+            events = _fetch_events(symbol)
+            if events:
+                # See the async analyzer's equivalent block for why
+                # the full dict is passed through, not just
+                # next_earnings_date.
+                normalized["event_data"] = events
+                if events.get("next_earnings_date"):
+                    normalized["event_risk"] = True
+                    reasons = normalized.get("reasons", {})
+                    reasons["event"] = [f"Earnings due: {events['next_earnings_date']}"]
+                    normalized["reasons"] = reasons
+
+        if normalized.get("prediction_score") is None:
             try:
-                resp = client.get(f"{DECISION_URL}/decide/{symbol}")
-                resp.raise_for_status()
-                raw = resp.json()
-                normalized = _normalize_decision_response(raw, symbol)
+                pred_resp = client.get(f"{PREDICTION_URL}/predict/{symbol}", timeout=60)
+                if pred_resp.status_code == 200:
+                    pred_data = pred_resp.json()
+                    if pred_data.get("model_loaded"):
+                        normalized["prediction_score"] = pred_data.get("prediction_score")
+                        normalized["prediction_note"] = pred_data.get("note")
+            except Exception as e:
+                logger.warning(f"Prediction service lookup failed during watchlist scan for {symbol}: {e}")
 
-                if normalized.get("close") is None:
-                    price = _fetch_price_from_quote(symbol)
-                    if price is not None:
-                        normalized["close"] = price
-                        if normalized.get("support") is None:
-                            normalized["support"] = round(price * 0.95, 2)
-                        if normalized.get("resistance") is None:
-                            normalized["resistance"] = round(price * 1.05, 2)
+        # Adds a concrete calendar-date holding period estimate
+        # alongside whatever decision-engine's own holding_period
+        # string is (often a static "2-6 weeks" or "N/A") — kept as
+        # a separate field so nothing that already reads
+        # holding_period breaks.
+        entry = normalized.get("entry_range") or {}
+        entry_price = entry.get("low") or normalized.get("close")
+        normalized["holding_period_estimate"] = _estimate_holding_period(
+            entry_price, normalized.get("target"), normalized.get("decision")
+        )
+        normalized["natural_language_summary"] = _generate_summary(normalized)
+        return normalized
 
-                _merge_fundamentals(normalized, symbol)
-
-                if normalized.get("news_score") is None:
-                    news = _fetch_news(symbol)
-                    if news:
-                        normalized["news_score"] = news.get("news_score")
-                        reasons = normalized.get("reasons", {})
-                        if news.get("reasons"):
-                            reasons["news"] = news["reasons"]
-                            normalized["reasons"] = reasons
-
-                if normalized.get("event_risk") is False and not normalized.get("reasons", {}).get("event"):
-                    events = _fetch_events(symbol)
-                    if events:
-                        # See the async analyzer's equivalent block for why
-                        # the full dict is passed through, not just
-                        # next_earnings_date.
-                        normalized["event_data"] = events
-                        if events.get("next_earnings_date"):
-                            normalized["event_risk"] = True
-                            reasons = normalized.get("reasons", {})
-                            reasons["event"] = [f"Earnings due: {events['next_earnings_date']}"]
-                            normalized["reasons"] = reasons
-
-                if normalized.get("prediction_score") is None:
-                    try:
-                        pred_resp = client.get(f"{PREDICTION_URL}/predict/{symbol}", timeout=60)
-                        if pred_resp.status_code == 200:
-                            pred_data = pred_resp.json()
-                            if pred_data.get("model_loaded"):
-                                normalized["prediction_score"] = pred_data.get("prediction_score")
-                                normalized["prediction_note"] = pred_data.get("note")
-                    except Exception as e:
-                        logger.warning(f"Prediction service lookup failed during watchlist scan for {symbol}: {e}")
-
-                # Adds a concrete calendar-date holding period estimate
-                # alongside whatever decision-engine's own holding_period
-                # string is (often a static "2-6 weeks" or "N/A") — kept as
-                # a separate field so nothing that already reads
-                # holding_period breaks.
-                entry = normalized.get("entry_range") or {}
-                entry_price = entry.get("low") or normalized.get("close")
-                normalized["holding_period_estimate"] = _estimate_holding_period(
-                    entry_price, normalized.get("target"), normalized.get("decision")
-                )
-                normalized["natural_language_summary"] = _generate_summary(normalized)
-                results.append(normalized)
-            except httpx.HTTPError as e:
-                logger.warning("Watchlist scan skipped %s: %s", symbol, e)
-                errors.append({"symbol": symbol, "error": str(e)})
+    limits = httpx.Limits(max_connections=_SCAN_CONCURRENCY * 2, max_keepalive_connections=_SCAN_CONCURRENCY)
+    with httpx.Client(timeout=180, limits=limits) as client:
+        with ThreadPoolExecutor(max_workers=max(1, _SCAN_CONCURRENCY)) as pool:
+            futures = {pool.submit(_scan_one_symbol, client, symbol): symbol for symbol in watchlist}
+            for fut in as_completed(futures):
+                symbol = futures[fut]
+                try:
+                    results.append(fut.result())
+                except httpx.HTTPError as e:
+                    logger.warning("Watchlist scan skipped %s: %s", symbol, e)
+                    errors.append({"symbol": symbol, "error": str(e)})
 
     results.sort(key=lambda r: r.get("combined_score", 0), reverse=True)
     actionable = [r for r in results if r.get("decision") in ("BUY NOW", "PREPARE TO BUY")]

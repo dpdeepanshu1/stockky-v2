@@ -1155,11 +1155,18 @@ export const api = {
     ),
 
   testCallMeBot: (message?: string) =>
+    // Fix: same class of bug as testNotifications above. The gateway's
+    // /notifications/call/me proxy uses a 70s timeout (CallMeBot voice call
+    // + text fallback can legitimately take that long), but this was set to
+    // a 30s client timeout with 1 retry — so it reliably aborted early and
+    // then silently placed a SECOND real phone call as a "retry" of a
+    // request that was often still in flight. No retries (real side
+    // effect), timeout raised to match the gateway's 70s + headroom.
     request<{ ok: boolean; result?: string; error?: string }>(
       `/notifications/call/me?message=${encodeURIComponent(message || "Stockky test call alert")}`,
       { method: "POST" },
-      1,
-      30000
+      0,
+      80000
     ),
 
   sendPicksToTelegram: (payload: { type: string; recommendations: Decision[] }) =>

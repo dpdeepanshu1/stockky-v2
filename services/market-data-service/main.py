@@ -365,7 +365,7 @@ def bhavcopy_universe(min_price: float = 0, limit: int = 3000):
         # Filter through symbol_master when available
         try:
             from sqlalchemy import text as _text
-            from db import get_engine as _get_engine
+            from kv_cache import _get_neon as _get_engine
             engine = _get_engine()
             with engine.connect() as conn:
                 rows = conn.execute(
@@ -391,34 +391,42 @@ def live_quote(symbol: str):
     §1 — Thin read off live_quotes table (populated by AngelOne WS feed).
     For real-trade-service and other services to consume without triggering
     any upstream API call.
+
+    Fix: this previously did `from db import get_engine`, but db.py only
+    exists in real-trade-service — that import always raised
+    ModuleNotFoundError here, silently caught below, so this endpoint has
+    never once returned a real row. Reuses kv_cache's existing
+    Oracle+Postgres dual-dialect engine instead, same as
+    angelone_ws_feed.py's write path.
     """
     sym = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
     try:
         from sqlalchemy import text as _text
-        from db import get_engine as _get_engine
-        engine = _get_engine()
-        with engine.connect() as conn:
-            row = conn.execute(
-                _text(
-                    "SELECT ltp, ohlc_json, volume, source, updated_at "
-                    "FROM live_quotes WHERE symbol = :s"
-                ),
-                {"s": sym},
-            ).fetchone()
-            if row:
-                import json as _json
-                ohlc = {}
-                try:
-                    ohlc = _json.loads(row[1]) if row[1] else {}
-                except Exception:
-                    pass
-                return {
-                    "symbol": sym, "ltp": float(row[0] or 0),
-                    "ohlc": ohlc, "volume": row[2],
-                    "source": row[3], "updated_at": str(row[4]),
-                }
-    except Exception:
-        pass
+        from kv_cache import _get_neon
+        engine = _get_neon()
+        if engine is not None:
+            with engine.connect() as conn:
+                row = conn.execute(
+                    _text(
+                        "SELECT ltp, ohlc_json, volume, source, updated_at "
+                        "FROM live_quotes WHERE symbol = :s"
+                    ),
+                    {"s": sym},
+                ).fetchone()
+                if row:
+                    import json as _json
+                    ohlc = {}
+                    try:
+                        ohlc = _json.loads(row[1]) if row[1] else {}
+                    except Exception:
+                        pass
+                    return {
+                        "symbol": sym, "ltp": float(row[0] or 0),
+                        "ohlc": ohlc, "volume": row[2],
+                        "source": row[3], "updated_at": str(row[4]),
+                    }
+    except Exception as e:
+        logger.debug("live_quote(%s): %s", sym, e)
     # Fall through to normal quote endpoint on DB miss
     return {"symbol": sym, "ltp": None, "source": "miss"}
 

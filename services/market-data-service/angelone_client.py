@@ -135,6 +135,25 @@ class AngelOneSession:
             body = r.json()
             return body.get("data") or []
 
+    async def get_quotes_batch(self, exchange: str, symbol_tokens: list) -> list:
+        """Fetch live quotes for multiple tokens in one call. AngelOne's
+        quote endpoint documents a cap of 50 tokens per exchange per
+        request — callers must chunk larger lists themselves (see
+        angelone_ws_feed.py's polling loop, which chunks in batches of 50)."""
+        if not symbol_tokens:
+            return []
+        await self.ensure_session()
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                f"{_BASE}/rest/secure/angelbroking/market/v1/quote/",
+                headers=self._headers(),
+                json={"mode": "FULL", "exchangeTokens": {exchange: symbol_tokens}},
+            )
+            r.raise_for_status()
+            body = r.json()
+            return (body.get("data") or {}).get("fetched") or []
+
+
 
 # Module-level singleton — shared across the service process
 _session = AngelOneSession()

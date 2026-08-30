@@ -165,21 +165,40 @@ services:
       # ── Fix (30 Aug 2026): /scan/watchlist now runs each symbol's
       # fundamentals/news/events/prediction lookups concurrently instead of
       # sequentially (see api-gateway/main.py _scan_one_symbol). This
-      # controls how many watchlist symbols are scanned in parallel — kept
-      # explicit here so it's tunable without a code change/redeploy.
-      # Raised 4 -> 8 (round 2, same date): with 4-way fan-out, watchlists
-      # past ~16-20 symbols on a cold cache still cleared 25s end-to-end
-      # (see test_20260830_131556.log — scan/watchlist FAILed at exactly
-      # 25.00s). analysis-intelligence-service is stateless and handles the
-      # extra concurrent load fine.
-      WATCHLIST_SCAN_CONCURRENCY: ${WATCHLIST_SCAN_CONCURRENCY:-8}
-      # New: hard wall-clock budget for the whole /scan/watchlist request,
+      # controls how many watchlist symbols are *outer* fan-out at once —
+      # kept explicit here so it's tunable without a code change/redeploy.
+      # Round 2 raised this 4 -> 8 to fix a timeout, which instead caused a
+      # worse one (test_20260830_134442.log — /scan/watchlist still failed,
+      # plus market/top-gainers and market/top-losers started failing too):
+      # outer concurrency multiplies with each symbol's own 5-way inner job
+      # concurrency, so 8 here meant up to 40 simultaneous outbound calls,
+      # well past this codebase's own established free-tier ceiling (see
+      # MAX_PARALLEL_WORKERS's comment above). Reverted to 4 — the real
+      # concurrency cap is now WATCHLIST_SCAN_HTTP_CONCURRENCY below, shared
+      # across every symbol and every inner job in one request.
+      WATCHLIST_SCAN_CONCURRENCY: ${WATCHLIST_SCAN_CONCURRENCY:-4}
+      # New (round 3): hard ceiling on TOTAL concurrent outbound HTTP calls
+      # across the whole /scan/watchlist request — every symbol's every
+      # inner job (price/fundamentals/news/events/prediction) shares this
+      # one budget via a semaphore, so outer fan-out above can never
+      # multiply into an overload. Defaults to MAX_PARALLEL_SCAN_WORKERS
+      # (same free-tier-safe ceiling /scan itself uses) if unset.
+      WATCHLIST_SCAN_HTTP_CONCURRENCY: ${WATCHLIST_SCAN_HTTP_CONCURRENCY:-8}
+      # Hard wall-clock budget for the whole /scan/watchlist request,
       # regardless of watchlist size or concurrency. Anything still running
       # past this is reported back as a skipped/"deadline exceeded" entry
       # instead of blocking the HTTP response — see api-gateway/main.py
       # scan_watchlist(). Keep this comfortably under whatever proxy/client
-      # timeout calls this endpoint (test harness here uses 25s).
-      WATCHLIST_SCAN_TIMEOUT_SECONDS: ${WATCHLIST_SCAN_TIMEOUT_SECONDS:-20}
+      # timeout calls this endpoint (test harness here uses 25s); lowered
+      # 20 -> 18 to leave more margin now that notification sending (see
+      # WATCHLIST_SCAN_GRACE_SECONDS below) no longer eats into that gap.
+      WATCHLIST_SCAN_TIMEOUT_SECONDS: ${WATCHLIST_SCAN_TIMEOUT_SECONDS:-18}
+      # New (round 3): after the deadline above, any still-running symbol
+      # lookups are handed to a background thread instead of being
+      # abandoned — this bounds how long that cleanup thread waits for them
+      # before force-releasing the HTTP client/thread pool, so a slow
+      # watchlist scan can never leak connections across repeated calls.
+      WATCHLIST_SCAN_GRACE_SECONDS: ${WATCHLIST_SCAN_GRACE_SECONDS:-30}
       # ── Oracle Autonomous DB (Oracle Cloud side only; empty on Render/Neon) ──
       ORACLE_DSN: ${ORACLE_DSN:-}
       ORACLE_USER: ${ORACLE_USER:-ADMIN}

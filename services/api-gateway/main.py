@@ -12,6 +12,7 @@ import gc
 import logging
 import difflib
 import uuid
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
@@ -2177,6 +2178,31 @@ def _send_scan_notification(recommendations: list, verdict: str, scanned: int, u
     except Exception as e:
         logger.warning("Failed to send scan notification: %s", e)
 
+def _cleanup_scan_resources(pool, client, not_done, deadline_seconds):
+    """Background-thread cleanup for /scan/watchlist stragglers.
+
+    Gives whatever didn't finish inside the request's own deadline a bounded
+    extra grace period to complete naturally (their results still only
+    write to caches, which the *next* /scan/watchlist call benefits from),
+    then force-releases the thread pool and HTTP client either way so a
+    slow watchlist scan can never leak connections/threads across calls.
+    """
+    grace = float(os.getenv("WATCHLIST_SCAN_GRACE_SECONDS", "30"))
+    try:
+        if not_done:
+            wait(not_done, timeout=grace)
+    except Exception:
+        pass
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
+    try:
+        client.close()
+    except Exception:
+        pass
+
+
 def _wake_notification_service() -> bool:
     try:
         resp = httpx.get(f"{NOTIFICATION_URL}/health", timeout=5)
@@ -3215,6 +3241,13 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
         )
 
 # ── Cached Market Movers Data ──────────────────────────────────────────────
+# Fix (30 Aug 2026): guards _get_nifty50_data's cold-cache fetch so
+# concurrent callers (top-gainers/top-losers/most-active all hit a cold
+# cache within milliseconds of each other on a fresh day) don't each
+# independently kick off their own full 50-symbol yfinance fetch. See the
+# function docstring below for the failure this caused.
+_nifty50_fetch_lock = threading.Lock()
+
 def _get_nifty50_data() -> List[dict]:
     today = datetime.now().strftime("%Y-%m-%d")
     cache_key = f"{MARKET_MOVERS_CACHE_PREFIX}{today}"
@@ -3223,34 +3256,64 @@ def _get_nifty50_data() -> List[dict]:
         logger.info("Serving cached market movers data for %s", today)
         return cached
 
-    logger.info("Fetching fresh market movers data from yfinance for %s", today)
-    nifty_symbols = _get_nifty_indices()[:50]
-    data = []
-    for sym in nifty_symbols:
-        try:
-            yf_ticker = resolve_ns_ticker(sym)
-            if not yf_ticker:
-                continue
-            ticker = yf.Ticker(yf_ticker)
-            hist = ticker.history(period="1d", interval="1m")
-            if hist.empty:
-                continue
-            latest = hist.iloc[-1]
-            prev_close = hist.iloc[0]["Close"]
-            change_pct = (latest["Close"] - prev_close) / prev_close * 100
-            data.append({
-                "symbol": sym,
-                "price": round(latest["Close"], 2),
-                "change": round(latest["Close"] - prev_close, 2),
-                "change_pct": round(change_pct, 2),
-                "volume": int(latest["Volume"]),
-                "high": round(latest["High"], 2),
-                "low": round(latest["Low"], 2),
-            })
-        except Exception as e:
-            logger.warning(f"Could not fetch {sym}: {e}")
-    _redis_set(cache_key, data, ttl=86400)
-    return data
+    # Fix (30 Aug 2026): test_20260830_134442.log — market/top-gainers and
+    # market/top-losers both timed out at 25.00s, back to back, right after
+    # /scan/watchlist also timed out. Two things were going on:
+    #   1. This function had no lock: top-gainers and top-losers both saw a
+    #      cache miss within the same request burst and each independently
+    #      started its own full 50-symbol sequential yfinance fetch —
+    #      doubling the work for the exact same "today" cache entry.
+    #   2. The fetch itself was a plain sequential for-loop over 50 tickers
+    #      with no bound on total time, so on a cold cache it could already
+    #      run long even alone.
+    # The lock below makes the second caller wait for the first fetch and
+    # reuse its result instead of duplicating it; the ThreadPoolExecutor
+    # below (bounded by the same MAX_PARALLEL_WORKERS ceiling used
+    # elsewhere in this file for yfinance-backed work) bounds the fetch
+    # itself to roughly 1/Nth of the old sequential time.
+    with _nifty50_fetch_lock:
+        # Re-check: another thread may have just finished fetching while
+        # we were waiting for the lock.
+        cached = _redis_get(cache_key)
+        if cached and isinstance(cached, list) and len(cached) > 0:
+            logger.info("Serving cached market movers data for %s (post-lock)", today)
+            return cached
+
+        logger.info("Fetching fresh market movers data from yfinance for %s", today)
+        nifty_symbols = _get_nifty_indices()[:50]
+
+        def _fetch_one(sym):
+            try:
+                yf_ticker = resolve_ns_ticker(sym)
+                if not yf_ticker:
+                    return None
+                ticker = yf.Ticker(yf_ticker)
+                hist = ticker.history(period="1d", interval="1m")
+                if hist.empty:
+                    return None
+                latest = hist.iloc[-1]
+                prev_close = hist.iloc[0]["Close"]
+                change_pct = (latest["Close"] - prev_close) / prev_close * 100
+                return {
+                    "symbol": sym,
+                    "price": round(latest["Close"], 2),
+                    "change": round(latest["Close"] - prev_close, 2),
+                    "change_pct": round(change_pct, 2),
+                    "volume": int(latest["Volume"]),
+                    "high": round(latest["High"], 2),
+                    "low": round(latest["Low"], 2),
+                }
+            except Exception as e:
+                logger.warning(f"Could not fetch {sym}: {e}")
+                return None
+
+        data = []
+        with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as ex:
+            for res in ex.map(_fetch_one, nifty_symbols):
+                if res:
+                    data.append(res)
+        _redis_set(cache_key, data, ttl=86400)
+        return data
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
 class WatchlistUpdate(BaseModel):
@@ -5071,31 +5134,43 @@ def scan_watchlist():
     # seconds each in the warm case, tens of seconds in the cold case (see
     # the decision/decide/RELIANCE timeout in the same test run). Serialized
     # across even a handful of watchlist symbols, that easily blows past any
-    # normal client/proxy timeout. Bounded concurrency (mirrors the pattern
-    # already used by refill_additional.py / weekend_hydrator.py) turns
-    # O(N × per-symbol time) into O(N / WATCHLIST_SCAN_CONCURRENCY ×
-    # per-symbol time) instead, without changing per-symbol behavior at all.
+    # normal client/proxy timeout. Bounded concurrency turns
+    # O(N × per-symbol time) into O(N / concurrency × per-symbol time)
+    # instead, without changing per-symbol behavior at all.
     #
-    # Fix (30 Aug 2026, round 2): concurrency alone still isn't a hard
-    # guarantee — test_20260830_131556.log shows /scan/watchlist itself
-    # timing out at 25.00s (status 000, i.e. the *client* gave up, not the
-    # server). With 4-way concurrency and a cold cache, N watchlist symbols
-    # take ceil(N/4) batches at up to ~5-6s/batch (fundamentals is the
-    # slowest single upstream call — see fundamental/analyze/RELIANCE at
-    # 5.43s in the same run), so anything past ~16-20 symbols was already
-    # over budget before any single call misbehaved. Two changes below:
-    # raise the default fan-out (analysis-intelligence-service is stateless
-    # and takes the extra load fine) and, more importantly, put a hard wall
-    # -clock deadline on the whole endpoint so it always responds inside
-    # that budget regardless of watchlist size — any symbol still running
-    # past the deadline is reported as skipped instead of blocking the
-    # response, and its inner jobs still populate the redis/kv caches they
-    # already write to, so the next call picks it up warm.
-    _SCAN_CONCURRENCY = int(os.getenv("WATCHLIST_SCAN_CONCURRENCY", "8"))
-    _SCAN_DEADLINE_SECONDS = float(os.getenv("WATCHLIST_SCAN_TIMEOUT_SECONDS", "20"))
+    # Fix (30 Aug 2026, round 2 — REVERTED, see round 3): raising
+    # WATCHLIST_SCAN_CONCURRENCY 4 -> 8 here made things *worse*:
+    # test_20260830_134442.log shows /scan/watchlist still timing out, and
+    # now market/top-gainers and market/top-losers (completely unrelated
+    # endpoints) started timing out too. Cause: this function's per-symbol
+    # concurrency is a *second* layer on top of each symbol's own 5-way
+    # inner job concurrency (price/fundamentals/news/events/prediction), so
+    # outer=8 meant up to 8 x 5 = 40 simultaneous outbound calls hitting
+    # analysis-intelligence-service and market-data-service at once. This
+    # codebase already has an established, deliberately conservative cap for
+    # exactly this reason — see MAX_PARALLEL_WORKERS above and its comment:
+    # "Higher values (12-20) spawn 4-5 internal HTTP calls per stock ->
+    # 50-100+ concurrent requests ... causing PoolTimeout / ReadTimeout and
+    # circuit-breaker opens". 40 concurrent calls from watchlist scan alone
+    # blew straight through that ceiling and starved every other endpoint
+    # sharing the same free-tier backends, which is exactly what the second
+    # test run showed.
+    #
+    # Fix (30 Aug 2026, round 3): one shared semaphore
+    # (_SCAN_HTTP_CONCURRENCY, aligned with MAX_PARALLEL_WORKERS, default 8)
+    # now caps TOTAL concurrent outbound calls across every symbol and every
+    # inner job in this request, regardless of outer fan-out — matching the
+    # pattern already used by /scan's own asyncio.Semaphore(8). Outer
+    # concurrency is back down to a modest default; it no longer needs to
+    # carry the load-limiting responsibility, the semaphore does.
+    _SCAN_CONCURRENCY = int(os.getenv("WATCHLIST_SCAN_CONCURRENCY", "4"))
+    _SCAN_HTTP_CONCURRENCY = int(os.getenv("WATCHLIST_SCAN_HTTP_CONCURRENCY", str(MAX_PARALLEL_WORKERS)))
+    _SCAN_DEADLINE_SECONDS = float(os.getenv("WATCHLIST_SCAN_TIMEOUT_SECONDS", "18"))
+    _http_sem = threading.BoundedSemaphore(max(1, _SCAN_HTTP_CONCURRENCY))
 
     def _scan_one_symbol(client: httpx.Client, symbol: str):
-        resp = client.get(f"{DECISION_URL}/decide/{symbol}")
+        with _http_sem:
+            resp = client.get(f"{DECISION_URL}/decide/{symbol}")
         resp.raise_for_status()
         raw = resp.json()
         normalized = _normalize_decision_response(raw, symbol)
@@ -5114,29 +5189,42 @@ def scan_watchlist():
         # concurrently bounds one symbol's wall time to the slowest single
         # lookup instead of the sum of all of them, on top of the
         # outer per-symbol concurrency already in place above.
+        # Each job below acquires the *shared* _http_sem (not a per-symbol
+        # one) before its actual network call — that's what keeps total
+        # concurrent outbound calls across the whole watchlist scan capped
+        # at _SCAN_HTTP_CONCURRENCY regardless of how many symbols/jobs are
+        # queued. Acquiring only around the call itself (not the whole job
+        # function) keeps cheap no-op jobs (e.g. price/news/events when
+        # already cached on `normalized`) from taking a slot they don't
+        # need.
         def _job_price():
             if normalized.get("close") is None:
-                return _fetch_price_from_quote(symbol)
+                with _http_sem:
+                    return _fetch_price_from_quote(symbol)
             return None
 
         def _job_fundamentals():
-            _merge_fundamentals(normalized, symbol)
+            with _http_sem:
+                _merge_fundamentals(normalized, symbol)
             return None
 
         def _job_news():
             if normalized.get("news_score") is None:
-                return _fetch_news(symbol)
+                with _http_sem:
+                    return _fetch_news(symbol)
             return None
 
         def _job_events():
             if normalized.get("event_risk") is False and not normalized.get("reasons", {}).get("event"):
-                return _fetch_events(symbol)
+                with _http_sem:
+                    return _fetch_events(symbol)
             return None
 
         def _job_prediction():
             if normalized.get("prediction_score") is None:
                 try:
-                    pred_resp = client.get(f"{PREDICTION_URL}/predict/{symbol}", timeout=60)
+                    with _http_sem:
+                        pred_resp = client.get(f"{PREDICTION_URL}/predict/{symbol}", timeout=30)
                     if pred_resp.status_code == 200:
                         return pred_resp.json()
                 except Exception as e:
@@ -5212,9 +5300,10 @@ def scan_watchlist():
     # deadline below existed. Now that the endpoint has its own explicit
     # wall-clock budget, a single upstream call hanging for 180s is exactly
     # the failure mode we need to bound, not paper over.
-    limits = httpx.Limits(max_connections=_SCAN_CONCURRENCY * 2, max_keepalive_connections=_SCAN_CONCURRENCY)
+    limits = httpx.Limits(max_connections=_SCAN_HTTP_CONCURRENCY * 2, max_keepalive_connections=_SCAN_HTTP_CONCURRENCY)
     client = httpx.Client(timeout=30, limits=limits)
     pool = ThreadPoolExecutor(max_workers=max(1, _SCAN_CONCURRENCY))
+    not_done = set()
     try:
         futures = {pool.submit(_scan_one_symbol, client, symbol): symbol for symbol in watchlist}
         done, not_done = wait(futures.keys(), timeout=_SCAN_DEADLINE_SECONDS)
@@ -5240,14 +5329,28 @@ def scan_watchlist():
                 "error": f"scan deadline ({_SCAN_DEADLINE_SECONDS:.0f}s) exceeded, skipped this run",
             })
     finally:
-        # wait=False + cancel_futures: don't let the still-running
-        # stragglers (or ones that never got a worker slot) hold the HTTP
-        # response hostage past the deadline above. cancel_futures drops
-        # anything not yet started; anything mid-flight simply finishes in
-        # the background — harmless since _scan_one_symbol's own jobs only
-        # write to caches, nothing here mutates `results`/`errors` after
-        # this point.
-        pool.shutdown(wait=False, cancel_futures=True)
+        # Fix (30 Aug 2026, round 3): round 2's `pool.shutdown(wait=False,
+        # cancel_futures=True)` here never closed `client` at all — every
+        # /scan/watchlist call that hit the deadline leaked an
+        # httpx.Client (and its open connection pool) for good, which on
+        # repeated calls compounds into exactly the kind of connection/
+        # resource exhaustion that starves unrelated endpoints. cancel_
+        # futures only drops jobs that hadn't started yet — anything mid-
+        # flight keeps running and still needs the client until it's done.
+        # Fix: hand the still-running stragglers, the pool, and the client
+        # to a background daemon thread that waits for them (bounded by its
+        # own grace period) and only then shuts down / closes — so
+        # resources always get released, just not on the response's clock.
+        if not_done:
+            threading.Thread(
+                target=_cleanup_scan_resources,
+                args=(pool, client, list(not_done), _SCAN_DEADLINE_SECONDS),
+                daemon=True,
+                name="watchlist-scan-cleanup",
+            ).start()
+        else:
+            pool.shutdown(wait=False)
+            client.close()
 
     results.sort(key=lambda r: r.get("combined_score", 0), reverse=True)
     actionable = [r for r in results if r.get("decision") in ("BUY NOW", "PREPARE TO BUY")]
@@ -5342,7 +5445,21 @@ def scan_watchlist():
         "partial": len(results) < len(watchlist) and any("deadline" in e.get("error", "") for e in errors),
     }
 
-    _send_scan_notification(result.get("recommendations", []), result["verdict"], result["scanned"], result["universe_size"])
+    # Fix (30 Aug 2026, round 3): this was a synchronous call on the
+    # response path — _send_scan_notification does a real outbound POST
+    # (timeout=15) plus a possible second CallMeBot POST (timeout=20), so
+    # on top of the scan deadline above it could add another 15-20s+ before
+    # the response went out, which is what pushed this endpoint from ~18s
+    # to over the client's 25s cutoff. Notifications are best-effort side
+    # effects, not something the caller is waiting on — send it from a
+    # background thread so it can take as long as it needs without holding
+    # up the /scan/watchlist response.
+    threading.Thread(
+        target=_send_scan_notification,
+        args=(result.get("recommendations", []), result["verdict"], result["scanned"], result["universe_size"]),
+        daemon=True,
+        name="watchlist-scan-notify",
+    ).start()
     return result
 
 # ── Market routes ────────────────────────────────────────────────────────────

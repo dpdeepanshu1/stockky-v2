@@ -282,6 +282,33 @@ app.add_middleware(
 
 
 @app.on_event("startup")
+async def _start_angelone_ws_feed():
+    """
+    §1 of the master prompt: AngelOne is meant to be the PRIMARY quote
+    source, with Yahoo/yfinance as fallback. angelone_client.py and
+    angelone_ws_feed.py were fully built for this, but nothing ever
+    called start_feed_background() at startup, so the feed never
+    connected and live_quotes/_LIVE never populated — the app kept
+    running entirely on Yahoo/yfinance regardless of AngelOne being
+    configured. This starts it, only when AngelOne creds are present.
+    """
+    try:
+        from angelone_client import get_session
+        if not get_session().is_configured():
+            logger.warning("angelone_ws_feed: ANGELONE_* env vars not set, not starting (falling back to Yahoo)")
+            return
+        from surprise_premarket import default_universe_from_env
+        import angelone_ws_feed
+        universe = default_universe_from_env()
+        if universe:
+            angelone_ws_feed.start_feed_background(universe)
+        else:
+            logger.warning("angelone_ws_feed: no universe configured (SURPRISE_UNIVERSE/SCAN_UNIVERSE), not starting")
+    except Exception as e:
+        logger.warning("angelone_ws_feed startup skipped: %s", e)
+
+
+@app.on_event("startup")
 async def _start_yahoo_ws_feed():
     """
     Point 1 continued: one persistent WebSocket connection to Yahoo's live
@@ -289,8 +316,10 @@ async def _start_yahoo_ws_feed():
     to the whole scan universe, replaces the vast majority of the
     per-symbol REST calls that were hitting yfinance/twelvedata/
     alphavantage/polygon rate limits (see the /quote/{symbol} waterfall —
-    it now checks this feed first). This is a different Yahoo backend from
-    the crumb-protected REST path, so it doesn't share that rate limit.
+    it now checks AngelOne then this feed). This is a different Yahoo
+    backend from the crumb-protected REST path, so it doesn't share that
+    rate limit. Runs regardless of AngelOne, so it's ready the moment
+    AngelOne quota/connection drops out.
     """
     try:
         from surprise_premarket import default_universe_from_env
@@ -1226,9 +1255,11 @@ def get_quote(symbol: str):
     """
     Short-circuit waterfall quote path (never parallel-fan-out):
 
-    0) Yahoo live WS feed (yahoo_ws_feed.py) — one persistent connection,
-       zero HTTP request, zero rate-limit exposure. Hit rate depends on
-       how long the feed has been subscribed/ticking for this symbol.
+    0) AngelOne live WS feed (angelone_ws_feed.py) — §1 primary source,
+       one persistent connection, zero HTTP request per call. Only hits
+       if ANGELONE_* creds are configured and the feed is ticking for
+       this symbol; falls through instantly otherwise.
+    0b) Yahoo live WS feed (yahoo_ws_feed.py) — same pattern, fallback.
     1) Soft / durable cache (if warm)
     2) Yahoo OHLCV (primary, $0)
     3) Yahoo Ticker.info (still $0)
@@ -1252,6 +1283,24 @@ def get_quote(symbol: str):
         )
 
     sym = normalize_symbol(symbol)
+
+    try:
+        import angelone_ws_feed
+        live = angelone_ws_feed.get_live_quote(sym)
+        if live and live.get("price"):
+            result = _pad_quote_response(sym, {
+                **live,
+                "name": sym,
+                "fetched_at": datetime.utcnow().isoformat(),
+            })
+            result = _sanitize_for_json(result)
+            result["source"] = "angelone_ws"
+            cache_key = f"quote:{sym}"
+            _cache_set(cache_key, result)
+            _fallback_set(cache_key, result)
+            return result
+    except Exception as e:
+        logger.debug("angelone_ws lookup %s: %s", sym, e)
 
     try:
         import yahoo_ws_feed

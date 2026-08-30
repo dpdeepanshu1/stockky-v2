@@ -932,27 +932,30 @@ def _get_momentum_movers() -> List[str]:
         except Exception as e:
             logger.debug("NSE movers %s: %s", endpoint, e)
 
-    # 2) Market-data service (already warm on gateway)
+    # 2) Gateway's own gainers/losers/most-active (wiring fix, 30-Aug session):
+    # this used to make an HTTP round-trip to MARKET_DATA_URL for
+    # /market/top-gainers, /market/top-losers, /market/most-active — but
+    # those three routes are defined on THIS service (api-gateway), not
+    # market-data-service. The call always 404'd against the wrong host and
+    # was silently swallowed by the try/except, so this source contributed
+    # zero symbols on every run. Calling the local functions directly is
+    # both correct and faster (no network round-trip for data already in
+    # this process) — and now also benefits from the nifty50-fetch lock +
+    # ThreadPoolExecutor fix below, since these all read through
+    # _get_nifty50_data().
     try:
-        base = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
-        for path in ("/market/top-gainers", "/market/top-losers", "/market/most-active"):
+        for getter in (market_top_gainers, market_top_losers, market_most_active):
             try:
-                r = httpx.get(f"{base}{path}", timeout=8)
-                if r.status_code != 200:
-                    continue
-                payload = r.json()
-                rows = payload if isinstance(payload, list) else payload.get("data") or payload.get("items") or []
-                for item in rows or []:
+                payload = getter()
+                for item in (payload or {}).get("data") or []:
                     if isinstance(item, dict):
                         sym = (item.get("symbol") or item.get("ticker") or "").upper().replace(".NS", "")
                         if sym:
                             movers.add(sym)
-                    elif isinstance(item, str) and item.isalpha():
-                        movers.add(item.upper())
             except Exception:
                 continue
     except Exception as e:
-        logger.debug("market-data movers: %s", e)
+        logger.debug("gateway movers: %s", e)
 
     # 3) Gateway's own /market endpoints (yfinance-backed) when available
     try:
@@ -1058,19 +1061,17 @@ def _get_event_symbols() -> List[str]:
     except Exception as e:
         logger.warning(f"Could not fetch event symbols: {e}")
 
-    # Extra: analysis-intelligence categorized bulk/insider from a seed set is too heavy;
-    # rely on event service + news. Also try market-data corporate actions if exposed.
-    try:
-        base = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
-        r = httpx.get(f"{base}/events/active-symbols", timeout=8)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, dict):
-                symbols.extend(data.get("symbols") or [])
-            elif isinstance(data, list):
-                symbols.extend([str(x) for x in data])
-    except Exception:
-        pass
+    # Wiring audit follow-up (30-Aug session, round 2): this "extra" block
+    # called {MARKET_DATA_URL}/events/active-symbols, which — like the
+    # /market/bulk-deals and /market/near-52w-high paths fixed earlier in
+    # this same audit — does not exist on market-data-service or anywhere
+    # else in the codebase. Always 404'd, silently caught, contributed
+    # nothing. The /symbols_with_events call above (against the actual
+    # event microservice) is the real, working source for this function;
+    # removed the dead fallback rather than leave a second copy of the
+    # same class of bug in the repo. A market-wide "active symbols with
+    # corporate actions" endpoint would need to be built on market-data-
+    # service or event-service first — that's a feature gap, not a fix.
 
     out = []
     seen = set()
@@ -1117,39 +1118,20 @@ def _get_bulk_deal_symbols() -> List[str]:
         except Exception as e:
             logger.debug("bulk deals %s: %s", endpoint, e)
 
-    # 2) Market-data service bulk/block endpoints (if exposed)
-    try:
-        base = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
-        for path in ("/market/bulk-deals", "/market/block-deals", "/nse/bulk-deals"):
-            try:
-                r = httpx.get(f"{base}{path}", timeout=10)
-                if r.status_code != 200:
-                    continue
-                payload = r.json()
-                rows = payload if isinstance(payload, list) else (payload.get("data") or payload.get("deals") or [])
-                for item in (rows or [])[:80]:
-                    if isinstance(item, dict):
-                        _add(item.get("symbol") or item.get("Symbol"))
-                    elif isinstance(item, str):
-                        _add(item)
-            except Exception:
-                continue
-    except Exception as e:
-        logger.debug("market-data bulk: %s", e)
-
-    # 3) Event service bulk/insider tags
-    try:
-        resp = httpx.get(f"{EVENT_URL}/bulk_deals", timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            rows = data if isinstance(data, list) else (data.get("symbols") or data.get("data") or [])
-            for item in rows[:80]:
-                if isinstance(item, dict):
-                    _add(item.get("symbol"))
-                elif isinstance(item, str):
-                    _add(item)
-    except Exception:
-        pass
+    # Wiring fix (30-Aug session): sources 2 and 3 used to call
+    # {MARKET_DATA_URL}/market/bulk-deals, /market/block-deals,
+    # /nse/bulk-deals, and {EVENT_URL}/bulk_deals. None of these routes
+    # are implemented on market-data-service or the event microservice —
+    # neither host exposes a market-wide bulk/block-deals list (the event
+    # service only has bulk_deals nested inside its per-symbol
+    # /events/{symbol} response, which requires already knowing the
+    # symbol — not useful for *discovering* symbols). Both blocks always
+    # 404'd and were silently caught, burning up to ~40s of timeout
+    # budget for zero rows on every run. Removed rather than faked; the
+    # NSE-direct source above is the only real source until/unless one of
+    # those services actually grows a market-wide bulk-deals endpoint
+    # (that's a feature addition, not a wiring fix — flagging for
+    # separate follow-up, not silently working around it here).
 
     logger.info("Bulk/block deal symbols: %s", len(out))
     return out[:100]
@@ -1167,38 +1149,34 @@ def _get_52w_extreme_symbols() -> List[str]:
         seen.add(s)
         out.append(s)
 
-    base = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
-    for path in (
-        "/market/near-52w-high",
-        "/market/near-52w-low",
-        "/market/52-week-high",
-        "/market/52-week-low",
-        "/market/top-gainers",
-        "/market/most-active",
-    ):
+    # Wiring fix (30-Aug session): this loop used to hit six paths on
+    # MARKET_DATA_URL. Four of them (/market/near-52w-high,
+    # /market/near-52w-low, /market/52-week-high, /market/52-week-low)
+    # are not implemented anywhere in the codebase — not on
+    # market-data-service, not on api-gateway, nowhere — so they always
+    # 404'd. The other two (/market/top-gainers, /market/most-active) ARE
+    # real, but they live on api-gateway itself, not market-data-service,
+    # so calling them via MARKET_DATA_URL also always 404'd. Net effect:
+    # this entire block contributed zero symbols on every single run,
+    # silently, with the fallback below doing all the real work. Fixed by
+    # calling the two real, locally-available functions directly (no
+    # network round-trip) and dropping the four endpoints that don't
+    # exist — implementing a real 52-week-high/low board is a genuine
+    # feature gap, not a wiring bug, and is a separate piece of work.
+    for getter in (market_top_gainers, market_most_active):
         try:
-            r = httpx.get(f"{base}{path}", timeout=10)
-            if r.status_code != 200:
-                continue
-            payload = r.json()
-            rows = payload if isinstance(payload, list) else (
-                payload.get("data") or payload.get("symbols") or payload.get("stocks") or []
-            )
-            for item in (rows or [])[:50]:
+            payload = getter()
+            for item in (payload or {}).get("data") or []:
                 if isinstance(item, dict):
-                    # Prefer names with ≥4% day move or near 52w when fields exist
                     chg = item.get("change_pct") or item.get("pChange") or item.get("pctChange")
                     try:
                         chg_f = abs(float(chg)) if chg is not None else None
                     except (TypeError, ValueError):
                         chg_f = None
-                    near = item.get("near_52w_high") or item.get("near_52w_low") or item.get("at_52w_high")
-                    if near or chg_f is None or chg_f >= 3.0:
+                    if chg_f is None or chg_f >= 3.0:
                         _add(item.get("symbol") or item.get("Symbol") or item.get("ticker"))
-                elif isinstance(item, str):
-                    _add(item)
         except Exception as e:
-            logger.debug("52w/movers %s: %s", path, e)
+            logger.debug("52w/movers %s: %s", getter.__name__, e)
 
     # NSE gainers already partially covered; add all-time/52w boards if present
     for endpoint, key in (

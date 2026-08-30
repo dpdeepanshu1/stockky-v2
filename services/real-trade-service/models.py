@@ -313,3 +313,19 @@ class TradeAuditLog(Base):
     occurred_at = Column(DateTime, nullable=False, default=_now)
 
     __table_args__ = (Index("ix_trade_audit_log_action_time", "action", "occurred_at"),)
+
+
+# ── Market Regime History (for adaptive threshold computation) ───────────────
+# Added by adaptive_thresholds.py improvement. One row per market_score reading
+# recorded during entry_engine's regime fetch. Pruned automatically to trailing
+# ADAPTIVE_HISTORY_DAYS. Provides the data for the 20th-percentile adaptive
+# regime gate instead of the frozen static threshold.
+class MarketRegimeHistory(Base):
+    """Records market_score readings for adaptive regime gate computation."""
+    __tablename__ = "market_regime_history"
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    score       = Column(Float, nullable=False)
+    recorded_at = Column(DateTime, nullable=False, default=_now)
+
+    __table_args__ = (Index("ix_market_regime_history_recorded_at", "recorded_at"),)

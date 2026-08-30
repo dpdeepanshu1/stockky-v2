@@ -778,40 +778,41 @@ def _get_all_nse_securities() -> List[str]:
                 symbols.append(item["symbol"].upper())
     logger.info(f"Fetched {len(symbols)} securities from NSE")
     if not symbols:
+        # §3: NSE live API unreachable — use bhavcopy universe (real EQ/BE/BZ
+        # symbols that actually traded, independent of the live JSON API).
+        try:
+            resp = httpx.get(
+                f"{MARKET_DATA_URL}/bhavcopy/universe",
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+            symbols = resp.json().get("symbols") or []
+            logger.warning(
+                "NSE live API unreachable — using bhavcopy universe fallback "
+                "(%d symbols)", len(symbols)
+            )
+        except Exception as e:
+            logger.error("bhavcopy universe fallback failed: %s", e)
+            symbols = []
+
+    if not symbols:
+        # Absolute last resort — both NSE live API and bhavcopy are down.
+        # Keep this list but it is NEVER the expected steady-state path.
         symbols = [
             "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "HCLTECH",
             "ITC", "SBIN", "BHARTIARTL", "KOTAKBANK", "LT", "M&M", "MARUTI",
-            "NESTLEIND", "NTPC", "ONGC", "POWERGRID", "SBILIFE", "SUNPHARMA",
-            "TATAMOTORS", "TATASTEEL", "WIPRO", "ADANIENT", "ADANIPORTS",
-            "ASIANPAINT", "AXISBANK", "BAJAJFINSV", "BRITANNIA", "CIPLA",
-            "COALINDIA", "DIVISLAB", "DRREDDY", "EICHERMOT", "GRASIM",
-            "HDFCLIFE", "HEROMOTOCO", "HINDALCO", "HINDUNILVR", "INDUSINDBK",
-            "JSWSTEEL", "LTIM", "SHRIRAMFIN", "TATACONSUM", "TRENT", "TITAN",
-            "ULTRACEMCO", "BAJAJ-AUTO", "BPCL", "APOLLOHOSP", "BAJFINANCE",
-            "BANDHANBNK", "BIOCON", "BOSCHLTD", "CHOLAFIN", "DABUR", "DALBHARAT",
-            "DIXON", "DMART", "ESCORTS", "FEDERALBNK", "GODREJCP", "GODREJPROP",
-            "HAVELLS", "HINDZINC", "IOC", "IRCTC", "LICHSGFIN", "MUTHOOTFIN",
-            "NAUKRI", "NMDC", "PAGEIND", "PETRONET", "PIIND", "PNB", "RBLBANK",
-            "SAIL", "SRTRANSFIN", "TATACOMM", "TECHM", "TORNTPHARM", "VEDL",
-            "ZOMATO", "IDEA", "ABFRL", "BANKBARODA", "BHEL", "CANBK", "HAL",
-            "IBULHSGFIN", "JINDALSTEL", "JUBLFOOD", "MCDOWELL-N", "MPHASIS",
-            "PIDILITIND", "SIEMENS", "UPL", "VBL", "YESBANK", "GAIL",
-            "AARTIIND", "ABB", "ADANIGREEN", "ADANITRANS", "ALKEM", "AMBER",
-            "ASHOKLEY", "ASTRAZEN", "AUROPHARMA", "BALKRISIND", "BERGEPAINT",
-            "BLUESTARCO", "CARBORUNIV", "CENTRALBK", "CGPOWER", "CISCO", "COCHINSHIP",
-            "COROMANDEL", "CROMPTON", "CUMMINSIND", "DELTACORP", "DIVISLAB",
-            "DLF", "EIDPARRY", "EXIDEIND", "FORTIS", "GMRINFRA", "GODREJIND",
-            "GREENPLY", "HINDPETRO", "IDEA", "INDIAMART", "INDIGO", "JSWENERGY",
-            "JUBILANT", "KPITTECH", "KPRMILL", "LALPATHLAB", "LUPIN", "MCX",
-            "MINDACORP", "MOTHERSUMI", "NATCOPHARM", "NAVINFLUOR", "NEULANDLAB",
-            "NILKAMAL", "NLCINDIA", "OIL", "PERSISTENT", "PFC", "PHOENIXLTD",
-            "PRESTIGE", "RAYMOND", "RECLTD", "RENUKA", "RITES", "RVNL",
-            "SCHAEFFLER", "SHREECEM", "SONATSOFTW", "SUNTV", "SUPRAJIT",
-            "SYRMA", "TATAELXSI", "TATAMTRDVR", "TATAPOWER", "TATATECH",
-            "TIMKEN", "TORNTPHARM", "TRIDENT", "TVSMOTOR", "WELSPUNIND", "WHIRLPOOL",
-            "WOCKPHARMA", "ZEEL", "ZYDUSWELL"
+            "NESTLEIND", "NTPC", "ONGC", "POWERGRID", "BAJFINANCE", "BAJAJFINSV",
+            "WIPRO", "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT",
+            "AXISBANK", "BPCL", "BRITANNIA", "CIPLA", "COALINDIA",
+            "DIVISLAB", "DRREDDY", "EICHERMOT", "GRASIM", "HDFCLIFE",
+            "HEROMOTOCO", "HINDALCO", "HINDUNILVR", "INDUSINDBK", "JSWSTEEL",
+            "LTIM", "LTTS", "MANKIND", "MOTHERSON", "MUTHOOTFIN",
+            "PIDILITIND", "RECLTD", "SHRIRAMFIN", "SUNPHARMA", "TATACONSUM",
+            "TATAMOTORS", "TATASTEEL", "TECHM", "TITAN", "TORNTPOWER",
+            "TRENT", "ULTRACEMCO", "UPL", "VEDL", "ZOMATO",
         ]
-        logger.warning(f"Using enhanced static fallback list with {len(symbols)} symbols")
+        logger.warning("Using static last-resort list with %d symbols (both live sources down)", len(symbols))
+
     return _filter_equities(symbols)
 
 def _get_nifty_indices() -> List[str]:
@@ -877,7 +878,19 @@ def _get_recent_ipos() -> List[str]:
         pass
     symbols = list(dict.fromkeys(symbols))  # dedupe preserve order
     if not symbols:
+        # §3: try ipo_scanner's independent calendar source before dropping to static list
+        try:
+            from ipo_scanner import fetch_ipoalerts_calendar
+            alt_rows = fetch_ipoalerts_calendar()
+            symbols = [r.get("symbol") for r in (alt_rows or []) if r.get("symbol")]
+            if symbols:
+                logger.info("_get_recent_ipos: ipoalerts fallback returned %d symbols", len(symbols))
+        except Exception as e:
+            logger.warning("ipoalerts fallback for recent-ipos failed: %s", e)
+
+    if not symbols:
         symbols = ["JIOFIN", "BLUESTONE", "CUPID", "IREDA", "RVNL", "HUDCO", "RAILTEL", "IRFC", "MVELECTRO"]
+        logger.warning("_get_recent_ipos: using static 9-name fallback list")
     return symbols
 
 def _get_momentum_movers() -> List[str]:

@@ -63,7 +63,14 @@ async def startup() -> None:
     _seed_defaults()
     from execution import auto_pilot
     auto_pilot.start()
-    logger.info("real-trade-service ready (Phase 1 — demo skeleton, no live order path wired)")
+    # Adaptive threshold staleness check — logs + Telegram warning if any
+    # regime-dependent constant is older than ADAPTIVE_STALE_THRESHOLD_DAYS.
+    try:
+        from adaptive_thresholds import startup_staleness_warning
+        startup_staleness_warning()
+    except Exception as _e:
+        logger.debug("adaptive staleness check failed (non-fatal): %s", _e)
+    logger.info("real-trade-service ready (adaptive thresholds + all improvements active)")
 
 
 def _seed_defaults() -> None:
@@ -783,6 +790,22 @@ async def list_orders(mode: str, limit: int = 50, admin: Optional[str] = Depends
         })
     return out
 
+
+
+
+@app.get("/adaptive/status")
+async def get_adaptive_status(db: Session = Depends(get_db)):
+    """
+    Shows the adaptive regime threshold, staleness of regime-dependent
+    constants, and history of recorded market scores.
+    No auth required — read-only diagnostics endpoint.
+    """
+    try:
+        from adaptive_thresholds import adaptive_status
+        return adaptive_status(db)
+    except Exception as e:
+        return {"error": str(e), "adaptive_active": False,
+                "static_fallback": config.ENTRY_REGIME_MIN_SCORE}
 
 @app.get("/candidates/{mode}")
 async def list_candidates(

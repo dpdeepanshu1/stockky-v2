@@ -38,6 +38,10 @@ MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7
 # have. Treat this as a reasonable prior that replaces one-size-fits-all
 # thresholds, not a precise live benchmark. yfinance's `sector` field
 # values are the dict keys.
+# §7 — SECTOR_TYPICAL_PE is kept as the static fallback only.
+# The live path reads from fundamentals_cache (DB) via sector_typical_pe_from_db().
+# If DB unavailable, falls back to this dict. Never delete this dict — it's the
+# last-resort floor for when both the DB and any live fetch are unavailable.
 SECTOR_TYPICAL_PE = {
     "Technology": 26,
     "Financial Services": 17,
@@ -50,8 +54,61 @@ SECTOR_TYPICAL_PE = {
     "Utilities": 16,
     "Real Estate": 22,
     "Communication Services": 20,
+    # Coarse sectoral index labels from symbol_master (§4)
+    "Bank": 15,
+    "IT": 26,
+    "Auto": 22,
+    "Pharma": 28,
+    "FMCG": 45,
+    "Metal": 12,
+    "Realty": 22,
+    "Media": 20,
+    "PSU Bank": 10,
+    "Private Bank": 16,
+    "Financial Services": 17,
+    "Energy": 11,
 }
-DEFAULT_TYPICAL_PE = 22  # broad-market fallback when sector is unknown or not in the table
+DEFAULT_TYPICAL_PE = 22
+
+
+def sector_typical_pe_from_db(sector: str) -> float:
+    """
+    §7 — Live sector P/E from fundamentals_cache table (median of cached PE ratios
+    for all active symbols in the sector). Falls back to SECTOR_TYPICAL_PE dict
+    if DB unavailable, sector has < 8 samples, or values are stale.
+    """
+    if not sector:
+        return float(SECTOR_TYPICAL_PE.get(sector, DEFAULT_TYPICAL_PE))
+    try:
+        db_url = (
+            os.getenv("CACHE_DATABASE_URL")
+            or os.getenv("DATABASE_URL")
+            or ""
+        )
+        if not db_url:
+            raise ValueError("no db url")
+        if db_url.startswith("postgres://"):
+            db_url = "postgresql://" + db_url[len("postgres://"):]
+        from sqlalchemy import create_engine, text as _text
+        import statistics as _stats
+        engine = create_engine(db_url, pool_pre_ping=True, pool_size=1,
+                               max_overflow=0, connect_args={"connect_timeout": 5})
+        with engine.connect() as conn:
+            rows = conn.execute(_text("""
+                SELECT (f.data_json->>'pe_ratio')::float AS pe
+                FROM fundamentals_cache f
+                JOIN symbol_master s ON s.current_symbol = f.symbol
+                WHERE s.sector = :sector
+                  AND s.status = 'active'
+                  AND f.updated_at > now() - interval '30 days'
+                  AND f.data_json->>'pe_ratio' IS NOT NULL
+            """), {"sector": sector}).fetchall()
+        vals = [float(r[0]) for r in rows if r[0] and float(r[0]) > 0]
+        if len(vals) >= 8:
+            return _stats.median(vals)
+    except Exception:
+        pass
+    return float(SECTOR_TYPICAL_PE.get(sector, DEFAULT_TYPICAL_PE))
 
 def _normalize_debt_to_equity(val, sector: str | None = None):
     """Yahoo often returns debtToEquity as percent (e.g. 95.4 = 0.954x)."""
@@ -77,7 +134,7 @@ def _sector_relative_pe_score(pe_ratio, sector: str | None):
     range instead of one fixed threshold for every stock."""
     if pe_ratio is None or pe_ratio <= 0:
         return 0, None
-    typical = SECTOR_TYPICAL_PE.get(sector, DEFAULT_TYPICAL_PE)
+    typical = sector_typical_pe_from_db(sector)  # §7 — DB-backed, falls back to dict
     ratio = pe_ratio / typical
     sector_label = sector or "broad market"
     if ratio < 0.7:

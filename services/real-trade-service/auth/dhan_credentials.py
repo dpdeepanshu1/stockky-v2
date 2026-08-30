@@ -1,3 +1,4 @@
+import os
 """
 auth/dhan_credentials.py — Layer 2 auth (the linked Dhan account).
 
@@ -235,20 +236,68 @@ def disarm_on_invalid_ip(db: Session, mode: str, err: str) -> bool:
 
 
 def refresh_if_totp_enabled(db: Session) -> bool:
-    """Opt-in auto-refresh path (decision 4). No-ops and returns False
-    unless config.DHAN_TOTP_ENABLED is set — in the default manual-paste
-    mode, an expired token is surfaced to the admin (and auto-disarms
-    trading) rather than silently retried. Implementing the actual TOTP
-    call is deferred until DHAN_TOTP_ENABLED is actually turned on for a
-    real account, since it needs a live TOTP secret to test against —
-    wiring it blind here would be untestable and is exactly the kind of
-    "looks done but was never actually exercised" code this project is
-    trying to avoid. See DhanHQ's /app/generateAccessToken docs."""
+    """
+    §2 — TOTP auto-refresh for Dhan access token.
+
+    Calls Dhan's /app/generateAccessToken endpoint with a fresh TOTP code.
+    Enabled only when DHAN_TOTP_ENABLED=true (default: false — manual paste).
+
+    FIELD NAME NOTE: Verify accessToken vs access_token against a live
+    sandbox call. Code logs all response keys on first call for confirmation.
+
+    Called by cycle_runner at the start of every REAL cycle, and by the
+    notification-scheduler's TOTP refresh cron (every 12-20h).
+    """
     if not config.DHAN_TOTP_ENABLED:
         return False
-    logger.warning(
-        "DHAN_TOTP_ENABLED=true but auto-refresh is not yet implemented — "
-        "falling back to manual reauthentication. Wire this in execution/dhan_client.py "
-        "once a real TOTP-enabled Dhan account is available to test against."
-    )
-    return False
+
+    totp_secret = os.environ.get("DHAN_TOTP_SECRET", "")
+    client_id   = os.environ.get("DHAN_CLIENT_ID", "")
+    dhan_pin    = os.environ.get("DHAN_PIN", "")
+
+    if not totp_secret or not client_id:
+        logger.error(
+            "DHAN_TOTP_ENABLED=true but DHAN_TOTP_SECRET or DHAN_CLIENT_ID not set."
+        )
+        return False
+
+    try:
+        import pyotp
+        totp_code = pyotp.TOTP(totp_secret).now()
+        import httpx as _httpx
+        r = _httpx.post(
+            "https://auth.dhan.co/app/generateAccessToken",
+            params={"dhanClientId": client_id, "pin": dhan_pin, "totp": totp_code},
+            timeout=15.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+        # Log keys so field name can be verified against live sandbox response
+        logger.info("Dhan TOTP refresh response keys: %s", list(data.keys()))
+        new_token = (
+            data.get("accessToken")
+            or data.get("access_token")
+            or (data.get("data") or {}).get("accessToken")
+            or (data.get("data") or {}).get("access_token")
+        )
+        if not new_token:
+            logger.error(
+                "refresh_if_totp_enabled: no token field in response. Raw: %s", data
+            )
+            return False
+        save_credentials(db, client_id, new_token)
+        logger.info("Dhan TOTP token refreshed successfully.")
+        try:
+            from notifier import notify_sync
+            notify_sync("🔑 *Dhan TOTP token refreshed* — new token saved.")
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        logger.error("refresh_if_totp_enabled failed: %s", e)
+        try:
+            from notifier import notify_sync
+            notify_sync(f"🚨 *Dhan TOTP refresh FAILED*\n{str(e)[:300]}")
+        except Exception:
+            pass
+        return False

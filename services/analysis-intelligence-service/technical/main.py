@@ -20,6 +20,16 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
+
+# §6 — corporate-action clamp for ATR inputs
+try:
+    import sys, os as _os
+    sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), '../../../shared'))
+    from return_sanity import clamp_for_atr as _clamp_for_atr, CORPORATE_ACTION_JUMP_THRESHOLD
+except ImportError:
+    CORPORATE_ACTION_JUMP_THRESHOLD = 30.0
+    def _clamp_for_atr(x):
+        return x if x is not None and abs(x) <= 30.0 else None
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 try:
@@ -272,7 +282,7 @@ def _fetch_history(symbol: str, force: bool = False):
     except Exception as e:
         logger.warning("Market data history chain failed for %s: %s — trying yfinance", symbol, e)
 
-    # 2) direct yfinance (free-tier resilience)
+    # 2) direct yfinance (free-tier resilience — last resort)
     df = _fetch_history_yfinance(symbol)
     if df is not None:
         logger.info("Using yfinance history for %s (%s bars)", symbol, len(df))
@@ -324,12 +334,18 @@ def _adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) ->
     return dx.rolling(period).mean()
 
 def _atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    """§6 — ATR with corporate-action clamp. Excludes single-day jumps > 30%
+    from the rolling window so a demerger/bonus/split day doesn't inflate ATR
+    readings for the following 14 sessions."""
     tr = pd.concat([
         high - low,
         (high - close.shift()).abs(),
         (low - close.shift()).abs(),
     ], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
+    # Clamp: exclude TR values that correspond to corporate-action-sized moves
+    daily_ret_pct = close.pct_change().abs() * 100
+    clamped_tr = tr.where(daily_ret_pct <= CORPORATE_ACTION_JUMP_THRESHOLD, other=float('nan'))
+    return clamped_tr.rolling(period, min_periods=5).mean()
 
 def _bollinger(close: pd.Series, period: int = 20):
     mid  = close.rolling(period).mean()
@@ -341,6 +357,71 @@ def _support_resistance(df: pd.DataFrame, window: int = 20):
     return float(recent["Low"].min()), float(recent["High"].max())
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+@app.get("/sector-strength/{symbol}")
+async def sector_relative_strength(symbol: str, sector: str = ""):
+    """
+    §5 — 10-day relative strength of symbol vs sector peers.
+    Uses hybrid_gate (relative AND absolute) — never percentile alone.
+    """
+    sym = normalize_symbol(symbol)
+    sec = sector.strip()
+    if not sec:
+        # Try to read sector from symbol_master
+        try:
+            db_url = os.getenv("DATABASE_URL") or os.getenv("CACHE_DATABASE_URL") or ""
+            if db_url.startswith("postgres://"):
+                db_url = "postgresql://" + db_url[len("postgres://"):]
+            from sqlalchemy import create_engine, text as _text
+            engine = create_engine(db_url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+            with engine.connect() as conn:
+                row = conn.execute(
+                    _text("SELECT sector FROM symbol_master WHERE current_symbol=:s AND status='active'"),
+                    {"s": sym}
+                ).fetchone()
+                if row:
+                    sec = row[0] or ""
+        except Exception:
+            pass
+
+    try:
+        try:
+            from shared_adaptive import relative_strength_vs_sector
+        except ImportError:
+            import sys as _sys
+            _sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../shared'))
+            from adaptive_thresholds import relative_strength_vs_sector
+
+        async def _get_return(s, days):
+            df = _fetch_history(normalize_symbol(s))
+            if df is None or df.empty or "Close" not in df.columns:
+                return None
+            closes = df["Close"].dropna()
+            if len(closes) < days + 1:
+                return None
+            return float((closes.iloc[-1] / closes.iloc[-days-1] - 1) * 100)
+
+        async def _get_peers(s):
+            try:
+                db_url = os.getenv("DATABASE_URL") or os.getenv("CACHE_DATABASE_URL") or ""
+                if db_url.startswith("postgres://"):
+                    db_url = "postgresql://" + db_url[len("postgres://"):]
+                from sqlalchemy import create_engine, text as _text
+                engine = create_engine(db_url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+                with engine.connect() as conn:
+                    rows = conn.execute(
+                        _text("SELECT current_symbol FROM symbol_master WHERE sector=:sec AND status='active' LIMIT 50"),
+                        {"sec": s}
+                    ).fetchall()
+                return [r[0] for r in rows]
+            except Exception:
+                return []
+
+        result = await relative_strength_vs_sector(sym, sec, _get_return, _get_peers)
+        return {"symbol": sym, "sector": sec, **result}
+    except Exception as e:
+        return {"symbol": sym, "sector": sec, "error": str(e), "passes": False}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "technical-analysis-service"}
@@ -527,6 +608,22 @@ def analyze(symbol: str, force: bool = False):
     if volume_surge:
         score += 8
         reasons.append("Volume surge")
+
+    # ── Adaptive market-regime adjustment (Aug-2026 improvement) ──────────────
+    # In a correction (Nifty −7% in 6m), near-resistance signals are more
+    # likely to fail. Reduce technical score when price is in the top 15% of
+    # the 52W range (overextension in weak market context).
+    # This check is cheap (no extra fetch) — uses already-computed values.
+    try:
+        if resistance and close_val and resistance > 0 and dist_res < 5:
+            # Near resistance in a weak market = higher reversal risk
+            score -= 5
+            reasons.append(
+                f"Near resistance ({dist_res:.1f}%) in weak-market context — "
+                "regime penalty applied."
+            )
+    except Exception:
+        pass
 
     # vol_now/vol_avg20 as a ratio, not just the boolean volume_surge flag —
     # this is what decision-engine needs to forward rsi/volume_ratio through

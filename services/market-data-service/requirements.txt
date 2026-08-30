@@ -13,3 +13,5 @@ psycopg2-binary==2.9.9
 # Oracle Autonomous DB driver (thin mode) — used only when ORACLE_* env is set (Oracle Cloud VM).
 # Harmless on Render/Neon: pure-Python, imported lazily, never loaded on the Postgres path.
 oracledb==2.5.1
+pyotp==2.9.0  # §1 AngelOne TOTP session auth
+python-dateutil==2.9.0

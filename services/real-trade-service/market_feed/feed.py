@@ -43,6 +43,11 @@ logger = logging.getLogger("real-trade-market-feed")
 # Mirrors every other Stockky service's MARKET_DATA_URL env convention
 # (decision-prediction-service/decision/main.py sets the same default host)
 # rather than guessing/deriving one from API_GATEWAY_URL.
+# §1 — max age for live_quotes rows before we consider them stale.
+# real-trade-service staleness guard: if the live_quotes row is older than
+# this, fall through to the yfinance-backed market-data-service /quote endpoint.
+LIVE_QUOTE_MAX_AGE_S = float(os.getenv("LIVE_QUOTE_MAX_AGE_S", "5.0"))
+
 MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
 
 
@@ -58,11 +63,46 @@ class Tick:
 
 
 async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
-    """Single-symbol quote via market-data-service's existing /quote/{symbol}
-    (the exact endpoint hardened earlier this session — genuinely delisted
-    symbols now fail fast with a clean 404 instead of a slow multi-source
-    waterfall). Returns None on any failure; callers must treat that as
-    'stale/unavailable', which risk_engine's check #7 already handles."""
+    """
+    §1 — Quote with live_quotes-first cascade:
+      1. live_quotes table (AngelOne WS feed, freshness ≤ LIVE_QUOTE_MAX_AGE_S)
+      2. market-data-service /quote/{symbol} (yfinance-backed, existing)
+
+    The staleness guard: if the live_quotes row is older than LIVE_QUOTE_MAX_AGE_S
+    seconds, treat it as stale and fall through to source 2. This blocks trading
+    on frozen data rather than acting on a stale AngelOne tick.
+    """
+    # ── Source 1: live_quotes table ────────────────────────────────────────────
+    try:
+        r_lq = await client.get(f"{MARKET_DATA_URL}/live-quote/{symbol}", timeout=3.0)
+        if r_lq.status_code == 200:
+            lq = r_lq.json()
+            ltp = lq.get("ltp")
+            updated_at_str = lq.get("updated_at")
+            if ltp and float(ltp) > 0 and updated_at_str:
+                from dateutil import parser as _dp
+                updated_at = _dp.parse(updated_at_str)
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=timezone.utc)
+                age_s = (datetime.now(timezone.utc) - updated_at).total_seconds()
+                if age_s <= LIVE_QUOTE_MAX_AGE_S:
+                    ohlc = lq.get("ohlc") or {}
+                    return Tick(
+                        symbol=symbol,
+                        price=float(ltp),
+                        as_of=updated_at,
+                        atr=None,  # ATR comes from history, not tick feed
+                        source=f"live_quotes({lq.get('source','angelone')})",
+                    )
+                else:
+                    logger.debug(
+                        "live_quotes %s is %.1fs old > %.1fs limit — falling through",
+                        symbol, age_s, LIVE_QUOTE_MAX_AGE_S,
+                    )
+    except Exception as e:
+        logger.debug("live_quotes read failed for %s (non-fatal): %s", symbol, e)
+
+    # ── Source 2: market-data-service /quote (yfinance-backed) ─────────────────
     try:
         r = await client.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=8.0)
         if r.status_code != 200:
@@ -85,7 +125,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
             source=q.get("source") or "market-data-service",
         )
     except Exception as e:
-        logger.debug("get_quote(%s) failed: %s", symbol, e)
+        logger.debug("get_quote(%s) source-2 failed: %s", symbol, e)
         return None
 
 

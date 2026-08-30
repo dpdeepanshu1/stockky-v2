@@ -43,12 +43,20 @@ async def run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str 
 
 async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
     if mode == "REAL":
-        # Real-time token check FIRST, before spending any Dhan calls or
-        # doing any sizing this cycle: our local 24h countdown is correct
-        # but can't see a token Dhan invalidated early (new token generated
-        # elsewhere, clock drift, revocation). If Dhan itself rejects the
-        # token, auto-disarm right here rather than proceeding to size and
-        # attempt orders that will just fail auth one by one.
+        # §2 — TOTP refresh: attempt before the liveness check so a freshly-
+        # expired token is renewed before we even call enforce_live_token.
+        # Non-blocking: TOTP failure doesn't disarm — enforce_live_token will
+        # catch any actual auth problem on the next line.
+        try:
+            from auth.dhan_credentials import refresh_if_totp_enabled
+            refresh_if_totp_enabled(db)
+        except Exception as _totp_err:
+            logger.debug("TOTP refresh attempt failed (non-fatal): %s", _totp_err)
+
+        # §2 — Real-time token liveness check (original, unchanged).
+        # A token Dhan already killed early (regenerated on Dhan Web, clock
+        # drift) disarms the gate and Telegrams immediately, instead of
+        # letting every order in the cycle fail silently one-by-one.
         from auth.dhan_credentials import enforce_live_token
         token_ok, token_err = enforce_live_token(db, mode)
         if not token_ok:

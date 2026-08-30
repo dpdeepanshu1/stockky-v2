@@ -45,6 +45,38 @@ CONCURRENCY = int(os.getenv("HYDRATOR_CONCURRENCY", "4"))
 DELAY_SEC = float(os.getenv("HYDRATOR_DELAY_SEC", "0"))
 
 
+def _check_regime_constant_staleness() -> None:
+    """Log a warning when any regime-dependent trading constant is stale (>30 days).
+    Called at hydrator start so the warning appears in scheduler logs weekly."""
+    from datetime import datetime, timezone
+    REGIME_CONSTANTS = {
+        "ENTRY_REGIME_MIN_SCORE":     ("38",   "2026-08-28"),
+        "ENTRY_MIN_REWARD_RISK":      ("2.0",  "2026-08-28"),
+        "CANDIDATE_MIN_CONVICTION":   ("55",   "2026-08-28"),
+        "CANDIDATE_DOWNTREND_6M_PCT": ("-10.0","2026-08-28"),
+    }
+    now = datetime.now(timezone.utc)
+    for name, (val, reviewed) in REGIME_CONSTANTS.items():
+        try:
+            age = (now - datetime.strptime(reviewed, "%Y-%m-%d").replace(tzinfo=timezone.utc)).days
+            if age >= 30:
+                logger.warning(
+                    "STALE REGIME CONSTANT: %s=%s (last reviewed %s, %dd ago). "
+                    "Re-run market research if market regime has changed.",
+                    name, val, reviewed, age
+                )
+        except Exception:
+            pass
+
+
+# Sector priority for hydration: outperforming sectors first (Aug-2026 research).
+# Symbols from these sectors will be hydrated in the first batch pass.
+_PRIORITY_SECTORS = frozenset({
+    "bank", "banking", "psu", "auto", "automobile", "metal", "steel",
+    "private bank", "nbfc", "finance",
+})
+
+
 def _fetch_universe() -> list[str]:
     urls = [
         f"{API_GATEWAY_URL}/scan/universe",

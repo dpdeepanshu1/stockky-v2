@@ -169,3 +169,48 @@ def startup_config_errors() -> list[str]:
     if DHAN_TOTP_ENABLED and not DHAN_TOTP_SECRET:
         errors.append("DHAN_TOTP_ENABLED=true but DHAN_TOTP_SECRET is not set.")
     return errors
+
+# ── Trading thresholds — two categories (STRUCTURAL and REGIME-DEPENDENT) ────
+#
+# STRUCTURAL (permanent hygiene — never change based on market conditions):
+#   These are mathematical safety caps, not market-regime judgments. They
+#   should stay constant regardless of bull/bear market.
+#
+RISK_MAX_POSITION_CONCENTRATION_PCT = float(os.getenv("RISK_MAX_POSITION_CONCENTRATION_PCT", "25.0"))
+RISK_MIN_STOCK_PRICE                = float(os.getenv("RISK_MIN_STOCK_PRICE", "20.0"))
+CANDIDATE_MIN_STOCK_PRICE           = float(os.getenv("CANDIDATE_MIN_STOCK_PRICE", "20.0"))
+CANDIDATE_MAX_ATR_PCT               = float(os.getenv("CANDIDATE_MAX_ATR_PCT", "7.0"))
+CANDIDATE_VOLUME_HEALTH_RATIO       = float(os.getenv("CANDIDATE_VOLUME_HEALTH_RATIO", "0.80"))
+CANDIDATE_BULLISH_THRESHOLD_PCT     = float(os.getenv("CANDIDATE_BULLISH_THRESHOLD_PCT", "0.5"))
+ENTRY_MAX_DRIFT_ATR                 = float(os.getenv("ENTRY_MAX_DRIFT_ATR", "0.75"))
+ENTRY_CONVICTION_MIDPOINT           = float(os.getenv("ENTRY_CONVICTION_MIDPOINT", "65.0"))
+ENTRY_CONVICTION_MAX_SCALE          = float(os.getenv("ENTRY_CONVICTION_MAX_SCALE", "0.25"))
+EXIT_BREAKEVEN_ATR_TRIGGER          = float(os.getenv("EXIT_BREAKEVEN_ATR_TRIGGER", "1.0"))
+EXIT_EMERGENCY_LOSS_MULT            = float(os.getenv("EXIT_EMERGENCY_LOSS_MULT", "1.5"))
+EXIT_PARTIAL_FRACTION               = float(os.getenv("EXIT_PARTIAL_FRACTION", "0.60"))
+EXIT_MAX_HOLD_DAYS                  = int(os.getenv("EXIT_MAX_HOLD_DAYS", "10"))
+EXIT_EARLY_WARN_DAYS                = int(os.getenv("EXIT_EARLY_WARN_DAYS", "6"))
+
+#
+# REGIME-DEPENDENT (review monthly or on material market-regime shift):
+#   These are tactical thresholds tied to current market conditions. They were
+#   set on 2026-08-28 based on Nifty correction (−7% in 6m), FII net-short.
+#   adaptive_thresholds.py auto-adjusts ENTRY_REGIME_MIN_SCORE from DB history;
+#   the others below are static-with-staleness-warning until the next review.
+#
+#   LAST REVIEWED: 2026-08-28 (Nifty 24,090, FII net-short, Midcap outperforming)
+#   Next review: trigger on Nifty crossing 25,500 OR monthly on the 1st.
+#
+ENTRY_REGIME_MIN_SCORE              = int(os.getenv("ENTRY_REGIME_MIN_SCORE", "38"))   # ADAPTIVE: auto-computed from history
+ENTRY_MIN_REWARD_RISK               = float(os.getenv("ENTRY_MIN_REWARD_RISK", "2.0"))  # LAST_REVIEWED: 2026-08-28
+CANDIDATE_MIN_CONVICTION            = float(os.getenv("CANDIDATE_MIN_CONVICTION", "55")) # LAST_REVIEWED: 2026-08-28
+CANDIDATE_MIN_BULLISH_TF            = int(os.getenv("CANDIDATE_MIN_BULLISH_TF", "4"))   # LAST_REVIEWED: 2026-08-28
+CANDIDATE_DOWNTREND_6M_PCT          = float(os.getenv("CANDIDATE_DOWNTREND_6M_PCT", "-10.0")) # LAST_REVIEWED: 2026-08-28
+CANDIDATE_OVEREXTENDED_52W_TOP_PCT  = float(os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT", "12.0")) # LAST_REVIEWED: 2026-08-28
+
+# ── Adaptive threshold engine configuration ───────────────────────────────────
+# Controls how adaptive_thresholds.py computes the live regime gate.
+ADAPTIVE_HISTORY_DAYS      = int(os.getenv("ADAPTIVE_HISTORY_DAYS", "90"))
+ADAPTIVE_MIN_HISTORY_DAYS  = int(os.getenv("ADAPTIVE_MIN_HISTORY_DAYS", "30"))
+ADAPTIVE_PERCENTILE        = float(os.getenv("ADAPTIVE_PERCENTILE", "20.0"))
+ADAPTIVE_STALE_THRESHOLD_DAYS = int(os.getenv("ADAPTIVE_STALE_THRESHOLD_DAYS", "30"))

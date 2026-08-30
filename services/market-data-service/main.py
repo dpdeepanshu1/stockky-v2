@@ -314,6 +314,87 @@ async def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
 
+@app.get("/bhavcopy/universe")
+def bhavcopy_universe(min_price: float = 0, limit: int = 3000):
+    """
+    §3 — Full real EQ/BE/BZ symbol list from the most recent fetchable
+    bhavcopy session. Used as the universe-of-last-resort by api-gateway
+    whenever NSE's live JSON securities API is unreachable.
+    Filters through symbol_master status='active' when that table exists.
+    """
+    from bhavcopy import _fetch_bhav_day_parsed, _candidate_session_dates, _nse_client
+    client = _nse_client()
+    for d in _candidate_session_dates(n=6):
+        parsed = _fetch_bhav_day_parsed(client, d)
+        if not parsed:
+            continue
+        syms = []
+        for s, row in parsed.items():
+            if min_price and (row.get("close") or 0) < min_price:
+                continue
+            syms.append(s)
+        # Filter through symbol_master when available
+        try:
+            from sqlalchemy import text as _text
+            from db import get_engine as _get_engine
+            engine = _get_engine()
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    _text("SELECT current_symbol FROM symbol_master WHERE status='active'")
+                ).fetchall()
+                active = {r[0] for r in rows}
+                if active:
+                    syms = [s for s in syms if s in active]
+        except Exception:
+            pass  # symbol_master not yet created — use full bhavcopy list
+        return {
+            "symbols": syms[:limit],
+            "session_date": str(d),
+            "count": len(syms[:limit]),
+            "source": "bhavcopy",
+        }
+    return {"symbols": [], "session_date": None, "count": 0}
+
+
+@app.get("/live-quote/{symbol}")
+def live_quote(symbol: str):
+    """
+    §1 — Thin read off live_quotes table (populated by AngelOne WS feed).
+    For real-trade-service and other services to consume without triggering
+    any upstream API call.
+    """
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
+    try:
+        from sqlalchemy import text as _text
+        from db import get_engine as _get_engine
+        engine = _get_engine()
+        with engine.connect() as conn:
+            row = conn.execute(
+                _text(
+                    "SELECT ltp, ohlc_json, volume, source, updated_at "
+                    "FROM live_quotes WHERE symbol = :s"
+                ),
+                {"s": sym},
+            ).fetchone()
+            if row:
+                import json as _json
+                ohlc = {}
+                try:
+                    ohlc = _json.loads(row[1]) if row[1] else {}
+                except Exception:
+                    pass
+                return {
+                    "symbol": sym, "ltp": float(row[0] or 0),
+                    "ohlc": ohlc, "volume": row[2],
+                    "source": row[3], "updated_at": str(row[4]),
+                }
+    except Exception:
+        pass
+    # Fall through to normal quote endpoint on DB miss
+    return {"symbol": sym, "ltp": None, "source": "miss"}
+
+
+
 @app.get("/internal/yahoo-ws-status")
 async def yahoo_ws_status():
     """Live-feed health — connected/subscribed count/last tick age. Polled

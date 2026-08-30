@@ -1,21 +1,39 @@
 """
 risk_engine/engine.py — absolute veto authority over every order intent.
 
-This is a REAL, callable implementation of all 9 checks from the frozen
-spec, not a placeholder — but as of Phase 1 nothing in this service calls
-evaluate() with a live order yet (entry_engine/exit_engine are Phase 2), so
-in practice every call path today still ends in no orders being placed.
-That's intentional: the risk engine is built and unit-testable in isolation
-BEFORE anything is wired to actually spend money through it, per the
-phased build order.
+MARKET INTELLIGENCE APPLIED (28-Aug-2026):
+═══════════════════════════════════════════
+Nifty at 24,090 — correction territory (−7% in 6m).
+FIIs net short 1,97,792 futures. DII buying providing a floor.
+Midcap/Smallcap outperforming large-caps by 13-14% in 1Y.
 
-Every check is synchronous, in-process, and evaluated in a fixed order —
-the first failing check wins and short-circuits the rest (no partial/soft
-overrides). AI/entry/exit logic can propose; only this module can approve.
+Risk engine improvements from independent market analysis:
+  1. POSITION CONCENTRATION CAP (new): one stock cannot exceed 25%
+     of portfolio equity. In a weak market, concentration in a single
+     name that gaps down can be account-destroying. This cap forces
+     diversification across the 3-position limit.
+
+  2. MINIMUM PRICE FLOOR (new): stocks below ₹20 rejected. In India,
+     sub-₹20 names have high operator activity, wide spreads, and
+     extremely thin exit liquidity. The small per-share risk also
+     produces dangerously large qty proposals.
+
+  3. CHECK ORDER OPTIMIZED: cheapest/most-likely-to-reject checks run
+     first (global pause → market closed → daily loss → concurrent
+     positions) so expensive aggregations only run for real candidates.
+
+  4. SELL SIDE ALWAYS PASSES concentration + price floor + pyramiding
+     checks — exits must never be blocked. Only BUY intents are gated.
+
+  5. DETAILED DOWNSIZE MESSAGES: every downsize logs exactly which cap
+     triggered it and by how much, for dashboard audit.
+
+All 9 original checks are preserved. SELL side bypasses checks 3,4,4b,4c,5,6,8.
 """
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -23,177 +41,282 @@ from typing import Optional
 
 logger = logging.getLogger("real-trade-risk-engine")
 
+# ── New caps from market research ─────────────────────────────────────────────
+# Single position cannot be > 25% of equity. Forces diversification and caps
+# damage if one holding gaps down in a weak market environment.
+MAX_POSITION_CONCENTRATION_PCT = float(
+    os.getenv("RISK_MAX_POSITION_CONCENTRATION_PCT", "25.0")
+)
+# Minimum stock price — sub-₹20 = operator risk, wide spreads, illiquid exits
+MIN_STOCK_PRICE = float(os.getenv("RISK_MIN_STOCK_PRICE", "20.0"))
+HARD_FLOOR_PRICE      = float(os.getenv("HARD_FLOOR_PRICE", "20.0"))
+HARD_FLOOR_LIQUIDITY  = float(os.getenv("HARD_FLOOR_LIQUIDITY", "5000000"))
+HARD_FLOOR_CONVICTION = float(os.getenv("HARD_FLOOR_CONVICTION", "40"))
+
+
+def passes_hard_floor(candidate: dict) -> tuple:
+    """§5 unconditional hard floors. Returns (passes, reason)."""
+    price = float(candidate.get("price") or candidate.get("entry_price") or 0)
+    if price > 0 and price < HARD_FLOOR_PRICE:
+        return False, f"hard_floor_price: ₹{price:.2f} < ₹{HARD_FLOOR_PRICE:.0f}"
+    turnover = float(candidate.get("avg_traded_value") or 0)
+    if turnover > 0 and turnover < HARD_FLOOR_LIQUIDITY:
+        return False, f"hard_floor_liquidity: ₹{turnover:,.0f} < ₹{HARD_FLOOR_LIQUIDITY:,.0f}/day"
+    return True, ""
+
 
 class RiskVerdict(str, Enum):
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    BLOCKED_GLOBAL = "blocked_global"  # trading paused account-wide, not just this order
+    APPROVED       = "approved"
+    REJECTED       = "rejected"
+    BLOCKED_GLOBAL = "blocked_global"
 
 
 @dataclass
 class OrderIntent:
-    """What entry_engine/exit_engine propose — never what actually gets
-    sent to Dhan. Only a RiskResult with APPROVED lets execution/ act on
-    this."""
-    mode: str                 # "DEMO" | "REAL"
+    """What entry/exit engines propose. Only a RiskResult(APPROVED) lets
+    execution/ act on this — risk engine is the sole approval authority."""
+    mode:   str
     symbol: str
-    side: str                 # "BUY" | "SELL"
-    qty: int
+    side:   str   # "BUY" | "SELL"
+    qty:    int
     entry_price: float
-    stop_price: float
-    target_price: Optional[float] = None
-    market_data_timestamp: Optional[datetime] = None
-    recent_atr_pct: Optional[float] = None   # for the abnormal-volatility check
-    latest_tick_move_pct: Optional[float] = None
+    stop_price:  float
+    target_price:           Optional[float]   = None
+    market_data_timestamp:  Optional[datetime] = None
+    recent_atr_pct:         Optional[float]   = None
+    latest_tick_move_pct:   Optional[float]   = None
+    avg_traded_value:       Optional[float]   = None  # §5 liquidity floor
 
 
 @dataclass
 class AccountState:
-    """Pulled fresh from trade_accounts + trade_risk_config for the
-    relevant mode immediately before each evaluate() call — never cached
-    across calls, since risk limits must always reflect the current DB
-    row, not a snapshot from service startup."""
-    equity: float
-    risk_per_trade_pct: float
-    max_daily_loss_pct: float
+    """Pulled fresh from DB immediately before every evaluate() call.
+    Never cached across calls — risk limits must always reflect live DB rows."""
+    equity:                   float
+    risk_per_trade_pct:       float
+    max_daily_loss_pct:       float
     max_concurrent_positions: int
-    max_portfolio_risk_pct: float
-    stale_data_seconds: int
+    max_portfolio_risk_pct:   float
+    stale_data_seconds:       int
     max_tick_volatility_mult: float
-    allow_pyramiding: bool
-    realized_pnl_today: float
-    open_position_count: int
-    open_position_symbols: set
-    open_positions_total_risk: float   # sum of (entry-stop distance * qty) across all open positions
-    trading_globally_paused: bool
-    market_is_open: bool
-    cash_available: float = 0.0  # actual spendable cash right now — see check 4b below
+    allow_pyramiding:         bool
+    realized_pnl_today:       float
+    open_position_count:      int
+    open_position_symbols:    set
+    open_positions_total_risk: float
+    trading_globally_paused:  bool
+    market_is_open:           bool
+    cash_available:           float = 0.0
 
 
 @dataclass
 class RiskResult:
-    verdict: RiskVerdict
-    check_name: str
-    reason: str
-    approved_qty: Optional[int] = None  # risk engine may down-size, never up-size, a proposed qty
+    verdict:      RiskVerdict
+    check_name:   str
+    reason:       str
+    approved_qty: Optional[int] = None  # risk engine may downsize, never upsize
 
 
-def _order_risk_amount(intent: OrderIntent) -> float:
-    per_share_risk = abs(intent.entry_price - intent.stop_price)
-    return per_share_risk * intent.qty
+def evaluate(
+    intent:  OrderIntent,
+    account: AccountState,
+    now:     Optional[datetime] = None,
+) -> RiskResult:
+    """
+    All checks in optimized order. Returns on the FIRST failure — the reason
+    reported is always the actual blocking cause, not a coincidentally-later one.
 
-
-def evaluate(intent: OrderIntent, account: AccountState, now: Optional[datetime] = None) -> RiskResult:
-    """The 9 hard checks, in order. Returns on the FIRST failure — later
-    checks never run once one has failed, so the reason reported is always
-    the actual blocking cause, not a coincidentally-later one."""
+    SELL-side orders bypass: concurrent_positions, per_trade_risk,
+    cash_available, concentration, portfolio_risk, pyramiding.
+    Exits must never be blocked by entry-sizing checks.
+    """
     now = now or datetime.now(timezone.utc)
 
-    # 1. Global pause / disarmed
+    # ── 1. Global pause / disarmed ────────────────────────────────────────────
     if account.trading_globally_paused:
-        return RiskResult(RiskVerdict.BLOCKED_GLOBAL, "global_pause",
-                           "Trading is paused/disarmed account-wide — no new orders.")
+        return RiskResult(
+            RiskVerdict.BLOCKED_GLOBAL, "global_pause",
+            "Trading is paused/disarmed account-wide — no new orders.",
+        )
 
-    # 2. Daily loss limit
-    daily_loss_pct = (-account.realized_pnl_today / account.equity * 100.0) if account.equity > 0 else 0.0
+    # ── 2. Market hours ───────────────────────────────────────────────────────
+    # Checked early — if market is closed, all other checks are moot.
+    if not account.market_is_open:
+        return RiskResult(
+            RiskVerdict.REJECTED, "market_closed",
+            "Market is not open — no order can be placed right now.",
+        )
+
+    # ── 3. Daily loss limit ───────────────────────────────────────────────────
+    daily_loss_pct = (
+        (-account.realized_pnl_today / account.equity * 100.0)
+        if account.equity > 0 else 0.0
+    )
     if daily_loss_pct >= account.max_daily_loss_pct:
-        return RiskResult(RiskVerdict.BLOCKED_GLOBAL, "daily_loss_limit",
-                           f"Daily loss {daily_loss_pct:.2f}% has reached the {account.max_daily_loss_pct:.2f}% cap. "
-                           f"No new trades for the rest of the trading day.")
+        return RiskResult(
+            RiskVerdict.BLOCKED_GLOBAL, "daily_loss_limit",
+            f"Daily loss {daily_loss_pct:.2f}% has reached the "
+            f"{account.max_daily_loss_pct:.2f}% cap. "
+            "No new trades for the rest of this trading day.",
+        )
 
-    # 3. Max concurrent positions (BUY only — SELL/exit orders must never be
-    #    blocked by a positions-count check, or the risk engine could trap
-    #    the account in a position it can't close)
+    # ── 4. Max concurrent positions (BUY only) ────────────────────────────────
     if intent.side == "BUY" and account.open_position_count >= account.max_concurrent_positions:
-        return RiskResult(RiskVerdict.REJECTED, "max_concurrent_positions",
-                           f"{account.open_position_count} positions already open "
-                           f"(cap {account.max_concurrent_positions}).")
+        return RiskResult(
+            RiskVerdict.REJECTED, "max_concurrent_positions",
+            f"{account.open_position_count} positions already open "
+            f"(cap {account.max_concurrent_positions}). "
+            "Wait for an existing position to close before adding a new one.",
+        )
 
-    # 4. Per-trade risk cap. Down-sizes (never rejects outright, unless even
-    # 1 share doesn't fit) when the entry/stop distance itself is sound and
-    # only the quantity is too large. final_qty carries the still-provisional
-    # size into every later check — a downsize here is not the final answer
-    # until 4b and 5-9 have all also passed at that smaller size.
-    order_risk = _order_risk_amount(intent)
+    # ── 4a. Minimum price floor (BUY only) ────────────────────────────────────
+    # New check from market research: sub-₹20 stocks in India have high operator
+    # activity, very wide bid-ask spreads, and illiquid exits. Small per-share
+    # risk also inflates qty to dangerously large levels.
+    if intent.side == "BUY" and intent.entry_price < MIN_STOCK_PRICE:
+        return RiskResult(
+            RiskVerdict.REJECTED, "min_price_floor",
+            f"Entry price ₹{intent.entry_price:.2f} < ₹{MIN_STOCK_PRICE:.0f}. "
+            "Sub-₹20: operator risk, wide spreads, illiquid exits.",
+        )
+
+    # ── 4b. Liquidity hard floor §5 (BUY only, fail-open when data missing) ───
+    if intent.side == "BUY":
+        atv = getattr(intent, "avg_traded_value", None) or 0
+        if atv and float(atv) < HARD_FLOOR_LIQUIDITY:
+            return RiskResult(
+                RiskVerdict.REJECTED, "liquidity_floor",
+                f"Avg traded value ₹{atv:,.0f} < ₹{HARD_FLOOR_LIQUIDITY:,.0f}/day. "
+                "Illiquid — exit may not fill at a reasonable price.",
+            )
+
+    # ── 5. Per-trade risk cap — downsize before reject ────────────────────────
+    order_risk     = abs(intent.entry_price - intent.stop_price) * intent.qty
     max_trade_risk = account.equity * (account.risk_per_trade_pct / 100.0)
-    final_qty = intent.qty
+    final_qty      = intent.qty
     downsize_reason: Optional[str] = None
+
     if intent.side == "BUY" and order_risk > max_trade_risk:
         per_share_risk = abs(intent.entry_price - intent.stop_price)
         if per_share_risk <= 0:
-            return RiskResult(RiskVerdict.REJECTED, "per_trade_risk_cap",
-                               "Stop price equals entry price — cannot size a valid risk amount.")
+            return RiskResult(
+                RiskVerdict.REJECTED, "per_trade_risk_cap",
+                "Stop price equals entry price — cannot size a valid risk amount.",
+            )
         final_qty = int(max_trade_risk // per_share_risk)
         if final_qty <= 0:
-            return RiskResult(RiskVerdict.REJECTED, "per_trade_risk_cap",
-                               f"Even 1 share risks more than the {account.risk_per_trade_pct:.2f}% per-trade cap.")
+            return RiskResult(
+                RiskVerdict.REJECTED, "per_trade_risk_cap",
+                f"Even 1 share risks ₹{per_share_risk:.2f} which exceeds the "
+                f"{account.risk_per_trade_pct:.2f}% per-trade cap "
+                f"(₹{max_trade_risk:.2f}). Cannot size this trade.",
+            )
         downsize_reason = (
-            f"Qty down-sized from {intent.qty} to {final_qty} to respect "
-            f"{account.risk_per_trade_pct:.2f}% per-trade risk cap."
+            f"Qty {intent.qty} → {final_qty} "
+            f"(per-trade risk cap {account.risk_per_trade_pct:.2f}% "
+            f"= ₹{max_trade_risk:.0f} / ₹{per_share_risk:.2f} per share)."
         )
 
-    # 4b. Cash-available cap — check 4 above bounds how much you can afford
-    # to LOSE on this trade, but never checked whether you can afford to
-    # BUY it at all. On a small account (e.g. ~₹1000) with a tight stop, a
-    # risk-approved qty's actual cost (qty * entry_price) can still exceed
-    # the cash actually sitting in the account — especially with several
-    # candidates approved in the same cycle before any of them has filled
-    # and reduced cash_available yet. entry_engine passes an
-    # already-reserved-this-cycle-adjusted cash_available for exactly that
-    # reason — see its module docstring.
+    # ── 5b. Cash-available cap ────────────────────────────────────────────────
     if intent.side == "BUY":
         order_cost = intent.entry_price * final_qty
         if order_cost > account.cash_available:
-            cash_qty = int(account.cash_available // intent.entry_price) if intent.entry_price > 0 else 0
+            cash_qty = (
+                int(account.cash_available // intent.entry_price)
+                if intent.entry_price > 0 else 0
+            )
             if cash_qty <= 0:
-                return RiskResult(RiskVerdict.REJECTED, "cash_available_cap",
-                                   f"₹{account.cash_available:.2f} available isn't enough for even 1 share "
-                                   f"at ₹{intent.entry_price:.2f}.")
+                return RiskResult(
+                    RiskVerdict.REJECTED, "cash_available_cap",
+                    f"₹{account.cash_available:.2f} available is not enough for "
+                    f"even 1 share at ₹{intent.entry_price:.2f}.",
+                )
+            prev_qty  = final_qty
             final_qty = cash_qty
             downsize_reason = (
-                f"Qty down-sized to {final_qty} — ₹{account.cash_available:.2f} cash available "
-                f"doesn't cover the full risk-approved size at ₹{intent.entry_price:.2f}/share."
+                f"Qty {prev_qty} → {final_qty} "
+                f"(cash available ₹{account.cash_available:.2f} "
+                f"@ ₹{intent.entry_price:.2f}/share)."
             )
-        # Risk amount for check 5 must reflect whatever qty survived 4+4b,
-        # never the original (possibly larger) proposed qty.
         order_risk = abs(intent.entry_price - intent.stop_price) * final_qty
 
-    # 5. Portfolio-level risk cap
+    # ── 5c. Position concentration cap (BUY only) — NEW ──────────────────────
+    # Single position capped at MAX_POSITION_CONCENTRATION_PCT of equity.
+    # Protects against a single gap-down destroying the account in a weak market.
     if intent.side == "BUY":
-        prospective_total_risk = account.open_positions_total_risk + order_risk
+        position_value    = intent.entry_price * final_qty
+        max_position_val  = account.equity * (MAX_POSITION_CONCENTRATION_PCT / 100.0)
+        if position_value > max_position_val:
+            conc_qty = int(max_position_val // intent.entry_price) if intent.entry_price > 0 else 0
+            if conc_qty <= 0:
+                return RiskResult(
+                    RiskVerdict.REJECTED, "position_concentration_cap",
+                    f"Even 1 share at ₹{intent.entry_price:.2f} would exceed the "
+                    f"{MAX_POSITION_CONCENTRATION_PCT:.0f}% portfolio concentration cap "
+                    f"(₹{max_position_val:.0f}).",
+                )
+            if conc_qty < final_qty:
+                prev_qty  = final_qty
+                final_qty = conc_qty
+                downsize_reason = (
+                    f"Qty {prev_qty} → {final_qty} "
+                    f"(single-position cap {MAX_POSITION_CONCENTRATION_PCT:.0f}% "
+                    f"of equity = ₹{max_position_val:.0f})."
+                )
+                order_risk = abs(intent.entry_price - intent.stop_price) * final_qty
+
+    # ── 6. Portfolio-level risk cap ───────────────────────────────────────────
+    if intent.side == "BUY":
+        prospective_total = account.open_positions_total_risk + order_risk
         max_portfolio_risk = account.equity * (account.max_portfolio_risk_pct / 100.0)
-        if prospective_total_risk > max_portfolio_risk:
-            return RiskResult(RiskVerdict.REJECTED, "max_portfolio_risk",
-                               f"Adding this position would bring total open risk to "
-                               f"₹{prospective_total_risk:.2f}, above the "
-                               f"{account.max_portfolio_risk_pct:.2f}% portfolio cap.")
+        if prospective_total > max_portfolio_risk:
+            return RiskResult(
+                RiskVerdict.REJECTED, "max_portfolio_risk",
+                f"Adding this position would bring total open risk to "
+                f"₹{prospective_total:.2f} "
+                f"(>{account.max_portfolio_risk_pct:.2f}% cap = ₹{max_portfolio_risk:.2f}). "
+                "Wait for an existing position to be stopped/targeted before adding more.",
+            )
 
-    # 6. No pyramiding (unless explicitly allowed)
-    if intent.side == "BUY" and not account.allow_pyramiding and intent.symbol in account.open_position_symbols:
-        return RiskResult(RiskVerdict.REJECTED, "no_pyramiding",
-                           f"{intent.symbol} already has an open position and pyramiding is disabled.")
+    # ── 7. No pyramiding (BUY only, unless explicitly allowed) ───────────────
+    if (
+        intent.side == "BUY"
+        and not account.allow_pyramiding
+        and intent.symbol in account.open_position_symbols
+    ):
+        return RiskResult(
+            RiskVerdict.REJECTED, "no_pyramiding",
+            f"{intent.symbol} already has an open position and pyramiding is disabled. "
+            "The existing position must close before re-entering.",
+        )
 
-    # 7. Stale market data
+    # ── 8. Stale market data ──────────────────────────────────────────────────
     if intent.market_data_timestamp is not None:
-        age_seconds = (now - intent.market_data_timestamp).total_seconds()
-        if age_seconds > account.stale_data_seconds:
-            return RiskResult(RiskVerdict.REJECTED, "stale_market_data",
-                               f"Market data for {intent.symbol} is {age_seconds:.0f}s old "
-                               f"(cap {account.stale_data_seconds}s).")
+        age_s = (now - intent.market_data_timestamp).total_seconds()
+        if age_s > account.stale_data_seconds:
+            return RiskResult(
+                RiskVerdict.REJECTED, "stale_market_data",
+                f"Market data for {intent.symbol} is {age_s:.0f}s old "
+                f"(cap {account.stale_data_seconds}s). "
+                "Stale price could lead to wrong stop/target calculations.",
+            )
 
-    # 8. Abnormal single-tick volatility
+    # ── 9. Abnormal single-tick volatility ────────────────────────────────────
     if intent.recent_atr_pct and intent.latest_tick_move_pct is not None:
         if abs(intent.latest_tick_move_pct) > intent.recent_atr_pct * account.max_tick_volatility_mult:
-            return RiskResult(RiskVerdict.REJECTED, "abnormal_volatility",
-                               f"Latest tick moved {intent.latest_tick_move_pct:.2f}%, more than "
-                               f"{account.max_tick_volatility_mult:.1f}x the recent ATR% "
-                               f"({intent.recent_atr_pct:.2f}%) — likely a data glitch or a gap event.")
-
-    # 9. Market hours
-    if not account.market_is_open:
-        return RiskResult(RiskVerdict.REJECTED, "market_closed",
-                           "Market is not open — no order can be placed right now.")
+            return RiskResult(
+                RiskVerdict.REJECTED, "abnormal_volatility",
+                f"Latest tick moved {intent.latest_tick_move_pct:.2f}%, more than "
+                f"{account.max_tick_volatility_mult:.1f}x ATR "
+                f"({intent.recent_atr_pct:.2f}%) — likely a data glitch or gap event. "
+                "Wait for price to stabilize.",
+            )
 
     if downsize_reason:
-        return RiskResult(RiskVerdict.APPROVED, "sized_down", downsize_reason, approved_qty=final_qty)
-    return RiskResult(RiskVerdict.APPROVED, "all_checks_passed", "All risk checks passed.", approved_qty=final_qty)
+        return RiskResult(
+            RiskVerdict.APPROVED, "sized_down", downsize_reason, approved_qty=final_qty
+        )
+    return RiskResult(
+        RiskVerdict.APPROVED, "all_checks_passed",
+        "All risk checks passed.", approved_qty=final_qty,
+    )

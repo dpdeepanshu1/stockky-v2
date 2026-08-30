@@ -20,3 +20,5 @@ dhanhq==2.0.2
 # set. Harmless on Render/Neon: pure-Python, imported lazily, never loaded
 # on the Postgres path. Matches every other Stockky service's requirements.
 oracledb==2.5.1
+python-dateutil==2.9.0  # §1 live_quotes timestamp parsing in market_feed/feed.py
+pyotp==2.9.0  # §2 Dhan TOTP auto-refresh in auth/dhan_credentials.py

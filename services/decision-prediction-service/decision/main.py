@@ -512,14 +512,17 @@ def _combined_score(
 
     # Primary combined score leans short-term: ~65% news+events path
     # (news pillar + event_delta), ~35% technical/fundamental/pred/train/market.
-    weights = {
-        "t": 0.12,
-        "f": 0.08,
-        "n": 0.45,
-        "p": 0.08,
-        "m": 0.05,
-        "train": 0.07,
-    }
+    # Weight scheme: market_score-adaptive.
+    # In bearish/choppy market (score<50): tilt toward fundamentals+technicals,
+    # reduce news weight (news in weak market is noisy/panic-driven).
+    # In bull market (score>=60): restore news weight (momentum is real).
+    _ms_for_weights = market_score  # from outer scope
+    if _ms_for_weights < 38:   # correction territory (Aug-2026 regime)
+        weights = {"t": 0.18, "f": 0.15, "n": 0.30, "p": 0.10, "m": 0.05, "train": 0.10}
+    elif _ms_for_weights < 50:  # weak/neutral
+        weights = {"t": 0.15, "f": 0.12, "n": 0.38, "p": 0.09, "m": 0.05, "train": 0.09}
+    else:                       # neutral to bull (original weights)
+        weights = {"t": 0.12, "f": 0.08, "n": 0.45, "p": 0.08, "m": 0.05, "train": 0.07}
 
     total = (
         technical_score * weights["t"] +
@@ -575,6 +578,7 @@ def _decide(
     data_insufficient: bool = False,
     live_win_rate=None,
     live_win_rate_n: int = 0,
+    market_score: int = 50,
 ) -> Decision:
     if data_insufficient:
         if news_score is not None and news_score >= 60:
@@ -601,8 +605,19 @@ def _decide(
 
     # Closed-loop: live win-rate shifts decision thresholds
     bar_shift = _live_win_rate_threshold_shift(live_win_rate, live_win_rate_n)
-    buy_bar = 68.0 + bar_shift
-    prepare_bar = 54.0 + bar_shift * 0.7
+
+    # Adaptive market-regime adjustment — market_score now passed as explicit param.
+    # In correction territory (score<38), bars rise continuously so only the
+    # strongest setups get BUY NOW. Transitions smoothly as market recovers.
+    if market_score < 38:
+        _regime_extra = (market_score - 38) * -0.3   # score=25 → +3.9 extra on bars
+    elif market_score < 50:
+        _regime_extra = (market_score - 50) * -0.15  # mild tightening 38–50
+    else:
+        _regime_extra = 0.0
+
+    buy_bar = 68.0 + bar_shift + _regime_extra
+    prepare_bar = 54.0 + bar_shift * 0.7 + _regime_extra * 0.6
 
     if adj >= buy_bar and technical_score >= 50 and fundamental_score >= 40:
         return Decision.PREPARE_TO_BUY if event_risk else Decision.BUY_NOW
@@ -1305,6 +1320,7 @@ async def _decide_impl(
             data_insufficient,
             live_win_rate=live_wr,
             live_win_rate_n=live_n,
+            market_score=market_score,
         )
 
         data_quality = _assess_data_quality(
@@ -1542,6 +1558,17 @@ async def _decide_impl(
             logger.warning("decide cache set failed: %s", ce)
         if isinstance(response, dict):
             response["from_cache"] = False
+            # Add market context so frontend can show regime note on each card
+            response["market_regime"] = {
+                "score": market_score,
+                "note": (
+                    "Correction (−7% in 6m, FII net-short)" if market_score < 38
+                    else "Weak/Neutral" if market_score < 50
+                    else "Neutral-Bullish" if market_score < 65
+                    else "Bullish"
+                ),
+                "bars_raised": market_score < 50,
+            }
         return response
 
     except Exception as e:

@@ -554,6 +554,48 @@ def _empty_frame():
         return None
 
 
+# ── Hard wall-clock cap for every yfinance call ─────────────────────────────
+# yfinance's own `timeout=` kwarg only bounds a single underlying HTTP
+# request; internal retries/backoff — and Yahoo occasionally black-holing a
+# connection instead of erroring — can still let one .history()/.info/
+# download() call run far longer than any caller expects. That is exactly
+# what produced the http_code=000 hangs seen in testing on /market/indices,
+# /scan/watchlist, /stockky-hot, /decision/decide/{symbol}, etc.: the test
+# client's own curl timeout (25s) fired while the server was still stuck
+# inside a yfinance call that never returned and never raised. Running the
+# real call on a small dedicated pool and enforcing a hard ceiling here means
+# every call site — current and future — gets a clean, fast exception
+# instead of hanging the whole request indefinitely. Callers that already
+# catch Exception around these calls (market/indices, decide's technical
+# fallback, etc.) fall back to cached/neutral data exactly as if yfinance
+# had raised any other error.
+import concurrent.futures as _cf
+
+YFINANCE_HARD_TIMEOUT_SEC = float(os.getenv("YFINANCE_HARD_TIMEOUT_SEC", "18"))
+_yf_hardcap_pool = _cf.ThreadPoolExecutor(
+    max_workers=int(os.getenv("YFINANCE_POOL_WORKERS", "8")),
+    thread_name_prefix="yf-hardcap",
+)
+
+
+def _yf_call_with_hard_timeout(fn, *args, **kwargs):
+    """Run `fn(*args, **kwargs)` on a helper thread and enforce a hard
+    wall-clock ceiling. Raises TimeoutError (caught by callers' existing
+    except Exception blocks) instead of letting a stuck call hang forever.
+    Note: the underlying thread may keep running in the background after
+    we give up on it — unavoidable since yfinance/requests offers no
+    cooperative cancellation — but the caller is freed immediately."""
+    fut = _yf_hardcap_pool.submit(fn, *args, **kwargs)
+    try:
+        return fut.result(timeout=YFINANCE_HARD_TIMEOUT_SEC)
+    except _cf.TimeoutError:
+        logger.warning(
+            "yfinance call exceeded hard timeout of %.0fs — failing fast instead of hanging the request",
+            YFINANCE_HARD_TIMEOUT_SEC,
+        )
+        raise TimeoutError(f"yfinance call exceeded {YFINANCE_HARD_TIMEOUT_SEC:.0f}s hard timeout")
+
+
 def patch_yfinance() -> bool:
     """
     Monkeypatch yfinance.download and Ticker.history/Ticker.info so EVERY
@@ -607,7 +649,7 @@ def patch_yfinance() -> bool:
             wait = acquire("yfinance", weight=weight)
             if wait > 1.0:
                 logger.info("yfinance rate-limiter held download() for %.1fs (weight=%s, symbols=%s)", wait, weight, _n)
-            result = _orig_download(*args, **kwargs)
+            result = _yf_call_with_hard_timeout(_orig_download, *args, **kwargs)
             # Only attribute success/failure per-symbol for single-ticker calls;
             # in a batch an empty frame does not say WHICH ticker was missing.
             if _n == 1:
@@ -630,7 +672,7 @@ def patch_yfinance() -> bool:
                     return _empty_frame()
                 acquire("yfinance", weight=1)
                 try:
-                    result = _orig_history(self, *args, **kwargs)
+                    result = _yf_call_with_hard_timeout(_orig_history, self, *args, **kwargs)
                 except Exception:
                     # Count the failure immediately instead of letting the caller
                     # (and yfinance's own retry loop) rediscover it next cycle.
@@ -654,7 +696,7 @@ def patch_yfinance() -> bool:
                         return {}
                     acquire("yfinance", weight=2)
                     try:
-                        result = _orig_info_getter(self)
+                        result = _yf_call_with_hard_timeout(_orig_info_getter, self)
                     except Exception:
                         note_symbol_failure(sym)
                         raise

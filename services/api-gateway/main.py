@@ -7083,9 +7083,48 @@ async def api_surprise_stop():
 
 
 @app.get("/stockky-hot")
-async def stockky_hot_endpoint(force: bool = False):
-    """HTTP entry for Stockky 🔥 Stocks tab — full universe, batched internally."""
-    return await stockky_hot_stocks(force=force, max_symbols=None, progress_cb=None)
+async def stockky_hot_endpoint(force: bool = False, background_tasks: BackgroundTasks = None):
+    """HTTP entry for Stockky 🔥 Stocks tab — full universe, batched internally.
+
+    Fix: on a cache miss this used to run the full-universe scan inline on
+    the request (stockky_hot_stocks), which for a few hundred symbols can
+    easily run well past any client/proxy timeout — curl gave up at 25s
+    with http_code=000 in testing even though the scan was still running
+    server-side (same class of bug as the old /scheduler/hydrate/weekend
+    blocking call). /stockky-hot/run + /stockky-hot/status already solve
+    this correctly with a background job + poll pattern, so a cold cache
+    now reuses that instead of duplicating a second, blocking code path.
+    force=true still runs synchronously inline (unchanged) for callers
+    with a suitably long client-side timeout (manual/GHA use).
+    """
+    if force:
+        return await stockky_hot_stocks(force=True, max_symbols=None, progress_cb=None)
+
+    cached = _redis_get(HOT_STOCKS_CACHE_KEY)
+    if cached:
+        return {**cached, "cached": True}
+
+    # Cache is cold: kick off the same background job /stockky-hot/run uses
+    # (no-op if one is already running) and return immediately instead of
+    # blocking the request on a full universe scan.
+    if background_tasks is not None:
+        try:
+            await stockky_hot_run(background_tasks, force=True)
+        except Exception as e:
+            logger.warning("stockky-hot background warm-up failed to start: %s", e)
+
+    stale = _redis_get(HOT_RESULT_KEY)
+    if stale:
+        return {**stale, "cached": True, "stale": True, "warming": True}
+
+    return {
+        "ok": True,
+        "warming": True,
+        "message": "Hot Picks is warming up (first run or cache expired) — poll /stockky-hot/status, or retry in a few seconds.",
+        "news_driven": [],
+        "results_driven": [],
+        "bulk_insider_driven": [],
+    }
 
 
 @app.get("/catalysts/alert/status")

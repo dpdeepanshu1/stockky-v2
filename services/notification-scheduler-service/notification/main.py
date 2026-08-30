@@ -30,6 +30,8 @@ v0.5.0 – respects the 'channel' parameter: "telegram", "discord", "slack", or 
 import os
 import json
 import logging
+import threading
+import time
 from typing import Optional
 
 import httpx
@@ -877,14 +879,66 @@ def _callmebot_users():
             users.append((ph.strip(), key.strip()))
     return users
 
+# In-memory status for the last /call/me dispatch — lets the (fast, default)
+# fire-and-forget response be followed up with GET /call/me/status instead of
+# the caller having to hold the HTTP connection open for the real result.
+_CALL_ME_STATE: dict = {"status": "idle", "result": None, "started_epoch": None, "updated_epoch": None}
+_CALL_ME_LOCK = threading.Lock()
+
+
+def _set_call_me_state(**kw) -> None:
+    with _CALL_ME_LOCK:
+        _CALL_ME_STATE.update(kw)
+        _CALL_ME_STATE["updated_epoch"] = time.time()
+
+
+def _run_call_me(cfg: dict, message: str) -> None:
+    try:
+        result = _send_callmebot(cfg, "Stockky Call Alert", message, voice_first=True)
+        _set_call_me_state(
+            status="done",
+            result=result,
+            ok=isinstance(result, str) and result.startswith("sent"),
+        )
+    except Exception as e:
+        logger.exception("call/me background dispatch failed")
+        _set_call_me_state(status="error", result=str(e)[:200], ok=False)
+
+
 @app.post("/call/me")
 @app.get("/call/me")
-def call_me_now(message: str = "Stockky alert: action required on your picks"):
-    """Manual Call Me Now — always prefers Telegram Voice Call first, then text fallback."""
+def call_me_now(message: str = "Stockky alert: action required on your picks", wait: bool = False):
+    """Manual Call Me Now — always prefers Telegram Voice Call first, then text fallback.
+
+    Fix: _send_callmebot tries a voice call then a text fallback per
+    recipient, each with up to a 35s timeout and one retry — worst case
+    ~140s for a single recipient, well past any normal client/proxy
+    timeout (curl gave up at 25s with http_code=000 in testing, even
+    though the call was still going through server-side). Runs in the
+    background and returns immediately by default (poll GET /call/me/status
+    for the outcome), the same fire-and-forget + pollable-status pattern
+    already used by /scheduler/hydrate/weekend. Pass wait=true to block and
+    get the final result inline instead (only for callers with a long
+    enough client-side timeout).
+    """
     cfg = _load_config()
     cfg = dict(cfg)
     enabled = dict(cfg.get("enabled") or {})
     enabled["callmebot"] = True
     cfg["enabled"] = enabled
-    result = _send_callmebot(cfg, "Stockky Call Alert", message, voice_first=True)
-    return {"ok": isinstance(result, str) and result.startswith("sent"), "result": result}
+
+    if wait:
+        result = _send_callmebot(cfg, "Stockky Call Alert", message, voice_first=True)
+        return {"ok": isinstance(result, str) and result.startswith("sent"), "result": result}
+
+    _set_call_me_state(status="running", result=None, ok=None, started_epoch=time.time())
+    thread = threading.Thread(target=_run_call_me, args=(cfg, message), daemon=True)
+    thread.start()
+    return {"ok": True, "started": True, "message": "Call dispatch started — poll GET /call/me/status for the result."}
+
+
+@app.get("/call/me/status")
+def call_me_status():
+    """Poll the outcome of the most recent background /call/me dispatch."""
+    with _CALL_ME_LOCK:
+        return {"ok": True, **_CALL_ME_STATE}

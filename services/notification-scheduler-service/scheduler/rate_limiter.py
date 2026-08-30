@@ -173,6 +173,38 @@ _yf_patched = False
 _yf_patch_lock = threading.Lock()
 
 
+# ── Hard wall-clock cap for every yfinance call ─────────────────────────────
+# yfinance's own `timeout=` kwarg only bounds a single underlying HTTP
+# request; internal retries/backoff — and Yahoo occasionally black-holing a
+# connection instead of erroring — can still let one .history()/.info/
+# download() call run far longer than any caller expects, hanging the whole
+# request. Running the real call on a small dedicated pool and enforcing a
+# hard ceiling here means every call site gets a clean, fast exception
+# instead of hanging indefinitely.
+import concurrent.futures as _cf
+
+YFINANCE_HARD_TIMEOUT_SEC = float(os.getenv("YFINANCE_HARD_TIMEOUT_SEC", "18"))
+_yf_hardcap_pool = _cf.ThreadPoolExecutor(
+    max_workers=int(os.getenv("YFINANCE_POOL_WORKERS", "8")),
+    thread_name_prefix="yf-hardcap",
+)
+
+
+def _yf_call_with_hard_timeout(fn, *args, **kwargs):
+    """Run `fn(*args, **kwargs)` on a helper thread and enforce a hard
+    wall-clock ceiling. Raises TimeoutError instead of letting a stuck
+    call hang forever; callers already wrap these in try/except."""
+    fut = _yf_hardcap_pool.submit(fn, *args, **kwargs)
+    try:
+        return fut.result(timeout=YFINANCE_HARD_TIMEOUT_SEC)
+    except _cf.TimeoutError:
+        logger.warning(
+            "yfinance call exceeded hard timeout of %.0fs — failing fast instead of hanging the request",
+            YFINANCE_HARD_TIMEOUT_SEC,
+        )
+        raise TimeoutError(f"yfinance call exceeded {YFINANCE_HARD_TIMEOUT_SEC:.0f}s hard timeout")
+
+
 def patch_yfinance() -> bool:
     """
     Monkeypatch yfinance.download and Ticker.history/Ticker.info so EVERY
@@ -213,7 +245,7 @@ def patch_yfinance() -> bool:
             wait = acquire("yfinance", weight=weight)
             if wait > 1.0:
                 logger.info("yfinance rate-limiter held download() for %.1fs (weight=%s, symbols=%s)", wait, weight, _n)
-            return _orig_download(*args, **kwargs)
+            return _yf_call_with_hard_timeout(_orig_download, *args, **kwargs)
 
         yf.download = _patched_download
 
@@ -224,7 +256,7 @@ def patch_yfinance() -> bool:
 
             def _patched_history(self, *args, **kwargs):
                 acquire("yfinance", weight=1)
-                return _orig_history(self, *args, **kwargs)
+                return _yf_call_with_hard_timeout(_orig_history, self, *args, **kwargs)
 
             _TickerCls.history = _patched_history
 
@@ -234,7 +266,7 @@ def patch_yfinance() -> bool:
                     # crumb/auth-sensitive call yfinance makes, so weight it
                     # heavier than a plain history() request.
                     acquire("yfinance", weight=2)
-                    return _orig_info_getter(self)
+                    return _yf_call_with_hard_timeout(_orig_info_getter, self)
 
                 _TickerCls.info = property(_patched_info)
         except Exception as e:

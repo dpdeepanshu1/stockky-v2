@@ -150,17 +150,30 @@ export default function IpoFeedHealth() {
               )}
             </button>
           )}
-          {missing > 0 && (
+          {/* Bug fix (30-Aug session): this used to be gated on `missing > 0`
+              only. When total_tracked is ALSO 0 (nothing has ever been
+              scanned/persisted yet — e.g. first run, or the DB write path
+              silently failed), missing_count is 0 too (0 missing out of 0
+              rows), so this button — the one action that actually gets the
+              table populated — was invisible in exactly the situation the
+              user needed it most. Now it also shows whenever total === 0. */}
+          {(missing > 0 || total === 0) && (
             <button
               className="text-xs px-3 py-1.5 rounded border border-rose-500/40 bg-rose-600/20 text-rose-200 hover:bg-rose-600/35 disabled:opacity-50"
               onClick={() => void forceRescan()}
               disabled={rescanBusy}
-              title="Full universe re-scan from upstream — use if Auto-Repair isn't enough (e.g. discovery itself is stale)"
+              title={
+                total === 0
+                  ? "No IPOs tracked yet — run a full scan from upstream to populate the database"
+                  : "Full universe re-scan from upstream — use if Auto-Repair isn't enough (e.g. discovery itself is stale)"
+              }
             >
               {rescanBusy ? (
                 <span className="inline-flex items-center gap-1.5">
                   <BusySpinner className="border-rose-200" /> Starting…
                 </span>
+              ) : total === 0 ? (
+                "⚡ Run Initial Scan"
               ) : (
                 "⚡ Full Re-scan"
               )}
@@ -183,6 +196,16 @@ export default function IpoFeedHealth() {
       </div>
 
       {error && <p className="text-xs text-rose-400 mt-2">{error}</p>}
+      {/* Bug fix: /ipo/audit's `message`/`error` fields (e.g. "No IPO
+          database configured — scan results are cache-only.") were parsed
+          into IpoAuditStats but never rendered — the panel just showed
+          confusing 0/0/0/0% with no explanation of *why*. This is very
+          likely what a misconfigured/undeployed DB looks like in
+          production, indistinguishable in the UI from "scan ran but wrote
+          zero rows" until now. */}
+      {!error && stats && (stats.message || stats.error) && (
+        <p className="text-xs text-amber-400 mt-2">⚠️ {stats.message || stats.error}</p>
+      )}
       {repairMsg && <p className="text-xs text-emerald-400 mt-2">{repairMsg}</p>}
       {rescanMsg && <p className="text-xs text-emerald-400 mt-2">{rescanMsg}</p>}
 

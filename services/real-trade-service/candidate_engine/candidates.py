@@ -153,7 +153,21 @@ _SOURCES = {
 # risk_engine's own hard_floor_liquidity check at order time, so it isn't
 # duplicated here. See STOCKKY_ISSUE_LOG_AND_FIXES.md Issue 1 for the full
 # backtest evidence and the two alternative options that were not taken.
-VOLUME_SHOCK_MULTIPLIER = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MULTIPLIER", "3.0"))
+# Calibrated 30-Aug-2026 against 1y of real NSE bhavcopy data (819,906 rows,
+# 3,866 symbols) plus the user's own Groww "Volume shockers" screenshots for
+# the 28-Aug-2026 session. At the old MULTIPLIER=3.0, the joint (vol>=mult
+# AND ret>=min_return_pct) filter caught 15/20 of that day's real screenshot
+# movers but silently dropped 5 genuine ones that were still confirmed by a
+# real >=5% breakout return: NAZARA (+5.7%, 2.67x), KAPSTON (+11.6%, 2.63x),
+# TTKHLTCARE (+5.0%, 2.28x), UNIPARTS (+8.0%, 2.08x), MARINE (+8.7%, 2.01x).
+# Lowering the multiplier to 2.0 (keeping the 5% return gate unchanged)
+# recovers all 5 without materially opening the gate to noise: market-wide
+# that day, only 16/87 (~18%) of symbols with 2.0x-3.0x volume also cleared
+# the independent 5% return bar, vs 43->59 total joint-filter candidates
+# (+16/day) — the return gate, not the volume gate, is doing most of the
+# quality filtering here. Re-validate this pair against a fresh pull of
+# nse_bhavdata before trusting it long-term; market regimes change.
+VOLUME_SHOCK_MULTIPLIER = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MULTIPLIER", "2.0"))
 VOLUME_SHOCK_MIN_RETURN_PCT = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MIN_RETURN_PCT", "5.0"))
 
 

@@ -17,6 +17,7 @@ from peer_multi_quarter import (
     compute_peer_relative,
     detect_sector,
     fetch_fundamentals,
+    fetch_fundamentals_batch,
 )
 
 logger = logging.getLogger("peer_ranking")
@@ -47,12 +48,19 @@ def rank_against_peers(
         peer_list = [symbol] + peer_list
     peer_list = peer_list[: max_peers + 1]
 
+    # Fix (30 Aug 2026): fetch all non-self peers concurrently (cache-aware,
+    # shared with compute_peer_relative below) instead of one blocking
+    # request at a time — see peer_multi_quarter.py module docstring for
+    # why this mattered for /fundamental/analyze latency.
+    non_self_peers = [p for p in peer_list if p != symbol]
+    fetched = fetch_fundamentals_batch(market_data_url, non_self_peers)
+
     rows: List[Dict[str, Any]] = []
     for p in peer_list:
         if p == symbol:
             f = stock_fund
         else:
-            f = fetch_fundamentals(market_data_url, p)
+            f = fetched.get(p) or {}
         pe = _safe(f.get("pe_ratio") or f.get("trailingPE") or f.get("pe"))
         roe = _safe(f.get("roe") or f.get("returnOnEquity"))
         rg = _safe(f.get("revenue_growth_yoy") or f.get("revenueGrowth"))

@@ -16,11 +16,44 @@ Multi-quarter:
 from __future__ import annotations
 
 import logging
+import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
 logger = logging.getLogger("peer_multi_quarter")
+
+# ── Fix (30 Aug 2026): peer-fundamentals fetch was the root cause of
+# /fundamental/analyze/{symbol} consistently taking ~12s (and, downstream,
+# api-gateway's /scan/watchlist consistently timing out at the test
+# harness's 25s curl limit — see FIXES_30AUG2026_TEST_FAILURES.md).
+#
+# A single analyze() call ended up calling this module's fetch for peer
+# fundamentals from FOUR separate places (the inline peer loop in
+# fundamental/main.py, rank_against_peers()'s own ranking loop,
+# compute_peer_relative() called from inside rank_against_peers(), and
+# compute_peer_relative() called again from inside
+# enrich_fundamentals_with_peer_and_consistency()) — each doing its own
+# SEQUENTIAL for-loop of blocking HTTP calls, so a symbol's peers could be
+# fetched over the network up to 4x each, one at a time.
+#
+# Fix has two parts:
+#   1. A short-TTL in-process cache keyed by symbol, shared by every
+#      call-site in this file (and by peer_ranking.py, which imports
+#      fetch_fundamentals from here) — repeat lookups for the same peer
+#      within the TTL window are free instead of a fresh network round trip.
+#   2. fetch_fundamentals_batch() fetches any still-uncached symbols in
+#      parallel via a small thread pool, so a cold-cache lookup across N
+#      peers costs roughly one round trip instead of N sequential ones.
+# Behavior/return shape of fetch_fundamentals() and compute_peer_relative()
+# is unchanged — only how the data underneath is obtained.
+_FUND_CACHE: Dict[str, tuple] = {}  # symbol -> (fetched_at_epoch, data)
+_FUND_CACHE_LOCK = threading.Lock()
+_FUND_CACHE_TTL = float(os.getenv("PEER_FUNDAMENTALS_CACHE_TTL_SECONDS", "60"))
+_FUND_FETCH_MAX_WORKERS = int(os.getenv("PEER_FUNDAMENTALS_FETCH_WORKERS", "6"))
 
 # Default peer maps for common Indian sectors (extend as needed)
 DEFAULT_PEERS: Dict[str, List[str]] = {
@@ -79,16 +112,68 @@ def detect_sector(fundamentals: Dict[str, Any]) -> str:
     return "DEFAULT"
 
 
+def _fund_cache_get(symbol: str) -> Optional[Dict[str, Any]]:
+    with _FUND_CACHE_LOCK:
+        entry = _FUND_CACHE.get(symbol)
+    if not entry:
+        return None
+    fetched_at, data = entry
+    if (time.time() - fetched_at) > _FUND_CACHE_TTL:
+        return None
+    return data
+
+
+def _fund_cache_set(symbol: str, data: Dict[str, Any]) -> None:
+    with _FUND_CACHE_LOCK:
+        _FUND_CACHE[symbol] = (time.time(), data)
+
+
 def fetch_fundamentals(market_data_url: str, symbol: str, timeout: float = 15.0) -> Dict[str, Any]:
-    """Fetch fundamentals from market-data-service."""
+    """Fetch fundamentals from market-data-service (short-TTL cached — see
+    module docstring above for why)."""
+    cached = _fund_cache_get(symbol)
+    if cached is not None:
+        return cached
     try:
         url = f"{market_data_url.rstrip('/')}/fundamentals/{symbol}"
         resp = httpx.get(url, timeout=timeout)
         if resp.status_code == 200:
-            return resp.json() or {}
+            data = resp.json() or {}
+            _fund_cache_set(symbol, data)
+            return data
     except Exception as e:
         logger.warning("Fundamentals fetch failed for %s: %s", symbol, e)
     return {}
+
+
+def fetch_fundamentals_batch(
+    market_data_url: str, symbols: List[str], timeout: float = 15.0
+) -> Dict[str, Dict[str, Any]]:
+    """Fetch fundamentals for several symbols concurrently (cache-aware).
+    Returns {symbol: data}; a symbol whose fetch failed maps to {}.
+    """
+    result: Dict[str, Dict[str, Any]] = {}
+    to_fetch = []
+    for s in symbols:
+        cached = _fund_cache_get(s)
+        if cached is not None:
+            result[s] = cached
+        else:
+            to_fetch.append(s)
+
+    if not to_fetch:
+        return result
+
+    with ThreadPoolExecutor(max_workers=min(_FUND_FETCH_MAX_WORKERS, len(to_fetch))) as pool:
+        futures = {pool.submit(fetch_fundamentals, market_data_url, s, timeout): s for s in to_fetch}
+        for fut in as_completed(futures):
+            s = futures[fut]
+            try:
+                result[s] = fut.result()
+            except Exception as e:
+                logger.warning("Batch fundamentals fetch failed for %s: %s", s, e)
+                result[s] = {}
+    return result
 
 
 def compute_peer_relative(
@@ -117,8 +202,11 @@ def compute_peer_relative(
     peer_pes, peer_roes, peer_rev, peer_profit = [], [], [], []
     peer_details = []
 
+    # Fetch all peers concurrently (cache-aware) instead of one at a time —
+    # see module docstring above.
+    fetched = fetch_fundamentals_batch(market_data_url, peer_list)
     for p in peer_list:
-        f = fetch_fundamentals(market_data_url, p)
+        f = fetched.get(p) or {}
         if not f:
             continue
         pe = _safe(f.get("pe_ratio") or f.get("trailingPE") or f.get("pe"))

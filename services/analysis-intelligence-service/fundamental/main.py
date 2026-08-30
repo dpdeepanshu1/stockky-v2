@@ -568,18 +568,22 @@ def analyze(symbol: str, force: bool = False):
         logger.warning("multi-quarter check failed: %s", _mq)
 
     # ── Peer-relative metrics (from second version) ──
+    # Fix (30 Aug 2026): this used to fetch each peer's fundamentals one at
+    # a time via a fresh httpx.get, and apply_to_analyze_response() below
+    # (via rank_against_peers / compute_peer_relative) fetches largely the
+    # same peers again — up to 4 separate sequential fetch passes for one
+    # /analyze/{symbol} call, which is what made this endpoint consistently
+    # take ~12s (see peer_multi_quarter.py's module docstring). Using the
+    # shared cached+batched fetch here means these calls reuse whatever
+    # apply_to_analyze_response's own peer lookups already populated (or
+    # vice versa), and any still-needed lookups happen concurrently.
+    from peer_multi_quarter import fetch_fundamentals_batch
     sector_norm = normalize_sector(sector, symbol) if 'normalize_sector' in globals() else sector
     peer_list = peers_for(symbol, sector_norm) if 'peers_for' in globals() else []
     peer_rel = {"score": 50.0, "components": {}, "note": "peers_not_fetched"}
     try:
-        peer_rows = []
-        for ps in peer_list[:4]:
-            try:
-                pr = httpx.get(f"{MARKET_DATA_URL}/fundamentals/{ps}", timeout=8)
-                if pr.status_code == 200:
-                    peer_rows.append(pr.json())
-            except Exception:
-                continue
+        fetched_peers = fetch_fundamentals_batch(MARKET_DATA_URL, peer_list[:4])
+        peer_rows = [fetched_peers[ps] for ps in peer_list[:4] if fetched_peers.get(ps)]
         if peer_rows:
             peer_avg = average_metrics(peer_rows) if 'average_metrics' in globals() else {}
             peer_rel = peer_relative_score(metrics, peer_avg) if 'peer_relative_score' in globals() else {"score": 50.0}

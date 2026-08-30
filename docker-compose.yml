@@ -53,6 +53,13 @@ services:
       UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
       USE_REDIS: ${USE_REDIS:-0}
       PORT: "8000"
+      # ── Fix (30 Aug 2026): peer-fundamentals lookups used inside
+      # fundamental/analyze/{symbol} are now cached (TTL below) and
+      # fetched concurrently instead of one-at-a-time — see
+      # fundamental/peer_multi_quarter.py module docstring. Tunable here
+      # without a code change/redeploy if needed.
+      PEER_FUNDAMENTALS_CACHE_TTL_SECONDS: ${PEER_FUNDAMENTALS_CACHE_TTL_SECONDS:-60}
+      PEER_FUNDAMENTALS_FETCH_WORKERS: ${PEER_FUNDAMENTALS_FETCH_WORKERS:-6}
       # ── Oracle Autonomous DB (Oracle Cloud side only; empty on Render/Neon) ──
       ORACLE_DSN: ${ORACLE_DSN:-}
       ORACLE_USER: ${ORACLE_USER:-ADMIN}
@@ -155,6 +162,12 @@ services:
       USE_REDIS: ${USE_REDIS:-0}
       DISABLE_UPSTASH: ${DISABLE_UPSTASH:-1}
       PORT: "8000"
+      # ── Fix (30 Aug 2026): /scan/watchlist now runs each symbol's
+      # fundamentals/news/events/prediction lookups concurrently instead of
+      # sequentially (see api-gateway/main.py _scan_one_symbol). This
+      # controls how many watchlist symbols are scanned in parallel — kept
+      # explicit here so it's tunable without a code change/redeploy.
+      WATCHLIST_SCAN_CONCURRENCY: ${WATCHLIST_SCAN_CONCURRENCY:-4}
       # ── Oracle Autonomous DB (Oracle Cloud side only; empty on Render/Neon) ──
       ORACLE_DSN: ${ORACLE_DSN:-}
       ORACLE_USER: ${ORACLE_USER:-ADMIN}

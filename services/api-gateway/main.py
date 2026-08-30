@@ -5083,49 +5083,99 @@ def scan_watchlist():
         raw = resp.json()
         normalized = _normalize_decision_response(raw, symbol)
 
-        if normalized.get("close") is None:
-            price = _fetch_price_from_quote(symbol)
-            if price is not None:
-                normalized["close"] = price
-                if normalized.get("support") is None:
-                    normalized["support"] = round(price * 0.95, 2)
-                if normalized.get("resistance") is None:
-                    normalized["resistance"] = round(price * 1.05, 2)
+        # Fix (30 Aug 2026): these four enrichment lookups (price fallback,
+        # fundamentals merge, news, events, prediction) are independent of
+        # one another — each only reads/writes its own keys on `normalized`
+        # — but used to run one after another. On a cache miss each can
+        # cost several seconds (fundamentals in particular; see
+        # peer_multi_quarter.py's module docstring in
+        # analysis-intelligence-service for why that one was especially
+        # slow), so sequentially they could push a single symbol's scan
+        # time past any reasonable client timeout — this is what made
+        # /scan/watchlist time out in testing even after the per-symbol
+        # decide/predict calls themselves were fast. Running them
+        # concurrently bounds one symbol's wall time to the slowest single
+        # lookup instead of the sum of all of them, on top of the
+        # outer per-symbol concurrency already in place above.
+        def _job_price():
+            if normalized.get("close") is None:
+                return _fetch_price_from_quote(symbol)
+            return None
 
-        _merge_fundamentals(normalized, symbol)
+        def _job_fundamentals():
+            _merge_fundamentals(normalized, symbol)
+            return None
 
-        if normalized.get("news_score") is None:
-            news = _fetch_news(symbol)
-            if news:
-                normalized["news_score"] = news.get("news_score")
+        def _job_news():
+            if normalized.get("news_score") is None:
+                return _fetch_news(symbol)
+            return None
+
+        def _job_events():
+            if normalized.get("event_risk") is False and not normalized.get("reasons", {}).get("event"):
+                return _fetch_events(symbol)
+            return None
+
+        def _job_prediction():
+            if normalized.get("prediction_score") is None:
+                try:
+                    pred_resp = client.get(f"{PREDICTION_URL}/predict/{symbol}", timeout=60)
+                    if pred_resp.status_code == 200:
+                        return pred_resp.json()
+                except Exception as e:
+                    logger.warning(f"Prediction service lookup failed during watchlist scan for {symbol}: {e}")
+            return None
+
+        jobs = {
+            "price": _job_price,
+            "fundamentals": _job_fundamentals,
+            "news": _job_news,
+            "events": _job_events,
+            "prediction": _job_prediction,
+        }
+        job_results = {}
+        with ThreadPoolExecutor(max_workers=len(jobs)) as inner_pool:
+            futures = {inner_pool.submit(fn): name for name, fn in jobs.items()}
+            for fut in as_completed(futures):
+                name = futures[fut]
+                try:
+                    job_results[name] = fut.result()
+                except Exception as e:
+                    logger.warning(f"Watchlist scan enrichment '{name}' failed for {symbol}: {e}")
+                    job_results[name] = None
+
+        price = job_results.get("price")
+        if price is not None:
+            normalized["close"] = price
+            if normalized.get("support") is None:
+                normalized["support"] = round(price * 0.95, 2)
+            if normalized.get("resistance") is None:
+                normalized["resistance"] = round(price * 1.05, 2)
+
+        news = job_results.get("news")
+        if news:
+            normalized["news_score"] = news.get("news_score")
+            reasons = normalized.get("reasons", {})
+            if news.get("reasons"):
+                reasons["news"] = news["reasons"]
+                normalized["reasons"] = reasons
+
+        events = job_results.get("events")
+        if events:
+            # See the async analyzer's equivalent block for why
+            # the full dict is passed through, not just
+            # next_earnings_date.
+            normalized["event_data"] = events
+            if events.get("next_earnings_date"):
+                normalized["event_risk"] = True
                 reasons = normalized.get("reasons", {})
-                if news.get("reasons"):
-                    reasons["news"] = news["reasons"]
-                    normalized["reasons"] = reasons
+                reasons["event"] = [f"Earnings due: {events['next_earnings_date']}"]
+                normalized["reasons"] = reasons
 
-        if normalized.get("event_risk") is False and not normalized.get("reasons", {}).get("event"):
-            events = _fetch_events(symbol)
-            if events:
-                # See the async analyzer's equivalent block for why
-                # the full dict is passed through, not just
-                # next_earnings_date.
-                normalized["event_data"] = events
-                if events.get("next_earnings_date"):
-                    normalized["event_risk"] = True
-                    reasons = normalized.get("reasons", {})
-                    reasons["event"] = [f"Earnings due: {events['next_earnings_date']}"]
-                    normalized["reasons"] = reasons
-
-        if normalized.get("prediction_score") is None:
-            try:
-                pred_resp = client.get(f"{PREDICTION_URL}/predict/{symbol}", timeout=60)
-                if pred_resp.status_code == 200:
-                    pred_data = pred_resp.json()
-                    if pred_data.get("model_loaded"):
-                        normalized["prediction_score"] = pred_data.get("prediction_score")
-                        normalized["prediction_note"] = pred_data.get("note")
-            except Exception as e:
-                logger.warning(f"Prediction service lookup failed during watchlist scan for {symbol}: {e}")
+        pred_data = job_results.get("prediction")
+        if pred_data and pred_data.get("model_loaded"):
+            normalized["prediction_score"] = pred_data.get("prediction_score")
+            normalized["prediction_note"] = pred_data.get("note")
 
         # Adds a concrete calendar-date holding period estimate
         # alongside whatever decision-engine's own holding_period

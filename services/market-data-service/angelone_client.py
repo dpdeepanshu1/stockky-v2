@@ -83,11 +83,29 @@ class AngelOneSession:
             logger.info("AngelOne session refreshed (expires in 20h)")
 
     def _headers(self) -> dict:
+        # BUG FIX: this was missing X-UserType/X-SourceID/X-ClientLocalIP/
+        # X-ClientPublicIP/X-MACAddress — AngelOne's secure market-data
+        # endpoints (quote/candles), not just login, require the full
+        # header set (confirmed empirically: our manual curl test only
+        # succeeded once all of these were present). Without them, every
+        # get_quote/get_quotes_batch/get_candles call after a successful
+        # login was silently failing server-side, angelone_ws_feed.py's
+        # poll loop caught the exception and logged a warning per batch,
+        # live_quotes/_LIVE never actually got populated, and the whole
+        # system kept falling through to Yahoo/yfinance regardless of
+        # AngelOne being configured and logging in fine. This is the
+        # concrete root cause of "AngelOne configured but not giving
+        # real data."
         return {
-            "Authorization": f"Bearer {self.token}",
-            "X-PrivateKey":  self.api_key,
-            "Content-Type":  "application/json",
-            "Accept":        "application/json",
+            "Authorization":     f"Bearer {self.token}",
+            "X-PrivateKey":      self.api_key,
+            "Content-Type":      "application/json",
+            "Accept":            "application/json",
+            "X-UserType":        "USER",
+            "X-SourceID":        "WEB",
+            "X-ClientLocalIP":   "127.0.0.1",
+            "X-ClientPublicIP":  os.environ.get("ANGELONE_STATIC_IP", "127.0.0.1"),
+            "X-MACAddress":      "00:00:00:00:00:00",
         }
 
     async def get_quote(self, exchange: str, symbol_token: str) -> dict:

@@ -2000,9 +2000,22 @@ async def _generate_ai_summary(data: dict, client: httpx.AsyncClient) -> str:
     in _generate_summary() below on any failure — including a truncated
     response (finishReason == MAX_TOKENS), which is the classic symptom
     of maxOutputTokens being set too low and cutting the sentence off
-    mid-thought."""
+    mid-thought.
+
+    BUG FIX: this used to trust the `client` argument passed in by the
+    caller, captured at the start of that request. If a graceful shutdown
+    (container restart/redeploy — common on Render free-tier cold-start
+    cycling) closed `_shared_http_client` while this request was still
+    in flight, the caller's reference stayed pointing at the now-closed
+    client object even though `_get_http_client()` would hand any *new*
+    caller a fresh one. Result: "Cannot send a request, as the client
+    has been closed" — confirmed this was the actual failure, not a
+    Gemini-side issue, since decision-prediction-service's own Gemini
+    call succeeded in the same log window. Fetching fresh here means
+    this call always gets whichever client is currently alive."""
     if not GEMINI_API_KEY:
         return _generate_summary(data)
+    client = _get_http_client()  # always use the live client, ignore a possibly-stale one passed in
     try:
         async with GEMINI_SEMAPHORE:
             resp = await client.post(

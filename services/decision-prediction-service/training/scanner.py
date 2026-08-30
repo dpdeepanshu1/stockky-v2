@@ -179,8 +179,20 @@ class TrainingScanner:
             if hist_vecs is None or len(hist_vecs) == 0:
                 logger.info("Empty historical feature matrix — skip similarity for %s", symbol)
                 return None
-            # Guard all-NaN columns / empty slice warnings
-            with np.errstate(all="ignore"):
+            # Guard all-NaN columns / empty slice warnings.
+            # BUG FIX: np.errstate only silences numpy's own floating-point
+            # unit warnings (divide/invalid/overflow/underflow) — it does
+            # NOT silence "Mean of empty slice" / "Degrees of freedom <= 0",
+            # which nanfunctions.py raises via Python's warnings module.
+            # This is why the warning kept showing up in logs even with
+            # np.errstate already here: wrong suppression mechanism for
+            # this specific warning type. Combined with warnings.catch_warnings()
+            # below, which is what actually silences it — the case being
+            # guarded is legitimate and already handled (col_mean/col_std
+            # get NaN-filled right after), so this really is just log noise.
+            import warnings as _warnings
+            with np.errstate(all="ignore"), _warnings.catch_warnings():
+                _warnings.simplefilter("ignore", category=RuntimeWarning)
                 col_mean = np.nanmean(hist_vecs, axis=0)
                 col_std = np.nanstd(hist_vecs, axis=0)
             if col_mean is None or np.all(np.isnan(col_mean)):

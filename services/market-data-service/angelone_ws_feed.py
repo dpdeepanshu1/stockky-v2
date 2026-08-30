@@ -231,6 +231,7 @@ def start_feed_background(symbols: list) -> None:
     _running = True
 
     def _run():
+        global _running
         try:
             from angelone_client import get_session
             import angelone_scrip_master as scrip_master

@@ -101,20 +101,34 @@ jobs:
               fi
             done
           else
-            # Hourly slice via scheduler hydrate endpoint
+            # Hourly slice via scheduler hydrate endpoint.
+            # As of the background-job fix, this call returns almost
+            # instantly (job runs in a background thread on the service),
+            # so poll /hydrate/weekend/status for completion instead of
+            # holding a long-lived curl connection open.
             Q=""
             if [ -n "$HOUR_IDX" ]; then
               Q="?hour_idx=${HOUR_IDX}"
             fi
             URL="${NS}/scheduler/hydrate/weekend${Q}"
+            STATUS_URL="${NS}/scheduler/hydrate/weekend/status"
             echo "POST $URL"
-            # Long curl timeout — slice is small but each symbol can take 90s+
-            curl -sS -m 900 -X POST "$URL" || {
-              echo "Scheduler hydrate failed — trying gateway refill slice via Python fallback"
-              # Fallback: still hit gateway full is too heavy; try scheduler again once
+            curl -sS -m 60 -X POST "$URL" || {
+              echo "Scheduler hydrate trigger failed — retrying once"
               sleep 30
-              curl -sS -m 900 -X POST "$URL" || true
+              curl -sS -m 60 -X POST "$URL" || true
             }
+            echo "Polling $STATUS_URL"
+            for i in $(seq 1 120); do
+              sleep 15
+              ST=$(curl -sS -m 20 "$STATUS_URL" || echo '{}')
+              echo "poll $i: $ST"
+              JOBSTATUS=$(echo "$ST" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || echo "")
+              if [ "$JOBSTATUS" = "done" ] || [ "$JOBSTATUS" = "error" ] || [ "$JOBSTATUS" = "stalled" ]; then
+                echo "Finished with status=$JOBSTATUS"
+                break
+              fi
+            done
           fi
 
       - name: Summary

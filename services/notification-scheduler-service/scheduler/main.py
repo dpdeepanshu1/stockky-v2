@@ -64,17 +64,37 @@ def neon_keepalive():
 
 @app.get("/hydrate/weekend")
 @app.post("/hydrate/weekend")
-def hydrate_weekend(hour_idx: int | None = None, full: bool = False):
+def hydrate_weekend(hour_idx: int | None = None, full: bool = False, wait: bool = False):
     """
     Time-sliced weekend hydration (force=true) for fundamentals + technical + events.
     hour_idx 0..47 selects the slice; omit to use current UTC hour % 48.
     full=true processes the entire universe (manual / GHA full pass — slow by design).
+
+    Runs in the background and returns immediately by default (poll
+    /hydrate/weekend/status for progress) since a real slice — let alone a
+    full pass — can take from minutes to hours, far past what any normal
+    HTTP client/proxy/health-check timeout will tolerate on an open socket.
+    Pass wait=true to block and return the final result inline instead
+    (only recommended for manual runs with a very long client-side timeout).
     """
     try:
-        from weekend_hydrator import hydrate_batch
-        return hydrate_batch(hour_idx=hour_idx, full=full)
+        from weekend_hydrator import hydrate_batch, start_hydrate_background
+        if wait:
+            return hydrate_batch(hour_idx=hour_idx, full=full)
+        return start_hydrate_background(hour_idx=hour_idx, full=full)
     except Exception as e:
         logger.exception("hydrate_weekend failed")
+        return {"ok": False, "error": str(e)[:300]}
+
+
+@app.get("/hydrate/weekend/status")
+def hydrate_weekend_status():
+    """Poll the state of the current/last background hydration job."""
+    try:
+        from weekend_hydrator import get_hydrate_job
+        return get_hydrate_job()
+    except Exception as e:
+        logger.exception("hydrate_weekend_status failed")
         return {"ok": False, "error": str(e)[:300]}
 
 

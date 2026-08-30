@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
@@ -308,6 +309,92 @@ def hydrate_batch(
     }
     logger.info("Hydration done: %s", result)
     return result
+
+
+# ── Background job wrapper ──────────────────────────────────────────────
+# Fix: /scheduler/hydrate/weekend used to run hydrate_batch() synchronously
+# inside the request handler. A real slice (or --full) can legitimately take
+# minutes to hours (see GHA workflow, which uses a 900s curl timeout for a
+# single slice), so any normal HTTP client/proxy/test harness with a shorter
+# timeout (load balancers, uptime checks, CI smoke tests) sees the connection
+# die mid-flight with no response at all. The work itself was never the bug —
+# doing it on the request thread was. Mirrors the same fire-and-forget +
+# pollable /status pattern already used by refill_additional.py on the
+# api-gateway, so callers that want to wait can poll instead of holding a
+# socket open for the whole run.
+_HYDRATE_JOB: dict[str, Any] = {
+    "status": "idle",
+    "message": "Idle",
+    "full": False,
+    "hour_idx": None,
+    "processed_ok": 0,
+    "errors": 0,
+    "batch_size": 0,
+    "total_universe": 0,
+    "started_epoch": None,
+    "updated_epoch": None,
+}
+_HYDRATE_LOCK = threading.Lock()
+_STALE_AFTER_SEC = float(os.getenv("HYDRATOR_STALE_AFTER_SEC", "1800"))
+
+
+def get_hydrate_job() -> dict:
+    with _HYDRATE_LOCK:
+        job = dict(_HYDRATE_JOB)
+    if job.get("status") == "running":
+        last = job.get("updated_epoch") or 0
+        if last and (time.time() - last) > _STALE_AFTER_SEC:
+            job["status"] = "stalled"
+            job["message"] = (
+                f"No progress for {int(time.time() - last)}s — job likely died "
+                f"(dyno idle-kill/restart). Safe to start again."
+            )
+    return job
+
+
+def _set_job(**kw) -> None:
+    with _HYDRATE_LOCK:
+        _HYDRATE_JOB.update(kw)
+        _HYDRATE_JOB["updated_epoch"] = time.time()
+
+
+def _run_job(hour_idx: Optional[int], full: bool) -> None:
+    _set_job(
+        status="running",
+        message="Hydrating…",
+        full=full,
+        hour_idx=hour_idx,
+        started_epoch=time.time(),
+    )
+    try:
+        result = hydrate_batch(hour_idx=hour_idx, full=full)
+        _set_job(
+            status="done" if result.get("ok") else "error",
+            message="Hydration complete" if result.get("ok") else str(result.get("error")),
+            processed_ok=result.get("processed_ok", 0),
+            errors=result.get("errors", 0),
+            batch_size=result.get("batch_size", 0),
+            total_universe=result.get("total_universe", 0),
+            hour_idx=result.get("hour_idx", hour_idx),
+        )
+    except Exception as e:
+        logger.exception("hydrate background job failed")
+        _set_job(status="error", message=str(e)[:300])
+
+
+def start_hydrate_background(hour_idx: Optional[int] = None, full: bool = False) -> dict:
+    """Kick off hydrate_batch() on a daemon thread and return immediately.
+
+    Refuses to start a second run on top of one already in progress (unless
+    the previous run has gone stale) so concurrent triggers don't double up
+    on rate-limited upstream calls.
+    """
+    current = get_hydrate_job()
+    if current.get("status") == "running":
+        return {"ok": True, "already_running": True, "job": current}
+    thread = threading.Thread(target=_run_job, args=(hour_idx, full), daemon=True)
+    thread.start()
+    return {"ok": True, "started": True, "job": get_hydrate_job()}
 
 
 if __name__ == "__main__":

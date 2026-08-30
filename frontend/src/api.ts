@@ -1140,11 +1140,18 @@ export const api = {
     request<NotificationConfig>(`/notifications/config/${channel}`, { method: "DELETE" }, 2, 30000),
 
   testNotifications: () =>
+    // Fix: this fires a REAL alert to every enabled channel (CallMeBot can
+    // include a voice call). The old 30000ms timeout was shorter than the
+    // gateway's downstream call could legitimately take, so the request()
+    // helper's automatic retry-on-timeout was silently re-sending the same
+    // real test alert 2-3x per click. Now: no retries (non-idempotent side
+    // effect), and a timeout long enough to match the gateway's own
+    // (75s) timeout for this endpoint plus headroom.
     request<{ delivered: boolean; note?: string; results?: Record<string, string> }>(
       "/notifications/test",
       { method: "POST" },
-      2,
-      30000
+      0,
+      85000
     ),
 
   testCallMeBot: (message?: string) =>

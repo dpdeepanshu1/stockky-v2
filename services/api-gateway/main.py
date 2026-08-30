@@ -5553,10 +5553,34 @@ def notifications_call_me(request: Request, message: str = "Stockky test call al
 
 @app.post("/notifications/test")
 def test_notification_channels():
+    """Proxy a real test send to every enabled channel.
+
+    Fix: this used a flat 15s timeout, but the downstream /test dispatch can
+    fan out to CallMeBot, which tries a voice call then a text fallback per
+    recipient at up to 35s each (see notifications_call_me above, which
+    already uses timeout=70 for the same reason) — so a config with
+    CallMeBot enabled routinely took well past 15s and came back as a
+    misleading "Notification service unreachable" 502 even though nothing
+    was actually unreachable. Match the longer timeout and the wake-first +
+    distinct-timeout-message pattern already used by call/me and config.
+    """
     try:
-        resp = httpx.post(f"{NOTIFICATION_URL}/test", timeout=15)
+        httpx.get(f"{NOTIFICATION_URL}/health", timeout=10)
+    except Exception:
+        pass
+    try:
+        resp = httpx.post(f"{NOTIFICATION_URL}/test", timeout=75)
         resp.raise_for_status()
         return resp.json()
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "Notification test timed out (CallMeBot voice+text fallback and/or "
+                "free-tier cold start can take a while). Channels may still have "
+                "fired — check each app, or try Test again in 20s."
+            ),
+        )
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
 

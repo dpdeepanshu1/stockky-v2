@@ -23,6 +23,12 @@ In a weak-index, choppy market:
 
 All original structural code (DB load, sector sympathy, caching, repair) is
 unchanged — only the scoring thresholds and weights are updated.
+
+BUGFIX (31-Aug-2026): vwap/orb_high were defaulting to values that made the
+25-pt ORB/VWAP bucket structurally unreachable on every call (see the
+BUGFIX comment inside score_stock() for the full proof). Both now fall back
+to honest same-session proxies instead of values that trivially equal or
+bound current_price.
 """
 from __future__ import annotations
 
@@ -82,6 +88,13 @@ DIST_52W_NEAR_PCT = float(os.getenv("SURPRISE_DIST_52W_NEAR_PCT", "15.0"))
 # order-book depth — so it must be able to reach "breakout" on its own.
 SHOCKER_MIN_CHANGE_PCT = float(os.getenv("SURPRISE_SHOCKER_MIN_CHANGE_PCT", "5.0"))
 SHOCKER_MIN_RVOL = float(os.getenv("SURPRISE_SHOCKER_MIN_RVOL", "2.0"))
+
+# ── ORB-proxy tuning (added 31-Aug-2026, see BUGFIX note in score_stock) ─────
+# Fraction of a stock's normal daily ATR used as the "opening range" buffer
+# above the open when the feed has no true opening-range high.
+ORB_ATR_FRACTION = float(os.getenv("SURPRISE_ORB_ATR_FRACTION", "0.3"))
+# Fallback buffer (as a fraction of open price) when daily_atr is unknown/0.
+ORB_FALLBACK_PCT = float(os.getenv("SURPRISE_ORB_FALLBACK_PCT", "0.005"))
 
 
 def _normalize_db_url(url: str) -> str:
@@ -191,6 +204,43 @@ def directional_filter(candidates: list) -> tuple:
     neg = [c for c in candidates if (c.get("pct_change") or c.get("change_pct") or 0) <= 0]
     return pos, neg
 
+
+def _session_progress_ist() -> float:
+    """
+    BUGFIX (31-Aug-2026): fraction of the NSE trading session (9:15-15:30
+    IST, 375 minutes) elapsed right now — used as the fallback for
+    tick["session_progress"], which (confirmed via repo-wide grep, same as
+    vwap/orb_high) is never actually supplied by any tick source.
+
+    The old code hardcoded this fallback to a flat 0.4, i.e. it always
+    pretended it was ~40% through the session (~11:35am) no matter the
+    actual time. That value feeds directly into current_vol_15m via
+    `current_vol_15m = daily_volume / (25 * progress)`, which in turn drives
+    rvol — the single biggest scoring bucket (35 pts) plus rvol_slope
+    (10 pts). Concretely: at 9:35am (progress really ~0.05) the hardcoded
+    0.4 divides daily volume by 10 instead of ~1.25, understating rvol ~8x
+    right when volume bursts are most meaningful; at 3:15pm (progress really
+    ~0.96) it divides by 10 instead of ~24, overstating rvol ~2.4x late in
+    the day. Every scan, all day, was silently mis-scoring on the clock.
+
+    Returns a value clamped to [0.15, 1.0] to match the existing bounds
+    applied at the call site. Falls back to the old 0.4 constant only if
+    the time lookup itself fails (e.g. tzdata unavailable).
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, time as dtime
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        open_t, close_t = dtime(9, 15), dtime(15, 30)
+        tt = now.time()
+        if tt <= open_t:
+            return 0.15
+        if tt >= close_t:
+            return 1.0
+        elapsed_min = (now.hour * 60 + now.minute) - (open_t.hour * 60 + open_t.minute)
+        return max(0.15, min(elapsed_min / 375.0, 1.0))
+    except Exception:
+        return 0.4
 
 
 class SurpriseStockEngine:
@@ -387,14 +437,63 @@ class SurpriseStockEngine:
         open_price       = float(tick.get("open") or prev_close)
         current_vol_15m  = float(tick.get("vol_15m") or tick.get("volume") or 0.0)
         if current_vol_15m > 0 and tick.get("vol_15m") is None:
-            progress = float(tick.get("session_progress") or 0.4)
+            # BUGFIX (31-Aug-2026): session_progress is never supplied by any
+            # tick source either — was hardcoded to 0.4 regardless of actual
+            # clock time (see _session_progress_ist() docstring for the full
+            # impact on rvol). Use the real elapsed-session fraction instead.
+            sp_raw = tick.get("session_progress")
+            progress = float(sp_raw) if sp_raw is not None else _session_progress_ist()
             progress = max(0.15, min(progress, 1.0))
             current_vol_15m = current_vol_15m / max(1.0, 25.0 * progress)
 
-        orb_high  = float(tick.get("orb_high") or tick.get("high") or open_price)
-        vwap      = float(tick.get("vwap") or current_price)
         day_high  = float(tick.get("high") or current_price)
         day_low   = float(tick.get("low") or current_price)
+
+        # ── BUGFIX (31-Aug-2026): dead ORB/VWAP bucket ───────────────────────
+        # Confirmed across every tick source (/quote/{symbol}, the bulk quote
+        # cache in data_feed.py, the AngelOne WS feed, and the Yahoo WS feed):
+        # NONE of them ever populate "vwap" or "orb_high". grep across the
+        # whole repo turns up zero writers for either key — tick.get() always
+        # returns None for both, on every single call, not as an edge case.
+        #
+        # The old code then defaulted:
+        #   vwap     = tick.get("vwap") or current_price       -> == current_price
+        #   orb_high = tick.get("orb_high") or tick.get("high") -> == day_high
+        # `day_high` (tick["high"]) is the running session high computed from
+        # the SAME quote as current_price, so day_high >= current_price is a
+        # mathematical identity for any valid OHLC quote. That means both
+        #   current_price > vwap        (vwap == current_price)
+        #   current_price > orb_high    (orb_high == day_high >= current_price)
+        # are structurally impossible to satisfy — not rare misses, guaranteed
+        # False on every call — which permanently zeroed the entire 25-pt
+        # ORB/VWAP bucket (score's single biggest category) for 100% of
+        # scans, silently capping every stock ~25 points below its true score
+        # and starving both the "breakout" tier and the "building" tier (which
+        # has no override) of stocks that were genuinely trading strong.
+        #
+        # Fix: when the real intraday field isn't supplied, derive a proxy
+        # that is deliberately NOT equal to (or trivially bounded by)
+        # current_price, so the comparison stays meaningful:
+        #   - vwap proxy:     same-session typical price = (open+high+low)/3.
+        #     Unlike current_price itself, this only matches current_price by
+        #     coincidence, so "price above the session's typical price" is a
+        #     real, passable condition again.
+        #   - orb_high proxy: open + a fraction of the stock's own normal
+        #     daily range (daily_atr, already in static_cache). This models
+        #     "opening-range breakout" as "moved beyond a normal opening swing
+        #     from the open" — the closest honest substitute available when
+        #     the feed has no true first-15/30-min high. Falls back to a
+        #     small fixed % above open on illiquid names with atr=0.
+        vwap_raw = tick.get("vwap")
+        vwap = float(vwap_raw) if vwap_raw is not None else (open_price + day_high + day_low) / 3.0
+
+        orb_raw = tick.get("orb_high")
+        if orb_raw is not None:
+            orb_high = float(orb_raw)
+        else:
+            daily_atr_static = float(static.get("daily_atr") or 0.0)
+            orb_buffer = (daily_atr_static * ORB_ATR_FRACTION) if daily_atr_static > 0 else (open_price * ORB_FALLBACK_PCT)
+            orb_high = open_price + orb_buffer
 
         avg_15m_vol   = max(int(static.get("avg_15m_volume") or 1), 1)
         rvol          = round(current_vol_15m / avg_15m_vol, 2) if avg_15m_vol else 0.0
@@ -511,7 +610,17 @@ class SurpriseStockEngine:
             "rvol_slope":   rvol_slope,
             "buy_pct":      buy_pct,
             "trigger_type": trigger_type,
-            "trailing_stop": round(vwap * 0.985, 2),
+            # BUGFIX (31-Aug-2026): trailing_stop was `vwap * 0.985`. That was
+            # always safely below current_price only because the old vwap
+            # default WAS current_price (the very bug fixed above). Now that
+            # vwap is a genuine same-session proxy, it can legitimately sit
+            # ABOVE current_price (e.g. a stock that gapped up, spiked, and
+            # faded — still up on the day and qualifying via other buckets,
+            # but currently trading below its own session typical price) —
+            # which produced a "stop-loss" above the entry price. Anchor to
+            # whichever of {vwap, current_price} is lower so the stop is
+            # always genuinely below where the stock is trading right now.
+            "trailing_stop": round(min(vwap, current_price) * 0.985, 2),
             "target_1":     round(current_price * 1.05, 2),
             "prev_close":   round(prev_close, 2),
             "sector":       static.get("sector"),

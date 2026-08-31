@@ -176,6 +176,22 @@ _SOURCES = {
 # UPPER CIRCUIT (>=19.9%) FINDING:
 #   n=509, win=69.7%, mean=+5.22% next day — the STRONGEST signal in the dataset.
 #   These are tagged high_conviction=True + upper_circuit=True in payload.
+# BUG FIX (31-Aug-2026): both candidate refresh loops below used to fire one
+# asyncio.Task PER symbol with no concurrency cap at all — with a ~500-symbol
+# scan universe and up to 8 HTTP calls per symbol (7 timeframes + quote on
+# the standard track), that is thousands of simultaneous requests slammed
+# into market-data-service in one burst. market-data-service itself throttles
+# yfinance to YFINANCE_MAX_CONCURRENT=6 concurrent calls (see
+# docker-compose.yml) — everything past the front of that queue sits waiting
+# and blows past this file's own 8s/12s per-request timeouts before
+# market-data-service ever gets to it. That is what produced the
+# "No quote available for volume-shock check" rejection on literally every
+# symbol in one cycle, RELIANCE/HDFCBANK/INFY included — those are never
+# actually unquotable, the fetch never had a chance to complete. Bounding
+# concurrency here keeps the in-flight request count sane so the fast ones
+# succeed instead of all of them queuing behind each other into a timeout.
+CANDIDATE_ANALYSIS_CONCURRENCY = int(os.getenv("CANDIDATE_ANALYSIS_CONCURRENCY", "15"))
+
 VOLUME_SHOCK_MULTIPLIER = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MULTIPLIER", "2.0"))
 VOLUME_SHOCK_MIN_RETURN_PCT = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MIN_RETURN_PCT", "5.0"))
 
@@ -324,6 +340,21 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
         quote = None
 
     current_price = float((quote or {}).get("price") or (quote or {}).get("cmp") or 0)
+
+    # Data-starved marker: quote AND every single timeframe fetch came back
+    # empty. Unlike a genuine "weak momentum" rejection (some timeframes
+    # returned real numbers, they just weren't bullish), this means nothing
+    # came back from market-data-service at all for this symbol — almost
+    # always an upstream fetch problem (overload/timeout), not a real
+    # candidate-quality signal. Callers use this to distinguish the two
+    # instead of guessing from reject_reason text.
+    data_starved = quote is None and all(v is None for v in tf_returns.values())
+    if data_starved:
+        return {
+            "reject_reason": "No quote or history available (data fetch failed for all timeframes).",
+            "tf_returns": tf_returns, "bullish_count": 0, "atr_pct": None,
+            "data_starved": True,
+        }
 
     # ── Check 1: Minimum price floor ─────────────────────────────────────────
     if current_price > 0 and current_price < MIN_STOCK_PRICE:
@@ -740,20 +771,44 @@ async def _refresh_standard_candidates(db: Session, mode: str, open_syms: set) -
         return 0, seen_symbols
 
     # Run multi-timeframe analysis for all remaining symbols concurrently —
-    # one shared client, all symbols in parallel, not sequentially.
+    # one shared client, bounded parallelism (see CANDIDATE_ANALYSIS_CONCURRENCY
+    # note above), not one unbounded task per symbol and not sequentially.
     async with httpx.AsyncClient() as client:
+        sem = asyncio.Semaphore(CANDIDATE_ANALYSIS_CONCURRENCY)
+
+        async def _limited_mtf(symbol: str) -> dict:
+            async with sem:
+                return await _multi_tf_analysis(client, symbol)
+
         tf_tasks = {
-            r["symbol"]: asyncio.create_task(_multi_tf_analysis(client, r["symbol"]))
+            r["symbol"]: asyncio.create_task(_limited_mtf(r["symbol"]))
             for r in rows
         }
         tf_results = await asyncio.gather(*tf_tasks.values(), return_exceptions=True)
         tf_map: dict[str, dict] = {}
+        data_starved_count = 0
         for sym, result in zip(tf_tasks.keys(), tf_results):
             if isinstance(result, Exception):
                 logger.warning("MTF analysis error for %s: %s", sym, result)
                 tf_map[sym] = {"reject_reason": f"MTF fetch error: {result}", "atr_pct": None}
+                data_starved_count += 1
             else:
                 tf_map[sym] = result
+                if result.get("data_starved"):
+                    data_starved_count += 1
+        # Diagnostic: if almost every symbol came back with zero data (quote AND
+        # every timeframe fetch empty) rather than failing an actual quality
+        # check, that's a systemic upstream problem (market-data-service
+        # overloaded/unreachable), not hundreds of individually-bad symbols —
+        # surface it as one loud line instead of letting it hide inside
+        # hundreds of per-symbol "CANDIDATE REJECTED" info logs.
+        if tf_tasks and data_starved_count / len(tf_tasks) > 0.5:
+            logger.warning(
+                "candidate_engine: %d/%d symbols had zero quote/history data "
+                "in one cycle (mode=%s) — check market-data-service health/logs, "
+                "this almost never means that many quotes are genuinely unavailable.",
+                data_starved_count, len(tf_tasks), mode,
+            )
 
     inserted = 0
     skipped  = 0
@@ -816,18 +871,26 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
         if not candidates:
             return 0
 
+        sem = asyncio.Semaphore(CANDIDATE_ANALYSIS_CONCURRENCY)
+
+        async def _limited_vs(symbol: str) -> dict:
+            async with sem:
+                return await _volume_shock_analysis(client, symbol)
+
         vs_tasks = {
-            sym: asyncio.create_task(_volume_shock_analysis(client, sym))
+            sym: asyncio.create_task(_limited_vs(sym))
             for sym in candidates
         }
         vs_results = await asyncio.gather(*vs_tasks.values(), return_exceptions=True)
 
     inserted = 0
     skipped  = 0
+    no_quote_count = 0
     for sym, result in zip(vs_tasks.keys(), vs_results):
         if isinstance(result, Exception):
             logger.warning("volume_shock analysis error for %s: %s", sym, result)
             skipped += 1
+            no_quote_count += 1
             continue
 
         reject = result.get("reject_reason")
@@ -836,6 +899,8 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
                 "VOLUME_SHOCK CANDIDATE REJECTED %s (mode=%s) | %s", sym, mode, reject[:150]
             )
             skipped += 1
+            if "no quote" in reject.lower() or "insufficient" in reject.lower():
+                no_quote_count += 1
             continue
 
         # Elevate conviction_score for high-conviction signals
@@ -885,6 +950,17 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
         "candidate_engine: volume_shock inserted=%d skipped=%d mode=%s",
         inserted, skipped, mode,
     )
+    # Same systemic-failure diagnostic as the standard track above — see that
+    # note for why this is checked explicitly instead of left to blend into
+    # per-symbol REJECTED lines.
+    if vs_tasks and no_quote_count / len(vs_tasks) > 0.5:
+        logger.warning(
+            "candidate_engine: %d/%d volume_shock symbols rejected for missing "
+            "quote/history data in one cycle (mode=%s) — check market-data-service "
+            "health/logs, this almost never means that many quotes are genuinely "
+            "unavailable.",
+            no_quote_count, len(vs_tasks), mode,
+        )
     return inserted
 
 

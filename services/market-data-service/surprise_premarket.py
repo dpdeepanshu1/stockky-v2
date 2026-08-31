@@ -910,11 +910,69 @@ def precalculate_surprise_baselines(symbols: List[str]) -> Dict[str, Any]:
         _job_lock = False
 
 
+# ── Fallback universe (fix, 31-Aug-2026) ──────────────────────────────────────
+# BUG: when SURPRISE_UNIVERSE/SCAN_UNIVERSE isn't set AND the live universe
+# builder (_build_scan_universe(), which pulls ~500 symbols from NSE's
+# securities list + movers/news/bulk-deals/52W-extremes) fails or returns
+# nothing — e.g. NSE endpoint blocked/rate-limited — every caller of
+# default_universe_from_env() silently fell back to just 14 mega-caps
+# (RELIANCE, TCS, HDFCBANK...). None of those are the small/mid-cap names
+# that actually show up as "volume shockers" (Asian Hotels North, Bodal
+# Chemicals, Bharat Global Developers, etc.) — so on a day the live universe
+# fetch failed, the premarket job would seed baselines for 14 stocks, the
+# scanner would score those 14, and the whole feature would look like it
+# "worked" (200 OK, non-empty response) while structurally never being able
+# to surface the stocks the user actually wants. This replaces that 14-name
+# list with 250 real, liquid NSE symbols (data-derived from a year of NSE
+# bhavcopy delivery data — ranked by median daily turnover, spanning large,
+# mid and small caps across sectors, ETFs excluded) and logs a warning so a
+# fallback activation is visible in the logs instead of failing silently.
+_FALLBACK_LIQUID_UNIVERSE: List[str] = [
+        "HDFCBANK", "ICICIBANK", "RELIANCE", "BHARTIARTL", "INFY", "SBIN", "BSE", "ETERNAL",
+        "TCS", "M&M", "AXISBANK", "LT", "BAJFINANCE", "MCX", "VEDL", "IDEA", "KOTAKBANK",
+        "DIXON", "MARUTI", "SHRIRAMFIN", "BEL", "GROWW", "NETWEB", "INDIGO", "ITC",
+        "TATASTEEL", "HINDALCO", "KAYNES", "ADANIPOWER", "HAL", "HINDCOPPER", "SUNPHARMA",
+        "HCLTECH", "EICHERMOT", "TMPV", "NTPC", "HINDUNILVR", "ADANIENT", "COFORGE", "CANBK",
+        "TITAN", "NATIONALUM", "ADANIPORTS", "BAJAJ-AUTO", "SWIGGY", "POWERINDIA", "TRENT",
+        "POWERGRID", "WAAREEENER", "PAYTM", "JIOFIN", "HINDZINC", "HEROMOTOCO", "SUZLON",
+        "ONGC", "SAIL", "BHEL", "TECHM", "ULTRACEMCO", "COALINDIA", "ASHOKLEY", "TVSMOTOR",
+        "ADANIGREEN", "APOLLOHOSP", "PERSISTENT", "BANKBARODA", "WIPRO", "OLAELEC", "BPCL",
+        "ASIANPAINT", "MAXHEALTH", "POLYCAB", "PFC", "ATHERENERG", "MAZDOCK", "DATAPATTNS",
+        "INDUSTOWER", "GRSE", "VBL", "CHOLAFIN", "GVT&D", "INDUSINDBK", "POLICYBZR", "CDSL",
+        "CUMMINSIND", "HDFCAMC", "HINDPETRO", "DIVISLAB", "UNIONBANK", "RECLTD", "AMBER",
+        "MOTHERSON", "CGPOWER", "DLF", "MUTHOOTFIN", "BAJAJFINSV", "LAURUSLABS", "DRREDDY",
+        "FEDERALBNK", "LUPIN", "ANGELONE", "JSWSTEEL", "HDFCLIFE", "PNB", "YESBANK",
+        "SOLARINDS", "CUPID", "TATAPOWER", "IOC", "CIPLA", "AUBANK", "HFCL", "ADANIENSOL",
+        "GRASIM", "KALYANKJIL", "SAMMAANCAP", "BDL", "SBILIFE", "RVNL", "NMDC", "INDHOTEL",
+        "GMDCLTD", "FORCEMOT", "BRITANNIA", "BHARATFORG", "IDFCFIRSTB", "NESTLEIND", "RBLBANK",
+        "ABB", "APOLLO", "LODHA", "GAIL", "DMART", "INDIANB", "COCHINSHIP", "HYUNDAI",
+        "LENSKART", "NAUKRI", "TATACONSUM", "FORTIS", "LTF", "ABCAPITAL", "CHENNPETRO",
+        "AUROPHARMA", "UPL", "BANDHANBNK", "GODREJPROP", "TATSILV", "OFSS", "GODREJCP",
+        "JINDALSTEL", "ENRIN", "MTARTECH", "KEI", "MARICO", "BANKINDIA", "OIL", "TORNTPHARM",
+        "NYKAA", "GMRAIRPORT", "VOLTAS", "PGEL", "MPHASIS", "JSWENERGY", "GLENMARK", "SIEMENS",
+        "PREMIERENE", "VMM", "SRF", "BIOCON", "ANANTRAJ", "IRFC", "UNITDSPR", "HAVELLS",
+        "MAHABANK", "AMBUJACEM", "RPOWER", "MFSL", "MRPL", "MANAPPURAM", "ICICIGI",
+        "HBLENGINE", "APLAPOLLO", "RADICO", "HSCL", "PRESTIGE", "TATAELXSI", "LGEINDIA",
+        "NBCC", "HDFCSILVER", "LICI", "SYRMA", "SONACOMS", "KPITTECH", "PIDILITIND",
+        "DELHIVERY", "BOSCHLTD", "NHPC", "IDBI", "UNOMINDA", "APARINDS", "SAGILITY", "CAMS",
+        "JUBLFOOD", "INOXWIND", "GODFRYPHLP", "PNBHOUSING", "MANKIND", "ZEEL", "NAVINFLUOR",
+        "BELRISE", "PATANJALI", "360ONE", "KFINTECH", "IREDA", "WOCKPHARMA", "SCI", "TIINDIA",
+        "MRF", "SBICARD", "DABUR", "TDPOWERSYS", "PHOENIXLTD", "PAGEIND", "PWL", "ASTRAL",
+        "CARTRADE", "ZYDUSLIFE", "TARIL", "COLPAL", "IFCI", "IIFL", "M&MFIN", "PFOCUS",
+        "ACUTAAS", "MOTILALOFS", "SUPREMEIND", "NAM-INDIA", "CROMPTON", "OBEROIRLTY", "EMMVEE",
+        "EXIDEIND", "LICHSGFIN", "TEJASNET", "TATACAP", "IEX", "SOUTHBANK", "SHREECEM",
+        "CONCOR", "JPPOWER",
+]
+
+
 def default_universe_from_env() -> List[str]:
     raw = os.getenv("SURPRISE_UNIVERSE", "") or os.getenv("SCAN_UNIVERSE", "")
     if raw.strip():
         return [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]
-    return [
-        "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "BHARTIARTL",
-        "ITC", "LT", "KOTAKBANK", "AXISBANK", "HINDUNILVR", "BAJFINANCE", "MARUTI",
-    ]
+    logger.warning(
+        "surprise: SURPRISE_UNIVERSE/SCAN_UNIVERSE not set and live universe "
+        "build returned nothing — using %s-symbol liquid fallback universe "
+        "(large/mid/small cap mix, not just mega-caps)",
+        len(_FALLBACK_LIQUID_UNIVERSE),
+    )
+    return list(_FALLBACK_LIQUID_UNIVERSE)

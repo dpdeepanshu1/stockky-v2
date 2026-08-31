@@ -65,6 +65,24 @@ SECTOR_SYMPATHY_MIN_SCORE = int(os.getenv("SURPRISE_SECTOR_SYMPATHY_MIN_SCORE", 
 DIST_52W_BREAKOUT_PCT = float(os.getenv("SURPRISE_DIST_52W_BREAKOUT_PCT", "8.0"))
 DIST_52W_NEAR_PCT = float(os.getenv("SURPRISE_DIST_52W_NEAR_PCT", "15.0"))
 
+# ── Volume-Shocker override (added 31-Aug-2026) ───────────────────────────────
+# BUG: score_stock() requires MIN_SCORE=65/100 for the "breakout" tier, but
+# up to 30 of those points (order-book buy_pct=15 + 52W-proximity=15) are
+# structurally unreachable for most of the universe: buy_pct defaults to a
+# neutral 50 (0 pts) whenever the feed has no live bid/ask depth (true for
+# nearly every quote-only / EOD-derived tick), and the majority of genuine
+# single-day "volume shocker" pops (event/news driven small & midcaps) are
+# NOT trading near their 52-week high. Backtesting real >5% + high-RVOL move
+# days for stocks that Groww's own "Volume shockers" screen surfaced showed
+# most of them scoring 40-62 ("building") instead of "breakout" — i.e. a
+# confirmed, high-volume 5%+ mover was being demoted to a soft/secondary
+# signal purely because of two inapplicable sub-scores, not because the
+# move itself was weak. A large price move CONFIRMED by real volume is
+# exactly what "Volume shockers" means, independent of 52W distance or
+# order-book depth — so it must be able to reach "breakout" on its own.
+SHOCKER_MIN_CHANGE_PCT = float(os.getenv("SURPRISE_SHOCKER_MIN_CHANGE_PCT", "5.0"))
+SHOCKER_MIN_RVOL = float(os.getenv("SURPRISE_SHOCKER_MIN_RVOL", "2.0"))
+
 
 def _normalize_db_url(url: str) -> str:
     if url.startswith("postgres://"):
@@ -464,6 +482,18 @@ class SurpriseStockEngine:
 
         if score >= MIN_SCORE and price_change_pct > MIN_CHANGE_PCT:
             tier = "breakout"
+        elif (
+            price_change_pct >= SHOCKER_MIN_CHANGE_PCT
+            and rvol >= SHOCKER_MIN_RVOL
+            and current_price > prev_close
+        ):
+            # Volume-Shocker override — see comment on SHOCKER_MIN_CHANGE_PCT
+            # above. A confirmed big % move on real volume is "breakout"
+            # grade on its own; don't let it get stuck in "building" (or
+            # dropped entirely) just because it's far from its 52W high or
+            # the feed has no live order-book depth for buy_pct.
+            tier = "breakout"
+            trigger_type = "Volume Shocker"
         elif score >= BUILDING_MIN_SCORE and price_change_pct > BUILDING_MIN_CHANGE_PCT:
             tier = "building"
             if trigger_type == "Consolidation":

@@ -356,6 +356,28 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
             "data_starved": True,
         }
 
+    # ── Check 0: live quote must actually resolve ────────────────────────────
+    # Previously, a symbol with a broken/unresolvable quote (bad ticker,
+    # ambiguous company-name symbol like "APOLLO" instead of "APOLLOHOSP",
+    # transient market-data-service failure) could still pass every check
+    # below as long as SOME history timeframe came back — current_price
+    # just silently sat at 0 and none of the price-based checks fired. The
+    # candidate got inserted anyway, then sat forever as "WAIT — No current
+    # price available" every cycle (entry_engine hits the same broken
+    # /quote lookup and can never price it), permanently cluttering the
+    # watchlist. Reject it here instead, once, with a reason that actually
+    # explains why.
+    if current_price <= 0:
+        return {
+            "reject_reason": (
+                "No live quote available for this symbol — market-data-service "
+                "couldn't resolve a price (bad/ambiguous ticker, delisted, or a "
+                "transient upstream failure). Skipping rather than inserting a "
+                "candidate that can never be priced."
+            ),
+            "tf_returns": tf_returns, "bullish_count": 0, "atr_pct": None,
+        }
+
     # ── Check 1: Minimum price floor ─────────────────────────────────────────
     if current_price > 0 and current_price < MIN_STOCK_PRICE:
         return {
@@ -573,6 +595,13 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict
         return {"reject_reason": "Insufficient daily history for volume-shock check.", "atr_pct": None}
 
     current_price = float(quote.get("price") or quote.get("cmp") or 0)
+
+    # ── quote object came back but with no usable price (edge case: quote
+    # dict has other fields but price/cmp are missing/zero) — same failure
+    # mode as the standard track, same fix: reject rather than let it
+    # through with a phantom price. ─────────────────────────────────────
+    if current_price <= 0:
+        return {"reject_reason": "Quote returned but no usable price for volume-shock check.", "atr_pct": None}
 
     # ── Position-safety check: minimum price floor (kept — see module docstring) ──
     if current_price > 0 and current_price < MIN_STOCK_PRICE:

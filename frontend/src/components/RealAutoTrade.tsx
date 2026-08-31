@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl,
-  getSessionToken, setSessionToken,
+  getSessionToken, setSessionToken, setSessionExpiredHandler,
   type GateStatus, type AuditLogRow, type Position, type OrderRow, type CycleResult, type DhanStatus,
   type PipelineStatus, type CandidateRow,
 } from "../realTradeApi";
@@ -384,6 +384,7 @@ export default function RealAutoTrade() {
   // Service positions/orders
   const [positions, setPositions] = useState<Position[]>([]);
   const [orders, setOrders] = useState<OrderRow[]>([]);
+  const [orderRange, setOrderRange] = useState<"today" | "all">("today");
 
   const [auditRows, setAuditRows] = useState<AuditLogRow[]>([]);
   const [cycleBusy, setCycleBusy] = useState(false);
@@ -456,11 +457,21 @@ export default function RealAutoTrade() {
 
   const loadPositionsAndOrders = useCallback(async (m: Mode) => {
     try {
-      const [p, o] = await Promise.all([realTradeApi.positions(m), realTradeApi.orders(m, 20)]);
+      // 100 (not 20) so the "All" orders sub-tab has real history to show —
+      // "Today" is just a client-side filter over this same fetch, not a
+      // separate call.
+      const [p, o] = await Promise.all([realTradeApi.positions(m), realTradeApi.orders(m, 100)]);
       setPositions(p);
       setOrders(o);
     } catch { /* best-effort */ }
   }, []);
+
+  const isSameLocalDay = (iso: string, ref: Date): boolean => {
+    const d = new Date(iso);
+    return d.getFullYear() === ref.getFullYear()
+      && d.getMonth() === ref.getMonth()
+      && d.getDate() === ref.getDate();
+  };
 
   // Watchlist tab — what the engine has fetched/evaluated recently, with a
   // live price alongside whatever it's waiting on. The tab itself polls
@@ -500,6 +511,19 @@ export default function RealAutoTrade() {
   useEffect(() => {
     if (getRealTradeApiUrl()) void loadStatus(mode);
   }, [mode, loadStatus]);
+
+  // Registers once: the moment ANY request (including a background poll the
+  // user never directly triggered) discovers the session has expired, flip
+  // `loggedIn` immediately instead of leaving it stuck true from the last
+  // explicit login. See the long comment on setSessionExpiredHandler in
+  // realTradeApi.ts for why this used to go stale.
+  useEffect(() => {
+    setSessionExpiredHandler(() => {
+      setLoggedIn(false);
+      setError("Session expired — log in again to arm, run a cycle, or change settings. Auto-Pilot (if it was on) keeps running.");
+    });
+    return () => setSessionExpiredHandler(null);
+  }, []);
 
   useEffect(() => {
     // Load read-only data when armed even without an active admin session —
@@ -1338,7 +1362,11 @@ export default function RealAutoTrade() {
           {/* ═══════════════════════════════════════════════════════════════
               TAB: ORDERS
           ═══════════════════════════════════════════════════════════════ */}
-          {activeTab === "orders" && (
+          {activeTab === "orders" && (() => {
+            const now = new Date();
+            const todayOrders = orders.filter(o => isSameLocalDay(o.created_at, now));
+            const visibleOrders = orderRange === "today" ? todayOrders : orders;
+            return (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <SectionHdr>Recent orders — {mode}</SectionHdr>
@@ -1347,9 +1375,25 @@ export default function RealAutoTrade() {
                   ↻
                 </button>
               </div>
-              {orders.length === 0 ? (
+              <div className="flex gap-1.5">
+                <button onClick={() => setOrderRange("today")}
+                  className={`font-mono text-[10px] px-3 py-1.5 rounded-lg border ${orderRange === "today"
+                    ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-400"
+                    : "bg-zinc-900 border-zinc-800 text-zinc-500"}`}>
+                  Today ({todayOrders.length})
+                </button>
+                <button onClick={() => setOrderRange("all")}
+                  className={`font-mono text-[10px] px-3 py-1.5 rounded-lg border ${orderRange === "all"
+                    ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-400"
+                    : "bg-zinc-900 border-zinc-800 text-zinc-500"}`}>
+                  All ({orders.length})
+                </button>
+              </div>
+              {visibleOrders.length === 0 ? (
                 <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 text-center">
-                  <p className="font-mono text-sm text-zinc-600">No orders yet.</p>
+                  <p className="font-mono text-sm text-zinc-600">
+                    {orderRange === "today" ? "No orders today." : "No orders yet."}
+                  </p>
                 </div>
               ) : (
                 <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
@@ -1362,12 +1406,12 @@ export default function RealAutoTrade() {
                         <th className="text-right p-3">Limit</th>
                         <th className="text-right p-3">Current</th>
                         <th className="text-center p-3">Status</th>
-                        <th className="text-right p-3">Time</th>
+                        <th className="text-right p-3">{orderRange === "today" ? "Time" : "Date · Time"}</th>
                         <th className="p-3" />
                       </tr>
                     </thead>
                     <tbody>
-                      {orders.map(o => {
+                      {visibleOrders.map(o => {
                         const sc = o.status === "FILLED" ? "text-emerald-400"
                           : o.status === "CANCELLED" || o.status === "REJECTED" ? "text-rose-400"
                           : o.status === "PLACED" ? "text-amber-400"
@@ -1397,7 +1441,9 @@ export default function RealAutoTrade() {
                               ) : <span className="text-zinc-700">—</span>}
                             </td>
                             <td className={`p-3 text-center ${sc}`}>{o.status}</td>
-                            <td className="p-3 text-right text-zinc-600">{fmtTime(o.created_at)}</td>
+                            <td className="p-3 text-right text-zinc-600">
+                              {orderRange === "today" ? fmtTime(o.created_at) : `${fmtDate(o.created_at)} ${fmtTime(o.created_at)}`}
+                            </td>
                             <td className="p-3 text-right">
                               {o.status === "PLACED" && (
                                 <button onClick={() => void doCancelOrder(o)} disabled={actionBusy === `cancel:${o.id}`}
@@ -1414,7 +1460,8 @@ export default function RealAutoTrade() {
                 </div>
               )}
             </div>
-          )}
+            );
+          })()}
 
           {/* ═══════════════════════════════════════════════════════════════
               TAB: WATCHLIST — every candidate the engine has recently

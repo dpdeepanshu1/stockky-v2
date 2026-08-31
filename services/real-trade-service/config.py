@@ -208,6 +208,18 @@ EXIT_EARLY_WARN_DAYS                = int(os.getenv("EXIT_EARLY_WARN_DAYS", "6")
 #   Next review: trigger on Nifty crossing 25,500 OR monthly on the 1st.
 #
 ENTRY_REGIME_MIN_SCORE              = int(os.getenv("ENTRY_REGIME_MIN_SCORE", "38"))   # ADAPTIVE: auto-computed from history
+# 2026-08-31: the adaptive regime gate (see adaptive_thresholds.py) is a
+# TRAILING 90-day p20 — after a sharp, recent regime break it can sit far
+# above today's actual score for weeks (e.g. gate=65 vs today's score=19),
+# during which the fully-strict gate blocks every single REAL entry with no
+# way for even the strongest setup to get through. REGIME_OVERRIDE_TOP_N lets
+# the N highest-conviction candidates per cycle bypass ONLY this gate — they
+# still have to clear every other gate (drift, R:R floor, risk sizing, risk
+# engine) unchanged, and get sized at REGIME_OVERRIDE_RISK_SCALE of normal
+# risk as an extra margin for trading against a still-weak market read. Set
+# to 0 to fully restore the old "regime weak = nothing enters" behavior.
+ENTRY_REGIME_OVERRIDE_TOP_N         = int(os.getenv("ENTRY_REGIME_OVERRIDE_TOP_N", "1"))
+ENTRY_REGIME_OVERRIDE_RISK_SCALE    = float(os.getenv("ENTRY_REGIME_OVERRIDE_RISK_SCALE", "0.5"))
 ENTRY_MIN_REWARD_RISK               = float(os.getenv("ENTRY_MIN_REWARD_RISK", "2.0"))  # LAST_REVIEWED: 2026-08-28
 CANDIDATE_MIN_CONVICTION            = float(os.getenv("CANDIDATE_MIN_CONVICTION", "55")) # LAST_REVIEWED: 2026-08-28
 CANDIDATE_MIN_BULLISH_TF            = int(os.getenv("CANDIDATE_MIN_BULLISH_TF", "4"))   # LAST_REVIEWED: 2026-08-28

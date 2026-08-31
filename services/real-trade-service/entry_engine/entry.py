@@ -259,6 +259,22 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     symbols = list({c.symbol for c in candidates})
     ticks   = await get_quotes(symbols)
 
+    # ── Regime-gate override (2026-08-31) ───────────────────────────────────
+    # When the market-wide gate is blocking everything, still let the
+    # handful of strongest candidates this cycle through it — see the
+    # config.py docstring on ENTRY_REGIME_OVERRIDE_TOP_N for why. Picking the
+    # override set BEFORE the main loop (rather than "first N seen") means it
+    # is actually the highest-conviction names, not just whichever happened
+    # to be queued first.
+    override_ids: set[int] = set()
+    if mode == "REAL" and not regime_ok and config.ENTRY_REGIME_OVERRIDE_TOP_N > 0:
+        override_eligible = [
+            c for c in candidates
+            if (c.decision_label or "").upper() in _ACTIONABLE_DECISIONS and ticks.get(c.symbol) is not None
+        ]
+        override_eligible.sort(key=lambda c: (c.conviction_score or 0), reverse=True)
+        override_ids = {c.id for c in override_eligible[:config.ENTRY_REGIME_OVERRIDE_TOP_N]}
+
     entered = waited = rejected = 0
     entry_details: list[dict] = []
     reserved_cash = 0.0
@@ -320,7 +336,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             decision.proposed_target = target_price
 
         # ── Gate 3: adaptive market regime (REAL only) ─────────────────────────
-        if mode == "REAL" and not regime_ok:
+        is_regime_override = mode == "REAL" and not regime_ok and cand.id in override_ids
+        if mode == "REAL" and not regime_ok and not is_regime_override:
             try:
                 from adaptive_thresholds import threshold_age_note
                 age_note = threshold_age_note("ENTRY_REGIME_MIN_SCORE")
@@ -369,6 +386,12 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         adj_risk_pct   = _conviction_adjusted_risk_pct(
             account_state.risk_per_trade_pct, cand.conviction_score
         )
+        if is_regime_override:
+            # Extra caution on top of the normal conviction scaling — this
+            # trade is going in against a still-weak market read, so it gets
+            # a smaller slice of equity than the same candidate would on a
+            # healthy regime day.
+            adj_risk_pct *= config.ENTRY_REGIME_OVERRIDE_RISK_SCALE
         max_trade_risk = account_state.equity * (adj_risk_pct / 100.0)
         proposed_qty   = max(0, int(max_trade_risk // per_share_risk))
 
@@ -425,6 +448,13 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
 
         # ── Approved — create order ────────────────────────────────────────────
         decision.action = "ENTER"
+        if is_regime_override:
+            decision.reasoning = (
+                f"Regime override: score {market_score} < gate {threshold} ({threshold_src}), "
+                f"but this was the top-conviction candidate this cycle (conviction "
+                f"{cand.conviction_score}) — let through at {config.ENTRY_REGIME_OVERRIDE_RISK_SCALE:.0%} "
+                "of normal risk sizing instead of blocking every entry until the regime recovers."
+            )
         entered        += 1
         reserved_cash  += decision.proposed_qty * entry_price
         db.add(decision)
@@ -445,7 +475,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 f"Limit ₹{entry_price:.2f} | stop ₹{stop_price:.2f} | "
                 f"target ₹{target_price:.2f} | R:R {rr:.2f} | "
                 f"conviction {cand.conviction_score} | adj_risk {adj_risk_pct:.2f}% | "
-                f"regime_score {market_score} (gate={threshold},{threshold_src}) | "
+                f"regime_score {market_score} (gate={threshold},{threshold_src})"
+                f"{' | REGIME OVERRIDE' if is_regime_override else ''} | "
                 f"valid {config.ENTRY_VALIDITY_MINUTES}m"
             ),
         ))
@@ -470,7 +501,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     raise RuntimeError(f"Dhan returned no order id: {broker_result}")
                 record_real_order_sent(db, order, dhan_order_id)
                 await notify_async(
-                    f"📤 *BUY sent (auto)* — {cand.symbol}\n"
+                    f"📤 *BUY sent (auto)*{' 🟡 REGIME OVERRIDE' if is_regime_override else ''} — {cand.symbol}\n"
                     f"{decision.proposed_qty} @ ₹{entry_price:.2f} "
                     f"| stop ₹{stop_price:.2f} | target ₹{target_price:.2f}\n"
                     f"R:R {rr:.2f} | conviction {cand.conviction_score} "

@@ -32,6 +32,23 @@ export function setSessionToken(token: string | null) {
   else localStorage.removeItem(STORAGE_TOKEN_KEY);
 }
 
+// The dashboard mirrors "is there a session" into its own React `loggedIn`
+// state (so it can gate UI without re-reading localStorage on every render).
+// That mirror used to only ever get set on an explicit login/logout click —
+// but rtRequest can ALSO clear the token itself below, silently, from any
+// background poll (pipeline/watchlist/positions) that happens to run after
+// the session has expired. Without this hook the two go out of sync: the
+// dashboard keeps showing "Admin session active" from stale state while
+// every real request is now quietly failing with "Missing admin session
+// token", and Run Cycle / Auto-Pilot clicks appear to do nothing. Any
+// component that renders a logged-in/out banner should register here so it
+// hears about an expiry the moment it happens, not on the next unrelated
+// error.
+let sessionExpiredHandler: (() => void) | null = null;
+export function setSessionExpiredHandler(fn: (() => void) | null) {
+  sessionExpiredHandler = fn;
+}
+
 async function rtRequest<T>(path: string, init?: RequestInit, requireAuth = true): Promise<T> {
   const base = getRealTradeApiUrl();
   if (!base) {
@@ -56,7 +73,11 @@ async function rtRequest<T>(path: string, init?: RequestInit, requireAuth = true
     }
   }
   if (!resp.ok) {
-    if (resp.status === 401) setSessionToken(null); // expired/invalid — drop it so the UI re-shows login
+    if (resp.status === 401) {
+      const hadToken = !!getSessionToken();
+      setSessionToken(null); // expired/invalid — drop it so the UI re-shows login
+      if (hadToken) sessionExpiredHandler?.(); // only fire once, on the transition — not on every already-logged-out call
+    }
     const detail = (data && data.detail) || resp.statusText;
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }

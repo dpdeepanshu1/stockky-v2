@@ -720,9 +720,41 @@ async def _live_prices(symbols: list[str]) -> dict[str, float]:
         return {}
 
 
+async def _self_heal_orders(db: Session, mode: str) -> None:
+    """Best-effort "catch up" pass run on every read of positions/orders,
+    not just on a manual Run Cycle.
+
+    Without this, a PLACED order (limit not yet crossed, or — for REAL —
+    sent to Dhan but not yet confirmed) only ever advances (FILLED /
+    EXPIRED / reconciled) when someone happens to click Run Cycle while
+    looking at the dashboard. Skip a session (e.g. over a weekend) and the
+    order just sits PLACED forever: Positions looks empty (nothing filled
+    yet, correctly) but Orders never explains why, and there's nothing to
+    Sell because no position was ever opened. Running the same
+    check-fills / expire-stale / reconcile logic here means a page
+    refresh alone is enough to surface the true current state (most
+    commonly EXPIRED, once valid_until — a short ~15min window — has long
+    passed) instead of a stale-looking PLACED.
+
+    Never raises — a self-heal failure must not block the positions/orders
+    list from returning; the next read just retries.
+    """
+    try:
+        if mode == "DEMO":
+            from entry_engine.entry import check_pending_fills, expire_stale_orders
+            await check_pending_fills(db, mode)
+            await expire_stale_orders(db, mode)
+        else:
+            from execution.reconcile import reconcile_real_orders
+            await reconcile_real_orders(db)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("self-heal (%s) failed, returning state as-is: %s", mode, e)
+
+
 @app.get("/positions/{mode}")
 async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     mode = mode.upper()
+    await _self_heal_orders(db, mode)
     rows = (
         db.query(models.TradePosition)
         .filter(models.TradePosition.mode == mode,
@@ -762,6 +794,7 @@ async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin
 @app.get("/orders/{mode}")
 async def list_orders(mode: str, limit: int = 50, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     mode = mode.upper()
+    await _self_heal_orders(db, mode)
     rows = (
         db.query(models.TradeOrder).filter_by(mode=mode)
         .order_by(models.TradeOrder.created_at.desc()).limit(min(max(limit, 1), 200)).all()

@@ -1,0 +1,94 @@
+===== BASIC INFO =====
+date: Sun Aug 30 11:06:06 UTC 2026
+whoami: ubuntu
+pwd: /home/ubuntu/stockky-v2
+home: /home/ubuntu
+hostname: instance-20260821-2147
+OS: Ubuntu 24.04.4 LTS
+
+===== NETWORK / IP =====
+private IP(s): 10.0.0.202 172.17.0.1 172.18.0.1 
+public IP (via ifconfig.me, needs internet): 130.210.2.159
+listening ports (docker/app related):
+LISTEN 0      4096         0.0.0.0:5173       0.0.0.0:*          
+LISTEN 0      4096         0.0.0.0:8001       0.0.0.0:*          
+LISTEN 0      4096         0.0.0.0:8000       0.0.0.0:*          
+LISTEN 0      4096         0.0.0.0:8002       0.0.0.0:*          
+LISTEN 0      4096         0.0.0.0:8005       0.0.0.0:*          
+LISTEN 0      4096         0.0.0.0:8004       0.0.0.0:*          
+LISTEN 0      4096         0.0.0.0:8008       0.0.0.0:*          
+LISTEN 0      511          0.0.0.0:443        0.0.0.0:*          
+LISTEN 0      511          0.0.0.0:80         0.0.0.0:*          
+LISTEN 0      4096            [::]:5173          [::]:*          
+LISTEN 0      4096            [::]:8001          [::]:*          
+LISTEN 0      4096            [::]:8000          [::]:*          
+LISTEN 0      4096            [::]:8002          [::]:*          
+LISTEN 0      4096            [::]:8005          [::]:*          
+LISTEN 0      4096            [::]:8004          [::]:*          
+LISTEN 0      4096            [::]:8008          [::]:*          
+LISTEN 0      511             [::]:443           [::]:*          
+LISTEN 0      511             [::]:80            [::]:*          
+
+===== PROJECT LOCATION =====
+Looking for stockky-v2-main under $HOME (max depth 4)...
+Looking for docker-compose.yml with 'stockky' in it under $HOME...
+/home/ubuntu/stockky-v2/docker-compose.yml
+
+===== DOCKER =====
+docker version: Docker version 29.1.3, build 29.1.3-0ubuntu3~24.04.2
+docker compose version: Docker Compose version 2.40.3+ds1-0ubuntu1~24.04.1
+
+--- docker compose ps (run from inside the project dir) ---
+(cd into your stockky-v2-main folder and re-run this script, or run: cd <path> && docker compose ps)
+
+===== IF INSIDE THE PROJECT DIR (has docker-compose.yml here) =====
+Found docker-compose.yml in current dir: /home/ubuntu/stockky-v2
+.env present: yes
+oracle_wallet dir present: yes
+
+--- docker compose ps ---
+NAME                                          IMAGE                                       COMMAND                  SERVICE                          CREATED             STATUS             PORTS
+stockky-v2-analysis-intelligence-service-1    stockky-v2-analysis-intelligence-service    "uvicorn main:app --…"   analysis-intelligence-service    About an hour ago   Up About an hour   0.0.0.0:8002->8000/tcp, [::]:8002->8000/tcp
+stockky-v2-api-gateway-1                      stockky-v2-api-gateway                      "uvicorn main:app --…"   api-gateway                      About an hour ago   Up About an hour   0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp
+stockky-v2-decision-prediction-service-1      stockky-v2-decision-prediction-service      "uvicorn main:app --…"   decision-prediction-service      About an hour ago   Up About an hour   0.0.0.0:8004->8000/tcp, [::]:8004->8000/tcp
+stockky-v2-frontend-1                         stockky-v2-frontend                         "docker-entrypoint.s…"   frontend                         About an hour ago   Up About an hour   0.0.0.0:5173->5173/tcp, [::]:5173->5173/tcp
+stockky-v2-market-data-service-1              stockky-v2-market-data-service              "uvicorn main:app --…"   market-data-service              About an hour ago   Up About an hour   0.0.0.0:8001->8001/tcp, [::]:8001->8001/tcp
+stockky-v2-notification-scheduler-service-1   stockky-v2-notification-scheduler-service   "uvicorn main:app --…"   notification-scheduler-service   About an hour ago   Up About an hour   0.0.0.0:8008->8000/tcp, [::]:8008->8000/tcp
+stockky-v2-real-trade-service-1               stockky-v2-real-trade-service               "uvicorn main:app --…"   real-trade-service               About an hour ago   Up About an hour   0.0.0.0:8005->8005/tcp, [::]:8005->8005/tcp
+
+--- docker compose config --services (services this compose file defines) ---
+market-data-service
+analysis-intelligence-service
+decision-prediction-service
+api-gateway
+frontend
+notification-scheduler-service
+real-trade-service
+
+===== NGINX (if present, e.g. Oracle VM reverse proxy) =====
+nginx installed: nginx version: nginx/1.24.0 (Ubuntu)
+site configs:
+total 8
+drwxr-xr-x 2 root root 4096 Aug 21 19:18 .
+drwxr-xr-x 8 root root 4096 Aug 26 11:40 ..
+lrwxrwxrwx 1 root root   34 Aug 21 18:51 default -> /etc/nginx/sites-available/default
+lrwxrwxrwx 1 root root   34 Aug 21 19:18 stockky -> /etc/nginx/sites-available/stockky
+
+===== QUICK LOCAL HEALTH PING (only if services already running) =====
+  api-gateway (port 8000): http_code=200
+  market-data (port 8001): http_code=200
+  analysis (port 8002): http_code=200
+  decision-prediction (port 8004): http_code=200
+  real-trade (port 8005): http_code=200
+  notification-scheduler (port 8008): http_code=200
+  frontend (port 5173): http_code=200
+
+===== PYTHON / RESOURCES =====
+python3: Python 3.12.3
+disk free:
+/dev/sda1        45G   14G   31G  32% /
+memory:
+               total        used        free      shared  buff/cache   available
+Mem:            11Gi       1.7Gi       193Mi       6.7Mi         9Gi         9Gi
+
+===== DONE — paste everything above back to Claude =====

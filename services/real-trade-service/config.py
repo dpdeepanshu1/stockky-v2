@@ -179,6 +179,12 @@ def startup_config_errors() -> list[str]:
 RISK_MAX_POSITION_CONCENTRATION_PCT = float(os.getenv("RISK_MAX_POSITION_CONCENTRATION_PCT", "25.0"))
 RISK_MIN_STOCK_PRICE                = float(os.getenv("RISK_MIN_STOCK_PRICE", "20.0"))
 CANDIDATE_MIN_STOCK_PRICE           = float(os.getenv("CANDIDATE_MIN_STOCK_PRICE", "20.0"))
+# How long a symbol that already has a candidate row (this mode, any source
+# track) is skipped from being re-fetched/re-inserted. Without this, a
+# symbol that keeps qualifying every cycle (e.g. still sitting in the
+# volume-shock universe) got a brand-new TradeCandidate row every cycle,
+# which is what produced repeated duplicate cards on the Watchlist tab.
+CANDIDATE_DEDUPE_COOLDOWN_HOURS     = float(os.getenv("CANDIDATE_DEDUPE_COOLDOWN_HOURS", "6.0"))
 CANDIDATE_MAX_ATR_PCT               = float(os.getenv("CANDIDATE_MAX_ATR_PCT", "7.0"))
 CANDIDATE_VOLUME_HEALTH_RATIO       = float(os.getenv("CANDIDATE_VOLUME_HEALTH_RATIO", "0.80"))
 CANDIDATE_BULLISH_THRESHOLD_PCT     = float(os.getenv("CANDIDATE_BULLISH_THRESHOLD_PCT", "0.5"))

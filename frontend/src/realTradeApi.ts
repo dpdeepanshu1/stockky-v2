@@ -150,6 +150,7 @@ export interface CandidateRow {
   signal_price: number | null;
   received_at: string;
   consumed: boolean;
+  fetch_count: number;
   current_price: number | null;
   latest_decision: CandidateDecision | null;
 }

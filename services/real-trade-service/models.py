@@ -64,6 +64,25 @@ class TradeGateState(Base):
     auto_pilot_enabled = Column(Boolean, nullable=False, default=False)
     auto_pilot_enabled_at = Column(DateTime, nullable=True)
 
+    # ── Scheduled automation (2026-08-31) — three independent, config-gated,
+    # default-OFF features layered ON TOP of auto-pilot. Each runs only when
+    # BOTH its process-level env kill-switch (config.PREPICK_ENABLED etc.) AND
+    # this per-mode DB toggle are on, the mode is armed, and (except pre-pick,
+    # which runs pre-open) the market is open. The *_last_run columns hold the
+    # IST date ('YYYY-MM-DD') the action last fired, so each fires at most once
+    # per trading day even across process restarts (Render wipes memory).
+    prepick_enabled = Column(Boolean, nullable=False, default=False)
+    prepick_enabled_at = Column(DateTime, nullable=True)
+    prepick_last_run = Column(String(10), nullable=True)
+
+    enter_at_open_enabled = Column(Boolean, nullable=False, default=False)
+    enter_at_open_enabled_at = Column(DateTime, nullable=True)
+    enter_at_open_last_run = Column(String(10), nullable=True)
+
+    eod_squareoff_enabled = Column(Boolean, nullable=False, default=False)
+    eod_squareoff_enabled_at = Column(DateTime, nullable=True)
+    eod_squareoff_last_run = Column(String(10), nullable=True)
+
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 

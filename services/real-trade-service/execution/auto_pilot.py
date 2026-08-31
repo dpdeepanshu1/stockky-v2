@@ -29,12 +29,20 @@ import config
 import models
 from db import get_session_factory
 from notifier import notify_async
-from tz_utils import is_market_open_ist
+from tz_utils import (
+    is_market_open_ist,
+    ist_now,
+    ist_today_str,
+    parse_hhmm,
+    ist_time_at_or_after,
+    is_ist_weekday,
+)
 
 logger = logging.getLogger("real-trade-autopilot")
 
 _full_task: Optional[asyncio.Task] = None
 _exit_task: Optional[asyncio.Task] = None
+_schedule_task: Optional[asyncio.Task] = None
 _STARTUP_DELAY_SECONDS = 20
 
 # Per-mode locks — prevent concurrent cycles (manual + auto-pilot race)
@@ -156,6 +164,182 @@ async def _full_tick(mode: str) -> None:
             db.close()
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# Scheduled automation (2026-08-31): 9am pre-pick, enter-at-open, EOD square-off
+#
+# All three are DOUBLE-GATED and DEFAULT OFF:
+#   1. process-level env kill-switch  (config.PREPICK_ENABLED etc.)
+#   2. per-mode UI toggle             (gate.<feature>_enabled)
+#   3. the mode must be armed
+# and each fires AT MOST ONCE PER IST TRADING DAY, tracked by the gate's
+# <feature>_last_run date column so a Render restart can't cause a re-fire.
+# ══════════════════════════════════════════════════════════════════════════
+
+async def _prepick(db, mode: str) -> None:
+    """~09:00 pre-open: warm the candidate queue so the strongest names are
+    ready to enter the instant the market opens. Deliberately does NOT run the
+    entry evaluator (that would consume candidates while the market is shut) —
+    it only refreshes/queues them; enter-at-open does the actual entering."""
+    from candidate_engine.candidates import refresh_candidates
+    n = await refresh_candidates(db, mode)
+    logger.info("[schedule] pre-pick %s: refreshed %s candidates", mode, n)
+    await notify_async(
+        f"🌅 *Pre-pick — {mode}*\nQueued {n} candidate(s) before the open. "
+        "They'll be evaluated for entry when the market opens."
+    )
+
+
+async def _enter_at_open(db, mode: str, gate_armed: bool) -> None:
+    """~09:20 just after open: run one full entry cycle so the pre-picked names
+    get entered at the early price instead of waiting for the next auto-pilot
+    tick (which could be minutes away)."""
+    from cycle_runner import run_cycle_core
+    result = await run_cycle_core(db, mode, gate_armed, trigger="enter_at_open")
+    if result.get("auto_disarmed"):
+        await notify_async(
+            f"🔴 *Enter-at-open disarmed — {mode}*\n{result['auto_disarmed']}"
+        )
+        return
+    entry = result.get("entry") or {}
+    await notify_async(
+        f"🚀 *Enter-at-open — {mode}*\nEntries sent: {entry.get('entered', 0)} "
+        f"({entry.get('rejected', 0)} risk-rejected), waited: {entry.get('waited', 0)}."
+    )
+
+
+async def _eod_squareoff(db, mode: str) -> None:
+    """~15:15 before the close: flatten every open position for this mode so
+    nothing is carried overnight (intraday square-off). Reuses the exact manual-
+    close paths: DEMO closes at the live tick; REAL sends a MARKET sell to Dhan."""
+    from portfolio.portfolio import open_positions as _pf_open_positions, close_position as _pf_close_position
+    positions = list(_pf_open_positions(db, mode))
+    if not positions:
+        logger.info("[schedule] EOD square-off %s: no open positions", mode)
+        return
+    closed, sent, failed = 0, 0, 0
+    if mode == "DEMO":
+        from market_feed.feed import get_quotes
+        syms = list({p.symbol for p in positions})
+        ticks = await get_quotes(syms)
+        for p in positions:
+            tick = ticks.get(p.symbol)
+            if tick is None:
+                failed += 1
+                continue
+            try:
+                _pf_close_position(db, p, tick, p.qty_open, "eod_squareoff")
+                closed += 1
+            except Exception:
+                logger.exception("[schedule] EOD close failed for %s %s", mode, p.symbol)
+                failed += 1
+    else:  # REAL
+        from exit_engine.exit import _send_real_sell
+        for p in positions:
+            try:
+                if _send_real_sell(db, p, p.qty_open, "eod_squareoff", full=True):
+                    sent += 1
+                else:
+                    failed += 1
+            except Exception:
+                logger.exception("[schedule] EOD real-sell failed for %s %s", mode, p.symbol)
+                failed += 1
+    logger.info("[schedule] EOD square-off %s: closed=%s sent=%s failed=%s", mode, closed, sent, failed)
+    await notify_async(
+        f"🌆 *EOD square-off — {mode}*\n"
+        + (f"Closed {closed} position(s)." if mode == "DEMO" else f"Sent {sent} sell order(s) to Dhan.")
+        + (f" {failed} could not be closed (no price / broker reject) — check manually." if failed else "")
+    )
+
+
+async def _schedule_tick(mode: str) -> None:
+    """One pass of the time-trigger loop for a mode. Each feature is gated by
+    env + per-mode toggle + armed, fires once/day, and is time-of-day bound."""
+    if not is_ist_weekday():
+        return
+    # Cheap pre-check: if none of the env kill-switches are on, do nothing at all.
+    if not (config.PREPICK_ENABLED or config.ENTER_AT_OPEN_ENABLED or config.EOD_SQUAREOFF_ENABLED):
+        return
+
+    lock = _get_lock(mode)
+    if lock.locked():
+        return  # a full/exit cycle is mid-flight — try again next check
+    async with lock:
+        Session = get_session_factory()
+        db = Session()
+        try:
+            gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
+            if gate is None or not gate.armed:
+                return
+            today = ist_today_str()
+
+            # ── Pre-pick (pre-open; market need not be open) ──────────────────
+            if (
+                config.PREPICK_ENABLED and getattr(gate, "prepick_enabled", False)
+                and getattr(gate, "prepick_last_run", None) != today
+                and ist_time_at_or_after(parse_hhmm(config.PREPICK_TIME_IST, 9, 0))
+            ):
+                gate.prepick_last_run = today
+                db.commit()
+                try:
+                    await _prepick(db, mode)
+                except Exception:
+                    logger.exception("[schedule] pre-pick failed for %s", mode)
+                    await notify_async(f"⚠️ *Pre-pick error — {mode}* — see server logs.")
+
+            # ── Enter-at-open (market must be open) ───────────────────────────
+            if (
+                config.ENTER_AT_OPEN_ENABLED and getattr(gate, "enter_at_open_enabled", False)
+                and getattr(gate, "enter_at_open_last_run", None) != today
+                and is_market_open_ist()
+                and ist_time_at_or_after(parse_hhmm(config.ENTER_AT_OPEN_TIME_IST, 9, 20))
+            ):
+                gate.enter_at_open_last_run = today
+                db.commit()
+                try:
+                    await _enter_at_open(db, mode, gate.armed)
+                except Exception:
+                    logger.exception("[schedule] enter-at-open failed for %s", mode)
+                    await notify_async(f"⚠️ *Enter-at-open error — {mode}* — see server logs.")
+
+            # ── EOD square-off (during hours, near the close) ─────────────────
+            if (
+                config.EOD_SQUAREOFF_ENABLED and getattr(gate, "eod_squareoff_enabled", False)
+                and getattr(gate, "eod_squareoff_last_run", None) != today
+                and is_market_open_ist()
+                and ist_time_at_or_after(parse_hhmm(config.EOD_SQUAREOFF_TIME_IST, 15, 15))
+            ):
+                gate.eod_squareoff_last_run = today
+                db.commit()
+                try:
+                    await _eod_squareoff(db, mode)
+                except Exception:
+                    logger.exception("[schedule] EOD square-off failed for %s", mode)
+                    await notify_async(f"⚠️ *EOD square-off error — {mode}* — see server logs.")
+        except Exception:
+            logger.exception("[schedule] tick failed for %s", mode)
+        finally:
+            db.close()
+
+
+async def _schedule_loop() -> None:
+    """Time-of-day trigger loop for the three scheduled-automation features.
+    Runs regardless of auto_pilot_enabled (these are their own toggles), but
+    every action re-checks the gate/env/once-per-day guards at fire time."""
+    await asyncio.sleep(_STARTUP_DELAY_SECONDS + 10)
+    logger.info(
+        "Auto-pilot SCHEDULE loop running (check=%ss; prepick=%s open=%s eod=%s)",
+        config.SCHEDULE_CHECK_INTERVAL_SECONDS,
+        config.PREPICK_ENABLED, config.ENTER_AT_OPEN_ENABLED, config.EOD_SQUAREOFF_ENABLED,
+    )
+    while True:
+        for mode in ("DEMO", "REAL"):
+            try:
+                await _schedule_tick(mode)
+            except Exception:
+                logger.exception("schedule loop: unexpected error for %s", mode)
+        await asyncio.sleep(config.SCHEDULE_CHECK_INTERVAL_SECONDS)
+
+
 async def _fast_exit_loop() -> None:
     """Fast exit-only loop — tighter cadence than the full cycle."""
     await asyncio.sleep(_STARTUP_DELAY_SECONDS + 5)
@@ -189,7 +373,7 @@ async def _full_cycle_loop() -> None:
 
 def start() -> None:
     """Idempotent — safe to call from startup() even if hot-reloaded."""
-    global _full_task, _exit_task
+    global _full_task, _exit_task, _schedule_task
     if _full_task is None or _full_task.done():
         _full_task = asyncio.create_task(_full_cycle_loop())
         logger.info("Auto-pilot FULL CYCLE background task created.")
@@ -197,3 +381,11 @@ def start() -> None:
         _exit_task = asyncio.create_task(_fast_exit_loop())
         logger.info("Auto-pilot FAST EXIT background task created (interval=%ss).",
                     EXIT_CHECK_INTERVAL_SECONDS)
+    # Scheduled-automation loop (pre-pick / enter-at-open / EOD square-off).
+    # Always started; every action inside is env + per-mode + armed gated, so
+    # with all three env kill-switches OFF (the default) this loop wakes on its
+    # interval, finds nothing enabled, and goes straight back to sleep.
+    if _schedule_task is None or _schedule_task.done():
+        _schedule_task = asyncio.create_task(_schedule_loop())
+        logger.info("Auto-pilot SCHEDULE background task created (check=%ss).",
+                    config.SCHEDULE_CHECK_INTERVAL_SECONDS)

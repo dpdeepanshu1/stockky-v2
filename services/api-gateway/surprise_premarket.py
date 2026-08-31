@@ -114,7 +114,12 @@ def _engine(app_name: str, **_ignored):
     through surprise_schema.make_engine() rather than create_engine(_db_url()).
     """
     if _ss is not None:
+        # Prefer the process-wide cached pool so premarket/scan operations reuse
+        # one warm engine instead of opening (and sometimes leaking) a new pool
+        # per call — the churn was exhausting Neon's free-tier connection cap.
         try:
+            if hasattr(_ss, "shared_engine"):
+                return _ss.shared_engine(app_name)
             return _ss.make_engine(app_name)
         except Exception as e:
             logger.debug("surprise_schema.make_engine: %s", e)
@@ -130,6 +135,23 @@ def _engine(app_name: str, **_ignored):
         max_overflow=1,
         connect_args={"connect_timeout": 20, "application_name": app_name},
     )
+
+
+def _maybe_dispose(eng) -> None:
+    """Dispose an engine from _engine() ONLY when it is not the shared pool.
+
+    When surprise_schema is importable, _engine() returns the process-wide
+    shared_engine — disposing that on every operation is exactly the bug that
+    exhausted Neon's free-tier connection cap (throw away the warm pool, rebuild
+    a fresh TCP+TLS pool next call). Only the fallback create_engine() path
+    (surprise_schema missing) owns its engine and may be disposed.
+    """
+    if _ss is not None:
+        return
+    try:
+        eng.dispose()
+    except Exception:
+        pass
 
 
 def _sym_filter(column: str, param: str, dial: str):
@@ -597,14 +619,14 @@ def bulk_baselines_from_bhavcopy(symbols: List[str]) -> Tuple[List[Dict[str, Any
         raw: List[Dict[str, Any]] = []
         with eng.connect() as conn:
             if not _table_exists(conn, "daily_bhavcopy"):
-                eng.dispose()
+                _maybe_dispose(eng)
                 return [], list(symbols)
 
             # Normalize symbols for IN clause
             bases = [s.upper().replace(".NS", "").replace(".BO", "").strip() for s in symbols]
             bases = [b for b in bases if b]
             if not bases:
-                eng.dispose()
+                _maybe_dispose(eng)
                 return [], list(symbols)
 
             # Window function: last 20 rows per symbol
@@ -641,10 +663,10 @@ def bulk_baselines_from_bhavcopy(symbols: List[str]) -> Tuple[List[Dict[str, Any
             except Exception as e:
                 # Some Neon/pg versions prefer different array binding
                 logger.debug("bulk bhavcopy query failed: %s", e)
-                eng.dispose()
+                _maybe_dispose(eng)
                 return [], list(symbols)
 
-        eng.dispose()
+        _maybe_dispose(eng)
 
         by_sym: Dict[str, List[Dict[str, Any]]] = {}
         for r in raw:
@@ -718,7 +740,7 @@ def upsert_baselines(rows: List[Dict[str, Any]]) -> int:
         with eng.begin() as conn:
             # executemany in one transaction (far fewer Neon round-trips)
             conn.execute(sql, rows)
-        eng.dispose()
+        _maybe_dispose(eng)
         return len(rows)
     except Exception as e:
         logger.error("upsert_baselines failed (%s rows): %s", len(rows), e)
@@ -737,7 +759,7 @@ def upsert_baselines(rows: List[Dict[str, Any]]) -> int:
                         n += 1
                     except Exception:
                         pass
-            eng.dispose()
+            _maybe_dispose(eng)
         except Exception as e2:
             logger.error("upsert fallback failed: %s", e2)
         return n
@@ -827,7 +849,7 @@ def _freshness_check(symbols: List[str]) -> Dict[str, Any]:
         rows = []
         with eng.connect() as conn:
             if not _table_exists(conn, "surprise_static_feed"):
-                eng.dispose()
+                _maybe_dispose(eng)
                 return {"fresh": 0, "total": len(bases), "coverage": 0.0}
             where, bp = _sym_filter("symbol", "syms", dial)
             stmt = text(
@@ -837,7 +859,7 @@ def _freshness_check(symbols: List[str]) -> Dict[str, Any]:
                 stmt = stmt.bindparams(bp)
             for batch in (_chunks(bases, _ORACLE_IN_CHUNK) if dial == "oracle" else [bases]):
                 rows.extend(conn.execute(stmt, {"syms": batch}).fetchall())
-        eng.dispose()
+        _maybe_dispose(eng)
 
         fresh = 0
         for _sym, updated_at in rows:

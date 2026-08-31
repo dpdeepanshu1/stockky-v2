@@ -238,11 +238,29 @@ def _ensure_gate_state_columns(engine, dialect_name: str) -> None:
         adds = [
             ("auto_pilot_enabled", "ALTER TABLE trade_gate_state ADD (auto_pilot_enabled NUMBER(1) DEFAULT 0 NOT NULL)"),
             ("auto_pilot_enabled_at", "ALTER TABLE trade_gate_state ADD (auto_pilot_enabled_at TIMESTAMP)"),
+            ("prepick_enabled", "ALTER TABLE trade_gate_state ADD (prepick_enabled NUMBER(1) DEFAULT 0 NOT NULL)"),
+            ("prepick_enabled_at", "ALTER TABLE trade_gate_state ADD (prepick_enabled_at TIMESTAMP)"),
+            ("prepick_last_run", "ALTER TABLE trade_gate_state ADD (prepick_last_run VARCHAR2(10))"),
+            ("enter_at_open_enabled", "ALTER TABLE trade_gate_state ADD (enter_at_open_enabled NUMBER(1) DEFAULT 0 NOT NULL)"),
+            ("enter_at_open_enabled_at", "ALTER TABLE trade_gate_state ADD (enter_at_open_enabled_at TIMESTAMP)"),
+            ("enter_at_open_last_run", "ALTER TABLE trade_gate_state ADD (enter_at_open_last_run VARCHAR2(10))"),
+            ("eod_squareoff_enabled", "ALTER TABLE trade_gate_state ADD (eod_squareoff_enabled NUMBER(1) DEFAULT 0 NOT NULL)"),
+            ("eod_squareoff_enabled_at", "ALTER TABLE trade_gate_state ADD (eod_squareoff_enabled_at TIMESTAMP)"),
+            ("eod_squareoff_last_run", "ALTER TABLE trade_gate_state ADD (eod_squareoff_last_run VARCHAR2(10))"),
         ]
     else:
         adds = [
             ("auto_pilot_enabled", "ALTER TABLE trade_gate_state ADD COLUMN auto_pilot_enabled BOOLEAN DEFAULT FALSE NOT NULL"),
             ("auto_pilot_enabled_at", "ALTER TABLE trade_gate_state ADD COLUMN auto_pilot_enabled_at TIMESTAMP"),
+            ("prepick_enabled", "ALTER TABLE trade_gate_state ADD COLUMN prepick_enabled BOOLEAN DEFAULT FALSE NOT NULL"),
+            ("prepick_enabled_at", "ALTER TABLE trade_gate_state ADD COLUMN prepick_enabled_at TIMESTAMP"),
+            ("prepick_last_run", "ALTER TABLE trade_gate_state ADD COLUMN prepick_last_run VARCHAR(10)"),
+            ("enter_at_open_enabled", "ALTER TABLE trade_gate_state ADD COLUMN enter_at_open_enabled BOOLEAN DEFAULT FALSE NOT NULL"),
+            ("enter_at_open_enabled_at", "ALTER TABLE trade_gate_state ADD COLUMN enter_at_open_enabled_at TIMESTAMP"),
+            ("enter_at_open_last_run", "ALTER TABLE trade_gate_state ADD COLUMN enter_at_open_last_run VARCHAR(10)"),
+            ("eod_squareoff_enabled", "ALTER TABLE trade_gate_state ADD COLUMN eod_squareoff_enabled BOOLEAN DEFAULT FALSE NOT NULL"),
+            ("eod_squareoff_enabled_at", "ALTER TABLE trade_gate_state ADD COLUMN eod_squareoff_enabled_at TIMESTAMP"),
+            ("eod_squareoff_last_run", "ALTER TABLE trade_gate_state ADD COLUMN eod_squareoff_last_run VARCHAR(10)"),
         ]
 
     for col_name, sql in adds:

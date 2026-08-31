@@ -6245,6 +6245,49 @@ def hotpicks_db_upsert(payload) -> int:
         return 0
 
 
+def _build_hot_conviction_extra(decide_full, last_decision):
+    """Assemble the conviction fields a Hot Picks card renders — the trade
+    levels (Entry/Target/Stop/Horizon) and the per-pillar score row
+    (Tech/Fund/News/Pred/Mkt/Train) — from whatever decision record is already
+    cached for the symbol. Prefers the full decide-cache, falls back to the
+    lighter last_decision seed. Read-only; no network calls.
+
+    Returns ONLY non-None fields so splatting it into a hot item never clobbers
+    a real value with a null. This is the enrichment whose absence made every
+    one of those fields show "—" on the cards.
+    """
+    out: dict = {}
+    keys = (
+        "combined_score", "technical_score", "fundamental_score", "news_score",
+        "prediction_score", "market_score", "training_score",
+        "entry_range", "target", "stop_loss", "holding_period",
+        "holding_period_estimate", "confidence",
+    )
+    # last_decision first, decide_full last → the fuller record wins.
+    for src in (last_decision, decide_full):
+        if not isinstance(src, dict):
+            continue
+        for k in keys:
+            v = src.get(k)
+            if v is not None and v != "N/A":
+                out[k] = v
+    # Derive a Horizon label when we have entry+target but no explicit estimate.
+    if "holding_period_estimate" not in out:
+        try:
+            entry = out.get("entry_range")
+            entry_px = None
+            if isinstance(entry, dict):
+                entry_px = entry.get("low") or entry.get("high")
+            tgt = out.get("target")
+            if entry_px and tgt:
+                out["holding_period_estimate"] = _estimate_holding_period(
+                    float(entry_px), float(tgt), ""
+                )
+        except Exception:
+            pass
+    return out
+
+
 async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = None, progress_cb=None):
     """Curated list for Stockky 🔥 Stocks (internal; HTTP via /stockky-hot).
 
@@ -6279,13 +6322,29 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                     if dec in ("BUY NOW", "PREPARE TO BUY"):
                         scan_syms.append(s)
                         try:
+                            # Persist the FULL conviction picture (trade levels +
+                            # per-pillar scores), not just decision/score/reasons.
+                            # The Hot Picks cards read these back to render Entry/
+                            # Target/Stop/Horizon and the Tech/Fund/News/Pred/Mkt/
+                            # Train row — storing only 3 fields here is exactly why
+                            # those showed "—".
+                            _seed_dec = {
+                                "decision": r.get("decision"),
+                                "score": r.get("combined_score") or r.get("score"),
+                                "reasons": r.get("reasons") or [],
+                            }
+                            for _k in (
+                                "combined_score", "technical_score", "fundamental_score",
+                                "news_score", "prediction_score", "market_score",
+                                "training_score", "entry_range", "target", "stop_loss",
+                                "holding_period", "holding_period_estimate", "confidence",
+                            ):
+                                _v = r.get(_k)
+                                if _v is not None:
+                                    _seed_dec[_k] = _v
                             _redis_set(
                                 f"stockky:last_decision:{s}",
-                                {
-                                    "decision": r.get("decision"),
-                                    "score": r.get("combined_score") or r.get("score"),
-                                    "reasons": r.get("reasons") or [],
-                                },
+                                _seed_dec,
                                 ttl=86400,
                             )
                         except Exception:
@@ -6397,6 +6456,16 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                 except Exception:
                     decision_data = None
 
+                # Fuller conviction record for the card's trade levels + pillar
+                # scores. Prefer the full decide-cache; fall back to the light
+                # last_decision seed. Read-only KV lookups (no network).
+                _decide_full = None
+                try:
+                    _decide_full = _redis_get(f"{DECIDE_CACHE_PREFIX}{base}")
+                except Exception:
+                    _decide_full = None
+                conviction_extra = _build_hot_conviction_extra(_decide_full, decision_data)
+
                 decision = (decision_data or {}).get("decision") or "DO NOT BUY"
                 score = (decision_data or {}).get("score")
                 reasons = (decision_data or {}).get("reasons") or []
@@ -6489,10 +6558,11 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                 news_ok = hc >= 2 and nscore is not None and float(nscore) >= 55
                 if news_ok and (actionable or has_results or has_bulk_insider or from_scan or hc >= 4):
                     news_driven.append({
+                        **conviction_extra,
                         "symbol": base,
                         "decision": decision,
                         "score": score,
-                        "news_score": nscore,
+                        "news_score": (nscore if nscore is not None else conviction_extra.get("news_score")),
                         "headline_count": hc,
                         "summary": news_summary,
                         "reasons": reasons[:4],
@@ -6504,6 +6574,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
 
                 if event_data and has_results:
                     results_driven.append({
+                        **conviction_extra,
                         "symbol": base,
                         "decision": decision,
                         "score": score,
@@ -6518,6 +6589,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
 
                 if event_data and has_bulk_insider:
                     bulk_insider_driven.append({
+                        **conviction_extra,
                         "symbol": base,
                         "decision": decision,
                         "score": score,
@@ -10622,16 +10694,42 @@ def stockky_hot_audit():
 
 @app.post("/stockky-hot/repair-batch")
 def stockky_hot_repair_batch(limit: int = Query(15, ge=1, le=30), symbol: Optional[str] = Query(None)):
-    """Price-only repair for hotpicks_static_feed rows — mirrors
-    /api/surprise/repair-batch. Missing decision/score are reported by the
-    audit above but intentionally not faked here; they only come from a
-    fresh scoring pass (see hotpicks_repair_batch's docstring)."""
+    """Repair stored Hot Picks rows: first fill any missing PRICE via the
+    market-data waterfall, then run a real SCORE repair (decision/pillar
+    scores/trade levels) via the decision service for rows still missing them.
+    Nothing is fabricated — the score pass copies exactly what the decision
+    service returns. This is what makes the UI "Repair" button actually clear
+    the blank Entry/Target/Stop/Tech/Fund/… dashes, not just price."""
     try:
-        from hotpicks_store import hotpicks_repair_batch
+        from hotpicks_store import hotpicks_repair_batch, hotpicks_repair_scores
     except Exception as e:
         return {"status": "error", "error": f"hotpicks store unavailable: {str(e)[:160]}"}
     market_url = os.getenv("MARKET_DATA_URL", "")
-    return hotpicks_repair_batch(limit=limit, symbol=symbol, market_data_url=market_url)
+    decision_url = os.getenv("DECISION_URL", DECISION_URL)
+    price_res = hotpicks_repair_batch(limit=limit, symbol=symbol, market_data_url=market_url)
+    score_res = {}
+    try:
+        score_res = hotpicks_repair_scores(limit=limit, symbol=symbol, decision_url=decision_url)
+    except Exception as e:
+        score_res = {"status": "error", "error": str(e)[:160]}
+    price_repaired = list(price_res.get("repaired") or [])
+    score_repaired = list(score_res.get("repaired") or [])
+    combined = list(dict.fromkeys(price_repaired + score_repaired))
+    # Overall status: completed if either pass did (or would do) real work.
+    status = "completed"
+    if price_res.get("status") == "error" and score_res.get("status") == "error":
+        status = "error"
+    elif price_res.get("status") in ("not_found",) and not score_repaired and score_res.get("status") in ("not_found", "no_data"):
+        status = price_res.get("status")
+    return {
+        "status": status,
+        "repaired": combined,
+        "price_repaired": price_repaired,
+        "score_repaired": score_repaired,
+        "attempted": (price_res.get("attempted") or 0) + (score_res.get("attempted") or 0),
+        "price_detail": price_res,
+        "score_detail": score_res,
+    }
 
 
 

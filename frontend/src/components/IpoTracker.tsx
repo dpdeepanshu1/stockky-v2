@@ -317,6 +317,61 @@ export default function IpoTracker({
     }
   };
 
+  // Top-level buy sniper: rank EVERY tracked IPO that has a live price and pick
+  // the best 1-4 buy setups among them (the same "choose the best stock among
+  // them" flow as Hot Picks, applied to the IPO universe) instead of only being
+  // able to evaluate one row at a time.
+  const handleSearchBuysFromIpo = async () => {
+    setSniperOpen(true);
+    setSniperError(null);
+    setSuggestions([]);
+    const mapped = ipoList
+      .map((ipo) => {
+        const price = Number(ipo?.current_price) || 0;
+        if (!ipo?.symbol || price <= 0) return null;
+        const conv = ipo.ipo_score || ipo.pre_listing_advisory_score || 60;
+        return {
+          symbol: ipo.symbol,
+          decision: ipo.decision || "HOLD",
+          combined_score: conv,
+          conviction: conv,
+          price,
+          cmp: price,
+          change_pct: ipo.momentum_5d_pct,
+          atr: ipo.atr_pct ? (ipo.atr_pct / 100) * price : undefined,
+          technical_score: ipo.ipo_score || 60,
+          fundamental_score: ipo.pre_listing_advisory_score || 60,
+          sector: "IPO",
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => !!x);
+    if (!mapped.length) {
+      setSniperError(
+        "No IPOs with a live price to evaluate yet — run a scan / premarket feed first."
+      );
+      return;
+    }
+    setSniperLoading(true);
+    try {
+      const data = await api.findBuys({
+        stocks: mapped,
+        target_count: 4,
+        min_conviction: 55,
+      });
+      const found = (data?.suggestions || []) as BuySuggestion[];
+      setSuggestions(found);
+      if (!found.length) {
+        setSniperError(
+          data?.error || "No actionable IPO buy setups right now — scores/momentum too weak."
+        );
+      }
+    } catch (err: any) {
+      setSniperError(err?.message || "Failed to find IPO buy setups");
+    } finally {
+      setSniperLoading(false);
+    }
+  };
+
   const submitIpoAdd = async () => {
     if (!ipoForm.company_name.trim()) return;
     setIpoAddBusy(true);
@@ -504,6 +559,15 @@ export default function IpoTracker({
               className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-rose-500/20 border border-rose-400/40 text-rose-100 hover:bg-rose-500/30 disabled:opacity-40"
             >
               {stopBusy ? "Stopping…" : "■ Stop"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleSearchBuysFromIpo()}
+              disabled={sniperLoading || ipoList.length === 0}
+              title="Rank every tracked IPO with a live price and pick the 1-4 best buy setups among them"
+              className="font-mono text-[11px] px-3 py-1.5 rounded-lg border border-emerald-500/50 bg-emerald-600/20 text-emerald-200 hover:bg-emerald-600/35 disabled:opacity-40 shadow-lg shadow-emerald-900/20"
+            >
+              {sniperLoading && !sniperBusySymbol ? "Sniping…" : "🎯 Search for Buy Stocks (1-4)"}
             </button>
             <button
               type="button"

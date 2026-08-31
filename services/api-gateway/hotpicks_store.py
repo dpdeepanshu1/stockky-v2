@@ -700,3 +700,158 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
         out["status"] = "error"
         out["error"] = str(e)[:200]
         return out
+
+
+# Conviction fields a Hot Picks card renders. When any are absent from a stored
+# row the card shows "—"; a real scoring pass (below) is the only honest way to
+# fill them — we copy exactly what the decision service returns, never fake it.
+_HOT_SCORE_FIELDS = (
+    "combined_score", "technical_score", "fundamental_score", "news_score",
+    "prediction_score", "market_score", "training_score",
+    "entry_range", "target", "stop_loss", "holding_period",
+    "holding_period_estimate", "confidence",
+)
+
+
+def _row_needs_scores(blob: Dict[str, Any]) -> bool:
+    """True when a stored hot item is missing the core conviction fields, so the
+    card would render blank dashes for Tech/Fund/…/Entry/Target/Stop."""
+    if not isinstance(blob, dict):
+        return True
+    if not blob.get("technical_score"):
+        return True
+    if not (blob.get("combined_score") or blob.get("score")):
+        return True
+    # Trade levels: if neither entry nor target present, treat as needing a pass.
+    if not blob.get("entry_range") and not blob.get("target"):
+        return True
+    return False
+
+
+def hotpicks_repair_scores(
+    limit: int = 15,
+    symbol: Optional[str] = None,
+    decision_url: str = "",
+) -> Dict[str, Any]:
+    """Fill missing decision/score/trade-levels on hotpicks_static_feed rows by
+    asking the decision service for a fresh score — the honest counterpart to
+    hotpicks_repair_batch's price-only fill. For each stored row that is missing
+    the conviction fields, GET {decision_url}/decide/{symbol}, copy the real
+    scores/levels into item_json, and persist. Nothing is fabricated; a symbol
+    the decision service can't score is left untouched.
+    """
+    import httpx
+
+    out: Dict[str, Any] = {"status": "no_data", "repaired": [], "attempted": 0}
+    dec_base = (decision_url or os.getenv("DECISION_URL") or "").rstrip("/")
+    if not dec_base:
+        out["status"] = "not_configured"
+        out["error"] = "DECISION_URL not set"
+        return out
+    try:
+        hp = _schema()
+        from sqlalchemy import text
+    except Exception as e:
+        out["status"] = "error"
+        out["error"] = f"hotpicks_schema unavailable: {str(e)[:160]}"
+        return out
+    if not hp.database_url():
+        out["status"] = "not_configured"
+        return out
+
+    force_sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip() or None
+    try:
+        dial = hp.dialect()
+        eng = hp.shared_engine("stockky-hotpicks-score-repair")
+        if eng is None:
+            out["status"] = "error"
+            out["error"] = "Could not build a database engine"
+            return out
+
+        targets: list = []  # (symbol, section, blob)
+        with eng.connect() as conn:
+            # Was a 24h window — too narrow: Hot Picks rows can be older than
+            # that (weekends, or a day the market wasn't scanned), so a repair
+            # run would find 0 rows and report "Nothing missing scores" even
+            # though cards were showing "—". Widened to 72h; _row_needs_scores()
+            # below is still the real filter, so this is just a sanity bound
+            # on how far back we scan, not the thing deciding what gets repaired.
+            res = conn.execute(
+                text(f"SELECT symbol, section, item_json FROM {hp.TABLE_NAME} "
+                     "WHERE updated_at >= " + ("SYSTIMESTAMP - NUMTODSINTERVAL(72, 'HOUR')" if dial == "oracle"
+                                                else "NOW() - INTERVAL '72 hours'"))
+            )
+            for row in res.fetchall():
+                sym, section, item_json_raw = row[0], row[1], row[2]
+                if force_sym and sym != force_sym:
+                    continue
+                try:
+                    blob = json.loads(item_json_raw or "{}")
+                except Exception:
+                    blob = {}
+                if _row_needs_scores(blob):
+                    targets.append((sym, section, blob))
+
+        if force_sym and not targets:
+            out["status"] = "not_found"
+            out["message"] = f"{force_sym} not missing any scores in the last 24h."
+            return out
+        targets = targets[: max(1, min(int(limit or 15), 30))]
+        out["attempted"] = len(targets)
+        if not targets:
+            out["status"] = "completed"
+            out["message"] = "Nothing missing scores."
+            return out
+
+        repaired = []
+        with httpx.Client(timeout=15.0, follow_redirects=True) as client, eng.begin() as conn:
+            for sym, section, blob in targets:
+                try:
+                    r = client.get(f"{dec_base}/decide/{sym}")
+                    if r.status_code != 200:
+                        time.sleep(0.4)
+                        continue
+                    body = r.json() if isinstance(r.json(), dict) else {}
+                    if not body:
+                        time.sleep(0.4)
+                        continue
+                    changed = False
+                    dec = body.get("decision")
+                    if dec:
+                        blob["decision"] = dec
+                        changed = True
+                    sc = body.get("combined_score")
+                    if sc is not None:
+                        blob["score"] = sc
+                        blob["combined_score"] = sc
+                        changed = True
+                    for k in _HOT_SCORE_FIELDS:
+                        v = body.get(k)
+                        if v is not None and v != "N/A":
+                            blob[k] = v
+                            changed = True
+                    rs = body.get("reasons")
+                    if rs:
+                        blob["reasons"] = rs if isinstance(rs, list) else blob.get("reasons")
+                    if changed:
+                        conn.execute(
+                            text(f"UPDATE {hp.TABLE_NAME} SET item_json = :item_json, "
+                                 f"updated_at = {hp.now_func(dial)} WHERE symbol = :symbol AND section = :section"),
+                            {"item_json": json.dumps(blob)[:15000], "symbol": sym, "section": section},
+                        )
+                        repaired.append(sym)
+                except Exception as e:
+                    logger.debug("hotpicks score-repair %s failed: %s", sym, e)
+                time.sleep(0.4)
+
+        with _AUDIT_LOCK:
+            _AUDIT_CACHE.pop("v", None)
+        out["status"] = "completed"
+        out["repaired"] = repaired
+        return out
+    except Exception as e:
+        logger.warning("hotpicks_repair_scores failed: %s", e)
+        out["status"] = "error"
+        out["error"] = str(e)[:200]
+        return out
+

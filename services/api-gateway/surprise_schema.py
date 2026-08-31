@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from typing import Optional
 
 # Neon/Postgres <-> Oracle portability shim (sits next to this file in the
@@ -194,6 +195,44 @@ def make_engine(app_name: str = "stockky-surprise"):
         pool_timeout=8,
         connect_args={"connect_timeout": 8, "application_name": app_name},
     )
+
+
+_ENGINE_CACHE: dict = {}
+_ENGINE_LOCK = threading.Lock()
+
+
+def shared_engine(app_name: str = "stockky-surprise"):
+    """Process-wide cached engine — build the pool ONCE, not per operation.
+
+    Mirrors hotpicks_schema.shared_engine. make_engine() opens a brand-new pool
+    on every call (full TCP+TLS handshake, and wallet/mTLS on Oracle), and the
+    Surprise scan/premarket paths were calling it per operation — some paths even
+    leaked the engine (never disposed). On Neon's free tier (~20 connection cap)
+    that churn/leak exhausts connections and makes Surprise (and everything else
+    sharing the DB) start failing. Caching by (app_name, resolved URL) keeps one
+    warm pool per process.
+
+    Callers must NOT dispose() an engine obtained from here — it is shared.
+    """
+    key = (app_name, database_url() or "")
+    with _ENGINE_LOCK:
+        eng = _ENGINE_CACHE.get(key)
+        if eng is None:
+            eng = make_engine(app_name)
+            if eng is not None:
+                _ENGINE_CACHE[key] = eng
+        return eng
+
+
+def dispose_shared_engines() -> None:
+    """Drop all cached pools (test teardown / a deliberate reconnect)."""
+    with _ENGINE_LOCK:
+        for eng in _ENGINE_CACHE.values():
+            try:
+                eng.dispose()
+            except Exception:
+                pass
+        _ENGINE_CACHE.clear()
 
 
 def table_exists_sql(dial: Optional[str] = None) -> str:

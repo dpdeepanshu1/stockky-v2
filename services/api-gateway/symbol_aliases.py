@@ -138,6 +138,41 @@ def is_known_delisted(symbol: str) -> bool:
     base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
     return base in KNOWN_DELISTED
 
+
+# ── Non-equity instrument filter ────────────────────────────────────────────
+# NSE carries instruments whose ticker LOOKS like an equity symbol but is a
+# rights entitlement, partly-paid share, warrant, or debt/NCD series. These
+# must never enter the buy universe: they have no continuous equity liquidity,
+# settle differently, are frequently mispriced by the equity quote path, and
+# are exactly the kind of "stock" that shows up selected but can never actually
+# be entered/exited as a normal equity trade.
+#
+# The regex is deliberately CONSERVATIVE — it matches only high-confidence
+# temporary/non-equity suffixes so it never clips a legitimate equity ticker
+# that happens to contain a hyphen (BAJAJ-AUTO, M&M-style names) or digits:
+#   -RE            rights entitlement
+#   -PP / -P1..-P9 partly paid
+#   -W1..-W9 / -WA warrants
+#   -R1..-R9 / -RR rights variants
+#   -E1..-E9       when-issued / entitlement variants
+#   -NCD / -N1..-N9  debt / NCD series
+_NON_EQUITY_SUFFIX_RE = re.compile(
+    r"-(RE|RR|PP|P[1-9]|R[1-9]|W[1-9]|WA|E[1-9]|N[1-9]|NCD)$",
+    re.IGNORECASE,
+)
+
+
+def is_non_equity_instrument(symbol: str) -> bool:
+    """True for rights entitlements (-RE), partly-paid (-PP/-P1..), warrants
+    (-W1../-WA), rights variants (-R1../-RR) and NCD/debt series (-NCD/-N1..)
+    — instruments that carry an equity-looking symbol but should never be
+    tracked, quoted, or traded as equity. Conservative by design (see regex)."""
+    base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    if not base:
+        return False
+    return bool(_NON_EQUITY_SUFFIX_RE.search(base))
+
+
 # Chronically-over-₹5000 NSE names. This is deliberately a SHORT, high-
 # confidence static list (not an attempt to track every high-priced stock
 # on NSE) — its only job is to let the ≤₹5000 universe/data-feed gate (see
@@ -202,6 +237,8 @@ def resolve_ns_ticker(symbol: str) -> Optional[str]:
         return None
     if base in KNOWN_NOT_ON_NSE or base in KNOWN_DELISTED:
         return None
+    if is_non_equity_instrument(base):
+        return None
     base = _apply_all_renames(base)
     return f"{base}.NS"
 
@@ -214,6 +251,8 @@ def resolve_base_symbol(symbol: str) -> Optional[str]:
     if not base:
         return None
     if base in KNOWN_NOT_ON_NSE or base in KNOWN_DELISTED:
+        return None
+    if is_non_equity_instrument(base):
         return None
     return _apply_all_renames(base)
 
@@ -463,6 +502,8 @@ def resolve_with_fallback(symbol: str) -> Tuple[Optional[str], Dict[str, Any]]:
         return None, {"resolution": "skip_not_nse"}
     if base in KNOWN_DELISTED:
         return None, {"resolution": "skip_delisted_merged", "detail": KNOWN_DELISTED[base]}
+    if is_non_equity_instrument(base):
+        return None, {"resolution": "skip_non_equity"}
     if is_learned_delisted(base):
         return None, {"resolution": "skip_delisted"}
 

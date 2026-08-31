@@ -76,6 +76,15 @@ _DURABLE_PREFIXES = (
     "stockky:rate_limit_stats",  # cross-service rate-limit dashboard alias
     "stockky:rate_limit_events_neon",
     "system:rate_limit",  # plan-compatible alias key (market-data)
+    # ── Durable feed caches (added) ─────────────────────────────────────────
+    # These three were memory-only, so a Render restart / free-tier sleep wiped
+    # them and the Surprise tab (and Hot Picks) painted empty until a full
+    # premarket re-run. The code already TREATS them as durable (surprise
+    # writes ttl=None when the market is closed and the UI advertises "durable
+    # closed"), so the missing durability was a real bug, not intent.
+    "system:surprise_feed",     # SURPRISE_FEED_CACHE_KEY (surprise_scanner.py)
+    "system:bulk_quote_cache",  # BULK_QUOTE_CACHE_KEY (data_feed.py)
+    "stockky:hot_stocks",       # HOT_STOCKS_CACHE_KEY (main.py)
 )
 
 

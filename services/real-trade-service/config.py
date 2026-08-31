@@ -144,6 +144,33 @@ AUTO_PILOT_INTERVAL_SECONDS = max(30, int(os.getenv("AUTO_PILOT_INTERVAL_SECONDS
 # only notify when a cycle actually entered/filled/exited something.
 AUTO_PILOT_NOTIFY_HEARTBEAT = os.getenv("AUTO_PILOT_NOTIFY_HEARTBEAT", "false").lower() == "true"
 
+# ── Scheduled automation (2026-08-31) — three OPTIONAL, time-of-day features
+#    layered on top of auto-pilot. ALL DEFAULT OFF. These are the process-level
+#    kill-switches: a feature runs only when BOTH its env flag here is true AND
+#    the per-mode UI toggle (models.TradeGateState.*_enabled) is on AND the mode
+#    is armed. Leaving these false means the new loop is inert no matter what the
+#    dashboard shows — the intended posture until the whole flow is proven in
+#    DEMO. Times are IST 'HH:MM'.
+#
+#      PREPICK        ~09:00 pre-open: refresh candidates + pre-rank so the queue
+#                     is warm the moment the market opens (no order placed;
+#                     market is shut).
+#      ENTER_AT_OPEN  ~09:20 just after open: run one full entry cycle so the
+#                     pre-picked names get entered at the early/optimum price.
+#      EOD_SQUAREOFF  ~15:15 before close: close all open positions for the mode
+#                     so nothing is carried overnight (intraday square-off).
+PREPICK_ENABLED = os.getenv("PREPICK_ENABLED", "false").lower() == "true"
+PREPICK_TIME_IST = os.getenv("PREPICK_TIME_IST", "09:00")
+
+ENTER_AT_OPEN_ENABLED = os.getenv("ENTER_AT_OPEN_ENABLED", "false").lower() == "true"
+ENTER_AT_OPEN_TIME_IST = os.getenv("ENTER_AT_OPEN_TIME_IST", "09:20")
+
+EOD_SQUAREOFF_ENABLED = os.getenv("EOD_SQUAREOFF_ENABLED", "false").lower() == "true"
+EOD_SQUAREOFF_TIME_IST = os.getenv("EOD_SQUAREOFF_TIME_IST", "15:15")
+
+# How often the time-trigger loop wakes to check the clock (seconds).
+SCHEDULE_CHECK_INTERVAL_SECONDS = max(20, int(os.getenv("SCHEDULE_CHECK_INTERVAL_SECONDS", "60")))
+
 # ── Telegram — direct bot notifications for fills/exits/auto-pilot ticks.
 #    Separate from notification-scheduler-service's own Telegram config on
 #    purpose: that service notifies about SCAN opportunities (candidates

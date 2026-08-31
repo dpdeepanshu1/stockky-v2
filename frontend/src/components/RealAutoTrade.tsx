@@ -389,6 +389,7 @@ export default function RealAutoTrade() {
   const [auditRows, setAuditRows] = useState<AuditLogRow[]>([]);
   const [cycleBusy, setCycleBusy] = useState(false);
   const [autoPilotBusy, setAutoPilotBusy] = useState(false);
+  const [featureBusy, setFeatureBusy] = useState<string | null>(null);
   const [cycleResult, setCycleResult] = useState<CycleResult | null>(null);
   const [pipeline, setPipeline] = useState<PipelineStatus | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
@@ -713,6 +714,18 @@ export default function RealAutoTrade() {
       await loadStatus(mode);
     } catch (e: any) { setError(e?.message || "Auto-Pilot toggle failed"); }
     finally { setAutoPilotBusy(false); }
+  };
+
+  const doToggleFeature = async (
+    feature: "prepick" | "enter_at_open" | "eod_squareoff",
+    currentlyEnabled: boolean,
+  ) => {
+    setFeatureBusy(feature); setError(null);
+    try {
+      await realTradeApi.setFeature(mode, feature, !currentlyEnabled);
+      await loadStatus(mode);
+    } catch (e: any) { setError(e?.message || "Automation toggle failed"); }
+    finally { setFeatureBusy(null); }
   };
 
   // ── No URL configured ────────────────────────────────────────────────────
@@ -1648,6 +1661,76 @@ export default function RealAutoTrade() {
                 </div>
                 {!armed && (
                   <p className="font-mono text-[10px] text-zinc-600 mb-3">Arm {mode} first to enable Auto-Pilot.</p>
+                )}
+
+                {/* Scheduled Automation (2026-08-31) — three optional time-of-day
+                    features layered on top of Auto-Pilot. Each is gated by BOTH
+                    this per-mode switch AND a server-side env kill-switch (env_on),
+                    plus the mode being armed, and fires at most once per trading
+                    day. All default OFF — turn on in DEMO first to prove the flow
+                    before enabling for REAL money. */}
+                {status?.scheduled_automation && (
+                  <div className="mb-3 rounded-lg border border-zinc-800 bg-zinc-950/60 overflow-hidden">
+                    <div className="px-3 py-2 border-b border-zinc-800 bg-zinc-900/40">
+                      <p className="font-mono text-[11px] text-zinc-300">⏰ Scheduled Automation</p>
+                      <p className="font-mono text-[9px] text-zinc-600 mt-0.5">
+                        Pre-pick the best stocks before the open, auto-enter at market open, and square off before close.
+                        {" "}Fires once per trading day. Test in DEMO before enabling for REAL.
+                      </p>
+                    </div>
+                    <div className="divide-y divide-zinc-800/70">
+                      {([
+                        { key: "prepick" as const, icon: "🌅", title: "Pre-pick (pre-open)",
+                          desc: "Warm the candidate queue so the strongest names are ready the moment the market opens. No order is placed." },
+                        { key: "enter_at_open" as const, icon: "🚀", title: "Enter at open",
+                          desc: "Run one full entry cycle just after the open so pre-picked names get entered at the early price." },
+                        { key: "eod_squareoff" as const, icon: "🌆", title: "EOD square-off",
+                          desc: "Close every open position before the close so nothing is carried overnight (intraday square-off)." },
+                      ]).map(f => {
+                        const st = status.scheduled_automation![f.key];
+                        const on = st.enabled;
+                        const busy = featureBusy === f.key;
+                        return (
+                          <div key={f.key} className={`flex items-start justify-between gap-3 px-3 py-2.5 ${on && st.env_on ? "bg-emerald-500/[0.04]" : ""}`}>
+                            <div className="min-w-0">
+                              <p className="font-mono text-[11px] text-zinc-300">
+                                {f.icon} {f.title}{" "}
+                                <span className="text-zinc-600">· {st.time_ist} IST</span>{" "}
+                                {on
+                                  ? <span className="text-emerald-400">ON</span>
+                                  : <span className="text-zinc-600">OFF</span>}
+                              </p>
+                              <p className="font-mono text-[9px] text-zinc-600 mt-0.5">{f.desc}</p>
+                              {on && !st.env_on && (
+                                <p className="font-mono text-[9px] text-amber-400/80 mt-1">
+                                  ⚠ Saved, but switched off at the server ({f.key.toUpperCase()}_ENABLED env is false) — it won't run until that's set.
+                                </p>
+                              )}
+                              {st.last_run && (
+                                <p className="font-mono text-[9px] text-zinc-700 mt-0.5">Last ran: {st.last_run}</p>
+                              )}
+                            </div>
+                            <button
+                              onClick={() => void doToggleFeature(f.key, on)}
+                              disabled={!armed || busy}
+                              className={`shrink-0 px-3 py-1.5 rounded-lg font-mono text-[11px] disabled:opacity-40 ${
+                                on
+                                  ? "bg-rose-500/10 border border-rose-500/30 text-rose-300"
+                                  : "bg-emerald-500/10 border border-emerald-500/30 text-emerald-300"
+                              }`}
+                            >
+                              {busy ? "…" : on ? "Turn Off" : "Turn On"}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {!armed && (
+                      <p className="font-mono text-[9px] text-zinc-600 px-3 py-2 border-t border-zinc-800">
+                        Arm {mode} first to enable scheduled automation.
+                      </p>
+                    )}
+                  </div>
                 )}
 
                 {cycleBusy && (

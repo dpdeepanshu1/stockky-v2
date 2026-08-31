@@ -111,7 +111,17 @@ export default function FeedHealthPanel({
         <button
           type="button"
           onClick={() => void onRepairBatch()}
-          disabled={batchRepairBusy || healthLoading || (healthData?.missing_data ?? 0) === 0}
+          disabled={
+            batchRepairBusy ||
+            healthLoading ||
+            // Enable whenever there is anything repairable. The backend reports
+            // price-only gaps in `missing_data` but the full repairable set
+            // (price + decision + score) lives in `incomplete_stocks`, which is
+            // exactly what the table below renders. Gating on `missing_data`
+            // left this button greyed out whenever only decision/score were
+            // missing — the common case — so repair "did nothing".
+            ((healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 0) === 0)
+          }
           className="font-mono text-xs px-3 py-1.5 rounded-lg bg-rose-600/20 text-rose-200 border border-rose-500/40 hover:bg-rose-600/35 transition disabled:opacity-50"
         >
           {batchRepairBusy ? "Repairing…" : repairBatchLabel}

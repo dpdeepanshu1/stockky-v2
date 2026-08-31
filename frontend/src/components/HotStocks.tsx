@@ -490,10 +490,40 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
     setSniperError(null);
     setSuggestions([]);
     try {
+      // Work off whatever picks are already loaded; if none are (the user hit
+      // this before running/refreshing a Hot Picks search), pull the persisted
+      // table so the button works standalone at the top of the page instead of
+      // sitting disabled until a scan completes.
+      let src: HotPayload | null = data;
+      if (!payloadHasPicks(src as any)) {
+        try {
+          const stored = await api.getStockkyHotTable(24);
+          if (payloadHasPicks(stored)) src = stored as unknown as HotPayload;
+        } catch {
+          /* fall through to live result */
+        }
+        if (!payloadHasPicks(src as any)) {
+          try {
+            const res = await api.getStockkyHotResult();
+            if (res?.ok !== false && (res?.news_driven || res?.bulk_insider_driven)) {
+              src = res as HotPayload;
+            }
+          } catch {
+            /* no cached result yet */
+          }
+        }
+        if (payloadHasPicks(src as any)) setData(src);
+      }
+      if (!payloadHasPicks(src as any)) {
+        setSniperError(
+          "No Hot Picks loaded yet. Run “Search Hot Picks Stocks” first, then Search for Buy Stocks."
+        );
+        return;
+      }
       const list = [
-        ...(data?.bulk_insider_driven || []),
-        ...(data?.results_driven || []),
-        ...(data?.news_driven || []),
+        ...(src?.bulk_insider_driven || []),
+        ...(src?.results_driven || []),
+        ...(src?.news_driven || []),
       ];
       const mapped = list.map((p) => {
         const live = (liveQuotes as any)?.[p.symbol!];
@@ -695,7 +725,8 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
           <button
             type="button"
             onClick={handleSearchBuysFromHot}
-            disabled={sniperLoading || !data}
+            disabled={sniperLoading}
+            title="Rank the loaded Hot Picks and pick the 1-4 best buy setups. Loads the latest saved picks automatically if none are on screen yet."
             className="font-mono text-xs px-4 py-2 rounded-lg border border-emerald-500/50 bg-emerald-600/20 text-emerald-200 hover:bg-emerald-600/35 disabled:opacity-50 shadow-lg shadow-emerald-900/20"
           >
             {sniperLoading ? "Sniping…" : "🎯 Search for Buy Stocks (1-4)"}

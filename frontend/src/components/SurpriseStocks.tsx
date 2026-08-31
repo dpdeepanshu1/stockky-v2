@@ -742,7 +742,9 @@ export default function SurpriseStocks({
             disabled={
               batchRepairBusy ||
               healthLoading ||
-              (healthData?.missing_data ?? 0) === 0
+              // See FeedHealthPanel: enable on the full repairable set
+              // (incomplete_stocks), not the price-only missing_data count.
+              ((healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 0) === 0)
             }
             className="font-mono text-xs px-3 py-1.5 rounded-lg bg-rose-600/20 text-rose-200 border border-rose-500/40 hover:bg-rose-600/35 transition disabled:opacity-50"
           >

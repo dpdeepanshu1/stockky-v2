@@ -15,9 +15,13 @@ as given and does not re-check it against the DB itself.
 """
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy.orm import Session
 
 import pipeline_status as pstat
+
+logger = logging.getLogger("real-trade-cycle")
 
 
 async def run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str = "manual") -> dict:

@@ -139,6 +139,15 @@ class RiskConfigUpdate(BaseModel):
     allow_pyramiding: Optional[bool] = None
 
 
+class FeatureToggleRequest(BaseModel):
+    """Body for POST /features/{mode} — flip ONE scheduled-automation feature
+    on or off for a mode. feature must be one of the three known keys; enabled
+    is the desired per-mode state (the env kill-switch still has final say at
+    fire time)."""
+    feature: str   # "prepick" | "enter_at_open" | "eod_squareoff"
+    enabled: bool
+
+
 # ── Gate helpers ─────────────────────────────────────────────────────────────
 def _gate(db: Session, mode: str) -> models.TradeGateState:
     row = db.query(models.TradeGateState).filter_by(mode=mode).first()
@@ -222,6 +231,39 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
         "armed": gate.armed,
         "disarmed_reason": gate.disarmed_reason,
         "auto_pilot_enabled": gate.auto_pilot_enabled,
+        # Scheduled automation (2026-08-31): the three optional time-of-day
+        # features. `enabled` is the per-mode UI toggle (this DB row); `env_on`
+        # is the process-level kill-switch (config, set on Render). A feature
+        # only actually fires when BOTH are true AND the mode is armed — so the
+        # dashboard greys out / warns when env_on is false, because flipping the
+        # UI toggle alone would do nothing until the env var is set too.
+        # getattr(..., default) throughout this block, not direct attribute
+        # access: on first boot against an existing DB, the additive
+        # migration for these columns runs in init_schema() but this ORM
+        # instance may already be constructed against the old mapping, so
+        # SQLAlchemy can return None (or raise) for the not-yet-migrated
+        # columns. Matches the pattern _schedule_tick already uses in
+        # auto_pilot.py for the *_enabled reads.
+        "scheduled_automation": {
+            "prepick": {
+                "enabled": bool(getattr(gate, "prepick_enabled", False)),
+                "env_on": config.PREPICK_ENABLED,
+                "time_ist": config.PREPICK_TIME_IST,
+                "last_run": getattr(gate, "prepick_last_run", None),
+            },
+            "enter_at_open": {
+                "enabled": bool(getattr(gate, "enter_at_open_enabled", False)),
+                "env_on": config.ENTER_AT_OPEN_ENABLED,
+                "time_ist": config.ENTER_AT_OPEN_TIME_IST,
+                "last_run": getattr(gate, "enter_at_open_last_run", None),
+            },
+            "eod_squareoff": {
+                "enabled": bool(getattr(gate, "eod_squareoff_enabled", False)),
+                "env_on": config.EOD_SQUAREOFF_ENABLED,
+                "time_ist": config.EOD_SQUAREOFF_TIME_IST,
+                "last_run": getattr(gate, "eod_squareoff_last_run", None),
+            },
+        },
         "account": {
             "starting_capital": account.starting_capital if account else None,
             "current_equity": account.current_equity if account else None,
@@ -701,6 +743,60 @@ async def autopilot_disable(mode: str, admin: Optional[str] = Depends(require_ad
     db.commit()
     log_action(db, actor=admin or "demo-user", action="AUTOPILOT_DISABLED", mode=mode)
     return {"ok": True, "mode": mode, "auto_pilot_enabled": False}
+
+
+# ── Scheduled automation toggles (2026-08-31) ───────────────────────────────
+# Per-mode UI switches for the three time-of-day features (pre-pick /
+# enter-at-open / EOD square-off). Same auth as autopilot (admin required for
+# REAL). Flipping a switch here only sets the DB flag — the loop in
+# execution/auto_pilot.py still requires the matching env kill-switch
+# (config.*_ENABLED) to be true AND the mode to be armed before it fires
+# anything, and each feature fires at most once per IST trading day.
+_FEATURE_COLUMNS = {
+    "prepick": ("prepick_enabled", "prepick_enabled_at"),
+    "enter_at_open": ("enter_at_open_enabled", "enter_at_open_enabled_at"),
+    "eod_squareoff": ("eod_squareoff_enabled", "eod_squareoff_enabled_at"),
+}
+_FEATURE_ENV_FLAG = {
+    "prepick": "PREPICK_ENABLED",
+    "enter_at_open": "ENTER_AT_OPEN_ENABLED",
+    "eod_squareoff": "EOD_SQUAREOFF_ENABLED",
+}
+
+
+@app.post("/features/{mode}")
+async def set_feature(mode: str, body: FeatureToggleRequest,
+                      admin: Optional[str] = Depends(require_admin_if_real),
+                      db: Session = Depends(get_db)):
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    feature = (body.feature or "").strip().lower()
+    if feature not in _FEATURE_COLUMNS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"feature must be one of {sorted(_FEATURE_COLUMNS)}",
+        )
+    enabled_col, enabled_at_col = _FEATURE_COLUMNS[feature]
+    gate = _gate(db, mode)
+    setattr(gate, enabled_col, bool(body.enabled))
+    setattr(gate, enabled_at_col, datetime.now(timezone.utc) if body.enabled else None)
+    db.commit()
+    log_action(
+        db, actor=admin or "demo-user",
+        action=f"FEATURE_{feature.upper()}_{'ENABLED' if body.enabled else 'DISABLED'}",
+        mode=mode,
+    )
+    env_on = bool(getattr(config, _FEATURE_ENV_FLAG[feature], False))
+    return {
+        "ok": True,
+        "mode": mode,
+        "feature": feature,
+        "enabled": bool(body.enabled),
+        # Surfaced so the frontend can warn "toggle saved, but this feature is
+        # switched off at the server (env) level so it won't run yet".
+        "env_on": env_on,
+    }
 
 
 async def _live_prices(symbols: list[str]) -> dict[str, float]:

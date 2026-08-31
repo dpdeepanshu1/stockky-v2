@@ -52,14 +52,21 @@ MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7
 
 
 class Tick:
-    __slots__ = ("symbol", "price", "as_of", "atr", "source")
+    __slots__ = ("symbol", "price", "as_of", "atr", "source", "volume")
 
-    def __init__(self, symbol: str, price: float, as_of: datetime, atr: Optional[float], source: str):
+    def __init__(self, symbol: str, price: float, as_of: datetime, atr: Optional[float], source: str,
+                 volume: Optional[int] = None):
         self.symbol = symbol
         self.price = price
         self.as_of = as_of
         self.atr = atr
         self.source = source
+        # Traded volume for the session, when the upstream source provides it.
+        # entry_engine/entry.py reads this (via getattr fallback) to compute
+        # avg_traded_value for risk_engine's liquidity floor check (#7) — that
+        # check silently no-ops without it, so keep this populated wherever a
+        # quote source actually returns volume.
+        self.volume = volume
 
 
 async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
@@ -87,12 +94,14 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
                 age_s = (datetime.now(timezone.utc) - updated_at).total_seconds()
                 if age_s <= LIVE_QUOTE_MAX_AGE_S:
                     ohlc = lq.get("ohlc") or {}
+                    vol = lq.get("volume")
                     return Tick(
                         symbol=symbol,
                         price=float(ltp),
                         as_of=updated_at,
                         atr=None,  # ATR comes from history, not tick feed
                         source=f"live_quotes({lq.get('source','angelone')})",
+                        volume=int(vol) if vol not in (None, "") else None,
                     )
                 else:
                     logger.debug(
@@ -111,6 +120,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
         price = q.get("price") or q.get("cmp")
         if not price or float(price) <= 0:
             return None
+        vol = q.get("volume")
         return Tick(
             symbol=symbol,
             price=float(price),
@@ -123,6 +133,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
             as_of=datetime.now(timezone.utc),
             atr=float(q["atr"]) if q.get("atr") else None,
             source=q.get("source") or "market-data-service",
+            volume=int(vol) if vol not in (None, "") else None,
         )
     except Exception as e:
         logger.debug("get_quote(%s) source-2 failed: %s", symbol, e)
@@ -140,6 +151,54 @@ async def get_quotes(symbols: list[str]) -> dict[str, Tick]:
         return out
     async with httpx.AsyncClient() as client:
         results = await asyncio.gather(*[get_quote(client, s) for s in symbols])
+    for sym, tick in zip(symbols, results):
+        if tick is not None:
+            out[sym] = tick
+    return out
+
+
+async def _get_preview(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
+    """Best-effort last-close / previous-close lookup for a symbol whose LIVE
+    tick is missing. This is a NON-TRADEABLE price — it can be yesterday's
+    close — used only so the dashboard can show a preview Waiting-at / Stop /
+    Target instead of blank '—' columns, and so a WAIT can explain itself. It
+    is never used to size or place an order (the ENTER path only runs when a
+    real live tick exists). Source is tagged 'preview:last_close' so nothing
+    downstream can mistake it for a fresh quote.
+    """
+    for path in (f"/quote/{symbol}", f"/last-close/{symbol}"):
+        try:
+            r = await client.get(f"{MARKET_DATA_URL}{path}", timeout=8.0)
+            if r.status_code != 200:
+                continue
+            q = r.json()
+            px = (
+                q.get("price") or q.get("cmp") or q.get("ltp")
+                or q.get("prev_close") or q.get("previous_close")
+                or q.get("close") or q.get("last_close")
+            )
+            if px and float(px) > 0:
+                return Tick(
+                    symbol=symbol,
+                    price=float(px),
+                    as_of=datetime.now(timezone.utc),
+                    atr=float(q["atr"]) if q.get("atr") else None,
+                    source="preview:last_close",
+                )
+        except Exception as e:
+            logger.debug("get_preview(%s) via %s failed: %s", symbol, path, e)
+            continue
+    return None
+
+
+async def get_preview_quotes(symbols: list[str]) -> dict[str, Tick]:
+    """Bulk best-effort preview (last-close) prices — see _get_preview. Only
+    call this for symbols that came back empty from get_quotes()."""
+    out: dict[str, Tick] = {}
+    if not symbols:
+        return out
+    async with httpx.AsyncClient() as client:
+        results = await asyncio.gather(*[_get_preview(client, s) for s in symbols])
     for sym, tick in zip(symbols, results):
         if tick is not None:
             out[sym] = tick

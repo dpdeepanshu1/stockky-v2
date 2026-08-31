@@ -31,7 +31,7 @@ import config
 import models
 from audit.logger import log_action
 from execution import dhan_client
-from market_feed.feed import get_quotes
+from market_feed.feed import get_quotes, get_preview_quotes, MARKET_DATA_URL
 from notifier import notify_async
 from portfolio.portfolio import get_account, open_positions, record_real_order_sent
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
@@ -259,6 +259,19 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     symbols = list({c.symbol for c in candidates})
     ticks   = await get_quotes(symbols)
 
+    # Preview (last-close) prices ONLY for symbols with no live tick, so a WAIT
+    # can still show Waiting-at / Stop / Target instead of blank '—' columns and
+    # can name why the live quote is missing. These are non-tradeable: the ENTER
+    # path below never runs on a preview (it requires a real live tick).
+    missing_syms = [s for s in symbols if ticks.get(s) is None]
+    preview_ticks: dict = {}
+    if missing_syms:
+        try:
+            preview_ticks = await get_preview_quotes(missing_syms)
+        except Exception as e:
+            logger.debug("preview quote fetch failed (non-fatal): %s", e)
+            preview_ticks = {}
+
     # ── Regime-gate override (2026-08-31) ───────────────────────────────────
     # When the market-wide gate is blocking everything, still let the
     # handful of strongest candidates this cycle through it — see the
@@ -307,10 +320,39 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
 
         # ── Gate 2: price available ───────────────────────────────────────────
         if tick is None:
-            _wait("No current price available — market_feed returned nothing.")
+            # No live tick. Try a preview (last-close) price so the dashboard
+            # shows Waiting-at / Stop / Target instead of blank columns, and so
+            # the WAIT explains itself (which market-data host we tried). This
+            # is informational ONLY — with no live tick we never reach ENTER, so
+            # no order is ever priced off this preview.
+            pv = preview_ticks.get(cand.symbol)
+            if pv is not None:
+                _pstop_pct, _ptgt_pct = _atr_stop_target_pct(
+                    _clamp_for_atr(pv.atr / pv.price * 100.0) if pv.atr else None
+                )
+                _p_entry = round(pv.price * (1 + config.ENTRY_ZONE_UPPER_PCT / 100.0 / 2), 2)
+                _p_stop  = round(pv.price * (1 - _pstop_pct / 100.0), 2)
+                _p_tgt   = round(pv.price * (1 + _ptgt_pct / 100.0), 2)
+                _wait(
+                    f"No live quote (showing preview from last close ₹{pv.price:.2f}). "
+                    f"Waiting for a fresh tick from market-data before entry — "
+                    f"if this persists the market-data service ({MARKET_DATA_URL}) "
+                    "may be cold-starting, rate-limited, or MARKET_DATA_URL is misconfigured."
+                )
+                decision.proposed_price  = _p_entry
+                decision.proposed_stop   = _p_stop
+                decision.proposed_target = _p_tgt
+            else:
+                _wait(
+                    "No current price available — market_feed returned nothing "
+                    f"(tried live_quotes + {MARKET_DATA_URL}/quote and last-close). "
+                    "The market-data service may be asleep (Render cold start), "
+                    "rate-limited, or MARKET_DATA_URL may be unset/misconfigured."
+                )
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
-                                   "reasoning": decision.reasoning, "risk_verdict": None})
+                                   "reasoning": decision.reasoning,
+                                   "risk_verdict": None})
             continue
 
         # §6 — clamp ATR: exclude corporate-action day jumps > 30%

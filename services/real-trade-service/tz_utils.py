@@ -57,6 +57,38 @@ def as_aware(dt: Optional[datetime]) -> Optional[datetime]:
     return dt
 
 
+def ist_now(now: Optional[datetime] = None) -> datetime:
+    """Current wall-clock time in IST (or convert a given UTC dt to IST)."""
+    return (now or datetime.now(timezone.utc)).astimezone(IST)
+
+
+def ist_today_str(now: Optional[datetime] = None) -> str:
+    """IST calendar date as 'YYYY-MM-DD' — used to fire a scheduled action at
+    most once per trading day (store the last-fired date, compare to this)."""
+    return ist_now(now).strftime("%Y-%m-%d")
+
+
+def parse_hhmm(value: str, default_h: int, default_m: int) -> _time:
+    """Parse an 'HH:MM' env string into a time, falling back to a default."""
+    try:
+        hh, mm = str(value).strip().split(":")
+        return _time(int(hh), int(mm))
+    except Exception:
+        return _time(default_h, default_m)
+
+
+def ist_time_at_or_after(target: _time, now: Optional[datetime] = None) -> bool:
+    """True once the current IST clock time is at/after `target`. Callers pair
+    this with a once-per-day date guard so a window (not just the exact minute)
+    still fires exactly once."""
+    return ist_now(now).time() >= target
+
+
+def is_ist_weekday(now: Optional[datetime] = None) -> bool:
+    """Mon–Fri in IST (no exchange-holiday awareness — see is_market_open_ist)."""
+    return ist_now(now).weekday() < 5
+
+
 def iso_utc(dt: Optional[datetime]) -> Optional[str]:
     """Every JSON timestamp this service sends to the frontend MUST go
     through this, not a bare `.isoformat()`. Root cause (see module

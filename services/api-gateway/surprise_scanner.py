@@ -148,11 +148,16 @@ def _db_url() -> Optional[str]:
 
 
 def _engine(app_name: str):
+    # Prefer the process-wide cached pool so repeated scans reuse one warm
+    # engine instead of opening (and sometimes leaking) a fresh pool each time.
+    # Callers must NOT dispose the returned engine — it is shared.
     if _ss is not None:
         try:
+            if hasattr(_ss, "shared_engine"):
+                return _ss.shared_engine(app_name)
             return _ss.make_engine(app_name)
         except Exception as e:
-            logger.debug("surprise_schema.make_engine: %s", e)
+            logger.debug("surprise_schema engine: %s", e)
     url = _db_url()
     if not url:
         return None
@@ -291,7 +296,8 @@ class SurpriseStockEngine:
                     "high_52w, dist_52w_pct, sector, is_liquid, updated_at "
                     "FROM surprise_static_feed"
                 )).mappings().all()
-            eng.dispose()
+            # NOTE: engine is process-wide shared now (surprise_schema.shared_engine)
+            # — do NOT dispose it here or every scan throws away the warm pool.
             cache: Dict[str, Dict[str, Any]] = {}
             for r in rows:
                 d = dict(r)

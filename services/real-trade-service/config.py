@@ -98,6 +98,24 @@ DHAN_TOKEN_LIFETIME_DAYS = float(os.getenv("DHAN_TOKEN_LIFETIME_DAYS", "1") or 1
 DHAN_TOTP_ENABLED = os.getenv("DHAN_TOTP_ENABLED", "false").lower() == "true"
 DHAN_TOTP_SECRET = os.getenv("DHAN_TOTP_SECRET", "")  # only read when the above is true
 
+# §2 proactive TOTP refresh loop (execution/auto_pilot.py:_totp_refresh_loop,
+# auth/dhan_credentials.py:token_needs_refresh). Added alongside the
+# 2026-09-01 TOTP proactive-refresh fix but missed from config.py at the
+# time — caused AttributeError on startup (auto_pilot.start() logs both
+# values unconditionally, even with DHAN_TOTP_ENABLED=false). Fixed here.
+# How often the background loop wakes to check whether the current Dhan
+# token is inside the refresh margin. No-op wake (cheap) while
+# DHAN_TOTP_ENABLED=false.
+DHAN_TOTP_REFRESH_CHECK_INTERVAL_SECONDS = max(
+    60, int(os.getenv("DHAN_TOTP_REFRESH_CHECK_INTERVAL_SECONDS", "1800") or 1800)
+)
+# How close to the token's effective expiry (DHAN_HARD_CAP_HOURS-clamped,
+# see auth/dhan_credentials.py:_effective_expiry) the loop proactively
+# refreshes, instead of waiting for it to actually expire.
+DHAN_TOTP_REFRESH_MARGIN_HOURS = float(
+    os.getenv("DHAN_TOTP_REFRESH_MARGIN_HOURS", "2") or 2
+)
+
 # Dhan sandbox vs live base URL — sandbox is the default until Phase 2's
 # validation runs are done; execution/dhan_client.py reads this, never
 # hardcodes a host.

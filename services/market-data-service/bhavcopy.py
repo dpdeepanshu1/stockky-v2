@@ -722,19 +722,19 @@ def delivery_from_nse_cm_series(symbol: str) -> Optional[Dict[str, Any]]:
         rows = data.get("data") or data.get("historicalData") or []
         if not rows:
             return None
-            # Prefer newest row with delivery fields
-            for row in reversed(rows):
-                pct = row.get("CH_DELIVERY_PERC") or row.get("DELIV_PER") or row.get("deliveryToTradedQuantity")
-                if pct is None:
-                    continue
-                return {
-                    "symbol": sym,
-                    "delivery_pct": round(float(pct), 2),
-                    "traded_qty": row.get("CH_TOT_TRADED_QTY") or row.get("TTL_TRD_QNTY"),
-                    "delivery_qty": row.get("CH_DELIV_QTY"),
-                    "source": "nse_cm_historical",
-                    "session_date": row.get("CH_TIMESTAMP") or row.get("mTIMESTAMP"),
-                }
+        # Prefer newest row with delivery fields
+        for row in reversed(rows):
+            pct = row.get("CH_DELIVERY_PERC") or row.get("DELIV_PER") or row.get("deliveryToTradedQuantity")
+            if pct is None:
+                continue
+            return {
+                "symbol": sym,
+                "delivery_pct": round(float(pct), 2),
+                "traded_qty": row.get("CH_TOT_TRADED_QTY") or row.get("TTL_TRD_QNTY"),
+                "delivery_qty": row.get("CH_DELIV_QTY"),
+                "source": "nse_cm_historical",
+                "session_date": row.get("CH_TIMESTAMP") or row.get("mTIMESTAMP"),
+            }
     except Exception as e:
         logger.debug("cm series delivery failed %s: %s", sym, e)
     return None

@@ -206,6 +206,27 @@ UPPER_CIRCUIT_THRESHOLD_PCT = float(os.getenv("CANDIDATE_UPPER_CIRCUIT_PCT", "19
 # >60% = institutional quality; include in payload for frontend display
 DELIVERY_HIGH_QUALITY_PCT = float(os.getenv("CANDIDATE_DELIVERY_HIGH_QUALITY_PCT", "60.0"))
 
+# ── 2026-09-01 re-backtest (819,906-row NSE bhavcopy, reproduced independently) ──
+# Confirmed the tiered structure above holds (win rate rises with each tier,
+# 2-day decay confirmed) though exact magnitudes came in a bit lower than the
+# original 30-Aug calibration note (base 44.8% vs 48.1%, HC 51.2% vs 55.7%,
+# UC 67.4% vs 69.7% — same direction, likely a different data window/methodology
+# than whatever produced the original numbers; not a discrepancy worth chasing
+# further, the ranking and decay conclusions are what the tiers/time-stop
+# actually depend on).
+# NEW finding this round: the BASE tier (vol>=2x, ret>=5%, the two above it
+# already filter fine) is measurably improved by requiring delivery data to
+# be known and >=30% — win 44.8%→45.7%, mean +0.27%→+0.41%, median flips
+# from -0.08% to +0.00%. Only applied to the base tier (not HIGH_CONVICTION
+# or UPPER_CIRCUIT, whose n is already small and whose win rates are already
+# strong on their own). Rejects only when delivery_pct IS available and is
+# below this bar — a candidate with no delivery data (get_delivery's neutral
+# 50.0 fallback, or a genuine missing read) is NOT rejected on this check
+# alone, since a missing-data reject would be indistinguishable from a
+# low-delivery reject in the logs and this filter is meant to catch
+# intraday-churn moves specifically, not unrelated data gaps.
+BASE_TIER_MIN_DELIVERY_PCT = float(os.getenv("CANDIDATE_BASE_MIN_DELIVERY_PCT", "30.0"))
+
 
 # ── Fetch helpers ─────────────────────────────────────────────────────────────
 
@@ -680,6 +701,30 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict
     # >60% = institutional buying; <30% = intraday/speculative churn.
     delivery_pct = float(quote.get("delivery_pct") or quote.get("deliv_per") or 0)
     high_delivery = delivery_pct >= DELIVERY_HIGH_QUALITY_PCT if delivery_pct > 0 else None
+
+    # ── BASE-tier delivery quality gate (2026-09-01 re-backtest finding) ──────
+    # Only applies when this candidate is NOT already high_conviction/
+    # upper_circuit (those tiers already backtest strongly on their own and
+    # have small enough n that adding another filter would just shrink them
+    # further for no measured benefit) AND delivery data is actually known
+    # (delivery_pct > 0 here means "known"; 0 means unavailable, see
+    # get_delivery()'s own neutral-fallback comment in bhavcopy.py — a
+    # missing-data case is not treated as a low-delivery rejection).
+    if (
+        not upper_circuit
+        and not high_conviction
+        and delivery_pct > 0
+        and delivery_pct < BASE_TIER_MIN_DELIVERY_PCT
+    ):
+        return {
+            "reject_reason": (
+                f"Delivery {delivery_pct:.1f}% < {BASE_TIER_MIN_DELIVERY_PCT}% "
+                "for a base-tier (non-high-conviction) volume-shock candidate — "
+                "backtest shows this combination is disproportionately "
+                "intraday/speculative churn rather than a real breakout."
+            ),
+            "atr_pct": atr_pct,
+        }
 
     return {
         "reject_reason":     None,

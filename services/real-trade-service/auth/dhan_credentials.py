@@ -235,6 +235,32 @@ def disarm_on_invalid_ip(db: Session, mode: str, err: str) -> bool:
     return was_armed
 
 
+def token_needs_refresh(db: Session) -> bool:
+    """True when the current Dhan token is within
+    config.DHAN_TOTP_REFRESH_MARGIN_HOURS of its effective (hard-capped)
+    expiry, or there's no usable token at all yet.
+
+    Referenced by execution/auto_pilot.py:_totp_refresh_loop but was
+    missing from this module — every proactive-refresh tick threw
+    ImportError (caught, logged, retried next tick — never crashed the
+    loop, but also meant proactive refresh silently never ran). Added
+    here alongside the config.py fix for the two DHAN_TOTP_REFRESH_*
+    settings that same loop logs on startup.
+
+    No live Dhan call here — purely the same local-clock math
+    is_token_valid()/connection_status() already use, kept fast since the
+    loop polls this every DHAN_TOTP_REFRESH_CHECK_INTERVAL_SECONDS.
+    """
+    row = db.query(models.TradeCredential).first()
+    if row is None or not row.access_token_encrypted:
+        return True  # nothing saved yet — let refresh_if_totp_enabled try
+    effective_expiry = _effective_expiry(row)
+    if effective_expiry is None:
+        return True
+    margin = timedelta(hours=config.DHAN_TOTP_REFRESH_MARGIN_HOURS)
+    return datetime.now(timezone.utc) >= (effective_expiry - margin)
+
+
 def refresh_if_totp_enabled(db: Session) -> bool:
     """
     §2 — TOTP auto-refresh for Dhan access token.

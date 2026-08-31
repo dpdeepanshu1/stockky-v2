@@ -66,7 +66,24 @@ REGIME_MIN_SCORE_STATIC = int(os.getenv("ENTRY_REGIME_MIN_SCORE", "38"))
 CONVICTION_MIDPOINT  = float(os.getenv("ENTRY_CONVICTION_MIDPOINT", "65.0"))
 CONVICTION_MAX_SCALE = float(os.getenv("ENTRY_CONVICTION_MAX_SCALE", "0.25"))
 
-_ACTIONABLE_DECISIONS = {"BUY NOW", "PREPARE TO BUY"}
+# BUG FIX (31-Aug-2026): this set used to be {"BUY NOW", "PREPARE TO BUY"}
+# only — a straight copy-paste of candidate_engine/candidates.py's own
+# _ACTIONABLE_DECISIONS at the time. When the volume-shock momentum track
+# was added there (see candidates.py's _refresh_volume_shock_candidates —
+# "Option A (Issue 1 fix)"), it started inserting TradeCandidate rows with
+# decision_label "VOLUME_SHOCK" / "VOLUME_SHOCK_HIGH_CONVICTION" /
+# "VOLUME_SHOCK_UPPER_CIRCUIT", but this file's copy of the set was never
+# updated to match. Every volume-shock candidate — the entire point of that
+# track — was therefore permanently stuck on WAIT with "Source decision
+# 'VOLUME_SHOCK' is not actionable for entry.", visible in the dashboard's
+# Live Cycle Status (candidates found, 0 entered, all WAIT) even though
+# candidate_engine was finding and inserting them correctly. There is
+# nothing else gating these labels anywhere else in the entry path, so this
+# was a straight dead-end for that whole feature, not a deliberate filter.
+_ACTIONABLE_DECISIONS = {
+    "BUY NOW", "PREPARE TO BUY",
+    "VOLUME_SHOCK", "VOLUME_SHOCK_HIGH_CONVICTION", "VOLUME_SHOCK_UPPER_CIRCUIT",
+}
 
 # ── Adaptive regime cache (2-minute TTL to avoid DB hit every candidate) ─────
 _regime_cache: dict = {"score": None, "threshold": None, "source": None, "ts": 0.0}

@@ -13,6 +13,7 @@ import logging
 import difflib
 import uuid
 import threading
+import random
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
@@ -899,15 +900,28 @@ def _get_momentum_movers() -> List[str]:
     """Real-time movers: NSE gainers/losers/most-active + ≥5% day/week moves."""
     movers: set[str] = set()
 
-    # 1) NSE live boards (best free real-time source when reachable)
+    # 1) NSE live boards (best free real-time source when reachable — this
+    # is the ONLY source below that is genuinely full-market: gainers/
+    # losers/volume-gainers boards are not restricted to any index. If
+    # this source is silently blocked/empty, everything downstream
+    # degrades to the large-cap-biased sources 2-4, which structurally
+    # cannot surface most real smallcap/midcap volume-shocker moves — so
+    # its per-endpoint yield is now logged explicitly (31-Aug-2026) so a
+    # future silent NSE-block is diagnosable from logs instead of only
+    # showing up as a generic "Momentum movers collected: N" line that
+    # can't distinguish "genuinely quiet market" from "NSE blocked us".
+    nse_live_before = len(movers)
     for endpoint, key in (
         ("live-analysis-variations?index=gainers", "nse:gainers"),
         ("live-analysis-variations?index=losers", "nse:losers"),
         ("live-analysis-variations?index=volume-gainers", "nse:vol_gainers"),
         ("equity-stock-indices?index=NIFTY%20500", "nse:nifty500_idx"),
     ):
+        pre = len(movers)
         try:
             data = _fetch_from_nse_api(endpoint, key, ttl=900)
+            if data is None:
+                logger.warning("NSE movers %s: no data (blocked/unreachable?)", endpoint)
             rows = []
             if isinstance(data, dict):
                 rows = data.get("data") or data.get("NIFTY") or []
@@ -931,6 +945,11 @@ def _get_momentum_movers() -> List[str]:
                         movers.add(sym.replace("&", "").replace("-", "") if False else sym)
         except Exception as e:
             logger.debug("NSE movers %s: %s", endpoint, e)
+        logger.info("NSE movers %s: +%d symbols", endpoint, len(movers) - pre)
+    logger.info(
+        "momentum_movers step1 (NSE live boards, full-market): %d symbols",
+        len(movers) - nse_live_before,
+    )
 
     # 2) Gateway's own gainers/losers/most-active (wiring fix, 30-Aug session):
     # this used to make an HTTP round-trip to MARKET_DATA_URL for
@@ -975,8 +994,48 @@ def _get_momentum_movers() -> List[str]:
         pass
 
     # 4) Targeted yfinance 1d ≥5% on a liquid seed (limit calls for free tier)
+    #
+    # BUG FIX (31-Aug-2026): the old line was
+    #   seed = (_get_nifty_indices() + _get_all_nse_securities()[:120])[:80]
+    # `_get_nifty_indices()` alone is already ~250-450 symbols long (NIFTY
+    # 50 + NEXT 50 + MIDCAP100 + MIDCAP150 + SMALLCAP100, concatenated IN
+    # THAT ORDER). Truncating the *combined* list to the first 80 elements
+    # therefore kept almost nothing but NIFTY 50 / NEXT 50 large-caps —
+    # the midcap/smallcap tail of _get_nifty_indices() and the entire
+    # _get_all_nse_securities()[:120] slice were concatenated on but
+    # essentially never reached. That is why real volume-shocker sessions
+    # (see 31-Aug-2026 Groww "Volume shockers" screenshots: Ashoka
+    # Buildcon, Diffusion Engineers, Aym Syntex, Manali Petrochemicals,
+    # Bodal Chemicals, Q-Line Biotech, Modison, Kapston Services, John
+    # Cockerill, RPG Life Sciences, Veranda Learning... none of them
+    # NIFTY50/NEXT50 names) never reached this fallback scan at all, and
+    # since sources 1-3 above are themselves large-cap-biased or
+    # NSE-live-API-dependent (frequently 401/403-blocked from datacenter
+    # IPs — see _fetch_from_nse_api), this was the *only* remaining path
+    # that could have surfaced them, and it was structurally incapable of
+    # doing so.
+    #
+    # Fix: sample explicitly from each market-cap bucket instead of
+    # truncating one concatenated list. Mid/smallcap gets the larger
+    # share, since that is where the actually-missed movers are, and the
+    # general-universe slice is RANDOMIZED (not an alphabetical prefix)
+    # so successive scan cycles rotate across the ~2000-symbol NSE list
+    # instead of always re-checking the same A-D names.
     if len(movers) < 40:
-        seed = list(dict.fromkeys(_get_nifty_indices() + _get_all_nse_securities()[:120]))[:80]
+        nifty_idx_full = _get_nifty_indices()  # NIFTY50+NEXT50+MID100+MID150+SMALL100
+        largecap_seed = nifty_idx_full[:20]     # small largecap slice — cheap sanity coverage
+        midsmall_seed = nifty_idx_full[20:]     # NEXT50 tail + MID/SMALLCAP — highest value
+        random.shuffle(midsmall_seed)
+        all_sec = _get_all_nse_securities()
+        general_pool = [s for s in all_sec if s not in set(nifty_idx_full)]
+        general_sample = random.sample(general_pool, min(150, len(general_pool))) if general_pool else []
+        seed = list(dict.fromkeys(largecap_seed + midsmall_seed[:80] + general_sample))[:180]
+        logger.info(
+            "momentum_movers fallback seed: %d largecap + %d mid/smallcap-index + "
+            "%d general (rotating) = %d total (nse_live_movers_so_far=%d)",
+            len(largecap_seed), min(80, len(midsmall_seed)), len(general_sample),
+            len(seed), len(movers),
+        )
         for sym in seed:
             try:
                 yf_ticker = resolve_ns_ticker(sym)
@@ -3258,7 +3317,26 @@ def _get_nifty50_data() -> List[dict]:
             return cached
 
         logger.info("Fetching fresh market movers data from yfinance for %s", today)
-        nifty_symbols = _get_nifty_indices()[:50]
+        # BUG (31-Aug-2026): `_get_nifty_indices()[:50]` — despite this
+        # function's name/callers implying general "market movers" — was
+        # *always* exactly the NIFTY 50 constituents, because
+        # _get_nifty_indices() concatenates NIFTY 50 first, then NEXT 50 /
+        # MIDCAP100 / MIDCAP150 / SMALLCAP100 after it; slicing the first
+        # 50 off the front never reaches anything past NIFTY 50 itself.
+        # /market/top-gainers, /market/top-losers, /market/most-active
+        # (and momentum_movers step 2/3) were therefore large-cap-only by
+        # construction and could never surface a smallcap/midcap
+        # volume-shocker like the ones in the 31-Aug-2026 Groww
+        # screenshots. Mix in a shuffled sample of the NEXT50/MID/SMALL
+        # tail too — keep the full NIFTY 50 (cheap, always relevant) and
+        # add a bounded, randomized slice of the rest so this reflects
+        # more than large-caps without blowing up fetch time (this stays
+        # cached once/day behind the lock above).
+        nifty_idx_all = _get_nifty_indices()
+        nifty50_only = nifty_idx_all[:50]
+        rest = nifty_idx_all[50:]
+        random.shuffle(rest)
+        nifty_symbols = list(dict.fromkeys(nifty50_only + rest[:100]))
 
         def _fetch_one(sym):
             try:

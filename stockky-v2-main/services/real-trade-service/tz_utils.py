@@ -1,0 +1,107 @@
+"""tz_utils.py — single place to fix the offset-naive vs offset-aware
+datetime crash across this service.
+
+Root cause: models.py declares timestamp columns as plain `DateTime`
+(no `timezone=True`). Every write goes in as tz-aware UTC
+(`datetime.now(timezone.utc)`), but most DB drivers (SQLite always,
+Postgres unless the column is TIMESTAMPTZ) hand it back on read as a
+*naive* datetime. Comparing that naive value against a fresh
+`datetime.now(timezone.utc)` raises:
+    TypeError: can't compare offset-naive and offset-aware datetimes
+
+This is exactly what was crashing GET /status/REAL and POST /dhan/connect
+(_check_and_expire_gates in main.py and connection_status/is_token_valid
+in auth/dhan_credentials.py).
+
+Fix: always pass DB-sourced datetimes through `as_aware()` before
+comparing them to `datetime.now(timezone.utc)`.
+"""
+from __future__ import annotations
+
+from datetime import datetime, time as _time, timezone
+from typing import Optional
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
+
+_MARKET_OPEN = _time(9, 15)
+_MARKET_CLOSE = _time(15, 30)
+
+
+def is_market_open_ist(now: Optional[datetime] = None) -> bool:
+    """Best-effort NSE market-hours check: Mon–Fri, 09:15–15:30 IST.
+    Deliberately does NOT know about exchange holidays (that list lives in
+    notification-scheduler-service/scheduler/run_once.py's HOLIDAYS_2026,
+    a separate service with no shared import path here) — auto-pilot will
+    still attempt a cycle on a holiday, but every order it could place
+    still goes through market_feed's live quote + the risk engine, so a
+    holiday with no ticks simply produces WAIT/no-price outcomes rather
+    than a bad order. Good enough for gating a background loop; NOT a
+    substitute for a real trading-calendar check inside the risk engine
+    itself (that remains a Phase 3 TODO, same as the other
+    `market_is_open=True` placeholders across this service)."""
+    ist_now = (now or datetime.now(timezone.utc)).astimezone(IST)
+    if ist_now.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    return _MARKET_OPEN <= ist_now.time() <= _MARKET_CLOSE
+
+
+def as_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    """Return dt with UTC tzinfo attached if it's naive. Every timestamp
+    this service writes is UTC, so a naive value read back from the DB is
+    assumed to be naive-UTC, not local time."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def ist_now(now: Optional[datetime] = None) -> datetime:
+    """Current wall-clock time in IST (or convert a given UTC dt to IST)."""
+    return (now or datetime.now(timezone.utc)).astimezone(IST)
+
+
+def ist_today_str(now: Optional[datetime] = None) -> str:
+    """IST calendar date as 'YYYY-MM-DD' — used to fire a scheduled action at
+    most once per trading day (store the last-fired date, compare to this)."""
+    return ist_now(now).strftime("%Y-%m-%d")
+
+
+def parse_hhmm(value: str, default_h: int, default_m: int) -> _time:
+    """Parse an 'HH:MM' env string into a time, falling back to a default."""
+    try:
+        hh, mm = str(value).strip().split(":")
+        return _time(int(hh), int(mm))
+    except Exception:
+        return _time(default_h, default_m)
+
+
+def ist_time_at_or_after(target: _time, now: Optional[datetime] = None) -> bool:
+    """True once the current IST clock time is at/after `target`. Callers pair
+    this with a once-per-day date guard so a window (not just the exact minute)
+    still fires exactly once."""
+    return ist_now(now).time() >= target
+
+
+def is_ist_weekday(now: Optional[datetime] = None) -> bool:
+    """Mon–Fri in IST (no exchange-holiday awareness — see is_market_open_ist)."""
+    return ist_now(now).weekday() < 5
+
+
+def iso_utc(dt: Optional[datetime]) -> Optional[str]:
+    """Every JSON timestamp this service sends to the frontend MUST go
+    through this, not a bare `.isoformat()`. Root cause (see module
+    docstring above): a DB-sourced datetime almost always comes back
+    *naive* even though it was written as UTC, so `.isoformat()` on it
+    prints no offset/Z suffix at all — e.g. "2026-08-28T04:07:00"
+    instead of "2026-08-28T04:07:00+00:00". `new Date(...)` in the
+    browser then parses that offset-less string as LOCAL time, not UTC,
+    so every timestamp rendered in the dashboard (Activity log, Orders,
+    Watchlist "Fetched"/"Evaluated", position opened_at, etc.) shows the
+    raw UTC clock digits mislabeled as if they were already IST — off by
+    exactly the IST offset (+5:30). Wrapping with as_aware() first
+    guarantees the string always carries an explicit UTC offset, so the
+    browser converts it to the viewer's local time correctly."""
+    aware = as_aware(dt)
+    return aware.isoformat() if aware else None

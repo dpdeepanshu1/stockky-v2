@@ -1,0 +1,31 @@
+# Surprise Stocks — hourly during market hours (staggered :45)
+# 09:45–14:45 IST ≈ 04:15–09:15 UTC → cron 15 4-9
+name: Surprise Stocks Hourly Scanner
+
+on:
+  schedule:
+    # 09:45, 10:45, 11:45, 12:45, 13:45, 14:45 IST (Mon–Fri)
+    - cron: "15 4,5,6,7,8,9 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  run-surprise-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Trigger Surprise Scan
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+        run: |
+          set +e
+          GW="${API_GATEWAY_URL%/}"
+          [ -n "$GW" ] || { echo "API_GATEWAY_URL missing"; exit 1; }
+          case "$GW" in http://*|https://*) ;; *) echo "URL must include https://"; exit 1;; esac
+          curl -sS -m 30 "$GW/health?warm=true" || true
+          sleep 5
+          # Prefer gateway surprise scan endpoints if present
+          curl -sS -m 120 -X POST "$GW/api/surprise/scan" \
+            -H "Content-Type: application/json" \
+            || curl -sS -m 120 -X POST "$GW/surprise/scan" \
+            || curl -sS -m 120 -X POST "$GW/surprise/run" \
+            || echo "No surprise endpoint responded — check gateway routes"

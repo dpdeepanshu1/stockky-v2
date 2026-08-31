@@ -1,0 +1,94 @@
+# Market Scheduler — every 2 hours during NSE session (IST)
+# 10:00, 12:00, 14:00 IST = 04:30, 06:30, 08:30 UTC — using :00 of 4,6,8 UTC ≈ 09:30, 11:30, 13:30 IST
+# User plan: 10:00, 12:00, 14:00 IST → cron '0 4,6,8 * * 1-5' (04:00 UTC = 09:30 IST close enough;
+# exact 10:00 IST = 04:30 UTC — use 30 4,6,8 for precision)
+name: Market Scheduler Runner
+
+on:
+  schedule:
+    # 10:00, 12:00, 14:00 IST (Mon–Fri) → 04:30, 06:30, 08:30 UTC
+    - cron: "30 4,6,8 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      force_scan:
+        description: "Force scan (bypass market hours)"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: IST gate (Asia/Kolkata)
+        id: ist
+        run: |
+          set -e
+          DOW=$(TZ=Asia/Kolkata date +%u)
+          HM=$(TZ=Asia/Kolkata date +%H%M)
+          NOW=$(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M %Z')
+          echo "IST now: $NOW DOW=$DOW HM=$HM"
+          RUN=0
+          if [ "$DOW" -le 5 ] && [ "$HM" -ge 0900 ] && [ "$HM" -le 1545 ]; then
+            RUN=1
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_scan }}" = "true" ]; then
+            RUN=1
+          fi
+          echo "run=$RUN" >> "$GITHUB_OUTPUT"
+          if [ "$RUN" -eq 0 ]; then
+            echo "Outside IST market window — skip scheduler tick"
+          fi
+
+      - name: Install dependencies
+        if: steps.ist.outputs.run == '1'
+        run: |
+          pip install -r services/notification-scheduler-service/scheduler/requirements.txt
+
+      - name: Wake up services
+        if: steps.ist.outputs.run == '1'
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+          MARKET_DATA_URL: ${{ secrets.MARKET_DATA_URL }}
+          NOTIFICATION_URL: ${{ secrets.NOTIFICATION_URL }}
+          ANALYSIS_URL: ${{ secrets.ANALYSIS_INTELLIGENCE_URL }}
+          DECISION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
+        run: |
+          set +e
+          GW="${API_GATEWAY_URL%/}"
+          if [ -z "$GW" ]; then
+            echo "API_GATEWAY_URL not set — skip wake"
+            exit 0
+          fi
+          # Must include https:// in secret
+          case "$GW" in http://*|https://*) ;; *) echo "API_GATEWAY_URL missing protocol"; exit 1;; esac
+          echo "Waking via $GW/wake-all ..."
+          curl -fsS -m 60 -X POST "$GW/wake-all" || curl -fsS -m 60 "$GW/wake-all" || true
+          for U in "$API_GATEWAY_URL" "$MARKET_DATA_URL" "$NOTIFICATION_URL" "$ANALYSIS_URL" "$DECISION_URL"; do
+            [ -z "$U" ] && continue
+            case "$U" in http://*|https://*) ;; *) continue;; esac
+            curl -fsS -m 20 "${U%/}/health?warm=true" || curl -fsS -m 15 "${U%/}/health" || true
+          done
+          curl -fsS -m 15 "$GW/ops/keepalive" || true
+
+      - name: Run scheduler once
+        if: steps.ist.outputs.run == '1'
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+          NOTIFICATION_URL: ${{ secrets.NOTIFICATION_URL }}
+          EVENT_TRACKER_URL: ${{ secrets.EVENT_TRACKER_URL }}
+          USE_REDIS: "0"
+          PREFER_DATA_FEED: "1"
+        run: |
+          set -e
+          GW="${API_GATEWAY_URL%/}"
+          case "$GW" in http://*|https://*) ;; *) echo "API_GATEWAY_URL must include https://"; exit 1;; esac
+          cd services/notification-scheduler-service/scheduler
+          python run_once.py

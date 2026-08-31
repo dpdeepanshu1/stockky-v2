@@ -1,0 +1,59 @@
+{
+  "training_config": {
+    "model_type": "XGBoost",
+    "target_type": "Log_Return",
+    "forecast_horizon_days": 5,
+    "lookback_window": 30,
+    "validation_strategy": {
+      "method": "WalkForward",
+      "train_window_size": 126,
+      "validation_window_size": 21,
+      "step_size": 21,
+      "embargo_days": 5
+    },
+    "preprocessing": {
+      "scaler_type": "RobustScaler",
+      "fit_scaler_per_fold": true
+    },
+    "hyperparameters": {
+      "max_depth": 4,
+      "learning_rate": 0.02,
+      "n_estimators": 200,
+      "subsample": 0.8,
+      "colsample_bytree": 0.8,
+      "tree_method": "hist",
+      "reg_alpha": 0.5,
+      "reg_lambda": 1.0
+    },
+    "early_stopping": {
+      "enabled": true,
+      "patience": 10,
+      "min_delta": 0.0001
+    },
+    "trading": {
+      "long_threshold": 0.0,
+      "short_threshold": 0.0,
+      "transaction_cost_bps": 5,
+      "slippage_bps": 2,
+      "allow_short": false
+    },
+    "evaluation_metrics": [
+      "RMSE",
+      "MAE",
+      "DirectionalAccuracy",
+      "WinRate",
+      "ProfitFactor",
+      "SharpeRatio",
+      "SortinoRatio",
+      "MaximumDrawdown",
+      "MaximumDrawdownDuration",
+      "CumulativeReturn"
+    ],
+    "random_seed": 42,
+    "data": {
+      "symbol": "^NSEI",
+      "start_date": "2020-01-01",
+      "end_date": "2023-12-31"
+    }
+  }
+}

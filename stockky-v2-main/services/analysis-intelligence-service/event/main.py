@@ -1,0 +1,1126 @@
+"""
+Event Tracker Service v0.4.4
+-----------------------------
+Dynamically fetches company name from yfinance for any symbol.
+Works for ALL stocks, not just those in NAME_HINTS.
+
+Merged with v0.3.1 features:
+- /events/{symbol}/categorized endpoint with upcoming/recent events
+- Shared _diff_events logic for /check and /events/{symbol}/categorized
+"""
+import os
+try:
+    from event_depth import enrich_events
+except Exception:
+    enrich_events = None  # type: ignore
+import json
+import math
+import time
+import random
+import time
+import logging
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
+from urllib.parse import quote
+from functools import wraps
+
+import yfinance as yf
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+import feedparser
+import httpx
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from upstash_redis import Redis
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("event-tracker-service")
+
+app = FastAPI(title="Stockky Event Tracker Service", version="0.4.4")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+EVENT_CACHE_TTL = 4 * 3600
+EMPTY_NEWS_CACHE_TTL = 3600
+EVENT_FALLBACK_TTL = 30 * 24 * 3600
+STATE_KEY = "stockky:event_state"
+EVENT_CACHE_PREFIX = "stockky:event:"
+EVENT_FALLBACK_PREFIX = "stockky:event:fallback:"
+EVENTS_LIST_CACHE_KEY = "stockky:events_list"
+EVENTS_LIST_CACHE_TTL = 3600
+
+# ── In‑memory cache for yfinance calls and company names ──
+_yf_cache: Dict[str, Dict[str, Any]] = {}
+_company_name_cache: Dict[str, str] = {}
+CACHE_TTL_SECONDS = 300  # 5 minutes
+COMPANY_NAME_CACHE_TTL = 3600  # 1 hour (company name rarely changes)
+
+def cached_yf(method_name: str):
+    """Decorator to cache results of yfinance methods with TTL."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(symbol: str, *args, **kwargs):
+            cache_key = f"{symbol}:{method_name}"
+            now = time.time()
+            if cache_key in _yf_cache:
+                entry = _yf_cache[cache_key]
+                if now - entry["timestamp"] < CACHE_TTL_SECONDS:
+                    logger.debug(f"Cache hit for {cache_key}")
+                    return entry["value"]
+                else:
+                    del _yf_cache[cache_key]
+            logger.debug(f"Cache miss for {cache_key}, calling yfinance")
+            result = func(symbol, *args, **kwargs)
+            _yf_cache[cache_key] = {"value": result, "timestamp": now}
+            return result
+        return wrapper
+    return decorator
+
+
+# ── Cache: memory-first; Redis only if USE_REDIS=1 ─────────────────────────────
+_USE_REDIS = os.getenv("USE_REDIS", "0").lower() in ("1", "true", "yes")
+_redis = None
+_mem: dict = {}
+_mem_exp: dict = {}
+
+try:
+    if _USE_REDIS and os.getenv("UPSTASH_REDIS_REST_URL") and os.getenv("UPSTASH_REDIS_REST_TOKEN"):
+        _redis = Redis(
+            url=os.getenv("UPSTASH_REDIS_REST_URL"),
+            token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
+        )
+        _redis.ping()
+        logger.info("Event tracker: Upstash Redis ON (USE_REDIS=1)")
+    else:
+        logger.info("Event tracker: USE_REDIS=0 — in-memory cache only (no Upstash)")
+except Exception as e:
+    logger.warning("Redis unavailable, memory-only: %s", e)
+    _redis = None
+
+
+def _redis_get(key: str):
+    exp = _mem_exp.get(key)
+    if key in _mem and (exp is None or exp > time.time()):
+        return _mem[key]
+    if not _redis:
+        return None
+    try:
+        val = _redis.get(key)
+        if not val:
+            return None
+        parsed = json.loads(val) if isinstance(val, (str, bytes)) else val
+        _mem[key] = parsed
+        return parsed
+    except Exception:
+        return None
+
+
+def _redis_set(key: str, value, ttl: int = None):
+    if ttl:
+        _mem_exp[key] = time.time() + int(ttl)
+    else:
+        _mem_exp[key] = None
+    _mem[key] = value
+    if len(_mem) > 4000:
+        for k in list(_mem.keys())[:400]:
+            _mem.pop(k, None)
+            _mem_exp.pop(k, None)
+    if not _redis:
+        return
+    try:
+        data = json.dumps(value, default=str)
+        if ttl:
+            _redis.setex(key, ttl, data)
+        else:
+            _redis.set(key, data)
+    except Exception as e:
+        logger.debug("Redis set failed for %s: %s", key, e)
+
+
+def _load_state() -> dict:
+    return _redis_get(STATE_KEY) or {"subscriptions": [], "last_known": {}}
+
+
+def _save_state(state: dict):
+    _redis_set(STATE_KEY, state)
+
+
+class SubscribeRequest(BaseModel):
+    symbols: List[str]
+
+
+def _normalize(symbol: str) -> str:
+    symbol = symbol.strip().upper()
+    return symbol if symbol.endswith((".NS", ".BO")) else f"{symbol}.NS"
+
+
+def _safe_float(val):
+    try:
+        f = float(val)
+        return f if math.isfinite(f) else None
+    except (TypeError, ValueError):
+        return None
+
+
+# ── Cached yfinance calls ──
+
+_yf_ticker_cache: Dict[str, yf.Ticker] = {}
+# When Yahoo returns 429, skip further heavy yfinance calls for a cool-down window
+_yf_rate_limited_until: float = 0.0
+_YF_COOLDOWN_SEC = 120.0
+
+
+def _yf_is_rate_limited() -> bool:
+    import time as _t
+    return _t.time() < _yf_rate_limited_until
+
+
+def _yf_mark_rate_limited(err: Exception | str | None = None) -> None:
+    import time as _t
+    global _yf_rate_limited_until
+    msg = str(err or "")
+    if "429" in msg or "Too Many Requests" in msg or "Rate limited" in msg:
+        _yf_rate_limited_until = max(_yf_rate_limited_until, _t.time() + _YF_COOLDOWN_SEC)
+        logger.warning("Yahoo/yfinance rate-limited — pausing yfinance enrichment for %.0fs", _YF_COOLDOWN_SEC)
+        try:
+            from rate_limit_report import report_if_rate_limited
+            report_if_rate_limited(err, provider="market_data", path="event/yfinance")
+        except Exception:
+            pass
+
+
+def _get_ticker(symbol: str) -> yf.Ticker:
+    if symbol not in _yf_ticker_cache:
+        _yf_ticker_cache[symbol] = yf.Ticker(symbol)
+        try:
+            _yf_ticker_cache[symbol]._tz = "Asia/Kolkata"
+        except Exception:
+            pass
+    return _yf_ticker_cache[symbol]
+
+def _get_company_name(symbol: str) -> str:
+    """Get the long company name from yfinance, with fallback to the symbol."""
+    if symbol in _company_name_cache:
+        return _company_name_cache[symbol]
+    fallback = symbol.replace(".NS", "").replace(".BO", "")
+    if _yf_is_rate_limited():
+        _company_name_cache[symbol] = fallback
+        return fallback
+    ticker = _get_ticker(symbol)
+    try:
+        info = ticker.info or {}
+        name = info.get("longName") or info.get("shortName") or fallback
+        _company_name_cache[symbol] = name
+        return name
+    except Exception as e:
+        _yf_mark_rate_limited(e)
+        logger.debug("Could not fetch company name for %s: %s", symbol, e)
+        _company_name_cache[symbol] = fallback
+        return fallback
+
+@cached_yf("get_earnings_dates")
+def _get_earnings_dates(symbol: str, limit: int = 1):
+    ticker = _get_ticker(symbol)
+    try:
+        return ticker.get_earnings_dates(limit=limit)
+    except Exception as e:
+        logger.warning(f"get_earnings_dates failed for {symbol}: {e}")
+        return None
+
+@cached_yf("dividends")
+def _get_dividends(symbol: str):
+    ticker = _get_ticker(symbol)
+    try:
+        return ticker.dividends
+    except Exception as e:
+        logger.warning(f"dividends failed for {symbol}: {e}")
+        return None
+
+@cached_yf("splits")
+def _get_splits(symbol: str):
+    ticker = _get_ticker(symbol)
+    try:
+        return ticker.splits
+    except Exception as e:
+        logger.warning(f"splits failed for {symbol}: {e}")
+        return None
+
+@cached_yf("insider_transactions")
+def _get_insider_transactions(symbol: str):
+    ticker = _get_ticker(symbol)
+    try:
+        return ticker.insider_transactions
+    except Exception as e:
+        logger.warning(f"insider_transactions failed for {symbol}: {e}")
+        return None
+
+@cached_yf("upgrades_downgrades")
+def _get_upgrades_downgrades(symbol: str):
+    ticker = _get_ticker(symbol)
+    try:
+        return ticker.upgrades_downgrades
+    except Exception as e:
+        logger.warning(f"upgrades_downgrades failed for {symbol}: {e}")
+        return None
+
+@cached_yf("institutional_holders")
+def _get_institutional_holders(symbol: str):
+    ticker = _get_ticker(symbol)
+    try:
+        return ticker.institutional_holders
+    except Exception as e:
+        logger.warning(f"institutional_holders failed for {symbol}: {e}")
+        return None
+
+@cached_yf("earnings_history")
+def _get_earnings_history(symbol: str):
+    if _yf_is_rate_limited():
+        return None
+    ticker = _get_ticker(symbol)
+    try:
+        # Newer yfinance versions removed `.earnings_history`; prefer getattr + fallbacks
+        eh = getattr(ticker, "earnings_history", None)
+        if eh is None:
+            get_eh = getattr(ticker, "get_earnings_history", None)
+            if callable(get_eh):
+                eh = get_eh()
+        if eh is None:
+            return None
+        return eh
+    except Exception as e:
+        _yf_mark_rate_limited(e)
+        logger.debug("earnings_history failed for %s: %s", symbol, e)
+        return None
+
+@cached_yf("news")
+def _get_news(symbol: str):
+    ticker = _get_ticker(symbol)
+    try:
+        news = ticker.news
+        if not news:
+            return []
+        return news
+    except Exception as e:
+        # Yahoo often returns empty body → json "Expecting value: line 1 column 1"
+        msg = str(e)
+        if "Expecting value" in msg or "line 1 column 1" in msg:
+            logger.debug("Yahoo news empty/non-JSON for %s — skipping", symbol)
+        else:
+            logger.warning("news failed for %s: %s", symbol, e)
+        return []
+
+
+# Extra name aliases for better matching (e.g. PWL / Physics Wallah)
+_EVENT_ALIASES = {
+    "PWL": ["Physics Wallah", "PhysicsWallah", "Physics-Wallah", "PW Edtech"],
+    "RELIANCE": ["Reliance Industries", "RIL"],
+    "SBIN": ["State Bank of India", "SBI"],
+    "TCS": ["Tata Consultancy Services"],
+    "INFY": ["Infosys"],
+    "ZOMATO": ["Zomato", "Eternal"],
+}
+
+# Event-type keyword groups for classification & summarization
+_EVENT_TYPE_KEYWORDS = {
+    "results": [
+        "result", "results", "earnings", "q1", "q2", "q3", "q4", "quarterly",
+        "profit", "pat ", "revenue", "net profit", "sales growth", "eps ",
+        "financial results", "quarterly numbers", "earnings release",
+        "posts profit", "reports profit", "profit jumps", "profit falls",
+        "top-line", "bottom-line", "yoy growth", "qoq growth", "consolidated results",
+        "standalone results", "ebitda", "operating profit",
+    ],
+    "board_meeting": [
+        "board meeting", "board meet", "board of directors", "agm", "egm",
+        "annual general meeting", "extraordinary general", "shareholder meeting",
+    ],
+    "bulk_block": [
+        "bulk deal", "block deal", "bulk buys", "block trade", "large deal",
+        "institutional buy", "institutional sell", "big ticket",
+        "bulk purchase", "block purchase", "fii bought", "dii bought",
+        "picked up shares", "offloaded shares in bulk",
+    ],
+    "insider": [
+        "insider", "promoter buying", "promoter selling", "promoter stake",
+        "insider trading", "management buy", "key personnel", "stake increase",
+        "stake decrease", "shareholding pattern", "promoters hike",
+        "promoters reduce", "insider buy", "insider sell", "sast disclosure",
+        "open market purchase", "promoter group",
+    ],
+    "dividend": [
+        "dividend", "interim dividend", "final dividend", "dividend payout",
+        "record date", "ex-dividend",
+    ],
+    "corporate_action": [
+        "stock split", "bonus issue", "bonus share", "rights issue", "buyback",
+        "merger", "demerger", "acquisition", "takeover", "delisting",
+    ],
+    "guidance": [
+        "guidance", "outlook", "forecast", "raises guidance", "cuts guidance",
+        "order win", "order book", "contract win", "mou", "partnership",
+    ],
+}
+
+
+def _get_keywords(symbol: str) -> List[str]:
+    """Return keywords to search in news feeds (company + aliases + base)."""
+    company = _get_company_name(symbol)
+    base = symbol.replace(".NS", "").replace(".BO", "").upper()
+    keys = {company, base, base.lower(), company.lower()}
+    for a in _EVENT_ALIASES.get(base, []):
+        keys.add(a)
+        keys.add(a.lower())
+    # Split multi-word company names
+    for part in company.replace("&", " ").split():
+        if len(part) > 2:
+            keys.add(part.lower())
+    return list(keys)
+
+
+def _classify_event_title(title: str) -> Optional[str]:
+    """Classify a news title into an event category using keyword groups."""
+    t = (title or "").lower()
+    for etype, kws in _EVENT_TYPE_KEYWORDS.items():
+        if any(k in t for k in kws):
+            return etype
+    return None
+
+
+def _summarize_events(events: dict) -> str:
+    """Clear human-readable summary for the Event section on the frontend."""
+    parts = []
+    sym = (events.get("symbol") or "").replace(".NS", "").replace(".BO", "")
+    if events.get("next_earnings_date"):
+        parts.append(f"📅 Next results/earnings: {events['next_earnings_date']}")
+    es = events.get("earnings_surprise")
+    if es and es.get("surprise_pct") is not None:
+        direction = "beat" if es["surprise_pct"] > 0 else "missed"
+        parts.append(f"📊 Latest earnings {direction} estimates by {abs(es['surprise_pct']):.1f}%")
+    ins = events.get("recent_insider_transactions") or []
+    if ins:
+        buys = [i for i in ins if "buy" in (i.get("transaction") or "").lower() or "purchase" in (i.get("transaction") or "").lower()]
+        sells = [i for i in ins if "sell" in (i.get("transaction") or "").lower() or "sale" in (i.get("transaction") or "").lower()]
+        if buys:
+            parts.append(f"🟢 Insider/promoter buying ({len(buys)} txn(s))")
+        if sells:
+            parts.append(f"🔴 Insider/promoter selling ({len(sells)} txn(s))")
+    bulk = events.get("bulk_deals") or []
+    if bulk:
+        sample = ""
+        try:
+            first = bulk[0] if isinstance(bulk[0], dict) else {}
+            side = first.get("transaction") or first.get("side") or ""
+            sample = f" — {side}" if side else ""
+        except Exception:
+            pass
+        parts.append(f"📦 Bulk/block deal(s): {len(bulk)}{sample}")
+    if events.get("last_dividend"):
+        d = events["last_dividend"]
+        parts.append(f"💰 Last dividend: {d.get('amount')} on {d.get('date')}")
+    news = events.get("recent_news") or []
+    classified = {}
+    for n in news:
+        cat = _classify_event_title(n.get("title") or "")
+        if cat:
+            classified.setdefault(cat, []).append(n.get("title"))
+    # Prefer important categories first
+    priority = ["results", "bulk_block", "insider", "board_meeting", "dividend", "corporate_action", "guidance"]
+    for cat in priority:
+        titles = classified.get(cat) or []
+        if not titles:
+            continue
+        label = {
+            "results": "Results",
+            "bulk_block": "Bulk/Block",
+            "insider": "Insider",
+            "board_meeting": "Board",
+            "dividend": "Dividend",
+            "corporate_action": "Corporate action",
+            "guidance": "Guidance/Orders",
+        }.get(cat, cat.replace("_", " ").title())
+        parts.append(f"{label}: {titles[0][:100]}")
+    if not parts:
+        return f"No major corporate events detected for {sym} in the recent window."
+    return " | ".join(parts)
+
+
+# ── News sources ──
+
+def _fetch_google_news(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
+    """Fetch from Google News RSS using the company name."""
+    company = _get_company_name(symbol)
+    query = quote(company)
+    feed_url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
+    try:
+        parsed = feedparser.parse(feed_url)
+        logger.info(f"Google News feed entries for {symbol}: {len(parsed.entries)}")
+        if getattr(parsed, "bozo", False) and not parsed.entries:
+            logger.warning("Google News RSS feed returned empty for %s", symbol)
+            return []
+        items = []
+        cutoff = datetime.utcnow() - timedelta(days=30)
+        for entry in parsed.entries[:max_items]:
+            published = None
+            if getattr(entry, "published_parsed", None):
+                published = datetime(*entry.published_parsed[:6])
+            if published and published < cutoff:
+                continue
+            items.append({
+                "title": entry.title,
+                "publisher": getattr(entry.source, "title", None) if hasattr(entry, "source") else "Google News",
+                "published": published.isoformat() if published else None,
+                "url": entry.link,
+            })
+        return items
+    except Exception as e:
+        logger.warning("Failed to fetch Google News for %s: %s", symbol, e)
+        return []
+
+
+def _fetch_moneycontrol_news(symbol: str, max_items: int = 5) -> List[Dict[str, Any]]:
+    keywords = _get_keywords(symbol)
+    feed_url = "https://www.moneycontrol.com/rss/latestnews.xml"
+    try:
+        parsed = feedparser.parse(feed_url)
+        logger.info(f"Moneycontrol feed entries for {symbol}: {len(parsed.entries)}")
+        items = []
+        cutoff = datetime.utcnow() - timedelta(days=30)
+        for entry in parsed.entries[:50]:
+            title = entry.title.lower()
+            desc = entry.description.lower() if hasattr(entry, "description") else ""
+            text = title + " " + desc
+            if any(kw.lower() in text for kw in keywords):
+                published = None
+                if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                    published = datetime(*entry.published_parsed[:6])
+                if published and published < cutoff:
+                    continue
+                items.append({
+                    "title": entry.title,
+                    "publisher": "Moneycontrol",
+                    "published": published.isoformat() if published else None,
+                    "url": entry.link,
+                })
+                if len(items) >= max_items:
+                    break
+        return items
+    except Exception as e:
+        logger.warning("Moneycontrol fetch failed for %s: %s", symbol, e)
+        return []
+
+
+def _fetch_economic_times(symbol: str, max_items: int = 5) -> List[Dict[str, Any]]:
+    keywords = _get_keywords(symbol)
+    feed_url = "https://economictimes.indiatimes.com/rssfeedstopstories.cms"
+    try:
+        parsed = feedparser.parse(feed_url)
+        logger.info(f"Economic Times feed entries for {symbol}: {len(parsed.entries)}")
+        items = []
+        cutoff = datetime.utcnow() - timedelta(days=30)
+        for entry in parsed.entries[:50]:
+            title = entry.title.lower()
+            desc = entry.description.lower() if hasattr(entry, "description") else ""
+            text = title + " " + desc
+            if any(kw.lower() in text for kw in keywords):
+                published = None
+                if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                    published = datetime(*entry.published_parsed[:6])
+                if published and published < cutoff:
+                    continue
+                items.append({
+                    "title": entry.title,
+                    "publisher": "Economic Times",
+                    "published": published.isoformat() if published else None,
+                    "url": entry.link,
+                })
+                if len(items) >= max_items:
+                    break
+        return items
+    except Exception as e:
+        logger.warning("Economic Times fetch failed for %s: %s", symbol, e)
+        return []
+
+
+def _fetch_cnbc_tv18(symbol: str, max_items: int = 5) -> List[Dict[str, Any]]:
+    keywords = _get_keywords(symbol)
+    feed_url = "https://www.cnbctv18.com/feed/"
+    try:
+        parsed = feedparser.parse(feed_url)
+        logger.info(f"CNBC TV18 feed entries for {symbol}: {len(parsed.entries)}")
+        items = []
+        cutoff = datetime.utcnow() - timedelta(days=30)
+        for entry in parsed.entries[:50]:
+            title = entry.title.lower()
+            desc = entry.description.lower() if hasattr(entry, "description") else ""
+            text = title + " " + desc
+            if any(kw.lower() in text for kw in keywords):
+                published = None
+                if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                    published = datetime(*entry.published_parsed[:6])
+                if published and published < cutoff:
+                    continue
+                items.append({
+                    "title": entry.title,
+                    "publisher": "CNBC TV18",
+                    "published": published.isoformat() if published else None,
+                    "url": entry.link,
+                })
+                if len(items) >= max_items:
+                    break
+        return items
+    except Exception as e:
+        logger.warning("CNBC TV18 fetch failed for %s: %s", symbol, e)
+        return []
+
+
+def _fetch_yf_news(symbol: str) -> List[Dict[str, Any]]:
+    news_data = _get_news(symbol)
+    if not news_data:
+        return []
+    items = []
+    for item in news_data[:5]:
+        items.append({
+            "title": item.get("content", {}).get("title") or item.get("title", ""),
+            "publisher": (item.get("content", {}).get("provider", {}) or {}).get("displayName") or item.get("publisher", ""),
+            "published": item.get("content", {}).get("pubDate") or str(item.get("providerPublishTime", "")),
+            "url": (item.get("content", {}).get("canonicalUrl", {}) or {}).get("url") or item.get("link", ""),
+        })
+    return items
+
+
+def _fetch_news_from_multiple_sources(symbol: str, max_total: int = 15) -> List[Dict[str, Any]]:
+    all_news = []
+
+    # 1. Yahoo Finance
+    yf_news = _fetch_yf_news(symbol)
+    logger.info(f"Yahoo Finance news for {symbol}: {len(yf_news)} items")
+    if yf_news:
+        all_news.extend(yf_news)
+
+    # 2. Google News
+    google_news = _fetch_google_news(symbol, max_items=8)
+    logger.info(f"Google News for {symbol}: {len(google_news)} items")
+    if google_news:
+        all_news.extend(google_news)
+
+    # 3. Moneycontrol
+    mc_news = _fetch_moneycontrol_news(symbol, max_items=5)
+    logger.info(f"Moneycontrol for {symbol}: {len(mc_news)} items")
+    if mc_news:
+        all_news.extend(mc_news)
+
+    # 4. Economic Times
+    et_news = _fetch_economic_times(symbol, max_items=5)
+    logger.info(f"Economic Times for {symbol}: {len(et_news)} items")
+    if et_news:
+        all_news.extend(et_news)
+
+    # 5. CNBC TV18
+    cnbc_news = _fetch_cnbc_tv18(symbol, max_items=5)
+    logger.info(f"CNBC TV18 for {symbol}: {len(cnbc_news)} items")
+    if cnbc_news:
+        all_news.extend(cnbc_news)
+
+    # Deduplicate
+    seen = set()
+    unique = []
+    for item in all_news:
+        key = item["title"].strip().lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+
+    # Sort by published date (newest first)
+    unique.sort(key=lambda x: x.get("published") or "", reverse=True)
+
+    logger.info(f"Total unique news for {symbol} after dedup: {len(unique)}")
+    return unique[:max_total]
+
+
+# ── Core event fetch ──────────────────────────────────────────────────────────
+def _fetch_events(symbol: str, force: bool = False) -> dict:
+    sym = _normalize(symbol)
+    cache_key = f"{EVENT_CACHE_PREFIX}{sym}"
+
+    if not force:
+        cached = _redis_get(cache_key)
+        # Honor Redis TTL only. Empty-news entries use EMPTY_NEWS_CACHE_TTL (1h);
+        # requiring recent_news non-empty used to bypass that and re-hit Yahoo all day.
+        if cached:
+            n = len(cached.get("recent_news") or [])
+            logger.info(f"Event cache hit for {sym} (news={n})")
+            return cached
+
+    logger.info(f"=== Fetching fresh events for {sym} ===")
+    if _yf_is_rate_limited():
+        logger.info("yfinance cool-down active — relying on RSS news only for %s", sym)
+
+    # Use cached yfinance calls
+    earnings_dates = _get_earnings_dates(sym, limit=1)
+    next_earnings = None
+    if earnings_dates is not None and not earnings_dates.empty:
+        try:
+            next_earnings = str(earnings_dates.index[0].date())
+        except Exception:
+            pass
+
+    divs = _get_dividends(sym)
+    last_dividend = None
+    if divs is not None and not divs.empty:
+        try:
+            last_dividend = {
+                "date": str(divs.index[-1].date()),
+                "amount": _safe_float(divs.iloc[-1]),
+            }
+        except Exception:
+            pass
+
+    splits_data = _get_splits(sym)
+    last_split = None
+    if splits_data is not None and not splits_data.empty:
+        try:
+            last_split = {
+                "date": str(splits_data.index[-1].date()),
+                "ratio": _safe_float(splits_data.iloc[-1]),
+            }
+        except Exception:
+            pass
+
+    ins = _get_insider_transactions(sym)
+    recent_insider = []
+    if ins is not None and not ins.empty:
+        try:
+            for _, row in ins.head(3).iterrows():
+                recent_insider.append({
+                    "date": str(row.get("Start Date", "")) or str(row.name),
+                    "insider": str(row.get("Insider", "")),
+                    "transaction": str(row.get("Transaction", "")),
+                    "shares": int(row["Shares"]) if "Shares" in row and _safe_float(row.get("Shares")) else None,
+                    "value": _safe_float(row.get("Value")),
+                })
+        except Exception:
+            pass
+
+    ud = _get_upgrades_downgrades(sym)
+    recent_analyst = []
+    if ud is not None and not ud.empty:
+        try:
+            ud_sorted = ud.sort_index(ascending=False)
+            for _, row in ud_sorted.head(3).iterrows():
+                recent_analyst.append({
+                    "date": str(row.name.date()) if hasattr(row.name, "date") else str(row.name),
+                    "firm": str(row.get("Firm", "")),
+                    "to_grade": str(row.get("ToGrade", "")),
+                    "from_grade": str(row.get("FromGrade", "")),
+                    "action": str(row.get("Action", "")),
+                })
+        except Exception:
+            pass
+
+    ih = _get_institutional_holders(sym)
+    institutional_holders = []
+    if ih is not None and not ih.empty:
+        try:
+            for _, row in ih.head(5).iterrows():
+                institutional_holders.append({
+                    "holder": str(row.get("Holder", "")),
+                    "shares": int(row["Shares"]) if "Shares" in row and _safe_float(row.get("Shares")) else None,
+                    "pct_held": _safe_float(row.get("% Out")),
+                })
+        except Exception:
+            pass
+
+    # ── Multi-source news ──
+    recent_news = _fetch_news_from_multiple_sources(sym, max_total=15)
+
+    # Earnings surprise
+    earnings_surprise = None
+    earnings_history = _get_earnings_history(sym)
+    if earnings_history is not None and not earnings_history.empty:
+        try:
+            latest = earnings_history.iloc[0]
+            actual = latest.get("actual")
+            estimate = latest.get("estimate")
+            if actual is not None and estimate is not None and estimate != 0:
+                surprise_pct = ((actual - estimate) / estimate) * 100
+                earnings_surprise = {
+                    "date": str(latest.name),
+                    "actual": _safe_float(actual),
+                    "estimate": _safe_float(estimate),
+                    "surprise_pct": round(surprise_pct, 2)
+                }
+        except Exception:
+            pass
+
+    bulk_deals = []
+    fii_dii_net_flow = None
+
+    classified_events = []
+    for n in recent_news:
+        cat = _classify_event_title(n.get("title") or "")
+        item = {**n, "event_type": cat or "general"}
+        if cat:
+            classified_events.append(item)
+        if cat == "bulk_block":
+            bulk_deals.append({
+                "title": n.get("title"),
+                "published": n.get("published"),
+                "url": n.get("url"),
+                "source": n.get("publisher"),
+            })
+
+    result = {
+        "symbol": sym,
+        "next_earnings_date": next_earnings,
+        "last_dividend": last_dividend,
+        "last_split": last_split,
+        "recent_insider_transactions": recent_insider,
+        "recent_analyst_actions": recent_analyst,
+        "institutional_holders": institutional_holders,
+        "recent_news": recent_news,
+        "classified_events": classified_events,
+        "earnings_surprise": earnings_surprise,
+        "bulk_deals": bulk_deals,
+        "fii_dii_net_flow": fii_dii_net_flow,
+        "checked_at": datetime.utcnow().isoformat(),
+        "cached": False,
+    }
+    result["summary"] = _summarize_events(result)
+    # INTEGRATION: event_depth — event_summary, recent_event_score, has_positive_catalyst
+    if enrich_events is not None:
+        try:
+            result = enrich_events(result, symbol=sym)
+        except Exception as e:
+            logger.warning("enrich_events failed for %s: %s", sym, e)
+
+    fallback_key = f"{EVENT_FALLBACK_PREFIX}{sym}"
+    has_real_data = any([
+        next_earnings, last_dividend, last_split,
+        recent_insider, recent_analyst, institutional_holders, recent_news,
+        earnings_surprise, bulk_deals, fii_dii_net_flow,
+    ])
+
+    if has_real_data:
+        ttl = EVENT_CACHE_TTL if recent_news else EMPTY_NEWS_CACHE_TTL
+        if not recent_news:
+            logger.info(f"No news for {sym}; caching with short TTL ({ttl}s)")
+        _redis_set(cache_key, {**result, "cached": True}, ttl=ttl)
+        _redis_set(fallback_key, result, ttl=EVENT_FALLBACK_TTL)
+        logger.info(f"Finished fetching events for {sym}: {len(recent_news)} news items")
+        return result
+
+    stale = _redis_get(fallback_key)
+    if stale:
+        logger.info(f"Live fetch for {sym} empty; serving fallback")
+        stale = {**stale, "cached": True, "stale": True}
+        _redis_set(cache_key, stale, ttl=900)
+        return stale
+
+    return result
+
+
+# ── Shared diff logic (from v0.3.1) ──────────────────────────────────────────
+def _diff_events(previous: dict, current: dict) -> list[str]:
+    """Compares two event snapshots for one symbol and returns a list of
+    human-readable change descriptions. Shared by /check and /events/{symbol}/categorized
+    so both surface the same real detected changes.
+    """
+    diff_reasons = []
+
+    if previous.get("next_earnings_date") != current.get("next_earnings_date"):
+        diff_reasons.append(
+            f"Earnings date: {previous.get('next_earnings_date')} → {current.get('next_earnings_date')}"
+        )
+
+    prev_div = previous.get("last_dividend") or {}
+    cur_div = current.get("last_dividend") or {}
+    if prev_div.get("date") != cur_div.get("date") and cur_div.get("date"):
+        diff_reasons.append(f"New dividend declared: ₹{cur_div.get('amount')} on {cur_div.get('date')}")
+
+    prev_split = previous.get("last_split") or {}
+    cur_split = current.get("last_split") or {}
+    if prev_split.get("date") != cur_split.get("date") and cur_split.get("date"):
+        diff_reasons.append(f"Stock split: {cur_split.get('ratio')}:1 on {cur_split.get('date')}")
+
+    prev_keys = {
+        (a.get("date", "") + a.get("firm", ""))
+        for a in (previous.get("recent_analyst_actions") or [])
+    }
+    for action in (current.get("recent_analyst_actions") or []):
+        key = action.get("date", "") + action.get("firm", "")
+        if key not in prev_keys:
+            diff_reasons.append(
+                f"Analyst: {action.get('firm')} {action.get('action')} → {action.get('to_grade')}"
+            )
+
+    prev_insider_keys = {
+        (a.get("date", "") + a.get("insider", ""))
+        for a in (previous.get("recent_insider_transactions") or [])
+    }
+    for txn in (current.get("recent_insider_transactions") or []):
+        key = txn.get("date", "") + txn.get("insider", "")
+        if key not in prev_insider_keys:
+            diff_reasons.append(
+                f"Insider {txn.get('transaction')}: {txn.get('insider')} — {txn.get('shares')} shares"
+            )
+
+    prev_surprise = previous.get("earnings_surprise") or {}
+    cur_surprise = current.get("earnings_surprise") or {}
+    if prev_surprise.get("surprise_pct") != cur_surprise.get("surprise_pct"):
+        diff_reasons.append(f"Earnings surprise: {cur_surprise.get('surprise_pct')}%")
+
+    prev_bulk = previous.get("bulk_deals") or []
+    cur_bulk = current.get("bulk_deals") or []
+    if len(cur_bulk) != len(prev_bulk):
+        diff_reasons.append("Bulk/Block deal detected")
+
+    # Institutional / mutual fund holding changes
+    prev_holders = {h.get("holder"): h for h in (previous.get("institutional_holders") or []) if h.get("holder")}
+    cur_holders = {h.get("holder"): h for h in (current.get("institutional_holders") or []) if h.get("holder")}
+    for name, cur_h in cur_holders.items():
+        prev_h = prev_holders.get(name)
+        cur_shares = cur_h.get("shares")
+        if prev_h is None and cur_shares:
+            diff_reasons.append(f"New institutional holder: {name} — {cur_shares:,} shares")
+        elif prev_h is not None and cur_shares and prev_h.get("shares"):
+            prev_shares = prev_h.get("shares")
+            if cur_shares > prev_shares * 1.05:
+                pct_increase = round((cur_shares - prev_shares) / prev_shares * 100, 1)
+                diff_reasons.append(
+                    f"{name} increased holding by {pct_increase}% "
+                    f"({prev_shares:,} → {cur_shares:,} shares)"
+                )
+
+    return diff_reasons
+
+
+# ── Routes ──
+@app.get("/")
+def root():
+    return {
+        "service": "Stockky Event Tracker Service",
+        "version": "0.4.4",
+        "status": "running",
+        "endpoints": {
+            "/health": "GET",
+            "/events/{symbol}": "GET full snapshot",
+            "/events/{symbol}/categorized": "GET upcoming/recent events + changes",
+            "/events/{symbol}?force=true": "GET bypass cache",
+            "/subscribe": "POST",
+            "/subscriptions": "GET",
+            "/check": "GET",
+            "/symbols_with_events": "GET",
+        },
+    }
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "event-tracker-service", "redis": bool(_redis)}
+
+
+@app.get("/events/{symbol}")
+def get_events(symbol: str, force: bool = False):
+    return _fetch_events(symbol, force=force)
+
+
+@app.get("/events/{symbol}/categorized")
+def get_events_categorized(symbol: str, force: bool = False):
+    """Same underlying data as /events/{symbol}, split into 'upcoming'
+    (things that haven't happened yet — next earnings date, if in the
+    future) and 'recent' (things that already happened — last dividend,
+    last split, recent insider/analyst activity, earnings surprise),
+    plus 'recent_changes': real detected changes since the last time
+    this symbol was checked, using the same diff logic /check uses.
+    """
+    symbol = _normalize(symbol)
+    current = _fetch_events(symbol, force=force)
+
+    state = _load_state()
+    previous = state["last_known"].get(symbol, {})
+    recent_changes = _diff_events(previous, current) if previous else []
+
+    upcoming = []
+    recent = []
+
+    next_earnings = current.get("next_earnings_date")
+    if next_earnings:
+        try:
+            is_future = datetime.fromisoformat(next_earnings.replace("Z", "")) >= datetime.utcnow()
+        except (ValueError, TypeError):
+            is_future = True  # unparseable date — don't silently drop it, default to showing it
+        (upcoming if is_future else recent).append({
+            "type": "earnings_date", "date": next_earnings,
+            "description": f"Next earnings: {next_earnings}",
+        })
+
+    last_dividend = current.get("last_dividend")
+    if last_dividend and last_dividend.get("date"):
+        recent.append({
+            "type": "dividend", "date": last_dividend.get("date"),
+            "description": f"Dividend of ₹{last_dividend.get('amount')} declared",
+        })
+
+    last_split = current.get("last_split")
+    if last_split and last_split.get("date"):
+        recent.append({
+            "type": "split", "date": last_split.get("date"),
+            "description": f"{last_split.get('ratio')}:1 stock split",
+        })
+
+    for action in (current.get("recent_analyst_actions") or []):
+        recent.append({
+            "type": "analyst", "date": action.get("date"),
+            "description": f"{action.get('firm')}: {action.get('action')} → {action.get('to_grade')}",
+        })
+
+    for txn in (current.get("recent_insider_transactions") or []):
+        recent.append({
+            "type": "insider", "date": txn.get("date"),
+            "description": f"Insider {txn.get('transaction')}: {txn.get('insider')} — {txn.get('shares')} shares",
+        })
+
+    earnings_surprise = current.get("earnings_surprise")
+    if earnings_surprise and earnings_surprise.get("date"):
+        recent.append({
+            "type": "earnings_surprise", "date": earnings_surprise.get("date"),
+            "description": f"Earnings surprise: {earnings_surprise.get('surprise_pct')}% vs estimate",
+        })
+
+    # Sort each section newest-first where a date is available
+    recent.sort(key=lambda x: x.get("date") or "", reverse=True)
+
+    out = {
+        "symbol": symbol,
+        "upcoming": upcoming,
+        "recent": recent,
+        "recent_changes": recent_changes,
+        "institutional_holders": current.get("institutional_holders") or [],
+        "checked_at": current.get("checked_at"),
+        "summary": current.get("summary") or current.get("event_summary"),
+        "event_summary": current.get("event_summary") or current.get("summary"),
+        "recent_event_score": current.get("recent_event_score"),
+        "has_positive_catalyst": current.get("has_positive_catalyst"),
+    }
+    if enrich_events is not None:
+        try:
+            out = enrich_events({**current, **out}, symbol=symbol)
+            # keep categorized lists
+            out["upcoming"] = upcoming
+            out["recent"] = recent
+            out["recent_changes"] = recent_changes
+        except Exception as e:
+            logger.warning("categorized enrich_events failed: %s", e)
+    return out
+
+
+@app.post("/subscribe")
+def subscribe(req: SubscribeRequest):
+    state = _load_state()
+    existing = set(state["subscriptions"])
+    for s in req.symbols:
+        existing.add(_normalize(s))
+    state["subscriptions"] = sorted(existing)
+    _save_state(state)
+    return {"subscriptions": state["subscriptions"]}
+
+
+@app.get("/subscriptions")
+def list_subscriptions():
+    return {"subscriptions": _load_state()["subscriptions"]}
+
+
+@app.get("/check")
+def check_for_changes():
+    """Diff each subscribed symbol against last known snapshot.
+    Staggered with 1s delay between symbols to avoid Yahoo rate limits.
+    Uses the shared _diff_events function.
+    """
+    state = _load_state()
+    changes = []
+
+    for i, symbol in enumerate(state["subscriptions"]):
+        if i > 0:
+            time.sleep(1)
+
+        current = _fetch_events(symbol)
+        previous = state["last_known"].get(symbol, {})
+        diff_reasons = _diff_events(previous, current)
+
+        if diff_reasons:
+            changes.append({"symbol": symbol, "changes": diff_reasons, "current": current})
+
+        state["last_known"][symbol] = current
+
+    _save_state(state)
+    return {
+        "checked": len(state["subscriptions"]),
+        "changes": changes,
+        "checked_at": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/symbols_with_events")
+def symbols_with_events(days_ahead: int = 7):
+    """Return a list of subscribed symbols that have an upcoming event
+    (earnings, dividend, split) within the next `days_ahead` days.
+    The list is cached in Redis for 1 hour.
+    """
+    cached = _redis_get(EVENTS_LIST_CACHE_KEY)
+    if cached and isinstance(cached, list):
+        return {"symbols": cached}
+
+    state = _load_state()
+    subscriptions = state.get("subscriptions", [])
+    if not subscriptions:
+        _redis_set(EVENTS_LIST_CACHE_KEY, [], ttl=EVENTS_LIST_CACHE_TTL)
+        return {"symbols": []}
+
+    now = datetime.utcnow()
+    cutoff = now + timedelta(days=days_ahead)
+    result_symbols = []
+
+    for symbol in subscriptions:
+        cache_key = f"{EVENT_CACHE_PREFIX}{symbol}"
+        cached_events = _redis_get(cache_key)
+        if not cached_events:
+            continue
+
+        next_earnings = cached_events.get("next_earnings_date")
+        if next_earnings:
+            try:
+                dt = datetime.fromisoformat(next_earnings)
+                if now <= dt <= cutoff:
+                    result_symbols.append(symbol)
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+        last_div = cached_events.get("last_dividend")
+        if last_div and last_div.get("date"):
+            try:
+                dt = datetime.fromisoformat(last_div["date"])
+                if now <= dt <= cutoff:
+                    result_symbols.append(symbol)
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+        last_split = cached_events.get("last_split")
+        if last_split and last_split.get("date"):
+            try:
+                dt = datetime.fromisoformat(last_split["date"])
+                if now <= dt <= cutoff:
+                    result_symbols.append(symbol)
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+    result_symbols = sorted(set(result_symbols))
+    _redis_set(EVENTS_LIST_CACHE_KEY, result_symbols, ttl=EVENTS_LIST_CACHE_TTL)
+    return {"symbols": result_symbols}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8006))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)

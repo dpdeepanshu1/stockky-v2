@@ -638,6 +638,30 @@ async def check_pending_fills(db: Session, mode: str) -> int:
 
 
 async def expire_stale_orders(db: Session, mode: str) -> int:
+    """Expire PLACED entry orders whose ENTRY_VALIDITY_MINUTES window has
+    closed unfilled (config.ENTRY_NO_CHASE — no chase, re-evaluate next
+    cycle).
+
+    BUG FIX (2026-09-01): for REAL this used to just flip the LOCAL status
+    to EXPIRED and stop there. ENTRY_VALIDITY_MINUTES (15m) is a
+    Stockky-side "cancel-and-reassess" window — it has nothing to do with
+    the order's actual validity at Dhan (dhan_client.place_order defaults
+    to validity="DAY"), so the real limit order was left resting live at
+    the exchange for the rest of the trading day. The moment this function
+    marked it EXPIRED, reconcile_real_orders() — which only ever looks at
+    orders still status=="PLACED" — would stop checking it forever. If
+    that resting order filled later in the day, real shares would be
+    bought with real money and Stockky would never find out: no position
+    opened, no cash debited, no notification, invisible everywhere in the
+    app. Same policy as the manual /orders/{mode}/{id}/cancel route and
+    dhan_client's own docstring (cancelling is never gated by armed state):
+    tell Dhan first, only mark EXPIRED locally once Dhan confirms there's
+    nothing left resting. If the cancel call itself fails — which can
+    legitimately mean "it already filled" or "it was already
+    cancelled/rejected" — don't guess either way; leave the order PLACED
+    so reconcile_real_orders() resolves it against Dhan's own order book
+    next cycle instead of this function silently declaring it dead.
+    """
     now   = datetime.now(timezone.utc)
     stale = (
         db.query(models.TradeOrder)
@@ -649,15 +673,35 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
         )
         .all()
     )
+    expired = 0
     for order in stale:
+        if mode == "REAL" and order.dhan_order_id:
+            try:
+                dhan_client.cancel_order(db, is_armed=True, dhan_order_id=order.dhan_order_id)
+            except Exception as e:
+                logger.warning(
+                    "expire_stale_orders: Dhan cancel failed for %s (order %s) — "
+                    "leaving PLACED so reconcile can resolve it against Dhan: %s",
+                    order.symbol, order.dhan_order_id, e,
+                )
+                await notify_async(
+                    f"⚠️ *Entry window closed but Dhan cancel failed* — {order.symbol}\n"
+                    f"{str(e)[:300]}\n"
+                    "Order left PLACED — reconcile will check next cycle in case it already filled."
+                )
+                continue
+
         order.status     = "EXPIRED"
         order.updated_at = now
         db.add(models.TradeOrderEvent(
             order_id=order.id, event_type="EXPIRED",
-            detail="Entry window closed unfilled — no chase.",
+            detail="Entry window closed unfilled — no chase." + (
+                " Dhan order cancelled." if mode == "REAL" and order.dhan_order_id else ""
+            ),
         ))
-    if stale:
+        expired += 1
+    if expired:
         db.commit()
         log_action(db, actor="system", action="ORDERS_EXPIRED", mode=mode,
-                   detail=f"count={len(stale)}")
-    return len(stale)
+                   detail=f"count={expired}")
+    return expired

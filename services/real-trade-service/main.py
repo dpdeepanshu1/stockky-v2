@@ -142,8 +142,8 @@ class RiskConfigUpdate(BaseModel):
 class FeatureToggleRequest(BaseModel):
     """Body for POST /features/{mode} — flip ONE scheduled-automation feature
     on or off for a mode. feature must be one of the three known keys; enabled
-    is the desired per-mode state (the env kill-switch still has final say at
-    fire time)."""
+    is the desired per-mode state, which takes effect immediately (this is
+    the sole gate — no env kill-switch anymore)."""
     feature: str   # "prepick" | "enter_at_open" | "eod_squareoff"
     enabled: bool
 
@@ -230,13 +230,22 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
         "risk_config_confirmed": gate.risk_config_confirmed,
         "armed": gate.armed,
         "disarmed_reason": gate.disarmed_reason,
-        "auto_pilot_enabled": gate.auto_pilot_enabled,
-        # Scheduled automation (2026-08-31): the three optional time-of-day
-        # features. `enabled` is the per-mode UI toggle (this DB row); `env_on`
-        # is the process-level kill-switch (config, set on Render). A feature
-        # only actually fires when BOTH are true AND the mode is armed — so the
-        # dashboard greys out / warns when env_on is false, because flipping the
-        # UI toggle alone would do nothing until the env var is set too.
+        # BUG FIX (2026-09-01): was a direct `gate.auto_pilot_enabled` read.
+        # auto_pilot_enabled/auto_pilot_enabled_at are additive-migration
+        # columns too (_ensure_gate_state_columns, same as the three
+        # scheduled_automation fields right below) — the 2026-09-01 audit
+        # fixed the migration-race getattr gap for those three but missed
+        # this one, which is exactly the same class of column added the
+        # same way. getattr(..., default) here for the same reason.
+        "auto_pilot_enabled": bool(getattr(gate, "auto_pilot_enabled", False)),
+        # Scheduled automation (2026-08-31; env-gate removed 2026-09-01): the
+        # three optional time-of-day features. `enabled` is the per-mode UI
+        # toggle (this DB row) — it is now the SOLE on/off authority; a
+        # feature fires once it's enabled here AND the mode is armed. There
+        # used to also be a process-level `env_on` kill-switch surfaced here
+        # (config, set on Render) that the dashboard would warn about if
+        # unset; it's been removed so the toggle alone gives full control,
+        # with no separate server-side flag to also set.
         # getattr(..., default) throughout this block, not direct attribute
         # access: on first boot against an existing DB, the additive
         # migration for these columns runs in init_schema() but this ORM
@@ -247,19 +256,16 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
         "scheduled_automation": {
             "prepick": {
                 "enabled": bool(getattr(gate, "prepick_enabled", False)),
-                "env_on": config.PREPICK_ENABLED,
                 "time_ist": config.PREPICK_TIME_IST,
                 "last_run": getattr(gate, "prepick_last_run", None),
             },
             "enter_at_open": {
                 "enabled": bool(getattr(gate, "enter_at_open_enabled", False)),
-                "env_on": config.ENTER_AT_OPEN_ENABLED,
                 "time_ist": config.ENTER_AT_OPEN_TIME_IST,
                 "last_run": getattr(gate, "enter_at_open_last_run", None),
             },
             "eod_squareoff": {
                 "enabled": bool(getattr(gate, "eod_squareoff_enabled", False)),
-                "env_on": config.EOD_SQUAREOFF_ENABLED,
                 "time_ist": config.EOD_SQUAREOFF_TIME_IST,
                 "last_run": getattr(gate, "eod_squareoff_last_run", None),
             },
@@ -745,22 +751,17 @@ async def autopilot_disable(mode: str, admin: Optional[str] = Depends(require_ad
     return {"ok": True, "mode": mode, "auto_pilot_enabled": False}
 
 
-# ── Scheduled automation toggles (2026-08-31) ───────────────────────────────
+# ── Scheduled automation toggles (2026-08-31; env-gate removed 2026-09-01) ──
 # Per-mode UI switches for the three time-of-day features (pre-pick /
 # enter-at-open / EOD square-off). Same auth as autopilot (admin required for
-# REAL). Flipping a switch here only sets the DB flag — the loop in
-# execution/auto_pilot.py still requires the matching env kill-switch
-# (config.*_ENABLED) to be true AND the mode to be armed before it fires
-# anything, and each feature fires at most once per IST trading day.
+# REAL). Flipping a switch here sets the DB flag and takes effect immediately —
+# the loop in execution/auto_pilot.py only requires the mode to be armed
+# beyond that (no matching env kill-switch anymore), and each feature fires
+# at most once per IST trading day.
 _FEATURE_COLUMNS = {
     "prepick": ("prepick_enabled", "prepick_enabled_at"),
     "enter_at_open": ("enter_at_open_enabled", "enter_at_open_enabled_at"),
     "eod_squareoff": ("eod_squareoff_enabled", "eod_squareoff_enabled_at"),
-}
-_FEATURE_ENV_FLAG = {
-    "prepick": "PREPICK_ENABLED",
-    "enter_at_open": "ENTER_AT_OPEN_ENABLED",
-    "eod_squareoff": "EOD_SQUAREOFF_ENABLED",
 }
 
 
@@ -787,15 +788,15 @@ async def set_feature(mode: str, body: FeatureToggleRequest,
         action=f"FEATURE_{feature.upper()}_{'ENABLED' if body.enabled else 'DISABLED'}",
         mode=mode,
     )
-    env_on = bool(getattr(config, _FEATURE_ENV_FLAG[feature], False))
     return {
         "ok": True,
         "mode": mode,
         "feature": feature,
+        # This toggle is now the sole on/off authority for the feature (the
+        # separate server-side env_on kill-switch was removed 2026-09-01 at
+        # the admin's request) — flipping it here is immediately effective,
+        # no Render env var / redeploy required.
         "enabled": bool(body.enabled),
-        # Surfaced so the frontend can warn "toggle saved, but this feature is
-        # switched off at the server (env) level so it won't run yet".
-        "env_on": env_on,
     }
 
 

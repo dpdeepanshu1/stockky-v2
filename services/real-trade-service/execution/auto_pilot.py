@@ -43,6 +43,7 @@ logger = logging.getLogger("real-trade-autopilot")
 _full_task: Optional[asyncio.Task] = None
 _exit_task: Optional[asyncio.Task] = None
 _schedule_task: Optional[asyncio.Task] = None
+_totp_task: Optional[asyncio.Task] = None
 _STARTUP_DELAY_SECONDS = 20
 
 # Per-mode locks — prevent concurrent cycles (manual + auto-pilot race)
@@ -107,7 +108,12 @@ async def _exit_only_tick(mode: str) -> None:
         db = Session()
         try:
             gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
-            if gate is None or not gate.armed or not gate.auto_pilot_enabled:
+            if gate is None or not gate.armed or not getattr(gate, "auto_pilot_enabled", False):
+                # BUG FIX (2026-09-01): direct attribute read on a
+                # migration-added column (see main.py's /status/{mode} fix
+                # for the same class of bug) — getattr keeps this safe on
+                # first boot against an existing DB before the additive
+                # migration in init_schema() has run.
                 return
             if not is_market_open_ist():
                 return
@@ -142,7 +148,12 @@ async def _full_tick(mode: str) -> None:
         db = Session()
         try:
             gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
-            if gate is None or not gate.armed or not gate.auto_pilot_enabled:
+            if gate is None or not gate.armed or not getattr(gate, "auto_pilot_enabled", False):
+                # BUG FIX (2026-09-01): direct attribute read on a
+                # migration-added column (see main.py's /status/{mode} fix
+                # for the same class of bug) — getattr keeps this safe on
+                # first boot against an existing DB before the additive
+                # migration in init_schema() has run.
                 return
             if not is_market_open_ist():
                 return
@@ -165,12 +176,16 @@ async def _full_tick(mode: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Scheduled automation (2026-08-31): 9am pre-pick, enter-at-open, EOD square-off
+# Scheduled automation (2026-08-31; env-gate removed 2026-09-01): 9am
+# pre-pick, enter-at-open, EOD square-off.
 #
-# All three are DOUBLE-GATED and DEFAULT OFF:
-#   1. process-level env kill-switch  (config.PREPICK_ENABLED etc.)
-#   2. per-mode UI toggle             (gate.<feature>_enabled)
-#   3. the mode must be armed
+# All three are DEFAULT OFF and gated by:
+#   1. per-mode UI toggle  (gate.<feature>_enabled) — sole authority now;
+#      there used to also be a process-level env kill-switch
+#      (config.PREPICK_ENABLED etc.) but it's been removed so the dashboard
+#      toggle alone gives full control, with no Render env var / redeploy
+#      needed to activate a feature already switched on in the UI.
+#   2. the mode must be armed
 # and each fires AT MOST ONCE PER IST TRADING DAY, tracked by the gate's
 # <feature>_last_run date column so a Render restart can't cause a re-fire.
 # ══════════════════════════════════════════════════════════════════════════
@@ -253,11 +268,8 @@ async def _eod_squareoff(db, mode: str) -> None:
 
 async def _schedule_tick(mode: str) -> None:
     """One pass of the time-trigger loop for a mode. Each feature is gated by
-    env + per-mode toggle + armed, fires once/day, and is time-of-day bound."""
+    its per-mode toggle + armed, fires once/day, and is time-of-day bound."""
     if not is_ist_weekday():
-        return
-    # Cheap pre-check: if none of the env kill-switches are on, do nothing at all.
-    if not (config.PREPICK_ENABLED or config.ENTER_AT_OPEN_ENABLED or config.EOD_SQUAREOFF_ENABLED):
         return
 
     lock = _get_lock(mode)
@@ -274,7 +286,7 @@ async def _schedule_tick(mode: str) -> None:
 
             # ── Pre-pick (pre-open; market need not be open) ──────────────────
             if (
-                config.PREPICK_ENABLED and getattr(gate, "prepick_enabled", False)
+                getattr(gate, "prepick_enabled", False)
                 and getattr(gate, "prepick_last_run", None) != today
                 and ist_time_at_or_after(parse_hhmm(config.PREPICK_TIME_IST, 9, 0))
             ):
@@ -288,7 +300,7 @@ async def _schedule_tick(mode: str) -> None:
 
             # ── Enter-at-open (market must be open) ───────────────────────────
             if (
-                config.ENTER_AT_OPEN_ENABLED and getattr(gate, "enter_at_open_enabled", False)
+                getattr(gate, "enter_at_open_enabled", False)
                 and getattr(gate, "enter_at_open_last_run", None) != today
                 and is_market_open_ist()
                 and ist_time_at_or_after(parse_hhmm(config.ENTER_AT_OPEN_TIME_IST, 9, 20))
@@ -303,7 +315,7 @@ async def _schedule_tick(mode: str) -> None:
 
             # ── EOD square-off (during hours, near the close) ─────────────────
             if (
-                config.EOD_SQUAREOFF_ENABLED and getattr(gate, "eod_squareoff_enabled", False)
+                getattr(gate, "eod_squareoff_enabled", False)
                 and getattr(gate, "eod_squareoff_last_run", None) != today
                 and is_market_open_ist()
                 and ist_time_at_or_after(parse_hhmm(config.EOD_SQUAREOFF_TIME_IST, 15, 15))
@@ -324,12 +336,12 @@ async def _schedule_tick(mode: str) -> None:
 async def _schedule_loop() -> None:
     """Time-of-day trigger loop for the three scheduled-automation features.
     Runs regardless of auto_pilot_enabled (these are their own toggles), but
-    every action re-checks the gate/env/once-per-day guards at fire time."""
+    every action re-checks the gate/once-per-day guards at fire time."""
     await asyncio.sleep(_STARTUP_DELAY_SECONDS + 10)
     logger.info(
-        "Auto-pilot SCHEDULE loop running (check=%ss; prepick=%s open=%s eod=%s)",
+        "Auto-pilot SCHEDULE loop running (check=%ss); each feature's own "
+        "per-mode dashboard toggle is the sole on/off authority now.",
         config.SCHEDULE_CHECK_INTERVAL_SECONDS,
-        config.PREPICK_ENABLED, config.ENTER_AT_OPEN_ENABLED, config.EOD_SQUAREOFF_ENABLED,
     )
     while True:
         for mode in ("DEMO", "REAL"):
@@ -371,9 +383,52 @@ async def _full_cycle_loop() -> None:
         await asyncio.sleep(config.AUTO_PILOT_INTERVAL_SECONDS)
 
 
+async def _totp_refresh_loop() -> None:
+    """Standalone proactive Dhan TOTP refresh loop (2026-09-01).
+
+    Independent of market hours, auto_pilot_enabled, and armed state — it
+    has to be, since its whole job is to keep a fresh token ready BEFORE
+    the existing one expires, including on a quiet day with no cycles, or
+    while REAL is sitting disarmed waiting for exactly this to happen.
+
+    Each tick is a cheap DB read (token_needs_refresh) that only does real
+    work — hitting Dhan for a new token — when a refresh is actually due;
+    the whole loop is a no-op whenever DHAN_TOTP_ENABLED=false (the
+    default), so it's safe to always start.
+
+    On a successful refresh, refresh_if_totp_enabled() also restores
+    gate.dhan_connected for REAL (see auth/dhan_credentials.py), which is
+    what heals the disarmed + dhan_connected=False deadlock automatically —
+    no dashboard visit required before /arm works again.
+    """
+    await asyncio.sleep(_STARTUP_DELAY_SECONDS + 15)
+    logger.info(
+        "Auto-pilot TOTP refresh loop running (check=%ss, margin=%sh, totp_enabled=%s)",
+        config.DHAN_TOTP_REFRESH_CHECK_INTERVAL_SECONDS,
+        config.DHAN_TOTP_REFRESH_MARGIN_HOURS,
+        config.DHAN_TOTP_ENABLED,
+    )
+    while True:
+        if config.DHAN_TOTP_ENABLED:
+            Session = get_session_factory()
+            db = Session()
+            try:
+                from auth.dhan_credentials import token_needs_refresh, refresh_if_totp_enabled
+                if token_needs_refresh(db):
+                    logger.info("Dhan token within refresh margin — refreshing proactively.")
+                    ok = refresh_if_totp_enabled(db)
+                    if not ok:
+                        logger.warning("Proactive Dhan TOTP refresh attempt failed — will retry next check.")
+            except Exception:
+                logger.exception("TOTP refresh loop: unexpected error")
+            finally:
+                db.close()
+        await asyncio.sleep(config.DHAN_TOTP_REFRESH_CHECK_INTERVAL_SECONDS)
+
+
 def start() -> None:
     """Idempotent — safe to call from startup() even if hot-reloaded."""
-    global _full_task, _exit_task, _schedule_task
+    global _full_task, _exit_task, _schedule_task, _totp_task
     if _full_task is None or _full_task.done():
         _full_task = asyncio.create_task(_full_cycle_loop())
         logger.info("Auto-pilot FULL CYCLE background task created.")
@@ -382,10 +437,18 @@ def start() -> None:
         logger.info("Auto-pilot FAST EXIT background task created (interval=%ss).",
                     EXIT_CHECK_INTERVAL_SECONDS)
     # Scheduled-automation loop (pre-pick / enter-at-open / EOD square-off).
-    # Always started; every action inside is env + per-mode + armed gated, so
-    # with all three env kill-switches OFF (the default) this loop wakes on its
+    # Always started; every action inside is per-mode-toggle + armed gated,
+    # so with all three toggles OFF (the default) this loop wakes on its
     # interval, finds nothing enabled, and goes straight back to sleep.
     if _schedule_task is None or _schedule_task.done():
         _schedule_task = asyncio.create_task(_schedule_loop())
         logger.info("Auto-pilot SCHEDULE background task created (check=%ss).",
                     config.SCHEDULE_CHECK_INTERVAL_SECONDS)
+    # Proactive Dhan TOTP refresh loop — always started, same posture as the
+    # schedule loop above: harmless no-op while DHAN_TOTP_ENABLED=false, and
+    # no main.py change needed since start() is already called unconditionally
+    # at startup.
+    if _totp_task is None or _totp_task.done():
+        _totp_task = asyncio.create_task(_totp_refresh_loop())
+        logger.info("Auto-pilot TOTP refresh background task created (check=%ss).",
+                    config.DHAN_TOTP_REFRESH_CHECK_INTERVAL_SECONDS)

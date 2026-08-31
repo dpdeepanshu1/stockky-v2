@@ -27,6 +27,19 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger("surprise-premarket")
 
 LOOKBACK_DAYS = int(os.getenv("SURPRISE_LOOKBACK_DAYS", "30"))
+# BUG FIX (31-Aug-2026): is_liquid was gated on raw SHARE volume (>=50,000
+# shares/day) with no price awareness. That's fine for a ₹20 penny stock
+# (50k shares = only ₹10L/day) but is an absurdly high bar for anything
+# mid-priced or above — a ₹1,000+ stock trading a genuinely liquid ₹1Cr+/day
+# in turnover on just 10,000 shares was marked is_liquid=False and silently
+# dropped from `keys` in SurpriseStockEngine.scan() before score_stock() ever
+# ran, regardless of how real the move was. This is likely why higher-priced
+# "volume shocker" names (Balrampur Chini ₹721, Sundaram-Clayton ₹1,315,
+# eClerx ₹2,022, Craftsman Automation ₹11,424, LMW ₹19,711, etc.) never
+# reached the scanner at all. Switched to a rupee-turnover floor — the same
+# ₹50L/day HARD_FLOOR_LIQUIDITY already used inside score_stock() — so the
+# pre-filter and the in-score check now agree and neither is price-blind.
+LIQUID_MIN_DAILY_TURNOVER = float(os.getenv("SURPRISE_LIQUID_MIN_TURNOVER", "5000000"))
 MAX_SYMBOLS = int(os.getenv("SURPRISE_MAX_SYMBOLS", "320"))
 # Concurrent yfinance workers (free-tier safe; override via env)
 MAX_WORKERS = int(os.getenv("SURPRISE_PREMARKET_WORKERS", "6"))  # free-tier safe
@@ -279,7 +292,7 @@ def bulk_baselines_from_yfinance(
                     "high_52w": round(high_52w, 2),
                     "dist_52w_pct": round(dist_52w_pct, 2),
                     "sector": None,
-                    "is_liquid": bool(avg_daily_vol >= 50000),
+                    "is_liquid": bool((avg_daily_vol * prev_close) >= LIQUID_MIN_DAILY_TURNOVER),
                 })
                 found.add(base)
             except Exception as e:
@@ -354,7 +367,7 @@ def compute_baseline_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
             "high_52w": round(high_52w, 2),
             "dist_52w_pct": round(dist_52w_pct, 2),
             "sector": None,
-            "is_liquid": bool(avg_daily_vol >= 50000),
+            "is_liquid": bool((avg_daily_vol * prev_close) >= LIQUID_MIN_DAILY_TURNOVER),
         }
     except Exception as e:
         logger.debug("baseline %s failed: %s", base, e)
@@ -407,7 +420,7 @@ def compute_baseline_from_bhavcopy(symbol: str, conn) -> Optional[Dict[str, Any]
             "high_52w": round(high_52w, 2),
             "dist_52w_pct": round(dist_52w_pct, 2),
             "sector": None,
-            "is_liquid": bool(float(np.mean(volumes)) >= 50000),
+            "is_liquid": bool((float(np.mean(volumes)) * prev_close) >= LIQUID_MIN_DAILY_TURNOVER),
         }
     except Exception as e:
         # Table missing or query error → silent fallback to yfinance
@@ -528,7 +541,7 @@ def bulk_baselines_from_bhavcopy(symbols: List[str]) -> Tuple[List[Dict[str, Any
                     "high_52w": round(high_52w, 2),
                     "dist_52w_pct": round(dist_52w_pct, 2),
                     "sector": None,
-                    "is_liquid": bool(float(np.mean(volumes)) >= 50000),
+                    "is_liquid": bool((float(np.mean(volumes)) * prev_close) >= LIQUID_MIN_DAILY_TURNOVER),
                 })
                 found.add(sym)
             except Exception:

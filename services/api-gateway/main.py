@@ -6728,7 +6728,10 @@ async def api_surprise_scan(
     Lightweight surprise scan:
       1) bulk-load surprise_static_feed from Neon
       2) concurrent live quotes (bounded)
-      3) score filter (>=60, change >1%)
+      3) score filter — see surprise_scanner.MIN_SCORE / MIN_CHANGE_PCT for the
+         live thresholds (this docstring previously said ">=60, change >1%",
+         which drifted out of sync with the actual values; read from the
+         module constants instead of hardcoding a number here again).
     """
     try:
         from surprise_scanner import surprise_engine

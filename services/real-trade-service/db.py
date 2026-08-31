@@ -54,11 +54,30 @@ def get_engine():
     if _engine is not None:
         return _engine
 
+    # BUG FIX (31-Aug-2026): pool_size=2/max_overflow=2 (4 connections total)
+    # was sized for "write volume is low — order/position events, not scan
+    # traffic", which undercounted this service's actual concurrent DB
+    # users once Auto-Pilot shipped: the fast-exit loop and the full-cycle
+    # loop are two INDEPENDENT asyncio background tasks (execution/
+    # auto_pilot.py) that can each hold a checked-out connection at the
+    # same time, and the full cycle in particular (candidates → entry →
+    # fills → expire → exit → reconcile, see cycle_runner.py) holds its
+    # single connection open for the connection's ENTIRE duration —
+    # including slow/failing outbound candidate-scan HTTP calls (the
+    # WriteTimeout errors seen alongside this in the logs). Add normal
+    # dashboard traffic on top (/status/DEMO + /status/REAL polling,
+    # /auth/login, manual /cycle/run) and 4 total connections was routinely
+    # exhausted, producing the "QueuePool limit ... connection timed out"
+    # crash loop on every request (gate_status, login, exit-only tick)
+    # while a full cycle was mid-flight. Raised to 4/4 (8 total) — still
+    # modest for a service with no write-heavy hot path, but enough
+    # headroom for 2 background loops + a few concurrent dashboard/API
+    # requests without queuing past pool_timeout.
     if _oc.oracle_is_configured(config.DATABASE_URL):
         _engine, _ = _oc.build_oracle_engine(
             config.DATABASE_URL,
-            db_pool_size=2,      # this service's write volume is low —
-            db_max_overflow=2,   # order/position events, not scan traffic
+            db_pool_size=4,
+            db_max_overflow=4,
         )
         return _engine
 
@@ -70,9 +89,9 @@ def get_engine():
     _engine = create_engine(
         url,
         pool_pre_ping=True,
-        pool_size=2,
-        max_overflow=2,
-        pool_timeout=10,
+        pool_size=4,
+        max_overflow=4,
+        pool_timeout=30,
         connect_args={"connect_timeout": 10, "application_name": "real-trade-service"},
     )
     return _engine

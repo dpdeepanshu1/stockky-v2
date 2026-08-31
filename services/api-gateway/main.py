@@ -1420,7 +1420,22 @@ def _build_scan_universe() -> List[str]:
     try:
         all_stocks = _get_all_nse_securities()
         if all_stocks:
-            universe.update(all_stocks[:SCAN_UNIVERSE_TARGET])
+            # BUG FIX (31-Aug-2026): _get_all_nse_securities() returns NSE's
+            # "SECURITIES IN NSE" list in NSE's own (effectively alphabetical)
+            # order. Slicing the first SCAN_UNIVERSE_TARGET elements off that
+            # list — as this used to do — meant the non-dynamic base of the
+            # scan universe was always the same ~500 early-alphabet names
+            # (A-D-ish) every single cycle, structurally starving anything
+            # from later in the alphabet of a slot unless a dynamic source
+            # (movers/news/bulk-deals/etc.) happened to surface it. Same bug
+            # class already fixed in _get_momentum_movers()'s fallback seed
+            # (see the 31-Aug-2026 note there) — fixed here the same way:
+            # shuffle a copy before truncating, so the base slice rotates
+            # across the full ~2000-symbol NSE list cycle to cycle instead
+            # of always favoring early letters.
+            shuffled_stocks = list(all_stocks)
+            random.shuffle(shuffled_stocks)
+            universe.update(shuffled_stocks[:SCAN_UNIVERSE_TARGET])
         else:
             universe.update(_get_nifty_indices())
     except Exception as e:
@@ -1519,7 +1534,13 @@ def _build_scan_universe() -> List[str]:
     # larger target size.
     pad_floor = max(200, int(SCAN_UNIVERSE_TARGET * 0.4))
     if len(ordered) < pad_floor:
+        # Same alphabetical-bias bug as the base-universe slice above — pad
+        # candidates were pulled off _get_all_nse_securities() in NSE's
+        # native order, so a "thin sources" cycle always padded with the
+        # same early-alphabet names first. Shuffle before taking the pad
+        # slice for the same rotating-coverage reason.
         pad = [s for s in _get_all_nse_securities() if s not in set(ordered)]
+        random.shuffle(pad)
         ordered.extend(pad[: max(0, pad_floor + 20 - len(ordered))])
         logger.info("Universe padded to %s symbols (live sources were thin)", len(ordered))
 

@@ -68,7 +68,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import httpx
@@ -712,7 +712,7 @@ def _rows_from_surprise(payload: Any) -> list[dict]:
 
 # ── Main refresh ──────────────────────────────────────────────────────────────
 
-async def _refresh_standard_candidates(db: Session, mode: str, open_syms: set) -> tuple[int, set]:
+async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set) -> tuple[int, set]:
     """The original MANUAL/AUTO candidate flow — untouched by the Issue 1
     fix (see module docstring / _volume_shock_analysis for the new,
     fully-independent track). Returns (inserted_count, handled_symbols) —
@@ -759,13 +759,16 @@ async def _refresh_standard_candidates(db: Session, mode: str, open_syms: set) -
     rows = list(by_symbol.values())
     seen_symbols = {r["symbol"] for r in rows}
 
-    # Drop symbols already in open positions — risk_engine would also catch
-    # this via no_pyramiding, but skipping MTF fetches for them saves time.
-    rows = [r for r in rows if r["symbol"] not in open_syms]
+    # Drop symbols already in open positions, or already candidated within
+    # the dedupe cooldown — risk_engine would also catch open positions via
+    # no_pyramiding, but skipping MTF fetches for them saves time; the
+    # cooldown skip is what keeps a still-qualifying symbol from getting a
+    # fresh duplicate row every single cycle.
+    rows = [r for r in rows if r["symbol"] not in exclude_syms]
 
     if not rows:
         logger.info(
-            "candidate_engine: all %d candidates already have open positions (mode=%s)",
+            "candidate_engine: all %d candidates already have open positions or are in cooldown (mode=%s)",
             len(by_symbol), mode,
         )
         return 0, seen_symbols
@@ -964,11 +967,36 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
     return inserted
 
 
+def _recently_candidated_symbols(db: Session, mode: str) -> set:
+    """Symbols that already have a TradeCandidate row (either track, any
+    consumed state) inserted within CANDIDATE_DEDUPE_COOLDOWN_HOURS. Without
+    this, a symbol that keeps qualifying every cycle (still sitting in the
+    hot-picks/volume-shock universe) gets re-inserted as a brand-new row
+    every single cycle — that's what produced repeated duplicate cards for
+    the same symbol on the Watchlist tab. A symbol already evaluated
+    recently is still visible on the dashboard from its earlier row (with
+    its latest_decision joined in), so re-fetching it adds noise, not
+    information, until the cooldown lapses."""
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=config.CANDIDATE_DEDUPE_COOLDOWN_HOURS)
+        rows = (
+            db.query(models.TradeCandidate.symbol)
+            .filter(models.TradeCandidate.mode == mode,
+                    models.TradeCandidate.received_at >= cutoff)
+            .all()
+        )
+        return {r[0] for r in rows}
+    except Exception as e:
+        logger.debug("_recently_candidated_symbols failed (non-fatal, dedupe skipped): %s", e)
+        return set()
+
+
 async def refresh_candidates(db: Session, mode: str) -> int:
     """
     Fetch every source → score-filter → deduplicate by symbol (keep
-    highest conviction) → drop already-open positions → run concurrent
-    multi-timeframe + quality analysis → insert only passing rows.
+    highest conviction) → drop already-open positions and symbols already
+    candidated within the cooldown window → run concurrent multi-timeframe
+    + quality analysis → insert only passing rows.
 
     Runs TWO independent tracks (Issue 1 fix, Option A):
       1. The original MANUAL/AUTO flow (_refresh_standard_candidates),
@@ -981,10 +1009,12 @@ async def refresh_candidates(db: Session, mode: str) -> int:
     Returns the total number of candidate rows inserted across both tracks.
     """
     open_syms = {p.symbol for p in open_positions(db, mode)}
+    cooldown_syms = _recently_candidated_symbols(db, mode)
+    exclude = open_syms | cooldown_syms
 
-    standard_inserted, standard_seen = await _refresh_standard_candidates(db, mode, open_syms)
+    standard_inserted, standard_seen = await _refresh_standard_candidates(db, mode, exclude)
     shock_inserted = await _refresh_volume_shock_candidates(
-        db, mode, exclude_symbols=open_syms | standard_seen
+        db, mode, exclude_symbols=exclude | standard_seen
     )
 
     return standard_inserted + shock_inserted

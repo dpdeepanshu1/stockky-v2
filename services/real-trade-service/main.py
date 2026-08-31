@@ -819,16 +819,32 @@ async def list_candidates(
     (if any yet), plus a live price so 'waiting at limit ₹X, currently ₹Y'
     is visible without cross-referencing the Orders tab. Read-only —
     exactly like /pipeline/status, this never influences entry_engine's own
-    evaluation, which reads trade_candidates itself, not this endpoint."""
+    evaluation, which reads trade_candidates itself, not this endpoint.
+
+    One card per symbol: candidate_engine's dedupe cooldown (see
+    candidate_engine/candidates.py) stops new duplicate rows from being
+    inserted going forward, but rows inserted before that fix (or a symbol
+    that legitimately got re-candidated after its cooldown lapsed) can
+    still leave more than one row for the same symbol in the fetched
+    window — those are collapsed here into the most recent row, with
+    `fetch_count` showing how many times it showed up."""
     mode = mode.upper()
     if mode not in ("DEMO", "REAL"):
         raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
 
-    candidates = (
+    raw_candidates = (
         db.query(models.TradeCandidate).filter_by(mode=mode)
         .order_by(models.TradeCandidate.received_at.desc())
         .limit(min(max(limit, 1), 200)).all()
     )
+    candidates = []
+    seen: dict[str, int] = {}
+    for c in raw_candidates:
+        if c.symbol in seen:
+            seen[c.symbol] += 1
+            continue
+        seen[c.symbol] = 1
+        candidates.append(c)
     symbols = [c.symbol for c in candidates]
     prices = await _live_prices(symbols)
 
@@ -862,6 +878,7 @@ async def list_candidates(
             "decision_label": c.decision_label, "conviction_score": c.conviction_score,
             "signal_price": c.signal_price, "received_at": iso_utc(c.received_at),
             "consumed": c.consumed,
+            "fetch_count": seen.get(c.symbol, 1),
             "current_price": ltp,
             "latest_decision": {
                 "action": d.action, "reasoning": d.reasoning,

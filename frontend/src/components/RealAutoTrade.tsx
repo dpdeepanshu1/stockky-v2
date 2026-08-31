@@ -1459,6 +1459,11 @@ export default function RealAutoTrade() {
                         >
                           <div>
                             <span className="font-mono text-base font-bold text-zinc-100">{c.symbol}</span>
+                            {c.fetch_count > 1 && (
+                              <span className="font-mono text-[9px] text-zinc-500 ml-2 px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700" title={`Seen ${c.fetch_count} times in this window`}>
+                                ×{c.fetch_count}
+                              </span>
+                            )}
                             {c.source_tab && (
                               <span className="font-mono text-[9px] text-zinc-600 ml-2 uppercase">{SOURCE_LABELS[c.source_tab] || c.source_tab}</span>
                             )}

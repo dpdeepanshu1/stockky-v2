@@ -301,6 +301,24 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         raw_atr_pct = (tick.atr / tick.price * 100.0) if tick.atr else None
         atr_pct = _clamp_for_atr(raw_atr_pct) if raw_atr_pct is not None else None
 
+        # ── Compute prices (moved ahead of gates 3/4 — a tick is all this
+        # needs, so every WAIT from here on can carry a preview entry/stop/
+        # target instead of leaving the dashboard's "Waiting at" / "Stop
+        # loss" columns blank. This is informational only: it does not
+        # affect qty, risk sizing, or order placement, which still happen
+        # only after gates 3-5 pass below.) ───────────────────────────────
+        stop_pct, target_pct = _atr_stop_target_pct(atr_pct)
+        entry_price  = round(tick.price * (1 + config.ENTRY_ZONE_UPPER_PCT / 100.0 / 2), 2)
+        stop_price   = round(tick.price * (1 - stop_pct   / 100.0), 2)
+        target_price = round(tick.price * (1 + target_pct / 100.0), 2)
+        per_share_risk = entry_price - stop_price
+
+        def _wait_with_preview(reason: str) -> None:
+            _wait(reason)
+            decision.proposed_price  = entry_price
+            decision.proposed_stop   = stop_price
+            decision.proposed_target = target_price
+
         # ── Gate 3: adaptive market regime (REAL only) ─────────────────────────
         if mode == "REAL" and not regime_ok:
             try:
@@ -308,7 +326,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 age_note = threshold_age_note("ENTRY_REGIME_MIN_SCORE")
             except Exception:
                 age_note = ""
-            _wait(
+            _wait_with_preview(
                 f"Market regime score {market_score} < adaptive gate {threshold} "
                 f"({threshold_src}) {age_note}. "
                 "Nifty regime is weak — deferring new BUY entries until recovery."
@@ -321,21 +339,14 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # ── Gate 4: entry drift ───────────────────────────────────────────────
         drift_ok, drift_reason = _entry_drift_ok(tick.price, cand.signal_price, atr_pct)
         if not drift_ok:
-            _wait(drift_reason)
+            _wait_with_preview(drift_reason)
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": drift_reason, "risk_verdict": None})
             continue
 
-        # ── Compute prices ────────────────────────────────────────────────────
-        stop_pct, target_pct = _atr_stop_target_pct(atr_pct)
-        entry_price  = round(tick.price * (1 + config.ENTRY_ZONE_UPPER_PCT / 100.0 / 2), 2)
-        stop_price   = round(tick.price * (1 - stop_pct   / 100.0), 2)
-        target_price = round(tick.price * (1 + target_pct / 100.0), 2)
-        per_share_risk = entry_price - stop_price
-
         if per_share_risk <= 0:
-            _wait("Computed stop is not below entry — invalid risk setup.")
+            _wait_with_preview("Computed stop is not below entry — invalid risk setup.")
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": decision.reasoning, "risk_verdict": None})
@@ -344,7 +355,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # ── Gate 5: reward:risk floor ─────────────────────────────────────────
         rr = _reward_risk_ratio(entry_price, stop_price, target_price)
         if rr < MIN_REWARD_RISK_RATIO:
-            _wait(
+            _wait_with_preview(
                 f"R:R {rr:.2f}:1 below floor {MIN_REWARD_RISK_RATIO:.1f}:1 — "
                 "setup does not offer enough reward for the risk. Skip."
             )
@@ -362,7 +373,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         proposed_qty   = max(0, int(max_trade_risk // per_share_risk))
 
         if proposed_qty <= 0:
-            _wait(
+            _wait_with_preview(
                 f"Even 1 share exceeds conviction-adjusted risk cap "
                 f"({adj_risk_pct:.2f}% of equity = ₹{max_trade_risk:.2f})."
             )

@@ -107,7 +107,7 @@ DHAN_TOTP_SECRET = os.getenv("DHAN_TOTP_SECRET", "")  # only read when the above
 # token is inside the refresh margin. No-op wake (cheap) while
 # DHAN_TOTP_ENABLED=false.
 DHAN_TOTP_REFRESH_CHECK_INTERVAL_SECONDS = max(
-    60, int(os.getenv("DHAN_TOTP_REFRESH_CHECK_INTERVAL_SECONDS", "1800") or 1800)
+    60, int(os.getenv("DHAN_TOTP_REFRESH_CHECK_INTERVAL_SECONDS", "900") or 900)
 )
 # How close to the token's effective expiry (DHAN_HARD_CAP_HOURS-clamped,
 # see auth/dhan_credentials.py:_effective_expiry) the loop proactively
@@ -177,13 +177,13 @@ AUTO_PILOT_NOTIFY_HEARTBEAT = os.getenv("AUTO_PILOT_NOTIFY_HEARTBEAT", "false").
 #                     pre-picked names get entered at the early/optimum price.
 #      EOD_SQUAREOFF  ~15:15 before close: close all open positions for the mode
 #                     so nothing is carried overnight (intraday square-off).
-PREPICK_ENABLED = os.getenv("PREPICK_ENABLED", "false").lower() == "true"
+# 2026-09-01: the three *_ENABLED env kill-switches (PREPICK_ENABLED,
+# ENTER_AT_OPEN_ENABLED, EOD_SQUAREOFF_ENABLED) were removed at the admin's
+# request — the per-mode dashboard toggle (TradeGateState.prepick_enabled
+# etc.) is now the SOLE on/off authority for these three features. Only the
+# time-of-day vars remain here.
 PREPICK_TIME_IST = os.getenv("PREPICK_TIME_IST", "09:00")
-
-ENTER_AT_OPEN_ENABLED = os.getenv("ENTER_AT_OPEN_ENABLED", "false").lower() == "true"
 ENTER_AT_OPEN_TIME_IST = os.getenv("ENTER_AT_OPEN_TIME_IST", "09:20")
-
-EOD_SQUAREOFF_ENABLED = os.getenv("EOD_SQUAREOFF_ENABLED", "false").lower() == "true"
 EOD_SQUAREOFF_TIME_IST = os.getenv("EOD_SQUAREOFF_TIME_IST", "15:15")
 
 # How often the time-trigger loop wakes to check the clock (seconds).

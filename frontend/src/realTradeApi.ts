@@ -85,8 +85,9 @@ async function rtRequest<T>(path: string, init?: RequestInit, requireAuth = true
 }
 
 export interface ScheduledFeatureState {
-  enabled: boolean;   // per-mode UI toggle (this DB row)
-  env_on: boolean;    // process-level kill-switch (config, set on the server)
+  enabled: boolean;   // per-mode UI toggle (this DB row) — SOLE on/off authority
+                       // (the separate server-side env_on kill-switch was
+                       // removed 2026-09-01; no server-side flag exists anymore)
   time_ist: string;   // "HH:MM" IST the action is scheduled for
   last_run: string | null;  // "YYYY-MM-DD" it last fired, null if never
 }
@@ -327,15 +328,16 @@ export const realTradeApi = {
     rtRequest<{ ok: boolean; mode: string; auto_pilot_enabled: boolean }>(`/autopilot/${mode}/disable`, { method: "POST" }),
 
   // Scheduled automation (2026-08-31) — flip one of the three time-of-day
-  // features on/off for a mode. env_on in the response is the server-side
-  // kill-switch: if false, the toggle is saved but the feature stays inert
-  // until the matching env var is set on the service.
+  // features on/off for a mode. This toggle is the SOLE on/off authority
+  // (the separate server-side env_on kill-switch was removed 2026-09-01 at
+  // the admin's request) — flipping it here is immediately effective, no
+  // Render env var / redeploy required.
   setFeature: (
     mode: "DEMO" | "REAL",
     feature: "prepick" | "enter_at_open" | "eod_squareoff",
     enabled: boolean,
   ) =>
-    rtRequest<{ ok: boolean; mode: string; feature: string; enabled: boolean; env_on: boolean }>(
+    rtRequest<{ ok: boolean; mode: string; feature: string; enabled: boolean }>(
       `/features/${mode}`,
       { method: "POST", body: JSON.stringify({ feature, enabled }) },
       mode === "REAL",

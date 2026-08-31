@@ -64,10 +64,10 @@ class TradeGateState(Base):
     auto_pilot_enabled = Column(Boolean, nullable=False, default=False)
     auto_pilot_enabled_at = Column(DateTime, nullable=True)
 
-    # ── Scheduled automation (2026-08-31) — three independent, config-gated,
-    # default-OFF features layered ON TOP of auto-pilot. Each runs only when
-    # BOTH its process-level env kill-switch (config.PREPICK_ENABLED etc.) AND
-    # this per-mode DB toggle are on, the mode is armed, and (except pre-pick,
+    # ── Scheduled automation (2026-08-31) — three independent, default-OFF
+    # features layered ON TOP of auto-pilot. Each runs when this per-mode DB
+    # toggle is on (the SOLE on/off authority since 2026-09-01's env-gate
+    # removal — see config.py), the mode is armed, and (except pre-pick,
     # which runs pre-open) the market is open. The *_last_run columns hold the
     # IST date ('YYYY-MM-DD') the action last fired, so each fires at most once
     # per trading day even across process restarts (Render wipes memory).

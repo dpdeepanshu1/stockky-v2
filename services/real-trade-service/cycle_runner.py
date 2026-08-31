@@ -51,9 +51,20 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
         # expired token is renewed before we even call enforce_live_token.
         # Non-blocking: TOTP failure doesn't disarm — enforce_live_token will
         # catch any actual auth problem on the next line.
+        #
+        # BUG FIX (2026-09-01): this used to call refresh_if_totp_enabled()
+        # UNCONDITIONALLY on every REAL cycle. With AUTO_PILOT_INTERVAL_SECONDS's
+        # 180s default that's ~130 live calls/day to Dhan's generateAccessToken
+        # endpoint even when the current token had hours of life left, plus a
+        # "🔑 token refreshed" Telegram roughly every 3 minutes all day once
+        # DHAN_TOTP_ENABLED was on. Gated with token_needs_refresh(db) — the
+        # same check the standalone _totp_refresh_loop in execution/auto_pilot.py
+        # uses — so this remains only a same-cycle safety net; the standalone
+        # loop is the primary proactive path.
         try:
-            from auth.dhan_credentials import refresh_if_totp_enabled
-            refresh_if_totp_enabled(db)
+            from auth.dhan_credentials import refresh_if_totp_enabled, token_needs_refresh
+            if token_needs_refresh(db):
+                refresh_if_totp_enabled(db)
         except Exception as _totp_err:
             logger.debug("TOTP refresh attempt failed (non-fatal): %s", _totp_err)
 

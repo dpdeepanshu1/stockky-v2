@@ -1664,11 +1664,11 @@ export default function RealAutoTrade() {
                 )}
 
                 {/* Scheduled Automation (2026-08-31) — three optional time-of-day
-                    features layered on top of Auto-Pilot. Each is gated by BOTH
-                    this per-mode switch AND a server-side env kill-switch (env_on),
-                    plus the mode being armed, and fires at most once per trading
-                    day. All default OFF — turn on in DEMO first to prove the flow
-                    before enabling for REAL money. */}
+                    features layered on top of Auto-Pilot. This per-mode switch is
+                    the SOLE on/off authority (the server-side env kill-switch was
+                    removed 2026-09-01), plus the mode being armed, and fires at
+                    most once per trading day. All default OFF — turn on in DEMO
+                    first to prove the flow before enabling for REAL money. */}
                 {status?.scheduled_automation && (
                   <div className="mb-3 rounded-lg border border-zinc-800 bg-zinc-950/60 overflow-hidden">
                     <div className="px-3 py-2 border-b border-zinc-800 bg-zinc-900/40">
@@ -1691,7 +1691,7 @@ export default function RealAutoTrade() {
                         const on = st.enabled;
                         const busy = featureBusy === f.key;
                         return (
-                          <div key={f.key} className={`flex items-start justify-between gap-3 px-3 py-2.5 ${on && st.env_on ? "bg-emerald-500/[0.04]" : ""}`}>
+                          <div key={f.key} className={`flex items-start justify-between gap-3 px-3 py-2.5 ${on ? "bg-emerald-500/[0.04]" : ""}`}>
                             <div className="min-w-0">
                               <p className="font-mono text-[11px] text-zinc-300">
                                 {f.icon} {f.title}{" "}
@@ -1701,11 +1701,6 @@ export default function RealAutoTrade() {
                                   : <span className="text-zinc-600">OFF</span>}
                               </p>
                               <p className="font-mono text-[9px] text-zinc-600 mt-0.5">{f.desc}</p>
-                              {on && !st.env_on && (
-                                <p className="font-mono text-[9px] text-amber-400/80 mt-1">
-                                  ⚠ Saved, but switched off at the server ({f.key.toUpperCase()}_ENABLED env is false) — it won't run until that's set.
-                                </p>
-                              )}
                               {st.last_run && (
                                 <p className="font-mono text-[9px] text-zinc-700 mt-0.5">Last ran: {st.last_run}</p>
                               )}

@@ -313,6 +313,25 @@ def refresh_if_totp_enabled(db: Session) -> bool:
             return False
         save_credentials(db, client_id, new_token)
         logger.info("Dhan TOTP token refreshed successfully.")
+
+        # BUG FIX (2026-09-01): a fresh token landing here fixed the
+        # CREDENTIAL but, if REAL had already auto-disarmed with
+        # dhan_connected=False (main.py's gate-expiry check / enforce_live_token
+        # rejecting the old token), left the gate flag stuck False — /arm kept
+        # 409'ing on "missing gates: dhan_connected" until a human re-opened
+        # the dashboard and re-saved the same token manually. Heal the gate
+        # flag here so /arm stops being blocked; REAL still stays disarmed —
+        # the admin still re-arms explicitly, this only clears the stale flag.
+        try:
+            gate = db.query(models.TradeGateState).filter_by(mode="REAL").first()
+            if gate is not None and not gate.dhan_connected:
+                gate.dhan_connected = True
+                gate.dhan_connected_at = datetime.now(timezone.utc)
+                db.commit()
+                logger.info("REAL gate.dhan_connected restored after TOTP refresh.")
+        except Exception:
+            logger.exception("Failed to restore gate.dhan_connected after TOTP refresh (non-fatal).")
+
         try:
             from notifier import notify_sync
             notify_sync("🔑 *Dhan TOTP token refreshed* — new token saved.")

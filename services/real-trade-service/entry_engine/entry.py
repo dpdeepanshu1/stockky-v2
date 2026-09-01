@@ -332,8 +332,12 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     _clamp_for_atr(pv.atr / pv.price * 100.0) if pv.atr else None
                 )
                 _p_entry = round_to_tick(pv.price * (1 + config.ENTRY_ZONE_UPPER_PCT / 100.0 / 2))
-                _p_stop  = round(pv.price * (1 - _pstop_pct / 100.0), 2)
-                _p_tgt   = round(pv.price * (1 + _ptgt_pct / 100.0), 2)
+                # 2026-09-01 fix: stop/target anchored to _p_entry (the actual
+                # price this preview implies you'd pay), not the raw pv.price —
+                # see the matching fix + comment on the live-tick path below
+                # for why anchoring to pre-premium price systematically breaks R:R.
+                _p_stop  = round(_p_entry * (1 - _pstop_pct / 100.0), 2)
+                _p_tgt   = round(_p_entry * (1 + _ptgt_pct / 100.0), 2)
                 _wait(
                     f"No live quote (showing preview from last close ₹{pv.price:.2f}). "
                     f"Waiting for a fresh tick from market-data before entry — "
@@ -377,8 +381,30 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # rounding — they're internal trigger levels compared against a
         # continuous LTP, never sent to the broker as an order price.
         entry_price  = round_to_tick(tick.price * (1 + config.ENTRY_ZONE_UPPER_PCT / 100.0 / 2))
-        stop_price   = round(tick.price * (1 - stop_pct   / 100.0), 2)
-        target_price = round(tick.price * (1 + target_pct / 100.0), 2)
+        # 2026-09-01 fix (R:R-floor false-reject bug): stop_price/target_price
+        # used to be computed off tick.price (raw current LTP) while
+        # entry_price is tick.price PLUS the ENTRY_ZONE_UPPER_PCT/2 premium
+        # (added by the tick-size fix so the limit order lands on a valid
+        # ₹0.05 grid point). Reward/risk was then measured between entry_price
+        # and those tick.price-anchored levels — mixing two different base
+        # prices — which silently added the premium to risk and subtracted it
+        # from reward on every single candidate, every time, regardless of
+        # symbol. For the ATR-based case (stop=1.5x, target=3x ATR — a clean,
+        # by-design 2.0:1) and the flat fallback (3.2%/6.5% — 2.03:1), that
+        # fixed erosion (2 x ENTRY_ZONE_UPPER_PCT/2 = 0.5% of price, split
+        # between the two legs) was enough to push literally every setup
+        # below MIN_REWARD_RISK_RATIO=2.0 — e.g. FLAT case computed to exactly
+        # 1.81:1 every time, matching the dashboard's identical R:R across
+        # unrelated symbols (ENGINERS, GRAPHITE, REDINGTON, VTL all showing
+        # 1.81:1) that admin flagged as "why isn't it picking any stock."
+        # Anchoring stop_price/target_price to entry_price instead — the
+        # price this trade would actually be filled at — makes reward/risk
+        # exactly target_pct/stop_pct again (2.0:1 ATR case, 2.03:1 flat
+        # case), independent of the entry premium, and is also the more
+        # correct number: your real risk/reward is relative to what you'd
+        # actually pay, not to a stale pre-premium tick.
+        stop_price   = round(entry_price * (1 - stop_pct   / 100.0), 2)
+        target_price = round(entry_price * (1 + target_pct / 100.0), 2)
         per_share_risk = entry_price - stop_price
 
         def _wait_with_preview(reason: str) -> None:

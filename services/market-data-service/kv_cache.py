@@ -61,6 +61,16 @@ _DURABLE_PREFIXES = (
     "stockky:notification:",
     "indianapi:fundamentals:",
     "indianapi:",
+    # 2026-09-01: market-data-service's own /fundamentals/{symbol} cache
+    # (main.py's _get_fundamentals_inner, cache_key "fundamentals:{sym}")
+    # was routing through main.py's OWN plain in-process _MemCache only —
+    # never through this module's durable get()/set() at all, despite this
+    # file sitting right next to main.py specifically to provide that.
+    # Fundamentals (P/E, ROE, debt/equity, etc.) only change quarterly, so
+    # losing them on every restart/redeploy and re-hitting yfinance for
+    # every symbol again was pure waste. See main.py's _get_fundamentals_inner
+    # for the get()/set() calls that now use this prefix.
+    "fundamentals:",
     "stockky:decide_cache:",  # optional durability for decide (low volume)
     "stockky:batch_result:",  # scan batch cache survives free-tier sleep
     "stockky:rate_limit",  # rate-limit dashboard durable events/stats
@@ -258,12 +268,22 @@ def _get_neon():
             if _oc is not None and _oc.oracle_is_configured(url):
                 # ── Oracle Autonomous DB (Oracle Cloud VM only) ──
                 # Wallet / DSN / creds ride in from the ORACLE_* env vars (see
-                # oracle_compat.py + .env.oracle.example). Small pool for the
-                # cache layer; Oracle ADB tolerates far more than Neon free.
+                # oracle_compat.py + .env.oracle.example).
+                # 2026-09-01: this used to reuse CACHE_DB_POOL_SIZE/
+                # CACHE_DB_MAX_OVERFLOW with the SAME tiny "2"/"1" defaults
+                # written for Neon's free-tier cap just below -- despite this
+                # comment already saying "Oracle ADB tolerates far more than
+                # Neon free," nothing here actually acted on that. Given
+                # dedicated *_ORACLE env vars now (falling back to the shared
+                # ones if unset, for anyone already overriding those) with
+                # defaults sized for a real Oracle Cloud deployment instead of
+                # a shared free-tier assumption. If your specific ADB OCPU
+                # count/session limit is tighter than this, you'll see
+                # ORA-12520 "no more sessions" -- lower these via env.
                 eng, _ = _oc.build_oracle_engine(
                     url,
-                    db_pool_size=os.getenv("CACHE_DB_POOL_SIZE", "2"),
-                    db_max_overflow=os.getenv("CACHE_DB_MAX_OVERFLOW", "1"),
+                    db_pool_size=os.getenv("CACHE_DB_POOL_SIZE_ORACLE", os.getenv("CACHE_DB_POOL_SIZE", "5")),
+                    db_max_overflow=os.getenv("CACHE_DB_MAX_OVERFLOW_ORACLE", os.getenv("CACHE_DB_MAX_OVERFLOW", "3")),
                     db_pool_recycle=os.getenv("CACHE_DB_POOL_RECYCLE", "300"),
                     db_pool_timeout=os.getenv("CACHE_DB_POOL_TIMEOUT", "10"),
                 )

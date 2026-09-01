@@ -14,9 +14,45 @@ from typing import Optional
 import httpx
 import pyotp
 
+try:
+    from rate_limiter import acquire as _rl_acquire, in_cooldown as _rl_in_cooldown, set_cooldown as _rl_set_cooldown
+except Exception:  # pragma: no cover — keep working even if rate_limiter.py is ever absent
+    def _rl_acquire(provider, weight=1.0, max_wait=20.0):
+        return 0.0
+    def _rl_in_cooldown(provider):
+        return False
+    def _rl_set_cooldown(provider, seconds):
+        pass
+
 logger = logging.getLogger("angelone-client")
 
 _BASE = "https://apiconnect.angelone.in"
+
+# 2026-09-01 fix: this client made every REST call with zero rate limiting —
+# AngelOne is now the primary quote/candle source (this module's own
+# docstring above), so it takes the same shared-bucket treatment yfinance
+# already had (see rate_limiter.py's "angelone_*" buckets and their
+# reasoning). AngelOne's real 403 body on a rate-limit hit is
+# {"status": false, "message": "Access denied because of exceeding access
+# rate", "errorcode": "..."} per multiple SmartAPI Forum reports (topics
+# 5560, 5636/5637) — detect it and cool down rather than let the caller's
+# normal retry logic hammer it again immediately.
+_ANGELONE_COOLDOWN_SEC = float(os.environ.get("ANGELONE_COOLDOWN_SEC", "30"))
+
+
+def _is_rate_limit_response(status_code: int, body: Optional[dict]) -> bool:
+    if status_code == 403:
+        msg = ((body or {}).get("message") or "").lower()
+        if "exceeding access rate" in msg or "access denied" in msg:
+            return True
+    return status_code == 429
+
+
+def _safe_json(r: httpx.Response) -> Optional[dict]:
+    try:
+        return r.json()
+    except Exception:
+        return None
 
 
 class AngelOneSession:
@@ -110,7 +146,10 @@ class AngelOneSession:
 
     async def get_quote(self, exchange: str, symbol_token: str) -> dict:
         """Fetch live quote for one symbol token."""
+        if _rl_in_cooldown("angelone_quote"):
+            return {}
         await self.ensure_session()
+        _rl_acquire("angelone_quote", weight=1)
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.post(
                 f"{_BASE}/rest/secure/angelbroking/market/v1/quote/",
@@ -120,6 +159,9 @@ class AngelOneSession:
                     "exchangeTokens": {exchange: [symbol_token]},
                 },
             )
+            if _is_rate_limit_response(r.status_code, _safe_json(r)):
+                _rl_set_cooldown("angelone_quote", _ANGELONE_COOLDOWN_SEC)
+                return {}
             r.raise_for_status()
             body = r.json()
             fetched = (body.get("data") or {}).get("fetched") or []
@@ -136,7 +178,10 @@ class AngelOneSession:
         to_date: str,
     ) -> list:
         """Fetch OHLCV candles. interval: ONE_MINUTE/FIVE_MINUTE/ONE_DAY etc."""
+        if _rl_in_cooldown("angelone_candle"):
+            return []
         await self.ensure_session()
+        _rl_acquire("angelone_candle", weight=1)
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.post(
                 f"{_BASE}/rest/secure/angelbroking/historical/v1/getCandleData",
@@ -149,6 +194,9 @@ class AngelOneSession:
                     "todate":      to_date,
                 },
             )
+            if _is_rate_limit_response(r.status_code, _safe_json(r)):
+                _rl_set_cooldown("angelone_candle", _ANGELONE_COOLDOWN_SEC)
+                return []
             r.raise_for_status()
             body = r.json()
             return body.get("data") or []
@@ -160,13 +208,23 @@ class AngelOneSession:
         angelone_ws_feed.py's polling loop, which chunks in batches of 50)."""
         if not symbol_tokens:
             return []
+        if _rl_in_cooldown("angelone_quote"):
+            return []
         await self.ensure_session()
+        # One HTTP call regardless of how many tokens are in this batch (up
+        # to the 50-token cap), so this costs the same ONE unit against the
+        # angelone_quote bucket as a single-symbol get_quote() call — same
+        # reasoning as yfinance's batch weight capping (see rate_limiter.py).
+        _rl_acquire("angelone_quote", weight=1)
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.post(
                 f"{_BASE}/rest/secure/angelbroking/market/v1/quote/",
                 headers=self._headers(),
                 json={"mode": "FULL", "exchangeTokens": {exchange: symbol_tokens}},
             )
+            if _is_rate_limit_response(r.status_code, _safe_json(r)):
+                _rl_set_cooldown("angelone_quote", _ANGELONE_COOLDOWN_SEC)
+                return []
             r.raise_for_status()
             body = r.json()
             return (body.get("data") or {}).get("fetched") or []

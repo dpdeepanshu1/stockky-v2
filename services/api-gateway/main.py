@@ -6795,6 +6795,8 @@ async def api_surprise_audit():
 async def api_surprise_scan(
     force_reload: bool = False,
     symbols: str = None,
+    cached: bool = False,
+    limit: int = None,
 ):
     """
     Lightweight surprise scan:
@@ -6804,6 +6806,16 @@ async def api_surprise_scan(
          live thresholds (this docstring previously said ">=60, change >1%",
          which drifted out of sync with the actual values; read from the
          module constants instead of hardcoding a number here again).
+
+    `cached=true` (default False): serve the last computed full-universe
+    result if it's still fresh (see SurpriseStockEngine.scan's
+    cached_max_age_sec) instead of running a new scan. Callers like
+    candidate_engine that just want a cheap read of "what does the surprise
+    tab currently show" should pass this — see the 2026-09-01 incident fix
+    in surprise_scanner.py for why this used to be silently ignored.
+    `limit` (optional): truncate the returned `stocks` list to the top N
+    by score — candidate_engine's own use of this endpoint always passed
+    limit=20 but nothing here ever honored it.
     """
     try:
         from surprise_scanner import surprise_engine
@@ -6820,7 +6832,11 @@ async def api_surprise_scan(
         market_data_url=MARKET_DATA_URL,
         symbols=sym_list,
         force_reload_static=bool(force_reload),
+        cached=bool(cached),
     )
+    if limit and isinstance(result.get("stocks"), list):
+        result = dict(result)
+        result["stocks"] = result["stocks"][: max(0, int(limit))]
     return result
 
 

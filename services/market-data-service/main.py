@@ -1602,12 +1602,17 @@ def get_quotes_bulk(req: BulkQuoteRequest):
     if not yf_tickers:
         return {"ok": False, "error": "No valid symbols after normalize", "quotes": []}
 
-    try:
-        from rate_limiter import acquire as rl_acquire, suggested_timeout as rl_timeout
-        rl_acquire("yfinance", weight=len(yf_tickers))
-        _ = rl_timeout(25.0, "yfinance")  # widened timeout applied via yf's own session below
-    except Exception:
-        pass
+    # NOTE: do NOT manually acquire("yfinance", weight=len(yf_tickers)) here.
+    # yf.download() below is monkeypatched by rate_limiter.patch_yfinance()
+    # to already charge a small constant weight (1-2) per batch call — see
+    # that function's own comment: "charging one token per ticker
+    # catastrophically over-throttled ... Count a batch as a small
+    # constant." A manual pre-acquire with weight=len(yf_tickers) here
+    # bypasses that fix and re-introduces the exact bug it was written to
+    # solve: a 200-symbol bulk call would block for (200-6)/2 ≈ 97s on this
+    # pre-acquire alone, before yf.download() (correctly rate-limited)
+    # even starts. Let the patched yf.download() do the one, correctly-
+    # weighted acquisition itself.
 
     try:
         data = yf.download(
@@ -1785,6 +1790,22 @@ def get_history(
         cached = _cache_get(cache_key)
         if cached:
             return cached
+        # 2026-09-01 incident fix: a symbol that just came back "possibly
+        # delisted" / 404-not-found from every candidate ticker is going to
+        # fail the exact same way again next cycle (~180s later) — nothing
+        # about its data changes in an hour. Without this, that guaranteed
+        # failure still spends rate-limiter budget and a real yfinance
+        # round-trip every single cycle, forever, competing with the
+        # symbols that could actually succeed. A short negative-TTL means a
+        # symbol that gets fixed upstream (re-listed, Yahoo backfills it)
+        # is only stale for at most this long, not permanently blacklisted
+        # like KNOWN_DELISTED_SYMBOLS.
+        neg_key = f"{cache_key}:nodata"
+        if _cache_get(neg_key):
+            raise HTTPException(
+                status_code=404,
+                detail=f"No history found for {symbol} (cached no-data result, retries in <=1h)",
+            )
 
     last_err = None
     for cand in candidates:
@@ -1866,6 +1887,13 @@ def get_history(
     if last_err and any(x in last_err.lower() for x in ("timeout", "429", "503", "connection", "temporarily")):
         _report_rate_limit(503, path=f"/history/{symbol}", detail=detail, symbol=symbol)
         raise HTTPException(status_code=503, detail=f"Temporary history unavailable for {symbol}: {detail}")
+    # Genuine 404 (e.g. "possibly delisted", "Quote not found") — cache the
+    # negative result for an hour so this guaranteed failure doesn't retry
+    # every cycle (see neg_key check above).
+    try:
+        _cache_set(f"{cache_key}:nodata", True, ttl=3600)
+    except Exception:
+        pass
     raise HTTPException(status_code=404, detail=f"No history found for {symbol}: {detail}")
 
 @app.get("/fundamentals/{symbol}")
@@ -1903,7 +1931,19 @@ def _get_fundamentals_inner(symbol: str, force: bool = False):
     sym = normalize_symbol(symbol)
     cache_key = f"fundamentals:{sym}"
     if not force:
-        cached = _cache_get(cache_key)
+        # 2026-09-01 fix: this used to call _cache_get() (main.py's own
+        # plain in-process _MemCache) — every restart/redeploy wiped it,
+        # forcing a fresh yfinance call for every symbol again even though
+        # fundamentals only change quarterly. kv_cache.get() is the same
+        # memory-first fast path PLUS a durable Oracle/Neon fallback for
+        # "fundamentals:" keys (see kv_cache.py's _DURABLE_PREFIXES), so a
+        # cold process now serves last quarter's numbers from the DB
+        # instead of re-fetching from Yahoo.
+        try:
+            from kv_cache import get as _kv_durable_get
+            cached = _kv_durable_get(cache_key)
+        except Exception:
+            cached = _cache_get(cache_key)  # kv_cache unavailable — old behavior
         if cached:
             return _sanitize_for_json(cached)
     if _in_cooldown("yfinance"):
@@ -2156,7 +2196,11 @@ def _get_fundamentals_inner(symbol: str, force: bool = False):
         _fallback_set(cache_key, result)
 
     if result:
-        _cache_set(cache_key, result, ttl=86400)  # fundamentals change slowly, cache 24h
+        try:
+            from kv_cache import set as _kv_durable_set
+            _kv_durable_set(cache_key, result, ttl=86400)  # fundamentals change slowly, cache 24h
+        except Exception:
+            _cache_set(cache_key, result, ttl=86400)  # kv_cache unavailable — old behavior
         return result
 
     stale = _fallback_get(cache_key)

@@ -249,7 +249,10 @@ async def _fetch_history(
         r = await client.get(
             f"{MARKET_DATA_URL}/history/{symbol}",
             params={"period": period, "interval": interval},
-            timeout=12.0,
+            # Same 38s worst-case math as _fetch_quote above (20s rate_limiter
+            # max_wait + 18s YFINANCE_HARD_TIMEOUT_SEC) — history goes through
+            # the same patched Ticker.history() rate-limiter gate.
+            timeout=42.0,
         )
         if r.status_code == 200:
             data = r.json()
@@ -261,12 +264,68 @@ async def _fetch_history(
 
 async def _fetch_quote(client: httpx.AsyncClient, symbol: str) -> Optional[dict]:
     try:
-        r = await client.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=8.0)
+        # Timeout math: on a cache miss this falls through to yfinance REST,
+        # whose worst case server-side is 20s (rate_limiter.py max_wait) +
+        # 18s (YFINANCE_HARD_TIMEOUT_SEC) = 38s. A shorter client timeout
+        # would give up before the server's own fail-fast could ever fire.
+        # _prefetch_quotes_bulk() above means this is almost always a warm
+        # cache hit (fast) — 42s only matters for whatever wasn't warmed.
+        r = await client.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=42.0)
         if r.status_code == 200:
             return r.json()
     except Exception as e:
         logger.debug("quote %s failed: %s", symbol, e)
     return None
+
+
+# ── 2026-09-01 incident fix: bulk quote pre-warming ──────────────────────────
+# candidate_engine used to fire one GET /quote/{symbol} per candidate,
+# concurrency-bounded but still one HTTP call (and one competing shot at the
+# shared yfinance rate limiter) per symbol. For any symbol outside the
+# ~250-name AngelOne/Yahoo live-feed subscription that falls through to
+# yfinance REST — 2 req/s sustained, burst 6 (see rate_limiter.py) — so a
+# 200+ symbol scan universe produces 200+ requests competing for ~2
+# tokens/sec, most of which queue well past this file's own per-request
+# timeout and come back empty. That is what caused the 2026-09-01 incident:
+# candidate_engine logged "206/206 volume_shock symbols rejected for missing
+# quote/history data" — none of those symbols were actually unquotable, the
+# fetch just never got a turn.
+#
+# market-data-service's POST /quotes/bulk was already built to solve exactly
+# this class of problem (its own docstring: "Replaces ticker-by-ticker loops
+# that trigger free-tier 429 cascades") — ONE yf.download() call per chunk,
+# ONE rate-limiter acquisition, and every result gets cached under
+# quote:{symbol} server-side. Warming that cache before the per-symbol
+# fetches below run means _fetch_quote() mostly hits a warm cache (fast,
+# no rate-limiter contention) instead of racing 200 other requests for the
+# same few tokens/sec.
+BULK_QUOTE_CHUNK_SIZE = int(os.getenv("CANDIDATE_BULK_QUOTE_CHUNK_SIZE", "40"))
+BULK_QUOTE_TIMEOUT_SECONDS = float(os.getenv("CANDIDATE_BULK_QUOTE_TIMEOUT_SECONDS", "90.0"))
+
+
+async def _prefetch_quotes_bulk(client: httpx.AsyncClient, symbols: list[str]) -> None:
+    """Best-effort: warm market-data-service's quote cache for `symbols` via
+    chunked POST /quotes/bulk calls. Never raises — if a chunk fails (or
+    /quotes/bulk itself has an issue), the per-symbol _fetch_quote() fallback
+    that runs afterward still works exactly as it did before this fix, just
+    slower for whichever symbols didn't get warmed."""
+    unique = list(dict.fromkeys(s for s in symbols if s))
+    if not unique:
+        return
+    for i in range(0, len(unique), BULK_QUOTE_CHUNK_SIZE):
+        chunk = unique[i:i + BULK_QUOTE_CHUNK_SIZE]
+        try:
+            await client.post(
+                f"{MARKET_DATA_URL}/quotes/bulk",
+                json={"symbols": chunk},
+                timeout=BULK_QUOTE_TIMEOUT_SECONDS,
+            )
+        except Exception as e:
+            logger.debug(
+                "bulk quote prefetch chunk of %d symbols failed: %s: %s",
+                len(chunk), type(e).__name__, e,
+            )
+            continue
 
 
 # ── Analysis helpers ──────────────────────────────────────────────────────────
@@ -851,6 +910,14 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
     # one shared client, bounded parallelism (see CANDIDATE_ANALYSIS_CONCURRENCY
     # note above), not one unbounded task per symbol and not sequentially.
     async with httpx.AsyncClient() as client:
+        # Warm market-data-service's quote cache in bulk first — see
+        # _prefetch_quotes_bulk docstring (2026-09-01 incident fix). This
+        # track's row count is normally small (hot_picks/ipo/surprise), but
+        # it shares the same per-symbol _fetch_quote() call inside
+        # _multi_tf_analysis(), so the same rate-limiter contention applies
+        # whenever those sources return a larger batch.
+        await _prefetch_quotes_bulk(client, [r["symbol"] for r in rows])
+
         sem = asyncio.Semaphore(CANDIDATE_ANALYSIS_CONCURRENCY)
 
         async def _limited_mtf(symbol: str) -> dict:
@@ -947,6 +1014,14 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
         candidates = [s for s in candidates if s not in exclude_symbols]
         if not candidates:
             return 0
+
+        # 2026-09-01 incident fix — see _prefetch_quotes_bulk docstring.
+        # This is the track that actually hit "206/206 volume_shock symbols
+        # rejected for missing quote/history data": /scan/universe can
+        # return 200+ symbols, most outside the live-feed subscription, so
+        # warm the quote cache in bulk BEFORE the per-symbol semaphore loop
+        # below fires 200+ individually rate-limited /quote/{symbol} calls.
+        await _prefetch_quotes_bulk(client, candidates)
 
         sem = asyncio.Semaphore(CANDIDATE_ANALYSIS_CONCURRENCY)
 

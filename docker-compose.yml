@@ -29,6 +29,11 @@ services:
       YFINANCE_MIN_INTERVAL_SEC: ${YFINANCE_MIN_INTERVAL_SEC:-0.08}
       USE_REDIS: ${USE_REDIS:-0}
       PORT: "8001"
+      # 2026-09-01 fix: market-data-service's own periodic feed-universe
+      # refresh job needs this to reach api-gateway's /scan/universe (see
+      # "feed universe refresh: API_GATEWAY_URL not set, skipping" in logs)
+      # — was only set for notification-scheduler-service/real-trade-service.
+      API_GATEWAY_URL: http://api-gateway:8000
       # ── Oracle Autonomous DB (Oracle Cloud side only; empty on Render/Neon) ──
       ORACLE_DSN: ${ORACLE_DSN:-}
       ORACLE_USER: ${ORACLE_USER:-ADMIN}

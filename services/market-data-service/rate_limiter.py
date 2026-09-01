@@ -39,11 +39,26 @@ logger = logging.getLogger("rate-limiter")
 # Provider -> (sustained requests/sec, burst capacity). Tuned conservatively
 # for free-tier upstreams; override via env without a code change.
 _DEFAULTS = {
-    "yfinance": (2.0, 6),      # Yahoo: ~2 req/s sustained, small burst
+    "yfinance": (2.0, 6),      # Yahoo: ~2 req/s sustained, small burst — now a
+                               # fallback-only path (AngelOne is primary), see
+                               # module docstring addendum below.
     "indianapi": (1.0, 3),     # IndianAPI free tier: strict
     "nse": (1.0, 3),           # NSE official: strict, blocks aggressively
     "market_data": (8.0, 20),  # our own market-data-service /quote proxy
     "analysis": (3.0, 8),      # analysis-intelligence-service (fundamental/technical/event)
+    # AngelOne SmartAPI — added 2026-09-01. Documented per-endpoint limits
+    # (https://smartapi.angelone.in/docs/RateLimit, forum confirmations):
+    # getCandleData 3 req/s/client, quote/LTP "combined limit" ~9 req/s,
+    # getOrderBook/getTradeBook 1 req/s. HOWEVER multiple independent forum
+    # reports (SmartAPI Forum topics 5560, 5636/5637, 5611, 5625, 5595) show
+    # AngelOne issuing 403 "Access denied because of exceeding access rate"
+    # even at 0.003-0.33 req/s — an order of magnitude under the documented
+    # ceiling — so these buckets deliberately sit well below the documented
+    # numbers rather than matching them exactly; matching the docs exactly
+    # has repeatedly proven to still get real accounts rate-limited.
+    "angelone_quote":  (5.0, 8),   # docs: ~9 combined; staying well under it
+    "angelone_candle": (1.5, 3),   # docs: 3/s; halved for the same reason
+    "angelone_order":  (0.7, 2),   # docs: 1/s (order book/trade book/orders)
 }
 
 
@@ -143,6 +158,27 @@ def acquire(provider: str, weight: float = 1.0, max_wait: float = 20.0) -> float
     except Exception as e:
         logger.debug("rate_limiter.acquire(%s) failed open: %s", provider, e)
         return 0.0
+
+
+# ── Shared cooldown facility ─────────────────────────────────────────────────
+# main.py already had this exact pattern (_UPSTREAM_COOLDOWN dict + _in_cooldown
+# / _set_cooldown helpers) hardcoded for yfinance/nse/twelvedata/etc. Hosting
+# an equivalent here means other modules in this service — angelone_client.py
+# in particular — can report/check a cooldown after a real 403/429 without
+# importing main.py (which would be circular: main.py imports angelone_client).
+_cooldowns: Dict[str, float] = {}
+_cooldowns_lock = threading.Lock()
+
+
+def in_cooldown(provider: str) -> bool:
+    with _cooldowns_lock:
+        return time.time() < _cooldowns.get(provider, 0.0)
+
+
+def set_cooldown(provider: str, seconds: float) -> None:
+    with _cooldowns_lock:
+        _cooldowns[provider] = time.time() + seconds
+    logger.warning("rate_limiter: %s cooldown for %.0fs (rate limit / access-denied response)", provider, seconds)
 
 
 def suggested_timeout(base_timeout: float, provider: str, floor: float = 1.0) -> float:

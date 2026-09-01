@@ -255,6 +255,7 @@ class SurpriseStockEngine:
         self.semaphore = asyncio.Semaphore(max(4, min(CONCURRENCY, 20)))
         self._last_rvol: Dict[str, float] = {}
         self._last_scan_ts: float = 0.0
+        self._last_result: Optional[Dict[str, Any]] = None
 
     def load_static_cache(self, force: bool = False) -> int:
         if self.static_cache and not force and (time.time() - self._loaded_at) < 300:
@@ -718,8 +719,32 @@ class SurpriseStockEngine:
         market_data_url: str,
         symbols: Optional[List[str]] = None,
         force_reload_static: bool = False,
+        cached: bool = False,
+        cached_max_age_sec: float = 90.0,
     ) -> Dict[str, Any]:
         t0 = time.time()
+
+        # ── 2026-09-01 incident fix ──────────────────────────────────────
+        # candidate_engine's /surprise/scan?cached=true call was written to
+        # expect a cheap read that "returns the last scored result without
+        # triggering a new full scan cycle" (see candidates.py _SOURCES
+        # comment) — but `cached` was never wired up here, so FastAPI
+        # silently dropped the unrecognized query param and every single
+        # call ran the full loop below (live quote fetch for the whole
+        # liquid static universe, in batches of 25). Under load that's
+        # exactly what produced the "candidate fetch ... failed: ReadTimeout"
+        # in the log. A per-symbol request list (`symbols` given) still
+        # always does a live fetch — the cache only covers the default
+        # full-universe scan, which is what candidate_engine actually asks
+        # for.
+        if cached and not symbols and self._last_result is not None:
+            age = time.time() - self._last_scan_ts
+            if age <= cached_max_age_sec:
+                result = dict(self._last_result)
+                result["from_cache"] = True
+                result["cache_age_sec"] = round(age, 1)
+                return result
+
         n_static = self.load_static_cache(force=force_reload_static)
         if n_static == 0:
             return {
@@ -792,7 +817,7 @@ class SurpriseStockEngine:
         results.sort(key=lambda x: x["score"], reverse=True)
         breakout_count = sum(1 for r in results if r.get("tier") == "breakout")
         building_count = sum(1 for r in results if r.get("tier") == "building")
-        return {
+        result = {
             "count":           len(results),
             "stocks":          results,
             "breakout_count":  breakout_count,
@@ -808,6 +833,12 @@ class SurpriseStockEngine:
             "building_min_score": BUILDING_MIN_SCORE,
             "market_note":     "Aug-2026: Nifty -7% 6m, FII net-short — thresholds raised for quality",
         }
+        # Only cache full-universe scans (symbols=None) — a filtered
+        # request isn't representative of "the last scored result" that
+        # the cached=true fast-path above is meant to serve.
+        if not symbols:
+            self._last_result = result
+        return result
 
 
 surprise_engine = SurpriseStockEngine()

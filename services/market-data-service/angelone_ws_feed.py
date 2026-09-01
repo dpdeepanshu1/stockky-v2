@@ -31,10 +31,16 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+from market_hours import is_feed_window_ist
+
 logger = logging.getLogger("angelone-ws-feed")
 
 _running = False
 _thread: Optional[threading.Thread] = None
+
+# How often an idling (outside market hours) loop rechecks whether the
+# window has opened. Cheap — just a datetime compare, no upstream call.
+IDLE_RECHECK_S = 60.0
 
 # How often a full poll cycle restarts once it finishes the whole universe.
 # The file itself only updates once/day, but this governs freshness of
@@ -217,6 +223,7 @@ def feed_status() -> dict:
         "running": _running,
         "cached_symbols": n,
         "newest_tick_age_s": (time.time() - newest) if newest else None,
+        "in_market_window": is_feed_window_ist(),
     }
 
 
@@ -287,7 +294,27 @@ def start_feed_background(symbols: list) -> None:
                     await asyncio.sleep(BATCH_GAP_S)
 
             async def _poll_forever():
+                was_idle = False
                 while _running:
+                    # 2026-09-01 fix: this loop used to poll AngelOne for the
+                    # whole universe every ~3s, 24/7, with no market-hours
+                    # awareness — the trading-decision loop (auto_pilot.py)
+                    # was already correctly gated to market hours, but this
+                    # background tick feed was not, which is what showed up
+                    # in logs as AngelOne/yfinance activity pre-market with
+                    # "nothing running." Idle outside the window instead.
+                    if not is_feed_window_ist():
+                        if not was_idle:
+                            logger.info(
+                                "AngelOne feed: outside market hours (IST) — idling, "
+                                "rechecking every %.0fs", IDLE_RECHECK_S,
+                            )
+                            was_idle = True
+                        await asyncio.sleep(IDLE_RECHECK_S)
+                        continue
+                    if was_idle:
+                        logger.info("AngelOne feed: market window open — resuming polling")
+                        was_idle = False
                     cycle_start = time.time()
                     await _poll_cycle()
                     elapsed = time.time() - cycle_start

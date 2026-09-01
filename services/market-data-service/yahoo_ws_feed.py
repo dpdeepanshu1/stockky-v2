@@ -32,7 +32,14 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from market_hours import is_feed_window_ist
+
 logger = logging.getLogger("yahoo-ws-feed")
+
+# How often an idling (outside market hours) connection rechecks whether
+# the window has opened, and how long to sleep between disconnect checks
+# while parked.
+IDLE_RECHECK_S = 60.0
 
 _LIVE: Dict[str, dict] = {}
 _LOCK = threading.Lock()
@@ -98,7 +105,38 @@ async def _async_feed_main(universe: List[str]) -> None:
     global _WS_CLIENT
     import yfinance as yf
 
+    was_idle = False
     while True:
+        # 2026-09-01 fix: this streaming connection used to stay open and
+        # subscribed 24/7 with no market-hours awareness — the
+        # trading-decision loop (auto_pilot.py in real-trade-service) was
+        # already gated to market hours, but this background tick feed
+        # was not. Idle (no open connection) outside the window instead of
+        # holding a live socket to Yahoo's streamer all night.
+        if not is_feed_window_ist():
+            if _WS_CLIENT is not None:
+                try:
+                    close_fn = getattr(_WS_CLIENT, "close", None) or getattr(_WS_CLIENT, "disconnect", None)
+                    if close_fn:
+                        maybe_coro = close_fn()
+                        if asyncio.iscoroutine(maybe_coro):
+                            await maybe_coro
+                except Exception as e:
+                    logger.debug("yahoo_ws_feed: close on market-close failed (non-fatal): %s", e)
+                _WS_CLIENT = None
+                with _LOCK:
+                    _STATE["connected"] = False
+            if not was_idle:
+                logger.info(
+                    "yahoo_ws_feed: outside market hours (IST) — idling, "
+                    "rechecking every %.0fs", IDLE_RECHECK_S,
+                )
+                was_idle = True
+            await asyncio.sleep(IDLE_RECHECK_S)
+            continue
+        if was_idle:
+            logger.info("yahoo_ws_feed: market window open — resuming connection")
+            was_idle = False
         try:
             ws = yf.AsyncWebSocket(verbose=False)
             _WS_CLIENT = ws
@@ -206,4 +244,5 @@ def feed_status() -> dict:
             "last_message_age_sec": round(time.time() - last, 1) if last else None,
             "reconnects": _STATE["reconnects"],
             "error": _STATE.get("error"),
+            "in_market_window": is_feed_window_ist(),
         }

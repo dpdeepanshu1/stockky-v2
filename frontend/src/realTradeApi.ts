@@ -207,6 +207,7 @@ export interface EntryDetailRow {
 
 export interface PipelineCycleRecord {
   trigger: "manual" | "autopilot";
+  warning?: string | null;
   started_at: string;
   ended_at: string;
   duration_ms: number;
@@ -228,6 +229,7 @@ export interface PipelineStatus {
   mode: string;
   running: boolean;
   trigger?: "manual" | "autopilot";
+  warning?: string | null;
   started_at?: string;
   stage?: string;
   stages?: string[];

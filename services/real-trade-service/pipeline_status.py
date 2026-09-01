@@ -48,11 +48,15 @@ def _now() -> float:
     return time.monotonic()
 
 
-def start_cycle(mode: str, trigger: str) -> None:
-    """trigger: 'manual' (Run Cycle button / API call) or 'autopilot'."""
+def start_cycle(mode: str, trigger: str, warning: Optional[str] = None) -> None:
+    """trigger: 'manual' (Run Cycle button / API call) or 'autopilot'.
+    warning: optional best-effort note surfaced on the dashboard for this
+    cycle (e.g. "started pre-market") — purely informational, never blocks
+    or alters anything the cycle does."""
     with _LOCK:
         _STATE[mode] = {
             "trigger": trigger,
+            "warning": warning,
             "started_at": _now(),
             "started_at_iso": datetime.now(timezone.utc).isoformat(),
             "stage": "starting",
@@ -125,6 +129,7 @@ def end_cycle(mode: str, result: dict, error: Optional[str] = None) -> None:
         entry_details = (entry.get("entry_details") or [])[:20]
         record = {
             "trigger": st["trigger"],
+            "warning": st.get("warning"),
             "started_at": st["started_at_iso"],
             "ended_at": datetime.now(timezone.utc).isoformat(),
             "duration_ms": total_ms,
@@ -164,6 +169,7 @@ def get_status(mode: str) -> dict:
             "mode": mode,
             "running": True,
             "trigger": st["trigger"],
+            "warning": st.get("warning"),
             "started_at": st["started_at_iso"],
             "stage": st["stage"],
             "stages": STAGES,

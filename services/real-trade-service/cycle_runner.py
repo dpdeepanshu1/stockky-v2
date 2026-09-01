@@ -27,16 +27,45 @@ logger = logging.getLogger("real-trade-cycle")
 async def run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str = "manual") -> dict:
     mode = mode.upper()
 
+    # 2026-09-01 fix: a manual "Run Cycle" click bypasses Auto-Pilot's own
+    # market-hours gate (only the automatic background loop was gated —
+    # see execution/auto_pilot.py) and always ran the full scan, even
+    # pre/post-market, silently. Left as a known follow-up in the previous
+    # incident (dashboard 504 while "nothing running" — the actual cause
+    # was a slow pre-market manual cycle, not something misbehaving).
+    # Per admin: still process the cycle either way — just warn.
+    warning = None
+    if trigger == "manual":
+        try:
+            from tz_utils import is_market_open_ist, ist_now
+            if not is_market_open_ist():
+                when = ist_now().strftime("%H:%M IST")
+                warning = f"Started outside market hours ({when}) — quotes may be stale/last-close, not live ticks"
+                logger.warning("run_cycle_core: manual %s cycle started outside market hours (%s)", mode, when)
+                try:
+                    import notifier
+                    await notifier.notify_async(
+                        f"⚠️ Manual Run Cycle ({mode}) started outside market hours ({when}). "
+                        f"Proceeding as requested — prices used may be stale/last-close."
+                    )
+                except Exception as _notify_err:
+                    logger.debug("pre-market cycle warning notify failed (non-fatal): %s", _notify_err)
+        except Exception as _gate_err:
+            logger.debug("market-hours warning check failed (non-fatal, cycle still proceeds): %s", _gate_err)
+
     # Best-effort status tracking for the dashboard. Every call is guarded
     # so a bug here can NEVER affect the actual cycle (see pipeline_status.py
     # docstring) — worst case the dashboard shows stale/no progress.
     try:
-        pstat.start_cycle(mode, trigger)
+        pstat.start_cycle(mode, trigger, warning=warning)
     except Exception:
         pass
 
     try:
-        return await _run_cycle_core(db, mode, gate_armed)
+        result = await _run_cycle_core(db, mode, gate_armed)
+        if warning:
+            result["pre_market_warning"] = warning
+        return result
     except Exception as e:
         try:
             pstat.end_cycle(mode, {}, error=f"{type(e).__name__}: {e}")

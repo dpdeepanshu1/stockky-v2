@@ -1602,6 +1602,72 @@ def get_quotes_bulk(req: BulkQuoteRequest):
     if not yf_tickers:
         return {"ok": False, "error": "No valid symbols after normalize", "quotes": []}
 
+    # 2026-09-01 fix: this endpoint used to call yf.download() for every
+    # requested symbol on every call, with no cache check at all — unlike
+    # /quote/{symbol} just above, which already checks quote:{sym} first.
+    # A slow/rate-limited Yahoo session meant every bulk call (e.g. each
+    # stage of a candidate scan cycle) re-paid the full 18s hard timeout
+    # per chunk even for symbols already fetched moments earlier, which is
+    # what stacked up into a 415s "Run Cycle" and surfaced as a raw dashboard
+    # 504. Serve already-fresh quotes (recent kv cache, or a live AngelOne/
+    # Yahoo streaming tick) for free, and only ask yfinance for the rest.
+    results: list = []
+    still_needed: list = []
+    for mapped in yf_tickers:
+        cached = _cache_get(f"quote:{mapped}")
+        if cached:
+            results.append(cached)
+            continue
+        still_needed.append(mapped)
+
+    if still_needed:
+        live_hits: dict = {}
+        try:
+            import angelone_ws_feed
+            base_syms = [symbol_map.get(t, t).replace(".NS", "").replace(".BO", "") for t in still_needed]
+            live_hits.update(angelone_ws_feed.get_live_quotes_bulk(base_syms, max_age_sec=15.0))
+        except Exception as e:
+            logger.debug("quotes/bulk: angelone live cache check failed (non-fatal): %s", e)
+        try:
+            import yahoo_ws_feed
+            base_syms = [symbol_map.get(t, t).replace(".NS", "").replace(".BO", "") for t in still_needed]
+            for sym, q in yahoo_ws_feed.get_live_quotes_bulk(base_syms, max_age_sec=15.0).items():
+                live_hits.setdefault(sym, q)
+        except Exception as e:
+            logger.debug("quotes/bulk: yahoo live cache check failed (non-fatal): %s", e)
+
+        remaining = []
+        for mapped in still_needed:
+            base = symbol_map.get(mapped, mapped).replace(".NS", "").replace(".BO", "")
+            live = live_hits.get(base)
+            if live:
+                quote = _pad_quote_response(base, {
+                    "symbol": base,
+                    "price": live.get("price"),
+                    "day_high": live.get("high") or live.get("day_high"),
+                    "day_low": live.get("low") or live.get("day_low"),
+                    "volume": live.get("volume"),
+                    "source": live.get("source") or "live_feed",
+                    "fetched_at": datetime.utcnow().isoformat(),
+                })
+                try:
+                    _cache_set(f"quote:{mapped}", quote, ttl=15)
+                except Exception:
+                    pass
+                results.append(quote)
+            else:
+                remaining.append(mapped)
+        yf_tickers = remaining
+    else:
+        yf_tickers = []
+
+    if not yf_tickers:
+        # Everything was already fresh (cache or live feed) — no yfinance
+        # call needed at all this time.
+        return {"ok": True, "quotes": _sanitize_for_json(results), "note": "served from cache/live feed"}
+
+    symbol_map = {k: v for k, v in symbol_map.items() if k in yf_tickers}
+
     # NOTE: do NOT manually acquire("yfinance", weight=len(yf_tickers)) here.
     # yf.download() below is monkeypatched by rate_limiter.patch_yfinance()
     # to already charge a small constant weight (1-2) per batch call — see
@@ -1630,11 +1696,26 @@ def get_quotes_bulk(req: BulkQuoteRequest):
             _report_rate_limit(429 if "429" in str(e) or "Too Many" in str(e) else 502, path="/quotes/bulk", detail=str(e)[:200])
         except Exception:
             pass
-        raise HTTPException(status_code=502, detail=str(e)[:300])
+        # 2026-09-01 fix: this used to raise HTTPException(502) unconditionally,
+        # discarding any quotes already served from cache/live feed above and
+        # forcing every caller up the chain to handle a hard failure. Callers
+        # (candidates.py's _prefetch_quotes_bulk, api-gateway's data_feed.py)
+        # already treat this endpoint as best-effort and degrade gracefully —
+        # returning 200 with whatever we have (possibly a partial/empty quote
+        # list) instead of a raw 502 means a slow/timing-out yfinance chunk no
+        # longer contributes an unhandled error to the request chain that was
+        # showing up as a raw dashboard 504 during a long Run Cycle.
+        return {
+            "ok": bool(results),
+            "quotes": _sanitize_for_json(results),
+            "error": f"{type(e).__name__}: {str(e)[:200]}",
+            "degraded": True,
+        }
 
-    results = []
     if data is None or (hasattr(data, "empty") and data.empty):
-        return {"ok": True, "quotes": [], "note": "empty download"}
+        # `results` may already hold cache/live-feed hits collected above
+        # even though yfinance itself returned nothing for the rest.
+        return {"ok": True, "quotes": _sanitize_for_json(results), "note": "empty download"}
 
     # Ensure pandas is available (yfinance already depends on it)
     import pandas as pd

@@ -154,6 +154,9 @@ function PipelineLiveStatus({ pipeline, mode }: { pipeline: PipelineStatus | nul
               )}
             </p>
           )}
+          {pipeline.warning && (
+            <p className="font-mono text-[10px] text-amber-400">⚠ {pipeline.warning}</p>
+          )}
         </div>
       )}
 
@@ -163,6 +166,9 @@ function PipelineLiveStatus({ pipeline, mode }: { pipeline: PipelineStatus | nul
             Last cycle — {pipeline.last_cycle.trigger === "autopilot" ? "🤖 Auto-Pilot" : "▶ Manual"} ·{" "}
             {fmtTime(pipeline.last_cycle.ended_at)} · took {msFmt(pipeline.last_cycle.duration_ms)}
           </p>
+          {pipeline.last_cycle.warning && (
+            <p className="font-mono text-[10px] text-amber-400 mb-1">⚠ {pipeline.last_cycle.warning}</p>
+          )}
           {pipeline.last_cycle.error ? (
             <p className="font-mono text-[10px] text-rose-400">Error: {pipeline.last_cycle.error}</p>
           ) : pipeline.last_cycle.auto_disarmed ? (

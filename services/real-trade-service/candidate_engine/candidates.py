@@ -829,14 +829,30 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict
     # quote.get("atr") was always None (market-data-service /quote never
     # computes or returns ATR; AngelOne tick carries no history), so this is
     # always a real improvement over the prior no-op.
+    #
+    # 2026-09-01 fix: this used to pass the FULL `candles` list (including
+    # today's own shock-day candle) into the 14-day ATR window. A genuine
+    # volume-shock move — the exact thing this track is built to catch — by
+    # definition produces an unusually wide high/low range on the day it
+    # happens, so including it here inflated the very ATR reading meant to
+    # measure the stock's *normal* volatility, one contaminated by the event
+    # itself. Today's candle carries 1/14 of the trailing-window weight, and
+    # for the biggest moves (near-20% upper-circuit days) that was enough to
+    # push otherwise-good candidates over the MAX_ATR_PCT cap on the exact
+    # day they'd be worth buying (see the 30-Aug backtest note above:
+    # upper_circuit has the strongest win rate of any tier). Excluding
+    # today's candle (candles[:-1]) measures baseline/pre-shock volatility
+    # instead, which is what a "is this normally too wild to size safely"
+    # check should be asking. Actual position sizing at order time still
+    # uses live price/quantity math, not this pre-shock ATR reading.
     atr_pct: Optional[float] = None
-    atr_val = _compute_atr_from_candles(candles)
+    atr_val = _compute_atr_from_candles(candles[:-1])
     if atr_val and atr_val > 0 and current_price > 0:
         atr_pct = round(atr_val / current_price * 100, 2)
         if atr_pct > MAX_ATR_PCT:
             return {
                 "reject_reason": (
-                    f"ATR {atr_pct:.1f}% > cap {MAX_ATR_PCT}%. "
+                    f"Pre-shock ATR {atr_pct:.1f}% > cap {MAX_ATR_PCT}%. "
                     "Too volatile to produce a safe position size within the "
                     "1% per-trade risk cap."
                 ),

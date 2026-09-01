@@ -896,6 +896,50 @@ def _get_recent_ipos() -> List[str]:
         logger.warning("_get_recent_ipos: using static 9-name fallback list")
     return symbols
 
+# ── Rotating coverage cursor for the general-pool momentum-mover fallback ───
+# (2026-09-01) A plain random.sample() every cycle gives no guarantee that
+# any particular symbol outside the NIFTY indices is ever actually checked —
+# purely by chance it could be skipped for dozens of cycles running. This
+# cursor instead walks the (stably sorted) general_pool in fixed-size slices,
+# wrapping around and reshuffling the visit order only once a full lap
+# completes, so every symbol gets examined exactly once every
+# ceil(len(general_pool) / _GENERAL_POOL_SAMPLE_SIZE) cycles — a bounded,
+# known worst case instead of an open-ended one.
+_GENERAL_POOL_SAMPLE_SIZE = 150
+_general_pool_cursor_lock = threading.Lock()
+_general_pool_order: List[str] = []
+_general_pool_order_key: Optional[tuple] = None
+_general_pool_pos = 0
+
+
+def _next_general_pool_slice(general_pool: List[str], sample_size: int) -> List[str]:
+    global _general_pool_order, _general_pool_order_key, _general_pool_pos
+    if not general_pool:
+        return []
+    with _general_pool_cursor_lock:
+        key = (len(general_pool), general_pool[0], general_pool[-1])
+        if _general_pool_order_key != key:
+            # Pool composition changed (fresh NSE securities list, or first
+            # call this process) — reshuffle once and restart the cursor.
+            # Randomizing the ORDER (not the per-call sample) still avoids
+            # always starting from the same A-prefix names, while keeping
+            # full-lap coverage guaranteed.
+            _general_pool_order = list(general_pool)
+            random.shuffle(_general_pool_order)
+            _general_pool_order_key = key
+            _general_pool_pos = 0
+        n = len(_general_pool_order)
+        size = min(sample_size, n)
+        start = _general_pool_pos % n
+        end = start + size
+        if end <= n:
+            out = _general_pool_order[start:end]
+        else:
+            out = _general_pool_order[start:] + _general_pool_order[: end - n]
+        _general_pool_pos = end % n
+        return out
+
+
 def _get_momentum_movers() -> List[str]:
     """Real-time movers: NSE gainers/losers/most-active + ≥5% day/week moves."""
     movers: set[str] = set()
@@ -1037,20 +1081,45 @@ def _get_momentum_movers() -> List[str]:
     # general-universe slice is RANDOMIZED (not an alphabetical prefix)
     # so successive scan cycles rotate across the ~2000-symbol NSE list
     # instead of always re-checking the same A-D names.
+    nse_live_contributed = len(movers) - nse_live_before
+    if nse_live_contributed == 0:
+        # Step 1 (the only genuinely full-market source) contributed nothing
+        # this cycle. That's either a genuinely quiet market or NSE is
+        # blocking this session — the two look identical downstream (a thin
+        # `movers` set) unless flagged explicitly here.
+        logger.warning(
+            "momentum_movers: NSE live boards (gainers/losers/volume-gainers/"
+            "nifty500) contributed 0 symbols this cycle — likely blocked "
+            "(401/403) rather than a genuinely quiet market. Falling back "
+            "entirely to the rotating general-pool sample below, which only "
+            "covers a fraction of NSE per cycle."
+        )
+
     if len(movers) < 40:
         nifty_idx_full = _get_nifty_indices()  # NIFTY50+NEXT50+MID100+MID150+SMALL100
         largecap_seed = nifty_idx_full[:20]     # small largecap slice — cheap sanity coverage
         midsmall_seed = nifty_idx_full[20:]     # NEXT50 tail + MID/SMALLCAP — highest value
         random.shuffle(midsmall_seed)
         all_sec = _get_all_nse_securities()
-        general_pool = [s for s in all_sec if s not in set(nifty_idx_full)]
-        general_sample = random.sample(general_pool, min(150, len(general_pool))) if general_pool else []
+        general_pool = sorted(s for s in all_sec if s not in set(nifty_idx_full))
+        # 2026-09-01 fix: this used to be a fresh random.sample() every call,
+        # so coverage of the ~2000-symbol general pool was purely probabilistic
+        # — a given symbol (e.g. one of the Groww "Volume shockers" names that
+        # isn't in any NIFTY index) could go unsampled for many cycles in a
+        # row by bad luck, while others got re-checked repeatedly for no
+        # benefit. A persistent rotating cursor instead guarantees the WHOLE
+        # general_pool is covered exactly once every
+        # ceil(len(general_pool) / _GENERAL_POOL_SAMPLE_SIZE) cycles, so real
+        # coverage gaps shrink to a bounded, known cycle count instead of
+        # "maybe never." Sample size/order otherwise unchanged, so this adds
+        # no extra yfinance load per cycle.
+        general_sample = _next_general_pool_slice(general_pool, _GENERAL_POOL_SAMPLE_SIZE)
         seed = list(dict.fromkeys(largecap_seed + midsmall_seed[:80] + general_sample))[:180]
         logger.info(
             "momentum_movers fallback seed: %d largecap + %d mid/smallcap-index + "
-            "%d general (rotating) = %d total (nse_live_movers_so_far=%d)",
+            "%d general (rotating cursor, full pool=%d) = %d total (nse_live_movers_so_far=%d)",
             len(largecap_seed), min(80, len(midsmall_seed)), len(general_sample),
-            len(seed), len(movers),
+            len(general_pool), len(seed), len(movers),
         )
         for sym in seed:
             try:

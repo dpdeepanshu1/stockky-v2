@@ -252,6 +252,16 @@ def score_horizon(
     classification: str,
     flags: dict,
 ) -> Dict[str, Any]:
+    # IMPORTANT: work on a local copy. `pillars` is built once in
+    # multi_horizon_decide() and the SAME dict object is passed into this
+    # function for all three horizons (short/mid/long). Mutating it in
+    # place here previously caused the news time-decay below to compound
+    # across horizons (short decayed once, mid decayed the already-decayed
+    # value again, long a third time), silently corrupting mid/long scores
+    # on every /decide call. Copying keeps each horizon's decay independent
+    # and always applied to the original, undecayed pillar value.
+    pillars = dict(pillars)
+
     weights = HORIZON_WEIGHTS[horizon]
     mult = regime_multipliers(market_score, classification)
     total_w = 0.0

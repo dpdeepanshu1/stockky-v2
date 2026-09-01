@@ -208,7 +208,16 @@ class CircuitBreaker:
                 logger.warning("circuit %s → open (half_open probe failed): %s", self.name, self._last_error)
                 return
             self._failures += 1
-            if self._failures >= self.failure_threshold:
+            # Only transition + (re)stamp opened_at the moment the circuit
+            # actually opens. Without the `self._state != "open"` guard, a
+            # burst of concurrent calls already in flight when the breaker
+            # tripped each land here afterward, and every one of them re-ran
+            # this block (since self._failures stays >= threshold forever),
+            # pushing self._opened_at forward each time. That kept the
+            # recovery_timeout countdown perpetually restarting, so the
+            # circuit could stay open far longer than recovery_timeout
+            # instead of moving to half_open on schedule.
+            if self._state != "open" and self._failures >= self.failure_threshold:
                 self._state = "open"
                 self._opened_at = time.time()
                 logger.warning(

@@ -420,6 +420,32 @@ async def dhan_account(admin: str = Depends(require_admin), db: Session = Depend
 
 
 # ── Routes: risk config (gate 3) ────────────────────────────────────────────
+@app.get("/risk-config/{mode}")
+async def get_risk_config(mode: str, db: Session = Depends(get_db)):
+    """Read-only, no admin auth — matches the public-ish pattern of GET
+    /status/{mode}. Returns the same fields POST /risk-config accepts so
+    the frontend can populate its risk-config form without a separate
+    /status call.  Diagnostic log showed HTTP 404 on this exact endpoint."""
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    risk = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
+    if risk is None:
+        raise HTTPException(status_code=404, detail=f"No risk config row for mode={mode}")
+    return {
+        "mode": mode,
+        "risk_per_trade_pct": risk.risk_per_trade_pct,
+        "max_daily_loss_pct": risk.max_daily_loss_pct,
+        "max_concurrent_positions": risk.max_concurrent_positions,
+        "max_portfolio_risk_pct": risk.max_portfolio_risk_pct,
+        "stale_data_seconds": risk.stale_data_seconds,
+        "max_tick_volatility_mult": risk.max_tick_volatility_mult,
+        "allow_pyramiding": risk.allow_pyramiding,
+        "updated_at": iso_utc(risk.updated_at) if risk.updated_at else None,
+        "updated_by": risk.updated_by,
+    }
+
+
 @app.post("/risk-config")
 async def update_risk_config(body: RiskConfigUpdate, authorization: str = Header(default=""), db: Session = Depends(get_db)):
     mode = body.mode.upper()

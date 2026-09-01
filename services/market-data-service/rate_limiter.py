@@ -226,6 +226,27 @@ _yf_hardcap_pool = _cf.ThreadPoolExecutor(
 )
 
 
+def _breaker_allows_call() -> bool:
+    """Return False (and log) if the shared yfinance circuit breaker is open.
+    Called at the top of every patched yfinance call site BEFORE acquire() so
+    a tripped breaker fails in milliseconds rather than paying the full
+    rate-limiter wait (up to max_wait=20s) and the 18s hard timeout on every
+    subsequent call in a stuck loop.
+    """
+    try:
+        from circuit_breaker import get_breaker
+        br = get_breaker("yfinance", failure_threshold=6, recovery_timeout=120)
+        if not br.allow():
+            logger.warning(
+                "yfinance circuit open — skipping rate-limiter wait; retry in %.0fs",
+                br.retry_after(),
+            )
+            return False
+    except Exception:
+        pass
+    return True
+
+
 def _yf_call_with_hard_timeout(fn, *args, **kwargs):
     """Run `fn(*args, **kwargs)` on a helper thread and enforce a hard
     wall-clock ceiling. Raises TimeoutError instead of letting a stuck
@@ -300,6 +321,8 @@ def patch_yfinance() -> bool:
         _orig_download = yf.download
 
         def _patched_download(*args, **kwargs):
+            if not _breaker_allows_call():
+                raise RuntimeError("yfinance circuit open; retry later")
             tickers_arg = kwargs.get("tickers") or (args[0] if args else "")
             # A batch yf.download("A.NS B.NS C.NS ...") is ONE HTTP request to
             # Yahoo (yfinance chunks internally), so charging one token per
@@ -323,6 +346,8 @@ def patch_yfinance() -> bool:
             _orig_info_getter = _TickerCls.info.fget if isinstance(_TickerCls.info, property) else None
 
             def _patched_history(self, *args, **kwargs):
+                if not _breaker_allows_call():
+                    raise RuntimeError("yfinance circuit open; retry later")
                 acquire("yfinance", weight=1)
                 return _yf_call_with_hard_timeout(_orig_history, self, *args, **kwargs)
 
@@ -333,6 +358,8 @@ def patch_yfinance() -> bool:
                     # .info triggers Yahoo's quoteSummary endpoint — the most
                     # crumb/auth-sensitive call yfinance makes, so weight it
                     # heavier than a plain history() request.
+                    if not _breaker_allows_call():
+                        raise RuntimeError("yfinance circuit open; retry later")
                     acquire("yfinance", weight=2)
                     return _yf_call_with_hard_timeout(_orig_info_getter, self)
 

@@ -1121,20 +1121,37 @@ def _get_momentum_movers() -> List[str]:
             len(largecap_seed), min(80, len(midsmall_seed)), len(general_sample),
             len(general_pool), len(seed), len(movers),
         )
+        # BUG FIX (2026-09-01, round 15): this used to call yf.Ticker(...).history()
+        # once PER SYMBOL, sequentially — up to 180 blocking network round-trips
+        # in-process. That's what made GET /scan/universe time out at 20s (the
+        # diagnostic script's own client timeout; unthrottled the loop actually
+        # runs for minutes). It also bypassed market-data-service's shared
+        # yfinance rate limiter/circuit breaker entirely, adding an uncoordinated
+        # burst of Yahoo calls on top of whatever market-data-service was already
+        # throttling. Fix: delegate to the same POST /quotes/bulk endpoint the
+        # rest of this codebase already uses for exactly this problem (see
+        # bulk_yahoo_download_prices / run_bulk_yahoo_price_feed) — ONE
+        # yf.download() call for the whole seed, routed through the existing
+        # rate limiter, with kv-cache/live-feed short-circuiting for anything
+        # already fresh. Trade-off: /quotes/bulk only carries today's
+        # day_change_pct, not 5-day history, so the week_chg>=5% leg is dropped
+        # here — day_chg alone is still the dominant volume-shock signal.
+        try:
+            from data_feed import bulk_yahoo_download_prices
+            bulk_quotes = bulk_yahoo_download_prices(seed)
+        except Exception as e:
+            logger.warning("momentum_movers bulk quote fetch failed: %s", e)
+            bulk_quotes = {}
         for sym in seed:
-            try:
-                yf_ticker = resolve_ns_ticker(sym)
-                if not yf_ticker:
-                    continue  # known non-NSE / delisted — skip, don't burn a call
-                hist = yf.Ticker(yf_ticker).history(period="5d", interval="1d")
-                if hist is None or hist.empty or len(hist) < 2:
-                    continue
-                day_chg = (float(hist["Close"].iloc[-1]) - float(hist["Close"].iloc[-2])) / float(hist["Close"].iloc[-2]) * 100
-                week_chg = (float(hist["Close"].iloc[-1]) - float(hist["Close"].iloc[0])) / float(hist["Close"].iloc[0]) * 100
-                if abs(day_chg) >= 5.0 or abs(week_chg) >= 5.0:
-                    movers.add(sym)
-            except Exception:
+            q = bulk_quotes.get(sym)
+            if not isinstance(q, dict):
                 continue
+            try:
+                day_chg = float(q.get("day_change_pct"))
+            except (TypeError, ValueError):
+                continue
+            if abs(day_chg) >= 5.0:
+                movers.add(sym)
 
     out = sorted(movers)
     logger.info("Momentum movers collected: %s symbols", len(out))

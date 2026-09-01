@@ -37,6 +37,7 @@ from portfolio.portfolio import get_account, open_positions, record_real_order_s
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
 from tz_utils import is_market_open_ist
 import pipeline_status as pstat
+from execution.dhan_client import round_to_tick
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
 try:
@@ -330,7 +331,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 _pstop_pct, _ptgt_pct = _atr_stop_target_pct(
                     _clamp_for_atr(pv.atr / pv.price * 100.0) if pv.atr else None
                 )
-                _p_entry = round(pv.price * (1 + config.ENTRY_ZONE_UPPER_PCT / 100.0 / 2), 2)
+                _p_entry = round_to_tick(pv.price * (1 + config.ENTRY_ZONE_UPPER_PCT / 100.0 / 2))
                 _p_stop  = round(pv.price * (1 - _pstop_pct / 100.0), 2)
                 _p_tgt   = round(pv.price * (1 + _ptgt_pct / 100.0), 2)
                 _wait(
@@ -366,7 +367,16 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # affect qty, risk sizing, or order placement, which still happen
         # only after gates 3-5 pass below.) ───────────────────────────────
         stop_pct, target_pct = _atr_stop_target_pct(atr_pct)
-        entry_price  = round(tick.price * (1 + config.ENTRY_ZONE_UPPER_PCT / 100.0 / 2), 2)
+        # 2026-09-01 fix: entry_price is the actual LIMIT price sent to Dhan —
+        # must be a valid NSE tick (₹0.05 multiple) or the broker rejects the
+        # order outright. See execution/dhan_client.py's TICK_SIZE comment —
+        # this was previously a plain 2dp round, which is off-tick ~80% of
+        # the time and was silently killing risk-approved BUYs at the
+        # "Dhan placement failed" step below with no distinct signal that
+        # tick size was the cause. stop_price/target_price stay plain
+        # rounding — they're internal trigger levels compared against a
+        # continuous LTP, never sent to the broker as an order price.
+        entry_price  = round_to_tick(tick.price * (1 + config.ENTRY_ZONE_UPPER_PCT / 100.0 / 2))
         stop_price   = round(tick.price * (1 - stop_pct   / 100.0), 2)
         target_price = round(tick.price * (1 + target_pct / 100.0), 2)
         per_share_risk = entry_price - stop_price

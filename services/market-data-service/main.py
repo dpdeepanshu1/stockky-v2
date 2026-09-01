@@ -779,7 +779,13 @@ SMART_SYMBOL_MAP = {
 # but callers that check is_known_delisted() first can avoid the network
 # round-trip entirely and purge the row instead of "repairing" it forever.
 KNOWN_DELISTED_SYMBOLS = {
-    "TATAMTRDVR",  # merged into TATAMOTORS 2024-08-30 (7 ordinary : 10 DVR)
+    "TATAMTRDVR",   # merged into TATAMOTORS 2024-08-30 (7 ordinary : 10 DVR)
+    # Confirmed via Yahoo 404 logs on 2026-09-01 — both symbols returned
+    # "Quote not found" / "possibly delisted; no price data found" on every
+    # single cycle, burning rate-limiter slots and contributing to the
+    # 288s candidate-fetch stall.  Add here so they short-circuit instantly.
+    "AAKASH",       # AAKASH.BO — not found on Yahoo/BSE
+    "ANNAPURNA",    # ANNAPURNA.BO — not found on Yahoo/BSE
 }
 
 
@@ -870,6 +876,10 @@ class QuoteResponse(BaseModel):
     """
     Quote-only schema. Fundamentals (pe_ratio, market_cap) stay Optional=None —
     never inject fake 0s that poison Neon merges / scanners / ML.
+    atr: 14-period Average True Range in price units (₹).  Populated only when
+    the yfinance OHLCV path runs (period=2d gives us at least 2 candles; for a
+    proper 14-period value the /history endpoint is used). None when the fast
+    AngelOne/Yahoo WS path serves the quote — callers must not treat None as 0.
     """
     symbol: str
     name: Optional[str] = None
@@ -880,6 +890,7 @@ class QuoteResponse(BaseModel):
     day_high: Optional[float] = None
     day_low: Optional[float] = None
     volume: Optional[int] = None
+    atr: Optional[float] = None         # 14-period ATR in ₹; None when not computable
     market_cap: Optional[float] = None  # fundamental service owns this
     pe_ratio: Optional[float] = None    # fundamental service owns this
     source: Optional[str] = "unknown"
@@ -964,6 +975,10 @@ def _pad_quote_response(sym: str, data: Optional[dict] = None) -> dict:
         "day_high": high,
         "day_low": low,
         "volume": vol,
+        # ATR: pass through only when caller explicitly provides it (never invent).
+        # The yfinance OHLCV path computes it from history; AngelOne/WS paths
+        # leave it absent (callers read _cached_atr() from feed.py instead).
+        "atr": _f("atr"),
         # Fundamentals: pass through only if explicitly provided (never invent)
         "market_cap": _f("market_cap"),
         "pe_ratio": _f("pe_ratio"),
@@ -1016,7 +1031,9 @@ def _is_rate_limit_error(err: Exception) -> bool:
 
 def _yahoo_ohlcv_quote(symbol: str) -> Optional[dict]:
     """
-    Real candle metrics via yfinance period=2d.
+    Real candle metrics via yfinance period=1mo/1d.
+    Fetches 1mo of daily bars instead of just 2d so we can compute a proper
+    14-period ATR (True Range needs at least 15 bars; 2d gave only 2).
     Returns None on failure — never fake zeros.
     """
     if _in_cooldown("yfinance"):
@@ -1027,7 +1044,7 @@ def _yahoo_ohlcv_quote(symbol: str) -> Optional[dict]:
     for ticker in tickers:
         try:
             t = yf.Ticker(ticker)
-            hist = t.history(period="2d")
+            hist = t.history(period="1mo", interval="1d")
             if hist is None or hist.empty or "Close" not in hist.columns:
                 continue
             latest = hist.iloc[-1]
@@ -1035,8 +1052,8 @@ def _yahoo_ohlcv_quote(symbol: str) -> Optional[dict]:
             if price != price or price <= 0:
                 continue
             high = float(latest["High"]) if "High" in hist.columns else None
-            low = float(latest["Low"]) if "Low" in hist.columns else None
-            vol = None
+            low  = float(latest["Low"])  if "Low"  in hist.columns else None
+            vol  = None
             if "Volume" in hist.columns:
                 try:
                     vol = int(float(latest["Volume"]))
@@ -1053,6 +1070,25 @@ def _yahoo_ohlcv_quote(symbol: str) -> Optional[dict]:
             change_pct = None
             if prev_close and prev_close > 0:
                 change_pct = round(((price - prev_close) / prev_close) * 100, 2)
+
+            # ── Compute 14-period ATR from the month of OHLC data ─────────────
+            atr_val: Optional[float] = None
+            if len(hist) >= 15 and "High" in hist.columns and "Low" in hist.columns:
+                try:
+                    closes = list(hist["Close"])
+                    highs  = list(hist["High"])
+                    lows   = list(hist["Low"])
+                    trs = []
+                    for i in range(1, len(closes)):
+                        h, l, pc = float(highs[i]), float(lows[i]), float(closes[i - 1])
+                        if h > 0 and l > 0 and pc > 0:
+                            trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+                    if len(trs) >= 14:
+                        atr_val = sum(trs[-14:]) / 14
+                except Exception:
+                    atr_val = None
+            # ─────────────────────────────────────────────────────────────────
+
             base = ticker.replace(".NS", "").replace(".BO", "")
             return {
                 "symbol": base,
@@ -1062,8 +1098,9 @@ def _yahoo_ohlcv_quote(symbol: str) -> Optional[dict]:
                 "previous_close": prev_close,
                 "day_change_pct": change_pct,
                 "day_high": high if high == high else None,
-                "day_low": low if low == low else None,
+                "day_low":  low  if low  == low  else None,
                 "volume": vol,
+                "atr": atr_val,
                 "source": "yahoo",
                 "yahoo_ticker": ticker,
                 "fetched_at": datetime.utcnow().isoformat(),

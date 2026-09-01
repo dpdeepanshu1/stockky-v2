@@ -330,6 +330,32 @@ async def _prefetch_quotes_bulk(client: httpx.AsyncClient, symbols: list[str]) -
 
 # ── Analysis helpers ──────────────────────────────────────────────────────────
 
+_ATR_WINDOW = 14
+
+
+def _compute_atr_from_candles(candles: list) -> Optional[float]:
+    """14-period ATR (simple average of true ranges) from OHLC candle dicts.
+    Returns None if there are fewer than _ATR_WINDOW+1 valid candles.
+    Used by _multi_tf_analysis and _volume_shock_analysis so both can derive
+    ATR from candles they already fetched — no extra HTTP call needed."""
+    if not candles or len(candles) < _ATR_WINDOW + 1:
+        return None
+    try:
+        trs = []
+        for i in range(1, len(candles)):
+            h  = float(candles[i].get("high")  or 0)
+            l  = float(candles[i].get("low")   or 0)
+            pc = float(candles[i - 1].get("close") or 0)
+            if h <= 0 or l <= 0 or pc <= 0:
+                continue
+            trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+        if len(trs) < _ATR_WINDOW:
+            return None
+        return sum(trs[-_ATR_WINDOW:]) / _ATR_WINDOW
+    except Exception:
+        return None
+
+
 def _pct_return(candles: list[dict]) -> Optional[float]:
     """Return percentage change from first open to last close. None if < 2 bars."""
     if len(candles) < 2:
@@ -521,11 +547,16 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
                     }
 
     # ── Check 5: ATR volatility cap ───────────────────────────────────────────
+    # ATR is computed from the 1m (1mo/1d) candles already fetched above —
+    # quote.get("atr") was always None because market-data-service's /quote
+    # endpoint never computes or returns ATR, and the AngelOne tick feed
+    # carries no history.  Computing from candles in-hand costs nothing extra.
     atr_pct: Optional[float] = None
-    if quote and current_price > 0:
-        atr = quote.get("atr")
-        if atr:
-            atr_pct = round(float(atr) / current_price * 100, 2)
+    candles_1m_for_atr = fetched.get("1m")
+    if isinstance(candles_1m_for_atr, list) and current_price > 0:
+        atr_val = _compute_atr_from_candles(candles_1m_for_atr)
+        if atr_val and atr_val > 0:
+            atr_pct = round(atr_val / current_price * 100, 2)
             if atr_pct > MAX_ATR_PCT:
                 return {
                     "reject_reason": (
@@ -729,10 +760,14 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict
         }
 
     # ── Position-safety check: ATR volatility cap (kept — see module docstring) ──
+    # Compute ATR from the 1mo/1d candles already fetched by hist_task above.
+    # quote.get("atr") was always None (market-data-service /quote never
+    # computes or returns ATR; AngelOne tick carries no history), so this is
+    # always a real improvement over the prior no-op.
     atr_pct: Optional[float] = None
-    atr = quote.get("atr")
-    if atr and current_price > 0:
-        atr_pct = round(float(atr) / current_price * 100, 2)
+    atr_val = _compute_atr_from_candles(candles)
+    if atr_val and atr_val > 0 and current_price > 0:
+        atr_pct = round(atr_val / current_price * 100, 2)
         if atr_pct > MAX_ATR_PCT:
             return {
                 "reject_reason": (

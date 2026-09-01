@@ -38,6 +38,38 @@ _security_cache_loaded_at: float = 0.0
 
 NSE_EQ_SEGMENT = "NSE_EQ"
 
+# 2026-09-01 fix: NSE equity limit orders must be priced in multiples of this
+# tick size (₹0.05, uniform across price bands for equities on NSE). Nothing
+# in this service ever enforced that — entry_engine/entry.py computed
+# entry_price as tick.price * 1.0025 rounded to 2dp, which lands on an
+# invalid price the overwhelming majority of the time (spot-checked: ~80% of
+# sampled prices). manual_engine.py's LIMIT ticket price had the same gap.
+# A price like ₹847.41 (not a multiple of 0.05) is rejected outright by
+# Dhan/the exchange, which surfaces here as "Risk-approved but Dhan
+# placement failed" — a silent, systemic reason a risk-approved BUY never
+# actually enters, indistinguishable in the logs from a genuine broker
+# rejection. round_to_tick() is applied at the source (entry.py,
+# manual_engine.py) so the stored decision/order price matches what's
+# actually sent, AND again here in place_order() as a defense-in-depth
+# safety net for any caller that forgets.
+TICK_SIZE = 0.05
+
+
+def round_to_tick(price: float, tick_size: float = TICK_SIZE) -> float:
+    """Round `price` to the nearest valid exchange tick (default ₹0.05).
+    Uses banker's-rounding-safe integer math (round the tick COUNT, not the
+    float) to avoid floating-point drift like round(8.475/0.05) landing on
+    169 vs 170 depending on binary representation. Returns the input
+    unchanged if it's <= 0 (nothing to round) or tick_size is invalid."""
+    try:
+        price = float(price)
+        if price <= 0 or tick_size <= 0:
+            return price
+        ticks = round(price / tick_size)
+        return round(ticks * tick_size, 2)
+    except (TypeError, ValueError):
+        return price
+
 
 class SecurityNotResolvedError(Exception):
     pass
@@ -319,6 +351,18 @@ def place_order(
     if not is_armed:
         raise DhanNotArmedError("Real trading is not armed — refusing to place order.")
     client = _get_sdk_client(db)
+
+    # Defense-in-depth: see TICK_SIZE/round_to_tick module comment above.
+    # MARKET orders correctly send price=0 (no limit) — never touch that.
+    if order_type == "LIMIT" and price:
+        tick_safe_price = round_to_tick(price)
+        if tick_safe_price != price:
+            logger.info(
+                "place_order: rounded LIMIT price ₹%.4f -> ₹%.2f to a valid %.2f tick "
+                "(caller did not pre-round)", price, tick_safe_price, TICK_SIZE,
+            )
+        price = tick_safe_price
+
     logger.info(
         "Placing REAL order: %s %s x%s @ %s (%s, %s)",
         transaction_type, security_id, quantity, price, order_type, product_type,

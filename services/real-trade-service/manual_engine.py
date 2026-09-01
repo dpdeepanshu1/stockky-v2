@@ -129,6 +129,14 @@ async def evaluate_manual_order(
         return {"ok": False, "reason": "no_price", "detail": f"No current price available for {symbol} — try again shortly."}
 
     reference_price = req.limit_price if (order_type == "LIMIT" and req.limit_price) else tick.price
+    if order_type == "LIMIT" and reference_price:
+        # 2026-09-01 fix: a user-typed limit price (or one echoed back from
+        # an earlier preview) is very unlikely to land on a valid NSE tick
+        # (₹0.05 multiple) — see execution/dhan_client.py's TICK_SIZE
+        # comment. Round once here so the preview economics, the stored
+        # order, and what's actually sent to Dhan all agree; place_order()
+        # also re-rounds as a defense-in-depth safety net.
+        reference_price = dhan_client.round_to_tick(reference_price)
 
     # ── BUY: new/added position, full risk-engine path ─────────────────
     if side == "BUY":

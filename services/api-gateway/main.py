@@ -968,7 +968,10 @@ def _get_momentum_movers() -> List[str]:
                 payload = getter()
                 for item in (payload or {}).get("data") or []:
                     if isinstance(item, dict):
-                        sym = (item.get("symbol") or item.get("ticker") or "").upper().replace(".NS", "")
+                        raw_sym = item.get("symbol") or item.get("ticker") or ""
+                        # Same delisted/index/rename gate as step 1 above —
+                        # these boards weren't routed through it before.
+                        sym = _clean_equity_symbol(raw_sym)
                         if sym:
                             movers.add(sym)
             except Exception:
@@ -982,7 +985,7 @@ def _get_momentum_movers() -> List[str]:
         for row in data or []:
             if not isinstance(row, dict):
                 continue
-            sym = (row.get("symbol") or "").upper()
+            sym = _clean_equity_symbol(row.get("symbol") or "")
             chg = row.get("change_pct") or row.get("pChange")
             try:
                 if sym and chg is not None and abs(float(chg)) >= 3.0:
@@ -1135,7 +1138,10 @@ def _get_event_symbols() -> List[str]:
     out = []
     seen = set()
     for s in symbols:
-        su = str(s).upper().replace(".NS", "").replace(".BO", "")
+        # Delisted/index/rename gate — EVENT_URL's corporate-events feed can
+        # reference a symbol that's since delisted or merged; nothing here
+        # previously checked that before it entered the scan universe.
+        su = _clean_equity_symbol(s)
         if su and su not in seen:
             seen.add(su)
             out.append(su)
@@ -1149,7 +1155,12 @@ def _get_bulk_deal_symbols() -> List[str]:
     seen = set()
 
     def _add(sym: str):
-        s = (sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        # Route through _clean_equity_symbol (delisted/index/rename gate) —
+        # this source previously only normalized case/suffix, which is why
+        # a delisted or merged-away symbol on NSE's bulk/block-deals board
+        # could reach the scan universe untouched. See the delisted-gate
+        # comment in _build_scan_universe() for the full root-cause writeup.
+        s = _clean_equity_symbol(sym)
         if not s or s in seen or len(s) < 2:
             return
         seen.add(s)
@@ -1202,7 +1213,9 @@ def _get_52w_extreme_symbols() -> List[str]:
     seen = set()
 
     def _add(sym: str):
-        s = (sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        # Same delisted/index/rename gate as _get_bulk_deal_symbols._add —
+        # this 52w/gainers source had the identical gap.
+        s = _clean_equity_symbol(sym)
         if not s or s in seen:
             return
         seen.add(s)
@@ -1413,6 +1426,11 @@ def _build_scan_universe() -> List[str]:
 
     cached = _redis_get(SCAN_UNIVERSE_KEY)
     if cached and isinstance(cached, list) and len(cached) > 0:
+        # Always re-apply the delisted/index gate too, not just price — a symbol
+        # can get added to KNOWN_DELISTED (symbol_aliases.py) *after* this cache
+        # was written, and without this the stale cache would keep serving it
+        # for its full TTL instead of dropping it on the next rebuild.
+        cached = _filter_equities(cached)
         # Always re-apply ≤₹5000 gate so a stale cache cannot reintroduce high-ticket names
         return _filter_symbols_under_max_price(cached)
 
@@ -1477,13 +1495,43 @@ def _build_scan_universe() -> List[str]:
         else:
             universe.add(target)
 
+    # ── Delisted/merged gate — applied ONCE here for every source ──────────
+    # ROOT CAUSE (why delisted names were reaching the scan universe):
+    # _get_all_nse_securities() and _get_nifty_indices() already ran every
+    # symbol through _clean_equity_symbol() (which checks is_known_delisted()
+    # from symbol_aliases.py), but that gate was applied per-source, not
+    # centrally. _get_bulk_deal_symbols(), _get_52w_extreme_symbols() and
+    # _get_event_symbols() built their output with a bare uppercase/suffix
+    # normalizer (_add() in each function) and never called
+    # _clean_equity_symbol() at all — so a delisted or merged-away ticker
+    # surfacing through NSE's bulk-deal board, a 52-week-high/gainers scrape,
+    # or the corporate-events feed sailed straight into `universe` with zero
+    # eligibility check. _get_momentum_movers() had the same gap in its
+    # steps 2-3 (gateway's own gainers/losers/most-active, and the
+    # yfinance seed's `movers.add(sym)` calls). Watchlist/searched entries
+    # were never checked either. This loop is the single point every source
+    # funnels through before scoring, so gating HERE (via _clean_equity_symbol,
+    # the same function _get_all_nse_securities already trusts) closes the
+    # gap for all current sources and any future one, instead of patching
+    # each source's _add() helper individually and risking the next new
+    # source repeating the same omission.
     clean = []
     seen = set()
+    dropped_delisted = 0
     for s in universe:
-        s = s.upper().replace(".NS", "").replace(".BO", "")
-        if s and s not in seen:
-            seen.add(s)
-            clean.append(s)
+        c = _clean_equity_symbol(s)
+        if c is None:
+            if str(s or "").strip():
+                dropped_delisted += 1
+            continue
+        if c not in seen:
+            seen.add(c)
+            clean.append(c)
+    if dropped_delisted:
+        logger.info(
+            "Scan universe: dropped %d delisted/merged/invalid symbols before build",
+            dropped_delisted,
+        )
 
     if not clean:
         fallback = [

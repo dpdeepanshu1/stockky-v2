@@ -737,9 +737,23 @@ def run_t1_sweep(db_session=None, max_batch: int = 80):
 
 
 
-def run_t5_sweep(db_session=None):
-    """Reliable T+5 evaluation sweep."""
+def run_t5_sweep(db_session=None, max_batch: int = 80):
+    """Reliable T+5 evaluation sweep for cron / GitHub Actions.
+
+    BUG FIX (2026-09-01): this called `evaluate_t5()` — no prediction_id,
+    which evaluate_t5() requires — behind a `"evaluate_t5" in dir()` guard.
+    dir() with no arguments returns the CURRENT LOCAL SCOPE, not module
+    globals; evaluate_t5 is a module-level function never locally bound
+    here, so the guard was always False and this always returned the fake
+    placeholder {"ok": True, ..., "evaluated": 0} without evaluating a
+    single prediction — even if the guard had been fixed, the bare
+    evaluate_t5() call itself would have raised (missing prediction_id).
+    evaluate_pending_predictions('T+5', ...) is the real batch sweep
+    (already used correctly by evaluate_all_predictions() above and by
+    run_t1_sweep's T+1 equivalent) — call that instead, matching
+    run_t1_sweep's pattern exactly.
+    """
     try:
-        return evaluate_t5() if "evaluate_t5" in dir() else {"ok": True, "message": "evaluate_t5 invoked", "evaluated": 0}
+        return evaluate_pending_predictions("T+5", max_batch=max_batch)
     except Exception as ex:
         return {"ok": False, "error": str(ex)}

@@ -980,8 +980,21 @@ def _get_momentum_movers() -> List[str]:
         logger.debug("gateway movers: %s", e)
 
     # 3) Gateway's own /market endpoints (yfinance-backed) when available
+    #
+    # BUG FIX (2026-09-01): the guard here was `"_get_nifty50_data" in dir()`
+    # — dir() with no arguments returns names in the CURRENT LOCAL SCOPE,
+    # not the module's globals, and _get_nifty50_data is never assigned as
+    # a local variable inside this function (it's only ever called). So
+    # this condition was always False, `data` was always `[]`, and this
+    # entire source has contributed zero movers since it was added —
+    # silently, since the surrounding try/except also swallows the dead
+    # branch without a trace. _get_nifty50_data is a plain module-level
+    # function defined earlier in this same file (already called directly,
+    # unguarded, elsewhere — see market_top_gainers/losers/most_active
+    # above) — call it directly; the existing try/except already protects
+    # this whole block from any real failure.
     try:
-        data = _get_nifty50_data() if "_get_nifty50_data" in dir() else []
+        data = _get_nifty50_data()
         for row in data or []:
             if not isinstance(row, dict):
                 continue
@@ -7743,10 +7756,16 @@ async def catalyst_alert_scan(
                     notified = True
                 except Exception as e:
                     logger.warning("catalyst telegram failed: %s", e)
+                    # BUG FIX (2026-09-01): `"send_picks_to_telegram" in dir()`
+                    # checks the CURRENT LOCAL SCOPE, not module globals —
+                    # send_picks_to_telegram is a module-level function (never
+                    # a local variable here), so this guard was always False
+                    # and this fallback notify path never actually ran when
+                    # the primary /notify POST above failed. Call it directly;
+                    # the surrounding try/except already covers a real failure.
                     try:
-                        if "send_picks_to_telegram" in dir():
-                            send_picks_to_telegram({"recommendations": unique[:10]})
-                            notified = True
+                        send_picks_to_telegram({"recommendations": unique[:10]})
+                        notified = True
                     except Exception as e2:
                         logger.warning("catalyst telegram fallback: %s", e2)
 

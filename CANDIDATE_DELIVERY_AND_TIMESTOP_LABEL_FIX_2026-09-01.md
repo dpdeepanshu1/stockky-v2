@@ -170,3 +170,57 @@ touched lines have had a fresh read), everything outside
 `real-trade-service` (analysis-intelligence-service, decision-prediction-
 service, notification-scheduler-service, api-gateway, market-data-service
 beyond `candidates.py`'s delivery-pct fix).
+
+## Issue 5 — broken `"name" in dir()` feature-detection guards (3 sites, real functions silently never called)
+
+**Root cause pattern:** `dir()` called with no arguments returns names in
+the *current local scope*, not the module's globals. Several places in
+this codebase used `"some_module_level_function" in dir()` as a guard,
+presumably intending "does this function exist / is it importable" — but
+since the function is a plain module-level def and never a local variable
+in the calling function, the condition is always `False`. Each site quietly
+fell through to a fallback/no-op branch instead of raising a clear error,
+so the breakage was invisible in logs.
+
+1. **`services/api-gateway/main.py` — `_get_momentum_movers()`, source 3**
+   (Gateway's own yfinance-backed Nifty50 mover check). Guard always False
+   → `data = []` always → this entire momentum source has contributed zero
+   symbols to `/scan/universe`'s `momentum_movers` field since it was
+   added, which `real-trade-service/candidate_engine/candidates.py`'s
+   `_rows_from_volume_shock()` consumes directly for the volume_shock
+   candidate track. Fixed: call `_get_nifty50_data()` directly (already
+   called unguarded elsewhere in the same file).
+
+2. **`services/api-gateway/main.py` — catalyst-alert Telegram fallback.**
+   Guard on `send_picks_to_telegram` (a real, working module-level
+   function) always False → the fallback notify path never ran when the
+   primary `/notify` POST failed. Fixed: call directly.
+
+3. **`services/decision-prediction-service/training/evaluate.py` —
+   `run_t5_sweep()`.** Guard on `evaluate_t5` always False → always
+   returned a fake `{"ok": True, ..., "evaluated": 0}` without evaluating
+   anything (and even a fixed guard would have then called `evaluate_t5()`
+   with no `prediction_id`, which the function requires — a second bug
+   stacked on the first). Fixed to call `evaluate_pending_predictions("T+5",
+   max_batch=max_batch)`, the real batch sweep already used correctly by
+   `evaluate_all_predictions()` and mirroring `run_t1_sweep`'s own pattern.
+   Note: grepped the whole repo — neither `run_t5_sweep` nor `run_t1_sweep`
+   currently has an in-repo caller, so this one's live-impact is unconfirmed
+   (likely an external cron/GHA entry point not present in this archive).
+
+**Checked and confirmed NOT bugs** (same `dir()`/`locals()` pattern,
+different context): `main.py`'s `top_picks_short`/`top_picks_mid`/
+`top_picks_long`/`final_verdict_scan` guards (api-gateway ~L3285-3289) and
+`decision/main.py`'s `mh` guard (~L1523) — in both cases the checked name
+IS a local variable unconditionally assigned earlier in the same
+straight-line function body, so `in dir()`/`in locals()` correctly
+evaluates True every time execution reaches that point; redundant/
+defensive, not broken. Also `main.py`'s `_redis_delete` guard
+(~L8535) — the guard is equally broken, but `_redis_delete` doesn't exist
+anywhere in the codebase either, so "fixing" the guard would just trade a
+silent no-op for a caught `NameError`; left as-is since two other deletion
+paths in the same loop (`_kv_cache.kv_delete`, `_redis.delete`) already
+cover the actual cleanup.
+
+Grepped analysis-intelligence-service, notification-scheduler-service, and
+market-data-service for the same `in dir()` pattern — none found there.

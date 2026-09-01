@@ -229,16 +229,48 @@ _yf_hardcap_pool = _cf.ThreadPoolExecutor(
 def _yf_call_with_hard_timeout(fn, *args, **kwargs):
     """Run `fn(*args, **kwargs)` on a helper thread and enforce a hard
     wall-clock ceiling. Raises TimeoutError instead of letting a stuck
-    call hang forever; callers already wrap these in try/except."""
+    call hang forever; callers already wrap these in try/except.
+
+    2026-09-01 fix: this used to submit straight to the hardcap pool on
+    every call, with no circuit-breaker check — so once Yahoo started
+    black-holing calls (e.g. a bulk /quotes/bulk chunk loop with several
+    chunks in a row), EVERY chunk still paid the full 18s hard timeout one
+    after another (candidates.py's _prefetch_quotes_bulk loop is
+    sequential), which is exactly what stacked up into a 300+s "Fetching
+    candidates" stall and surfaced as a raw dashboard 504. main.py's
+    single-ticker path (_with_retry) already consulted the shared
+    "yfinance" breaker before calling; this batch entry point (yf.download,
+    used by /quotes/bulk) did not. Checking it here means the SECOND chunk
+    onward fails in milliseconds instead of 18s once the breaker has
+    already tripped from the first chunk's failure.
+    """
+    try:
+        from circuit_breaker import get_breaker
+        br = get_breaker("yfinance", failure_threshold=6, recovery_timeout=120)
+    except Exception:
+        br = None
+
+    if br is not None and not br.allow():
+        raise RuntimeError(f"yfinance circuit open; retry in {br.retry_after():.0f}s")
+
     fut = _yf_hardcap_pool.submit(fn, *args, **kwargs)
     try:
-        return fut.result(timeout=YFINANCE_HARD_TIMEOUT_SEC)
+        result = fut.result(timeout=YFINANCE_HARD_TIMEOUT_SEC)
+        if br is not None:
+            br.record_success()
+        return result
     except _cf.TimeoutError:
         logger.warning(
             "yfinance call exceeded hard timeout of %.0fs — failing fast instead of hanging the request",
             YFINANCE_HARD_TIMEOUT_SEC,
         )
+        if br is not None:
+            br.record_failure("hard timeout")
         raise TimeoutError(f"yfinance call exceeded {YFINANCE_HARD_TIMEOUT_SEC:.0f}s hard timeout")
+    except Exception as e:
+        if br is not None:
+            br.record_failure(str(e))
+        raise
 
 
 def patch_yfinance() -> bool:

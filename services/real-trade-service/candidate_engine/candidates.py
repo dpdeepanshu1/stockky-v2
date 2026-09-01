@@ -192,8 +192,18 @@ _SOURCES = {
 # succeed instead of all of them queuing behind each other into a timeout.
 CANDIDATE_ANALYSIS_CONCURRENCY = int(os.getenv("CANDIDATE_ANALYSIS_CONCURRENCY", "15"))
 
-VOLUME_SHOCK_MULTIPLIER = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MULTIPLIER", "2.0"))
-VOLUME_SHOCK_MIN_RETURN_PCT = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MIN_RETURN_PCT", "5.0"))
+# 2026-09-01 tuning: loosened from 2.0x/5.0% to widen the entry gate so more
+# of /scan/universe's momentum_movers survive into the candidate list. This
+# trades precision for volume — the 30-Aug/re-backtest numbers in the block
+# above were measured at 2.0x/5.0%, not at these looser values, so treat the
+# base-tier win-rate/mean-return figures here as directional, not exact,
+# until re-backtested at the new cutoffs. HIGH_CONVICTION/UPPER_CIRCUIT
+# tiers below are left untouched — those are the strong, well-evidenced
+# signals and loosening them would dilute the one part of this gate with
+# the most backtest support. Both remain env-overridable with no code
+# change if this turns out too loose (or not loose enough) in practice.
+VOLUME_SHOCK_MULTIPLIER = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MULTIPLIER", "1.5"))
+VOLUME_SHOCK_MIN_RETURN_PCT = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MIN_RETURN_PCT", "3.5"))
 
 # HIGH CONVICTION tier — from 1-year NSE backtest (30-Aug-2026):
 # vol >= 15x AND return >= 15% → 55.7% next-day win rate, mean +2.28%
@@ -302,30 +312,56 @@ async def _fetch_quote(client: httpx.AsyncClient, symbol: str) -> Optional[dict]
 BULK_QUOTE_CHUNK_SIZE = int(os.getenv("CANDIDATE_BULK_QUOTE_CHUNK_SIZE", "40"))
 BULK_QUOTE_TIMEOUT_SECONDS = float(os.getenv("CANDIDATE_BULK_QUOTE_TIMEOUT_SECONDS", "90.0"))
 
+# 2026-09-01 incident fix (504 / 300+s "Fetching candidates" stall): this
+# loop used to `await` one chunk POST at a time in a plain `for`, so N
+# chunks cost the SUM of every chunk's time. When Yahoo is having a bad
+# day, each chunk's yf.download() pays the full YFINANCE_HARD_TIMEOUT_SEC
+# (18s) before failing — a ~330-symbol volume_shock universe at chunk
+# size 40 is 9 chunks, i.e. 9 x 18s = 162s minimum sequential, more once
+# the rate-limiter's own queuing/backoff is added on top, which is what
+# produced the exact 333.9s stall + dashboard 504 in the 2026-09-01
+# incident log. Firing chunks concurrently (bounded, so we don't slam
+# market-data-service or the shared yfinance bucket any harder than
+# before — the token bucket + circuit breaker downstream still cap real
+# throughput) turns that into roughly ONE chunk's wall-clock time instead
+# of the sum. Paired with rate_limiter.py's new breaker check on the bulk
+# yf.download() path, a Yahoo outage now fails the whole prefetch in
+# roughly one hard-timeout window, not one per chunk.
+BULK_QUOTE_CONCURRENCY = int(os.getenv("CANDIDATE_BULK_QUOTE_CONCURRENCY", "4"))
+
 
 async def _prefetch_quotes_bulk(client: httpx.AsyncClient, symbols: list[str]) -> None:
     """Best-effort: warm market-data-service's quote cache for `symbols` via
-    chunked POST /quotes/bulk calls. Never raises — if a chunk fails (or
-    /quotes/bulk itself has an issue), the per-symbol _fetch_quote() fallback
-    that runs afterward still works exactly as it did before this fix, just
-    slower for whichever symbols didn't get warmed."""
+    chunked POST /quotes/bulk calls, fired with bounded concurrency. Never
+    raises — if a chunk fails (or /quotes/bulk itself has an issue), the
+    per-symbol _fetch_quote() fallback that runs afterward still works
+    exactly as it did before this fix, just slower for whichever symbols
+    didn't get warmed."""
     unique = list(dict.fromkeys(s for s in symbols if s))
     if not unique:
         return
-    for i in range(0, len(unique), BULK_QUOTE_CHUNK_SIZE):
-        chunk = unique[i:i + BULK_QUOTE_CHUNK_SIZE]
-        try:
-            await client.post(
-                f"{MARKET_DATA_URL}/quotes/bulk",
-                json={"symbols": chunk},
-                timeout=BULK_QUOTE_TIMEOUT_SECONDS,
-            )
-        except Exception as e:
-            logger.debug(
-                "bulk quote prefetch chunk of %d symbols failed: %s: %s",
-                len(chunk), type(e).__name__, e,
-            )
-            continue
+
+    chunks = [
+        unique[i:i + BULK_QUOTE_CHUNK_SIZE]
+        for i in range(0, len(unique), BULK_QUOTE_CHUNK_SIZE)
+    ]
+    sem = asyncio.Semaphore(BULK_QUOTE_CONCURRENCY)
+
+    async def _post_chunk(chunk: list[str]) -> None:
+        async with sem:
+            try:
+                await client.post(
+                    f"{MARKET_DATA_URL}/quotes/bulk",
+                    json={"symbols": chunk},
+                    timeout=BULK_QUOTE_TIMEOUT_SECONDS,
+                )
+            except Exception as e:
+                logger.debug(
+                    "bulk quote prefetch chunk of %d symbols failed: %s: %s",
+                    len(chunk), type(e).__name__, e,
+                )
+
+    await asyncio.gather(*(_post_chunk(c) for c in chunks))
 
 
 # ── Analysis helpers ──────────────────────────────────────────────────────────

@@ -132,3 +132,41 @@ stockky-v2-main/
 ## No ops action needed
 All three fixes are pure code changes to logic already wired up — no new
 env vars, no schema migration (every touched column already exists).
+
+## Issue 4 — adaptive_thresholds.py "30 days of history" gate measured readings, not days
+
+**File:** `services/real-trade-service/adaptive_thresholds.py`
+
+`adaptive_regime_threshold()` and `adaptive_status()` gated the adaptive
+percentile calculation on `ADAPTIVE_MIN_HISTORY_DAYS` (30) by comparing it
+against `len(scores)` — the count of raw `MarketRegimeHistory` rows. But
+`record_market_score()` is called once per regime-cache refresh
+(`entry_engine`'s `_REGIME_TTL_S` = 120s, effectively once per ~180s
+auto-pilot cycle during market hours), not once per calendar day. 30 rows
+therefore accumulates in roughly an hour of a single trading session, not
+30 distinct days — the adaptive gate could start overriding the static
+`ENTRY_REGIME_MIN_SCORE` off a couple hours of intraday data, defeating the
+module's own "FALLBACK GUARANTEE" (never activate before 30 days of real
+history).
+
+**Fix:** both functions now compute the count of *distinct calendar days*
+present in the trailing-90-day window (`{r.recorded_at.date() for r in
+rows}`) and gate activation/reporting on that instead of the raw row
+count. `adaptive_status()`'s response gained `history_days_available`
+alongside the existing `history_readings_available` so the dashboard can
+show both.
+
+Audited alongside this (no bugs found, internally consistent):
+`execution/dhan_client.py`, `cycle_runner.py`, `execution/reconcile.py`,
+`execution/equity_sync.py`, `auth/dhan_credentials.py` (incl. TOTP-refresh
+interplay with `execution/auto_pilot.py`'s `_totp_refresh_loop`), and
+`market_feed/feed.py`. One cosmetic-only note: `dhan_client.py`'s module
+docstring still describes a `modify_order` re-arm check, but no
+`modify_order` function exists in the file or is called anywhere in the
+service — dead documentation, not a functional bug.
+
+**Not yet reviewed:** `risk_engine/engine.py` in full (only previously-
+touched lines have had a fresh read), everything outside
+`real-trade-service` (analysis-intelligence-service, decision-prediction-
+service, notification-scheduler-service, api-gateway, market-data-service
+beyond `candidates.py`'s delivery-pct fix).

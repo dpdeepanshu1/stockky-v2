@@ -114,13 +114,24 @@ def adaptive_regime_threshold(db: Session) -> tuple[int, str]:
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=ADAPTIVE_HISTORY_DAYS)
         rows = (
-            db.query(MarketRegimeHistory.score)
+            db.query(MarketRegimeHistory.score, MarketRegimeHistory.recorded_at)
             .filter(MarketRegimeHistory.recorded_at >= cutoff)
             .order_by(MarketRegimeHistory.recorded_at.asc())
             .all()
         )
         scores = [float(r.score) for r in rows]
-        if len(scores) < ADAPTIVE_MIN_HISTORY_DAYS:
+        # BUG FIX (2026-09-01): the "30 days of history" safety gate was
+        # comparing len(scores) — i.e. the raw READING count — against
+        # ADAPTIVE_MIN_HISTORY_DAYS. record_market_score() is called once
+        # per regime-cache refresh (~every 120s the cache is cold, per
+        # entry_engine's _REGIME_TTL_S / auto-pilot's ~180s cycle interval),
+        # not once per calendar day, so 30 readings accumulates in roughly
+        # an hour of a single trading session — the adaptive percentile then
+        # activates on a couple hours of intraday data instead of the 30
+        # distinct days the module's own docstring/FALLBACK GUARANTEE
+        # promises. Count distinct calendar days actually covered instead.
+        distinct_days = len({r.recorded_at.date() for r in rows})
+        if distinct_days < ADAPTIVE_MIN_HISTORY_DAYS:
             return static_val, "static"
 
         sorted_scores = sorted(scores)
@@ -232,11 +243,18 @@ def adaptive_status(db: Session) -> dict:
     stale = check_threshold_staleness()
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=ADAPTIVE_HISTORY_DAYS)
-        count = (
-            db.query(MarketRegimeHistory)
+        recorded_ats = [
+            r[0] for r in
+            db.query(MarketRegimeHistory.recorded_at)
             .filter(MarketRegimeHistory.recorded_at >= cutoff)
-            .count()
-        )
+            .all()
+        ]
+        count = len(recorded_ats)
+        # BUG FIX (2026-09-01): same readings-vs-days mixup as
+        # adaptive_regime_threshold() — activation/advice must be gated on
+        # distinct days observed, not raw reading rows (see that function's
+        # comment for why those diverge sharply intraday).
+        distinct_days = len({dt.date() for dt in recorded_ats})
         latest_score_row = (
             db.query(MarketRegimeHistory)
             .order_by(MarketRegimeHistory.recorded_at.desc())
@@ -245,6 +263,7 @@ def adaptive_status(db: Session) -> dict:
         latest_score = float(latest_score_row.score) if latest_score_row else None
     except Exception:
         count = 0
+        distinct_days = 0
         latest_score = None
 
     return {
@@ -252,8 +271,9 @@ def adaptive_status(db: Session) -> dict:
         "threshold_source":           source,
         "history_days_used":          ADAPTIVE_HISTORY_DAYS,
         "history_readings_available": count,
+        "history_days_available":     distinct_days,
         "min_history_needed":         ADAPTIVE_MIN_HISTORY_DAYS,
-        "adaptive_active":            count >= ADAPTIVE_MIN_HISTORY_DAYS,
+        "adaptive_active":            distinct_days >= ADAPTIVE_MIN_HISTORY_DAYS,
         "percentile_used":            ADAPTIVE_PERCENTILE,
         "static_fallback":            config.ENTRY_REGIME_MIN_SCORE,
         "latest_market_score":        latest_score,
@@ -264,9 +284,10 @@ def adaptive_status(db: Session) -> dict:
         },
         "advice": (
             "Adaptive gate is active — threshold auto-adjusts to market regime."
-            if count >= ADAPTIVE_MIN_HISTORY_DAYS
-            else f"Adaptive gate needs {ADAPTIVE_MIN_HISTORY_DAYS - count} more score readings "
-                 f"(~{ADAPTIVE_MIN_HISTORY_DAYS - count} more cycle ticks) to activate. "
+            if distinct_days >= ADAPTIVE_MIN_HISTORY_DAYS
+            else f"Adaptive gate needs {ADAPTIVE_MIN_HISTORY_DAYS - distinct_days} more distinct "
+                 f"trading day(s) of history to activate ({count} readings across "
+                 f"{distinct_days} day(s) so far). "
                  f"Using static fallback {config.ENTRY_REGIME_MIN_SCORE} until then."
         ),
     }

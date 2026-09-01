@@ -1,126 +1,150 @@
 #!/usr/bin/env bash
 ###############################################################################
-# stockky_diagnostic_round14.sh
+# stockky_diag_full.sh
 #
-# ONE script, ONE log file. Run this, then paste/upload the log file back
-# to Claude (in this chat) and I'll go through it and fix everything found
-# in one pass.
+# Comprehensive diagnostic for real-trade-service + dependencies.
+# Tests all major components: candidates, entry, exit, risk, portfolio,
+# adaptive, circuit breakers, logs, and cycle timing.
 #
-# WHAT THIS DOES (in order):
-#   0. Runs the existing stockky_test_all.sh read-only sweep (health +
-#      every safe endpoint on every service, syntax-checks every .py file)
-#   1. Triggers a REAL, FULL pipeline cycle in DEMO mode
-#        -> POST /cycle/run/DEMO
-#        This pulls REAL live market data and runs the actual candidate
-#        picking (candidate_engine), entry timing (entry_engine), and
-#        exit/sell logic (exit_engine) end-to-end, exactly like a real
-#        cycle does -- it just trades with the simulated DEMO wallet, not
-#        real money. This is what will actually exercise "how we pick the
-#        stock and when we sell" with real data.
-#   2. Times that cycle precisely (this is how we confirm/deny the 504
-#      Pipeline-tab timeout from your last screenshot -- REAL mode hit
-#      323.2s against nginx's 300s limit; we check where DEMO lands).
-#   3. Pulls the results of that cycle: candidates picked, any positions
-#      opened/closed, pipeline status, circuit breaker states, adaptive
-#      threshold status.
-#   4. Writes ALL of the above -- every request, status code, timing, and
-#      response body -- into one timestamped log file.
-#
-# WHAT THIS DELIBERATELY DOES NOT DO
-#   - Never touches REAL mode. No real orders, no real broker calls, no
-#     real money at risk, anywhere in this script.
-#   - Never arms/disarms anything or changes risk-config.
-#
-# USAGE
-#   chmod +x stockky_diagnostic_round14.sh
-#   ./stockky_diagnostic_round14.sh
-#   (then send me the printed .log file path's contents)
-#
-# ENV OVERRIDES (same as stockky_test_all.sh; sane docker-compose defaults
-# apply if unset)
-#   GATEWAY_URL MARKET_URL ANALYSIS_URL DECISION_URL NOTIF_URL TRADE_URL
+# USAGE:
+#   chmod +x stockky_diag_full.sh
+#   ./stockky_diag_full.sh
+#   (then paste the log file content back)
 ###############################################################################
 set -uo pipefail
 
 TRADE_URL="${TRADE_URL:-http://localhost:8005}"
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
+MARKET_URL="${MARKET_URL:-http://localhost:8001}"
+ANALYSIS_URL="${ANALYSIS_URL:-http://localhost:8002}"
+DECISION_URL="${DECISION_URL:-http://localhost:8004}"
+NOTIF_URL="${NOTIF_URL:-http://localhost:8008}"
 
 TS="$(date +%Y%m%d_%H%M%S)"
-LOGFILE="stockky_diagnostic_${TS}.log"
+LOGFILE="stockky_diag_full_${TS}.log"
 
 log() { echo -e "$1" | tee -a "$LOGFILE"; }
+log_cmd() { echo -e "\n--- $1 ---" | tee -a "$LOGFILE"; }
 
 : > "$LOGFILE"
 log "###############################################################"
-log "# Stockky full diagnostic -- $(date)"
+log "# Stockky FULL diagnostic -- $(date)"
 log "# host: $(hostname)  user: $(whoami)"
-log "# TRADE_URL=$TRADE_URL  GATEWAY_URL=$GATEWAY_URL"
+log "# TRADE_URL=$TRADE_URL, GATEWAY_URL=$GATEWAY_URL"
 log "###############################################################"
 
 # ---------------------------------------------------------------------------
-# STEP 0: existing safe read-only sweep, if present
+# STEP 0: Health check all services (quick, parallel)
 # ---------------------------------------------------------------------------
-if [[ -f "./stockky_test_all.sh" ]]; then
-  log "\n===== STEP 0: stockky_test_all.sh (read-only sweep) ====="
-  chmod +x ./stockky_test_all.sh
-  # tee (not >>) so you see live progress instead of a silent hang;
-  # timeout guards against wait_for looping forever if a service (e.g.
-  # frontend on :5173) simply isn't deployed here
-  timeout 300 ./stockky_test_all.sh 2>&1 | tee -a "$LOGFILE"
-  RC=${PIPESTATUS[0]}
-  if [[ $RC -eq 124 ]]; then
-    log "!! stockky_test_all.sh hit the 300s guard and was killed — likely stuck waiting on a service that isn't up (check which 'waiting for ...' line printed last above)."
-  fi
-  log "----- end of stockky_test_all.sh output -----"
-else
-  log "\n===== STEP 0: SKIPPED (stockky_test_all.sh not found in $(pwd)) ====="
-fi
+log_cmd "HEALTH CHECK (all services)"
+for port in 8000 8001 8002 8004 8005 8008; do
+  curl -s -o /dev/null -w "port $port: %{http_code}\n" -m 5 "http://localhost:$port/health" &
+done
+wait
+log ""
 
 # ---------------------------------------------------------------------------
-# STEP 1: trigger a real DEMO cycle with real market data, timed precisely
+# STEP 1: Real-trade-service internal state before cycle
 # ---------------------------------------------------------------------------
-log "\n===== STEP 1: full pipeline cycle in DEMO mode (real market data, simulated wallet) ====="
+log_cmd "PRE-CYCLE STATE (real-trade-service)"
+for endpoint in status/DEMO pipeline/status/DEMO candidates/DEMO positions/DEMO orders/DEMO adaptive/status; do
+  log "--- /$endpoint ---"
+  curl -s -m 10 "http://localhost:8005/$endpoint" | head -c 300 | tee -a "$LOGFILE"
+  log ""
+done
+
+# Also check risk config and account
+log "--- /risk-config/DEMO ---"
+curl -s -m 10 "http://localhost:8005/risk-config/DEMO" | head -c 300 | tee -a "$LOGFILE"
+log ""
+
+# ---------------------------------------------------------------------------
+# STEP 2: Trigger DEMO cycle with timing
+# ---------------------------------------------------------------------------
+log_cmd "TRIGGER DEMO CYCLE (600s timeout)"
 CYCLE_START=$(date +%s.%N)
-CYCLE_HTTP_CODE=$(curl -s -o /tmp/stockky_cycle_demo.json -w "%{http_code}" \
+CYCLE_HTTP=$(curl -s -o /tmp/cycle_response.json -w "%{http_code}" \
   -X POST "${TRADE_URL}/cycle/run/DEMO" \
   -H "Content-Type: application/json" \
   --max-time 600)
 CYCLE_END=$(date +%s.%N)
 CYCLE_SECS=$(awk "BEGIN{printf \"%.1f\", $CYCLE_END-$CYCLE_START}")
 
-log "POST /cycle/run/DEMO -> HTTP $CYCLE_HTTP_CODE, took ${CYCLE_SECS}s"
+log "POST /cycle/run/DEMO -> HTTP $CYCLE_HTTP, took ${CYCLE_SECS}s"
 if [[ "$CYCLE_SECS" != "" ]] && awk "BEGIN{exit !($CYCLE_SECS > 250)}"; then
-  log "  !! WARNING: this is approaching/over typical nginx proxy_read_timeout (300s). Note this in what you send back."
+  log "  !! WARNING: cycle took >250s – likely bulk-prefetch stall."
 fi
-log "--- response body (first 4000 chars) ---"
-head -c 4000 /tmp/stockky_cycle_demo.json | tee -a "$LOGFILE"
-log "\n--- (full response saved separately at /tmp/stockky_cycle_demo.json) ---"
+log "--- response body (first 2000 chars) ---"
+head -c 2000 /tmp/cycle_response.json | tee -a "$LOGFILE"
+log "\n--- (full response saved at /tmp/cycle_response.json) ---"
 
 # ---------------------------------------------------------------------------
-# STEP 2: pull the results of that cycle
+# STEP 3: Post-cycle state (immediately after cycle returns)
 # ---------------------------------------------------------------------------
-log "\n===== STEP 2: post-cycle state ====="
-
-for pair in \
-  "GET|${TRADE_URL}/pipeline/status/DEMO|pipeline status" \
-  "GET|${TRADE_URL}/candidates/DEMO|candidates picked" \
-  "GET|${TRADE_URL}/positions/DEMO|open/closed positions" \
-  "GET|${TRADE_URL}/orders/DEMO|orders" \
-  "GET|${TRADE_URL}/adaptive/status|adaptive thresholds" \
-  "GET|${GATEWAY_URL}/circuits|circuit breaker states" \
-  ; do
-  METHOD="${pair%%|*}"; rest="${pair#*|}"; URL="${rest%%|*}"; DESC="${rest#*|}"
-  log "\n--- $DESC ($METHOD $URL) ---"
-  T0=$(date +%s.%N)
-  BODY=$(curl -s -m 30 -w "\n__HTTP_CODE__:%{http_code}" -X "$METHOD" "$URL")
-  T1=$(date +%s.%N)
-  SECS=$(awk "BEGIN{printf \"%.1f\", $T1-$T0}")
-  CODE=$(echo "$BODY" | grep -o '__HTTP_CODE__:[0-9]*' | cut -d: -f2)
-  echo "$BODY" | sed 's/__HTTP_CODE__:[0-9]*$//' | head -c 3000 | tee -a "$LOGFILE"
-  log "\n(HTTP $CODE, ${SECS}s)"
+log_cmd "POST-CYCLE STATE"
+for endpoint in pipeline/status/DEMO candidates/DEMO positions/DEMO orders/DEMO adaptive/status; do
+  log "--- /$endpoint ---"
+  curl -s -m 10 "http://localhost:8005/$endpoint" | head -c 300 | tee -a "$LOGFILE"
+  log ""
 done
 
+# ---------------------------------------------------------------------------
+# STEP 4: Circuit breakers (gateway and real-trade)
+# ---------------------------------------------------------------------------
+log_cmd "CIRCUIT BREAKER STATES"
+log "--- Gateway circuits ---"
+curl -s -m 10 "$GATEWAY_URL/circuits" | head -c 500 | tee -a "$LOGFILE"
+log ""
+log "--- Real-trade circuits (if any) ---"
+curl -s -m 10 "$TRADE_URL/circuits" 2>/dev/null | head -c 500 | tee -a "$LOGFILE" || echo "No /circuits endpoint" | tee -a "$LOGFILE"
+log ""
+
+# ---------------------------------------------------------------------------
+# STEP 5: Dhan connectivity (if credentials set)
+# ---------------------------------------------------------------------------
+log_cmd "DHAN STATUS (if configured)"
+curl -s -m 10 "$TRADE_URL/dhan/status" | head -c 500 | tee -a "$LOGFILE"
+log ""
+
+# ---------------------------------------------------------------------------
+# STEP 6: Market regime / adaptive thresholds detail
+# ---------------------------------------------------------------------------
+log_cmd "ADAPTIVE THRESHOLDS DETAIL"
+curl -s -m 10 "$TRADE_URL/adaptive/status?detail=1" 2>/dev/null | head -c 500 | tee -a "$LOGFILE" || echo "No detail param" | tee -a "$LOGFILE"
+log ""
+
+# ---------------------------------------------------------------------------
+# STEP 7: Service logs (last 200 lines of real-trade and api-gateway)
+# ---------------------------------------------------------------------------
+log_cmd "REAL-TRADE-SERVICE LOGS (last 200 lines)"
+docker compose logs --tail=200 real-trade-service 2>&1 | tee -a "$LOGFILE"
+
+log_cmd "API-GATEWAY LOGS (last 200 lines)"
+docker compose logs --tail=200 api-gateway 2>&1 | tee -a "$LOGFILE"
+
+# Also check market-data-service logs for any related errors
+log_cmd "MARKET-DATA-SERVICE LOGS (last 100 lines)"
+docker compose logs --tail=100 market-data-service 2>&1 | tee -a "$LOGFILE"
+
+# ---------------------------------------------------------------------------
+# STEP 8: Grep for specific patterns (prefetch, timeout, errors, volume_shock)
+# ---------------------------------------------------------------------------
+log_cmd "GREP FOR KEY PATTERNS (real-trade logs)"
+docker compose logs real-trade-service 2>&1 | grep -iE "prefetch|volume_shock|timeout|18s|error|exception|stall|circuit" | tail -30 | tee -a "$LOGFILE"
+
+log_cmd "GREP FOR VOLUME_SHOCK CANDIDATES"
+docker compose logs real-trade-service 2>&1 | grep -i "volume_shock" | tail -20 | tee -a "$LOGFILE"
+
+# ---------------------------------------------------------------------------
+# STEP 9: Check if the fix for bulk-prefetch is applied (look for concurrency settings)
+# ---------------------------------------------------------------------------
+log_cmd "CHECK FOR PREFETCH CONCURRENCY SETTINGS (env)"
+docker compose exec real-trade-service env | grep -i "CANDIDATE_BULK" | tee -a "$LOGFILE" || echo "No CANDIDATE_BULK_* env vars set" | tee -a "$LOGFILE"
+
+# ---------------------------------------------------------------------------
+# STEP 10: Final summary
+# ---------------------------------------------------------------------------
 log "\n###############################################################"
 log "# DONE. Log file: $(pwd)/${LOGFILE}"
-log "# Send that file (or paste its contents) back in chat."
+log "# Please paste the contents of this file back."
 log "###############################################################"

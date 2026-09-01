@@ -237,6 +237,22 @@ def resolve_ns_ticker(symbol: str) -> Optional[str]:
         return None
     if base in KNOWN_NOT_ON_NSE or base in KNOWN_DELISTED:
         return None
+    # is_learned_delisted() is defined further down in this module but, like
+    # is_known_delisted() above, is a plain module-level function resolved at
+    # call time — safe to reference here despite appearing later in the file.
+    # Wiring it in here (not just at rate_limiter.py's yfinance call sites,
+    # see that module's comment on this same gap) closes the other half of
+    # it: a symbol that crossed MAX_FAILURE_STREAK stopped burning yfinance
+    # calls, but kept its slot in the scan universe forever because nothing
+    # that BUILDS the universe ever checked the learned-delisted list — only
+    # the static KNOWN_DELISTED dict. That's why the same handful of dead
+    # SME/IPO tickers could keep resurfacing as "still missing" in Database
+    # Feed Health even after yfinance had already given up on them.
+    try:
+        if is_learned_delisted(base):
+            return None
+    except Exception:
+        pass
     if is_non_equity_instrument(base):
         return None
     base = _apply_all_renames(base)
@@ -252,6 +268,13 @@ def resolve_base_symbol(symbol: str) -> Optional[str]:
         return None
     if base in KNOWN_NOT_ON_NSE or base in KNOWN_DELISTED:
         return None
+    # Same learned-delisted gate as resolve_ns_ticker() above — see that
+    # function's comment for why this half of the wiring was missing.
+    try:
+        if is_learned_delisted(base):
+            return None
+    except Exception:
+        pass
     if is_non_equity_instrument(base):
         return None
     return _apply_all_renames(base)

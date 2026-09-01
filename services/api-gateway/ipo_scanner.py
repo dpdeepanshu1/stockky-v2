@@ -721,6 +721,21 @@ def _normalize_nse_row(row: Dict[str, Any], kind: str) -> Optional[Dict[str, Any
         ).upper().strip()
         if not symbol:
             return None
+        # Reject non-equity public issues (NCDs/bonds, partly-paid rights
+        # issues) that NSE's public-past-issues endpoint returns alongside
+        # genuine equity IPOs with no instrument-type field to tell them
+        # apart. Real NSE equity tickers never start with a digit; NCD/bond
+        # series tickers do — they're coded as <coupon><issuer><maturity-year>
+        # (e.g. "1150VIES30" = 11.50% coupon, VIES issuer, matures 2030;
+        # "925ECL28" = 9.25% coupon, ECL, matures 2028). Without this check
+        # these fed straight into the IPO tracker's price-fetch pipeline as
+        # if they were newly-listed stocks, where yfinance/NSE quote lookups
+        # can only ever fail for them (they're debt instruments, not
+        # equities, so they were never going to have an equity quote) —
+        # pure wasted "possibly delisted" noise on every prefeed cycle,
+        # never actually delisted because they were never equities.
+        if symbol[0].isdigit():
+            return None
         issue_price = _extract_price_band_upper(
             _nse_placeholder_none(row.get("issuePrice"))
             or _nse_placeholder_none(row.get("priceRange"))

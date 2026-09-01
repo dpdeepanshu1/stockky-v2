@@ -9476,9 +9476,13 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
     # symbol like TATAMTRDVR never even reaches market-data-service.
     try:
         from symbol_aliases import is_known_delisted as _is_known_delisted
+        from symbol_aliases import is_learned_delisted as _is_learned_delisted
+        from symbol_aliases import MAX_FAILURE_STREAK as _MAX_FAILURE_STREAK
         from symbol_aliases import resolve_with_fallback as _resolve_with_fallback
     except Exception:
         _is_known_delisted = lambda _s: False  # noqa: E731
+        _is_learned_delisted = lambda _s: False  # noqa: E731
+        _MAX_FAILURE_STREAK = 5
         _resolve_with_fallback = None
     if _is_known_delisted(base):
         try:
@@ -9493,6 +9497,30 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
             "complete": False,
             "purged": True,
             "message": f"{base} is delisted/merged (not a rename) — removed from feed without a network call.",
+        }
+
+    # Self-learned delisting (rate_limiter.py's yfinance monkeypatch already
+    # gave up on this symbol after MAX_FAILURE_STREAK consecutive failures —
+    # see symbol_aliases.record_resolution_failure/is_learned_delisted). This
+    # is exactly why Repair used to return 200 "success" with patched_fields
+    # empty and no error, forever: nothing purged the row, so it just kept
+    # re-attempting a fetch the yfinance layer had already flagged as
+    # hopeless. Purge here too, but with a distinct message (lower-confidence
+    # than a manually-confirmed KNOWN_DELISTED entry, since it's inferred
+    # from repeated failures rather than a verified corporate action).
+    if _is_learned_delisted(base):
+        try:
+            store.delete_symbol(base)
+        except Exception as e:
+            logger.warning("repair: purge learned-delisted %s failed: %s", base, e)
+        return {
+            "symbol": base,
+            "patched_fields": [],
+            "still_missing": [],
+            "price": _feed_resolved_price(current),
+            "complete": False,
+            "purged": True,
+            "message": f"{base} failed to resolve on {_MAX_FAILURE_STREAK}+ consecutive attempts across all price sources — removed from feed as probably delisted (self-learned, not manually confirmed).",
         }
 
     if "price" in missing and market_url:

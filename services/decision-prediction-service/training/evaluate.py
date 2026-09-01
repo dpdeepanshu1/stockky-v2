@@ -416,7 +416,20 @@ def evaluate_t5(prediction_id: str):
             logger.warning("Not enough data for %s on T+5 (bars=%s)", pred.symbol, len(bars) if bars else 0)
             return {"ok": False, "reason": "not_enough_bars"}
 
-        pred_day = start_date
+        # BUG FIX (2026-09-01): this used to be `pred_day = start_date`, but
+        # start_date is padded 5 calendar days BEFORE the real prediction date
+        # (see the fetch window above) purely so _fetch_bars has prior sessions
+        # to work with. Since _fetch_bars/_add() already filters every returned
+        # bar to be >= start_date, session0 (first bar >= pred_day) resolved to
+        # index 0 on almost every call — anchoring "entry session" and the
+        # whole T+1..T+5 window (bars[session0+1:session0+6]) to ~5 calendar
+        # days (2-4 trading sessions) BEFORE the prediction was actually made,
+        # not the 5 sessions after it. period_high/period_low/close/return_pct/
+        # target_reached/stop_loss_reached were all computed over the wrong
+        # window, silently mislabeling T+5 outcomes for training. Use the real
+        # prediction date here, exactly like evaluate_t1/_entry_and_t1_close
+        # already do above.
+        pred_day = pred.timestamp.date() if pred.timestamp else start_date
         session0 = None
         for i, b in enumerate(bars):
             if b["date"] >= pred_day:

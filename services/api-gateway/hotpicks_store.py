@@ -794,7 +794,7 @@ def hotpicks_repair_scores(
 
         if force_sym and not targets:
             out["status"] = "not_found"
-            out["message"] = f"{force_sym} not missing any scores in the last 24h."
+            out["message"] = f"{force_sym} not missing any scores in the last 72h."
             return out
         targets = targets[: max(1, min(int(limit or 15), 30))]
         out["attempted"] = len(targets)

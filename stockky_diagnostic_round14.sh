@@ -63,7 +63,14 @@ log "###############################################################"
 if [[ -f "./stockky_test_all.sh" ]]; then
   log "\n===== STEP 0: stockky_test_all.sh (read-only sweep) ====="
   chmod +x ./stockky_test_all.sh
-  ./stockky_test_all.sh >> "$LOGFILE" 2>&1
+  # tee (not >>) so you see live progress instead of a silent hang;
+  # timeout guards against wait_for looping forever if a service (e.g.
+  # frontend on :5173) simply isn't deployed here
+  timeout 300 ./stockky_test_all.sh 2>&1 | tee -a "$LOGFILE"
+  RC=${PIPESTATUS[0]}
+  if [[ $RC -eq 124 ]]; then
+    log "!! stockky_test_all.sh hit the 300s guard and was killed — likely stuck waiting on a service that isn't up (check which 'waiting for ...' line printed last above)."
+  fi
   log "----- end of stockky_test_all.sh output -----"
 else
   log "\n===== STEP 0: SKIPPED (stockky_test_all.sh not found in $(pwd)) ====="

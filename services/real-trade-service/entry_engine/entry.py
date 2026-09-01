@@ -667,7 +667,13 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
         db.query(models.TradeOrder)
         .filter(
             models.TradeOrder.mode        == mode,
-            models.TradeOrder.status      == "PLACED",
+            # "PARTIAL" (Dhan PART_TRADED, reconcile.py) included alongside
+            # "PLACED": a partially-filled entry order still has a resting
+            # remainder at Dhan past ENTRY_VALIDITY_MINUTES just like a
+            # fully-unfilled one does, and needs the same cancel-the-rest
+            # treatment — the shares that DID fill are already booked into
+            # a position independently of this order-status transition.
+            models.TradeOrder.status.in_(("PLACED", "PARTIAL")),
             models.TradeOrder.valid_until.isnot(None),
             models.TradeOrder.valid_until  < now,
         )
@@ -691,11 +697,19 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
                 )
                 continue
 
+        # A PARTIAL order still gets the SAME terminal "EXPIRED" order
+        # status here — the order itself is done (no more shares coming,
+        # remainder cancelled at Dhan above), and how many shares DID fill
+        # already lives independently in order.filled_qty_so_far and the
+        # TradePosition reconcile opened for them, not in this label.
+        was_partial = order.status == "PARTIAL"
         order.status     = "EXPIRED"
         order.updated_at = now
+        fill_note = f" {order.filled_qty_so_far}/{order.qty} had already filled." if was_partial else ""
         db.add(models.TradeOrderEvent(
             order_id=order.id, event_type="EXPIRED",
-            detail="Entry window closed unfilled — no chase." + (
+            detail=("Entry window closed partially filled — no chase for the rest." if was_partial
+                    else "Entry window closed unfilled — no chase.") + fill_note + (
                 " Dhan order cancelled." if mode == "REAL" and order.dhan_order_id else ""
             ),
         ))

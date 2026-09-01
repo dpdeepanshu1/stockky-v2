@@ -176,7 +176,8 @@ def _fix_stale_dhan_token_expiry(engine) -> None:
 # create_all(checkfirst=True) only creates MISSING TABLES — it never adds a
 # column to a table that already exists (see SQLAlchemy docs: it diffs
 # table names, not column sets). trade_orders existed before
-# execution_source/confirmed_by/confirmed_at were added to models.py, so on
+# execution_source/confirmed_by/confirmed_at/filled_qty_so_far were added to
+# models.py, so on
 # any already-deployed DB those three columns must be added by hand, once,
 # additively — same idiom decision-prediction-service/training/models.py
 # already uses for its own schema drift. Safe to call on every boot: each
@@ -198,6 +199,7 @@ def _ensure_manual_order_columns(engine, dialect_name: str) -> None:
             ("confirmed_by", "ALTER TABLE trade_orders ADD (confirmed_by VARCHAR2(64))"),
             ("confirmed_at", "ALTER TABLE trade_orders ADD (confirmed_at TIMESTAMP)"),
             ("exit_reason", "ALTER TABLE trade_orders ADD (exit_reason VARCHAR2(32))"),
+            ("filled_qty_so_far", "ALTER TABLE trade_orders ADD (filled_qty_so_far NUMBER(10) DEFAULT 0 NOT NULL)"),
         ]
     else:
         adds = [
@@ -205,6 +207,7 @@ def _ensure_manual_order_columns(engine, dialect_name: str) -> None:
             ("confirmed_by", "ALTER TABLE trade_orders ADD COLUMN confirmed_by VARCHAR(64)"),
             ("confirmed_at", "ALTER TABLE trade_orders ADD COLUMN confirmed_at TIMESTAMP"),
             ("exit_reason", "ALTER TABLE trade_orders ADD COLUMN exit_reason VARCHAR(32)"),
+            ("filled_qty_so_far", "ALTER TABLE trade_orders ADD COLUMN filled_qty_so_far INTEGER DEFAULT 0 NOT NULL"),
         ]
 
     for col_name, sql in adds:

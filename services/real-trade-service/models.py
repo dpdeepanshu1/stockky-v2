@@ -206,6 +206,20 @@ class TradeOrder(Base):
     # column is what record_real_exit_fill and the partial-exit
     # breakeven-stop logic key off of instead (see reconcile.py, 2026-08-27).
     exit_reason = Column(String(32), nullable=True)
+    # Cumulative qty this order has ever had booked into a TradeFill /
+    # position / account by reconcile_real_orders — NOT the same as
+    # TradeFill rows summed (kept as its own column so reconcile can do a
+    # cheap "how much is new since last check" comparison without a
+    # second query every pass). Dhan's filledQty on a PART_TRADED or
+    # TRADED order is always the order's cumulative filled quantity to
+    # date, never a per-poll increment, so reconcile diffs against this
+    # column to book only the NEW shares each pass instead of re-booking
+    # the whole cumulative amount every time it sees the same order.
+    # Stays 0 for DEMO orders (which never go through reconcile) and for
+    # any REAL order that hasn't had a broker-confirmed fill yet. See
+    # db.py's _ensure_manual_order_columns for the additive migration
+    # that adds this column to an already-deployed table.
+    filled_qty_so_far = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, nullable=False, default=_now)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 

@@ -122,10 +122,21 @@ def _write_exit_decision(
 
 def _has_pending_real_sell(db: Session, symbol: str) -> bool:
     """True if a REAL SELL for this symbol is already placed and awaiting
-    broker confirmation — prevents double-selling before reconcile runs."""
+    broker confirmation — prevents double-selling before reconcile runs.
+    Includes "PARTIAL" (Dhan PART_TRADED — reconcile.py) alongside
+    "PLACED": a SELL that's only partially filled is still awaiting the
+    rest of its own fill at the broker, so it must keep blocking a second
+    SELL the exact same way an unfilled one does — otherwise this system
+    could send another market SELL for the same remaining qty while
+    Dhan's own order is still working."""
     return (
         db.query(models.TradeOrder)
-        .filter_by(mode="REAL", symbol=symbol, side="SELL", status="PLACED")
+        .filter(
+            models.TradeOrder.mode == "REAL",
+            models.TradeOrder.symbol == symbol,
+            models.TradeOrder.side == "SELL",
+            models.TradeOrder.status.in_(("PLACED", "PARTIAL")),
+        )
         .first()
         is not None
     )

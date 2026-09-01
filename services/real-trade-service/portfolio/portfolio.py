@@ -188,16 +188,33 @@ def record_real_order_sent(db: Session, order: models.TradeOrder, dhan_order_id:
 
 
 def record_real_fill(db: Session, order: models.TradeOrder, fill_price: float, filled_qty: int,
-                      stop_price: float, target_price: float) -> None:
+                      stop_price: float, target_price: float, is_partial: bool = False) -> None:
     """REAL-only equivalent of try_fill_entry's position-opening half, but
     driven by a CONFIRMED fill from Dhan (reconcile_real_orders), never by
     a simulated price check. Mirrors try_fill_entry's pyramiding/average
-    logic so both modes produce the same TradePosition shape."""
+    logic so both modes produce the same TradePosition shape.
+
+    `filled_qty` here is always the NEW/incremental qty to book this call
+    (reconcile_real_orders is responsible for diffing against
+    order.filled_qty_so_far before calling this — see that module's
+    docstring) — never the order's cumulative broker-reported qty, or a
+    PART_TRADED order would get the same shares added to the position
+    twice.
+
+    `is_partial=True` (order still PART_TRADED at the broker — more fills
+    may still come) leaves order.status as "PARTIAL" instead of "FILLED",
+    so reconcile's next-cycle query (status in PLACED/PARTIAL) keeps
+    checking this order for the rest of the fill. Caller still owns
+    order.filled_qty_so_far — this function only ever books the position
+    side of a fill, same division of responsibility record_real_exit_fill
+    already uses for exits."""
     now = datetime.now(timezone.utc)
-    order.status = "FILLED"
+    order.status = "PARTIAL" if is_partial else "FILLED"
     order.updated_at = now
-    db.add(models.TradeOrderEvent(order_id=order.id, event_type="FILLED",
-                                   detail=f"Broker-confirmed fill @ {fill_price} x{filled_qty}"))
+    event_type = "PARTIAL_FILL" if is_partial else "FILLED"
+    detail_verb = "Broker-confirmed partial fill" if is_partial else "Broker-confirmed fill"
+    db.add(models.TradeOrderEvent(order_id=order.id, event_type=event_type,
+                                   detail=f"{detail_verb} @ {fill_price} x{filled_qty}"))
     db.add(models.TradeFill(order_id=order.id, qty=filled_qty, price=fill_price, filled_at=now))
 
     position = db.query(models.TradePosition).filter_by(mode="REAL", symbol=order.symbol, status="OPEN").first()

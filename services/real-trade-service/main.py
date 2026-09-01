@@ -896,16 +896,18 @@ async def list_orders(mode: str, limit: int = 50, admin: Optional[str] = Depends
         db.query(models.TradeOrder).filter_by(mode=mode)
         .order_by(models.TradeOrder.created_at.desc()).limit(min(max(limit, 1), 200)).all()
     )
-    # Only bother pricing orders still "in flight" (waiting on a limit fill) —
-    # a FILLED/CANCELLED/REJECTED/EXPIRED order's current price is irrelevant
-    # dashboard noise, and skipping them keeps the live-price call small.
-    live_symbols = [o.symbol for o in rows if o.status in ("PENDING", "PLACED")]
+    # Only bother pricing orders still "in flight" (waiting on a limit fill,
+    # in full or in part) — a FILLED/CANCELLED/REJECTED/EXPIRED order's
+    # current price is irrelevant dashboard noise, and skipping them keeps
+    # the live-price call small. "PARTIAL" (Dhan PART_TRADED) is in-flight
+    # too — the remainder is still resting at the broker same as "PLACED".
+    live_symbols = [o.symbol for o in rows if o.status in ("PENDING", "PLACED", "PARTIAL")]
     prices = await _live_prices(live_symbols)
     out = []
     for o in rows:
         ltp = prices.get(o.symbol)
         limit_distance_pct = None
-        if ltp is not None and o.limit_price and o.status in ("PENDING", "PLACED"):
+        if ltp is not None and o.limit_price and o.status in ("PENDING", "PLACED", "PARTIAL"):
             # Positive = LTP still above the BUY limit (waiting for price to
             # come down to fill); negative = LTP has already crossed it.
             limit_distance_pct = round((ltp - o.limit_price) / o.limit_price * 100.0, 2)
@@ -1073,14 +1075,16 @@ async def manual_cancel_order(
     mode: str, order_id: int,
     admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
 ):
-    """Manual override — cancel a still-PLACED order. Always allowed
-    regardless of armed state (matches dhan_client.cancel_order's own
-    policy: backing out of a pending order is never gated by arming)."""
+    """Manual override — cancel a still-resting order (PLACED, or PARTIAL —
+    Dhan PART_TRADED — where only the unfilled remainder gets cancelled;
+    whatever already filled stays booked). Always allowed regardless of
+    armed state (matches dhan_client.cancel_order's own policy: backing
+    out of a pending order is never gated by arming)."""
     mode = mode.upper()
     order = db.query(models.TradeOrder).filter_by(id=order_id, mode=mode).first()
     if order is None:
         raise HTTPException(status_code=404, detail="Order not found")
-    if order.status != "PLACED":
+    if order.status not in ("PLACED", "PARTIAL"):
         raise HTTPException(status_code=409, detail=f"Order is {order.status} — nothing to cancel.")
 
     if mode == "REAL" and order.dhan_order_id:

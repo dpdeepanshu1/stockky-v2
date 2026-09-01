@@ -288,6 +288,35 @@ async def _fetch_quote(client: httpx.AsyncClient, symbol: str) -> Optional[dict]
     return None
 
 
+# ── 2026-09-01 bugfix: delivery_pct was never actually fetched ──────────────
+# _volume_shock_analysis used to read quote.get("delivery_pct") /
+# quote.get("deliv_per"), but market-data-service's /quote and /quotes/bulk
+# responses are built by _pad_quote_response(), whose fixed output schema
+# (symbol/name/price/cmp/previous_close/day_change_pct/day_high/day_low/
+# volume/atr/market_cap/pe_ratio/source/fetched_at) never includes either
+# key — delivery is served from a completely separate GET /delivery/{symbol}
+# endpoint (bhavcopy.get_delivery), never merged into the quote payload.
+# So delivery_pct was silently always 0 here, which made high_delivery
+# always None and the whole BASE_TIER_MIN_DELIVERY_PCT gate (the
+# 2026-09-01 re-backtest finding documented above — 44.8%→45.7% win rate
+# uplift) dead code: `delivery_pct > 0` was never true, so the reject branch
+# could never fire and the payload's delivery_pct/high_delivery fields sent
+# to the frontend were always None even when NSE delivery data genuinely
+# existed for that symbol. Fixing this by actually calling the delivery
+# endpoint below, gated to the base tier only (see call site) since
+# /delivery/{symbol} is Redis-cached server-side but can still be a cold
+# NSE/bhavcopy fetch — no need to pay that for upper_circuit/high_conviction
+# candidates, which never consult delivery_pct for their reject decision.
+async def _fetch_delivery(client: httpx.AsyncClient, symbol: str) -> Optional[dict]:
+    try:
+        r = await client.get(f"{MARKET_DATA_URL}/delivery/{symbol}", timeout=20.0)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        logger.debug("delivery %s failed: %s", symbol, e)
+    return None
+
+
 # ── 2026-09-01 incident fix: bulk quote pre-warming ──────────────────────────
 # candidate_engine used to fire one GET /quote/{symbol} per candidate,
 # concurrency-bounded but still one HTTP call (and one competing shot at the
@@ -826,24 +855,37 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict
         )
     )
 
-    # ── Delivery % context from quote (if available) ──────────────────────────
-    # Fetched from market data or bhavcopy; enriches signal quality assessment.
-    # >60% = institutional buying; <30% = intraday/speculative churn.
-    delivery_pct = float(quote.get("delivery_pct") or quote.get("deliv_per") or 0)
-    high_delivery = delivery_pct >= DELIVERY_HIGH_QUALITY_PCT if delivery_pct > 0 else None
+    # ── Delivery % context (2026-09-01 bugfix — see _fetch_delivery docstring) ──
+    # Only fetched for base-tier candidates: HIGH_CONVICTION/UPPER_CIRCUIT never
+    # consult delivery_pct for their reject decision, so there's no reason to
+    # pay for the extra (possibly cold-cache) HTTP call on those.
+    # get_delivery()'s neutral fallback returns delivery_pct=50.0 with
+    # source="fallback_neutral" when no real NSE/bhavcopy data exists for the
+    # symbol — that's "unknown", not "known and 50%", so it must NOT be
+    # treated as real delivery data here (50.0 is >= BASE_TIER_MIN_DELIVERY_PCT
+    # anyway, so treating it as real would silently mask the gap, not just
+    # miscount it).
+    delivery_pct: Optional[float] = None
+    if not upper_circuit and not high_conviction:
+        delivery = await _fetch_delivery(client, symbol)
+        if isinstance(delivery, dict) and delivery.get("source") != "fallback_neutral":
+            raw_dp = delivery.get("delivery_pct")
+            if raw_dp is not None:
+                delivery_pct = float(raw_dp)
+    high_delivery = (
+        delivery_pct >= DELIVERY_HIGH_QUALITY_PCT if delivery_pct is not None else None
+    )
 
     # ── BASE-tier delivery quality gate (2026-09-01 re-backtest finding) ──────
     # Only applies when this candidate is NOT already high_conviction/
     # upper_circuit (those tiers already backtest strongly on their own and
     # have small enough n that adding another filter would just shrink them
     # further for no measured benefit) AND delivery data is actually known
-    # (delivery_pct > 0 here means "known"; 0 means unavailable, see
-    # get_delivery()'s own neutral-fallback comment in bhavcopy.py — a
-    # missing-data case is not treated as a low-delivery rejection).
+    # (a missing-data case is not treated as a low-delivery rejection).
     if (
         not upper_circuit
         and not high_conviction
-        and delivery_pct > 0
+        and delivery_pct is not None
         and delivery_pct < BASE_TIER_MIN_DELIVERY_PCT
     ):
         return {
@@ -865,7 +907,7 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict
         # ── HIGH CONVICTION fields (30-Aug-2026 NSE backtest) ──────────────
         "high_conviction":   high_conviction,
         "upper_circuit":     upper_circuit,
-        "delivery_pct":      delivery_pct if delivery_pct > 0 else None,
+        "delivery_pct":      delivery_pct,
         "high_delivery":     high_delivery,
         # ── Time-stop hint ──────────────────────────────────────────────────
         # Backtest: Day+1 mean=+2.28%, Day+2 mean=-1.30%.

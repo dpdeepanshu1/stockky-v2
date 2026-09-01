@@ -554,7 +554,11 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
         open_position_count=len(open_positions),
         open_position_symbols={p.symbol for p in open_positions},
         open_positions_total_risk=sum(
-            abs(p.avg_entry_price - (p.current_stop or p.avg_entry_price)) * p.qty_open
+            # BUG FIX (2026-09-01) — same fix as entry_engine/entry.py's
+            # _account_state: abs() turned a profitable ratcheted-up stop
+            # (breakeven/ATR-trail — see exit_engine/exit.py) into a fake
+            # positive "risk" figure instead of the 0 it actually represents.
+            max(0.0, p.avg_entry_price - (p.current_stop or p.avg_entry_price)) * p.qty_open
             for p in open_positions
         ),
         trading_globally_paused=not gate.armed,

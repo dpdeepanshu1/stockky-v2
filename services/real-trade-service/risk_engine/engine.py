@@ -50,22 +50,27 @@ logger = logging.getLogger("real-trade-risk-engine")
 MAX_POSITION_CONCENTRATION_PCT = float(
     os.getenv("RISK_MAX_POSITION_CONCENTRATION_PCT", "25.0")
 )
-# Minimum stock price — sub-₹20 = operator risk, wide spreads, illiquid exits
-MIN_STOCK_PRICE = float(os.getenv("RISK_MIN_STOCK_PRICE", "20.0"))
-HARD_FLOOR_PRICE      = float(os.getenv("HARD_FLOOR_PRICE", "20.0"))
-HARD_FLOOR_LIQUIDITY  = float(os.getenv("HARD_FLOOR_LIQUIDITY", "5000000"))
-HARD_FLOOR_CONVICTION = float(os.getenv("HARD_FLOOR_CONVICTION", "40"))
+# Minimum stock price — sub-₹20 = operator risk, wide spreads, illiquid exits.
+# 2026-09-01 cleanup: this used to be duplicated as two independently-
+# configurable env vars (MIN_STOCK_PRICE / HARD_FLOOR_PRICE) both defaulting
+# to ₹20 — MIN_STOCK_PRICE was the one actually enforced (check #4a below);
+# HARD_FLOOR_PRICE only ever fed the dead passes_hard_floor() helper removed
+# in the same cleanup (see below). Collapsed to one knob so retuning the
+# floor only ever requires touching one env var.
+MIN_STOCK_PRICE = float(os.getenv("RISK_MIN_STOCK_PRICE", os.getenv("HARD_FLOOR_PRICE", "20.0")))
+HARD_FLOOR_LIQUIDITY = float(os.getenv("HARD_FLOOR_LIQUIDITY", "5000000"))
+# 2026-09-01 cleanup: HARD_FLOOR_CONVICTION and the passes_hard_floor()
+# helper below it were removed here — both were dead code, never called
+# from evaluate() or anywhere else. A conviction floor is already enforced
+# upstream in candidate_engine.candidates (MIN_CONVICTION=55, stricter than
+# the 40 this used to define), so there was no live gap; this was leftover
+# incomplete wiring from the original "§5 hard floor" feature, where
+# HARD_FLOOR_PRICE/HARD_FLOOR_LIQUIDITY got inlined directly into checks
+# #4a/#4b but the conviction floor never did. If a risk-engine-level
+# conviction floor is wanted later, re-add it as an explicit check in
+# evaluate() (with access to intent/candidate conviction_score) rather than
+# reviving this unused helper.
 
-
-def passes_hard_floor(candidate: dict) -> tuple:
-    """§5 unconditional hard floors. Returns (passes, reason)."""
-    price = float(candidate.get("price") or candidate.get("entry_price") or 0)
-    if price > 0 and price < HARD_FLOOR_PRICE:
-        return False, f"hard_floor_price: ₹{price:.2f} < ₹{HARD_FLOOR_PRICE:.0f}"
-    turnover = float(candidate.get("avg_traded_value") or 0)
-    if turnover > 0 and turnover < HARD_FLOOR_LIQUIDITY:
-        return False, f"hard_floor_liquidity: ₹{turnover:,.0f} < ₹{HARD_FLOOR_LIQUIDITY:,.0f}/day"
-    return True, ""
 
 
 class RiskVerdict(str, Enum):
@@ -89,6 +94,16 @@ class OrderIntent:
     recent_atr_pct:         Optional[float]   = None
     latest_tick_move_pct:   Optional[float]   = None
     avg_traded_value:       Optional[float]   = None  # §5 liquidity floor
+    # 2026-09-01 fix: entry_engine's conviction-adjusted sizing (±25% off
+    # account.risk_per_trade_pct via _conviction_adjusted_risk_pct) was
+    # computed and used to size proposed_qty, but never communicated to
+    # risk_engine — check #5 below independently re-derived max_trade_risk
+    # from the raw account.risk_per_trade_pct, which silently downsized any
+    # conviction-based UPSIZE back to the base-percentage qty (downsizing
+    # was unaffected, since it already sat under the base cap). When set,
+    # check #5 uses this instead of account.risk_per_trade_pct so the
+    # conviction bump actually survives to the placed order.
+    adj_risk_pct:           Optional[float]   = None
 
 
 @dataclass
@@ -200,8 +215,19 @@ def evaluate(
             )
 
     # ── 5. Per-trade risk cap — downsize before reject ────────────────────────
+    # 2026-09-01 fix: use intent.adj_risk_pct (entry_engine's conviction-
+    # adjusted %) when the caller supplied one, instead of always falling
+    # back to the raw account.risk_per_trade_pct — otherwise a high-
+    # conviction upsize computed upstream gets silently clawed back to the
+    # base-percentage qty right here. Manual orders (which don't set
+    # adj_risk_pct) are unaffected — they still get the base cap exactly as
+    # before.
+    effective_risk_pct = (
+        intent.adj_risk_pct if intent.adj_risk_pct is not None
+        else account.risk_per_trade_pct
+    )
     order_risk     = abs(intent.entry_price - intent.stop_price) * intent.qty
-    max_trade_risk = account.equity * (account.risk_per_trade_pct / 100.0)
+    max_trade_risk = account.equity * (effective_risk_pct / 100.0)
     final_qty      = intent.qty
     downsize_reason: Optional[str] = None
 
@@ -217,12 +243,12 @@ def evaluate(
             return RiskResult(
                 RiskVerdict.REJECTED, "per_trade_risk_cap",
                 f"Even 1 share risks ₹{per_share_risk:.2f} which exceeds the "
-                f"{account.risk_per_trade_pct:.2f}% per-trade cap "
+                f"{effective_risk_pct:.2f}% per-trade cap "
                 f"(₹{max_trade_risk:.2f}). Cannot size this trade.",
             )
         downsize_reason = (
             f"Qty {intent.qty} → {final_qty} "
-            f"(per-trade risk cap {account.risk_per_trade_pct:.2f}% "
+            f"(per-trade risk cap {effective_risk_pct:.2f}% "
             f"= ₹{max_trade_risk:.0f} / ₹{per_share_risk:.2f} per share)."
         )
 

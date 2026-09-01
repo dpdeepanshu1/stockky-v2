@@ -259,6 +259,15 @@ class TradePosition(Base):
     avg_entry_price = Column(Float, nullable=False)
     current_stop = Column(Float, nullable=True)
     current_target = Column(Float, nullable=True)
+    # 2026-09-01 fix: fixed once at position-open time (|avg_entry_price -
+    # stop_price| from the opening fill) so exit_engine's gap-down
+    # emergency-exit check has a stable "original stop distance" to compare
+    # against. Previously that check re-derived the distance from
+    # current_stop every cycle, which drifts as the trail/breakeven logic
+    # moves current_stop — nullable so rows opened before this migration
+    # (which have no way to know their original distance) fall back to the
+    # old current_stop-based approximation in exit_engine.
+    initial_stop_distance = Column(Float, nullable=True)
     unrealized_pnl = Column(Float, nullable=False, default=0.0)
     realized_pnl = Column(Float, nullable=False, default=0.0)
     opened_at = Column(DateTime, nullable=False, default=_now)

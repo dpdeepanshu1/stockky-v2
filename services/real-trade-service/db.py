@@ -136,6 +136,7 @@ def init_schema() -> None:
 
     _ensure_manual_order_columns(eng, dialect())
     _ensure_gate_state_columns(eng, dialect())
+    _ensure_position_columns(eng, dialect())
     _fix_stale_dhan_token_expiry(eng)
 
 
@@ -298,6 +299,44 @@ def _ensure_gate_state_columns(engine, dialect_name: str) -> None:
 # additive (never touches existing data), and works whether or not the
 # table has a "real" IDENTITY column — the trigger only fires on the null
 # case, so a table that DOES already have working identity is unaffected.
+# Same additive-migration idiom as _ensure_manual_order_columns above —
+# trade_positions existed before initial_stop_distance was added to
+# models.py (2026-09-01, gap-down emergency-exit fix), so on any
+# already-deployed DB this column must be added by hand, once. Nullable
+# and left NULL for existing open rows — exit_engine falls back to its
+# previous current_stop-based approximation for those until they close.
+def _ensure_position_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        existing = {c["name"] for c in inspect(engine).get_columns("trade_positions")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect trade_positions columns: %s", e)
+        return
+
+    if dialect_name == "oracle":
+        adds = [
+            ("initial_stop_distance", "ALTER TABLE trade_positions ADD (initial_stop_distance FLOAT)"),
+        ]
+    else:
+        adds = [
+            ("initial_stop_distance", "ALTER TABLE trade_positions ADD COLUMN initial_stop_distance FLOAT"),
+        ]
+
+    for col_name, sql in adds:
+        if col_name in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added trade_positions.%s", col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add trade_positions.%s: %s", col_name, e)
+
+
 def _ensure_oracle_autoincrement(engine, base) -> None:
     from sqlalchemy import text
 

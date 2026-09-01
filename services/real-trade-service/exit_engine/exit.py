@@ -279,9 +279,22 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
         # In a weak market (Aug-2026), gap-downs are common. If unrealized loss
         # exceeds EMERGENCY_LOSS_MULT × original stop distance, the stop has
         # been gapped through — exit immediately regardless of current_stop level.
-        original_risk = abs(
-            position.avg_entry_price - (position.current_stop or position.avg_entry_price)
-        )
+        #
+        # 2026-09-01 fix: use position.initial_stop_distance (fixed once at
+        # OPEN time) instead of re-deriving from current_stop every cycle.
+        # current_stop moves via breakeven/ATR-trail, so the old approach
+        # drifted: once trail tightens near LTP the threshold shrinks toward
+        # zero (relabels an ordinary stop-hit as "EMERGENCY" — harmless but
+        # confusing in the audit log), and once breakeven pushes current_stop
+        # above entry the threshold GROWS (delays the emergency catch exactly
+        # when there's the most unrealized profit at stake — the opposite of
+        # the intent). Rows opened before this migration have no stored
+        # value, so they fall back to the previous approximation.
+        original_risk = position.initial_stop_distance
+        if original_risk is None:
+            original_risk = abs(
+                position.avg_entry_price - (position.current_stop or position.avg_entry_price)
+            )
         unrealized_loss_per_share = position.avg_entry_price - ltp
         if (
             original_risk > 0
@@ -390,7 +403,19 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                 f"(LTP ₹{ltp:.2f} vs entry ₹{position.avg_entry_price:.2f}). "
                 "Capital freed for better-performing setups."
             )
-            _write_exit_decision(db, position, "EMERGENCY_EXIT", reasoning, ltp)
+            # BUG FIX (2026-09-01): this was logging action="EMERGENCY_EXIT" —
+            # copy-pasted from the gap-down branch above. A time-stop close is
+            # a full position exit, not the gap-through emergency case (that
+            # branch, and its own "emergency_exits" tally counter, are above
+            # and untouched). Using "EMERGENCY_EXIT" here mislabeled every
+            # time-stop close in the audit trail/dashboard decision history —
+            # reasoning correctly said "Time-stop:..." but the action field
+            # said EMERGENCY_EXIT, and the counters (time_stops vs
+            # emergency_exits) already disagreed with what got written to
+            # TradeExitDecision.action. "FULL_EXIT" matches models.py's
+            # documented action taxonomy and the stop-hit branch below, which
+            # uses the same label for the same kind of event (full close).
+            _write_exit_decision(db, position, "FULL_EXIT", reasoning, ltp)
             if mode == "DEMO":
                 close_position(db, position, tick, position.qty_open, "time_stop")
                 time_stops += 1

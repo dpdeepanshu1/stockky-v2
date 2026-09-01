@@ -68,8 +68,35 @@ async def _book_fill_delta(
 
     if order.side == "BUY":
         decision = db.query(models.TradeDecision).filter_by(id=order.decision_id).first()
-        stop_price = decision.proposed_stop if decision else fill_price * 0.97
-        target_price = decision.proposed_target if decision else fill_price * 1.03
+        # 2026-09-01 fix: previously fell back to a hardcoded 3%/3% stop/
+        # target when the decision row couldn't be found (or lacked these
+        # fields) — inconsistent with entry_engine's actual flat fallback
+        # (FLAT_STOP_PCT/FLAT_TARGET_PCT = 3.2%/6.5%) used everywhere else
+        # a stop/target has to be invented without a live ATR read. Reusing
+        # those constants here means a rare broken-decision-link case still
+        # gets the same risk/reward shape as a normal entry, instead of a
+        # tighter, inconsistent one. This should be rare — log it so it's
+        # visible rather than a silent, unexplained stop/target on the
+        # dashboard.
+        from entry_engine.entry import FLAT_STOP_PCT, FLAT_TARGET_PCT
+        if decision is not None and decision.proposed_stop is not None:
+            stop_price = decision.proposed_stop
+        else:
+            stop_price = round(fill_price * (1 - FLAT_STOP_PCT / 100.0), 2)
+            logger.warning(
+                "reconcile: no decision/proposed_stop for order %s (%s) — "
+                "using flat %.1f%% fallback stop ₹%.2f instead.",
+                order.id, order.symbol, FLAT_STOP_PCT, stop_price,
+            )
+        if decision is not None and decision.proposed_target is not None:
+            target_price = decision.proposed_target
+        else:
+            target_price = round(fill_price * (1 + FLAT_TARGET_PCT / 100.0), 2)
+            logger.warning(
+                "reconcile: no decision/proposed_target for order %s (%s) — "
+                "using flat %.1f%% fallback target ₹%.2f instead.",
+                order.id, order.symbol, FLAT_TARGET_PCT, target_price,
+            )
         record_real_fill(db, order, fill_price, delta_qty, stop_price, target_price, is_partial=is_partial)
         if is_partial:
             await notify_async(

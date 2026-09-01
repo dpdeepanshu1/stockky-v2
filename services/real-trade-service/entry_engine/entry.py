@@ -216,7 +216,25 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
         open_position_count=len(positions),
         open_position_symbols={p.symbol for p in positions},
         open_positions_total_risk=sum(
-            abs(p.avg_entry_price - (p.current_stop or p.avg_entry_price)) * p.qty_open
+            # BUG FIX (2026-09-01): was abs(avg_entry_price - current_stop) —
+            # for a position whose stop has been moved to/above entry (see
+            # exit_engine/exit.py's breakeven-stop and age-aware ATR-trail
+            # logic, both of which explicitly ratchet current_stop upward
+            # once a trade is in profit), avg_entry_price - current_stop is
+            # negative: hitting that stop locks in a GAIN, not a loss. abs()
+            # turned that guaranteed-profit distance into a positive "risk"
+            # figure and added it to open_positions_total_risk, which feeds
+            # directly into risk_engine's max_portfolio_risk cap just below
+            # (§6: prospective_total = open_positions_total_risk + order_risk).
+            # That overstated the portfolio's real downside exposure for
+            # every position that had moved favorably, and could reject a
+            # genuinely safe new entry because already-de-risked winners were
+            # still being counted at their full original risk. Clamping to 0
+            # means a position whose stop is at/above entry contributes
+            # nothing to the portfolio risk cap, matching what
+            # max_portfolio_risk is actually meant to measure: capital that
+            # would be lost if every open stop got hit right now.
+            max(0.0, p.avg_entry_price - (p.current_stop or p.avg_entry_price)) * p.qty_open
             for p in positions
         ),
         trading_globally_paused=not gate_armed,
@@ -501,6 +519,12 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             recent_atr_pct=atr_pct,
             latest_tick_move_pct=None,
             avg_traded_value=avg_traded_value,
+            # 2026-09-01 fix: without this, risk_engine's own per-trade cap
+            # check re-derives max_trade_risk from the raw (non-conviction)
+            # account.risk_per_trade_pct and silently claws proposed_qty
+            # back down to the base-percentage amount — nullifying the
+            # conviction upsize we just computed above.
+            adj_risk_pct=adj_risk_pct,
         )
         result = risk_evaluate(intent, account_state)
 

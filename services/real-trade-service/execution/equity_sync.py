@@ -43,22 +43,41 @@ logger = logging.getLogger("real-trade-equity-sync")
 # in the live API, not a typo introduced here. Try every known spelling
 # rather than trusting one; RealAutoTrade.tsx's pickNum() does the same
 # thing on the frontend for the same reason.
+#
+# 2026-09-01 note: these five keys are NOT all the same underlying quantity
+# — "sodLimit" is a start-of-day figure that doesn't reflect intraday
+# usage, and "withdrawableBalance" can legitimately sit below the actual
+# tradeable balance (funds blocked as margin/collateral aren't withdrawable
+# but may still be usable for a new trade). The order below is a best-
+# effort ranking (most-likely-current-and-tradeable first, start-of-day
+# last), not a verified-against-live-Dhan-responses guarantee — this
+# service has not had a live account exercise every one of these fields
+# to confirm which actually populates on a real response. _pick_balance()
+# now returns which key matched, and sync_real_equity() logs a WARNING the
+# first time it's used and again any time the matched key CHANGES between
+# syncs (e.g. Dhan stops populating "availableCash" and this silently
+# starts falling through to "sodLimit" instead) — that's the actual signal
+# worth watching for in production, since a silent fallback-key change
+# would otherwise size every future trade off a different, unnoticed
+# definition of "available equity" without any visible warning.
 _BALANCE_KEYS = (
     "availabelBalance", "availableBalance", "availableCash",
     "withdrawableBalance", "sodLimit",
 )
 
+_last_balance_key: Optional[str] = None
 
-def _pick_balance(funds: dict) -> Optional[float]:
+
+def _pick_balance(funds: dict) -> tuple[Optional[float], Optional[str]]:
     for key in _BALANCE_KEYS:
         v = funds.get(key)
         if v is None:
             continue
         try:
-            return float(v)
+            return float(v), key
         except (TypeError, ValueError):
             continue
-    return None
+    return None, None
 
 
 def sync_real_equity(db: Session) -> Optional[float]:
@@ -77,10 +96,28 @@ def sync_real_equity(db: Session) -> Optional[float]:
         logger.warning("equity_sync: Dhan get_funds failed, keeping last-known equity: %s", e)
         return None
 
-    balance = _pick_balance(funds)
+    balance, matched_key = _pick_balance(funds)
     if balance is None:
         logger.warning("equity_sync: Dhan funds response had no recognizable balance field: %s", funds)
         return None
+
+    global _last_balance_key
+    if matched_key != _last_balance_key:
+        if _last_balance_key is None:
+            logger.warning(
+                "equity_sync: using Dhan balance field '%s' for REAL equity — "
+                "verify this reflects a sensible current tradeable balance.",
+                matched_key,
+            )
+        else:
+            logger.warning(
+                "equity_sync: Dhan balance field in use changed '%s' -> '%s' — "
+                "the funds response shape shifted; verify the new field still "
+                "reflects a sensible tradeable balance, not a stale/different-"
+                "scoped figure.",
+                _last_balance_key, matched_key,
+            )
+        _last_balance_key = matched_key
 
     account = get_account(db, "REAL")
     market_value = _open_positions_market_value(db, "REAL")

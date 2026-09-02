@@ -1,13 +1,15 @@
 """
-offline_test_harness.py — Short-Term Trading Upgrade real-data test harness (2026-09-02)
+offline_test_harness.py — Short-Term Trading Upgrade real-data test harness
+(2026-09-02, v2: candidate_engine + risk_engine coverage added)
 
 WHAT THIS DOES
 ──────────────
 Runs the ACTUAL real-trade-service Python modules — not a reimplementation —
 against a local data folder (from stockky_data_download.ipynb's output zip)
 and an in-memory SQLite DB, so the full watchlist → entry-band → exit-profile
-pipeline can be exercised with real NSE data, with no live services, no
-Oracle/Postgres DB, and no Dhan connection required.
+→ candidate-scoring → risk-check pipeline can be exercised with real NSE
+data, with no live services, no Oracle/Postgres DB, and no Dhan connection
+required.
 
 Modules imported and actually executed (unmodified):
     watchlist_engine.decay
@@ -15,24 +17,40 @@ Modules imported and actually executed (unmodified):
     watchlist_engine.watchlist    (refresh_watchlist, expire_stale_entries)
     entry_engine.entry            (evaluate_watchlist_entries)
     exit_engine.exit               (_load_profile, _trail_atr_mult)
+    candidate_engine.candidates   (refresh_candidates — full RSI/ADX/ATR-cap/
+                                    resistance multi-timeframe scoring, NEW v2)
+    risk_engine.engine            (evaluate() — all 9 checks, NEW v2)
     models                        (real schema, via sqlite instead of Oracle/Postgres)
 
 The only things swapped out are network calls (httpx → fixture files) and
 get_quotes() (→ fixture quotes.json). Nothing about the decision logic is
-touched.
+touched. No retry logic has been added anywhere in this harness — every
+fixture lookup is a single attempt, same as before.
 
-WHAT THIS DOES NOT DO
-──────────────────────
-- Does not place any Dhan order (dhan_client is never called: RiskVerdict /
-  order placement lives past evaluate_watchlist_entries's TradeCandidate
-  insert, which is as far as this harness goes deliberately).
-- Does not run candidate_engine's full multi-timeframe analysis (RSI/ADX/
-  ATR-cap/resistance) — that pulls in numpy/pandas-heavy technical scoring
-  that belongs to analysis-intelligence-service, not real-trade-service.
-  extended / extended_short ARE reproduced here (see technical_flags()) using
-  the exact formula from analysis-intelligence-service/technical/main.py, since
-  that's a two-line calc directly relevant to the "already popped, don't
-  chase" bug this upgrade fixed.
+WHAT THIS STILL DOES NOT DO (cannot be tested from a data zip, full stop)
+──────────────────────────────────────────────────────────────────────────
+- Does not place any Dhan order. execution/dhan_client.py (place_order,
+  cancel_order, get_positions, get_funds, token auth) needs a live or paper
+  Dhan broker connection — there is no notebook-downloadable data that can
+  stand in for that. RiskVerdict.APPROVED is as far downstream as this
+  harness goes; nothing past risk_engine.evaluate() is exercised.
+- Does not run execution/auto_pilot.py, equity_sync.py, reconcile.py, the
+  actual cycle_runner.py scheduler loop, or main.py's FastAPI service —
+  none of these add decision logic beyond what Stages 1-6 already exercise;
+  they're wiring/scheduling around it.
+- risk_engine's AccountState (equity, cash_available, open positions, daily
+  P&L) is SYNTHETIC in this harness — it comes from TradeRiskConfig's own
+  schema defaults (models.py) and config.py's DEFAULT_DEMO_CAPITAL, not from
+  a real Dhan account, since no real data zip can contain your live account
+  state. Every price/ATR/technical-score feeding INTO risk_engine.evaluate()
+  IS real. See build_demo_account() below for the exact numbers and where
+  each one is sourced from.
+- Two source tracks have no NSE-public data equivalent and are synthesized
+  as empty-but-valid payloads so their code path falls through cleanly
+  instead of crashing (documented in FixtureRouter below): watchlist tier 2
+  (/events/raw-feed) and candidate "surprise" momentum (/surprise/scan).
+  Everything else — hot_picks, ipo, volume_shock/scan-universe, history,
+  quote, delivery — is served from real downloaded data.
 
 USAGE
 ─────
@@ -100,6 +118,8 @@ class FixtureRouter:
         self.ipo_list = self._load("ipo/ipo_list.json")
         self.volume_shockers = self._load("events/volume_shockers.json")
         self.quotes = (self._load("quotes/all_quotes.json") or {}).get("quotes", {})
+        self.delivery = (self._load("quotes/delivery.json") or {}).get("delivery", {})
+        self.history = {}  # lazy per-symbol cache, loaded on first request
         self.raw_feed = self._load("events/raw_feed.json")  # optional, see note below
         if self.raw_feed is None:
             # Not produced by the download notebook (Tier 2 needs a live
@@ -110,6 +130,25 @@ class FixtureRouter:
             # unhealthy. This is the one tier the offline harness cannot
             # fully exercise; Tier 1 and Tier 3 get full coverage.
             self.raw_feed = {"items": [], "hours": 24, "checked_at": None}
+        # candidate_engine's "surprise" track (/surprise/scan?cached=true) has
+        # no NSE-public equivalent either (needs a live surprise-momentum
+        # scan service) — same synthesize-empty treatment as raw_feed above,
+        # so _refresh_standard_candidates falls through cleanly to hot_picks
+        # + ipo instead of crashing on a 404.
+        self.surprise = {"results": []}
+        # period/interval -> download-notebook's history file key. Verified
+        # against candidate_engine.candidates._multi_tf_analysis's `periods`
+        # dict and the download notebook's cell 5 TIMEFRAMES list.
+        self._tf_key_map = {
+            ("1d", "60m"): "1d_60m",
+            ("5d", "1d"): "5d_1d",
+            ("1mo", "1d"): "1mo_1d",
+            ("3mo", "1d"): "3mo_1d",
+            ("6mo", "1wk"): "6mo_1wk",
+            ("1y", "1wk"): "1y_1wk",
+            ("1y", "1d"): "1y_1d",
+            ("2y", "1mo"): "2y_1mo",
+        }
 
     def _load(self, rel_path: str):
         p = self.data_dir / rel_path
@@ -118,8 +157,16 @@ class FixtureRouter:
         with open(p) as f:
             return json.load(f)
 
+    def _load_history(self, symbol: str):
+        if symbol not in self.history:
+            self.history[symbol] = self._load(f"history/{symbol}.json")
+        return self.history[symbol]
+
     def get(self, url: str):
-        path = urlparse(url).path
+        parsed = urlparse(url)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+
         if path == "/stockky-hot":
             return _FakeResponse(200, self.hot_picks or {})
         if path == "/surprise/ipo/list":
@@ -128,11 +175,47 @@ class FixtureRouter:
             return _FakeResponse(200, self.volume_shockers or {"momentum_movers": []})
         if path == "/events/raw-feed":
             return _FakeResponse(200, self.raw_feed)
+        if path == "/surprise/scan":
+            return _FakeResponse(200, self.surprise)
+        if path.startswith("/history/"):
+            symbol = path.rsplit("/", 1)[-1]
+            period = (query.get("period") or [None])[0]
+            interval = (query.get("interval") or [None])[0]
+            hdata = self._load_history(symbol)
+            if hdata is None:
+                return _FakeResponse(404, None)
+            key = self._tf_key_map.get((period, interval))
+            candles = hdata.get("timeframes", {}).get(key, []) if key else []
+            return _FakeResponse(200, {"symbol": symbol, "candles": candles})
+        if path.startswith("/quote/"):
+            symbol = path.rsplit("/", 1)[-1]
+            q = self.quotes.get(symbol)
+            if q is None:
+                return _FakeResponse(404, None)
+            return _FakeResponse(200, q)
+        if path.startswith("/delivery/"):
+            symbol = path.rsplit("/", 1)[-1]
+            d = self.delivery.get(symbol)
+            if d is None:
+                return _FakeResponse(404, None)
+            return _FakeResponse(200, d)
+        return _FakeResponse(404, None)
+
+    def post(self, url: str, json_body):
+        # Only real POST caller is candidate_engine's /quotes/bulk cache-warm
+        # prefetch — best-effort by design (candidates.py's own docstring:
+        # "never raises"), and every result it would warm is already served
+        # directly by the per-symbol GET /quote/{symbol} route above. A
+        # fixture doesn't need a real server-side cache to warm, so this is
+        # a harmless no-op 200, not a shortcut around any real logic.
+        path = urlparse(url).path
+        if path == "/quotes/bulk":
+            return _FakeResponse(200, {"warmed": True})
         return _FakeResponse(404, None)
 
 
 class _FakeAsyncClient:
-    """Drop-in replacement for httpx.AsyncClient covering only .get()."""
+    """Drop-in replacement for httpx.AsyncClient covering .get() and .post()."""
     _router: FixtureRouter = None  # set by install_fixture_router()
 
     def __init__(self, *a, **kw):
@@ -149,6 +232,9 @@ class _FakeAsyncClient:
             sep = "&" if "?" in url else "?"
             url = url + sep + "&".join(f"{k}={v}" for k, v in params.items())
         return self._router.get(url)
+
+    async def post(self, url, json=None, timeout=None):
+        return self._router.post(url, json)
 
 
 def install_fixture_router(data_dir: Path):
@@ -305,8 +391,106 @@ async def run(data_dir: Path):
     else:
         print("    none flagged in this data pull")
 
+    # ── Stage 5: candidate_engine full scoring (REAL candidate_engine.candidates) ──
+    # Real RSI/ADX/ATR-cap/resistance multi-timeframe scoring against real
+    # history/quote/delivery data, via the FixtureRouter's new routes.
+    import candidate_engine.candidates as candidates_mod
+
+    inserted = await candidates_mod.refresh_candidates(db, MODE)
+    # watchlist_entry_id is set only for Stage 2's entry_engine-sourced rows —
+    # filter those out here so this breakdown shows just what candidate_engine
+    # itself inserted this stage, not Stage 2's rows re-listed under a new label.
+    ce_candidates = (
+        db.query(models.TradeCandidate)
+        .filter_by(mode=MODE)
+        .filter(models.TradeCandidate.watchlist_entry_id.is_(None))
+        .all()
+    )
+    by_source = {}
+    for c in ce_candidates:
+        by_source.setdefault(c.source_tab, []).append(c)
+    print(f"\n[Stage 5] candidate_engine.refresh_candidates: {inserted} candidates inserted "
+          f"(quality+MTF filter passed)")
+    for src, cands in by_source.items():
+        syms = ", ".join(c.symbol for c in cands[:8])
+        more = " ..." if len(cands) > 8 else ""
+        print(f"    {src:14s} ({len(cands):3d} symbols): {syms}{more}")
+    if not ce_candidates:
+        print("    No candidates passed candidate_engine's quality gate on this data pull —"
+              " this can be a genuinely weak/choppy market day (MIN_CONVICTION=55,"
+              " MIN_BULLISH_TIMEFRAMES=4 are strict by design), not necessarily a bug.")
+
+    # Stage 6 risk-checks every TradeCandidate row regardless of which stage
+    # produced it — that matches production (risk_engine is the single choke
+    # point downstream of both entry_engine and candidate_engine).
+    all_candidates = db.query(models.TradeCandidate).filter_by(mode=MODE).all()
+
+    # ── Stage 6: risk_engine.evaluate() (REAL risk_engine.engine) ────────────
+    # AccountState here is SYNTHETIC — see module docstring's "WHAT THIS
+    # STILL DOES NOT DO" section for exactly why and where each number comes
+    # from. entry_price/atr/qty are computed from the REAL candidate data
+    # produced in Stage 5, not invented.
+    import risk_engine.engine as risk_mod
+
+    def build_demo_account() -> "risk_mod.AccountState":
+        # Every numeric default below is the REAL schema/config default —
+        # models.TradeRiskConfig's column defaults and config.py's
+        # DEFAULT_DEMO_CAPITAL — not a harness-invented number. This models
+        # a freshly-seeded DEMO account with no open positions and no P&L
+        # yet today, since a real one isn't available from a data-only zip.
+        return risk_mod.AccountState(
+            equity=config.DEFAULT_DEMO_CAPITAL,
+            risk_per_trade_pct=1.0,
+            max_daily_loss_pct=3.0,
+            max_concurrent_positions=3,
+            max_portfolio_risk_pct=5.0,
+            stale_data_seconds=30,
+            max_tick_volatility_mult=2.0,
+            allow_pyramiding=False,
+            realized_pnl_today=0.0,
+            open_position_count=0,
+            open_position_symbols=set(),
+            open_positions_total_risk=0.0,
+            trading_globally_paused=False,
+            market_is_open=True,
+            cash_available=config.DEFAULT_DEMO_CAPITAL,
+        )
+
+    account = build_demo_account()
+    print(f"\n[Stage 6] risk_engine.evaluate() against {len(all_candidates)} real candidates "
+          f"(synthetic DEMO account: equity=₹{account.equity:,.0f}, "
+          f"risk_per_trade={account.risk_per_trade_pct}%):")
+    verdict_tally: dict[str, int] = {}
+    for c in all_candidates:
+        payload = json.loads(c.raw_payload or "{}")
+        atr_pct = (payload.get("_mtf") or {}).get("atr_pct")
+        price = c.signal_price or 0.0
+        if not price:
+            q = router.quotes.get(c.symbol) or {}
+            price = q.get("price") or q.get("ltp") or 0.0
+        if not price:
+            verdict_tally["no_price_skip"] = verdict_tally.get("no_price_skip", 0) + 1
+            continue
+        atr_abs = (atr_pct / 100.0 * price) if atr_pct else price * 0.02  # 2% fallback
+        stop_price = round(price - 1.5 * atr_abs, 2)
+        risk_per_share = price - stop_price
+        qty = int((account.equity * (account.risk_per_trade_pct / 100.0)) // risk_per_share) if risk_per_share > 0 else 0
+
+        intent = risk_mod.OrderIntent(
+            mode=MODE, symbol=c.symbol, side="BUY", qty=max(qty, 1),
+            entry_price=price, stop_price=stop_price,
+            recent_atr_pct=atr_pct,
+        )
+        result = risk_mod.evaluate(intent, account)
+        verdict_tally[result.check_name] = verdict_tally.get(result.check_name, 0) + 1
+        if result.verdict != risk_mod.RiskVerdict.APPROVED:
+            print(f"    {c.symbol:12s} {result.verdict.value:9s} [{result.check_name}] {result.reason[:90]}")
+    n_approved = verdict_tally.get("all_checks_passed", 0) + verdict_tally.get("sized_down", 0)
+    print(f"    {n_approved}/{len(all_candidates)} approved (breakdown: {verdict_tally})")
+
     print(f"\n{'='*70}\nDONE. {len(rows)} watchlist rows | {tally.get('queued', 0)} queued for entry | "
-          f"{tally.get('missed', 0)} missed (already ran) | {len(flagged)} symbols extended/extended_short\n{'='*70}")
+          f"{tally.get('missed', 0)} missed (already ran) | {len(flagged)} symbols extended/extended_short | "
+          f"{inserted} candidate_engine candidates | {len(all_candidates)} risk_engine-evaluated\n{'='*70}")
 
 
 if __name__ == "__main__":

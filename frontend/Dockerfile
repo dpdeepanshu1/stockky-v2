@@ -1,36 +1,28 @@
-# Stockky frontend — PRODUCTION build, served as static files.
+# Stockky frontend — PRODUCTION build, served by nginx instead of `vite
+# preview` (a Node.js process).
 #
-# Why this changed: the old image ran `npm run dev` (the Vite dev server). The
-# dev server opens an HMR websocket (/@vite/client). Behind the HTTPS nginx
-# reverse proxy that websocket can't stay connected, so Vite's client keeps
-# deciding the server "restarted" and forces a full-page reload — that is the
-# ~5-second reload-when-idle you were seeing. A production build has NO HMR
-# websocket, so the page stays put.
-FROM node:20-slim
+# WHY THIS CHANGED (speed, not correctness): `vite preview` is a full Node
+# runtime just to hand out static files — on a 2 vCPU / 12 GB VM that's
+# wasted RAM and a slower TTFB than a purpose-built static file server.
+# nginx:alpine serves the exact same `dist/` bundle with sendfile(),
+# gzip, and long-lived cache headers on the hashed asset filenames, using
+# a fraction of the memory and no JS runtime startup at all. The build
+# step (stage 1) is unchanged from before — only how the result is served
+# changes. No application code or data logic is touched.
+#
+# Stage 1 — build the static bundle (same as before).
+FROM node:20-slim AS build
 WORKDIR /app
-
-# Install deps first (better layer caching). devDependencies include vite/tsc,
-# which are needed to build, so we do a full install (not --production).
 COPY package.json ./
 RUN npm install
-
-# App source.
 COPY . .
-
-# VITE_* variables are inlined into the JS bundle at BUILD time (not read at
-# runtime), so the API base URL MUST be provided as a build arg.
-# docker-compose passes this from .env (VITE_API_URL). Default "/api" is a
-# relative path that also works behind nginx if the var is unset.
 ARG VITE_API_URL=/api
 ENV VITE_API_URL=${VITE_API_URL}
-
-# Build with vite directly instead of `npm run build` (which is "tsc && vite
-# build"): a stray TypeScript type error should not be able to fail the
-# production image. Vite transpiles TS on its own.
 RUN npx vite build
 
-EXPOSE 5173
-# Serve the built dist/ with `vite preview` — a plain static file server with
-# NO HMR/websocket, so there is no reload loop. host + allowedHosts come from
-# vite.config.ts (preview block) so stockky.duckdns.org is not blocked.
-CMD ["npx", "vite", "preview", "--host", "0.0.0.0", "--port", "5173"]
+# Stage 2 — serve dist/ with nginx. Final image has no Node.js in it at all.
+FROM nginx:1.27-alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 8080
+CMD ["nginx", "-g", "daemon off;"]

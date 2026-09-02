@@ -123,14 +123,37 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
         sync_real_equity(db)
 
     from candidate_engine.candidates import refresh_candidates
-    from entry_engine.entry import evaluate_mode as entry_evaluate, check_pending_fills, expire_stale_orders
+    from entry_engine.entry import (
+        evaluate_mode as entry_evaluate, check_pending_fills, expire_stale_orders,
+        evaluate_watchlist_entries,
+    )
     from exit_engine.exit import evaluate_mode as exit_evaluate
+    from watchlist_engine.watchlist import refresh_watchlist, expire_stale_entries
+    from portfolio.portfolio import open_positions
+    from resilience.local_cache import snapshot_open_positions
 
     def _stage(name: str) -> None:
         try:
             pstat.set_stage(mode, name)
         except Exception:
             pass
+
+    # ── Short-Term Trading Upgrade (2026-09-02) ─────────────────────────────
+    # Stage 1 (watchlist ingestion) + Stage 2 (band-check trigger pass) run
+    # BEFORE the existing candidate refresh, so any watchlist-sourced
+    # TradeCandidate rows queued this cycle are already present when
+    # entry_evaluate does its single pass over unconsumed candidates below —
+    # one entry pipeline, not two. Each step is independently best-effort:
+    # a failure here should never block the existing candidate/entry/exit
+    # flow that already works today.
+    _stage("watchlist")
+    try:
+        await refresh_watchlist(db, mode)
+        expire_stale_entries(db, mode)
+        watchlist_result = await evaluate_watchlist_entries(db, mode)
+    except Exception as exc:
+        logger.warning("run_cycle_core: watchlist stage failed (non-fatal): %s", exc)
+        watchlist_result = {"error": str(exc)}
 
     _stage("candidates")
     new_candidates = await refresh_candidates(db, mode)
@@ -140,6 +163,16 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
     fills = await check_pending_fills(db, mode)
     _stage("expire")
     expired = await expire_stale_orders(db, mode)
+
+    # 2026-09-02 Short-Term Trading Upgrade (resilience 3.1): snapshot open
+    # positions BEFORE exit evaluation/order placement, so a mid-cycle DB
+    # write failure followed by a restart can be detected by
+    # reconcile_on_startup() instead of silently trusting either side.
+    try:
+        snapshot_open_positions(db, open_positions(db, mode))
+    except Exception as exc:
+        logger.warning("run_cycle_core: position snapshot failed (non-fatal): %s", exc)
+
     _stage("exit")
     exit_result = await exit_evaluate(db, mode)
 
@@ -152,6 +185,7 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
 
     result = {
         "mode": mode,
+        "watchlist": watchlist_result,
         "new_candidates": new_candidates,
         "entry": entry_result,
         "fills": fills,

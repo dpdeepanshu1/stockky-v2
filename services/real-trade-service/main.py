@@ -61,6 +61,23 @@ async def startup() -> None:
         raise RuntimeError(f"real-trade-service refusing to start: {'; '.join(errors)}")
     init_schema()
     _seed_defaults()
+    # 2026-09-02 Short-Term Trading Upgrade (resilience 3.1): compare the
+    # last per-cycle open-positions snapshot (resilience/local_cache.py)
+    # against live DB state. Never auto-corrects — just logs a
+    # RECONCILE_MISMATCH audit event if a DB hiccup around the last
+    # shutdown/restart caused the two to diverge, so a human can confirm
+    # Dhan's own broker state is the source of truth.
+    try:
+        from db import get_session_factory
+        from resilience.local_cache import reconcile_on_startup
+        _Session = get_session_factory()
+        _db = _Session()
+        try:
+            reconcile_on_startup(_db)
+        finally:
+            _db.close()
+    except Exception as _e:
+        logger.debug("startup position reconcile failed (non-fatal): %s", _e)
     from execution import auto_pilot
     auto_pilot.start()
     # Adaptive threshold staleness check — logs + Telegram warning if any

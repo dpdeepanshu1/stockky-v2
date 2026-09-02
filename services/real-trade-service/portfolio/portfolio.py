@@ -98,6 +98,10 @@ def try_fill_entry(db: Session, order: models.TradeOrder, tick: Tick, stop_price
             # has a stable reference distance, not one that drifts as
             # current_stop trails.
             initial_stop_distance=abs(fill_price - stop_price),
+            # 2026-09-02 Short-Term Trading Upgrade: thread watchlist origin
+            # through so exit_engine._load_profile can apply the right
+            # catalyst-aware exit profile. NULL for non-watchlist orders.
+            watchlist_entry_id=getattr(order, "watchlist_entry_id", None),
         )
         db.add(position)
         db.flush()
@@ -229,6 +233,10 @@ def record_real_fill(db: Session, order: models.TradeOrder, fill_price: float, f
             current_stop=stop_price, current_target=target_price,
             # 2026-09-01 fix: same fixed-at-open distance as the DEMO path.
             initial_stop_distance=abs(fill_price - stop_price),
+            # 2026-09-02 Short-Term Trading Upgrade: thread watchlist origin
+            # through so exit_engine._load_profile applies the catalyst-aware
+            # exit profile. NULL for non-watchlist orders.
+            watchlist_entry_id=getattr(order, "watchlist_entry_id", None),
         )
         db.add(position)
         db.flush()

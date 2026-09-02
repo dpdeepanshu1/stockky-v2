@@ -38,6 +38,13 @@ PORT = int(os.getenv("PORT", "8005"))
 #    writes back into api-gateway's data) ───────────────────────────────────
 API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "https://stockky-api-gateway.onrender.com").rstrip("/")
 
+# Short-Term Trading Upgrade (2026-09-02): analysis-intelligence-service's
+# event sub-service, used only by watchlist_engine/sources.py's Tier 2
+# fallback (raw catalyst feed, pre-scoring — see that module's docstring).
+# Independent from API_GATEWAY_URL so Tier 2 keeps working via its own
+# circuit breaker even when api-gateway (Tier 1) is unhealthy.
+EVENT_URL = os.getenv("EVENT_URL", "https://stockky-event-tracker.onrender.com").rstrip("/")
+
 # ── Admin auth (Layer 1) ─────────────────────────────────────────────────────
 # Argon2id hash of the admin password — generate once with:
 #   python -c "from argon2 import PasswordHasher; print(PasswordHasher().hash('yourpassword'))"

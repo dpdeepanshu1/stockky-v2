@@ -149,6 +149,11 @@ class TradeCandidate(Base):
     raw_payload = Column(Text, nullable=True)  # JSON snapshot of the source recommendation
     received_at = Column(DateTime, nullable=False, default=_now)
     consumed = Column(Boolean, nullable=False, default=False)  # entry_engine has evaluated it
+    # 2026-09-02 Short-Term Trading Upgrade: set when this candidate was
+    # produced by watchlist_engine's entry-trigger pass — lets exit_engine
+    # trace back to the catalyst's horizon_class for catalyst-aware exits.
+    # NULL for all other source tracks — no behavior change.
+    watchlist_entry_id = Column(Integer, ForeignKey("trade_watchlist.id"), nullable=True)
 
     __table_args__ = (Index("ix_trade_candidates_mode_symbol", "mode", "symbol"),)
 
@@ -220,6 +225,11 @@ class TradeOrder(Base):
     # db.py's _ensure_manual_order_columns for the additive migration
     # that adds this column to an already-deployed table.
     filled_qty_so_far = Column(Integer, nullable=False, default=0)
+    # 2026-09-02 Short-Term Trading Upgrade: copied from the originating
+    # TradeCandidate.watchlist_entry_id at order-creation time (entry_engine),
+    # so portfolio.py's fill handlers can stamp the resulting TradePosition
+    # without an extra join. NULL for manual/non-watchlist orders.
+    watchlist_entry_id = Column(Integer, ForeignKey("trade_watchlist.id"), nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
@@ -272,6 +282,11 @@ class TradePosition(Base):
     realized_pnl = Column(Float, nullable=False, default=0.0)
     opened_at = Column(DateTime, nullable=False, default=_now)
     closed_at = Column(DateTime, nullable=True)
+    # 2026-09-02 Short-Term Trading Upgrade: set (from TradeOrder.watchlist_entry_id)
+    # when position was opened off a watchlist-sourced entry. exit_engine._load_profile
+    # uses it to look up horizon_class for catalyst-aware exit profile.
+    # NULL for manual trades and pre-migration positions — fall back to global defaults.
+    watchlist_entry_id = Column(Integer, ForeignKey("trade_watchlist.id"), nullable=True)
 
     __table_args__ = (Index("ix_trade_positions_mode_symbol_status", "mode", "symbol", "status"),)
 
@@ -371,3 +386,52 @@ class MarketRegimeHistory(Base):
     recorded_at = Column(DateTime, nullable=False, default=_now)
 
     __table_args__ = (Index("ix_market_regime_history_recorded_at", "recorded_at"),)
+
+
+# ── Short-Term Trading Upgrade (2026-09-02) ─────────────────────────────────
+# Watchlist: catalyst detection (Stage 1) is now separate from entry timing
+# (Stage 2). watchlist_engine.watchlist writes one row per detected catalyst
+# here; entry_engine.evaluate_watchlist_entries is the Stage-2 trigger pass
+# that reads active rows, checks price hasn't run past entry_band_pct from
+# catalyst_price, and — if still within band — inserts a tagged TradeCandidate
+# into the existing pipeline so exit_engine can later apply a catalyst-aware
+# exit profile.
+class WatchlistEntry(Base):
+    __tablename__ = "trade_watchlist"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mode = Column(String(8), nullable=False)   # "DEMO" | "REAL"
+    symbol = Column(String(32), nullable=False, index=True)
+
+    catalyst_type = Column(String(16), nullable=False)    # "bulk_block"|"insider"|"results"|"board"|"ipo"|"volume_shock"
+    catalyst_price = Column(Float, nullable=False, default=0.0)  # 0.0 = unknown (Tier 3 rows set on first sight)
+    catalyst_ts = Column(DateTime, nullable=False, default=_now)
+
+    horizon_class = Column(String(8), nullable=False)     # "short" | "mid" | "long"
+    decay_half_life_days = Column(Float, nullable=False)
+    entry_band_pct = Column(Float, nullable=False)        # max move-from-catalyst before entry refused
+
+    source_tier = Column(Integer, nullable=False)         # 1=full pipeline, 2=degraded classify, 3=volume-shock
+    conviction_score = Column(Float, nullable=True)       # from upstream score if Tier 1
+
+    status = Column(String(12), nullable=False, default="active")  # active|entered|expired|missed
+    missed_reason = Column(String(255), nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+
+    created_at = Column(DateTime, nullable=False, default=_now)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        Index("ix_trade_watchlist_mode_status", "mode", "status"),
+        Index("ix_trade_watchlist_mode_sym_type_status", "mode", "symbol", "catalyst_type", "status"),
+    )
+
+
+# ── Resilience — last-known-good cache (real-trade-service's own outbound
+# calls and open-positions snapshot per cycle) ───────────────────────────────
+class ResilienceCache(Base):
+    __tablename__ = "trade_resilience_cache"
+
+    key = Column(String(64), primary_key=True)
+    payload_json = Column(Text, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)

@@ -457,6 +457,8 @@ def analyze(symbol: str, force: bool = False):
                 "rsi": 50,
                 "support": None,
                 "resistance": None,
+                "extended": False,
+                "extended_short": False,
                 "data_insufficient": True,
                 "summary": f"Technical indicators neutral (RSI: 50). Last quote ₹{price:.2f}; history temporarily thin.",
                 "reasons": [
@@ -474,6 +476,8 @@ def analyze(symbol: str, force: bool = False):
                 "rsi": 50,
                 "support": None,
                 "resistance": None,
+                "extended": False,
+                "extended_short": False,
                 "data_insufficient": True,
                 "summary": "Technical indicators neutral (RSI: 50). Price history unavailable — retry shortly.",
                 "reasons": [
@@ -609,6 +613,35 @@ def analyze(symbol: str, force: bool = False):
         score += 8
         reasons.append("Volume surge")
 
+    # ── Short-Term Trading Upgrade (2026-09-02) — bonus fix ───────────────────
+    # BUG: the only "extended" (already-popped, don't chase) check anywhere in
+    # this service was `_rs_vs_nifty`'s dead/unused `ret > 0.18` over a 21-
+    # TRADING-DAY (~1 month) window — see that function above; it was never
+    # actually called from analyze(), so "extended" never reached the result
+    # dict at all, and a stock that popped >5% in the last 2-3 days (a bulk-
+    # deal/results move, exactly the catalysts watchlist_engine now tracks)
+    # was invisible to this check either way. This service only has daily
+    # candles (Bug 2, same root-cause note), so "same-day" isn't directly
+    # observable here — but a short trailing-window return using the candles
+    # we DO have is: cheap, catches same-week pops the 21-day version misses
+    # by construction, and needs no new data source.
+    extended = False
+    extended_short = False
+    try:
+        if data_length >= 22:
+            ret_21d  = float(close.iloc[-1] / close.iloc[-21] - 1.0)
+            extended = ret_21d > 0.18  # >18% in ~1 month — unchanged threshold
+        if data_length >= 5:
+            # ~3 trading days — short enough to catch a bulk-deal/results pop
+            # that the 21-day window structurally cannot flag until it's
+            # already a month old.
+            ret_3d = float(close.iloc[-1] / close.iloc[-4] - 1.0)
+            extended_short = ret_3d > 0.05  # >5% in ~3 sessions
+            if extended_short:
+                reasons.append(f"Extended short-term: +{ret_3d*100:.1f}% over ~3 sessions — chase risk")
+    except Exception:
+        pass  # fail-open: missing/short history just leaves both flags False
+
     # ── Adaptive market-regime adjustment (Aug-2026 improvement) ──────────────
     # In a correction (Nifty −7% in 6m), near-resistance signals are more
     # likely to fail. Reduce technical score when price is in the top 15% of
@@ -673,6 +706,8 @@ def analyze(symbol: str, force: bool = False):
         "volume_ratio": volume_ratio,
         "delivery_pct": delivery_pct,
         "delivery_source": delivery_source,
+        "extended": bool(extended),
+        "extended_short": bool(extended_short),
         "data_insufficient": data_length < 30,
         "reasons": reasons,
     }

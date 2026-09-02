@@ -94,13 +94,49 @@ MAX_HOLD_DAYS = int(os.getenv("EXIT_MAX_HOLD_DAYS", "10"))
 EARLY_WARN_DAYS = int(os.getenv("EXIT_EARLY_WARN_DAYS", "6"))
 
 
-def _trail_atr_mult(held_days: int) -> float:
+def _trail_atr_mult(held_days: int, schedule=None) -> float:
     """Return the ATR multiplier for trailing stop based on how long
-    the position has been held. Tightens over time to protect profits."""
-    for max_days, mult in TRAIL_ATR_SCHEDULE:
+    the position has been held. Tightens over time to protect profits.
+    Accepts an optional schedule override (per-catalyst-horizon profile);
+    falls back to the module-level TRAIL_ATR_SCHEDULE."""
+    s = schedule if schedule is not None else TRAIL_ATR_SCHEDULE
+    for max_days, mult in s:
         if held_days <= max_days:
             return mult
-    return TRAIL_ATR_SCHEDULE[-1][1]
+    return s[-1][1]
+
+
+# ── Short-Term Trading Upgrade (2026-09-02): per-position exit profile ────────
+# Positions opened from a WatchlistEntry carry watchlist_entry_id, which lets
+# us look up the catalyst's horizon_class and apply a tighter or looser exit
+# profile. Manual trades (watchlist_entry_id=None) fall back to the existing
+# module-level constants above — NO behavior change for them.
+
+def _load_profile(db: Session, position) -> dict:
+    """
+    Return the exit profile dict for this position.
+    Keys match exit.py's module constants: trail_atr_schedule,
+    breakeven_atr_trigger, max_hold_days, early_warn_days, partial_exit_fraction.
+    """
+    from watchlist_engine.decay import exit_profile_for
+
+    if getattr(position, "watchlist_entry_id", None) is None:
+        # Manual or pre-upgrade position — use existing global defaults.
+        return {
+            "trail_atr_schedule":    TRAIL_ATR_SCHEDULE,
+            "breakeven_atr_trigger": BREAKEVEN_ATR_TRIGGER,
+            "max_hold_days":         MAX_HOLD_DAYS,
+            "early_warn_days":       EARLY_WARN_DAYS,
+            "partial_exit_fraction": PARTIAL_EXIT_FRACTION,
+            "horizon_class":         None,
+        }
+    try:
+        row = db.query(models.WatchlistEntry).get(position.watchlist_entry_id)
+        horizon_class = row.horizon_class if row else None
+    except Exception:
+        horizon_class = None
+    profile = exit_profile_for(horizon_class)
+    return {**profile, "horizon_class": horizon_class}
 
 
 def _write_exit_decision(
@@ -275,6 +311,18 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
 
         held_days = (now - as_aware(position.opened_at)).days
 
+        # Short-Term Trading Upgrade (2026-09-02): load per-position exit
+        # profile. For watchlist-sourced positions this uses the catalyst's
+        # horizon_class; for manual/pre-upgrade positions it returns the
+        # existing global constants — zero behavior change for those.
+        _prof = _load_profile(db, position)
+        _trail_schedule  = _prof["trail_atr_schedule"]
+        _be_trigger      = _prof["breakeven_atr_trigger"]
+        _max_hold        = _prof["max_hold_days"]
+        _early_warn      = _prof["early_warn_days"]
+        _partial_frac    = _prof["partial_exit_fraction"]
+        _horizon         = _prof["horizon_class"]  # for audit trail
+
         # ── 0. Emergency gap-down exit ────────────────────────────────────────
         # In a weak market (Aug-2026), gap-downs are common. If unrealized loss
         # exceeds EMERGENCY_LOSS_MULT × original stop distance, the stop has
@@ -340,7 +388,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
             and ltp >= position.current_target
             and position.status == "OPEN"
         ):
-            qty_to_close = max(1, int(position.qty_open * PARTIAL_EXIT_FRACTION))
+            qty_to_close = max(1, int(position.qty_open * _partial_frac))
             pct_locked   = qty_to_close / position.qty_open * 100
             reasoning = (
                 f"Target ₹{position.current_target:.2f} hit at LTP ₹{ltp:.2f}. "
@@ -397,11 +445,12 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
         # ── 3. Time stop (with early warning at EARLY_WARN_DAYS) ─────────────
         # In a choppy market, a non-performing position after MAX_HOLD_DAYS
         # is tying up capital that could be in outperforming midcaps/PSU banks.
-        if held_days >= MAX_HOLD_DAYS and ltp <= position.avg_entry_price * 1.01:
+        if held_days >= _max_hold and ltp <= position.avg_entry_price * 1.01:
             reasoning = (
                 f"Time-stop: held {held_days} days with no meaningful favorable move "
                 f"(LTP ₹{ltp:.2f} vs entry ₹{position.avg_entry_price:.2f}). "
-                "Capital freed for better-performing setups."
+                f"Capital freed for better-performing setups."
+                f" [horizon={_horizon or 'manual'}]"
             )
             # BUG FIX (2026-09-01): this was logging action="EMERGENCY_EXIT" —
             # copy-pasted from the gap-down branch above. A time-stop close is
@@ -427,24 +476,25 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
             continue
 
         # Early warning (no exit — just visibility for the dashboard)
-        if held_days == EARLY_WARN_DAYS and ltp <= position.avg_entry_price:
+        if held_days == _early_warn and ltp <= position.avg_entry_price:
             _write_exit_decision(
                 db, position, "HOLD",
                 f"Day {held_days} review: LTP ₹{ltp:.2f} still at/below entry "
                 f"₹{position.avg_entry_price:.2f}. "
-                f"Time-stop fires in {MAX_HOLD_DAYS - held_days} more days if no move.",
+                f"Time-stop fires in {_max_hold - held_days} more days if no move."
+                f" [horizon={_horizon or 'manual'}]",
                 ltp,
             )
             held += 1
             continue
 
-        # ── 4. Breakeven stop (once gain ≥ BREAKEVEN_ATR_TRIGGER × ATR) ──────
+        # ── 4. Breakeven stop (once gain ≥ _be_trigger × ATR) ────────────────
         # Creates a free-ride floor: once the trade is meaningfully in profit
         # (defined as 1×ATR gain), we protect that by moving stop to entry.
         # Even if price reverses from here, we exit at breakeven, not a loss.
         if tick.atr and ltp > position.avg_entry_price:
             gain_per_share = ltp - position.avg_entry_price
-            if gain_per_share >= BREAKEVEN_ATR_TRIGGER * tick.atr:
+            if gain_per_share >= _be_trigger * tick.atr:
                 be_level = position.avg_entry_price
                 if position.current_stop is None or position.current_stop < be_level:
                     old_stop = position.current_stop
@@ -454,16 +504,16 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                         detail=(
                             f"Stop raised to breakeven ₹{be_level:.2f} "
                             f"(was ₹{old_stop}) — gain ₹{gain_per_share:.2f} "
-                            f"≥ {BREAKEVEN_ATR_TRIGGER}×ATR ₹{tick.atr:.2f}. "
-                            "Trade is now a free ride."
+                            f"≥ {_be_trigger}×ATR ₹{tick.atr:.2f}. "
+                            f"Trade is now a free ride. [horizon={_horizon or 'manual'}]"
                         ),
                     ))
                     db.commit()
                     _write_exit_decision(
                         db, position, "TRAIL_STOP",
                         f"Breakeven stop set at ₹{be_level:.2f} — "
-                        f"gain ₹{gain_per_share:.2f} ≥ {BREAKEVEN_ATR_TRIGGER}×ATR. "
-                        "Trade is now risk-free.",
+                        f"gain ₹{gain_per_share:.2f} ≥ {_be_trigger}×ATR. "
+                        f"Trade is now risk-free. [horizon={_horizon or 'manual'}]",
                         ltp,
                     )
                     trailed += 1
@@ -474,7 +524,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
         # that would loosen the stop, which is wrong).
         # ATR multiplier tightens as trade ages to protect accumulated profit.
         if tick.atr and ltp > position.avg_entry_price:
-            trail_mult   = _trail_atr_mult(held_days)
+            trail_mult   = _trail_atr_mult(held_days, schedule=_trail_schedule)
             raw_atr_pct  = tick.atr / ltp * 100.0
             # §6 — clamp: if today's ATR looks like a corporate-action jump, skip
             # the trail update entirely this cycle rather than using a distorted ATR.

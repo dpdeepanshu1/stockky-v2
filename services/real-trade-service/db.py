@@ -137,6 +137,7 @@ def init_schema() -> None:
     _ensure_manual_order_columns(eng, dialect())
     _ensure_gate_state_columns(eng, dialect())
     _ensure_position_columns(eng, dialect())
+    _ensure_watchlist_link_columns(eng, dialect())
     _fix_stale_dhan_token_expiry(eng)
 
 
@@ -335,6 +336,44 @@ def _ensure_position_columns(engine, dialect_name: str) -> None:
             if "already exists" in m.lower() or "ORA-01430" in m:
                 continue
             logger.warning("real-trade-db: could not add trade_positions.%s: %s", col_name, e)
+
+
+# Short-Term Trading Upgrade (2026-09-02): trade_candidates, trade_orders,
+# and trade_positions all existed before watchlist_entry_id was added to
+# models.py — same additive-migration idiom as every _ensure_* fn above.
+# trade_watchlist/trade_resilience_cache are brand-new tables so create_all()
+# handles them; only the FK-carrying columns on pre-existing tables need this.
+# All three are nullable and default NULL, so every pre-existing row and every
+# future non-watchlist row is completely unaffected.
+def _ensure_watchlist_link_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    targets = [
+        ("trade_candidates", "watchlist_entry_id"),
+        ("trade_orders",     "watchlist_entry_id"),
+        ("trade_positions",  "watchlist_entry_id"),
+    ]
+    for table_name, col_name in targets:
+        try:
+            existing = {c["name"] for c in inspect(engine).get_columns(table_name)}
+        except Exception as e:
+            logger.warning("real-trade-db: could not inspect %s columns: %s", table_name, e)
+            continue
+        if col_name in existing:
+            continue
+        if dialect_name == "oracle":
+            sql = f"ALTER TABLE {table_name} ADD ({col_name} NUMBER(10))"
+        else:
+            sql = f"ALTER TABLE {table_name} ADD COLUMN {col_name} INTEGER"
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added %s.%s", table_name, col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add %s.%s: %s", table_name, col_name, e)
 
 
 def _ensure_oracle_autoincrement(engine, base) -> None:

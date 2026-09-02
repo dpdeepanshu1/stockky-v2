@@ -151,12 +151,22 @@ def score_to_decision(
     horizon: str,
     live_win_rate=None,
     live_win_rate_n: int = 0,
+    extended_short: bool = False,
 ) -> str:
     """Soft score-driven rules (not hard AND gates). Prefer short-term aggressiveness.
 
     Closed-loop: live_win_rate shifts BUY_NOW / PREPARE thresholds so the
     engine becomes more selective when recent outcomes are weak and slightly
     more aggressive when the live edge is strong.
+
+    extended_short (2026-09-02 Short-Term Trading Upgrade bonus fix):
+    technical/main.py's `extended` flag is a 21-trading-day (~1 month)
+    window — it cannot flag a stock that already popped in the last 2-3
+    days, which is exactly the "buy after it's boosted, then it drops"
+    failure mode for short-horizon (2-3 day / 1 week) trades. extended_short
+    is a tighter ~3-session window (>5% move). It only applies its own
+    penalty for horizon=="short" — the horizon this failure mode actually
+    hits — and does not affect mid/long horizon scoring at all.
     """
     if thin_history or low_liquidity:
         return DO_NOT_BUY
@@ -170,6 +180,12 @@ def score_to_decision(
     adj = score - (6 if extended and horizon != "short" else (3 if extended else 0))
     if event_risk and horizon == "short":
         adj -= 4
+    if extended_short and horizon == "short":
+        # Deliberately a larger penalty than the plain `extended` short-horizon
+        # case above (3) — this flag means the move already happened THIS
+        # week, which is precisely the "already boosted, don't chase" signal
+        # a 2-3 day / 1-week hold cannot afford to ignore.
+        adj -= 8
 
     buy_off, prep_extra, _ = _threshold_offsets(live_win_rate, live_win_rate_n)
 
@@ -302,6 +318,7 @@ def score_horizon(
         already_owned=bool(flags.get("already_owned")),
         event_risk=bool(flags.get("event_risk")),
         extended=bool(flags.get("extended")),
+        extended_short=bool(flags.get("extended_short")),
         thin_history=bool(flags.get("thin_history")),
         low_liquidity=bool(flags.get("low_liquidity")),
         horizon=horizon,

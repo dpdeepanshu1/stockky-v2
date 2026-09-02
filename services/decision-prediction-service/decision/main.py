@@ -1262,6 +1262,12 @@ async def _decide_impl(
             "already_owned": already_owned,
             "event_risk": bool((events or {}).get("event_risk") or (events or {}).get("next_earnings_date")),
             "extended": bool(technical.get("extended") or technical.get("overextended")),
+            # 2026-09-02 Short-Term Trading Upgrade bonus fix: technical
+            # service's 21-day extended check misses a fast (2-3 day)
+            # bulk-deal/results pop entirely by construction. extended_short
+            # is a tighter trailing-window flag (~3 sessions, >5% move) —
+            # see technical/main.py's analyze() for the computation.
+            "extended_short": bool(technical.get("extended_short")),
             "thin_history": bool(technical.get("data_insufficient") or technical.get("thin_history")),
             "low_liquidity": bool(technical.get("low_liquidity")),
             "live_win_rate": (training or {}).get("live_win_rate") or (training or {}).get("win_rate"),

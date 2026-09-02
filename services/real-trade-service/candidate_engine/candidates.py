@@ -695,7 +695,12 @@ def _rows_from_hot_picks(payload: dict) -> list[dict]:
 
 
 def _rows_from_ipo(payload: Any) -> list[dict]:
-    items = payload if isinstance(payload, list) else (payload or {}).get("items", [])
+    # 2026-09-02 fix: /surprise/ipo/list wraps results under "results", not "items"
+    # (verified against api-gateway/ipo_scanner.py's get_ipo_list return value).
+    # Checking "results" first, then "items" as a fallback for schema changes.
+    items = payload if isinstance(payload, list) else (
+        (payload or {}).get("results") or (payload or {}).get("items") or []
+    )
     out = []
     for item in items or []:
         if not isinstance(item, dict) or not item.get("symbol"):

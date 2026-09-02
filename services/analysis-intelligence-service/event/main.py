@@ -905,6 +905,7 @@ def root():
             "/events/{symbol}": "GET full snapshot",
             "/events/{symbol}/categorized": "GET upcoming/recent events + changes",
             "/events/{symbol}?force=true": "GET bypass cache",
+            "/events/raw-feed?hours=24": "GET pre-scoring raw feed (Short-Term Trading Upgrade Tier 2)",
             "/subscribe": "POST",
             "/subscriptions": "GET",
             "/check": "GET",
@@ -1027,6 +1028,60 @@ def subscribe(req: SubscribeRequest):
 @app.get("/subscriptions")
 def list_subscriptions():
     return {"subscriptions": _load_state()["subscriptions"]}
+
+
+# ── Short-Term Trading Upgrade (2026-09-02) ─────────────────────────────────
+# Lightweight, pre-scoring feed for real-trade-service's watchlist_engine
+# Tier 2 fallback (see that service's watchlist_engine/sources.py docstring).
+# Deliberately the cheapest possible read: it reuses whatever this service's
+# own ingestion already cached per symbol (the same recent_news list
+# classify_events / _fetch_events already build, keyed off EVENT_CACHE_PREFIX)
+# and flattens it into a single recent list, with NO scoring/pillar
+# aggregation applied — that's the entire point, so real-trade-service's
+# Tier 2 depends only on this service's raw cache being warm, never on
+# decision-prediction-service's full pipeline being healthy.
+@app.get("/events/raw-feed")
+def raw_feed(hours: int = 24):
+    """
+    Raw detected items (symbol, headline, price-at-detection if known,
+    timestamp, publisher) for subscribed symbols, filtered to the last
+    `hours`. No cache bypass, no fresh fetches — reads only what's already
+    cached under EVENT_CACHE_PREFIX so this stays a cheap, always-fast call
+    even if yfinance/RSS sources are themselves degraded.
+    """
+    state = _load_state()
+    subscriptions = state.get("subscriptions", [])
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
+
+    items: list[dict] = []
+    for symbol in subscriptions:
+        cache_key = f"{EVENT_CACHE_PREFIX}{symbol}"
+        cached = _redis_get(cache_key)
+        if not cached:
+            continue
+        for n in (cached.get("recent_news") or []):
+            published = n.get("published")
+            if published:
+                try:
+                    pub_dt = datetime.fromisoformat(published.replace("Z", ""))
+                    if pub_dt < cutoff:
+                        continue
+                except (ValueError, TypeError):
+                    pass  # unparseable date — don't silently drop it
+            items.append({
+                "symbol": symbol,
+                "headline": n.get("title"),
+                # price-at-detection isn't tracked per-news-item today, so
+                # this is left None — real-trade-service's Tier 2 path
+                # (watchlist_engine/sources.py) already handles a missing
+                # price by treating it like a Tier 3 row (sets it on first
+                # live-tick sight instead of trusting a detection-time price).
+                "price": None,
+                "ts": published,
+                "publisher": n.get("publisher"),
+            })
+
+    return {"items": items, "hours": hours, "checked_at": datetime.utcnow().isoformat()}
 
 
 @app.get("/check")

@@ -568,6 +568,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             limit_price=entry_price,
             valid_until=datetime.now(timezone.utc) + timedelta(minutes=config.ENTRY_VALIDITY_MINUTES),
             status="PLACED",
+            # 2026-09-02 Short-Term Trading Upgrade: carry the watchlist origin
+            # forward so portfolio.py can stamp the resulting TradePosition.
+            watchlist_entry_id=getattr(cand, "watchlist_entry_id", None),
         )
         db.add(order)
         db.flush()
@@ -779,3 +782,119 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
         log_action(db, actor="system", action="ORDERS_EXPIRED", mode=mode,
                    detail=f"count={expired}")
     return expired
+
+
+# ── Short-Term Trading Upgrade (2026-09-02) ─────────────────────────────────
+# Stage 2 trigger pass: read active WatchlistEntry rows, check price hasn't
+# run past entry_band_pct from catalyst_price, and — if still within band —
+# insert a tagged TradeCandidate with watchlist_entry_id set so it flows into
+# the EXISTING evaluate_mode pipeline (which already has ATR/resistance/volume/
+# risk checks). This keeps one entry pipeline instead of two.
+
+async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
+    """
+    Trigger pass over active WatchlistEntry rows.
+
+    For each entry:
+      - Skip if already tracked in TradeCandidate (unconsumed, same mode+symbol).
+      - Fetch current price.
+      - If catalyst_price == 0.0 (Tier 3 rows, not yet seen), set it now.
+      - If price has moved more than entry_band_pct above catalyst_price → mark
+        "missed" and skip (the stock already ran, don't chase).
+      - Otherwise insert a TradeCandidate tagged with this watchlist_entry_id
+        (decision_label="BUY NOW", source_tab="watchlist") so evaluate_mode
+        picks it up in the same or next cycle.
+
+    Returns a tally dict for logs / dashboard.
+    """
+    active = (
+        db.query(models.WatchlistEntry)
+        .filter_by(mode=mode, status="active")
+        .all()
+    )
+    if not active:
+        return {"watchlist_checked": 0, "band_ok": 0, "missed": 0, "queued": 0}
+
+    symbols = list({row.symbol for row in active})
+    ticks = await get_quotes(symbols)
+
+    already_queued_symbols = {
+        c.symbol
+        for c in db.query(models.TradeCandidate)
+        .filter_by(mode=mode, consumed=False)
+        .filter(models.TradeCandidate.watchlist_entry_id.isnot(None))
+        .all()
+    }
+
+    band_ok = missed = queued = 0
+    now = datetime.now(timezone.utc)
+
+    for row in active:
+        tick = ticks.get(row.symbol)
+        if tick is None:
+            continue  # no price — skip this cycle, try again next
+
+        price = tick.price
+
+        # Tier 3 rows start with catalyst_price=0.0 — set it on first sight.
+        if row.catalyst_price == 0.0:
+            row.catalyst_price = price
+            row.updated_at = now
+            db.commit()
+            continue  # begin monitoring from next cycle
+
+        pct_move = (price - row.catalyst_price) / row.catalyst_price
+
+        if pct_move > row.entry_band_pct:
+            # Price has run past the entry band — the catalyst edge is gone.
+            row.status = "missed"
+            row.missed_reason = (
+                f"price moved {pct_move:.1%} from catalyst ₹{row.catalyst_price:.2f} "
+                f"(band was {row.entry_band_pct:.1%})"
+            )
+            row.updated_at = now
+            db.commit()
+            missed += 1
+            logger.info(
+                "watchlist trigger[%s/%s]: MISSED — %s",
+                mode, row.symbol, row.missed_reason,
+            )
+            continue
+
+        band_ok += 1
+
+        # Already has an unconsumed watchlist-sourced candidate waiting — skip.
+        if row.symbol in already_queued_symbols:
+            continue
+
+        # Within band and not yet queued — insert a tagged TradeCandidate.
+        cand = models.TradeCandidate(
+            mode=mode,
+            symbol=row.symbol,
+            source_tab="watchlist",
+            decision_label="BUY NOW",
+            conviction_score=row.conviction_score,
+            signal_price=price,
+            raw_payload=None,
+            consumed=False,
+            watchlist_entry_id=row.id,
+        )
+        db.add(cand)
+        already_queued_symbols.add(row.symbol)
+        queued += 1
+        logger.info(
+            "watchlist trigger[%s/%s]: QUEUED — catalyst=%s tier=%d "
+            "catalyst_px=₹%.2f current_px=₹%.2f move=%.2f%%",
+            mode, row.symbol, row.catalyst_type, row.source_tier,
+            row.catalyst_price, price, pct_move * 100,
+        )
+
+    if queued:
+        db.commit()
+
+    return {
+        "watchlist_checked": len(active),
+        "band_ok": band_ok,
+        "missed": missed,
+        "queued": queued,
+    }

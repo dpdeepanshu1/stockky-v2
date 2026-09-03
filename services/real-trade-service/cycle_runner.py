@@ -148,7 +148,14 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
     # the same cycle it changes, not one cycle late.
     _stage("dynamic_universe")
     try:
-        await refresh_dynamic_universe(db)
+        du_result = await refresh_dynamic_universe(db)
+        if du_result is not None:
+            from resilience.local_cache import save_snapshot
+            from datetime import datetime, timezone
+            save_snapshot(db, "dynamic_universe_last", {
+                **du_result, "mode": mode,
+                "synced_at": datetime.now(timezone.utc).isoformat(),
+            })
     except Exception as exc:
         logger.warning("run_cycle_core: dynamic universe refresh failed (non-fatal): %s", exc)
 

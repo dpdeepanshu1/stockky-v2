@@ -68,6 +68,27 @@ class CircuitBreaker:
             return False
         return True
 
+    def to_dict(self) -> dict:
+        """Read-only status snapshot for the /resilience/status endpoint —
+        2026-09-03. Never used for any trading decision, observability only."""
+        if self._opened_at is None:
+            state = "closed"
+        elif self.is_open:
+            state = "open"
+        else:
+            state = "half_open"
+        return {
+            "name": self.name,
+            "state": state,
+            "consecutive_failures": self._failures,
+            "failure_threshold": self.failure_threshold,
+            "cooldown_s": self.cooldown_s,
+            "seconds_until_retry": (
+                max(0.0, self.cooldown_s - (time.monotonic() - self._opened_at))
+                if self._opened_at is not None else None
+            ),
+        }
+
     def record_success(self) -> None:
         was_degraded = self._failures > 0 or self._opened_at is not None
         if was_degraded:

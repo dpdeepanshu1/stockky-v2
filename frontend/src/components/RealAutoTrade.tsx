@@ -3,7 +3,7 @@ import {
   realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl,
   getSessionToken, setSessionToken, setSessionExpiredHandler,
   type GateStatus, type AuditLogRow, type Position, type OrderRow, type CycleResult, type DhanStatus,
-  type PipelineStatus, type CandidateRow,
+  type PipelineStatus, type CandidateRow, type WatchlistEntry, type ResilienceStatus,
 } from "../realTradeApi";
 import ManualTradeTicket from "./trading/ManualTradeTicket";
 
@@ -79,11 +79,13 @@ function SectionHdr({ children }: { children: React.ReactNode }) {
 // anything itself. ───────────────────────────────────────────────────────────
 const STAGE_LABELS: Record<string, string> = {
   starting: "Starting…",
+  dynamic_universe: "Widening/pruning watchlist universe",
+  watchlist: "Detecting catalysts (watchlist)",
   candidates: "Fetching candidates",
-  entry: "Evaluating entries",
+  entry: "Evaluating entries (chase-guard check)",
   fills: "Checking fills",
   expire: "Expiring stale orders",
-  exit: "Evaluating exits",
+  exit: "Evaluating exits (horizon-aware)",
   reconcile: "Reconciling with Dhan",
 };
 
@@ -242,15 +244,166 @@ function PipelineLiveStatus({ pipeline, mode }: { pipeline: PipelineStatus | nul
   );
 }
 
+// ── Catalyst watchlist + signal-sourcing health (2026-09-03) ─────────────────
+// Separate concept from the "Watchlist" tab (which shows trade_candidates,
+// post-risk-engine). This shows the EARLIER stage: what was detected as a
+// catalyst before any price-band check ran, incl. rows the chase-guard
+// rejected ("missed") — plus whether either upstream circuit breaker is
+// currently degraded, and what the last dynamic-universe sync actually did.
+// Fetches its own data on an interval, independent of the rest of the tab's
+// state, so it works whether or not Pipeline is the active tab's first load.
+const SOURCE_TIER_LABELS: Record<number, string> = {
+  1: "Tier 1 · full pipeline",
+  2: "Tier 2 · raw event feed",
+  3: "Tier 3 · volume shock",
+};
+const WATCHLIST_STATUS_STYLE: Record<string, string> = {
+  active: "text-signal-prepare border-signal-prepare/30 bg-signal-prepare/5",
+  entered: "text-signal-buy border-signal-buy/30 bg-signal-buy/5",
+  missed: "text-signal-sell border-signal-sell/30 bg-signal-sell/5",
+  expired: "text-mist border-slate bg-ink",
+};
+
+function BreakerDot({ state }: { state: "closed" | "open" | "half_open" }) {
+  const color = state === "closed" ? "bg-signal-buy" : state === "half_open" ? "bg-signal-hold" : "bg-signal-sell";
+  return <span className={`inline-block w-2 h-2 rounded-full ${color}`} />;
+}
+
+function CatalystWatchlistPanel({ mode }: { mode: Mode }) {
+  const [entries, setEntries] = useState<WatchlistEntry[] | null>(null);
+  const [resilience, setResilience] = useState<ResilienceStatus | null>(null);
+  const [statusFilter, setStatusFilter] = useState<string>("");
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [wl, res] = await Promise.all([
+        realTradeApi.watchlistEntries(mode, statusFilter || undefined),
+        realTradeApi.resilienceStatus(),
+      ]);
+      setEntries(wl.entries);
+      setResilience(res);
+    } catch {
+      // Best-effort observability panel — a failure here shouldn't disrupt
+      // the rest of the Pipeline tab. Leaves last-known data on screen.
+    } finally {
+      setLoading(false);
+    }
+  }, [mode, statusFilter]);
+
+  useEffect(() => {
+    void load();
+    const t = setInterval(() => void load(), 30_000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  return (
+    <div className="space-y-4">
+      {/* Signal sourcing health */}
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        <SectionHdr>Signal sourcing health</SectionHdr>
+        <div className="grid grid-cols-2 gap-3 mt-2">
+          {resilience && Object.entries(resilience.breakers).map(([key, b]) => (
+            <div key={key} className="bg-ink border border-slate rounded-xl p-3">
+              <div className="flex items-center gap-2 mb-1">
+                <BreakerDot state={b.state} />
+                <span className="font-display text-xs font-bold text-paper capitalize">{key.replace("_", " ")}</span>
+              </div>
+              <p className="font-display tabular-nums text-[10px] text-mist capitalize">{b.state}</p>
+              {b.state !== "closed" && (
+                <p className="font-display tabular-nums text-[9px] text-signal-sell mt-1">
+                  {b.consecutive_failures}/{b.failure_threshold} failures
+                  {b.seconds_until_retry != null && ` · retry in ${Math.round(b.seconds_until_retry)}s`}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="mt-3 pt-3 border-t border-slate">
+          <p className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-1">Last dynamic-universe sync</p>
+          {resilience?.dynamic_universe_last ? (
+            <p className="font-display tabular-nums text-[11px] text-paper">
+              +{resilience.dynamic_universe_last.added.length} added · −{resilience.dynamic_universe_last.removed.length} removed ·{" "}
+              {resilience.dynamic_universe_last.kept} kept ·{" "}
+              <span className="text-mist">{fmtTime(resilience.dynamic_universe_last.synced_at)}</span>
+            </p>
+          ) : (
+            <p className="font-display tabular-nums text-[11px] text-mist">No sync recorded yet this run (runs every ~20 min, market hours only)</p>
+          )}
+        </div>
+      </div>
+
+      {/* Catalyst watchlist */}
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        <div className="flex items-center justify-between mb-1">
+          <SectionHdr>Catalyst watchlist — {mode}</SectionHdr>
+          <button onClick={() => void load()} disabled={loading}
+            className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-ink border border-slate text-mist disabled:opacity-40">
+            {loading ? "…" : "↻"}
+          </button>
+        </div>
+        <p className="font-display tabular-nums text-[10px] text-mist -mt-1 mb-2">
+          Catalyst detected — before any price-band or risk check. Different from the "Watchlist" tab (that's post-evaluation candidates).
+        </p>
+        <div className="flex gap-1 mb-3">
+          {["", "active", "entered", "missed", "expired"].map(s => (
+            <button key={s || "all"} onClick={() => setStatusFilter(s)}
+              className={`px-2.5 py-1 rounded-full font-display text-[10px] font-semibold transition-colors ${
+                statusFilter === s ? "bg-signal-buy text-white" : "bg-ink border border-slate text-mist hover:text-paper"
+              }`}>
+              {s || "All"}
+            </button>
+          ))}
+        </div>
+
+        {!entries || entries.length === 0 ? (
+          <p className="font-display tabular-nums text-[11px] text-mist py-4 text-center">
+            {entries === null ? "Loading…" : "No catalyst watchlist entries" + (statusFilter ? ` with status "${statusFilter}"` : "") + " right now."}
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {entries.map(e => (
+              <div key={e.id} className="bg-ink border border-slate rounded-xl p-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="font-display text-sm font-bold text-paper">{e.symbol}</span>
+                    <span className="font-display tabular-nums text-[9px] text-mist">{e.catalyst_type}</span>
+                  </div>
+                  <span className={`font-display tabular-nums text-[9px] px-2 py-0.5 rounded-full border ${WATCHLIST_STATUS_STYLE[e.status] || "text-mist border-slate"}`}>
+                    {e.status}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1.5 font-display tabular-nums text-[10px] text-mist">
+                  <span>{SOURCE_TIER_LABELS[e.source_tier] || `Tier ${e.source_tier}`}</span>
+                  <span>Horizon: {e.horizon_class}</span>
+                  <span>Band: {(e.entry_band_pct * 100).toFixed(1)}%</span>
+                  {e.conviction_score != null && <span>Conviction: {e.conviction_score}</span>}
+                  {e.catalyst_ts && <span>Detected {fmtTime(e.catalyst_ts)}</span>}
+                </div>
+                {e.missed_reason && (
+                  <p className="font-display tabular-nums text-[10px] text-signal-sell mt-1.5">⚠ {e.missed_reason}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Order flow diagram (how a trade executes) ────────────────────────────────
 function OrderFlowDiagram({ mode }: { mode: Mode }) {
   const steps = [
-    { id: "candidate", label: "Candidate", desc: "Hot Picks / IPO / Scan" },
-    { id: "risk", label: "Risk Check", desc: "9 engine checks" },
+    { id: "universe", label: "Dynamic Universe", desc: "Widen/prune auto-tracked symbols (~20min, mkt hrs)" },
+    { id: "watchlist", label: "Watchlist", desc: "Catalyst detected — no price gate yet" },
+    { id: "candidate", label: "Candidate", desc: "Hot Picks / IPO / Scan / Watchlist trigger" },
+    { id: "risk", label: "Risk Check", desc: "9 engine checks + entry-band (chase guard)" },
     { id: "order", label: "Place Order", desc: mode === "REAL" ? "Dhan API (LIMIT)" : "Paper trade" },
     { id: "fill", label: "Fill", desc: mode === "REAL" ? "Reconcile w/ Dhan" : "Simulated price" },
     { id: "position", label: "Position Open", desc: "Stop + Target set" },
-    { id: "exit", label: "Exit", desc: "Stop / Target / Trail / Time" },
+    { id: "exit", label: "Exit", desc: "Horizon-aware: Stop / Target / Trail / Time" },
   ];
   return (
     <div className="bg-graphite border border-slate rounded-2xl p-4 mb-4">
@@ -1635,6 +1788,8 @@ export default function RealAutoTrade() {
               <OrderFlowDiagram mode={mode} />
 
               <PipelineLiveStatus pipeline={pipeline} mode={mode} />
+
+              <CatalystWatchlistPanel mode={mode} />
 
               <div className="bg-graphite border border-slate rounded-2xl p-4">
                 <div className="flex items-center justify-between mb-3">

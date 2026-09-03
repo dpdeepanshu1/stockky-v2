@@ -35,6 +35,8 @@ _STATE: dict[str, dict[str, Any]] = {}
 _HISTORY: dict[str, deque] = {"DEMO": deque(maxlen=_HISTORY_MAXLEN), "REAL": deque(maxlen=_HISTORY_MAXLEN)}
 
 STAGES = (
+    "dynamic_universe",  # dynamic_universe.refresh_dynamic_universe: widen/prune auto-tracked symbols
+    "watchlist",         # watchlist.refresh_watchlist + entry.evaluate_watchlist_entries: catalyst detect + band-check trigger
     "candidates",     # refresh_candidates: pulling hot-picks / IPO from api-gateway
     "entry",          # entry_engine.evaluate_mode: pricing + risk-checking each candidate
     "fills",          # check_pending_fills (DEMO simulated fills)

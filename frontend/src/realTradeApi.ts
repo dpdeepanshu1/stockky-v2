@@ -244,6 +244,53 @@ export interface PipelineStatus {
   history: PipelineCycleRecord[];
 }
 
+// 2026-09-03 — catalyst watchlist (WatchlistEntry) + resilience status types.
+export interface WatchlistEntry {
+  id: number;
+  symbol: string;
+  catalyst_type: string;
+  catalyst_price: number;
+  catalyst_ts: string | null;
+  horizon_class: string;
+  entry_band_pct: number;
+  source_tier: number;
+  conviction_score: number | null;
+  status: "active" | "entered" | "expired" | "missed" | string;
+  missed_reason: string | null;
+  expires_at: string | null;
+}
+
+export interface WatchlistEntriesResponse {
+  mode: string;
+  count: number;
+  entries: WatchlistEntry[];
+}
+
+export interface CircuitBreakerStatus {
+  name: string;
+  state: "closed" | "open" | "half_open";
+  consecutive_failures: number;
+  failure_threshold: number;
+  cooldown_s: number;
+  seconds_until_retry: number | null;
+}
+
+export interface DynamicUniverseLast {
+  mode: string;
+  added: string[];
+  removed: string[];
+  kept: number;
+  synced_at: string;
+}
+
+export interface ResilienceStatus {
+  breakers: {
+    api_gateway: CircuitBreakerStatus;
+    market_data: CircuitBreakerStatus;
+  };
+  dynamic_universe_last: DynamicUniverseLast | null;
+}
+
 export interface ManualOrderRequest {
   symbol: string;
   side: "BUY" | "SELL";
@@ -373,6 +420,19 @@ export const realTradeApi = {
 
   pipelineStatus: (mode: "DEMO" | "REAL") =>
     rtRequest<PipelineStatus>(`/pipeline/status/${mode}`, {}, mode === "REAL"),
+
+  // 2026-09-03 — catalyst watchlist (trade_watchlist / WatchlistEntry) and
+  // resilience status (circuit breakers + last dynamic-universe sync).
+  // Both read-only/observational, same rtRequest pattern as everything else.
+  watchlistEntries: (mode: "DEMO" | "REAL", status?: string) =>
+    rtRequest<WatchlistEntriesResponse>(
+      `/watchlist-entries/${mode}${status ? `?status=${status}` : ""}`,
+      {},
+      mode === "REAL"
+    ),
+
+  resilienceStatus: () =>
+    rtRequest<ResilienceStatus>(`/resilience/status`, {}, true),
 
   positions: (mode: "DEMO" | "REAL") =>
     rtRequest<Position[]>(`/positions/${mode}`, {}, mode === "REAL"),

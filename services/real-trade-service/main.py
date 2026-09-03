@@ -786,6 +786,86 @@ async def pipeline_status_route(mode: str, admin: Optional[str] = Depends(requir
     return pstat.get_status(mode)
 
 
+@app.get("/watchlist-entries/{mode}")
+async def watchlist_entries_route(
+    mode: str,
+    status: Optional[str] = None,
+    limit: int = 100,
+    admin: Optional[str] = Depends(require_admin_if_real),
+    db: Session = Depends(get_db),
+):
+    """
+    2026-09-03 — read-only view of the catalyst-detection watchlist
+    (trade_watchlist / WatchlistEntry). This is a DIFFERENT, earlier stage
+    than the existing "Watchlist" tab (which shows trade_candidates, i.e.
+    post-risk-engine evaluation) — this endpoint shows what the system
+    detected as a catalyst BEFORE any price-band or risk check ran,
+    including rows marked "missed" (price ran past the entry band) so the
+    chase-guard's actual behavior is visible, not just successful entries.
+    Purely observational — never used by entry_engine's own evaluation,
+    which reads this table itself, not through this endpoint.
+    """
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    limit = max(1, min(limit, 300))
+
+    q = db.query(models.WatchlistEntry).filter_by(mode=mode)
+    if status:
+        q = q.filter_by(status=status)
+    rows = q.order_by(models.WatchlistEntry.catalyst_ts.desc()).limit(limit).all()
+
+    return {
+        "mode": mode,
+        "count": len(rows),
+        "entries": [
+            {
+                "id": r.id,
+                "symbol": r.symbol,
+                "catalyst_type": r.catalyst_type,
+                "catalyst_price": r.catalyst_price,
+                "catalyst_ts": r.catalyst_ts.isoformat() if r.catalyst_ts else None,
+                "horizon_class": r.horizon_class,
+                "entry_band_pct": r.entry_band_pct,
+                "source_tier": r.source_tier,
+                "conviction_score": r.conviction_score,
+                "status": r.status,
+                "missed_reason": r.missed_reason,
+                "expires_at": r.expires_at.isoformat() if r.expires_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.get("/resilience/status")
+async def resilience_status_route(
+    admin: Optional[str] = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    2026-09-03 — surfaces the two things that were previously invisible on
+    the dashboard: whether either upstream circuit breaker (api-gateway,
+    market-data-service) is currently open/degraded, and what the last
+    dynamic-universe sync actually did (added/removed/kept, and when).
+    Read-only, observational — mirrors what's already happening in the
+    code (resilience/circuit_breaker.py, watchlist_engine/dynamic_universe.py),
+    doesn't change any behavior itself.
+    """
+    from resilience.circuit_breaker import api_gateway_breaker, market_data_breaker
+    from resilience.local_cache import load_snapshot
+
+    du_last = load_snapshot(db, "dynamic_universe_last")
+
+    return {
+        "breakers": {
+            "api_gateway": api_gateway_breaker.to_dict(),
+            "market_data": market_data_breaker.to_dict(),
+        },
+        "dynamic_universe_last": du_last,
+    }
+
+
 # ── Routes: Auto-Pilot (2026-08-27) ──────────────────────────────────────────
 # Toggle only — the actual loop lives in execution/auto_pilot.py, started
 # once at app startup and running for the lifetime of the process. Turning

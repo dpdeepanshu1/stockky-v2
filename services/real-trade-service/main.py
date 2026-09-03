@@ -365,6 +365,26 @@ async def connect_dhan(body: ConnectDhanRequest, admin: str = Depends(require_ad
     return dhan_credentials.connection_status(db)
 
 
+@app.post("/dhan/regenerate-token")
+async def regenerate_dhan_token(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    # Manual trigger for the same TOTP auto-refresh cycle_runner and the
+    # notification-scheduler's cron already call on a schedule — for when
+    # the Dhan token expired and the scheduled refresh didn't fire in time.
+    # 409s with a clear message when DHAN_TOTP_ENABLED=false (the default,
+    # manual-paste mode) instead of silently no-op'ing, so the button gives
+    # an honest result rather than looking broken.
+    if not config.DHAN_TOTP_ENABLED:
+        raise HTTPException(
+            status_code=409,
+            detail="Auto-regenerate is off (DHAN_TOTP_ENABLED=false) — this account uses manual daily token paste. Use \"Rotate token\" below to paste a fresh token from web.dhan.co.",
+        )
+    ok = dhan_credentials.refresh_if_totp_enabled(db)
+    if not ok:
+        raise HTTPException(status_code=502, detail="Dhan token regeneration failed — check DHAN_TOTP_SECRET/DHAN_CLIENT_ID/DHAN_PIN and service logs.")
+    log_action(db, actor=admin, action="DHAN_TOKEN_REGENERATED", mode="REAL")
+    return dhan_credentials.connection_status(db)
+
+
 @app.get("/dhan/status")
 async def dhan_status(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     return dhan_credentials.connection_status(db)

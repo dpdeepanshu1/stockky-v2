@@ -367,6 +367,7 @@ export default function RealAutoTrade() {
   const [status, setStatus] = useState<GateStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [regenLoading, setRegenLoading] = useState(false);
 
   const [loggedIn, setLoggedIn] = useState(!!getSessionToken());
   const [username, setUsername] = useState("admin");
@@ -609,6 +610,19 @@ export default function RealAutoTrade() {
       await loadStatus(mode);
     } catch (e: any) { setError(e?.message || "Failed to connect Dhan"); }
     finally { setLoading(false); }
+  };
+
+  // Server-side auto-regenerate — only succeeds when DHAN_TOTP_ENABLED=true.
+  // Own loading flag so it doesn't freeze the other buttons on this panel;
+  // errors (including the expected 409 in manual-paste mode) surface via
+  // the existing shared error banner.
+  const doRegenerateToken = async () => {
+    setRegenLoading(true); setError(null);
+    try {
+      await realTradeApi.dhanRegenerateToken();
+      await loadStatus(mode);
+    } catch (e: any) { setError(e?.message || "Failed to regenerate Dhan token"); }
+    finally { setRegenLoading(false); }
   };
 
   const doArm = async () => {
@@ -1013,6 +1027,9 @@ export default function RealAutoTrade() {
                         </button>
                         <button onClick={() => setShowDhanForm(!showDhanForm)} className="font-display tabular-nums text-[10px] text-mist hover:text-paper">
                           Rotate token
+                        </button>
+                        <button onClick={() => void doRegenerateToken()} disabled={regenLoading} className="font-display tabular-nums text-[10px] text-signal-prepare hover:text-signal-prepare disabled:opacity-40">
+                          {regenLoading ? "Regenerating…" : "⟳ Regenerate token"}
                         </button>
                       </div>
                     </div>

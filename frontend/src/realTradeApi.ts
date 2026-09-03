@@ -305,6 +305,9 @@ export const realTradeApi = {
       "/dhan/connect", { method: "POST", body: JSON.stringify({ client_id, access_token }) }
     ),
 
+  dhanRegenerateToken: () =>
+    rtRequest<DhanStatus>("/dhan/regenerate-token", { method: "POST" }),
+
   dhanStatus: () => rtRequest<DhanStatus>("/dhan/status"),
 
   dhanFunds: () => rtRequest<any>("/dhan/funds"),

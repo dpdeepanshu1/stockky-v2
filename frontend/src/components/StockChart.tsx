@@ -174,15 +174,20 @@ export default function StockChart({ symbol, compact = false }: Props) {
           </button>
         </div>
       ) : (
+        /* recharts' CategoricalChartProps type doesn't declare
+           onTouchStart/onTouchMove/onTouchEnd, so passing them directly
+           fails `tsc` (TS2322) even though recharts handles them at
+           runtime — passes the same chart-state object handleMove already
+           reads (state.activePayload), same as the mouse handlers. Spread
+           via an `any`-cast object so the touch-scrub behavior is
+           unchanged and only the type check is satisfied. */
         <ResponsiveContainer width="100%" height={compact ? 80 : 220}>
           <AreaChart
             data={chartData}
             margin={{ top: 4, right: 4, left: 0, bottom: 0 }}
             onMouseMove={handleMove}
             onMouseLeave={handleLeave}
-            onTouchStart={handleMove}
-            onTouchMove={handleMove}
-            onTouchEnd={handleLeave}
+            {...({ onTouchStart: handleMove, onTouchMove: handleMove, onTouchEnd: handleLeave } as any)}
           >
             <defs>
               <linearGradient id={`grad-${symbol}-${period}`} x1="0" y1="0" x2="0" y2="1">

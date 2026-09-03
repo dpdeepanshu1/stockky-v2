@@ -1259,18 +1259,20 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
     return inserted
 
 
-def _recently_candidated_symbols(db: Session, mode: str) -> set:
+def _recently_candidated_symbols(db: Session, mode: str, hours: Optional[float] = None) -> set:
     """Symbols that already have a TradeCandidate row (either track, any
-    consumed state) inserted within CANDIDATE_DEDUPE_COOLDOWN_HOURS. Without
-    this, a symbol that keeps qualifying every cycle (still sitting in the
-    hot-picks/volume-shock universe) gets re-inserted as a brand-new row
-    every single cycle — that's what produced repeated duplicate cards for
-    the same symbol on the Watchlist tab. A symbol already evaluated
-    recently is still visible on the dashboard from its earlier row (with
-    its latest_decision joined in), so re-fetching it adds noise, not
-    information, until the cooldown lapses."""
+    consumed state) inserted within the given cooldown window (defaults to
+    CANDIDATE_DEDUPE_COOLDOWN_HOURS=6h for the standard track).
+
+    2026-09-03: volume_shock track uses a shorter 2h cooldown (passed via
+    the hours arg). Rationale: volume-shock moves are intraday — the backtest
+    shows 2-day decay, but the move itself plays out within hours of the
+    signal. A 6h dedupe window means a stock that was regime-blocked at
+    9:30am won't re-qualify until 3:30pm (market close). At 2h it can
+    re-enter the watchlist later the same session if conditions improve."""
+    cooldown = hours if hours is not None else config.CANDIDATE_DEDUPE_COOLDOWN_HOURS
     try:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=config.CANDIDATE_DEDUPE_COOLDOWN_HOURS)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=cooldown)
         rows = (
             db.query(models.TradeCandidate.symbol)
             .filter(models.TradeCandidate.mode == mode,
@@ -1301,12 +1303,20 @@ async def refresh_candidates(db: Session, mode: str) -> int:
     Returns the total number of candidate rows inserted across both tracks.
     """
     open_syms = {p.symbol for p in open_positions(db, mode)}
+    # Standard track: 6h dedupe cooldown (avoids duplicate cards for slow-moving signals)
     cooldown_syms = _recently_candidated_symbols(db, mode)
     exclude = open_syms | cooldown_syms
 
     standard_inserted, standard_seen = await _refresh_standard_candidates(db, mode, exclude)
+
+    # Volume-shock track: 2h dedupe cooldown — intraday moves play out within
+    # hours; a 6h window would block re-evaluation for the rest of the session
+    # if the signal was regime-blocked at open. 2h lets it re-qualify after
+    # the regime gate clears (e.g. post-market-score fix deployment today).
+    shock_cooldown_syms = _recently_candidated_symbols(db, mode, hours=2.0)
+    shock_exclude = open_syms | shock_cooldown_syms | standard_seen
     shock_inserted = await _refresh_volume_shock_candidates(
-        db, mode, exclude_symbols=exclude | standard_seen
+        db, mode, exclude_symbols=shock_exclude
     )
 
     return standard_inserted + shock_inserted

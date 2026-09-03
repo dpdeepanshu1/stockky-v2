@@ -5794,7 +5794,15 @@ def get_market_indices(force_refresh: bool = False):
         sensex_change_pct = (sensex_change / sensex_prev_close) * 100
 
         avg_change = (nifty_change_pct + sensex_change_pct) / 2
-        sensitivity = 0.3
+        # 2026-09-03 fix: sensitivity raised 0.3 → 1.5.
+        # Old formula mapped ±0.3% Nifty move to full 0-100 range, so a
+        # routine -0.26% flat/slightly-down day scored 7 — "disaster" level.
+        # Real crashes are -2% to -3%. At sensitivity=1.5:
+        #   -1.5% → score 0 (genuine bad day), 0% → 50, +1.5% → 100
+        #   today's -0.26% → score ~41 (correctly: slightly weak, not catastrophic)
+        # This stops the regime gate from blocking individual volume-shock
+        # movers on routine flat-Nifty days.
+        sensitivity = 1.5
         raw_score = 50 + (avg_change / sensitivity) * 50
         market_score = max(0, min(100, raw_score))
 

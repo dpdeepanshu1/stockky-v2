@@ -203,7 +203,16 @@ CANDIDATE_ANALYSIS_CONCURRENCY = int(os.getenv("CANDIDATE_ANALYSIS_CONCURRENCY",
 # the most backtest support. Both remain env-overridable with no code
 # change if this turns out too loose (or not loose enough) in practice.
 VOLUME_SHOCK_MULTIPLIER = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MULTIPLIER", "1.5"))
-VOLUME_SHOCK_MIN_RETURN_PCT = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MIN_RETURN_PCT", "3.5"))
+# 2026-09-03 recalibration: lowered from 3.5% → 2.5%.
+# Rationale: real NSE volume-shocker sessions (Groww screenshots 2026-09-03)
+# show genuine institutional movers like Hikal +16.95%, Raymond +14.13%,
+# GOCL +9.46%, Elecon +7.42%, Shanthi Gears +9.99% — all well above 2.5%.
+# The 3.5% gate was already rejecting today's entire scan universe (all 8
+# symbols scored 0.9%–2.8%), meaning no volume-shock candidates were ever
+# inserted. Lowering to 2.5% lets moderate-strength movers through while
+# the HIGH_CONVICTION (15x vol + 15% return) and UPPER_CIRCUIT (19.9%)
+# tiers — which have the strongest backtest evidence — remain unchanged.
+VOLUME_SHOCK_MIN_RETURN_PCT = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MIN_RETURN_PCT", "2.5"))
 
 # HIGH CONVICTION tier — from 1-year NSE backtest (30-Aug-2026):
 # vol >= 15x AND return >= 15% → 55.7% next-day win rate, mean +2.28%

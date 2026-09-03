@@ -45,12 +45,12 @@ from models import Base, MarketRegimeHistory  # MarketRegimeHistory defined in m
 logger = logging.getLogger("real-trade-adaptive")
 
 _REGIME_CONSTANTS = {
-    "ENTRY_REGIME_MIN_SCORE":             (config.ENTRY_REGIME_MIN_SCORE,             "2026-08-28"),
-    "ENTRY_MIN_REWARD_RISK":              (config.ENTRY_MIN_REWARD_RISK,              "2026-08-28"),
-    "CANDIDATE_MIN_CONVICTION":           (config.CANDIDATE_MIN_CONVICTION,           "2026-08-28"),
-    "CANDIDATE_DOWNTREND_6M_PCT":         (config.CANDIDATE_DOWNTREND_6M_PCT,         "2026-08-28"),
-    "CANDIDATE_MIN_BULLISH_TF":           (config.CANDIDATE_MIN_BULLISH_TF,           "2026-08-28"),
-    "CANDIDATE_OVEREXTENDED_52W_TOP_PCT": (config.CANDIDATE_OVEREXTENDED_52W_TOP_PCT, "2026-08-28"),
+    "ENTRY_REGIME_MIN_SCORE":             (config.ENTRY_REGIME_MIN_SCORE,             "2026-09-03"),
+    "ENTRY_MIN_REWARD_RISK":              (config.ENTRY_MIN_REWARD_RISK,              "2026-09-03"),
+    "CANDIDATE_MIN_CONVICTION":           (config.CANDIDATE_MIN_CONVICTION,           "2026-09-03"),
+    "CANDIDATE_DOWNTREND_6M_PCT":         (config.CANDIDATE_DOWNTREND_6M_PCT,         "2026-09-03"),
+    "CANDIDATE_MIN_BULLISH_TF":           (config.CANDIDATE_MIN_BULLISH_TF,           "2026-09-03"),
+    "CANDIDATE_OVEREXTENDED_52W_TOP_PCT": (config.CANDIDATE_OVEREXTENDED_52W_TOP_PCT, "2026-09-03"),
 }
 
 ADAPTIVE_HISTORY_DAYS     = int(os.getenv("ADAPTIVE_HISTORY_DAYS", "90"))

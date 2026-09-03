@@ -259,7 +259,7 @@ EXIT_EARLY_WARN_DAYS                = int(os.getenv("EXIT_EARLY_WARN_DAYS", "6")
 #   LAST REVIEWED: 2026-08-28 (Nifty 24,090, FII net-short, Midcap outperforming)
 #   Next review: trigger on Nifty crossing 25,500 OR monthly on the 1st.
 #
-ENTRY_REGIME_MIN_SCORE              = int(os.getenv("ENTRY_REGIME_MIN_SCORE", "38"))   # ADAPTIVE: auto-computed from history
+ENTRY_REGIME_MIN_SCORE              = int(os.getenv("ENTRY_REGIME_MIN_SCORE", "25"))   # ADAPTIVE: auto-computed from history. 2026-09-03: lowered 38→25. Rationale: Nifty flat (+0.05%) but individual stocks making 7-17% moves (Hikal, Raymond, GOCL etc). Broad market regime score should not block individual volume-shock movers. REGIME_OVERRIDE still lets top-1 high-conviction candidate through even below this gate.
 # 2026-08-31: the adaptive regime gate (see adaptive_thresholds.py) is a
 # TRAILING 90-day p20 — after a sharp, recent regime break it can sit far
 # above today's actual score for weeks (e.g. gate=65 vs today's score=19),
@@ -272,11 +272,11 @@ ENTRY_REGIME_MIN_SCORE              = int(os.getenv("ENTRY_REGIME_MIN_SCORE", "3
 # to 0 to fully restore the old "regime weak = nothing enters" behavior.
 ENTRY_REGIME_OVERRIDE_TOP_N         = int(os.getenv("ENTRY_REGIME_OVERRIDE_TOP_N", "1"))
 ENTRY_REGIME_OVERRIDE_RISK_SCALE    = float(os.getenv("ENTRY_REGIME_OVERRIDE_RISK_SCALE", "0.5"))
-ENTRY_MIN_REWARD_RISK               = float(os.getenv("ENTRY_MIN_REWARD_RISK", "2.0"))  # LAST_REVIEWED: 2026-08-28
-CANDIDATE_MIN_CONVICTION            = float(os.getenv("CANDIDATE_MIN_CONVICTION", "55")) # LAST_REVIEWED: 2026-08-28
-CANDIDATE_MIN_BULLISH_TF            = int(os.getenv("CANDIDATE_MIN_BULLISH_TF", "4"))   # LAST_REVIEWED: 2026-08-28
-CANDIDATE_DOWNTREND_6M_PCT          = float(os.getenv("CANDIDATE_DOWNTREND_6M_PCT", "-10.0")) # LAST_REVIEWED: 2026-08-28
-CANDIDATE_OVEREXTENDED_52W_TOP_PCT  = float(os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT", "12.0")) # LAST_REVIEWED: 2026-08-28
+ENTRY_MIN_REWARD_RISK               = float(os.getenv("ENTRY_MIN_REWARD_RISK", "2.0"))  # LAST_REVIEWED: 2026-09-03
+CANDIDATE_MIN_CONVICTION            = float(os.getenv("CANDIDATE_MIN_CONVICTION", "55")) # LAST_REVIEWED: 2026-09-03
+CANDIDATE_MIN_BULLISH_TF            = int(os.getenv("CANDIDATE_MIN_BULLISH_TF", "4"))   # LAST_REVIEWED: 2026-09-03
+CANDIDATE_DOWNTREND_6M_PCT          = float(os.getenv("CANDIDATE_DOWNTREND_6M_PCT", "-10.0")) # LAST_REVIEWED: 2026-09-03
+CANDIDATE_OVEREXTENDED_52W_TOP_PCT  = float(os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT", "12.0")) # LAST_REVIEWED: 2026-09-03
 
 # ── Adaptive threshold engine configuration ───────────────────────────────────
 # Controls how adaptive_thresholds.py computes the live regime gate.

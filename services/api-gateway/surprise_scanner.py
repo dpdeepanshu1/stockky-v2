@@ -53,6 +53,15 @@ HARD_FLOOR_LIQUIDITY = float(os.getenv("HARD_FLOOR_LIQUIDITY", "5000000"))
 MIN_CHANGE_PCT = float(os.getenv("SURPRISE_MIN_CHANGE_PCT", "1.5"))
 CONCURRENCY = int(os.getenv("SURPRISE_SCAN_CONCURRENCY", "20"))
 QUOTE_TIMEOUT = float(os.getenv("SURPRISE_QUOTE_TIMEOUT", "3"))
+# 2026-09-03 fix: default cached_max_age_sec (below, in SurpriseStockEngine.scan)
+# was 90s while real-trade-service's pipeline cycle (AUTO_PILOT_INTERVAL_SECONDS,
+# config.py) defaults to 180s. That mismatch meant candidate_engine's
+# `cached=true` call almost always found the cache already stale and fell
+# through to a full live scan of the whole liquid static universe — which is
+# what produced the recurring "surprise/scan ... ReadTimeout" in the logs
+# (candidate_engine's own client-side timeout on that call is 25s). Widened
+# so one full-universe scan reliably covers a full pipeline cycle with margin.
+SURPRISE_CACHE_MAX_AGE_SEC = float(os.getenv("SURPRISE_CACHE_MAX_AGE_SEC", "220"))
 MAX_STOCK_PRICE = float(os.getenv("MAX_STOCK_PRICE", "0") or 0)
 # Value-buy badge: ₹20–₹500 (same as buy_sniper — midcaps/smallcaps outperforming)
 VALUE_BUY_THRESHOLD = float(os.getenv("VALUE_BUY_THRESHOLD", "500") or 500)
@@ -720,7 +729,7 @@ class SurpriseStockEngine:
         symbols: Optional[List[str]] = None,
         force_reload_static: bool = False,
         cached: bool = False,
-        cached_max_age_sec: float = 90.0,
+        cached_max_age_sec: float = SURPRISE_CACHE_MAX_AGE_SEC,
     ) -> Dict[str, Any]:
         t0 = time.time()
 

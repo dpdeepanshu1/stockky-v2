@@ -160,6 +160,31 @@ def acquire(provider: str, weight: float = 1.0, max_wait: float = 20.0) -> float
         return 0.0
 
 
+def would_block(provider: str, weight: float = 1.0) -> bool:
+    """Non-blocking peek: True if acquire(provider, weight) would have to
+    wait right now (not enough tokens available this instant). Does not
+    consume tokens — only refills from elapsed time the same way acquire()
+    would, so calling this has no side effect on the bucket's future
+    behavior.
+
+    2026-09-03: added so a best-effort/degradable call site (market-data-
+    service's /quotes/bulk yfinance fallback) can skip a doomed attempt
+    instead of paying acquire()'s full max_wait AND then still likely
+    failing the subsequent hard-timeout download — see that call site's
+    comment for the specific "max_wait exceeded ... yfinance call exceeded
+    18s hard timeout" pattern this avoids.
+    """
+    try:
+        b = _get_bucket(provider)
+        with b.lock:
+            now = time.time()
+            elapsed = now - b.updated
+            tokens = min(b.capacity, b.tokens + elapsed * b.rps)
+            return tokens < weight
+    except Exception:
+        return False
+
+
 # ── Shared cooldown facility ─────────────────────────────────────────────────
 # main.py already had this exact pattern (_UPSTREAM_COOLDOWN dict + _in_cooldown
 # / _set_cooldown helpers) hardcoded for yfinance/nse/twelvedata/etc. Hosting

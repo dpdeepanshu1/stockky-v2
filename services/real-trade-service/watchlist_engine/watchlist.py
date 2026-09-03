@@ -48,20 +48,47 @@ async def refresh_watchlist(db: Session, mode: str) -> int:
         if not sym:
             continue
 
-        # De-duplicate: skip if we already have an active entry for this
-        # symbol + catalyst_type combo in this mode.
-        existing = (
-            db.query(models.WatchlistEntry)
-            .filter_by(mode=mode, symbol=sym, catalyst_type=ctype, status="active")
-            .first()
-        )
-        if existing:
-            continue
-
         profile = profile_for(ctype)
         ts = c.get("catalyst_ts") or _now()
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
+
+        # De-duplicate: skip if we already have an active entry for this
+        # symbol + catalyst_type combo in this mode, OR a row (any status)
+        # for the exact same catalyst event (same catalyst_ts).
+        #
+        # 2026-09-03 fix: the old check only looked at status="active".
+        # For sources with a deterministic catalyst_ts (IPO's catalyst_ts
+        # is derived from listing_date — see sources.py — so it's identical
+        # on every poll of the same listing), a past-dated listing_date
+        # produces expires_at (catalyst_ts + 3×half-life, see expiry_from())
+        # that is already in the past at insert time. That row gets marked
+        # "expired" on the very next expire_stale_entries() pass, at which
+        # point the active-only check no longer finds it — so the next
+        # refresh_watchlist cycle re-inserts an identical duplicate row,
+        # which immediately expires again. Net effect: one duplicate row
+        # per cycle, forever, for any already-past-dated IPO the upstream
+        # feed keeps listing. Matching on catalyst_ts (regardless of
+        # status) closes that loop: the same real-world event is only ever
+        # inserted once. Tier 3 (volume_shock) is unaffected — its
+        # catalyst_ts is always freshly set to _now() per cycle (sources.py
+        # never supplies one), so this OR-clause practically never matches
+        # for it and re-evaluation each cycle still works as designed.
+        existing = (
+            db.query(models.WatchlistEntry)
+            .filter(
+                models.WatchlistEntry.mode == mode,
+                models.WatchlistEntry.symbol == sym,
+                models.WatchlistEntry.catalyst_type == ctype,
+            )
+            .filter(
+                (models.WatchlistEntry.status == "active")
+                | (models.WatchlistEntry.catalyst_ts == ts)
+            )
+            .first()
+        )
+        if existing:
+            continue
 
         catalyst_price = c.get("catalyst_price")
         if catalyst_price is None:

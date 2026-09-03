@@ -1717,6 +1717,39 @@ def get_quotes_bulk(req: BulkQuoteRequest):
     # even starts. Let the patched yf.download() do the one, correctly-
     # weighted acquisition itself.
 
+    # 2026-09-03 fix: when the shared yfinance bucket is already saturated
+    # (weight=1-2 per batch, capacity=6 by default — see rate_limiter.py's
+    # yfinance patch comment), this call was still going ahead into
+    # yf.download() every time: paying acquire()'s wait (up to max_wait=20s)
+    # inside the patched download, and then very often still hitting the
+    # 18s hard timeout right after — exactly the
+    # "rate_limiter: max_wait exceeded, proceeding anyway" immediately
+    # followed by "yfinance call exceeded hard timeout of 18s" pattern in
+    # the logs. Worst case that's ~20s+18s=38s spent on a single /quotes/
+    # bulk call that was likely to degrade anyway. Peeking with
+    # would_block() (non-blocking, no side effect) lets this best-effort
+    # endpoint skip straight to the degraded/cached response instead —
+    # same fallback shape the except-block below already returns, just
+    # reached in milliseconds instead of ~38s when the bucket is this busy.
+    try:
+        _yf_weight = 1 if len(yf_tickers) <= 1 else 2
+        if _rl.would_block("yfinance", weight=_yf_weight):
+            logger.warning(
+                "quotes/bulk: yfinance rate-limit bucket saturated — "
+                "skipping this cycle's download instead of paying the "
+                "wait + hard-timeout on a call likely to fail anyway "
+                "(%d symbol(s) served from cache/live-feed only)",
+                len(results),
+            )
+            return {
+                "ok": bool(results),
+                "quotes": _sanitize_for_json(results),
+                "note": "yfinance rate-limit bucket saturated — skipped this cycle, served cache/live-feed only",
+                "degraded": True,
+            }
+    except Exception:
+        pass
+
     try:
         data = yf.download(
             tickers=" ".join(yf_tickers),

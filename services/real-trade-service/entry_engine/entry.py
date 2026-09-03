@@ -541,8 +541,22 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         ))
 
         if result.verdict != RiskVerdict.APPROVED:
+            # 2026-09-03 fix: this branch has always labeled the candidate
+            # "WAIT" (both decision.action and the entry_details row below)
+            # — correctly, since risk_engine's REJECTED verdicts here are
+            # temporary conditions (position cap full, per-trade risk cap,
+            # etc. — see risk_engine/engine.py) that can clear on a later
+            # cycle, not permanent rejections. But the summary counter
+            # incremented was `rejected`, not `waited` — so the dashboard's
+            # top-line "N waited / M rejected" never matched the actual
+            # per-row "WAIT ..." labels underneath it (e.g. 18 rows all
+            # reading "WAIT ... 3 positions already open" while the summary
+            # said "2 waited · 18 rejected"). Counting `waited` here makes
+            # the summary agree with what's actually shown per-candidate.
+            # TradeRiskEvent (above) still separately records the granular
+            # risk_engine verdict/reason for every check — unaffected.
             decision.action = "WAIT"
-            rejected += 1
+            waited += 1
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": result.reason, "risk_verdict": result.verdict.value})

@@ -299,8 +299,26 @@ def _parse_dhan_expiry(raw) -> Optional[datetime]:
         if not s:
             return None
         # Try ISO 8601 first (handles "...Z" and offset forms).
+        #
+        # CONFIRMED 2026-09-03 against a real Dhan response: the actual
+        # expiryTime value is bare/naive ISO ('2026-09-04T11:11:11.614',
+        # no offset) and is in IST, not UTC — same convention as the
+        # "YYYY-MM-DD HH:MM:SS" branch below. The original version of
+        # this branch called as_aware() on the naive parsed datetime,
+        # which (per tz_utils.as_aware's own contract) stamps naive
+        # values as UTC — silently wrong by +5:30 for every Dhan expiry.
+        # It didn't show up as a visible symptom before because the 24h
+        # _effective_expiry safety-cap happened to land on the same
+        # instant for a straight-24h token; a shorter-lived token would
+        # have made the app think it had far more time left than it
+        # really did. Only a string that already carries an explicit
+        # offset/"Z" is trusted as directly UTC-convertible, as-is.
         try:
-            return as_aware(datetime.fromisoformat(s.replace("Z", "+00:00")))
+            parsed = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                ist = parsed.replace(tzinfo=timezone(timedelta(hours=5, minutes=30)))
+                return ist.astimezone(timezone.utc)
+            return parsed.astimezone(timezone.utc)
         except ValueError:
             pass
         # Common Dhan-style "YYYY-MM-DD HH:MM:SS" (assume IST, per Dhan's

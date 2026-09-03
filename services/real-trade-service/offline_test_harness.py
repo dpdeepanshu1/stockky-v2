@@ -285,8 +285,11 @@ def technical_flags(candles_1y_1d: list[dict]) -> dict:
     closes = [c["close"] for c in candles_1y_1d]
     n = len(closes)
     flags = {"extended": False, "extended_short": False, "ret_21d": None, "ret_3d": None}
-    if n >= 22:
-        ret_21d = closes[-1] / closes[-22] - 1.0
+    if n >= 21:
+        # BUG FIX (2026-09-02): was closes[-22], off by one day vs production
+        # (analysis-intelligence-service/technical/main.py uses
+        # close.iloc[-1]/close.iloc[-21]). Matched to production exactly.
+        ret_21d = closes[-1] / closes[-21] - 1.0
         flags["ret_21d"] = round(ret_21d, 4)
         flags["extended"] = ret_21d > 0.18
     if n >= 5:
@@ -395,8 +398,44 @@ async def run(data_dir: Path):
     # Real RSI/ADX/ATR-cap/resistance multi-timeframe scoring against real
     # history/quote/delivery data, via the FixtureRouter's new routes.
     import candidate_engine.candidates as candidates_mod
+    import logging as _logging
+    import re as _re
 
-    inserted = await candidates_mod.refresh_candidates(db, MODE)
+    # REJECT-REASON LOGGING (2026-09-02): candidate_engine only logs why a
+    # symbol was rejected, it never returns/stores that reason anywhere the
+    # harness could otherwise see — so Stage 5 used to only ever show
+    # SURVIVING candidates, with no way to tell why e.g. TORNTPOWER/NUVAMA/
+    # KAJARIACER didn't pass the gate on a given data pull. Capture those
+    # log lines for the duration of this one call only (removed in finally),
+    # so it can never affect candidate_engine's own behavior.
+    class _RejectCapture(_logging.Handler):
+        _PATTERNS = (
+            _re.compile(r"CANDIDATE REJECTED (\S+) \| (.+)"),
+            _re.compile(r"VOLUME_SHOCK CANDIDATE REJECTED (\S+) \| (.+)"),
+        )
+
+        def __init__(self):
+            super().__init__()
+            self.rejects: list[tuple[str, str]] = []
+
+        def emit(self, record):
+            try:
+                msg = record.getMessage()
+            except Exception:
+                return
+            for pat in self._PATTERNS:
+                m = pat.search(msg)
+                if m:
+                    self.rejects.append((m.group(1), m.group(2)))
+                    return
+
+    _reject_capture = _RejectCapture()
+    _candidates_logger = _logging.getLogger("real-trade-candidates")
+    _candidates_logger.addHandler(_reject_capture)
+    try:
+        inserted = await candidates_mod.refresh_candidates(db, MODE)
+    finally:
+        _candidates_logger.removeHandler(_reject_capture)
     # watchlist_entry_id is set only for Stage 2's entry_engine-sourced rows —
     # filter those out here so this breakdown shows just what candidate_engine
     # itself inserted this stage, not Stage 2's rows re-listed under a new label.
@@ -419,6 +458,14 @@ async def run(data_dir: Path):
         print("    No candidates passed candidate_engine's quality gate on this data pull —"
               " this can be a genuinely weak/choppy market day (MIN_CONVICTION=55,"
               " MIN_BULLISH_TIMEFRAMES=4 are strict by design), not necessarily a bug.")
+    if _reject_capture.rejects:
+        print(f"\n[Stage 5] rejected ({len(_reject_capture.rejects)} symbols, reason from log):")
+        for sym, reason in _reject_capture.rejects[:30]:
+            print(f"    {sym:12s} {reason}")
+        if len(_reject_capture.rejects) > 30:
+            print(f"    ... and {len(_reject_capture.rejects) - 30} more")
+    else:
+        print("    (no reject-reason log lines captured this run)")
 
     # Stage 6 risk-checks every TradeCandidate row regardless of which stage
     # produced it — that matches production (risk_engine is the single choke

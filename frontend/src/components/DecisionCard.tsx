@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Decision, api, TrainingScore, FundamentalMetrics, CategorizedEvents } from "../api";
 import { decisionStyle } from "../decisionStyle";
 import StockChart from "./StockChart";
+import BottomSheet from "./BottomSheet";
 import { useStockkyRealtime } from "../useRealtime";
 import { toActionablePick } from "./ScanPanel";
 import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
@@ -476,53 +477,53 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
         </div>
       </div>
 
-      {/* Trade modal */}
-      {showTradeModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/70 backdrop-blur-sm p-4">
-          <div className="bg-graphite border border-slate/60 rounded-2xl p-6 w-full max-w-sm">
-            <h3 className="font-mono text-xs text-mist uppercase tracking-widest mb-1">
-              Trade {data.symbol}
-            </h3>
-            <p className="text-mist/50 text-xs mb-4">
-              Opens a paper trade at ₹{data.close ?? "current price"} using dummy capital from your
-              shared portfolio balance, and records this pick to training either way.
-            </p>
-            <div className="flex items-center gap-2 mb-4">
-              <span className="font-mono text-lg text-mist">₹</span>
-              <input
-                type="number"
-                value={tradeCapital}
-                onChange={(e) => setTradeCapital(e.target.value)}
-                className="flex-1 bg-ink/50 border border-slate/40 rounded-lg px-3 py-2 font-mono text-lg text-paper focus:outline-none focus:border-emerald-500/60"
-                autoFocus
-              />
-            </div>
-            {tradeResult && (
-              <p className="text-xs font-mono text-mist/70 mb-4">{tradeResult}</p>
-            )}
-            <div className="flex gap-2">
+      {/* Trade modal — 2026-09-03 UI upgrade: BottomSheet (slides up on mobile) */}
+      <BottomSheet
+        isOpen={showTradeModal}
+        onClose={() => { setShowTradeModal(false); setTradeResult(null); }}
+        title={`Trade ${data.symbol}`}
+        desktopMaxWidth="sm:max-w-sm"
+      >
+        <div className="p-5">
+          <p className="text-mist text-xs mb-4">
+            Opens a paper trade at ₹{data.close ?? "current price"} using dummy capital from your
+            shared portfolio balance, and records this pick to training either way.
+          </p>
+          <div className="flex items-center gap-2 mb-4">
+            <span className="font-display text-lg text-mist">₹</span>
+            <input
+              type="number"
+              value={tradeCapital}
+              onChange={(e) => setTradeCapital(e.target.value)}
+              className="flex-1 bg-ink border border-slate rounded-xl px-3 py-2.5 font-display text-lg text-paper focus:outline-none focus:border-signal-buy"
+              autoFocus
+            />
+          </div>
+          {tradeResult && (
+            <p className="text-xs text-mist mb-4">{tradeResult}</p>
+          )}
+          <div className="flex gap-2">
+            <button
+              onClick={() => { setShowTradeModal(false); setTradeResult(null); }}
+              className="flex-1 text-xs font-semibold uppercase tracking-wider border border-slate rounded-xl py-2.5 text-mist hover:text-paper transition"
+            >
+              {tradeResult ? "Close" : "Cancel"}
+            </button>
+            {!tradeResult && (
               <button
-                onClick={() => { setShowTradeModal(false); setTradeResult(null); }}
-                className="flex-1 text-xs font-mono uppercase tracking-wider border border-slate/40 rounded-lg py-2 text-mist hover:text-paper transition"
+                onClick={handleTradeThis}
+                disabled={tradingInProgress}
+                className="flex-1 text-xs font-semibold uppercase tracking-wider bg-signal-buy text-white rounded-xl py-2.5 hover:opacity-90 transition disabled:opacity-50 flex items-center justify-center gap-2"
               >
-                {tradeResult ? "Close" : "Cancel"}
+                {tradingInProgress && (
+                  <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-white animate-spin" />
+                )}
+                {tradingInProgress ? "Opening..." : "Confirm Trade"}
               </button>
-              {!tradeResult && (
-                <button
-                  onClick={handleTradeThis}
-                  disabled={tradingInProgress}
-                  className="flex-1 text-xs font-mono uppercase tracking-wider bg-emerald-500/20 border border-emerald-500/50 text-emerald-400 rounded-lg py-2 hover:bg-emerald-500/30 transition disabled:opacity-50 flex items-center justify-center gap-2"
-                >
-                  {tradingInProgress && (
-                    <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-emerald-400 animate-spin" />
-                  )}
-                  {tradingInProgress ? "Opening..." : "Confirm Trade"}
-                </button>
-              )}
-            </div>
+            )}
           </div>
         </div>
-      )}
+      </BottomSheet>
 
       <StockChart symbol={data.symbol} />
 

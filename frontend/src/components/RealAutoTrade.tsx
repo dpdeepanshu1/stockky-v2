@@ -45,31 +45,31 @@ function pickNum(obj: any, ...keys: string[]): number | null {
 }
 
 function pnlColor(n: number | null | undefined): string {
-  if (n == null) return "text-zinc-500";
-  return n >= 0 ? "text-emerald-400" : "text-rose-400";
+  if (n == null) return "text-mist";
+  return n >= 0 ? "text-signal-buy" : "text-signal-sell";
 }
 
 // ── Status dot ──────────────────────────────────────────────────────────────
 function Dot({ on, pulse }: { on: boolean; pulse?: boolean }) {
   return (
-    <span className={`inline-block w-2 h-2 rounded-full ${on ? "bg-emerald-400" : "bg-red-500"} ${pulse && on ? "animate-pulse" : ""}`} />
+    <span className={`inline-block w-2 h-2 rounded-full ${on ? "bg-signal-buy" : "bg-signal-sell"} ${pulse && on ? "animate-pulse" : ""}`} />
   );
 }
 
 // ── Tiny stat card ──────────────────────────────────────────────────────────
 function StatCard({ label, value, sub, color }: { label: string; value: React.ReactNode; sub?: string; color?: string }) {
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 flex flex-col gap-0.5">
-      <p className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">{label}</p>
-      <p className={`text-lg font-bold font-mono ${color ?? "text-zinc-100"}`}>{value}</p>
-      {sub && <p className="text-[10px] font-mono text-zinc-600">{sub}</p>}
+    <div className="bg-graphite border border-slate rounded-2xl p-3 flex flex-col gap-0.5">
+      <p className="text-[10px] font-display tabular-nums uppercase tracking-widest text-mist">{label}</p>
+      <p className={`text-lg font-bold font-display tabular-nums ${color ?? "text-paper"}`}>{value}</p>
+      {sub && <p className="text-[10px] font-display tabular-nums text-mist">{sub}</p>}
     </div>
   );
 }
 
 // ── Section header ───────────────────────────────────────────────────────────
 function SectionHdr({ children }: { children: React.ReactNode }) {
-  return <p className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 mb-2">{children}</p>;
+  return <p className="text-[10px] font-display tabular-nums uppercase tracking-widest text-mist mb-2">{children}</p>;
 }
 
 // ── Live pipeline status (2026-08-27) — what the cycle is doing RIGHT NOW,
@@ -100,34 +100,34 @@ function msFmt(ms: number | null | undefined): string {
 function PipelineLiveStatus({ pipeline, mode }: { pipeline: PipelineStatus | null; mode: Mode }) {
   if (!pipeline) {
     return (
-      <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
         <SectionHdr>Live cycle status — {mode}</SectionHdr>
-        <p className="font-mono text-[11px] text-zinc-600">Loading…</p>
+        <p className="font-display tabular-nums text-[11px] text-mist">Loading…</p>
       </div>
     );
   }
 
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 space-y-3">
+    <div className="bg-graphite border border-slate rounded-2xl p-4 space-y-3">
       <div className="flex items-center justify-between">
         <SectionHdr>Live cycle status — {mode}</SectionHdr>
         {pipeline.running ? (
-          <span className="font-mono text-[10px] text-emerald-400 flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          <span className="font-display tabular-nums text-[10px] text-signal-buy flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-signal-buy animate-pulse" />
             {pipeline.trigger === "autopilot" ? "Auto-Pilot cycle running" : "Cycle running"}
           </span>
         ) : (
-          <span className="font-mono text-[10px] text-zinc-600">Idle — no cycle running</span>
+          <span className="font-display tabular-nums text-[10px] text-mist">Idle — no cycle running</span>
         )}
       </div>
 
       {pipeline.running && (
-        <div className="bg-zinc-950 border border-zinc-800 rounded-lg p-3 space-y-2">
+        <div className="bg-ink border border-slate rounded-xl p-3 space-y-2">
           <div className="flex items-center justify-between">
-            <p className="font-mono text-xs text-zinc-200">
+            <p className="font-display tabular-nums text-xs text-paper">
               {STAGE_LABELS[pipeline.stage || ""] || pipeline.stage}
             </p>
-            <p className="font-mono text-[10px] text-zinc-500">
+            <p className="font-display tabular-nums text-[10px] text-mist">
               stage {msFmt(pipeline.stage_elapsed_ms)} · total {msFmt(pipeline.total_elapsed_ms)}
             </p>
           </div>
@@ -135,62 +135,62 @@ function PipelineLiveStatus({ pipeline, mode }: { pipeline: PipelineStatus | nul
           <div className="flex items-center gap-1">
             {(pipeline.stages || []).map(s => (
               <div key={s} className={`h-1.5 flex-1 rounded-full ${
-                s === pipeline.stage ? "bg-emerald-500 animate-pulse"
-                : (pipeline.stage_timings_ms && s in pipeline.stage_timings_ms) ? "bg-emerald-800"
-                : "bg-zinc-800"
+                s === pipeline.stage ? "bg-signal-buy animate-pulse"
+                : (pipeline.stage_timings_ms && s in pipeline.stage_timings_ms) ? "bg-signal-buy"
+                : "bg-ink"
               }`} title={STAGE_LABELS[s] || s} />
             ))}
           </div>
           {pipeline.current_source && (
-            <p className="font-mono text-[10px] text-sky-400">
+            <p className="font-display tabular-nums text-[10px] text-signal-prepare">
               Source: {SOURCE_LABELS[pipeline.current_source] || pipeline.current_source}
             </p>
           )}
           {pipeline.current_symbol && (
-            <p className="font-mono text-[10px] text-amber-300">
+            <p className="font-display tabular-nums text-[10px] text-signal-hold">
               Symbol: {pipeline.current_symbol}
               {!!pipeline.symbols_total && (
-                <span className="text-zinc-600"> ({(pipeline.symbols_done ?? 0) + 1}/{pipeline.symbols_total})</span>
+                <span className="text-mist"> ({(pipeline.symbols_done ?? 0) + 1}/{pipeline.symbols_total})</span>
               )}
             </p>
           )}
           {pipeline.warning && (
-            <p className="font-mono text-[10px] text-amber-400">⚠ {pipeline.warning}</p>
+            <p className="font-display tabular-nums text-[10px] text-signal-hold">⚠ {pipeline.warning}</p>
           )}
         </div>
       )}
 
       {pipeline.last_cycle && (
         <div>
-          <p className="font-mono text-[10px] text-zinc-500 mb-1">
+          <p className="font-display tabular-nums text-[10px] text-mist mb-1">
             Last cycle — {pipeline.last_cycle.trigger === "autopilot" ? "🤖 Auto-Pilot" : "▶ Manual"} ·{" "}
             {fmtTime(pipeline.last_cycle.ended_at)} · took {msFmt(pipeline.last_cycle.duration_ms)}
           </p>
           {pipeline.last_cycle.warning && (
-            <p className="font-mono text-[10px] text-amber-400 mb-1">⚠ {pipeline.last_cycle.warning}</p>
+            <p className="font-display tabular-nums text-[10px] text-signal-hold mb-1">⚠ {pipeline.last_cycle.warning}</p>
           )}
           {pipeline.last_cycle.error ? (
-            <p className="font-mono text-[10px] text-rose-400">Error: {pipeline.last_cycle.error}</p>
+            <p className="font-display tabular-nums text-[10px] text-signal-sell">Error: {pipeline.last_cycle.error}</p>
           ) : pipeline.last_cycle.auto_disarmed ? (
-            <p className="font-mono text-[10px] text-rose-400">Auto-disarmed: {pipeline.last_cycle.auto_disarmed}</p>
+            <p className="font-display tabular-nums text-[10px] text-signal-sell">Auto-disarmed: {pipeline.last_cycle.auto_disarmed}</p>
           ) : (
             <>
-              <p className="font-mono text-[10px] text-zinc-400">
+              <p className="font-display tabular-nums text-[10px] text-mist">
                 {pipeline.last_cycle.new_candidates ?? 0} candidates · {pipeline.last_cycle.entered ?? 0} entered ·{" "}
                 {pipeline.last_cycle.waited ?? 0} waited · {pipeline.last_cycle.rejected ?? 0} rejected ·{" "}
                 {pipeline.last_cycle.full_exits ?? 0} closed
               </p>
               {!!pipeline.last_cycle.entry_details?.length && (
-                <div className="mt-2 space-y-1 border-t border-zinc-800 pt-2">
+                <div className="mt-2 space-y-1 border-t border-slate pt-2">
                   {pipeline.last_cycle.entry_details.map((row, i) => {
-                    const color = row.action === "ENTER" ? "text-emerald-400"
-                      : row.risk_verdict === "REJECTED" || row.risk_verdict === "BLOCKED_GLOBAL" ? "text-rose-400"
-                      : "text-amber-400";
+                    const color = row.action === "ENTER" ? "text-signal-buy"
+                      : row.risk_verdict === "REJECTED" || row.risk_verdict === "BLOCKED_GLOBAL" ? "text-signal-sell"
+                      : "text-signal-hold";
                     return (
-                      <p key={i} className="font-mono text-[10px] text-zinc-500">
+                      <p key={i} className="font-display tabular-nums text-[10px] text-mist">
                         <span className={`font-bold ${color}`}>{row.action}</span>{" "}
-                        <span className="text-zinc-300">{row.symbol}</span>
-                        {row.reasoning && <span className="text-zinc-600"> — {row.reasoning}</span>}
+                        <span className="text-paper">{row.symbol}</span>
+                        {row.reasoning && <span className="text-mist"> — {row.reasoning}</span>}
                       </p>
                     );
                   })}
@@ -203,13 +203,13 @@ function PipelineLiveStatus({ pipeline, mode }: { pipeline: PipelineStatus | nul
 
       {pipeline.history && pipeline.history.length > 1 && (
         <details className="group">
-          <summary className="font-mono text-[10px] text-zinc-500 cursor-pointer select-none">
+          <summary className="font-display tabular-nums text-[10px] text-mist cursor-pointer select-none">
             Recent cycles ({pipeline.history.length}) — includes Auto-Pilot ticks even when this tab was closed
           </summary>
           <div className="mt-2 overflow-x-auto">
-            <table className="w-full font-mono text-[10px]">
+            <table className="w-full font-display tabular-nums text-[10px]">
               <thead>
-                <tr className="text-zinc-600 text-left">
+                <tr className="text-mist text-left">
                   <th className="py-1 pr-3">Time</th>
                   <th className="py-1 pr-3">Trigger</th>
                   <th className="py-1 pr-3">Duration</th>
@@ -222,15 +222,15 @@ function PipelineLiveStatus({ pipeline, mode }: { pipeline: PipelineStatus | nul
               </thead>
               <tbody>
                 {pipeline.history.map((c, i) => (
-                  <tr key={i} className="border-t border-zinc-900 text-zinc-400">
+                  <tr key={i} className="border-t border-slate text-mist">
                     <td className="py-1 pr-3">{fmtTime(c.ended_at)}</td>
                     <td className="py-1 pr-3">{c.trigger === "autopilot" ? "🤖 auto" : "▶ manual"}</td>
                     <td className="py-1 pr-3">{msFmt(c.duration_ms)}</td>
                     <td className="py-1 pr-3">{c.new_candidates ?? "—"}</td>
-                    <td className="py-1 pr-3 text-emerald-400">{c.entered ?? "—"}</td>
-                    <td className="py-1 pr-3 text-rose-400">{c.rejected ?? "—"}</td>
+                    <td className="py-1 pr-3 text-signal-buy">{c.entered ?? "—"}</td>
+                    <td className="py-1 pr-3 text-signal-sell">{c.rejected ?? "—"}</td>
                     <td className="py-1 pr-3">{c.full_exits ?? "—"}</td>
-                    <td className="py-1 text-rose-400">{c.error || c.auto_disarmed || ""}</td>
+                    <td className="py-1 text-signal-sell">{c.error || c.auto_disarmed || ""}</td>
                   </tr>
                 ))}
               </tbody>
@@ -253,7 +253,7 @@ function OrderFlowDiagram({ mode }: { mode: Mode }) {
     { id: "exit", label: "Exit", desc: "Stop / Target / Trail / Time" },
   ];
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 mb-4">
+    <div className="bg-graphite border border-slate rounded-2xl p-4 mb-4">
       <SectionHdr>How a trade executes — {mode} mode</SectionHdr>
       <div className="flex items-center gap-0 overflow-x-auto pb-1">
         {steps.map((s, i) => (
@@ -261,16 +261,16 @@ function OrderFlowDiagram({ mode }: { mode: Mode }) {
             <div className="flex flex-col items-center gap-1 min-w-[80px]">
               <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold border ${
                 mode === "REAL"
-                  ? "bg-amber-500/10 border-amber-500/40 text-amber-400"
-                  : "bg-emerald-500/10 border-emerald-500/40 text-emerald-400"
+                  ? "bg-signal-hold/10 border-signal-hold/40 text-signal-hold"
+                  : "bg-signal-buy/10 border-signal-buy/40 text-signal-buy"
               }`}>{i + 1}</div>
-              <p className="text-[10px] font-mono font-bold text-zinc-200 text-center leading-tight">{s.label}</p>
-              <p className="text-[9px] font-mono text-zinc-600 text-center leading-tight">{s.desc}</p>
+              <p className="text-[10px] font-display tabular-nums font-bold text-paper text-center leading-tight">{s.label}</p>
+              <p className="text-[9px] font-display tabular-nums text-mist text-center leading-tight">{s.desc}</p>
             </div>
             {i < steps.length - 1 && (
               <div className="w-6 flex-shrink-0 flex items-center justify-center mb-6">
-                <div className="h-px w-full bg-zinc-700" />
-                <span className="text-zinc-600 text-[9px] -ml-1">›</span>
+                <div className="h-px w-full bg-slate" />
+                <span className="text-mist text-[9px] -ml-1">›</span>
               </div>
             )}
           </div>
@@ -296,23 +296,23 @@ function BalanceAllocation({ funds, positions }: { funds: any; positions: any[] 
   }, 0);
 
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 mb-4">
+    <div className="bg-graphite border border-slate rounded-2xl p-4 mb-4">
       <SectionHdr>Balance allocation</SectionHdr>
       <div className="space-y-3">
         {/* Bar */}
-        <div className="h-3 rounded-full bg-zinc-800 flex overflow-hidden">
-          <div className="bg-emerald-500/70 transition-all" style={{ width: `${pct(available)}%` }} />
-          <div className="bg-amber-500/70 transition-all" style={{ width: `${pct(utilized)}%` }} />
-          {collateral > 0 && <div className="bg-sky-500/70 transition-all" style={{ width: `${pct(collateral)}%` }} />}
+        <div className="h-3 rounded-full bg-ink flex overflow-hidden">
+          <div className="bg-signal-buy/70 transition-all" style={{ width: `${pct(available)}%` }} />
+          <div className="bg-signal-hold/70 transition-all" style={{ width: `${pct(utilized)}%` }} />
+          {collateral > 0 && <div className="bg-signal-prepare/70 transition-all" style={{ width: `${pct(collateral)}%` }} />}
         </div>
-        <div className="grid grid-cols-3 gap-2 text-[10px] font-mono">
-          <div><span className="inline-block w-2 h-2 rounded-sm bg-emerald-500/70 mr-1" />Available<br/><span className="text-zinc-200 font-bold">{fmtInr(available, 0)}</span></div>
-          <div><span className="inline-block w-2 h-2 rounded-sm bg-amber-500/70 mr-1" />Utilized<br/><span className="text-zinc-200 font-bold">{fmtInr(utilized, 0)}</span></div>
-          {collateral > 0 && <div><span className="inline-block w-2 h-2 rounded-sm bg-sky-500/70 mr-1" />Collateral<br/><span className="text-zinc-200 font-bold">{fmtInr(collateral, 0)}</span></div>}
+        <div className="grid grid-cols-3 gap-2 text-[10px] font-display tabular-nums">
+          <div><span className="inline-block w-2 h-2 rounded-sm bg-signal-buy/70 mr-1" />Available<br/><span className="text-paper font-bold">{fmtInr(available, 0)}</span></div>
+          <div><span className="inline-block w-2 h-2 rounded-sm bg-signal-hold/70 mr-1" />Utilized<br/><span className="text-paper font-bold">{fmtInr(utilized, 0)}</span></div>
+          {collateral > 0 && <div><span className="inline-block w-2 h-2 rounded-sm bg-signal-prepare/70 mr-1" />Collateral<br/><span className="text-paper font-bold">{fmtInr(collateral, 0)}</span></div>}
         </div>
         {positions.length > 0 && (
-          <div className="border-t border-zinc-800 pt-2">
-            <p className="text-[9px] font-mono text-zinc-600 mb-1">OPEN BROKER POSITIONS</p>
+          <div className="border-t border-slate pt-2">
+            <p className="text-[9px] font-display tabular-nums text-mist mb-1">OPEN BROKER POSITIONS</p>
             <div className="space-y-1">
               {positions.slice(0, 6).map((p, i) => {
                 const sym = p.tradingSymbol || p.symbol || "—";
@@ -323,12 +323,12 @@ function BalanceAllocation({ funds, positions }: { funds: any; positions: any[] 
                 const valPct = total > 0 ? Math.round((val / total) * 100) : 0;
                 return (
                   <div key={i} className="flex items-center gap-2">
-                    <div className="w-24 font-mono text-[10px] text-zinc-300 truncate">{sym}</div>
-                    <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                      <div className="h-full bg-amber-500/60 rounded-full" style={{ width: `${valPct}%` }} />
+                    <div className="w-24 font-display tabular-nums text-[10px] text-paper truncate">{sym}</div>
+                    <div className="flex-1 h-1.5 bg-ink rounded-full overflow-hidden">
+                      <div className="h-full bg-signal-hold/60 rounded-full" style={{ width: `${valPct}%` }} />
                     </div>
-                    <div className="w-16 text-right font-mono text-[10px] text-zinc-400">{fmtInr(val, 0)}</div>
-                    <div className={`w-14 text-right font-mono text-[10px] ${pnlColor(pnl)}`}>{pnl >= 0 ? "+" : ""}{fmtInr(pnl, 0)}</div>
+                    <div className="w-16 text-right font-display tabular-nums text-[10px] text-mist">{fmtInr(val, 0)}</div>
+                    <div className={`w-14 text-right font-display tabular-nums text-[10px] ${pnlColor(pnl)}`}>{pnl >= 0 ? "+" : ""}{fmtInr(pnl, 0)}</div>
                   </div>
                 );
               })}
@@ -343,17 +343,17 @@ function BalanceAllocation({ funds, positions }: { funds: any; positions: any[] 
 // ── Gate sequence steps ──────────────────────────────────────────────────────
 function GateStep({ n, label, done, active }: { n: number; label: string; done: boolean; active: boolean }) {
   return (
-    <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
-      done ? "bg-emerald-500/5 border-emerald-500/20" :
-      active ? "bg-amber-500/10 border-amber-500/30 animate-pulse" :
-      "bg-zinc-900 border-zinc-800"
+    <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border transition-colors ${
+      done ? "bg-signal-buy/5 border-signal-buy/20" :
+      active ? "bg-signal-hold/10 border-signal-hold/30 animate-pulse" :
+      "bg-graphite border-slate"
     }`}>
       <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${
-        done ? "bg-emerald-500/20 text-emerald-400" :
-        active ? "bg-amber-500/20 text-amber-400" :
-        "bg-zinc-800 text-zinc-600"
+        done ? "bg-signal-buy/20 text-signal-buy" :
+        active ? "bg-signal-hold/20 text-signal-hold" :
+        "bg-ink text-mist"
       }`}>{done ? "✓" : n}</div>
-      <span className={`text-[11px] font-mono ${done ? "text-emerald-300" : active ? "text-amber-300" : "text-zinc-600"}`}>{label}</span>
+      <span className={`text-[11px] font-display tabular-nums ${done ? "text-signal-buy" : active ? "text-signal-hold" : "text-mist"}`}>{label}</span>
     </div>
   );
 }
@@ -738,16 +738,16 @@ export default function RealAutoTrade() {
   if (!getRealTradeApiUrl()) {
     return (
       <div className="p-4 max-w-lg mx-auto">
-        <p className="font-mono text-xs text-zinc-400 mb-1 uppercase tracking-widest">Real Trade Service URL</p>
-        <p className="font-mono text-[11px] text-zinc-600 mb-3">Paste your real-trade-service URL (separate Render deploy from api-gateway).</p>
+        <p className="font-display tabular-nums text-xs text-mist mb-1 uppercase tracking-widest">Real Trade Service URL</p>
+        <p className="font-display tabular-nums text-[11px] text-mist mb-3">Paste your real-trade-service URL (separate Render deploy from api-gateway).</p>
         <div className="flex gap-2">
           <input
-            className="flex-1 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 font-mono text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+            className="flex-1 bg-graphite border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-xs text-paper focus:outline-none focus:border-slate"
             placeholder="https://stockky-real-trade.onrender.com"
             value={apiUrlInput}
             onChange={e => setApiUrlInput(e.target.value)}
           />
-          <button onClick={saveApiUrl} className="px-4 py-2 rounded-lg bg-emerald-600/20 border border-emerald-500/40 font-mono text-xs text-emerald-300">Save</button>
+          <button onClick={saveApiUrl} className="px-4 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 font-display tabular-nums text-xs text-signal-buy">Save</button>
         </div>
       </div>
     );
@@ -777,15 +777,15 @@ export default function RealAutoTrade() {
       <div className="flex items-center justify-between mb-1 px-1">
         <div className="flex items-center gap-2">
           <span className="text-base">🤖</span>
-          <span className="font-mono text-sm font-bold text-zinc-100">Real Auto Trade</span>
-          {armed && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 animate-pulse">ARMED</span>}
+          <span className="font-display tabular-nums text-sm font-bold text-paper">Real Auto Trade</span>
+          {armed && <span className="text-[10px] font-display tabular-nums px-2 py-0.5 rounded-full bg-signal-buy/15 border border-signal-buy/30 text-signal-buy animate-pulse">ARMED</span>}
         </div>
         <div className="flex gap-1.5">
           {(["DEMO", "REAL"] as Mode[]).map(m => (
-            <button key={m} onClick={() => setMode(m)} className={`px-3 py-1 rounded-lg font-mono text-[11px] border transition-colors ${
+            <button key={m} onClick={() => setMode(m)} className={`px-3 py-1 rounded-xl font-display tabular-nums text-[11px] border transition-colors ${
               mode === m
-                ? m === "DEMO" ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-300" : "bg-rose-500/15 border-rose-500/30 text-rose-300"
-                : "bg-zinc-900 border-zinc-800 text-zinc-600"
+                ? m === "DEMO" ? "bg-signal-buy/15 border-signal-buy/30 text-signal-buy" : "bg-signal-sell/15 border-signal-sell/30 text-signal-sell"
+                : "bg-graphite border-slate text-mist"
             }`}>
               <Dot on={mode === m && armed} pulse /> {m}
             </button>
@@ -794,30 +794,30 @@ export default function RealAutoTrade() {
       </div>
 
       {/* Phase notice */}
-      <p className="font-mono text-[10px] text-amber-400/70 mb-3 px-1">
+      <p className="font-display tabular-nums text-[10px] text-signal-hold/70 mb-3 px-1">
         Phase 2 active — DEMO fully wired (candidates→risk→fill→exit). REAL places live Dhan orders & reconciles fills.
       </p>
 
       {/* Error banner */}
       {error && (
-        <div className="mb-3 px-3 py-2 rounded-lg bg-rose-950/40 border border-rose-500/30 font-mono text-xs text-rose-300 flex items-start justify-between gap-2">
+        <div className="mb-3 px-3 py-2 rounded-xl bg-signal-sell/40 border border-signal-sell/30 font-display tabular-nums text-xs text-signal-sell flex items-start justify-between gap-2">
           <span>{error}</span>
-          <button onClick={() => setError(null)} className="text-rose-500 hover:text-rose-300 flex-shrink-0">✕</button>
+          <button onClick={() => setError(null)} className="text-signal-sell hover:text-signal-sell flex-shrink-0">✕</button>
         </div>
       )}
 
       {/* ── Auth / session bar (REAL only) ──────────────────────────────── */}
       {mode === "REAL" && !loggedIn && !status?.armed ? (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 mb-4">
+        <div className="bg-graphite border border-slate rounded-2xl p-4 mb-4">
           <SectionHdr>Admin login required for REAL mode</SectionHdr>
           <div className="space-y-2">
-            <input className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 font-mono text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+            <input className="w-full bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-xs text-paper focus:outline-none focus:border-slate"
               placeholder="Admin username" value={username} onChange={e => setUsername(e.target.value)} />
-            <input type="password" className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 font-mono text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+            <input type="password" className="w-full bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-xs text-paper focus:outline-none focus:border-slate"
               placeholder="Password" value={password} onChange={e => setPassword(e.target.value)}
               onKeyDown={e => e.key === "Enter" && void doLogin()} />
             <button onClick={() => void doLogin()} disabled={loading || !password}
-              className="w-full py-2 rounded-lg bg-sky-500/15 border border-sky-500/30 font-mono text-xs text-sky-300 disabled:opacity-40">
+              className="w-full py-2 rounded-xl bg-signal-prepare/15 border border-signal-prepare/30 font-display tabular-nums text-xs text-signal-prepare disabled:opacity-40">
               {loading ? "Authenticating…" : "Authenticate"}
             </button>
           </div>
@@ -826,34 +826,34 @@ export default function RealAutoTrade() {
         <>
           {mode === "REAL" && (
             loggedIn ? (
-              <div className="flex items-center justify-between mb-3 px-3 py-1.5 rounded-lg bg-emerald-500/5 border border-emerald-500/20">
-                <span className="font-mono text-[11px] text-emerald-400 flex items-center gap-1.5">
+              <div className="flex items-center justify-between mb-3 px-3 py-1.5 rounded-xl bg-signal-buy/5 border border-signal-buy/20">
+                <span className="font-display tabular-nums text-[11px] text-signal-buy flex items-center gap-1.5">
                   <Dot on={true} /> Admin session active ({username})
                 </span>
-                <button onClick={() => void doLogout()} className="font-mono text-[10px] px-2 py-1 rounded bg-rose-500/10 border border-rose-500/20 text-rose-400">
+                <button onClick={() => void doLogout()} className="font-display tabular-nums text-[10px] px-2 py-1 rounded bg-signal-sell/10 border border-signal-sell/20 text-signal-sell">
                   Log out
                 </button>
               </div>
             ) : (
-              <div className="flex items-center justify-between mb-3 px-3 py-1.5 rounded-lg bg-amber-500/5 border border-amber-500/20">
-                <span className="font-mono text-[11px] text-amber-400">
+              <div className="flex items-center justify-between mb-3 px-3 py-1.5 rounded-xl bg-signal-hold/5 border border-signal-hold/20">
+                <span className="font-display tabular-nums text-[11px] text-signal-hold">
                   Session expired — auto-pilot still running. Log in to make changes.
                 </span>
-                <button onClick={() => setActiveTab("overview")} className="font-mono text-[10px] px-2 py-1 rounded bg-sky-500/10 border border-sky-500/20 text-sky-400">
+                <button onClick={() => setActiveTab("overview")} className="font-display tabular-nums text-[10px] px-2 py-1 rounded bg-signal-prepare/10 border border-signal-prepare/20 text-signal-prepare">
                   Log in
                 </button>
               </div>
             )
           )}
 
-          {/* ── Tab bar ─────────────────────────────────────────────────── */}
-          <div className="flex gap-1 mb-4 overflow-x-auto pb-1">
+          {/* ── Tab bar (Groww-style pill segmented control) ───────────── */}
+          <div className="flex gap-1 mb-4 overflow-x-auto pb-1 bg-ink border border-slate rounded-full p-1">
             {tabs.map(t => (
               <button key={t.id} onClick={() => setActiveTab(t.id)}
-                className={`px-3 py-1.5 rounded-lg font-mono text-[11px] whitespace-nowrap border transition-colors flex-shrink-0 ${
+                className={`px-3.5 py-1.5 rounded-full font-display text-[12px] font-semibold whitespace-nowrap transition-colors flex-shrink-0 ${
                   activeTab === t.id
-                    ? "bg-zinc-700 border-zinc-600 text-zinc-100"
-                    : "bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300"
+                    ? "bg-signal-buy text-white"
+                    : "text-mist hover:text-paper"
                 }`}>
                 {t.label}
               </button>
@@ -866,7 +866,7 @@ export default function RealAutoTrade() {
           {activeTab === "overview" && (
             <div className="space-y-4">
               {/* Gate sequence */}
-              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+              <div className="bg-graphite border border-slate rounded-2xl p-4">
                 <SectionHdr>Arming sequence — {mode} mode</SectionHdr>
                 <div className="grid grid-cols-2 gap-2 mb-4">
                   <GateStep n={1} label="Admin authenticated" done={gate1} active={nextGateNeeded === 1} />
@@ -878,16 +878,16 @@ export default function RealAutoTrade() {
                 {/* Inline login form when armed but session expired —
                     don't block the full page, just gate the mutating actions */}
                 {mode === "REAL" && !loggedIn && armed && (
-                  <div className="mb-3 p-3 rounded-lg border border-amber-500/20 bg-amber-500/5 space-y-2">
-                    <p className="font-mono text-[10px] text-amber-400">Session expired — log in to disarm or change config. Auto-pilot keeps running.</p>
+                  <div className="mb-3 p-3 rounded-xl border border-signal-hold/20 bg-signal-hold/5 space-y-2">
+                    <p className="font-display tabular-nums text-[10px] text-signal-hold">Session expired — log in to disarm or change config. Auto-pilot keeps running.</p>
                     <div className="flex gap-2">
-                      <input className="flex-1 bg-zinc-950 border border-zinc-700 rounded px-2 py-1 font-mono text-xs text-zinc-200 focus:outline-none"
+                      <input className="flex-1 bg-ink border border-slate rounded px-2 py-1 font-display tabular-nums text-xs text-paper focus:outline-none"
                         placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} />
-                      <input type="password" className="flex-1 bg-zinc-950 border border-zinc-700 rounded px-2 py-1 font-mono text-xs text-zinc-200 focus:outline-none"
+                      <input type="password" className="flex-1 bg-ink border border-slate rounded px-2 py-1 font-display tabular-nums text-xs text-paper focus:outline-none"
                         placeholder="Password" value={password} onChange={e => setPassword(e.target.value)}
                         onKeyDown={e => e.key === "Enter" && void doLogin()} />
                       <button onClick={() => void doLogin()} disabled={loading || !password}
-                        className="px-3 py-1 rounded bg-sky-500/15 border border-sky-500/30 font-mono text-xs text-sky-300 disabled:opacity-40">
+                        className="px-3 py-1 rounded bg-signal-prepare/15 border border-signal-prepare/30 font-display tabular-nums text-xs text-signal-prepare disabled:opacity-40">
                         {loading ? "…" : "Login"}
                       </button>
                     </div>
@@ -898,72 +898,72 @@ export default function RealAutoTrade() {
                     logged in but gate not met */}
                 {status && !gate3 && mode === "REAL" && gate1 && gate2 && (
                   <button onClick={() => void doConfirmRisk()}
-                    className="w-full py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 font-mono text-xs text-amber-300">
+                    className="w-full py-2 rounded-xl bg-signal-hold/10 border border-signal-hold/30 font-display tabular-nums text-xs text-signal-hold">
                     Confirm risk configuration
                   </button>
                 )}
                 {status && !gate3 && mode === "DEMO" && (
                   <button onClick={() => void doConfirmRisk()}
-                    className="w-full py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 font-mono text-xs text-amber-300">
+                    className="w-full py-2 rounded-xl bg-signal-hold/10 border border-signal-hold/30 font-display tabular-nums text-xs text-signal-hold">
                     Confirm risk configuration
                   </button>
                 )}
 
                 <div className="flex gap-2 mt-2">
                   {armed ? (
-                    <button onClick={() => void doDisarm()} className="flex-1 py-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 font-mono text-xs text-rose-300">
+                    <button onClick={() => void doDisarm()} className="flex-1 py-2.5 rounded-xl bg-signal-sell/10 border border-signal-sell/30 font-display tabular-nums text-xs text-signal-sell">
                       🛑 DISARM
                     </button>
                   ) : (
                     <button onClick={() => void doArm()} disabled={loading || !gate1 || !gate2 || !gate3}
-                      className="flex-1 py-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 font-mono text-xs text-emerald-300 disabled:opacity-30">
+                      className="flex-1 py-2.5 rounded-xl bg-signal-buy/10 border border-signal-buy/30 font-display tabular-nums text-xs text-signal-buy disabled:opacity-30">
                       {loading ? "Arming…" : "⚡ ARM"}
                     </button>
                   )}
-                  <button onClick={() => void doEmergencyPause()} className="px-4 py-2.5 rounded-lg bg-red-900/30 border border-red-500/40 font-mono text-xs text-red-300">
+                  <button onClick={() => void doEmergencyPause()} className="px-4 py-2.5 rounded-xl bg-signal-sell/30 border border-signal-sell/40 font-display tabular-nums text-xs text-signal-sell">
                     🚨 PAUSE ALL
                   </button>
                 </div>
                 {status?.disarmed_reason && (
                   /outbound IP|invalid ip|not whitelisted/i.test(status.disarmed_reason) ? (
-                    <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
-                      <p className="font-mono text-[10px] text-amber-300">
+                    <div className="mt-2 rounded-xl border border-signal-hold/30 bg-signal-hold/5 px-3 py-2">
+                      <p className="font-display tabular-nums text-[10px] text-signal-hold">
                         🚨 Auto-paused: Dhan rejected an order because this service's outbound IP isn't whitelisted.
                       </p>
-                      <p className="font-mono text-[9px] text-zinc-500 mt-1">
+                      <p className="font-display tabular-nums text-[9px] text-mist mt-1">
                         Reads (funds/positions) still work — only order placement is IP-gated by Dhan, which is
                         why the account shows connected while this happens.
                       </p>
                       <div className="flex items-center gap-2 mt-2">
                         <button onClick={() => void doNetworkCheck()} disabled={networkCheckBusy}
-                          className="font-mono text-[10px] px-3 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 disabled:opacity-40">
+                          className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-signal-hold/10 border border-signal-hold/30 text-signal-hold disabled:opacity-40">
                           {networkCheckBusy ? "Checking…" : "Check outbound IP"}
                         </button>
                         {networkCheck?.outbound_ip && (
-                          <code className="font-mono text-[10px] text-zinc-200 bg-zinc-950 px-2 py-1 rounded">{networkCheck.outbound_ip}</code>
+                          <code className="font-display tabular-nums text-[10px] text-paper bg-ink px-2 py-1 rounded">{networkCheck.outbound_ip}</code>
                         )}
                       </div>
                       {networkCheck && (
-                        <p className="font-mono text-[9px] text-zinc-600 mt-1">{networkCheck.note}</p>
+                        <p className="font-display tabular-nums text-[9px] text-mist mt-1">{networkCheck.note}</p>
                       )}
-                      <p className="font-mono text-[9px] text-zinc-600 mt-1">
+                      <p className="font-display tabular-nums text-[9px] text-mist mt-1">
                         Add that IP under Dhan Web → My Profile → API Access → IP Whitelisting, then re-arm.
                         A non-static host IP can change on redeploy — re-check if this recurs.
                       </p>
                     </div>
                   ) : (
-                    <p className="font-mono text-[10px] text-amber-400/60 mt-2">Last disarm: {status.disarmed_reason}</p>
+                    <p className="font-display tabular-nums text-[10px] text-signal-hold/60 mt-2">Last disarm: {status.disarmed_reason}</p>
                   )
                 )}
               </div>
 
               {/* REAL: Dhan account card */}
               {mode === "REAL" && (
-                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                <div className="bg-graphite border border-slate rounded-2xl p-4">
                   <div className="flex items-center justify-between mb-3">
                     <SectionHdr>Dhan account</SectionHdr>
-                    <span className={`font-mono text-[10px] px-2 py-0.5 rounded-full border ${
-                      dhanAccount?.connected ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" : "bg-rose-500/10 border-rose-500/30 text-rose-400"
+                    <span className={`font-display tabular-nums text-[10px] px-2 py-0.5 rounded-full border ${
+                      dhanAccount?.connected ? "bg-signal-buy/10 border-signal-buy/30 text-signal-buy" : "bg-signal-sell/10 border-signal-sell/30 text-signal-sell"
                     }`}>
                       {dhanAccount?.connected ? "🟢 Connected" : "🔴 Disconnected"}
                     </span>
@@ -971,19 +971,19 @@ export default function RealAutoTrade() {
 
                   {dhanAccount?.connected ? (
                     <div className="space-y-3">
-                      <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-zinc-500">
-                        <div>Client ID <span className="text-zinc-200 ml-1">{dhanAccount.client_id_masked}</span></div>
-                        <div>Token <span className={`ml-1 ${(secondsRemaining ?? 0) < 7200 ? "text-rose-400" : "text-emerald-400"}`}>
+                      <div className="grid grid-cols-2 gap-2 text-[11px] font-display tabular-nums text-mist">
+                        <div>Client ID <span className="text-paper ml-1">{dhanAccount.client_id_masked}</span></div>
+                        <div>Token <span className={`ml-1 ${(secondsRemaining ?? 0) < 7200 ? "text-signal-sell" : "text-signal-buy"}`}>
                           {secondsRemaining != null ? (secondsRemaining <= 0 ? "expired" : fmtHms(secondsRemaining) + " left") : "—"}
                         </span></div>
                       </div>
-                      <p className="font-mono text-[9px] text-zinc-700 -mt-2">
+                      <p className="font-display tabular-nums text-[9px] text-mist -mt-2">
                         {dhanAccount.token_issued_at && `Issued ${fmtDate(dhanAccount.token_issued_at)} ${fmtTime(dhanAccount.token_issued_at)} · `}
                         Dhan hard-caps every token at {dhanAccount.token_hard_cap_hours ?? 24}h regardless of when it was generated.
                       </p>
 
                       {dhanAccount.funds_error ? (
-                        <p className="font-mono text-[11px] text-rose-300 bg-rose-500/5 rounded-lg px-3 py-2 border border-rose-500/20">
+                        <p className="font-display tabular-nums text-[11px] text-signal-sell bg-signal-sell/5 rounded-xl px-3 py-2 border border-signal-sell/20">
                           ⚠ Live funds check failed: {dhanAccount.funds_error}
                         </p>
                       ) : dhanAccount.funds ? (
@@ -998,9 +998,9 @@ export default function RealAutoTrade() {
                           ].map(f => {
                             const v = pickNum(dhanAccount.funds, ...f.keys);
                             return (
-                              <div key={f.label} className="bg-zinc-950 border border-zinc-800 rounded-lg p-2">
-                                <p className="font-mono text-[9px] uppercase tracking-widest text-zinc-600">{f.label}</p>
-                                <p className="font-mono text-sm font-bold text-zinc-100 mt-0.5">{fmtInr(v, 0)}</p>
+                              <div key={f.label} className="bg-ink border border-slate rounded-xl p-2">
+                                <p className="font-display tabular-nums text-[9px] uppercase tracking-widest text-mist">{f.label}</p>
+                                <p className="font-display tabular-nums text-sm font-bold text-paper mt-0.5">{fmtInr(v, 0)}</p>
                               </div>
                             );
                           })}
@@ -1008,34 +1008,34 @@ export default function RealAutoTrade() {
                       ) : null}
 
                       <div className="flex gap-2">
-                        <button onClick={() => void loadStatus(mode)} className="font-mono text-[10px] text-sky-400 hover:text-sky-300">
+                        <button onClick={() => void loadStatus(mode)} className="font-display tabular-nums text-[10px] text-signal-prepare hover:text-signal-prepare">
                           ↻ Refresh
                         </button>
-                        <button onClick={() => setShowDhanForm(!showDhanForm)} className="font-mono text-[10px] text-zinc-500 hover:text-zinc-300">
+                        <button onClick={() => setShowDhanForm(!showDhanForm)} className="font-display tabular-nums text-[10px] text-mist hover:text-paper">
                           Rotate token
                         </button>
                       </div>
                     </div>
                   ) : (
-                    <p className="font-mono text-[11px] text-zinc-600">Connect Dhan below to enable REAL trading and see live balance.</p>
+                    <p className="font-display tabular-nums text-[11px] text-mist">Connect Dhan below to enable REAL trading and see live balance.</p>
                   )}
 
                   {/* Dhan connect form */}
                   {(!dhanAccount?.connected || showDhanForm) && (
-                    <div className="mt-3 space-y-2 border-t border-zinc-800 pt-3">
-                      <p className="font-mono text-[10px] text-zinc-500">{dhanAccount?.connected ? "Paste a fresh access token to rotate" : "Connect your Dhan account"}</p>
-                      <input className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 font-mono text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+                    <div className="mt-3 space-y-2 border-t border-slate pt-3">
+                      <p className="font-display tabular-nums text-[10px] text-mist">{dhanAccount?.connected ? "Paste a fresh access token to rotate" : "Connect your Dhan account"}</p>
+                      <input className="w-full bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-xs text-paper focus:outline-none focus:border-slate"
                         placeholder="Dhan Client ID" value={dhanClientId} onChange={e => setDhanClientId(e.target.value)} />
-                      <input type="password" className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 font-mono text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+                      <input type="password" className="w-full bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-xs text-paper focus:outline-none focus:border-slate"
                         placeholder="Access Token (generate at web.dhan.co → DhanHQ APIs)" value={dhanToken} onChange={e => setDhanToken(e.target.value)} />
                       <div className="flex gap-2">
                         <button onClick={() => void doConnectDhan()} disabled={loading || !dhanClientId || !dhanToken}
-                          className="flex-1 py-2 rounded-lg bg-sky-500/10 border border-sky-500/30 font-mono text-xs text-sky-300 disabled:opacity-40">
+                          className="flex-1 py-2 rounded-xl bg-signal-prepare/10 border border-signal-prepare/30 font-display tabular-nums text-xs text-signal-prepare disabled:opacity-40">
                           {loading ? "Connecting…" : dhanAccount?.connected ? "Save new token" : "Connect Dhan"}
                         </button>
                         {dhanAccount?.connected && (
                           <button onClick={() => setShowDhanForm(false)}
-                            className="px-3 py-2 rounded-lg border border-zinc-700 font-mono text-xs text-zinc-500">
+                            className="px-3 py-2 rounded-xl border border-slate font-display tabular-nums text-xs text-mist">
                             Cancel
                           </button>
                         )}
@@ -1049,10 +1049,10 @@ export default function RealAutoTrade() {
                   (backend enforces the same rule and 409s otherwise, so the UI just
                   mirrors it instead of letting someone submit a doomed request). */}
               {status?.risk_config && (
-                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                <div className="bg-graphite border border-slate rounded-2xl p-4">
                   <div className="flex items-center justify-between mb-1">
                     <SectionHdr>Risk configuration — {mode}</SectionHdr>
-                    {armed && <span className="font-mono text-[9px] text-amber-400 uppercase">locked while armed</span>}
+                    {armed && <span className="font-display tabular-nums text-[9px] text-signal-hold uppercase">locked while armed</span>}
                   </div>
                   {riskForm && (
                     <div className="grid grid-cols-2 gap-3">
@@ -1064,41 +1064,41 @@ export default function RealAutoTrade() {
                         ["stale_data_seconds", "Stale data cutoff (s)"],
                         ["max_tick_volatility_mult", "Max tick volatility ×"],
                       ] as const).map(([key, label]) => (
-                        <div key={key} className="bg-zinc-950 border border-zinc-800 rounded-lg p-2">
-                          <p className="font-mono text-[9px] uppercase tracking-widest text-zinc-600">{label}</p>
+                        <div key={key} className="bg-ink border border-slate rounded-xl p-2">
+                          <p className="font-display tabular-nums text-[9px] uppercase tracking-widest text-mist">{label}</p>
                           <input
                             type="number" inputMode="decimal" disabled={armed}
                             value={riskForm[key]}
                             onChange={e => setRiskForm(f => f && { ...f, [key]: e.target.value })}
-                            className="w-full bg-transparent font-mono text-sm font-bold text-zinc-100 mt-0.5 focus:outline-none disabled:opacity-60"
+                            className="w-full bg-transparent font-display tabular-nums text-sm font-bold text-paper mt-0.5 focus:outline-none disabled:opacity-60"
                           />
                         </div>
                       ))}
-                      <label className="col-span-2 flex items-center gap-2 bg-zinc-950 border border-zinc-800 rounded-lg p-2 cursor-pointer">
+                      <label className="col-span-2 flex items-center gap-2 bg-ink border border-slate rounded-xl p-2 cursor-pointer">
                         <input type="checkbox" disabled={armed} checked={riskForm.allow_pyramiding}
                           onChange={e => setRiskForm(f => f && { ...f, allow_pyramiding: e.target.checked })}
-                          className="accent-sky-500" />
-                        <span className="font-mono text-[10px] text-zinc-400">Allow pyramiding (add to an existing open position)</span>
+                          className="accent-signal-prepare" />
+                        <span className="font-display tabular-nums text-[10px] text-mist">Allow pyramiding (add to an existing open position)</span>
                       </label>
                     </div>
                   )}
                   {riskMsg && (
-                    <p className={`font-mono text-[10px] mt-2 ${riskMsg.ok ? "text-emerald-400" : "text-rose-400"}`}>{riskMsg.text}</p>
+                    <p className={`font-display tabular-nums text-[10px] mt-2 ${riskMsg.ok ? "text-signal-buy" : "text-signal-sell"}`}>{riskMsg.text}</p>
                   )}
                   {status.risk_config.updated_at && (
-                    <p className="font-mono text-[9px] text-zinc-700 mt-2">
+                    <p className="font-display tabular-nums text-[9px] text-mist mt-2">
                       Last saved {fmtDate(status.risk_config.updated_at)} {fmtTime(status.risk_config.updated_at)}
                       {status.risk_config.updated_by ? ` by ${status.risk_config.updated_by}` : ""}
                     </p>
                   )}
                   {!armed && (
                     <button onClick={() => void doSaveRiskConfig()} disabled={riskSaving}
-                      className="mt-3 w-full py-2 rounded-lg bg-sky-500/10 border border-sky-500/30 font-mono text-xs text-sky-300 disabled:opacity-40">
+                      className="mt-3 w-full py-2 rounded-xl bg-signal-prepare/10 border border-signal-prepare/30 font-display tabular-nums text-xs text-signal-prepare disabled:opacity-40">
                       {riskSaving ? "Saving…" : "Save changes"}
                     </button>
                   )}
                   {!gate3 && (
-                    <button onClick={() => void doConfirmRisk()} className="mt-2 w-full py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 font-mono text-xs text-amber-300">
+                    <button onClick={() => void doConfirmRisk()} className="mt-2 w-full py-2 rounded-xl bg-signal-hold/10 border border-signal-hold/30 font-display tabular-nums text-xs text-signal-hold">
                       Confirm this risk configuration
                     </button>
                   )}
@@ -1139,25 +1139,25 @@ export default function RealAutoTrade() {
           {activeTab === "live" && (
             <div className="space-y-4">
               {mode !== "REAL" ? (
-                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 text-center">
-                  <p className="font-mono text-sm text-zinc-500">Switch to REAL mode and log in to see live Dhan account data.</p>
+                <div className="bg-graphite border border-slate rounded-2xl p-6 text-center">
+                  <p className="font-display tabular-nums text-sm text-mist">Switch to REAL mode and log in to see live Dhan account data.</p>
                 </div>
               ) : !loggedIn ? (
-                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 text-center">
-                  <p className="font-mono text-sm text-zinc-500">Log in to view live Dhan data.</p>
+                <div className="bg-graphite border border-slate rounded-2xl p-6 text-center">
+                  <p className="font-display tabular-nums text-sm text-mist">Log in to view live Dhan data.</p>
                 </div>
               ) : (
                 <>
                   <div className="flex items-center justify-between">
                     <SectionHdr>Live data from Dhan broker</SectionHdr>
                     <button onClick={() => void loadLiveDhanData()} disabled={liveLoading}
-                      className="font-mono text-[10px] px-3 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-400 disabled:opacity-40">
+                      className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-ink border border-slate text-mist disabled:opacity-40">
                       {liveLoading ? "Loading…" : "↻ Refresh all"}
                     </button>
                   </div>
 
                   {liveError && (
-                    <div className="px-3 py-2 rounded-lg bg-rose-950/40 border border-rose-500/30 font-mono text-xs text-rose-300">{liveError}</div>
+                    <div className="px-3 py-2 rounded-xl bg-signal-sell/40 border border-signal-sell/30 font-display tabular-nums text-xs text-signal-sell">{liveError}</div>
                   )}
 
                   {/* Balance allocation */}
@@ -1166,10 +1166,10 @@ export default function RealAutoTrade() {
                   )}
 
                   {/* Live positions */}
-                  <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                  <div className="bg-graphite border border-slate rounded-2xl p-4">
                     <SectionHdr>Open positions at Dhan ({livePositions.length})</SectionHdr>
                     {livePositions.length === 0 ? (
-                      <p className="font-mono text-[11px] text-zinc-600">No open positions at broker.</p>
+                      <p className="font-display tabular-nums text-[11px] text-mist">No open positions at broker.</p>
                     ) : (
                       <div className="space-y-2">
                         {livePositions.map((p, i) => {
@@ -1180,21 +1180,21 @@ export default function RealAutoTrade() {
                           const pnl = Number(p.unrealizedProfit || p.dayBuyValue || 0);
                           const product = p.positionType || p.productType || "";
                           return (
-                            <div key={i} className="bg-zinc-950 rounded-lg px-3 py-2 border border-zinc-800">
+                            <div key={i} className="bg-ink rounded-xl px-3 py-2 border border-slate">
                               <div className="flex items-center justify-between">
                                 <div>
-                                  <span className="font-mono text-sm font-bold text-zinc-100">{sym}</span>
-                                  <span className="font-mono text-[10px] text-zinc-600 ml-2">{product}</span>
+                                  <span className="font-display tabular-nums text-sm font-bold text-paper">{sym}</span>
+                                  <span className="font-display tabular-nums text-[10px] text-mist ml-2">{product}</span>
                                 </div>
-                                <span className={`font-mono text-sm font-bold ${pnlColor(pnl)}`}>
+                                <span className={`font-display tabular-nums text-sm font-bold ${pnlColor(pnl)}`}>
                                   {pnl >= 0 ? "+" : ""}{fmtInr(pnl, 2)}
                                 </span>
                               </div>
-                              <div className="flex gap-4 mt-1 font-mono text-[10px] text-zinc-500">
-                                <span>Qty <span className="text-zinc-300">{qty}</span></span>
-                                <span>Avg <span className="text-zinc-300">₹{avg.toFixed(2)}</span></span>
-                                <span>LTP <span className="text-zinc-300">₹{ltp.toFixed(2)}</span></span>
-                                <span>Val <span className="text-zinc-300">{fmtInr(qty * avg, 0)}</span></span>
+                              <div className="flex gap-4 mt-1 font-display tabular-nums text-[10px] text-mist">
+                                <span>Qty <span className="text-paper">{qty}</span></span>
+                                <span>Avg <span className="text-paper">₹{avg.toFixed(2)}</span></span>
+                                <span>LTP <span className="text-paper">₹{ltp.toFixed(2)}</span></span>
+                                <span>Val <span className="text-paper">{fmtInr(qty * avg, 0)}</span></span>
                               </div>
                             </div>
                           );
@@ -1204,15 +1204,15 @@ export default function RealAutoTrade() {
                   </div>
 
                   {/* Live holdings */}
-                  <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                  <div className="bg-graphite border border-slate rounded-2xl p-4">
                     <SectionHdr>Demat holdings ({liveHoldings.length})</SectionHdr>
                     {liveHoldings.length === 0 ? (
-                      <p className="font-mono text-[11px] text-zinc-600">No holdings in demat.</p>
+                      <p className="font-display tabular-nums text-[11px] text-mist">No holdings in demat.</p>
                     ) : (
                       <div className="overflow-x-auto">
-                        <table className="w-full font-mono text-[11px]">
+                        <table className="w-full font-display tabular-nums text-[11px]">
                           <thead>
-                            <tr className="text-zinc-600 border-b border-zinc-800">
+                            <tr className="text-mist border-b border-slate">
                               <th className="text-left py-1 pr-3">Symbol</th>
                               <th className="text-right pr-3">Qty</th>
                               <th className="text-right pr-3">Avg Cost</th>
@@ -1228,11 +1228,11 @@ export default function RealAutoTrade() {
                               const ltp = Number(h.lastTradedPrice || h.ltp || 0);
                               const pnl = (ltp - avg) * qty;
                               return (
-                                <tr key={i} className="border-b border-zinc-900 hover:bg-zinc-950">
-                                  <td className="py-1.5 pr-3 text-zinc-200 font-bold">{sym}</td>
-                                  <td className="text-right pr-3 text-zinc-400">{qty}</td>
-                                  <td className="text-right pr-3 text-zinc-400">₹{avg.toFixed(2)}</td>
-                                  <td className="text-right pr-3 text-zinc-400">₹{ltp.toFixed(2)}</td>
+                                <tr key={i} className="border-b border-slate hover:bg-ink">
+                                  <td className="py-1.5 pr-3 text-paper font-bold">{sym}</td>
+                                  <td className="text-right pr-3 text-mist">{qty}</td>
+                                  <td className="text-right pr-3 text-mist">₹{avg.toFixed(2)}</td>
+                                  <td className="text-right pr-3 text-mist">₹{ltp.toFixed(2)}</td>
                                   <td className={`text-right ${pnlColor(pnl)}`}>{pnl >= 0 ? "+" : ""}{fmtInr(pnl, 0)}</td>
                                 </tr>
                               );
@@ -1244,10 +1244,10 @@ export default function RealAutoTrade() {
                   </div>
 
                   {/* Live orders from Dhan */}
-                  <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                  <div className="bg-graphite border border-slate rounded-2xl p-4">
                     <SectionHdr>Today's orders at Dhan ({liveDhanOrders.length})</SectionHdr>
                     {liveDhanOrders.length === 0 ? (
-                      <p className="font-mono text-[11px] text-zinc-600">No orders placed today.</p>
+                      <p className="font-display tabular-nums text-[11px] text-mist">No orders placed today.</p>
                     ) : (
                       <div className="space-y-1.5 max-h-60 overflow-y-auto">
                         {liveDhanOrders.map((o, i) => {
@@ -1256,18 +1256,18 @@ export default function RealAutoTrade() {
                           const qty = Number(o.quantity || 0);
                           const price = Number(o.price || o.averageTradedPrice || 0);
                           const status = (o.orderStatus || o.status || "").toUpperCase();
-                          const statusColor = status === "TRADED" || status === "FILLED" ? "text-emerald-400"
-                            : status === "REJECTED" || status === "CANCELLED" ? "text-rose-400"
-                            : "text-amber-400";
+                          const statusColor = status === "TRADED" || status === "FILLED" ? "text-signal-buy"
+                            : status === "REJECTED" || status === "CANCELLED" ? "text-signal-sell"
+                            : "text-signal-hold";
                           return (
-                            <div key={i} className="flex items-center justify-between bg-zinc-950 rounded-lg px-3 py-1.5 border border-zinc-800">
-                              <div className="flex items-center gap-2 font-mono text-[11px]">
-                                <span className={`font-bold ${side === "BUY" ? "text-emerald-400" : "text-rose-400"}`}>{side}</span>
-                                <span className="text-zinc-200">{sym}</span>
-                                <span className="text-zinc-500">×{qty}</span>
-                                {price > 0 && <span className="text-zinc-500">@ ₹{price.toFixed(2)}</span>}
+                            <div key={i} className="flex items-center justify-between bg-ink rounded-xl px-3 py-1.5 border border-slate">
+                              <div className="flex items-center gap-2 font-display tabular-nums text-[11px]">
+                                <span className={`font-bold ${side === "BUY" ? "text-signal-buy" : "text-signal-sell"}`}>{side}</span>
+                                <span className="text-paper">{sym}</span>
+                                <span className="text-mist">×{qty}</span>
+                                {price > 0 && <span className="text-mist">@ ₹{price.toFixed(2)}</span>}
                               </div>
-                              <span className={`font-mono text-[10px] ${statusColor}`}>{status}</span>
+                              <span className={`font-display tabular-nums text-[10px] ${statusColor}`}>{status}</span>
                             </div>
                           );
                         })}
@@ -1289,67 +1289,72 @@ export default function RealAutoTrade() {
                 <div className="flex gap-2">
                   {armed && (
                     <button onClick={() => void doReconcile()} disabled={actionBusy === "reconcile"}
-                      className="font-mono text-[10px] px-3 py-1 rounded-lg bg-sky-500/10 border border-sky-500/30 text-sky-400 disabled:opacity-40">
+                      className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-signal-prepare/10 border border-signal-prepare/30 text-signal-prepare disabled:opacity-40">
                       {actionBusy === "reconcile" ? "Checking…" : "🔄 Reconcile"}
                     </button>
                   )}
                   <button onClick={() => void loadPositionsAndOrders(mode)}
-                    className="font-mono text-[10px] px-3 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-400">
+                    className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-ink border border-slate text-mist">
                     ↻
                   </button>
                 </div>
               </div>
 
               {actionMsg && (
-                <div className={`px-3 py-2 rounded-lg border font-mono text-xs ${actionMsg.ok ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-300" : "bg-rose-500/5 border-rose-500/20 text-rose-300"}`}>
+                <div className={`px-3 py-2 rounded-xl border font-display tabular-nums text-xs ${actionMsg.ok ? "bg-signal-buy/5 border-signal-buy/20 text-signal-buy" : "bg-signal-sell/5 border-signal-sell/20 text-signal-sell"}`}>
                   {actionMsg.text}
                 </div>
               )}
 
               {positions.length === 0 ? (
-                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 text-center">
-                  <p className="font-mono text-sm text-zinc-600">No open positions.</p>
+                <div className="bg-graphite border border-slate rounded-2xl p-6 text-center">
+                  <p className="font-display tabular-nums text-sm text-mist">No open positions.</p>
                 </div>
               ) : (
                 <div className="space-y-2">
                   {positions.map(p => (
-                    <div key={p.id} className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                    <div key={p.id} className="bg-graphite border border-slate rounded-2xl p-4">
                       <div className="flex items-start justify-between mb-2">
-                        <div>
-                          <span className="font-mono text-base font-bold text-zinc-100">{p.symbol}</span>
-                          <span className="font-mono text-[10px] text-zinc-600 ml-2">{p.status}</span>
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-8 h-8 shrink-0 rounded-full bg-ink border border-slate flex items-center justify-center font-display text-[11px] font-bold text-mist">
+                            {p.symbol.slice(0, 2)}
+                          </div>
+                          <div>
+                            <span className="font-display text-base font-bold text-paper">{p.symbol}</span>
+                            <span className="font-display tabular-nums text-[10px] text-mist ml-2">{p.status}</span>
+                          </div>
                         </div>
                         <div className="text-right">
-                          <span className={`font-mono text-base font-bold ${pnlColor(p.unrealized_pnl)}`}>
+                          <span className={`font-display tabular-nums text-base font-bold ${pnlColor(p.unrealized_pnl)}`}>
                             {p.unrealized_pnl >= 0 ? "+" : ""}{fmtInr(p.unrealized_pnl, 2)}
                           </span>
                           {p.pnl_pct != null && (
-                            <span className={`font-mono text-[10px] ml-1 ${pnlColor(p.pnl_pct)}`}>
+                            <span className={`font-display tabular-nums text-[10px] ml-1 ${pnlColor(p.pnl_pct)}`}>
                               ({p.pnl_pct >= 0 ? "+" : ""}{p.pnl_pct}%)
                             </span>
                           )}
                         </div>
                       </div>
-                      <div className="grid grid-cols-5 gap-2 font-mono text-[10px] text-zinc-500 mb-3">
-                        <div>Qty<br/><span className="text-zinc-200 font-bold">{p.qty_open}</span></div>
-                        <div>Entry<br/><span className="text-zinc-200 font-bold">₹{p.avg_entry_price}</span></div>
-                        <div>Current<br/><span className="text-sky-400 font-bold">{p.current_price != null ? `₹${p.current_price.toFixed(2)}` : "—"}</span></div>
+                      <div className="grid grid-cols-5 gap-2 font-display tabular-nums text-[10px] text-mist mb-3">
+                        <div>Qty<br/><span className="text-paper font-bold">{p.qty_open}</span></div>
+                        <div>Entry<br/><span className="text-paper font-bold">₹{p.avg_entry_price}</span></div>
+                        <div>Current<br/><span className="text-signal-prepare font-bold">{p.current_price != null ? `₹${p.current_price.toFixed(2)}` : "—"}</span></div>
                         <div>
                           Stop
-                          {p.stop_distance_pct != null && <span className="text-zinc-700"> ({p.stop_distance_pct}%)</span>}
-                          <br/><span className="text-rose-400 font-bold">{p.current_stop ? `₹${p.current_stop}` : "—"}</span>
+                          {p.stop_distance_pct != null && <span className="text-mist"> ({p.stop_distance_pct}%)</span>}
+                          <br/><span className="text-signal-sell font-bold">{p.current_stop ? `₹${p.current_stop}` : "—"}</span>
                         </div>
                         <div>
                           Target
-                          {p.target_distance_pct != null && <span className="text-zinc-700"> ({p.target_distance_pct}%)</span>}
-                          <br/><span className="text-emerald-400 font-bold">{p.current_target ? `₹${p.current_target}` : "—"}</span>
+                          {p.target_distance_pct != null && <span className="text-mist"> ({p.target_distance_pct}%)</span>}
+                          <br/><span className="text-signal-buy font-bold">{p.current_target ? `₹${p.current_target}` : "—"}</span>
                         </div>
                       </div>
                       {/* Risk:reward bar with a live marker for where current price sits between stop and target */}
                       {p.current_stop && p.current_target && (
-                        <div className="relative h-1.5 rounded-full bg-zinc-800 flex overflow-hidden mb-2">
-                          <div className="bg-rose-500/50" style={{ width: "50%" }} />
-                          <div className="bg-emerald-500/50" style={{ width: "50%" }} />
+                        <div className="relative h-1.5 rounded-full bg-ink flex overflow-hidden mb-2">
+                          <div className="bg-signal-sell/50" style={{ width: "50%" }} />
+                          <div className="bg-signal-buy/50" style={{ width: "50%" }} />
                           {p.current_price != null && p.current_target > p.current_stop && (
                             <div
                               className="absolute top-[-2px] w-[3px] h-[9px] bg-white rounded-full"
@@ -1361,12 +1366,12 @@ export default function RealAutoTrade() {
                         </div>
                       )}
                       <div className="flex items-center justify-between">
-                        <span className="font-mono text-[10px] text-zinc-600">{fmtDate(p.opened_at)} {fmtTime(p.opened_at)}</span>
+                        <span className="font-display tabular-nums text-[10px] text-mist">{fmtDate(p.opened_at)} {fmtTime(p.opened_at)}</span>
                         {p.status === "PENDING_EXIT" ? (
-                          <span className="font-mono text-[10px] text-amber-400">pending exit…</span>
+                          <span className="font-display tabular-nums text-[10px] text-signal-hold">pending exit…</span>
                         ) : (
                           <button onClick={() => void doClosePosition(p)} disabled={actionBusy === `close:${p.id}`}
-                            className="font-mono text-[10px] px-2 py-1 rounded bg-rose-500/10 border border-rose-500/20 text-rose-400 disabled:opacity-40">
+                            className="font-display tabular-nums text-[10px] px-2 py-1 rounded bg-signal-sell/10 border border-signal-sell/20 text-signal-sell disabled:opacity-40">
                             {actionBusy === `close:${p.id}` ? "Closing…" : "Close position"}
                           </button>
                         )}
@@ -1390,35 +1395,35 @@ export default function RealAutoTrade() {
               <div className="flex items-center justify-between">
                 <SectionHdr>Recent orders — {mode}</SectionHdr>
                 <button onClick={() => void loadPositionsAndOrders(mode)}
-                  className="font-mono text-[10px] px-3 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-400">
+                  className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-ink border border-slate text-mist">
                   ↻
                 </button>
               </div>
               <div className="flex gap-1.5">
                 <button onClick={() => setOrderRange("today")}
-                  className={`font-mono text-[10px] px-3 py-1.5 rounded-lg border ${orderRange === "today"
-                    ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-400"
-                    : "bg-zinc-900 border-zinc-800 text-zinc-500"}`}>
+                  className={`font-display tabular-nums text-[10px] px-3 py-1.5 rounded-xl border ${orderRange === "today"
+                    ? "bg-signal-buy/10 border-signal-buy/40 text-signal-buy"
+                    : "bg-graphite border-slate text-mist"}`}>
                   Today ({todayOrders.length})
                 </button>
                 <button onClick={() => setOrderRange("all")}
-                  className={`font-mono text-[10px] px-3 py-1.5 rounded-lg border ${orderRange === "all"
-                    ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-400"
-                    : "bg-zinc-900 border-zinc-800 text-zinc-500"}`}>
+                  className={`font-display tabular-nums text-[10px] px-3 py-1.5 rounded-xl border ${orderRange === "all"
+                    ? "bg-signal-buy/10 border-signal-buy/40 text-signal-buy"
+                    : "bg-graphite border-slate text-mist"}`}>
                   All ({orders.length})
                 </button>
               </div>
               {visibleOrders.length === 0 ? (
-                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 text-center">
-                  <p className="font-mono text-sm text-zinc-600">
+                <div className="bg-graphite border border-slate rounded-2xl p-6 text-center">
+                  <p className="font-display tabular-nums text-sm text-mist">
                     {orderRange === "today" ? "No orders today." : "No orders yet."}
                   </p>
                 </div>
               ) : (
-                <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
-                  <table className="w-full font-mono text-[11px]">
-                    <thead className="border-b border-zinc-800">
-                      <tr className="text-zinc-600">
+                <div className="bg-graphite border border-slate rounded-2xl overflow-hidden">
+                  <table className="w-full font-display tabular-nums text-[11px]">
+                    <thead className="border-b border-slate">
+                      <tr className="text-mist">
                         <th className="text-left p-3">Symbol</th>
                         <th className="text-left p-3">Side</th>
                         <th className="text-right p-3">Qty</th>
@@ -1431,42 +1436,42 @@ export default function RealAutoTrade() {
                     </thead>
                     <tbody>
                       {visibleOrders.map(o => {
-                        const sc = o.status === "FILLED" ? "text-emerald-400"
-                          : o.status === "CANCELLED" || o.status === "REJECTED" ? "text-rose-400"
-                          : o.status === "PLACED" ? "text-amber-400"
-                          : "text-zinc-500";
+                        const sc = o.status === "FILLED" ? "text-signal-buy"
+                          : o.status === "CANCELLED" || o.status === "REJECTED" ? "text-signal-sell"
+                          : o.status === "PLACED" ? "text-signal-hold"
+                          : "text-mist";
                         const waiting = o.status === "PENDING" || o.status === "PLACED";
                         return (
-                          <tr key={o.id} className="border-b border-zinc-900 hover:bg-zinc-950">
-                            <td className="p-3 font-bold text-zinc-100">
+                          <tr key={o.id} className="border-b border-slate hover:bg-ink">
+                            <td className="p-3 font-bold text-paper">
                               {o.symbol}
                               {o.execution_source === "MANUAL" && (
-                                <span className="ml-1.5 font-mono text-[9px] text-sky-400 align-middle">MANUAL</span>
+                                <span className="ml-1.5 font-display tabular-nums text-[9px] text-signal-prepare align-middle">MANUAL</span>
                               )}
                             </td>
-                            <td className={`p-3 font-bold ${o.side === "BUY" ? "text-emerald-400" : "text-rose-400"}`}>{o.side}</td>
-                            <td className="p-3 text-right text-zinc-400">{o.qty}</td>
-                            <td className="p-3 text-right text-zinc-400">{o.limit_price ? `₹${o.limit_price}` : "MKT"}</td>
+                            <td className={`p-3 font-bold ${o.side === "BUY" ? "text-signal-buy" : "text-signal-sell"}`}>{o.side}</td>
+                            <td className="p-3 text-right text-mist">{o.qty}</td>
+                            <td className="p-3 text-right text-mist">{o.limit_price ? `₹${o.limit_price}` : "MKT"}</td>
                             <td className="p-3 text-right">
                               {waiting && o.current_price != null ? (
-                                <span className={o.limit_distance_pct != null && o.limit_distance_pct <= 0 ? "text-emerald-400" : "text-zinc-400"}>
+                                <span className={o.limit_distance_pct != null && o.limit_distance_pct <= 0 ? "text-signal-buy" : "text-mist"}>
                                   ₹{o.current_price.toFixed(2)}
                                   {o.limit_distance_pct != null && (
-                                    <span className="text-[9px] text-zinc-600 ml-1">
+                                    <span className="text-[9px] text-mist ml-1">
                                       ({o.limit_distance_pct > 0 ? "+" : ""}{o.limit_distance_pct}%)
                                     </span>
                                   )}
                                 </span>
-                              ) : <span className="text-zinc-700">—</span>}
+                              ) : <span className="text-mist">—</span>}
                             </td>
                             <td className={`p-3 text-center ${sc}`}>{o.status}</td>
-                            <td className="p-3 text-right text-zinc-600">
+                            <td className="p-3 text-right text-mist">
                               {orderRange === "today" ? fmtTime(o.created_at) : `${fmtDate(o.created_at)} ${fmtTime(o.created_at)}`}
                             </td>
                             <td className="p-3 text-right">
                               {o.status === "PLACED" && (
                                 <button onClick={() => void doCancelOrder(o)} disabled={actionBusy === `cancel:${o.id}`}
-                                  className="text-rose-400 hover:text-rose-300 disabled:opacity-40">
+                                  className="text-signal-sell hover:text-signal-sell disabled:opacity-40">
                                   {actionBusy === `cancel:${o.id}` ? "…" : "✕"}
                                 </button>
                               )}
@@ -1494,17 +1499,17 @@ export default function RealAutoTrade() {
               <div className="flex items-center justify-between">
                 <SectionHdr>Candidate watchlist — {mode}</SectionHdr>
                 <button onClick={() => void loadCandidates(mode)} disabled={candidatesLoading}
-                  className="font-mono text-[10px] px-3 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-400 disabled:opacity-40">
+                  className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-ink border border-slate text-mist disabled:opacity-40">
                   {candidatesLoading ? "…" : "↻"}
                 </button>
               </div>
-              <p className="font-mono text-[10px] text-zinc-600 -mt-2">
+              <p className="font-display tabular-nums text-[10px] text-mist -mt-2">
                 Stocks pulled from Hot Picks / IPO / market scan, evaluated by the risk engine each cycle.
               </p>
 
               {candidates.length === 0 ? (
-                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 text-center">
-                  <p className="font-mono text-sm text-zinc-600">
+                <div className="bg-graphite border border-slate rounded-2xl p-6 text-center">
+                  <p className="font-display tabular-nums text-sm text-mist">
                     {candidatesLoading ? "Loading…" : "No candidates fetched yet — run a cycle or wait for Auto-Pilot."}
                   </p>
                 </div>
@@ -1512,90 +1517,90 @@ export default function RealAutoTrade() {
                 <div className="space-y-2">
                   {candidates.map(c => {
                     const d = c.latest_decision;
-                    const actionColor = d?.action === "ENTER" ? "text-emerald-400"
-                      : d?.action === "WAIT" ? "text-amber-400"
-                      : d?.risk_verdict === "REJECTED" || d?.risk_verdict === "BLOCKED_GLOBAL" ? "text-rose-400"
-                      : "text-zinc-500";
+                    const actionColor = d?.action === "ENTER" ? "text-signal-buy"
+                      : d?.action === "WAIT" ? "text-signal-hold"
+                      : d?.risk_verdict === "REJECTED" || d?.risk_verdict === "BLOCKED_GLOBAL" ? "text-signal-sell"
+                      : "text-mist";
                     const expanded = expandedCandidateId === c.id;
                     return (
-                      <div key={c.id} className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                      <div key={c.id} className="bg-graphite border border-slate rounded-2xl p-4">
                         <button
                           onClick={() => setExpandedCandidateId(expanded ? null : c.id)}
                           className="flex items-start justify-between mb-2 w-full text-left"
                         >
                           <div>
-                            <span className="font-mono text-base font-bold text-zinc-100">{c.symbol}</span>
+                            <span className="font-display tabular-nums text-base font-bold text-paper">{c.symbol}</span>
                             {c.fetch_count > 1 && (
-                              <span className="font-mono text-[9px] text-zinc-500 ml-2 px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700" title={`Seen ${c.fetch_count} times in this window`}>
+                              <span className="font-display tabular-nums text-[9px] text-mist ml-2 px-1.5 py-0.5 rounded bg-ink border border-slate" title={`Seen ${c.fetch_count} times in this window`}>
                                 ×{c.fetch_count}
                               </span>
                             )}
                             {c.source_tab && (
-                              <span className="font-mono text-[9px] text-zinc-600 ml-2 uppercase">{SOURCE_LABELS[c.source_tab] || c.source_tab}</span>
+                              <span className="font-display tabular-nums text-[9px] text-mist ml-2 uppercase">{SOURCE_LABELS[c.source_tab] || c.source_tab}</span>
                             )}
                             {c.decision_label && (
-                              <span className="font-mono text-[9px] text-sky-400 ml-2">{c.decision_label}</span>
+                              <span className="font-display tabular-nums text-[9px] text-signal-prepare ml-2">{c.decision_label}</span>
                             )}
                           </div>
                           <span className="flex items-center gap-2">
-                            <span className={`font-mono text-[11px] font-bold ${actionColor}`}>
+                            <span className={`font-display tabular-nums text-[11px] font-bold ${actionColor}`}>
                               {d ? d.action : "not yet evaluated"}
                             </span>
-                            <span className="font-mono text-[9px] text-zinc-600">{expanded ? "▲" : "▼"}</span>
+                            <span className="font-display tabular-nums text-[9px] text-mist">{expanded ? "▲" : "▼"}</span>
                           </span>
                         </button>
 
-                        <div className="grid grid-cols-4 gap-2 font-mono text-[10px] text-zinc-500 mb-2">
-                          <div>Signal<br/><span className="text-zinc-300 font-bold">{c.signal_price ? `₹${c.signal_price}` : "—"}</span></div>
+                        <div className="grid grid-cols-4 gap-2 font-display tabular-nums text-[10px] text-mist mb-2">
+                          <div>Signal<br/><span className="text-paper font-bold">{c.signal_price ? `₹${c.signal_price}` : "—"}</span></div>
                           <div>
                             {d?.action === "WAIT" ? "Waiting at" : "Entry limit"}
                             <br/>
-                            <span className="text-amber-400 font-bold">{d?.proposed_price ? `₹${d.proposed_price}` : "—"}</span>
+                            <span className="text-signal-hold font-bold">{d?.proposed_price ? `₹${d.proposed_price}` : "—"}</span>
                           </div>
                           <div>
                             Current
                             <br/>
-                            <span className="text-zinc-100 font-bold">
+                            <span className="text-paper font-bold">
                               {c.current_price != null ? `₹${c.current_price.toFixed(2)}` : "—"}
                               {d?.limit_distance_pct != null && (
-                                <span className={`ml-1 text-[9px] ${d.limit_distance_pct <= 0 ? "text-emerald-400" : "text-zinc-600"}`}>
+                                <span className={`ml-1 text-[9px] ${d.limit_distance_pct <= 0 ? "text-signal-buy" : "text-mist"}`}>
                                   ({d.limit_distance_pct > 0 ? "+" : ""}{d.limit_distance_pct}%)
                                 </span>
                               )}
                             </span>
                           </div>
-                          <div>Stop loss<br/><span className="text-rose-400 font-bold">{d?.proposed_stop ? `₹${d.proposed_stop}` : "—"}</span></div>
+                          <div>Stop loss<br/><span className="text-signal-sell font-bold">{d?.proposed_stop ? `₹${d.proposed_stop}` : "—"}</span></div>
                         </div>
 
                         {d?.reasoning && (
-                          <p className="font-mono text-[10px] text-zinc-600 border-t border-zinc-800 pt-2 mt-1">
-                            {d.risk_verdict && <span className={`font-bold mr-1 ${d.risk_verdict === "APPROVED" ? "text-emerald-500" : "text-rose-500"}`}>[{d.risk_verdict}]</span>}
+                          <p className="font-display tabular-nums text-[10px] text-mist border-t border-slate pt-2 mt-1">
+                            {d.risk_verdict && <span className={`font-bold mr-1 ${d.risk_verdict === "APPROVED" ? "text-signal-buy" : "text-signal-sell"}`}>[{d.risk_verdict}]</span>}
                             {d.reasoning}
                           </p>
                         )}
 
                         {expanded && (
-                          <div className="border-t border-zinc-800 pt-2 mt-2 space-y-2">
-                            <div className="grid grid-cols-3 gap-2 font-mono text-[10px] text-zinc-500">
-                              <div>Conviction<br/><span className="text-zinc-200 font-bold">{c.conviction_score != null ? c.conviction_score.toFixed(1) : "—"}</span></div>
-                              <div>Proposed qty<br/><span className="text-zinc-200 font-bold">{d?.proposed_qty ?? "—"}</span></div>
-                              <div>Target<br/><span className="text-emerald-400 font-bold">{d?.proposed_target ? `₹${d.proposed_target}` : "—"}</span></div>
+                          <div className="border-t border-slate pt-2 mt-2 space-y-2">
+                            <div className="grid grid-cols-3 gap-2 font-display tabular-nums text-[10px] text-mist">
+                              <div>Conviction<br/><span className="text-paper font-bold">{c.conviction_score != null ? c.conviction_score.toFixed(1) : "—"}</span></div>
+                              <div>Proposed qty<br/><span className="text-paper font-bold">{d?.proposed_qty ?? "—"}</span></div>
+                              <div>Target<br/><span className="text-signal-buy font-bold">{d?.proposed_target ? `₹${d.proposed_target}` : "—"}</span></div>
                             </div>
                             {d?.risk_verdict_reason && d.risk_verdict_reason !== d.reasoning && (
-                              <p className="font-mono text-[10px] text-zinc-500">
-                                <span className="text-zinc-600">Risk engine verdict — </span>{d.risk_verdict_reason}
+                              <p className="font-display tabular-nums text-[10px] text-mist">
+                                <span className="text-mist">Risk engine verdict — </span>{d.risk_verdict_reason}
                               </p>
                             )}
-                            <p className="font-mono text-[9px] text-zinc-700">Candidate #{c.id}{d ? " · has been evaluated" : " · awaiting first evaluation"}</p>
+                            <p className="font-display tabular-nums text-[9px] text-mist">Candidate #{c.id}{d ? " · has been evaluated" : " · awaiting first evaluation"}</p>
                           </div>
                         )}
 
                         <div className="flex items-center justify-between mt-2">
-                          <span className="font-mono text-[9px] text-zinc-700">
+                          <span className="font-display tabular-nums text-[9px] text-mist">
                             Fetched {fmtDate(c.received_at)} {fmtTime(c.received_at)}
                             {c.consumed ? "" : " · not yet evaluated"}
                           </span>
-                          {d && <span className="font-mono text-[9px] text-zinc-700">Evaluated {fmtTime(d.evaluated_at)}</span>}
+                          {d && <span className="font-display tabular-nums text-[9px] text-mist">Evaluated {fmtTime(d.evaluated_at)}</span>}
                         </div>
                       </div>
                     );
@@ -1614,24 +1619,24 @@ export default function RealAutoTrade() {
 
               <PipelineLiveStatus pipeline={pipeline} mode={mode} />
 
-              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+              <div className="bg-graphite border border-slate rounded-2xl p-4">
                 <div className="flex items-center justify-between mb-3">
                   <div>
                     <SectionHdr>AI Trade pipeline — {mode}</SectionHdr>
-                    <p className="font-mono text-[10px] text-zinc-600">Candidate → Risk → {mode === "REAL" ? "Dhan Order" : "Simulated Fill"} → Position → Exit</p>
+                    <p className="font-display tabular-nums text-[10px] text-mist">Candidate → Risk → {mode === "REAL" ? "Dhan Order" : "Simulated Fill"} → Position → Exit</p>
                   </div>
                   {armed ? (
                     <button onClick={() => void doRunCycle()} disabled={cycleBusy}
-                      className="px-4 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 font-mono text-xs text-emerald-300 disabled:opacity-40">
+                      className="px-4 py-2 rounded-xl bg-signal-buy/10 border border-signal-buy/30 font-display tabular-nums text-xs text-signal-buy disabled:opacity-40">
                       {cycleBusy ? "Running…" : "▶ Run Cycle"}
                     </button>
                   ) : (
-                    <span className="font-mono text-[10px] text-zinc-600">Arm first to run cycles</span>
+                    <span className="font-display tabular-nums text-[10px] text-mist">Arm first to run cycles</span>
                   )}
                 </div>
 
                 {mode === "REAL" && (
-                  <p className="font-mono text-[10px] text-amber-400/70 mb-3 bg-amber-500/5 rounded-lg px-3 py-2 border border-amber-500/20">
+                  <p className="font-display tabular-nums text-[10px] text-signal-hold/70 mb-3 bg-signal-hold/5 rounded-xl px-3 py-2 border border-signal-hold/20">
                     REAL mode: orders placed live at Dhan. Reconcile runs automatically at end of each cycle.
                   </p>
                 )}
@@ -1640,14 +1645,14 @@ export default function RealAutoTrade() {
                     (market hours only) so it keeps working with this page
                     closed. Telegram must be configured on the backend
                     (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID) to get notified. */}
-                <div className={`flex items-center justify-between mb-3 px-3 py-2 rounded-lg border ${
-                  status?.auto_pilot_enabled ? "bg-emerald-500/5 border-emerald-500/20" : "bg-zinc-950 border-zinc-800"
+                <div className={`flex items-center justify-between mb-3 px-3 py-2 rounded-xl border ${
+                  status?.auto_pilot_enabled ? "bg-signal-buy/5 border-signal-buy/20" : "bg-ink border-slate"
                 }`}>
                   <div>
-                    <p className="font-mono text-[11px] text-zinc-300">
-                      🤖 Auto-Pilot {status?.auto_pilot_enabled ? <span className="text-emerald-400">ON</span> : <span className="text-zinc-600">OFF</span>}
+                    <p className="font-display tabular-nums text-[11px] text-paper">
+                      🤖 Auto-Pilot {status?.auto_pilot_enabled ? <span className="text-signal-buy">ON</span> : <span className="text-mist">OFF</span>}
                     </p>
-                    <p className="font-mono text-[9px] text-zinc-600">
+                    <p className="font-display tabular-nums text-[9px] text-mist">
                       {status?.auto_pilot_enabled
                         ? "Running this cycle automatically during market hours — Telegram notifies you of every action."
                         : "Off — Run Cycle only fires when you click it here."}
@@ -1656,17 +1661,17 @@ export default function RealAutoTrade() {
                   <button
                     onClick={() => void doToggleAutoPilot()}
                     disabled={!armed || autoPilotBusy}
-                    className={`px-4 py-2 rounded-lg font-mono text-xs disabled:opacity-40 ${
+                    className={`px-4 py-2 rounded-xl font-display tabular-nums text-xs disabled:opacity-40 ${
                       status?.auto_pilot_enabled
-                        ? "bg-rose-500/10 border border-rose-500/30 text-rose-300"
-                        : "bg-emerald-500/10 border border-emerald-500/30 text-emerald-300"
+                        ? "bg-signal-sell/10 border border-signal-sell/30 text-signal-sell"
+                        : "bg-signal-buy/10 border border-signal-buy/30 text-signal-buy"
                     }`}
                   >
                     {autoPilotBusy ? "…" : status?.auto_pilot_enabled ? "Turn Off" : "Turn On"}
                   </button>
                 </div>
                 {!armed && (
-                  <p className="font-mono text-[10px] text-zinc-600 mb-3">Arm {mode} first to enable Auto-Pilot.</p>
+                  <p className="font-display tabular-nums text-[10px] text-mist mb-3">Arm {mode} first to enable Auto-Pilot.</p>
                 )}
 
                 {/* Scheduled Automation (2026-08-31) — three optional time-of-day
@@ -1676,15 +1681,15 @@ export default function RealAutoTrade() {
                     most once per trading day. All default OFF — turn on in DEMO
                     first to prove the flow before enabling for REAL money. */}
                 {status?.scheduled_automation && (
-                  <div className="mb-3 rounded-lg border border-zinc-800 bg-zinc-950/60 overflow-hidden">
-                    <div className="px-3 py-2 border-b border-zinc-800 bg-zinc-900/40">
-                      <p className="font-mono text-[11px] text-zinc-300">⏰ Scheduled Automation</p>
-                      <p className="font-mono text-[9px] text-zinc-600 mt-0.5">
+                  <div className="mb-3 rounded-xl border border-slate bg-ink/60 overflow-hidden">
+                    <div className="px-3 py-2 border-b border-slate bg-graphite/40">
+                      <p className="font-display tabular-nums text-[11px] text-paper">⏰ Scheduled Automation</p>
+                      <p className="font-display tabular-nums text-[9px] text-mist mt-0.5">
                         Pre-pick the best stocks before the open, auto-enter at market open, and square off before close.
                         {" "}Fires once per trading day. Test in DEMO before enabling for REAL.
                       </p>
                     </div>
-                    <div className="divide-y divide-zinc-800/70">
+                    <div className="divide-y divide-slate">
                       {([
                         { key: "prepick" as const, icon: "🌅", title: "Pre-pick (pre-open)",
                           desc: "Warm the candidate queue so the strongest names are ready the moment the market opens. No order is placed." },
@@ -1697,27 +1702,27 @@ export default function RealAutoTrade() {
                         const on = st.enabled;
                         const busy = featureBusy === f.key;
                         return (
-                          <div key={f.key} className={`flex items-start justify-between gap-3 px-3 py-2.5 ${on ? "bg-emerald-500/[0.04]" : ""}`}>
+                          <div key={f.key} className={`flex items-start justify-between gap-3 px-3 py-2.5 ${on ? "bg-signal-buy/[0.04]" : ""}`}>
                             <div className="min-w-0">
-                              <p className="font-mono text-[11px] text-zinc-300">
+                              <p className="font-display tabular-nums text-[11px] text-paper">
                                 {f.icon} {f.title}{" "}
-                                <span className="text-zinc-600">· {st.time_ist} IST</span>{" "}
+                                <span className="text-mist">· {st.time_ist} IST</span>{" "}
                                 {on
-                                  ? <span className="text-emerald-400">ON</span>
-                                  : <span className="text-zinc-600">OFF</span>}
+                                  ? <span className="text-signal-buy">ON</span>
+                                  : <span className="text-mist">OFF</span>}
                               </p>
-                              <p className="font-mono text-[9px] text-zinc-600 mt-0.5">{f.desc}</p>
+                              <p className="font-display tabular-nums text-[9px] text-mist mt-0.5">{f.desc}</p>
                               {st.last_run && (
-                                <p className="font-mono text-[9px] text-zinc-700 mt-0.5">Last ran: {st.last_run}</p>
+                                <p className="font-display tabular-nums text-[9px] text-mist mt-0.5">Last ran: {st.last_run}</p>
                               )}
                             </div>
                             <button
                               onClick={() => void doToggleFeature(f.key, on)}
                               disabled={!armed || busy}
-                              className={`shrink-0 px-3 py-1.5 rounded-lg font-mono text-[11px] disabled:opacity-40 ${
+                              className={`shrink-0 px-3 py-1.5 rounded-xl font-display tabular-nums text-[11px] disabled:opacity-40 ${
                                 on
-                                  ? "bg-rose-500/10 border border-rose-500/30 text-rose-300"
-                                  : "bg-emerald-500/10 border border-emerald-500/30 text-emerald-300"
+                                  ? "bg-signal-sell/10 border border-signal-sell/30 text-signal-sell"
+                                  : "bg-signal-buy/10 border border-signal-buy/30 text-signal-buy"
                               }`}
                             >
                               {busy ? "…" : on ? "Turn Off" : "Turn On"}
@@ -1727,7 +1732,7 @@ export default function RealAutoTrade() {
                       })}
                     </div>
                     {!armed && (
-                      <p className="font-mono text-[9px] text-zinc-600 px-3 py-2 border-t border-zinc-800">
+                      <p className="font-display tabular-nums text-[9px] text-mist px-3 py-2 border-t border-slate">
                         Arm {mode} first to enable scheduled automation.
                       </p>
                     )}
@@ -1735,29 +1740,29 @@ export default function RealAutoTrade() {
                 )}
 
                 {cycleBusy && (
-                  <div className="h-1 w-full bg-zinc-800 rounded-full overflow-hidden mb-3">
-                    <div className="h-full w-1/3 bg-emerald-500/60 animate-pulse rounded-full" />
+                  <div className="h-1 w-full bg-ink rounded-full overflow-hidden mb-3">
+                    <div className="h-full w-1/3 bg-signal-buy/60 animate-pulse rounded-full" />
                   </div>
                 )}
 
                 {(cycleResult || cycleBusy) && (
                   <div className="grid grid-cols-3 gap-2">
                     {[
-                      { label: "Candidates", value: cycleResult?.new_candidates, color: "text-sky-400" },
-                      { label: "Entered", value: cycleResult?.entry.entered, color: "text-emerald-400" },
-                      { label: "Waited", value: cycleResult?.entry.waited, color: "text-amber-400" },
-                      { label: "Rejected", value: cycleResult?.entry.rejected, color: "text-rose-400" },
-                      { label: "Fills", value: cycleResult?.fills, color: "text-emerald-400" },
-                      { label: "Expired", value: cycleResult?.expired_orders, color: "text-zinc-500" },
-                      { label: "Held", value: cycleResult?.exit.held, color: "text-zinc-400" },
-                      { label: "Trailed", value: cycleResult?.exit.trailed, color: "text-sky-400" },
-                      { label: "Part. exit", value: cycleResult?.exit.partial_exits, color: "text-amber-400" },
-                      { label: "Closed", value: cycleResult?.exit.full_exits, color: "text-emerald-400" },
-                      { label: "Time-stop", value: cycleResult?.exit.time_stops, color: "text-rose-400" },
+                      { label: "Candidates", value: cycleResult?.new_candidates, color: "text-signal-prepare" },
+                      { label: "Entered", value: cycleResult?.entry.entered, color: "text-signal-buy" },
+                      { label: "Waited", value: cycleResult?.entry.waited, color: "text-signal-hold" },
+                      { label: "Rejected", value: cycleResult?.entry.rejected, color: "text-signal-sell" },
+                      { label: "Fills", value: cycleResult?.fills, color: "text-signal-buy" },
+                      { label: "Expired", value: cycleResult?.expired_orders, color: "text-mist" },
+                      { label: "Held", value: cycleResult?.exit.held, color: "text-mist" },
+                      { label: "Trailed", value: cycleResult?.exit.trailed, color: "text-signal-prepare" },
+                      { label: "Part. exit", value: cycleResult?.exit.partial_exits, color: "text-signal-hold" },
+                      { label: "Closed", value: cycleResult?.exit.full_exits, color: "text-signal-buy" },
+                      { label: "Time-stop", value: cycleResult?.exit.time_stops, color: "text-signal-sell" },
                     ].map(s => (
                       <StatCard key={s.label} label={s.label}
                         value={cycleBusy && s.value == null ? "…" : (s.value ?? 0)}
-                        color={cycleBusy && s.value == null ? "text-zinc-700 animate-pulse" : s.color} />
+                        color={cycleBusy && s.value == null ? "text-mist animate-pulse" : s.color} />
                     ))}
                   </div>
                 )}
@@ -1779,28 +1784,28 @@ export default function RealAutoTrade() {
               <div className="flex items-center justify-between">
                 <SectionHdr>Recent activity — {mode}</SectionHdr>
                 <button onClick={() => void loadAudit()}
-                  className="font-mono text-[10px] px-3 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-400">
+                  className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-ink border border-slate text-mist">
                   ↻ Refresh
                 </button>
               </div>
-              <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+              <div className="bg-graphite border border-slate rounded-2xl overflow-hidden">
                 {auditRows.length === 0 ? (
-                  <p className="font-mono text-[11px] text-zinc-600 p-4">No activity yet — click Refresh.</p>
+                  <p className="font-display tabular-nums text-[11px] text-mist p-4">No activity yet — click Refresh.</p>
                 ) : (
-                  <div className="divide-y divide-zinc-900">
+                  <div className="divide-y divide-slate">
                     {auditRows.map((r, i) => {
                       const isPositive = ["ARMED", "ADMIN_LOGIN", "DHAN_CONNECTED", "MANUAL_CLOSE", "RISK_CONFIG_CONFIRMED"].includes(r.action);
                       const isNegative = ["DISARMED", "ADMIN_LOGOUT", "MANUAL_CANCEL"].includes(r.action);
                       return (
-                        <div key={i} className="flex items-start justify-between gap-3 px-4 py-2 hover:bg-zinc-950">
+                        <div key={i} className="flex items-start justify-between gap-3 px-4 py-2 hover:bg-ink">
                           <div className="flex items-start gap-2 min-w-0">
-                            <span className={`flex-shrink-0 mt-0.5 ${isPositive ? "text-emerald-500" : isNegative ? "text-rose-500" : "text-zinc-600"}`}>●</span>
+                            <span className={`flex-shrink-0 mt-0.5 ${isPositive ? "text-signal-buy" : isNegative ? "text-signal-sell" : "text-mist"}`}>●</span>
                             <div className="min-w-0">
-                              <span className="font-mono text-[11px] text-zinc-200 font-bold">{r.action}</span>
-                              {r.detail && <span className="font-mono text-[10px] text-zinc-500 ml-2 truncate">{r.detail}</span>}
+                              <span className="font-display tabular-nums text-[11px] text-paper font-bold">{r.action}</span>
+                              {r.detail && <span className="font-display tabular-nums text-[10px] text-mist ml-2 truncate">{r.detail}</span>}
                             </div>
                           </div>
-                          <span className="font-mono text-[10px] text-zinc-700 whitespace-nowrap flex-shrink-0">{fmtTime(r.occurred_at)}</span>
+                          <span className="font-display tabular-nums text-[10px] text-mist whitespace-nowrap flex-shrink-0">{fmtTime(r.occurred_at)}</span>
                         </div>
                       );
                     })}

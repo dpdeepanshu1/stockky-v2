@@ -3,8 +3,9 @@
 @tailwind utilities;
 
 /* ═══════════════════════════════════════════════════════════════
-   STOCKKY TERMINAL — TradingView × Zerodha × Bloomberg
-   Dense dark terminal, amber data accents, crisp mono numbers
+   STOCKKY — Groww-style consumer trading UI (2026-09-03 UI upgrade)
+   Light-first, generous rounded cards, crisp green/red, friendly
+   geometric sans. Dark "terminal" mode kept as an opt-in toggle.
    ═══════════════════════════════════════════════════════════════ */
 
 :root {
@@ -22,31 +23,42 @@
   --buy: #0ecb81;
   --sell: #f6465d;
   --hold: #f5a623;
-  --radius-sm: 4px;
-  --radius-md: 6px;
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
   --sidebar-w: 200px;
   --topbar-h: 40px;
   --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
-  --font-sans: "Inter", system-ui, sans-serif;
+  --font-sans: "DM Sans", "Inter", system-ui, sans-serif;
 }
 
 html.light {
-  --bg: #eef2f6;
+  /* Groww-inspired palette: near-white app background, pure-white cards,
+     a single crisp mint-green brand/positive color, warm coral for
+     negative/loss, soft neutral-grey borders instead of hard lines. */
+  --bg: #f7f9f9;
   --bg-elevated: #ffffff;
   --panel: #ffffff;
-  --panel-2: #f4f7fb;
-  --border: #cfd8e3;
-  --border-strong: #9aa8b8;
-  --fg: #0b1220;
-  --muted: #4a5a6d;
-  --muted-2: #6b7c8f;
-  --cyan: #2563eb;
-  --amber: #d97706;
-  --buy: #059669;
-  --sell: #dc2626;
-  --hold: #d97706;
+  --panel-2: #f1f5f4;
+  --border: #e6ebea;
+  --border-strong: #d3dcda;
+  --fg: #1a1e22;
+  --muted: #6b7680;
+  --muted-2: #93a0a8;
+  --cyan: #3968ef;
+  --amber: #ed7a1a;
+  --buy: #00b386;
+  --sell: #ff5b52;
+  --hold: #ed7a1a;
   color-scheme: light;
+  --card-shadow: 0 1px 2px rgba(16, 24, 32, 0.04), 0 8px 24px rgba(16, 24, 32, 0.06);
 }
+
+html.light .card,
+html.light [class*="rounded"] {
+  box-shadow: var(--card-shadow, none);
+}
+
 
 html, body, #root {
   min-height: 100%;

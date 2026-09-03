@@ -137,7 +137,18 @@ def _redis_set(key: str, value, ttl: int = None):
 
 
 def _load_state() -> dict:
-    return _redis_get(STATE_KEY) or {"subscriptions": [], "last_known": {}}
+    state = _redis_get(STATE_KEY) or {"subscriptions": [], "last_known": {}}
+    # subscription_meta (2026-09-03 dynamic watchlist upgrade): tracks how
+    # each symbol got onto the list — "user" (added via the notification
+    # watchlist, never auto-pruned) vs "auto" (added by real-trade-service's
+    # dynamic universe refresh, safe to prune when it falls out of the
+    # current desired set). Backfilled as "user" for anything that predates
+    # this field, so nothing pre-existing is ever treated as prunable by
+    # accident.
+    state.setdefault("subscription_meta", {})
+    for sym in state["subscriptions"]:
+        state["subscription_meta"].setdefault(sym, {"source": "user", "added_at": None})
+    return state
 
 
 def _save_state(state: dict):
@@ -146,6 +157,12 @@ def _save_state(state: dict):
 
 class SubscribeRequest(BaseModel):
     symbols: List[str]
+    source: str = "user"  # "user" (manual/notification watchlist) | "auto" (dynamic universe)
+
+
+class UnsubscribeRequest(BaseModel):
+    symbols: List[str]
+    only_source: Optional[str] = None  # if set, only removes symbols tagged with this source
 
 
 def _normalize(symbol: str) -> str:
@@ -1018,16 +1035,59 @@ def get_events_categorized(symbol: str, force: bool = False):
 def subscribe(req: SubscribeRequest):
     state = _load_state()
     existing = set(state["subscriptions"])
+    now_iso = datetime.utcnow().isoformat()
     for s in req.symbols:
-        existing.add(_normalize(s))
+        sym = _normalize(s)
+        existing.add(sym)
+        # A symbol already tracked as "user" stays "user" even if an auto
+        # refresh re-adds it — manual/notification-watchlist entries are
+        # never downgraded to prunable.
+        meta = state["subscription_meta"].get(sym)
+        if meta is None or (req.source == "user" and meta.get("source") != "user"):
+            state["subscription_meta"][sym] = {"source": req.source, "added_at": now_iso}
     state["subscriptions"] = sorted(existing)
     _save_state(state)
     return {"subscriptions": state["subscriptions"]}
 
 
+@app.post("/unsubscribe")
+def unsubscribe(req: UnsubscribeRequest):
+    """
+    2026-09-03 dynamic watchlist upgrade. Removes symbols from tracking.
+    If only_source is set (e.g. "auto"), a symbol is only removed when its
+    stored source matches — this is what lets real-trade-service's dynamic
+    universe refresh safely prune names IT added without ever touching a
+    symbol the user manually put on their notification watchlist.
+    """
+    state = _load_state()
+    existing = set(state["subscriptions"])
+    removed = []
+    for s in req.symbols:
+        sym = _normalize(s)
+        if sym not in existing:
+            continue
+        meta = state["subscription_meta"].get(sym, {"source": "user"})
+        if req.only_source and meta.get("source") != req.only_source:
+            continue
+        existing.discard(sym)
+        state["subscription_meta"].pop(sym, None)
+        removed.append(sym)
+    state["subscriptions"] = sorted(existing)
+    _save_state(state)
+    return {"subscriptions": state["subscriptions"], "removed": removed}
+
+
 @app.get("/subscriptions")
-def list_subscriptions():
-    return {"subscriptions": _load_state()["subscriptions"]}
+def list_subscriptions(source: Optional[str] = None):
+    state = _load_state()
+    if source:
+        return {
+            "subscriptions": [
+                s for s in state["subscriptions"]
+                if state["subscription_meta"].get(s, {}).get("source") == source
+            ]
+        }
+    return {"subscriptions": state["subscriptions"]}
 
 
 # ── Short-Term Trading Upgrade (2026-09-02) ─────────────────────────────────

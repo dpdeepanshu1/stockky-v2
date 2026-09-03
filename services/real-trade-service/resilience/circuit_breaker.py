@@ -13,11 +13,32 @@ Three module-level singletons cover the three upstream dependencies:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Callable, Optional
 
+from notifier import notify_async
+
 logger = logging.getLogger("real-trade-circuit-breaker")
+
+
+def _alert(text: str) -> None:
+    """
+    Fire-and-forget Telegram alert on a breaker state change (2026-09-03
+    durability upgrade). Degraded mode must never be silent — schedule the
+    notification without blocking or failing the caller if the event loop
+    or Telegram itself has a problem.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(notify_async(text))
+    except RuntimeError:
+        # No running loop (e.g. called from sync test code) — skip silently,
+        # this is a best-effort alert, never a hard dependency.
+        logger.debug("circuit_breaker: no running loop, skipping alert: %s", text)
+    except Exception as exc:
+        logger.warning("circuit_breaker: alert dispatch failed (%s)", exc)
 
 
 class CircuitBreaker:
@@ -48,8 +69,10 @@ class CircuitBreaker:
         return True
 
     def record_success(self) -> None:
-        if self._failures > 0 or self._opened_at is not None:
+        was_degraded = self._failures > 0 or self._opened_at is not None
+        if was_degraded:
             logger.info("circuit_breaker[%s]: recovered — CLOSED", self.name)
+            _alert(f"✅ Stockky: {self.name} recovered — back to full signal quality (Tier 1).")
         self._failures = 0
         self._opened_at = None
 
@@ -60,6 +83,10 @@ class CircuitBreaker:
             logger.warning(
                 "circuit_breaker[%s]: OPEN after %d consecutive failures",
                 self.name, self._failures,
+            )
+            _alert(
+                f"⚠️ Stockky: {self.name} is DOWN ({self._failures} consecutive failures). "
+                f"Falling back to degraded signal sourcing for at least {self.cooldown_s:.0f}s."
             )
 
     async def call(

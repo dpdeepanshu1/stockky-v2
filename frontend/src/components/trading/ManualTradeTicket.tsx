@@ -102,26 +102,26 @@ export default function ManualTradeTicket({
   const blockedByArm = mode === "REAL" && !armed && side === "BUY";
 
   return (
-    <div className="border border-white/10 rounded-lg p-4 mb-4">
-      <p className="font-mono text-xs text-paper/70 mb-3">Manual Trade Ticket ({mode})</p>
+    <div className="border border-white/10 rounded-xl p-4 mb-4">
+      <p className="font-display tabular-nums text-xs text-paper/70 mb-3">Manual Trade Ticket ({mode})</p>
 
       <div className="grid grid-cols-2 gap-2 mb-2">
         <input
           value={symbol}
           onChange={(e) => { setSymbol(e.target.value.toUpperCase()); setShowConfirmStep(false); setPreview(null); }}
           placeholder="SYMBOL e.g. TCS"
-          className="bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs uppercase"
+          className="bg-graphite border border-white/10 rounded px-3 py-2 font-display tabular-nums text-xs uppercase"
         />
         <div className="flex gap-1">
           {(["BUY", "SELL"] as const).map((s) => (
             <button
               key={s}
               onClick={() => { setSide(s); setShowConfirmStep(false); setPreview(null); }}
-              className={`flex-1 px-2 py-2 rounded font-mono text-xs border ${
+              className={`flex-1 px-2 py-2 rounded font-display tabular-nums text-xs border ${
                 side === s
                   ? s === "BUY"
-                    ? "bg-emerald-600/30 border-emerald-500/60 text-emerald-200"
-                    : "bg-rose-600/30 border-rose-500/60 text-rose-200"
+                    ? "bg-signal-buy/30 border-signal-buy/60 text-white"
+                    : "bg-signal-sell/30 border-signal-sell/60 text-white"
                   : "bg-graphite border-white/10 text-paper/50"
               }`}
             >
@@ -132,32 +132,32 @@ export default function ManualTradeTicket({
       </div>
 
       <div className="grid grid-cols-3 gap-2 mb-2">
-        <label className="font-mono text-[10px] text-paper/40 col-span-3 -mb-1">Quantity</label>
+        <label className="font-display tabular-nums text-[10px] text-paper/40 col-span-3 -mb-1">Quantity</label>
         <input
           type="number" min={1} value={qty}
           onChange={(e) => { setQty(Math.max(1, Number(e.target.value) || 1)); setShowConfirmStep(false); }}
-          className="bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs col-span-3"
+          className="bg-graphite border border-white/10 rounded px-3 py-2 font-display tabular-nums text-xs col-span-3"
         />
       </div>
 
       <div className="grid grid-cols-2 gap-2 mb-2">
         <div>
-          <label className="font-mono text-[10px] text-paper/40">Order Type</label>
+          <label className="font-display tabular-nums text-[10px] text-paper/40">Order Type</label>
           <select
             value={orderType}
             onChange={(e) => { setOrderType(e.target.value as "LIMIT" | "MARKET"); setShowConfirmStep(false); }}
-            className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs"
+            className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-display tabular-nums text-xs"
           >
             <option value="LIMIT">LIMIT</option>
             <option value="MARKET">MARKET</option>
           </select>
         </div>
         <div>
-          <label className="font-mono text-[10px] text-paper/40">Product</label>
+          <label className="font-display tabular-nums text-[10px] text-paper/40">Product</label>
           <select
             value={productType}
             onChange={(e) => { setProductType(e.target.value as "CNC" | "MIS"); setShowConfirmStep(false); }}
-            className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs"
+            className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-display tabular-nums text-xs"
           >
             <option value="CNC">CNC (delivery)</option>
             <option value="MIS">MIS (intraday)</option>
@@ -167,11 +167,11 @@ export default function ManualTradeTicket({
 
       {orderType === "LIMIT" && (
         <div className="mb-2">
-          <label className="font-mono text-[10px] text-paper/40">Limit Price (₹, optional — defaults to LTP)</label>
+          <label className="font-display tabular-nums text-[10px] text-paper/40">Limit Price (₹, optional — defaults to LTP)</label>
           <input
             type="number" value={limitPrice}
             onChange={(e) => { setLimitPrice(e.target.value); setShowConfirmStep(false); }}
-            className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs"
+            className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-display tabular-nums text-xs"
           />
         </div>
       )}
@@ -179,44 +179,44 @@ export default function ManualTradeTicket({
       {side === "BUY" && (
         <div className="grid grid-cols-2 gap-2 mb-2">
           <div>
-            <label className="font-mono text-[10px] text-paper/40">Stop Loss (₹, optional)</label>
+            <label className="font-display tabular-nums text-[10px] text-paper/40">Stop Loss (₹, optional)</label>
             <input
               type="number" value={stopPrice}
               onChange={(e) => { setStopPrice(e.target.value); setShowConfirmStep(false); }}
-              className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs"
+              className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-display tabular-nums text-xs"
             />
           </div>
           <div>
-            <label className="font-mono text-[10px] text-paper/40">Target (₹, optional)</label>
+            <label className="font-display tabular-nums text-[10px] text-paper/40">Target (₹, optional)</label>
             <input
               type="number" value={targetPrice}
               onChange={(e) => { setTargetPrice(e.target.value); setShowConfirmStep(false); }}
-              className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-mono text-xs"
+              className="w-full bg-graphite border border-white/10 rounded px-3 py-2 font-display tabular-nums text-xs"
             />
           </div>
         </div>
       )}
 
       {blockedByArm && (
-        <p className="font-mono text-[11px] text-amber-300/70 mb-2">
+        <p className="font-display tabular-nums text-[11px] text-signal-hold/70 mb-2">
           {mode} is not armed — arm it before a manual BUY can be sent.
         </p>
       )}
-      {err && <p className="font-mono text-[11px] text-rose-300/80 mb-2">{err}</p>}
+      {err && <p className="font-display tabular-nums text-[11px] text-signal-sell/80 mb-2">{err}</p>}
 
       {!showConfirmStep && (
         <button
           onClick={() => void doPreview()}
           disabled={!canReview || previewing}
-          className="w-full px-4 py-2 rounded bg-sky-600/30 border border-sky-500/60 font-mono text-xs disabled:opacity-50"
+          className="w-full px-4 py-2 rounded bg-signal-prepare/30 border border-signal-prepare/60 font-display tabular-nums text-xs disabled:opacity-50"
         >
           {previewing ? "Checking…" : `Review ${side}`}
         </button>
       )}
 
       {showConfirmStep && preview && (
-        <div className={`border rounded-lg p-3 mt-2 font-mono text-[11px] space-y-1 ${
-          preview.ok ? "border-emerald-500/40 bg-emerald-950/20" : "border-rose-500/40 bg-rose-950/20"
+        <div className={`border rounded-xl p-3 mt-2 font-display tabular-nums text-[11px] space-y-1 ${
+          preview.ok ? "border-signal-buy/40 bg-signal-buy/20" : "border-signal-sell/40 bg-signal-sell/20"
         }`}>
           {side === "BUY" ? (
             <>
@@ -237,12 +237,12 @@ export default function ManualTradeTicket({
             </>
           )}
           {!preview.ok && (
-            <p className="text-rose-300/90 pt-1">{preview.detail || preview.reason}</p>
+            <p className="text-signal-sell/90 pt-1">{preview.detail || preview.reason}</p>
           )}
 
           {preview.ok && mode === "REAL" ? (
             <div className="pt-2 space-y-2">
-              <p className="text-amber-300/90 uppercase tracking-wide">⚠ Real money order</p>
+              <p className="text-signal-hold/90 uppercase tracking-wide">⚠ Real money order</p>
               <div className="flex gap-2">
                 <button onClick={() => { setShowConfirmStep(false); setPreview(null); }} className="flex-1 px-3 py-2 rounded bg-graphite border border-white/10 text-paper/60">
                   Cancel
@@ -251,7 +251,7 @@ export default function ManualTradeTicket({
                   onClick={() => void doConfirm()}
                   disabled={confirming}
                   className={`flex-1 px-3 py-2 rounded font-bold disabled:opacity-50 ${
-                    side === "BUY" ? "bg-emerald-600/40 border border-emerald-500/70 text-emerald-100" : "bg-rose-600/40 border border-rose-500/70 text-rose-100"
+                    side === "BUY" ? "bg-signal-buy/40 border border-signal-buy/70 text-white" : "bg-signal-sell/40 border border-signal-sell/70 text-white"
                   }`}
                 >
                   {confirming ? "Sending…" : `CONFIRM ${side}`}
@@ -263,7 +263,7 @@ export default function ManualTradeTicket({
               onClick={() => void doConfirm()}
               disabled={confirming}
               className={`w-full mt-2 px-3 py-2 rounded font-bold disabled:opacity-50 ${
-                side === "BUY" ? "bg-emerald-600/40 border border-emerald-500/70 text-emerald-100" : "bg-rose-600/40 border border-rose-500/70 text-rose-100"
+                side === "BUY" ? "bg-signal-buy/40 border border-signal-buy/70 text-white" : "bg-signal-sell/40 border border-signal-sell/70 text-white"
               }`}
             >
               {confirming ? "Sending…" : `Confirm ${side} (${mode})`}
@@ -277,7 +277,7 @@ export default function ManualTradeTicket({
       )}
 
       {result && (
-        <p className={`font-mono text-[11px] mt-2 ${result.ok ? "text-emerald-300/80" : "text-rose-300/80"}`}>
+        <p className={`font-display tabular-nums text-[11px] mt-2 ${result.ok ? "text-signal-buy/80" : "text-signal-sell/80"}`}>
           {result.ok ? "✓ " : "✕ "}{result.text}
         </p>
       )}

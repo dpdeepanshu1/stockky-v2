@@ -92,7 +92,9 @@ export default function App() {
       const t = localStorage.getItem("stockky_theme");
       if (t === "light" || t === "dark") return t;
     } catch {}
-    return "dark";
+    // 2026-09-03 Groww-style UI upgrade: default to light (Groww opens
+    // light-first). Existing users with a saved preference are unaffected.
+    return "light";
   });
   useEffect(() => {
     document.documentElement.classList.toggle("light", theme === "light");

@@ -56,7 +56,7 @@ services:
     logging: *default-logging
     # Heaviest I/O fan-out service (AngelOne + yfinance + NSE waterfall) —
     # give it the largest CPU share of the six.
-    cpus: "0.65"
+    cpus: "0.55"
     mem_limit: 1200m
     mem_reservation: 500m
 
@@ -125,8 +125,9 @@ services:
     restart: unless-stopped
     logging: *default-logging
     # sklearn training bursts need more headroom than its steady-state CPU
-    # use — mem_limit is the biggest of the six on purpose.
-    cpus: "0.45"
+    # use — mem_limit stays large on purpose. cpus trimmed slightly
+    # (2026-09-03) to make room for real-trade-service's priority bump.
+    cpus: "0.40"
     mem_limit: 1600m
     mem_reservation: 400m
 
@@ -219,6 +220,7 @@ services:
     environment:
       API_GATEWAY_URL: http://api-gateway:8000
       MARKET_DATA_URL: http://market-data-service:8001
+      EVENT_URL: http://analysis-intelligence-service:8000/event
       NOTIFICATION_SERVICE_URL: http://notification-scheduler-service:8000/notification
       PORT: "8005"
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
@@ -242,15 +244,26 @@ services:
       TNS_ADMIN: /oracle_wallet
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
-    depends_on:
-      - api-gateway
-      - market-data-service
-      - notification-scheduler-service
+    # depends_on intentionally removed (2026-09-03 durability upgrade):
+    # real-trade-service must start on VM reboot without waiting on the rest
+    # of the stack. It handles unreachable dependencies at runtime via
+    # circuit_breaker.py + the Tier 1/2/3 degradation ladder, not via
+    # startup ordering.
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8005/health', timeout=5) or sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     logging: *default-logging
-    cpus: "0.30"
-    mem_limit: 450m
-    mem_reservation: 150m
+    # Highest priority in the stack (2026-09-03 durability upgrade): this is
+    # the only service placing real orders, so it now gets the largest
+    # cpu/mem share on the box, trimmed from market-data-service and
+    # decision-prediction-service below.
+    cpus: "0.70"
+    mem_limit: 1000m
+    mem_reservation: 400m
 
   frontend:
     build:

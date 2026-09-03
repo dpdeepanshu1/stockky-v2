@@ -129,6 +129,7 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
     )
     from exit_engine.exit import evaluate_mode as exit_evaluate
     from watchlist_engine.watchlist import refresh_watchlist, expire_stale_entries
+    from watchlist_engine.dynamic_universe import refresh_dynamic_universe
     from portfolio.portfolio import open_positions
     from resilience.local_cache import snapshot_open_positions
 
@@ -137,6 +138,19 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
             pstat.set_stage(mode, name)
         except Exception:
             pass
+
+    # ── Dynamic watchlist upgrade (2026-09-03) ──────────────────────────────
+    # Best-effort, market-hours-gated, throttled internally to once per
+    # ~20 min (see REFRESH_INTERVAL_MIN) — safe to call every cycle since it
+    # no-ops cheaply outside its own refresh window. Widens/shrinks the
+    # event tracker's "auto" subscriptions based on current market activity
+    # BEFORE the watchlist stage below, so Tier 2 sees the widened universe
+    # the same cycle it changes, not one cycle late.
+    _stage("dynamic_universe")
+    try:
+        await refresh_dynamic_universe(db)
+    except Exception as exc:
+        logger.warning("run_cycle_core: dynamic universe refresh failed (non-fatal): %s", exc)
 
     # ── Short-Term Trading Upgrade (2026-09-02) ─────────────────────────────
     # Stage 1 (watchlist ingestion) + Stage 2 (band-check trigger pass) run

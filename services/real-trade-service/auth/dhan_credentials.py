@@ -68,11 +68,27 @@ def _mask(client_id: str) -> str:
     return "*" * (len(client_id) - 4) + client_id[-4:]
 
 
-def save_credentials(db: Session, client_id: str, access_token: str) -> models.TradeCredential:
-    """Encrypt and persist a freshly-pasted Dhan client id + access token.
-    Called only from an admin-authenticated route. Overwrites the single
-    existing row (there is exactly one trade_credentials row — this service
-    supports one linked Dhan account)."""
+def save_credentials(
+    db: Session,
+    client_id: str,
+    access_token: str,
+    real_expires_at: Optional[datetime] = None,
+) -> models.TradeCredential:
+    """Encrypt and persist a freshly-pasted or freshly-regenerated Dhan
+    client id + access token. Called only from an admin-authenticated route
+    (manual paste) or refresh_if_totp_enabled() (TOTP auto-refresh).
+    Overwrites the single existing row (there is exactly one
+    trade_credentials row — this service supports one linked Dhan account).
+
+    real_expires_at: when Dhan's own generateAccessToken response tells us
+    the actual expiry (its `expiryTime` field), pass it here so the stored
+    value reflects reality instead of the DHAN_TOKEN_LIFETIME_HOURS guess.
+    Manual paste has no such data from Dhan, so it stays None there and
+    falls back to the guess as before. Either way, _effective_expiry() still
+    clamps to issued_at + DHAN_HARD_CAP_HOURS as a safety ceiling, so a bad
+    or malformed value from Dhan can never make the displayed countdown
+    LONGER than 24h — only shorter/more accurate.
+    """
     f = _fernet()
     now = datetime.now(timezone.utc)
     row = db.query(models.TradeCredential).first()
@@ -83,7 +99,7 @@ def save_credentials(db: Session, client_id: str, access_token: str) -> models.T
     row.dhan_client_id_encrypted = f.encrypt(client_id.encode()).decode()
     row.access_token_encrypted = f.encrypt(access_token.encode()).decode()
     row.token_issued_at = now
-    row.token_expires_at = now + timedelta(hours=DHAN_TOKEN_LIFETIME_HOURS)
+    row.token_expires_at = as_aware(real_expires_at) if real_expires_at else (now + timedelta(hours=DHAN_TOKEN_LIFETIME_HOURS))
     row.updated_at = now
     db.commit()
     db.refresh(row)
@@ -261,6 +277,47 @@ def token_needs_refresh(db: Session) -> bool:
     return datetime.now(timezone.utc) >= (effective_expiry - margin)
 
 
+def _parse_dhan_expiry(raw) -> Optional[datetime]:
+    """Best-effort parse of Dhan's `expiryTime` field from
+    /app/generateAccessToken. Field format was never confirmed against a
+    live response before 2026-09-03 (see refresh_if_totp_enabled's
+    docstring) — this logs the raw value once so the format can be
+    confirmed, and returns None on anything it can't parse so callers
+    fall back to the existing DHAN_TOKEN_LIFETIME_HOURS guess rather than
+    ever storing a wrong/garbage expiry.
+    """
+    if raw is None:
+        return None
+    logger.info("Dhan expiryTime raw value: %r (type %s)", raw, type(raw).__name__)
+    try:
+        if isinstance(raw, (int, float)):
+            # Epoch seconds vs milliseconds — Dhan/most brokers use seconds,
+            # but guard against ms (13-digit) just in case.
+            ts = raw / 1000.0 if raw > 10_000_000_000 else float(raw)
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        s = str(raw).strip()
+        if not s:
+            return None
+        # Try ISO 8601 first (handles "...Z" and offset forms).
+        try:
+            return as_aware(datetime.fromisoformat(s.replace("Z", "+00:00")))
+        except ValueError:
+            pass
+        # Common Dhan-style "YYYY-MM-DD HH:MM:SS" (assume IST, per Dhan's
+        # docs convention — convert to UTC).
+        try:
+            naive = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+            ist = naive.replace(tzinfo=timezone(timedelta(hours=5, minutes=30)))
+            return ist.astimezone(timezone.utc)
+        except ValueError:
+            pass
+        logger.error("Could not parse Dhan expiryTime value: %r — falling back to lifetime guess.", raw)
+        return None
+    except Exception:
+        logger.exception("Unexpected error parsing Dhan expiryTime %r — falling back to lifetime guess.", raw)
+        return None
+
+
 def refresh_if_totp_enabled(db: Session) -> bool:
     """
     §2 — TOTP auto-refresh for Dhan access token.
@@ -311,8 +368,14 @@ def refresh_if_totp_enabled(db: Session) -> bool:
                 "refresh_if_totp_enabled: no token field in response. Raw: %s", data
             )
             return False
-        save_credentials(db, client_id, new_token)
-        logger.info("Dhan TOTP token refreshed successfully.")
+        real_expiry = _parse_dhan_expiry(
+            data.get("expiryTime") or (data.get("data") or {}).get("expiryTime")
+        )
+        save_credentials(db, client_id, new_token, real_expires_at=real_expiry)
+        logger.info(
+            "Dhan TOTP token refreshed successfully. Real expiry from Dhan: %s",
+            real_expiry.isoformat() if real_expiry else "unparsed — used 24h lifetime guess",
+        )
 
         # BUG FIX (2026-09-01): a fresh token landing here fixed the
         # CREDENTIAL but, if REAL had already auto-disarmed with

@@ -993,7 +993,7 @@ export default function RealAutoTrade() {
                       </div>
                       <p className="font-display tabular-nums text-[9px] text-mist -mt-2">
                         {dhanAccount.token_issued_at && `Issued ${fmtDate(dhanAccount.token_issued_at)} ${fmtTime(dhanAccount.token_issued_at)} · `}
-                        Dhan hard-caps every token at {dhanAccount.token_hard_cap_hours ?? 24}h regardless of when it was generated.
+                        Countdown reflects Dhan's own expiry when a regenerated token reports one, otherwise assumes {dhanAccount.token_hard_cap_hours ?? 24}h as a safety ceiling.
                       </p>
 
                       {dhanAccount.funds_error ? (

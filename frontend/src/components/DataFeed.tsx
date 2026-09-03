@@ -301,7 +301,7 @@ export default function DataFeed() {
               onClick={onResume}
               disabled={!canResume}
               title="Continue from last committed checkpoint (works after sleep/timeout)"
-              className="font-mono text-xs px-3 py-2 rounded-lg bg-sky-500/20 border border-sky-500/40 text-sky-200 hover:bg-sky-500/30 disabled:opacity-40"
+              className="font-display tabular-nums text-xs px-3 py-2 rounded-2xl bg-signal-prepare/20 border border-signal-prepare/40 text-signal-prepare hover:bg-signal-prepare/30 disabled:opacity-40"
             >
               {busy === "resume" ? "Resuming…" : "Resume"}
             </button>
@@ -310,7 +310,7 @@ export default function DataFeed() {
               onClick={onStop}
               disabled={!canStop}
               title="Stop now and commit checkpoint (force, even if worker died)"
-              className="font-mono text-xs px-3 py-2 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-200 hover:bg-rose-500/30 disabled:opacity-40"
+              className="font-display tabular-nums text-xs px-3 py-2 rounded-2xl bg-signal-sell/20 border border-signal-sell/40 text-white hover:bg-signal-sell/30 disabled:opacity-40"
             >
               {busy === "stop" ? "Stopping…" : "Stop"}
             </button>
@@ -319,7 +319,7 @@ export default function DataFeed() {
               onClick={onRefreshPage}
               disabled={busy != null}
               title="Refresh status from server — auto-heals stuck Running after sleep"
-              className="font-mono text-xs px-3 py-2 rounded-lg bg-slate-500/20 border border-slate-400/40 text-paper hover:bg-slate-500/30 disabled:opacity-40"
+              className="font-display tabular-nums text-xs px-3 py-2 rounded-2xl bg-slate-500/20 border border-slate-400/40 text-paper hover:bg-slate-500/30 disabled:opacity-40"
             >
               {busy === "refresh-ui" ? "…" : "Refresh status"}
             </button>
@@ -328,18 +328,18 @@ export default function DataFeed() {
               onClick={onRefillAdditional}
               disabled={busy != null || status === "running"}
               title="Force-refresh fundamentals, technical snapshot, and events into the data-feed (merge, never wipe). Slow and deliberate on free tier."
-              className="font-mono text-xs px-3 py-2 rounded-lg bg-violet-500/20 border border-violet-400/40 text-violet-100 hover:bg-violet-500/30 disabled:opacity-40"
+              className="font-display tabular-nums text-xs px-3 py-2 rounded-2xl bg-signal-prepare/20 border border-signal-prepare/40 text-white hover:bg-signal-prepare/30 disabled:opacity-40"
             >
               {busy === "refill" ? "Refilling…" : "Refill Additional Data"}
             </button>
             {refillJob?.status && refillJob.status !== "idle" && (
-              <span className="font-mono text-[10px] text-mist/60 self-center">
+              <span className="font-display tabular-nums text-[10px] text-mist/60 self-center">
                 {refillJob.status === "stalled"
                   ? "⚠ refill stalled — safe to restart"
                   : `refill: ${refillJob.processed ?? 0}/${refillJob.total ?? "—"} (ok=${refillJob.ok_count ?? 0} err=${refillJob.error_count ?? 0})`}
-                {wsConnected && <span className="text-emerald-400/80 ml-1">● live</span>}
+                {wsConnected && <span className="text-signal-buy/80 ml-1">● live</span>}
                 {!!yfRateLimit?.waiters && (
-                  <span className="text-amber-400/80 ml-1">
+                  <span className="text-signal-hold/80 ml-1">
                     · queued ({yfRateLimit.waiters} waiting on shared rate limit)
                   </span>
                 )}
@@ -347,15 +347,15 @@ export default function DataFeed() {
             )}
             {wsFeed && (
               <span
-                className="font-mono text-[10px] text-mist/50 self-center"
+                className="font-display tabular-nums text-[10px] text-mist/50 self-center"
                 title="Live quotes come from one persistent Yahoo WebSocket connection instead of per-symbol REST calls — this is what stopped the rate-limit cascade."
               >
                 {wsFeed.connected ? (
-                  <span className="text-emerald-400/80">
+                  <span className="text-signal-buy/80">
                     ● live quote feed — {wsFeed.subscribed_count ?? 0} symbols subscribed, {wsFeed.live_symbols_count ?? 0} ticking
                   </span>
                 ) : (
-                  <span className="text-amber-400/80">⚠ live quote feed reconnecting — falling back to REST</span>
+                  <span className="text-signal-hold/80">⚠ live quote feed reconnecting — falling back to REST</span>
                 )}
               </span>
             )}
@@ -368,7 +368,7 @@ export default function DataFeed() {
                   ? "All stocks fed — start a full re-feed from 0"
                   : "Start feed for scan universe (from 0)"
               }
-              className="font-mono text-xs px-4 py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-200 hover:bg-amber-500/30 disabled:opacity-40"
+              className="font-display tabular-nums text-xs px-4 py-2 rounded-2xl bg-signal-hold/20 border border-signal-hold/40 text-signal-hold hover:bg-signal-hold/30 disabled:opacity-40"
             >
               {status === "running" && !job?.stop_requested
                 ? "Feeding…"
@@ -381,7 +381,7 @@ export default function DataFeed() {
               onClick={startNewOnly}
               disabled={busy != null || isActivelyRunning}
               title="Only feed symbols that are not already in the data-feed store"
-              className="font-mono text-xs px-4 py-2 rounded-lg bg-sky-500/15 border border-sky-500/40 text-sky-100 hover:bg-sky-500/25 disabled:opacity-40"
+              className="font-display tabular-nums text-xs px-4 py-2 rounded-2xl bg-signal-prepare/15 border border-signal-prepare/40 text-white hover:bg-signal-prepare/25 disabled:opacity-40"
             >
               {busy === "start-new" ? "Feeding new…" : "Feed newly added stocks only"}
             </button>
@@ -389,25 +389,25 @@ export default function DataFeed() {
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5">
-          <div className="rounded-xl border border-slate/40 bg-ink/40 p-3">
-            <div className="font-mono text-[10px] text-mist uppercase tracking-wider">Stocks in feed</div>
-            <div className="font-mono text-lg text-paper mt-1">{stocksInFeed || "—"}</div>
+          <div className="rounded-2xl border border-slate/40 bg-ink/40 p-3">
+            <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-wider">Stocks in feed</div>
+            <div className="font-display tabular-nums text-lg text-paper mt-1">{stocksInFeed || "—"}</div>
           </div>
-          <div className="rounded-xl border border-slate/40 bg-ink/40 p-3">
-            <div className="font-mono text-[10px] text-mist uppercase tracking-wider">Last success</div>
-            <div className="font-mono text-[11px] text-paper mt-1 break-all">
+          <div className="rounded-2xl border border-slate/40 bg-ink/40 p-3">
+            <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-wider">Last success</div>
+            <div className="font-display tabular-nums text-[11px] text-paper mt-1 break-all">
               {meta?.last_success_at
                 ? new Date(meta.last_success_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
                 : "Never"}
             </div>
           </div>
-          <div className="rounded-xl border border-slate/40 bg-ink/40 p-3">
-            <div className="font-mono text-[10px] text-mist uppercase tracking-wider">Job</div>
-            <div className="font-mono text-sm text-paper mt-1 capitalize">{status}</div>
+          <div className="rounded-2xl border border-slate/40 bg-ink/40 p-3">
+            <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-wider">Job</div>
+            <div className="font-display tabular-nums text-sm text-paper mt-1 capitalize">{status}</div>
           </div>
-          <div className="rounded-xl border border-slate/40 bg-ink/40 p-3">
-            <div className="font-mono text-[10px] text-mist uppercase tracking-wider">Progress</div>
-            <div className="font-mono text-sm text-paper mt-1">
+          <div className="rounded-2xl border border-slate/40 bg-ink/40 p-3">
+            <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-wider">Progress</div>
+            <div className="font-display tabular-nums text-sm text-paper mt-1">
               {processed}/{total} ({pct}%)
             </div>
           </div>
@@ -417,11 +417,11 @@ export default function DataFeed() {
           <div className="mt-5 space-y-3">
             <div className="h-2 rounded-full bg-slate/40 overflow-hidden">
               <div
-                className="h-full bg-amber-500/80 transition-all duration-500"
+                className="h-full bg-signal-hold/80 transition-all duration-500"
                 style={{ width: `${pct}%` }}
               />
             </div>
-            <div className="flex flex-wrap gap-4 font-mono text-[11px] text-mist">
+            <div className="flex flex-wrap gap-4 font-display tabular-nums text-[11px] text-mist">
               <span>Elapsed {fmtSec(job?.elapsed_sec)}</span>
               <span>Remaining ~{fmtSec(job?.estimated_remaining_sec)}</span>
               <span className="text-mist/80">{job?.message}</span>
@@ -431,7 +431,7 @@ export default function DataFeed() {
         )}
 
         {partial && status !== "running" && (
-          <p className="mt-3 font-mono text-[11px] text-sky-300/80">
+          <p className="mt-3 font-display tabular-nums text-[11px] text-signal-prepare/80">
             Checkpoint at {processed}/{total}
             {stocksInFeed ? ` · ${stocksInFeed} stocks saved` : ""}. Press <b>Resume</b> to continue
             without re-feeding completed symbols.
@@ -439,34 +439,34 @@ export default function DataFeed() {
         )}
 
         {status === "running" && job?.stop_requested && (
-          <p className="mt-3 font-mono text-[11px] text-amber-300/90">
+          <p className="mt-3 font-display tabular-nums text-[11px] text-signal-hold/90">
             Stop was requested. Click <b>Refresh status</b> or <b>Stop</b> again to force-commit, then{" "}
             <b>Resume</b>.
           </p>
         )}
 
         {banner && (
-          <div className="mt-4 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 font-mono text-xs text-emerald-200">
+          <div className="mt-4 rounded-2xl border border-signal-buy/40 bg-signal-buy/10 px-3 py-2 font-display tabular-nums text-xs text-white">
             ✅ {banner}
           </div>
         )}
         {err && (
-          <div className="mt-4 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 font-mono text-xs text-rose-200">
+          <div className="mt-4 rounded-2xl border border-signal-sell/40 bg-signal-sell/10 px-3 py-2 font-display tabular-nums text-xs text-white">
             {err}
           </div>
         )}
         {meta?.last_message && !banner && (
-          <p className="mt-3 font-mono text-[11px] text-mist/60">{meta.last_message}</p>
+          <p className="mt-3 font-display tabular-nums text-[11px] text-mist/60">{meta.last_message}</p>
         )}
       </div>
 
       {/* Real-time price alerts */}
-      <div className="mt-6 rounded-xl border border-slate bg-ink/40 p-4">
+      <div className="mt-6 rounded-2xl border border-slate bg-ink/40 p-4">
         <div className="flex flex-wrap justify-between items-center gap-2 mb-3">
-          <h3 className="font-mono text-sm font-bold text-paper">⚡ Price Alerts</h3>
+          <h3 className="font-display tabular-nums text-sm font-bold text-paper">⚡ Price Alerts</h3>
           <button
             type="button"
-            className="font-mono text-[11px] px-2 py-1 rounded border border-slate text-mist hover:bg-slate/40"
+            className="font-display tabular-nums text-[11px] px-2 py-1 rounded border border-slate text-mist hover:bg-slate/40"
             onClick={async () => {
               try {
                 const res = await api.listPriceAlerts();
@@ -479,19 +479,19 @@ export default function DataFeed() {
         </div>
         <div className="flex flex-wrap gap-2 mb-3">
           <input
-            className="font-mono text-xs bg-graphite border border-slate rounded px-2 py-1.5 text-paper w-28"
+            className="font-display tabular-nums text-xs bg-graphite border border-slate rounded px-2 py-1.5 text-paper w-28"
             placeholder="Symbol"
             value={alertSym}
             onChange={(e) => setAlertSym(e.target.value.toUpperCase())}
           />
           <input
-            className="font-mono text-xs bg-graphite border border-slate rounded px-2 py-1.5 text-paper w-28"
+            className="font-display tabular-nums text-xs bg-graphite border border-slate rounded px-2 py-1.5 text-paper w-28"
             placeholder="Target ₹"
             value={alertTarget}
             onChange={(e) => setAlertTarget(e.target.value)}
           />
           <select
-            className="font-mono text-xs bg-graphite border border-slate rounded px-2 py-1.5 text-paper"
+            className="font-display tabular-nums text-xs bg-graphite border border-slate rounded px-2 py-1.5 text-paper"
             value={alertDir}
             onChange={(e) => setAlertDir(e.target.value as "above" | "below")}
           >
@@ -501,7 +501,7 @@ export default function DataFeed() {
           <button
             type="button"
             disabled={alertBusy || !alertSym || !alertTarget}
-            className="font-mono text-xs px-3 py-1.5 rounded bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 disabled:opacity-50"
+            className="font-display tabular-nums text-xs px-3 py-1.5 rounded bg-signal-buy/30 text-white border border-signal-buy/40 disabled:opacity-50"
             onClick={async () => {
               setAlertBusy(true);
               try {
@@ -525,7 +525,7 @@ export default function DataFeed() {
           </button>
           <button
             type="button"
-            className="font-mono text-xs px-3 py-1.5 rounded bg-amber-600/20 text-amber-200 border border-amber-500/40"
+            className="font-display tabular-nums text-xs px-3 py-1.5 rounded bg-signal-hold/20 text-signal-hold border border-signal-hold/40"
             onClick={async () => {
               try {
                 const res = await api.evaluatePriceAlerts();
@@ -544,12 +544,12 @@ export default function DataFeed() {
         </div>
         <ul className="space-y-1 max-h-40 overflow-y-auto">
           {(alerts || []).length === 0 ? (
-            <li className="font-mono text-[11px] text-mist/50">No alerts yet</li>
+            <li className="font-display tabular-nums text-[11px] text-mist/50">No alerts yet</li>
           ) : (
             alerts.map((a) => (
               <li
                 key={a.id}
-                className="flex justify-between items-center font-mono text-[11px] text-mist border-b border-slate/40 py-1"
+                className="flex justify-between items-center font-display tabular-nums text-[11px] text-mist border-b border-slate/40 py-1"
               >
                 <span>
                   {a.symbol} {a.direction} ₹{a.target_price}
@@ -557,7 +557,7 @@ export default function DataFeed() {
                 </span>
                 <button
                   type="button"
-                  className="text-rose-300 hover:text-rose-200"
+                  className="text-signal-sell hover:text-white"
                   onClick={async () => {
                     await api.deletePriceAlert(a.id);
                     const res = await api.listPriceAlerts();

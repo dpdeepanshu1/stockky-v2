@@ -28,7 +28,7 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
     <div className="watchlist-terminal space-y-4">
       <header className="terminal-panel">
         <p className="dash-section-title">Watchlist</p>
-        <h2 className="font-display text-lg text-cyan-300/90 mb-1">Tracked symbols</h2>
+        <h2 className="font-display text-lg text-signal-prepare/90 mb-1">Tracked symbols</h2>
         <p className="text-xs text-mist/70 max-w-xl">
           Priority universe for scans and alerts. Saved to cloud when backend is connected.
         </p>
@@ -37,7 +37,7 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
 
       <div className="terminal-panel">
         <div className="flex flex-col sm:flex-row gap-2 mb-4">
-          <div className="flex items-center gap-2 border border-slate/60 rounded-lg px-3 py-2 bg-ink/60 focus-within:border-cyan-500/40 transition flex-1">
+          <div className="flex items-center gap-2 border border-slate/60 rounded-lg px-3 py-2 bg-ink/60 focus-within:border-signal-prepare/40 transition flex-1">
             <span className="font-mono text-mist text-xs">NSE:</span>
             <input
               value={input}
@@ -73,12 +73,12 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
             {symbols.map((s) => (
               <div
                 key={s}
-                className="flex items-center justify-between gap-2 border border-slate/50 rounded-lg px-3 py-2 bg-ink/40 hover:border-cyan-500/30 transition"
+                className="flex items-center justify-between gap-2 border border-slate/50 rounded-lg px-3 py-2 bg-ink/40 hover:border-signal-prepare/30 transition"
               >
                 <button
                   type="button"
                   onClick={() => onAnalyse(s)}
-                  className="font-mono text-sm text-paper hover:text-cyan-300 transition"
+                  className="font-mono text-sm text-paper hover:text-signal-prepare transition"
                 >
                   {s}
                 </button>

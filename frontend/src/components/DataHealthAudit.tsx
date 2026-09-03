@@ -140,7 +140,7 @@ export default function DataHealthAudit() {
 
   const health = stats?.health_score ?? 0;
   const healthColor =
-    health >= 90 ? "text-emerald-400" : health >= 70 ? "text-amber-300" : "text-rose-400";
+    health >= 90 ? "text-signal-buy" : health >= 70 ? "text-signal-hold" : "text-signal-sell";
 
   const refillRunning = refillJob?.status === "running";
   const refillPct =
@@ -150,7 +150,7 @@ export default function DataHealthAudit() {
     <div className="scan-bento-card space-y-5 mt-6">
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate/40 pb-4">
         <div>
-          <h2 className="font-mono text-sm text-paper flex items-center gap-2 mb-1">
+          <h2 className="font-display tabular-nums text-sm text-paper flex items-center gap-2 mb-1">
             🩺 Database Feed Health
           </h2>
           <p className="text-xs text-mist/60 mb-0">
@@ -197,8 +197,8 @@ export default function DataHealthAudit() {
       </div>
 
       {refillJob && (refillRunning || refillJob.status === "done" || refillJob.status === "stopped" || refillJob.status === "error") && (
-        <div className="rounded-lg border border-slate/50 bg-graphite/40 p-3 space-y-1.5">
-          <div className="flex items-center justify-between text-[11px] font-mono text-mist/70">
+        <div className="rounded-xl border border-slate/50 bg-graphite/40 p-3 space-y-1.5">
+          <div className="flex items-center justify-between text-[11px] font-display tabular-nums text-mist/70">
             <span>Refill All · {refillJob.status}</span>
             <span>
               {refillJob.processed ?? 0}/{refillJob.total ?? 0} · {refillJob.ok_count ?? 0} improved
@@ -211,13 +211,13 @@ export default function DataHealthAudit() {
             />
           </div>
           {refillJob.message && (
-            <p className="text-[10px] text-mist/50 font-mono">{refillJob.message}</p>
+            <p className="text-[10px] text-mist/50 font-display tabular-nums">{refillJob.message}</p>
           )}
         </div>
       )}
 
       {(message || error) && (
-        <div className={`mono text-xs ${error ? "text-rose-300" : "text-mist/80"}`}>
+        <div className={`mono text-xs ${error ? "text-signal-sell" : "text-mist/80"}`}>
           {error || message}
         </div>
       )}
@@ -237,7 +237,7 @@ export default function DataHealthAudit() {
         </div>
         <div className="scan-stat">
           <span className="scan-stat-label">Missing data</span>
-          <span className="scan-stat-value text-rose-400">{stats?.incomplete_count ?? "—"}</span>
+          <span className="scan-stat-value text-signal-sell">{stats?.incomplete_count ?? "—"}</span>
         </div>
       </div>
 
@@ -247,7 +247,7 @@ export default function DataHealthAudit() {
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           placeholder="Filter symbol or field (RSI, PE…)"
-          className="font-mono text-xs bg-graphite/60 border border-slate/50 rounded-lg px-3 py-1.5 text-paper min-w-[12rem] flex-1 max-w-md"
+          className="font-display tabular-nums text-xs bg-graphite/60 border border-slate/50 rounded-xl px-3 py-1.5 text-paper min-w-[12rem] flex-1 max-w-md"
         />
         <span className="mono text-[10px] text-mist/50">
           Showing {rows.length}
@@ -255,8 +255,8 @@ export default function DataHealthAudit() {
         </span>
       </div>
 
-      <div className="rounded-xl border border-slate overflow-hidden scan-table-wrap">
-        <table className="w-full text-sm font-mono">
+      <div className="rounded-2xl border border-slate overflow-hidden scan-table-wrap">
+        <table className="w-full text-sm font-display tabular-nums">
           <thead>
             <tr className="border-b border-slate bg-graphite">
               <th className="text-left px-4 py-3 text-[10px] text-mist uppercase tracking-widest">Symbol</th>
@@ -274,7 +274,7 @@ export default function DataHealthAudit() {
                     {item.current_price > 0 ? (
                       <span className="text-paper">₹{Number(item.current_price).toLocaleString("en-IN")}</span>
                     ) : (
-                      <span className="text-rose-400">0 (missing)</span>
+                      <span className="text-signal-sell">0 (missing)</span>
                     )}
                   </td>
                   <td className="px-4 py-2.5">
@@ -282,7 +282,7 @@ export default function DataHealthAudit() {
                       {item.missing_fields.map((field) => (
                         <span
                           key={field}
-                          className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase bg-rose-950/60 text-rose-300 border border-rose-800/40"
+                          className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase bg-signal-sell/60 text-signal-sell border border-signal-sell/40"
                         >
                           {field}
                         </span>

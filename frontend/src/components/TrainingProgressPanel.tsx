@@ -118,24 +118,24 @@ export default function TrainingProgressPanel({
   if (!active && !done && !failed && idx < 0) return null;
 
   return (
-    <div className="rounded-lg border border-zinc-700/80 bg-zinc-900/80 p-4 mb-4">
+    <div className="rounded-xl border border-slate/80 bg-graphite/80 p-4 mb-4">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-zinc-100 tracking-wide">{title}</h3>
-        <div className="text-xs font-mono text-cyan-400">
+        <h3 className="text-sm font-semibold text-paper tracking-wide">{title}</h3>
+        <div className="text-xs font-display tabular-nums text-signal-prepare">
           {done ? "Complete" : failed ? "Stopped" : `${progressPct}%`}
         </div>
       </div>
 
-      <div className="h-1.5 w-full rounded bg-zinc-800 overflow-hidden mb-3">
+      <div className="h-1.5 w-full rounded bg-ink overflow-hidden mb-3">
         <div
           className={`h-full transition-all duration-500 ${
-            failed ? "bg-amber-500" : done ? "bg-emerald-500" : "bg-cyan-500"
+            failed ? "bg-signal-hold" : done ? "bg-signal-buy" : "bg-signal-prepare"
           }`}
           style={{ width: `${progressPct}%` }}
         />
       </div>
 
-      <div className="flex justify-between text-[11px] text-zinc-400 font-mono mb-3">
+      <div className="flex justify-between text-[11px] text-mist font-display tabular-nums mb-3">
         <span>Elapsed {formatTime(elapsedSec)}</span>
         <span>{done || failed ? "—" : `~${formatTime(remaining)} remaining`}</span>
       </div>
@@ -148,22 +148,22 @@ export default function TrainingProgressPanel({
               <div
                 className={`mt-0.5 h-2 w-2 rounded-full shrink-0 ${
                   state === "done"
-                    ? "bg-emerald-500"
+                    ? "bg-signal-buy"
                     : state === "active"
-                    ? "bg-cyan-400 animate-pulse"
-                    : "bg-zinc-600"
+                    ? "bg-signal-prepare animate-pulse"
+                    : "bg-mist"
                 }`}
               />
               <div className="min-w-0">
                 <div
                   className={`text-xs ${
-                    state === "active" ? "text-cyan-300 font-medium" : state === "done" ? "text-zinc-300" : "text-zinc-500"
+                    state === "active" ? "text-signal-prepare font-medium" : state === "done" ? "text-paper" : "text-mist"
                   }`}
                 >
                   {s.label}
                 </div>
                 {state === "active" && (
-                  <div className="text-[11px] text-zinc-500 truncate">
+                  <div className="text-[11px] text-mist truncate">
                     {typeof detail?.message === "string"
                       ? detail.message
                       : s.detail}

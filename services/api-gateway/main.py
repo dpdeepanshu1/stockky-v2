@@ -4127,6 +4127,26 @@ async def wake_all_services():
     }
 
 
+@app.get("/market/momentum-movers")
+def momentum_movers_route():
+    """
+    2026-09-03 — exposes the existing full-market NSE gainers/losers/
+    volume-gainers scan (_get_momentum_movers, already used internally by
+    the hot-picks/scan endpoints) as its own lightweight endpoint, so
+    real-trade-service's dynamic_universe.py can widen its auto-tracked
+    watchlist using this broader, catalyst-agnostic momentum source in
+    addition to the volume-shock scanner it already uses — not a new
+    detection mechanism, just a new way to reach an existing one.
+    Read-only, cheap: returns symbols only, no scoring/pillar work.
+    """
+    try:
+        symbols = _get_momentum_movers()
+    except Exception as e:
+        logger.warning("momentum_movers_route failed: %s", e)
+        symbols = []
+    return {"symbols": symbols, "count": len(symbols)}
+
+
 @app.get("/health")
 def health(warm: bool = False):
     return {

@@ -141,7 +141,7 @@ function HotFeedHealth({ refreshKey }: { refreshKey: number }) {
 
   const issues = audit.issues || [];
   const healthy = Boolean(audit.ok && audit.table_exists && (audit.rows_24h ?? 0) > 0 && !issues.length);
-  const dot = healthy ? "bg-emerald-400" : issues.length ? "bg-amber-400" : "bg-slate-400";
+  const dot = healthy ? "bg-signal-buy" : issues.length ? "bg-signal-hold" : "bg-slate-400";
   const backendLabel =
     audit.backend === "oracle"
       ? "Oracle Autonomous DB"
@@ -158,16 +158,16 @@ function HotFeedHealth({ refreshKey }: { refreshKey: number }) {
       >
         <span className="flex items-center gap-2">
           <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
-          <span className="font-mono text-[11px] text-paper">Hot Picks Feed Health</span>
-          <span className="font-mono text-[10px] text-mist/60">
+          <span className="font-display tabular-nums text-[11px] text-paper">Hot Picks Feed Health</span>
+          <span className="font-display tabular-nums text-[10px] text-mist/60">
             {audit.rows_24h ?? 0} rows / 24h · {fmtAge(audit.age_hours)} · {backendLabel}
           </span>
         </span>
-        <span className="font-mono text-[10px] text-mist/60">{open ? "hide ▲" : "details ▼"}</span>
+        <span className="font-display tabular-nums text-[10px] text-mist/60">{open ? "hide ▲" : "details ▼"}</span>
       </button>
 
       {open && (
-        <div className="mt-3 space-y-2 font-mono text-[10px] text-mist/80">
+        <div className="mt-3 space-y-2 font-display tabular-nums text-[10px] text-mist/80">
           <div className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
             <span>
               table <span className="text-paper">{audit.table || "—"}</span>
@@ -180,7 +180,7 @@ function HotFeedHealth({ refreshKey }: { refreshKey: number }) {
             </span>
             <span>
               fresh (&le;{audit.fresh_threshold_hours ?? 24}h){" "}
-              <span className={audit.fresh ? "text-emerald-300" : "text-amber-300"}>
+              <span className={audit.fresh ? "text-signal-buy" : "text-signal-hold"}>
                 {audit.fresh ? "yes" : "no"}
               </span>
             </span>
@@ -211,7 +211,7 @@ function HotFeedHealth({ refreshKey }: { refreshKey: number }) {
           {issues.length > 0 && (
             <ul className="space-y-1 pt-1">
               {issues.map((msg, i) => (
-                <li key={i} className="text-amber-300/90">
+                <li key={i} className="text-signal-hold/90">
                   • {msg}
                 </li>
               ))}
@@ -222,7 +222,7 @@ function HotFeedHealth({ refreshKey }: { refreshKey: number }) {
             type="button"
             onClick={load}
             disabled={busy}
-            className="mt-1 rounded-md border border-slate/50 px-2 py-1 text-[10px] text-mist hover:bg-slate/30 disabled:opacity-50"
+            className="mt-1 rounded-xl border border-slate/50 px-2 py-1 text-[10px] text-mist hover:bg-slate/30 disabled:opacity-50"
           >
             {busy ? "Checking…" : "Re-check"}
           </button>
@@ -697,7 +697,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
             onClick={startPremarket}
             disabled={premarketBusy || loading}
             title="Bulk pre-feeds prices for every eligible stock before you search — makes the search below instant instead of showing ₹— on cold symbols"
-            className="font-mono text-xs px-4 py-2 rounded-lg bg-sky-500/20 border border-sky-500/40 text-sky-100 hover:bg-sky-500/30 disabled:opacity-50"
+            className="font-display tabular-nums text-xs px-4 py-2 rounded-xl bg-signal-prepare/20 border border-signal-prepare/40 text-white hover:bg-signal-prepare/30 disabled:opacity-50"
           >
             {premarketBusy ? "Pre-feeding…" : "☀ Premarket"}
           </button>
@@ -705,7 +705,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
             type="button"
             onClick={startSearch}
             disabled={loading}
-            className="font-mono text-xs px-4 py-2 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-100 hover:bg-rose-500/30 disabled:opacity-50"
+            className="font-display tabular-nums text-xs px-4 py-2 rounded-xl bg-signal-sell/20 border border-signal-sell/40 text-white hover:bg-signal-sell/30 disabled:opacity-50"
           >
             {loading ? "Searching…" : "Search Hot Picks Stocks"}
           </button>
@@ -714,20 +714,20 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
               type="button"
               onClick={stopSearch}
               disabled={stopBusy}
-              className="font-mono text-xs px-4 py-2 rounded-lg border border-amber-500/50 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25 disabled:opacity-50"
+              className="font-display tabular-nums text-xs px-4 py-2 rounded-xl border border-signal-hold/50 bg-signal-hold/15 text-signal-hold hover:bg-signal-hold/25 disabled:opacity-50"
             >
               {stopBusy ? "Stopping…" : "■ Stop"}
             </button>
           )}
           {premarketBusy && premarketMsg && (
-            <span className="font-mono text-[11px] text-sky-200/80 self-center">{premarketMsg}</span>
+            <span className="font-display tabular-nums text-[11px] text-signal-prepare/80 self-center">{premarketMsg}</span>
           )}
           <button
             type="button"
             onClick={handleSearchBuysFromHot}
             disabled={sniperLoading}
             title="Rank the loaded Hot Picks and pick the 1-4 best buy setups. Loads the latest saved picks automatically if none are on screen yet."
-            className="font-mono text-xs px-4 py-2 rounded-lg border border-emerald-500/50 bg-emerald-600/20 text-emerald-200 hover:bg-emerald-600/35 disabled:opacity-50 shadow-lg shadow-emerald-900/20"
+            className="font-display tabular-nums text-xs px-4 py-2 rounded-xl border border-signal-buy/50 bg-signal-buy/20 text-white hover:bg-signal-buy/35 disabled:opacity-50 shadow-lg shadow-emerald-900/20"
           >
             {sniperLoading ? "Sniping…" : "🎯 Search for Buy Stocks (1-4)"}
           </button>
@@ -736,24 +736,24 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
             onClick={() => void notifyTopPicks()}
             disabled={notifyBusy || !data}
             title="Send the current top 5 Hot Picks to Telegram"
-            className="font-mono text-xs px-4 py-2 rounded-lg bg-sky-600/25 border border-sky-500/50 text-sky-200 hover:bg-sky-600/35 disabled:opacity-50 shadow-lg shadow-sky-900/20"
+            className="font-display tabular-nums text-xs px-4 py-2 rounded-xl bg-signal-prepare/25 border border-signal-prepare/50 text-signal-prepare hover:bg-signal-prepare/35 disabled:opacity-50 shadow-lg shadow-sky-900/20"
           >
             {notifyBusy ? "Sending…" : "📨 Send Top 5 to Telegram"}
           </button>
         </div>
         {notifyMsg && (
-          <p className="mt-2 font-mono text-[11px] text-sky-200/80">{notifyMsg}</p>
+          <p className="mt-2 font-display tabular-nums text-[11px] text-signal-prepare/80">{notifyMsg}</p>
         )}
 
         {loading && (
           <div className="mt-4 space-y-3">
             <div className="h-2 rounded-full bg-slate/40 overflow-hidden">
               <div
-                className="h-full bg-rose-500/80 transition-all duration-500"
+                className="h-full bg-signal-sell/80 transition-all duration-500"
                 style={{ width: `${progress?.pct ?? 5}%` }}
               />
             </div>
-            <div className="flex flex-wrap gap-4 font-mono text-[11px] text-mist">
+            <div className="flex flex-wrap gap-4 font-display tabular-nums text-[11px] text-mist">
               <span>
                 {progress?.processed ?? 0}/{progress?.total ? progress.total : "…"}
               </span>
@@ -787,7 +787,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
         patchingSymbol={patchingSymbol}
       />
       {repairMsg && (
-        <p className={`font-mono text-[11px] mt-1 ${repairMsg.ok ? "text-emerald-300/80" : "text-rose-300/80"}`}>
+        <p className={`font-display tabular-nums text-[11px] mt-1 ${repairMsg.ok ? "text-signal-buy/80" : "text-signal-sell/80"}`}>
           {repairMsg.text}
         </p>
       )}
@@ -839,7 +839,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
       )}
 
       {!data && !loading && (
-        <div className="rounded-xl border border-slate/40 bg-graphite/50 p-6 text-center text-mist/60 font-mono text-xs">
+        <div className="rounded-2xl border border-slate/40 bg-graphite/50 p-6 text-center text-mist/60 font-display tabular-nums text-xs">
           Click <strong className="text-paper">Search Hot Picks Stocks</strong> to run the catalyst
           pipeline. Nothing is auto-loaded (free-tier friendly).
         </div>

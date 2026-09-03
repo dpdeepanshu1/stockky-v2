@@ -46,7 +46,7 @@ const handleSendUniverseForTraining = async () => {
 
 // Button JSX:
 <button
-  className="text-xs px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-white font-medium"
+  className="text-xs px-3 py-1.5 rounded bg-signal-prepare hover:bg-signal-prepare text-white font-medium"
   onClick={handleSendUniverseForTraining}
   title="Send the entire daily scan universe into training (more stocks = better model)"
 >

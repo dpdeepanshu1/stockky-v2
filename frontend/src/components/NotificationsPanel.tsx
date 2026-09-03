@@ -191,20 +191,20 @@ export default function NotificationsPanel() {
 
   if (loading) {
     return (
-      <div className="rounded-xl border border-slate bg-graphite p-8">
-        <p className="font-mono text-xs text-mist">Loading notification settings...</p>
+      <div className="rounded-2xl border border-slate bg-graphite p-8">
+        <p className="font-display tabular-nums text-xs text-mist">Loading notification settings...</p>
       </div>
     );
   }
 
   if (loadError && !config) {
     return (
-      <div className="rounded-xl border border-signal-sell/40 bg-signal-sell/5 p-6">
-        <p className="font-mono text-xs text-signal-sell/70 uppercase tracking-widest mb-1">
+      <div className="rounded-2xl border border-signal-sell/40 bg-signal-sell/5 p-6">
+        <p className="font-display tabular-nums text-xs text-signal-sell/70 uppercase tracking-widest mb-1">
           Couldn't load notification settings
         </p>
         <p className="text-sm text-signal-sell mb-3">{loadError}</p>
-        <button onClick={load} className="font-mono text-xs text-mist hover:text-paper underline">
+        <button onClick={load} className="font-display tabular-nums text-xs text-mist hover:text-paper underline">
           Retry
         </button>
       </div>
@@ -217,7 +217,7 @@ export default function NotificationsPanel() {
     <div className="space-y-5 alerts-terminal">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h2 className="font-display text-xl mb-1 text-cyan-300/90">Notification channels</h2>
+          <h2 className="font-display text-xl mb-1 text-signal-prepare/90">Notification channels</h2>
           <p className="text-xs text-mist/60 mb-2">Voice-first CallMeBot on urgent alerts · outbox retry · Telegram / Discord / Slack</p>
           <p className="text-mist text-sm max-w-lg">
             Connect a free channel to get pinged on new BUY NOW calls and SELL flips. Everything
@@ -237,14 +237,14 @@ export default function NotificationsPanel() {
         <button
           onClick={runTest}
           disabled={testing}
-          className="border border-slate rounded-lg px-4 py-2.5 font-mono text-xs text-mist hover:text-paper hover:border-mist transition whitespace-nowrap disabled:opacity-50"
+          className="border border-slate rounded-xl px-4 py-2.5 font-display tabular-nums text-xs text-mist hover:text-paper hover:border-mist transition whitespace-nowrap disabled:opacity-50"
         >
           {testing ? "Sending..." : "Send test notification"}
         </button>
       </div>
 
       {testResult && (
-        <div className="rounded-lg border border-slate bg-graphite px-4 py-3 font-mono text-xs text-mist">
+        <div className="rounded-xl border border-slate bg-graphite px-4 py-3 font-display tabular-nums text-xs text-mist">
           {testResult}
         </div>
       )}
@@ -393,13 +393,13 @@ export default function NotificationsPanel() {
               setTestingCall(false);
             }
           }}
-          className="mt-2 font-mono text-xs px-3 py-2 rounded-lg border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/15 disabled:opacity-40"
+          className="mt-2 font-display tabular-nums text-xs px-3 py-2 rounded-xl border border-signal-buy/40 text-signal-buy hover:bg-signal-buy/15 disabled:opacity-40"
         >
           {testingCall ? "Calling…" : "📞 Test CallMeBot"}
         </button>
-        <p className="text-[10px] text-mist/60 mt-2 font-mono leading-relaxed">
-          Primary example: <span className="text-emerald-400">@dpdeep29</span>. Extra users must each open CallMeBot in Telegram and start the bot once — otherwise only you get the call.
-          Auto-alerts on <span className="text-emerald-400">BUY NOW</span> go to all configured users.
+        <p className="text-[10px] text-mist/60 mt-2 font-display tabular-nums leading-relaxed">
+          Primary example: <span className="text-signal-buy">@dpdeep29</span>. Extra users must each open CallMeBot in Telegram and start the bot once — otherwise only you get the call.
+          Auto-alerts on <span className="text-signal-buy">BUY NOW</span> go to all configured users.
         </p>
       </ChannelCard>
     </div>
@@ -429,11 +429,11 @@ function ChannelCard({
 }) {
   const meta = CHANNEL_META[channel];
   return (
-    <div className="rounded-xl border border-slate bg-graphite p-5">
+    <div className="rounded-2xl border border-slate bg-graphite p-5">
       <div className="flex items-start justify-between gap-4 flex-wrap mb-4">
         <div>
           <div className="flex items-center gap-2 mb-1">
-            <span className="font-mono text-sm text-paper">{meta.label}</span>
+            <span className="font-display tabular-nums text-sm text-paper">{meta.label}</span>
             <StatusPill connected={connected} enabled={enabled} />
           </div>
           <p className="text-mist/70 text-xs max-w-sm">{meta.blurb}</p>
@@ -441,7 +441,7 @@ function ChannelCard({
             href={meta.setupUrl}
             target="_blank"
             rel="noreferrer"
-            className="font-mono text-[11px] text-signal-prepare hover:text-paper transition inline-block mt-1"
+            className="font-display tabular-nums text-[11px] text-signal-prepare hover:text-paper transition inline-block mt-1"
           >
             {meta.setupLabel}
           </a>
@@ -449,11 +449,11 @@ function ChannelCard({
 
         {connected && (
           <div className="flex items-center gap-3 shrink-0">
-            <span className="font-mono text-[10px] text-mist/50">{masked}</span>
+            <span className="font-display tabular-nums text-[10px] text-mist/50">{masked}</span>
             <ToggleSwitch checked={enabled} onChange={onToggle} label={enabled ? "Started" : "Stopped"} />
             <button
               onClick={onDisconnect}
-              className="font-mono text-[10px] uppercase tracking-widest text-mist/50 hover:text-signal-sell transition"
+              className="font-display tabular-nums text-[10px] uppercase tracking-widest text-mist/50 hover:text-signal-sell transition"
             >
               Disconnect
             </button>
@@ -466,7 +466,7 @@ function ChannelCard({
         <button
           onClick={onSave}
           disabled={saving}
-          className="border border-slate rounded-lg px-4 py-2.5 font-mono text-xs text-mist hover:text-paper hover:border-signal-prepare/60 transition disabled:opacity-50 h-fit"
+          className="border border-slate rounded-xl px-4 py-2.5 font-display tabular-nums text-xs text-mist hover:text-paper hover:border-signal-prepare/60 transition disabled:opacity-50 h-fit"
         >
           {saving ? "Saving..." : connected ? "Update & start" : "Connect & start"}
         </button>
@@ -478,17 +478,17 @@ function ChannelCard({
 function StatusPill({ connected, enabled }: { connected: boolean; enabled: boolean }) {
   if (!connected) {
     return (
-      <span className="font-mono text-[10px] uppercase tracking-widest text-mist/40 border border-slate rounded-full px-2 py-0.5">
+      <span className="font-display tabular-nums text-[10px] uppercase tracking-widest text-mist/40 border border-slate rounded-full px-2 py-0.5">
         Not connected
       </span>
     );
   }
   return enabled ? (
-    <span className="font-mono text-[10px] uppercase tracking-widest text-signal-buy border border-signal-buy/40 bg-signal-buy/10 rounded-full px-2 py-0.5">
+    <span className="font-display tabular-nums text-[10px] uppercase tracking-widest text-signal-buy border border-signal-buy/40 bg-signal-buy/10 rounded-full px-2 py-0.5">
       Running
     </span>
   ) : (
-    <span className="font-mono text-[10px] uppercase tracking-widest text-signal-hold border border-signal-hold/40 bg-signal-hold/10 rounded-full px-2 py-0.5">
+    <span className="font-display tabular-nums text-[10px] uppercase tracking-widest text-signal-hold border border-signal-hold/40 bg-signal-hold/10 rounded-full px-2 py-0.5">
       Stopped
     </span>
   );
@@ -520,7 +520,7 @@ function ToggleSwitch({
           }`}
         />
       </span>
-      <span className="font-mono text-[10px] text-mist group-hover:text-paper transition">{label}</span>
+      <span className="font-display tabular-nums text-[10px] text-mist group-hover:text-paper transition">{label}</span>
     </button>
   );
 }
@@ -540,7 +540,7 @@ function Field({
 }) {
   return (
     <label className="block">
-      <span className="font-mono text-[10px] text-mist uppercase tracking-widest mb-1 block">{label}</span>
+      <span className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-1 block">{label}</span>
       <input
         type={type}
         value={value}
@@ -548,7 +548,7 @@ function Field({
         placeholder={placeholder}
         spellCheck={false}
         autoComplete="off"
-        className="w-full bg-ink/60 border border-slate rounded-lg px-3 py-2.5 font-mono text-xs text-paper placeholder:text-mist/30 outline-none focus:border-signal-prepare/60 transition"
+        className="w-full bg-ink/60 border border-slate rounded-xl px-3 py-2.5 font-display tabular-nums text-xs text-paper placeholder:text-mist/30 outline-none focus:border-signal-prepare/60 transition"
       />
     </label>
   );

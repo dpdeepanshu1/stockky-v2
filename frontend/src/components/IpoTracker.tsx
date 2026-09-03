@@ -46,15 +46,15 @@ function decisionBadgeClass(decision?: string): string {
   const d = (decision || "").toUpperCase();
   if (d === "BUY NOW") return "bg-signal-buy/20 text-signal-buy border-signal-buy/40";
   if (d === "PREPARE TO BUY") return "bg-signal-prepare/20 text-signal-prepare border-signal-prepare/40";
-  if (d === "SELL") return "bg-rose-500/20 text-rose-300 border-rose-500/40";
+  if (d === "SELL") return "bg-signal-sell/20 text-signal-sell border-signal-sell/40";
   if (d === "DO NOT BUY") return "bg-mist/10 text-mist/70 border-slate/50";
-  return "bg-amber-500/10 text-amber-300 border-amber-500/30"; // HOLD
+  return "bg-signal-hold/10 text-signal-hold border-signal-hold/30"; // HOLD
 }
 
 function stageLabel(ipo: IpoAnalysis): { text: string; tone: string } {
   if (ipo.stage === "upcoming") return { text: `Lists ${ipo.listing_date}`, tone: "text-mist/60" };
-  if (ipo.stage === "pre_listing") return { text: "Lists today · pre-open", tone: "text-amber-300" };
-  if (ipo.stage === "listing_day") return { text: "Listing day · live", tone: "text-emerald-300" };
+  if (ipo.stage === "pre_listing") return { text: "Lists today · pre-open", tone: "text-signal-hold" };
+  if (ipo.stage === "listing_day") return { text: "Listing day · live", tone: "text-signal-buy" };
   if (ipo.stage === "listed") return { text: `Day ${ipo.days_since_listing}`, tone: "text-mist/60" };
   return { text: ipo.stage || "—", tone: "text-mist/50" };
 }
@@ -427,16 +427,16 @@ export default function IpoTracker({
 
   return (
     <div className="space-y-4">
-      <div className="rounded-xl border border-slate bg-graphite p-4 sm:p-6">
+      <div className="rounded-2xl border border-slate bg-graphite p-4 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
           <div>
-            <h2 className="font-display text-xl text-violet-300/95">🆕 IPO Tracker</h2>
-            <p className="font-mono text-[11px] text-mist/60 mt-1 max-w-xl">
+            <h2 className="font-display text-xl text-signal-prepare/95">🆕 IPO Tracker</h2>
+            <p className="font-display tabular-nums text-[11px] text-mist/60 mt-1 max-w-xl">
               Short-term buy/sell read on recently-listed, listing-today and upcoming NSE IPOs.
               Entry / target / stop numbers are computed server-side, so a listing-day row is
               actionable the moment it prints.
             </p>
-            <p className="font-mono text-[10px] text-mist/45 mt-2">
+            <p className="font-display tabular-nums text-[10px] text-mist/45 mt-2">
               {ipoList.length} shown
               {totalScanned != null && totalScanned !== ipoList.length
                 ? ` of ${totalScanned} scanned`
@@ -444,7 +444,7 @@ export default function IpoTracker({
               {ipoGeneratedAt && (
                 <span> · updated {new Date(ipoGeneratedAt).toLocaleTimeString("en-IN")}</span>
               )}
-              {wsConnected && <span className="text-emerald-400/80 ml-1">● live</span>}
+              {wsConnected && <span className="text-signal-buy/80 ml-1">● live</span>}
             </p>
           </div>
 
@@ -453,13 +453,13 @@ export default function IpoTracker({
                 The backend scan itself always walks the full ~1y universe
                 (see WINDOW_RECENT/WINDOW_3M/WINDOW_6M/WINDOW_WIDE above); these
                 buttons only change which already-scanned rows are shown. */}
-            <div className="inline-flex rounded-lg border border-slate/60 overflow-hidden">
+            <div className="inline-flex rounded-xl border border-slate/60 overflow-hidden">
               <button
                 type="button"
                 onClick={() => setDisplayDays(WINDOW_RECENT)}
-                className={`font-mono text-[11px] px-3 py-1.5 transition ${
+                className={`font-display tabular-nums text-[11px] px-3 py-1.5 transition ${
                   displayDays === WINDOW_RECENT
-                    ? "bg-violet-500/25 text-violet-100"
+                    ? "bg-signal-prepare/25 text-white"
                     : "bg-transparent text-mist/60 hover:bg-slate/30"
                 }`}
               >
@@ -468,9 +468,9 @@ export default function IpoTracker({
               <button
                 type="button"
                 onClick={() => setDisplayDays(WINDOW_3M)}
-                className={`font-mono text-[11px] px-3 py-1.5 border-l border-slate/60 transition ${
+                className={`font-display tabular-nums text-[11px] px-3 py-1.5 border-l border-slate/60 transition ${
                   displayDays === WINDOW_3M
-                    ? "bg-violet-500/25 text-violet-100"
+                    ? "bg-signal-prepare/25 text-white"
                     : "bg-transparent text-mist/60 hover:bg-slate/30"
                 }`}
               >
@@ -479,9 +479,9 @@ export default function IpoTracker({
               <button
                 type="button"
                 onClick={() => setDisplayDays(WINDOW_6M)}
-                className={`font-mono text-[11px] px-3 py-1.5 border-l border-slate/60 transition ${
+                className={`font-display tabular-nums text-[11px] px-3 py-1.5 border-l border-slate/60 transition ${
                   displayDays === WINDOW_6M
-                    ? "bg-violet-500/25 text-violet-100"
+                    ? "bg-signal-prepare/25 text-white"
                     : "bg-transparent text-mist/60 hover:bg-slate/30"
                 }`}
               >
@@ -490,9 +490,9 @@ export default function IpoTracker({
               <button
                 type="button"
                 onClick={() => setDisplayDays(WINDOW_WIDE)}
-                className={`font-mono text-[11px] px-3 py-1.5 border-l border-slate/60 transition ${
+                className={`font-display tabular-nums text-[11px] px-3 py-1.5 border-l border-slate/60 transition ${
                   displayDays === WINDOW_WIDE
-                    ? "bg-violet-500/25 text-violet-100"
+                    ? "bg-signal-prepare/25 text-white"
                     : "bg-transparent text-mist/60 hover:bg-slate/30"
                 }`}
               >
@@ -503,7 +503,7 @@ export default function IpoTracker({
             <button
               type="button"
               onClick={() => setIpoAddOpen(!ipoAddOpen)}
-              className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-slate-500/20 border border-slate-400/40 text-paper hover:bg-slate-500/30"
+              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-slate-500/20 border border-slate-400/40 text-paper hover:bg-slate-500/30"
             >
               + Add IPO
             </button>
@@ -512,11 +512,11 @@ export default function IpoTracker({
               onClick={() => void startIpoScan(true)}
               disabled={ipoScanning}
               title="Bulk-seeds ipo_static_feed for every tracked IPO in one background pass — the same job the morning 'IPO Premarket Refresh' GitHub Action runs on a schedule, triggered here on demand instead of waiting for it."
-              className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-amber-500/20 border border-amber-400/40 text-amber-100 hover:bg-amber-500/30 disabled:opacity-40"
+              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-signal-hold/20 border border-signal-hold/40 text-white hover:bg-signal-hold/30 disabled:opacity-40"
             >
               {ipoScanning ? (
                 <span className="inline-flex items-center gap-1.5">
-                  <BusySpinner className="border-amber-200" /> Feeding…
+                  <BusySpinner className="border-signal-hold" /> Feeding…
                 </span>
               ) : (
                 "📥 Premarket Feed"
@@ -527,11 +527,11 @@ export default function IpoTracker({
               onClick={() => void loadFromDb()}
               disabled={dbLoadBusy}
               title="Reads ipo_static_feed / the cached list only — never calls NSE/yfinance. Use Force Rescan for that."
-              className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-violet-500/20 border border-violet-400/40 text-violet-100 hover:bg-violet-500/30 disabled:opacity-40"
+              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-signal-prepare/20 border border-signal-prepare/40 text-white hover:bg-signal-prepare/30 disabled:opacity-40"
             >
               {dbLoadBusy ? (
                 <span className="inline-flex items-center gap-1.5">
-                  <BusySpinner className="border-violet-200" /> Loading…
+                  <BusySpinner className="border-signal-prepare" /> Loading…
                 </span>
               ) : (
                 "↻ Scan IPOs (DB)"
@@ -542,11 +542,11 @@ export default function IpoTracker({
               onClick={() => void startIpoScan(true)}
               disabled={ipoScanning}
               title="Ignore the freshness cache and re-scan every IPO from scratch, straight from upstream (NSE + yfinance) — same underlying action as Premarket Feed, exposed here for a one-off refresh mid-session"
-              className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-violet-500/10 border border-violet-400/30 text-violet-200/80 hover:bg-violet-500/20 disabled:opacity-40"
+              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-signal-prepare/10 border border-signal-prepare/30 text-signal-prepare/80 hover:bg-signal-prepare/20 disabled:opacity-40"
             >
               {ipoScanning ? (
                 <span className="inline-flex items-center gap-1.5">
-                  <BusySpinner className="border-violet-200" /> Scanning…
+                  <BusySpinner className="border-signal-prepare" /> Scanning…
                 </span>
               ) : (
                 "Force Scan (upstream)"
@@ -556,7 +556,7 @@ export default function IpoTracker({
               type="button"
               onClick={() => void stopIpoScan()}
               disabled={!ipoScanning || stopBusy}
-              className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-rose-500/20 border border-rose-400/40 text-rose-100 hover:bg-rose-500/30 disabled:opacity-40"
+              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-signal-sell/20 border border-signal-sell/40 text-white hover:bg-signal-sell/30 disabled:opacity-40"
             >
               {stopBusy ? "Stopping…" : "■ Stop"}
             </button>
@@ -565,7 +565,7 @@ export default function IpoTracker({
               onClick={() => void handleSearchBuysFromIpo()}
               disabled={sniperLoading || ipoList.length === 0}
               title="Rank every tracked IPO with a live price and pick the 1-4 best buy setups among them"
-              className="font-mono text-[11px] px-3 py-1.5 rounded-lg border border-emerald-500/50 bg-emerald-600/20 text-emerald-200 hover:bg-emerald-600/35 disabled:opacity-40 shadow-lg shadow-emerald-900/20"
+              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl border border-signal-buy/50 bg-signal-buy/20 text-white hover:bg-signal-buy/35 disabled:opacity-40 shadow-lg shadow-emerald-900/20"
             >
               {sniperLoading && !sniperBusySymbol ? "Sniping…" : "🎯 Search for Buy Stocks (1-4)"}
             </button>
@@ -574,30 +574,30 @@ export default function IpoTracker({
               onClick={() => void notifyTop5(5)}
               disabled={notifyBusy || ipoList.length === 0}
               title="Send the top 5 IPO Tracker picks to Telegram (uses the same notification channel configured in Settings)"
-              className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-sky-500/20 border border-sky-400/40 text-sky-100 hover:bg-sky-500/30 disabled:opacity-40"
+              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-signal-prepare/20 border border-signal-prepare/40 text-white hover:bg-signal-prepare/30 disabled:opacity-40"
             >
               {notifyBusy ? "Sending…" : "📨 Send Top 5 to Telegram"}
             </button>
           </div>
           {notifyMsg && (
-            <p className="font-mono text-[10px] text-zinc-500 mt-1">{notifyMsg}</p>
+            <p className="font-display tabular-nums text-[10px] text-mist mt-1">{notifyMsg}</p>
           )}
         </div>
 
         {ipoAddOpen && (
-          <div className="mb-4 rounded-lg border border-slate/50 bg-ink/60 p-3 flex flex-col gap-2">
+          <div className="mb-4 rounded-xl border border-slate/50 bg-ink/60 p-3 flex flex-col gap-2">
             <input
               placeholder="Exact company name (e.g. Tempsens Instruments (India) Limited)"
               value={ipoForm.company_name}
               onChange={(e) => setIpoForm({ company_name: e.target.value })}
               onKeyDown={(e) => e.key === "Enter" && void submitIpoAdd()}
-              className="bg-ink/60 border border-slate rounded-lg px-2 py-1.5 font-mono text-xs text-paper placeholder:text-mist/30 outline-none"
+              className="bg-ink/60 border border-slate rounded-xl px-2 py-1.5 font-display tabular-nums text-xs text-paper placeholder:text-mist/30 outline-none"
             />
-            <p className="font-mono text-[10px] text-mist/50">
+            <p className="font-display tabular-nums text-[10px] text-mist/50">
               Just the name — symbol, issue price, and listing date are looked up automatically.
             </p>
             {ipoAddNotice && (
-              <div className="rounded-lg border border-amber-400/30 bg-amber-500/5 px-2 py-1.5 font-mono text-[11px] text-amber-200/90">
+              <div className="rounded-xl border border-signal-hold/30 bg-signal-hold/5 px-2 py-1.5 font-display tabular-nums text-[11px] text-signal-hold/90">
                 {ipoAddNotice.message}
                 {ipoAddNotice.suggestions.length > 0 && (
                   <div className="mt-1 flex flex-wrap gap-1">
@@ -609,7 +609,7 @@ export default function IpoTracker({
                           setIpoForm({ company_name: s });
                           setIpoAddNotice(null);
                         }}
-                        className="rounded border border-amber-400/40 px-1.5 py-0.5 text-amber-100 hover:bg-amber-500/20"
+                        className="rounded border border-signal-hold/40 px-1.5 py-0.5 text-white hover:bg-signal-hold/20"
                       >
                         {s}
                       </button>
@@ -622,7 +622,7 @@ export default function IpoTracker({
               type="button"
               onClick={() => void submitIpoAdd()}
               disabled={ipoAddBusy || !ipoForm.company_name.trim()}
-              className="font-mono text-xs px-3 py-2 rounded-lg bg-emerald-500/20 border border-emerald-400/40 text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-40"
+              className="font-display tabular-nums text-xs px-3 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 text-white hover:bg-signal-buy/30 disabled:opacity-40"
             >
               {ipoAddBusy ? "Looking it up…" : "Add & Scan"}
             </button>
@@ -630,10 +630,10 @@ export default function IpoTracker({
         )}
 
         {(ipoScanning || (ipoProgress?.status && ipoProgress.status === "running")) && (
-          <div className="mb-4 rounded-xl border border-violet-500/30 bg-violet-500/5 px-4 py-3">
+          <div className="mb-4 rounded-2xl border border-signal-prepare/30 bg-signal-prepare/5 px-4 py-3">
             <div className="flex flex-wrap justify-between gap-2 mb-2">
-              <p className="font-mono text-[11px] text-violet-200">IPO scan · {ipoProgress?.status || "running"}</p>
-              <p className="font-mono text-[10px] text-mist/60">
+              <p className="font-display tabular-nums text-[11px] text-signal-prepare">IPO scan · {ipoProgress?.status || "running"}</p>
+              <p className="font-display tabular-nums text-[10px] text-mist/60">
                 {ipoProgress?.processed ?? 0}/{ipoProgress?.total ?? "—"}
               </p>
             </div>
@@ -643,30 +643,30 @@ export default function IpoTracker({
                 style={{ width: `${pct}%` }}
               />
             </div>
-            <p className="font-mono text-[10px] text-mist/50 mt-1.5">
+            <p className="font-display tabular-nums text-[10px] text-mist/50 mt-1.5">
               {pct}% · {ipoProgress?.message || "…"}
             </p>
           </div>
         )}
 
         {ipoProgress?.status === "stopped" && !ipoScanning && (
-          <div className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 font-mono text-[11px] text-amber-200">
+          <div className="mb-4 rounded-xl border border-signal-hold/40 bg-signal-hold/10 px-3 py-2 font-display tabular-nums text-[11px] text-signal-hold">
             {ipoProgress.message || "Scan stopped — partial results kept."}
           </div>
         )}
         {ipoProgress?.status === "skipped_fresh" && !ipoScanning && (
-          <div className="mb-4 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-2 font-mono text-[11px] text-sky-200">
+          <div className="mb-4 rounded-xl border border-signal-prepare/40 bg-signal-prepare/10 px-3 py-2 font-display tabular-nums text-[11px] text-signal-prepare">
             {ipoProgress.message}
           </div>
         )}
         {ipoError && (
-          <div className="mb-4 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 font-mono text-[11px] text-rose-200">
+          <div className="mb-4 rounded-xl border border-signal-sell/40 bg-signal-sell/10 px-3 py-2 font-display tabular-nums text-[11px] text-white">
             {ipoError}
           </div>
         )}
 
         {ipoList.length === 0 && !ipoScanning ? (
-          <p className="font-mono text-[11px] text-mist/45 py-6 text-center">
+          <p className="font-display tabular-nums text-[11px] text-mist/45 py-6 text-center">
             No IPOs in the last {displayDays === WINDOW_WIDE ? "year" : `${displayDays} days`} — tap
             “Scan IPOs” for auto-discovery, switch to “Last 1y” to widen the window, or “+ Add IPO”
             if NSE’s feed is blocked.
@@ -679,29 +679,29 @@ export default function IpoTracker({
               return (
                 <div
                   key={ipo.symbol}
-                  className="rounded-lg border border-slate/50 bg-ink/50 px-3 py-2.5"
+                  className="rounded-xl border border-slate/50 bg-ink/50 px-3 py-2.5"
                 >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="min-w-[140px]">
                     <button
                       type="button"
                       onClick={() => onSelect?.(ipo.symbol)}
-                      className="font-mono text-xs text-paper hover:text-emerald-300 text-left"
+                      className="font-display tabular-nums text-xs text-paper hover:text-signal-buy text-left"
                     >
                       {ipo.symbol}
                     </button>
-                    <p className={`font-mono text-[10px] ${stage.tone}`}>{stage.text}</p>
+                    <p className={`font-display tabular-nums text-[10px] ${stage.tone}`}>{stage.text}</p>
                   </div>
 
-                  <div className="font-mono text-[10px] text-mist/60 min-w-[110px]">
+                  <div className="font-display tabular-nums text-[10px] text-mist/60 min-w-[110px]">
                     <p>Issue ₹{ipo.issue_price}</p>
                     {ipo.current_price != null && <p>CMP ₹{ipo.current_price}</p>}
                   </div>
 
                   {gainPct != null && (
                     <p
-                      className={`font-mono text-xs min-w-[70px] ${
-                        gainPct >= 0 ? "text-emerald-400" : "text-rose-400"
+                      className={`font-display tabular-nums text-xs min-w-[70px] ${
+                        gainPct >= 0 ? "text-signal-buy" : "text-signal-sell"
                       }`}
                     >
                       {gainPct >= 0 ? "+" : ""}
@@ -710,19 +710,19 @@ export default function IpoTracker({
                   )}
 
                   {ipo.ipo_score != null && (
-                    <p className="font-mono text-[10px] text-mist/50 min-w-[70px]">
+                    <p className="font-display tabular-nums text-[10px] text-mist/50 min-w-[70px]">
                       Score {Math.round(ipo.ipo_score)}/100
                     </p>
                   )}
 
                   {ipo.pre_listing_advisory && (
-                    <p className="font-mono text-[10px] text-amber-300/80 max-w-[200px]">
+                    <p className="font-display tabular-nums text-[10px] text-signal-hold/80 max-w-[200px]">
                       {ipo.pre_listing_advisory}
                     </p>
                   )}
 
                   <span
-                    className={`font-mono text-[10px] px-2 py-1 rounded-md border ${decisionBadgeClass(
+                    className={`font-display tabular-nums text-[10px] px-2 py-1 rounded-xl border ${decisionBadgeClass(
                       ipo.decision
                     )}`}
                   >
@@ -739,7 +739,7 @@ export default function IpoTracker({
                           ? "Show the stored buy setup"
                           : "No stored setup yet — scan live for one"
                       }
-                      className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-signal-buy/20 border border-signal-buy/40 text-signal-buy hover:bg-signal-buy/30 disabled:opacity-50"
+                      className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-signal-buy/20 border border-signal-buy/40 text-signal-buy hover:bg-signal-buy/30 disabled:opacity-50"
                     >
                       {sniperLoading && sniperBusySymbol === ipo.symbol ? (
                         <span className="inline-flex items-center gap-1.5">
@@ -760,7 +760,7 @@ export default function IpoTracker({
                   <button
                     type="button"
                     onClick={() => setExpandedSymbol((cur) => (cur === ipo.symbol ? null : ipo.symbol))}
-                    className="font-mono text-[10px] text-mist/50 hover:text-paper transition uppercase tracking-wide"
+                    className="font-display tabular-nums text-[10px] text-mist/50 hover:text-paper transition uppercase tracking-wide"
                   >
                     {expandedSymbol === ipo.symbol ? "Hide detail ▴" : "Detail ▾"}
                   </button>
@@ -769,8 +769,8 @@ export default function IpoTracker({
                 {expandedSymbol === ipo.symbol && (
                   <div className="mt-2.5 pt-2.5 border-t border-slate/40 grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2">
                     <div>
-                      <p className="font-mono text-[9px] text-mist/40 uppercase tracking-wide mb-1">Listing</p>
-                      <div className="font-mono text-[10px] text-mist/70 space-y-0.5">
+                      <p className="font-display tabular-nums text-[9px] text-mist/40 uppercase tracking-wide mb-1">Listing</p>
+                      <div className="font-display tabular-nums text-[10px] text-mist/70 space-y-0.5">
                         {ipo.listing_date && <p>Listed {ipo.listing_date}</p>}
                         {ipo.days_since_listing != null && <p>{ipo.days_since_listing}d since listing</p>}
                         {ipo.listing_day_close != null && <p>Day-1 close ₹{ipo.listing_day_close}</p>}
@@ -783,8 +783,8 @@ export default function IpoTracker({
                     </div>
 
                     <div>
-                      <p className="font-mono text-[9px] text-mist/40 uppercase tracking-wide mb-1">Momentum</p>
-                      <div className="font-mono text-[10px] text-mist/70 space-y-0.5">
+                      <p className="font-display tabular-nums text-[9px] text-mist/40 uppercase tracking-wide mb-1">Momentum</p>
+                      <div className="font-display tabular-nums text-[10px] text-mist/70 space-y-0.5">
                         {ipo.momentum_5d_pct != null && <p>5d momentum {ipo.momentum_5d_pct.toFixed(1)}%</p>}
                         {ipo.volume_trend_ratio != null && <p>Volume trend {ipo.volume_trend_ratio.toFixed(2)}x</p>}
                         {ipo.atr_pct != null && <p>ATR {ipo.atr_pct.toFixed(1)}%</p>}
@@ -799,8 +799,8 @@ export default function IpoTracker({
 
                     {ipo.score_breakdown && Object.keys(ipo.score_breakdown).length > 0 && (
                       <div>
-                        <p className="font-mono text-[9px] text-mist/40 uppercase tracking-wide mb-1">Score Breakdown</p>
-                        <div className="font-mono text-[10px] text-mist/70 space-y-0.5">
+                        <p className="font-display tabular-nums text-[9px] text-mist/40 uppercase tracking-wide mb-1">Score Breakdown</p>
+                        <div className="font-display tabular-nums text-[10px] text-mist/70 space-y-0.5">
                           {Object.entries(ipo.score_breakdown).map(([k, v]) => (
                             <p key={k} className="flex justify-between gap-2">
                               <span className="text-mist/50">{k.replace(/_/g, " ")}</span>
@@ -813,8 +813,8 @@ export default function IpoTracker({
 
                     {ipo.fundamentals_snapshot && Object.keys(ipo.fundamentals_snapshot).length > 0 && (
                       <div>
-                        <p className="font-mono text-[9px] text-mist/40 uppercase tracking-wide mb-1">Fundamentals</p>
-                        <div className="font-mono text-[10px] text-mist/70 space-y-0.5">
+                        <p className="font-display tabular-nums text-[9px] text-mist/40 uppercase tracking-wide mb-1">Fundamentals</p>
+                        <div className="font-display tabular-nums text-[10px] text-mist/70 space-y-0.5">
                           {Object.entries(ipo.fundamentals_snapshot).map(([k, v]) => (
                             <p key={k} className="flex justify-between gap-2">
                               <span className="text-mist/50">{k.replace(/_/g, " ")}</span>
@@ -827,7 +827,7 @@ export default function IpoTracker({
 
                     {ipo.message && (
                       <div className="col-span-full">
-                        <p className="font-mono text-[10px] text-mist/50">{ipo.message}</p>
+                        <p className="font-display tabular-nums text-[10px] text-mist/50">{ipo.message}</p>
                       </div>
                     )}
                   </div>

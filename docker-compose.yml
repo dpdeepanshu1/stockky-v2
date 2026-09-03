@@ -53,6 +53,12 @@ services:
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8001/health', timeout=5) or sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     logging: *default-logging
     # Heaviest I/O fan-out service (AngelOne + yfinance + NSE waterfall) —
     # give it the largest CPU share of the six.
@@ -85,6 +91,12 @@ services:
     depends_on:
       - market-data-service
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health', timeout=5) or sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     logging: *default-logging
     cpus: "0.45"
     mem_limit: 900m
@@ -123,6 +135,12 @@ services:
       - market-data-service
       - analysis-intelligence-service
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health', timeout=5) or sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     logging: *default-logging
     # sklearn training bursts need more headroom than its steady-state CPU
     # use — mem_limit stays large on purpose. cpus trimmed slightly
@@ -156,6 +174,12 @@ services:
     depends_on:
       - api-gateway
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health', timeout=5) or sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     logging: *default-logging
     # Mostly idle, timer-driven — smallest share.
     cpus: "0.15"
@@ -204,6 +228,12 @@ services:
       - analysis-intelligence-service
       - decision-prediction-service
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health', timeout=5) or sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     logging: *default-logging
     # Pure async I/O fan-out/proxy — CPU-light, but every request passes
     # through it, so it still gets a solid share.

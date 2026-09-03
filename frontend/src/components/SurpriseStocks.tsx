@@ -530,17 +530,17 @@ export default function SurpriseStocks({
   const scPct = Math.min(100, Math.max(0, Number(scanProg?.percent ?? 0)));
 
   return (
-    <div className="rounded-xl border border-slate bg-graphite p-4 sm:p-6">
+    <div className="rounded-2xl border border-slate bg-graphite p-4 sm:p-6">
       <div className="flex flex-wrap justify-between items-start gap-4 mb-5">
         <div>
-          <h2 className="font-display text-xl text-emerald-400/95">
+          <h2 className="font-display text-xl text-signal-buy/95">
             ⚡ Surprise Momentum Stocks
           </h2>
-          <p className="font-mono text-[11px] text-mist/60 mt-1 max-w-xl">
+          <p className="font-display tabular-nums text-[11px] text-mist/60 mt-1 max-w-xl">
             High RVOL / ORB vs Neon baselines. Live quotes only for ticks; static from premarket.
           </p>
           {meta && (
-            <p className="font-mono text-[10px] text-mist/45 mt-2">
+            <p className="font-display tabular-nums text-[10px] text-mist/45 mt-2">
               baselines {meta.static_loaded ?? "—"} · quotes {meta.quotes_ok ?? "—"}/
               {meta.universe_scanned ?? "—"} · {meta.elapsed_sec ?? "—"}s
               {lastAt ? ` · ${lastAt}` : ""}
@@ -552,7 +552,7 @@ export default function SurpriseStocks({
             type="button"
             onClick={startPremarket}
             disabled={pmRunning}
-            className="font-mono text-xs px-4 py-2 rounded-lg bg-amber-600/25 text-amber-200 border border-amber-500/40 hover:bg-amber-600/40 transition disabled:opacity-50"
+            className="font-display tabular-nums text-xs px-4 py-2 rounded-xl bg-signal-hold/25 text-signal-hold border border-signal-hold/40 hover:bg-signal-hold/40 transition disabled:opacity-50"
           >
             {pmRunning ? "Premarket running…" : "🛠 Run Premarket Feed"}
           </button>
@@ -560,7 +560,7 @@ export default function SurpriseStocks({
             type="button"
             onClick={() => void runMarketAwareQuoteFeed(false)}
             disabled={quoteFeedBusy || pmRunning}
-            className="font-mono text-xs px-4 py-2 rounded-lg bg-sky-600/25 text-sky-200 border border-sky-500/40 hover:bg-sky-600/40 transition disabled:opacity-50"
+            className="font-display tabular-nums text-xs px-4 py-2 rounded-xl bg-signal-prepare/25 text-signal-prepare border border-signal-prepare/40 hover:bg-signal-prepare/40 transition disabled:opacity-50"
           >
             {quoteFeedBusy ? "Bulk quotes…" : "📡 Bulk Quote Feed (50×)"}
           </button>
@@ -568,7 +568,7 @@ export default function SurpriseStocks({
             type="button"
             onClick={() => fetchSurpriseStocks(true)}
             disabled={loading}
-            className="font-mono text-xs px-4 py-2 rounded-lg bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-600/45 transition disabled:opacity-50"
+            className="font-display tabular-nums text-xs px-4 py-2 rounded-xl bg-signal-buy/30 text-signal-buy border border-signal-buy/40 hover:bg-signal-buy/45 transition disabled:opacity-50"
           >
             {loading ? "Scanning…" : "Refresh Scan"}
           </button>
@@ -581,7 +581,7 @@ export default function SurpriseStocks({
                 ? "Halt after the current symbol — results already collected are kept"
                 : "Nothing is running"
             }
-            className="font-mono text-xs px-4 py-2 rounded-lg bg-rose-600/25 text-rose-200 border border-rose-500/40 hover:bg-rose-600/40 transition disabled:opacity-40"
+            className="font-display tabular-nums text-xs px-4 py-2 rounded-xl bg-signal-sell/25 text-white border border-signal-sell/40 hover:bg-signal-sell/40 transition disabled:opacity-40"
           >
             {stopBusy ? "Stopping…" : "⏹ Stop"}
           </button>
@@ -589,7 +589,7 @@ export default function SurpriseStocks({
             type="button"
             onClick={handleSearchBuysFromSurprise}
             disabled={stocks.length === 0 || sniperLoading}
-            className="font-mono text-xs bg-emerald-600/25 border border-emerald-500/50 text-emerald-200 rounded-lg px-3 py-2 transition hover:bg-emerald-600/35 disabled:opacity-50 shadow-lg shadow-emerald-900/20"
+            className="font-display tabular-nums text-xs bg-signal-buy/25 border border-signal-buy/50 text-white rounded-xl px-3 py-2 transition hover:bg-signal-buy/35 disabled:opacity-50 shadow-lg shadow-emerald-900/20"
           >
             {sniperLoading ? "Sniping…" : "🎯 Search for Buy Stocks (1-4)"}
           </button>
@@ -598,24 +598,24 @@ export default function SurpriseStocks({
             onClick={() => void notifyTopPicks()}
             disabled={notifyBusy}
             title="Send the current top 5 Surprise Momentum picks to Telegram"
-            className="font-mono text-xs bg-sky-600/25 border border-sky-500/50 text-sky-200 rounded-lg px-3 py-2 transition hover:bg-sky-600/35 disabled:opacity-50 shadow-lg shadow-sky-900/20"
+            className="font-display tabular-nums text-xs bg-signal-prepare/25 border border-signal-prepare/50 text-signal-prepare rounded-xl px-3 py-2 transition hover:bg-signal-prepare/35 disabled:opacity-50 shadow-lg shadow-sky-900/20"
           >
             {notifyBusy ? "Sending…" : "📨 Send Top 5 to Telegram"}
           </button>
 
         </div>
         {notifyMsg && (
-          <p className="font-mono text-[11px] text-white/60 mt-2">{notifyMsg}</p>
+          <p className="font-display tabular-nums text-[11px] text-white/60 mt-2">{notifyMsg}</p>
         )}
       </div>
 
       {(pmRunning || (pmProgress && pmProgress.stage && pmProgress.stage !== "idle")) && (
-        <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3">
+        <div className="mb-4 rounded-2xl border border-signal-hold/30 bg-signal-hold/5 px-4 py-3">
           <div className="flex flex-wrap justify-between gap-2 mb-2">
-            <p className="font-mono text-[11px] text-amber-200">
+            <p className="font-display tabular-nums text-[11px] text-signal-hold">
               Premarket · {pmProgress?.stage || "—"}
             </p>
-            <p className="font-mono text-[10px] text-mist/60">
+            <p className="font-display tabular-nums text-[10px] text-mist/60">
               {pmProgress?.processed ?? 0}/{pmProgress?.total ?? "—"} · {formatEta(pmProgress?.elapsed_sec)} · ETA{" "}
               {formatEta(pmProgress?.eta_sec)}
             </p>
@@ -626,11 +626,11 @@ export default function SurpriseStocks({
               style={{ width: `${pmPct}%` }}
             />
           </div>
-          <p className="font-mono text-[10px] text-mist/50 mt-1.5">
+          <p className="font-display tabular-nums text-[10px] text-mist/50 mt-1.5">
             {pmPct}% · {pmProgress?.message || "…"}
-            {wsConnected && <span className="text-emerald-400/80 ml-2">● live</span>}
+            {wsConnected && <span className="text-signal-buy/80 ml-2">● live</span>}
             {!!yfRateLimit?.waiters && (
-              <span className="text-amber-400/80 ml-2">
+              <span className="text-signal-hold/80 ml-2">
                 · queued behind shared rate limit ({yfRateLimit.waiters} waiting)
               </span>
             )}
@@ -640,12 +640,12 @@ export default function SurpriseStocks({
 
       {/* Live surprise scan pipeline (same idea as Market Scan) */}
       {(loading || (scanProg && scanProg.total > 0 && scanProg.percent < 100)) && (
-        <div className="mb-4 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-3">
+        <div className="mb-4 rounded-2xl border border-signal-buy/30 bg-signal-buy/5 px-4 py-3">
           <div className="flex flex-wrap justify-between gap-2 mb-2">
-            <p className="font-mono text-[11px] text-emerald-300">
+            <p className="font-display tabular-nums text-[11px] text-signal-buy">
               Surprise scan · {scanProg?.hits ?? 0} hits
             </p>
-            <p className="font-mono text-[10px] text-mist/60">
+            <p className="font-display tabular-nums text-[10px] text-mist/60">
               {scanProg?.processed ?? 0}/{scanProg?.total ?? "—"} · quotes {scanProg?.quotes_ok ?? 0} ·{" "}
               {formatEta(scanProg?.elapsed)} · ETA {formatEta(scanProg?.eta_sec)}
             </p>
@@ -656,28 +656,28 @@ export default function SurpriseStocks({
               style={{ width: `${scPct}%` }}
             />
           </div>
-          <p className="font-mono text-[10px] text-mist/50 mt-1.5">{scPct}% complete</p>
+          <p className="font-display tabular-nums text-[10px] text-mist/50 mt-1.5">{scPct}% complete</p>
         </div>
       )}
 
       {pmError && (
-        <div className="mb-4 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 font-mono text-[11px] text-rose-200">
+        <div className="mb-4 rounded-xl border border-signal-sell/40 bg-signal-sell/10 px-3 py-2 font-display tabular-nums text-[11px] text-white">
           Premarket: {pmError}
         </div>
       )}
       {error && (
-        <div className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 font-mono text-[11px] text-amber-200">
+        <div className="mb-4 rounded-xl border border-signal-hold/40 bg-signal-hold/10 px-3 py-2 font-display tabular-nums text-[11px] text-signal-hold">
           {error}
         </div>
       )}
 
 
       {/* Premarket / Surprise Feed Health */}
-      <div className="mt-2 mb-6 border border-slate bg-ink/40 rounded-xl p-4 sm:p-5">
+      <div className="mt-2 mb-6 border border-slate bg-ink/40 rounded-2xl p-4 sm:p-5">
         <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
           <div>
-            <h3 className="font-mono text-sm font-bold text-paper">Premarket Feed Health</h3>
-            <p className="font-mono text-[10px] text-mist/50 mt-0.5">
+            <h3 className="font-display tabular-nums text-sm font-bold text-paper">Premarket Feed Health</h3>
+            <p className="font-display tabular-nums text-[10px] text-mist/50 mt-0.5">
               Audit live quote cache and refresh safely (2h open / durable closed).
               {healthData?.market_open != null
                 ? healthData.market_open
@@ -691,48 +691,48 @@ export default function SurpriseStocks({
             type="button"
             onClick={() => void fetchSurpriseHealth()}
             disabled={healthLoading}
-            className="font-mono text-xs px-3 py-1.5 bg-graphite text-mist rounded-lg border border-slate hover:bg-slate/40 transition disabled:opacity-50"
+            className="font-display tabular-nums text-xs px-3 py-1.5 bg-graphite text-mist rounded-xl border border-slate hover:bg-slate/40 transition disabled:opacity-50"
           >
             {healthLoading ? "Auditing…" : "🔄 Refresh Audit"}
           </button>
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div className="p-3 rounded-lg bg-graphite/80 border border-slate/60">
-            <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">Health score</div>
+          <div className="p-3 rounded-xl bg-graphite/80 border border-slate/60">
+            <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">Health score</div>
             <div
-              className={`font-mono text-xl font-bold mt-1 ${
+              className={`font-display tabular-nums text-xl font-bold mt-1 ${
                 (healthData?.health_score ?? 0) >= 90
-                  ? "text-emerald-400"
+                  ? "text-signal-buy"
                   : (healthData?.health_score ?? 0) >= 70
-                    ? "text-amber-300"
-                    : "text-rose-400"
+                    ? "text-signal-hold"
+                    : "text-signal-sell"
               }`}
             >
               {healthData?.health_score ?? "—"}%
             </div>
           </div>
-          <div className="p-3 rounded-lg bg-graphite/80 border border-slate/60">
-            <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">Total tracked</div>
-            <div className="font-mono text-xl font-bold text-paper mt-1">
+          <div className="p-3 rounded-xl bg-graphite/80 border border-slate/60">
+            <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">Total tracked</div>
+            <div className="font-display tabular-nums text-xl font-bold text-paper mt-1">
               {healthData?.total_tracked ?? "—"}
             </div>
           </div>
-          <div className="p-3 rounded-lg bg-graphite/80 border border-slate/60">
-            <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">Fully populated</div>
-            <div className="font-mono text-xl font-bold text-emerald-400 mt-1">
+          <div className="p-3 rounded-xl bg-graphite/80 border border-slate/60">
+            <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">Fully populated</div>
+            <div className="font-display tabular-nums text-xl font-bold text-signal-buy mt-1">
               {healthData?.fully_populated ?? "—"}
             </div>
           </div>
-          <div className="p-3 rounded-lg bg-graphite/80 border border-slate/60">
-            <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">Missing data</div>
-            <div className="font-mono text-xl font-bold text-rose-400 mt-1">
+          <div className="p-3 rounded-xl bg-graphite/80 border border-slate/60">
+            <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">Missing data</div>
+            <div className="font-display tabular-nums text-xl font-bold text-signal-sell mt-1">
               {healthData?.missing_data ?? "—"}
             </div>
           </div>
         </div>
         {healthData?.message && (
-          <p className="font-mono text-[10px] text-mist/50 mt-3">{healthData.message}</p>
+          <p className="font-display tabular-nums text-[10px] text-mist/50 mt-3">{healthData.message}</p>
         )}
 
         <div className="flex flex-wrap gap-2 mt-4">
@@ -746,22 +746,22 @@ export default function SurpriseStocks({
               // (incomplete_stocks), not the price-only missing_data count.
               ((healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 0) === 0)
             }
-            className="font-mono text-xs px-3 py-1.5 rounded-lg bg-rose-600/20 text-rose-200 border border-rose-500/40 hover:bg-rose-600/35 transition disabled:opacity-50"
+            className="font-display tabular-nums text-xs px-3 py-1.5 rounded-xl bg-signal-sell/20 text-white border border-signal-sell/40 hover:bg-signal-sell/35 transition disabled:opacity-50"
           >
             {batchRepairBusy ? "Repairing…" : "⚡ Auto-Repair Missing (15)"}
           </button>
         </div>
         {repairMsg && (
-          <p className={`font-mono text-[11px] mt-2 ${repairMsg.ok ? "text-emerald-300/80" : "text-rose-300/80"}`}>
+          <p className={`font-display tabular-nums text-[11px] mt-2 ${repairMsg.ok ? "text-signal-buy/80" : "text-signal-sell/80"}`}>
             {repairMsg.text}
           </p>
         )}
 
         {(healthData?.incomplete_stocks?.length ?? 0) > 0 && (
-          <div className="mt-4 overflow-x-auto rounded-lg border border-slate/60">
+          <div className="mt-4 overflow-x-auto rounded-xl border border-slate/60">
             <table className="w-full text-left text-xs">
               <thead>
-                <tr className="text-mist/50 border-b border-slate/60 font-mono text-[10px] uppercase tracking-wider">
+                <tr className="text-mist/50 border-b border-slate/60 font-display tabular-nums text-[10px] uppercase tracking-wider">
                   <th className="py-2 px-3">Symbol</th>
                   <th className="py-2 px-3">Price</th>
                   <th className="py-2 px-3">Missing</th>
@@ -771,13 +771,13 @@ export default function SurpriseStocks({
               <tbody>
                 {(healthData?.incomplete_stocks || []).map((stock) => (
                   <tr key={stock.symbol} className="border-b border-slate/40 hover:bg-ink/40">
-                    <td className="py-2 px-3 font-mono font-semibold text-paper">{stock.symbol}</td>
-                    <td className="py-2 px-3 font-mono text-rose-400">0 (missing)</td>
+                    <td className="py-2 px-3 font-display tabular-nums font-semibold text-paper">{stock.symbol}</td>
+                    <td className="py-2 px-3 font-display tabular-nums text-signal-sell">0 (missing)</td>
                     <td className="py-2 px-3">
                       {(stock.missing_fields || ["price"]).map((m) => (
                         <span
                           key={m}
-                          className="inline-block bg-rose-900/40 text-rose-300 px-1.5 py-0.5 rounded mr-1 text-[10px] uppercase"
+                          className="inline-block bg-signal-sell/40 text-signal-sell px-1.5 py-0.5 rounded mr-1 text-[10px] uppercase"
                         >
                           {m}
                         </span>
@@ -788,7 +788,7 @@ export default function SurpriseStocks({
                         type="button"
                         onClick={() => void handleRepairSingle(stock.symbol)}
                         disabled={patchingSymbol === stock.symbol || batchRepairBusy}
-                        className="font-mono text-[11px] px-2 py-1 bg-graphite text-mist rounded border border-slate hover:bg-slate/40 disabled:opacity-50"
+                        className="font-display tabular-nums text-[11px] px-2 py-1 bg-graphite text-mist rounded border border-slate hover:bg-slate/40 disabled:opacity-50"
                       >
                         {patchingSymbol === stock.symbol ? "Patching…" : "Repair"}
                       </button>
@@ -804,7 +804,7 @@ export default function SurpriseStocks({
       <div className="overflow-x-auto">
         <table className="w-full text-left border-collapse">
           <thead>
-            <tr className="border-b border-slate/80 text-mist/50 font-mono text-[10px] uppercase tracking-wider">
+            <tr className="border-b border-slate/80 text-mist/50 font-display tabular-nums text-[10px] uppercase tracking-wider">
               <th className="py-2.5 px-3">Symbol</th>
               <th className="py-2.5 px-3">Tier</th>
               <th className="py-2.5 px-3">Score</th>
@@ -825,7 +825,7 @@ export default function SurpriseStocks({
                   <button
                     type="button"
                     onClick={() => onSelect?.(s.symbol)}
-                    className="font-mono font-semibold text-paper hover:text-emerald-300"
+                    className="font-display tabular-nums font-semibold text-paper hover:text-signal-buy"
                   >
                     {s.symbol}
                   </button>
@@ -833,42 +833,42 @@ export default function SurpriseStocks({
                 <td className="py-2.5 px-3">
                   <span
                     className={
-                      "font-mono text-[10px] px-2 py-0.5 rounded border " +
+                      "font-display tabular-nums text-[10px] px-2 py-0.5 rounded border " +
                       (isBuilding
-                        ? "bg-amber-950/60 text-amber-300 border-amber-700/40"
-                        : "bg-emerald-950/60 text-emerald-300 border-emerald-700/40")
+                        ? "bg-signal-hold/60 text-signal-hold border-signal-hold/40"
+                        : "bg-signal-buy/60 text-signal-buy border-signal-buy/40")
                     }
                   >
                     {isBuilding ? "Building" : "Breakout"}
                   </span>
                 </td>
                 <td className="py-2.5 px-3">
-                  <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-700/50">
+                  <span className="font-display tabular-nums text-[11px] px-2 py-0.5 rounded bg-signal-buy/80 text-signal-buy border border-signal-buy/50">
                     {s.score}/100
                   </span>
                 </td>
-                <td className="py-2.5 px-3 font-mono text-xs text-paper">
+                <td className="py-2.5 px-3 font-display tabular-nums text-xs text-paper">
                   {formatInrPrice(s as any, null, "—")}
                 </td>
-                <td className="py-2.5 px-3 font-mono text-xs font-semibold text-emerald-400">
+                <td className="py-2.5 px-3 font-display tabular-nums text-xs font-semibold text-signal-buy">
                   {Number(s.change_pct) >= 0 ? "+" : ""}
                   {Number(s.change_pct).toFixed(2)}%
                 </td>
-                <td className="py-2.5 px-3 font-mono text-xs text-amber-300 font-bold">
+                <td className="py-2.5 px-3 font-display tabular-nums text-xs text-signal-hold font-bold">
                   {Number(s.rvol).toFixed(2)}x
                   {typeof s.rvol_slope === "number" && s.rvol_slope > 0 && (
-                    <span className="text-emerald-400 ml-1">↑{s.rvol_slope.toFixed(2)}</span>
+                    <span className="text-signal-buy ml-1">↑{s.rvol_slope.toFixed(2)}</span>
                   )}
                 </td>
                 <td className="py-2.5 px-3">
-                  <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-700/40">
+                  <span className="font-display tabular-nums text-[10px] px-2 py-0.5 rounded bg-signal-prepare/60 text-signal-prepare border border-signal-prepare/40">
                     {s.trigger_type}
                   </span>
                 </td>
-                <td className="py-2.5 px-3 font-mono text-xs text-emerald-300/90">
+                <td className="py-2.5 px-3 font-display tabular-nums text-xs text-signal-buy/90">
                   ₹{Number(s.target_1).toFixed(2)}
                 </td>
-                <td className="py-2.5 px-3 font-mono text-xs text-rose-300/90">
+                <td className="py-2.5 px-3 font-display tabular-nums text-xs text-signal-sell/90">
                   ₹{Number(s.trailing_stop).toFixed(2)}
                 </td>
               </tr>
@@ -876,14 +876,14 @@ export default function SurpriseStocks({
             })}
             {stocks.length === 0 && !loading && (
               <tr>
-                <td colSpan={9} className="py-10 text-center font-mono text-xs text-mist/45">
+                <td colSpan={9} className="py-10 text-center font-display tabular-nums text-xs text-mist/45">
                   No surprise breakouts or early-building setups right now.
                 </td>
               </tr>
             )}
             {loading && stocks.length === 0 && (
               <tr>
-                <td colSpan={9} className="py-10 text-center font-mono text-xs text-mist/50">
+                <td colSpan={9} className="py-10 text-center font-display tabular-nums text-xs text-mist/50">
                   Scanning universe… {scanProg ? `${scanProg.processed}/${scanProg.total}` : ""}
                 </td>
               </tr>

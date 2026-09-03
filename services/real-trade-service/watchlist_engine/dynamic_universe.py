@@ -118,19 +118,58 @@ async def refresh_dynamic_universe(db=None) -> Optional[dict]:
         except Exception as e:
             logger.warning("dynamic_universe: unsubscribe call failed (%s)", e)
 
+    # 2026-09-03 — trigger the event tracker's own /check pass so the newly
+    # (un)subscribed symbols' cache actually gets populated. Found via audit
+    # that nothing anywhere called /check on a schedule — /events/raw-feed
+    # only ever reads the cache, never populates it, so Tier 2 could stay
+    # permanently cold for any symbol added here. /check iterates every
+    # subscription with a 1s stagger (rate-limit friendly by design), so
+    # this can take a while with a full 60-symbol universe — generous
+    # timeout, and a failure here is logged but never fails the cycle.
+    try:
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            r = await client.get(f"{config.EVENT_URL}/check")
+            r.raise_for_status()
+        logger.info("dynamic_universe: triggered /check to warm the event cache")
+    except Exception as e:
+        logger.warning("dynamic_universe: /check trigger failed (%s) — Tier 2 cache may be stale", e)
+
     return result
 
 
 async def _compute_desired_universe() -> list[str]:
     """
-    Broad, cheap "what's actually moving right now" source. Reuses the
-    same scanner Tier 3 already relies on (candidate_engine) rather than
-    inventing a second universe-detection mechanism.
+    Broad, cheap "what's actually moving right now" source.
+
+    2026-09-03 widened: previously volume-shock only (candidate_engine's
+    scanner, still the primary source — proven, already running for
+    Tier 3). Now unions in api-gateway's full-market NSE gainers/losers/
+    volume-gainers board too (/market/momentum-movers, a thin wrapper
+    around the existing _get_momentum_movers used internally by hot-picks)
+    — this catches broader momentum than pure volume-shock alone, without
+    inventing a third detection mechanism. Either source failing is
+    non-fatal; the other still contributes.
     """
     from candidate_engine.candidates import _fetch_volume_shock_universe
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        symbols = await _fetch_volume_shock_universe(client)
+    symbols: list[str] = []
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            vol_shock = await _fetch_volume_shock_universe(client)
+        symbols.extend(vol_shock)
+    except Exception as e:
+        logger.warning("dynamic_universe: volume-shock source failed (%s), continuing with momentum-movers only", e)
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(f"{config.API_GATEWAY_URL}/market/momentum-movers")
+            r.raise_for_status()
+            movers = r.json().get("symbols", [])
+        symbols.extend(movers)
+    except Exception as e:
+        logger.warning("dynamic_universe: momentum-movers source failed (%s), continuing with volume-shock only", e)
+
     return list(dict.fromkeys(s.upper() for s in symbols))  # de-dup, preserve order
 
 

@@ -125,7 +125,7 @@ export default function IpoFeedHealth() {
   const health = stats?.health_score ?? 0;
 
   return (
-    <div className="rounded-lg border border-white/10 bg-black/30 p-4 mt-4">
+    <div className="rounded-xl border border-white/10 bg-black/30 p-4 mt-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <p className="text-sm font-semibold text-white/90">🗄️ IPO Database Feed Health</p>
@@ -136,14 +136,14 @@ export default function IpoFeedHealth() {
         <div className="flex items-center gap-2 flex-wrap">
           {missing > 0 && (
             <button
-              className="text-xs px-3 py-1.5 rounded border border-emerald-500/40 bg-emerald-600/20 text-emerald-200 hover:bg-emerald-600/35 disabled:opacity-50"
+              className="text-xs px-3 py-1.5 rounded border border-signal-buy/40 bg-signal-buy/20 text-white hover:bg-signal-buy/35 disabled:opacity-50"
               onClick={() => void autoRepairAll()}
               disabled={repairBusy}
               title="Re-runs the analysis only for symbols currently missing a field (bounded batch), not a full re-scan"
             >
               {repairBusy ? (
                 <span className="inline-flex items-center gap-1.5">
-                  <BusySpinner className="border-emerald-200" /> Repairing…
+                  <BusySpinner className="border-white" /> Repairing…
                 </span>
               ) : (
                 "🛠 Auto-Repair All"
@@ -159,7 +159,7 @@ export default function IpoFeedHealth() {
               user needed it most. Now it also shows whenever total === 0. */}
           {(missing > 0 || total === 0) && (
             <button
-              className="text-xs px-3 py-1.5 rounded border border-rose-500/40 bg-rose-600/20 text-rose-200 hover:bg-rose-600/35 disabled:opacity-50"
+              className="text-xs px-3 py-1.5 rounded border border-signal-sell/40 bg-signal-sell/20 text-white hover:bg-signal-sell/35 disabled:opacity-50"
               onClick={() => void forceRescan()}
               disabled={rescanBusy}
               title={
@@ -170,7 +170,7 @@ export default function IpoFeedHealth() {
             >
               {rescanBusy ? (
                 <span className="inline-flex items-center gap-1.5">
-                  <BusySpinner className="border-rose-200" /> Starting…
+                  <BusySpinner className="border-white" /> Starting…
                 </span>
               ) : total === 0 ? (
                 "⚡ Run Initial Scan"
@@ -195,7 +195,7 @@ export default function IpoFeedHealth() {
         </div>
       </div>
 
-      {error && <p className="text-xs text-rose-400 mt-2">{error}</p>}
+      {error && <p className="text-xs text-signal-sell mt-2">{error}</p>}
       {/* Bug fix: /ipo/audit's `message`/`error` fields (e.g. "No IPO
           database configured — scan results are cache-only.") were parsed
           into IpoAuditStats but never rendered — the panel just showed
@@ -204,10 +204,10 @@ export default function IpoFeedHealth() {
           production, indistinguishable in the UI from "scan ran but wrote
           zero rows" until now. */}
       {!error && stats && (stats.message || stats.error) && (
-        <p className="text-xs text-amber-400 mt-2">⚠️ {stats.message || stats.error}</p>
+        <p className="text-xs text-signal-hold mt-2">⚠️ {stats.message || stats.error}</p>
       )}
-      {repairMsg && <p className="text-xs text-emerald-400 mt-2">{repairMsg}</p>}
-      {rescanMsg && <p className="text-xs text-emerald-400 mt-2">{rescanMsg}</p>}
+      {repairMsg && <p className="text-xs text-signal-buy mt-2">{repairMsg}</p>}
+      {rescanMsg && <p className="text-xs text-signal-buy mt-2">{rescanMsg}</p>}
 
 
 
@@ -253,7 +253,7 @@ export default function IpoFeedHealth() {
                     {row.missing_fields.map((f) => (
                       <span
                         key={f}
-                        className="inline-block mr-1 mb-1 px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 text-[10px]"
+                        className="inline-block mr-1 mb-1 px-1.5 py-0.5 rounded bg-signal-sell/15 text-signal-sell border border-signal-sell/30 text-[10px]"
                       >
                         {f}
                       </span>
@@ -268,7 +268,7 @@ export default function IpoFeedHealth() {
           </p>
         </div>
       ) : (
-        <p className="text-xs text-emerald-400 mt-3">All tracked IPOs are fully scored ✓</p>
+        <p className="text-xs text-signal-buy mt-3">All tracked IPOs are fully scored ✓</p>
       )}
     </div>
   );

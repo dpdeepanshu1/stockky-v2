@@ -359,11 +359,11 @@ export default function Trades() {
     <div className="max-w-5xl mx-auto p-6 space-y-6">
       {toast && (
         <div
-          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-lg font-mono text-sm border shadow-lg ${
+          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl font-display tabular-nums text-sm border shadow-lg ${
             toast.type === "success"
-              ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-400"
+              ? "bg-signal-buy/10 border-signal-buy/40 text-signal-buy"
               : toast.type === "error"
-              ? "bg-red-500/10 border-red-500/40 text-red-400"
+              ? "bg-signal-sell/10 border-signal-sell/40 text-signal-sell"
               : "bg-slate/20 border-slate/40 text-mist"
           }`}
         >
@@ -374,40 +374,40 @@ export default function Trades() {
       <DbStatusStrip status={dbStatus} />
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h2 className="font-mono text-sm text-paper uppercase tracking-widest">Paper Trading</h2>
+          <h2 className="font-display tabular-nums text-sm text-paper uppercase tracking-widest">Paper Trading</h2>
           <p className="text-[11px] text-mist/50 mt-0.5">Groww-style simulator · virtual cash · AI decisions</p>
         </div>
         <div className="flex gap-2 flex-wrap">
           <button
             onClick={() => setShowManual((v) => !v)}
-            className="text-xs font-mono uppercase tracking-wider bg-cyan-500/10 border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/20 rounded-lg px-3 py-2 transition"
+            className="text-xs font-display tabular-nums uppercase tracking-wider bg-signal-prepare/10 border border-signal-prepare/40 text-signal-prepare hover:bg-signal-prepare/20 rounded-xl px-3 py-2 transition"
           >
             + Add Stock
           </button>
           <button
             onClick={() => setShowDeposit(true)}
-            className="text-xs font-mono uppercase tracking-wider bg-emerald-500/15 border border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/25 rounded-lg px-3 py-2 transition"
+            className="text-xs font-display tabular-nums uppercase tracking-wider bg-signal-buy/15 border border-signal-buy/40 text-signal-buy hover:bg-signal-buy/25 rounded-xl px-3 py-2 transition"
           >
             + Add Funds
           </button>
           <button
             onClick={runMarkToMarket}
             disabled={markingToMarket}
-            className="text-xs font-mono uppercase tracking-wider bg-slate/40 hover:bg-slate/60 text-paper rounded-lg px-3 py-2 disabled:opacity-40 transition flex items-center gap-2"
+            className="text-xs font-display tabular-nums uppercase tracking-wider bg-slate/40 hover:bg-slate/60 text-paper rounded-xl px-3 py-2 disabled:opacity-40 transition flex items-center gap-2"
           >
             {markingToMarket && <Spinner />}
             {markingToMarket ? "Marking..." : "Mark to Market"}
           </button>
           <button
             onClick={loadBackups}
-            className="text-xs font-mono uppercase tracking-wider bg-slate/40 hover:bg-slate/60 text-mist rounded-lg px-3 py-2 transition"
+            className="text-xs font-display tabular-nums uppercase tracking-wider bg-slate/40 hover:bg-slate/60 text-mist rounded-xl px-3 py-2 transition"
           >
             Backups
           </button>
           <button
             onClick={runClearWithBackup}
             disabled={clearing}
-            className="text-xs font-mono uppercase tracking-wider bg-red-500/10 border border-red-500/40 text-red-400 hover:bg-red-500/20 rounded-lg px-3 py-2 disabled:opacity-40 transition"
+            className="text-xs font-display tabular-nums uppercase tracking-wider bg-signal-sell/10 border border-signal-sell/40 text-signal-sell hover:bg-signal-sell/20 rounded-xl px-3 py-2 disabled:opacity-40 transition"
           >
             {clearing ? "Clearing..." : "Clear All + Backup"}
           </button>
@@ -416,7 +416,7 @@ export default function Trades() {
 
       {showManual && (
         <div className="manual-trade-panel">
-          <h3 className="font-mono text-xs text-paper uppercase tracking-widest mb-2">Manual open position</h3>
+          <h3 className="font-display tabular-nums text-xs text-paper uppercase tracking-widest mb-2">Manual open position</h3>
           <div className="ai-warning">
             AI warning: Manual trades bypass Stockky decision scores, entry/target logic, and conviction filters.
             Size and timing are entirely your responsibility. Prefer scan → Trade buttons when possible.
@@ -443,7 +443,7 @@ export default function Trades() {
             <button type="button" className="btn-terminal" disabled={manualBusy} onClick={submitManualTrade}>
               {manualBusy ? "Opening…" : "Open paper trade"}
             </button>
-            <button type="button" className="text-xs font-mono text-mist border border-slate/40 rounded-lg px-3 py-2" onClick={() => setShowManual(false)}>
+            <button type="button" className="text-xs font-display tabular-nums text-mist border border-slate/40 rounded-xl px-3 py-2" onClick={() => setShowManual(false)}>
               Cancel
             </button>
           </div>
@@ -451,12 +451,12 @@ export default function Trades() {
       )}
 
       {showBackups && (
-        <div className="bg-graphite border border-slate/60 rounded-xl p-4">
+        <div className="bg-graphite border border-slate/60 rounded-2xl p-4">
           <div className="flex justify-between items-center mb-2">
-            <h3 className="font-mono text-xs text-mist uppercase tracking-widest">Backup history</h3>
+            <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest">Backup history</h3>
             <button onClick={() => setShowBackups(false)} className="text-xs text-mist hover:text-paper">Close</button>
           </div>
-          <p className="text-[10px] font-mono text-mist/50 mb-2">Kept for 14 days (DB when DATABASE_URL set).</p>
+          <p className="text-[10px] font-display tabular-nums text-mist/50 mb-2">Kept for 14 days (DB when DATABASE_URL set).</p>
           {backups.length === 0 ? (
             <p className="text-sm text-mist/60">No backups yet. Use Clear All + Backup to create one.</p>
           ) : (
@@ -466,7 +466,7 @@ export default function Trades() {
                   <button
                     type="button"
                     onClick={() => openBackupDetail(b)}
-                    className="font-mono text-xs text-sky-400 hover:text-sky-300 underline underline-offset-2 text-left"
+                    className="font-display tabular-nums text-xs text-signal-prepare hover:text-signal-prepare underline underline-offset-2 text-left"
                   >
                     {b}
                   </button>
@@ -475,7 +475,7 @@ export default function Trades() {
             </ul>
           )}
           {loadingBackup && (
-            <p className="text-xs text-mist/60 mt-2 font-mono">Loading backup…</p>
+            <p className="text-xs text-mist/60 mt-2 font-display tabular-nums">Loading backup…</p>
           )}
         </div>
       )}
@@ -485,17 +485,17 @@ export default function Trades() {
           <div className="bg-graphite border border-slate/60 rounded-2xl p-5 w-full max-w-lg max-h-[80vh] flex flex-col shadow-xl">
             <div className="flex items-start justify-between gap-3 mb-3">
               <div>
-                <h3 className="font-mono text-xs text-mist uppercase tracking-widest">Backup detail</h3>
-                <p className="font-mono text-sm text-paper mt-1 break-all">{backupDetail.filename}</p>
+                <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest">Backup detail</h3>
+                <p className="font-display tabular-nums text-sm text-paper mt-1 break-all">{backupDetail.filename}</p>
               </div>
               <button
                 onClick={() => setBackupDetail(null)}
-                className="text-xs font-mono text-mist hover:text-paper border border-slate/40 rounded-lg px-2 py-1"
+                className="text-xs font-display tabular-nums text-mist hover:text-paper border border-slate/40 rounded-xl px-2 py-1"
               >
                 Close
               </button>
             </div>
-            <div className="text-xs font-mono text-mist/80 space-y-2 mb-3">
+            <div className="text-xs font-display tabular-nums text-mist/80 space-y-2 mb-3">
               {backupDetail.data?.created_at && (
                 <p>Created: <span className="text-paper">{String(backupDetail.data.created_at)}</span></p>
               )}
@@ -509,11 +509,11 @@ export default function Trades() {
                 </span>
               </p>
             </div>
-            <div className="flex-1 overflow-auto rounded-lg bg-ink/50 border border-slate/40 p-3">
+            <div className="flex-1 overflow-auto rounded-xl bg-ink/50 border border-slate/40 p-3">
               {Array.isArray(backupDetail.data?.trades) && backupDetail.data.trades.length > 0 ? (
                 <ul className="space-y-2">
                   {backupDetail.data.trades.map((t: any, i: number) => (
-                    <li key={t.trade_id || i} className="font-mono text-[11px] border-b border-slate/30 pb-2 text-slate-300">
+                    <li key={t.trade_id || i} className="font-display tabular-nums text-[11px] border-b border-slate/30 pb-2 text-slate-300">
                       <span className="text-white font-bold">{t.symbol || "—"}</span>
                       {" · "}
                       {t.status || "—"}
@@ -522,7 +522,7 @@ export default function Trades() {
                       {" @ "}
                       {fmtPriceCell(safeTradePrice(t, "entry"))}
                       {t.pnl_pct != null && (
-                        <span className={Number(t.pnl_pct) >= 0 ? " text-emerald-400" : " text-red-400"}>
+                        <span className={Number(t.pnl_pct) >= 0 ? " text-signal-buy" : " text-signal-sell"}>
                           {" · PnL "}{Number(t.pnl_pct)}%
                         </span>
                       )}
@@ -530,7 +530,7 @@ export default function Trades() {
                   ))}
                 </ul>
               ) : (
-                <pre className="font-mono text-[10px] text-mist/80 whitespace-pre-wrap break-all">
+                <pre className="font-display tabular-nums text-[10px] text-mist/80 whitespace-pre-wrap break-all">
                   {JSON.stringify(backupDetail.data, null, 2)}
                 </pre>
               )}
@@ -543,18 +543,18 @@ export default function Trades() {
       {addMoreId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/70 backdrop-blur-sm p-4">
           <div className="bg-graphite border border-slate/60 rounded-2xl p-6 w-full max-w-sm">
-            <h3 className="font-mono text-xs text-mist uppercase tracking-widest mb-1">Buy more</h3>
+            <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-1">Buy more</h3>
             <p className="text-[11px] text-mist/60 mb-4">Add quantity to open position (avg entry updates like Groww)</p>
-            <label className="block text-[10px] font-mono text-mist uppercase mb-1">Quantity</label>
+            <label className="block text-[10px] font-display tabular-nums text-mist uppercase mb-1">Quantity</label>
             <input type="number" min="0.01" step="1" value={addQty} onChange={(e) => setAddQty(e.target.value)}
-              className="w-full bg-ink/50 border border-slate/40 rounded-lg px-3 py-2 font-mono text-lg text-paper mb-3 focus:outline-none focus:border-emerald-500/60" autoFocus />
-            <label className="block text-[10px] font-mono text-mist uppercase mb-1">Price (optional — blank = last entry)</label>
+              className="w-full bg-ink/50 border border-slate/40 rounded-xl px-3 py-2 font-display tabular-nums text-lg text-paper mb-3 focus:outline-none focus:border-signal-buy/60" autoFocus />
+            <label className="block text-[10px] font-display tabular-nums text-mist uppercase mb-1">Price (optional — blank = last entry)</label>
             <input type="number" min="0" step="0.05" value={addPrice} onChange={(e) => setAddPrice(e.target.value)}
-              className="w-full bg-ink/50 border border-slate/40 rounded-lg px-3 py-2 font-mono text-paper mb-4 focus:outline-none focus:border-emerald-500/60" placeholder="Market / avg" />
+              className="w-full bg-ink/50 border border-slate/40 rounded-xl px-3 py-2 font-display tabular-nums text-paper mb-4 focus:outline-none focus:border-signal-buy/60" placeholder="Market / avg" />
             <div className="flex gap-2">
-              <button onClick={() => setAddMoreId(null)} className="flex-1 text-xs font-mono uppercase border border-slate/40 rounded-lg py-2 text-mist">Cancel</button>
+              <button onClick={() => setAddMoreId(null)} className="flex-1 text-xs font-display tabular-nums uppercase border border-slate/40 rounded-xl py-2 text-mist">Cancel</button>
               <button onClick={submitAddMore} disabled={adding}
-                className="flex-1 text-xs font-mono uppercase bg-emerald-500/20 border border-emerald-500/50 text-emerald-400 rounded-lg py-2 disabled:opacity-50">
+                className="flex-1 text-xs font-display tabular-nums uppercase bg-signal-buy/20 border border-signal-buy/50 text-signal-buy rounded-xl py-2 disabled:opacity-50">
                 {adding ? "Adding..." : "Confirm Buy"}
               </button>
             </div>
@@ -565,14 +565,14 @@ export default function Trades() {
       {showDeposit && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/70 backdrop-blur-sm p-4">
           <div className="bg-graphite border border-slate/60 rounded-2xl p-6 w-full max-w-sm">
-            <h3 className="font-mono text-xs text-mist uppercase tracking-widest mb-4">Add Dummy Funds</h3>
+            <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-4">Add Dummy Funds</h3>
             <div className="flex items-center gap-2 mb-4">
-              <span className="font-mono text-lg text-mist">Rs</span>
+              <span className="font-display tabular-nums text-lg text-mist">Rs</span>
               <input
                 type="number"
                 value={depositAmount}
                 onChange={(e) => setDepositAmount(e.target.value)}
-                className="flex-1 bg-ink/50 border border-slate/40 rounded-lg px-3 py-2 font-mono text-lg text-paper focus:outline-none focus:border-emerald-500/60"
+                className="flex-1 bg-ink/50 border border-slate/40 rounded-xl px-3 py-2 font-display tabular-nums text-lg text-paper focus:outline-none focus:border-signal-buy/60"
                 autoFocus
               />
             </div>
@@ -581,7 +581,7 @@ export default function Trades() {
                 <button
                   key={amt}
                   onClick={() => setDepositAmount(String(amt))}
-                  className="flex-1 text-[10px] font-mono border border-slate/40 rounded-lg py-1.5 text-mist hover:text-paper hover:border-slate/60 transition"
+                  className="flex-1 text-[10px] font-display tabular-nums border border-slate/40 rounded-xl py-1.5 text-mist hover:text-paper hover:border-slate/60 transition"
                 >
                   +{(amt / 1000).toFixed(0)}k
                 </button>
@@ -590,14 +590,14 @@ export default function Trades() {
             <div className="flex gap-2">
               <button
                 onClick={() => setShowDeposit(false)}
-                className="flex-1 text-xs font-mono uppercase tracking-wider border border-slate/40 rounded-lg py-2 text-mist hover:text-paper transition"
+                className="flex-1 text-xs font-display tabular-nums uppercase tracking-wider border border-slate/40 rounded-xl py-2 text-mist hover:text-paper transition"
               >
                 Cancel
               </button>
               <button
                 onClick={submitDeposit}
                 disabled={depositing}
-                className="flex-1 text-xs font-mono uppercase tracking-wider bg-emerald-500/20 border border-emerald-500/50 text-emerald-400 rounded-lg py-2 hover:bg-emerald-500/30 transition disabled:opacity-50 flex items-center justify-center gap-2"
+                className="flex-1 text-xs font-display tabular-nums uppercase tracking-wider bg-signal-buy/20 border border-signal-buy/50 text-signal-buy rounded-xl py-2 hover:bg-signal-buy/30 transition disabled:opacity-50 flex items-center justify-center gap-2"
               >
                 {depositing && <Spinner />}
                 {depositing ? "Adding..." : "Confirm"}
@@ -610,10 +610,10 @@ export default function Trades() {
       {summary && (
         <div className="bg-gradient-to-br from-graphite to-ink/60 border border-slate/60 rounded-2xl p-6">
           <div className="flex items-baseline justify-between mb-1">
-            <span className="font-mono text-[10px] text-mist/60 uppercase tracking-widest">Total Equity</span>
+            <span className="font-display tabular-nums text-[10px] text-mist/60 uppercase tracking-widest">Total Equity</span>
             <span
-              className={`font-mono text-xs px-2 py-0.5 rounded-full ${
-                summary.realized_pnl >= 0 ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"
+              className={`font-display tabular-nums text-xs px-2 py-0.5 rounded-full ${
+                summary.realized_pnl >= 0 ? "bg-signal-buy/15 text-signal-buy" : "bg-signal-sell/15 text-signal-sell"
               }`}
             >
               {summary.realized_pnl >= 0 ? "Up" : "Down"} {fmtMoney(Math.abs(summary.realized_pnl))} realized
@@ -651,17 +651,17 @@ export default function Trades() {
               highlight="down"
             />
           </div>
-          <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-mono text-mist/70">
+          <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-display tabular-nums text-mist/70">
             <div>Open: <span className="text-paper">{openTrades.length}</span></div>
             <div>Closed: <span className="text-paper">{closedTrades.length}</span></div>
-            <div>Realized: <span className={summary.realized_pnl >= 0 ? "text-emerald-400" : "text-red-400"}>{fmtMoney(summary.realized_pnl)}</span></div>
+            <div>Realized: <span className={summary.realized_pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}>{fmtMoney(summary.realized_pnl)}</span></div>
             <div>Equity: <span className="text-paper tabular-nums">{fmtMoney(summary.total_equity)}</span></div>
           </div>
         </div>
       )}
 
-      <div className="bg-graphite border border-slate/60 rounded-xl p-5">
-        <div className="flex gap-1 bg-ink/40 border border-slate/40 rounded-lg p-0.5 w-fit mb-4 flex-wrap">
+      <div className="bg-graphite border border-slate/60 rounded-2xl p-5">
+        <div className="flex gap-1 bg-ink/40 border border-slate/40 rounded-xl p-0.5 w-fit mb-4 flex-wrap">
           {([
             ["open", `Open (${openTrades.length})`],
             ["closed", `Closed (${closedTrades.length})`],
@@ -671,7 +671,7 @@ export default function Trades() {
             <button
               key={key}
               onClick={() => setTab(key)}
-              className={`px-3 py-1 text-xs font-mono uppercase rounded-md transition-colors ${
+              className={`px-3 py-1 text-xs font-display tabular-nums uppercase rounded-xl transition-colors ${
                 tab === key ? "bg-slate/60 text-paper" : "text-mist/50 hover:text-mist"
               }`}
             >
@@ -707,7 +707,7 @@ export default function Trades() {
             <Empty text="No closed positions yet." />
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-xs font-mono">
+              <table className="w-full text-xs font-display tabular-nums">
                 <thead>
                   <tr className="text-mist/50 uppercase tracking-wider border-b border-slate/40">
                     <th className="text-left py-2 pr-3">Symbol</th>
@@ -725,7 +725,7 @@ export default function Trades() {
                       <td className="py-2 pr-3">{t.symbol}</td>
                       <td className="text-right py-2 px-2">{fmtPriceCell(safeTradePrice(t, "entry"))}</td>
                       <td className="text-right py-2 px-2">{fmtPriceCell(safeTradePrice(t, "exit"))}</td>
-                      <td className={`text-right py-2 px-2 ${(t.pnl_pct ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      <td className={`text-right py-2 px-2 ${(t.pnl_pct ?? 0) >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
                         {fmtPct(t.pnl_pct)}
                       </td>
                       <td className="text-right py-2 px-2 text-mist/60">{t.exit_reason?.replace(/_/g, " ") ?? "—"}</td>
@@ -759,46 +759,46 @@ function PositionCard({
   const isUp = (trade.pnl_pct ?? 0) >= 0;
   const days = daysHeld(trade.entry_date);
   return (
-    <div className="border border-slate/40 rounded-xl overflow-hidden transition-all hover:border-slate/60">
+    <div className="border border-slate/40 rounded-2xl overflow-hidden transition-all hover:border-slate/60">
       <div onClick={onToggle} className="p-4 cursor-pointer flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
-          <div className={`w-1.5 h-10 rounded-full shrink-0 ${isUp ? "bg-emerald-400" : "bg-red-400"}`} />
+          <div className={`w-1.5 h-10 rounded-full shrink-0 ${isUp ? "bg-signal-buy" : "bg-signal-sell"}`} />
           <div className="min-w-0">
             <div className="font-display text-lg text-paper truncate">{trade.symbol}</div>
-            <div className="font-mono text-[10px] text-mist/50">
+            <div className="font-display tabular-nums text-[10px] text-mist/50">
               {trade.quantity} sh @ {fmtPriceCell(safeTradePrice(trade, "entry"))} · {days}d held
             </div>
           </div>
         </div>
         <div className="text-right shrink-0">
-          <div className="font-mono text-sm text-paper">{fmtPriceCell(safeTradePrice(trade, "last") || Number(trade.current_price))}</div>
-          <div className={`font-mono text-xs ${isUp ? "text-emerald-400" : "text-red-400"}`}>
+          <div className="font-display tabular-nums text-sm text-paper">{fmtPriceCell(safeTradePrice(trade, "last") || Number(trade.current_price))}</div>
+          <div className={`font-display tabular-nums text-xs ${isUp ? "text-signal-buy" : "text-signal-sell"}`}>
             {fmtPct(trade.pnl_pct)}
           </div>
         </div>
-        <span className={`font-mono text-mist/40 text-xs transition-transform duration-200 ${expanded ? "rotate-180" : ""}`}>▾</span>
+        <span className={`font-display tabular-nums text-mist/40 text-xs transition-transform duration-200 ${expanded ? "rotate-180" : ""}`}>▾</span>
       </div>
       {expanded && (
         <div className="border-t border-slate/30 p-4 bg-ink/20">
           <StockChart symbol={trade.symbol} compact />
-          <div className="grid grid-cols-3 gap-3 mt-3 font-mono text-xs">
+          <div className="grid grid-cols-3 gap-3 mt-3 font-display tabular-nums text-xs">
             <div>
               <div className="text-mist/40 text-[10px] uppercase">Target</div>
-              <div className="text-emerald-400">{trade.target ? `₹${trade.target}` : "—"}</div>
+              <div className="text-signal-buy">{trade.target ? `₹${trade.target}` : "—"}</div>
             </div>
             <div>
               <div className="text-mist/40 text-[10px] uppercase">Stop Loss</div>
-              <div className="text-red-400">{trade.stop_loss ? `₹${trade.stop_loss}` : "—"}</div>
+              <div className="text-signal-sell">{trade.stop_loss ? `₹${trade.stop_loss}` : "—"}</div>
             </div>
             <div>
               <div className="text-mist/40 text-[10px] uppercase">P&amp;L Amount</div>
-              <div className={isUp ? "text-emerald-400" : "text-red-400"}>{fmtMoney(trade.pnl_amount)}</div>
+              <div className={isUp ? "text-signal-buy" : "text-signal-sell"}>{fmtMoney(trade.pnl_amount)}</div>
             </div>
           </div>
           <button
             onClick={(e) => { e.stopPropagation(); onClose(); }}
             disabled={closing}
-            className="mt-4 w-full text-[10px] uppercase tracking-wider text-mist/60 hover:text-paper border border-slate/40 rounded-lg py-2 disabled:opacity-40 transition"
+            className="mt-4 w-full text-[10px] uppercase tracking-wider text-mist/60 hover:text-paper border border-slate/40 rounded-xl py-2 disabled:opacity-40 transition"
           >
             {closing ? "Closing..." : "Close Position at Market"}
           </button>
@@ -812,7 +812,7 @@ function ReportTable({ rows, periodLabel }: { rows: TradeReportBucket[]; periodL
   if (rows.length === 0) return <Empty text="No trade activity in this window yet." />;
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-xs font-mono">
+      <table className="w-full text-xs font-display tabular-nums">
         <thead>
           <tr className="text-mist/50 uppercase tracking-wider border-b border-slate/40">
             <th className="text-left py-2 pr-3">{periodLabel}</th>
@@ -829,7 +829,7 @@ function ReportTable({ rows, periodLabel }: { rows: TradeReportBucket[]; periodL
               <td className="text-right py-2 px-2 text-mist/70">{r.trades_opened}</td>
               <td className="text-right py-2 px-2 text-mist/70">{r.trades_closed}</td>
               <td className="text-right py-2 px-2 text-mist/70">{r.win_rate == null ? "—" : `${r.win_rate}%`}</td>
-              <td className={`text-right py-2 pl-2 ${r.realized_pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              <td className={`text-right py-2 pl-2 ${r.realized_pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
                 {fmtMoney(r.realized_pnl)}
               </td>
             </tr>
@@ -850,11 +850,11 @@ function Spinner({ size = "sm" }: { size?: "sm" | "lg" }) {
 }
 
 function StatCard({ label, value, highlight }: { label: string; value: string | number; highlight?: "up" | "down" }) {
-  const color = highlight === "up" ? "text-emerald-400" : highlight === "down" ? "text-red-400" : "text-paper";
+  const color = highlight === "up" ? "text-signal-buy" : highlight === "down" ? "text-signal-sell" : "text-paper";
   return (
-    <div className="bg-ink/40 border border-slate/40 rounded-xl px-4 py-3">
-      <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">{label}</div>
-      <div className={`font-mono text-lg mt-1 ${color}`}>{value}</div>
+    <div className="bg-ink/40 border border-slate/40 rounded-2xl px-4 py-3">
+      <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">{label}</div>
+      <div className={`font-display tabular-nums text-lg mt-1 ${color}`}>{value}</div>
     </div>
   );
 }
@@ -862,7 +862,7 @@ function StatCard({ label, value, highlight }: { label: string; value: string | 
 function DbStatusStrip({ status }: { status: any }) {
   if (!status) {
     return (
-      <div className="font-mono text-[11px] text-mist/60 border border-slate/40 rounded-lg px-3 py-2">
+      <div className="font-display tabular-nums text-[11px] text-mist/60 border border-slate/40 rounded-xl px-3 py-2">
         Checking database connection…
       </div>
     );
@@ -870,17 +870,17 @@ function DbStatusStrip({ status }: { status: any }) {
   const bad = status.db_connected === false;
   const warn = !bad && (status.db_backend === "sqlite" || status.db_durable === false);
   const cls = bad
-    ? "border-red-500/40 bg-red-500/10 text-red-300"
+    ? "border-signal-sell/40 bg-signal-sell/10 text-signal-sell"
     : warn
-    ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
-    : "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
+    ? "border-signal-hold/40 bg-signal-hold/10 text-signal-hold"
+    : "border-signal-buy/40 bg-signal-buy/10 text-signal-buy";
   const title = bad
     ? "Database not connected"
     : warn
     ? "SQLite only — data may reset on redeploy"
     : `Postgres connected (${status.db_provider || "supabase/neon"})`;
   return (
-    <div className={`font-mono text-[11px] rounded-lg px-3 py-2 border ${cls}`}>
+    <div className={`font-display tabular-nums text-[11px] rounded-xl px-3 py-2 border ${cls}`}>
       <span className="font-semibold uppercase tracking-wide text-[10px]">{title}</span>
       {(status.db_error || status.db_message) && (
         <span className="opacity-90"> — {status.db_error || status.db_message}</span>

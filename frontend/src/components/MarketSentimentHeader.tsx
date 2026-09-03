@@ -46,10 +46,10 @@ export default function MarketSentimentHeader() {
   if (error) {
     return (
       <div className="bg-graphite border border-signal-sell/30 rounded-2xl p-6">
-        <p className="text-signal-sell font-mono text-sm">{error}</p>
+        <p className="text-signal-sell font-display tabular-nums text-sm">{error}</p>
         <button
           onClick={() => fetchData(true)}
-          className="mt-2 text-mist hover:text-paper text-xs font-mono underline"
+          className="mt-2 text-mist hover:text-paper text-xs font-display tabular-nums underline"
         >
           Retry
         </button>
@@ -79,21 +79,21 @@ export default function MarketSentimentHeader() {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           <div>
-            <h2 className="font-mono text-xs text-mist uppercase tracking-widest">
+            <h2 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest">
               📊 Market Sentiment
             </h2>
             <div className="flex items-center gap-3 mt-1 flex-wrap">
               <span className={`text-lg font-bold ${moodColor.split(' ')[1]}`}>
                 {market_mood}
               </span>
-              <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono border ${moodColor}`}>
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-display tabular-nums border ${moodColor}`}>
                 Score: {Math.round(market_score)}/100
               </span>
               {formattedTime && (
-                <span className="text-[10px] text-mist/40 font-mono flex items-center gap-1">
+                <span className="text-[10px] text-mist/40 font-display tabular-nums flex items-center gap-1">
                   Updated: {formattedTime}
                   {stale && (
-                    <span className="text-yellow-500/60 ml-1" title="Data is stale – showing last known values">
+                    <span className="text-signal-hold/60 ml-1" title="Data is stale – showing last known values">
                       ⚠️
                     </span>
                   )}
@@ -105,14 +105,14 @@ export default function MarketSentimentHeader() {
 
         <div className="flex flex-wrap items-center gap-6">
           {/* NIFTY 50 */}
-          <div className="flex items-center gap-3 bg-ink/50 px-4 py-2 rounded-xl border border-slate/40">
+          <div className="flex items-center gap-3 bg-ink/50 px-4 py-2 rounded-2xl border border-slate/40">
             <div>
-              <div className="font-mono text-[10px] text-mist/60 uppercase tracking-wider">NIFTY 50</div>
-              <div className={`font-mono text-xl font-bold ${niftyColor}`}>
+              <div className="font-display tabular-nums text-[10px] text-mist/60 uppercase tracking-wider">NIFTY 50</div>
+              <div className={`font-display tabular-nums text-xl font-bold ${niftyColor}`}>
                 {nifty.price.toLocaleString("en-IN")}
               </div>
             </div>
-            <div className={`flex items-center gap-1 font-mono text-sm ${niftyColor}`}>
+            <div className={`flex items-center gap-1 font-display tabular-nums text-sm ${niftyColor}`}>
               {nifty.change >= 0 ? "▲" : "▼"}
               <span>{nifty.change >= 0 ? "+" : ""}{nifty.change.toFixed(2)}</span>
               <span className="text-[10px] opacity-70">
@@ -122,14 +122,14 @@ export default function MarketSentimentHeader() {
           </div>
 
           {/* SENSEX */}
-          <div className="flex items-center gap-3 bg-ink/50 px-4 py-2 rounded-xl border border-slate/40">
+          <div className="flex items-center gap-3 bg-ink/50 px-4 py-2 rounded-2xl border border-slate/40">
             <div>
-              <div className="font-mono text-[10px] text-mist/60 uppercase tracking-wider">SENSEX</div>
-              <div className={`font-mono text-xl font-bold ${sensexColor}`}>
+              <div className="font-display tabular-nums text-[10px] text-mist/60 uppercase tracking-wider">SENSEX</div>
+              <div className={`font-display tabular-nums text-xl font-bold ${sensexColor}`}>
                 {sensex.price.toLocaleString("en-IN")}
               </div>
             </div>
-            <div className={`flex items-center gap-1 font-mono text-sm ${sensexColor}`}>
+            <div className={`flex items-center gap-1 font-display tabular-nums text-sm ${sensexColor}`}>
               {sensex.change >= 0 ? "▲" : "▼"}
               <span>{sensex.change >= 0 ? "+" : ""}{sensex.change.toFixed(2)}</span>
               <span className="text-[10px] opacity-70">

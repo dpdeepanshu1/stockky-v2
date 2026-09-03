@@ -41,8 +41,8 @@ type RateLimitSnapshot = {
 
 function levelClass(level: string) {
   if (level === "critical") return "text-signal-sell border-signal-sell/40 bg-signal-sell/10";
-  if (level === "warn" || level === "degraded") return "text-amber-300 border-amber-500/40 bg-amber-500/10";
-  if (level === "watch") return "text-cyan-300 border-cyan-500/30 bg-cyan-500/5";
+  if (level === "warn" || level === "degraded") return "text-signal-hold border-signal-hold/40 bg-signal-hold/10";
+  if (level === "watch") return "text-signal-prepare border-signal-prepare/30 bg-signal-prepare/5";
   return "text-signal-buy border-signal-buy/30 bg-signal-buy/5";
 }
 
@@ -106,7 +106,7 @@ export default function RateLimitDashboard() {
 
       {data && (
         <>
-          <div className={`terminal-panel border rounded-lg px-3 py-2 ${levelClass(data.overall)}`}>
+          <div className={`terminal-panel border rounded-xl px-3 py-2 ${levelClass(data.overall)}`}>
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <span className="mono text-sm font-medium uppercase tracking-wider">
                 Overall: {data.overall}
@@ -121,7 +121,7 @@ export default function RateLimitDashboard() {
             {data.upstreams?.map((u) => (
               <div
                 key={u.id}
-                className={`terminal-panel border rounded-lg px-3 py-2 ${levelClass(u.level)}`}
+                className={`terminal-panel border rounded-xl px-3 py-2 ${levelClass(u.level)}`}
               >
                 <div className="flex justify-between items-baseline gap-2">
                   <span className="mono text-xs font-medium">{u.label}</span>
@@ -144,7 +144,7 @@ export default function RateLimitDashboard() {
                 {data.circuits.map((c, i) => (
                   <div key={c.name || i} className="flex justify-between mono text-[11px] gap-2">
                     <span>{c.name || "—"}</span>
-                    <span className={c.state === "open" ? "text-signal-sell" : c.state === "half_open" ? "text-amber-300" : "text-signal-buy"}>
+                    <span className={c.state === "open" ? "text-signal-sell" : c.state === "half_open" ? "text-signal-hold" : "text-signal-buy"}>
                       {c.state || "?"}{typeof c.failures === "number" ? ` (${c.failures} fails)` : ""}
                     </span>
                   </div>
@@ -181,7 +181,7 @@ export default function RateLimitDashboard() {
                   <tr key={i} className="border-b border-slate/20 align-top">
                     <td className="py-1 pr-2 whitespace-nowrap">{fmtTime(e.ts)}</td>
                     <td className="py-1 pr-2">{e.source}</td>
-                    <td className={`py-1 pr-2 ${e.status === 429 || e.status === 503 ? "text-amber-300" : ""}`}>
+                    <td className={`py-1 pr-2 ${e.status === 429 || e.status === 503 ? "text-signal-hold" : ""}`}>
                       {e.status}
                     </td>
                     <td className="py-1 pr-2">{e.symbol || "—"}</td>

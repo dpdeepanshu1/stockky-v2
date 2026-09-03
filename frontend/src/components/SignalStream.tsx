@@ -98,7 +98,7 @@ export default function SignalStream({
                 </span>
               </div>
               {prov && (
-                <div className="mono text-[10px] text-amber-400 mb-2 uppercase tracking-wide">
+                <div className="mono text-[10px] text-signal-hold mb-2 uppercase tracking-wide">
                   Provisional — not full conviction
                 </div>
               )}

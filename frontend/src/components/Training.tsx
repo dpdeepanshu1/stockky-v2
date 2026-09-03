@@ -582,9 +582,9 @@ export default function Training() {
           const val = metrics[key];
           if (val === undefined || val === null) return null;
           return (
-            <div key={key} className="bg-ink/40 border border-slate/40 rounded-lg px-3 py-2">
-              <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">{label}</div>
-              <div className="font-mono text-sm text-paper mt-0.5">{formatValue(key, val)}</div>
+            <div key={key} className="bg-ink/40 border border-slate/40 rounded-2xl px-3 py-2">
+              <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">{label}</div>
+              <div className="font-display tabular-nums text-sm text-paper mt-0.5">{formatValue(key, val)}</div>
             </div>
           );
         })}
@@ -604,7 +604,7 @@ export default function Training() {
     }
     return (
       <div className="overflow-x-auto mt-2">
-        <table className="w-full text-xs font-mono">
+        <table className="w-full text-xs font-display tabular-nums">
           <thead>
             <tr className="text-mist/50 border-b border-slate/40">
               <th className="text-left py-1 pr-3">{periodView === "daily" ? "Date" : "Week"}</th>
@@ -625,11 +625,11 @@ export default function Training() {
                 <td className="text-right py-1 px-2 text-mist/80">{row.predictions_recorded}</td>
                 <td className="text-right py-1 px-2 text-mist/80">{row.buy_now}</td>
                 <td className="text-right py-1 px-2 text-mist/80">{row.prepare_to_buy}</td>
-                <td className={`text-right py-1 px-2 ${row.t1_success_rate == null ? "text-mist/40" : row.t1_success_rate >= 50 ? "text-signal-buy" : "text-red-400"}`}>
+                <td className={`text-right py-1 px-2 ${row.t1_success_rate == null ? "text-mist/40" : row.t1_success_rate >= 50 ? "text-signal-buy" : "text-signal-sell"}`}>
                   {row.t1_success_rate == null ? "—" : `${row.t1_success_rate}%`}
                 </td>
                 <td className="text-right py-1 px-2 text-mist/60">{row.t1_avg_return_pct == null ? "—" : `${row.t1_avg_return_pct}%`}</td>
-                <td className={`text-right py-1 px-2 ${row.t5_success_rate == null ? "text-mist/40" : row.t5_success_rate >= 50 ? "text-signal-buy" : "text-red-400"}`}>
+                <td className={`text-right py-1 px-2 ${row.t5_success_rate == null ? "text-mist/40" : row.t5_success_rate >= 50 ? "text-signal-buy" : "text-signal-sell"}`}>
                   {row.t5_success_rate == null ? "—" : `${row.t5_success_rate}%`}
                 </td>
                 <td className="text-right py-1 px-2 text-mist/60">{row.t5_avg_return_pct == null ? "—" : `${row.t5_avg_return_pct}%`}</td>
@@ -648,7 +648,7 @@ export default function Training() {
 
     return (
       <div className="overflow-x-auto mt-2">
-        <table className="w-full text-xs font-mono">
+        <table className="w-full text-xs font-display tabular-nums">
           <thead>
             <tr className="text-mist/50 border-b border-slate/40">
               <th className="text-left py-1 pr-4">Symbol</th>
@@ -668,12 +668,12 @@ export default function Training() {
                 <td className="py-1 pr-4 text-mist/80">₹{p.price?.toFixed(2) || "—"}</td>
                 <td className="py-1 pr-4 text-mist/60">{formatDate(p.timestamp)}</td>
                 <td className="py-1 pr-4">
-                  <span className={p.t1_success === 1 ? "text-signal-buy" : p.t1_success === 0 ? "text-mist/40" : "text-red-400"}>
+                  <span className={p.t1_success === 1 ? "text-signal-buy" : p.t1_success === 0 ? "text-mist/40" : "text-signal-sell"}>
                     {p.t1_success === 1 ? "✅" : p.t1_success === 0 ? "⏳" : "❌"}
                   </span>
                 </td>
                 <td className="py-1 pr-4">
-                  <span className={p.t5_success === 1 ? "text-signal-buy" : p.t5_success === 0 ? "text-mist/40" : "text-red-400"}>
+                  <span className={p.t5_success === 1 ? "text-signal-buy" : p.t5_success === 0 ? "text-mist/40" : "text-signal-sell"}>
                     {p.t5_success === 1 ? "✅" : p.t5_success === 0 ? "⏳" : "❌"}
                   </span>
                 </td>
@@ -699,14 +699,14 @@ export default function Training() {
     return (
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
         {insights.map((insight, idx) => (
-          <div key={idx} className="bg-ink/40 border border-slate/40 rounded-lg px-3 py-2">
-            <div className="font-mono text-xs text-paper">{insight.insight}</div>
+          <div key={idx} className="bg-ink/40 border border-slate/40 rounded-2xl px-3 py-2">
+            <div className="font-display tabular-nums text-xs text-paper">{insight.insight}</div>
             <div className="flex gap-3 mt-1 text-xs text-mist/60">
               <span>📊 {insight.sample_size} samples</span>
-              <span className={insight.confidence === "high" ? "text-signal-buy" : "text-yellow-400"}>
+              <span className={insight.confidence === "high" ? "text-signal-buy" : "text-signal-hold"}>
                 {insight.confidence} confidence
               </span>
-              {insight.active && <span className="text-green-400">• active</span>}
+              {insight.active && <span className="text-signal-buy">• active</span>}
             </div>
           </div>
         ))}
@@ -719,12 +719,12 @@ export default function Training() {
       {/* Toast Alert */}
       {toast && (
         <div
-          className={`fixed top-20 right-4 z-50 px-5 py-3 rounded-xl shadow-2xl font-mono text-sm flex items-center gap-3 transition-all duration-300 transform ${
+          className={`fixed top-20 right-4 z-50 px-5 py-3 rounded-2xl shadow-2xl font-display tabular-nums text-sm flex items-center gap-3 transition-all duration-300 transform ${
             toast.type === "success"
-              ? "bg-green-500/20 border border-green-400/40 text-green-400"
+              ? "bg-signal-buy/20 border border-signal-buy/40 text-signal-buy"
               : toast.type === "error"
-              ? "bg-red-500/20 border border-red-400/40 text-red-400"
-              : "bg-blue-500/20 border border-blue-400/40 text-blue-400"
+              ? "bg-signal-sell/20 border border-signal-sell/40 text-signal-sell"
+              : "bg-signal-prepare/20 border border-signal-prepare/40 text-signal-prepare"
           } animate-slideIn`}
         >
           <span>{toast.message}</span>
@@ -741,11 +741,11 @@ export default function Training() {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <h2 className="font-display text-2xl text-paper">🧠 Training Intelligence
         {status?.service_url ? (
-          <span className="ml-2 font-mono text-[10px] text-signal-buy/80">· linked</span>
+          <span className="ml-2 font-display tabular-nums text-[10px] text-signal-buy/80">· linked</span>
         ) : status ? (
-          <span className="ml-2 font-mono text-[10px] text-mist/50">· status loaded</span>
+          <span className="ml-2 font-display tabular-nums text-[10px] text-mist/50">· status loaded</span>
         ) : (
-          <span className="ml-2 font-mono text-[10px] text-amber-300/80">· connecting…</span>
+          <span className="ml-2 font-display tabular-nums text-[10px] text-signal-hold/80">· connecting…</span>
         )}</h2>
         <div className="flex flex-wrap gap-3">
           <button
@@ -756,7 +756,7 @@ export default function Training() {
                 ? "Backend still reports a lock — will resume monitoring, or Clear Lock first"
                 : undefined
             }
-            className={`font-mono text-sm px-5 py-2 rounded-lg transition-all ${
+            className={`font-display tabular-nums text-sm px-5 py-2 rounded-2xl transition-all ${
               training
                 ? "bg-slate/30 text-mist/50 cursor-not-allowed"
                 : "bg-signal-prepare/20 text-signal-prepare border border-signal-prepare/30 hover:bg-signal-prepare/30"
@@ -778,7 +778,7 @@ export default function Training() {
           <button
             onClick={handleStopTraining}
             disabled={(!training && !status?.training_in_progress) || isStopping}
-            className="font-mono text-sm px-4 py-2 rounded-lg bg-red-500/20 text-red-400 border border-red-400/30 hover:bg-red-500/30 transition disabled:opacity-50"
+            className="font-display tabular-nums text-sm px-4 py-2 rounded-2xl bg-signal-sell/20 text-signal-sell border border-signal-sell/30 hover:bg-signal-sell/30 transition disabled:opacity-50"
           >
             {isStopping ? "Stopping..." : "⏹ Stop Training"}
           </button>
@@ -792,21 +792,21 @@ export default function Training() {
             }}
             disabled={isStopping}
             title="Force-release training.lock if a previous run crashed or timed out"
-            className="font-mono text-sm px-4 py-2 rounded-lg bg-amber-500/15 text-amber-300 border border-amber-400/40 hover:bg-amber-500/25 transition disabled:opacity-50"
+            className="font-display tabular-nums text-sm px-4 py-2 rounded-2xl bg-signal-hold/15 text-signal-hold border border-signal-hold/40 hover:bg-signal-hold/25 transition disabled:opacity-50"
           >
             🔓 Clear Lock
           </button>
 
           <button
             onClick={handleRefresh}
-            className="font-mono text-sm px-4 py-2 rounded-lg bg-blue-500/20 text-blue-400 border border-blue-400/30 hover:bg-blue-500/30 transition"
+            className="font-display tabular-nums text-sm px-4 py-2 rounded-2xl bg-signal-prepare/20 text-signal-prepare border border-signal-prepare/30 hover:bg-signal-prepare/30 transition"
           >
             🔄 Refresh
           </button>
 
           <button
             onClick={handleRestart}
-            className="font-mono text-sm px-4 py-2 rounded-lg bg-yellow-500/20 text-yellow-400 border border-yellow-400/30 hover:bg-yellow-500/30 transition"
+            className="font-display tabular-nums text-sm px-4 py-2 rounded-2xl bg-signal-hold/20 text-signal-hold border border-signal-hold/30 hover:bg-signal-hold/30 transition"
           >
             🔁 Restart Page
           </button>
@@ -815,8 +815,8 @@ export default function Training() {
 
       {/* Stuck-lock / live progress banner */}
       {(training || status?.training_in_progress) && (
-        <div className="rounded-xl border border-signal-prepare/30 bg-signal-prepare/5 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-          <div className="font-mono text-xs text-mist space-y-1">
+        <div className="rounded-2xl border border-signal-prepare/30 bg-signal-prepare/5 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="font-display tabular-nums text-xs text-mist space-y-1">
             <p>
               <span className="text-signal-prepare">● Training active</span>
               {trainProgress?.stage ? (
@@ -837,7 +837,7 @@ export default function Training() {
             </p>
             {elapsedSeconds >= 90 &&
               (!trainProgress?.stage || trainProgress.stage === "idle" || trainProgress.stage === "loading_data") && (
-                <p className="text-amber-300/90">
+                <p className="text-signal-hold/90">
                   Progress looks stuck. If this persists, click <strong>Clear Lock</strong> then Trigger Training again.
                 </p>
               )}
@@ -850,7 +850,7 @@ export default function Training() {
               stopTraining(false);
               setIsStopping(false);
             }}
-            className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-200 border border-amber-400/40 hover:bg-amber-500/30"
+            className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-2xl bg-signal-hold/20 text-signal-hold border border-signal-hold/40 hover:bg-signal-hold/30"
           >
             Unlock &amp; reset
           </button>
@@ -860,11 +860,11 @@ export default function Training() {
 
       {/* Manual intervention: for when scheduler-service isn't running these on
           its own cron. Each button hits the same endpoint the automation would. */}
-      <div className="bg-graphite border border-slate/60 rounded-xl p-4">
-        <h3 className="font-mono text-xs text-mist uppercase tracking-widest mb-2">
+      <div className="bg-graphite border border-slate/60 rounded-2xl p-4">
+        <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-2">
           🎓 How “Add to Training” works
         </h3>
-        <p className="font-mono text-[11px] text-mist/80 leading-relaxed">
+        <p className="font-display tabular-nums text-[11px] text-mist/80 leading-relaxed">
           One snapshot per symbol + decision per <strong className="text-paper">IST calendar day</strong>.
           If you see “already in today&apos;s training set”, those picks are already tracked for T+1 / T+5 —
           not a failure. Scores refresh when price/score moves. Use <em>All Actionable for Training</em>
@@ -872,7 +872,7 @@ export default function Training() {
         </p>
         <DbConnectionBanner status={status as any} />
         {status && (
-          <div className="mt-2 font-mono text-[11px] text-mist/70 flex flex-wrap gap-3">
+          <div className="mt-2 font-display tabular-nums text-[11px] text-mist/70 flex flex-wrap gap-3">
             {(status as any).live_win_rate != null && (
               <span>
                 Live win-rate: {Math.round(Number((status as any).live_win_rate) * 1000) / 10}%
@@ -893,22 +893,22 @@ export default function Training() {
         )}
       </div>
 
-      <div className="bg-graphite border border-slate/60 rounded-xl p-4">
-        <h3 className="font-mono text-xs text-mist uppercase tracking-widest mb-3">
+      <div className="bg-graphite border border-slate/60 rounded-2xl p-4">
+        <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-3">
           🛠️ Manual Controls (use if automation isn't running)
         </h3>
         <div className="flex flex-wrap gap-3">
           <button
             onClick={() => runEvaluation("t1")}
             disabled={runningT1}
-            className="font-mono text-xs px-4 py-2 rounded-lg bg-slate/30 text-mist hover:bg-slate/50 transition disabled:opacity-50 flex items-center gap-2"
+            className="font-display tabular-nums text-xs px-4 py-2 rounded-2xl bg-slate/30 text-mist hover:bg-slate/50 transition disabled:opacity-50 flex items-center gap-2"
           >
             {runningT1 ? <Spinner /> : null} Run T+1 Evaluation Sweep
           </button>
           <button
             onClick={() => runEvaluation("t5")}
             disabled={runningT5}
-            className="font-mono text-xs px-4 py-2 rounded-lg bg-slate/30 text-mist hover:bg-slate/50 transition disabled:opacity-50 flex items-center gap-2"
+            className="font-display tabular-nums text-xs px-4 py-2 rounded-2xl bg-slate/30 text-mist hover:bg-slate/50 transition disabled:opacity-50 flex items-center gap-2"
           >
             {runningT5 ? <Spinner /> : null} Run T+5 Evaluation Sweep
           </button>
@@ -917,18 +917,18 @@ export default function Training() {
           Trade mark-to-market has its own manual trigger on the Trades tab.
         </p>
         {evalPipeline && (
-          <div className="mt-4 rounded-lg border border-signal-prepare/30 bg-slate/20 p-3">
+          <div className="mt-4 rounded-2xl border border-signal-prepare/30 bg-slate/20 p-3">
             <div className="flex items-center justify-between mb-2">
-              <span className="font-mono text-xs text-mist uppercase tracking-widest">
+              <span className="font-display tabular-nums text-xs text-mist uppercase tracking-widest">
                 {evalPipeline.period.toUpperCase()} evaluation pipeline
               </span>
-              <span className="font-mono text-[10px] text-mist/60">
+              <span className="font-display tabular-nums text-[10px] text-mist/60">
                 {evalPipeline.at ? new Date(evalPipeline.at).toLocaleTimeString() : ""}
               </span>
             </div>
             <ol className="space-y-1.5 mb-2">
               {evalPipeline.steps.map((s, i) => (
-                <li key={i} className="flex gap-2 text-[11px] font-mono">
+                <li key={i} className="flex gap-2 text-[11px] font-display tabular-nums">
                   <span className={s.ok ? "text-signal-buy" : "text-signal-sell"}>{s.ok ? "✓" : "✗"}</span>
                   <span className="text-mist/90 min-w-[7rem]">{s.step}</span>
                   <span className="text-mist/60 break-all">{s.detail}</span>
@@ -939,12 +939,12 @@ export default function Training() {
               <p className="text-xs text-mist/80 mb-0">{evalPipeline.message}</p>
             )}
             {evalPipeline.reasons && (
-              <p className="text-[10px] font-mono text-mist/50 mb-0 mt-1">
+              <p className="text-[10px] font-display tabular-nums text-mist/50 mb-0 mt-1">
                 reasons: {Object.entries(evalPipeline.reasons).map(([k, v]) => `${k}=${v}`).join(" · ")}
               </p>
             )}
             {evalPipeline.labeled_sample && evalPipeline.labeled_sample.length > 0 && (
-              <ul className="mt-2 space-y-0.5 text-[10px] font-mono text-mist/70 mb-0">
+              <ul className="mt-2 space-y-0.5 text-[10px] font-display tabular-nums text-mist/70 mb-0">
                 {evalPipeline.labeled_sample.map((row, i) => (
                   <li key={i}>
                     {row.symbol}: {row.mode || "?"}{" "}
@@ -965,10 +965,10 @@ export default function Training() {
               const label = key === "t1" ? "T+1" : "T+5";
               const running = key === "t1" ? runningT1 : runningT5;
               return (
-                <div key={key} className="rounded-lg border border-slate/50 bg-slate/20 p-3">
+                <div key={key} className="rounded-2xl border border-slate/50 bg-slate/20 p-3">
                   <div className="flex items-center justify-between mb-1">
-                    <span className="font-mono text-xs text-mist uppercase tracking-widest">{label} queue</span>
-                    <span className="font-mono text-[10px] text-signal-prepare">
+                    <span className="font-display tabular-nums text-xs text-mist uppercase tracking-widest">{label} queue</span>
+                    <span className="font-display tabular-nums text-[10px] text-signal-prepare">
                       {running ? "sweeping…" : b.status}
                     </span>
                   </div>
@@ -978,7 +978,7 @@ export default function Training() {
                       style={{ width: `${Math.min(100, b.progress_pct || 0)}%` }}
                     />
                   </div>
-                  <div className="font-mono text-[11px] text-mist/80 space-y-0.5">
+                  <div className="font-display tabular-nums text-[11px] text-mist/80 space-y-0.5">
                     <div>Evaluated {b.evaluated} · Pending {b.pending} · Due now {b.due_now}</div>
                     <div>
                       Success {b.success_rate_pct != null ? `${b.success_rate_pct}%` : "—"}
@@ -996,7 +996,7 @@ export default function Training() {
 
       {/* Training in progress: animated stage pipeline */}
       {(training || status?.training_in_progress) && (
-        <div className="bg-graphite border border-signal-prepare/30 rounded-xl p-5">
+        <div className="bg-graphite border border-signal-prepare/30 rounded-2xl p-5">
           <div className="flex items-center gap-4 mb-4">
             <Spinner size="lg" />
             <div>
@@ -1004,16 +1004,16 @@ export default function Training() {
                 {training ? "Training in progress..." : "Training is running in background..."}
               </h3>
               <div className="flex flex-wrap gap-6 mt-1 text-sm">
-                <div className="rounded-md border border-signal-prepare/40 bg-signal-prepare/10 px-3 py-1">
+                <div className="rounded-2xl border border-signal-prepare/40 bg-signal-prepare/10 px-3 py-1">
                   <span className="text-mist/60">Elapsed: </span>
-                  <span className="font-mono text-lg text-signal-prepare font-semibold">{formatTime(elapsedSeconds || 0)}</span>
+                  <span className="font-display tabular-nums text-lg text-signal-prepare font-semibold">{formatTime(elapsedSeconds || 0)}</span>
                 </div>
                 {(() => {
                   const eta = estimateTrainingRemaining(trainProgress?.stage, elapsedSeconds);
                   return eta != null && eta > 0 ? (
                     <div>
                       <span className="text-mist/60">Est. remaining: </span>
-                      <span className="font-mono text-paper">~{formatTime(eta)}</span>
+                      <span className="font-display tabular-nums text-paper">~{formatTime(eta)}</span>
                     </div>
                   ) : null;
                 })()}
@@ -1032,7 +1032,7 @@ export default function Training() {
           <StageTracker stage={trainProgress?.stage} />
 
           {trainProgress?.detail && Object.keys(trainProgress.detail).length > 0 && (
-            <div className="mt-4 bg-ink/40 border border-slate/30 rounded-lg p-3 font-mono text-xs">
+            <div className="mt-4 bg-ink/40 border border-slate/30 rounded-2xl p-3 font-display tabular-nums text-xs">
               {trainProgress.detail.dataset_size != null && (
                 <div className="text-mist/70">
                   Dataset: <span className="text-paper">{String(trainProgress.detail.dataset_size)}</span> examples across{" "}
@@ -1082,13 +1082,13 @@ export default function Training() {
       ) : (
         <div className="space-y-6">
           {/* Production Model */}
-          <div className="bg-graphite border border-slate rounded-xl p-5">
-            <h3 className="font-mono text-xs text-mist uppercase tracking-widest mb-2">
+          <div className="bg-graphite border border-slate rounded-2xl p-5">
+            <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-2">
               📦 Production Model
             </h3>
             {status?.production_model_exists ? (
               <div>
-                <span className="font-mono text-sm text-signal-buy">✅ Deployed</span>
+                <span className="font-display tabular-nums text-sm text-signal-buy">✅ Deployed</span>
                 <div className="mt-2 text-xs text-mist/60">
                   Last training: {formatDate(status?.last_training)}
                   {status?.model_version && (
@@ -1109,8 +1109,8 @@ export default function Training() {
           </div>
 
           {/* Walk‑Forward Metrics */}
-          <div className="bg-graphite border border-slate/60 rounded-xl p-5">
-            <h3 className="font-mono text-xs text-mist uppercase tracking-widest mb-2">
+          <div className="bg-graphite border border-slate/60 rounded-2xl p-5">
+            <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-2">
               📉 Walk‑Forward Performance Metrics
             </h3>
             {renderMetrics(status?.metrics || {})}
@@ -1118,17 +1118,17 @@ export default function Training() {
 
           {/* Fold Details */}
           {status?.fold_details && status.fold_details.length > 0 && (
-            <div className="bg-graphite border border-slate/40 rounded-xl p-5">
+            <div className="bg-graphite border border-slate/40 rounded-2xl p-5">
               <button
                 onClick={() => setShowFolds(!showFolds)}
-                className="font-mono text-xs text-mist uppercase tracking-widest flex items-center gap-2 hover:text-paper transition"
+                className="font-display tabular-nums text-xs text-mist uppercase tracking-widest flex items-center gap-2 hover:text-paper transition"
               >
                 📋 Fold Details
                 <span className="text-xs">{showFolds ? "▲" : "▼"}</span>
               </button>
               {showFolds && (
                 <div className="mt-3 overflow-x-auto">
-                  <table className="w-full text-xs font-mono">
+                  <table className="w-full text-xs font-display tabular-nums">
                     <thead>
                       <tr className="text-mist/50 border-b border-slate/40">
                         <th className="text-left py-1 pr-4">Fold</th>
@@ -1160,17 +1160,17 @@ export default function Training() {
           )}
 
           {/* Daily / Weekly Pick Tracking */}
-          <div className="bg-graphite border border-slate/60 rounded-xl p-5">
+          <div className="bg-graphite border border-slate/60 rounded-2xl p-5">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="font-mono text-xs text-mist uppercase tracking-widest">
+              <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest">
                 📅 Pick Tracking (T+1 / T+5 by {periodView === "daily" ? "day" : "week"})
               </h3>
-              <div className="flex gap-1 bg-ink/40 border border-slate/40 rounded-lg p-0.5">
+              <div className="flex gap-1 bg-ink/40 border border-slate/40 rounded-2xl p-0.5">
                 {(["daily", "weekly"] as const).map((v) => (
                   <button
                     key={v}
                     onClick={() => setPeriodView(v)}
-                    className={`px-3 py-1 text-xs font-mono uppercase rounded-md transition-colors ${
+                    className={`px-3 py-1 text-xs font-display tabular-nums uppercase rounded-2xl transition-colors ${
                       periodView === v ? "bg-slate/60 text-paper" : "text-mist/50 hover:text-mist"
                     }`}
                   >
@@ -1183,8 +1183,8 @@ export default function Training() {
           </div>
 
           {/* Prediction History */}
-          <div className="bg-graphite border border-slate/60 rounded-xl p-5">
-            <h3 className="font-mono text-xs text-mist uppercase tracking-widest mb-2">
+          <div className="bg-graphite border border-slate/60 rounded-2xl p-5">
+            <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-2">
               📋 Prediction History (T+1 / T+5 tracking)
             </h3>
             {renderPredictionHistory()}
@@ -1192,8 +1192,8 @@ export default function Training() {
 
           {/* Summary Metrics */}
           {summaryMetrics && (
-            <div className="bg-graphite border border-slate/60 rounded-xl p-5">
-              <h3 className="font-mono text-xs text-mist uppercase tracking-widest mb-2">
+            <div className="bg-graphite border border-slate/60 rounded-2xl p-5">
+              <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-2">
                 📊 Training Run Summary
               </h3>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
@@ -1206,8 +1206,8 @@ export default function Training() {
           )}
 
           {/* Learning Insights */}
-          <div className="bg-graphite border border-slate/60 rounded-xl p-5">
-            <h3 className="font-mono text-xs text-mist uppercase tracking-widest mb-2">
+          <div className="bg-graphite border border-slate/60 rounded-2xl p-5">
+            <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-2">
               💡 Learning Insights
             </h3>
             {renderInsights()}
@@ -1244,7 +1244,7 @@ function StageTracker({ stage }: { stage?: string }) {
   return (
     <div>
       {connecting && (
-        <div className="text-[10px] font-mono text-mist/40 uppercase tracking-widest mb-2">
+        <div className="text-[10px] font-display tabular-nums text-mist/40 uppercase tracking-widest mb-2">
           Connecting to training progress...
         </div>
       )}
@@ -1265,7 +1265,7 @@ function StageTracker({ stage }: { stage?: string }) {
                   }`}
                 />
                 <span
-                  className={`text-[9px] font-mono uppercase whitespace-nowrap ${
+                  className={`text-[9px] font-display tabular-nums uppercase whitespace-nowrap ${
                     isDone ? "text-signal-buy" : isCurrent ? "text-signal-prepare" : "text-mist/30"
                   }`}
                 >
@@ -1311,9 +1311,9 @@ function Spinner({ size = "sm" }: { size?: "sm" | "lg" }) {
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="bg-ink/40 border border-slate/40 rounded-xl px-4 py-3">
-      <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">{label}</div>
-      <div className="font-mono text-lg text-paper mt-1">{value}</div>
+    <div className="bg-ink/40 border border-slate/40 rounded-2xl px-4 py-3">
+      <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">{label}</div>
+      <div className="font-display tabular-nums text-lg text-paper mt-1">{value}</div>
     </div>
   );
 }
@@ -1335,7 +1335,7 @@ function DbConnectionBanner({ status }: { status?: any }) {
   const s = live || status;
   if (!s) {
     return (
-      <div className="mt-2 font-mono text-[11px] text-mist/60 border border-slate/40 rounded-lg px-3 py-2">
+      <div className="mt-2 font-display tabular-nums text-[11px] text-mist/60 border border-slate/40 rounded-2xl px-3 py-2">
         Checking database connection…
       </div>
     );
@@ -1344,10 +1344,10 @@ function DbConnectionBanner({ status }: { status?: any }) {
   const warn = s.db_backend === "sqlite" || s.db_durable === false;
   const bad = s.db_connected === false;
   const cls = bad
-    ? "border-red-500/40 bg-red-500/10 text-red-300"
+    ? "border-signal-sell/40 bg-signal-sell/10 text-signal-sell"
     : warn
-    ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
-    : "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
+    ? "border-signal-hold/40 bg-signal-hold/10 text-signal-hold"
+    : "border-signal-buy/40 bg-signal-buy/10 text-signal-buy";
   const title = bad
     ? "Database not connected"
     : warn
@@ -1355,7 +1355,7 @@ function DbConnectionBanner({ status }: { status?: any }) {
     : `Database connected (${(s.db_provider || s.db_backend || "postgres").toString()})`;
   const msg = s.db_error || s.db_message || (ok ? "Trades & training will persist." : "");
   return (
-    <div className={`mt-2 font-mono text-[11px] rounded-lg px-3 py-2 border ${cls}`}>
+    <div className={`mt-2 font-display tabular-nums text-[11px] rounded-2xl px-3 py-2 border ${cls}`}>
       <div className="font-semibold tracking-wide uppercase text-[10px] mb-0.5">{title}</div>
       <div className="opacity-90 leading-relaxed">{msg}</div>
     </div>

@@ -485,16 +485,16 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
           <div className="flex items-center gap-3 w-full sm:w-auto">
             <button
               onClick={onBack}
-              className="font-mono text-xs text-mist hover:text-paper transition flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-graphite/40 hover:bg-graphite/60 border border-slate/40"
+              className="font-display tabular-nums text-xs text-mist hover:text-paper transition flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-graphite/40 hover:bg-graphite/60 border border-slate/40"
             >
               ← Back
             </button>
-            <span className="font-mono text-xs text-mist/70">
+            <span className="font-display tabular-nums text-xs text-mist/70">
               Scanned: <strong className="text-paper">{result.scanned}</strong>
               {" / "}
               Universe {result.universe_size}
               {(result as any).lite && (
-                <span className="ml-2 text-amber-300/90 border border-amber-500/30 px-1.5 py-0.5 rounded text-[10px]">LITE</span>
+                <span className="ml-2 text-signal-hold/90 border border-signal-hold/30 px-1.5 py-0.5 rounded text-[10px]">LITE</span>
               )}
               <span className="text-mist/40"> · ≤ ₹5000</span>
             </span>
@@ -506,7 +506,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
               type="button"
               onClick={handleRefreshPrepareToBuy}
               disabled={isRefreshing}
-              className="font-mono text-xs px-3 py-2 rounded-lg bg-amber-600/80 hover:bg-amber-500 text-white font-bold transition disabled:opacity-50 flex-1 sm:flex-none"
+              className="font-display tabular-nums text-xs px-3 py-2 rounded-xl bg-signal-hold/80 hover:bg-signal-hold text-white font-bold transition disabled:opacity-50 flex-1 sm:flex-none"
             >
               {isRefreshing ? "⏳ Syncing…" : "🔄 Refresh 'Prepare to Buy'"}
             </button>
@@ -514,7 +514,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
               type="button"
               onClick={handleSearchBuys}
               disabled={!result || sniperLoading}
-              className="font-mono text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg px-4 py-2 transition disabled:opacity-50 flex items-center justify-center gap-2 shadow-md hover:shadow-emerald-900/40 animate-pulse flex-1 sm:flex-none"
+              className="font-display tabular-nums text-xs bg-signal-buy hover:bg-signal-buy text-white font-bold rounded-xl px-4 py-2 transition disabled:opacity-50 flex items-center justify-center gap-2 shadow-md hover:shadow-emerald-900/40 animate-pulse flex-1 sm:flex-none"
             >
               {sniperLoading ? (
                 <>
@@ -528,7 +528,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
           </div>
         </div>
         {refreshMsg && (
-          <p className="font-mono text-[10px] text-amber-200/90 mt-2 mb-0">{refreshMsg}</p>
+          <p className="font-display tabular-nums text-[10px] text-signal-hold/90 mt-2 mb-0">{refreshMsg}</p>
         )}
       </div>
 
@@ -621,12 +621,12 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
       </div>
 
       {commitMessage && (
-        <div className="font-mono text-xs text-mist/70">{commitMessage}</div>
+        <div className="font-display tabular-nums text-xs text-mist/70">{commitMessage}</div>
       )}
       {balanceLow && (
         <div className="balance-modal-overlay" role="dialog" aria-modal="true">
           <div className="balance-modal">
-            <h3 className="mono text-sm text-amber-300 uppercase tracking-widest mb-2">Insufficient cash</h3>
+            <h3 className="mono text-sm text-signal-hold uppercase tracking-widest mb-2">Insufficient cash</h3>
             <p className="text-xs text-mist/90 mb-3">
               Some paper trades could not be opened. Deposit funds to continue.
             </p>
@@ -641,7 +641,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
               </div>
               <div>
                 <span className="text-mist">Shortfall</span>
-                <strong className="text-amber-300">
+                <strong className="text-signal-hold">
                   ₹{Math.max(0, (balanceLow.needed ?? 0) - (balanceLow.available ?? 0)).toLocaleString("en-IN")}
                 </strong>
               </div>
@@ -664,7 +664,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
               </button>
               <button
                 type="button"
-                className="font-mono text-xs px-3 py-1.5 rounded-lg border border-amber-500/40 text-amber-200 hover:bg-amber-500/20"
+                className="font-display tabular-nums text-xs px-3 py-1.5 rounded-xl border border-signal-hold/40 text-signal-hold hover:bg-signal-hold/20"
                 onClick={() => setBalanceLow(null)}
               >
                 Dismiss
@@ -689,7 +689,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
                   <button
                     key={d.symbol}
                     onClick={() => onSelect(d.symbol)}
-                    className="font-mono text-sm border border-slate/60 px-4 py-2 rounded-lg hover:border-mist/60 hover:text-paper transition"
+                    className="font-display tabular-nums text-sm border border-slate/60 px-4 py-2 rounded-xl hover:border-mist/60 hover:text-paper transition"
                   >
                     {d.symbol} <span className="text-mist/50">({d.combined_score})</span>
                   </button>
@@ -756,15 +756,15 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
       {/* ── Full results (unique symbols only) ── */}
       <section className="scan-table-section">
         <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-          <div className="font-mono text-[10px] text-mist uppercase tracking-widest">
+          <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest">
             All results · {allSorted.length} unique
           </div>
           <span className="mono text-[10px] text-mist/40">
             Top board symbols marked · filter: {filterChip}
           </span>
         </div>
-        <div className="rounded-xl border border-slate overflow-hidden scan-table-wrap">
-          <table className="w-full text-sm font-mono">
+        <div className="rounded-2xl border border-slate overflow-hidden scan-table-wrap">
+          <table className="w-full text-sm font-display tabular-nums">
             <thead>
               <tr className="border-b border-slate bg-graphite">
                 <th className="text-left px-4 py-3 text-[10px] text-mist uppercase tracking-widest">Symbol</th>
@@ -805,7 +805,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
                               onClick={() => void sendToRealTrade(r, "DEMO")}
                               disabled={sendingToTrade === `${r.symbol}:DEMO`}
                               title="Queue this stock for the Real Automatic Trade DEMO cycle"
-                              className="text-[10px] text-emerald-300 hover:text-emerald-200 transition uppercase tracking-wide disabled:opacity-50"
+                              className="text-[10px] text-signal-buy hover:text-white transition uppercase tracking-wide disabled:opacity-50"
                             >
                               {sendingToTrade === `${r.symbol}:DEMO` ? "…" : "→ DEMO"}
                             </button>
@@ -813,7 +813,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
                               onClick={() => void sendToRealTrade(r, "REAL")}
                               disabled={sendingToTrade === `${r.symbol}:REAL`}
                               title="Queue this stock for the Real Automatic Trade REAL cycle (requires admin login + armed)"
-                              className="text-[10px] text-rose-300 hover:text-rose-200 transition uppercase tracking-wide disabled:opacity-50"
+                              className="text-[10px] text-signal-sell hover:text-white transition uppercase tracking-wide disabled:opacity-50"
                             >
                               {sendingToTrade === `${r.symbol}:REAL` ? "…" : "→ REAL"}
                             </button>
@@ -827,7 +827,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
                         </button>
                       </div>
                       {sendTradeMsg && sendTradeMsg.symbol === r.symbol && (
-                        <p className={`text-[9px] mt-1 ${sendTradeMsg.ok ? "text-emerald-300/80" : "text-rose-300/80"}`}>
+                        <p className={`text-[9px] mt-1 ${sendTradeMsg.ok ? "text-signal-buy/80" : "text-signal-sell/80"}`}>
                           {sendTradeMsg.text}
                         </p>
                       )}
@@ -844,11 +844,11 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
       </section>
 
       {result.errors.length > 0 && (
-        <div className="rounded-xl border border-slate bg-graphite p-4">
-          <div className="font-mono text-[10px] text-mist uppercase tracking-widest mb-2">Skipped ({result.errors.length})</div>
+        <div className="rounded-2xl border border-slate bg-graphite p-4">
+          <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-2">Skipped ({result.errors.length})</div>
           <div className="flex flex-wrap gap-2">
             {result.errors.map((e) => (
-              <span key={e.symbol} className="font-mono text-xs text-mist/50">{e.symbol}</span>
+              <span key={e.symbol} className="font-display tabular-nums text-xs text-mist/50">{e.symbol}</span>
             ))}
           </div>
         </div>
@@ -928,13 +928,13 @@ function TopPick({
   return (
     <button
       onClick={() => onSelect(data.symbol)}
-      className={`text-left rounded-xl border ${style.border} ${style.bg} p-5 sm:p-6 hover:brightness-110 transition group h-full min-h-[11.5rem] flex flex-col w-full`}
+      className={`text-left rounded-2xl border ${style.border} ${style.bg} p-5 sm:p-6 hover:brightness-110 transition group h-full min-h-[11.5rem] flex flex-col w-full`}
     >
       <div className="flex items-start justify-between mb-3 gap-2">
-        <span className="font-mono text-[10px] text-mist/60 shrink-0">#{rank}</span>
-        <span className="font-mono text-xs text-signal-buy shrink-0">+{upside}% target</span>
+        <span className="font-display tabular-nums text-[10px] text-mist/60 shrink-0">#{rank}</span>
+        <span className="font-display tabular-nums text-xs text-signal-buy shrink-0">+{upside}% target</span>
       </div>
-      <div className="font-mono text-sm text-mist mb-1 truncate">{data.symbol}</div>
+      <div className="font-display tabular-nums text-sm text-mist mb-1 truncate">{data.symbol}</div>
       <div className={`font-display text-xl sm:text-2xl ${style.color} mb-2 leading-tight`}>
         {data.decision}
       </div>
@@ -946,10 +946,10 @@ function TopPick({
               key={s.key}
               className={
                 s.key === "short"
-                  ? "font-mono text-[9px] uppercase tracking-wide px-2 py-0.5 rounded-full border border-sky-400/40 bg-sky-500/15 text-sky-200"
+                  ? "font-display tabular-nums text-[9px] uppercase tracking-wide px-2 py-0.5 rounded-full border border-signal-prepare/40 bg-signal-prepare/15 text-signal-prepare"
                   : s.key === "mid"
-                  ? "font-mono text-[9px] uppercase tracking-wide px-2 py-0.5 rounded-full border border-violet-400/40 bg-violet-500/15 text-violet-200"
-                  : "font-mono text-[9px] uppercase tracking-wide px-2 py-0.5 rounded-full border border-amber-400/40 bg-amber-500/15 text-amber-200"
+                  ? "font-display tabular-nums text-[9px] uppercase tracking-wide px-2 py-0.5 rounded-full border border-signal-prepare/40 bg-signal-prepare/15 text-signal-prepare"
+                  : "font-display tabular-nums text-[9px] uppercase tracking-wide px-2 py-0.5 rounded-full border border-signal-hold/40 bg-signal-hold/15 text-signal-hold"
               }
             >
               {s.label}
@@ -957,12 +957,12 @@ function TopPick({
           ))}
         </div>
       )}
-      <div className="flex justify-between font-mono text-xs text-mist mt-auto">
+      <div className="flex justify-between font-display tabular-nums text-xs text-mist mt-auto">
         <span>{formatInrPrice(data)}</span>
         <span>Score {data.combined_score}/100</span>
       </div>
       <div className="mt-3 pt-3 border-t border-slate/40 flex items-center justify-between gap-2">
-        <span className="font-mono text-[10px] text-mist/50 group-hover:text-mist transition">
+        <span className="font-display tabular-nums text-[10px] text-mist/50 group-hover:text-mist transition">
           View full analysis →
         </span>
         <span
@@ -978,7 +978,7 @@ function TopPick({
               onAddToWatchlist(data.symbol);
             }
           }}
-          className={`text-[10px] font-mono transition border px-2 py-0.5 rounded flex items-center gap-1 cursor-pointer ${
+          className={`text-[10px] font-display tabular-nums transition border px-2 py-0.5 rounded flex items-center gap-1 cursor-pointer ${
             isAdding
               ? "bg-signal-buy/20 border-signal-buy text-signal-buy"
               : "text-signal-prepare hover:text-paper border-signal-prepare/30"
@@ -1008,22 +1008,22 @@ function CandidateCard({
   return (
     <div
       onClick={() => onSelect(data.symbol)}
-      className="border border-slate/60 bg-graphite/30 rounded-xl p-4 hover:border-mist/60 cursor-pointer transition-all duration-300 hover:shadow-glow-sm"
+      className="border border-slate/60 bg-graphite/30 rounded-2xl p-4 hover:border-mist/60 cursor-pointer transition-all duration-300 hover:shadow-glow-sm"
     >
       <div className="flex items-center justify-between">
         <div>
-          <div className="font-mono text-sm text-paper">{data.symbol}</div>
+          <div className="font-display tabular-nums text-sm text-paper">{data.symbol}</div>
           <div className={`font-display text-lg ${style.color}`}>{data.decision}</div>
         </div>
         <div className="text-right">
-          <div className="text-sm font-mono text-paper">{formatInrPrice(data)}</div>
+          <div className="text-sm font-display tabular-nums text-paper">{formatInrPrice(data)}</div>
           <div className="text-xs text-mist/60">Score: {data.combined_score}</div>
         </div>
       </div>
       <button
         onClick={(e) => { e.stopPropagation(); onAddToWatchlist(data.symbol); }}
         disabled={isAdding}
-        className={`mt-2 text-[10px] font-mono transition border px-2 py-0.5 rounded ${
+        className={`mt-2 text-[10px] font-display tabular-nums transition border px-2 py-0.5 rounded ${
           isAdding 
             ? "bg-signal-buy/20 border-signal-buy text-signal-buy" 
             : "text-signal-prepare hover:text-paper border-signal-prepare/30"

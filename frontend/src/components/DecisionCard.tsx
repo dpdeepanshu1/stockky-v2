@@ -160,9 +160,9 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
   const sentimentLabel = computedNewsScore >= 70 ? 'Positive' :
                          computedNewsScore >= 50 ? 'Neutral' :
                          'Negative';
-  const sentimentColor = computedNewsScore >= 70 ? 'text-green-500' :
-                         computedNewsScore >= 50 ? 'text-yellow-500' :
-                         'text-red-500';
+  const sentimentColor = computedNewsScore >= 70 ? 'text-signal-buy' :
+                         computedNewsScore >= 50 ? 'text-signal-hold' :
+                         'text-signal-sell';
 
   // ── Fetch training score ──
   useEffect(() => {
@@ -304,7 +304,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
     <div className="space-y-4 stock-detail-terminal">
       <button
         onClick={onBack}
-        className="font-mono text-xs text-mist hover:text-paper transition flex items-center gap-1"
+        className="font-display tabular-nums text-xs text-mist hover:text-paper transition flex items-center gap-1"
       >
         ← Back
       </button>
@@ -324,10 +324,10 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
                 {data.symbol}
               </span>
               {data.sector && (
-                <span className="font-mono text-[10px] text-mist/70 uppercase tracking-wider">{data.sector}</span>
+                <span className="font-display tabular-nums text-[10px] text-mist/70 uppercase tracking-wider">{data.sector}</span>
               )}
               {data.valuation && (
-                <span className="font-mono text-[10px] text-mist/50">· {data.valuation}</span>
+                <span className="font-display tabular-nums text-[10px] text-mist/50">· {data.valuation}</span>
               )}
             </div>
             <h2 className={`font-display text-2xl sm:text-4xl leading-none ${style.color} mt-2 tracking-tight`}>
@@ -337,23 +337,23 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
             {data.data_quality && (
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <span
-                  className={`font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border ${
+                  className={`font-display tabular-nums text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border ${
                     data.data_quality.level === "high"
-                      ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/10"
+                      ? "border-signal-buy/40 text-signal-buy bg-signal-buy/10"
                       : data.data_quality.level === "low"
-                      ? "border-amber-500/40 text-amber-200 bg-amber-500/10"
+                      ? "border-signal-hold/40 text-signal-hold bg-signal-hold/10"
                       : "border-slate-400/40 text-mist bg-slate/20"
                   }`}
                 >
                   Data quality: {data.data_quality.level || "unknown"}
                 </span>
                 {data.data_quality.note && (
-                  <span className="font-mono text-[10px] text-mist/65">{data.data_quality.note}</span>
+                  <span className="font-display tabular-nums text-[10px] text-mist/65">{data.data_quality.note}</span>
                 )}
               </div>
             )}
             {data.data_quality?.flags && data.data_quality.flags.length > 0 && (
-              <ul className="mt-1 font-mono text-[10px] text-mist/55 list-disc list-inside">
+              <ul className="mt-1 font-display tabular-nums text-[10px] text-mist/55 list-disc list-inside">
                 {data.data_quality.flags.slice(0, 3).map((f, i) => (
                   <li key={i}>{f}</li>
                 ))}
@@ -362,7 +362,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
           </div>
 
           <div className="dc-col-side">
-            <div className="dc-price-block font-mono">
+            <div className="dc-price-block font-display tabular-nums">
               <div className="text-2xl sm:text-3xl text-paper tabular-nums">
                 {hasPrice ? `₹${displayClose.toLocaleString("en-IN")}` : data.data_insufficient ? "Awaiting Data" : "Syncing…"}
               </div>
@@ -380,7 +380,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
         </div>
 
         {data.event_risk && (
-          <div className="mt-6 rounded-lg border border-signal-hold/40 bg-signal-hold/10 px-4 py-3 text-sm text-signal-hold font-mono flex items-start gap-2">
+          <div className="mt-6 rounded-xl border border-signal-hold/40 bg-signal-hold/10 px-4 py-3 text-sm text-signal-hold font-display tabular-nums flex items-start gap-2">
             <span>⚠</span>
             <span>{data.reasons.event?.[0] || "Upcoming corporate event — elevated near-term risk"}</span>
           </div>
@@ -389,30 +389,30 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
         {isBullish && data.entry_range && hasPrice && (
           <div className="grid grid-cols-3 gap-4 mt-8 pt-6 border-t border-slate/40">
             <div>
-              <div className="font-mono text-[10px] text-mist uppercase tracking-widest mb-1">Entry range</div>
-              <div className="font-mono text-sm text-paper">
+              <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-1">Entry range</div>
+              <div className="font-display tabular-nums text-sm text-paper">
                 ₹{data.entry_range.low?.toLocaleString("en-IN") ?? "N/A"} – 
                 ₹{data.entry_range.high?.toLocaleString("en-IN") ?? "N/A"}
               </div>
             </div>
             <div>
-              <div className="font-mono text-[10px] text-mist uppercase tracking-widest mb-1">Target</div>
-              <div className="font-mono text-sm text-signal-buy">
+              <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-1">Target</div>
+              <div className="font-display tabular-nums text-sm text-signal-buy">
                 ₹{data.target?.toLocaleString("en-IN") ?? "N/A"}
               </div>
               {data.target != null && data.close != null && data.close !== 0 && (
-                <div className="font-mono text-[10px] text-mist/50 mt-0.5">
+                <div className="font-display tabular-nums text-[10px] text-mist/50 mt-0.5">
                   +{(((data.target - data.close) / data.close) * 100).toFixed(1)}%
                 </div>
               )}
             </div>
             <div>
-              <div className="font-mono text-[10px] text-mist uppercase tracking-widest mb-1">Stop loss</div>
-              <div className="font-mono text-sm text-signal-sell">
+              <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-1">Stop loss</div>
+              <div className="font-display tabular-nums text-sm text-signal-sell">
                 ₹{data.stop_loss?.toLocaleString("en-IN") ?? "N/A"}
               </div>
               {data.stop_loss != null && data.close != null && data.close !== 0 && (
-                <div className="font-mono text-[10px] text-mist/50 mt-0.5">
+                <div className="font-display tabular-nums text-[10px] text-mist/50 mt-0.5">
                   -{(((data.close - data.stop_loss) / data.close) * 100).toFixed(1)}%
                 </div>
               )}
@@ -424,7 +424,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
           {isBullish && (
             <button
               onClick={() => setShowTradeModal(true)}
-              className="text-[10px] font-mono transition border px-3 py-1.5 rounded-lg flex items-center gap-1 bg-emerald-500/15 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/25"
+              className="text-[10px] font-display tabular-nums transition border px-3 py-1.5 rounded-xl flex items-center gap-1 bg-signal-buy/15 border-signal-buy/40 text-signal-buy hover:bg-signal-buy/25"
             >
               💰 Trade This
             </button>
@@ -451,7 +451,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
                   setCalling(false);
                 }
               }}
-              className="text-[10px] font-mono transition border px-3 py-1.5 rounded-lg flex items-center gap-1 bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25 disabled:opacity-50"
+              className="text-[10px] font-display tabular-nums transition border px-3 py-1.5 rounded-xl flex items-center gap-1 bg-signal-hold/15 border-signal-hold/40 text-signal-hold hover:bg-signal-hold/25 disabled:opacity-50"
             >
               {calling ? "Calling…" : "📞 Call Alert"}
             </button>
@@ -459,7 +459,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
           <button
             onClick={handleAddToWatchlist}
             disabled={isAddingWatchlist}
-            className={`text-[10px] font-mono transition border px-3 py-1 rounded flex items-center gap-1 ${
+            className={`text-[10px] font-display tabular-nums transition border px-3 py-1 rounded flex items-center gap-1 ${
               isAddingWatchlist 
                 ? "bg-signal-buy/20 border-signal-buy text-signal-buy" 
                 : "text-signal-prepare hover:text-paper border-signal-prepare/30"
@@ -495,7 +495,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
               type="number"
               value={tradeCapital}
               onChange={(e) => setTradeCapital(e.target.value)}
-              className="flex-1 bg-ink border border-slate rounded-xl px-3 py-2.5 font-display text-lg text-paper focus:outline-none focus:border-signal-buy"
+              className="flex-1 bg-ink border border-slate rounded-2xl px-3 py-2.5 font-display text-lg text-paper focus:outline-none focus:border-signal-buy"
               autoFocus
             />
           </div>
@@ -505,7 +505,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
           <div className="flex gap-2">
             <button
               onClick={() => { setShowTradeModal(false); setTradeResult(null); }}
-              className="flex-1 text-xs font-semibold uppercase tracking-wider border border-slate rounded-xl py-2.5 text-mist hover:text-paper transition"
+              className="flex-1 text-xs font-semibold uppercase tracking-wider border border-slate rounded-2xl py-2.5 text-mist hover:text-paper transition"
             >
               {tradeResult ? "Close" : "Cancel"}
             </button>
@@ -513,7 +513,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
               <button
                 onClick={handleTradeThis}
                 disabled={tradingInProgress}
-                className="flex-1 text-xs font-semibold uppercase tracking-wider bg-signal-buy text-white rounded-xl py-2.5 hover:opacity-90 transition disabled:opacity-50 flex items-center justify-center gap-2"
+                className="flex-1 text-xs font-semibold uppercase tracking-wider bg-signal-buy text-white rounded-2xl py-2.5 hover:opacity-90 transition disabled:opacity-50 flex items-center justify-center gap-2"
               >
                 {tradingInProgress && (
                   <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-white animate-spin" />
@@ -529,13 +529,13 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
 
       {/* Training score */}
       {loadingTrainingScore ? (
-        <div className="rounded-xl border border-slate/40 bg-graphite/30 p-4 text-xs text-mist/40 font-mono flex items-center gap-2">
+        <div className="rounded-2xl border border-slate/40 bg-graphite/30 p-4 text-xs text-mist/40 font-display tabular-nums flex items-center gap-2">
           <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-mist/40 animate-spin" />
           Checking model recommendation...
         </div>
       ) : trainingScore && (trainingScore as any).available !== false ? (
-        <div className="rounded-xl border border-signal-prepare/30 bg-graphite p-5">
-          <h3 className="font-mono text-[10px] text-mist uppercase tracking-widest mb-3">
+        <div className="rounded-2xl border border-signal-prepare/30 bg-graphite p-5">
+          <h3 className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-3">
             🤖 Model Recommendation
           </h3>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
@@ -557,8 +557,8 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
 
       {/* Price levels + Score breakdown */}
       <div className="grid grid-cols-2 gap-4">
-        <div className="rounded-xl border border-slate bg-graphite p-5">
-          <div className="font-mono text-[10px] text-mist uppercase tracking-widest mb-3">Price levels</div>
+        <div className="rounded-2xl border border-slate bg-graphite p-5">
+          <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-3">Price levels</div>
           {displayClose != null && data.support != null && data.resistance != null ? (
             <PriceLevelBar close={displayClose} support={data.support} resistance={data.resistance} />
           ) : (
@@ -569,8 +569,8 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
             </p>
           )}
         </div>
-        <div className="rounded-xl border border-slate bg-graphite p-5">
-          <div className="font-mono text-[10px] text-mist uppercase tracking-widest mb-3">Score breakdown</div>
+        <div className="rounded-2xl border border-slate bg-graphite p-5">
+          <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-3">Score breakdown</div>
           <div className="space-y-3">
             {scores.map((s) => (
               <ScoreBar key={s.label} label={s.label} value={s.value} />
@@ -581,8 +581,8 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
 
       {/* Fundamental Metrics */}
       {metrics && (
-        <div className="rounded-xl border border-slate/60 bg-graphite/30 p-5">
-          <h3 className="font-mono text-[10px] text-mist uppercase tracking-widest mb-3">
+        <div className="rounded-2xl border border-slate/60 bg-graphite/30 p-5">
+          <h3 className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-3">
             📊 Fundamental Metrics
           </h3>
           {data.fundamental_fallback ? (
@@ -676,7 +676,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
 
       {/* Holding period */}
       {(data.holding_period !== "N/A" || data.holding_period_estimate) && (
-        <div className="rounded-xl border border-slate bg-graphite px-5 py-4 font-mono text-xs text-mist">
+        <div className="rounded-2xl border border-slate bg-graphite px-5 py-4 font-display tabular-nums text-xs text-mist">
           <div className="flex justify-between">
             <span className="uppercase tracking-widest">Suggested holding period</span>
             <span className="text-paper">{data.holding_period}</span>
@@ -692,8 +692,8 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
 
       {/* Long-term hold */}
       {data.long_term_hold && (
-        <div className="rounded-xl border border-signal-buy/40 bg-signal-buy/5 px-5 py-4">
-          <div className="flex items-center gap-2 font-mono text-xs uppercase tracking-widest text-signal-buy">
+        <div className="rounded-2xl border border-signal-buy/40 bg-signal-buy/5 px-5 py-4">
+          <div className="flex items-center gap-2 font-display tabular-nums text-xs uppercase tracking-widest text-signal-buy">
             💎 Highly Recommend for Long Term Hold
           </div>
           <p className="text-mist/60 text-xs mt-1">
@@ -702,7 +702,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
           {data.long_term_hold_estimate && (
             <div className="mt-2 pt-2 border-t border-signal-buy/20 flex justify-between text-xs">
               <span className="text-mist/50 uppercase tracking-widest text-[10px]">Suggested hold</span>
-              <span className="text-paper font-mono">{data.long_term_hold_estimate.label}</span>
+              <span className="text-paper font-display tabular-nums">{data.long_term_hold_estimate.label}</span>
             </div>
           )}
         </div>
@@ -712,7 +712,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
       <section className="terminal-panel">
         <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
           <p className="dash-section-title mb-0">News</p>
-          <span className={`font-mono text-[11px] ${sentimentColor}`}>
+          <span className={`font-display tabular-nums text-[11px] ${sentimentColor}`}>
             Score {computedNewsScore} · {sentimentLabel}
             {newsHeadlineCount ? ` · ${newsHeadlineCount} items` : ""}
           </span>
@@ -732,9 +732,9 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
               const url = typeof h === "object" ? h.url : undefined;
               if (!title) return null;
               return (
-                <li key={i} className="font-mono text-[11px] text-mist/85 leading-snug">
+                <li key={i} className="font-display tabular-nums text-[11px] text-mist/85 leading-snug">
                   {url ? (
-                    <a href={url} target="_blank" rel="noreferrer" className="text-sky-400 hover:text-sky-300 underline-offset-2 hover:underline">
+                    <a href={url} target="_blank" rel="noreferrer" className="text-signal-prepare hover:text-signal-prepare underline-offset-2 hover:underline">
                       {title.length > 110 ? title.slice(0, 109) + "…" : title}
                     </a>
                   ) : (
@@ -762,9 +762,9 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
         {expandedNewsIndex === -1 && recentNewsItems.length > 3 && (
           <ul className="mt-2 space-y-1.5 border-t border-slate/40 pt-2">
             {recentNewsItems.slice(3, 12).map((item, idx) => (
-              <li key={idx} className="font-mono text-[11px] text-mist/80">
+              <li key={idx} className="font-display tabular-nums text-[11px] text-mist/80">
                 {item.url ? (
-                  <a href={item.url} target="_blank" rel="noreferrer" className="text-sky-400 hover:underline">
+                  <a href={item.url} target="_blank" rel="noreferrer" className="text-signal-prepare hover:underline">
                     {item.title}
                   </a>
                 ) : (
@@ -791,7 +791,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
               : "No major corporate events detected in the recent window.")}
         </p>
         {(data as any).event_data?.next_earnings_date && (
-          <p className="font-mono text-[11px] text-amber-300/90">
+          <p className="font-display tabular-nums text-[11px] text-signal-hold/90">
             Next earnings: {(data as any).event_data.next_earnings_date}
           </p>
         )}
@@ -801,8 +801,8 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
 
       {/* Natural-language summary */}
       {data.natural_language_summary && (
-        <div className="rounded-xl border border-slate/60 bg-graphite/50 p-5">
-          <h4 className="font-mono text-xs text-mist uppercase tracking-widest mb-2">
+        <div className="rounded-2xl border border-slate/60 bg-graphite/50 p-5">
+          <h4 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-2">
             💬 Final Remarks
           </h4>
           <p className="text-sm text-paper/90 leading-relaxed">
@@ -835,7 +835,7 @@ function EventSection({ symbol, compact }: { symbol: string; compact?: boolean }
   if (loading) {
     if (compact) return null;
     return (
-      <div className="rounded-xl border border-slate/40 bg-graphite/30 p-4 text-xs text-mist/40 font-mono flex items-center gap-2">
+      <div className="rounded-2xl border border-slate/40 bg-graphite/30 p-4 text-xs text-mist/40 font-display tabular-nums flex items-center gap-2">
         <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-mist/40 animate-spin" />
         Loading events...
       </div>
@@ -846,14 +846,14 @@ function EventSection({ symbol, compact }: { symbol: string; compact?: boolean }
   if (!hasAnything) return null;
 
   return (
-    <div className={compact ? "mt-2" : "rounded-xl border border-slate/60 bg-graphite/50 p-5"}>
+    <div className={compact ? "mt-2" : "rounded-2xl border border-slate/60 bg-graphite/50 p-5"}>
       {!compact && (
-        <h4 className="font-mono text-xs text-mist uppercase tracking-widest mb-3">📅 Event Update</h4>
+        <h4 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-3">📅 Event Update</h4>
       )}
 
       {events.recent_changes.length > 0 && (
-        <div className="mb-4 bg-signal-prepare/10 border border-signal-prepare/30 rounded-lg p-3">
-          <div className="font-mono text-[10px] text-signal-prepare uppercase tracking-wider mb-2">
+        <div className="mb-4 bg-signal-prepare/10 border border-signal-prepare/30 rounded-xl p-3">
+          <div className="font-display tabular-nums text-[10px] text-signal-prepare uppercase tracking-wider mb-2">
             Newly Detected
           </div>
           <ul className="space-y-1.5">
@@ -869,7 +869,7 @@ function EventSection({ symbol, compact }: { symbol: string; compact?: boolean }
 
       {events.upcoming.length > 0 && (
         <div className="mb-3">
-          <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider mb-2">Upcoming</div>
+          <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider mb-2">Upcoming</div>
           <ul className="space-y-1.5">
             {events.upcoming.map((e, i) => (
               <li key={i} className="text-sm text-mist/80 flex gap-2">
@@ -877,7 +877,7 @@ function EventSection({ symbol, compact }: { symbol: string; compact?: boolean }
                 <span>
                   {e.description}
                   {(e.date || (e as any).datetime) && (
-                    <span className="block font-mono text-[10px] text-mist/45 mt-0.5">
+                    <span className="block font-display tabular-nums text-[10px] text-mist/45 mt-0.5">
                       {formatWhen(e.date || (e as any).datetime)}
                     </span>
                   )}
@@ -890,7 +890,7 @@ function EventSection({ symbol, compact }: { symbol: string; compact?: boolean }
 
       {events.recent.length > 0 && (
         <div>
-          <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider mb-2">Previous</div>
+          <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider mb-2">Previous</div>
           <ul className="space-y-1.5">
             {events.recent.slice(0, 5).map((e, i) => (
               <li key={i} className="text-sm text-mist/70 flex gap-2">
@@ -898,7 +898,7 @@ function EventSection({ symbol, compact }: { symbol: string; compact?: boolean }
                 <span>
                   {e.description}
                   {(e.date || (e as any).datetime) && (
-                    <span className="block font-mono text-[10px] text-mist/45 mt-0.5">
+                    <span className="block font-display tabular-nums text-[10px] text-mist/45 mt-0.5">
                       {formatWhen(e.date || (e as any).datetime)}
                     </span>
                   )}
@@ -970,7 +970,7 @@ function EventDataView({ data }: { data: Record<string, unknown> }) {
     if (!items.length) return null;
     return (
       <div key={key} className="space-y-2">
-        <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">
+        <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">
           {key.replace(/_/g, " ")}
         </div>
         <ul className="space-y-2">
@@ -997,17 +997,17 @@ function EventDataView({ data }: { data: Record<string, unknown> }) {
               return (
                 <li
                   key={idx}
-                  className="rounded-lg border border-slate/40 bg-ink/40 px-3 py-2 text-sm"
+                  className="rounded-xl border border-slate/40 bg-ink/40 px-3 py-2 text-sm"
                 >
                   <div className="text-paper leading-snug font-medium">{title || "Event"}</div>
-                  <div className="mt-1 flex flex-wrap gap-2 text-[10px] font-mono text-mist/50">
+                  <div className="mt-1 flex flex-wrap gap-2 text-[10px] font-display tabular-nums text-mist/50">
                     {meta && <span>{meta}</span>}
                     {url && (
                       <a
                         href={url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-sky-400 hover:underline"
+                        className="text-signal-prepare hover:underline"
                         onClick={(e) => e.stopPropagation()}
                       >
                         {shortUrl(url)} ↗
@@ -1037,10 +1037,10 @@ function EventDataView({ data }: { data: Record<string, unknown> }) {
               return (
                 <li
                   key={idx}
-                  className="rounded-lg border border-slate/40 bg-ink/40 px-3 py-2 text-sm"
+                  className="rounded-xl border border-slate/40 bg-ink/40 px-3 py-2 text-sm"
                 >
                   <div className="text-paper leading-snug font-medium">{title}</div>
-                  <div className="mt-1 flex flex-wrap gap-2 text-[10px] font-mono text-mist/50">
+                  <div className="mt-1 flex flex-wrap gap-2 text-[10px] font-display tabular-nums text-mist/50">
                     {publisher && <span>{String(publisher)}</span>}
                     {pubLabel && <span>{pubLabel}</span>}
                     {url && (
@@ -1048,7 +1048,7 @@ function EventDataView({ data }: { data: Record<string, unknown> }) {
                         href={url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-sky-400 hover:underline"
+                        className="text-signal-prepare hover:underline"
                         onClick={(e) => e.stopPropagation()}
                       >
                         {shortUrl(url)} ↗
@@ -1108,7 +1108,7 @@ function EventDataView({ data }: { data: Record<string, unknown> }) {
           }
           return (
             <div key={key}>
-              <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider mb-1">
+              <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider mb-1">
                 {label}
               </div>
               <p className="text-sm text-mist/80">{formatVal(value)}</p>
@@ -1126,8 +1126,8 @@ function EventDataView({ data }: { data: Record<string, unknown> }) {
           }
           const title = formatVal(o.title || o.summary || o.description);
           return (
-            <div key={key} className="rounded-lg border border-slate/40 bg-ink/40 px-3 py-2">
-              <div className="font-mono text-[10px] text-mist/50 uppercase tracking-wider mb-1">
+            <div key={key} className="rounded-xl border border-slate/40 bg-ink/40 px-3 py-2">
+              <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider mb-1">
                 {label}
               </div>
               {title ? (
@@ -1148,11 +1148,11 @@ function EventDataView({ data }: { data: Record<string, unknown> }) {
             key={key}
             className={
               isMeta
-                ? "flex justify-between gap-4 font-mono text-[10px] text-mist/50"
-                : "rounded-lg border border-slate/40 bg-ink/40 px-3 py-2"
+                ? "flex justify-between gap-4 font-display tabular-nums text-[10px] text-mist/50"
+                : "rounded-xl border border-slate/40 bg-ink/40 px-3 py-2"
             }
           >
-            <span className={isMeta ? "uppercase tracking-wider" : "font-mono text-[10px] text-mist/50 uppercase tracking-wider block mb-1"}>
+            <span className={isMeta ? "uppercase tracking-wider" : "font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider block mb-1"}>
               {label}
             </span>
             <span className={isMeta ? "text-right text-mist/70" : "text-sm text-paper leading-snug"}>
@@ -1196,15 +1196,15 @@ function NewsItemWithFundamentals({
       }) + ' UTC'
     : 'Date not available';
 
-  const impactColor = impact === 'positive' ? 'text-green-500' :
-                      impact === 'negative' ? 'text-red-500' :
-                      'text-yellow-500';
+  const impactColor = impact === 'positive' ? 'text-signal-buy' :
+                      impact === 'negative' ? 'text-signal-sell' :
+                      'text-signal-hold';
   const impactEmoji = impact === 'positive' ? '📈' :
                       impact === 'negative' ? '📉' :
                       '⚪';
 
   return (
-    <div className="border-b border-gray-200 dark:border-gray-700 py-2 last:border-0">
+    <div className="border-b border-paper dark:border-slate py-2 last:border-0">
       <div className="flex items-start gap-2">
         <span className="text-sm mt-0.5">{impactEmoji}</span>
         <div className="flex-1">
@@ -1213,15 +1213,15 @@ function NewsItemWithFundamentals({
               href={item.url}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-blue-600 dark:text-blue-400 hover:underline font-medium"
+              className="text-signal-prepare dark:text-signal-prepare hover:underline font-medium"
             >
               {item.title}
             </a>
           ) : (
-            <span className="font-medium text-gray-800 dark:text-gray-200">{item.title}</span>
+            <span className="font-medium text-ink dark:text-paper">{item.title}</span>
           )}
           <div className="flex items-center gap-3 mt-0.5 flex-wrap">
-            <div className="text-xs text-gray-500 dark:text-gray-400">
+            <div className="text-xs text-mist dark:text-mist">
               {item.publisher && <span className="mr-2">{item.publisher}</span>}
               <span>{formattedDate}</span>
             </div>
@@ -1230,7 +1230,7 @@ function NewsItemWithFundamentals({
             </span>
             <button
               onClick={onToggle}
-              className="text-[10px] font-mono text-mist/50 hover:text-mist transition border border-slate/30 rounded px-2 py-0.5"
+              className="text-[10px] font-display tabular-nums text-mist/50 hover:text-mist transition border border-slate/30 rounded px-2 py-0.5"
             >
               {isExpanded ? 'Hide Fundamentals' : 'Show Fundamentals'}
             </button>
@@ -1239,20 +1239,20 @@ function NewsItemWithFundamentals({
       </div>
 
       {isExpanded && fundamentalMetrics && (
-        <div className="mt-2 ml-6 p-3 bg-ink/30 rounded-lg border border-slate/40">
+        <div className="mt-2 ml-6 p-3 bg-ink/30 rounded-xl border border-slate/40">
           <div className="flex items-center justify-between mb-2">
-            <span className="font-mono text-[10px] text-mist/50 uppercase tracking-wider">
+            <span className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">
               📊 Fundamental Impact
             </span>
             <span className="text-xs text-mist/60">
-              Score: <span className="font-mono font-medium text-paper">{fundamentalScore ?? 'N/A'}</span>
+              Score: <span className="font-display tabular-nums font-medium text-paper">{fundamentalScore ?? 'N/A'}</span>
             </span>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
             {fundamentalMetrics.revenue_growth !== null && fundamentalMetrics.revenue_growth !== undefined && (
               <div className="bg-ink/40 rounded px-2 py-1">
                 <div className="text-[9px] text-mist/50 uppercase">Revenue Growth</div>
-                <div className={`text-sm font-mono ${fundamentalMetrics.revenue_growth > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                <div className={`text-sm font-display tabular-nums ${fundamentalMetrics.revenue_growth > 0 ? 'text-signal-buy' : 'text-signal-sell'}`}>
                   {fundamentalMetrics.revenue_growth.toFixed(1)}%
                 </div>
               </div>
@@ -1260,7 +1260,7 @@ function NewsItemWithFundamentals({
             {fundamentalMetrics.earnings_growth !== null && fundamentalMetrics.earnings_growth !== undefined && (
               <div className="bg-ink/40 rounded px-2 py-1">
                 <div className="text-[9px] text-mist/50 uppercase">Earnings Growth</div>
-                <div className={`text-sm font-mono ${fundamentalMetrics.earnings_growth > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                <div className={`text-sm font-display tabular-nums ${fundamentalMetrics.earnings_growth > 0 ? 'text-signal-buy' : 'text-signal-sell'}`}>
                   {fundamentalMetrics.earnings_growth.toFixed(1)}%
                 </div>
               </div>
@@ -1268,7 +1268,7 @@ function NewsItemWithFundamentals({
             {fundamentalMetrics.roe !== null && fundamentalMetrics.roe !== undefined && (
               <div className="bg-ink/40 rounded px-2 py-1">
                 <div className="text-[9px] text-mist/50 uppercase">ROE</div>
-                <div className={`text-sm font-mono ${fundamentalMetrics.roe > 15 ? 'text-green-400' : fundamentalMetrics.roe > 0 ? 'text-yellow-400' : 'text-red-400'}`}>
+                <div className={`text-sm font-display tabular-nums ${fundamentalMetrics.roe > 15 ? 'text-signal-buy' : fundamentalMetrics.roe > 0 ? 'text-signal-hold' : 'text-signal-sell'}`}>
                   {fundamentalMetrics.roe.toFixed(1)}%
                 </div>
               </div>
@@ -1276,7 +1276,7 @@ function NewsItemWithFundamentals({
             {fundamentalMetrics.debt_to_equity !== null && fundamentalMetrics.debt_to_equity !== undefined && (
               <div className="bg-ink/40 rounded px-2 py-1">
                 <div className="text-[9px] text-mist/50 uppercase">Debt/Equity</div>
-                <div className={`text-sm font-mono ${fundamentalMetrics.debt_to_equity < 1 ? 'text-green-400' : fundamentalMetrics.debt_to_equity < 2 ? 'text-yellow-400' : 'text-red-400'}`}>
+                <div className={`text-sm font-display tabular-nums ${fundamentalMetrics.debt_to_equity < 1 ? 'text-signal-buy' : fundamentalMetrics.debt_to_equity < 2 ? 'text-signal-hold' : 'text-signal-sell'}`}>
                   {Number(fundamentalMetrics.debt_to_equity).toFixed(2)}x
                 </div>
               </div>
@@ -1284,7 +1284,7 @@ function NewsItemWithFundamentals({
             {fundamentalMetrics.profit_margins !== null && fundamentalMetrics.profit_margins !== undefined && (
               <div className="bg-ink/40 rounded px-2 py-1">
                 <div className="text-[9px] text-mist/50 uppercase">Net Margin</div>
-                <div className={`text-sm font-mono ${fundamentalMetrics.profit_margins > 10 ? 'text-green-400' : fundamentalMetrics.profit_margins > 0 ? 'text-yellow-400' : 'text-red-400'}`}>
+                <div className={`text-sm font-display tabular-nums ${fundamentalMetrics.profit_margins > 10 ? 'text-signal-buy' : fundamentalMetrics.profit_margins > 0 ? 'text-signal-hold' : 'text-signal-sell'}`}>
                   {fundamentalMetrics.profit_margins.toFixed(1)}%
                 </div>
               </div>
@@ -1292,7 +1292,7 @@ function NewsItemWithFundamentals({
             {fundamentalMetrics.pe_ratio !== null && fundamentalMetrics.pe_ratio !== undefined && (
               <div className="bg-ink/40 rounded px-2 py-1">
                 <div className="text-[9px] text-mist/50 uppercase">P/E Ratio</div>
-                <div className={`text-sm font-mono ${fundamentalMetrics.pe_ratio < 20 ? 'text-green-400' : fundamentalMetrics.pe_ratio < 30 ? 'text-yellow-400' : 'text-red-400'}`}>
+                <div className={`text-sm font-display tabular-nums ${fundamentalMetrics.pe_ratio < 20 ? 'text-signal-buy' : fundamentalMetrics.pe_ratio < 30 ? 'text-signal-hold' : 'text-signal-sell'}`}>
                   {fundamentalMetrics.pe_ratio.toFixed(1)}
                 </div>
               </div>
@@ -1328,7 +1328,7 @@ function PriceLevelBar({ close, support, resistance }: { close: number; support:
           style={{ left: `${Math.min(95, Math.max(5, closePct))}%`, transform: "translate(-50%, -50%)" }}
         />
       </div>
-      <div className="flex justify-between font-mono text-[10px]">
+      <div className="flex justify-between font-display tabular-nums text-[10px]">
         <span className="text-signal-sell">S ₹{support.toLocaleString("en-IN")}</span>
         <span className="text-signal-prepare">₹{close.toLocaleString("en-IN")}</span>
         <span className="text-signal-buy">R ₹{resistance.toLocaleString("en-IN")}</span>
@@ -1341,7 +1341,7 @@ function ScoreBar({ label, value }: { label: string; value: number }) {
   const color = value >= 70 ? "bg-signal-buy" : value >= 50 ? "bg-signal-prepare" : "bg-signal-sell/60";
   return (
     <div>
-      <div className="flex justify-between font-mono text-[10px] text-mist mb-1">
+      <div className="flex justify-between font-display tabular-nums text-[10px] text-mist mb-1">
         <span className="uppercase tracking-wide">{label}</span>
         <span className={value >= 70 ? "text-signal-buy" : value >= 50 ? "text-signal-prepare" : "text-signal-sell"}>{value}</span>
       </div>
@@ -1360,8 +1360,8 @@ function ReasonList({ title, items, maxItems }: { title: string; items: string[]
   const visibleItems = shouldTruncate ? items.slice(0, maxItems) : items;
 
   return (
-    <div className="rounded-xl border border-slate bg-graphite p-5">
-      <h3 className="font-mono text-[10px] text-mist uppercase tracking-widest mb-3">{title}</h3>
+    <div className="rounded-2xl border border-slate bg-graphite p-5">
+      <h3 className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-3">{title}</h3>
       {hasItems ? (
         <>
           <ul className="space-y-2">
@@ -1375,7 +1375,7 @@ function ReasonList({ title, items, maxItems }: { title: string; items: string[]
           {maxItems != null && items.length > maxItems && (
             <button
               onClick={() => setExpanded(!expanded)}
-              className="mt-2 text-[10px] font-mono uppercase tracking-wider text-mist/40 hover:text-mist/70 transition"
+              className="mt-2 text-[10px] font-display tabular-nums uppercase tracking-wider text-mist/40 hover:text-mist/70 transition"
             >
               {expanded ? "Show less" : `+${items.length - maxItems} more`}
             </button>
@@ -1390,9 +1390,9 @@ function ReasonList({ title, items, maxItems }: { title: string; items: string[]
 
 function MetricItem({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-ink/40 border border-slate/40 rounded-lg px-3 py-2">
-      <div className="font-mono text-[9px] text-mist/50 uppercase tracking-wider">{label}</div>
-      <div className="font-mono text-sm text-paper mt-0.5">{value}</div>
+    <div className="bg-ink/40 border border-slate/40 rounded-xl px-3 py-2">
+      <div className="font-display tabular-nums text-[9px] text-mist/50 uppercase tracking-wider">{label}</div>
+      <div className="font-display tabular-nums text-sm text-paper mt-0.5">{value}</div>
     </div>
   );
 }
@@ -1413,9 +1413,9 @@ function EventScoreBadge({ data }: { data: any }) {
     data?.event_score_raw_delta ?? data?.event_data?.event_score_raw_delta ?? data?.events?.event_score_raw_delta;
   if (score == null) return null;
 
-  const tone = score >= 65 ? "text-emerald-400 border-emerald-500/40 bg-emerald-500/10"
-    : score >= 50 ? "text-amber-300 border-amber-500/30 bg-amber-500/10"
-    : "text-rose-400 border-rose-500/40 bg-rose-500/10";
+  const tone = score >= 65 ? "text-signal-buy border-signal-buy/40 bg-signal-buy/10"
+    : score >= 50 ? "text-signal-hold border-signal-hold/30 bg-signal-hold/10"
+    : "text-signal-sell border-signal-sell/40 bg-signal-sell/10";
 
   const top = [...breakdown]
     .sort((a, b) => Math.abs(b.decayed_impact ?? 0) - Math.abs(a.decayed_impact ?? 0))
@@ -1423,12 +1423,12 @@ function EventScoreBadge({ data }: { data: any }) {
 
   return (
     <div className="mt-2 mb-3 flex flex-wrap items-center gap-2">
-      <span className={`font-mono text-[11px] px-2 py-1 rounded-md border ${tone}`}>
+      <span className={`font-display tabular-nums text-[11px] px-2 py-1 rounded-xl border ${tone}`}>
         Event Score {Math.round(score)}/100
       </span>
       {rawDelta != null && (
         <span
-          className="font-mono text-[10px] px-1.5 py-0.5 rounded border text-mist/70 border-slate/40 bg-graphite/40"
+          className="font-display tabular-nums text-[10px] px-1.5 py-0.5 rounded border text-mist/70 border-slate/40 bg-graphite/40"
           title="Natural/raw score before the 0-100 neutral-50 compression — the signed sum of every event's recency-decayed impact"
         >
           natural {rawDelta >= 0 ? "+" : ""}
@@ -1438,10 +1438,10 @@ function EventScoreBadge({ data }: { data: any }) {
       {top.map((b, i) => (
         <span
           key={i}
-          className={`font-mono text-[10px] px-1.5 py-0.5 rounded border ${
+          className={`font-display tabular-nums text-[10px] px-1.5 py-0.5 rounded border ${
             (b.decayed_impact ?? 0) >= 0
-              ? "text-emerald-300/90 border-emerald-500/25 bg-emerald-500/5"
-              : "text-rose-300/90 border-rose-500/25 bg-rose-500/5"
+              ? "text-signal-buy/90 border-signal-buy/25 bg-signal-buy/5"
+              : "text-signal-sell/90 border-signal-sell/25 bg-signal-sell/5"
           }`}
           title={`base ${b.base_impact} · age ${b.age_days ?? "?"}d`}
         >

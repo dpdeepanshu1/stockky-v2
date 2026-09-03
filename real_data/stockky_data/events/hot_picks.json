@@ -1,0 +1,152 @@
+{
+  "bulk_insider_driven": [
+    {
+      "symbol": "INDUSINDBK",
+      "price": 978.0,
+      "score": 60.0,
+      "driver": "insider"
+    },
+    {
+      "symbol": "NESTLEIND",
+      "price": 1425.0,
+      "score": 60.0,
+      "driver": "insider"
+    },
+    {
+      "symbol": "CIPLA",
+      "price": 1412.800048828125,
+      "score": 60.0,
+      "driver": "insider"
+    },
+    {
+      "symbol": "CANBK",
+      "price": 126.30000305175781,
+      "score": 60.0,
+      "driver": "bulk_block"
+    }
+  ],
+  "results_driven": [
+    {
+      "symbol": "RELIANCE",
+      "price": 1313.0999755859375,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "TCS",
+      "price": 2348.0,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "INFY",
+      "price": 1140.0,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "HINDUNILVR",
+      "price": 1975.0,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "ICICIBANK",
+      "price": 1426.5,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "KOTAKBANK",
+      "price": 423.5,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "SBIN",
+      "price": 1020.9000244140625,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "BHARTIARTL",
+      "price": 1862.800048828125,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "BAJFINANCE",
+      "price": 1055.9000244140625,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "TITAN",
+      "price": 5074.0,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "AXISBANK",
+      "price": 1253.9000244140625,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "MARUTI",
+      "price": 12849.0,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "SUNPHARMA",
+      "price": 1931.699951171875,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "ULTRACEMCO",
+      "price": 11393.0,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "BAJAJFINSV",
+      "price": 1990.0,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "NTPC",
+      "price": 330.0,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "M&M",
+      "price": 3190.0,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "HCLTECH",
+      "price": 1331.5,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "POWERGRID",
+      "price": 266.79998779296875,
+      "score": 60.0,
+      "driver": "results"
+    },
+    {
+      "symbol": "ADANIPORTS",
+      "price": 1672.699951171875,
+      "score": 60.0,
+      "driver": "results"
+    }
+  ],
+  "news_driven": [],
+  "generated_at": "2026-09-02T10:42:31.069414"
+}

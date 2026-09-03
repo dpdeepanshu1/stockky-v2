@@ -1210,6 +1210,53 @@ def _waterfall_polygon_price(symbol: str) -> Optional[float]:
     return None
 
 
+def _fetch_nse_fundamentals(symbol: str) -> Optional[dict]:
+    """NSE quote-equity fallback for get_fundamentals() when yfinance fails.
+
+    Was previously called without ever being defined (NameError on every
+    yfinance-fundamentals failure — see BUG FIX note at the call site).
+    Reuses the same NSE quote-equity endpoint/client as
+    _waterfall_nse_direct_price. NSE's public quote-equity response does not
+    carry PE/ROE/debt-equity-style ratios (those need a paid data source) —
+    this only reliably yields sector/industry and a couple of price-adjacent
+    fields, so the caller's numeric fields stay None here rather than being
+    guessed. Still real value over the previous behavior: sector/industry
+    populated instead of a hard crash, and the stale-cache path downstream
+    still runs for symbols this also can't help with.
+    """
+    base = _waterfall_equity_base(symbol)
+    if not base:
+        return None
+    try:
+        from bhavcopy import _nse_client
+        client = _nse_client()
+        r = client.get(f"https://www.nseindia.com/api/quote-equity?symbol={base}")
+        if r.status_code != 200 or not r.content:
+            return None
+        data = r.json() or {}
+    except Exception as e:
+        logger.debug("NSE fundamentals fallback %s: %s", base, e)
+        return None
+
+    info = data.get("info") or {}
+    industry_info = data.get("industryInfo") or {}
+    security_info = data.get("securityInfo") or {}
+    price_info = data.get("priceInfo") or {}
+    return {
+        "secInfo": {
+            "sector": industry_info.get("sector") or info.get("industry"),
+            "industry": industry_info.get("industry") or info.get("industry"),
+            "pe": None,
+            "marketCap": None,
+            "dividendYield": None,
+            "roe": None,
+            "debtToEquity": None,
+            "faceValue": security_info.get("faceValue"),
+            "lastPrice": _safe(price_info.get("lastPrice")),
+        }
+    }
+
+
 def _waterfall_nse_direct_price(symbol: str) -> Optional[float]:
     """NSE's own quote-equity API — no key, no quota, and NOT gated behind
     Yahoo's crumb/cookie flow, so this keeps working during a yfinance
@@ -2306,7 +2353,22 @@ def _get_fundamentals_inner(symbol: str, force: bool = False):
 
     except Exception as e:
         logger.warning(f"YFinance failed for {sym}, falling back to NSE India: {e}")
-        nse_data = _fetch_nse_fundamentals(sym)
+        # BUG FIX (2026-09-03, pyflakes audit): _fetch_nse_fundamentals was
+        # called here but never defined anywhere in the codebase — every time
+        # yfinance failed for fundamentals, this line raised a NameError
+        # INSIDE this except block, which propagated up uncaught instead of
+        # reaching the "stale = _fallback_get(cache_key)" resilience path a
+        # few lines below. That path never ran for this failure mode, so a
+        # yfinance fundamentals outage crashed the request instead of
+        # degrading gracefully to stale/cached data. Wrapped in its own
+        # try/except (belt-and-suspenders even now that the function exists)
+        # so any future failure here still falls through to the stale-cache
+        # path instead of ever crashing the whole fundamentals fetch again.
+        try:
+            nse_data = _fetch_nse_fundamentals(sym)
+        except Exception as e2:
+            logger.warning(f"NSE India fallback also failed for {sym}: {e2}")
+            nse_data = None
         if nse_data:
             sec_info = nse_data.get("secInfo", {})
             result = {

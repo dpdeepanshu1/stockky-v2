@@ -1127,27 +1127,36 @@ async def list_candidates(
     symbols = [c.symbol for c in candidates]
     prices = await _live_prices(symbols)
 
-    # Latest ENTRY decision per symbol (one query, not N+1) — gives each
-    # candidate its most recent WAIT/ENTER verdict + reasoning + the
-    # limit/stop/target the risk engine proposed for it, if it has been
-    # evaluated at least once.
-    latest_decisions: dict[str, models.TradeDecision] = {}
+    # BUG FIX (2026-09-03): this used to key decisions by symbol only, so
+    # the card shown for a symbol's *newest* (possibly not-yet-evaluated)
+    # candidate row could silently display the reasoning from an OLDER
+    # candidate row for the same symbol — e.g. a fresh "BUY NOW" watchlist
+    # candidate rendering a stale "Source decision 'VOLUME_SHOCK' is not
+    # actionable for entry." reasoning left over from a *different*,
+    # earlier candidate row that has since been superseded. Each
+    # TradeDecision already carries the candidate_id it was actually
+    # evaluated for (see entry_engine/entry.py), so key by candidate_id
+    # instead: a candidate with no decision yet for its own id correctly
+    # shows "not yet evaluated" with no reasoning, rather than borrowing
+    # a mismatched one from a different candidate row.
+    latest_decisions: dict[int, models.TradeDecision] = {}
     if symbols:
         decision_rows = (
             db.query(models.TradeDecision)
             .filter(models.TradeDecision.mode == mode,
                     models.TradeDecision.decision_type == "ENTRY",
-                    models.TradeDecision.symbol.in_(set(symbols)))
+                    models.TradeDecision.symbol.in_(set(symbols)),
+                    models.TradeDecision.candidate_id.isnot(None))
             .order_by(models.TradeDecision.created_at.desc())
             .all()
         )
         for d in decision_rows:
-            if d.symbol not in latest_decisions:
-                latest_decisions[d.symbol] = d  # first hit per symbol = most recent (already ordered desc)
+            if d.candidate_id not in latest_decisions:
+                latest_decisions[d.candidate_id] = d  # first hit per candidate = most recent
 
     out = []
     for c in candidates:
-        d = latest_decisions.get(c.symbol)
+        d = latest_decisions.get(c.id)
         ltp = prices.get(c.symbol)
         limit_distance_pct = None
         if ltp is not None and d and d.proposed_price and d.action == "WAIT":

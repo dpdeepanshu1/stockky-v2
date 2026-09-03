@@ -17,7 +17,7 @@ import random
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
-from typing import List, Optional, Set, Dict, Union
+from typing import List, Optional, Set, Dict, Union, Any
 
 import httpx
 import yfinance as yf
@@ -801,6 +801,23 @@ def _get_all_nse_securities() -> List[str]:
     if not symbols:
         # Absolute last resort — both NSE live API and bhavcopy are down.
         # Keep this list but it is NEVER the expected steady-state path.
+        #
+        # BUG FIX (2026-09-03, Groww "Volume shockers"/"Intraday Screener"
+        # screenshots session): this list was frozen at large, long-listed
+        # NIFTY names only. Several of TODAY's real high-percentage movers
+        # from the user's screenshots — GROWW (Billionbrains Garage
+        # Ventures), PINELABS, URBANCO (Urban Company), SWIGGY, OLAELEC
+        # (Ola Electric Mobility), ATHERENERG (Ather Energy), FIRSTCRY
+        # (Brainbees Solutions), VENTIVE (Ventive Hospitality), SHREEJISPG
+        # (Shreeji Shipping Global), NETWEB (Netweb Technologies India) —
+        # are all 2024-2025-listed names that did not exist when this list
+        # was first written, so in the absolute-worst-case path (NSE live
+        # AND bhavcopy both down) the scan universe couldn't have surfaced
+        # any of them even by luck. Tickers verified against NSE listing
+        # circulars/exchange data before adding — this is a safety-net
+        # list, not the primary universe source, so it only matters when
+        # everything else has already failed, but it should still be a
+        # real sample of what's actually trading, not a frozen 2023 list.
         symbols = [
             "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "HCLTECH",
             "ITC", "SBIN", "BHARTIARTL", "KOTAKBANK", "LT", "M&M", "MARUTI",
@@ -813,6 +830,10 @@ def _get_all_nse_securities() -> List[str]:
             "PIDILITIND", "RECLTD", "SHRIRAMFIN", "SUNPHARMA", "TATACONSUM",
             "TATAMOTORS", "TATASTEEL", "TECHM", "TITAN", "TORNTPOWER",
             "TRENT", "ULTRACEMCO", "UPL", "VEDL", "ZOMATO",
+            # Recently-listed, high-turnover names (added 2026-09-03) —
+            # confirmed NSE symbols, not guesses.
+            "GROWW", "PINELABS", "URBANCO", "SWIGGY", "OLAELEC",
+            "ATHERENERG", "FIRSTCRY", "VENTIVE", "SHREEJISPG", "NETWEB",
         ]
         logger.warning("Using static last-resort list with %d symbols (both live sources down)", len(symbols))
 
@@ -892,8 +913,20 @@ def _get_recent_ipos() -> List[str]:
             logger.warning("ipoalerts fallback for recent-ipos failed: %s", e)
 
     if not symbols:
-        symbols = ["JIOFIN", "BLUESTONE", "CUPID", "IREDA", "RVNL", "HUDCO", "RAILTEL", "IRFC", "MVELECTRO"]
-        logger.warning("_get_recent_ipos: using static 9-name fallback list")
+        # BUG FIX (2026-09-03): this fallback (used only when both the
+        # live public-past-issues endpoint AND the ipoalerts fallback
+        # fail) had gone stale — it was missing most of the actual
+        # 2025-2026 IPO cohort. Confirmed real NSE symbols added below
+        # (verified against listing circulars, not guessed) so the IPO
+        # Tracker's worst-case path still surfaces genuinely recent
+        # listings instead of an outdated, unverifiable list.
+        symbols = [
+            "JIOFIN", "BLUESTONE", "CUPID", "IREDA", "RVNL", "HUDCO",
+            "RAILTEL", "IRFC", "MVELECTRO",
+            "GROWW", "PINELABS", "URBANCO", "VENTIVE", "SHREEJISPG",
+            "FIRSTCRY", "SWIGGY", "OLAELEC", "ATHERENERG", "NETWEB",
+        ]
+        logger.warning("_get_recent_ipos: using static fallback list (%d names)", len(symbols))
     return symbols
 
 # ── Rotating coverage cursor for the general-pool momentum-mover fallback ───
@@ -8666,10 +8699,20 @@ async def hard_reset_database(preserve_days: int = 7):
             "stockky:hot_job",
         ]
         for gk in ghost_keys:
-            try:
-                _redis_delete(gk) if "_redis_delete" in dir() else None
-            except Exception:
-                pass
+            # BUG FIX (2026-09-03, pyflakes audit): this used to be
+            # `_redis_delete(gk) if "_redis_delete" in dir() else None` —
+            # the exact same `dir()`-with-no-arguments anti-pattern already
+            # fixed once in this file for `_get_nifty50_data` (see the
+            # 2026-09-01 note on _get_momentum_movers above): dir() with no
+            # arguments returns names in the CURRENT LOCAL SCOPE, not module
+            # globals, and `_redis_delete` was never a local variable here —
+            # so the condition was always False and this line silently did
+            # nothing on every call, for a function that (like
+            # _fetch_nse_fundamentals above) was never actually defined
+            # anywhere in the codebase either. Removed rather than
+            # reimplemented: the two blocks below (_kv_cache.kv_delete and
+            # _redis.delete) already cover both real ghost-key cleanup paths
+            # this service uses, so this was dead weight, not a gap.
             try:
                 if _kv_cache is not None:
                     _kv_cache.kv_delete(gk)

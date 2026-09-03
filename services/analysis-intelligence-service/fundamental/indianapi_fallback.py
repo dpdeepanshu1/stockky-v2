@@ -68,6 +68,15 @@ def _get_redis_client():
 
 
 def _cache_get(redis_client, symbol: str):
+    # BUG FIX (2026-09-03, pyflakes audit): the `try: return json.loads(raw)`
+    # block below was dead — the `return None` above it makes this function
+    # return unconditionally, so the dead code was never reachable — but it
+    # referenced `raw`, a name never assigned anywhere in this function, a
+    # leftover from an earlier version where _kv.get() returned a raw JSON
+    # string that needed decoding. _kv.get() now returns an already-parsed
+    # value, so there is nothing left to decode; removed the unreachable
+    # (and, if it ever became reachable, broken) block rather than leaving
+    # it as confusing dead weight.
     key = CACHE_KEY_PREFIX + symbol.upper()
     if _kv is not None:
         try:
@@ -75,11 +84,6 @@ def _cache_get(redis_client, symbol: str):
         except Exception:
             return None
     return None
-
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return None
 
 
 def _cache_set(redis_client, symbol: str, payload: Dict[str, Any]) -> None:

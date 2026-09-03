@@ -8361,6 +8361,41 @@ async def startup_event():
         logger.warning(f"Startup warning (indices, non-fatal): {e}")
 
 
+# ── Startup surprise-scan cache pre-warm ────────────────────────────────────
+# 2026-09-03 fix: SurpriseStockEngine.scan()'s cached=true fast path (used
+# by real-trade-service's candidate_engine on every pipeline cycle, see
+# _SOURCES["surprise"]) only has anything to serve once _last_result has
+# been populated by at least one full scan. Right after a fresh deploy/
+# restart, _last_result is None, so the very first cached=true call of the
+# day is guaranteed to fall through to a full live scan — which can still
+# exceed candidate_engine's 25s client timeout on a cold process (no warm
+# quote cache, cold DB connection pool), producing exactly one
+# "candidate fetch .../surprise/scan?cached=true... failed: ReadTimeout"
+# right after every restart even though SURPRISE_CACHE_MAX_AGE_SEC=220s
+# (this same file, surprise_scanner.py) already fixed the *recurring*
+# version of this timeout for steady-state operation. Firing the first
+# scan here, in the background, means _last_result is warm by the time the
+# real pipeline cycle asks for it — same pattern as the indices warm just
+# above, but as a genuine background task (create_task, not awaited)
+# since a full surprise-universe scan can legitimately take longer than
+# the 8s budget used for indices, and must never delay app readiness.
+@app.on_event("startup")
+async def _warm_surprise_scan_cache():
+    async def _warm():
+        try:
+            from surprise_scanner import surprise_engine
+            client = _get_http_client()
+            await surprise_engine.scan(client=client, market_data_url=MARKET_DATA_URL)
+            logger.info("Startup: surprise/scan cache pre-warmed (first pipeline cycle will hit cached=true)")
+        except Exception as e:
+            logger.warning("Startup warning (surprise-scan warm, non-fatal): %s", e)
+
+    try:
+        asyncio.create_task(_warm())
+    except Exception as e:
+        logger.debug("surprise-scan warm task not scheduled: %s", e)
+
+
 
 @app.post("/ops/circuit-reset")
 @app.get("/ops/circuit-reset")

@@ -198,10 +198,25 @@ async def _prepick(db, mode: str) -> None:
     from candidate_engine.candidates import refresh_candidates
     n = await refresh_candidates(db, mode)
     logger.info("[schedule] pre-pick %s: refreshed %s candidates", mode, n)
-    await notify_async(
-        f"🌅 *Pre-pick — {mode}*\nQueued {n} candidate(s) before the open. "
-        "They'll be evaluated for entry when the market opens."
-    )
+    # ENRICHMENT (2026-09-02): previously just a bare count. Now lists the
+    # actual queued symbols + signal price (top 10) so the Telegram alert
+    # is useful on its own, matching the SELL-notification enrichment.
+    lines = [f"🌅 *Pre-pick — {mode}*\nQueued {n} candidate(s) before the open."]
+    if n:
+        top = (
+            db.query(models.TradeCandidate)
+            .filter_by(mode=mode, consumed=False)
+            .order_by(models.TradeCandidate.received_at.desc())
+            .limit(10)
+            .all()
+        )
+        for c in top:
+            price_txt = f"₹{c.signal_price:.2f}" if c.signal_price is not None else "—"
+            lines.append(f"  • {c.symbol} @ {price_txt}")
+        if n > len(top):
+            lines.append(f"  ...and {n - len(top)} more")
+    lines.append("They'll be evaluated for entry when the market opens.")
+    await notify_async("\n".join(lines))
 
 
 async def _enter_at_open(db, mode: str, gate_armed: bool) -> None:

@@ -379,9 +379,26 @@ def _ensure_watchlist_link_columns(engine, dialect_name: str) -> None:
 def _ensure_oracle_autoincrement(engine, base) -> None:
     from sqlalchemy import text
 
+    # BUG FIX (2026-09-02, ORA-00904 "ID: invalid identifier"): this used to
+    # iterate every trade_* table unconditionally and run SELECT/DDL that
+    # hard-assumes an `id` column exists. trade_resilience_cache has PK=`key`
+    # (String(64)), no `id` column at all — that unconditional SELECT NVL(MAX(id)...)
+    # is exactly what threw ORA-00904 on every cold start. Skip any table
+    # whose primary key doesn't include `id`; zero schema change otherwise.
+    tables_with_id_pk = {
+        t.name
+        for t in base.metadata.sorted_tables
+        if "id" in {c.name for c in t.primary_key.columns}
+    }
     tables = [t.name for t in base.metadata.sorted_tables]
     with engine.connect() as conn:
         for table in tables:
+            if table not in tables_with_id_pk:
+                logger.info(
+                    "oracle autoincrement: skipping %s — primary key is not `id`",
+                    table,
+                )
+                continue
             try:
                 has_identity = conn.execute(
                     text(

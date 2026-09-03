@@ -227,8 +227,16 @@ def _send_real_sell(
             detail=f"{reason}: MARKET SELL {qty} sent to Dhan",
         ))
         record_real_exit_sent(db, position, dhan_order_id, qty, reason, full=full)
+        # ENRICHMENT (2026-09-02): previously just symbol + qty + reason, no
+        # price at all. Now includes entry price, current stop/target, and
+        # last-mark unrealized P&L so the Telegram alert is actionable on
+        # its own without needing to open the dashboard.
+        _stop_txt = f"₹{position.current_stop:.2f}" if position.current_stop is not None else "—"
+        _target_txt = f"₹{position.current_target:.2f}" if position.current_target is not None else "—"
         notify_sync(
             f"📤 *SELL sent* — {position.symbol} ×{qty} ({reason})\n"
+            f"Entry: ₹{position.avg_entry_price:.2f} | Stop: {_stop_txt} | Target: {_target_txt}\n"
+            f"Unrealized P&L: ₹{position.unrealized_pnl:,.2f}\n"
             "Awaiting broker fill confirmation."
         )
         return True

@@ -902,6 +902,9 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
             continue
 
         # Within band and not yet queued — insert a tagged TradeCandidate.
+        # Stamp updated_at so monitoring queries can distinguish "evaluated
+        # and queued" from genuinely never-touched rows.
+        row.updated_at = now
         cand = models.TradeCandidate(
             mode=mode,
             symbol=row.symbol,

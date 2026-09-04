@@ -875,7 +875,16 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
             row.updated_at = now
             db.commit()
             if row.source_tier == 3:
-                continue  # Tier 3: begin monitoring from next cycle (by design)
+                # Tier 3 (volume_shock): catalyst_price was intentionally None at
+                # insert — we just set the baseline. Originally this did `continue`
+                # to wait for the NEXT cycle before band-checking. But AUTO_PILOT_
+                # INTERVAL_SECONDS=180 means "next cycle" is up to 3 minutes away,
+                # which is an eternity for a fast-moving volume-shock stock. Instead,
+                # fall through immediately using the price we just set as the baseline
+                # — pct_move will be 0.0 (price == catalyst_price), so the band check
+                # trivially passes and we queue a candidate in this same cycle.
+                # This halves the latency from discovery to candidate for Tier-3 rows.
+                pass  # fall through to band-check below
 
         pct_move = (price - row.catalyst_price) / row.catalyst_price
 

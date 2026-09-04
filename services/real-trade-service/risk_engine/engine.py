@@ -58,6 +58,13 @@ MAX_POSITION_CONCENTRATION_PCT = float(
 # in the same cleanup (see below). Collapsed to one knob so retuning the
 # floor only ever requires touching one env var.
 MIN_STOCK_PRICE = float(os.getenv("RISK_MIN_STOCK_PRICE", os.getenv("HARD_FLOOR_PRICE", "20.0")))
+# Maximum per-share price. Stocks above this threshold require a minimum position
+# value (entry_price / stop_pct) that exceeds the per-trade risk budget at the
+# current account size — they will always hit the "1 share exceeds risk cap"
+# rejection. Setting an explicit ceiling here gives a cleaner rejection reason
+# and prevents the risk engine from wasting time sizing an impossible order.
+# Default ₹3000. Override via RISK_MAX_STOCK_PRICE env var as account grows.
+MAX_STOCK_PRICE = float(os.getenv("RISK_MAX_STOCK_PRICE", "3000.0"))
 HARD_FLOOR_LIQUIDITY = float(os.getenv("HARD_FLOOR_LIQUIDITY", "5000000"))
 # 2026-09-01 cleanup: HARD_FLOOR_CONVICTION and the passes_hard_floor()
 # helper below it were removed here — both were dead code, never called
@@ -202,6 +209,22 @@ def evaluate(
             RiskVerdict.REJECTED, "min_price_floor",
             f"Entry price ₹{intent.entry_price:.2f} < ₹{MIN_STOCK_PRICE:.0f}. "
             "Sub-₹20: operator risk, wide spreads, illiquid exits.",
+        )
+
+    # ── 4a-ii. Maximum price ceiling (BUY only) ───────────────────────────────
+    # Stocks priced above MAX_STOCK_PRICE (default ₹3000) require a position
+    # value larger than the per-trade risk budget allows at this account size.
+    # Rejecting early avoids the confusing "even 1 share exceeds risk cap"
+    # message and makes the real reason explicit. Override RISK_MAX_STOCK_PRICE
+    # env var as equity grows and the budget expands.
+    if intent.side == "BUY" and intent.entry_price > MAX_STOCK_PRICE:
+        return RiskResult(
+            RiskVerdict.REJECTED, "max_price_ceiling",
+            f"Entry price ₹{intent.entry_price:,.0f} exceeds the ₹{MAX_STOCK_PRICE:,.0f} "
+            f"per-share ceiling for this account size. Stock too expensive to size "
+            f"within the {account.risk_per_trade_pct:.1f}% per-trade risk budget "
+            f"(₹{account.equity * account.risk_per_trade_pct / 100:.0f}). "
+            f"Raise RISK_MAX_STOCK_PRICE env var when equity grows.",
         )
 
     # ── 4b. Liquidity hard floor §5 (BUY only, fail-open when data missing) ───

@@ -1653,6 +1653,71 @@ def get_quote(symbol: str):
 
 
 
+@app.get("/angelone/movers")
+def angelone_movers():
+    """
+    Full-exchange price gainers + losers straight from AngelOne SmartAPI.
+
+    2026-09-04: added as the fix for _get_momentum_movers()'s fallback
+    seed scan (api-gateway/main.py step 4), which called yf.download() on
+    a ~180-symbol rotating seed every cycle it ran. That's a real source
+    of rate-limit/latency risk on its own — separate from, but the same
+    shape as, the NSE 403-from-datacenter-IP problem this codebase already
+    works around: Yahoo has no official bulk-pull rate-limit contract, so
+    a 180-symbol yf.download() from a cloud IP degrades unpredictably
+    under load instead of failing cleanly.
+
+    This endpoint is authenticated via the same AngelOne broker session
+    already used for REAL-mode order placement — no per-symbol loop, no
+    seed-size/coverage tradeoff, ONE call per direction (gainers, losers)
+    returns the whole exchange's mover board. Cached like every other
+    route in this file via get_cache_ttl() (5 min market-open / 6h closed).
+    """
+    cache_key = "angelone:movers"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        from angelone_client import get_session
+        session = get_session()
+        if not session.is_configured():
+            return {"status": "not_configured", "data": [], "reason": "ANGELONE_* env vars not set"}
+
+        async def _fetch_both():
+            gainers = await session.get_gainers_losers("PercPriceGainers")
+            losers = await session.get_gainers_losers("PercPriceLosers")
+            return gainers, losers
+
+        gainers, losers = asyncio.run(_fetch_both())
+        rows = []
+        for direction, batch in (("gainer", gainers), ("loser", losers)):
+            for row in batch or []:
+                if not isinstance(row, dict):
+                    continue
+                sym = (row.get("tradingSymbol") or row.get("symbolName") or "").upper()
+                sym = sym.replace("-EQ", "").strip()
+                if not sym:
+                    continue
+                rows.append({
+                    "symbol": sym,
+                    "direction": direction,
+                    "pct_change": row.get("percentChange"),
+                    "ltp": row.get("ltp"),
+                })
+        result = {
+            "status": "ok",
+            "data": rows,
+            "gainers_count": len(gainers or []),
+            "losers_count": len(losers or []),
+            "fetched_at": datetime.utcnow().isoformat(),
+        }
+        _cache_set(cache_key, result)
+        return result
+    except Exception as e:
+        logger.warning("angelone/movers failed: %s", e)
+        return {"status": "error", "data": [], "error": str(e)[:300]}
+
+
 @app.post("/quotes/bulk")
 def get_quotes_bulk(req: BulkQuoteRequest):
     """

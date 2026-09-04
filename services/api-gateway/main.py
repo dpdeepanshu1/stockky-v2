@@ -1028,6 +1028,46 @@ def _get_momentum_movers() -> List[str]:
         len(movers) - nse_live_before,
     )
 
+    # 1b) AngelOne full-exchange gainers/losers (2026-09-04 addition).
+    #
+    # This is the fix for the yfinance seed scan in step 4 below being a
+    # rate-limit/latency risk of its own: yf.download() on a ~180-symbol
+    # rotating seed, every cycle it ran, from a cloud IP, with no official
+    # bulk-pull rate-limit contract from Yahoo — a slower-onset version of
+    # the exact same "unauthenticated cloud IP hitting a market-data
+    # provider" problem NSE's Akamai block already causes in step 1.
+    #
+    # AngelOne's marketData/v1/gainersLosers is genuinely whole-exchange
+    # (not a sampled seed) and authenticated via the SAME broker session
+    # already used for REAL-mode order placement — so it's not subject to
+    # NSE's datacenter-IP block OR Yahoo's rate limiting. Runs ALWAYS
+    # (unconditionally, like step 1), not gated behind step 1 failing, so
+    # it's a genuine co-primary source rather than a fallback — same
+    # reasoning as why step 4's yfinance scan should NOT have been gated
+    # behind "if NSE failed" either. One HTTP round-trip to
+    # market-data-service (which does the actual AngelOne call + caching),
+    # not a per-symbol loop.
+    try:
+        resp = httpx.get(f"{MARKET_DATA_URL}/angelone/movers", timeout=10.0)
+        if resp.status_code == 200:
+            payload = resp.json()
+            pre = len(movers)
+            for row in (payload.get("data") or []):
+                if not isinstance(row, dict):
+                    continue
+                sym = _clean_equity_symbol((row.get("symbol") or "").upper())
+                if sym:
+                    movers.add(sym)
+            logger.info(
+                "AngelOne movers: +%d symbols (status=%s, gainers=%s, losers=%s)",
+                len(movers) - pre, payload.get("status"),
+                payload.get("gainers_count"), payload.get("losers_count"),
+            )
+        else:
+            logger.debug("AngelOne movers: HTTP %d", resp.status_code)
+    except Exception as e:
+        logger.debug("AngelOne movers fetch failed: %s", e)
+
     # 2) Gateway's own gainers/losers/most-active (wiring fix, 30-Aug session):
     # this used to make an HTTP round-trip to MARKET_DATA_URL for
     # /market/top-gainers, /market/top-losers, /market/most-active — but

@@ -201,6 +201,47 @@ class AngelOneSession:
             body = r.json()
             return body.get("data") or []
 
+    async def get_gainers_losers(self, datatype: str = "PercPriceGainers", expirytype: str = "NEAR") -> list:
+        """Full-exchange movers screener — unlike get_quote/get_quotes_batch,
+        this is NOT scoped to a token list you already know about. One HTTP
+        call returns AngelOne's whole-exchange gainers/losers board directly.
+
+        datatype: PercPriceGainers | PercPriceLosers | PercOIGainers | PercOILosers
+        (OI variants are F&O open-interest movers; price variants are the
+        equity-wide movers this codebase actually wants.)
+
+        2026-09-04 fix: added to replace the yfinance bulk-seed scan as the
+        full-market momentum-mover source in _get_momentum_movers(). That
+        scan called yf.download() on a ~180-symbol rotating seed every cycle
+        it ran — Yahoo has no official/stable rate-limit contract for
+        unauthenticated bulk pulls from a datacenter IP, so it produced the
+        same class of problem as NSE's Akamai block: throttling and added
+        latency, just less deterministically. This endpoint is authenticated
+        (same broker session already used for REAL-mode order placement),
+        genuinely whole-exchange (not a sampled seed), and costs exactly ONE
+        call per direction per cycle — no per-symbol loop, no seed-size
+        tradeoff between coverage and call volume.
+        """
+        if _rl_in_cooldown("angelone_gainers"):
+            return []
+        await self.ensure_session()
+        _rl_acquire("angelone_gainers", weight=1)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                f"{_BASE}/rest/secure/angelbroking/marketData/v1/gainersLosers",
+                headers=self._headers(),
+                json={"datatype": datatype, "expirytype": expirytype},
+            )
+            if _is_rate_limit_response(r.status_code, _safe_json(r)):
+                _rl_set_cooldown("angelone_gainers", _ANGELONE_COOLDOWN_SEC)
+                return []
+            r.raise_for_status()
+            body = r.json()
+            if not body.get("status"):
+                logger.warning("AngelOne gainersLosers(%s): %s", datatype, body.get("message"))
+                return []
+            return body.get("data") or []
+
     async def get_quotes_batch(self, exchange: str, symbol_tokens: list) -> list:
         """Fetch live quotes for multiple tokens in one call. AngelOne's
         quote endpoint documents a cap of 50 tokens per exchange per

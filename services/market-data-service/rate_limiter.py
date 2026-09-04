@@ -59,6 +59,12 @@ _DEFAULTS = {
     "angelone_quote":  (5.0, 8),   # docs: ~9 combined; staying well under it
     "angelone_candle": (1.5, 3),   # docs: 3/s; halved for the same reason
     "angelone_order":  (0.7, 2),   # docs: 1/s (order book/trade book/orders)
+    # gainersLosers has no documented per-second figure of its own (it's
+    # not in the endpoint rate-limit table the others above are sourced
+    # from) — treated as conservatively as angelone_order since it's called
+    # at most 2x/cycle (gainers + losers) rather than per-symbol, so there's
+    # no throughput reason to push it any higher.
+    "angelone_gainers": (0.5, 2),
 }
 
 

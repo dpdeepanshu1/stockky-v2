@@ -26,7 +26,13 @@ CATALYST_PROFILES: dict[str, dict] = {
     "insider":      {"horizon_class": "short", "decay_half_life_days": 5,  "entry_band_pct": 0.05},
     "results":      {"horizon_class": "mid",   "decay_half_life_days": 12, "entry_band_pct": 0.07},
     "board":        {"horizon_class": "mid",   "decay_half_life_days": 10, "entry_band_pct": 0.06},
-    "volume_shock": {"horizon_class": "short", "decay_half_life_days": 2,  "entry_band_pct": 0.03},
+    # 2026-09-04 calibration: calibrate_decay_profiles.py — 100% missed_rate
+    # across 306 REAL volume_shock entries over 30 days (19 marked "missed",
+    # 0 entered). entry_band_pct=0.03 was rejecting every catalyst before any
+    # reached evaluate_mode. Volume-shock moves are intraday; 3% is too tight
+    # for normal post-volume volatility. Widened to 0.06 (matching board).
+    # Re-run calibrate_decay_profiles.py in 2-3 weeks once entered count > 8.
+    "volume_shock": {"horizon_class": "short", "decay_half_life_days": 2,  "entry_band_pct": 0.06},
 }
 
 DEFAULT_CATALYST_PROFILE: dict = {

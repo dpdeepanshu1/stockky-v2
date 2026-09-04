@@ -812,7 +812,10 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
     For each entry:
       - Skip if already tracked in TradeCandidate (unconsumed, same mode+symbol).
       - Fetch current price.
-      - If catalyst_price == 0.0 (Tier 3 rows, not yet seen), set it now.
+      - If catalyst_price == 0.0: set it from the current tick.
+          Tier 3 rows: skip to next cycle (price just established, band-check
+          next time — by design). Tier 1/2 rows: fall through immediately
+          (price was missing at api-gateway ingest, not a deliberate sentinel).
       - If price has moved more than entry_band_pct above catalyst_price → mark
         "missed" and skip (the stock already ran, don't chase).
       - Otherwise insert a TradeCandidate tagged with this watchlist_entry_id
@@ -850,12 +853,29 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
 
         price = tick.price
 
-        # Tier 3 rows start with catalyst_price=0.0 — set it on first sight.
+        # catalyst_price == 0.0 means the price was not known at insert time.
+        # Two distinct cases:
+        #   Tier 3 (volume_shock): sources.py intentionally sets catalyst_price=None
+        #     (stored as 0.0) — the catalyst IS the volume event, so the right
+        #     baseline is the first price we actually see. Skip this cycle so
+        #     the NEXT cycle's band-check is anchored to a real observation, not
+        #     the same tick that just triggered discovery. This was the original
+        #     design and is correct.
+        #   Tier 1 / Tier 2: catalyst_price SHOULD have come from the api-gateway
+        #     ("price" / "close" / "cmp" fields in sources.py). If it arrived as
+        #     0.0 it means those fields were missing/null in the upstream payload
+        #     (e.g. GROWW, MCX, HONASA, GLAXO, BEML, NCC in the 2026-09-04 audit).
+        #     In this case we still set the price now, but there is no reason to
+        #     skip — the entry is fully known, we just lacked the price at ingest.
+        #     Fall through to the band-check immediately so these rows don't sit
+        #     NEVER TOUCHED until the next cycle (which may not come until the
+        #     next market session for intraday-created entries).
         if row.catalyst_price == 0.0:
             row.catalyst_price = price
             row.updated_at = now
             db.commit()
-            continue  # begin monitoring from next cycle
+            if row.source_tier == 3:
+                continue  # Tier 3: begin monitoring from next cycle (by design)
 
         pct_move = (price - row.catalyst_price) / row.catalyst_price
 

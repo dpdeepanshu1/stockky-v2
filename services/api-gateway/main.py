@@ -5,6 +5,7 @@ Single entry point for the React frontend.
 v2.5.16 – uses IST for fetched_at timestamp (hh:mm:ss AM/PM).
 """
 import os
+import re
 import json
 import time
 import asyncio
@@ -726,6 +727,21 @@ _DELISTED_RENAME = {
     "TATAMTRDVR": None,          # genuine 2024 merger into TATAMOTORS, not a rename
 }
 
+# 2026-09-04 (session19 FUT-contamination fix, entry #95): F&O futures/
+# options contracts (e.g. "APLAPOLLO29SEP26FUT", "ANGELONE29SEP26FUT",
+# "BANKNIFTY29SEP2648000CE") leaked into the equity movers list because no
+# filter here — or in symbol_aliases.py — ever checked for the NSE F&O
+# naming convention (base symbol + dd-MMM-yy contract date + FUT/strike+CE
+# or PE). Same fast-path treatment as _INDEX_PSEUDO_TOKENS below: checked
+# BEFORE falling through to symbol_aliases.is_non_equity_instrument() (which
+# now also carries this same regex, see that module) so the guard holds
+# even in the except-fallback branch further down that returns the raw
+# symbol unfiltered if the symbol_aliases import itself fails.
+_DERIVATIVE_CONTRACT_RE = re.compile(
+    r"\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}"
+    r"(FUT|\d+(\.\d+)?(CE|PE))$"
+)
+
 
 def _clean_equity_symbol(sym) -> Optional[str]:
     """Return a tradable NSE equity symbol, or None if it's an index
@@ -747,6 +763,8 @@ def _clean_equity_symbol(sym) -> Optional[str]:
     if " " in s:
         return None
     if s in _INDEX_PSEUDO_TOKENS:
+        return None
+    if _DERIVATIVE_CONTRACT_RE.search(s):
         return None
     if s in _DELISTED_RENAME:
         return _DELISTED_RENAME[s]  # may be a renamed ticker or None (drop)

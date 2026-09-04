@@ -161,16 +161,35 @@ _NON_EQUITY_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 2026-09-04 (session19 FUT-contamination fix): F&O derivatives contracts —
+# futures and options — carry NSE symbols that LOOK like an equity ticker
+# with a date/strike suffix bolted on, e.g. "APLAPOLLO29SEP26FUT",
+# "ANGELONE29SEP26FUT" (futures: <BASE><DD><MMM><YY>FUT), or
+# "BANKNIFTY29SEP2648000CE" (options: <BASE><DD><MMM><YY><STRIKE><CE|PE>).
+# These slipped into the equity movers list (entry #95) because nothing in
+# this module's filters — or _clean_equity_symbol's fast-path in
+# api-gateway/main.py — ever checked for the F&O naming convention; only
+# the hyphenated rights/warrant/NCD suffixes above were covered. Same
+# conservative-regex philosophy as _NON_EQUITY_SUFFIX_RE: match only the
+# high-confidence dd-mon-yy contract-date pattern so a legitimate equity
+# ticker that happens to contain digits is never clipped.
+_DERIVATIVE_CONTRACT_RE = re.compile(
+    r"\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}"
+    r"(FUT|\d+(\.\d+)?(CE|PE))$"
+)
+
 
 def is_non_equity_instrument(symbol: str) -> bool:
     """True for rights entitlements (-RE), partly-paid (-PP/-P1..), warrants
-    (-W1../-WA), rights variants (-R1../-RR) and NCD/debt series (-NCD/-N1..)
-    — instruments that carry an equity-looking symbol but should never be
-    tracked, quoted, or traded as equity. Conservative by design (see regex)."""
+    (-W1../-WA), rights variants (-R1../-RR), NCD/debt series (-NCD/-N1..),
+    and F&O futures/options contract symbols (<BASE>ddMMMyyFUT or
+    <BASE>ddMMMyy<strike>CE/PE) — instruments that carry an equity-looking
+    symbol but should never be tracked, quoted, or traded as equity.
+    Conservative by design (see regexes)."""
     base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
     if not base:
         return False
-    return bool(_NON_EQUITY_SUFFIX_RE.search(base))
+    return bool(_NON_EQUITY_SUFFIX_RE.search(base) or _DERIVATIVE_CONTRACT_RE.search(base))
 
 
 # Chronically-over-₹5000 NSE names. This is deliberately a SHORT, high-

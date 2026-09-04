@@ -202,25 +202,28 @@ class AngelOneSession:
             return body.get("data") or []
 
     async def get_gainers_losers(self, datatype: str = "PercPriceGainers", expirytype: str = "NEAR") -> list:
-        """Full-exchange movers screener — unlike get_quote/get_quotes_batch,
-        this is NOT scoped to a token list you already know about. One HTTP
-        call returns AngelOne's whole-exchange gainers/losers board directly.
+        """
+        !! F&O DERIVATIVES SEGMENT ONLY — NOT a cash-equity screener !!
 
-        datatype: PercPriceGainers | PercPriceLosers | PercOIGainers | PercOILosers
-        (OI variants are F&O open-interest movers; price variants are the
-        equity-wide movers this codebase actually wants.)
-
-        2026-09-04 fix: added to replace the yfinance bulk-seed scan as the
-        full-market momentum-mover source in _get_momentum_movers(). That
-        scan called yf.download() on a ~180-symbol rotating seed every cycle
-        it ran — Yahoo has no official/stable rate-limit contract for
-        unauthenticated bulk pulls from a datacenter IP, so it produced the
-        same class of problem as NSE's Akamai block: throttling and added
-        latency, just less deterministically. This endpoint is authenticated
-        (same broker session already used for REAL-mode order placement),
-        genuinely whole-exchange (not a sampled seed), and costs exactly ONE
-        call per direction per cycle — no per-symbol loop, no seed-size
-        tradeoff between coverage and call volume.
+        2026-09-04 CORRECTION: this was originally added (and briefly wired
+        into /angelone/movers) on the wrong assumption that it was a
+        whole-market equity gainers/losers board. It is not. AngelOne's own
+        SmartAPI announcement is explicit: "Top Gainers/Losers API gives
+        you the Top gainers and Losers in the DERIVATIVES SEGMENT for the
+        day" — rows come back as futures contracts (e.g.
+        "HDFCBANK25JAN24FUT"), scoped to the ~200 F&O-eligible large/mid
+        caps only. Two consequences that made it the wrong tool for
+        _get_momentum_movers(): (1) accounts without the F&O segment
+        activated get a flat 403 on this endpoint — that's an access
+        restriction, not a rate-limit or bug; (2) even with F&O access, it
+        structurally cannot surface small/midcap volume-shockers (the
+        actual gap this codebase needs filled — see session19g's Groww
+        screenshot names, almost none of which are F&O stocks).
+        /angelone/movers now does a real whole-market LTP sweep instead
+        (see market-data-service main.py) and does NOT call this method.
+        Left in place only in case a future F&O-specific feature
+        (PCR/OI-buildup signals) wants it — datatype:
+        PercPriceGainers | PercPriceLosers | PercOIGainers | PercOILosers.
         """
         if _rl_in_cooldown("angelone_gainers"):
             return []

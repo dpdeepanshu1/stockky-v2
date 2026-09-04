@@ -1028,7 +1028,7 @@ def _get_momentum_movers() -> List[str]:
         len(movers) - nse_live_before,
     )
 
-    # 1b) AngelOne full-exchange gainers/losers (2026-09-04 addition).
+    # 1b) AngelOne whole-market LTP sweep (2026-09-04, corrected).
     #
     # This is the fix for the yfinance seed scan in step 4 below being a
     # rate-limit/latency risk of its own: yf.download() on a ~180-symbol
@@ -1037,18 +1037,19 @@ def _get_momentum_movers() -> List[str]:
     # the exact same "unauthenticated cloud IP hitting a market-data
     # provider" problem NSE's Akamai block already causes in step 1.
     #
-    # AngelOne's marketData/v1/gainersLosers is genuinely whole-exchange
-    # (not a sampled seed) and authenticated via the SAME broker session
-    # already used for REAL-mode order placement — so it's not subject to
-    # NSE's datacenter-IP block OR Yahoo's rate limiting. Runs ALWAYS
-    # (unconditionally, like step 1), not gated behind step 1 failing, so
-    # it's a genuine co-primary source rather than a fallback — same
-    # reasoning as why step 4's yfinance scan should NOT have been gated
-    # behind "if NSE failed" either. One HTTP round-trip to
-    # market-data-service (which does the actual AngelOne call + caching),
-    # not a per-symbol loop.
+    # NOTE: an earlier version of this step called AngelOne's
+    # marketData/v1/gainersLosers endpoint directly — that turned out to be
+    # F&O-derivatives-scoped only (confirmed against AngelOne's own SmartAPI
+    # docs), not a cash-equity board, so it's been replaced. market-data-
+    # service's /angelone/movers now sweeps the FULL NSE-EQ token universe
+    # (~2000 symbols, via angelone_scrip_master + the same authenticated
+    # quote batch endpoint already used for REAL-mode trading) and computes
+    # day_change_pct itself from ltp vs previous close — genuinely
+    # whole-market, not F&O-scoped, not NSE-block-exposed, not
+    # Yahoo-rate-limit-exposed. Runs ALWAYS (unconditionally, like step 1),
+    # not gated behind step 1 failing, so it's a genuine co-primary source.
     try:
-        resp = httpx.get(f"{MARKET_DATA_URL}/angelone/movers", timeout=10.0)
+        resp = httpx.get(f"{MARKET_DATA_URL}/angelone/movers", timeout=25.0)
         if resp.status_code == 200:
             payload = resp.json()
             pre = len(movers)
@@ -1059,9 +1060,9 @@ def _get_momentum_movers() -> List[str]:
                 if sym:
                     movers.add(sym)
             logger.info(
-                "AngelOne movers: +%d symbols (status=%s, gainers=%s, losers=%s)",
+                "AngelOne movers: +%d symbols (status=%s, universe=%s, quotes_fetched=%s)",
                 len(movers) - pre, payload.get("status"),
-                payload.get("gainers_count"), payload.get("losers_count"),
+                payload.get("universe_size"), payload.get("quotes_fetched"),
             )
         else:
             logger.debug("AngelOne movers: HTTP %d", resp.status_code)

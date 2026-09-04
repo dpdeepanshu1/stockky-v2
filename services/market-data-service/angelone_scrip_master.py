@@ -94,6 +94,19 @@ def get_tokens_bulk(symbols: List[str]) -> Dict[str, str]:
     return out
 
 
+def get_all_symbols() -> Dict[str, str]:
+    """Returns the FULL {clean_symbol: token} map for every NSE-EQ symbol
+    in the scrip master (~2000 symbols) — not scoped to any pre-selected
+    seed/watchlist. Added 2026-09-04 to support a whole-market AngelOne
+    LTP sweep (see market-data-service main.py's /angelone/movers), which
+    needs every symbol's token to compute day_change_pct itself instead of
+    depending on NSE's (blockable) gainers/losers boards or a sampled
+    yfinance seed."""
+    ensure_loaded()
+    return dict(_token_map)
+
+
+
 def status() -> dict:
     return {
         "loaded_symbols": len(_token_map),

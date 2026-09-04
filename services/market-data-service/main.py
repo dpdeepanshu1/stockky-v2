@@ -1656,22 +1656,22 @@ def get_quote(symbol: str):
 @app.get("/angelone/movers")
 def angelone_movers():
     """
-    Full-exchange price gainers + losers straight from AngelOne SmartAPI.
+    Whole-market equity movers computed from AngelOne LTP data directly —
+    NOT AngelOne's gainersLosers API (that's F&O-derivatives-only, see the
+    2026-09-04 correction note on AngelOneSession.get_gainers_losers).
 
-    2026-09-04: added as the fix for _get_momentum_movers()'s fallback
-    seed scan (api-gateway/main.py step 4), which called yf.download() on
-    a ~180-symbol rotating seed every cycle it ran. That's a real source
-    of rate-limit/latency risk on its own — separate from, but the same
-    shape as, the NSE 403-from-datacenter-IP problem this codebase already
-    works around: Yahoo has no official bulk-pull rate-limit contract, so
-    a 180-symbol yf.download() from a cloud IP degrades unpredictably
-    under load instead of failing cleanly.
+    Approach: pull the full NSE-EQ symbol->token map (~2000 symbols, no
+    auth needed, refreshed once/day — angelone_scrip_master.py), batch it
+    50-at-a-time through the SAME authenticated quote endpoint already used
+    for REAL-mode trading (get_quotes_batch), and compute day_change_pct
+    ourselves from each row's ltp vs close (previous close). This is a
+    genuine full-market source: not a sampled seed like the old yfinance
+    step, not blockable like NSE's Akamai-fronted boards (this is an
+    authenticated broker call), and not F&O-scoped like gainersLosers.
 
-    This endpoint is authenticated via the same AngelOne broker session
-    already used for REAL-mode order placement — no per-symbol loop, no
-    seed-size/coverage tradeoff, ONE call per direction (gainers, losers)
-    returns the whole exchange's mover board. Cached like every other
-    route in this file via get_cache_ttl() (5 min market-open / 6h closed).
+    Cost: ~2000 symbols / 50 per batch = ~40 calls, throttled by the
+    existing angelone_quote bucket (5/s, burst 8) — a few seconds total,
+    well inside documented limits. Cached like every other route here.
     """
     cache_key = "angelone:movers"
     cached = _cache_get(cache_key)
@@ -1679,36 +1679,55 @@ def angelone_movers():
         return cached
     try:
         from angelone_client import get_session
+        import angelone_scrip_master as scrip_master
+
         session = get_session()
         if not session.is_configured():
             return {"status": "not_configured", "data": [], "reason": "ANGELONE_* env vars not set"}
 
-        async def _fetch_both():
-            gainers = await session.get_gainers_losers("PercPriceGainers")
-            losers = await session.get_gainers_losers("PercPriceLosers")
-            return gainers, losers
+        token_map = scrip_master.get_all_symbols()  # {clean_symbol: token}
+        if not token_map:
+            return {"status": "error", "data": [], "error": "scrip master returned 0 symbols"}
+        reverse_map = {v: k for k, v in token_map.items()}
+        tokens = list(token_map.values())
 
-        gainers, losers = asyncio.run(_fetch_both())
+        async def _sweep():
+            await session.ensure_session()
+            out = []
+            for i in range(0, len(tokens), 50):
+                batch = tokens[i:i + 50]
+                try:
+                    fetched = await session.get_quotes_batch("NSE", batch)
+                except Exception as e:
+                    logger.debug("angelone/movers batch %d-%d failed: %s", i, i + len(batch), e)
+                    continue
+                out.extend(fetched or [])
+            return out
+
+        rows_raw = asyncio.run(_sweep())
         rows = []
-        for direction, batch in (("gainer", gainers), ("loser", losers)):
-            for row in batch or []:
-                if not isinstance(row, dict):
-                    continue
-                sym = (row.get("tradingSymbol") or row.get("symbolName") or "").upper()
-                sym = sym.replace("-EQ", "").strip()
-                if not sym:
-                    continue
-                rows.append({
-                    "symbol": sym,
-                    "direction": direction,
-                    "pct_change": row.get("percentChange"),
-                    "ltp": row.get("ltp"),
-                })
+        for row in rows_raw:
+            if not isinstance(row, dict):
+                continue
+            tok = str(row.get("symbolToken") or "")
+            sym = reverse_map.get(tok)
+            if not sym:
+                continue
+            try:
+                ltp = float(row.get("ltp"))
+                prev_close = float(row.get("close"))
+            except (TypeError, ValueError):
+                continue
+            if prev_close <= 0:
+                continue
+            pct = (ltp - prev_close) / prev_close * 100.0
+            if abs(pct) >= 5.0:
+                rows.append({"symbol": sym, "pct_change": round(pct, 2), "ltp": ltp})
         result = {
             "status": "ok",
             "data": rows,
-            "gainers_count": len(gainers or []),
-            "losers_count": len(losers or []),
+            "universe_size": len(tokens),
+            "quotes_fetched": len(rows_raw),
             "fetched_at": datetime.utcnow().isoformat(),
         }
         _cache_set(cache_key, result)

@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 import models
 from execution import dhan_client
 from notifier import notify_async
-from portfolio.portfolio import record_real_fill, record_real_exit_fill
+from portfolio.portfolio import record_real_fill, record_real_exit_fill, import_broker_holdings
 
 logger = logging.getLogger("real-trade-reconcile")
 
@@ -160,6 +160,76 @@ async def _book_fill_delta(
         )
 
 
+def _restore_orphaned_position(db: Session, position: models.TradePosition, note: str) -> None:
+    """Revert a PENDING_EXIT position back to a live status once we know
+    its SELL definitively died with zero fill.
+
+    There's no separate "status before PENDING_EXIT" column (see
+    record_real_exit_sent — it overwrites status unconditionally when the
+    SELL is sent, and full=True is only ever used for the WHOLE open qty,
+    never a partial), so the pre-exit status is gone by the time we get
+    here. realized_pnl is only ever nonzero after a PRIOR partial-exit fill
+    was actually booked for this position (record_real_exit_fill is the
+    only writer of it), so its presence is a reliable, already-available
+    signal for whether this position was OPEN or PARTIALLY_CLOSED right
+    before the now-dead SELL was sent — no schema change needed."""
+    restored = "PARTIALLY_CLOSED" if position.realized_pnl else "OPEN"
+    position.status = restored
+    db.add(models.TradePositionEvent(
+        position_id=position.id, event_type="EXIT_ORDER_DEAD",
+        detail=f"{note} — restored to {restored} for re-evaluation next cycle",
+    ))
+    logger.warning(
+        "reconcile: position %s (%s) restored from PENDING_EXIT to %s — %s",
+        position.id, position.symbol, restored, note,
+    )
+
+
+def _repair_orphaned_pending_exits(db: Session, tally: dict) -> None:
+    """Self-heal pass for positions ALREADY stuck at PENDING_EXIT with no
+    active SELL order left to reconcile them.
+
+    BUG (found 2026-09-04, dashboard showed ASHOKLEY/ADANIPOWER stuck
+    PENDING_EXIT with the reconcile banner reading "checked 0"): the
+    per-order loop below only ever revisits an order that's still PLACED/
+    PARTIAL. A SELL that died (REJECTED/CANCELLED) at the broker with
+    ZERO fill, in a cycle BEFORE this fix existed, already advanced past
+    that query — its order.status is permanently REJECTED/CANCELLED now,
+    so `pending_orders` never finds it again, and the dead-status branch
+    below (which now reverts the position itself the moment an order
+    dies) never got the chance to run for it. Its position is left at
+    PENDING_EXIT forever: open_positions() excludes that status, so
+    exit_engine never re-evaluates it, and nothing ever sells it again —
+    a true orphan, invisible to every other part of this pipeline.
+
+    Runs BEFORE the pending_orders early-return so it fires even when
+    there is nothing left to check (exactly this bug's symptom), the same
+    way _self_heal_orders already self-heals stale PLACED orders on every
+    positions/orders read, not just on a manual Run Cycle."""
+    orphans = (
+        db.query(models.TradePosition)
+        .filter(models.TradePosition.mode == "REAL", models.TradePosition.status == "PENDING_EXIT")
+        .all()
+    )
+    fixed = 0
+    for pos in orphans:
+        still_in_flight = db.query(models.TradeOrder).filter(
+            models.TradeOrder.mode == "REAL",
+            models.TradeOrder.symbol == pos.symbol,
+            models.TradeOrder.side == "SELL",
+            models.TradeOrder.status.in_(("PLACED", "PARTIAL")),
+        ).first()
+        if still_in_flight is not None:
+            continue  # genuinely still awaiting the broker — leave it for the loop below
+        _restore_orphaned_position(
+            db, pos, "no active SELL order found for this PENDING_EXIT position"
+        )
+        fixed += 1
+    if fixed:
+        db.commit()
+    tally["positions_unstuck"] = fixed
+
+
 async def reconcile_real_orders(db: Session) -> dict:
     """One pass over every REAL order still PLACED or PARTIAL, and every
     REAL position PENDING_EXIT. Returns a tally for the cycle summary.
@@ -170,7 +240,23 @@ async def reconcile_real_orders(db: Session) -> dict:
     unlike FILLED/REJECTED/CANCELLED, it must stay in this query so the
     rest of the fill (or a cancel of the remainder) gets picked up on a
     later cycle instead of silently stopping after the first partial."""
-    tally = {"checked": 0, "entries_filled": 0, "partial_fills": 0, "exits_confirmed": 0, "dead_orders": 0, "errors": 0}
+    tally = {"checked": 0, "entries_filled": 0, "partial_fills": 0, "exits_confirmed": 0,
+             "dead_orders": 0, "errors": 0, "positions_unstuck": 0, "holdings_imported": 0}
+
+    _repair_orphaned_pending_exits(db, tally)
+
+    # 2026-09-04 fix: pre-existing/manually-bought Dhan holdings (confirmed
+    # against a user's Portfolio.csv export — Devyani International,
+    # Paradeep Phosphates, Suzlon Energy, Vodafone Idea had no row here at
+    # all) were invisible to /positions, /orders, and exit_engine because
+    # nothing ever imported them. Runs every cycle, before the
+    # pending_orders early-return, same self-heal treatment as the orphan
+    # repair above — idempotent (see import_broker_holdings' own
+    # already-tracked check), so this is a no-op once a holding is in.
+    try:
+        tally["holdings_imported"] = import_broker_holdings(db)
+    except Exception as e:  # noqa: BLE001 — must never block the rest of the cycle
+        logger.warning("reconcile: import_broker_holdings failed: %s", e)
 
     pending_orders = db.query(models.TradeOrder).filter(
         models.TradeOrder.mode == "REAL", models.TradeOrder.status.in_(("PLACED", "PARTIAL"))
@@ -253,6 +339,22 @@ async def reconcile_real_orders(db: Session) -> dict:
             if delta_qty and delta_qty > 0 and fill_price is not None:
                 await _book_fill_delta(db, order, float(fill_price), delta_qty, is_partial=True)
                 tally["partial_fills"] += 1
+            elif order.side == "SELL":
+                # BUG FIX (2026-09-04, see _repair_orphaned_pending_exits'
+                # docstring for the full incident): a SELL that dies with
+                # ZERO fill must not leave its position stuck at
+                # PENDING_EXIT — fix it the moment we learn the order is
+                # dead, in this same cycle, rather than waiting for the
+                # repair pass to catch it as an orphan next time.
+                dead_position = db.query(models.TradePosition).filter_by(
+                    mode="REAL", symbol=order.symbol, status="PENDING_EXIT"
+                ).first()
+                if dead_position is not None:
+                    _restore_orphaned_position(
+                        db, dead_position,
+                        f"SELL order {order.dhan_order_id} came back {status.lower()} with zero fill",
+                    )
+                    tally["positions_unstuck"] += 1
             dead_status = "REJECTED" if status == "REJECTED" else "CANCELLED"
             order.status = dead_status
             note = f" (after {order.filled_qty_so_far} of {order.qty} already filled)" if order.filled_qty_so_far else ""

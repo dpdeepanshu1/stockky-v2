@@ -60,6 +60,114 @@ def open_positions(db: Session, mode: str) -> list[models.TradePosition]:
     )
 
 
+def import_broker_holdings(db: Session) -> int:
+    """Bring pre-existing Dhan demat holdings — stocks bought manually, or
+    already sitting in the account before Stockky started trading it —
+    into this system's own TradePosition table, so the Positions/Orders
+    tabs and exit_engine can see and manage them too.
+
+    THE GAP THIS CLOSES: Stockky only ever creates a TradePosition row
+    when ITS OWN entry_engine places and fills a BUY. A holding that was
+    never bought through this app (checked against a user's Portfolio.csv
+    export: e.g. Devyani International, Paradeep Phosphates, Suzlon
+    Energy, Vodafone Idea) has no TradeOrder/TradePosition row at all —
+    invisible to /positions and /orders, and invisible to exit_engine's
+    open_positions() query, so nothing ever evaluates a stop/target for it
+    and nothing ever sells it automatically. dhan_client.get_holdings()
+    already existed (wired to a read-only /dhan/holdings admin endpoint)
+    but was never used to populate this system's own tracking tables —
+    this function is that missing wiring.
+
+    Idempotent: only creates a row for a symbol with NO existing REAL
+    position in OPEN/PARTIALLY_CLOSED/PENDING_EXIT — safe to call every
+    cycle (see reconcile_real_orders), never double-imports.
+
+    Deliberately does NOT touch account.cash_available: these shares were
+    never bought through this system's own ledger, so there's no matching
+    cash deduction to make — this is monitoring/exit management only, not
+    a real fill event.
+
+    No proposed_stop/target exists for a position that was never opened
+    via a TradeDecision, so this uses the same flat-percentage fallback
+    entry_engine/exit_engine already fall back to elsewhere
+    (FLAT_STOP_PCT/FLAT_TARGET_PCT) rather than inventing a third
+    convention — applied around the BROKER'S OWN avgCostPrice, not a
+    fresh live price, so the stop/target reflects the actual cost basis.
+    """
+    from entry_engine.entry import FLAT_STOP_PCT, FLAT_TARGET_PCT
+    from execution import dhan_client
+
+    try:
+        holdings = dhan_client.get_holdings(db)
+    except Exception as e:  # noqa: BLE001 — never block a reconcile cycle over this
+        logger.warning("import_broker_holdings: could not fetch Dhan holdings: %s", e)
+        return 0
+
+    def _get(row: dict, *keys, default=None):
+        for k in keys:
+            if k in row and row[k] not in (None, ""):
+                return row[k]
+        return default
+
+    imported = 0
+    now = datetime.now(timezone.utc)
+    for row in holdings or []:
+        if not isinstance(row, dict):
+            continue
+        # Dhan v2's confirmed field names (dhanhq.co/docs/v2/portfolio) are
+        # tradingSymbol/totalQty/avgCostPrice — snake_case fallbacks kept
+        # defensively in case a future SDK version renames them, same
+        # idiom already used throughout reconcile.py for this exact class
+        # of uncertainty.
+        raw_symbol = _get(row, "tradingSymbol", "trading_symbol", "symbol")
+        qty = _get(row, "totalQty", "total_qty", "quantity")
+        avg_price = _get(row, "avgCostPrice", "avg_cost_price", "average_price")
+        if not raw_symbol or not qty or not avg_price:
+            continue
+        try:
+            qty = int(qty)
+            avg_price = float(avg_price)
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0 or avg_price <= 0:
+            continue
+        symbol = str(raw_symbol).upper().strip()
+
+        already_tracked = db.query(models.TradePosition).filter(
+            models.TradePosition.mode == "REAL",
+            models.TradePosition.symbol == symbol,
+            models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED", "PENDING_EXIT")),
+        ).first()
+        if already_tracked is not None:
+            continue
+
+        stop_price = round(avg_price * (1 - FLAT_STOP_PCT / 100.0), 2)
+        target_price = round(avg_price * (1 + FLAT_TARGET_PCT / 100.0), 2)
+        position = models.TradePosition(
+            mode="REAL", symbol=symbol, status="OPEN",
+            qty_open=qty, avg_entry_price=avg_price, opened_at=now,
+            current_stop=stop_price, current_target=target_price,
+            initial_stop_distance=abs(avg_price - stop_price),
+        )
+        db.add(position)
+        db.flush()
+        db.add(models.TradePositionEvent(
+            position_id=position.id, event_type="OPENED",
+            detail=f"Imported from Dhan demat holdings (pre-existing, not bought via this "
+                   f"app): {qty} @ avg cost ₹{avg_price}, flat {FLAT_STOP_PCT}%/{FLAT_TARGET_PCT}% "
+                   f"stop/target since no decision/proposed_stop exists for it",
+        ))
+        logger.info(
+            "import_broker_holdings: imported %s (%d shares @ avg ₹%.2f) as a new tracked "
+            "REAL position — now visible to /positions and exit_engine", symbol, qty, avg_price,
+        )
+        imported += 1
+
+    if imported:
+        db.commit()
+    return imported
+
+
 def try_fill_entry(db: Session, order: models.TradeOrder, tick: Tick, stop_price: float, target_price: float) -> bool:
     """DEMO-only. Returns True and records a fill + opens/adds-to a
     position if the current tick would fill this pending limit BUY order;

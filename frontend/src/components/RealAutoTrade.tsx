@@ -860,7 +860,19 @@ export default function RealAutoTrade() {
     setActionBusy("reconcile"); setActionMsg(null);
     try {
       const res = await realTradeApi.reconcile(mode);
-      setActionMsg({ ok: true, text: res.note || `Checked ${res.checked ?? 0} · filled ${res.entries_filled ?? 0} · exits ${res.exits_confirmed ?? 0}` });
+      let text = res.note || `Checked ${res.checked ?? 0} · filled ${res.entries_filled ?? 0} · exits ${res.exits_confirmed ?? 0}`;
+      // 2026-09-04: surface the two new self-heal tallies too — otherwise a
+      // cycle that unstuck a PENDING_EXIT position or imported pre-existing
+      // Dhan holdings still reads as "nothing happened" (checked 0 · filled
+      // 0 · exits 0), which is exactly what prompted this fix in the first
+      // place (dashboard showed that banner while ASHOKLEY/ADANIPOWER were
+      // silently stuck). Only appended when non-zero, so the common case
+      // (nothing to repair) stays exactly as terse as before.
+      const extras: string[] = [];
+      if (res.positions_unstuck) extras.push(`${res.positions_unstuck} stuck position${res.positions_unstuck === 1 ? "" : "s"} restored`);
+      if (res.holdings_imported) extras.push(`${res.holdings_imported} holding${res.holdings_imported === 1 ? "" : "s"} imported`);
+      if (extras.length) text += ` · ${extras.join(" · ")}`;
+      setActionMsg({ ok: true, text });
       await loadPositionsAndOrders(mode);
     } catch (e: any) { setActionMsg({ ok: false, text: e?.message || "Reconcile failed" }); }
     finally { setActionBusy(null); }

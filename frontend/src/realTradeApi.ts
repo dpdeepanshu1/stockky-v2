@@ -456,7 +456,7 @@ export const realTradeApi = {
     ),
 
   reconcile: (mode: "DEMO" | "REAL") =>
-    rtRequest<{ ok: boolean; checked?: number; entries_filled?: number; exits_confirmed?: number; dead_orders?: number; errors?: number; note?: string }>(
+    rtRequest<{ ok: boolean; checked?: number; entries_filled?: number; exits_confirmed?: number; dead_orders?: number; errors?: number; positions_unstuck?: number; holdings_imported?: number; note?: string }>(
       `/reconcile/${mode}`, { method: "POST" }, mode === "REAL"
     ),
 

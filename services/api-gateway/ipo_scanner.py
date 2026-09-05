@@ -1763,6 +1763,16 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
     repaired: List[str] = []
     still_no_data: List[str] = []
     results: List[Dict[str, Any]] = []
+    # Bug 3 fix (2026-09-05): two paths used to drop a symbol on the floor
+    # with NO record anywhere the user could see — not in `repaired`, not in
+    # `still_no_data`, nothing in the response at all, just a server log line.
+    # A symbol stuck in that gap (entry purged from the upstream universe, or
+    # analyze_ipo() raising) looked identical to "repair worked, nothing left
+    # to do" from the frontend's point of view — it silently vanished from
+    # subsequent "missing" audits (see get_ipo_feed_audit note below) while
+    # its card kept showing stage="error" forever, with no way for anyone to
+    # tell why. `failed` now names every such symbol with a reason.
+    failed: List[Dict[str, str]] = []
     for m in missing:
         sym = m.get("symbol")
         # Skip no_data_yet rows — Yahoo still doesn't have them; hammering
@@ -1777,6 +1787,7 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
         # auto-discovered NSE/ipoalerts window.
         entry = by_symbol.get(sym) or manual_by_symbol.get(sym)
         if entry is None:
+            failed.append({"symbol": sym, "reason": "not_found_upstream"})
             continue
         try:
             r = analyze_ipo(entry)
@@ -1796,6 +1807,7 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
                 )
         except Exception as e:
             logger.warning("ipo_repair_batch: analyze failed for %s: %s", sym, e)
+            failed.append({"symbol": sym, "reason": str(e)[:160]})
         time.sleep(0.3)  # same cooldown discipline as every other waterfall repair in this codebase
 
     if results:
@@ -1823,6 +1835,7 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
     out["status"] = "completed"
     out["repaired"] = repaired
     out["still_no_data"] = still_no_data
+    out["failed"] = failed  # [{symbol, reason}] — see Bug 3 fix note above
     # Build an honest summary: distinguish "not found upstream" from
     # "Yahoo doesn't have price data yet" — the latter is expected and
     # resolves on its own; the former means the symbol was purged from
@@ -1838,7 +1851,10 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
     elif len(repaired) < actionable:
         skipped = actionable - len(repaired)
         parts = [f"Repaired {len(repaired)}/{actionable} actionable symbol(s)"]
-        if skipped:
+        if skipped and failed:
+            names = ", ".join(f"{f['symbol']} ({f['reason']})" for f in failed[:5])
+            parts.append(f"{skipped} failed — {names}{'…' if len(failed) > 5 else ''}")
+        elif skipped:
             parts.append(f"{skipped} no longer found upstream")
         if still_no_data:
             parts.append(f"{len(still_no_data)} waiting on Yahoo data")

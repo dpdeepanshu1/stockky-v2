@@ -1756,9 +1756,35 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
         return out
     out["attempted"] = len(missing)
 
-    universe, _diag = _merged_ipo_universe()
+    universe, diag = _merged_ipo_universe()
     by_symbol = {u.get("symbol"): u for u in universe if u.get("symbol")}
     manual_by_symbol = {m.get("symbol"): m for m in _manual_ipos() if m.get("symbol")}
+    # Bug 4 fix (2026-09-05): root cause of "every single missing symbol
+    # fails with not_found_upstream" — NSE's IPO endpoints are blocked from
+    # this VM's datacenter IP more often than not (see fetch_nse_ipo_calendar
+    # docstring), and ipoalerts only ever covers "open"/"listed" statuses,
+    # never "upcoming". So on a bad fetch, `universe` above can come back
+    # near-empty even though these exact symbols were successfully
+    # discovered by a PAST scan and are sitting right now in the cached
+    # IPO_LIST_KEY payload the tracker cards themselves are rendering from
+    # (that's why KANOHAR/PRASOLCHEM/etc. show correct issue price + listing
+    # date on the card, but repair still calls them "not found upstream" —
+    # repair was only ever looking at the live fetch, never the cache it
+    # already has). Add the cached list as a third fallback tier, same
+    # priority as manual entries: reuse the last-known-good record instead
+    # of declaring the symbol lost because today's live call happened to
+    # fail.
+    try:
+        _cached_list = _kv().kv_get(IPO_LIST_KEY)
+        _cached_results = _cached_list.get("results") if isinstance(_cached_list, dict) else None
+    except Exception:
+        _cached_results = None
+    cached_by_symbol = {
+        c.get("symbol"): c
+        for c in (_cached_results or [])
+        if c.get("symbol") and c.get("listing_date") and c.get("issue_price")
+    }
+    upstream_fetch_empty = diag.get("nse_candidates", 0) == 0 and diag.get("ipoalerts_candidates", 0) == 0
 
     repaired: List[str] = []
     still_no_data: List[str] = []
@@ -1784,10 +1810,33 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
         # Prefer the live upstream universe entry (freshest listing/issue
         # data); fall back to the manual-entry record so a hand-added IPO
         # can still be repaired even after it ages out of the
-        # auto-discovered NSE/ipoalerts window.
-        entry = by_symbol.get(sym) or manual_by_symbol.get(sym)
+        # auto-discovered NSE/ipoalerts window; fall back again to the
+        # cached IPO_LIST_KEY record (see Bug 4 fix above) for a symbol a
+        # past scan already discovered but today's live fetch missed.
+        entry = by_symbol.get(sym) or manual_by_symbol.get(sym) or cached_by_symbol.get(sym)
         if entry is None:
-            failed.append({"symbol": sym, "reason": "not_found_upstream"})
+            # NSE's public-past-issues endpoint returns NCD/bond debt-series
+            # rows (coded <coupon><issuer><maturity-year>, e.g. "1150VIES30"
+            # = 11.50% coupon, VIES, matures 2030) alongside genuine equity
+            # IPOs. _normalize_nse_row() now rejects these on sight (real
+            # NSE equity tickers never start with a digit), which is correct
+            # going forward — but a row for one that slipped into
+            # ipo_static_feed before that filter existed will never again
+            # be found upstream, because it was never a real IPO to begin
+            # with. Name that plainly instead of implying it's a fetch
+            # problem that repair might fix on a future click.
+            if sym and sym[0].isdigit():
+                failed.append({
+                    "symbol": sym,
+                    "reason": "non_equity_instrument (NCD/bond series, not an equity IPO — will never resolve, remove from tracking)",
+                })
+            elif upstream_fetch_empty:
+                failed.append({
+                    "symbol": sym,
+                    "reason": "not_found_upstream (NSE+ipoalerts both returned 0 candidates this attempt — looks like a blocked/failed fetch, not a delisted symbol; try Force Scan again later)",
+                })
+            else:
+                failed.append({"symbol": sym, "reason": "not_found_upstream"})
             continue
         try:
             r = analyze_ipo(entry)
@@ -1976,6 +2025,16 @@ def get_ipo_list(display_days: Optional[int] = None) -> dict:
     full up-to-a-year scan window the backend actually discovered. Pre-listing/
     listing-day/upcoming entries always pass through regardless of display_days
     since "days since listing" doesn't apply to them yet.
+
+    Bug fix (2026-09-05): "no_data_yet" used to be in that same always-pass
+    bucket, but it doesn't belong there — a no_data_yet row IS already listed
+    (it has a real, past listing_date; Yahoo just hasn't indexed a price for
+    it yet), unlike pre_listing/listing_day/upcoming which genuinely have no
+    "age" to measure. Bypassing the window for it meant an SME IPO that
+    listed 8 months ago and is still stuck waiting on Yahoo kept showing up
+    under "Last 30d" forever — the exact "should be only last 30" complaint.
+    It's now measured against listing_date like every other already-listed
+    row, so it only shows in a window wide enough to actually cover it.
     """
     try:
         cached = _kv().kv_get(IPO_LIST_KEY)
@@ -1992,7 +2051,7 @@ def get_ipo_list(display_days: Optional[int] = None) -> dict:
     now = datetime.now(IST)
     filtered = []
     for r in results:
-        if r.get("stage") in ("pre_listing", "listing_day", "upcoming", "no_data_yet"):
+        if r.get("stage") in ("pre_listing", "listing_day", "upcoming"):
             filtered.append(r)
             continue
         dt = _parse_date(r.get("listing_date"))

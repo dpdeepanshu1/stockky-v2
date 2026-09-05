@@ -46,6 +46,8 @@ interface IpoAuditStats {
   non_equity_ipos?: MissingIpo[];
   pending_listing_count?: number;
   pending_listing_ipos?: MissingIpo[];
+  pre_listing_count?: number;
+  pre_listing_ipos?: MissingIpo[];
   health_score?: number;
   message?: string;
   error?: string;
@@ -164,6 +166,7 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
   const noDataYet = stats?.no_data_yet_count ?? 0;
   const nonEquity = stats?.non_equity_count ?? 0;
   const pendingListing = stats?.pending_listing_count ?? 0;
+  const preListingPending = stats?.pre_listing_count ?? 0;
 
   return (
     <div className="rounded-xl border border-white/10 bg-black/30 p-4 mt-4">
@@ -315,6 +318,17 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
             <p className="text-lg font-semibold text-signal-prepare">{pendingListing}</p>
           </div>
         )}
+        {/* pre_listing_pending: listing TODAY but still in pre-open / no-trade
+            window. Cannot score until NSE opens trading for the symbol —
+            yfinance returns "no data" for these until they start trading.
+            Own tile so they don't inflate Missing Data or the Auto-Repair
+            button count. They resolve on their own once the market opens. */}
+        {preListingPending > 0 && (
+          <div className="rounded border border-white/20 bg-white/5 p-3">
+            <p className="text-[10px] uppercase tracking-wide text-white/50">Pre-Open Today</p>
+            <p className="text-lg font-semibold text-white/80">{preListingPending}</p>
+          </div>
+        )}
       </div>
 
       {total === 0 ? (
@@ -426,6 +440,41 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
               These are NCD/bond debt-series tickers (e.g. 1150VIES30), not equity IPOs — they were
               never scoreable and slipped in before the tracker filtered them out at discovery. Use
               "Delete Non-Equity Rows" above to remove them; Auto-Repair will keep skipping them.
+            </p>
+          </div>
+        </details>
+      )}
+
+      {/* Pre-listing / pre-open section — lists TODAY but NSE hasn't opened
+          trading yet. yfinance returns "possibly delisted; no price data found"
+          and AngelOne LTP is also absent in this window. These score
+          automatically once the market opens; they're NOT broken. */}
+      {preListingPending > 0 && (stats?.pre_listing_ipos || []).length > 0 && (
+        <details className="mt-3">
+          <summary className="text-[11px] text-white/60 cursor-pointer select-none">
+            🕐 {preListingPending} symbol(s) listing today — pre-open, score pending market open — click to expand
+          </summary>
+          <div className="mt-2 max-h-40 overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-white/40">
+                  <th className="py-1 pr-2">Symbol</th>
+                  <th className="py-1">Company</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(stats?.pre_listing_ipos || []).map((row) => (
+                  <tr key={row.symbol} className="border-t border-white/5">
+                    <td className="py-1 pr-2 font-medium text-white/70">{row.symbol}</td>
+                    <td className="py-1 text-white/50 text-[11px]">{row.company_name || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-[11px] text-white/40 mt-2">
+              These IPOs list today but NSE hasn't opened trading yet — no price exists to score.
+              They will score automatically once the market opens (usually 9:15 AM IST).
+              Run Auto-Repair after market open to pick them up immediately.
             </p>
           </div>
         </details>

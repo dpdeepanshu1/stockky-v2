@@ -2213,7 +2213,8 @@ def get_ipo_feed_audit() -> dict:
     missing = []
     no_data_yet = []
     non_equity = []
-    pending_listing = []
+    pending_listing = []   # stage=="upcoming": future listing_date, structurally unscoreable today
+    pre_listing_pending = []  # stage=="pre_listing": lists TODAY but market not open yet
     for r in rows:
         missing_fields = [
             f for f in ("issue_price", "ipo_score", "decision")
@@ -2253,35 +2254,37 @@ def get_ipo_feed_audit() -> dict:
         # yet — a future listing_date) have no ipo_score/decision by
         # DEFINITION: there's no price to score until the IPO actually
         # starts trading, which won't happen today no matter how many
-        # times Auto-Repair retries. These were previously dumped into
-        # ordinary `missing`, so Auto-Repair dutifully re-ran analyze_ipo()
-        # on them every click (confirmed in logs: "KANOHAR analyzed but
-        # still unscored (stage=upcoming) — not counted as repaired" — the
-        # entry WAS found upstream every time), burning a real
-        # investorgain.com + market-data-service round trip for a result
-        # that structurally cannot change before listing day. Same
-        # "separate bucket, don't count against health, don't hand to
-        # repair" treatment as no_data_yet/non_equity — resolves on its
-        # own once the IPO's listing date actually arrives.
-        #
-        # NOTE: "pre_listing" (listing TODAY, still pre-open) is
-        # deliberately NOT included here — it can genuinely resolve within
-        # the same day once trading opens, so it stays repair-eligible.
-        # ipo_repair_batch's summary message is fixed separately (see its
-        # own Bug 8 fix note) so a pre_listing row that's found-and-
-        # analyzed-but-still-pre-open no longer gets mislabeled
-        # "not found upstream" either.
+        # times Auto-Repair retries. Same "separate bucket, don't count
+        # against health, don't hand to repair" treatment as no_data_yet/
+        # non_equity — resolves on its own once the IPO's listing date arrives.
         elif (r.get("stage") or "") == "upcoming":
             pending_listing.append(row_entry)
+        # Bug 9 fix (2026-09-05): "pre_listing" rows (listing TODAY but still
+        # in pre-open / no-trade window) cannot score until NSE actually
+        # opens trading for that symbol — yfinance returns "possibly delisted;
+        # no price data found" for them, AngelOne REST finds no LTP, and
+        # analyze_ipo() correctly returns stage=pre_listing with no score.
+        # Dumping them into ordinary `missing` makes the health panel show
+        # "Missing Data: 3" and "Auto-Repair All (3)" even though clicking
+        # repair just re-confirms they still can't score (as seen in logs:
+        # "PERNIASPOP/SHANTIINOR/ASHUTOSH analyzed but still unscored
+        # (stage=pre_listing)"). Move them to their own bucket so they're
+        # excluded from missing_count / health denominator / Auto-Repair
+        # button count — ipo_repair_batch still accepts them if the user
+        # explicitly calls it (e.g. post-open), because they CAN resolve
+        # within the same trading day once the market opens.
+        elif (r.get("stage") or "") == "pre_listing":
+            pre_listing_pending.append(row_entry)
         else:
             missing.append(row_entry)
 
-    # Health % counts only rows that are fixable: fully_scored out of
-    # (total − no_data_yet − non_equity − pending_listing), since none of
-    # those three is "broken" in a way Auto-Repair can address — no_data_yet
-    # just needs time, non_equity needs a manual delete not a rescan, and
-    # pending_listing just needs the IPO to actually list.
-    actionable_total = total - len(no_data_yet) - len(non_equity) - len(pending_listing)
+    # Health % counts only rows that are fixable right now: fully_scored out
+    # of (total − no_data_yet − non_equity − pending_listing − pre_listing_pending),
+    # since none of those four is "broken" in a way Auto-Repair can address
+    # today — no_data_yet and pre_listing_pending resolve on their own (Yahoo
+    # crawl catching up / market opening), non_equity needs a manual delete,
+    # and pending_listing just needs the IPO to actually list.
+    actionable_total = total - len(no_data_yet) - len(non_equity) - len(pending_listing) - len(pre_listing_pending)
     health = round((fully_scored / max(actionable_total, 1)) * 100, 1) if actionable_total > 0 else 0.0
     return {
         "ok": True,
@@ -2295,6 +2298,8 @@ def get_ipo_feed_audit() -> dict:
         "non_equity_ipos": non_equity[:50],
         "pending_listing_count": len(pending_listing),
         "pending_listing_ipos": pending_listing[:50],
+        "pre_listing_count": len(pre_listing_pending),
+        "pre_listing_ipos": pre_listing_pending[:50],
         "health_score": health,
         "message": (
             "No IPO rows tracked yet — run Scan IPOs first."
@@ -2304,6 +2309,7 @@ def get_ipo_feed_audit() -> dict:
                 + (f" · {len(no_data_yet)} waiting on Yahoo data" if no_data_yet else "")
                 + (f" · {len(non_equity)} non-equity (NCD/bond) rows to delete manually" if non_equity else "")
                 + (f" · {len(pending_listing)} not yet listed" if pending_listing else "")
+                + (f" · {len(pre_listing_pending)} pre-open (score once market opens)" if pre_listing_pending else "")
             )
         ),
     }

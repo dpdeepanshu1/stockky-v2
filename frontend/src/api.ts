@@ -1292,6 +1292,16 @@ export const api = {
     request<{ accepted?: boolean; already_running?: boolean; message?: string }>(
       `/ipo/scan?background=true&force=true`, { method: "POST" }, 1, 30000
     ),
+  // "📥 Premarket Feed" — same as forceIpoScan but also wipes ipo_static_feed
+  // (and replaces, not merges, the cached list) once the fresh fetch is
+  // confirmed healthy — see the safety check in _run_ipo_scan_locked. Gives
+  // a genuinely clean re-feed (stale/removed IPOs and any leftover
+  // non-equity rows don't just accumulate) without reintroducing the
+  // data-loss bug a blind wipe would cause on a degraded fetch.
+  wipeAndFeedIpoScan: () =>
+    request<{ accepted?: boolean; already_running?: boolean; message?: string }>(
+      `/ipo/scan?background=true&force=true&wipe=true`, { method: "POST" }, 1, 30000
+    ),
   ipoScanStatus: () =>
     request<{
       status?: string;
@@ -1389,6 +1399,14 @@ export const api = {
         missing_fields: string[];
         updated_at?: string;
       }>;
+      non_equity_count?: number;
+      non_equity_ipos?: Array<{
+        symbol: string;
+        company_name?: string;
+        stage?: string;
+        missing_fields: string[];
+        updated_at?: string;
+      }>;
       health_score?: number;
       message?: string;
       error?: string;
@@ -1402,6 +1420,17 @@ export const api = {
       { method: "POST" },
       1,
       120000
+    ),
+  // Deletes every ipo_static_feed row flagged non_equity (NCD/bond
+  // debt-series symbols like 1150VIES30) — these can never resolve via
+  // Auto-Repair since they were never real equity IPOs. Backs the IPO
+  // health tab's "Delete Non-Equity Rows" button.
+  ipoPurgeNonEquity: () =>
+    request<{ status: string; purged?: string[]; message?: string; error?: string }>(
+      `/ipo/purge-non-equity`,
+      { method: "POST" },
+      1,
+      30000
     ),
   // Manual "Send Top 5 to Telegram" button for the IPO Tracker tab (same
   // pattern as surpriseNotifyTopPicks / hotPicksNotifyTopPicks above).

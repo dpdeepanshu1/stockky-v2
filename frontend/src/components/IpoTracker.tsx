@@ -190,13 +190,17 @@ export default function IpoTracker({
   );
   const { connected: wsConnected } = useStockkyRealtime(onRealtimeMessage);
 
-  const startIpoScan = useCallback(async (force = false) => {
+  const startIpoScan = useCallback(async (force = false, wipe = false) => {
     setIpoError(null);
     ipoScanStartedAtRef.current = Date.now();
     setIpoScanning(true);
-    setIpoProgress({ message: force ? "Starting full re-scan…" : "Starting IPO scan…" });
+    setIpoProgress({
+      message: wipe ? "Wiping stale data, feeding fresh…" : force ? "Starting full re-scan…" : "Starting IPO scan…",
+    });
     try {
-      if (force) {
+      if (wipe) {
+        await api.wipeAndFeedIpoScan();
+      } else if (force) {
         await api.forceIpoScan();
       } else {
         await api.ipoScan();
@@ -513,9 +517,9 @@ export default function IpoTracker({
             </button>
             <button
               type="button"
-              onClick={() => void startIpoScan(true)}
+              onClick={() => void startIpoScan(true, true)}
               disabled={ipoScanning}
-              title="Bulk-seeds ipo_static_feed for every tracked IPO in one background pass — the same job the morning 'IPO Premarket Refresh' GitHub Action runs on a schedule, triggered here on demand instead of waiting for it."
+              title="Wipes ipo_static_feed and the cached list, then bulk-seeds fresh from upstream (NSE + ipoalerts + yfinance) — same job the morning 'IPO Premarket Refresh' GitHub Action runs on a schedule (without the wipe), triggered here on demand. Only wipes once the fresh fetch is confirmed healthy; downgrades to a safe merge instead if NSE looks partially blocked, so a bad fetch can't erase good data."
               className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-signal-hold/20 border border-signal-hold/40 text-white hover:bg-signal-hold/30 disabled:opacity-40"
             >
               {ipoScanning ? (
@@ -543,9 +547,9 @@ export default function IpoTracker({
             </button>
             <button
               type="button"
-              onClick={() => void startIpoScan(true)}
+              onClick={() => void startIpoScan(true, false)}
               disabled={ipoScanning}
-              title="Ignore the freshness cache and re-scan every IPO from scratch, straight from upstream (NSE + yfinance) — same underlying action as Premarket Feed, exposed here for a one-off refresh mid-session"
+              title="Re-scans every IPO from scratch, straight from upstream (NSE + yfinance), merging fresh results into the existing cache/DB (new data wins per symbol, nothing already-known disappears) — a one-off refresh mid-session without the full wipe Premarket Feed does."
               className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-signal-prepare/10 border border-signal-prepare/30 text-signal-prepare/80 hover:bg-signal-prepare/20 disabled:opacity-40"
             >
               {ipoScanning ? (

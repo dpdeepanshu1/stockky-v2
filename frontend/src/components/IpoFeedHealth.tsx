@@ -42,6 +42,8 @@ interface IpoAuditStats {
   missing_ipos?: MissingIpo[];
   no_data_yet_count?: number;
   no_data_yet_ipos?: MissingIpo[];
+  non_equity_count?: number;
+  non_equity_ipos?: MissingIpo[];
   health_score?: number;
   message?: string;
   error?: string;
@@ -55,6 +57,8 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
   const [repairMsg, setRepairMsg] = useState<string | null>(null);
   const [rescanBusy, setRescanBusy] = useState(false);
   const [rescanMsg, setRescanMsg] = useState<string | null>(null);
+  const [purgeBusy, setPurgeBusy] = useState(false);
+  const [purgeMsg, setPurgeMsg] = useState<string | null>(null);
 
   const fetchAudit = useCallback(async () => {
     setLoading(true);
@@ -89,8 +93,9 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
       const limit = Math.min(100, Math.max(20, stats?.missing_count ?? 20));
       const res = await api.ipoRepairBatch(limit);
       if (res.status === "completed") {
-        setRepairMsg(res.message || (res.repaired?.length > 0
-          ? `Repaired ${res.repaired.length} symbol(s): ${(res.repaired || []).join(", ")}`
+        const repairedList = res.repaired || [];
+        setRepairMsg(res.message || (repairedList.length > 0
+          ? `Repaired ${repairedList.length} symbol(s): ${repairedList.join(", ")}`
           : "Nothing needed repair."));
         // Notify parent (IpoTracker) to reload its card list so repaired
         // scores appear immediately without a manual page refresh.
@@ -128,11 +133,34 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
     }
   }, []);
 
+  // Deletes rows that were never real equity IPOs to begin with (NCD/bond
+  // debt-series symbols like 1150VIES30) — Auto-Repair can never fix these
+  // since analyze_ipo() has nothing to score them on; this is the actual
+  // resolution for them.
+  const purgeNonEquity = useCallback(async () => {
+    setPurgeBusy(true);
+    setPurgeMsg(null);
+    setError(null);
+    try {
+      const res = await api.ipoPurgeNonEquity();
+      setPurgeMsg(res.message || (res.purged?.length
+        ? `Deleted ${res.purged.length} non-equity row(s).`
+        : "No non-equity rows found."));
+      await fetchAudit();
+    } catch (e: any) {
+      setPurgeMsg(null);
+      setError(e?.message || "Failed to delete non-equity rows");
+    } finally {
+      setPurgeBusy(false);
+    }
+  }, [fetchAudit]);
+
   const total = stats?.total_tracked ?? 0;
   const scored = stats?.fully_scored ?? 0;
   const missing = stats?.missing_count ?? 0;
   const health = stats?.health_score ?? 0;
   const noDataYet = stats?.no_data_yet_count ?? 0;
+  const nonEquity = stats?.non_equity_count ?? 0;
 
   return (
     <div className="rounded-xl border border-white/10 bg-black/30 p-4 mt-4">
@@ -189,6 +217,22 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
               )}
             </button>
           )}
+          {nonEquity > 0 && (
+            <button
+              className="text-xs px-3 py-1.5 rounded border border-white/20 bg-white/5 text-white/80 hover:bg-white/15 disabled:opacity-50"
+              onClick={() => void purgeNonEquity()}
+              disabled={purgeBusy}
+              title="Deletes NCD/bond debt-series rows (e.g. 1150VIES30) that were never real equity IPOs — Auto-Repair can never score these, so this is the actual fix"
+            >
+              {purgeBusy ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <BusySpinner className="border-white" /> Deleting…
+                </span>
+              ) : (
+                `🗑 Delete Non-Equity Rows (${nonEquity})`
+              )}
+            </button>
+          )}
           <button
             className="text-xs px-3 py-1.5 rounded border border-white/15 bg-white/5 hover:bg-white/10"
             onClick={() => void fetchAudit()}
@@ -218,6 +262,7 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
       )}
       {repairMsg && <p className="text-xs text-signal-buy mt-2">{repairMsg}</p>}
       {rescanMsg && <p className="text-xs text-signal-buy mt-2">{rescanMsg}</p>}
+      {purgeMsg && <p className="text-xs text-signal-buy mt-2">{purgeMsg}</p>}
 
 
 
@@ -245,6 +290,16 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
           <div className="rounded border border-signal-hold/30 bg-signal-hold/5 p-3">
             <p className="text-[10px] uppercase tracking-wide text-signal-hold/70">Awaiting Yahoo</p>
             <p className="text-lg font-semibold text-signal-hold">{noDataYet}</p>
+          </div>
+        )}
+        {/* non_equity: NCD/bond rows that were never real IPOs — its own
+            bucket, same reasoning as no_data_yet above, except this one
+            never resolves on its own and needs the Delete button instead
+            of a rescan or repair. */}
+        {nonEquity > 0 && (
+          <div className="rounded border border-white/20 bg-white/5 p-3">
+            <p className="text-[10px] uppercase tracking-wide text-white/50">Non-Equity (NCD/Bond)</p>
+            <p className="text-lg font-semibold text-white/80">{nonEquity}</p>
           </div>
         )}
       </div>
@@ -323,6 +378,41 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
               Yahoo Finance hasn't indexed these tickers yet — common for new NSE SME listings.
               They'll resolve automatically once Yahoo's crawl picks them up (usually 1–5 days).
               Auto-Repair skips them so the repair count stays honest.
+            </p>
+          </div>
+        </details>
+      )}
+
+      {/* Non-equity section — NCD/bond debt-series rows that were never
+          real IPOs (e.g. 1150VIES30) and slipped into ipo_static_feed
+          before this filter existed. Unlike Awaiting Yahoo, these never
+          resolve on their own — the Delete button above is the fix. */}
+      {nonEquity > 0 && (stats?.non_equity_ipos || []).length > 0 && (
+        <details className="mt-3">
+          <summary className="text-[11px] text-white/60 cursor-pointer select-none">
+            🚫 {nonEquity} non-equity (NCD/bond) row(s) — click to expand
+          </summary>
+          <div className="mt-2 max-h-40 overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-white/40">
+                  <th className="py-1 pr-2">Symbol</th>
+                  <th className="py-1">Company</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(stats?.non_equity_ipos || []).map((row) => (
+                  <tr key={row.symbol} className="border-t border-white/5">
+                    <td className="py-1 pr-2 font-medium text-white/70">{row.symbol}</td>
+                    <td className="py-1 text-white/50 text-[11px]">{row.company_name || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-[11px] text-white/40 mt-2">
+              These are NCD/bond debt-series tickers (e.g. 1150VIES30), not equity IPOs — they were
+              never scoreable and slipped in before the tracker filtered them out at discovery. Use
+              "Delete Non-Equity Rows" above to remove them; Auto-Repair will keep skipping them.
             </p>
           </div>
         </details>

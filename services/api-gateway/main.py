@@ -7373,6 +7373,19 @@ async def api_ipo_scan(
             "force=true explicitly when a real on-demand re-scan is wanted."
         ),
     ),
+    wipe: bool = Query(
+        False,
+        description=(
+            "Delete every existing ipo_static_feed row (and replace, not "
+            "merge, the cached list) once the fresh upstream fetch has been "
+            "confirmed healthy enough to trust — see the safety check in "
+            "ipo_scanner._run_ipo_scan_locked. Implies force=true. The "
+            "frontend's '📥 Premarket Feed' button passes this so stale/"
+            "removed IPOs and any leftover non-equity rows don't just "
+            "accumulate forever; 'Force Rescan' does NOT pass this, so it "
+            "stays a safe merge-only refresh."
+        ),
+    ),
     background_tasks: BackgroundTasks = None,
 ):
     """
@@ -7388,9 +7401,9 @@ async def api_ipo_scan(
         return {"accepted": True, "already_running": True, **current}
 
     if background and background_tasks is not None:
-        background_tasks.add_task(run_ipo_scan, force=force)
-        return {"accepted": True, "background": True, "force": force, "message": "IPO scan started"}
-    result = run_ipo_scan(force=force)
+        background_tasks.add_task(run_ipo_scan, force=force, wipe=wipe)
+        return {"accepted": True, "background": True, "force": force, "wipe": wipe, "message": "IPO scan started"}
+    result = run_ipo_scan(force=force, wipe=wipe)
     return {"accepted": True, "background": False, **result}
 
 
@@ -7493,6 +7506,21 @@ async def api_ipo_repair_batch(limit: int = Query(15, ge=1, le=100), symbol: Opt
     except Exception as e:
         return {"status": "error", "error": f"ipo_scanner unavailable: {str(e)[:160]}"}
     return ipo_repair_batch(limit=limit, symbol=symbol)
+
+
+@app.post("/ipo/purge-non-equity")
+@app.post("/surprise/ipo/purge-non-equity")
+async def api_ipo_purge_non_equity():
+    """Delete every ipo_static_feed row flagged non_equity (NCD/bond
+    debt-series symbols like 1150VIES30 that slipped in before
+    ipo_scanner._is_ipo_non_equity existed) — these can never resolve via
+    Auto-Repair since they were never real equity IPOs to begin with.
+    Backs the IPO health tab's 'Delete Non-Equity Rows' button."""
+    try:
+        from ipo_scanner import purge_non_equity_ipos
+    except Exception as e:
+        return {"status": "error", "error": f"ipo_scanner unavailable: {str(e)[:160]}"}
+    return purge_non_equity_ipos()
 
 
 @app.post("/ipo/notify-top-picks")

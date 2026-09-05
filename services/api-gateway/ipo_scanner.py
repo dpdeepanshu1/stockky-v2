@@ -147,6 +147,32 @@ IPO_JOB_KEY = "stockky:ipo:job"            # scan progress
 IPOALERTS_API_KEY = os.getenv("IPOALERTS_API_KEY", "").strip()
 IPOALERTS_BASE = "https://api.ipoalerts.in/ipos"
 
+
+def _is_ipo_non_equity(symbol: str) -> bool:
+    """True for anything that isn't a real, tradeable equity IPO — NCD/bond
+    debt-series tickers (coded <coupon><issuer><maturity-year>, e.g.
+    "1150VIES30" = 11.50% coupon, VIES, matures 2030 — real NSE equity
+    tickers never start with a digit), and the broader rights/warrant/
+    partly-paid/F&O-contract patterns symbol_aliases.is_non_equity_instrument
+    already knows about (reused here so the IPO tracker and the main equity
+    pipeline agree on one definition instead of drifting).
+
+    Used both to keep these out of ipo_static_feed at discovery time ("only
+    IPO, not bond, nothing else" — see the wipe-and-refeed path in
+    run_ipo_scan) and to give ipo_repair_batch an honest, specific reason
+    for a row that predates this filter.
+    """
+    sym = (symbol or "").upper().strip()
+    if not sym:
+        return False
+    if sym[0].isdigit():
+        return True
+    try:
+        from symbol_aliases import is_non_equity_instrument
+        return is_non_equity_instrument(sym)
+    except Exception:
+        return False
+
 # ── ipoalerts quota management ──────────────────────────────────────────────
 # The free ipoalerts.in tier is capped at 25 requests/day. We budget well
 # under that (default 20, leaving headroom for manual testing) and spend it
@@ -295,6 +321,42 @@ def _ipo_db_upsert(rows: List[Dict[str, Any]]) -> int:
     except Exception as e:
         logger.warning("ipo db upsert failed (non-fatal, kv cache still served): %s", e)
         return 0
+    finally:
+        if eng is not None:
+            try:
+                eng.dispose()
+            except Exception:
+                pass
+
+
+def _ipo_db_wipe() -> bool:
+    """DELETE every row from ipo_static_feed. Used only by the explicit
+    "wipe and refeed fresh" path (see run_ipo_scan's `wipe` param) — never
+    called automatically, and only reached after that path has already
+    confirmed the new upstream fetch looks healthy enough to trust (see the
+    safety check in _run_ipo_scan_locked). Best-effort/non-fatal like every
+    other DB helper in this file: kv_cache is still the fast-path source the
+    endpoints actually serve from.
+    """
+    try:
+        import ipo_schema
+        from sqlalchemy import text
+    except Exception:
+        return False
+    url = ipo_schema.database_url()
+    if not url:
+        return False
+    eng = None
+    try:
+        eng = ipo_schema.make_engine("stockky-ipo-wipe")
+        if eng is None:
+            return False
+        with eng.begin() as conn:
+            conn.execute(text(f"DELETE FROM {ipo_schema.TABLE_NAME}"))
+        return True
+    except Exception as e:
+        logger.warning("ipo db wipe failed (non-fatal): %s", e)
+        return False
     finally:
         if eng is not None:
             try:
@@ -491,6 +553,8 @@ def _normalize_ipoalerts_row(row: Dict[str, Any], status: str) -> Optional[Dict[
     try:
         symbol = str(row.get("symbol") or "").upper().strip()
         if not symbol:
+            return None
+        if _is_ipo_non_equity(symbol):
             return None
         price_range = str(row.get("priceRange") or "")
         issue_price = None
@@ -734,7 +798,7 @@ def _normalize_nse_row(row: Dict[str, Any], kind: str) -> Optional[Dict[str, Any
         # equities, so they were never going to have an equity quote) —
         # pure wasted "possibly delisted" noise on every prefeed cycle,
         # never actually delisted because they were never equities.
-        if symbol[0].isdigit():
+        if _is_ipo_non_equity(symbol):
             return None
         issue_price = _extract_price_band_upper(
             _nse_placeholder_none(row.get("issuePrice"))
@@ -1004,11 +1068,18 @@ def _merged_ipo_universe() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
 
     by_symbol: Dict[str, Dict[str, Any]] = {}
     for a in nse:
+        if _is_ipo_non_equity(a.get("symbol")):
+            continue
         by_symbol[a["symbol"]] = a
     for a in ipoalerts:
+        if _is_ipo_non_equity(a.get("symbol")):
+            continue
         by_symbol[a["symbol"]] = a  # ipoalerts overrides NSE guess
     manual_symbols = {m["symbol"] for m in manual if m.get("symbol")}
     for m in manual:
+        # Manual entries are a deliberate, explicit user action ("+ Add
+        # IPO") — not filtered for non-equity. If someone hand-adds a bond
+        # on purpose that's their call, not this pipeline's to second-guess.
         by_symbol[m["symbol"]] = m  # manual overrides everything
 
     merged = list(by_symbol.values())
@@ -1600,7 +1671,7 @@ def _merge_ipo_results(new_results: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return merged
 
 
-def run_ipo_scan(force: bool = False) -> dict:
+def run_ipo_scan(force: bool = False, wipe: bool = False) -> dict:
     # Guard against overlapping scans (e.g. the UI's poll + a manual
     # "Run Premarket Feed" click landing close together, or a page refresh
     # re-firing the trigger before the previous run finished). Two scans
@@ -1613,13 +1684,15 @@ def run_ipo_scan(force: bool = False) -> dict:
         logger.info("run_ipo_scan: scan already in progress, skipping duplicate trigger")
         return {**get_ipo_scan_progress(), "skipped": True, "reason": "scan already running"}
     try:
-        return _run_ipo_scan_locked(force=force)
+        return _run_ipo_scan_locked(force=force, wipe=wipe)
     finally:
         _IPO_SCAN_LOCK.release()
 
 
-def _run_ipo_scan_locked(force: bool = False) -> dict:
+def _run_ipo_scan_locked(force: bool = False, wipe: bool = False) -> dict:
     clear_ipo_stop()
+    if wipe:
+        force = True  # a wipe-and-refeed is meaningless against a stale-but-fresh-enough cache
     try:
         import ipo_schema
         ipo_schema.ensure_ipo_schema()
@@ -1678,6 +1751,35 @@ def _run_ipo_scan_locked(force: bool = False) -> dict:
     _set_job(status="running", message=f"Scanning {total} IPO(s)…", processed=0, total=total,
               started_at=datetime.now(IST).isoformat())
 
+    # Wipe safety check (2026-09-05): "Premarket Feed" wipes ipo_static_feed
+    # before re-feeding so stale/removed IPOs and leftover bonds don't just
+    # accumulate forever — but a wipe committed to on the strength of a
+    # DEGRADED fetch is exactly the KANOHAR-style data loss Bug 5 fixed.
+    # NSE's two endpoints fail independently (public-past-issues can succeed
+    # while all-upcoming-issues 403s) — total>0 doesn't mean this fetch is
+    # complete. Compare this fetch's "upcoming"-stage count against what was
+    # already known before touching anything: if upcoming dropped to zero
+    # while previous runs had some, that's the specific failure signature,
+    # not a real "no upcoming IPOs right now" — downgrade to the safe merge
+    # instead of wiping.
+    wipe_downgraded_reason = None
+    if wipe:
+        new_upcoming = sum(1 for u in universe if u.get("stage") == "upcoming")
+        try:
+            _cached_before = _kv().kv_get(IPO_LIST_KEY)
+            _existing_before = _cached_before.get("results") or [] if isinstance(_cached_before, dict) else []
+        except Exception:
+            _existing_before = []
+        existing_upcoming = sum(1 for r in _existing_before if r.get("stage") == "upcoming")
+        if existing_upcoming > 0 and new_upcoming == 0:
+            wipe = False
+            wipe_downgraded_reason = (
+                f"wipe skipped: this fetch found 0 upcoming-stage IPOs but {existing_upcoming} "
+                f"were already known — looks like a partial NSE block (all-upcoming-issues "
+                f"endpoint), not a real drop to zero; merged instead of wiping to avoid losing them."
+            )
+            logger.warning("run_ipo_scan: %s", wipe_downgraded_reason)
+
     results: List[Dict[str, Any]] = []
     errors = 0
     stopped = False
@@ -1727,24 +1829,31 @@ def _run_ipo_scan_locked(force: bool = False) -> dict:
     results.sort(key=_sort_key)
 
     try:
-        # Bug 5 fix (2026-09-05): this used to be a blind overwrite of the
-        # ENTIRE cached list with only what THIS scan discovered. That's
-        # destructive whenever this run's upstream fetch is degraded
-        # relative to a previous run — e.g. NSE's public-past-issues
-        # endpoint succeeds but all-upcoming-issues 403s this time (a
-        # partial, not total, block — total==0 already short-circuits
-        # above and never reaches here). universe/total looked "fine" (>0)
-        # so the scan ran and happily overwrote the cache with a list
-        # missing every currently-upcoming IPO, even though a previous scan
-        # had already discovered them correctly. That's exactly how
-        # KANOHAR/PRASOLCHEM/GLASSWALL/PRANAV/MOMSBELIEF/DEEPA vanished
-        # from the cache between one scan and the next — a Full Re-scan
-        # click during a partial NSE block quietly threw away good data
-        # that Auto-Repair then had nothing left to fall back to. Merge
-        # with whatever's already cached instead — same "new data wins per
-        # symbol, nothing already-known just disappears" rule
-        # ipo_repair_batch's own cache-sync already uses.
-        _kv().kv_set(IPO_LIST_KEY, {"results": _merge_ipo_results(results), "generated_at": datetime.now(IST).isoformat()}, ttl=IPO_LIST_CACHE_TTL_SEC)
+        if wipe:
+            # Confirmed-healthy fetch (safety check above already downgraded
+            # `wipe` to False otherwise) — genuinely replace, not merge, so
+            # stale/delisted/bond rows the source no longer returns actually
+            # disappear instead of lingering forever.
+            _kv().kv_set(IPO_LIST_KEY, {"results": results, "generated_at": datetime.now(IST).isoformat()}, ttl=IPO_LIST_CACHE_TTL_SEC)
+        else:
+            # Bug 5 fix (2026-09-05): this used to be a blind overwrite of the
+            # ENTIRE cached list with only what THIS scan discovered. That's
+            # destructive whenever this run's upstream fetch is degraded
+            # relative to a previous run — e.g. NSE's public-past-issues
+            # endpoint succeeds but all-upcoming-issues 403s this time (a
+            # partial, not total, block — total==0 already short-circuits
+            # above and never reaches here). universe/total looked "fine" (>0)
+            # so the scan ran and happily overwrote the cache with a list
+            # missing every currently-upcoming IPO, even though a previous scan
+            # had already discovered them correctly. That's exactly how
+            # KANOHAR/PRASOLCHEM/GLASSWALL/PRANAV/MOMSBELIEF/DEEPA vanished
+            # from the cache between one scan and the next — a Full Re-scan
+            # click during a partial NSE block quietly threw away good data
+            # that Auto-Repair then had nothing left to fall back to. Merge
+            # with whatever's already cached instead — same "new data wins per
+            # symbol, nothing already-known just disappears" rule
+            # ipo_repair_batch's own cache-sync already uses.
+            _kv().kv_set(IPO_LIST_KEY, {"results": _merge_ipo_results(results), "generated_at": datetime.now(IST).isoformat()}, ttl=IPO_LIST_CACHE_TTL_SEC)
     except Exception as e:
         logger.warning("could not persist ipo list: %s", e)
 
@@ -1752,13 +1861,22 @@ def _run_ipo_scan_locked(force: bool = False) -> dict:
     # ipo_schema.py). This is what lets the next scan within
     # IPO_DB_FRESH_HOURS skip re-hitting NSE entirely, and gives Database
     # Feed Health-style visibility into exactly what the last scan saw.
+    if wipe:
+        wiped_ok = _ipo_db_wipe()
+        if not wiped_ok:
+            logger.warning("run_ipo_scan: DB wipe failed or unavailable — new rows will upsert over old ones instead")
     try:
         n = _ipo_db_upsert(results)
-        logger.info("ipo_static_feed: upserted %s/%s rows", n, len(results))
+        logger.info("ipo_static_feed: upserted %s/%s rows%s", n, len(results), " (after wipe)" if wipe else "")
     except Exception as e:
         logger.warning("ipo db persist failed (non-fatal): %s", e)
 
-    return _set_job(status="done", message=f"Done: {len(results)} analyzed, {errors} errors",
+    done_message = f"Done: {len(results)} analyzed, {errors} errors"
+    if wipe:
+        done_message += " — ipo_static_feed wiped and refed fresh"
+    if wipe_downgraded_reason:
+        done_message += f" — {wipe_downgraded_reason}"
+    return _set_job(status="done", message=done_message,
                       processed=total, total=total, results_count=len(results))
 
 
@@ -1865,7 +1983,7 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
             # be found upstream, because it was never a real IPO to begin
             # with. Name that plainly instead of implying it's a fetch
             # problem that repair might fix on a future click.
-            if sym and sym[0].isdigit():
+            if _is_ipo_non_equity(sym):
                 failed.append({
                     "symbol": sym,
                     "reason": "non_equity_instrument (NCD/bond series, not an equity IPO — will never resolve, remove from tracking)",
@@ -1947,6 +2065,75 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
     return out
 
 
+def _ipo_db_delete_symbols(symbols: List[str]) -> int:
+    """DELETE specific rows from ipo_static_feed by symbol. Used by
+    purge_non_equity_ipos() — a targeted version of _ipo_db_wipe() for
+    removing just the NCD/bond rows a user confirms should go, without
+    touching anything else in the table.
+    """
+    symbols = [s for s in (symbols or []) if s]
+    if not symbols:
+        return 0
+    try:
+        import ipo_schema
+        from sqlalchemy import text
+    except Exception:
+        return 0
+    url = ipo_schema.database_url()
+    if not url:
+        return 0
+    eng = None
+    try:
+        eng = ipo_schema.make_engine("stockky-ipo-purge")
+        if eng is None:
+            return 0
+        n = 0
+        with eng.begin() as conn:
+            for sym in symbols:
+                conn.execute(text(f"DELETE FROM {ipo_schema.TABLE_NAME} WHERE symbol = :symbol"), {"symbol": sym})
+                n += 1
+        return n
+    except Exception as e:
+        logger.warning("ipo db delete_symbols failed (non-fatal): %s", e)
+        return 0
+    finally:
+        if eng is not None:
+            try:
+                eng.dispose()
+            except Exception:
+                pass
+
+
+def purge_non_equity_ipos() -> dict:
+    """Delete every row currently flagged non_equity (NCD/bond debt-series
+    symbols like 1150VIES30 that slipped into ipo_static_feed before
+    _is_ipo_non_equity existed) from both the DB and the cached list. These
+    can never resolve via Auto-Repair — they were never real equity IPOs —
+    so this is the actual fix for them, not another repair attempt.
+    """
+    audit = get_ipo_feed_audit()
+    if not audit.get("ok"):
+        return {"status": "error", "error": audit.get("error") or "audit failed", "purged": []}
+    non_equity = audit.get("non_equity_ipos") or []
+    symbols = [r.get("symbol") for r in non_equity if r.get("symbol")]
+    if not symbols:
+        return {"status": "completed", "purged": [], "message": "No non-equity (NCD/bond) rows found."}
+    n = _ipo_db_delete_symbols(symbols)
+    try:
+        cached = _kv().kv_get(IPO_LIST_KEY)
+        if isinstance(cached, dict) and cached.get("results"):
+            drop = set(symbols)
+            cached["results"] = [r for r in cached["results"] if r.get("symbol") not in drop]
+            _kv().kv_set(IPO_LIST_KEY, cached, ttl=IPO_LIST_CACHE_TTL_SEC)
+    except Exception as e:
+        logger.debug("purge_non_equity_ipos: cache cleanup skipped: %s", e)
+    return {
+        "status": "completed",
+        "purged": symbols,
+        "message": f"Deleted {n}/{len(symbols)} non-equity row(s): {', '.join(symbols[:8])}{'…' if len(symbols) > 8 else ''}",
+    }
+
+
 def get_ipo_feed_audit() -> dict:
     """
     IPO Tracker's OWN feed-health audit — reads ipo_static_feed (the IPO
@@ -2003,6 +2190,7 @@ def get_ipo_feed_audit() -> dict:
     fully_scored = 0
     missing = []
     no_data_yet = []
+    non_equity = []
     for r in rows:
         missing_fields = [
             f for f in ("issue_price", "ipo_score", "decision")
@@ -2018,20 +2206,34 @@ def get_ipo_feed_audit() -> dict:
             "missing_fields": missing_fields,
             "updated_at": str(r.get("updated_at") or ""),
         }
+        # Bug 6 fix (2026-09-05): rows like 1150VIES30 (NCD/bond series that
+        # slipped into ipo_static_feed before _is_ipo_non_equity existed)
+        # were counted as ordinary "missing" rows forever — Auto-Repair
+        # would try them every click, fail every click (they're not equity,
+        # analyze_ipo() can never score them), and they'd drag the health %
+        # down permanently even though nothing was actually broken; they
+        # were just never real IPOs. Same "separate bucket, don't count
+        # against health, don't hand to repair" treatment as no_data_yet
+        # below — except this one never resolves on its own and should
+        # just be deleted from ipo_static_feed by hand.
+        if _is_ipo_non_equity(r.get("symbol")):
+            non_equity.append(row_entry)
         # ── Bug 2 fix: no_data_yet rows (Yahoo not yet indexed) are a
         # separate category from genuinely broken rows. They're not fixable
         # by Auto-Repair today, so including them in missing_count inflates
         # the "health gap" and makes the repair button lie. Show them in
         # their own section so the user knows they exist but aren't stuck —
         # just waiting on Yahoo's crawl schedule.
-        if (r.get("stage") or "") == "no_data_yet":
+        elif (r.get("stage") or "") == "no_data_yet":
             no_data_yet.append(row_entry)
         else:
             missing.append(row_entry)
 
     # Health % counts only rows that are fixable: fully_scored out of
-    # (total − no_data_yet), since no_data_yet is not "broken", just waiting.
-    actionable_total = total - len(no_data_yet)
+    # (total − no_data_yet − non_equity), since neither is "broken" in a
+    # way Auto-Repair can address — no_data_yet just needs time, non_equity
+    # needs a manual delete, not a rescan.
+    actionable_total = total - len(no_data_yet) - len(non_equity)
     health = round((fully_scored / max(actionable_total, 1)) * 100, 1) if actionable_total > 0 else 0.0
     return {
         "ok": True,
@@ -2041,6 +2243,8 @@ def get_ipo_feed_audit() -> dict:
         "missing_ipos": missing[:200],
         "no_data_yet_count": len(no_data_yet),
         "no_data_yet_ipos": no_data_yet[:50],
+        "non_equity_count": len(non_equity),
+        "non_equity_ipos": non_equity[:50],
         "health_score": health,
         "message": (
             "No IPO rows tracked yet — run Scan IPOs first."
@@ -2048,6 +2252,7 @@ def get_ipo_feed_audit() -> dict:
             else (
                 f"IPO feed health {health}% · {fully_scored}/{actionable_total} scored"
                 + (f" · {len(no_data_yet)} waiting on Yahoo data" if no_data_yet else "")
+                + (f" · {len(non_equity)} non-equity (NCD/bond) rows to delete manually" if non_equity else "")
             )
         ),
     }

@@ -1579,6 +1579,27 @@ def _build_ipo_suggestion(
 _IPO_SCAN_LOCK = threading.Lock()
 
 
+def _merge_ipo_results(new_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Merge a fresh batch of analyzed IPO rows into whatever's already in
+    IPO_LIST_KEY, new-wins-per-symbol, instead of the caller overwriting the
+    whole cache with just this batch. See Bug 5 fix note in run_ipo_scan for
+    why a blind overwrite is destructive (a partially-degraded upstream
+    fetch can "succeed" with total>0 while still missing symbols a past scan
+    already had correctly). Used by both run_ipo_scan and ipo_repair_batch
+    so the cache accumulates knowledge across runs instead of resetting to
+    whatever the most recent, possibly-degraded fetch happened to find.
+    """
+    try:
+        cached = _kv().kv_get(IPO_LIST_KEY)
+    except Exception:
+        cached = None
+    existing = list(cached.get("results") or []) if isinstance(cached, dict) else []
+    by_sym_new = {r.get("symbol"): r for r in new_results if r.get("symbol")}
+    merged = [by_sym_new.pop(e.get("symbol"), e) for e in existing]
+    merged.extend(by_sym_new.values())  # any new symbol not already cached
+    return merged
+
+
 def run_ipo_scan(force: bool = False) -> dict:
     # Guard against overlapping scans (e.g. the UI's poll + a manual
     # "Run Premarket Feed" click landing close together, or a page refresh
@@ -1683,8 +1704,10 @@ def _run_ipo_scan_locked(force: bool = False) -> dict:
         # Persist whatever was analyzed before Stop was pressed instead of
         # discarding it — same "partial results are still useful" behaviour
         # as the Surprise premarket job.
+        # Bug 5 fix (2026-09-05): merge with the previous cache instead of
+        # overwriting it (see note on the full-scan write below for why).
         try:
-            _kv().kv_set(IPO_LIST_KEY, {"results": results, "generated_at": datetime.now(IST).isoformat()}, ttl=IPO_LIST_CACHE_TTL_SEC)
+            _kv().kv_set(IPO_LIST_KEY, {"results": _merge_ipo_results(results), "generated_at": datetime.now(IST).isoformat()}, ttl=IPO_LIST_CACHE_TTL_SEC)
         except Exception as e:
             logger.warning("could not persist partial ipo list: %s", e)
         clear_ipo_stop()
@@ -1704,7 +1727,24 @@ def _run_ipo_scan_locked(force: bool = False) -> dict:
     results.sort(key=_sort_key)
 
     try:
-        _kv().kv_set(IPO_LIST_KEY, {"results": results, "generated_at": datetime.now(IST).isoformat()}, ttl=IPO_LIST_CACHE_TTL_SEC)
+        # Bug 5 fix (2026-09-05): this used to be a blind overwrite of the
+        # ENTIRE cached list with only what THIS scan discovered. That's
+        # destructive whenever this run's upstream fetch is degraded
+        # relative to a previous run — e.g. NSE's public-past-issues
+        # endpoint succeeds but all-upcoming-issues 403s this time (a
+        # partial, not total, block — total==0 already short-circuits
+        # above and never reaches here). universe/total looked "fine" (>0)
+        # so the scan ran and happily overwrote the cache with a list
+        # missing every currently-upcoming IPO, even though a previous scan
+        # had already discovered them correctly. That's exactly how
+        # KANOHAR/PRASOLCHEM/GLASSWALL/PRANAV/MOMSBELIEF/DEEPA vanished
+        # from the cache between one scan and the next — a Full Re-scan
+        # click during a partial NSE block quietly threw away good data
+        # that Auto-Repair then had nothing left to fall back to. Merge
+        # with whatever's already cached instead — same "new data wins per
+        # symbol, nothing already-known just disappears" rule
+        # ipo_repair_batch's own cache-sync already uses.
+        _kv().kv_set(IPO_LIST_KEY, {"results": _merge_ipo_results(results), "generated_at": datetime.now(IST).isoformat()}, ttl=IPO_LIST_CACHE_TTL_SEC)
     except Exception as e:
         logger.warning("could not persist ipo list: %s", e)
 
@@ -1869,15 +1909,11 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
         # table reflects the repair immediately instead of waiting for the
         # next scheduled/manual scan to overwrite it.
         try:
-            cached = _kv().kv_get(IPO_LIST_KEY)
-            cached = cached if isinstance(cached, dict) else {}
-            existing = list(cached.get("results") or [])
-            by_sym_repaired = {r.get("symbol"): r for r in results}
-            merged = [by_sym_repaired.pop(r.get("symbol"), r) for r in existing]
-            merged.extend(by_sym_repaired.values())  # any repaired symbol not already in the cached list
-            cached["results"] = merged
-            cached["generated_at"] = cached.get("generated_at") or datetime.now(IST).isoformat()
-            _kv().kv_set(IPO_LIST_KEY, cached, ttl=IPO_LIST_CACHE_TTL_SEC)
+            _kv().kv_set(
+                IPO_LIST_KEY,
+                {"results": _merge_ipo_results(results), "generated_at": datetime.now(IST).isoformat()},
+                ttl=IPO_LIST_CACHE_TTL_SEC,
+            )
         except Exception as e:
             logger.debug("ipo_repair_batch: cache sync skipped: %s", e)
 

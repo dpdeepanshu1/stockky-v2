@@ -1,0 +1,99 @@
+{
+  "downloaded_at": "2026-09-02T10:43:18.567707",
+  "today_date": "2026-09-02",
+  "total_symbols": 285,
+  "history_timeframes": [
+    {
+      "key": "1d_60m",
+      "period": "1d",
+      "interval": "60m",
+      "use": "intraday momentum"
+    },
+    {
+      "key": "5d_1d",
+      "period": "5d",
+      "interval": "1d",
+      "use": "short-term trend"
+    },
+    {
+      "key": "1mo_1d",
+      "period": "1mo",
+      "interval": "1d",
+      "use": "swing + ATR"
+    },
+    {
+      "key": "3mo_1d",
+      "period": "3mo",
+      "interval": "1d",
+      "use": "medium trend"
+    },
+    {
+      "key": "6mo_1wk",
+      "period": "6mo",
+      "interval": "1wk",
+      "use": "structural trend"
+    },
+    {
+      "key": "1y_1wk",
+      "period": "1y",
+      "interval": "1wk",
+      "use": "52w range"
+    },
+    {
+      "key": "1y_1d",
+      "period": "1y",
+      "interval": "1d",
+      "use": "extended/extended_short flags"
+    },
+    {
+      "key": "2y_1mo",
+      "period": "2y",
+      "interval": "1mo",
+      "use": "macro base"
+    }
+  ],
+  "files": {
+    "symbols": "symbols.json",
+    "quotes": "quotes/all_quotes.json",
+    "delivery": "quotes/delivery.json",
+    "history_per_sym": "history/{SYMBOL}.json",
+    "nifty_index": "index/NIFTY50_1y_1d.json",
+    "nse_bulk_deals": "bulk_deals/nse_bulk_deals_30d.json",
+    "nse_block_deals": "bulk_deals/nse_block_deals_30d.json",
+    "nse_insider": "bulk_deals/nse_insider_30d.json",
+    "news": "news/all_news.json",
+    "volume_shockers": "events/volume_shockers.json",
+    "hot_picks": "events/hot_picks.json",
+    "ipo_list": "ipo/ipo_list.json"
+  },
+  "errors": [
+    "quote/ADANITRANS: 'currentTradingPeriod'",
+    "quote/AMARAJABAT: 'currentTradingPeriod'",
+    "quote/AVINASH: 'currentTradingPeriod'",
+    "quote/CENTURYTEX: 'currentTradingPeriod'",
+    "quote/HBLPOWER: 'currentTradingPeriod'",
+    "quote/HECL: 'currentTradingPeriod'",
+    "quote/ICICIPRU: 'currentTradingPeriod'",
+    "quote/ICICIlombard: 'currentTradingPeriod'",
+    "quote/ISEC: 'currentTradingPeriod'",
+    "quote/JCHAC: 'currentTradingPeriod'",
+    "quote/KALPATPOWR: 'currentTradingPeriod'",
+    "quote/LTIM: 'currentTradingPeriod'",
+    "quote/MCDOWELL-N: 'currentTradingPeriod'",
+    "quote/MINDAIND: 'currentTradingPeriod'",
+    "quote/MTAR: 'currentTradingPeriod'",
+    "quote/PEL: 'currentTradingPeriod'",
+    "quote/PRISMJOHNS: 'currentTradingPeriod'",
+    "quote/SEQUENT: 'currentTradingPeriod'",
+    "quote/SUVENPHAR: 'currentTradingPeriod'",
+    "quote/TATAMOTORS: 'currentTradingPeriod'",
+    "quote/UJJIVAN: 'currentTradingPeriod'",
+    "quote/WABCOINDIA: 'currentTradingPeriod'",
+    "quote/ZOMATO: 'currentTradingPeriod'",
+    "NSE bulk deals: empty/failed",
+    "NSE block deals: empty/failed",
+    "NSE insider: empty/failed",
+    "NSE equity master CSV: unreachable from both hostnames"
+  ],
+  "error_count": 27
+}

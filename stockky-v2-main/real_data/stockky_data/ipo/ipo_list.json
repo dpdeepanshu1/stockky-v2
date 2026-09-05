@@ -1,0 +1,68 @@
+{
+  "results": [
+    {
+      "symbol": "BAJAJHFL",
+      "company": "Bajaj Housing Finance",
+      "listing_date": "2024-09-16",
+      "stage": "listed"
+    },
+    {
+      "symbol": "MANBA",
+      "company": "Manba Finance",
+      "listing_date": "2024-09-30",
+      "stage": "listed"
+    },
+    {
+      "symbol": "DIFFUSION",
+      "company": "Diffusion Engineers",
+      "listing_date": "2024-10-04",
+      "stage": "listed"
+    },
+    {
+      "symbol": "GARUDA",
+      "company": "Garuda Construction",
+      "listing_date": "2024-10-08",
+      "stage": "listed"
+    },
+    {
+      "symbol": "AFCONS",
+      "company": "Afcons Infrastructure",
+      "listing_date": "2024-10-25",
+      "stage": "listed"
+    },
+    {
+      "symbol": "NIVA",
+      "company": "Niva Bupa",
+      "listing_date": "2024-11-14",
+      "stage": "listed"
+    },
+    {
+      "symbol": "SWIGGY",
+      "company": "Swiggy",
+      "listing_date": "2024-11-13",
+      "stage": "listed"
+    },
+    {
+      "symbol": "SAGILITY",
+      "company": "Sagility India",
+      "listing_date": "2024-11-12",
+      "stage": "listed"
+    },
+    {
+      "symbol": "ACME",
+      "company": "ACME Solar Holdings",
+      "listing_date": "2024-11-13",
+      "stage": "listed"
+    },
+    {
+      "symbol": "NTPCGREEN",
+      "company": "NTPC Green Energy",
+      "listing_date": "2024-11-27",
+      "stage": "listed"
+    }
+  ],
+  "fallback_used": true,
+  "source": "manual_hardcoded_2024",
+  "generated_at": "2026-09-02",
+  "downloaded_at": "2026-09-02"
+}

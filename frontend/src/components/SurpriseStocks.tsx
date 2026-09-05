@@ -494,9 +494,10 @@ export default function SurpriseStocks({
     setRepairMsg(null);
     try {
       // Repair ALL missing — use the full incomplete_stocks count.
-      // Backend now accepts up to 100 per call (raised from 30).
+      // Backend accepts up to 100 per call (le=100) — clamp to it, or an
+      // incomplete count over 100 gets rejected with a 422 instead of repaired.
       const totalMissing = healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 15;
-      const limit = Math.max(15, totalMissing);
+      const limit = Math.min(100, Math.max(15, totalMissing));
       const res = await api.surpriseRepairBatch(limit);
       const repaired: string[] = res?.repaired || [];
       if (res?.status === "error") {
@@ -757,7 +758,7 @@ export default function SurpriseStocks({
             }
             className="font-display tabular-nums text-xs px-3 py-1.5 rounded-xl bg-signal-sell/20 text-white border border-signal-sell/40 hover:bg-signal-sell/35 transition disabled:opacity-50"
           >
-            {batchRepairBusy ? "Repairing…" : `⚡ Repair All Missing (${healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 0})`}
+            {batchRepairBusy ? "Repairing…" : `⚡ Repair All Missing (${Math.min(100, healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 0)})`}
           </button>
         </div>
         {repairMsg && (

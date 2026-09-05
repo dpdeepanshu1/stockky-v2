@@ -352,10 +352,12 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
     try {
       // Repair ALL incomplete symbols — use the full incomplete_stocks count
       // so the button fixes everything in one click, not just the first 15.
-      // Cap at 30 (backend max per call). If there are more we run a second pass.
+      // /stockky-hot/repair-batch caps `limit` at 100 (le=100) server-side, so
+      // clamp here too — sending totalMissing uncapped (e.g. 149) got rejected
+      // with a 422 ("Input should be less than or equal to 100") instead of
+      // actually repairing anything.
       const totalMissing = healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 15;
-      // Send the full count — backend now accepts up to 100 per call.
-      const limit = Math.max(15, totalMissing);
+      const limit = Math.min(100, Math.max(15, totalMissing));
       const res = await api.hotPicksRepairBatch(limit);
       const repaired: string[] = res?.repaired || [];
       if (res?.status === "error") {
@@ -803,7 +805,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
         repairBatchLabel={
           (() => {
             const n = healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 0;
-            return n > 0 ? `⚡ Repair All Missing (${n})` : "⚡ Repair All Missing";
+            return n > 0 ? `⚡ Repair All Missing (${Math.min(100, n)})` : "⚡ Repair All Missing";
           })()
         }
       />

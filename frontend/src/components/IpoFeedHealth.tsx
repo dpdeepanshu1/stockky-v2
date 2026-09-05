@@ -80,8 +80,13 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
     setRepairMsg(null);
     setError(null);
     try {
-      // Use the full missing_count so one click repairs everything, not just 20.
-      const limit = Math.max(20, stats?.missing_count ?? 20);
+      // Use the full missing_count so one click repairs everything, not just 20 —
+      // but /ipo/repair-batch caps `limit` at 100 (le=100) server-side, so clamp
+      // here too. Without this, missing_count > 100 (e.g. 149) sent the raw
+      // count straight through and the backend rejected it with a 422
+      // ("Input should be less than or equal to 100"), which looked like the
+      // repair silently failing rather than a validation error.
+      const limit = Math.min(100, Math.max(20, stats?.missing_count ?? 20));
       const res = await api.ipoRepairBatch(limit);
       if (res.status === "completed") {
         setRepairMsg(res.message || (res.repaired?.length > 0
@@ -151,7 +156,7 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
                   <BusySpinner className="border-white" /> Repairing…
                 </span>
               ) : (
-                `🛠 Auto-Repair All${missing > 0 ? ` (${missing})` : ""}`
+                `🛠 Auto-Repair All${missing > 0 ? ` (${Math.min(100, missing)})` : ""}`
               )}
             </button>
           )}

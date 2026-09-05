@@ -2046,3 +2046,30 @@ html.light .mobile-drawer-backdrop {
   background: rgba(16, 185, 129, 0.28);
   border-color: rgba(16, 185, 129, 0.7);
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   Accessibility pass (2026-09-05 UI audit)
+   - Keyboard-only focus ring: invisible to mouse users (:focus-visible),
+     consistent across every button/link/tab/card in the app instead of
+     relying on each component to define its own focus treatment.
+   - Respect the OS-level "reduce motion" preference — the app leans on
+     fadeIn/shimmer/pulse animations throughout; this turns them into
+     instant, non-animated state changes for users who've asked for it,
+     without touching any component code.
+   ═══════════════════════════════════════════════════════════════ */
+:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

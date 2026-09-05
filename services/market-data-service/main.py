@@ -1337,6 +1337,73 @@ def _waterfall_nse_direct_price(symbol: str) -> Optional[float]:
     return None
 
 
+def _waterfall_angelone_price(symbol: str) -> Optional[float]:
+    """AngelOne SmartAPI REST quote, on-demand for ANY symbol — not just
+    the fixed universe angelone_ws_feed.py subscribes to at startup.
+
+    Gap this closes (2026-09-05): angelone_client.py + angelone_ws_feed.py
+    were fully built and the master prompt's stated intent was "AngelOne
+    -> yfinance -> NSE -> IndianAPI" (see _waterfall_indianapi_price's own
+    docstring above), but the only AngelOne path actually wired into
+    get_quote() was the WS feed's in-memory cache (angelone_ws_feed.
+    get_live_quote), which only ever has data for symbols in
+    default_universe_from_env()'s static SURPRISE_UNIVERSE/SCAN_UNIVERSE
+    list. A freshly-listed IPO symbol (PERNIASPOP, SHANTIINOR, ASHUTOSH...)
+    isn't in that list — the WS feed never subscribes to it — so it fell
+    straight through to NSE-direct (often 403 from this VM's datacenter
+    IP), then TwelveData (404 — these tiny NSE SME listings usually aren't
+    covered) and AlphaVantage/Polygon (200 OK but no real Indian-equity
+    data for a ticker that obscure), and get_quote() gave up with nothing.
+    AngelOne is a real NSE broker feed and the single most likely source
+    to actually have a fresh listing's price, so it belongs ahead of the
+    weaker/US-centric paid tiers below — inserted right after NSE-direct
+    in get_quote(), same tier IndianAPI already occupies.
+
+    Requires ANGELONE_CLIENT_ID/MPIN/API_KEY/TOTP_SECRET; returns None
+    immediately if unconfigured (angelone_client.get_session().
+    is_configured() is False), so a deployment without AngelOne creds
+    behaves exactly as before this change — same "no-op unless configured"
+    contract as _waterfall_indianapi_price above.
+    """
+    try:
+        from angelone_client import get_session
+    except Exception as e:
+        logger.debug("angelone waterfall: client unavailable: %s", e)
+        return None
+    session = get_session()
+    if not session.is_configured():
+        return None
+    base = _waterfall_equity_base(symbol)
+    if not base:
+        return None
+    try:
+        import angelone_scrip_master as scrip_master
+        token = scrip_master.get_token(base)
+    except Exception as e:
+        logger.debug("angelone waterfall: scrip master lookup %s: %s", base, e)
+        return None
+    if not token:
+        # Not every symbol resolves — scrip master only carries NSE cash-
+        # equity "-EQ" rows (see angelone_scrip_master.py), and a brand new
+        # SME IPO can take a day or two to appear in AngelOne's own daily
+        # scrip master refresh too. Fall through quietly, same as every
+        # other waterfall tier when it has nothing.
+        return None
+    try:
+        # get_quote/ensure_session are async (TOTP login + httpx.AsyncClient
+        # — see angelone_client.py); this endpoint is sync, so bridge with
+        # asyncio.run(). Safe here: FastAPI runs sync path functions in a
+        # worker thread with no already-running event loop to conflict with.
+        quote = asyncio.run(session.get_quote("NSE", token))
+        px = _safe((quote or {}).get("ltp"))
+        if px is not None and px > 0:
+            logger.info("AngelOne waterfall hit %s → ₹%.2f", base, px)
+            return float(px)
+    except Exception as e:
+        logger.debug("AngelOne waterfall %s: %s", base, e)
+    return None
+
+
 def _waterfall_bhavcopy_price(symbol: str) -> Optional[float]:
     """Absolute last resort: official NSE bhavcopy EOD close.
 
@@ -1622,6 +1689,22 @@ def get_quote(symbol: str):
                 waterfall_source = "nse_direct"
         except Exception as e:
             logger.debug("nse-direct waterfall %s: %s", sym, e)
+
+    # AngelOne REST, on-demand for any symbol (2026-09-05) — closes the gap
+    # where only angelone_ws_feed's fixed-universe cache was ever checked
+    # (see get_quote()'s stage 0 above), so a freshly-listed IPO symbol that
+    # isn't in that static universe never got an AngelOne lookup at all.
+    # Sits ahead of IndianAPI/TwelveData/AlphaVantage/Polygon per the
+    # documented "Angel -> yfinance -> NSE -> IndianAPI" intent — a real NSE
+    # broker feed is the most likely of the remaining tiers to actually have
+    # a fresh listing's price.
+    if not is_index and not waterfall_price:
+        try:
+            waterfall_price = _waterfall_angelone_price(sym)
+            if waterfall_price and waterfall_price > 0:
+                waterfall_source = "angelone_rest"
+        except Exception as e:
+            logger.debug("angelone waterfall %s: %s", sym, e)
 
     # IndianAPI — requested fallback order is Angel -> yfinance -> NSE ->
     # IndianAPI, so this sits right after NSE-direct, ahead of the older

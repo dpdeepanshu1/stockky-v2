@@ -1407,6 +1407,14 @@ export const api = {
         missing_fields: string[];
         updated_at?: string;
       }>;
+      pending_listing_count?: number;
+      pending_listing_ipos?: Array<{
+        symbol: string;
+        company_name?: string;
+        stage?: string;
+        missing_fields: string[];
+        updated_at?: string;
+      }>;
       health_score?: number;
       message?: string;
       error?: string;
@@ -1415,7 +1423,7 @@ export const api = {
   // field, not a full universe re-scan. Backs the IPO health tab's
   // Auto-Repair button (mirrors hotPicksRepairBatch above).
   ipoRepairBatch: (limit = 20, symbol?: string) =>
-    request<{ status: string; repaired?: string[]; still_no_data?: string[]; attempted?: number; message?: string; error?: string }>(
+    request<{ status: string; repaired?: string[]; still_no_data?: string[]; not_yet_tradeable?: string[]; attempted?: number; message?: string; error?: string }>(
       `/ipo/repair-batch?limit=${limit}${symbol ? `&symbol=${encodeURIComponent(symbol)}` : ""}`,
       { method: "POST" },
       1,

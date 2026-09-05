@@ -44,6 +44,8 @@ interface IpoAuditStats {
   no_data_yet_ipos?: MissingIpo[];
   non_equity_count?: number;
   non_equity_ipos?: MissingIpo[];
+  pending_listing_count?: number;
+  pending_listing_ipos?: MissingIpo[];
   health_score?: number;
   message?: string;
   error?: string;
@@ -161,6 +163,7 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
   const health = stats?.health_score ?? 0;
   const noDataYet = stats?.no_data_yet_count ?? 0;
   const nonEquity = stats?.non_equity_count ?? 0;
+  const pendingListing = stats?.pending_listing_count ?? 0;
 
   return (
     <div className="rounded-xl border border-white/10 bg-black/30 p-4 mt-4">
@@ -300,6 +303,16 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
           <div className="rounded border border-white/20 bg-white/5 p-3">
             <p className="text-[10px] uppercase tracking-wide text-white/50">Non-Equity (NCD/Bond)</p>
             <p className="text-lg font-semibold text-white/80">{nonEquity}</p>
+          </div>
+        )}
+        {/* pending_listing: "upcoming" stage rows — future listing_date, no
+            score possible until that date arrives. Own tile, same
+            reasoning as no_data_yet/non_equity above: not broken, not
+            Auto-Repair's job, just not time yet. */}
+        {pendingListing > 0 && (
+          <div className="rounded border border-signal-prepare/30 bg-signal-prepare/5 p-3">
+            <p className="text-[10px] uppercase tracking-wide text-signal-prepare/70">Not Yet Listed</p>
+            <p className="text-lg font-semibold text-signal-prepare">{pendingListing}</p>
           </div>
         )}
       </div>

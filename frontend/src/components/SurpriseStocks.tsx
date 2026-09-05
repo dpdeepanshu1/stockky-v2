@@ -472,25 +472,32 @@ export default function SurpriseStocks({
         if (res?.status === "error" || res?.status === "not_found") {
           setRepairMsg({ ok: false, text: res.error || res.message || `Could not repair ${symbol}.` });
         } else if ((res?.repaired || []).length > 0) {
-          setRepairMsg({ ok: true, text: `Repaired ${symbol}.` });
+          setRepairMsg({ ok: true, text: `Repaired ${symbol} — price updated.` });
         } else {
-          setRepairMsg({ ok: true, text: res?.message || `${symbol} already has a price — nothing to repair.` });
+          setRepairMsg({ ok: true, text: res?.message || `${symbol}: nothing missing.` });
         }
+        // Refresh both the health audit AND the stocks table so the repaired
+        // price appears in the row immediately without a manual re-scan.
         await fetchSurpriseHealth();
+        await fetchSurpriseStocks(false);
       } catch (e: any) {
         setRepairMsg({ ok: false, text: e?.message || `Repair failed for ${symbol}` });
       } finally {
         setPatchingSymbol(null);
       }
     },
-    [fetchSurpriseHealth]
+    [fetchSurpriseHealth, fetchSurpriseStocks]
   );
 
   const handleRepairBatchMissing = useCallback(async () => {
     setBatchRepairBusy(true);
     setRepairMsg(null);
     try {
-      const res = await api.surpriseRepairBatch(15);
+      // Repair ALL missing — use the full incomplete_stocks count.
+      // Backend now accepts up to 100 per call (raised from 30).
+      const totalMissing = healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 15;
+      const limit = Math.max(15, totalMissing);
+      const res = await api.surpriseRepairBatch(limit);
       const repaired: string[] = res?.repaired || [];
       if (res?.status === "error") {
         setRepairMsg({ ok: false, text: res.error || "Batch repair failed" });
@@ -499,13 +506,15 @@ export default function SurpriseStocks({
       } else {
         setRepairMsg({ ok: true, text: res?.message || "Nothing needed repair." });
       }
+      // Refresh both audit and stocks table.
       await fetchSurpriseHealth();
+      await fetchSurpriseStocks(false);
     } catch (e: any) {
       setRepairMsg({ ok: false, text: e?.message || "Batch repair failed" });
     } finally {
       setBatchRepairBusy(false);
     }
-  }, [fetchSurpriseHealth]);
+  }, [fetchSurpriseHealth, fetchSurpriseStocks, healthData]);
 
   const runMarketAwareQuoteFeed = useCallback(async (force = false) => {
     setQuoteFeedBusy(true);
@@ -748,7 +757,7 @@ export default function SurpriseStocks({
             }
             className="font-display tabular-nums text-xs px-3 py-1.5 rounded-xl bg-signal-sell/20 text-white border border-signal-sell/40 hover:bg-signal-sell/35 transition disabled:opacity-50"
           >
-            {batchRepairBusy ? "Repairing…" : "⚡ Auto-Repair Missing (15)"}
+            {batchRepairBusy ? "Repairing…" : `⚡ Repair All Missing (${healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 0})`}
           </button>
         </div>
         {repairMsg && (
@@ -772,7 +781,11 @@ export default function SurpriseStocks({
                 {(healthData?.incomplete_stocks || []).map((stock) => (
                   <tr key={stock.symbol} className="border-b border-slate/40 hover:bg-ink/40">
                     <td className="py-2 px-3 font-display tabular-nums font-semibold text-paper">{stock.symbol}</td>
-                    <td className="py-2 px-3 font-display tabular-nums text-signal-sell">0 (missing)</td>
+                    <td className="py-2 px-3 font-display tabular-nums text-signal-sell">
+                      {stock.current_price && stock.current_price > 0
+                        ? `₹${stock.current_price.toFixed(2)}`
+                        : "—"}
+                    </td>
                     <td className="py-2 px-3">
                       {(stock.missing_fields || ["price"]).map((m) => (
                         <span
@@ -850,7 +863,7 @@ export default function SurpriseStocks({
                 <td className="py-2.5 px-3 font-display tabular-nums text-xs text-paper">
                   {formatInrPrice(s as any, null, "—")}
                 </td>
-                <td className="py-2.5 px-3 font-display tabular-nums text-xs font-semibold text-signal-buy">
+                <td className={`py-2.5 px-3 font-display tabular-nums text-xs font-semibold ${Number(s.change_pct) >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
                   {Number(s.change_pct) >= 0 ? "+" : ""}
                   {Number(s.change_pct).toFixed(2)}%
                 </td>

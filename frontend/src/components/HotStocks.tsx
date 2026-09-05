@@ -317,62 +317,6 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
     }
   }, []);
 
-  const handleRepairBatchMissing = useCallback(async () => {
-    setBatchRepairBusy(true);
-    setRepairMsg(null);
-    try {
-      const res = await api.hotPicksRepairBatch(15);
-      const repaired: string[] = res?.repaired || [];
-      if (res?.status === "error") {
-        setRepairMsg({ ok: false, text: res.error || "Repair failed." });
-      } else if (repaired.length > 0) {
-        setRepairMsg({ ok: true, text: `Repaired ${repaired.length} symbol(s): ${repaired.join(", ")}` });
-      } else {
-        setRepairMsg({ ok: true, text: res?.message || "Nothing needed repair (all recent Hot Picks already have a price)." });
-      }
-      await fetchHotPicksHealth();
-    } catch (e: any) {
-      setRepairMsg({ ok: false, text: e?.message || "Repair request failed — check the service is reachable." });
-    } finally {
-      setBatchRepairBusy(false);
-    }
-  }, [fetchHotPicksHealth]);
-
-  const handleRepairSingle = useCallback(async (symbol: string) => {
-    setPatchingSymbol(symbol);
-    setRepairMsg(null);
-    try {
-      const res = await api.hotPicksRepairBatch(1, symbol);
-      if (res?.status === "error" || res?.status === "not_found") {
-        setRepairMsg({ ok: false, text: res.error || res.message || `Could not repair ${symbol}.` });
-      } else if ((res?.repaired || []).length > 0) {
-        setRepairMsg({ ok: true, text: `Repaired ${symbol}.` });
-      } else {
-        setRepairMsg({ ok: true, text: res?.message || `${symbol} already has a price — nothing to repair.` });
-      }
-      await fetchHotPicksHealth();
-    } catch (e: any) {
-      setRepairMsg({ ok: false, text: e?.message || `Failed to repair ${symbol}.` });
-    } finally {
-      setPatchingSymbol(null);
-    }
-  }, [fetchHotPicksHealth]);
-
-  useEffect(() => {
-    void fetchHotPicksHealth();
-  }, [fetchHotPicksHealth]);
-
-  const { quotes: liveQuotes, subscribeQuotes } = useStockkyRealtime();
-
-  useEffect(() => {
-    const symbols = (data?.news_driven || [])
-      .concat(data?.results_driven || [])
-      .concat(data?.bulk_insider_driven || [])
-      .map((x) => x.symbol)
-      .filter(Boolean) as string[];
-    if (symbols.length) subscribeQuotes(symbols);
-  }, [data, subscribeQuotes]);
-
   /**
    * Instant paint. Two sources, cheapest-first:
    *   1. /stockky-hot/table — the last 24h of hotpicks_static_feed rows. Survives
@@ -401,6 +345,74 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
       /* no cached result yet */
     }
   }, []);
+
+  const handleRepairBatchMissing = useCallback(async () => {
+    setBatchRepairBusy(true);
+    setRepairMsg(null);
+    try {
+      // Repair ALL incomplete symbols — use the full incomplete_stocks count
+      // so the button fixes everything in one click, not just the first 15.
+      // Cap at 30 (backend max per call). If there are more we run a second pass.
+      const totalMissing = healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 15;
+      // Send the full count — backend now accepts up to 100 per call.
+      const limit = Math.max(15, totalMissing);
+      const res = await api.hotPicksRepairBatch(limit);
+      const repaired: string[] = res?.repaired || [];
+      if (res?.status === "error") {
+        setRepairMsg({ ok: false, text: res.error || "Repair failed." });
+      } else if (repaired.length > 0) {
+        setRepairMsg({ ok: true, text: `Repaired ${repaired.length} symbol(s): ${repaired.join(", ")}` });
+      } else {
+        setRepairMsg({ ok: true, text: res?.message || "Nothing needed repair." });
+      }
+      // Reload card data so repaired scores/prices appear immediately —
+      // without this the cards still show "—" even though the DB was updated.
+      await loadCached();
+      await fetchHotPicksHealth();
+    } catch (e: any) {
+      setRepairMsg({ ok: false, text: e?.message || "Repair request failed — check the service is reachable." });
+    } finally {
+      setBatchRepairBusy(false);
+    }
+  }, [fetchHotPicksHealth, loadCached, healthData]);
+
+  const handleRepairSingle = useCallback(async (symbol: string) => {
+    setPatchingSymbol(symbol);
+    setRepairMsg(null);
+    try {
+      const res = await api.hotPicksRepairBatch(1, symbol);
+      if (res?.status === "error" || res?.status === "not_found") {
+        setRepairMsg({ ok: false, text: res.error || res.message || `Could not repair ${symbol}.` });
+      } else if ((res?.repaired || []).length > 0) {
+        setRepairMsg({ ok: true, text: `Repaired ${symbol} — scores and price updated.` });
+      } else {
+        setRepairMsg({ ok: true, text: res?.message || `${symbol}: nothing missing.` });
+      }
+      // Reload card data after single repair so the card stops showing "—"
+      // immediately without requiring a full page refresh.
+      await loadCached();
+      await fetchHotPicksHealth();
+    } catch (e: any) {
+      setRepairMsg({ ok: false, text: e?.message || `Failed to repair ${symbol}.` });
+    } finally {
+      setPatchingSymbol(null);
+    }
+  }, [fetchHotPicksHealth, loadCached]);
+
+  useEffect(() => {
+    void fetchHotPicksHealth();
+  }, [fetchHotPicksHealth]);
+
+  const { quotes: liveQuotes, subscribeQuotes } = useStockkyRealtime();
+
+  useEffect(() => {
+    const symbols = (data?.news_driven || [])
+      .concat(data?.results_driven || [])
+      .concat(data?.bulk_insider_driven || [])
+      .map((x) => x.symbol)
+      .filter(Boolean) as string[];
+    if (symbols.length) subscribeQuotes(symbols);
+  }, [data, subscribeQuotes]);
 
   const pollJob = useCallback(async () => {
     try {
@@ -546,9 +558,12 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
           ltp: safePrice,
           close: safePrice,
           change_pct: Number((p as any).change_pct || 0),
-          technical_score: Number((p as any).technical_score || 75),
-          fundamental_score: Number((p as any).fundamental_score || 70),
-          news_score: p.news_score,
+          // Pass actual scores — don't substitute fake 75/70 when missing.
+          // BuySniper already handles null gracefully; fabricating values
+          // inflates conviction for unscored picks and corrupts its ranking.
+          technical_score: (p as any).technical_score ?? null,
+          fundamental_score: (p as any).fundamental_score ?? null,
+          news_score: p.news_score ?? null,
         };
       }).filter((x) => x.symbol && Number(x.price) > 0);
       const res = await api.findBuys({
@@ -785,6 +800,12 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
         onRepairSingle={handleRepairSingle}
         batchRepairBusy={batchRepairBusy}
         patchingSymbol={patchingSymbol}
+        repairBatchLabel={
+          (() => {
+            const n = healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 0;
+            return n > 0 ? `⚡ Repair All Missing (${n})` : "⚡ Repair All Missing";
+          })()
+        }
       />
       {repairMsg && (
         <p className={`font-display tabular-nums text-[11px] mt-1 ${repairMsg.ok ? "text-signal-buy/80" : "text-signal-sell/80"}`}>

@@ -645,7 +645,7 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
             out["status"] = "not_found"
             out["message"] = f"{force_sym} not in the last 24h of stored Hot Picks."
             return out
-        targets = targets[: max(1, min(int(limit or 15), 30))]
+        targets = targets[: max(1, min(int(limit or 15), 100))]
         out["attempted"] = len(targets)
         if not targets:
             out["status"] = "completed"
@@ -796,12 +796,7 @@ def hotpicks_repair_scores(
             out["status"] = "not_found"
             out["message"] = f"{force_sym} not missing any scores in the last 72h."
             return out
-        targets = targets[: max(1, min(int(limit or 15), 30))]
-        out["attempted"] = len(targets)
-        if not targets:
-            out["status"] = "completed"
-            out["message"] = "Nothing missing scores."
-            return out
+        targets = targets[: max(1, min(int(limit or 15), 100))]
 
         repaired = []
         with httpx.Client(timeout=15.0, follow_redirects=True) as client, eng.begin() as conn:

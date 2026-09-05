@@ -5841,21 +5841,47 @@ def market_trending():
     trending_data = []
     for sym in trending[:10]:
         try:
-            yf_ticker = resolve_ns_ticker(sym)
-            if not yf_ticker:
-                continue
-            ticker = yf.Ticker(yf_ticker)
-            hist = ticker.history(period="1d")
-            if not hist.empty:
+            # Round 4 of "AngelOne everywhere" (2026-09-05): try
+            # market-data-service's /quote first — already Angel ->
+            # yfinance -> NSE -> IndianAPI (rounds 1-2) — before the
+            # direct-yfinance path, which is kept below unchanged as the
+            # fallback if the market-data-service call fails outright.
+            price = change = change_pct = None
+            try:
+                resp = httpx.get(f"{MARKET_DATA_URL}/quote/{sym}", timeout=6)
+                if resp.status_code == 200:
+                    data = resp.json() or {}
+                    p = data.get("price") or data.get("cmp")
+                    prev = data.get("previous_close")
+                    if p is not None and float(p) > 0:
+                        price = round(float(p), 2)
+                        if prev and float(prev) > 0:
+                            change = round(float(p) - float(prev), 2)
+                            change_pct = round((change / float(prev)) * 100, 2)
+                        elif data.get("day_change_pct") is not None:
+                            change_pct = data.get("day_change_pct")
+                            change = round(price * change_pct / 100, 2) if change_pct is not None else None
+            except Exception as e:
+                logger.debug("trending market-data quote %s: %s", sym, e)
+
+            if price is None:
+                yf_ticker = resolve_ns_ticker(sym)
+                if not yf_ticker:
+                    continue
+                ticker = yf.Ticker(yf_ticker)
+                hist = ticker.history(period="1d")
+                if hist.empty:
+                    continue
                 price = round(hist["Close"].iloc[-1], 2)
                 change = round(hist["Close"].iloc[-1] - hist["Open"].iloc[-1], 2)
                 change_pct = round(change / hist["Open"].iloc[-1] * 100, 2)
-                trending_data.append({
-                    "symbol": sym,
-                    "price": price,
-                    "change": change,
-                    "change_pct": change_pct,
-                })
+
+            trending_data.append({
+                "symbol": sym,
+                "price": price,
+                "change": change,
+                "change_pct": change_pct,
+            })
         except:
             pass
     return {"data": trending_data, "count": len(trending_data)}
@@ -7014,7 +7040,7 @@ async def api_run_premarket_feed(force: bool = False, request: Request = None):
 
 @app.post("/api/surprise/repair-batch")
 @app.post("/surprise/repair-batch")
-async def api_surprise_repair_batch(limit: int = 15, symbol: str = None):
+async def api_surprise_repair_batch(limit: int = Query(15, ge=1, le=100), symbol: Optional[str] = Query(None)):
     """Fill missing surprise quotes via market-data waterfall (0.5s pacing).
     Optional symbol= targets a single ticker (UI Repair button).
     """
@@ -7456,7 +7482,7 @@ async def api_ipo_add(body: IpoAddRequest):
 
 @app.post("/ipo/repair-batch")
 @app.post("/surprise/ipo/repair-batch")
-async def api_ipo_repair_batch(limit: int = Query(15, ge=1, le=30), symbol: Optional[str] = Query(None)):
+async def api_ipo_repair_batch(limit: int = Query(15, ge=1, le=100), symbol: Optional[str] = Query(None)):
     """Targeted repair for ipo_static_feed rows missing price/score/decision
     — re-runs analyze_ipo() only for the specific missing symbols (bounded
     by `limit`), not a full-universe re-scan. Mirrors /stockky-hot/repair-batch
@@ -11055,7 +11081,7 @@ def stockky_hot_audit():
 
 
 @app.post("/stockky-hot/repair-batch")
-def stockky_hot_repair_batch(limit: int = Query(15, ge=1, le=30), symbol: Optional[str] = Query(None)):
+def stockky_hot_repair_batch(limit: int = Query(15, ge=1, le=100), symbol: Optional[str] = Query(None)):
     """Repair stored Hot Picks rows: first fill any missing PRICE via the
     market-data waterfall, then run a real SCORE repair (decision/pillar
     scores/trade levels) via the decision service for rows still missing them.

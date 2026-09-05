@@ -185,7 +185,7 @@ export interface IpoAnalysis {
   source?: string;
   subscription_times?: number | null;
   days_since_listing?: number;
-  stage?: "upcoming" | "pre_listing" | "listing_day" | "listed" | "unknown" | "error";
+  stage?: "upcoming" | "pre_listing" | "listing_day" | "listed" | "unknown" | "error" | "no_data_yet";
   message?: string;
   current_price?: number;
   listing_day_close?: number;
@@ -204,6 +204,7 @@ export interface IpoAnalysis {
   buy_suggestion?: IpoBuySuggestion | null;
   gmp?: number | null;
   gmp_pct_of_issue?: number;
+  gmp_implied_listing?: number;
   fundamentals_snapshot?: Record<string, number | null>;
   error?: string;
 }
@@ -1335,9 +1336,19 @@ export const api = {
       error?: string;
       notification_result?: { delivered?: boolean; note?: string };
     }>(`/stockky-hot/notify-top-picks?top_n=${topN}`, { method: "POST" }, 1, 30000),
-  hotPicksAudit: () => request<any>("/stockky-hot/audit", undefined, 2, 30000),
-  hotPicksRepairBatch: (limit = 15, symbol?: string) =>
-    request<any>(
+  hotPicksAudit: () => request<{
+    ok: boolean;
+    total_tracked?: number;
+    rows_24h?: number;
+    fully_populated?: number;
+    missing_data?: number;
+    incomplete_stocks?: Array<{ symbol: string; missing_fields: string[] }>;
+    health_score?: number;
+    message?: string;
+    error?: string;
+  }>("/stockky-hot/audit", undefined, 2, 30000),
+  hotPicksRepairBatch: (limit = 20, symbol?: string) =>
+    request<{ status: string; repaired?: string[]; attempted?: number; message?: string; error?: string }>(
       `/stockky-hot/repair-batch?limit=${limit}${symbol ? `&symbol=${encodeURIComponent(symbol)}` : ""}`,
       { method: "POST" },
       1,
@@ -1370,6 +1381,14 @@ export const api = {
         missing_fields: string[];
         updated_at?: string;
       }>;
+      no_data_yet_count?: number;
+      no_data_yet_ipos?: Array<{
+        symbol: string;
+        company_name?: string;
+        stage?: string;
+        missing_fields: string[];
+        updated_at?: string;
+      }>;
       health_score?: number;
       message?: string;
       error?: string;
@@ -1377,8 +1396,8 @@ export const api = {
   // Targeted repair — re-runs analyze_ipo() only for symbols missing a
   // field, not a full universe re-scan. Backs the IPO health tab's
   // Auto-Repair button (mirrors hotPicksRepairBatch above).
-  ipoRepairBatch: (limit = 15, symbol?: string) =>
-    request<{ status: string; repaired?: string[]; attempted?: number; message?: string; error?: string }>(
+  ipoRepairBatch: (limit = 20, symbol?: string) =>
+    request<{ status: string; repaired?: string[]; still_no_data?: string[]; attempted?: number; message?: string; error?: string }>(
       `/ipo/repair-batch?limit=${limit}${symbol ? `&symbol=${encodeURIComponent(symbol)}` : ""}`,
       { method: "POST" },
       1,
@@ -1775,9 +1794,18 @@ export const api = {
   runSurprisePremarketFeed: (force = false) =>
     request<any>(`/api/surprise/run-premarket-feed?force=${force}`, { method: "POST" }, 1, 300000),
   surpriseAudit: () =>
-    request<any>("/api/surprise/audit", undefined, 2, 30000),
-  surpriseRepairBatch: (limit = 15, symbol?: string) =>
-    request<any>(
+    request<{
+      ok: boolean;
+      total_tracked?: number;
+      fully_populated?: number;
+      missing_data?: number;
+      incomplete_stocks?: Array<{ symbol: string; missing_fields: string[]; current_price?: number }>;
+      health_score?: number;
+      message?: string;
+      error?: string;
+    }>("/api/surprise/audit", undefined, 2, 30000),
+  surpriseRepairBatch: (limit = 20, symbol?: string) =>
+    request<{ status: string; repaired?: string[]; attempted?: number; message?: string; error?: string }>(
       `/api/surprise/repair-batch?limit=${limit}${symbol ? `&symbol=${encodeURIComponent(symbol)}` : ""}`,
       { method: "POST" },
       1,

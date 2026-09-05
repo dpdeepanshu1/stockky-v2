@@ -1142,6 +1142,75 @@ def _quote_now(symbol: str) -> Optional[float]:
     return None
 
 
+def _fetch_gmp(symbol: str, company_name: str = "", issue_price: float = 0.0) -> Optional[float]:
+    """Best-effort Grey Market Premium (GMP) scrape from investorgain.com — a
+    freely accessible IPO data aggregator that doesn't require an API key.
+
+    GMP = the unofficial pre-listing / post-listing premium over issue price
+    that the grey market is pricing in. A positive GMP means grey-market demand
+    above issue price; negative means the stock is trading below issue in the
+    grey market — a breakdown signal.
+
+    Implementation is intentionally conservative: match GMP only within a
+    window of text that also contains the company name or symbol, so we never
+    return another company's GMP when the page lists many rows. Fails silently
+    on any error — never blocks IPO scoring.
+    """
+    try:
+        base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        name_key = (company_name or base).strip()
+        # Search keyword: try symbol first (exact), fall back to first two words
+        # of company name (avoids "Limited"/"Ltd" noise in URL params).
+        name_words = name_key.split()
+        search_term = base if len(base) >= 4 else " ".join(name_words[:2])
+
+        url = "https://www.investorgain.com/report/ipo-performance-tracker/272/"
+        r = httpx.get(
+            url,
+            params={"company": search_term[:40]},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            },
+            timeout=8,
+            follow_redirects=True,
+        )
+        if r.status_code != 200:
+            return None
+
+        page = r.text
+        # Anchor the GMP search to a window of ~400 chars around where the
+        # company name / symbol appears on the page. Without this anchoring the
+        # first regex match anywhere on the page would return whatever GMP
+        # happens to appear first — probably a different company.
+        anchor = name_key[:20].lower()
+        idx = page.lower().find(anchor)
+        if idx < 0:
+            # Try symbol as fallback anchor
+            idx = page.lower().find(base.lower())
+        if idx < 0:
+            return None  # company not found on this page — don't guess
+
+        # Extract a 600-char window centred on the match and scan for GMP
+        window = page[max(0, idx - 100): idx + 500]
+        gmp_match = re.search(
+            r"GMP\s*[:\-]?\s*[₹]?\s*([-+]?\d+(?:\.\d+)?)",
+            window, re.IGNORECASE
+        )
+        if not gmp_match:
+            return None
+        gmp_val = float(gmp_match.group(1))
+        # Sanity gate: GMP above 3× issue price or a round suspicious zero
+        # on a high-issue-price stock is almost certainly a parse artefact.
+        if issue_price > 0:
+            if abs(gmp_val) > issue_price * 3:
+                return None
+        return gmp_val
+    except Exception as e:
+        logger.debug("gmp fetch %s: %s", symbol, e)
+    return None
+
+
 def _fetch_ipo_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
     """
     Best-effort profit/loss snapshot for a freshly-listed company, reused
@@ -1205,6 +1274,28 @@ def analyze_ipo(entry: Dict[str, Any], now: Optional[datetime] = None) -> Dict[s
         "gmp": entry.get("gmp"),
     }
 
+    # ── Auto-fetch GMP when not provided by the discovery source ─────────
+    # ipoalerts only provides GMP on paid plans; NSE never does. For pre-
+    # listing and recently-listed stocks where GMP matters most, attempt a
+    # best-effort scrape so the UI always has something to show.
+    # Gate: only scrape for upcoming/pre-listing/listing-day and stocks within
+    # 5 days of listing — for older stocks GMP is stale and the 8s timeout
+    # would block every repair/scan cycle needlessly.
+    _days_approx = (now.replace(tzinfo=None) - listing_dt).days if listing_dt else 999
+    _gmp_relevant = _days_approx <= 5  # upcoming (negative) counts as relevant too
+    if result.get("gmp") is None and _gmp_relevant:
+        scraped_gmp = _fetch_gmp(symbol, company_name, issue_price)
+        if scraped_gmp is not None:
+            result["gmp"] = scraped_gmp
+            logger.debug("gmp scraped for %s: ₹%.2f", symbol, scraped_gmp)
+
+    # Pre-compute gmp_pct_of_issue once here so every stage (pre_listing,
+    # listing_day, listed) gets it without duplicate logic.
+    _gmp = result.get("gmp")
+    if _gmp is not None and issue_price > 0:
+        result["gmp_pct_of_issue"] = round((_gmp / issue_price) * 100, 1)
+        result["gmp_implied_listing"] = round(issue_price + _gmp, 2)
+
     if listing_dt is None:
         result["stage"] = "unknown"
         result["error"] = "Could not parse listing_date"
@@ -1226,7 +1317,11 @@ def analyze_ipo(entry: Dict[str, Any], now: Optional[datetime] = None) -> Dict[s
             result["message"] = "Lists today — no trade printed yet (check again after 10:00 AM IST)."
             # Early advisory from subscription strength and/or GMP, if we have them.
             sub = entry.get("subscription_times")
-            gmp = entry.get("gmp")
+            # Use result["gmp"] not entry.get("gmp") — result["gmp"] has already
+            # been enriched by _fetch_gmp() above; entry.get("gmp") would miss
+            # scraped GMP and leave the advisory blank for freshly-listed stocks
+            # where the discovery source (NSE/ipoalerts free) didn't supply it.
+            gmp = result.get("gmp")
             parts = []
             if sub is not None:
                 sub_score = _clamp(50 + min(sub, 50) * 1.0)  # 1x=50 (neutral), 50x+=~100
@@ -1234,10 +1329,10 @@ def analyze_ipo(entry: Dict[str, Any], now: Optional[datetime] = None) -> Dict[s
             if gmp is not None and issue_price:
                 # GMP as % of issue price is a rough proxy for expected listing pop —
                 # same 50=neutral / saturating shape as the subscription score above.
-                gmp_pct = (gmp / issue_price) * 100.0
+                # gmp_pct_of_issue already set upfront (line ~1292) — just use it for score.
+                gmp_pct = result.get("gmp_pct_of_issue") or ((gmp / issue_price) * 100.0)
                 gmp_score = _clamp(50 + min(max(gmp_pct, -50), 100) * 0.5)
                 parts.append(gmp_score)
-                result["gmp_pct_of_issue"] = round(gmp_pct, 1)
             if parts:
                 sub_score = sum(parts) / len(parts)
                 result["pre_listing_advisory_score"] = round(sub_score, 1)
@@ -1276,8 +1371,24 @@ def analyze_ipo(entry: Dict[str, Any], now: Optional[datetime] = None) -> Dict[s
     # have that much trading history yet.
     hist = _fetch_history(symbol, min(days_since_listing + 2, LOOKBACK_DAYS_MAX))
     if hist is None or hist.empty:
-        result["stage"] = "error"
-        result["message"] = "Could not fetch post-listing price history"
+        # ── Fix (Bug 2): Yahoo Finance frequently has no data for freshly-listed
+        # NSE names — SME-platform stocks in particular can take days to weeks to
+        # appear in Yahoo's index, and some thin-float names never do. This is NOT
+        # an error in our pipeline; it's a data-availability gap at the source.
+        # Calling it "error" caused two downstream problems:
+        #   a) the audit counted these rows as "missing data" needing repair, making
+        #      the health % look worse than reality and the missing-count misleading.
+        #   b) the repair button would analyze_ipo() them again, get the same empty
+        #      response, and report them as "Repaired" — a lie (Bug 1's root cause).
+        # "no_data_yet" is the honest label: not broken, just not available yet.
+        # The audit now separates these out so the health % reflects genuinely
+        # fixable gaps, and the repair batch skips them (see ipo_repair_batch).
+        result["stage"] = "no_data_yet"
+        result["message"] = (
+            "No price history from Yahoo Finance yet — this is common for freshly-listed "
+            "NSE names (esp. SME-platform). Yahoo's index typically catches up in a few days; "
+            "try Auto-Repair again then. No action needed now."
+        )
         return result
 
     # Best-effort P&L snapshot — most freshly-listed names won't have
@@ -1638,7 +1749,7 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
             out["status"] = "not_found"
             out["message"] = f"{force_sym} is not currently missing any fields."
             return out
-    missing = missing[: max(1, min(int(limit or 15), 30))]
+    missing = missing[: max(1, min(int(limit or 15), 100))]
     if not missing:
         out["status"] = "completed"
         out["message"] = "Nothing missing — every tracked IPO is fully scored."
@@ -1650,9 +1761,16 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
     manual_by_symbol = {m.get("symbol"): m for m in _manual_ipos() if m.get("symbol")}
 
     repaired: List[str] = []
+    still_no_data: List[str] = []
     results: List[Dict[str, Any]] = []
     for m in missing:
         sym = m.get("symbol")
+        # Skip no_data_yet rows — Yahoo still doesn't have them; hammering
+        # them again wastes quota and produces a misleading "Repaired" count
+        # (Bug 1 fix: only add to repaired[] if we actually got a score back).
+        if (m.get("stage") or "") == "no_data_yet":
+            still_no_data.append(sym)
+            continue
         # Prefer the live upstream universe entry (freshest listing/issue
         # data); fall back to the manual-entry record so a hand-added IPO
         # can still be repaired even after it ages out of the
@@ -1663,7 +1781,19 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
         try:
             r = analyze_ipo(entry)
             results.append(r)
-            repaired.append(sym)
+            # ── Bug 1 fix: only claim "repaired" if analyze_ipo actually
+            # produced a score. Previously any non-exception return was
+            # counted — so a result with stage=no_data_yet (no ipo_score,
+            # no decision) was reported as "Repaired" even though it wrote
+            # the exact same stuck row right back to the DB. The health %
+            # never moved but the button kept lying about it.
+            if r.get("ipo_score") is not None and r.get("decision"):
+                repaired.append(sym)
+            else:
+                logger.info(
+                    "ipo_repair_batch: %s analyzed but still unscored (stage=%s) — not counted as repaired",
+                    sym, r.get("stage"),
+                )
         except Exception as e:
             logger.warning("ipo_repair_batch: analyze failed for %s: %s", sym, e)
         time.sleep(0.3)  # same cooldown discipline as every other waterfall repair in this codebase
@@ -1692,9 +1822,27 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
 
     out["status"] = "completed"
     out["repaired"] = repaired
-    if len(repaired) < len(missing):
-        skipped = len(missing) - len(repaired)
-        out["message"] = f"Repaired {len(repaired)}/{len(missing)} — {skipped} symbol(s) no longer found upstream."
+    out["still_no_data"] = still_no_data
+    # Build an honest summary: distinguish "not found upstream" from
+    # "Yahoo doesn't have price data yet" — the latter is expected and
+    # resolves on its own; the former means the symbol was purged from
+    # NSE's registry and won't ever be fixable by re-scanning.
+    actionable = len(missing) - len(still_no_data)
+    if still_no_data and len(repaired) >= actionable:
+        out["message"] = (
+            f"Repaired {len(repaired)}/{actionable} actionable symbol(s). "
+            f"{len(still_no_data)} symbol(s) still waiting on Yahoo price data "
+            f"({', '.join(still_no_data[:5])}{'…' if len(still_no_data) > 5 else ''}) "
+            f"— try again in a day or two."
+        )
+    elif len(repaired) < actionable:
+        skipped = actionable - len(repaired)
+        parts = [f"Repaired {len(repaired)}/{actionable} actionable symbol(s)"]
+        if skipped:
+            parts.append(f"{skipped} no longer found upstream")
+        if still_no_data:
+            parts.append(f"{len(still_no_data)} waiting on Yahoo data")
+        out["message"] = " — ".join(parts) + "."
     return out
 
 
@@ -1753,34 +1901,53 @@ def get_ipo_feed_audit() -> dict:
     total = len(rows)
     fully_scored = 0
     missing = []
+    no_data_yet = []
     for r in rows:
         missing_fields = [
             f for f in ("issue_price", "ipo_score", "decision")
             if r.get(f) in (None, "")
         ]
-        if missing_fields:
-            missing.append({
-                "symbol": r.get("symbol"),
-                "company_name": r.get("company_name"),
-                "stage": r.get("stage"),
-                "missing_fields": missing_fields,
-                "updated_at": str(r.get("updated_at") or ""),
-            })
-        else:
+        if not missing_fields:
             fully_scored += 1
+            continue
+        row_entry = {
+            "symbol": r.get("symbol"),
+            "company_name": r.get("company_name"),
+            "stage": r.get("stage"),
+            "missing_fields": missing_fields,
+            "updated_at": str(r.get("updated_at") or ""),
+        }
+        # ── Bug 2 fix: no_data_yet rows (Yahoo not yet indexed) are a
+        # separate category from genuinely broken rows. They're not fixable
+        # by Auto-Repair today, so including them in missing_count inflates
+        # the "health gap" and makes the repair button lie. Show them in
+        # their own section so the user knows they exist but aren't stuck —
+        # just waiting on Yahoo's crawl schedule.
+        if (r.get("stage") or "") == "no_data_yet":
+            no_data_yet.append(row_entry)
+        else:
+            missing.append(row_entry)
 
-    health = round((fully_scored / max(total, 1)) * 100, 1) if total > 0 else 0.0
+    # Health % counts only rows that are fixable: fully_scored out of
+    # (total − no_data_yet), since no_data_yet is not "broken", just waiting.
+    actionable_total = total - len(no_data_yet)
+    health = round((fully_scored / max(actionable_total, 1)) * 100, 1) if actionable_total > 0 else 0.0
     return {
         "ok": True,
         "total_tracked": total,
         "fully_scored": fully_scored,
         "missing_count": len(missing),
         "missing_ipos": missing[:200],
+        "no_data_yet_count": len(no_data_yet),
+        "no_data_yet_ipos": no_data_yet[:50],
         "health_score": health,
         "message": (
             "No IPO rows tracked yet — run Scan IPOs first."
             if total == 0
-            else f"IPO feed health {health}% · {fully_scored}/{total} fully scored"
+            else (
+                f"IPO feed health {health}% · {fully_scored}/{actionable_total} scored"
+                + (f" · {len(no_data_yet)} waiting on Yahoo data" if no_data_yet else "")
+            )
         ),
     }
 
@@ -1809,7 +1976,7 @@ def get_ipo_list(display_days: Optional[int] = None) -> dict:
     now = datetime.now(IST)
     filtered = []
     for r in results:
-        if r.get("stage") in ("pre_listing", "listing_day", "upcoming"):
+        if r.get("stage") in ("pre_listing", "listing_day", "upcoming", "no_data_yet"):
             filtered.append(r)
             continue
         dt = _parse_date(r.get("listing_date"))

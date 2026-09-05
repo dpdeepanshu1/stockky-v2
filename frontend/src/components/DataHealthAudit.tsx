@@ -117,7 +117,11 @@ export default function DataHealthAudit() {
     setMessage(null);
     setError(null);
     try {
-      const res = await api.repairFeedBatch(15);
+      // Use full incomplete count — backend cap is 25 for data-feed repair
+      // (rate-safe: 500ms between symbols), so anything above 25 silently
+      // clamps there. Still better than hardcoding 15 and leaving rows unfixed.
+      const limit = Math.min(25, Math.max(15, stats?.incomplete_stocks?.length ?? 15));
+      const res = await api.repairFeedBatch(limit);
       setMessage(
         `Batch done: ${res?.repaired_count ?? 0} touched · ${res?.successish_count ?? 0} improved`
       );
@@ -172,7 +176,7 @@ export default function DataHealthAudit() {
             disabled={loading || batchBusy || refillRunning || (stats?.incomplete_count ?? 0) === 0}
             className="scan-action-btn scan-action-trade"
           >
-            {batchBusy ? "Repairing…" : "⚡ Auto-Repair Next 15"}
+            {batchBusy ? "Repairing…" : `⚡ Auto-Repair${stats?.incomplete_stocks?.length ? ` (${Math.min(25, stats.incomplete_stocks.length)})` : ""}`}
           </button>
           {refillRunning ? (
             <button

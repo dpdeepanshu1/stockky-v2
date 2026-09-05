@@ -40,12 +40,14 @@ interface IpoAuditStats {
   fully_scored?: number;
   missing_count?: number;
   missing_ipos?: MissingIpo[];
+  no_data_yet_count?: number;
+  no_data_yet_ipos?: MissingIpo[];
   health_score?: number;
   message?: string;
   error?: string;
 }
 
-export default function IpoFeedHealth() {
+export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?: () => void } = {}) {
   const [stats, setStats] = useState<IpoAuditStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -78,14 +80,16 @@ export default function IpoFeedHealth() {
     setRepairMsg(null);
     setError(null);
     try {
-      const res = await api.ipoRepairBatch(20);
+      // Use the full missing_count so one click repairs everything, not just 20.
+      const limit = Math.max(20, stats?.missing_count ?? 20);
+      const res = await api.ipoRepairBatch(limit);
       if (res.status === "completed") {
-        const n = res.repaired?.length ?? 0;
-        setRepairMsg(
-          n > 0
-            ? `Repaired ${n} symbol(s): ${(res.repaired || []).join(", ")}`
-            : res.message || "Nothing needed repair."
-        );
+        setRepairMsg(res.message || (res.repaired?.length > 0
+          ? `Repaired ${res.repaired.length} symbol(s): ${(res.repaired || []).join(", ")}`
+          : "Nothing needed repair."));
+        // Notify parent (IpoTracker) to reload its card list so repaired
+        // scores appear immediately without a manual page refresh.
+        onRepairComplete?.();
       } else {
         setRepairMsg(res.message || res.error || "Repair did not complete.");
       }
@@ -96,7 +100,7 @@ export default function IpoFeedHealth() {
     } finally {
       setRepairBusy(false);
     }
-  }, [fetchAudit]);
+  }, [fetchAudit, onRepairComplete, stats?.missing_count]);
 
   // Kept as a secondary action for when a targeted repair isn't enough
   // (e.g. NSE/ipoalerts discovery itself needs refreshing, not just
@@ -123,6 +127,7 @@ export default function IpoFeedHealth() {
   const scored = stats?.fully_scored ?? 0;
   const missing = stats?.missing_count ?? 0;
   const health = stats?.health_score ?? 0;
+  const noDataYet = stats?.no_data_yet_count ?? 0;
 
   return (
     <div className="rounded-xl border border-white/10 bg-black/30 p-4 mt-4">
@@ -146,7 +151,7 @@ export default function IpoFeedHealth() {
                   <BusySpinner className="border-white" /> Repairing…
                 </span>
               ) : (
-                "🛠 Auto-Repair All"
+                `🛠 Auto-Repair All${missing > 0 ? ` (${missing})` : ""}`
               )}
             </button>
           )}
@@ -211,7 +216,7 @@ export default function IpoFeedHealth() {
 
 
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-3">
         <div className="rounded border border-white/10 p-3">
           <p className="text-[10px] uppercase tracking-wide text-white/40">Health Score</p>
           <p className="text-lg font-semibold">{health}%</p>
@@ -228,6 +233,15 @@ export default function IpoFeedHealth() {
           <p className="text-[10px] uppercase tracking-wide text-white/40">Missing Data</p>
           <p className="text-lg font-semibold">{missing}</p>
         </div>
+        {/* no_data_yet: shown only when non-zero — it's a distinct bucket
+            (waiting on Yahoo), not a broken/missing row, so it shouldn't
+            inflate the "Missing Data" number or the repair queue. */}
+        {noDataYet > 0 && (
+          <div className="rounded border border-signal-hold/30 bg-signal-hold/5 p-3">
+            <p className="text-[10px] uppercase tracking-wide text-signal-hold/70">Awaiting Yahoo</p>
+            <p className="text-lg font-semibold text-signal-hold">{noDataYet}</p>
+          </div>
+        )}
       </div>
 
       {total === 0 ? (
@@ -248,7 +262,11 @@ export default function IpoFeedHealth() {
               {(stats?.missing_ipos || []).map((row) => (
                 <tr key={row.symbol} className="border-t border-white/5">
                   <td className="py-1 pr-2 font-medium">{row.symbol}</td>
-                  <td className="py-1 pr-2 text-white/60">{row.stage || "—"}</td>
+                  <td className="py-1 pr-2 text-white/60">
+                    {row.stage === "no_data_yet" ? "⏳ Awaiting Yahoo"
+                      : row.stage === "error" ? "⚠ Error"
+                      : row.stage || "—"}
+                  </td>
                   <td className="py-1">
                     {row.missing_fields.map((f) => (
                       <span
@@ -269,6 +287,40 @@ export default function IpoFeedHealth() {
         </div>
       ) : (
         <p className="text-xs text-signal-buy mt-3">All tracked IPOs are fully scored ✓</p>
+      )}
+
+      {/* Waiting-on-Yahoo section — separate from the "broken" missing table.
+          These rows aren't fixable today; they need Yahoo to crawl the ticker.
+          Show them collapsed so the user knows they exist but isn't alarmed. */}
+      {noDataYet > 0 && (stats?.no_data_yet_ipos || []).length > 0 && (
+        <details className="mt-3">
+          <summary className="text-[11px] text-signal-hold/80 cursor-pointer select-none">
+            ⏳ {noDataYet} symbol(s) waiting on Yahoo price data — click to expand
+          </summary>
+          <div className="mt-2 max-h-40 overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-white/40">
+                  <th className="py-1 pr-2">Symbol</th>
+                  <th className="py-1">Company</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(stats?.no_data_yet_ipos || []).map((row) => (
+                  <tr key={row.symbol} className="border-t border-white/5">
+                    <td className="py-1 pr-2 font-medium text-signal-hold">{row.symbol}</td>
+                    <td className="py-1 text-white/50 text-[11px]">{row.company_name || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-[11px] text-white/40 mt-2">
+              Yahoo Finance hasn't indexed these tickers yet — common for new NSE SME listings.
+              They'll resolve automatically once Yahoo's crawl picks them up (usually 1–5 days).
+              Auto-Repair skips them so the repair count stays honest.
+            </p>
+          </div>
+        </details>
       )}
     </div>
   );

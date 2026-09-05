@@ -23,6 +23,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import httpx
 import yfinance as yf
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
@@ -32,6 +33,10 @@ import models as db_models
 logger = logging.getLogger("training-service.trades")
 
 IST = ZoneInfo("Asia/Kolkata")
+
+MARKET_DATA_URL = os.environ.get(
+    "MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com"
+).rstrip("/")
 
 def ist_now() -> datetime:
     return datetime.now(IST).replace(tzinfo=None)
@@ -325,6 +330,24 @@ def open_trades_bulk(prediction_ids, capital: float = None, max_holding_days: in
 
 
 def _fetch_latest_price(symbol: str):
+    """
+    Round 3 of "AngelOne everywhere" (2026-09-05): try market-data-service's
+    /quote first — it's already AngelOne -> yfinance -> NSE -> IndianAPI
+    (rounds 1-2) — before falling back to a direct yfinance call. The
+    direct-yfinance path below is unchanged and still runs exactly as
+    before on any failure (market-data-service down/unreachable, bad
+    response, timeout), so this can't make trade-closing prices less
+    available than they already were.
+    """
+    try:
+        r = httpx.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=8)
+        if r.status_code == 200:
+            data = r.json() or {}
+            px = data.get("price") or data.get("cmp")
+            if px is not None and float(px) > 0:
+                return float(px)
+    except Exception as e:
+        logger.debug("market-data-service quote failed for %s, falling back to yfinance: %s", symbol, e)
     try:
         ticker = yf.Ticker(symbol + ".NS")
         hist = ticker.history(period="5d")

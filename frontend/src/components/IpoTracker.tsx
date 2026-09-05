@@ -56,6 +56,10 @@ function stageLabel(ipo: IpoAnalysis): { text: string; tone: string } {
   if (ipo.stage === "pre_listing") return { text: "Lists today · pre-open", tone: "text-signal-hold" };
   if (ipo.stage === "listing_day") return { text: "Listing day · live", tone: "text-signal-buy" };
   if (ipo.stage === "listed") return { text: `Day ${ipo.days_since_listing}`, tone: "text-mist/60" };
+  // no_data_yet: Yahoo hasn't indexed this ticker yet — common for fresh NSE SME listings.
+  // Show a human-readable label instead of the raw internal stage name.
+  if (ipo.stage === "no_data_yet") return { text: "⏳ Awaiting Yahoo data", tone: "text-signal-hold/70" };
+  if (ipo.stage === "error") return { text: "⚠ Data error", tone: "text-signal-sell/70" };
   return { text: ipo.stage || "—", tone: "text-mist/50" };
 }
 
@@ -715,6 +719,17 @@ export default function IpoTracker({
                     </p>
                   )}
 
+                  {/* GMP shown on card face — most relevant for pre/upcoming IPOs.
+                      For already-listed stocks (days_since_listing > 1) the stock
+                      is already trading and GMP is stale/irrelevant; skip it there. */}
+                  {ipo.gmp != null && (ipo.stage === "upcoming" || ipo.stage === "pre_listing" || ipo.stage === "listing_day" || ipo.stage === "no_data_yet") && (
+                    <p className={`font-display tabular-nums text-[10px] min-w-[90px] font-semibold ${
+                      ipo.gmp > 0 ? "text-signal-buy" : ipo.gmp < 0 ? "text-signal-sell" : "text-mist/60"
+                    }`}>
+                      GMP ₹{ipo.gmp}{ipo.gmp_pct_of_issue != null ? ` (${ipo.gmp_pct_of_issue > 0 ? "+" : ""}${ipo.gmp_pct_of_issue.toFixed(0)}%)` : ""}
+                    </p>
+                  )}
+
                   {ipo.pre_listing_advisory && (
                     <p className="font-display tabular-nums text-[10px] text-signal-hold/80 max-w-[200px]">
                       {ipo.pre_listing_advisory}
@@ -788,12 +803,23 @@ export default function IpoTracker({
                         {ipo.momentum_5d_pct != null && <p>5d momentum {ipo.momentum_5d_pct.toFixed(1)}%</p>}
                         {ipo.volume_trend_ratio != null && <p>Volume trend {ipo.volume_trend_ratio.toFixed(2)}x</p>}
                         {ipo.atr_pct != null && <p>ATR {ipo.atr_pct.toFixed(1)}%</p>}
-                        {ipo.gmp != null && <p>GMP ₹{ipo.gmp}</p>}
-                        {ipo.gmp_pct_of_issue != null && <p>GMP {ipo.gmp_pct_of_issue.toFixed(1)}% of issue</p>}
+                        {ipo.gmp != null && (
+                          <p className={ipo.gmp >= 0 ? "text-signal-buy" : "text-signal-sell"}>
+                            GMP ₹{ipo.gmp} ({ipo.gmp_pct_of_issue != null ? `${ipo.gmp_pct_of_issue > 0 ? "+" : ""}${ipo.gmp_pct_of_issue.toFixed(1)}%` : ""} of issue)
+                          </p>
+                        )}
+                        {ipo.gmp_implied_listing != null && (
+                          <p className="text-mist/60">
+                            Implied listing ₹{ipo.gmp_implied_listing}
+                          </p>
+                        )}
+                        {ipo.gmp == null && (
+                          <p className="text-mist/40">GMP: not available</p>
+                        )}
                         {ipo.momentum_5d_pct == null &&
                           ipo.volume_trend_ratio == null &&
                           ipo.atr_pct == null &&
-                          ipo.gmp == null && <p className="text-mist/40">Not available yet</p>}
+                          ipo.gmp == null && <p className="text-mist/40">No momentum data yet</p>}
                       </div>
                     </div>
 
@@ -841,7 +867,7 @@ export default function IpoTracker({
 
       {/* Generic feed audit — same component the Data Feed tab uses, so a
           missing-price problem behind an IPO row can be diagnosed here. */}
-      <IpoFeedHealth />
+      <IpoFeedHealth onRepairComplete={fetchIpoList} />
 
       <BuySniperModal
         isOpen={sniperOpen}

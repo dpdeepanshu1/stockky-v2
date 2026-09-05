@@ -1152,7 +1152,7 @@ def repair_surprise_batch(limit: int = 15, market_data_url: str = "", symbol: st
                 sym = str(item.get("symbol") or "").upper().strip()
                 if sym:
                     targets.append(sym)
-        targets = targets[: max(1, min(int(limit or 15), 30))]
+        targets = targets[: max(1, min(int(limit or 15), 100))]
 
     if not targets:
         return {"status": "completed", "repaired": [], "message": "Nothing missing"}

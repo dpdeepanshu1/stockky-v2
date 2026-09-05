@@ -1257,6 +1257,58 @@ def _fetch_nse_fundamentals(symbol: str) -> Optional[dict]:
     }
 
 
+INDIANAPI_KEY = os.environ.get("INDIANAPI_KEY")
+
+
+def _waterfall_indianapi_price(symbol: str) -> Optional[float]:
+    """
+    IndianAPI (stock.indianapi.in) as a /quote price fallback — added
+    round 2 of "AngelOne everywhere" (2026-09-05). IndianAPI was already
+    used elsewhere in this codebase (analysis-intelligence-service's
+    fundamental/indianapi_fallback.py) but only for fundamentals — its
+    response already carries currentPrice.NSE/.BSE too (see that module's
+    docstring for the verified response shape), just never read here.
+    rate_limiter.py's "indianapi" bucket and kv_cache.py's "indianapi:"
+    prefix were already scaffolded in this service but had no caller —
+    this is the first one.
+    Requires INDIANAPI_KEY; returns None immediately if unset, so any
+    deployment without a key behaves exactly as it did before this change.
+    """
+    if not INDIANAPI_KEY:
+        return None
+    if _in_cooldown("indianapi"):
+        return None
+    base = _waterfall_equity_base(symbol)
+    if not base:
+        return None
+    try:
+        from rate_limiter import acquire as _rl_acquire
+        _rl_acquire("indianapi", weight=1)
+    except Exception:
+        pass
+    try:
+        r = requests.get(
+            "https://stock.indianapi.in/stock",
+            params={"name": base},
+            headers={"x-api-key": INDIANAPI_KEY},
+            timeout=10,
+        )
+        if r.status_code == 429:
+            _set_cooldown("indianapi", 120)
+            return None
+        if r.status_code != 200 or not r.content:
+            return None
+        data = r.json() or {}
+        cp = data.get("currentPrice") or {}
+        px = _safe(cp.get("NSE") or cp.get("BSE"))
+        if px is not None and px > 0:
+            logger.info("IndianAPI waterfall hit %s → ₹%.2f", base, px)
+            return float(px)
+    except Exception as e:
+        logger.debug("IndianAPI waterfall %s: %s", base, e)
+    return None
+
+
 def _waterfall_nse_direct_price(symbol: str) -> Optional[float]:
     """NSE's own quote-equity API — no key, no quota, and NOT gated behind
     Yahoo's crumb/cookie flow, so this keeps working during a yfinance
@@ -1570,6 +1622,18 @@ def get_quote(symbol: str):
                 waterfall_source = "nse_direct"
         except Exception as e:
             logger.debug("nse-direct waterfall %s: %s", sym, e)
+
+    # IndianAPI — requested fallback order is Angel -> yfinance -> NSE ->
+    # IndianAPI, so this sits right after NSE-direct, ahead of the older
+    # TwelveData/AlphaVantage/Polygon paid tiers (kept in place below as
+    # extra safety nets, not removed).
+    if not is_index and not waterfall_price:
+        try:
+            waterfall_price = _waterfall_indianapi_price(sym)
+            if waterfall_price and waterfall_price > 0:
+                waterfall_source = "indianapi"
+        except Exception as e:
+            logger.debug("indianapi waterfall %s: %s", sym, e)
 
     if not is_index and not waterfall_price and not _in_cooldown("yfinance"):
         try:
@@ -2013,6 +2077,148 @@ def get_quotes_bulk(req: BulkQuoteRequest):
     return {"ok": True, "quotes": _sanitize_for_json(results)}
 
 
+def _angelone_interval(interval: str) -> Optional[str]:
+    """Only intervals AngelOne's getCandleData maps to cleanly. '1wk' and
+    anything else return None so the caller skips straight to the existing
+    yfinance loop, unchanged."""
+    return {"1d": "ONE_DAY", "1h": "ONE_HOUR"}.get(interval)
+
+
+def _angelone_history_candles(
+    sym: str, period: str, interval: str, days: Optional[int], start_date, end_date
+) -> Optional[list]:
+    """
+    2026-09-04: AngelOne candles as the PRIMARY OHLCV source for /history
+    (daily/hourly), ahead of yfinance — mirrors the AngelOne-first pattern
+    /quote already uses via angelone_ws_feed. Handles interval='1d'/'1h'
+    only; everything else (e.g. '1wk') falls straight through to the
+    yfinance loop below, unchanged.
+
+    Every failure mode here (not configured, no scrip-master token,
+    rate-limited/cooldown, malformed response, network error) returns None
+    — the yfinance loop then runs exactly as it did before this change.
+    This can never make history less available than it already was.
+    """
+    angel_interval = _angelone_interval(interval)
+    if not angel_interval:
+        return None
+    # Scrip master only maps plain NSE-EQ symbols — skip index tickers
+    # (^NSEI etc.) and anything with a space (index display names).
+    angel_sym = (sym or "").replace(".NS", "").replace(".BO", "").strip()
+    if not angel_sym or angel_sym.startswith("^") or " " in angel_sym:
+        return None
+    try:
+        from angelone_client import get_session
+        session = get_session()
+        if not session.is_configured():
+            return None
+        import angelone_scrip_master
+        token = angelone_scrip_master.get_token(angel_sym)
+        if not token:
+            return None
+
+        ist = ZoneInfo("Asia/Kolkata")
+        if start_date is not None:
+            _from = datetime.combine(start_date, dtime(9, 15))
+            _to = datetime.combine(end_date, dtime(15, 30))
+        else:
+            _period_days = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
+            span = _period_days.get(period, 180)
+            _to = datetime.now(ist).replace(tzinfo=None)
+            _from = _to - timedelta(days=span)
+
+        from_str = _from.strftime("%Y-%m-%d %H:%M")
+        to_str = _to.strftime("%Y-%m-%d %H:%M")
+
+        raw = asyncio.run(session.get_candles("NSE", token, angel_interval, from_str, to_str))
+        if not raw:
+            return None
+
+        candles = []
+        for row in raw:
+            try:
+                ts, o, h, l, c, v = row[0], row[1], row[2], row[3], row[4], row[5]
+                candles.append({
+                    "date": str(ts)[:16].replace("T", " "),
+                    "open": _safe(o),
+                    "high": _safe(h),
+                    "low": _safe(l),
+                    "close": _safe(c),
+                    "volume": int(v) if v is not None else 0,
+                })
+            except Exception:
+                continue
+        return candles or None
+    except Exception as e:
+        logger.debug("AngelOne history attempt for %s failed, falling back to yfinance: %s", angel_sym, e)
+        return None
+
+
+def _nse_history_candles(sym: str, period: str, interval: str, days: Optional[int], start_date, end_date) -> Optional[list]:
+    """
+    NSE's own historical/cm/equity endpoint as a further /history
+    fallback, tried after yfinance — round 2 of "AngelOne everywhere"
+    (2026-09-05). Requested order was Angel -> yfinance -> NSE ->
+    IndianAPI, but IndianAPI's /stock endpoint (indianapi_fallback.py)
+    only returns a current price, no historical candles per its
+    documented response shape — so NSE is the last tier for /history,
+    not IndianAPI. Daily bars only (NSE's endpoint isn't intraday).
+    Reuses the same NSE client/endpoint and CH_* field names already
+    relied on for delivery% in bhavcopy.py::delivery_from_nse_cm_series.
+    Any request failure or unexpected response shape returns None and
+    the caller's existing 404/503 handling runs exactly as before.
+    """
+    if interval != "1d":
+        return None
+    if _in_cooldown("nse_direct"):
+        return None
+    base = (sym or "").replace(".NS", "").replace(".BO", "").strip()
+    if not base or base.startswith("^") or " " in base:
+        return None
+    try:
+        if start_date is not None:
+            _from, _to = start_date, end_date
+        else:
+            _period_days = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
+            span = _period_days.get(period, 180)
+            _to = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+            _from = _to - timedelta(days=span)
+
+        from bhavcopy import _nse_client
+        client = _nse_client()
+        r = client.get(
+            f"https://www.nseindia.com/api/historical/cm/equity"
+            f"?symbol={base}&series=[%22EQ%22]&from={_from.strftime('%d-%m-%Y')}"
+            f"&to={_to.strftime('%d-%m-%Y')}"
+        )
+        if r.status_code == 429:
+            _set_cooldown("nse_direct", 90)
+            return None
+        if r.status_code != 200 or not r.content:
+            return None
+        data = r.json() or {}
+        rows = data.get("data") or data.get("historicalData") or []
+        candles = []
+        for row in rows:
+            c = _safe(row.get("CH_CLOSING_PRICE"))
+            if c is None:
+                continue
+            ts = str(row.get("CH_TIMESTAMP") or row.get("mTIMESTAMP") or "")[:16]
+            candles.append({
+                "date": ts,
+                "open": _safe(row.get("CH_OPENING_PRICE")),
+                "high": _safe(row.get("CH_TRADE_HIGH_PRICE")),
+                "low": _safe(row.get("CH_TRADE_LOW_PRICE")),
+                "close": c,
+                "volume": int(_safe(row.get("CH_TOT_TRADED_QTY")) or 0),
+            })
+        candles.sort(key=lambda x: x["date"])
+        return candles or None
+    except Exception as e:
+        logger.debug("NSE-history fallback for %s: %s", base, e)
+        return None
+
+
 @app.get("/history/{symbol}")
 def get_history(
     symbol: str,
@@ -2089,6 +2295,22 @@ def get_history(
                 detail=f"No history found for {symbol} (cached no-data result, retries in <=1h)",
             )
 
+    angel_candles = _angelone_history_candles(sym, period, interval, days, start_date, end_date)
+    if angel_candles:
+        if len(angel_candles) > MAX_HISTORY_ROWS:
+            angel_candles = angel_candles[-MAX_HISTORY_ROWS:]
+        result = {
+            "symbol": sym,
+            "requested": (symbol or "").strip(),
+            "period": period,
+            "interval": interval,
+            "candles": angel_candles,
+            "source": "angelone",
+        }
+        hist_ttl = 900 if is_market_open() else 21600
+        _cache_set(cache_key, result, ttl=hist_ttl)
+        return result
+
     last_err = None
     for cand in candidates:
         try:
@@ -2162,6 +2384,24 @@ def get_history(
             last_err = str(e)
             logger.warning("History candidate %s failed for %s: %s", cand, symbol, e)
             continue
+
+    # All yfinance candidates failed — try NSE historical before giving up
+    # (round 2 of "AngelOne everywhere": Angel -> yfinance -> NSE tier).
+    nse_candles = _nse_history_candles(sym, period, interval, days, start_date, end_date)
+    if nse_candles:
+        if len(nse_candles) > MAX_HISTORY_ROWS:
+            nse_candles = nse_candles[-MAX_HISTORY_ROWS:]
+        result = {
+            "symbol": sym,
+            "requested": (symbol or "").strip(),
+            "period": period,
+            "interval": interval,
+            "candles": nse_candles,
+            "source": "nse_direct",
+        }
+        hist_ttl = 900 if is_market_open() else 21600
+        _cache_set(cache_key, result, ttl=hist_ttl)
+        return result
 
     # All candidates failed
     detail = last_err or f"No history for {symbol}"

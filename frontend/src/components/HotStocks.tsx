@@ -316,6 +316,12 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
   const [batchRepairBusy, setBatchRepairBusy] = useState(false);
   const [patchingSymbol, setPatchingSymbol] = useState<string | null>(null);
   const [repairMsg, setRepairMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const repairPollRef = useRef<number | null>(null);
+  const [repairProgress, setRepairProgress] = useState<{
+    processed: number; total: number; elapsed: number;
+    remaining?: number | null; pct: number;
+    repaired: string[]; failed: string[]; msg: string;
+  } | null>(null);
   const [premarketBusy, setPremarketBusy] = useState(false);
   const [premarketMsg, setPremarketMsg] = useState<string | null>(null);
   const [premarketProgress, setPremarketProgress] = useState<{
@@ -363,81 +369,131 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
     }
   }, []);
 
+  const stopRepairPoll = () => {
+    if (repairPollRef.current != null) {
+      window.clearInterval(repairPollRef.current);
+      repairPollRef.current = null;
+    }
+  };
+
+  const pollRepairJob = useCallback(async () => {
+    try {
+      const st = await api.hotPicksRepairStatus();
+      const processed = st?.processed ?? 0;
+      const total = st?.total ?? 0;
+      const repaired = st?.repaired ?? [];
+      const failed = st?.failed ?? [];
+
+      setRepairProgress({
+        processed,
+        total,
+        elapsed: st?.elapsed_sec ?? 0,
+        remaining: st?.estimated_remaining_sec ?? null,
+        pct: total ? Math.min(99, Math.round((processed / total) * 100)) : 10,
+        repaired,
+        failed,
+        msg: st?.message ?? "Repairing…",
+      });
+
+      if (st?.status !== "running") {
+        stopRepairPoll();
+        setBatchRepairBusy(false);
+        // Show final result
+        if (st?.status === "error" || (st?.score_detail?.error && !repaired.length)) {
+          const err = st?.score_detail?.error || st?.error || st?.message || "Repair failed.";
+          setRepairMsg({ ok: false, text: err });
+        } else if (repaired.length > 0) {
+          setRepairMsg({ ok: true, text: st?.message || `Repaired ${repaired.length} symbol(s)` });
+        } else {
+          setRepairMsg({ ok: true, text: st?.message || "Nothing needed repair." });
+        }
+        setRepairProgress(null);
+        // Reload cards + health so fixed scores appear immediately
+        await loadCached();
+        await fetchHotPicksHealth();
+      }
+    } catch {
+      /* poll failure — keep trying */
+    }
+  }, [fetchHotPicksHealth, loadCached]);
+
   const handleRepairBatchMissing = useCallback(async () => {
+    stopRepairPoll();
     setBatchRepairBusy(true);
     setRepairMsg(null);
+    setRepairProgress(null);
     try {
-      // Repair ALL incomplete symbols — use the full incomplete_stocks count
-      // so the button fixes everything in one click, not just the first 15.
-      // /stockky-hot/repair-batch caps `limit` at 100 (le=100) server-side, so
-      // clamp here too — sending totalMissing uncapped (e.g. 149) got rejected
-      // with a 422 ("Input should be less than or equal to 100") instead of
-      // actually repairing anything.
       const totalMissing = healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 15;
       const limit = Math.min(100, Math.max(15, totalMissing));
-      const res = await api.hotPicksRepairBatch(limit) as any;
-      const repaired: string[] = res?.repaired || [];
-      if (res?.status === "error") {
-        // Surface the most actionable error. Score repair failing because
-        // DECISION_URL is not configured is the most common cause of
-        // "Repair All" looking like it did nothing when only scores are missing.
-        const scoreErr = (res as any)?.score_detail?.error || (res as any)?.price_detail?.error || res.error;
-        setRepairMsg({ ok: false, text: scoreErr || "Repair failed." });
-      } else if (repaired.length > 0) {
-        const priceCount = ((res as any)?.price_repaired || []).length;
-        const scoreCount = ((res as any)?.score_repaired || []).length;
-        const parts: string[] = [];
-        if (scoreCount > 0) parts.push(`${scoreCount} score(s)`);
-        if (priceCount > 0) parts.push(`${priceCount} price(s)`);
-        const detail = parts.length ? ` (${parts.join(", ")})` : "";
-        setRepairMsg({ ok: true, text: `Repaired ${repaired.length} symbol(s)${detail}: ${repaired.join(", ")}` });
-      } else {
-        // Both passes found nothing to fix — check if score pass had an error.
-        const scoreErr = (res as any)?.score_detail?.error;
-        if (scoreErr) {
-          // Score repair silently failed (e.g. DECISION_URL not set); price
-          // pass found nothing because symbols have prices. Surface clearly.
-          setRepairMsg({
-            ok: false,
-            text: `Price: nothing missing. Score repair failed: ${scoreErr} — check DECISION_URL env var is set on the api-gateway container.`,
-          });
-        } else {
-          setRepairMsg({ ok: true, text: res?.message || "Nothing needed repair." });
-        }
+      const res = await api.hotPicksRepairBatch(limit);
+      if (!res?.ok && res?.status === "error") {
+        setRepairMsg({ ok: false, text: (res as any)?.error || "Could not start repair." });
+        setBatchRepairBusy(false);
+        return;
       }
-      // Reload card data so repaired scores/prices appear immediately —
-      // without this the cards still show "—" even though the DB was updated.
-      await loadCached();
-      await fetchHotPicksHealth();
+      if (res?.already_running) {
+        setRepairMsg({ ok: true, text: "Repair is already running…" });
+      }
+      // Kick off polling — job runs in background on server
+      repairPollRef.current = window.setInterval(pollRepairJob, 2000);
     } catch (e: any) {
-      setRepairMsg({ ok: false, text: e?.message || "Repair request failed — check the service is reachable." });
-    } finally {
+      setRepairMsg({ ok: false, text: e?.message || "Repair request failed." });
       setBatchRepairBusy(false);
     }
-  }, [fetchHotPicksHealth, loadCached, healthData]);
+  }, [fetchHotPicksHealth, loadCached, healthData, pollRepairJob]);
 
   const handleRepairSingle = useCallback(async (symbol: string) => {
+    stopRepairPoll();
     setPatchingSymbol(symbol);
     setRepairMsg(null);
+    setRepairProgress(null);
     try {
-      const res = await api.hotPicksRepairBatch(1, symbol) as any;
-      if (res?.status === "error" || res?.status === "not_found") {
-        const err = (res as any)?.score_detail?.error || res.error || res.message || `Could not repair ${symbol}.`;
-        setRepairMsg({ ok: false, text: err });
-      } else if ((res?.repaired || []).length > 0) {
-        const priceFixed = ((res as any)?.price_repaired || []).includes(symbol);
-        const scoreFixed = ((res as any)?.score_repaired || []).includes(symbol);
-        const what = [scoreFixed && "scores", priceFixed && "price"].filter(Boolean).join(" + ") || "data";
-        setRepairMsg({ ok: true, text: `Repaired ${symbol} — ${what} updated.` });
-      } else {
-        // Check if score repair silently failed
-        const scoreErr = (res as any)?.score_detail?.error;
-        if (scoreErr) {
-          setRepairMsg({ ok: false, text: `${symbol}: score repair failed — ${scoreErr}. Check DECISION_URL env var.` });
-        } else {
-          setRepairMsg({ ok: true, text: res?.message || `${symbol}: nothing missing.` });
-        }
+      const res = await api.hotPicksRepairBatch(1, symbol);
+      if (!res?.ok && (res as any)?.status === "error") {
+        setRepairMsg({ ok: false, text: (res as any)?.error || `Could not repair ${symbol}.` });
+        setPatchingSymbol(null);
+        return;
       }
+      if ((res as any)?.already_running) {
+        setRepairMsg({ ok: true, text: `Repair already running — ${symbol} will be included.` });
+        setPatchingSymbol(null);
+        return;
+      }
+      // Poll for completion — same as batch
+      repairPollRef.current = window.setInterval(async () => {
+        try {
+          const st = await api.hotPicksRepairStatus();
+          const repaired = st?.repaired ?? [];
+          const failed = st?.failed ?? [];
+          setRepairProgress({
+            processed: st?.processed ?? 0,
+            total: st?.total ?? 1,
+            elapsed: st?.elapsed_sec ?? 0,
+            remaining: st?.estimated_remaining_sec ?? null,
+            pct: Math.min(99, Math.round(((st?.processed ?? 0) / (st?.total ?? 1)) * 100)),
+            repaired,
+            failed,
+            msg: st?.message ?? `Repairing ${symbol}…`,
+          });
+          if (st?.status !== "running") {
+            stopRepairPoll();
+            setPatchingSymbol(null);
+            setRepairProgress(null);
+            if (repaired.includes(symbol)) {
+              setRepairMsg({ ok: true, text: `${symbol} repaired successfully.` });
+            } else if (st?.score_detail?.error) {
+              setRepairMsg({ ok: false, text: `${symbol}: ${st.score_detail.error}` });
+            } else {
+              setRepairMsg({ ok: true, text: st?.message || `${symbol}: nothing missing.` });
+            }
+            await loadCached();
+            await fetchHotPicksHealth();
+          }
+        } catch { /* keep polling */ }
+      }, 2000);
+      return; // early return — cleanup is in poll
+    } catch (e: any) {
+      setRepairMsg({ ok: false, text: e?.message || `Could not repair ${symbol}.` });
       // Reload card data after single repair so the card stops showing "—"
       // immediately without requiring a full page refresh.
       await loadCached();
@@ -741,6 +797,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
   };
 
   useEffect(() => stopPremarketPoll, []);
+  useEffect(() => stopRepairPoll, []);
 
   // Bug N fix: resume premarket progress bar on mount (e.g. tab reload mid-run).
   // Mirrors the main scan's mount-resume useEffect — checks the status endpoint
@@ -903,6 +960,88 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
               <span>{jobMsg}</span>
             </div>
             <Pipeline running={true} />
+          </div>
+        )}
+
+        {/* Live repair progress — shown while batchRepairBusy and a job is running */}
+        {repairProgress && batchRepairBusy && (
+          <div className="mt-4 rounded-2xl border border-signal-prepare/30 bg-signal-prepare/5 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="font-display tabular-nums text-[11px] text-signal-prepare font-medium">
+                ⚙ Repair in progress
+              </span>
+              <span className="font-display tabular-nums text-[10px] text-mist/50">
+                {repairProgress.processed}/{repairProgress.total}
+              </span>
+            </div>
+            {/* Progress bar */}
+            <div className="h-1.5 rounded-full bg-slate/40 overflow-hidden">
+              <div
+                className="h-full bg-signal-prepare/70 transition-all duration-500"
+                style={{ width: `${repairProgress.pct}%` }}
+              />
+            </div>
+            {/* Stats row */}
+            <div className="flex flex-wrap gap-4 font-display tabular-nums text-[10px] text-mist/60">
+              <span>Elapsed {fmtSec(repairProgress.elapsed)}</span>
+              <span>
+                {repairProgress.remaining == null ? "estimating…" : `~${fmtSec(repairProgress.remaining)} remaining`}
+              </span>
+              <span className="text-mist/40">{repairProgress.msg}</span>
+            </div>
+            {/* Live repaired list */}
+            {repairProgress.repaired.length > 0 && (
+              <div className="space-y-1">
+                <div className="font-display tabular-nums text-[9px] text-signal-buy/70 uppercase tracking-wider">
+                  Fixed so far
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {repairProgress.repaired.map(s => (
+                    <span key={s} className="font-display tabular-nums text-[9px] px-1.5 py-0.5 rounded-md bg-signal-buy/15 text-signal-buy border border-signal-buy/30">
+                      {s}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Live failed list */}
+            {repairProgress.failed.length > 0 && (
+              <div className="space-y-1">
+                <div className="font-display tabular-nums text-[9px] text-signal-sell/70 uppercase tracking-wider">
+                  Failed
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {repairProgress.failed.map(s => (
+                    <span key={s} className="font-display tabular-nums text-[9px] px-1.5 py-0.5 rounded-md bg-signal-sell/10 text-signal-sell/70 border border-signal-sell/20">
+                      {s}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Pipeline stages visual */}
+            <div className="border-t border-slate/20 pt-3">
+              <div className="font-display tabular-nums text-[9px] text-mist/40 mb-2 uppercase tracking-wider">Repair pipeline</div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {[
+                  { label: "Price repair", icon: "💰", detail: "Bhavcopy + AngelOne waterfall" },
+                  { label: "Score repair", icon: "🤖", detail: "Decision service per symbol" },
+                  { label: "DB write", icon: "💾", detail: "Neon / Oracle upsert" },
+                  { label: "Cache flush", icon: "🔄", detail: "Audit cache invalidated" },
+                ].map((stage, i) => {
+                  const done = repairProgress.processed >= (i === 0 ? 1 : repairProgress.total * (i / 4));
+                  return (
+                    <div key={stage.label} className={`flex items-center gap-2 rounded-lg px-2 py-1.5 border ${done ? "border-signal-buy/30 bg-signal-buy/5" : "border-slate/20 bg-ink/20"}`}>
+                      <span className="text-[11px]">{stage.icon}</span>
+                      <div>
+                        <div className={`font-display tabular-nums text-[9px] ${done ? "text-signal-buy" : "text-mist/40"}`}>{stage.label}</div>
+                        <div className="font-display tabular-nums text-[8px] text-mist/25">{stage.detail}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         )}
 

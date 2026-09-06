@@ -57,6 +57,7 @@ from data_feed import (
     DataFeedStore, extract_feed_payload, DATA_FEED_TTL,
     hot_job_get, hot_job_set, HOT_RESULT_KEY,
     hot_premarket_job_get, hot_premarket_job_set,
+    hot_repair_job_get, hot_repair_job_set,
     try_refresh_lock, release_refresh_lock, soft_ttl_should_refresh,
     request_data_feed_stop, clear_data_feed_stop, data_feed_stop_requested,
 )
@@ -11229,44 +11230,229 @@ def stockky_hot_audit():
     return hotpicks_audit()
 
 
+@app.get("/stockky-hot/repair-batch/status")
+def stockky_hot_repair_batch_status():
+    """Poll the background repair job started by POST /stockky-hot/repair-batch."""
+    return hot_repair_job_get(_redis_get)
+
+
 @app.post("/stockky-hot/repair-batch")
-def stockky_hot_repair_batch(limit: int = Query(15, ge=1, le=100), symbol: Optional[str] = Query(None)):
-    """Repair stored Hot Picks rows: first fill any missing PRICE via the
-    market-data waterfall, then run a real SCORE repair (decision/pillar
-    scores/trade levels) via the decision service for rows still missing them.
-    Nothing is fabricated — the score pass copies exactly what the decision
-    service returns. This is what makes the UI "Repair" button actually clear
-    the blank Entry/Target/Stop/Tech/Fund/… dashes, not just price."""
+async def stockky_hot_repair_batch(
+    limit: int = Query(15, ge=1, le=100),
+    symbol: Optional[str] = Query(None),
+):
+    """Start a BACKGROUND repair job for Hot Picks rows missing price/score.
+    Returns immediately with {"ok": True, "status": "running"}.
+    Poll GET /stockky-hot/repair-batch/status for live progress.
+    Pass 1: price repair (fast). Pass 2: decision service score repair (slow, ~1s/symbol).
+    """
+    job = hot_repair_job_get(_redis_get)
+    if job.get("status") == "running":
+        return {"ok": True, "already_running": True, **job}
+
     try:
-        from hotpicks_store import hotpicks_repair_batch, hotpicks_repair_scores
+        from hotpicks_store import hotpicks_repair_batch, hotpicks_audit
     except Exception as e:
-        return {"status": "error", "error": f"hotpicks store unavailable: {str(e)[:160]}"}
+        return {"ok": False, "status": "error", "error": f"hotpicks store unavailable: {str(e)[:160]}"}
+
     market_url = os.getenv("MARKET_DATA_URL", "")
     decision_url = os.getenv("DECISION_URL", DECISION_URL)
-    price_res = hotpicks_repair_batch(limit=limit, symbol=symbol, market_data_url=market_url)
-    score_res = {}
+    force_sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip() or None
+
     try:
-        score_res = hotpicks_repair_scores(limit=limit, symbol=symbol, decision_url=decision_url)
-    except Exception as e:
-        score_res = {"status": "error", "error": str(e)[:160]}
-    price_repaired = list(price_res.get("repaired") or [])
-    score_repaired = list(score_res.get("repaired") or [])
-    combined = list(dict.fromkeys(price_repaired + score_repaired))
-    # Overall status: completed if either pass did (or would do) real work.
-    status = "completed"
-    if price_res.get("status") == "error" and score_res.get("status") == "error":
-        status = "error"
-    elif price_res.get("status") in ("not_found",) and not score_repaired and score_res.get("status") in ("not_found", "no_data"):
-        status = price_res.get("status")
+        audit = hotpicks_audit()
+        incomplete = audit.get("incomplete_stocks") or []
+        targets_count = 1 if force_sym else min(len(incomplete) or limit, 100)
+    except Exception:
+        targets_count = limit
+
+    hot_repair_job_set(
+        _redis_set, _redis_get,
+        status="running",
+        processed=0,
+        total=targets_count,
+        repaired=[],
+        failed=[],
+        price_detail={},
+        score_detail={},
+        started_at=datetime.now(IST).isoformat(),
+        finished_at=None,
+        message=f"Repairing {targets_count} symbol(s) — starting price pass…",
+        symbol=force_sym,
+    )
+
+    def _run_repair(lim, sym, murl, durl, n_targets):
+        try:
+            import time as _time
+            # Pass 1: price repair (fast)
+            hot_repair_job_set(_redis_set, _redis_get, message="Pass 1/2: filling missing prices…")
+            from hotpicks_store import hotpicks_repair_batch as _price_repair
+            price_res = _price_repair(limit=lim, symbol=sym, market_data_url=murl)
+            price_repaired = list(price_res.get("repaired") or [])
+            hot_repair_job_set(
+                _redis_set, _redis_get,
+                price_detail=price_res,
+                repaired=list(price_repaired),
+                processed=len(price_repaired),
+                message=f"Pass 1/2 done ({len(price_repaired)} price(s) fixed). Starting score repair…",
+            )
+
+            # Pass 2: score repair per-symbol for live progress
+            try:
+                from hotpicks_store import hotpicks_audit as _audit_fn, _row_needs_scores, _HOT_SCORE_FIELDS, _schema
+                from sqlalchemy import text as _text
+                import json as _json
+                import httpx as _httpx
+
+                audit2 = _audit_fn()
+                incomplete2 = audit2.get("incomplete_stocks") or []
+                score_targets = [
+                    s["symbol"] for s in incomplete2
+                    if "score" in (s.get("missing_fields") or [])
+                ]
+                if sym:
+                    score_targets = [s for s in score_targets if s == sym] or [sym]
+                score_targets = score_targets[:lim]
+            except Exception as e2:
+                score_targets = []
+                hot_repair_job_set(_redis_set, _redis_get,
+                    score_detail={"status": "error", "error": f"Could not list score targets: {str(e2)[:120]}"})
+
+            all_repaired = list(price_repaired)
+            all_failed = []
+            score_repaired = []
+            dec_err = None
+
+            if score_targets and not durl:
+                dec_err = "DECISION_URL not set — set it in api-gateway env vars"
+                all_failed = list(score_targets)
+                hot_repair_job_set(_redis_set, _redis_get,
+                    score_detail={"status": "not_configured", "error": dec_err},
+                    failed=all_failed,
+                    message=f"Score repair skipped: {dec_err}")
+            elif score_targets:
+                hot_repair_job_set(_redis_set, _redis_get,
+                    total=len(price_repaired) + len(score_targets),
+                    message=f"Pass 2/2: scoring {len(score_targets)} symbol(s)…")
+                try:
+                    hp = _schema()
+                    dial = hp.dialect()
+                    eng = hp.shared_engine("stockky-repair-bg")
+                    dec_base = durl.rstrip("/")
+
+                    # Load all blobs in one query
+                    rows_map = {}
+                    with eng.connect() as conn:
+                        res = conn.execute(_text(
+                            f"SELECT symbol, section, item_json FROM {hp.TABLE_NAME} "
+                            "WHERE updated_at >= " + (
+                                "SYSTIMESTAMP - NUMTODSINTERVAL(72, 'HOUR')"
+                                if dial == "oracle"
+                                else "NOW() - INTERVAL '72 hours'"
+                            )
+                        ))
+                        for row in res.fetchall():
+                            s, sec, ij = row[0], row[1], row[2]
+                            if s in score_targets:
+                                try:
+                                    rows_map[s] = (sec, _json.loads(ij or "{}"))
+                                except Exception:
+                                    rows_map[s] = (sec, {})
+
+                    with _httpx.Client(timeout=20.0, follow_redirects=True) as client:
+                        for i, target_sym in enumerate(score_targets):
+                            try:
+                                r = client.get(f"{dec_base}/decide/{target_sym}")
+                                sec, blob = rows_map.get(target_sym, ("hot_picks", {}))
+                                if r.status_code == 200:
+                                    body = r.json() if isinstance(r.json(), dict) else {}
+                                    if body:
+                                        changed = False
+                                        if body.get("decision"):
+                                            blob["decision"] = body["decision"]; changed = True
+                                        sc = body.get("combined_score")
+                                        if sc is not None:
+                                            blob["score"] = sc; blob["combined_score"] = sc; changed = True
+                                        for k in _HOT_SCORE_FIELDS:
+                                            v = body.get(k)
+                                            if v is not None and v != "N/A":
+                                                blob[k] = v; changed = True
+                                        if changed:
+                                            with eng.begin() as wconn:
+                                                wconn.execute(
+                                                    _text(f"UPDATE {hp.TABLE_NAME} SET item_json = :ij,"
+                                                          f" updated_at = {hp.now_func(dial)}"
+                                                          f" WHERE symbol = :sym AND section = :sec"),
+                                                    {"ij": _json.dumps(blob)[:15000],
+                                                     "sym": target_sym, "sec": sec},
+                                                )
+                                            score_repaired.append(target_sym)
+                                            if target_sym not in all_repaired:
+                                                all_repaired.append(target_sym)
+                                        else:
+                                            all_failed.append(target_sym)
+                                    else:
+                                        all_failed.append(target_sym)
+                                else:
+                                    all_failed.append(target_sym)
+                            except Exception as sym_e:
+                                logger.debug("repair bg score %s: %s", target_sym, sym_e)
+                                all_failed.append(target_sym)
+
+                            hot_repair_job_set(
+                                _redis_set, _redis_get,
+                                processed=len(price_repaired) + i + 1,
+                                repaired=list(all_repaired),
+                                failed=list(all_failed),
+                                message=f"Pass 2/2: {i+1}/{len(score_targets)} scored ({len(score_repaired)} fixed, {len(all_failed)} failed)",
+                            )
+                            _time.sleep(0.3)
+
+                except Exception as loop_e:
+                    logger.warning("repair bg score loop: %s", loop_e)
+                    dec_err = str(loop_e)[:200]
+                    hot_repair_job_set(_redis_set, _redis_get,
+                        score_detail={"status": "error", "error": dec_err})
+
+            msg = ", ".join(filter(None, [
+                f"{len(all_repaired)} repaired" if all_repaired else None,
+                f"{len(all_failed)} failed" if all_failed else None,
+                dec_err if dec_err else None,
+                "nothing needed repair" if not all_repaired and not all_failed else None,
+            ])) or "done"
+
+            hot_repair_job_set(
+                _redis_set, _redis_get,
+                status="completed",
+                repaired=all_repaired,
+                failed=all_failed,
+                score_repaired=score_repaired,
+                finished_at=datetime.now(IST).isoformat(),
+                message=msg,
+            )
+        except Exception as e:
+            logger.warning("repair background job failed: %s", e)
+            hot_repair_job_set(_redis_set, _redis_get,
+                status="error",
+                error=str(e)[:200],
+                finished_at=datetime.now(IST).isoformat(),
+                message=f"Repair failed: {str(e)[:120]}")
+
+    import threading as _threading
+    _threading.Thread(
+        target=_run_repair,
+        args=(limit, force_sym, market_url, decision_url, targets_count),
+        daemon=True,
+        name="stockky-hot-repair",
+    ).start()
+
     return {
-        "status": status,
-        "repaired": combined,
-        "price_repaired": price_repaired,
-        "score_repaired": score_repaired,
-        "attempted": (price_res.get("attempted") or 0) + (score_res.get("attempted") or 0),
-        "price_detail": price_res,
-        "score_detail": score_res,
+        "ok": True,
+        "status": "running",
+        "total": targets_count,
+        "message": f"Repair started for {targets_count} symbol(s)",
     }
+
 
 
 

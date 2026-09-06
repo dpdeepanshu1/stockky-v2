@@ -318,6 +318,9 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
   const [repairMsg, setRepairMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [premarketBusy, setPremarketBusy] = useState(false);
   const [premarketMsg, setPremarketMsg] = useState<string | null>(null);
+  const [premarketProgress, setPremarketProgress] = useState<{
+    processed: number; total: number; elapsed: number; remaining?: number | null; pct: number;
+  } | null>(null);
   const premarketPollRef = useRef<number | null>(null);
 
   const fetchHotPicksHealth = useCallback(async () => {
@@ -372,14 +375,35 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
       // actually repairing anything.
       const totalMissing = healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 15;
       const limit = Math.min(100, Math.max(15, totalMissing));
-      const res = await api.hotPicksRepairBatch(limit);
+      const res = await api.hotPicksRepairBatch(limit) as any;
       const repaired: string[] = res?.repaired || [];
       if (res?.status === "error") {
-        setRepairMsg({ ok: false, text: res.error || "Repair failed." });
+        // Surface the most actionable error. Score repair failing because
+        // DECISION_URL is not configured is the most common cause of
+        // "Repair All" looking like it did nothing when only scores are missing.
+        const scoreErr = (res as any)?.score_detail?.error || (res as any)?.price_detail?.error || res.error;
+        setRepairMsg({ ok: false, text: scoreErr || "Repair failed." });
       } else if (repaired.length > 0) {
-        setRepairMsg({ ok: true, text: `Repaired ${repaired.length} symbol(s): ${repaired.join(", ")}` });
+        const priceCount = ((res as any)?.price_repaired || []).length;
+        const scoreCount = ((res as any)?.score_repaired || []).length;
+        const parts: string[] = [];
+        if (scoreCount > 0) parts.push(`${scoreCount} score(s)`);
+        if (priceCount > 0) parts.push(`${priceCount} price(s)`);
+        const detail = parts.length ? ` (${parts.join(", ")})` : "";
+        setRepairMsg({ ok: true, text: `Repaired ${repaired.length} symbol(s)${detail}: ${repaired.join(", ")}` });
       } else {
-        setRepairMsg({ ok: true, text: res?.message || "Nothing needed repair." });
+        // Both passes found nothing to fix — check if score pass had an error.
+        const scoreErr = (res as any)?.score_detail?.error;
+        if (scoreErr) {
+          // Score repair silently failed (e.g. DECISION_URL not set); price
+          // pass found nothing because symbols have prices. Surface clearly.
+          setRepairMsg({
+            ok: false,
+            text: `Price: nothing missing. Score repair failed: ${scoreErr} — check DECISION_URL env var is set on the api-gateway container.`,
+          });
+        } else {
+          setRepairMsg({ ok: true, text: res?.message || "Nothing needed repair." });
+        }
       }
       // Reload card data so repaired scores/prices appear immediately —
       // without this the cards still show "—" even though the DB was updated.
@@ -396,13 +420,23 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
     setPatchingSymbol(symbol);
     setRepairMsg(null);
     try {
-      const res = await api.hotPicksRepairBatch(1, symbol);
+      const res = await api.hotPicksRepairBatch(1, symbol) as any;
       if (res?.status === "error" || res?.status === "not_found") {
-        setRepairMsg({ ok: false, text: res.error || res.message || `Could not repair ${symbol}.` });
+        const err = (res as any)?.score_detail?.error || res.error || res.message || `Could not repair ${symbol}.`;
+        setRepairMsg({ ok: false, text: err });
       } else if ((res?.repaired || []).length > 0) {
-        setRepairMsg({ ok: true, text: `Repaired ${symbol} — scores and price updated.` });
+        const priceFixed = ((res as any)?.price_repaired || []).includes(symbol);
+        const scoreFixed = ((res as any)?.score_repaired || []).includes(symbol);
+        const what = [scoreFixed && "scores", priceFixed && "price"].filter(Boolean).join(" + ") || "data";
+        setRepairMsg({ ok: true, text: `Repaired ${symbol} — ${what} updated.` });
       } else {
-        setRepairMsg({ ok: true, text: res?.message || `${symbol}: nothing missing.` });
+        // Check if score repair silently failed
+        const scoreErr = (res as any)?.score_detail?.error;
+        if (scoreErr) {
+          setRepairMsg({ ok: false, text: `${symbol}: score repair failed — ${scoreErr}. Check DECISION_URL env var.` });
+        } else {
+          setRepairMsg({ ok: true, text: res?.message || `${symbol}: nothing missing.` });
+        }
       }
       // Reload card data after single repair so the card stops showing "—"
       // immediately without requiring a full page refresh.
@@ -652,6 +686,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
       if (st?.status !== "running") {
         stopPremarketPoll();
         setPremarketBusy(false);
+        setPremarketProgress(null);
         // Keep a visible completion message so the user knows what happened.
         // If market is closed, bhavcopy-only mode runs and message says so.
         const doneMsg =
@@ -661,6 +696,15 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
             : "Pre-feed complete ✓");
         setPremarketMsg(doneMsg);
       } else {
+        // Bug M-2 fix: update the progress bar on every poll tick, same
+        // pattern as the main scan's pollJob progress update.
+        setPremarketProgress({
+          processed,
+          total,
+          elapsed: st?.elapsed_sec ?? 0,
+          remaining: st?.estimated_remaining_sec ?? null,
+          pct: total ? Math.min(100, Math.round((processed / total) * 100)) : 5,
+        });
         setPremarketMsg(
           st?.message ||
           (total ? `Pre-feeding ${processed}/${total}…` : "Pre-feeding…")
@@ -673,6 +717,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
 
   const startPremarket = async () => {
     setPremarketBusy(true);
+    setPremarketProgress(null);  // clear stale progress bar before new run
     setPremarketMsg(null);       // Bug E fix: clear stale result before new run starts
     setPremarketMsg("Starting premarket pre-feed…");
     try {
@@ -696,6 +741,38 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
   };
 
   useEffect(() => stopPremarketPoll, []);
+
+  // Bug N fix: resume premarket progress bar on mount (e.g. tab reload mid-run).
+  // Mirrors the main scan's mount-resume useEffect — checks the status endpoint
+  // once and re-arms the poll interval if the job is still running.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const st = await api.getStockkyHotPremarketStatus();
+        if (cancelled || st?.status !== "running") return;
+        setPremarketBusy(true);
+        const total = st?.total || 0;
+        const processed = st?.processed || 0;
+        setPremarketProgress({
+          processed,
+          total,
+          elapsed: st?.elapsed_sec ?? 0,
+          remaining: st?.estimated_remaining_sec ?? null,
+          pct: total ? Math.min(100, Math.round((processed / total) * 100)) : 5,
+        });
+        setPremarketMsg(
+          st?.message || (total ? `Pre-feeding ${processed}/${total}…` : "Pre-feeding…")
+        );
+        stopPremarketPoll();
+        premarketPollRef.current = window.setInterval(pollPremarketJob, 3000);
+      } catch {
+        /* no premarket job in flight */
+      }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const notifyTopPicks = useCallback(async () => {
     setNotifyBusy(true);
@@ -760,9 +837,27 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
               {stopBusy ? "Stopping…" : "■ Stop"}
             </button>
           )}
-          {premarketMsg && (
+          {(premarketBusy && premarketProgress) ? (
+            <div className="flex-1 min-w-[160px] space-y-1 self-center">
+              <div className="h-1.5 rounded-full bg-slate/40 overflow-hidden">
+                <div
+                  className="h-full bg-signal-prepare/70 transition-all duration-500"
+                  style={{ width: `${premarketProgress.pct ?? 5}%` }}
+                />
+              </div>
+              <div className="flex gap-3 font-display tabular-nums text-[10px] text-mist/70">
+                <span>{premarketProgress.processed}/{premarketProgress.total || "…"}</span>
+                <span>Elapsed {fmtSec(premarketProgress.elapsed)}</span>
+                <span>
+                  {premarketProgress.remaining == null
+                    ? "estimating…"
+                    : `~${fmtSec(premarketProgress.remaining)}`}
+                </span>
+              </div>
+            </div>
+          ) : premarketMsg ? (
             <span className="font-display tabular-nums text-[11px] text-signal-prepare/80 self-center">{premarketMsg}</span>
-          )}
+          ) : null}
           <button
             type="button"
             onClick={handleSearchBuysFromHot}
@@ -886,9 +981,12 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
       )}
 
       {!data && !loading && (
-        <div className="rounded-2xl border border-slate/40 bg-graphite/50 p-6 text-center text-mist/60 font-display tabular-nums text-xs">
-          Click <strong className="text-paper">Search Hot Picks Stocks</strong> to run the catalyst
-          pipeline. Nothing is auto-loaded (free-tier friendly).
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-slate/40 bg-graphite/50 p-6 text-center text-mist/60 font-display tabular-nums text-xs">
+            Click <strong className="text-paper">Search Hot Picks Stocks</strong> to run the catalyst
+            pipeline. Nothing is auto-loaded (free-tier friendly).
+          </div>
+          <Pipeline dashboard running={false} />
         </div>
       )}
 

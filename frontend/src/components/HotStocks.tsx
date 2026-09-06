@@ -318,6 +318,16 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
   const [repairMsg, setRepairMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [premarketBusy, setPremarketBusy] = useState(false);
   const [premarketMsg, setPremarketMsg] = useState<string | null>(null);
+  // Same shape as `progress` (the Search Hot Picks Stocks bar) so the two
+  // jobs render identically — premarket used to be text-only with no bar,
+  // no elapsed/remaining and no pipeline visual, unlike the search job.
+  const [premarketProgress, setPremarketProgress] = useState<{
+    processed: number;
+    total: number;
+    elapsed: number;
+    remaining?: number | null;
+    pct: number;
+  } | null>(null);
   const premarketPollRef = useRef<number | null>(null);
 
   const fetchHotPicksHealth = useCallback(async () => {
@@ -649,6 +659,13 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
       const st = await api.getStockkyHotPremarketStatus();
       const total = st?.total || 0;
       const processed = st?.processed || 0;
+      setPremarketProgress({
+        processed,
+        total,
+        elapsed: st?.elapsed_sec ?? 0,
+        remaining: st?.estimated_remaining_sec,
+        pct: total ? Math.min(100, Math.round((processed / total) * 100)) : 0,
+      });
       if (st?.status !== "running") {
         stopPremarketPoll();
         setPremarketBusy(false);
@@ -660,14 +677,16 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
             ? `Pre-fed ${processed}/${total} symbols ✓`
             : "Pre-feed complete ✓");
         setPremarketMsg(doneMsg);
-      } else {
-        setPremarketMsg(
-          st?.message ||
-          (total ? `Pre-feeding ${processed}/${total}…` : "Pre-feeding…")
-        );
+        return false;
       }
+      setPremarketMsg(
+        st?.message ||
+        (total ? `Pre-feeding ${processed}/${total}…` : "Pre-feeding…")
+      );
+      return true;
     } catch (e: any) {
       // Best-effort — a failed poll doesn't need to surface as an error banner.
+      return false;
     }
   }, []);
 
@@ -675,11 +694,15 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
     setPremarketBusy(true);
     setPremarketMsg(null);       // Bug E fix: clear stale result before new run starts
     setPremarketMsg("Starting premarket pre-feed…");
+    // Real total is unknown until the backend reports the built universe size —
+    // same "don't fake a 100% denominator" rule as the Search Hot Picks bar.
+    setPremarketProgress({ processed: 0, total: 0, elapsed: 0, remaining: null, pct: 0 });
     try {
       const res = await api.runStockkyHotPremarket();
       if (!res?.ok) {
         setPremarketMsg(res?.error || "Could not start premarket pre-feed");
         setPremarketBusy(false);
+        setPremarketProgress(null);
         return;
       }
       if (res.already_running) {
@@ -692,8 +715,33 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
     } catch (e: any) {
       setPremarketMsg(e?.message || "Failed to start premarket pre-feed");
       setPremarketBusy(false);
+      setPremarketProgress(null);
     }
   };
+
+  // Resume an in-flight premarket job on mount/reload — mirrors the Search
+  // Hot Picks resume effect above. Without this, reloading mid pre-feed left
+  // premarketBusy/premarketMsg reset to idle with no way to see the job was
+  // still running server-side until the next manual click.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const st = await api.getStockkyHotPremarketStatus();
+        if (!cancelled && st?.status === "running") {
+          setPremarketBusy(true);
+          stopPremarketPoll();
+          premarketPollRef.current = window.setInterval(pollPremarketJob, 3000);
+          await pollPremarketJob();
+        }
+      } catch {
+        /* no premarket job in flight */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pollPremarketJob]);
 
   useEffect(() => stopPremarketPoll, []);
 
@@ -760,9 +808,6 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
               {stopBusy ? "Stopping…" : "■ Stop"}
             </button>
           )}
-          {premarketMsg && (
-            <span className="font-display tabular-nums text-[11px] text-signal-prepare/80 self-center">{premarketMsg}</span>
-          )}
           <button
             type="button"
             onClick={handleSearchBuysFromHot}
@@ -784,6 +829,34 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
         </div>
         {notifyMsg && (
           <p className="mt-2 font-display tabular-nums text-[11px] text-signal-prepare/80">{notifyMsg}</p>
+        )}
+
+        {(premarketBusy || premarketMsg) && (
+          <div className="mt-4 space-y-2">
+            <div className="h-2 rounded-full bg-slate/40 overflow-hidden">
+              <div
+                className="h-full bg-signal-prepare/80 transition-all duration-500"
+                style={{ width: `${premarketBusy ? (premarketProgress?.pct ?? 5) : 100}%` }}
+              />
+            </div>
+            <div className="flex flex-wrap gap-4 font-display tabular-nums text-[11px] text-mist">
+              <span>
+                {premarketProgress?.processed ?? 0}/{premarketProgress?.total ? premarketProgress.total : "…"}
+              </span>
+              {premarketBusy && (
+                <>
+                  <span>Elapsed {fmtSec(premarketProgress?.elapsed)}</span>
+                  <span>
+                    Remaining{" "}
+                    {premarketProgress?.remaining == null
+                      ? "estimating…"
+                      : `~${fmtSec(premarketProgress.remaining)}`}
+                  </span>
+                </>
+              )}
+              <span className="text-signal-prepare/80">{premarketMsg}</span>
+            </div>
+          </div>
         )}
 
         {loading && (

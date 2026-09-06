@@ -98,6 +98,41 @@ def hydrate_weekend_status():
         return {"ok": False, "error": str(e)[:300]}
 
 
+@app.get("/symbol-master/sync")
+@app.post("/symbol-master/sync")
+def symbol_master_sync(wait: bool = False):
+    """
+    Bug L fix: trigger the nightly symbol_master sync (Nifty 500 + sectoral
+    index constituents → sector/industry/status). This module previously had
+    no HTTP route, no scheduler call, and no GitHub Actions workflow — it
+    only ever ran if someone SSHed in and executed the script by hand, so
+    the symbol_master table was never created in production and the
+    sector-relative-strength feature (§4/§5) silently did nothing.
+    Runs in the background and returns immediately by default (poll
+    /symbol-master/sync/status) since the full sync makes ~14 rate-limited
+    NSE calls; pass wait=true to block and get the result inline instead.
+    """
+    try:
+        from symbol_master_sync import run_sync, start_sync_background
+        if wait:
+            return run_sync()
+        return start_sync_background()
+    except Exception as e:
+        logger.exception("symbol_master_sync failed")
+        return {"ok": False, "error": str(e)[:300]}
+
+
+@app.get("/symbol-master/sync/status")
+def symbol_master_sync_status():
+    """Poll the state of the current/last background symbol_master sync job."""
+    try:
+        from symbol_master_sync import get_sync_job
+        return get_sync_job()
+    except Exception as e:
+        logger.exception("symbol_master_sync_status failed")
+        return {"ok": False, "error": str(e)[:300]}
+
+
 @app.on_event("startup")
 async def start_loop():
     global _task

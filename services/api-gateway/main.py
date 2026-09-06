@@ -6898,22 +6898,20 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                 logger.warning("stockky-hot skip %s: %s", sym, e)
 
     # ── Price enrichment ────────────────────────────────────────────────
-    # news_driven/results_driven/bulk_insider_driven items were built purely
-    # from news_data/event_data — no price field was ever attached, so the
-    # frontend's resolveDisplayPrice() found nothing and rendered "₹0"
-    # (Price metric on every Hot Picks card, incl. the Results/Earnings
-    # section). The ≤₹5000 universe's feed store already has a live/last
-    # price for every symbol that's actually in-universe, so look it up
-    # here — one cheap in-memory/KV read per symbol, no network calls —
-    # instead of leaving the card with nothing to show. Symbols that are
-    # over the ₹5000 cap (or otherwise purged from the feed store, e.g.
-    # PERSISTENT/SOLARINDS surfaced purely because they were in the news)
-    # legitimately have no price to show here; the frontend now renders
-    # "₹—" for those instead of a misleading "₹0" (see ConvictionCard.tsx).
+    # Pass 1: feed store (bhavcopy/Oracle) — cheap in-memory/KV reads.
+    # Pass 2: AngelOne LTP waterfall via market-data-service /quote/{sym}
+    #   for any symbol still at price=0 after pass 1.  Market-data-service
+    #   already resolves AngelOne→yfinance→NSE in its /quote waterfall
+    #   (decision #16), so a single concurrent batch of GET /quote/{sym}
+    #   calls here gets live LTP during market hours and prevents hot-picks
+    #   cards from showing "₹—" for symbols that are in-universe but whose
+    #   feed-store row is stale (e.g. freshly-listed names, catalyst names
+    #   outside the ≤₹5000 data-feed universe).
     try:
         _hot_store = _feed_store()
     except Exception:
         _hot_store = None
+    # Pass 1: feed store
     if _hot_store is not None:
         for _bucket in (news_driven, results_driven, bulk_insider_driven):
             for _item in _bucket:
@@ -6925,6 +6923,33 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                         _item["close"] = _px
                 except Exception:
                     pass
+    # Pass 2: AngelOne / yfinance waterfall for anything still missing a price.
+    # Collect all unpinned symbols, batch-fetch via _fetch_prices_bulk_async
+    # (concurrent GET /quote/{sym} on market-data-service — AngelOne first).
+    _still_missing = [
+        _item
+        for _bucket in (news_driven, results_driven, bulk_insider_driven)
+        for _item in _bucket
+        if not (float(_item.get("price") or 0) > 0 or float(_item.get("close") or 0) > 0)
+    ]
+    if _still_missing:
+        _miss_syms = list({_item.get("symbol") or "" for _item in _still_missing if _item.get("symbol")})
+        try:
+            _live_prices: dict = await _fetch_prices_bulk_async(_miss_syms, client)
+            if _live_prices:
+                for _item in _still_missing:
+                    _sym = _item.get("symbol") or ""
+                    _lpx = _live_prices.get(_sym) or _live_prices.get(_sym.replace(".NS", "").replace(".BO", ""))
+                    if _lpx and float(_lpx) > 0:
+                        _item["price"] = float(_lpx)
+                        _item["close"] = float(_lpx)
+                logger.info(
+                    "stockky-hot price pass-2 (AngelOne/yf waterfall): %s/%s symbols resolved",
+                    sum(1 for s in _miss_syms if _live_prices.get(s)),
+                    len(_miss_syms),
+                )
+        except Exception as _pe:
+            logger.debug("stockky-hot price pass-2 failed (non-fatal): %s", _pe)
 
     def _rank(items: list) -> list:
         order = {"BUY NOW": 0, "PREPARE TO BUY": 1, "DO NOT BUY": 2, "SELL": 3}
@@ -10800,19 +10825,115 @@ async def stockky_hot_premarket(background_tasks: BackgroundTasks):
     def _run_premarket(syms: list):
         """Runs entirely outside the HTTP request — a full-universe bulk
         feed can take a while; background=true semantics match every
-        other premarket job in this app (IPO, Surprise)."""
+        other premarket job in this app (IPO, Surprise).
+        
+        Price source priority (2026-09-06):
+          Market OPEN  → AngelOne LTP sweep first (POST /quotes/bulk on
+                          market-data-service which waterfalls Angel→yf),
+                          then bhavcopy for any remaining misses.
+          Market CLOSED → bhavcopy (yesterday's close) only — same as before.
+        """
         try:
             from data_feed import run_bulk_yahoo_price_feed
+            phase = _market_session_phase_ist()
+            market_open = phase in ("preopen", "open", "post")
+
+            # Bug G fix (2026-09-06): original order was AngelOne THEN bhavcopy.
+            # bhavcopy's put_symbols_bulk() calls merge_feed_payload() which
+            # unconditionally overwrites volatile price fields (price/ltp/close)
+            # from the incoming payload — bhavcopy's T-1 close silently won over
+            # AngelOne's fresh LTP every time, making the sweep a no-op.
+            # Fix: run bhavcopy FIRST (T-1 close baseline for all symbols),
+            # then AngelOne sweep SECOND (live LTP overwrites for open market),
+            # so live prices always win. merge_feed_payload's "incoming wins for
+            # volatile fields" rule now works in our favour.
+            angelone_hits = 0
+
+            # Step 1: bhavcopy baseline (always — market open or closed)
             result = run_bulk_yahoo_price_feed(syms, merge_existing=True) or {}
+
+            # Step 2: AngelOne live LTP sweep — only during market session.
+            # Runs AFTER bhavcopy so live prices overwrite the T-1 baseline.
+            if market_open:
+                try:
+                    import time as _time
+                    import httpx as _httpx
+                    chunk_sz = 50  # AngelOne's documented per-request cap
+                    total_syms = len(syms)
+                    hot_premarket_job_set(
+                        _redis_set, _redis_get,
+                        message=f"AngelOne LTP sweep: overlaying live prices on {total_syms} bhavcopy-seeded symbols…",
+                    )
+                    _pm_store = _feed_store()
+                    for _ci, _chunk_start in enumerate(range(0, total_syms, chunk_sz)):
+                        _chunk = syms[_chunk_start: _chunk_start + chunk_sz]
+                        try:
+                            _r = _httpx.post(
+                                f"{MARKET_DATA_URL.rstrip('/')}/quotes/bulk",
+                                json={"symbols": _chunk},
+                                timeout=12.0,
+                            )
+                            if _r.status_code == 200:
+                                _body = _r.json()
+                                _quotes = _body.get("quotes") or []
+                                for _q in _quotes:
+                                    _sym_q = _q.get("symbol") or ""
+                                    if not _sym_q:
+                                        continue
+                                    _px = None
+                                    for _k in ("price", "ltp", "close", "cmp", "last_price"):
+                                        try:
+                                            _v = float(_q.get(_k) or 0)
+                                            if _v > 0:
+                                                _px = _v
+                                                break
+                                        except (TypeError, ValueError):
+                                            pass
+                                    if _px:
+                                        angelone_hits += 1
+                                        try:
+                                            _existing = _pm_store.get_symbol(_sym_q) or {}
+                                            _existing.update({
+                                                "symbol": _sym_q,
+                                                "price": _px,
+                                                "ltp": _px,
+                                                "close": _px,
+                                                "source": _q.get("source", "angelone_rest"),
+                                                "fetched_at": _q.get("fetched_at", ""),
+                                                "price_refreshed_at": _q.get("fetched_at", ""),
+                                            })
+                                            _pm_store.put_symbol(_sym_q, _existing, ttl=DATA_FEED_TTL)
+                                        except Exception as _we:
+                                            logger.debug("hot premarket store-write failed for %s: %s", _sym_q, _we)
+                        except Exception as _ce:
+                            logger.debug("hot premarket AngelOne chunk %s failed (non-fatal): %s", _ci, _ce)
+                        _time.sleep(0.3)  # stay well under AngelOne rate limit
+                    logger.info(
+                        "hot premarket AngelOne sweep: %s/%s symbols had live LTP (written after bhavcopy)",
+                        angelone_hits, total_syms,
+                    )
+                    hot_premarket_job_set(
+                        _redis_set, _redis_get,
+                        message=f"AngelOne overlay done ({angelone_hits}/{total_syms} live prices written over bhavcopy baseline).",
+                    )
+                except Exception as _ae:
+                    logger.warning("hot premarket AngelOne sweep failed (non-fatal): %s", _ae)
             n = int(result.get("tracked_stocks") or 0)
             ts = datetime.now(IST).isoformat()
+            base_msg = result.get("message") or f"Pre-fed {n}/{len(syms)} stocks"
+            # angelone_hits is updated during the sweep (Step 2) which runs after
+            # run_bulk_yahoo_price_feed (Step 1), so the count here is final.
+            if market_open and angelone_hits > 0:
+                final_msg = f"{base_msg} · {angelone_hits} live LTPs overlaid from AngelOne"
+            else:
+                final_msg = base_msg
             hot_premarket_job_set(
                 _redis_set,
                 _redis_get,
                 status="done",
                 processed=n,
                 total=len(syms),
-                message=result.get("message") or f"Pre-fed {n}/{len(syms)} stocks",
+                message=final_msg,
                 finished_at=ts,
             )
         except Exception as e:

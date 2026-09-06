@@ -403,6 +403,29 @@ async def _refresh_feed_universe_loop():
 async def _start_feed_universe_refresh():
     asyncio.create_task(_refresh_feed_universe_loop())
 
+
+@app.on_event("startup")
+async def _preload_angelone_scrip_master():
+    """
+    Bug I fix: angelone_scrip_master.ensure_loaded() was never called until
+    the first request that needed a token (get_token/get_tokens_bulk/
+    get_all_symbols) — typically the first /quotes/bulk call. That call
+    triggers a synchronous httpx.get() of the ~2000-row scrip master JSON
+    (up to the 30s timeout on a slow/cold network path), so whichever
+    request happened to be first paid the full fetch latency as a spike.
+    Warm the cache here instead, off the event loop (run_in_executor),
+    so it's already populated by the time real traffic arrives. Runs
+    regardless of AngelOne creds being configured — the scrip master file
+    itself needs no auth — and a failed preload just leaves the map empty;
+    ensure_loaded() will retry lazily on first use same as before.
+    """
+    try:
+        import angelone_scrip_master as scrip_master
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, scrip_master.ensure_loaded)
+    except Exception as e:
+        logger.warning("angelone_scrip_master preload skipped: %s", e)
+
 # ── Root & Health endpoints (fix 404) ────────────────────────────────────────
 @app.get("/")
 async def root():
@@ -1976,10 +1999,120 @@ def get_quotes_bulk(req: BulkQuoteRequest):
     else:
         yf_tickers = []
 
+    # ── AngelOne REST batch (2026-09-06) ───────────────────────────────
+    # After the WS-feed in-memory cache miss, try AngelOne REST API before
+    # falling through to yfinance.  The WS feed only has data for the fixed
+    # SCAN_UNIVERSE / SURPRISE_UNIVERSE, so any symbol outside that set
+    # (freshly-listed IPOs, catalyst names, all 500 premarket symbols) would
+    # previously skip straight to yfinance even during market hours.
+    # AngelOne REST covers the full NSE-EQ universe via scrip_master tokens;
+    # its get_quotes_batch() handles up to 50 tokens per call. We chunk
+    #  into batches of 50, resolve each symbol to a token, and
+    # hit the REST endpoint. Symbols that AngelOne returns an LTP for are
+    # moved out of yf_tickers; the rest still fall through to yfinance.
+    if yf_tickers:
+        try:
+            import angelone_client as _ao_client
+            import angelone_scrip_master as _ao_sm
+            import asyncio as _aio
+
+            # Bug A fix (2026-09-06): guard on is_configured() — without this,
+            # every chunk pays a failed login attempt (~1-2s each) when creds
+            # are absent, and a 500-symbol request takes 10 × 2s = 20s just to
+            # decide AngelOne can't help.
+            if not _ao_client.get_session().is_configured():
+                raise RuntimeError("AngelOne not configured — skip to yfinance")
+
+            # Bug B fix (2026-09-06): build the full token map first, then
+            # issue ONE asyncio.run() per 50-token chunk (AngelOne's cap),
+            # instead of one asyncio.run() per chunk, each creating and
+            # destroying an event loop. Still chunked to stay within AngelOne's
+            # documented per-request cap of 50 tokens.
+            _ao_chunk_size = 50
+            _ao_still: list = []
+
+            # Step 1: resolve all yf_tickers to tokens in one pass
+            _full_tok_map: dict = {}   # token → base_symbol
+            _full_ticker_map: dict = {}  # base_symbol → original yf-ticker key
+            for _t in yf_tickers:
+                _base = symbol_map.get(_t, _t).replace(".NS", "").replace(".BO", "")
+                _tok = _ao_sm.get_token(_base)
+                if _tok:
+                    _full_tok_map[_tok] = _base
+                    _full_ticker_map[_base] = _t
+                else:
+                    _ao_still.append(_t)  # no scrip_master entry → yfinance
+
+            _all_tokens = list(_full_tok_map.keys())
+            _ao_resolved: set = set()
+
+            # Step 2: chunked REST calls — one event loop per chunk, not one per call
+            for _chunk_start in range(0, len(_all_tokens), _ao_chunk_size):
+                _tok_chunk = _all_tokens[_chunk_start: _chunk_start + _ao_chunk_size]
+                try:
+                    _fetched = _aio.run(
+                        _ao_client.get_session().get_quotes_batch("NSE", _tok_chunk)
+                    )
+                except RuntimeError:
+                    _fetched = []
+                except Exception as _be:
+                    logger.debug("quotes/bulk: AngelOne REST chunk failed: %s", _be)
+                    _fetched = []
+
+                for _fq in (_fetched or []):
+                    _tok = str(_fq.get("symbolToken") or "")
+                    _base = _full_tok_map.get(_tok)
+                    if not _base:
+                        continue
+                    _ltp = None
+                    for _k in ("ltp", "close", "open"):
+                        try:
+                            _v = float(_fq.get(_k) or 0)
+                            if _v > 0:
+                                _ltp = _v
+                                break
+                        except (TypeError, ValueError):
+                            pass
+                    if _ltp is None:
+                        continue
+                    _mapped_key = _full_ticker_map.get(_base)
+                    if not _mapped_key:
+                        continue
+                    quote = _pad_quote_response(_base, {
+                        "symbol": _base,
+                        "price": _ltp,
+                        "ltp": _ltp,
+                        "day_high": float(_fq.get("high") or 0) or None,
+                        "day_low": float(_fq.get("low") or 0) or None,
+                        "volume": _fq.get("tradeVolume"),
+                        "source": "angelone_rest",
+                        "fetched_at": datetime.utcnow().isoformat(),
+                    })
+                    try:
+                        _cache_set(f"quote:{_mapped_key}", quote, ttl=12)
+                    except Exception:
+                        pass
+                    results.append(quote)
+                    _ao_resolved.add(_mapped_key)
+
+            # Anything not resolved by AngelOne falls through to yfinance
+            for _base, _ticker in _full_ticker_map.items():
+                if _ticker not in _ao_resolved:
+                    _ao_still.append(_ticker)
+
+            yf_tickers = _ao_still
+            if len(yf_tickers) < len(remaining or []):
+                logger.info(
+                    "quotes/bulk: AngelOne REST resolved %s/%s symbols, %s left for yfinance",
+                    len((remaining or [])) - len(yf_tickers), len(remaining or []), len(yf_tickers),
+                )
+        except Exception as _ao_err:
+            logger.debug("quotes/bulk: AngelOne REST block failed (non-fatal): %s", _ao_err)
+
     if not yf_tickers:
-        # Everything was already fresh (cache or live feed) — no yfinance
-        # call needed at all this time.
-        return {"ok": True, "quotes": _sanitize_for_json(results), "note": "served from cache/live feed"}
+        # Everything was already fresh (cache, live feed, or AngelOne REST) —
+        # no yfinance call needed at all this time.
+        return {"ok": True, "quotes": _sanitize_for_json(results), "note": "served from cache/live feed/angelone"}
 
     symbol_map = {k: v for k, v in symbol_map.items() if k in yf_tickers}
 

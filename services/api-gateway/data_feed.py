@@ -1793,7 +1793,9 @@ def run_bulk_yahoo_price_feed(
             "BULK_PATH done bhavcopy-only hits=%s/%s market_open=%s (skip Yahoo)",
             bhav_hits, total, market_open,
         )
-        _progress(saved, f"Bulk complete (bhavcopy-only): {saved}/{total}")
+        # Bug D fix (2026-09-06): "yesterday" is wrong on weekends and post-holiday
+        # days — say "last trading session" instead which is always accurate.
+        _progress(saved, f"Pre-fed {saved}/{total} symbols using last trading session's close prices (market closed — bhavcopy only). Run again after 9:15 AM IST for live prices.")
         return {
             "status": "success",
             "tracked_stocks": saved,

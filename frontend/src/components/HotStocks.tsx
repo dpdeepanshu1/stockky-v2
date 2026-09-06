@@ -498,8 +498,6 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
       // immediately without requiring a full page refresh.
       await loadCached();
       await fetchHotPicksHealth();
-    } catch (e: any) {
-      setRepairMsg({ ok: false, text: e?.message || `Failed to repair ${symbol}.` });
     } finally {
       setPatchingSymbol(null);
     }

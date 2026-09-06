@@ -32,8 +32,19 @@ SCRIP_MASTER_URL = os.getenv(
 REFRESH_INTERVAL_S = float(os.getenv("ANGELONE_SCRIP_MASTER_REFRESH_S", str(24 * 3600)))
 
 _lock = threading.Lock()
-_token_map: Dict[str, str] = {}   # e.g. "SBIN" -> "3045"
+_token_map: Dict[str, str] = {}       # e.g. "SBIN" -> "3045"  (NSE, all equity series)
+_bse_token_map: Dict[str, str] = {}   # e.g. "500325" style BSE cash-equity fallback
 _loaded_at: float = 0.0
+
+# NSE cash-equity series we accept, beyond the plain main-board "-EQ":
+#   -BE / -BZ : trade-to-trade (T2T) settlement series, still real cash equity
+#   -SM / -ST : NSE Emerge / SME board — this is exactly where a brand-new,
+#               small IPO (e.g. a sub-₹50cr issue) usually lists first, and
+#               is precisely the gap that let a fresh SME name fall through
+#               the whole waterfall (see main.py's 2026-09-05 _waterfall_
+#               angelone_price note) even though AngelOne actually carries
+#               a token for it under one of these suffixes, not "-EQ".
+_NSE_EQUITY_SUFFIXES = ("-EQ", "-BE", "-BZ", "-SM", "-ST")
 
 
 def _clean(symbol: str) -> str:
@@ -41,27 +52,54 @@ def _clean(symbol: str) -> str:
 
 
 def _load_sync() -> None:
-    global _token_map, _loaded_at
+    global _token_map, _bse_token_map, _loaded_at
     try:
         resp = httpx.get(SCRIP_MASTER_URL, timeout=30.0)
         resp.raise_for_status()
         rows = resp.json()
         new_map: Dict[str, str] = {}
+        new_bse_map: Dict[str, str] = {}
         for row in rows:
-            # NSE cash-equity rows are suffixed "-EQ" (e.g. "SBIN-EQ") —
-            # strip it to match the plain symbols used everywhere else in
-            # this codebase (symbol_master, candidate_engine, etc).
             sym_field = str(row.get("symbol", ""))
-            if row.get("exch_seg") == "NSE" and sym_field.endswith("-EQ") and row.get("token"):
-                new_map[sym_field[:-3].upper()] = str(row["token"])
-        if new_map:
+            token = row.get("token")
+            if not token:
+                continue
+            exch = row.get("exch_seg")
+            if exch == "NSE":
+                # Strip whichever equity-series suffix matched (e.g. "SBIN-EQ" ->
+                # "SBIN", "QUALIANCE-SM" -> "QUALIANCE") so lookups stay keyed
+                # by the same bare symbol used everywhere else in this codebase
+                # (symbol_master, candidate_engine, etc), regardless of which
+                # board/series it actually trades on.
+                for suf in _NSE_EQUITY_SUFFIXES:
+                    if sym_field.endswith(suf):
+                        new_map[sym_field[: -len(suf)].upper()] = str(token)
+                        break
+            elif exch == "BSE":
+                # BSE cash-equity rows: 'name' usually carries the human/trading
+                # symbol (BSE's own 'symbol' field is often just the numeric
+                # scrip code), so prefer name when it looks like a real ticker.
+                # Kept as a *separate* map and only consulted as a fallback in
+                # get_token() — NSE stays the primary source everywhere else,
+                # this just stops an NSE-only view of the world from silently
+                # dropping a BSE-listed (e.g. BSE-SME) name entirely.
+                name_field = str(row.get("name", "")).upper().strip()
+                candidate = name_field or sym_field.upper().strip()
+                if candidate and not candidate.isdigit():
+                    new_bse_map.setdefault(candidate, str(token))
+        if new_map or new_bse_map:
             with _lock:
                 _token_map = new_map
+                _bse_token_map = new_bse_map
                 _loaded_at = time.time()
-            logger.info("AngelOne scrip master loaded: %d NSE-EQ symbols", len(new_map))
+            logger.info(
+                "AngelOne scrip master loaded: %d NSE symbols (all equity series), "
+                "%d BSE fallback symbols",
+                len(new_map), len(new_bse_map),
+            )
         else:
             logger.warning(
-                "AngelOne scrip master fetch returned 0 usable NSE-EQ rows — "
+                "AngelOne scrip master fetch returned 0 usable equity rows — "
                 "check ANGELONE_SCRIP_MASTER_URL / the file's schema hasn't changed"
             )
     except Exception as e:
@@ -76,12 +114,39 @@ def ensure_loaded() -> None:
 
 
 def get_token(symbol: str) -> Optional[str]:
+    """NSE token first (every equity series, not just main-board -EQ); falls
+    back to the BSE cash-equity map when NSE has nothing — closes the gap
+    where a BSE-only or BSE-SME-only listing (no NSE line at all yet) never
+    resolved even though AngelOne carries a real token for it there."""
     ensure_loaded()
-    return _token_map.get(_clean(symbol))
+    clean = _clean(symbol)
+    tok = _token_map.get(clean)
+    if tok:
+        return tok
+    return _bse_token_map.get(clean)
+
+
+def get_exchange_for(symbol: str) -> Optional[str]:
+    """Which segment get_token()'s result belongs to ('NSE' or 'BSE'), so a
+    caller placing the actual quote/order request uses the right exch_seg."""
+    ensure_loaded()
+    clean = _clean(symbol)
+    if clean in _token_map:
+        return "NSE"
+    if clean in _bse_token_map:
+        return "BSE"
+    return None
 
 
 def get_tokens_bulk(symbols: List[str]) -> Dict[str, str]:
     """Returns {clean_symbol: token} — only for symbols actually resolved.
+    NSE-only, deliberately: every caller of this (the WS feed's polling
+    loop, /angelone/movers) batches the results through a single hardcoded
+    exch_seg="NSE" quote call, so mixing in a BSE-fallback token here would
+    get queried under the wrong exchange and return garbage/errors. A
+    symbol with only a BSE token still resolves correctly through the
+    single-symbol get_token()/get_exchange_for() path below, which passes
+    the matching exchange through per-call.
     Silently drops anything not found; callers should log the gap between
     requested and resolved counts if they need visibility into misses."""
     ensure_loaded()
@@ -95,13 +160,14 @@ def get_tokens_bulk(symbols: List[str]) -> Dict[str, str]:
 
 
 def get_all_symbols() -> Dict[str, str]:
-    """Returns the FULL {clean_symbol: token} map for every NSE-EQ symbol
-    in the scrip master (~2000 symbols) — not scoped to any pre-selected
+    """Returns the FULL {clean_symbol: token} map for every NSE equity symbol
+    in the scrip master (~2000+ symbols) — not scoped to any pre-selected
     seed/watchlist. Added 2026-09-04 to support a whole-market AngelOne
     LTP sweep (see market-data-service main.py's /angelone/movers), which
     needs every symbol's token to compute day_change_pct itself instead of
     depending on NSE's (blockable) gainers/losers boards or a sampled
-    yfinance seed."""
+    yfinance seed. NSE-only (BSE fallback map excluded) since /angelone/movers
+    batches through the NSE-segment quote endpoint."""
     ensure_loaded()
     return dict(_token_map)
 
@@ -110,6 +176,7 @@ def get_all_symbols() -> Dict[str, str]:
 def status() -> dict:
     return {
         "loaded_symbols": len(_token_map),
+        "loaded_bse_fallback_symbols": len(_bse_token_map),
         "loaded_at": _loaded_at or None,
         "age_seconds": (time.time() - _loaded_at) if _loaded_at else None,
         "source_url": SCRIP_MASTER_URL,

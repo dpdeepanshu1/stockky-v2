@@ -1402,22 +1402,26 @@ def _waterfall_angelone_price(symbol: str) -> Optional[float]:
     try:
         import angelone_scrip_master as scrip_master
         token = scrip_master.get_token(base)
+        exch = scrip_master.get_exchange_for(base) or "NSE"
     except Exception as e:
         logger.debug("angelone waterfall: scrip master lookup %s: %s", base, e)
         return None
     if not token:
-        # Not every symbol resolves — scrip master only carries NSE cash-
-        # equity "-EQ" rows (see angelone_scrip_master.py), and a brand new
-        # SME IPO can take a day or two to appear in AngelOne's own daily
-        # scrip master refresh too. Fall through quietly, same as every
-        # other waterfall tier when it has nothing.
+        # Not every symbol resolves — scrip master now carries every NSE
+        # cash-equity series (-EQ/-BE/-BZ/-SM/-ST) plus a BSE fallback (see
+        # angelone_scrip_master.py, widened 2026-09-06 after QUALIANCE-style
+        # SME/BSE-only listings were being silently dropped by the old
+        # NSE-"-EQ"-only filter), but a brand new IPO can still take a day
+        # or two to appear in AngelOne's own daily scrip master refresh at
+        # all. Fall through quietly, same as every other waterfall tier
+        # when it has nothing.
         return None
     try:
         # get_quote/ensure_session are async (TOTP login + httpx.AsyncClient
         # — see angelone_client.py); this endpoint is sync, so bridge with
         # asyncio.run(). Safe here: FastAPI runs sync path functions in a
         # worker thread with no already-running event loop to conflict with.
-        quote = asyncio.run(session.get_quote("NSE", token))
+        quote = asyncio.run(session.get_quote(exch, token))
         px = _safe((quote or {}).get("ltp"))
         if px is not None and px > 0:
             logger.info("AngelOne waterfall hit %s → ₹%.2f", base, px)
@@ -2318,8 +2322,9 @@ def _angelone_history_candles(
     angel_interval = _angelone_interval(interval)
     if not angel_interval:
         return None
-    # Scrip master only maps plain NSE-EQ symbols — skip index tickers
-    # (^NSEI etc.) and anything with a space (index display names).
+    # Scrip master maps NSE (all equity series) + BSE-fallback symbols —
+    # skip index tickers (^NSEI etc.) and anything with a space (index
+    # display names), neither of which it carries.
     angel_sym = (sym or "").replace(".NS", "").replace(".BO", "").strip()
     if not angel_sym or angel_sym.startswith("^") or " " in angel_sym:
         return None
@@ -2332,6 +2337,7 @@ def _angelone_history_candles(
         token = angelone_scrip_master.get_token(angel_sym)
         if not token:
             return None
+        angel_exch = angelone_scrip_master.get_exchange_for(angel_sym) or "NSE"
 
         ist = ZoneInfo("Asia/Kolkata")
         if start_date is not None:
@@ -2346,7 +2352,7 @@ def _angelone_history_candles(
         from_str = _from.strftime("%Y-%m-%d %H:%M")
         to_str = _to.strftime("%Y-%m-%d %H:%M")
 
-        raw = asyncio.run(session.get_candles("NSE", token, angel_interval, from_str, to_str))
+        raw = asyncio.run(session.get_candles(angel_exch, token, angel_interval, from_str, to_str))
         if not raw:
             return None
 

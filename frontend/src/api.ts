@@ -1364,25 +1364,6 @@ export const api = {
       1,
       180000
     ),
-  // "Repair All" — background job that walks every incomplete Hot Picks row
-  // (price + score/decision), not just the next 15/20. Mirrors
-  // repairFeedAll/Status/Stop below, scoped to /stockky-hot/*.
-  hotPicksRepairAll: () =>
-    request<{ ok: boolean; started?: boolean; already_running?: boolean; message?: string; status?: string; total?: number; processed?: number; ok_count?: number }>(
-      "/stockky-hot/repair-all",
-      { method: "POST" },
-      1,
-      30000
-    ),
-  hotPicksRepairAllStatus: () =>
-    request<{ status: "idle" | "running" | "done" | "stopped" | "error"; total: number; processed: number; ok_count: number; started_at?: string | null; finished_at?: string | null; message?: string; last_symbol?: string | null }>(
-      "/stockky-hot/repair-all/status",
-      undefined,
-      2,
-      15000
-    ),
-  hotPicksRepairAllStop: () =>
-    request<{ ok: boolean; message?: string }>("/stockky-hot/repair-all/stop", { method: "POST" }, 1, 15000),
   // displayDays narrows the stored scan to a window (30 = default, 365 = hard
   // cap). Omitted -> backend default (IPO_CHECKER_DEFAULT_DISPLAY_DAYS).
   ipoList: (displayDays?: number) =>

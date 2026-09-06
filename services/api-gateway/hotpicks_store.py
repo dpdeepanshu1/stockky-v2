@@ -605,12 +605,6 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
         return out
 
     force_sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip() or None
-    try:
-        from symbol_aliases import is_known_delisted, is_learned_delisted, record_resolution_failure
-    except Exception:
-        is_known_delisted = lambda _s: False  # noqa: E731
-        is_learned_delisted = lambda _s: False  # noqa: E731
-        record_resolution_failure = lambda _s: 0  # noqa: E731
     eng = None
     try:
         dial = hp.dialect()
@@ -630,17 +624,6 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
             for row in res.fetchall():
                 sym, section, item_json_raw = row[0], row[1], row[2]
                 if force_sym and sym != force_sym:
-                    continue
-                # Symbols confirmed (or self-learned, after repeated failures
-                # across every price source) to be delisted/not-yet-listed
-                # can never resolve here — including them just re-burns a
-                # provider round trip every single Repair All run, which is
-                # what was triggering cascading rate-limit cooldowns
-                # (IndianAPI/Alphavantage) that then starved genuinely
-                # repairable rows in the same run. Leave them "missing" in
-                # the audit (nothing to purge — a Hot Picks row is a
-                # catalyst snapshot, not a universe row) but skip the fetch.
-                if is_known_delisted(sym) or is_learned_delisted(sym):
                     continue
                 try:
                     blob = json.loads(item_json_raw or "{}")
@@ -676,10 +659,6 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
                 try:
                     r = client.get(f"{md}/quote/{sym}")
                     if r.status_code != 200:
-                        try:
-                            record_resolution_failure(sym)
-                        except Exception:
-                            pass
                         continue
                     body = r.json() if isinstance(r.json(), dict) else {}
                     px = None
@@ -696,20 +675,7 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
                     # or 0 means no cap; a symbol only stays "missing price"
                     # here if a cap is explicitly configured and it's over it).
                     _max_px = float(os.getenv("MAX_STOCK_PRICE", "0") or 0)
-                    if px is None:
-                        # A genuine "no source could quote this" miss (as opposed
-                        # to the over-cap branch below, which isn't a delisting
-                        # signal) — count it toward the durable failure streak
-                        # so a symbol that can never resolve (not yet listed,
-                        # or actually delisted) eventually gets skipped for free
-                        # instead of burning a provider round trip every run.
-                        try:
-                            record_resolution_failure(sym)
-                        except Exception:
-                            pass
-                        time.sleep(0.5)
-                        continue
-                    if _max_px > 0 and px > _max_px:
+                    if px is None or (_max_px > 0 and px > _max_px):
                         time.sleep(0.5)
                         continue
                     blob["price"] = px
@@ -749,12 +715,25 @@ _HOT_SCORE_FIELDS = (
 
 def _row_needs_scores(blob: Dict[str, Any]) -> bool:
     """True when a stored hot item is missing the core conviction fields, so the
-    card would render blank dashes for Tech/Fund/…/Entry/Target/Stop."""
+    card would render blank dashes for Tech/Fund/…/Entry/Target/Stop.
+
+    Uses `is None` rather than truthiness for the numeric checks: a real
+    technical_score/combined_score of exactly 0 is a legitimate low score, not
+    a missing one. The previous `not blob.get(...)` form treated 0 the same as
+    None/absent, so a genuinely (if rarely) zero-scored symbol would be
+    re-flagged as needing repair on every single audit/repair pass forever —
+    burning a decision-service call each time for a value that was already
+    correct. entry_range/target are strings/ranges, not scores, so a plain
+    falsy check (empty string, None, missing key) is still correct for them.
+    """
     if not isinstance(blob, dict):
         return True
-    if not blob.get("technical_score"):
+    ts = blob.get("technical_score")
+    if ts is None:
         return True
-    if not (blob.get("combined_score") or blob.get("score")):
+    cs = blob.get("combined_score")
+    sc = blob.get("score")
+    if cs is None and sc is None:
         return True
     # Trade levels: if neither entry nor target present, treat as needing a pass.
     if not blob.get("entry_range") and not blob.get("target"):
@@ -795,11 +774,6 @@ def hotpicks_repair_scores(
 
     force_sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip() or None
     try:
-        from symbol_aliases import is_known_delisted, is_learned_delisted
-    except Exception:
-        is_known_delisted = lambda _s: False  # noqa: E731
-        is_learned_delisted = lambda _s: False  # noqa: E731
-    try:
         dial = hp.dialect()
         eng = hp.shared_engine("stockky-hotpicks-score-repair")
         if eng is None:
@@ -824,15 +798,6 @@ def hotpicks_repair_scores(
                 sym, section, item_json_raw = row[0], row[1], row[2]
                 if force_sym and sym != force_sym:
                     continue
-                # A symbol confirmed/learned as delisted or not-yet-listed has
-                # no real market data behind it — /decide/{symbol} fans out to
-                # the technical + fundamental + prediction services, each of
-                # which will themselves stall trying to fetch data for it.
-                # Skipping here is what stops one unrepairable Hot Pick from
-                # dragging every other symbol's scoring into read-timeouts in
-                # the same run.
-                if is_known_delisted(sym) or is_learned_delisted(sym):
-                    continue
                 try:
                     blob = json.loads(item_json_raw or "{}")
                 except Exception:
@@ -845,7 +810,6 @@ def hotpicks_repair_scores(
             out["message"] = f"{force_sym} not missing any scores in the last 72h."
             return out
         targets = targets[: max(1, min(int(limit or 15), 100))]
-        out["attempted"] = len(targets)
 
         repaired = []
         with httpx.Client(timeout=15.0, follow_redirects=True) as client, eng.begin() as conn:
@@ -878,10 +842,27 @@ def hotpicks_repair_scores(
                     if rs:
                         blob["reasons"] = rs if isinstance(rs, list) else blob.get("reasons")
                     if changed:
+                        # item_json is the authoritative payload the cards read, but
+                        # decision/score/news_score are ALSO first-class columns that
+                        # the audit/health-panel query reads directly (see
+                        # _hotpicks_audit_uncached above: m.get("decision"),
+                        # m.get("score")). Writing only item_json left those columns
+                        # NULL forever, so a repaired row rendered correctly on the
+                        # card but the audit kept counting it as missing — the
+                        # "Repair All" button never actually shrank and the health
+                        # score stayed stuck. Keep both copies in sync on every write.
                         conn.execute(
                             text(f"UPDATE {hp.TABLE_NAME} SET item_json = :item_json, "
+                                 "decision = :decision, score = :score, news_score = :news_score, "
                                  f"updated_at = {hp.now_func(dial)} WHERE symbol = :symbol AND section = :section"),
-                            {"item_json": json.dumps(blob)[:15000], "symbol": sym, "section": section},
+                            {
+                                "item_json": json.dumps(blob)[:15000],
+                                "decision": blob.get("decision"),
+                                "score": _num(blob.get("score") if blob.get("score") is not None else blob.get("combined_score")),
+                                "news_score": _num(blob.get("news_score")),
+                                "symbol": sym,
+                                "section": section,
+                            },
                         )
                         repaired.append(sym)
                 except Exception as e:

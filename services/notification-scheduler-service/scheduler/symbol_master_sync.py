@@ -110,7 +110,7 @@ def run_sync() -> dict:
         logger.error("No DATABASE_URL — symbol_master sync skipped.")
         return {"error": "no db url", "upserted": 0}
 
-    from sqlalchemy import create_engine, text
+    from sqlalchemy import create_engine, text, bindparam
 
     url = DB_URL
     if url.startswith("postgres://"):
@@ -152,20 +152,46 @@ def run_sync() -> dict:
     time.sleep(1.0)
     symbol_industry = _fetch_nifty500_industries(client)
 
-    # Also get ALL NSE securities for status tracking
+    # Also get ALL NSE securities for status tracking.
+    # Bug L fix (part 2): the old `except: all_syms = set(symbol_sector.keys())`
+    # fallback substituted a MUCH smaller set (only symbols that happen to sit
+    # in one of the ~12 sectoral indices, a few hundred large/mid-caps) as if
+    # it were the full NSE universe. Every legitimate active symbol outside
+    # that small set — including the majority of Nifty 500 — would then match
+    # `current_symbol NOT IN :syms` below and get mass-marked 'delisted' on a
+    # single transient NSE API hiccup. Don't fabricate a stand-in universe on
+    # failure: leave all_syms empty so the delisting step (guarded below) is
+    # skipped entirely for this run, same as it already was for `if all_syms`
+    # when the primary fetch outright raised.
     time.sleep(1.0)
+    all_syms: set[str] = set()
     try:
         all_r = client.get(
             f"{_NSE_BASE}/api/equity-stockIndices",
             params={"index": "SECURITIES IN NSE"},
         )
-        all_syms = set()
         if all_r.status_code == 200:
             for item in (all_r.json().get("data") or []):
                 if isinstance(item, dict) and item.get("symbol"):
                     all_syms.add(item["symbol"].upper())
-    except Exception:
-        all_syms = set(symbol_sector.keys())
+    except Exception as e:
+        logger.warning("_fetch full NSE securities list failed: %s", e)
+
+    # Bug L fix (part 3): NSE's full listed-equity universe is ~2000 symbols;
+    # a healthy fetch should never come back with a fraction of that. Treat
+    # a suspiciously small result (partial page, schema change, throttled
+    # response that still returned 200) the same as an outright failure —
+    # skip delisting rather than risk mass-marking active symbols delisted
+    # off an incomplete list. Upserts above are unaffected either way; they
+    # only ever add/refresh rows, never remove.
+    MIN_PLAUSIBLE_UNIVERSE = int(os.getenv("SYMBOL_MASTER_MIN_UNIVERSE", "1000"))
+    delisting_safe = len(all_syms) >= MIN_PLAUSIBLE_UNIVERSE
+    if all_syms and not delisting_safe:
+        logger.warning(
+            "NSE 'SECURITIES IN NSE' returned only %d symbols (expected >= %d) — "
+            "skipping delisting pass this run, upserts still applied",
+            len(all_syms), MIN_PLAUSIBLE_UNIVERSE,
+        )
 
     upserted = 0
     with engine.begin() as conn:
@@ -190,16 +216,25 @@ def run_sync() -> dict:
             })
             upserted += 1
 
-        # Mark symbols not in today's NSE list as potentially delisted
-        if all_syms:
-            conn.execute(text("""
+        # Mark symbols not in today's NSE list as potentially delisted.
+        # Bug L fix (part 1): every other IN-clause in this codebase binds
+        # its list param via bindparam(expanding=True) (see kv_cache.py /
+        # surprise_premarket.py) — this was the one place that instead
+        # passed a raw tuple for a plain `:syms` placeholder, which SQLAlchemy's
+        # text() does not expand into `IN (a, b, c, ...)` on its own. The
+        # len==1 special-case a few lines up was a symptom of working around
+        # that without ever fixing the root cause. expanding=True handles
+        # any size correctly, so the special-casing is no longer needed.
+        if all_syms and delisting_safe:
+            stmt = text("""
                 UPDATE symbol_master
                 SET status = 'delisted', last_verified_at = :now
                 WHERE current_symbol NOT IN :syms
                   AND status = 'active'
                   AND last_verified_at < :cutoff
-            """), {
-                "syms":   tuple(all_syms) if len(all_syms) > 1 else (list(all_syms)[0], list(all_syms)[0]),
+            """).bindparams(bindparam("syms", expanding=True))
+            conn.execute(stmt, {
+                "syms":   list(all_syms),
                 "now":    now,
                 "cutoff": now,
             })
@@ -213,3 +248,57 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     result = run_sync()
     print(result)
+
+
+# ── Bug L fix (part 4): this module was never wired to anything — no HTTP
+# route, no scheduler call, no GitHub Actions workflow — despite its own
+# docstring saying "Run nightly (pre-market)". In production the
+# symbol_master table was therefore never even CREATE'd, silently killing
+# the §4/§5 sector-relative-strength feature end to end (technical/main.py's
+# /sector-strength/{symbol} and fundamental/main.py's sector join both read
+# from a table that doesn't exist, fail inside a try/except, and quietly
+# return empty). Add the same background-job + status-poll shape
+# weekend_hydrator.py already uses, so scheduler/main.py can expose a route
+# a GitHub Actions cron can hit, matching every other nightly job in this repo.
+import threading
+
+_SYNC_JOB: dict = {"status": "idle", "result": None, "started_at": None, "finished_at": None}
+_SYNC_LOCK = threading.Lock()
+
+
+def get_sync_job() -> dict:
+    with _SYNC_LOCK:
+        return dict(_SYNC_JOB)
+
+
+def _run_job() -> None:
+    with _SYNC_LOCK:
+        _SYNC_JOB["status"] = "running"
+        _SYNC_JOB["started_at"] = datetime.now(timezone.utc).isoformat()
+        _SYNC_JOB["result"] = None
+    try:
+        result = run_sync()
+        with _SYNC_LOCK:
+            _SYNC_JOB["status"] = "done"
+            _SYNC_JOB["result"] = result
+    except Exception as e:
+        logger.exception("symbol_master_sync background run failed")
+        with _SYNC_LOCK:
+            _SYNC_JOB["status"] = "error"
+            _SYNC_JOB["result"] = {"error": str(e)[:300]}
+    finally:
+        with _SYNC_LOCK:
+            _SYNC_JOB["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def start_sync_background() -> dict:
+    """Kick off run_sync() on a daemon thread and return immediately — the
+    full sync makes ~14 rate-limited NSE calls (1s apart) plus a DB pass,
+    comfortably past a synchronous HTTP client's patience. Poll
+    get_sync_job() for status/result, same pattern as weekend_hydrator."""
+    with _SYNC_LOCK:
+        if _SYNC_JOB["status"] == "running":
+            return {"status": "already_running", "job": dict(_SYNC_JOB)}
+    thread = threading.Thread(target=_run_job, daemon=True)
+    thread.start()
+    return {"status": "started"}

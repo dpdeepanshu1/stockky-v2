@@ -107,6 +107,21 @@ export default function FeedHealthPanel({
         <p className="font-display tabular-nums text-[10px] text-mist/50 mt-3">{healthData.message}</p>
       )}
 
+      {/* Empty-state: no scan has run yet today — explain rather than show 0/0/0% */}
+      {!healthLoading && (healthData?.total_tracked ?? 0) === 0 && (
+        <div className="mt-4 rounded-xl border border-slate/40 bg-graphite/40 px-4 py-5 text-center space-y-1">
+          <p className="font-display tabular-nums text-xs text-paper/80">
+            No scan results yet — run <strong className="text-paper">Search Hot Picks Stocks</strong> to populate this feed.
+          </p>
+          <p className="font-display tabular-nums text-[10px] text-mist/50">
+            Optionally click <strong className="text-signal-prepare">☀ Premarket</strong> first to warm up prices (closes market: yesterday&apos;s bhavcopy · live market: real-time LTP).
+          </p>
+          <p className="font-display tabular-nums text-[10px] text-mist/40">
+            The repair buttons below activate automatically once the first scan writes rows.
+          </p>
+        </div>
+      )}
+
       <div className="flex flex-wrap gap-2 mt-4">
         <button
           type="button"

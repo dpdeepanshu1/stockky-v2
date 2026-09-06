@@ -140,8 +140,19 @@ function HotFeedHealth({ refreshKey }: { refreshKey: number }) {
   if (!audit) return null;
 
   const issues = audit.issues || [];
-  const healthy = Boolean(audit.ok && audit.table_exists && (audit.rows_24h ?? 0) > 0 && !issues.length);
-  const dot = healthy ? "bg-signal-buy" : issues.length ? "bg-signal-hold" : "bg-slate-400";
+  const noRows = (audit.rows_24h ?? 0) === 0;
+  const healthy = Boolean(audit.ok && audit.table_exists && !noRows && !issues.length);
+  // Grey dot = no rows yet (not an error); amber = issues; green = healthy
+  // Bug K fix: audit.ok is the backend's real success/failure signal — it's
+  // only true for the empty-table-not-created-yet case despite issues being
+  // non-empty there (see hotpicks_store._hotpicks_audit_uncached). Every
+  // genuine failure (audit query failed, schema unavailable, no DB
+  // configured, engine unavailable) leaves ok=false while also leaving
+  // rows_24h at its 0 default — so noRows was always true for those errors
+  // too, and `issues.length && !noRows` silently downgraded them to the
+  // same grey dot as a harmless empty table. Treat !audit.ok as its own
+  // amber trigger, independent of noRows.
+  const dot = healthy ? "bg-signal-buy" : (!audit.ok || (issues.length && !noRows)) ? "bg-signal-hold" : "bg-slate-400";
   const backendLabel =
     audit.backend === "oracle"
       ? "Oracle Autonomous DB"
@@ -160,7 +171,10 @@ function HotFeedHealth({ refreshKey }: { refreshKey: number }) {
           <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
           <span className="font-display tabular-nums text-[11px] text-paper">Hot Picks Feed Health</span>
           <span className="font-display tabular-nums text-[10px] text-mist/60">
-            {audit.rows_24h ?? 0} rows / 24h · {fmtAge(audit.age_hours)} · {backendLabel}
+            {(audit.rows_24h ?? 0) === 0
+              ? <span className="text-signal-hold/80">0 rows — run Search Hot Picks Stocks to populate</span>
+              : <>{audit.rows_24h} rows / 24h · {fmtAge(audit.age_hours)} · {backendLabel}</>
+            }
           </span>
         </span>
         <span className="font-display tabular-nums text-[10px] text-mist/60">{open ? "hide ▲" : "details ▼"}</span>
@@ -635,13 +649,22 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
       const st = await api.getStockkyHotPremarketStatus();
       const total = st?.total || 0;
       const processed = st?.processed || 0;
-      setPremarketMsg(
-        st?.message ||
-        (total ? `Pre-feeding ${processed}/${total}…` : "Pre-feeding…")
-      );
       if (st?.status !== "running") {
         stopPremarketPoll();
         setPremarketBusy(false);
+        // Keep a visible completion message so the user knows what happened.
+        // If market is closed, bhavcopy-only mode runs and message says so.
+        const doneMsg =
+          st?.message ||
+          (total
+            ? `Pre-fed ${processed}/${total} symbols ✓`
+            : "Pre-feed complete ✓");
+        setPremarketMsg(doneMsg);
+      } else {
+        setPremarketMsg(
+          st?.message ||
+          (total ? `Pre-feeding ${processed}/${total}…` : "Pre-feeding…")
+        );
       }
     } catch (e: any) {
       // Best-effort — a failed poll doesn't need to surface as an error banner.
@@ -650,6 +673,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
 
   const startPremarket = async () => {
     setPremarketBusy(true);
+    setPremarketMsg(null);       // Bug E fix: clear stale result before new run starts
     setPremarketMsg("Starting premarket pre-feed…");
     try {
       const res = await api.runStockkyHotPremarket();
@@ -736,7 +760,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
               {stopBusy ? "Stopping…" : "■ Stop"}
             </button>
           )}
-          {premarketBusy && premarketMsg && (
+          {premarketMsg && (
             <span className="font-display tabular-nums text-[11px] text-signal-prepare/80 self-center">{premarketMsg}</span>
           )}
           <button

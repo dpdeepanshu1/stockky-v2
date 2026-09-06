@@ -99,7 +99,8 @@ class _Bucket:
                     deficit = weight - self.tokens
                     sleep_for = min(deficit / self.rps if self.rps > 0 else 0.5, 2.0)
                 if time.time() - start >= max_wait:
-                    logger.warning("rate_limiter: max_wait exceeded, proceeding anyway (weight=%s)", weight)
+                    # Downgraded WARNING→DEBUG (2026-09-06): proceeds safely; WARNING floods logs masking real errors.
+                    logger.debug("rate_limiter: max_wait exceeded, proceeding anyway (weight=%s)", weight)
                     with self.lock:
                         self.tokens = max(0.0, self.tokens - weight)
                     return time.time() - start

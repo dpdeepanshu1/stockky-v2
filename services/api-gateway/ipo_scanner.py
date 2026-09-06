@@ -1900,6 +1900,23 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
         return out
 
     missing = audit.get("missing_ipos") or []
+    # Bug J fix: get_ipo_feed_audit() (Bug 9 / decision #17) carves
+    # stage=="pre_listing" rows out of `missing_ipos` into their own
+    # `pre_listing_ipos` bucket so they don't inflate the health-panel's
+    # missing count or Auto-Repair-All button before the market opens.
+    # But that also meant ipo_repair_batch — which only ever read
+    # `missing_ipos` — could never reach a pre_listing row again, even
+    # after NSE opened and the symbol became scoreable, because its stage
+    # keeps it permanently routed to pre_listing_ipos in every subsequent
+    # audit. The Bug 9 docstring already promised "ipo_repair_batch still
+    # accepts them if the user explicitly calls it (e.g. post-open)" —
+    # that promise was never implemented. Fold pre_listing rows back in
+    # once the market is open (analyze_ipo() can only score them then
+    # anyway; including them pre-open would just re-confirm stage=
+    # pre_listing every time, per the Bug 9 root cause).
+    from surprise_scanner import is_market_open_ist
+    if is_market_open_ist():
+        missing = missing + (audit.get("pre_listing_ipos") or [])
     force_sym = (symbol or "").upper().strip() or None
     if force_sym:
         missing = [m for m in missing if str(m.get("symbol") or "").upper() == force_sym]

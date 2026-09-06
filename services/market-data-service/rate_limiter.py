@@ -39,9 +39,11 @@ logger = logging.getLogger("rate-limiter")
 # Provider -> (sustained requests/sec, burst capacity). Tuned conservatively
 # for free-tier upstreams; override via env without a code change.
 _DEFAULTS = {
-    "yfinance": (2.0, 6),      # Yahoo: ~2 req/s sustained, small burst — now a
-                               # fallback-only path (AngelOne is primary), see
-                               # module docstring addendum below.
+    "yfinance": (2.0, 12),     # Yahoo: burst raised 6→12 (2026-09-06): premarket
+                               # bulk feeds drain 6 tokens instantly when bhavcopy
+                               # misses a symbol and each miss hits yfinance; 12
+                               # absorbs short bursts without max_wait-exceeded.
+                               # Fallback-only path (AngelOne primary), see below.
     "indianapi": (1.0, 3),     # IndianAPI free tier: strict
     "nse": (1.0, 3),           # NSE official: strict, blocks aggressively
     "market_data": (8.0, 20),  # our own market-data-service /quote proxy
@@ -120,7 +122,10 @@ class _Bucket:
                     deficit = weight - self.tokens
                     sleep_for = min(deficit / self.rps if self.rps > 0 else 0.5, 2.0)
                 if time.time() - start >= max_wait:
-                    logger.warning("rate_limiter: max_wait exceeded, proceeding anyway (weight=%s)", weight)
+                    # Downgraded WARNING → DEBUG (2026-09-05): this path proceeds
+                    # safely (the call goes ahead); WARNING-level here floods logs
+                    # at ~1 line/s during premarket bulk feeds and buries real errors.
+                    logger.debug("rate_limiter: max_wait exceeded, proceeding anyway (weight=%s)", weight)
                     with self.lock:
                         self.tokens = max(0.0, self.tokens - weight)
                     return time.time() - start

@@ -27,6 +27,14 @@ interface Props {
   batchRepairBusy: boolean;
   patchingSymbol: string | null;
   repairBatchLabel?: string;
+  /** Optional: when the batch button kicks off a background "repair everything"
+   * job rather than one capped call, pass these to render a live progress bar
+   * and a Stop button underneath it. Omit entirely for callers that still use
+   * a single capped repair call (premarket/IPO tabs) — nothing changes for them. */
+  repairAllActive?: boolean;
+  repairAllProgress?: { processed: number; total: number } | null;
+  repairAllMessage?: string | null;
+  onStopRepairAll?: () => void | Promise<void>;
 }
 
 /**
@@ -41,6 +49,7 @@ export default function FeedHealthPanel({
   title, subtitle, healthData, healthLoading,
   onRefreshAudit, onRepairBatch, onRepairSingle,
   batchRepairBusy, patchingSymbol, repairBatchLabel = "⚡ Auto-Repair Missing (15)",
+  repairAllActive, repairAllProgress, repairAllMessage, onStopRepairAll,
 }: Props) {
   return (
     <div className="mt-2 mb-6 border border-slate bg-ink/40 rounded-2xl p-4 sm:p-5">
@@ -142,6 +151,36 @@ export default function FeedHealthPanel({
           {batchRepairBusy ? "Repairing…" : repairBatchLabel}
         </button>
       </div>
+
+      {repairAllActive && (
+        <div className="mt-3 space-y-1.5">
+          <div className="h-1.5 w-full rounded-full bg-graphite/80 overflow-hidden">
+            <div
+              className="h-full bg-signal-buy transition-all duration-500"
+              style={{
+                width:
+                  repairAllProgress?.total
+                    ? `${Math.max(4, Math.min(100, Math.round((repairAllProgress.processed / repairAllProgress.total) * 100)))}%`
+                    : "30%",
+              }}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <p className="font-display tabular-nums text-[10px] text-mist/60">
+              {repairAllMessage || "Repairing…"}
+            </p>
+            {onStopRepairAll && (
+              <button
+                type="button"
+                onClick={() => void onStopRepairAll()}
+                className="font-display tabular-nums text-[10px] px-2 py-1 rounded-lg bg-graphite text-mist border border-slate hover:bg-slate/40 transition shrink-0"
+              >
+                ⏹ Stop
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {(healthData?.incomplete_stocks?.length ?? 0) > 0 && (
         <div className="mt-4 overflow-x-auto rounded-xl border border-slate/60">

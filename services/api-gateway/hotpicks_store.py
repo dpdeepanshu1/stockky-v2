@@ -797,6 +797,7 @@ def hotpicks_repair_scores(
             out["message"] = f"{force_sym} not missing any scores in the last 72h."
             return out
         targets = targets[: max(1, min(int(limit or 15), 100))]
+        out["attempted"] = len(targets)
 
         repaired = []
         with httpx.Client(timeout=15.0, follow_redirects=True) as client, eng.begin() as conn:

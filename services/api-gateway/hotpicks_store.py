@@ -605,6 +605,12 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
         return out
 
     force_sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip() or None
+    try:
+        from symbol_aliases import is_known_delisted, is_learned_delisted, record_resolution_failure
+    except Exception:
+        is_known_delisted = lambda _s: False  # noqa: E731
+        is_learned_delisted = lambda _s: False  # noqa: E731
+        record_resolution_failure = lambda _s: 0  # noqa: E731
     eng = None
     try:
         dial = hp.dialect()
@@ -624,6 +630,17 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
             for row in res.fetchall():
                 sym, section, item_json_raw = row[0], row[1], row[2]
                 if force_sym and sym != force_sym:
+                    continue
+                # Symbols confirmed (or self-learned, after repeated failures
+                # across every price source) to be delisted/not-yet-listed
+                # can never resolve here — including them just re-burns a
+                # provider round trip every single Repair All run, which is
+                # what was triggering cascading rate-limit cooldowns
+                # (IndianAPI/Alphavantage) that then starved genuinely
+                # repairable rows in the same run. Leave them "missing" in
+                # the audit (nothing to purge — a Hot Picks row is a
+                # catalyst snapshot, not a universe row) but skip the fetch.
+                if is_known_delisted(sym) or is_learned_delisted(sym):
                     continue
                 try:
                     blob = json.loads(item_json_raw or "{}")
@@ -659,6 +676,10 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
                 try:
                     r = client.get(f"{md}/quote/{sym}")
                     if r.status_code != 200:
+                        try:
+                            record_resolution_failure(sym)
+                        except Exception:
+                            pass
                         continue
                     body = r.json() if isinstance(r.json(), dict) else {}
                     px = None
@@ -675,7 +696,20 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
                     # or 0 means no cap; a symbol only stays "missing price"
                     # here if a cap is explicitly configured and it's over it).
                     _max_px = float(os.getenv("MAX_STOCK_PRICE", "0") or 0)
-                    if px is None or (_max_px > 0 and px > _max_px):
+                    if px is None:
+                        # A genuine "no source could quote this" miss (as opposed
+                        # to the over-cap branch below, which isn't a delisting
+                        # signal) — count it toward the durable failure streak
+                        # so a symbol that can never resolve (not yet listed,
+                        # or actually delisted) eventually gets skipped for free
+                        # instead of burning a provider round trip every run.
+                        try:
+                            record_resolution_failure(sym)
+                        except Exception:
+                            pass
+                        time.sleep(0.5)
+                        continue
+                    if _max_px > 0 and px > _max_px:
                         time.sleep(0.5)
                         continue
                     blob["price"] = px
@@ -761,6 +795,11 @@ def hotpicks_repair_scores(
 
     force_sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip() or None
     try:
+        from symbol_aliases import is_known_delisted, is_learned_delisted
+    except Exception:
+        is_known_delisted = lambda _s: False  # noqa: E731
+        is_learned_delisted = lambda _s: False  # noqa: E731
+    try:
         dial = hp.dialect()
         eng = hp.shared_engine("stockky-hotpicks-score-repair")
         if eng is None:
@@ -784,6 +823,15 @@ def hotpicks_repair_scores(
             for row in res.fetchall():
                 sym, section, item_json_raw = row[0], row[1], row[2]
                 if force_sym and sym != force_sym:
+                    continue
+                # A symbol confirmed/learned as delisted or not-yet-listed has
+                # no real market data behind it — /decide/{symbol} fans out to
+                # the technical + fundamental + prediction services, each of
+                # which will themselves stall trying to fetch data for it.
+                # Skipping here is what stops one unrepairable Hot Pick from
+                # dragging every other symbol's scoring into read-timeouts in
+                # the same run.
+                if is_known_delisted(sym) or is_learned_delisted(sym):
                     continue
                 try:
                     blob = json.loads(item_json_raw or "{}")

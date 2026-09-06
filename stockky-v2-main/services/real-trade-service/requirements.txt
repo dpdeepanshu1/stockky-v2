@@ -1,0 +1,24 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+httpx==0.25.2
+python-dotenv==1.0.0
+pydantic==2.5.3
+sqlalchemy==2.0.23
+# Postgres/Neon driver — every other Stockky service pins this; real-trade-service
+# needs it too now that DATABASE_URL (Neon) is a supported backend alongside
+# Oracle. Missing this is exactly what "ModuleNotFoundError: No module named
+# 'psycopg2'" at get_engine()/create_engine() on boot means.
+psycopg2-binary==2.9.9
+argon2-cffi==23.1.0
+cryptography==41.0.7
+pyjwt==2.8.0
+websockets>=12.0.1
+# Official DhanHQ Python client — execution/dhan_client.py is the ONLY module
+# in this service allowed to import this.
+dhanhq==2.0.2
+# Oracle Autonomous DB driver (thin mode) — used only when ORACLE_* env is
+# set. Harmless on Render/Neon: pure-Python, imported lazily, never loaded
+# on the Postgres path. Matches every other Stockky service's requirements.
+oracledb==2.5.1
+python-dateutil==2.9.0  # §1 live_quotes timestamp parsing in market_feed/feed.py
+pyotp==2.9.0  # §2 Dhan TOTP auto-refresh in auth/dhan_credentials.py

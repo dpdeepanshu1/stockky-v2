@@ -1,0 +1,11 @@
+/home/workdir/artifacts/stockky-v2/.env.example
+/home/workdir/artifacts/stockky-v2/DEPLOY_GUIDE.md
+/home/workdir/artifacts/stockky-v2/README.md
+/home/workdir/artifacts/stockky-v2/config/service_urls.py
+/home/workdir/artifacts/stockky-v2/frontend/src/App.tsx
+/home/workdir/artifacts/stockky-v2/services/analysis-intelligence-service/fundamental/main.py
+/home/workdir/artifacts/stockky-v2/services/analysis-intelligence-service/technical/main.py
+/home/workdir/artifacts/stockky-v2/services/api-gateway/main.py
+/home/workdir/artifacts/stockky-v2/services/decision-prediction-service/decision/main.py
+/home/workdir/artifacts/stockky-v2/services/decision-prediction-service/prediction/main.py
+/home/workdir/artifacts/stockky-v2/services/decision-prediction-service/training/app.py

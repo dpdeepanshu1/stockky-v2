@@ -1,0 +1,127 @@
+{
+  "momentum_movers": [
+    "TORNTPOWER",
+    "COALINDIA",
+    "NUVAMA",
+    "UTIAMC",
+    "KAJARIACER",
+    "EICHERMOT",
+    "CLEAN",
+    "RAJESHEXPO",
+    "HEROMOTOCO",
+    "HATSUN",
+    "AFFLE",
+    "TATAPOWER"
+  ],
+  "details": [
+    {
+      "symbol": "TORNTPOWER",
+      "volume": 1312898,
+      "avg_volume_20": 263380,
+      "volume_ratio": 4.98,
+      "close": 1248.9,
+      "pct_change": 2.43,
+      "date": "2026-09-02 00:00:00+05:30"
+    },
+    {
+      "symbol": "COALINDIA",
+      "volume": 34128070,
+      "avg_volume_20": 7816159,
+      "volume_ratio": 4.37,
+      "close": 417.85,
+      "pct_change": 4.05,
+      "date": "2026-09-02 00:00:00+05:30"
+    },
+    {
+      "symbol": "NUVAMA",
+      "volume": 1438167,
+      "avg_volume_20": 329576,
+      "volume_ratio": 4.36,
+      "close": 1841.0,
+      "pct_change": 3.14,
+      "date": "2026-09-02 00:00:00+05:30"
+    },
+    {
+      "symbol": "UTIAMC",
+      "volume": 415847,
+      "avg_volume_20": 100814,
+      "volume_ratio": 4.12,
+      "close": 877.0,
+      "pct_change": -0.28,
+      "date": "2026-09-02 00:00:00+05:30"
+    },
+    {
+      "symbol": "KAJARIACER",
+      "volume": 725692,
+      "avg_volume_20": 219822,
+      "volume_ratio": 3.3,
+      "close": 1261.1,
+      "pct_change": 2.61,
+      "date": "2026-09-02 00:00:00+05:30"
+    },
+    {
+      "symbol": "EICHERMOT",
+      "volume": 1117429,
+      "avg_volume_20": 373571,
+      "volume_ratio": 2.99,
+      "close": 7711.5,
+      "pct_change": -3.24,
+      "date": "2026-09-02 00:00:00+05:30"
+    },
+    {
+      "symbol": "CLEAN",
+      "volume": 1112247,
+      "avg_volume_20": 401641,
+      "volume_ratio": 2.77,
+      "close": 863.15,
+      "pct_change": 4.36,
+      "date": "2026-09-02 00:00:00+05:30"
+    },
+    {
+      "symbol": "RAJESHEXPO",
+      "volume": 300872,
+      "avg_volume_20": 108698,
+      "volume_ratio": 2.77,
+      "close": 79.49,
+      "pct_change": 4.99,
+      "date": "2026-09-02 00:00:00+05:30"
+    },
+    {
+      "symbol": "HEROMOTOCO",
+      "volume": 1746616,
+      "avg_volume_20": 648189,
+      "volume_ratio": 2.69,
+      "close": 5300.0,
+      "pct_change": -4.59,
+      "date": "2026-09-02 00:00:00+05:30"
+    },
+    {
+      "symbol": "HATSUN",
+      "volume": 244250,
+      "avg_volume_20": 92381,
+      "volume_ratio": 2.64,
+      "close": 1193.6,
+      "pct_change": 1.28,
+      "date": "2026-09-02 00:00:00+05:30"
+    },
+    {
+      "symbol": "AFFLE",
+      "volume": 443261,
+      "avg_volume_20": 173759,
+      "volume_ratio": 2.55,
+      "close": 1517.9,
+      "pct_change": -3.02,
+      "date": "2026-09-02 00:00:00+05:30"
+    },
+    {
+      "symbol": "TATAPOWER",
+      "volume": 12228879,
+      "avg_volume_20": 4842147,
+      "volume_ratio": 2.53,
+      "close": 364.0,
+      "pct_change": 3.84,
+      "date": "2026-09-02 00:00:00+05:30"
+    }
+  ],
+  "downloaded_at": "2026-09-02"
+}

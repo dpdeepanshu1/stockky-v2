@@ -1,0 +1,805 @@
+{
+  "delivery": {
+    "AAVAS": {
+      "symbol": "AAVAS",
+      "delivery_pct": null,
+      "traded_qty": 229806,
+      "prev_close": 1248.4,
+      "market_cap": 99802349568,
+      "52w_high": 1771.9,
+      "52w_low": 1060.4,
+      "as_of": "2026-09-02"
+    },
+    "ABB": {
+      "symbol": "ABB",
+      "delivery_pct": null,
+      "traded_qty": 163167,
+      "prev_close": 7396.0,
+      "market_cap": 1578187620352,
+      "52w_high": 7924.5,
+      "52w_low": 4637.5,
+      "as_of": "2026-09-02"
+    },
+    "ABFRL": {
+      "symbol": "ABFRL",
+      "delivery_pct": null,
+      "traded_qty": 4427790,
+      "prev_close": 51.1,
+      "market_cap": 61410746368,
+      "52w_high": 94.95,
+      "52w_low": 50.2,
+      "as_of": "2026-09-02"
+    },
+    "ACCELYA": {
+      "symbol": "ACCELYA",
+      "delivery_pct": null,
+      "traded_qty": 4566,
+      "prev_close": 1132.3,
+      "market_cap": 16942798848,
+      "52w_high": 1527.0,
+      "52w_low": 1012.4,
+      "as_of": "2026-09-02"
+    },
+    "ADANIENT": {
+      "symbol": "ADANIENT",
+      "delivery_pct": null,
+      "traded_qty": 1641043,
+      "prev_close": 2863.9,
+      "market_cap": 4114954584064,
+      "52w_high": 3245.0,
+      "52w_low": 1753.0,
+      "as_of": "2026-09-02"
+    },
+    "ADANIGREEN": {
+      "symbol": "ADANIGREEN",
+      "delivery_pct": null,
+      "traded_qty": 2634168,
+      "prev_close": 1265.0,
+      "market_cap": 2134740303872,
+      "52w_high": 1631.5,
+      "52w_low": 765.0,
+      "as_of": "2026-09-02"
+    },
+    "ADANIPORTS": {
+      "symbol": "ADANIPORTS",
+      "delivery_pct": null,
+      "traded_qty": 2338933,
+      "prev_close": 1647.5,
+      "market_cap": 3853832159232,
+      "52w_high": 1891.1,
+      "52w_low": 1292.0,
+      "as_of": "2026-09-02"
+    },
+    "ADANITRANS": {
+      "symbol": "ADANITRANS",
+      "delivery_pct": null,
+      "traded_qty": null,
+      "prev_close": null,
+      "market_cap": null,
+      "52w_high": null,
+      "52w_low": null,
+      "as_of": "2026-09-02"
+    },
+    "AEGISLOG": {
+      "symbol": "AEGISLOG",
+      "delivery_pct": null,
+      "traded_qty": 722924,
+      "prev_close": 1219.3,
+      "market_cap": 435871809536,
+      "52w_high": 1497.8,
+      "52w_low": 576.1,
+      "as_of": "2026-09-02"
+    },
+    "AFFLE": {
+      "symbol": "AFFLE",
+      "delivery_pct": null,
+      "traded_qty": 443261,
+      "prev_close": 1565.1,
+      "market_cap": 213629927424,
+      "52w_high": 2185.9,
+      "52w_low": 1251.3,
+      "as_of": "2026-09-02"
+    },
+    "AJANTPHARM": {
+      "symbol": "AJANTPHARM",
+      "delivery_pct": null,
+      "traded_qty": 99444,
+      "prev_close": 3504.8,
+      "market_cap": 435069812736,
+      "52w_high": 3796.0,
+      "52w_low": 2329.9,
+      "as_of": "2026-09-02"
+    },
+    "ALEMBICLTD": {
+      "symbol": "ALEMBICLTD",
+      "delivery_pct": null,
+      "traded_qty": 642926,
+      "prev_close": 98.85,
+      "market_cap": 25714130944,
+      "52w_high": 108.5,
+      "52w_low": 70.46,
+      "as_of": "2026-09-02"
+    },
+    "ALKEM": {
+      "symbol": "ALKEM",
+      "delivery_pct": null,
+      "traded_qty": 218194,
+      "prev_close": 5300.0,
+      "market_cap": 622933639168,
+      "52w_high": 5933.5,
+      "52w_low": 5075.0,
+      "as_of": "2026-09-02"
+    },
+    "ALKYLAMINE": {
+      "symbol": "ALKYLAMINE",
+      "delivery_pct": null,
+      "traded_qty": 138949,
+      "prev_close": 2011.0,
+      "market_cap": 101039267840,
+      "52w_high": 2127.0,
+      "52w_low": 1212.0,
+      "as_of": "2026-09-02"
+    },
+    "AMARAJABAT": {
+      "symbol": "AMARAJABAT",
+      "delivery_pct": null,
+      "traded_qty": null,
+      "prev_close": null,
+      "market_cap": null,
+      "52w_high": null,
+      "52w_low": null,
+      "as_of": "2026-09-02"
+    },
+    "AMBUJACEM": {
+      "symbol": "AMBUJACEM",
+      "delivery_pct": null,
+      "traded_qty": 1330379,
+      "prev_close": 402.2,
+      "market_cap": 1000635891712,
+      "52w_high": 600.8,
+      "52w_low": 394.0,
+      "as_of": "2026-09-02"
+    },
+    "ANGELONE": {
+      "symbol": "ANGELONE",
+      "delivery_pct": null,
+      "traded_qty": 4435944,
+      "prev_close": 281.55,
+      "market_cap": 255244681216,
+      "52w_high": 360.45,
+      "52w_low": 208.63,
+      "as_of": "2026-09-02"
+    },
+    "ANURAS": {
+      "symbol": "ANURAS",
+      "delivery_pct": null,
+      "traded_qty": 280141,
+      "prev_close": 1259.8,
+      "market_cap": 141207961600,
+      "52w_high": 1415.0,
+      "52w_low": 1045.2,
+      "as_of": "2026-09-02"
+    },
+    "APOLLOHOSP": {
+      "symbol": "APOLLOHOSP",
+      "delivery_pct": null,
+      "traded_qty": 169171,
+      "prev_close": 8755.0,
+      "market_cap": 1253658460160,
+      "52w_high": 9050.0,
+      "52w_low": 6696.5,
+      "as_of": "2026-09-02"
+    },
+    "APOLLOTYRE": {
+      "symbol": "APOLLOTYRE",
+      "delivery_pct": null,
+      "traded_qty": 332910,
+      "prev_close": 442.7,
+      "market_cap": 274635177984,
+      "52w_high": 540.5,
+      "52w_low": 365.3,
+      "as_of": "2026-09-02"
+    },
+    "APTUS": {
+      "symbol": "APTUS",
+      "delivery_pct": null,
+      "traded_qty": 466539,
+      "prev_close": 253.36,
+      "market_cap": 127351111680,
+      "52w_high": 353.25,
+      "52w_low": 193.03,
+      "as_of": "2026-09-02"
+    },
+    "ARCHIES": {
+      "symbol": "ARCHIES",
+      "delivery_pct": null,
+      "traded_qty": 27462,
+      "prev_close": 13.4,
+      "market_cap": 437113184,
+      "52w_high": 24.38,
+      "52w_low": 10.86,
+      "as_of": "2026-09-02"
+    },
+    "ASIANPAINT": {
+      "symbol": "ASIANPAINT",
+      "delivery_pct": null,
+      "traded_qty": 497830,
+      "prev_close": 2575.5,
+      "market_cap": 2422973399040,
+      "52w_high": 2985.7,
+      "52w_low": 2115.0,
+      "as_of": "2026-09-02"
+    },
+    "ASTRAL": {
+      "symbol": "ASTRAL",
+      "delivery_pct": null,
+      "traded_qty": 1046510,
+      "prev_close": 1507.0,
+      "market_cap": 399482814464,
+      "52w_high": 1768.7,
+      "52w_low": 1311.6,
+      "as_of": "2026-09-02"
+    },
+    "ATUL": {
+      "symbol": "ATUL",
+      "delivery_pct": null,
+      "traded_qty": 22847,
+      "prev_close": 6452.0,
+      "market_cap": 190944509952,
+      "52w_high": 7180.0,
+      "52w_low": 5560.5,
+      "as_of": "2026-09-02"
+    },
+    "AUROPHARMA": {
+      "symbol": "AUROPHARMA",
+      "delivery_pct": null,
+      "traded_qty": 816323,
+      "prev_close": 1683.3,
+      "market_cap": 948337836032,
+      "52w_high": 1717.0,
+      "52w_low": 1016.2,
+      "as_of": "2026-09-02"
+    },
+    "AVINASH": {
+      "symbol": "AVINASH",
+      "delivery_pct": null,
+      "traded_qty": null,
+      "prev_close": null,
+      "market_cap": null,
+      "52w_high": null,
+      "52w_low": null,
+      "as_of": "2026-09-02"
+    },
+    "AXISBANK": {
+      "symbol": "AXISBANK",
+      "delivery_pct": null,
+      "traded_qty": 6436922,
+      "prev_close": 1258.0,
+      "market_cap": 3903698239488,
+      "52w_high": 1418.3,
+      "52w_low": 1045.0,
+      "as_of": "2026-09-02"
+    },
+    "BAJAJ-AUTO": {
+      "symbol": "BAJAJ-AUTO",
+      "delivery_pct": null,
+      "traded_qty": 333604,
+      "prev_close": 12361.0,
+      "market_cap": 3333370675200,
+      "52w_high": 12275.0,
+      "52w_low": 8491.5,
+      "as_of": "2026-09-02"
+    },
+    "BAJAJFINSV": {
+      "symbol": "BAJAJFINSV",
+      "delivery_pct": null,
+      "traded_qty": 730982,
+      "prev_close": 1972.0,
+      "market_cap": 3184487038976,
+      "52w_high": 2195.0,
+      "52w_low": 1597.0,
+      "as_of": "2026-09-02"
+    },
+    "BAJAJHLDNG": {
+      "symbol": "BAJAJHLDNG",
+      "delivery_pct": null,
+      "traded_qty": 32371,
+      "prev_close": 11310.0,
+      "market_cap": 1235357925376,
+      "52w_high": 13880.0,
+      "52w_low": 8588.0,
+      "as_of": "2026-09-02"
+    },
+    "BAJFINANCE": {
+      "symbol": "BAJFINANCE",
+      "delivery_pct": null,
+      "traded_qty": 6233871,
+      "prev_close": 1053.9,
+      "market_cap": 6568662269952,
+      "52w_high": 1176.4,
+      "52w_low": 787.9,
+      "as_of": "2026-09-02"
+    },
+    "BALRAMCHIN": {
+      "symbol": "BALRAMCHIN",
+      "delivery_pct": null,
+      "traded_qty": 4011450,
+      "prev_close": 668.85,
+      "market_cap": 141717422080,
+      "52w_high": 780.95,
+      "52w_low": 393.55,
+      "as_of": "2026-09-02"
+    },
+    "BANDHANBNK": {
+      "symbol": "BANDHANBNK",
+      "delivery_pct": null,
+      "traded_qty": 6394088,
+      "prev_close": 162.9,
+      "market_cap": 260226744320,
+      "52w_high": 220.76,
+      "52w_low": 134.25,
+      "as_of": "2026-09-02"
+    },
+    "BATAINDIA": {
+      "symbol": "BATAINDIA",
+      "delivery_pct": null,
+      "traded_qty": 86819,
+      "prev_close": 677.35,
+      "market_cap": 86171287552,
+      "52w_high": 1282.5,
+      "52w_low": 605.0,
+      "as_of": "2026-09-02"
+    },
+    "BAYERCROP": {
+      "symbol": "BAYERCROP",
+      "delivery_pct": null,
+      "traded_qty": 16833,
+      "prev_close": 3987.6,
+      "market_cap": 178847055872,
+      "52w_high": 5489.0,
+      "52w_low": 3935.0,
+      "as_of": "2026-09-02"
+    },
+    "BERGEPAINT": {
+      "symbol": "BERGEPAINT",
+      "delivery_pct": null,
+      "traded_qty": 225668,
+      "prev_close": 490.85,
+      "market_cap": 569067634688,
+      "52w_high": 594.55,
+      "52w_low": 391.1,
+      "as_of": "2026-09-02"
+    },
+    "BHARTIARTL": {
+      "symbol": "BHARTIARTL",
+      "delivery_pct": null,
+      "traded_qty": 4124856,
+      "prev_close": 1877.2,
+      "market_cap": 11621372002304,
+      "52w_high": 2174.5,
+      "52w_low": 1740.5,
+      "as_of": "2026-09-02"
+    },
+    "BIOCON": {
+      "symbol": "BIOCON",
+      "delivery_pct": null,
+      "traded_qty": 1432978,
+      "prev_close": 401.05,
+      "market_cap": null,
+      "52w_high": 447.15,
+      "52w_low": 337.05,
+      "as_of": "2026-09-02"
+    },
+    "BLUEDART": {
+      "symbol": "BLUEDART",
+      "delivery_pct": null,
+      "traded_qty": 23531,
+      "prev_close": 5105.0,
+      "market_cap": 119054909440,
+      "52w_high": 7036.0,
+      "52w_low": 4628.5,
+      "as_of": "2026-09-02"
+    },
+    "BLUESTARCO": {
+      "symbol": "BLUESTARCO",
+      "delivery_pct": null,
+      "traded_qty": 657740,
+      "prev_close": 1490.9,
+      "market_cap": 297143042048,
+      "52w_high": 2040.0,
+      "52w_low": 1432.5,
+      "as_of": "2026-09-02"
+    },
+    "BOSCHLTD": {
+      "symbol": "BOSCHLTD",
+      "delivery_pct": null,
+      "traded_qty": 50831,
+      "prev_close": 48550.0,
+      "market_cap": null,
+      "52w_high": 50000.0,
+      "52w_low": 28610.0,
+      "as_of": "2026-09-02"
+    },
+    "BPCL": {
+      "symbol": "BPCL",
+      "delivery_pct": null,
+      "traded_qty": 8277377,
+      "prev_close": 317.65,
+      "market_cap": 1365518188544,
+      "52w_high": 391.65,
+      "52w_low": 266.6,
+      "as_of": "2026-09-02"
+    },
+    "BRITANNIA": {
+      "symbol": "BRITANNIA",
+      "delivery_pct": null,
+      "traded_qty": 325670,
+      "prev_close": 5187.0,
+      "market_cap": 1241435209728,
+      "52w_high": 6336.0,
+      "52w_low": 5035.0,
+      "as_of": "2026-09-02"
+    },
+    "CANBK": {
+      "symbol": "CANBK",
+      "delivery_pct": null,
+      "traded_qty": 13229131,
+      "prev_close": 125.6,
+      "market_cap": 1145623281664,
+      "52w_high": 162.89,
+      "52w_low": 104.75,
+      "as_of": "2026-09-02"
+    },
+    "CANFINHOME": {
+      "symbol": "CANFINHOME",
+      "delivery_pct": null,
+      "traded_qty": 171617,
+      "prev_close": 793.4,
+      "market_cap": 105897844736,
+      "52w_high": 971.5,
+      "52w_low": 720.1,
+      "as_of": "2026-09-02"
+    },
+    "CAPLIPOINT": {
+      "symbol": "CAPLIPOINT",
+      "delivery_pct": null,
+      "traded_qty": 373588,
+      "prev_close": 2711.2,
+      "market_cap": 206789820416,
+      "52w_high": 2735.8,
+      "52w_low": 1500.3,
+      "as_of": "2026-09-02"
+    },
+    "CARBORUNIV": {
+      "symbol": "CARBORUNIV",
+      "delivery_pct": null,
+      "traded_qty": 146272,
+      "prev_close": 1100.5,
+      "market_cap": 204126502912,
+      "52w_high": 1306.9,
+      "52w_low": 735.2,
+      "as_of": "2026-09-02"
+    },
+    "CASTROLIND": {
+      "symbol": "CASTROLIND",
+      "delivery_pct": null,
+      "traded_qty": 858821,
+      "prev_close": 186.02,
+      "market_cap": 184055889920,
+      "52w_high": 210.75,
+      "52w_low": 170.1,
+      "as_of": "2026-09-02"
+    },
+    "CCL": {
+      "symbol": "CCL",
+      "delivery_pct": null,
+      "traded_qty": 145991,
+      "prev_close": 1100.1,
+      "market_cap": 144815505408,
+      "52w_high": 1242.2,
+      "52w_low": 815.5,
+      "as_of": "2026-09-02"
+    },
+    "CDSL": {
+      "symbol": "CDSL",
+      "delivery_pct": null,
+      "traded_qty": 857829,
+      "prev_close": 1391.0,
+      "market_cap": 285326802944,
+      "52w_high": 1673.7,
+      "52w_low": 1116.3,
+      "as_of": "2026-09-02"
+    },
+    "CEATLTD": {
+      "symbol": "CEATLTD",
+      "delivery_pct": null,
+      "traded_qty": 47129,
+      "prev_close": 3400.2,
+      "market_cap": 135418822656,
+      "52w_high": 4438.0,
+      "52w_low": 3061.2,
+      "as_of": "2026-09-02"
+    },
+    "CENTURYTEX": {
+      "symbol": "CENTURYTEX",
+      "delivery_pct": null,
+      "traded_qty": null,
+      "prev_close": null,
+      "market_cap": null,
+      "52w_high": null,
+      "52w_low": null,
+      "as_of": "2026-09-02"
+    },
+    "CHAMBLFERT": {
+      "symbol": "CHAMBLFERT",
+      "delivery_pct": null,
+      "traded_qty": 738955,
+      "prev_close": 412.3,
+      "market_cap": 164848386048,
+      "52w_high": 580.7,
+      "52w_low": 399.75,
+      "as_of": "2026-09-02"
+    },
+    "CHOLAFIN": {
+      "symbol": "CHOLAFIN",
+      "delivery_pct": null,
+      "traded_qty": 853167,
+      "prev_close": 1814.7,
+      "market_cap": 1559439081472,
+      "52w_high": 1952.5,
+      "52w_low": 1299.4,
+      "as_of": "2026-09-02"
+    },
+    "CIPLA": {
+      "symbol": "CIPLA",
+      "delivery_pct": null,
+      "traded_qty": 578237,
+      "prev_close": 1423.0,
+      "market_cap": 1141342470144,
+      "52w_high": 1673.0,
+      "52w_low": 1165.7,
+      "as_of": "2026-09-02"
+    },
+    "CLEAN": {
+      "symbol": "CLEAN",
+      "delivery_pct": null,
+      "traded_qty": 1112247,
+      "prev_close": 827.1,
+      "market_cap": 91739144192,
+      "52w_high": 1217.9,
+      "52w_low": 652.0,
+      "as_of": "2026-09-02"
+    },
+    "COALINDIA": {
+      "symbol": "COALINDIA",
+      "delivery_pct": null,
+      "traded_qty": 34128070,
+      "prev_close": 401.6,
+      "market_cap": 2575096086528,
+      "52w_high": 491.25,
+      "52w_low": 369.6,
+      "as_of": "2026-09-02"
+    },
+    "COFORGE": {
+      "symbol": "COFORGE",
+      "delivery_pct": null,
+      "traded_qty": 1664705,
+      "prev_close": 1988.9,
+      "market_cap": 870648774656,
+      "52w_high": 2021.2,
+      "52w_low": 1008.1,
+      "as_of": "2026-09-02"
+    },
+    "COLPAL": {
+      "symbol": "COLPAL",
+      "delivery_pct": null,
+      "traded_qty": 274660,
+      "prev_close": 1859.8,
+      "market_cap": 506301251584,
+      "52w_high": 2504.0,
+      "52w_low": 1782.0,
+      "as_of": "2026-09-02"
+    },
+    "CONCOR": {
+      "symbol": "CONCOR",
+      "delivery_pct": null,
+      "traded_qty": 2200028,
+      "prev_close": 514.0,
+      "market_cap": 388425154560,
+      "52w_high": 569.8,
+      "52w_low": 421.45,
+      "as_of": "2026-09-02"
+    },
+    "CREDITACC": {
+      "symbol": "CREDITACC",
+      "delivery_pct": null,
+      "traded_qty": 394282,
+      "prev_close": 1393.3,
+      "market_cap": 224908230656,
+      "52w_high": 1634.0,
+      "52w_low": 1113.0,
+      "as_of": "2026-09-02"
+    },
+    "CROMPTON": {
+      "symbol": "CROMPTON",
+      "delivery_pct": null,
+      "traded_qty": 3475503,
+      "prev_close": 231.1,
+      "market_cap": 146632294400,
+      "52w_high": 337.5,
+      "52w_low": 217.4,
+      "as_of": "2026-09-02"
+    },
+    "CYIENT": {
+      "symbol": "CYIENT",
+      "delivery_pct": null,
+      "traded_qty": 820286,
+      "prev_close": 1164.6,
+      "market_cap": 117553799168,
+      "52w_high": 1284.7,
+      "52w_low": 750.3,
+      "as_of": "2026-09-02"
+    },
+    "DABUR": {
+      "symbol": "DABUR",
+      "delivery_pct": null,
+      "traded_qty": 1597151,
+      "prev_close": 384.0,
+      "market_cap": 672329695232,
+      "52w_high": 577.0,
+      "52w_low": 377.6,
+      "as_of": "2026-09-02"
+    },
+    "DALBHARAT": {
+      "symbol": "DALBHARAT",
+      "delivery_pct": null,
+      "traded_qty": 58870,
+      "prev_close": 1806.6,
+      "market_cap": 332861931520,
+      "52w_high": 2496.3,
+      "52w_low": 1605.0,
+      "as_of": "2026-09-02"
+    },
+    "DCMSHRIRAM": {
+      "symbol": "DCMSHRIRAM",
+      "delivery_pct": null,
+      "traded_qty": 88712,
+      "prev_close": 1030.4,
+      "market_cap": 159190745088,
+      "52w_high": 1414.4,
+      "52w_low": 945.1,
+      "as_of": "2026-09-02"
+    },
+    "DEEPAKFERT": {
+      "symbol": "DEEPAKFERT",
+      "delivery_pct": null,
+      "traded_qty": 130758,
+      "prev_close": 1427.5,
+      "market_cap": 179021758464,
+      "52w_high": 1681.0,
+      "52w_low": 866.4,
+      "as_of": "2026-09-02"
+    },
+    "DELTACORP": {
+      "symbol": "DELTACORP",
+      "delivery_pct": null,
+      "traded_qty": 644622,
+      "prev_close": 57.41,
+      "market_cap": 15249564672,
+      "52w_high": 97.18,
+      "52w_low": 48.3,
+      "as_of": "2026-09-02"
+    },
+    "DHANUKA": {
+      "symbol": "DHANUKA",
+      "delivery_pct": null,
+      "traded_qty": 17041,
+      "prev_close": 990.35,
+      "market_cap": 44386635776,
+      "52w_high": 1654.4,
+      "52w_low": 889.6,
+      "as_of": "2026-09-02"
+    },
+    "DIVISLAB": {
+      "symbol": "DIVISLAB",
+      "delivery_pct": null,
+      "traded_qty": 403502,
+      "prev_close": 9165.0,
+      "market_cap": 2447620177920,
+      "52w_high": 9467.0,
+      "52w_low": 5636.5,
+      "as_of": "2026-09-02"
+    },
+    "DIXON": {
+      "symbol": "DIXON",
+      "delivery_pct": null,
+      "traded_qty": 216645,
+      "prev_close": 14461.0,
+      "market_cap": 887099621376,
+      "52w_high": 18471.0,
+      "52w_low": 9600.0,
+      "as_of": "2026-09-02"
+    },
+    "DLF": {
+      "symbol": "DLF",
+      "delivery_pct": null,
+      "traded_qty": 3577683,
+      "prev_close": 675.15,
+      "market_cap": 1667246063616,
+      "52w_high": 794.8,
+      "52w_low": 489.4,
+      "as_of": "2026-09-02"
+    },
+    "DRREDDY": {
+      "symbol": "DRREDDY",
+      "delivery_pct": null,
+      "traded_qty": 486524,
+      "prev_close": 1171.0,
+      "market_cap": 963350888448,
+      "52w_high": 1414.9,
+      "52w_low": 1101.0,
+      "as_of": "2026-09-02"
+    },
+    "EDELWEISS": {
+      "symbol": "EDELWEISS",
+      "delivery_pct": null,
+      "traded_qty": 5704416,
+      "prev_close": 128.94,
+      "market_cap": 119433363456,
+      "52w_high": 133.9,
+      "52w_low": 98.0,
+      "as_of": "2026-09-02"
+    },
+    "EICHERMOT": {
+      "symbol": "EICHERMOT",
+      "delivery_pct": null,
+      "traded_qty": 1117429,
+      "prev_close": 7970.0,
+      "market_cap": 2116974018560,
+      "52w_high": 8230.0,
+      "52w_low": 6282.5,
+      "as_of": "2026-09-02"
+    },
+    "EIDPARRY": {
+      "symbol": "EIDPARRY",
+      "delivery_pct": null,
+      "traded_qty": 358864,
+      "prev_close": 795.6,
+      "market_cap": 142480228352,
+      "52w_high": 1176.0,
+      "52w_low": 698.2,
+      "as_of": "2026-09-02"
+    },
+    "ELGIEQUIP": {
+      "symbol": "ELGIEQUIP",
+      "delivery_pct": null,
+      "traded_qty": 340529,
+      "prev_close": 628.9,
+      "market_cap": 194425176064,
+      "52w_high": 644.0,
+      "52w_low": 408.25,
+      "as_of": "2026-09-02"
+    },
+    "EMAMILTD": {
+      "symbol": "EMAMILTD",
+      "delivery_pct": null,
+      "traded_qty": 1183370,
+      "prev_close": 376.65,
+      "market_cap": 160653819904,
+      "52w_high": 618.0,
+      "52w_low": 362.0,
+      "as_of": "2026-09-02"
+    },
+    "EQUITASBNK": {
+      "symbol": "EQUITASBNK",
+      "delivery_pct": null,
+      "traded_qty": 670501,
+      "prev_close": 73.42,
+      "market_cap": 84021813248,
+      "52w_high": 83.9,
+      "52w_low": 50.85,
+      "as_of": "2026-09-02"
+    }
+  },
+  "downloaded_at": "2026-09-02"
+}

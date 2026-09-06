@@ -319,9 +319,6 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
   const [premarketBusy, setPremarketBusy] = useState(false);
   const [premarketMsg, setPremarketMsg] = useState<string | null>(null);
   const premarketPollRef = useRef<number | null>(null);
-  const [repairAllProgress, setRepairAllProgress] = useState<{ processed: number; total: number; ok_count: number } | null>(null);
-  const [repairAllLiveMsg, setRepairAllLiveMsg] = useState<string | null>(null);
-  const repairAllPollRef = useRef<number | null>(null);
 
   const fetchHotPicksHealth = useCallback(async () => {
     setHealthLoading(true);
@@ -363,102 +360,37 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
     }
   }, []);
 
-  const stopRepairAllPoll = useCallback(() => {
-    if (repairAllPollRef.current != null) {
-      window.clearInterval(repairAllPollRef.current);
-      repairAllPollRef.current = null;
-    }
-  }, []);
-
-  // Polls the background "Repair All" job (price + score/decision across the
-  // WHOLE incomplete set, not just the next 15/100 a single capped call could
-  // reach) and reflects live progress in the panel until it finishes.
-  const pollRepairAllJob = useCallback(async () => {
-    try {
-      const st = await api.hotPicksRepairAllStatus();
-      setRepairAllProgress({
-        processed: st?.processed || 0,
-        total: st?.total || 0,
-        ok_count: st?.ok_count || 0,
-      });
-      if (st?.status !== "running") {
-        stopRepairAllPoll();
-        setBatchRepairBusy(false);
-        setRepairAllLiveMsg(null);
-        setRepairMsg({
-          ok: st?.status === "done",
-          text: st?.message || (st?.status === "done" ? "Repair All finished." : "Repair All stopped."),
-        });
-        // Reload card data so repaired scores/prices appear immediately —
-        // without this the cards still show "—" even though the DB was updated.
-        await loadCached();
-        await fetchHotPicksHealth();
-      } else {
-        setRepairAllLiveMsg(st?.message || `${st?.processed || 0} attempted so far…`);
-      }
-    } catch {
-      // Best-effort poll — a single failed tick doesn't need to surface as an error.
-    }
-  }, [fetchHotPicksHealth, loadCached, stopRepairAllPoll]);
-
   const handleRepairBatchMissing = useCallback(async () => {
     setBatchRepairBusy(true);
     setRepairMsg(null);
-    setRepairAllProgress(null);
-    setRepairAllLiveMsg("Starting Repair All…");
     try {
-      // Kicks off a background job that walks EVERY incomplete row (price
-      // then score/decision), not a single capped call — the old path maxed
-      // out at 100 symbols per click (le=100 server-side) and needed
-      // re-clicking for a larger backlog.
-      const res = await api.hotPicksRepairAll();
-      if (!res?.ok) {
-        setBatchRepairBusy(false);
-        setRepairAllLiveMsg(null);
-        setRepairMsg({ ok: false, text: (res as any)?.message || "Could not start Repair All." });
-        return;
+      // Repair ALL incomplete symbols — use the full incomplete_stocks count
+      // so the button fixes everything in one click, not just the first 15.
+      // /stockky-hot/repair-batch caps `limit` at 100 (le=100) server-side, so
+      // clamp here too — sending totalMissing uncapped (e.g. 149) got rejected
+      // with a 422 ("Input should be less than or equal to 100") instead of
+      // actually repairing anything.
+      const totalMissing = healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 15;
+      const limit = Math.min(100, Math.max(15, totalMissing));
+      const res = await api.hotPicksRepairBatch(limit);
+      const repaired: string[] = res?.repaired || [];
+      if (res?.status === "error") {
+        setRepairMsg({ ok: false, text: res.error || "Repair failed." });
+      } else if (repaired.length > 0) {
+        setRepairMsg({ ok: true, text: `Repaired ${repaired.length} symbol(s): ${repaired.join(", ")}` });
+      } else {
+        setRepairMsg({ ok: true, text: res?.message || "Nothing needed repair." });
       }
-      setRepairAllLiveMsg(
-        res.already_running ? "Repair All is already running…" : res?.message || "Repairing every incomplete row…"
-      );
-      stopRepairAllPoll();
-      repairAllPollRef.current = window.setInterval(pollRepairAllJob, 3000);
-      await pollRepairAllJob();
+      // Reload card data so repaired scores/prices appear immediately —
+      // without this the cards still show "—" even though the DB was updated.
+      await loadCached();
+      await fetchHotPicksHealth();
     } catch (e: any) {
+      setRepairMsg({ ok: false, text: e?.message || "Repair request failed — check the service is reachable." });
+    } finally {
       setBatchRepairBusy(false);
-      setRepairAllLiveMsg(null);
-      setRepairMsg({ ok: false, text: e?.message || "Repair All request failed — check the service is reachable." });
     }
-  }, [pollRepairAllJob, stopRepairAllPoll]);
-
-  const handleStopRepairAll = useCallback(async () => {
-    try {
-      await api.hotPicksRepairAllStop();
-      setRepairAllLiveMsg("Stop requested — finishing current batch…");
-    } catch (e: any) {
-      setRepairMsg({ ok: false, text: e?.message || "Failed to stop Repair All." });
-    }
-  }, []);
-
-  // Resume progress display if a Repair All job is already running (e.g. the
-  // tab was reloaded mid-job) instead of the panel silently showing nothing.
-  useEffect(() => {
-    (async () => {
-      try {
-        const st = await api.hotPicksRepairAllStatus();
-        if (st?.status === "running") {
-          setBatchRepairBusy(true);
-          setRepairAllProgress({ processed: st.processed || 0, total: st.total || 0, ok_count: st.ok_count || 0 });
-          setRepairAllLiveMsg(st.message || "Repair All is running…");
-          stopRepairAllPoll();
-          repairAllPollRef.current = window.setInterval(pollRepairAllJob, 3000);
-        }
-      } catch {
-        /* best-effort */
-      }
-    })();
-    return stopRepairAllPoll;
-  }, [pollRepairAllJob, stopRepairAllPoll]);
+  }, [fetchHotPicksHealth, loadCached, healthData]);
 
   const handleRepairSingle = useCallback(async (symbol: string) => {
     setPatchingSymbol(symbol);
@@ -897,18 +829,9 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
         repairBatchLabel={
           (() => {
             const n = healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 0;
-            return n > 0 ? `⚡ Repair All (${n})` : "⚡ Repair All";
+            return n > 0 ? `⚡ Repair All Missing (${Math.min(100, n)})` : "⚡ Repair All Missing";
           })()
         }
-        repairAllActive={batchRepairBusy}
-        repairAllProgress={repairAllProgress}
-        repairAllMessage={
-          repairAllLiveMsg ||
-          (repairAllProgress
-            ? `${repairAllProgress.processed}${repairAllProgress.total ? ` / ~${repairAllProgress.total}` : ""} attempted · ${repairAllProgress.ok_count} fixed`
-            : null)
-        }
-        onStopRepairAll={handleStopRepairAll}
       />
       {repairMsg && (
         <p className={`font-display tabular-nums text-[11px] mt-1 ${repairMsg.ok ? "text-signal-buy/80" : "text-signal-sell/80"}`}>

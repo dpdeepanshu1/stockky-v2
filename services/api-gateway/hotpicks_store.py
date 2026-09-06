@@ -715,25 +715,12 @@ _HOT_SCORE_FIELDS = (
 
 def _row_needs_scores(blob: Dict[str, Any]) -> bool:
     """True when a stored hot item is missing the core conviction fields, so the
-    card would render blank dashes for Tech/Fund/…/Entry/Target/Stop.
-
-    Uses `is None` rather than truthiness for the numeric checks: a real
-    technical_score/combined_score of exactly 0 is a legitimate low score, not
-    a missing one. The previous `not blob.get(...)` form treated 0 the same as
-    None/absent, so a genuinely (if rarely) zero-scored symbol would be
-    re-flagged as needing repair on every single audit/repair pass forever —
-    burning a decision-service call each time for a value that was already
-    correct. entry_range/target are strings/ranges, not scores, so a plain
-    falsy check (empty string, None, missing key) is still correct for them.
-    """
+    card would render blank dashes for Tech/Fund/…/Entry/Target/Stop."""
     if not isinstance(blob, dict):
         return True
-    ts = blob.get("technical_score")
-    if ts is None:
+    if not blob.get("technical_score"):
         return True
-    cs = blob.get("combined_score")
-    sc = blob.get("score")
-    if cs is None and sc is None:
+    if not (blob.get("combined_score") or blob.get("score")):
         return True
     # Trade levels: if neither entry nor target present, treat as needing a pass.
     if not blob.get("entry_range") and not blob.get("target"):
@@ -842,27 +829,10 @@ def hotpicks_repair_scores(
                     if rs:
                         blob["reasons"] = rs if isinstance(rs, list) else blob.get("reasons")
                     if changed:
-                        # item_json is the authoritative payload the cards read, but
-                        # decision/score/news_score are ALSO first-class columns that
-                        # the audit/health-panel query reads directly (see
-                        # _hotpicks_audit_uncached above: m.get("decision"),
-                        # m.get("score")). Writing only item_json left those columns
-                        # NULL forever, so a repaired row rendered correctly on the
-                        # card but the audit kept counting it as missing — the
-                        # "Repair All" button never actually shrank and the health
-                        # score stayed stuck. Keep both copies in sync on every write.
                         conn.execute(
                             text(f"UPDATE {hp.TABLE_NAME} SET item_json = :item_json, "
-                                 "decision = :decision, score = :score, news_score = :news_score, "
                                  f"updated_at = {hp.now_func(dial)} WHERE symbol = :symbol AND section = :section"),
-                            {
-                                "item_json": json.dumps(blob)[:15000],
-                                "decision": blob.get("decision"),
-                                "score": _num(blob.get("score") if blob.get("score") is not None else blob.get("combined_score")),
-                                "news_score": _num(blob.get("news_score")),
-                                "symbol": sym,
-                                "section": section,
-                            },
+                            {"item_json": json.dumps(blob)[:15000], "symbol": sym, "section": section},
                         )
                         repaired.append(sym)
                 except Exception as e:

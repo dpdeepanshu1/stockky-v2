@@ -1358,12 +1358,26 @@ export const api = {
     error?: string;
   }>("/stockky-hot/audit", undefined, 2, 30000),
   hotPicksRepairBatch: (limit = 20, symbol?: string) =>
-    request<{ status: string; repaired?: string[]; attempted?: number; message?: string; error?: string }>(
+    request<{ ok: boolean; status: string; total?: number; message?: string; error?: string; already_running?: boolean }>(
       `/stockky-hot/repair-batch?limit=${limit}${symbol ? `&symbol=${encodeURIComponent(symbol)}` : ""}`,
       { method: "POST" },
       1,
-      180000
+      30000
     ),
+  hotPicksRepairStatus: () =>
+    request<{
+      status: string;
+      processed?: number;
+      total?: number;
+      elapsed_sec?: number;
+      estimated_remaining_sec?: number | null;
+      repaired?: string[];
+      failed?: string[];
+      score_repaired?: string[];
+      message?: string;
+      error?: string;
+      score_detail?: { status?: string; error?: string };
+    }>("/stockky-hot/repair-batch/status", undefined, 1, 10000),
   // displayDays narrows the stored scan to a window (30 = default, 365 = hard
   // cap). Omitted -> backend default (IPO_CHECKER_DEFAULT_DISPLAY_DAYS).
   ipoList: (displayDays?: number) =>

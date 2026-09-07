@@ -382,10 +382,21 @@ def _send_telegram(cfg: dict, title: str, message: str):
         return "not sent (disabled)"
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+    # BUG FIX (2026-09-07): Telegram's legacy Markdown parser silently drops
+    # the entire message when the text contains unescaped special chars like
+    # `_`, `.`, `(`, `)` — common in stock symbols, prices and trade messages.
+    # Switched to HTML mode: <b>…</b> for bold, no surprise failures.
+    # Convert the leading *title* Markdown bold to HTML <b> tag; leave the
+    # rest of `message` as plain text (trade messages from notifier.py use
+    # *bold* Markdown — strip those asterisks so they don't appear literally).
+    import re as _re
+    html_title = f"<b>{title}</b>"
+    html_message = _re.sub(r'\*([^*]+)\*', r'<b>\1</b>', message)
     payload = {
         "chat_id": chat_id,
-        "text": f"*{title}*\n\n{message}",
-        "parse_mode": "Markdown",
+        "text": f"{html_title}\n\n{html_message}",
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
     }
     try:
         resp = httpx.post(url, json=payload, timeout=10)
@@ -394,6 +405,18 @@ def _send_telegram(cfg: dict, title: str, message: str):
             return "sent"
         else:
             logger.error(f"Telegram API error: {resp.status_code} - {resp.text[:200]}")
+            # Second attempt: plain text (no parse_mode) as last resort
+            try:
+                plain_payload = {
+                    "chat_id": chat_id,
+                    "text": f"{title}\n\n{message}",
+                }
+                resp2 = httpx.post(url, json=plain_payload, timeout=10)
+                if resp2.status_code == 200:
+                    logger.info("Telegram sent (plain-text fallback)")
+                    return "sent (plain-text fallback)"
+            except Exception:
+                pass
             return f"failed: HTTP {resp.status_code}"
     except httpx.HTTPError as e:
         logger.error("Telegram notification failed: %s", e)

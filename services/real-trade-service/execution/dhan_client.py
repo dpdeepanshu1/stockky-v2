@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Optional
 
 import httpx
@@ -53,23 +54,72 @@ NSE_EQ_SEGMENT = "NSE_EQ"
 # manual_engine.py) so the stored decision/order price matches what's
 # actually sent, AND again here in place_order() as a defense-in-depth
 # safety net for any caller that forgets.
+#
+# 2026-09-07 fix: a real BUY (Wockhardt, ₹2,097.05, qty 1) was still
+# rejected by the exchange with "EXCH:16283:The order price is not multiple
+# of tick size" even though ₹2,097.05 LOOKS like a clean 0.05 multiple.
+# Root cause: the old round_to_tick() did `price / tick_size` and
+# `ticks * tick_size` in binary float. Both TICK_SIZE (0.05) and plenty of
+# "clean" 2-decimal rupee prices have no exact binary float representation
+# (0.05 in IEEE-754 double is actually 0.05000000000000000277...), so the
+# division/multiplication can land a hair off the true tick — e.g. produce
+# something that *prints* as 2097.05 via round(x, 2) but is actually
+# 2097.0499999999997 or 2097.0500000000002 underneath, which the exchange's
+# strict tick-multiple check (working in paise as integers) rejects even
+# though Python's own display rounds it away. round(x / 0.05) inherits that
+# same float error before it ever gets a chance to round to the nearest
+# integer tick count. This is exactly the kind of drift the function's own
+# docstring warned about but didn't fully close.
+#
+# Fix: do the tick math in Decimal, not float. Decimal(str(price)) parses
+# the price from its exact decimal text (not the binary float that's already
+# lost precision), so `price / tick_size` and `ticks * tick_size` are exact
+# base-10 operations with no binary rounding error anywhere in the chain.
+# The result is converted back to float only at the very end, once it is
+# already guaranteed to be an exact multiple of TICK_SIZE.
 TICK_SIZE = 0.05
+_TICK_SIZE_DEC = Decimal("0.05")
 
 
 def round_to_tick(price: float, tick_size: float = TICK_SIZE) -> float:
     """Round `price` to the nearest valid exchange tick (default ₹0.05).
-    Uses banker's-rounding-safe integer math (round the tick COUNT, not the
-    float) to avoid floating-point drift like round(8.475/0.05) landing on
-    169 vs 170 depending on binary representation. Returns the input
-    unchanged if it's <= 0 (nothing to round) or tick_size is invalid."""
+    Uses Decimal arithmetic (not binary float) end-to-end so the result is
+    an EXACT multiple of tick_size, not just something that happens to
+    display that way after a float round() — see the 2026-09-07 fix note
+    above for why the float version could still fail Dhan's tick check on
+    a price that looked perfectly clean. Returns the input unchanged if
+    it's <= 0 (nothing to round) or tick_size is invalid."""
     try:
-        price = float(price)
-        if price <= 0 or tick_size <= 0:
-            return price
-        ticks = round(price / tick_size)
-        return round(ticks * tick_size, 2)
-    except (TypeError, ValueError):
+        price_f = float(price)
+        if price_f <= 0 or tick_size <= 0:
+            return price_f
+        # str(price_f) — not Decimal(price_f) — so we start from the exact
+        # decimal digits a human/JSON would see, not price_f's underlying
+        # binary approximation.
+        price_dec = Decimal(str(price_f))
+        tick_dec = Decimal(str(tick_size))
+        ticks = (price_dec / tick_dec).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        result = (ticks * tick_dec).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        return float(result)
+    except (TypeError, ValueError, InvalidOperation):
         return price
+
+
+def is_valid_tick_price(price: float, tick_size: float = TICK_SIZE) -> bool:
+    """True if `price` is an exact multiple of tick_size, checked in Decimal
+    to avoid the same binary-float drift round_to_tick() guards against.
+    Used as a last-instant guard in place_order() so a bad price is caught
+    and logged here — with a clear reason — instead of only surfacing later
+    as an opaque exchange rejection."""
+    try:
+        price_dec = Decimal(str(float(price)))
+        tick_dec = Decimal(str(tick_size))
+        if price_dec <= 0 or tick_dec <= 0:
+            return True
+        remainder = (price_dec / tick_dec) % 1
+        return remainder == 0
+    except (TypeError, ValueError, InvalidOperation):
+        return False
 
 
 class SecurityNotResolvedError(Exception):
@@ -427,6 +477,20 @@ def place_order(
                 "(caller did not pre-round)", price, tick_safe_price, TICK_SIZE,
             )
         price = tick_safe_price
+        # 2026-09-07 fix: last-instant guard, checked in Decimal (see
+        # is_valid_tick_price above) so a price that survives rounding but
+        # is still off-tick due to *upstream* float drift (e.g. a caller
+        # did its own arithmetic on an already-rounded price before handing
+        # it here) is caught with a clear, attributable reason instead of
+        # silently reaching Dhan and coming back as an opaque
+        # "EXCH:16283:The order price is not multiple of tick size"
+        # rejection that looks identical to a genuine broker-side issue.
+        if not is_valid_tick_price(price):
+            raise ValueError(
+                f"Refusing to place LIMIT order at ₹{price} — not a valid "
+                f"₹{TICK_SIZE} tick multiple after rounding. This should be "
+                f"unreachable; report as a bug in the caller's price math."
+            )
 
     logger.info(
         "Placing REAL order: %s %s x%s @ %s (%s, %s)",

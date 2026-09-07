@@ -292,6 +292,13 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
             "current_equity": account.current_equity if account else None,
             "cash_available": account.cash_available if account else None,
             "realized_pnl_today": account.realized_pnl_today if account else None,
+            # 2026-09-09: was already tracked in the DB (record_real_exit_fill
+            # increments it on every closed trade) but never sent to the
+            # frontend — realized_pnl_today resets daily, so there was no
+            # field anywhere giving an all-time realized total. Needed for
+            # the dashboard's new invested/current-value/total-P&L summary
+            # (see RealAutoTrade.tsx's PortfolioSummary component).
+            "realized_pnl_total": account.realized_pnl_total if account else None,
         },
         "risk_config": {
             "risk_per_trade_pct": risk.risk_per_trade_pct if risk else None,

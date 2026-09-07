@@ -110,6 +110,7 @@ export interface GateStatus {
     current_equity: number | null;
     cash_available: number | null;
     realized_pnl_today: number | null;
+    realized_pnl_total: number | null;
   };
   risk_config: {
     risk_per_trade_pct: number | null;

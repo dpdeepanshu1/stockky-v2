@@ -375,8 +375,28 @@ def is_invalid_ip_error(message: str) -> bool:
 # the alert-throttling that keeps this from paging the same failure every
 # single retry cycle for hours (as it did in the raw logs this was found
 # from — 6h+ of the identical error, once per cycle, no dedup).
+# 2026-09-09 fix — same underlying blocker, different wording: after fixing
+# the "insufficient funds" bug (broker_imported → CNC, see CHANGES_
+# 2026-09-09_INSUFFICIENT_FUNDS_SELL_FIX.md), CNC SELLs for the newly-
+# import-fixed positions started failing with "Insufficient Holding
+# Quantity" / "Scrip limit insufficient" instead. Confirmed against Dhan's
+# own support article for that exact message (dhan.co/support/orders-and-
+# positions/order-rejections/why-was-my-order-rejected-with-scrip-limit-
+# insufficient-or-insufficient-holding-quantity-what-does-it-mean/): "This
+# error occurs when the scrip ... is not freely available in your holding"
+# — Dhan's wording for a holding that hasn't cleared today's CDSL eDIS/TPIN
+# authorization, the exact same SEBI-mandated step described above, just
+# surfaced through the scrip-limit RMS check instead of the CDSL-specific
+# qty-validation check that produces "Validate Qty from CDSL". Both checks
+# guard the same thing (is this holding authorized-for-sale today?) and
+# both need the identical human fix (open Dhan app → Verify Holdings →
+# enter T-PIN) — there is no way to tell them apart in a way that changes
+# what the user needs to do, so both route through the same detector/alert
+# rather than one falling into the generic "check Dhan directly" escalation
+# with no actionable guidance.
 _CDSL_EDIS_MARKERS = (
     "validate qty from cdsl", "cdsl", "edis", "tpin",
+    "insufficient holding quantity", "scrip limit insufficient",
 )
 
 

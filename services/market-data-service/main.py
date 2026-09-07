@@ -437,6 +437,39 @@ async def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
 
+@app.get("/angelone/network-check")
+async def angelone_network_check():
+    """2026-09-07: added after a session21 investigation traced AngelOne's
+    recurring 403 on secure endpoints to X-ClientPublicIP being sent as a
+    hardcoded/defaulted "127.0.0.1" (see angelone_client.py's
+    _resolve_client_public_ip() for the full root-cause note). Answers,
+    without needing an ad hoc docker exec + python heredoc, the two things
+    that error can't tell you on its own:
+      1. Is ANGELONE_STATIC_IP actually set in this container's env?
+      2. What real IP would we fall back to auto-detecting if not?
+    Read-only, no credentials touched — safe to call anytime.
+    """
+    import angelone_client
+
+    explicit = os.environ.get("ANGELONE_STATIC_IP", "").strip()
+    detected = angelone_client.get_outbound_ip()
+    return {
+        "angelone_static_ip_env_set": bool(explicit),
+        "angelone_static_ip_env_value": explicit or None,
+        "auto_detected_outbound_ip": detected,
+        "ip_that_will_actually_be_sent": explicit or detected or "127.0.0.1 (fallback — see note)",
+        "checked_at": datetime.utcnow().isoformat(),
+        "note": (
+            "AngelOne's secure endpoints validate X-ClientPublicIP. If this "
+            "doesn't match an IP AngelOne will accept, either set "
+            "ANGELONE_STATIC_IP to a known-good/whitelisted value, or route "
+            "outbound traffic through a static-IP proxy and set this env var "
+            "to that proxy's IP. Re-check after any redeploy/restart — a "
+            "non-static host IP can change."
+        ),
+    }
+
+
 @app.get("/bhavcopy/universe")
 def bhavcopy_universe(min_price: float = 0, limit: int = 3000):
     """

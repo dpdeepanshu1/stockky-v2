@@ -350,6 +350,41 @@ def is_invalid_ip_error(message: str) -> bool:
     return any(marker in m for marker in _INVALID_IP_MARKERS)
 
 
+# 2026-09-07 fix — session21 investigation: "Dhan API error: Validate Qty
+# from CDSL" kept recurring for IONEXCHANG/PARADEEP even AFTER confirming
+# (via direct DB query) that the exit engine was correctly computing
+# product_type="CNC" for these (both opened 3 days earlier, well past
+# same-day). That rules out the same-day/product-type theory entirely —
+# the real cause is CDSL's mandatory eDIS/TPIN authorization step, which
+# EVERY broker (not just Dhan) requires before it will let a CNC SELL
+# debit existing demat holdings: "To sell holding stocks, one needs to
+# complete the CDSL eDIS flow, generate T-PIN & mark stock to complete the
+# sell action" (Dhan's own API docs, https://dhanhq.co/docs/v1/edis/).
+# That authorization is a same-day-only, OTP-based step (valid for one
+# trading day, and required again for any newly-added holding — see Dhan's
+# support article "If I buy new stocks, will I have to verify my holding
+# again to sell them?") — there is NO way for a fully unattended service to
+# complete it, because the OTP goes to the account holder's registered
+# mobile number, and the actual TPIN entry happens on CDSL's own page, not
+# via a plain backend API call Dhan exposes. This is a SEBI-mandated
+# anti-PoA-misuse control (see the Oct-2021 CDSL outage coverage), not a
+# bug in this codebase, so there is no code fix that makes it go away —
+# only clear, non-spammy visibility so a human knows to open the Dhan app
+# and complete "Verify Holdings" before the market session, which is a
+# 30-second manual step. See exit_engine/exit.py's use of this detector for
+# the alert-throttling that keeps this from paging the same failure every
+# single retry cycle for hours (as it did in the raw logs this was found
+# from — 6h+ of the identical error, once per cycle, no dedup).
+_CDSL_EDIS_MARKERS = (
+    "validate qty from cdsl", "cdsl", "edis", "tpin",
+)
+
+
+def is_cdsl_edis_error(message: str) -> bool:
+    m = (message or "").lower()
+    return any(marker in m for marker in _CDSL_EDIS_MARKERS)
+
+
 def get_outbound_ip() -> Optional[str]:
     """Best-effort: what IP is this service ACTUALLY sending Dhan requests
     from right now? Answers the question an Invalid IP error can't on its

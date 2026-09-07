@@ -56,6 +56,7 @@ from notifier import notify_sync
 from portfolio.portfolio import (
     close_position, open_positions, refresh_unrealized, record_real_exit_sent,
 )
+from resilience.local_cache import load_snapshot, save_snapshot
 from tz_utils import as_aware, ist_today_str
 
 # §6 — corporate-action clamp for ATR trailing stop inputs
@@ -92,6 +93,18 @@ EMERGENCY_LOSS_MULT = float(os.getenv("EXIT_EMERGENCY_LOSS_MULT", "1.5"))
 MAX_HOLD_DAYS = int(os.getenv("EXIT_MAX_HOLD_DAYS", "10"))
 # Day at which we log an early warning (no exit yet, just visibility).
 EARLY_WARN_DAYS = int(os.getenv("EXIT_EARLY_WARN_DAYS", "6"))
+
+# 2026-09-07 fix: CDSL eDIS/TPIN rejections (see dhan_client.is_cdsl_edis_error's
+# docstring) are not a transient/retryable-into-success failure the same
+# way an IP or a broker hiccup is — they need a human to complete a manual
+# CDSL step, and will keep failing every cycle until that happens. Without
+# a cooldown, that means one Telegram alert PER SYMBOL PER CYCLE for as
+# long as the position stays open and unauthorized — exactly the 6h+ of
+# identical repeated alerts this was found from. Throttle to one alert per
+# position per this many minutes; the underlying retry (still attempted
+# every cycle, in case the human completes the CDSL step mid-day) is
+# unaffected — only the notification is throttled.
+CDSL_ALERT_COOLDOWN_MIN = int(os.getenv("EXIT_CDSL_ALERT_COOLDOWN_MIN", "60"))
 
 
 def _trail_atr_mult(held_days: int, schedule=None) -> float:
@@ -214,6 +227,15 @@ def _send_real_sell(
     the day's own buy and never touches CDSL holdings validation at all."""
     same_day_position = ist_today_str(as_aware(position.opened_at)) == ist_today_str()
     sell_product_type = "INTRADAY" if same_day_position else "CNC"
+    # 2026-09-07: permanent visibility into this decision — session21's
+    # investigation had to reconstruct this after the fact from a DB query
+    # because nothing logged it at decision time. Now every attempt (success
+    # or failure) leaves this line in the logs.
+    logger.info(
+        "exit SELL %s x%s (%s): opened_at=%s -> IST day %s (today=%s) -> product_type=%s",
+        position.symbol, qty, reason, position.opened_at,
+        ist_today_str(as_aware(position.opened_at)), ist_today_str(), sell_product_type,
+    )
     try:
         security_id = dhan_client.get_security_id(db, position.symbol)
         result = dhan_client.place_order(
@@ -277,6 +299,43 @@ def _send_real_sell(
                     f"{position.symbol} ×{qty} ({reason}) — position remains open."
                 )
             )
+        elif dhan_client.is_cdsl_edis_error(str(e)):
+            # 2026-09-07 fix: see dhan_client.is_cdsl_edis_error's docstring
+            # for why this specifically needs a human, not a retry, and
+            # CDSL_ALERT_COOLDOWN_MIN's comment above for why this branch
+            # is throttled instead of alerting every cycle like the raw
+            # logs showed happening for 6h+ straight.
+            snap_key = f"cdsl_alert_last_{position.id}"
+            last = load_snapshot(db, snap_key) or {}
+            last_at_raw = last.get("at")
+            due = True
+            if last_at_raw:
+                try:
+                    last_at = datetime.fromisoformat(last_at_raw)
+                    elapsed_min = (datetime.now(timezone.utc) - last_at).total_seconds() / 60.0
+                    due = elapsed_min >= CDSL_ALERT_COOLDOWN_MIN
+                except Exception:
+                    due = True
+            if due:
+                notify_sync(
+                    f"🔒 *EXIT BLOCKED — CDSL authorization required* — "
+                    f"{position.symbol} ×{qty} ({reason})\n"
+                    "Dhan needs a CDSL eDIS/TPIN 'Verify Holdings' step "
+                    "before it will sell this holding — this is a SEBI-"
+                    "mandated manual step (OTP to your registered mobile), "
+                    "not something this service can complete unattended.\n"
+                    "Open the Dhan app -> Verify Holdings, enter the TPIN "
+                    "sent to your phone, then this will clear on the next "
+                    "retry cycle. Position remains open until then.\n"
+                    f"(Next alert for this position suppressed for "
+                    f"{CDSL_ALERT_COOLDOWN_MIN} min — retries continue silently.)"
+                )
+                save_snapshot(db, snap_key, {"at": datetime.now(timezone.utc).isoformat()})
+            else:
+                logger.info(
+                    "CDSL block persists for %s (%s) — alert suppressed, "
+                    "still within cooldown.", position.symbol, reason,
+                )
         else:
             notify_sync(
                 f"⚠️ *SELL rejected by Dhan* — {position.symbol} ×{qty} ({reason})\n"

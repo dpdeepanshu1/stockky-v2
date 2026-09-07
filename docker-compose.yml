@@ -281,11 +281,34 @@ services:
     # startup ordering.
     restart: unless-stopped
     healthcheck:
+      # 2026-09-07 fix: real-trade-service's own trading cycles (_full_tick
+      # every AUTO_PILOT_INTERVAL_SECONDS=180s, _exit_only_tick every
+      # EXIT_CHECK_INTERVAL_SECONDS=45s — see execution/auto_pilot.py) run
+      # plain synchronous SQLAlchemy queries directly on the same asyncio
+      # event loop that serves this /health check, against a remote Oracle
+      # Autonomous DB. A legitimately busy cycle (many watchlist rows, each
+      # needing its own round-trip) can stall that loop — and therefore
+      # /health — for longer than interval(30s) x retries(3) = 90s, which is
+      # exactly what was observed: `docker compose ps` showed this container
+      # (unhealthy) while `docker stats` and its own logs proved it was
+      # alive and actively completing real work (successful calls to
+      # api-gateway) in the same window. Not a crash — a healthcheck window
+      # tighter than legitimate periodic processing time (the same class of
+      # false-timeout issue api-gateway's /stockky-hot endpoint already
+      # documents fixing for its own cold-scan case). Widened the tolerance
+      # window to interval(20s) x retries(6) = 120s so a normal-length cycle
+      # doesn't false-trip it, while still catching a genuinely dead
+      # process within ~2 minutes.
+      #
+      # This does NOT fix the underlying blocking — see the note above
+      # _full_tick/_exit_only_tick in execution/auto_pilot.py for why that
+      # part needs live testing before touching it (it shares locks that
+      # keep two trading cycles from overlapping on real capital).
       test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8005/health', timeout=5) or sys.exit(0)"]
-      interval: 30s
+      interval: 20s
       timeout: 10s
-      retries: 3
-      start_period: 20s
+      retries: 6
+      start_period: 60s
     logging: *default-logging
     # Highest priority in the stack (2026-09-03 durability upgrade): this is
     # the only service placing real orders, so it now gets the largest

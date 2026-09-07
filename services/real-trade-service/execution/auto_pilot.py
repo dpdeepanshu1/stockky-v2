@@ -99,7 +99,28 @@ def _summarize(mode: str, result: dict) -> tuple[str, bool]:
 
 
 async def _exit_only_tick(mode: str) -> None:
-    """Fast exit-only tick: exit_engine + reconcile, no candidates/entry."""
+    """Fast exit-only tick: exit_engine + reconcile, no candidates/entry.
+
+    2026-09-07 note (not fixed here — see docker-compose.yml's
+    real-trade-service healthcheck comment for the symptom this caused):
+    everything in this function's body — db = Session() and every db.query/
+    commit inside exit_evaluate/reconcile_real_orders — is plain synchronous
+    SQLAlchemy, executed directly on the SAME asyncio event loop that serves
+    /health and every other HTTP endpoint on this service. A slow cycle
+    (many open positions, each needing its own round-trip to the remote
+    Oracle DB) blocks that shared loop for its whole duration, which is
+    exactly what produced a container marked (unhealthy) in `docker compose
+    ps` while it was demonstrably still alive and working. The healthcheck
+    window has been widened as an immediate mitigation. The real fix would
+    move this tick's DB work off the main loop (e.g. run the whole tick body
+    — session creation through db.close() — on a dedicated thread with its
+    own event loop via asyncio.to_thread), but _get_lock(mode) here is an
+    asyncio.Lock bound to THIS (main) loop, and that lock is the only thing
+    stopping the fast-exit tick and the full-cycle tick from running
+    concurrently against real capital for the same mode. Moving the lock (or
+    the tick) to a different loop needs to be verified against a live stack
+    before shipping — not attempted blind in this session.
+    """
     lock = _get_lock(mode)
     if lock.locked():
         return  # full cycle is running — skip this fast tick, it'll cover exits

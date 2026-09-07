@@ -511,7 +511,7 @@ export default function IpoTracker({
             <button
               type="button"
               onClick={() => setIpoAddOpen(!ipoAddOpen)}
-              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-slate-500/20 border border-slate-400/40 text-paper hover:bg-slate-500/30"
+              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-mist/20 border border-mist/40 text-paper hover:bg-mist/30"
             >
               + Add IPO
             </button>

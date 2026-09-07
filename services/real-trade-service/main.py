@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -388,6 +388,55 @@ async def regenerate_dhan_token(admin: str = Depends(require_admin), db: Session
 @app.get("/dhan/status")
 async def dhan_status(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     return dhan_credentials.connection_status(db)
+
+
+@app.get("/dhan/edis/request-tpin")
+async def dhan_edis_request_tpin(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """Step 1 of the daily CDSL eDIS flow: tells CDSL to SMS a fresh T-PIN
+    to your registered mobile number. This does NOT give you a value to
+    store anywhere — it just triggers the SMS. Next: open
+    GET /dhan/edis/authorize-form in an actual browser (not curl/fetch —
+    it needs to run the page's own redirect JS) and enter that code on
+    CDSL's page when it asks. Repeat once each trading morning, or again
+    for any position whose shares only settled into your demat today."""
+    dhan_client.edis_request_tpin(db)
+    return {
+        "ok": True,
+        "detail": (
+            "T-PIN SMS requested. Now open GET /dhan/edis/authorize-form "
+            "in your browser and enter the code CDSL texted you."
+        ),
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/dhan/edis/authorize-form")
+async def dhan_edis_authorize_form(
+    admin: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+    bulk: bool = True,
+    isin: str = "",
+    qty: int = 0,
+):
+    """Step 2: returns CDSL's real HTML redirect form, rendered directly
+    (not wrapped in JSON) so opening this URL in a browser runs the form's
+    own onload JS, which redirects you to CDSL's own verification page
+    (edis.cdslindia.com) — that's where you type the T-PIN from the SMS
+    step 1 triggered. This backend never sees or stores that T-PIN; CDSL
+    authorizes the holding directly with the depository, which is the
+    entire point of the control. bulk=True (default) authorizes every
+    holding in the portfolio in one pass — pass bulk=false&isin=...&qty=...
+    to authorize a single position instead."""
+    html = dhan_client.edis_get_form(db, isin=isin, qty=qty, bulk=bulk)
+    return Response(content=html, media_type="text/html")
+
+
+@app.get("/dhan/edis/status")
+async def dhan_edis_status(admin: str = Depends(require_admin), db: Session = Depends(get_db), isin: str = "ALL"):
+    """Read-only check: has today's CDSL authorization already been done?
+    Check this before assuming an exit will fail — no need to re-run the
+    T-PIN flow if aprvdQty already covers what you're about to sell."""
+    return dhan_client.edis_inquire(db, isin=isin)
 
 
 @app.get("/dhan/network-check")

@@ -78,7 +78,24 @@ def main():
             print(f"[{ctype}] no watchlist entries in this window — skip\n")
             continue
 
-        entered = [e for e in entries if e.status == "entered"]
+        # BUG FIX (2026-09-06, round 2): WatchlistEntry.status is NEVER set
+        # to "entered" anywhere in the codebase — grep confirms the only
+        # values ever written to it are "active" (default), "missed"
+        # (entry_engine/entry.py's chase-guard), and "expired"
+        # (watchlist_engine/watchlist.py's TTL cleanup). Filtering on
+        # `status == "entered"` here always returned an empty list —
+        # structurally, regardless of how many real trades actually
+        # happened — which is exactly why the first live run showed
+        # entered=0 across every single catalyst type. The real signal for
+        # "did this watchlist row turn into a trade" is a linked
+        # TradePosition (open OR closed) via watchlist_entry_id, not the
+        # watchlist row's own status field.
+        entered_ids = {
+            wid for (wid,) in session.query(models.TradePosition.watchlist_entry_id)
+                .filter(models.TradePosition.watchlist_entry_id.in_([e.id for e in entries]))
+                .all()
+        }
+        entered = [e for e in entries if e.id in entered_ids]
         missed = [e for e in entries if e.status == "missed"]
         total_decided = len(entered) + len(missed)
         missed_rate = (len(missed) / total_decided) if total_decided else None

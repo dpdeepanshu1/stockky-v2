@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -27,6 +28,77 @@ except Exception:  # pragma: no cover — keep working even if rate_limiter.py i
 logger = logging.getLogger("angelone-client")
 
 _BASE = "https://apiconnect.angelone.in"
+
+# 2026-09-07 fix — ROOT CAUSE of the recurring 403 on the secure quote/
+# candle endpoints (session21 investigation): X-ClientPublicIP was being
+# sent as the LITERAL STRING "127.0.0.1" on every single call — both the
+# hardcoded value in _login() below, and the os.environ.get("ANGELONE_STATIC_IP",
+# "127.0.0.1") fallback in _headers(). Confirmed via `docker compose exec
+# market-data-service printenv | grep ANGELONE`: ANGELONE_STATIC_IP is not
+# set anywhere in this deployment (grep for it across the whole repo turns
+# up zero hits outside this file — it was never wired into docker-compose,
+# .env.example, or documented anywhere), so every request was going out
+# with a loopback address as its "client public IP". AngelOne's SmartAPI
+# validates this header (it's part of the same security header set that
+# _headers()'s own docstring already identified as required) — a
+# non-routable loopback address is never going to match anything on an
+# IP-whitelist and is a very plausible, concrete explanation for a 403 that
+# a rate-limit or a stale-token theory couldn't otherwise account for.
+#
+# Fix: resolve a REAL IP once (prefer an explicit ANGELONE_STATIC_IP if the
+# operator has one — e.g. behind a static-IP proxy — otherwise auto-detect
+# this container's actual outbound public IP via a public IP-echo service,
+# cached so we're not hitting that service on every request) and use it
+# everywhere X-ClientPublicIP is sent. 127.0.0.1 is kept ONLY as an
+# absolute last-resort if every detection method fails, and that case now
+# logs a loud, explicit warning instead of silently sending a value that
+# can never work.
+_outbound_ip_cache: dict[str, float | str | None] = {"ip": None, "at": 0.0}
+_OUTBOUND_IP_TTL_SECONDS = 15 * 60  # redeploys can change the egress IP
+
+
+def get_outbound_ip() -> Optional[str]:
+    """Best-effort real public IP this container is actually egressing
+    from right now. Same idea as real-trade-service's
+    execution.dhan_client.get_outbound_ip() — kept separate here since
+    these are independent microservices with no shared import path."""
+    try:
+        import httpx as _httpx  # local import: keep this cheap/optional
+        resp = _httpx.get("https://api.ipify.org?format=json", timeout=6.0)
+        resp.raise_for_status()
+        return resp.json().get("ip")
+    except Exception as e:
+        logger.warning("angelone get_outbound_ip: lookup failed: %s", e)
+        return None
+
+
+def _resolve_client_public_ip() -> str:
+    """What to put in X-ClientPublicIP. Priority: explicit ANGELONE_STATIC_IP
+    env var (operator knows better, e.g. a whitelisted static-IP proxy) ->
+    cached auto-detected outbound IP -> loud-warning 127.0.0.1 fallback."""
+    explicit = os.environ.get("ANGELONE_STATIC_IP", "").strip()
+    if explicit:
+        return explicit
+
+    now = time.time()
+    cached_ip = _outbound_ip_cache["ip"]
+    cached_at = _outbound_ip_cache["at"]
+    if cached_ip and (now - cached_at) < _OUTBOUND_IP_TTL_SECONDS:
+        return cached_ip
+
+    detected = get_outbound_ip()
+    if detected:
+        _outbound_ip_cache["ip"] = detected
+        _outbound_ip_cache["at"] = now
+        return detected
+
+    logger.warning(
+        "angelone: could not resolve a real outbound IP (no ANGELONE_STATIC_IP "
+        "set and auto-detection failed) — falling back to 127.0.0.1, which "
+        "AngelOne WILL reject with a 403 on secure endpoints. Set "
+        "ANGELONE_STATIC_IP or check outbound network access to api.ipify.org."
+    )
+    return "127.0.0.1"
 
 # 2026-09-01 fix: this client made every REST call with zero rate limiting —
 # AngelOne is now the primary quote/candle source (this module's own
@@ -89,6 +161,10 @@ class AngelOneSession:
                 "ANGELONE_API_KEY, ANGELONE_TOTP_SECRET env vars."
             )
         otp = pyotp.TOTP(self.totp_secret).now()
+        # 2026-09-07 fix: was hardcoded "127.0.0.1" — see module comment
+        # above _resolve_client_public_ip(). Login is a secure endpoint
+        # too, so it needs the same real-IP fix as _headers() below.
+        client_public_ip = _resolve_client_public_ip()
         async with httpx.AsyncClient(timeout=20.0) as client:
             r = await client.post(
                 f"{_BASE}/rest/auth/angelbroking/user/v1/loginByPassword",
@@ -104,7 +180,7 @@ class AngelOneSession:
                     "X-UserType":    "USER",
                     "X-SourceID":    "WEB",
                     "X-ClientLocalIP": "127.0.0.1",
-                    "X-ClientPublicIP": "127.0.0.1",
+                    "X-ClientPublicIP": client_public_ip,
                     "X-MACAddress":  "00:00:00:00:00:00",
                 },
             )
@@ -140,7 +216,11 @@ class AngelOneSession:
             "X-UserType":        "USER",
             "X-SourceID":        "WEB",
             "X-ClientLocalIP":   "127.0.0.1",
-            "X-ClientPublicIP":  os.environ.get("ANGELONE_STATIC_IP", "127.0.0.1"),
+            # 2026-09-07 fix: was a raw os.environ.get(..., "127.0.0.1")
+            # default with nothing ever setting ANGELONE_STATIC_IP in this
+            # deployment — every call silently sent the loopback address.
+            # See module comment above _resolve_client_public_ip().
+            "X-ClientPublicIP":  _resolve_client_public_ip(),
             "X-MACAddress":      "00:00:00:00:00:00",
         }
 

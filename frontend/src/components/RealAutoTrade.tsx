@@ -8,7 +8,7 @@ import {
 import ManualTradeTicket from "./trading/ManualTradeTicket";
 
 type Mode = "DEMO" | "REAL";
-type Tab = "overview" | "live" | "positions" | "orders" | "watchlist" | "pipeline" | "log";
+type Tab = "overview" | "live" | "positions" | "orders" | "watchlist" | "pipeline" | "charges" | "log";
 
 // ── Formatting helpers ───────────────────────────────────────────────────────
 function fmtInr(n: number | null | undefined, decimals = 0): string {
@@ -494,55 +494,79 @@ function BalanceAllocation({ funds, positions }: { funds: any; positions: any[] 
 }
 
 // ── Portfolio summary: invested / current stock value / P&L ─────────────────
-// 2026-09-09: added per user request — "how much i invested and how much
-// profit or loss and now what is total amount for stocks not include fund".
-// The existing "account" StatCards (starting capital / current equity / cash
-// available / P&L today) mix fund and equity figures and only ever show
-// TODAY's realized P&L, never an all-time total or a stocks-only value — so
-// there was no single place that answered "of the money in stocks right now,
-// what did I put in, what's it worth, and what have I made or lost overall."
 // Deliberately built from `positions` (this service's own OPEN/
 // PARTIALLY_CLOSED/PENDING_EXIT tracked positions, each carrying a known
 // avg_entry_price and live current_price from /positions) rather than
 // `livePositions`/`dhanAccount.funds` (Dhan's raw broker figures, already
-// shown separately in BalanceAllocation above) — this card is specifically
-// "what Stockky's own bookkeeping says about your stock holdings," not a
-// duplicate of the broker's own numbers.
-function PortfolioSummary({ positions, realizedPnlTotal }: { positions: Position[]; realizedPnlTotal: number | null }) {
+// shown separately in BalanceAllocation above).
+//
+// P&L calculation:
+//   unrealized = currentValue - invested         (open positions only)
+//   realized   = all closed trades this engine has tracked (realized_pnl_total)
+//   totalPnl   = realized + unrealized
+//   unrealizedPct = unrealized / invested * 100  (only open-position capital)
+//
+// NOTE: realized_pnl_total tracks only trades placed THROUGH this engine.
+// Money deposited from Dhan (outside this app) is NOT reflected as "profit"
+// — it only increases your fund balance and current_equity, not realized P&L.
+// So if equity > starting_capital, that gap is deposits, not gains.
+function PortfolioSummary({
+  positions,
+  realizedPnlTotal,
+  startingCapital,
+  currentEquity,
+}: {
+  positions: Position[];
+  realizedPnlTotal: number | null;
+  startingCapital: number | null;
+  currentEquity: number | null;
+}) {
   if (positions.length === 0 && realizedPnlTotal == null) return null;
 
   const invested = positions.reduce((sum, p) => sum + p.avg_entry_price * p.qty_open, 0);
   // Falls back to avg_entry_price (i.e. 0 unrealized) for a position with no
   // live tick yet this session — matches the same fallback /positions itself
-  // already uses for live_unrealized_pnl, so this card never contradicts the
-  // per-position P&L shown on the Positions tab.
+  // already uses for live_unrealized_pnl.
   const currentValue = positions.reduce(
     (sum, p) => sum + (p.current_price ?? p.avg_entry_price) * p.qty_open, 0
   );
   const unrealized = currentValue - invested;
   const realized = realizedPnlTotal ?? 0;
   const totalPnl = realized + unrealized;
-  const totalPnlPct = invested > 0 ? (unrealized / invested) * 100 : 0;
+  // P&L % is based on invested capital (open positions only), not equity
+  const unrealizedPct = invested > 0 ? (unrealized / invested) * 100 : 0;
+  const totalPnlPct = invested > 0 ? (totalPnl / invested) * 100 : 0;
+
+  // Deposits made outside this engine = equity growth not from trading
+  const depositsOutside =
+    startingCapital != null && currentEquity != null
+      ? Math.max(0, currentEquity - startingCapital - realized - unrealized)
+      : null;
 
   return (
     <div className="bg-graphite border border-slate rounded-2xl p-4 mb-4">
       <SectionHdr>Portfolio summary (stocks only — excludes fund balance)</SectionHdr>
       <div className="grid grid-cols-2 gap-2">
         <StatCard label="Invested (open positions)" value={fmtInr(invested, 0)} />
-        <StatCard label="Current value" value={fmtInr(currentValue, 0)} />
+        <StatCard label="Current stock value" value={fmtInr(currentValue, 0)} />
         <StatCard
-          label="Unrealized P&L"
-          value={`${unrealized >= 0 ? "+" : ""}${fmtInr(unrealized, 0)} (${totalPnlPct >= 0 ? "+" : ""}${totalPnlPct.toFixed(1)}%)`}
+          label="Unrealized P&L (open positions)"
+          value={`${unrealized >= 0 ? "+" : ""}${fmtInr(unrealized, 0)} (${unrealizedPct >= 0 ? "+" : ""}${unrealizedPct.toFixed(1)}%)`}
           color={pnlColor(unrealized)}
           sub={`${positions.length} open position${positions.length === 1 ? "" : "s"}`}
         />
         <StatCard
           label="Total P&L (realized + unrealized)"
-          value={`${totalPnl >= 0 ? "+" : ""}${fmtInr(totalPnl, 0)}`}
+          value={`${totalPnl >= 0 ? "+" : ""}${fmtInr(totalPnl, 0)} (${totalPnlPct >= 0 ? "+" : ""}${totalPnlPct.toFixed(1)}%)`}
           color={pnlColor(totalPnl)}
-          sub={`Realized all-time: ${realized >= 0 ? "+" : ""}${fmtInr(realized, 0)}`}
+          sub={`Realized all-time (this engine): ${realized >= 0 ? "+" : ""}${fmtInr(realized, 0)}`}
         />
       </div>
+      {depositsOutside != null && depositsOutside > 500 && (
+        <p className="font-display tabular-nums text-[10px] text-mist mt-2 pt-2 border-t border-slate">
+          ℹ️ Equity is ₹{(depositsOutside / 1000).toFixed(1)}k higher than starting capital + P&L — this reflects funds you deposited into Dhan directly, not trading gains.
+        </p>
+      )}
     </div>
   );
 }
@@ -567,7 +591,7 @@ function GateStep({ n, label, done, active }: { n: number; label: string; done: 
 
 // ── Main component ───────────────────────────────────────────────────────────
 export default function RealAutoTrade() {
-  const [mode, setMode] = useState<Mode>("DEMO");
+  const [mode, setMode] = useState<Mode>("REAL");
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [apiUrlInput, setApiUrlInput] = useState(getRealTradeApiUrl());
 
@@ -750,7 +774,7 @@ export default function RealAutoTrade() {
   }, [mode, loggedIn, status?.armed, loadPositionsAndOrders, loadCandidates]);
 
   useEffect(() => {
-    if (activeTab === "live" && mode === "REAL" && loggedIn) {
+    if ((activeTab === "live" || activeTab === "charges") && mode === "REAL" && loggedIn) {
       void loadLiveDhanData();
     }
     if (activeTab === "log") void loadAudit();
@@ -1001,6 +1025,7 @@ export default function RealAutoTrade() {
     { id: "orders", label: `Orders (${orders.length})` },
     { id: "watchlist", label: `Watchlist (${candidates.length})` },
     { id: "pipeline", label: "Pipeline" },
+    { id: "charges", label: "Charges" },
     { id: "log", label: "Activity" },
   ];
 
@@ -1342,7 +1367,12 @@ export default function RealAutoTrade() {
               )}
 
               {/* Portfolio summary — invested / current value / P&L, stocks only */}
-              <PortfolioSummary positions={positions} realizedPnlTotal={status?.account?.realized_pnl_total ?? null} />
+              <PortfolioSummary
+                positions={positions}
+                realizedPnlTotal={status?.account?.realized_pnl_total ?? null}
+                startingCapital={status?.account?.starting_capital ?? null}
+                currentEquity={status?.account?.current_equity ?? null}
+              />
 
               {/* Stockky account snapshot */}
               {status?.account && (
@@ -2016,6 +2046,229 @@ export default function RealAutoTrade() {
               )}
             </div>
           )}
+
+          {/* ═══════════════════════════════════════════════════════════════
+              TAB: DHAN CHARGES
+          ═══════════════════════════════════════════════════════════════ */}
+          {activeTab === "charges" && (() => {
+            // Dhan charges for equity intraday delivery (NSE):
+            // Brokerage: ₹20 or 0.03% per order leg (whichever lower), free for delivery
+            // STT: 0.025% on buy+sell for intraday, 0.1% on sell for delivery
+            // Exchange txn: 0.00345% NSE
+            // SEBI: 0.0001% on turnover
+            // GST: 18% on (brokerage + exchange txn charges)
+            // Stamp duty: 0.015% on buy value (delivery), 0.003% on buy value (intraday)
+            // DP charge: ₹13.5 per sell (delivery CNC only, per scrip per day)
+
+            const BROKERAGE_CAP = 20;
+            const BROKERAGE_PCT = 0.03 / 100;
+            const STT_INTRA_PCT = 0.025 / 100;      // both sides
+            const STT_DELIVERY_SELL_PCT = 0.1 / 100; // sell side only
+            const EXCHANGE_PCT = 0.00345 / 100;
+            const SEBI_PCT = 0.0001 / 100;
+            const GST_PCT = 0.18;
+            const STAMP_DELIVERY_PCT = 0.015 / 100;
+            const STAMP_INTRA_PCT = 0.003 / 100;
+            const DP_CHARGE = 13.5;
+
+            interface ChargeBreakdown {
+              brokerage: number; stt: number; exchange: number;
+              sebi: number; gst: number; stamp: number; dp: number; total: number;
+            }
+
+            function calcCharges(buyVal: number, sellVal: number, isDelivery: boolean): ChargeBreakdown {
+              const turnover = buyVal + sellVal;
+              const buyBrok = isDelivery ? 0 : Math.min(buyVal * BROKERAGE_PCT, BROKERAGE_CAP);
+              const sellBrok = isDelivery ? 0 : Math.min(sellVal * BROKERAGE_PCT, BROKERAGE_CAP);
+              const brokerage = buyBrok + sellBrok;
+              const stt = isDelivery
+                ? sellVal * STT_DELIVERY_SELL_PCT
+                : turnover * STT_INTRA_PCT;
+              const exchange = turnover * EXCHANGE_PCT;
+              const sebi = turnover * SEBI_PCT;
+              const gst = (brokerage + exchange) * GST_PCT;
+              const stamp = isDelivery ? buyVal * STAMP_DELIVERY_PCT : buyVal * STAMP_INTRA_PCT;
+              const dp = isDelivery ? DP_CHARGE : 0;
+              const total = brokerage + stt + exchange + sebi + gst + stamp + dp;
+              return { brokerage, stt, exchange, sebi, gst, stamp, dp, total };
+            }
+
+            // Compute charges from all orders in Dhan + our own orders
+            // Build from liveDhanOrders (real broker data) when in REAL mode
+            interface OrderCharge {
+              symbol: string; side: string; qty: number; price: number;
+              isDelivery: boolean; charges: ChargeBreakdown; time: string;
+            }
+
+            const orderCharges: OrderCharge[] = liveDhanOrders
+              .filter(o => {
+                const qty = Number(o.quantity || 0);
+                const price = Number(o.price || o.averageTradedPrice || 0);
+                const st = (o.orderStatus || o.status || "").toUpperCase();
+                return qty > 0 && price > 0 && (st === "TRADED" || st === "FILLED");
+              })
+              .map(o => {
+                const side = (o.transactionType || o.side || "").toUpperCase();
+                const qty = Number(o.quantity || 0);
+                const price = Number(o.price || o.averageTradedPrice || 0);
+                const val = qty * price;
+                const product = (o.productType || o.positionType || "").toUpperCase();
+                const isDelivery = product === "CNC" || product === "DELIVERY";
+                const buyVal = side === "BUY" ? val : 0;
+                const sellVal = side === "SELL" ? val : 0;
+                return {
+                  symbol: o.tradingSymbol || o.symbol || "—",
+                  side, qty, price, isDelivery,
+                  charges: calcCharges(buyVal, sellVal, isDelivery),
+                  time: o.createTime || o.updateTime || "",
+                };
+              });
+
+            // Aggregate totals
+            const totalBrokerage = orderCharges.reduce((s, o) => s + o.charges.brokerage, 0);
+            const totalSTT = orderCharges.reduce((s, o) => s + o.charges.stt, 0);
+            const totalExchange = orderCharges.reduce((s, o) => s + o.charges.exchange, 0);
+            const totalSEBI = orderCharges.reduce((s, o) => s + o.charges.sebi, 0);
+            const totalGST = orderCharges.reduce((s, o) => s + o.charges.gst, 0);
+            const totalStamp = orderCharges.reduce((s, o) => s + o.charges.stamp, 0);
+            const totalDP = orderCharges.reduce((s, o) => s + o.charges.dp, 0);
+            const grandTotal = orderCharges.reduce((s, o) => s + o.charges.total, 0);
+
+            // Pair BUY+SELL for same symbol to get round-trip charges
+            const roundTripMap: Record<string, { buy?: OrderCharge; sell?: OrderCharge }> = {};
+            for (const oc of orderCharges) {
+              if (!roundTripMap[oc.symbol]) roundTripMap[oc.symbol] = {};
+              if (oc.side === "BUY") roundTripMap[oc.symbol].buy = oc;
+              else roundTripMap[oc.symbol].sell = oc;
+            }
+
+            return (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <SectionHdr>Dhan charges breakdown</SectionHdr>
+                  {mode === "REAL" && loggedIn && (
+                    <button onClick={() => void loadLiveDhanData()} disabled={liveLoading}
+                      className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-ink border border-slate text-mist disabled:opacity-40">
+                      {liveLoading ? "…" : "↻ Refresh"}
+                    </button>
+                  )}
+                </div>
+
+                {mode !== "REAL" ? (
+                  <div className="bg-graphite border border-slate rounded-2xl p-6 text-center">
+                    <p className="font-display tabular-nums text-sm text-mist">Switch to REAL mode to see actual Dhan charges.</p>
+                  </div>
+                ) : !loggedIn ? (
+                  <div className="bg-graphite border border-slate rounded-2xl p-6 text-center">
+                    <p className="font-display tabular-nums text-sm text-mist">Log in to view charges.</p>
+                  </div>
+                ) : (
+                  <>
+                    {/* Summary cards */}
+                    <div className="bg-graphite border border-slate rounded-2xl p-4">
+                      <SectionHdr>All-time charges (today's Dhan orders)</SectionHdr>
+                      <div className="grid grid-cols-2 gap-2 mb-3">
+                        <StatCard label="Total charges paid" value={`-${fmtInr(grandTotal, 2)}`} color="text-signal-sell" sub={`${orderCharges.length} filled orders`} />
+                        <StatCard label="Brokerage" value={`-${fmtInr(totalBrokerage, 2)}`} color="text-signal-sell" sub="₹20 cap per leg" />
+                        <StatCard label="STT" value={`-${fmtInr(totalSTT, 2)}`} color="text-signal-sell" sub="Securities Transaction Tax" />
+                        <StatCard label="GST + Exchange" value={`-${fmtInr(totalGST + totalExchange, 2)}`} color="text-signal-sell" sub="18% GST on brokerage" />
+                      </div>
+                      <div className="border-t border-slate pt-3">
+                        <p className="font-display tabular-nums text-[10px] text-mist mb-2 uppercase tracking-widest">Full breakdown</p>
+                        <div className="space-y-1.5 font-display tabular-nums text-[11px]">
+                          {[
+                            { label: "Brokerage", val: totalBrokerage, note: "₹0 delivery, ₹20 or 0.03%/leg intraday" },
+                            { label: "STT", val: totalSTT, note: "0.025% intraday (both sides), 0.1% delivery (sell only)" },
+                            { label: "Exchange Txn", val: totalExchange, note: "0.00345% NSE" },
+                            { label: "SEBI charges", val: totalSEBI, note: "0.0001% on turnover" },
+                            { label: "GST", val: totalGST, note: "18% on brokerage + exchange fees" },
+                            { label: "Stamp duty", val: totalStamp, note: "0.015% delivery, 0.003% intraday (buy side)" },
+                            { label: "DP charges", val: totalDP, note: "₹13.5/sell for CNC delivery" },
+                          ].map(row => (
+                            <div key={row.label} className="flex items-center justify-between">
+                              <div>
+                                <span className="text-paper">{row.label}</span>
+                                <span className="text-mist text-[9px] ml-2">{row.note}</span>
+                              </div>
+                              <span className={row.val > 0 ? "text-signal-sell" : "text-mist"}>
+                                {row.val > 0 ? `-${fmtInr(row.val, 2)}` : "—"}
+                              </span>
+                            </div>
+                          ))}
+                          <div className="flex items-center justify-between border-t border-slate pt-2 mt-1">
+                            <span className="font-bold text-paper">Total charges</span>
+                            <span className="font-bold text-signal-sell">-{fmtInr(grandTotal, 2)}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Per-order breakdown */}
+                    {orderCharges.length > 0 && (
+                      <div className="bg-graphite border border-slate rounded-2xl p-4">
+                        <SectionHdr>Per trade charges (today)</SectionHdr>
+                        <div className="space-y-2">
+                          {orderCharges.map((oc, i) => (
+                            <div key={i} className="bg-ink border border-slate rounded-xl p-3">
+                              <div className="flex items-center justify-between mb-2">
+                                <div className="flex items-center gap-2">
+                                  <span className={`font-display tabular-nums text-xs font-bold ${oc.side === "BUY" ? "text-signal-buy" : "text-signal-sell"}`}>{oc.side}</span>
+                                  <span className="font-display tabular-nums text-sm font-bold text-paper">{oc.symbol}</span>
+                                  <span className="font-display tabular-nums text-[9px] text-mist">{oc.isDelivery ? "CNC" : "MIS"}</span>
+                                </div>
+                                <span className="font-display tabular-nums text-xs text-signal-sell font-bold">-{fmtInr(oc.charges.total, 2)}</span>
+                              </div>
+                              <div className="flex gap-3 font-display tabular-nums text-[10px] text-mist mb-2">
+                                <span>Qty <span className="text-paper">{oc.qty}</span></span>
+                                <span>Price <span className="text-paper">₹{oc.price.toFixed(2)}</span></span>
+                                <span>Value <span className="text-paper">{fmtInr(oc.qty * oc.price, 0)}</span></span>
+                              </div>
+                              <div className="grid grid-cols-4 gap-1.5 font-display tabular-nums text-[9px] text-mist">
+                                <div>Brokerage<br/><span className="text-paper">₹{oc.charges.brokerage.toFixed(2)}</span></div>
+                                <div>STT<br/><span className="text-paper">₹{oc.charges.stt.toFixed(2)}</span></div>
+                                <div>Exch+SEBI<br/><span className="text-paper">₹{(oc.charges.exchange + oc.charges.sebi).toFixed(2)}</span></div>
+                                <div>GST+Stamp{oc.charges.dp > 0 ? "+DP" : ""}<br/><span className="text-paper">₹{(oc.charges.gst + oc.charges.stamp + oc.charges.dp).toFixed(2)}</span></div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {orderCharges.length === 0 && (
+                      <div className="bg-graphite border border-slate rounded-2xl p-6 text-center">
+                        <p className="font-display tabular-nums text-sm text-mist">No filled orders today — charges appear once orders execute.</p>
+                        <p className="font-display tabular-nums text-[10px] text-mist mt-1">Refresh Live Dhan data first if orders are missing.</p>
+                      </div>
+                    )}
+
+                    {/* Rate reference card */}
+                    <div className="bg-graphite border border-slate rounded-2xl p-4">
+                      <SectionHdr>Dhan charge rates reference (NSE equity)</SectionHdr>
+                      <div className="space-y-1.5 font-display tabular-nums text-[11px]">
+                        {[
+                          { type: "Intraday (MIS)", brok: "₹20 or 0.03%/leg", stt: "0.025% both sides", stamp: "0.003% buy", dp: "—" },
+                          { type: "Delivery (CNC)", brok: "FREE", stt: "0.1% on sell", stamp: "0.015% buy", dp: "₹13.5/sell" },
+                        ].map(r => (
+                          <div key={r.type} className="bg-ink border border-slate rounded-xl p-3">
+                            <p className="font-bold text-paper mb-1.5">{r.type}</p>
+                            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px] text-mist">
+                              <span>Brokerage: <span className="text-paper">{r.brok}</span></span>
+                              <span>STT: <span className="text-paper">{r.stt}</span></span>
+                              <span>Exchange: <span className="text-paper">0.00345% + SEBI 0.0001%</span></span>
+                              <span>GST: <span className="text-paper">18% on brokerage+exch</span></span>
+                              <span>Stamp: <span className="text-paper">{r.stamp}</span></span>
+                              <span>DP: <span className="text-paper">{r.dp}</span></span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })()}
 
           {/* ═══════════════════════════════════════════════════════════════
               TAB: ACTIVITY LOG

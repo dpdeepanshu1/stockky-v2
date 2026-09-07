@@ -385,6 +385,31 @@ def is_cdsl_edis_error(message: str) -> bool:
     return any(marker in m for marker in _CDSL_EDIS_MARKERS)
 
 
+# 2026-09-09 fix — session "insufficient funds on SELL" investigation:
+# Dhan's RMS margin-shortfall rejection ("RMS:<id>:You have insufficient
+# funds. Please add Rs.<amount> to trade.") was previously unrecognized by
+# this module and fell into exit.py's generic catch-all branch — logged and
+# retried forever with no explanation of WHY a SELL of an owned holding
+# would ever need funds. The #1 cause (now fixed — see models.py
+# TradePosition.broker_imported and exit_engine.exit._send_real_sell's
+# docstring) was a broker-imported holding being sold product_type=
+# "INTRADAY": with no matching MIS position to net against, Dhan prices
+# that SELL like a fresh naked short and demands margin for it, which is
+# what this specific message reports. Kept as its own detector (rather than
+# folded into the generic branch) so exit.py can give a message that
+# explains the actual mechanism instead of a bare "Dhan rejected this"
+# — and so a genuine, still-possible funds shortfall (e.g. margin used
+# elsewhere in the account) gets the same clear framing.
+_INSUFFICIENT_FUNDS_MARKERS = (
+    "insufficient funds", "insufficient fund", "add rs.", "add funds",
+)
+
+
+def is_insufficient_funds_error(message: str) -> bool:
+    m = (message or "").lower()
+    return any(marker in m for marker in _INSUFFICIENT_FUNDS_MARKERS)
+
+
 # ── CDSL eDIS / TPIN flow (DhanHQ v2, verified against
 # https://dhanhq.co/docs/v2/edis/ on 2026-09-07 — this IS the current v2
 # path, unlike the deprecated v1 assumption an earlier pass here made) ──────

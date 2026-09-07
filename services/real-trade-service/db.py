@@ -137,6 +137,7 @@ def init_schema() -> None:
     _ensure_manual_order_columns(eng, dialect())
     _ensure_gate_state_columns(eng, dialect())
     _ensure_position_columns(eng, dialect())
+    _backfill_broker_imported_flag(eng)
     _ensure_watchlist_link_columns(eng, dialect())
     _fix_stale_dhan_token_expiry(eng)
 
@@ -318,10 +319,20 @@ def _ensure_position_columns(engine, dialect_name: str) -> None:
     if dialect_name == "oracle":
         adds = [
             ("initial_stop_distance", "ALTER TABLE trade_positions ADD (initial_stop_distance FLOAT)"),
+            # 2026-09-09 fix — see models.py TradePosition.broker_imported
+            # docstring: distinguishes a pre-existing demat holding
+            # (import_broker_holdings) from a position this system actually
+            # bought, so exit.py can force CNC for it regardless of the
+            # import-time opened_at. Existing rows default to 0/False, which
+            # is correct for every position opened via entry_engine/
+            # manual_engine — only newly-imported holdings ever need True,
+            # and import_broker_holdings sets it explicitly going forward.
+            ("broker_imported", "ALTER TABLE trade_positions ADD (broker_imported NUMBER(1) DEFAULT 0 NOT NULL)"),
         ]
     else:
         adds = [
             ("initial_stop_distance", "ALTER TABLE trade_positions ADD COLUMN initial_stop_distance FLOAT"),
+            ("broker_imported", "ALTER TABLE trade_positions ADD COLUMN broker_imported BOOLEAN DEFAULT FALSE NOT NULL"),
         ]
 
     for col_name, sql in adds:
@@ -336,6 +347,53 @@ def _ensure_position_columns(engine, dialect_name: str) -> None:
             if "already exists" in m.lower() or "ORA-01430" in m:
                 continue
             logger.warning("real-trade-db: could not add trade_positions.%s: %s", col_name, e)
+
+
+# 2026-09-09 data fixup: broker_imported (just added above, defaults False)
+# is only ever set True going forward by portfolio.import_broker_holdings —
+# it has no way to retroactively know about rows that import already
+# created BEFORE this column existed. Those rows are exactly the ones
+# stuck in the "insufficient funds" SELL-rejection loop the column exists
+# to fix (see models.py TradePosition.broker_imported and
+# exit_engine.exit._send_real_sell's docstrings), so leaving them at the
+# default would mean the fix only applies to future imports and every
+# already-open broker-imported position keeps failing. import_broker_
+# holdings has always written a TradePositionEvent(event_type="OPENED",
+# detail="Imported from Dhan demat holdings...") in the same transaction
+# as creating the position — that's a reliable, already-existing breadcrumb
+# to backfill from. One-time and idempotent: only rows still at
+# broker_imported=False get touched, so a row already correctly flagged
+# (or a genuinely-not-imported position that happens to match, which
+# shouldn't occur since only import_broker_holdings ever writes this exact
+# detail text) is never re-processed after its first pass.
+def _backfill_broker_imported_flag(engine) -> None:
+    from sqlalchemy import text
+
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text(
+                "UPDATE trade_positions SET broker_imported = TRUE "
+                "WHERE broker_imported = FALSE AND id IN ("
+                "  SELECT position_id FROM trade_position_events "
+                "  WHERE event_type = 'OPENED' "
+                "  AND detail LIKE 'Imported from Dhan demat holdings%'"
+                ")"
+            ) if dialect() != "oracle" else text(
+                "UPDATE trade_positions SET broker_imported = 1 "
+                "WHERE broker_imported = 0 AND id IN ("
+                "  SELECT position_id FROM trade_position_events "
+                "  WHERE event_type = 'OPENED' "
+                "  AND detail LIKE 'Imported from Dhan demat holdings%'"
+                ")"
+            ))
+            if result.rowcount:
+                logger.info(
+                    "real-trade-db: backfilled broker_imported=True on %s pre-existing "
+                    "imported-holding position(s) — see 2026-09-09 insufficient-funds fix",
+                    result.rowcount,
+                )
+    except Exception as e:
+        logger.warning("real-trade-db: could not backfill broker_imported flag: %s", e)
 
 
 # Short-Term Trading Upgrade (2026-09-02): trade_candidates, trade_orders,

@@ -77,7 +77,7 @@ from sqlalchemy.orm import Session
 import config
 import models
 import pipeline_status as pstat
-from portfolio.portfolio import open_positions
+from portfolio.portfolio import held_exposure_positions
 
 logger = logging.getLogger("real-trade-candidates")
 
@@ -1302,7 +1302,13 @@ async def refresh_candidates(db: Session, mode: str) -> int:
 
     Returns the total number of candidate rows inserted across both tracks.
     """
-    open_syms = {p.symbol for p in open_positions(db, mode)}
+    # BUG FIX (2026-09-07): was open_positions(), which excludes
+    # PENDING_EXIT (exit sent to Dhan, not yet fill-confirmed) — that symbol
+    # would look "not open" here and get re-candidated (and, before today's
+    # matching fix in entry_engine/entry.py's _account_state, could even
+    # clear the no-pyramiding risk check) while its previous exit was still
+    # in flight. See portfolio/portfolio.py's held_exposure_positions().
+    open_syms = {p.symbol for p in held_exposure_positions(db, mode)}
     # Standard track: 6h dedupe cooldown (avoids duplicate cards for slow-moving signals)
     cooldown_syms = _recently_candidated_symbols(db, mode)
     exclude = open_syms | cooldown_syms

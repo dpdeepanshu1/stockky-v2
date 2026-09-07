@@ -33,7 +33,7 @@ from audit.logger import log_action
 from execution import dhan_client
 from market_feed.feed import get_quotes, get_preview_quotes, MARKET_DATA_URL
 from notifier import notify_async
-from portfolio.portfolio import get_account, open_positions, record_real_order_sent
+from portfolio.portfolio import get_account, held_exposure_positions, record_real_order_sent
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
 from tz_utils import is_market_open_ist
 import pipeline_status as pstat
@@ -202,7 +202,16 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
         sync_real_equity(db)
     account   = get_account(db, mode)
     risk      = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
-    positions = open_positions(db, mode)
+    # BUG FIX (2026-09-07): open_positions() deliberately excludes
+    # PENDING_EXIT (an exit sent to Dhan but not yet fill-confirmed) — that's
+    # correct for the exit cycle's own re-evaluation loop, but this function
+    # feeds risk_engine's no-pyramiding check and portfolio-risk cap, where
+    # "does this symbol still have real held shares" is the right question.
+    # Using open_positions() here meant a symbol mid-exit looked exposure-free
+    # to the risk engine, so a fresh BUY candidate for that same symbol could
+    # sail through the no-pyramiding guard while the prior exit was still in
+    # flight at the broker. See portfolio/portfolio.py's held_exposure_positions().
+    positions = held_exposure_positions(db, mode)
     return AccountState(
         equity=account.current_equity,
         risk_per_trade_pct=risk.risk_per_trade_pct,

@@ -1019,10 +1019,24 @@ async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin
             stop_distance_pct = round((ltp - p.current_stop) / ltp * 100.0, 2)
         if ltp is not None and p.current_target:
             target_distance_pct = round((p.current_target - ltp) / ltp * 100.0, 2)
+        # BUG FIX (2026-09-07): p.unrealized_pnl is only updated by
+        # refresh_unrealized() inside exit_engine — which only runs during a
+        # full cycle.  Between cycles the DB value is stale (often ₹0 for new
+        # positions that have never been through an exit pass).  The dashboard
+        # was showing "+₹0 (+X%)" because it used the stale DB column while
+        # pnl_pct was computed from the live LTP. Now both use the same live
+        # source: if we have an LTP use it, otherwise fall back to the DB value
+        # (which is still the best-known mark, not zero, for positions that have
+        # been through at least one cycle).
+        live_unrealized_pnl = (
+            round((ltp - p.avg_entry_price) * p.qty_open, 2)
+            if ltp is not None and p.avg_entry_price
+            else p.unrealized_pnl
+        )
         out.append({
             "id": p.id, "symbol": p.symbol, "status": p.status, "qty_open": p.qty_open,
             "avg_entry_price": p.avg_entry_price, "current_stop": p.current_stop,
-            "current_target": p.current_target, "unrealized_pnl": p.unrealized_pnl,
+            "current_target": p.current_target, "unrealized_pnl": live_unrealized_pnl,
             "realized_pnl": p.realized_pnl, "opened_at": iso_utc(p.opened_at),
             "current_price": ltp,
             "pnl_pct": pnl_pct,

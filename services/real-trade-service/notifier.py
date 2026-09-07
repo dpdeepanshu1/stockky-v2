@@ -97,17 +97,29 @@ def _direct_telegram(text: str) -> bool:
         logger.debug("Direct Telegram fallback: env vars not set — notification dropped.")
         return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+    # BUG FIX (2026-09-07): switched to HTML parse_mode — Markdown silently
+    # drops messages containing unescaped `_`, `.`, `(` etc. (common in
+    # trade messages with rupee amounts, symbol names and Dhan error text).
+    # Convert *bold* markers from trade messages to <b>bold</b> HTML.
+    import re as _re
+    html_text = _re.sub(r'\*([^*]+)\*', r'<b>\1</b>', text)
     payload = {
         "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown",
+        "text": html_text,
+        "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
     try:
         resp = httpx.post(url, json=payload, timeout=15.0)
         if resp.status_code != 200:
             logger.warning("Direct Telegram notify failed (%s): %s", resp.status_code, resp.text[:200])
-            return False
+            # Plain-text last resort — still gets the message through even if HTML fails
+            try:
+                plain = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+                resp2 = httpx.post(url, json=plain, timeout=15.0)
+                return resp2.status_code == 200
+            except Exception:
+                return False
         return True
     except Exception as e:
         logger.warning("Direct Telegram notify error: %s", e)

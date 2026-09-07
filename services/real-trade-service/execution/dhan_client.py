@@ -385,6 +385,108 @@ def is_cdsl_edis_error(message: str) -> bool:
     return any(marker in m for marker in _CDSL_EDIS_MARKERS)
 
 
+# ── CDSL eDIS / TPIN flow (DhanHQ v2, verified against
+# https://dhanhq.co/docs/v2/edis/ on 2026-09-07 — this IS the current v2
+# path, unlike the deprecated v1 assumption an earlier pass here made) ──────
+#
+# IMPORTANT — read before wiring this into anything automatic: the T-PIN is
+# a one-time SMS OTP, not a credential. It CANNOT be generated once and
+# stored in .env like ANGELONE_API_KEY etc. — three separate reasons:
+#   1. GET /edis/tpin doesn't return a TPIN at all. It tells CDSL to SMS one
+#      to the account holder's registered mobile. The API response is just
+#      "202 Accepted" — no body, no PIN value for this backend to capture.
+#   2. Even once you have that SMS'd TPIN, Dhan's API never accepts it as a
+#      JSON field anywhere. POST /edis/form returns `edisFormHtml` — an
+#      HTML <form> whose own onload JS immediately auto-submits itself to
+#      CDSL's site (https://edis.cdslindia.com/eDIS/VerifyDIS/), carrying an
+#      encrypted CDSL transaction blob (TransDtls) in a hidden field. The
+#      TPIN is typed on CDSL'S page after that redirect — this backend
+#      never sees it and never could, by design (that's the whole point of
+#      the control: authorization happens directly with the depository, not
+#      through the broker's API).
+#   3. Even if it COULD be captured, it's single-use and short-lived —
+#      storing it anywhere for reuse would do nothing on the next call.
+#
+# What CAN be automated: requesting the OTP (edis_request_tpin) and
+# generating the CDSL redirect form (edis_get_form) are both plain backend
+# calls. What CANNOT: the actual TPIN entry, which needs a human in a real
+# browser on CDSL's page. See main.py's /dhan/edis/* endpoints — they cut
+# the manual step down to "open one URL, type the code you were just
+# texted", once per trading day (or again for any newly-settled holding).
+_DHAN_REST_BASE = "https://api.dhan.co/v2"
+
+
+def edis_request_tpin(db: Session) -> None:
+    """GET /v2/edis/tpin — tells CDSL to SMS a fresh T-PIN to the
+    account's registered mobile number. No response body (API returns
+    202 Accepted); nothing here to capture or store — see module note
+    above. Raises on any non-2xx via raise_for_status()."""
+    creds = dhan_credentials.get_decrypted_credentials(db)
+    if creds is None:
+        raise DhanNotConnectedError("No Dhan credentials stored — connect Dhan first.")
+    _client_id, access_token = creds
+    resp = httpx.get(
+        f"{_DHAN_REST_BASE}/edis/tpin",
+        headers={"Content-Type": "application/json", "access-token": access_token},
+        timeout=15.0,
+    )
+    resp.raise_for_status()
+
+
+def edis_get_form(
+    db: Session,
+    isin: str = "",
+    qty: int = 0,
+    exchange: str = "NSE",
+    segment: str = "EQ",
+    bulk: bool = True,
+) -> str:
+    """POST /v2/edis/form — returns CDSL's self-submitting HTML redirect
+    form as a raw string. bulk=True (the default) covers every holding in
+    the portfolio with one form/one TPIN entry, which is what you want for
+    the daily "authorize everything I might need to exit today" case;
+    pass bulk=False with a specific isin/qty to authorize just one
+    position. This function only fetches the form — it must be rendered
+    in an actual browser (see /dhan/edis/authorize-form in main.py) for
+    the redirect-to-CDSL + TPIN entry to happen; there is nothing to
+    "complete" purely server-side."""
+    creds = dhan_credentials.get_decrypted_credentials(db)
+    if creds is None:
+        raise DhanNotConnectedError("No Dhan credentials stored — connect Dhan first.")
+    _client_id, access_token = creds
+    resp = httpx.post(
+        f"{_DHAN_REST_BASE}/edis/form",
+        headers={"Content-Type": "application/json", "access-token": access_token},
+        json={"isin": isin, "qty": qty, "exchange": exchange, "segment": segment, "bulk": bulk},
+        timeout=15.0,
+    )
+    resp.raise_for_status()
+    data = resp.json() or {}
+    html = data.get("edisFormHtml")
+    if not html:
+        raise RuntimeError(f"Dhan /edis/form returned no edisFormHtml: {data}")
+    return html
+
+
+def edis_inquire(db: Session, isin: str = "ALL") -> dict:
+    """GET /v2/edis/inquire/{isin} — check whether holdings are currently
+    eDIS-approved for sale. Pass "ALL" (default) for a whole-portfolio
+    check. Useful for a morning dashboard check ("is today's authorization
+    already done?") before the exit engine ever needs to find out the hard
+    way via a rejected SELL."""
+    creds = dhan_credentials.get_decrypted_credentials(db)
+    if creds is None:
+        raise DhanNotConnectedError("No Dhan credentials stored — connect Dhan first.")
+    _client_id, access_token = creds
+    resp = httpx.get(
+        f"{_DHAN_REST_BASE}/edis/inquire/{isin}",
+        headers={"Content-Type": "application/json", "access-token": access_token},
+        timeout=15.0,
+    )
+    resp.raise_for_status()
+    return resp.json() or {}
+
+
 def get_outbound_ip() -> Optional[str]:
     """Best-effort: what IP is this service ACTUALLY sending Dhan requests
     from right now? Answers the question an Invalid IP error can't on its

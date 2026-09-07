@@ -115,4 +115,4 @@ Credentials are entered via masked `getpass` prompts each run, never
 saved to disk or included in the export. The notebook itself recommends
 the simpler alternative first: just run the existing local script
 directly on the Oracle VM and share its printed output, which never
-requires putting DB credentials into Colab at alll.
+requires putting DB credentials into Colab at all.

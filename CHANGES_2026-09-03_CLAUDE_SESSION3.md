@@ -12,7 +12,7 @@ token system) — same mechanical, verified-safe remap applied: every raw
 color reference now resolves through `ink/graphite/slate/mist/paper/
 signal.*`, `font-mono` → `font-display tabular-nums`, radius bumped.
 Verified zero raw color refs remain in any of the 15 files; brace balance
-checked before/after on every file (two pre-existing paren offsetss in
+checked before/after on every file (two pre-existing paren offsets in
 `DecisionCard.tsx`/`SurpriseStocks.tsx` confirmed identical before and
 after — proven not introduced by this edit, not just assumed).
 

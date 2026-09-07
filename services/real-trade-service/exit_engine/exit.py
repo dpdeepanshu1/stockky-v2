@@ -56,7 +56,7 @@ from notifier import notify_sync
 from portfolio.portfolio import (
     close_position, open_positions, refresh_unrealized, record_real_exit_sent,
 )
-from tz_utils import as_aware
+from tz_utils import as_aware, ist_today_str
 
 # §6 — corporate-action clamp for ATR trailing stop inputs
 try:
@@ -194,7 +194,26 @@ def _send_real_sell(
     Returns True only if Dhan accepted and returned an order id.
     On failure the position is left untouched so exit_engine retries next cycle.
     execution_source/confirmed_by: set by manual_engine.py for human-initiated
-    sells; left at AUTO defaults for all automatic exit logic."""
+    sells; left at AUTO defaults for all automatic exit logic.
+
+    2026-09-08 fix: this always sent product_type="CNC" (the place_order
+    default), which is correct for a position opened on an earlier trading
+    day — those shares have already settled into the demat account and are
+    real "holdings". It is WRONG for a position opened and exited the SAME
+    day (stop_hit / target_hit_partial / emergency_gap_down firing shortly
+    after entry are exactly this case): CDSL only credits a buy to the
+    demat account one working day later, so at the moment of a same-day
+    exit the shares aren't holdings yet — Dhan rejects the CNC SELL with
+    "Dhan API error: Validate Qty from CDSL" because there is nothing in
+    CDSL for it to validate the quantity against. (This is also why Dhan
+    requires a fresh CDSL eDIS/TPIN step to sell existing holdings at all —
+    an interactive one-time-password step this fully automated service has
+    no way to complete, and one that in any case only covers shares CDSL
+    already knows about, never same-day ones.) A same-day round trip must
+    instead be sold as product_type="INTRADAY", which settles net against
+    the day's own buy and never touches CDSL holdings validation at all."""
+    same_day_position = ist_today_str(as_aware(position.opened_at)) == ist_today_str()
+    sell_product_type = "INTRADAY" if same_day_position else "CNC"
     try:
         security_id = dhan_client.get_security_id(db, position.symbol)
         result = dhan_client.place_order(
@@ -205,6 +224,7 @@ def _send_real_sell(
             quantity=qty,
             order_type="MARKET",
             price=0,
+            product_type=sell_product_type,
         )
         dhan_order_id = str(result.get("orderId") or result.get("order_id") or "")
         if not dhan_order_id:
@@ -224,7 +244,7 @@ def _send_real_sell(
         db.flush()
         db.add(models.TradeOrderEvent(
             order_id=order.id, event_type="PLACED",
-            detail=f"{reason}: MARKET SELL {qty} sent to Dhan",
+            detail=f"{reason}: MARKET SELL {qty} sent to Dhan ({sell_product_type})",
         ))
         record_real_exit_sent(db, position, dhan_order_id, qty, reason, full=full)
         # ENRICHMENT (2026-09-02): previously just symbol + qty + reason, no

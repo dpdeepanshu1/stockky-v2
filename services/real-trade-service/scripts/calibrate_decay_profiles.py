@@ -1,5 +1,5 @@
 """
-scripts/calibrate_decay_profiles.py — 2026-09-03
+scripts/calibrate_decay_profiles.py — 2026-09-07
 
 Real gap from the audit: watchlist_engine/decay.py's CATALYST_PROFILES and
 EXIT_PROFILES (entry_band_pct, decay_half_life_days, max_hold_days, etc.)
@@ -34,6 +34,15 @@ What it computes, per catalyst_type:
   - Suggested max_hold_days: current value with a directional nudge
     printed as a comment, not auto-applied — a human should sanity-check
     before editing decay.py.
+  - expired_unconsumed: watchlist rows whose expires_at passed while
+    status was still "active" — price stayed inside entry_band_pct the
+    whole time (never hit the chase-guard), but no TradePosition was ever
+    created from it either. A high rate here says nothing about the
+    entry_band_pct or max_hold_days values in decay.py; it means rows are
+    passing the band check (queued as candidates) but something
+    downstream of watchlist_engine — risk_engine limits, daily entry
+    caps, a candidate queue that never gets consumed — is quietly
+    swallowing them before they ever become a trade.
 """
 from __future__ import annotations
 
@@ -110,6 +119,27 @@ def main():
         }
         entered = [e for e in entries if e.id in entered_ids]
         missed = [e for e in entries if e.status == "missed"]
+        # FIX (2026-09-07, round 3): the script only ever counted "missed"
+        # (chase-guard rejections) as a non-entry outcome. But
+        # watchlist.py's expire_stale_entries() sets status="expired" for
+        # any row whose expires_at passed while it was still "active" —
+        # meaning price stayed inside the entry band the whole time, but it
+        # never actually became a trade (blocked downstream by risk_engine,
+        # daily entry caps, candidate never consumed, etc.). That's neither
+        # a band-too-tight signal (band was fine — it never got rejected on
+        # price) nor a real entry. Previously these rows just vanished from
+        # entered/missed/total_decided, so e.g. ipo showed "87 entries,
+        # entered=0, missed=0" with no way to tell that all 87 had simply
+        # timed out unconsumed. Track them explicitly instead of dropping
+        # them on the floor. Guard against e.id in entered_ids in case a
+        # row was later expired after already producing a TradePosition
+        # (expire_stale_entries only filters status=="active", so this
+        # shouldn't happen today, but don't double-count if it ever does).
+        expired = [e for e in entries if e.status == "expired" and e.id not in entered_ids]
+        still_pending = [
+            e for e in entries
+            if e.status == "active" and e.id not in entered_ids
+        ]
         total_decided = len(entered) + len(missed)
         missed_rate = (len(missed) / total_decided) if total_decided else None
 
@@ -166,7 +196,20 @@ def main():
         print(f"[{ctype}]  (horizon_class={current['horizon_class']}, "
               f"current entry_band_pct={current['entry_band_pct']}, "
               f"current max_hold_days={exit_profile.get('max_hold_days', '?')})")
-        print(f"  watchlist entries: {len(entries)}  (entered={len(entered)}, missed={len(missed)})")
+        print(f"  watchlist entries: {len(entries)}  "
+              f"(entered={len(entered)}, missed={len(missed)}, "
+              f"expired_unconsumed={len(expired)}, still_pending={len(still_pending)})")
+
+        if expired:
+            expired_rate = len(expired) / len(entries)
+            print(f"  expired_unconsumed_rate: {expired_rate:.0%} "
+                  f"(entry_band_pct never rejected these — they timed out at "
+                  f"expires_at without ever producing a trade)")
+            if expired_rate > 0.5 and len(entries) >= MIN_SAMPLES:
+                print(f"  -> majority of entries here never convert even though price "
+                      f"stayed in-band. This is NOT a decay.py band/hold-time issue — "
+                      f"look downstream (risk_engine limits, daily entry caps, candidate "
+                      f"queue never consumed) for why band_ok rows aren't becoming trades.")
 
         if total_decided < MIN_SAMPLES:
             print(f"  -> not enough decided entries yet ({total_decided} < {MIN_SAMPLES}) to suggest a band change\n")

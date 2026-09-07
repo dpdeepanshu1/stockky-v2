@@ -1375,18 +1375,47 @@ export default function RealAutoTrade() {
               />
 
               {/* Stockky account snapshot */}
-              {status?.account && (
-                <div className="grid grid-cols-2 gap-2">
-                  <StatCard label="Starting capital" value={fmtInr(status.account.starting_capital)} />
-                  <StatCard label="Current equity" value={fmtInr(status.account.current_equity)} />
-                  <StatCard label="Cash available" value={fmtInr(status.account.cash_available)} />
-                  <StatCard
-                    label="P&L today"
-                    value={fmtInr(status.account.realized_pnl_today, 0)}
-                    color={pnlColor(status.account.realized_pnl_today)}
-                  />
-                </div>
-              )}
+              {status?.account && (() => {
+                const realized = status.account.realized_pnl_total ?? 0;
+                const unrealizedNow = positions.reduce(
+                  (sum, p) => sum + ((p.current_price ?? p.avg_entry_price) - p.avg_entry_price) * p.qty_open, 0
+                );
+                const netPnl = realized + unrealizedNow;
+                return (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-2 gap-2">
+                      <StatCard label="Starting capital" value={fmtInr(status.account.starting_capital)} />
+                      <StatCard label="Current equity" value={fmtInr(status.account.current_equity)} />
+                      <StatCard label="Cash available" value={fmtInr(status.account.cash_available)} />
+                      <StatCard
+                        label="P&L today"
+                        value={fmtInr(status.account.realized_pnl_today, 0)}
+                        color={pnlColor(status.account.realized_pnl_today)}
+                      />
+                    </div>
+                    {/* Net P&L summary — big clear card */}
+                    <div className={`rounded-2xl border p-4 flex items-center justify-between ${
+                      netPnl >= 0
+                        ? "bg-signal-buy/5 border-signal-buy/30"
+                        : "bg-signal-sell/5 border-signal-sell/30"
+                    }`}>
+                      <div>
+                        <p className="font-display tabular-nums text-[11px] uppercase tracking-widest text-mist mb-0.5">
+                          Total P&L — realized + unrealized
+                        </p>
+                        <p className="font-display tabular-nums text-[10px] text-mist">
+                          Realized: {fmtInr(realized, 0)} · Unrealized: {unrealizedNow >= 0 ? "+" : ""}{fmtInr(unrealizedNow, 0)}
+                        </p>
+                      </div>
+                      <p className={`font-display tabular-nums text-2xl font-bold ${
+                        netPnl >= 0 ? "text-signal-buy" : "text-signal-sell"
+                      }`}>
+                        {netPnl >= 0 ? "+" : ""}{fmtInr(netPnl, 0)}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Order flow diagram */}
               <OrderFlowDiagram mode={mode} />

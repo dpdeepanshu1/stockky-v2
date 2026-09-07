@@ -106,6 +106,12 @@ EARLY_WARN_DAYS = int(os.getenv("EXIT_EARLY_WARN_DAYS", "6"))
 # unaffected — only the notification is throttled.
 CDSL_ALERT_COOLDOWN_MIN = int(os.getenv("EXIT_CDSL_ALERT_COOLDOWN_MIN", "60"))
 
+# 2026-09-07: after this many CONSECUTIVE unrecognized SELL rejections for
+# the same position, escalate to a distinctly-worded alert (see the generic
+# rejection branch in _send_real_sell) instead of sending an identical
+# "rejected" message every single cycle forever.
+EXIT_REJECT_STREAK_ESCALATE_AT = int(os.getenv("EXIT_REJECT_STREAK_ESCALATE_AT", "3"))
+
 
 def _trail_atr_mult(held_days: int, schedule=None) -> float:
     """Return the ATR multiplier for trailing stop based on how long
@@ -269,6 +275,11 @@ def _send_real_sell(
             detail=f"{reason}: MARKET SELL {qty} sent to Dhan ({sell_product_type})",
         ))
         record_real_exit_sent(db, position, dhan_order_id, qty, reason, full=full)
+        # 2026-09-07: a successful placement means any prior repeated-
+        # rejection streak for this position is over — clear it so a later
+        # rejection (if the position re-enters trouble another way) starts
+        # counting fresh rather than inheriting today's count.
+        save_snapshot(db, f"exit_reject_streak_{position.id}", {"count": 0})
         # ENRICHMENT (2026-09-02): previously just symbol + qty + reason, no
         # price at all. Now includes entry price, current stop/target, and
         # last-mark unrealized P&L so the Telegram alert is actionable on
@@ -337,10 +348,65 @@ def _send_real_sell(
                     "still within cooldown.", position.symbol, reason,
                 )
         else:
-            notify_sync(
-                f"⚠️ *SELL rejected by Dhan* — {position.symbol} ×{qty} ({reason})\n"
-                f"{str(e)[:300]}"
-            )
+            # BUG FIX (2026-09-07): unlike the invalid-IP and CDSL branches
+            # above, this generic branch had no cooldown and no escalation —
+            # every cycle that keeps failing for the same reason (a rejection
+            # this service doesn't recognize, so it doesn't know NOT to keep
+            # retrying) sent an identical Telegram alert forever. Live
+            # evidence: PARADEEP's SELL was rejected 5 times in ~6 minutes,
+            # each retry producing its own alert with nothing distinguishing
+            # "first time seeing this" from "still stuck, same as last time."
+            # Apply the same streak-cooldown idiom already proven for CDSL:
+            # count consecutive failures for this position, throttle repeat
+            # alerts, and once the streak crosses a threshold, escalate to a
+            # visibly different message so a human knows this one needs
+            # manual attention rather than more silent auto-retries — the
+            # position itself is deliberately left untouched either way
+            # (still OPEN, still retried next cycle) since we don't know
+            # this is unrecoverable the way CDSL's error is.
+            snap_key = f"exit_reject_streak_{position.id}"
+            streak_state = load_snapshot(db, snap_key) or {}
+            streak = int(streak_state.get("count", 0)) + 1
+            last_alert_raw = streak_state.get("last_alert_at")
+            due = True
+            if last_alert_raw:
+                try:
+                    last_alert_at = datetime.fromisoformat(last_alert_raw)
+                    elapsed_min = (datetime.now(timezone.utc) - last_alert_at).total_seconds() / 60.0
+                    due = elapsed_min >= CDSL_ALERT_COOLDOWN_MIN
+                except Exception:
+                    due = True
+            if streak >= EXIT_REJECT_STREAK_ESCALATE_AT and not due and streak_state.get("escalated"):
+                # Already escalated and still within cooldown — stay silent,
+                # just keep the streak count moving.
+                logger.info(
+                    "exit SELL for %s still rejected (streak=%d, %s) — "
+                    "escalation alert suppressed, within cooldown.",
+                    position.symbol, streak, reason,
+                )
+            elif streak >= EXIT_REJECT_STREAK_ESCALATE_AT:
+                notify_sync(
+                    f"🆘 *EXIT STUCK — {streak} consecutive rejections* — "
+                    f"{position.symbol} ×{qty} ({reason})\n"
+                    f"Last error: {str(e)[:300]}\n"
+                    "This isn't a recognized transient failure (not IP/CDSL) — "
+                    "auto-retry alone is unlikely to fix it. Position remains "
+                    "OPEN and exposed. Please check Dhan directly (order book, "
+                    "actual held quantity for this symbol) before the next "
+                    "retry cycle.\n"
+                    f"(Further alerts for this position suppressed for "
+                    f"{CDSL_ALERT_COOLDOWN_MIN} min — retries continue silently.)"
+                )
+                streak_state["escalated"] = True
+                streak_state["last_alert_at"] = datetime.now(timezone.utc).isoformat()
+            elif due:
+                notify_sync(
+                    f"⚠️ *SELL rejected by Dhan* — {position.symbol} ×{qty} ({reason})\n"
+                    f"{str(e)[:300]}"
+                )
+                streak_state["last_alert_at"] = datetime.now(timezone.utc).isoformat()
+            streak_state["count"] = streak
+            save_snapshot(db, snap_key, streak_state)
         return False
 
 

@@ -38,6 +38,7 @@ What it computes, per catalyst_type:
 from __future__ import annotations
 
 import argparse
+import re
 import statistics
 import sys
 from datetime import datetime, timedelta
@@ -47,6 +48,18 @@ from sqlalchemy import func
 sys.path.insert(0, ".")  # run from services/real-trade-service/
 
 MIN_SAMPLES = 8  # below this, print "not enough data" rather than a number that's mostly noise
+
+_MISSED_REASON_RE = re.compile(r"price moved (-?\d+\.?\d*)%")
+
+
+def _percentile(sorted_vals: list[float], p: float) -> float:
+    """Linear-interpolated percentile, p in [0, 1]. sorted_vals must be non-empty and sorted."""
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    idx = p * (len(sorted_vals) - 1)
+    lo, hi = int(idx), min(int(idx) + 1, len(sorted_vals) - 1)
+    frac = idx - lo
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac
 
 
 def main():
@@ -158,9 +171,37 @@ def main():
         if total_decided < MIN_SAMPLES:
             print(f"  -> not enough decided entries yet ({total_decided} < {MIN_SAMPLES}) to suggest a band change\n")
         else:
-            print(f"  missed_rate: {missed_rate:.0%}"
-                  + ("  -> consider widening entry_band_pct, chase-guard rejecting most catalysts of this type"
-                     if missed_rate > 0.5 else ""))
+            print(f"  missed_rate: {missed_rate:.0%}")
+            if missed_rate > 0.5:
+                # NEW (2026-09-07): turn "consider widening" into an actual
+                # number instead of a vague nudge, by parsing the real
+                # pct_move each miss was rejected at out of missed_reason
+                # (entry_engine/entry.py writes it as
+                # "price moved {pct_move:.1%} from catalyst ..." on every
+                # "missed" row — see line ~894). Using the 70th percentile
+                # of those overruns as the suggested new band: wide enough
+                # to have caught most of the real misses, not so wide that
+                # a couple of outlier runaway moves drag it out — same
+                # judgment call a human would make eyeballing the
+                # distribution, just made reproducible.
+                overruns = []
+                for e in missed:
+                    m = _MISSED_REASON_RE.search(e.missed_reason or "")
+                    if m:
+                        overruns.append(float(m.group(1)) / 100)
+                if len(overruns) >= MIN_SAMPLES:
+                    overruns.sort()
+                    suggested = _percentile(overruns, 0.70)
+                    print(f"  -> current entry_band_pct={current['entry_band_pct']:.0%} catches "
+                          f"~{sum(1 for o in overruns if o <= current['entry_band_pct'])}/{len(overruns)} "
+                          f"of the real misses parsed here; widening to ~{suggested:.1%} "
+                          f"(70th percentile of {len(overruns)} missed overruns, "
+                          f"range {min(overruns):.1%}-{max(overruns):.1%}) would catch ~70% of them. "
+                          f"Still directional — sanity-check against slippage/liquidity before editing decay.py.")
+                else:
+                    print(f"  -> consider widening entry_band_pct, chase-guard rejecting most catalysts "
+                          f"of this type ({len(overruns)} missed_reason rows were parseable — not enough "
+                          f"for a percentile suggestion yet)")
 
         if len(closed_positions) < MIN_SAMPLES:
             print(f"  -> not enough closed positions yet ({len(closed_positions)} < {MIN_SAMPLES}) to suggest a hold-time change\n")

@@ -51,7 +51,7 @@ from audit.logger import log_action
 from execution import dhan_client
 from exit_engine.exit import _send_real_sell
 from market_feed.feed import get_quotes
-from portfolio.portfolio import close_position, get_account, open_positions, record_real_order_sent, try_fill_entry
+from portfolio.portfolio import close_position, get_account, held_exposure_positions, record_real_order_sent, try_fill_entry
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
 
 logger = logging.getLogger("real-trade-manual")
@@ -73,7 +73,12 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
         sync_real_equity(db)
     account = get_account(db, mode)
     risk = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
-    positions = open_positions(db, mode)
+    # BUG FIX (2026-09-07): same gap as entry_engine/entry.py's _account_state —
+    # open_positions() hides PENDING_EXIT (exit sent to Dhan, unconfirmed), so
+    # a manual "Confirm BUY" for a symbol whose prior position is mid-exit
+    # would sail through the no-pyramiding check. See portfolio.py's
+    # held_exposure_positions().
+    positions = held_exposure_positions(db, mode)
     return AccountState(
         equity=account.current_equity,
         risk_per_trade_pct=risk.risk_per_trade_pct,

@@ -52,10 +52,50 @@ def open_positions(db: Session, mode: str) -> list[models.TradePosition]:
     are excluded. (A query that only matched status='OPEN' would silently
     stop evaluating a position's remaining shares the moment its first
     partial exit fired — exactly the kind of orphaned-state bug this
-    session has been hunting elsewhere in the codebase.)"""
+    session has been hunting elsewhere in the codebase.)
+
+    PENDING_EXIT is deliberately excluded here — a position whose exit
+    was already sent to Dhan and is awaiting fill confirmation shouldn't
+    be re-evaluated for a NEW exit decision this cycle (exit_engine's
+    _has_pending_real_sell guards the same case; excluding it here just
+    avoids the redundant pass). See main.py's /positions/{mode} endpoint,
+    which explicitly re-includes PENDING_EXIT for display, for why that
+    exclusion is scoped to re-evaluation and not to "does this symbol
+    still represent held exposure" — see held_exposure_positions() below
+    for that second, distinct question.
+    """
     return (
         db.query(models.TradePosition)
         .filter(models.TradePosition.mode == mode, models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")))
+        .all()
+    )
+
+
+def held_exposure_positions(db: Session, mode: str) -> list[models.TradePosition]:
+    """
+    BUG FIX (2026-09-07): risk_engine's no-pyramiding check and portfolio-risk
+    cap (see entry_engine/entry.py's _account_state -> open_position_symbols /
+    open_positions_total_risk) were built on top of open_positions() above —
+    which deliberately EXCLUDES status="PENDING_EXIT" (an exit already sent to
+    Dhan but not yet fill-confirmed) so the EXIT cycle doesn't re-evaluate it.
+    That exclusion is correct for the exit loop, but entry.py's reuse of the
+    same helper for "does this symbol already have exposure" is a different
+    question with a different right answer: a PENDING_EXIT position still has
+    real shares sitting in the account until Dhan confirms the sell — they
+    just aren't visible to open_position_symbols, so the no-pyramiding guard
+    (risk_engine/engine.py check #7) silently lets a fresh BUY candidate for
+    that same symbol through risk-approval while the previous exit is still
+    in flight, and open_positions_total_risk understates real exposure by the
+    same amount. Use this (not open_positions()) anywhere the question is
+    "does the account currently hold this symbol" rather than "which
+    positions need a fresh exit decision this cycle."
+    """
+    return (
+        db.query(models.TradePosition)
+        .filter(
+            models.TradePosition.mode == mode,
+            models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED", "PENDING_EXIT")),
+        )
         .all()
     )
 
@@ -444,9 +484,19 @@ def record_real_exit_fill(db: Session, position: models.TradePosition, exit_pric
 def _open_positions_market_value(db: Session, mode: str) -> float:
     """Best-effort mark-to-market using each position's last known price
     (avg_entry_price as a floor when no fresher tick has been recorded
-    this cycle — refresh_unrealized() below is what keeps this current)."""
+    this cycle — refresh_unrealized() below is what keeps this current).
+
+    BUG FIX (2026-09-07): used open_positions() (excludes PENDING_EXIT), but
+    this feeds current_equity for REAL too (see execution/equity_sync.py) — a
+    position whose exit was sent to Dhan but not yet fill-confirmed still
+    physically holds those shares, so its value belongs in equity until the
+    sell actually clears. Excluding it understated REAL equity (and, via
+    _account_state, the risk-per-trade sizing derived from it) for as long as
+    an exit stayed in flight. Use held_exposure_positions() — same status set
+    main.py's /positions endpoint already treats as "still held."
+    """
     total = 0.0
-    for p in open_positions(db, mode):
+    for p in held_exposure_positions(db, mode):
         total += p.avg_entry_price * p.qty_open
     return total
 

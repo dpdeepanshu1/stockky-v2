@@ -121,3 +121,35 @@ genuinely margin-rejected if real margin is tied up elsewhere in the
 account; that case now surfaces via the new dedicated alert in step 5
 above instead of the old generic one, but still requires a human to
 check the account, same as before.
+
+## Addendum (same day) — "Insufficient Holding Quantity" surfaced next
+Fixing product_type to CNC (above) got these SELLs past the margin check,
+straight into Dhan's *next* gate: the CDSL eDIS/TPIN "Verify Holdings"
+authorization that `execution/dhan_client.py` already had extensive
+handling for under a different error string ("Validate Qty from CDSL",
+see `CHANGES_2026-09-08_CDSL_SAME_DAY_EXIT_FIX.md`). This time Dhan
+rejected with **"Insufficient Holding Quantity"** instead. Per Dhan's own
+support article for that exact message, it means the same thing: *"the
+scrip ... is not freely available in your holding"* — i.e. today's CDSL
+authorization hasn't been done for that holding yet, not a real quantity
+mismatch.
+
+**Fix:** widened `dhan_client._CDSL_EDIS_MARKERS` to also match
+`"insufficient holding quantity"` and `"scrip limit insufficient"`, so
+`is_cdsl_edis_error()` now recognizes both wordings and routes to the
+existing informative alert (open Dhan app → Verify Holdings → enter
+T-PIN) instead of falling through to the generic "3 consecutive
+rejections" escalation, which had no actionable next step.
+
+This is not something a fully automated service can complete by itself —
+it's a SEBI-mandated, OTP-to-your-phone step, same as the CDSL case
+already documented. **Action needed once, before these four positions
+(IDEA, SUZLON, DEVYANI, PARADEEP) can auto-exit:** call
+`GET /dhan/edis/request-tpin` (SMS's you a T-PIN), then open
+`GET /dhan/edis/authorize-form` in an actual browser (not curl — it
+redirects to CDSL's page where you enter the T-PIN) with `bulk=true` to
+cover all four holdings in one go. This authorization is valid for the
+current trading day only and will need to be redone on any day these
+positions are still open and need to exit — Dhan requires this daily, not
+once-ever.
+

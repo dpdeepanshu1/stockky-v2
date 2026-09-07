@@ -493,6 +493,60 @@ function BalanceAllocation({ funds, positions }: { funds: any; positions: any[] 
   );
 }
 
+// ── Portfolio summary: invested / current stock value / P&L ─────────────────
+// 2026-09-09: added per user request — "how much i invested and how much
+// profit or loss and now what is total amount for stocks not include fund".
+// The existing "account" StatCards (starting capital / current equity / cash
+// available / P&L today) mix fund and equity figures and only ever show
+// TODAY's realized P&L, never an all-time total or a stocks-only value — so
+// there was no single place that answered "of the money in stocks right now,
+// what did I put in, what's it worth, and what have I made or lost overall."
+// Deliberately built from `positions` (this service's own OPEN/
+// PARTIALLY_CLOSED/PENDING_EXIT tracked positions, each carrying a known
+// avg_entry_price and live current_price from /positions) rather than
+// `livePositions`/`dhanAccount.funds` (Dhan's raw broker figures, already
+// shown separately in BalanceAllocation above) — this card is specifically
+// "what Stockky's own bookkeeping says about your stock holdings," not a
+// duplicate of the broker's own numbers.
+function PortfolioSummary({ positions, realizedPnlTotal }: { positions: Position[]; realizedPnlTotal: number | null }) {
+  if (positions.length === 0 && realizedPnlTotal == null) return null;
+
+  const invested = positions.reduce((sum, p) => sum + p.avg_entry_price * p.qty_open, 0);
+  // Falls back to avg_entry_price (i.e. 0 unrealized) for a position with no
+  // live tick yet this session — matches the same fallback /positions itself
+  // already uses for live_unrealized_pnl, so this card never contradicts the
+  // per-position P&L shown on the Positions tab.
+  const currentValue = positions.reduce(
+    (sum, p) => sum + (p.current_price ?? p.avg_entry_price) * p.qty_open, 0
+  );
+  const unrealized = currentValue - invested;
+  const realized = realizedPnlTotal ?? 0;
+  const totalPnl = realized + unrealized;
+  const totalPnlPct = invested > 0 ? (unrealized / invested) * 100 : 0;
+
+  return (
+    <div className="bg-graphite border border-slate rounded-2xl p-4 mb-4">
+      <SectionHdr>Portfolio summary (stocks only — excludes fund balance)</SectionHdr>
+      <div className="grid grid-cols-2 gap-2">
+        <StatCard label="Invested (open positions)" value={fmtInr(invested, 0)} />
+        <StatCard label="Current value" value={fmtInr(currentValue, 0)} />
+        <StatCard
+          label="Unrealized P&L"
+          value={`${unrealized >= 0 ? "+" : ""}${fmtInr(unrealized, 0)} (${totalPnlPct >= 0 ? "+" : ""}${totalPnlPct.toFixed(1)}%)`}
+          color={pnlColor(unrealized)}
+          sub={`${positions.length} open position${positions.length === 1 ? "" : "s"}`}
+        />
+        <StatCard
+          label="Total P&L (realized + unrealized)"
+          value={`${totalPnl >= 0 ? "+" : ""}${fmtInr(totalPnl, 0)}`}
+          color={pnlColor(totalPnl)}
+          sub={`Realized all-time: ${realized >= 0 ? "+" : ""}${fmtInr(realized, 0)}`}
+        />
+      </div>
+    </div>
+  );
+}
+
 // ── Gate sequence steps ──────────────────────────────────────────────────────
 function GateStep({ n, label, done, active }: { n: number; label: string; done: boolean; active: boolean }) {
   return (
@@ -1286,6 +1340,9 @@ export default function RealAutoTrade() {
                   )}
                 </div>
               )}
+
+              {/* Portfolio summary — invested / current value / P&L, stocks only */}
+              <PortfolioSummary positions={positions} realizedPnlTotal={status?.account?.realized_pnl_total ?? null} />
 
               {/* Stockky account snapshot */}
               {status?.account && (

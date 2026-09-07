@@ -188,6 +188,16 @@ def import_broker_holdings(db: Session) -> int:
             qty_open=qty, avg_entry_price=avg_price, opened_at=now,
             current_stop=stop_price, current_target=target_price,
             initial_stop_distance=abs(avg_price - stop_price),
+            # 2026-09-09 fix: opened_at above is the IMPORT moment, not the
+            # real purchase date (Dhan's holdings API doesn't give us that) —
+            # exit_engine._send_real_sell used to read opened_at=="today" as
+            # "this was bought and is being sold same-day" and sell it
+            # product_type="INTRADAY". For a real demat holding with no
+            # matching MIS position, Dhan treats that as opening a fresh
+            # short and margin-rejects it ("insufficient funds") instead of
+            # squaring off. broker_imported=True tells exit.py to always use
+            # CNC for this position, independent of opened_at.
+            broker_imported=True,
         )
         db.add(position)
         db.flush()

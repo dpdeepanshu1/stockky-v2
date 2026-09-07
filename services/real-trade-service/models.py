@@ -288,6 +288,23 @@ class TradePosition(Base):
     # NULL for manual trades and pre-migration positions — fall back to global defaults.
     watchlist_entry_id = Column(Integer, ForeignKey("trade_watchlist.id"), nullable=True)
 
+    # 2026-09-09 fix (insufficient-funds SELL rejections — see
+    # portfolio.import_broker_holdings and exit_engine.exit._send_real_sell):
+    # True only for a position this system never bought itself — a
+    # pre-existing Dhan demat holding pulled in by import_broker_holdings.
+    # opened_at on those rows is set to the IMPORT moment (the real purchase
+    # date isn't available from Dhan's holdings API), which made exit.py's
+    # "was this opened today?" check misread a long-held holding as a
+    # same-day round trip and sell it product_type="INTRADAY" — a product
+    # type Dhan has no matching MIS position to net against, so it was
+    # priced like a fresh naked short and margin-rejected ("insufficient
+    # funds"). broker_imported lets exit.py force CNC for these regardless
+    # of opened_at, independent of the same-day heuristic. False (default)
+    # for every position this system opened itself via entry_engine/
+    # manual_engine, where opened_at is trustworthy and the existing
+    # same-day/CNC logic is correct as-is.
+    broker_imported = Column(Boolean, nullable=False, default=False)
+
     __table_args__ = (Index("ix_trade_positions_mode_symbol_status", "mode", "symbol", "status"),)
 
 

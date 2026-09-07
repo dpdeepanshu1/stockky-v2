@@ -230,8 +230,26 @@ def _send_real_sell(
     no way to complete, and one that in any case only covers shares CDSL
     already knows about, never same-day ones.) A same-day round trip must
     instead be sold as product_type="INTRADAY", which settles net against
-    the day's own buy and never touches CDSL holdings validation at all."""
-    same_day_position = ist_today_str(as_aware(position.opened_at)) == ist_today_str()
+    the day's own buy and never touches CDSL holdings validation at all.
+
+    2026-09-09 fix ("insufficient funds" on SELL — see models.py
+    TradePosition.broker_imported docstring): the same_day check below reads
+    position.opened_at, but for a position brought in by
+    portfolio.import_broker_holdings, opened_at is the IMPORT timestamp, not
+    the real purchase date — the Dhan holdings API doesn't expose that.
+    Importing today made every pre-existing holding look like a same-day
+    round trip and get sold product_type="INTRADAY". Dhan has no MIS
+    position to net that against, so it priced the SELL as a fresh naked
+    short and margin-rejected it with "insufficient funds" — a completely
+    different failure from the CDSL-eDIS case above, but easy to mistake for
+    it since both surface as a same-day SELL rejection. broker_imported is
+    checked FIRST and forces CNC unconditionally, because a holding this
+    system never bought itself is never a same-day round trip regardless of
+    what opened_at says."""
+    if position.broker_imported:
+        same_day_position = False
+    else:
+        same_day_position = ist_today_str(as_aware(position.opened_at)) == ist_today_str()
     sell_product_type = "INTRADAY" if same_day_position else "CNC"
     # 2026-09-07: permanent visibility into this decision — session21's
     # investigation had to reconstruct this after the fact from a DB query
@@ -346,6 +364,45 @@ def _send_real_sell(
                 logger.info(
                     "CDSL block persists for %s (%s) — alert suppressed, "
                     "still within cooldown.", position.symbol, reason,
+                )
+        elif dhan_client.is_insufficient_funds_error(str(e)):
+            # 2026-09-09 fix: see dhan_client.is_insufficient_funds_error's
+            # docstring. The common cause (a broker_imported holding sold as
+            # INTRADAY with no MIS position to net against, so Dhan margins
+            # it like a fresh short) is fixed above via product_type — this
+            # branch now mainly covers a genuine margin shortfall, or a
+            # pre-fix position that hasn't been re-evaluated yet. Reuses the
+            # same per-position cooldown key/idiom as the CDSL branch so a
+            # persistent shortfall doesn't page every cycle.
+            snap_key = f"funds_alert_last_{position.id}"
+            last = load_snapshot(db, snap_key) or {}
+            last_at_raw = last.get("at")
+            due = True
+            if last_at_raw:
+                try:
+                    last_at = datetime.fromisoformat(last_at_raw)
+                    elapsed_min = (datetime.now(timezone.utc) - last_at).total_seconds() / 60.0
+                    due = elapsed_min >= CDSL_ALERT_COOLDOWN_MIN
+                except Exception:
+                    due = True
+            if due:
+                notify_sync(
+                    f"💰 *EXIT BLOCKED — insufficient funds* — "
+                    f"{position.symbol} ×{qty} ({reason})\n"
+                    f"Dhan margin-rejected this SELL: {str(e)[:200]}\n"
+                    "This SELL was sent as a fresh margin position, not a "
+                    "square-off of an existing broker position — normally "
+                    "because Dhan has no matching intraday (MIS) position to "
+                    "net it against. Position remains open; will retry next "
+                    "cycle.\n"
+                    f"(Next alert for this position suppressed for "
+                    f"{CDSL_ALERT_COOLDOWN_MIN} min — retries continue silently.)"
+                )
+                save_snapshot(db, snap_key, {"at": datetime.now(timezone.utc).isoformat()})
+            else:
+                logger.info(
+                    "Insufficient-funds block persists for %s (%s) — alert "
+                    "suppressed, still within cooldown.", position.symbol, reason,
                 )
         else:
             # BUG FIX (2026-09-07): unlike the invalid-IP and CDSL branches

@@ -20,6 +20,7 @@ sequence already enforced in main.py's route dependencies:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Optional
 
@@ -118,8 +119,9 @@ def _load_security_cache(db: Session) -> None:
     """Loads NSE equity security IDs using dhanhq.fetch_security_list().
     Falls back to direct CSV download if SDK method fails.
     Only keeps main-board equity rows (SEM_SERIES=EQ, SEM_INSTRUMENT_NAME=EQUITY)."""
-    global _security_cache, _security_cache_loaded_at
+    global _security_cache, _security_cache_loaded_at, _security_collision_count
     client = _get_sdk_client(db)
+    _security_collision_count = 0  # reset per-load so the summary below reflects only this load
 
     fresh: dict[str, str] = {}
     try:
@@ -133,9 +135,9 @@ def _load_security_cache(db: Session) -> None:
                     instrument = str(row.get("SEM_INSTRUMENT_NAME", row.get("INSTRUMENT_NAME", ""))).strip()
                     series = str(row.get("SEM_SERIES", row.get("SERIES", ""))).strip()
                     sym = str(row.get("SEM_TRADING_SYMBOL", row.get("TRADING_SYMBOL", ""))).strip().upper()
-                    sec_id = str(row.get("SEM_SMST_SECURITY_ID", row.get("SECURITY_ID", ""))).strip()
-                    if exch == "NSE" and instrument == "EQUITY" and series in ("EQ", "") and sym and sec_id:
-                        fresh[sym] = sec_id
+                    sec_id_raw = str(row.get("SEM_SMST_SECURITY_ID", row.get("SECURITY_ID", ""))).strip()
+                    if exch == "NSE" and instrument == "EQUITY" and series in ("EQ", ""):
+                        _add_security(fresh, sym, sec_id_raw)
                 except Exception:
                     continue
     except Exception as e:
@@ -163,9 +165,8 @@ def _load_security_cache(db: Session) -> None:
                     if row.get("SEM_SERIES") not in (None, "", "EQ"):
                         continue
                     sym = (row.get("SEM_TRADING_SYMBOL") or "").strip().upper()
-                    sec_id = (row.get("SEM_SMST_SECURITY_ID") or "").strip()
-                    if sym and sec_id:
-                        fresh[sym] = sec_id
+                    sec_id_raw = (row.get("SEM_SMST_SECURITY_ID") or "").strip()
+                    _add_security(fresh, sym, sec_id_raw)
                 except Exception:
                     continue
         except Exception as e2:
@@ -175,9 +176,70 @@ def _load_security_cache(db: Session) -> None:
         logger.error("Dhan instrument list fetch returned 0 usable rows — keeping existing cache.")
         return
 
+    if _security_collision_count:
+        logger.warning(
+            "real-trade: %d symbol(s) had 2+ distinct security_ids in this load — "
+            "kept the first seen for each, see prior warnings for which symbols.",
+            _security_collision_count,
+        )
+
     _security_cache = fresh
     _security_cache_loaded_at = time.time()
     logger.info("real-trade: loaded %d NSE equity security IDs from Dhan", len(fresh))
+
+
+# 2026-09-07 fix: Dhan's compact security list is read via pandas
+# (client.fetch_security_list(mode='compact')). If ANY row anywhere in the
+# whole file has a blank/NaN SEM_SMST_SECURITY_ID, pandas upcasts that
+# WHOLE column to float64 for the load — so a perfectly normal id like
+# "12345" comes back as the Python float 12345.0, and str(12345.0) ==
+# "12345.0". Dhan's own order API then rejects that malformed id outright
+# with "Invalid SecurityId" — this reproduces the exact PARADEEP SELL
+# rejection: get_security_id() found *something* cached (so it didn't hit
+# SecurityNotResolvedError), but the cached value had a spurious ".0"
+# suffix that Dhan's live order engine doesn't accept. Whether this trips
+# depends on whether that day's master file happened to have a blank id
+# somewhere — so it can appear to "come and go" across different symbols
+# on different days, not just PARADEEP specifically.
+_TRAILING_FLOAT_SUFFIX_RE = re.compile(r"^(\d+)\.0+$")
+
+
+def _clean_security_id(raw: str) -> str:
+    """Strips a spurious trailing '.0' (or '.00', etc.) picked up from a
+    pandas float-dtype cast — see module comment above. Safe no-op on an
+    already-clean id."""
+    raw = (raw or "").strip()
+    m = _TRAILING_FLOAT_SUFFIX_RE.match(raw)
+    return m.group(1) if m else raw
+
+
+# 2026-09-07 fix: `fresh[sym] = sec_id` used to silently overwrite on any
+# repeat symbol — if Dhan's master ever lists two rows matching our filter
+# for the same SEM_TRADING_SYMBOL (a re-listed/re-issued instrument keeping
+# its old row alongside a new one, for example), whichever row iteration
+# happened to hit LAST silently won, with zero visibility into whether that
+# was the right one. Now: first-seen wins deterministically, and every
+# collision is logged so a human can tell which id Dhan's dashboard says is
+# actually live if a symbol starts getting rejected.
+_security_collision_count = 0
+
+
+def _add_security(fresh: dict[str, str], sym: str, sec_id_raw: str) -> None:
+    global _security_collision_count
+    sec_id = _clean_security_id(sec_id_raw)
+    if not sym or not sec_id:
+        return
+    if sym in fresh and fresh[sym] != sec_id:
+        _security_collision_count += 1
+        logger.warning(
+            "Security master has 2+ distinct security_ids for symbol '%s' "
+            "(keeping first seen: %s, ignoring: %s) — likely a re-listed/"
+            "re-issued instrument. If orders for this symbol are being "
+            "rejected, check which id Dhan's own dashboard shows as live.",
+            sym, fresh[sym], sec_id,
+        )
+        return
+    fresh[sym] = sec_id
 
 
 def get_security_id(db: Session, symbol: str) -> str:
@@ -192,7 +254,10 @@ def get_security_id(db: Session, symbol: str) -> str:
     sec_id = _security_cache.get(sym)
     if sec_id is None:
         raise SecurityNotResolvedError(f"No Dhan NSE_EQ security_id found for '{sym}'.")
-    return sec_id
+    # Defense-in-depth (see _clean_security_id): cleans up an already-cached
+    # malformed id immediately, without waiting for the 24h TTL or a
+    # service restart to pick up the _load_security_cache fix above.
+    return _clean_security_id(sec_id)
 
 
 # Substrings Dhan's own error remarks use for an actually-invalid/expired

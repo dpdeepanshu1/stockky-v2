@@ -562,6 +562,14 @@ function PortfolioSummary({
           sub={`Realized all-time (this engine): ${realized >= 0 ? "+" : ""}${fmtInr(realized, 0)}`}
         />
       </div>
+      {/* NEW (2026-09-07): this P&L is pure (exit_price - entry_price) * qty — it does
+          NOT subtract brokerage/STT/GST/DP. Without this line the number above reads
+          as the full picture when it isn't; the Charges tab has the real after-costs
+          number for today. */}
+      <p className="font-display tabular-nums text-[10px] text-mist mt-2 pt-2 border-t border-slate">
+        ℹ️ P&L above is price movement only — brokerage, STT, GST and other charges are
+        not subtracted. See the Charges tab for today's actual costs and net P&L after charges.
+      </p>
       {depositsOutside != null && depositsOutside > 500 && (
         <p className="font-display tabular-nums text-[10px] text-mist mt-2 pt-2 border-t border-slate">
           ℹ️ Equity is ₹{(depositsOutside / 1000).toFixed(1)}k higher than starting capital + P&L — this reflects funds you deposited into Dhan directly, not trading gains.
@@ -2117,7 +2125,11 @@ export default function RealAutoTrade() {
               const sebi = turnover * SEBI_PCT;
               const gst = (brokerage + exchange) * GST_PCT;
               const stamp = isDelivery ? buyVal * STAMP_DELIVERY_PCT : buyVal * STAMP_INTRA_PCT;
-              const dp = isDelivery ? DP_CHARGE : 0;
+              // BUG FIX (2026-09-07): was `isDelivery ? DP_CHARGE : 0` — charged DP on
+              // every CNC leg, including BUYs. DP (Depository Participant) charges only
+              // apply when shares leave your demat, i.e. a delivery SELL — never a BUY.
+              // That was adding a phantom ~₹13.5 to every CNC buy order's charges.
+              const dp = (isDelivery && sellVal > 0) ? DP_CHARGE : 0;
               const total = brokerage + stt + exchange + sebi + gst + stamp + dp;
               return { brokerage, stt, exchange, sebi, gst, stamp, dp, total };
             }
@@ -2195,13 +2207,44 @@ export default function RealAutoTrade() {
                   <>
                     {/* Summary cards */}
                     <div className="bg-graphite border border-slate rounded-2xl p-4">
-                      <SectionHdr>All-time charges (today's Dhan orders)</SectionHdr>
+                      {/* BUG FIX (2026-09-07): header used to say "All-time charges (today's
+                          Dhan orders)" — self-contradictory, and misleading: Dhan's order-list
+                          API (what liveDhanOrders is built from) only ever returns TODAY's
+                          orders, there is no true all-time total anywhere in this view. Labeled
+                          accurately now; a real all-time figure would need Dhan's separate
+                          trade-history/ledger API (date-range), which isn't wired up yet. */}
+                      <SectionHdr>Today's Dhan charges</SectionHdr>
                       <div className="grid grid-cols-2 gap-2 mb-3">
-                        <StatCard label="Total charges paid" value={`-${fmtInr(grandTotal, 2)}`} color="text-signal-sell" sub={`${orderCharges.length} filled orders`} />
+                        <StatCard label="Total charges paid" value={`-${fmtInr(grandTotal, 2)}`} color="text-signal-sell" sub={`${orderCharges.length} filled orders today`} />
                         <StatCard label="Brokerage" value={`-${fmtInr(totalBrokerage, 2)}`} color="text-signal-sell" sub="₹20 cap per leg" />
                         <StatCard label="STT" value={`-${fmtInr(totalSTT, 2)}`} color="text-signal-sell" sub="Securities Transaction Tax" />
                         <StatCard label="GST + Exchange" value={`-${fmtInr(totalGST + totalExchange, 2)}`} color="text-signal-sell" sub="18% GST on brokerage" />
                       </div>
+                      {/* NEW (2026-09-07): the Overview/Positions P&L is raw (exit_price -
+                          entry_price) * qty — it never subtracts brokerage/STT/GST/DP. This is
+                          the one place in the app that nets today's realized P&L against
+                          today's actual charges, so "did I really make/lose money today" has an
+                          honest answer somewhere. */}
+                      {status?.account?.realized_pnl_today != null && (
+                        <div className="bg-ink border border-slate rounded-xl p-3 mb-3">
+                          <div className="flex items-center justify-between font-display tabular-nums text-[11px] text-mist mb-1">
+                            <span>Realized P&L today (price only)</span>
+                            <span className={pnlColor(status.account.realized_pnl_today)}>
+                              {status.account.realized_pnl_today >= 0 ? "+" : ""}{fmtInr(status.account.realized_pnl_today, 2)}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between font-display tabular-nums text-[11px] text-mist mb-1">
+                            <span>− Charges today</span>
+                            <span className="text-signal-sell">-{fmtInr(grandTotal, 2)}</span>
+                          </div>
+                          <div className="flex items-center justify-between font-display tabular-nums text-xs font-bold border-t border-slate pt-1.5 mt-1">
+                            <span className="text-paper">Net realized P&L today (after charges)</span>
+                            <span className={pnlColor(status.account.realized_pnl_today - grandTotal)}>
+                              {(status.account.realized_pnl_today - grandTotal) >= 0 ? "+" : ""}{fmtInr(status.account.realized_pnl_today - grandTotal, 2)}
+                            </span>
+                          </div>
+                        </div>
+                      )}
                       <div className="border-t border-slate pt-3">
                         <p className="font-display tabular-nums text-[10px] text-mist mb-2 uppercase tracking-widest">Full breakdown</p>
                         <div className="space-y-1.5 font-display tabular-nums text-[11px]">

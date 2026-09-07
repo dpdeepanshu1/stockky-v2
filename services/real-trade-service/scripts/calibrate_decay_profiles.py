@@ -42,6 +42,8 @@ import statistics
 import sys
 from datetime import datetime, timedelta
 
+from sqlalchemy import func
+
 sys.path.insert(0, ".")  # run from services/real-trade-service/
 
 MIN_SAMPLES = 8  # below this, print "not enough data" rather than a number that's mostly noise
@@ -91,7 +93,41 @@ def main():
             )
             if pos and pos.closed_at:
                 held_days = (pos.closed_at - pos.opened_at).total_seconds() / 86400
-                pnl_pct = (pos.realized_pnl / (pos.avg_entry_price * max(pos.qty_open, 1))) * 100 if pos.avg_entry_price else None
+                # BUG FIX (2026-09-06): pnl_pct used to divide realized_pnl by
+                # qty_open — but qty_open is decremented to 0 on every exit
+                # (portfolio.py close_position/record_real_exit_fill both
+                # end with qty_open <= 0 -> status "CLOSED"), so for every
+                # CLOSED position the old `max(pos.qty_open, 1)` silently
+                # fell back to a denominator of 1. That turned pnl_pct into
+                # ~absolute rupee P&L per one share, not a real percentage —
+                # for any position sized more than 1 share, this wildly
+                # overstated (or understated, if realized_pnl was negative)
+                # the reported return, making median_pnl_pct meaningless for
+                # every catalyst type, not just the 4 still open. Fixed by
+                # reconstructing the ORIGINAL bought qty from the BUY
+                # order(s)/fills that opened this watchlist-sourced position
+                # — the only reliable source once exits have already reset
+                # qty_open toward 0.
+                buy_order_ids = [
+                    oid for (oid,) in session.query(models.TradeOrder.id)
+                        .filter(models.TradeOrder.watchlist_entry_id == e.id,
+                                models.TradeOrder.side == "BUY")
+                        .all()
+                ]
+                original_qty = None
+                if buy_order_ids:
+                    original_qty = session.query(func.sum(models.TradeFill.qty)).filter(
+                        models.TradeFill.order_id.in_(buy_order_ids)
+                    ).scalar()
+                if not original_qty:
+                    # Last-resort fallback for pre-migration rows with no
+                    # linked BUY order/fill — better than crashing, but flag
+                    # it so it isn't mistaken for a fully-reconstructed number.
+                    original_qty = pos.qty_open or 1
+                pnl_pct = (
+                    (pos.realized_pnl / (pos.avg_entry_price * original_qty)) * 100
+                    if pos.avg_entry_price else None
+                )
                 closed_positions.append((pos, held_days, pnl_pct))
 
         current = CATALYST_PROFILES[ctype]

@@ -10,6 +10,7 @@ import { useEffect, useState, useCallback } from "react";
 import { api, apiUrl, PaperTrade, PortfolioSummary, TradeReportBucket } from "../api";
 import { getSafePrice } from "../priceDisplay";
 import StockChart from "./StockChart";
+import BottomSheet from "./BottomSheet";
 
 const fmtMoney = (n: number | null | undefined) =>
   n == null || !Number.isFinite(Number(n)) ? "—" : `₹${Number(n).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
@@ -481,21 +482,15 @@ export default function Trades() {
       )}
 
       {backupDetail && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/80 backdrop-blur-sm p-4">
-          <div className="bg-graphite border border-slate/60 rounded-2xl p-5 w-full max-w-lg max-h-[80vh] flex flex-col shadow-xl">
-            <div className="flex items-start justify-between gap-3 mb-3">
-              <div>
-                <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest">Backup detail</h3>
-                <p className="font-display tabular-nums text-sm text-paper mt-1 break-all">{backupDetail.filename}</p>
-              </div>
-              <button
-                onClick={() => setBackupDetail(null)}
-                className="text-xs font-display tabular-nums text-mist hover:text-paper border border-slate/40 rounded-xl px-2 py-1"
-              >
-                Close
-              </button>
-            </div>
-            <div className="text-xs font-display tabular-nums text-mist/80 space-y-2 mb-3">
+        <BottomSheet
+          isOpen={!!backupDetail}
+          onClose={() => setBackupDetail(null)}
+          title="Backup detail"
+          subtitle={backupDetail.filename}
+          desktopMaxWidth="sm:max-w-lg"
+        >
+          <div className="p-5">
+            <div className="text-xs font-display tabular-nums text-mist space-y-2 mb-3">
               {backupDetail.data?.created_at && (
                 <p>Created: <span className="text-paper">{String(backupDetail.data.created_at)}</span></p>
               )}
@@ -509,12 +504,12 @@ export default function Trades() {
                 </span>
               </p>
             </div>
-            <div className="flex-1 overflow-auto rounded-xl bg-ink/50 border border-slate/40 p-3">
+            <div className="max-h-[50vh] overflow-auto rounded-xl bg-ink border border-slate p-3">
               {Array.isArray(backupDetail.data?.trades) && backupDetail.data.trades.length > 0 ? (
                 <ul className="space-y-2">
                   {backupDetail.data.trades.map((t: any, i: number) => (
-                    <li key={t.trade_id || i} className="font-display tabular-nums text-[11px] border-b border-slate/30 pb-2 text-slate-300">
-                      <span className="text-white font-bold">{t.symbol || "—"}</span>
+                    <li key={t.trade_id || i} className="font-display tabular-nums text-[11px] border-b border-slate pb-2 text-paper">
+                      <span className="text-paper font-bold">{t.symbol || "—"}</span>
                       {" · "}
                       {t.status || "—"}
                       {" · qty "}
@@ -530,49 +525,47 @@ export default function Trades() {
                   ))}
                 </ul>
               ) : (
-                <pre className="font-display tabular-nums text-[10px] text-mist/80 whitespace-pre-wrap break-all">
+                <pre className="font-display tabular-nums text-[10px] text-mist whitespace-pre-wrap break-all">
                   {JSON.stringify(backupDetail.data, null, 2)}
                 </pre>
               )}
             </div>
           </div>
-        </div>
+        </BottomSheet>
       )}
 
       
       {addMoreId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/70 backdrop-blur-sm p-4">
-          <div className="bg-graphite border border-slate/60 rounded-2xl p-6 w-full max-w-sm">
-            <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-1">Buy more</h3>
-            <p className="text-[11px] text-mist/60 mb-4">Add quantity to open position (avg entry updates like Groww)</p>
+        <BottomSheet isOpen={!!addMoreId} onClose={() => setAddMoreId(null)} title="Buy more" desktopMaxWidth="sm:max-w-sm">
+          <div className="p-5">
+            <p className="text-[11px] text-mist mb-4">Add quantity to open position (avg entry updates like Groww)</p>
             <label className="block text-[10px] font-display tabular-nums text-mist uppercase mb-1">Quantity</label>
             <input type="number" min="0.01" step="1" value={addQty} onChange={(e) => setAddQty(e.target.value)}
-              className="w-full bg-ink/50 border border-slate/40 rounded-xl px-3 py-2 font-display tabular-nums text-lg text-paper mb-3 focus:outline-none focus:border-signal-buy/60" autoFocus />
+              className="w-full bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-lg text-paper mb-3 focus:outline-none focus:border-signal-buy" autoFocus />
             <label className="block text-[10px] font-display tabular-nums text-mist uppercase mb-1">Price (optional — blank = last entry)</label>
             <input type="number" min="0" step="0.05" value={addPrice} onChange={(e) => setAddPrice(e.target.value)}
-              className="w-full bg-ink/50 border border-slate/40 rounded-xl px-3 py-2 font-display tabular-nums text-paper mb-4 focus:outline-none focus:border-signal-buy/60" placeholder="Market / avg" />
+              className="w-full bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-paper mb-4 focus:outline-none focus:border-signal-buy" placeholder="Market / avg" />
             <div className="flex gap-2">
-              <button onClick={() => setAddMoreId(null)} className="flex-1 text-xs font-display tabular-nums uppercase border border-slate/40 rounded-xl py-2 text-mist">Cancel</button>
+              <button onClick={() => setAddMoreId(null)} className="flex-1 text-xs font-display tabular-nums uppercase border border-slate rounded-xl py-2.5 text-mist">Cancel</button>
               <button onClick={submitAddMore} disabled={adding}
-                className="flex-1 text-xs font-display tabular-nums uppercase bg-signal-buy/20 border border-signal-buy/50 text-signal-buy rounded-xl py-2 disabled:opacity-50">
+                className="flex-1 text-xs font-display tabular-nums uppercase bg-signal-buy text-white rounded-xl py-2.5 disabled:opacity-50">
                 {adding ? "Adding..." : "Confirm Buy"}
               </button>
             </div>
           </div>
-        </div>
+        </BottomSheet>
       )}
 
       {showDeposit && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/70 backdrop-blur-sm p-4">
-          <div className="bg-graphite border border-slate/60 rounded-2xl p-6 w-full max-w-sm">
-            <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-4">Add Dummy Funds</h3>
+        <BottomSheet isOpen={showDeposit} onClose={() => setShowDeposit(false)} title="Add Dummy Funds" desktopMaxWidth="sm:max-w-sm">
+          <div className="p-5">
             <div className="flex items-center gap-2 mb-4">
               <span className="font-display tabular-nums text-lg text-mist">Rs</span>
               <input
                 type="number"
                 value={depositAmount}
                 onChange={(e) => setDepositAmount(e.target.value)}
-                className="flex-1 bg-ink/50 border border-slate/40 rounded-xl px-3 py-2 font-display tabular-nums text-lg text-paper focus:outline-none focus:border-signal-buy/60"
+                className="flex-1 bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-lg text-paper focus:outline-none focus:border-signal-buy"
                 autoFocus
               />
             </div>
@@ -581,7 +574,7 @@ export default function Trades() {
                 <button
                   key={amt}
                   onClick={() => setDepositAmount(String(amt))}
-                  className="flex-1 text-[10px] font-display tabular-nums border border-slate/40 rounded-xl py-1.5 text-mist hover:text-paper hover:border-slate/60 transition"
+                  className="flex-1 text-[10px] font-display tabular-nums border border-slate rounded-xl py-1.5 text-mist hover:text-paper hover:border-slate transition"
                 >
                   +{(amt / 1000).toFixed(0)}k
                 </button>
@@ -590,21 +583,21 @@ export default function Trades() {
             <div className="flex gap-2">
               <button
                 onClick={() => setShowDeposit(false)}
-                className="flex-1 text-xs font-display tabular-nums uppercase tracking-wider border border-slate/40 rounded-xl py-2 text-mist hover:text-paper transition"
+                className="flex-1 text-xs font-display tabular-nums uppercase tracking-wider border border-slate rounded-xl py-2.5 text-mist hover:text-paper transition"
               >
                 Cancel
               </button>
               <button
                 onClick={submitDeposit}
                 disabled={depositing}
-                className="flex-1 text-xs font-display tabular-nums uppercase tracking-wider bg-signal-buy/20 border border-signal-buy/50 text-signal-buy rounded-xl py-2 hover:bg-signal-buy/30 transition disabled:opacity-50 flex items-center justify-center gap-2"
+                className="flex-1 text-xs font-display tabular-nums uppercase tracking-wider bg-signal-buy text-white rounded-xl py-2.5 hover:opacity-90 transition disabled:opacity-50 flex items-center justify-center gap-2"
               >
                 {depositing && <Spinner />}
                 {depositing ? "Adding..." : "Confirm"}
               </button>
             </div>
           </div>
-        </div>
+        </BottomSheet>
       )}
 
       {summary && (

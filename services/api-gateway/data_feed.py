@@ -879,9 +879,6 @@ HOT_RESULT_KEY = "stockky:hot_result_db"
 # premarket bulk-feed run and a "Search Hot Picks Stocks" run never stomp
 # on each other's progress bar.
 HOT_PREMARKET_JOB_KEY = "stockky:hot_premarket_job"
-# Separate job key for the Hot Picks "Repair All" background job — kept
-# distinct so a repair run never stomps on a premarket or scan progress bar.
-HOT_REPAIR_JOB_KEY = "stockky:hot_repair_job"
 
 
 def _hot_job_recompute(j: dict) -> dict:
@@ -990,40 +987,6 @@ def hot_premarket_job_set(redis_set, redis_get, **kwargs) -> dict:
         redis_set(HOT_PREMARKET_JOB_KEY, j, ttl=7 * 86400)
     except Exception as e:
         logger.warning("hot_premarket_job_set durable fail: %s", e)
-    return j
-
-
-def hot_repair_job_get(redis_get) -> dict:
-    """Same shape/semantics as hot_premarket_job_get, but for the Hot Picks
-    'Repair All' background job — see HOT_REPAIR_JOB_KEY."""
-    try:
-        j = redis_get(HOT_REPAIR_JOB_KEY)
-    except Exception:
-        j = None
-    if isinstance(j, dict):
-        return _hot_job_recompute(dict(j))
-    return {
-        "status": "idle",
-        "processed": 0,
-        "total": 0,
-        "repaired": [],
-        "failed": [],
-        "started_at": None,
-        "elapsed_sec": 0,
-        "estimated_remaining_sec": None,
-        "message": "Idle",
-    }
-
-
-def hot_repair_job_set(redis_set, redis_get, **kwargs) -> dict:
-    j = hot_repair_job_get(redis_get)
-    j.update(kwargs)
-    _hot_job_recompute(j)
-    j["updated_at"] = _now_iso()
-    try:
-        redis_set(HOT_REPAIR_JOB_KEY, j, ttl=7 * 86400)
-    except Exception as e:
-        logger.warning("hot_repair_job_set durable fail: %s", e)
     return j
 
 

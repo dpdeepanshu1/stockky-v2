@@ -1,5 +1,5 @@
 """
-Decision Engine Service v0.7.7
+Decision Engine Service v0.7.6
 Changes:
 - Fetches market sentiment from API Gateway's /market/indices endpoint (fast and reliable)
 - Always includes the live market_score in the response
@@ -8,7 +8,6 @@ Changes:
 - Multi-horizon scoring (short/mid/long) via horizons.py
 - v0.7.5: Expanded shared httpx pool (150 keepalive / 400 max connections, 45s timeout)
   to eliminate PoolTimeout and ReadTimeout under concurrent free-tier scan load
-- v0.7.7: _fetch_optional now logs symbol in warning tag ("Technical[KEC] unavailable") for log correlation during concurrent scan
 - v0.7.6: Short-circuit path — when gateway/Neon already supplies RSI, PE, technical_score,
   fundamental_score, news_score etc., skip the corresponding HTTP calls to analysis-intelligence.
   New POST /decide/evaluate accepts a payload and prefers supplied data (eliminates ~90% of
@@ -173,7 +172,7 @@ def time_module_time():
     import time as _t
     return _t.time()
 
-app = FastAPI(title="Stockky Decision Engine", version="0.7.7")
+app = FastAPI(title="Stockky Decision Engine", version="0.7.6")
 
 # Shared downstream client — avoid per-request TLS to analysis/training/market-data
 # Expanded pool + longer timeouts for free-tier Render (prevents PoolTimeout / ReadTimeout
@@ -228,7 +227,7 @@ class Decision(str, Enum):
 
 @app.get("/")
 def root():
-    return {"service": "Stockky Decision Engine", "version": "0.7.7", "status": "running",
+    return {"service": "Stockky Decision Engine", "version": "0.7.6", "status": "running",
             "features": ["decide_cache", "decide_batch"]}
 
 
@@ -263,19 +262,11 @@ def circuits_status():
 
 
 # ── Fetch helpers ──────────────────────────────────────────────────
-async def _fetch_optional(client: httpx.AsyncClient, url: str, label: str, symbol: str = ""):
-    """Fetch optional pillar with circuit breaker (fail fast when dependency is down).
-
-    ``symbol`` is optional — when supplied it is appended to every warning/error
-    log line as ``label[symbol]`` so concurrent-scan logs can be correlated per
-    symbol instead of producing an undifferentiated wall of identical warnings.
-    The circuit breaker key is intentionally kept per-pillar (not per-symbol) so
-    a flaky symbol doesn't open the breaker for the whole downstream service.
-    """
-    tag = f"{label}[{symbol}]" if symbol else label
+async def _fetch_optional(client: httpx.AsyncClient, url: str, label: str):
+    """Fetch optional pillar with circuit breaker (fail fast when dependency is down)."""
     breaker = get_breaker(f"decision:{label.lower()}", failure_threshold=8, recovery_timeout=45)
     if not breaker.allow():
-        logger.warning("%s circuit OPEN — skip (retry in %.0fs)", tag, breaker.retry_after())
+        logger.warning("%s circuit OPEN — skip (retry in %.0fs)", label, breaker.retry_after())
         return None
     # Fundamentals / prediction need more than 5s on free-tier cold start
     timeout = httpx.Timeout(35.0 if label.lower() in ("fundamental", "prediction", "technical") else 20.0, connect=8.0)
@@ -284,7 +275,7 @@ async def _fetch_optional(client: httpx.AsyncClient, url: str, label: str, symbo
         if resp.status_code >= 400:
             detail = (resp.text or "")[:180].replace("\n", " ")
             breaker.record_failure(f"HTTP {resp.status_code}")
-            logger.warning("%s unavailable: HTTP %s %s", tag, resp.status_code, detail)
+            logger.warning("%s unavailable: HTTP %s %s", label, resp.status_code, detail)
             return None
         data = resp.json()
         breaker.record_success()
@@ -292,7 +283,7 @@ async def _fetch_optional(client: httpx.AsyncClient, url: str, label: str, symbo
     except Exception as e:
         msg = str(e) or type(e).__name__
         breaker.record_failure(msg)
-        logger.warning("%s unavailable: %s", tag, msg)
+        logger.warning("%s unavailable: %s", label, msg)
         return None
 
 
@@ -1126,24 +1117,24 @@ async def _decide_impl(
 
         if need_technical:
             tasks["technical"] = asyncio.create_task(
-                _fetch_optional(client, f"{TECHNICAL_URL}/analyze/{symbol}{force_query}", "Technical", symbol)
+                _fetch_optional(client, f"{TECHNICAL_URL}/analyze/{symbol}{force_query}", "Technical")
             )
         if need_fundamental:
             tasks["fundamental"] = asyncio.create_task(
-                _fetch_optional(client, f"{FUNDAMENTAL_URL}/analyze/{symbol}{force_query}", "Fundamental", symbol)
+                _fetch_optional(client, f"{FUNDAMENTAL_URL}/analyze/{symbol}{force_query}", "Fundamental")
             )
         if need_news:
             tasks["news"] = asyncio.create_task(
-                _fetch_optional(client, f"{NEWS_URL}/analyze/{symbol}{force_query}", "News", symbol)
+                _fetch_optional(client, f"{NEWS_URL}/analyze/{symbol}{force_query}", "News")
             )
         if need_events:
             tasks["events"] = asyncio.create_task(
-                _fetch_optional(client, f"{EVENT_URL}/events/{symbol}{force_query}", "Events", symbol)
+                _fetch_optional(client, f"{EVENT_URL}/events/{symbol}{force_query}", "Events")
             )
         if need_prediction:
             # Prediction path currently has no force cache layer; keep URL clean
             tasks["prediction"] = asyncio.create_task(
-                _fetch_optional(client, f"{PREDICTION_URL}/predict/{symbol}", "Prediction", symbol)
+                _fetch_optional(client, f"{PREDICTION_URL}/predict/{symbol}", "Prediction")
             )
         if need_sentiment:
             tasks["sentiment"] = asyncio.create_task(get_market_sentiment())

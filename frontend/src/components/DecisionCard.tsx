@@ -342,7 +342,7 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
                       ? "border-signal-buy/40 text-signal-buy bg-signal-buy/10"
                       : data.data_quality.level === "low"
                       ? "border-signal-hold/40 text-signal-hold bg-signal-hold/10"
-                      : "border-slate-400/40 text-mist bg-slate/20"
+                      : "border-mist/40 text-mist bg-slate/20"
                   }`}
                 >
                   Data quality: {data.data_quality.level || "unknown"}

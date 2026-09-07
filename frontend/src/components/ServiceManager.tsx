@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, wakeService, SystemServiceStatus } from "../api";
+import BottomSheet from "./BottomSheet";
 
 interface ServiceManagerProps {
   onClose: () => void;
@@ -96,9 +97,8 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
   };
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center p-3 sm:p-6">
-      <button type="button" className="absolute inset-0 bg-black/60 backdrop-blur-sm" aria-label="Close" onClick={onClose} />
-      <div className="topo-shell relative z-10 w-full max-w-lg max-h-[88vh] overflow-y-auto shadow-2xl">
+    <BottomSheet isOpen={true} onClose={onClose} desktopMaxWidth="sm:max-w-lg">
+      <div className="p-5">
         <div className="flex items-start justify-between gap-2 mb-1">
           <h2 className="topo-title">
             <span aria-hidden>◈</span> System Health &amp; 5 Microservices Topology
@@ -180,6 +180,6 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
           ))
         )}
       </div>
-    </div>
+    </BottomSheet>
   );
 }

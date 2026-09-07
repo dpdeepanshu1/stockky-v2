@@ -319,7 +319,7 @@ export default function DataFeed() {
               onClick={onRefreshPage}
               disabled={busy != null}
               title="Refresh status from server — auto-heals stuck Running after sleep"
-              className="font-display tabular-nums text-xs px-3 py-2 rounded-2xl bg-slate-500/20 border border-slate-400/40 text-paper hover:bg-slate-500/30 disabled:opacity-40"
+              className="font-display tabular-nums text-xs px-3 py-2 rounded-2xl bg-mist/20 border border-mist/40 text-paper hover:bg-mist/30 disabled:opacity-40"
             >
               {busy === "refresh-ui" ? "…" : "Refresh status"}
             </button>

@@ -99,15 +99,46 @@ class CircuitBreaker:
 
     def record_failure(self) -> None:
         self._failures += 1
-        if self._failures >= self.failure_threshold and self._opened_at is None:
+        if self._opened_at is None:
+            if self._failures >= self.failure_threshold:
+                self._opened_at = time.monotonic()
+                logger.warning(
+                    "circuit_breaker[%s]: OPEN after %d consecutive failures",
+                    self.name, self._failures,
+                )
+                _alert(
+                    f"⚠️ Stockky: {self.name} is DOWN ({self._failures} consecutive failures). "
+                    f"Falling back to degraded signal sourcing for at least {self.cooldown_s:.0f}s."
+                )
+        else:
+            # BUG FIX (2026-09-07): call() only reaches record_failure() while
+            # self._opened_at is already set if is_open evaluated False —
+            # i.e. the cooldown had elapsed and this was the single HALF-OPEN
+            # probe call. Previously this branch didn't exist, so a failed
+            # probe left _opened_at untouched at its original timestamp.
+            # is_open computes `elapsed = now - self._opened_at`, and once
+            # elapsed has already crossed cooldown_s once, it only keeps
+            # growing — so every later check kept evaluating elapsed >=
+            # cooldown_s and returning is_open=False (half-open) FOREVER,
+            # regardless of how many more probes failed. That let every
+            # subsequent call through as an unthrottled "probe" — exactly a
+            # circuit breaker that's supposed to protect a struggling
+            # upstream from being hammered, doing the opposite. It also
+            # explains "half_open, seconds_until_retry=0" persisting
+            # indefinitely on the dashboard: cooldown_s minus an
+            # ever-growing elapsed floors at 0 and stays there. Re-arm the
+            # clock here so a failed probe re-opens the breaker for another
+            # full cooldown window, same as the initial trip.
             self._opened_at = time.monotonic()
             logger.warning(
-                "circuit_breaker[%s]: OPEN after %d consecutive failures",
-                self.name, self._failures,
+                "circuit_breaker[%s]: half-open probe failed (failure #%d) — "
+                "re-OPENING for another %.0fs",
+                self.name, self._failures, self.cooldown_s,
             )
             _alert(
-                f"⚠️ Stockky: {self.name} is DOWN ({self._failures} consecutive failures). "
-                f"Falling back to degraded signal sourcing for at least {self.cooldown_s:.0f}s."
+                f"⚠️ Stockky: {self.name} probe failed again "
+                f"({self._failures} total consecutive failures) — still down, "
+                f"retrying in {self.cooldown_s:.0f}s."
             )
 
     async def call(

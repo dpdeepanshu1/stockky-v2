@@ -38,6 +38,7 @@ What it computes, per catalyst_type:
 from __future__ import annotations
 
 import argparse
+import re
 import statistics
 import sys
 from datetime import datetime, timedelta
@@ -47,6 +48,18 @@ from sqlalchemy import func
 sys.path.insert(0, ".")  # run from services/real-trade-service/
 
 MIN_SAMPLES = 8  # below this, print "not enough data" rather than a number that's mostly noise
+
+_MISSED_REASON_RE = re.compile(r"price moved (-?\d+\.?\d*)%")
+
+
+def _percentile(sorted_vals: list[float], p: float) -> float:
+    """Linear-interpolated percentile, p in [0, 1]. sorted_vals must be non-empty and sorted."""
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    idx = p * (len(sorted_vals) - 1)
+    lo, hi = int(idx), min(int(idx) + 1, len(sorted_vals) - 1)
+    frac = idx - lo
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac
 
 
 def main():
@@ -158,9 +171,54 @@ def main():
         if total_decided < MIN_SAMPLES:
             print(f"  -> not enough decided entries yet ({total_decided} < {MIN_SAMPLES}) to suggest a band change\n")
         else:
-            print(f"  missed_rate: {missed_rate:.0%}"
-                  + ("  -> consider widening entry_band_pct, chase-guard rejecting most catalysts of this type"
-                     if missed_rate > 0.5 else ""))
+            print(f"  missed_rate: {missed_rate:.0%}")
+            if missed_rate > 0.5:
+                # BUG FIX (2026-09-07): the first version of this compared
+                # every historical miss's overrun against TODAY's
+                # CATALYST_PROFILES value — but entry_band_pct is a real
+                # column FROZEN on each WatchlistEntry at creation time
+                # (watchlist.py: `entry_band_pct=profile["entry_band_pct"]`),
+                # never updated retroactively. A row created before the last
+                # decay.py edit is still evaluated against whatever band was
+                # active THEN, forever. Comparing its overrun to today's
+                # config produces exactly the confusing/wrong result seen in
+                # testing: "current band catches 37/37 misses" when every
+                # overrun was actually BELOW today's band — i.e. those rows
+                # were rejected under an older, smaller, now-superseded band
+                # and say nothing about whether today's setting is still too
+                # tight. Fixed by splitting on each row's own e.entry_band_pct:
+                # only rows evaluated under the band value that's still
+                # actually configured today are live evidence; anything else
+                # is reported separately as stale, not folded into the
+                # suggestion.
+                current_band = current["entry_band_pct"]
+                live_overruns, stale_overruns = [], []
+                for e in missed:
+                    m = _MISSED_REASON_RE.search(e.missed_reason or "")
+                    if not m:
+                        continue
+                    o = float(m.group(1)) / 100
+                    (live_overruns if e.entry_band_pct == current_band else stale_overruns).append(o)
+
+                if stale_overruns:
+                    print(f"  -> {len(stale_overruns)}/{len(missed)} misses were evaluated under an "
+                          f"older entry_band_pct (not today's {current_band:.0%}) — excluded as stale, "
+                          f"not evidence about the current setting")
+
+                if len(live_overruns) >= MIN_SAMPLES:
+                    live_overruns.sort()
+                    suggested = _percentile(live_overruns, 0.70)
+                    still_rejected = sum(1 for o in live_overruns if o > current_band)
+                    print(f"  -> under the CURRENT entry_band_pct={current_band:.0%} ({len(live_overruns)} "
+                          f"misses actually evaluated at this band): {still_rejected}/{len(live_overruns)} "
+                          f"would still be rejected today. 70th-percentile overrun is {suggested:.1%} "
+                          f"(range {min(live_overruns):.1%}-{max(live_overruns):.1%}) — widening to ~"
+                          f"{suggested:.1%} would catch ~70% of these. "
+                          f"Still directional — sanity-check against slippage/liquidity before editing decay.py.")
+                else:
+                    print(f"  -> only {len(live_overruns)} misses evaluated under the current "
+                          f"{current_band:.0%} band so far — not enough yet for a percentile suggestion "
+                          f"(need {MIN_SAMPLES}); most of the {len(missed)} misses here predate the current setting")
 
         if len(closed_positions) < MIN_SAMPLES:
             print(f"  -> not enough closed positions yet ({len(closed_positions)} < {MIN_SAMPLES}) to suggest a hold-time change\n")

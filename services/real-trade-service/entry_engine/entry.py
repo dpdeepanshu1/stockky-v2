@@ -177,9 +177,15 @@ def _entry_drift_ok(
     current_price: float,
     signal_price: Optional[float],
     atr_pct: Optional[float],
-) -> tuple[bool, str]:
+) -> tuple[bool, str, float, float]:
+    """Returns (ok, reason, drift_pct, max_drift_pct). drift_pct/max_drift_pct
+    are exposed (2026-09-08 fix, part of the cycle-level quality filter — see
+    _composite_quality_score below) so callers can score HOW close a
+    candidate still is to its signal, not just whether it cleared the gate —
+    a candidate that's drifted +0.05% is a meaningfully safer entry than one
+    that's drifted +0.74% against a 0.75×ATR limit, even though both pass."""
     if signal_price is None or signal_price <= 0 or current_price <= 0:
-        return True, ""
+        return True, "", 0.0, 0.0
     drift_pct     = (current_price - signal_price) / signal_price * 100
     one_atr_pct   = atr_pct if (atr_pct and atr_pct > 0) else 3.0
     max_drift_pct = one_atr_pct * MAX_ENTRY_DRIFT_ATR
@@ -187,13 +193,53 @@ def _entry_drift_ok(
         return False, (
             f"Price ₹{current_price:.2f} ran +{drift_pct:.1f}% above signal "
             f"₹{signal_price:.2f} (limit {max_drift_pct:.1f}% = {MAX_ENTRY_DRIFT_ATR}×ATR). Chasing — skip."
-        )
+        ), drift_pct, max_drift_pct
     if drift_pct < -max_drift_pct:
         return False, (
             f"Price ₹{current_price:.2f} fell {drift_pct:.1f}% below signal "
             f"₹{signal_price:.2f} (limit {max_drift_pct:.1f}%). Move may be done — re-evaluate next cycle."
-        )
-    return True, ""
+        ), drift_pct, max_drift_pct
+    return True, "", drift_pct, max_drift_pct
+
+
+def _composite_quality_score(
+    conviction_score: Optional[float], rr: float, drift_pct: float, max_drift_pct: float,
+) -> float:
+    """0-100 composite used ONLY to rank candidates that have already
+    individually passed gates 1-5 and risk_engine, against each other,
+    within the same cycle (2026-09-08 fix — see config.py's
+    ENTRY_CYCLE_QUALITY_FILTER_ENABLED docstring for the full incident).
+    Never used as a pass/fail gate on its own except against the
+    ENTRY_MIN_COMPOSITE_SCORE floor.
+
+    Three sub-scores, each 0-100:
+      conviction_norm  — the pipeline's own conviction_score, taken as-is
+                          (already 0-100 scale upstream).
+      rr_norm           — reward:risk scaled linearly from the MIN_REWARD_
+                          RISK_RATIO floor (0 credit — it only just cleared
+                          gate 5) up to ENTRY_COMPOSITE_RR_CEILING (100
+                          credit — an excellent setup), clamped both ends.
+      drift_safety_norm — 100 at zero drift from signal, linearly down to 0
+                          at the drift gate's own limit — rewards a candidate
+                          that hasn't run away from its signal yet over one
+                          that barely still qualifies.
+    """
+    conviction_norm = max(0.0, min(100.0, float(conviction_score) if conviction_score is not None else 50.0))
+
+    rr_span = max(config.ENTRY_COMPOSITE_RR_CEILING - MIN_REWARD_RISK_RATIO, 0.01)
+    rr_norm = max(0.0, min(100.0, (rr - MIN_REWARD_RISK_RATIO) / rr_span * 100.0))
+
+    if max_drift_pct > 0:
+        drift_safety_norm = max(0.0, min(100.0, (1.0 - abs(drift_pct) / max_drift_pct) * 100.0))
+    else:
+        drift_safety_norm = 100.0  # no signal_price to drift from — treat as neutral/safe
+
+    return round(
+        conviction_norm * config.ENTRY_COMPOSITE_WEIGHT_CONVICTION
+        + rr_norm * config.ENTRY_COMPOSITE_WEIGHT_RR
+        + drift_safety_norm * config.ENTRY_COMPOSITE_WEIGHT_DRIFT,
+        2,
+    )
 
 
 def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: float = 0.0) -> AccountState:
@@ -319,6 +365,12 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     entered = waited = rejected = 0
     entry_details: list[dict] = []
     reserved_cash = 0.0
+    # 2026-09-08 fix: candidates that clear every individual gate + risk_engine
+    # are staged here instead of being placed immediately — see config.py's
+    # ENTRY_CYCLE_QUALITY_FILTER_ENABLED docstring. Ranked against each other
+    # AFTER the loop below finishes, so the ranking sees this cycle's full
+    # candidate batch, not just whichever happened to be evaluated first.
+    approved_entries: list[dict] = []
 
     for idx, cand in enumerate(candidates):
         try:
@@ -459,7 +511,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             continue
 
         # ── Gate 4: entry drift ───────────────────────────────────────────────
-        drift_ok, drift_reason = _entry_drift_ok(tick.price, cand.signal_price, atr_pct)
+        drift_ok, drift_reason, drift_pct, max_drift_pct = _entry_drift_ok(tick.price, cand.signal_price, atr_pct)
         if not drift_ok:
             _wait_with_preview(drift_reason)
             db.add(decision)
@@ -571,7 +623,57 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                    "reasoning": result.reason, "risk_verdict": result.verdict.value})
             continue
 
-        # ── Approved — create order ────────────────────────────────────────────
+        # ── Approved — stage for this cycle's cross-candidate ranking ──────────
+        # 2026-09-08 fix: used to place the order immediately right here. Now
+        # stashes everything place_approved_entry (below, after the main loop)
+        # needs, and defers the actual entered/reserved_cash/order-placement
+        # side effects until Gate 6 has ranked this cycle's full approved batch
+        # — see config.py's ENTRY_CYCLE_QUALITY_FILTER_ENABLED docstring.
+        composite_score = _composite_quality_score(cand.conviction_score, rr, drift_pct, max_drift_pct)
+        approved_entries.append({
+            "cand": cand, "decision": decision,
+            "entry_price": entry_price, "stop_price": stop_price, "target_price": target_price,
+            "rr": rr, "adj_risk_pct": adj_risk_pct, "is_regime_override": is_regime_override,
+            "composite_score": composite_score,
+        })
+
+    # ── Gate 6: cycle-level cross-candidate quality ranking ─────────────────
+    # Only ever narrows what was already risk-approved — never overrides
+    # gates 1-5 or risk_engine, and never turns a WAIT/REJECT into an ENTER.
+    if approved_entries and config.ENTRY_CYCLE_QUALITY_FILTER_ENABLED:
+        approved_entries.sort(key=lambda e: e["composite_score"], reverse=True)
+        selected = [
+            e for i, e in enumerate(approved_entries)
+            if i < config.ENTRY_MAX_NEW_PER_CYCLE and e["composite_score"] >= config.ENTRY_MIN_COMPOSITE_SCORE
+        ]
+        selected_ids = {id(e) for e in selected}
+        skipped = [e for e in approved_entries if id(e) not in selected_ids]
+    else:
+        selected, skipped = approved_entries, []
+
+    for e in skipped:
+        decision = e["decision"]
+        decision.action = "WAIT"
+        decision.reasoning = (
+            f"Risk-approved (composite quality score {e['composite_score']:.1f}/100 — "
+            f"conviction/R:R/drift-safety blend) but not among this cycle's top "
+            f"{config.ENTRY_MAX_NEW_PER_CYCLE} candidates, or below the "
+            f"{config.ENTRY_MIN_COMPOSITE_SCORE:.0f} composite floor. Concentrating capital in "
+            "the strongest setups this cycle rather than every setup that merely cleared the "
+            "individual gates — re-evaluated fresh next cycle."
+        )
+        waited += 1
+        db.add(decision)
+        entry_details.append({
+            "symbol": e["cand"].symbol, "action": "WAIT",
+            "reasoning": decision.reasoning, "risk_verdict": decision.risk_verdict,
+        })
+
+    for e in selected:
+        cand, decision = e["cand"], e["decision"]
+        entry_price, stop_price, target_price = e["entry_price"], e["stop_price"], e["target_price"]
+        rr, adj_risk_pct, is_regime_override = e["rr"], e["adj_risk_pct"], e["is_regime_override"]
+
         decision.action = "ENTER"
         if is_regime_override:
             decision.reasoning = (
@@ -603,7 +705,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 f"Limit ₹{entry_price:.2f} | stop ₹{stop_price:.2f} | "
                 f"target ₹{target_price:.2f} | R:R {rr:.2f} | "
                 f"conviction {cand.conviction_score} | adj_risk {adj_risk_pct:.2f}% | "
-                f"regime_score {market_score} (gate={threshold},{threshold_src})"
+                f"regime_score {market_score} (gate={threshold},{threshold_src}) | "
+                f"composite {e['composite_score']:.1f}"
                 f"{' | REGIME OVERRIDE' if is_regime_override else ''} | "
                 f"valid {config.ENTRY_VALIDITY_MINUTES}m"
             ),
@@ -632,19 +735,19 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     f"📤 *BUY sent (auto)*{' 🟡 REGIME OVERRIDE' if is_regime_override else ''} — {cand.symbol}\n"
                     f"{decision.proposed_qty} @ ₹{entry_price:.2f} "
                     f"| stop ₹{stop_price:.2f} | target ₹{target_price:.2f}\n"
-                    f"R:R {rr:.2f} | conviction {cand.conviction_score} "
-                    f"| market score {market_score} (gate={threshold},{threshold_src})\n"
+                    f"R:R {rr:.2f} | conviction {cand.conviction_score} | composite {e['composite_score']:.1f}"
+                    f"\n| market score {market_score} (gate={threshold},{threshold_src})\n"
                     f"Awaiting broker fill confirmation."
                 )
-            except Exception as e:
-                logger.error("REAL order placement failed for %s: %s", cand.symbol, e)
+            except Exception as ex:
+                logger.error("REAL order placement failed for %s: %s", cand.symbol, ex)
                 order.status = "REJECTED"
                 db.add(models.TradeOrderEvent(
                     order_id=order.id, event_type="REJECTED",
-                    detail=f"Dhan placement failed: {e}",
+                    detail=f"Dhan placement failed: {ex}",
                 ))
                 decision.action = "WAIT"
-                if dhan_client.is_invalid_ip_error(str(e)):
+                if dhan_client.is_invalid_ip_error(str(ex)):
                     decision.reasoning = (
                         "Risk-approved but blocked: Dhan rejected — outbound IP not whitelisted. "
                         "Auto-paused REAL. See GET /dhan/network-check."
@@ -658,7 +761,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     })
                     db.commit()
                     from auth.dhan_credentials import disarm_on_invalid_ip
-                    just_disarmed = disarm_on_invalid_ip(db, mode, str(e))
+                    just_disarmed = disarm_on_invalid_ip(db, mode, str(ex))
                     if just_disarmed:
                         await notify_async(
                             "🚨 *REAL trading auto-paused* — Dhan rejecting orders (IP not whitelisted). "
@@ -669,13 +772,13 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                         "waited": waited, "rejected": rejected,
                         "auto_disarmed": "invalid_ip", "entry_details": entry_details,
                     }
-                decision.reasoning = f"Risk-approved but Dhan placement failed: {e}"
+                decision.reasoning = f"Risk-approved but Dhan placement failed: {ex}"
                 entered       -= 1
                 waited        += 1
                 reserved_cash -= decision.proposed_qty * entry_price  # release reserved capital
                 db.commit()
                 await notify_async(
-                    f"⚠️ *Auto BUY rejected by Dhan* — {cand.symbol}\n{str(e)[:300]}"
+                    f"⚠️ *Auto BUY rejected by Dhan* — {cand.symbol}\n{str(ex)[:300]}"
                 )
 
         db.add(decision)

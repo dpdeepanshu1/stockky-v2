@@ -1341,6 +1341,23 @@ async def manual_reconcile(mode: str, admin: Optional[str] = Depends(require_adm
     return {"ok": True, "mode": mode, **result}
 
 
+@app.post("/reconcile/{mode}/holdings-sync")
+async def manual_holdings_sync(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+    """Manual, on-demand trigger for JUST the ghost-position sweep (see
+    portfolio.holdings_sync_reconcile) — the same check that also runs
+    automatically as part of every full reconcile_real_orders() pass
+    (manual_reconcile above, or every REAL Run Cycle). Exposed on its own
+    so a known DB-vs-broker mismatch (e.g. Stockky showing more OPEN
+    positions than Dhan's own Portfolio page) can be fixed immediately
+    without waiting for or re-running everything else reconcile does."""
+    mode = mode.upper()
+    if mode != "REAL":
+        return {"ok": True, "mode": mode, "note": "DEMO positions are simulated — nothing to sync against a broker."}
+    from portfolio.portfolio import holdings_sync_reconcile
+    result = holdings_sync_reconcile(db)
+    return {"ok": True, "mode": mode, **result}
+
+
 @app.get("/audit-log")
 async def audit_log(mode: Optional[str] = None, limit: int = 50, authorization: str = Header(default=""), db: Session = Depends(get_db)):
     # mode=None (all modes) or mode=REAL both require admin, since either

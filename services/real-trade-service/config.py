@@ -138,6 +138,57 @@ ENTRY_ZONE_UPPER_PCT = float(os.getenv("ENTRY_ZONE_UPPER_PCT", "0.5"))   # limit
 ENTRY_VALIDITY_MINUTES = int(os.getenv("ENTRY_VALIDITY_MINUTES", "15"))  # one candle; cancel-and-reassess if unfilled
 ENTRY_NO_CHASE = True  # never re-price an unfilled entry upward; re-evaluate next cycle instead
 
+# 2026-09-08 fix (holdings-sync ghost-position reconciliation — see
+# portfolio.holdings_sync_reconcile): a REAL position this service booked
+# OPEN from an order Dhan's orderbook reported as TRADED/COMPLETE, but that
+# never actually shows up in Dhan's own get_positions()/get_holdings()
+# snapshot on a later cycle, is treated as a ghost and force-closed rather
+# than left open forever pointing at shares this account doesn't actually
+# hold (root cause of Stockky showing 19 OPEN positions against only 4 real
+# Dhan holdings). This guard window exists purely to avoid a false positive
+# on a position that filled only seconds/minutes ago — Dhan's own
+# positions/holdings feed isn't guaranteed to reflect a same-cycle fill
+# instantly, so a position younger than this is left alone and re-checked
+# next cycle instead of being force-closed on its very first pass.
+HOLDINGS_SYNC_GUARD_MINUTES = int(os.getenv("HOLDINGS_SYNC_GUARD_MINUTES", "30"))
+
+# ── 2026-09-08 — cycle-level entry quality filter (user-requested calibration
+# improvement, SyncContext STOCKKY decision #30) ────────────────────────────
+# Gates 1-5 in entry_engine/entry.py (actionable label / live price / regime /
+# drift / R:R floor) plus risk_engine's per-trade and portfolio caps are all
+# INDEPENDENT per-candidate checks — a mediocre setup that just barely clears
+# every individual floor gets entered exactly like a genuinely strong one.
+# Watching the live book (2026-09-08: 19 open REAL positions, a large
+# majority small losers) showed this concretely: too many marginal setups
+# were being let through, diluting capital across weak candidates instead of
+# concentrating it in the best few the pipeline found *that cycle*.
+#
+# This adds one more gate AFTER a candidate has already individually cleared
+# gates 1-5 and risk_engine: rank every risk-approved candidate THIS CYCLE
+# against each other by a composite quality score (see
+# entry_engine.entry._composite_quality_score) and only actually place orders
+# for the top ENTRY_MAX_NEW_PER_CYCLE of them, and only if that composite
+# score also clears ENTRY_MIN_COMPOSITE_SCORE. Everything that was
+# risk-approved but didn't make the cut is left WAIT (not REJECTED — a
+# genuinely good setup, just not the best of this cycle's batch) so it's
+# still visible next cycle instead of being silently discarded.
+ENTRY_CYCLE_QUALITY_FILTER_ENABLED = os.getenv("ENTRY_CYCLE_QUALITY_FILTER_ENABLED", "true").lower() == "true"
+ENTRY_MAX_NEW_PER_CYCLE = int(os.getenv("ENTRY_MAX_NEW_PER_CYCLE", "3"))
+ENTRY_MIN_COMPOSITE_SCORE = float(os.getenv("ENTRY_MIN_COMPOSITE_SCORE", "50.0"))
+# Weights must sum to 1.0 — conviction (the pipeline's own scoring across
+# analysis-intelligence/decision-prediction), reward:risk (how much upside
+# per unit of downside this specific setup offers), and drift safety (how
+# close price still is to the original signal — a candidate that's already
+# run far from its signal is chasing, even if it still numerically clears
+# the drift gate).
+ENTRY_COMPOSITE_WEIGHT_CONVICTION = float(os.getenv("ENTRY_COMPOSITE_WEIGHT_CONVICTION", "0.50"))
+ENTRY_COMPOSITE_WEIGHT_RR = float(os.getenv("ENTRY_COMPOSITE_WEIGHT_RR", "0.35"))
+ENTRY_COMPOSITE_WEIGHT_DRIFT = float(os.getenv("ENTRY_COMPOSITE_WEIGHT_DRIFT", "0.15"))
+# R:R at or above this is scored as "excellent" (100/100 on that sub-score) —
+# not a hard ceiling on trades, only on how much extra composite credit an
+# already-generous R:R keeps earning past this point.
+ENTRY_COMPOSITE_RR_CEILING = float(os.getenv("ENTRY_COMPOSITE_RR_CEILING", "4.0"))
+
 # ── Decision 2: conservative risk defaults (seed values only — admin can
 #    edit via UI while disarmed; risk_engine always reads the live DB row,
 #    never these constants directly, once trade_risk_config exists) ────────

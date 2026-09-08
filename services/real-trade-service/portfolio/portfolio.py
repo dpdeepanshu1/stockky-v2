@@ -266,6 +266,179 @@ def import_broker_holdings(db: Session) -> int:
     return imported
 
 
+def holdings_sync_reconcile(db: Session) -> dict:
+    """The mirror-image fix to import_broker_holdings() above, and the
+    other half of the "19 OPEN positions in Stockky's DB vs 4 real Dhan
+    holdings" incident (2026-09-08, SyncContext STOCKKY decision #29).
+
+    import_broker_holdings() brings a broker holding INTO this system when
+    Dhan has a stock this system doesn't know about. This function does
+    the opposite: it force-CLOSES a REAL position this system believes is
+    OPEN/PARTIALLY_CLOSED when Dhan's own holdings + live positions
+    snapshot shows the account does NOT actually hold that symbol any
+    more (or never settled into one).
+
+    ROOT CAUSE: reconcile_real_orders() books a position OPEN the moment
+    Dhan's orderbook (get_order_list) reports an order status of
+    TRADED/COMPLETE/PART_TRADED — that only proves the order was accepted
+    and reported executed at the exchange, never that the resulting
+    shares are still (or ever were) actually sitting in the demat/CNC
+    account by the time a later cycle runs. A same-day CNC buy that Dhan
+    later reverses (AMO/BO leg cancellation, margin shortfall caught at
+    settlement, an intraday product auto-square-off, etc.) leaves this
+    service's own books permanently "OPEN" for shares that no longer (or
+    never did) exist at the broker — invisible to Dhan's own Portfolio
+    page, but still shown here, still being risk-checked by
+    risk_engine's no-pyramiding logic, and still being evaluated for
+    stop/target exits that will only ever fail with a broker rejection
+    (see the PARADEEP "Invalid SecurityId" / "Validate Qty from CDSL"
+    incident this same session — some of those rejections were this exact
+    ghost-position class of bug, not a security-id or CDSL-authorization
+    problem at all).
+
+    THE FIX: build the set of symbols Dhan actually reports (demat
+    holdings + live intraday/CNC positions, unioned — a fresh same-day CNC
+    buy shows up in get_positions() before it settles into
+    get_holdings(), so BOTH must be checked or a same-day genuine holding
+    would be wrongly treated as a ghost). Any REAL OPEN/PARTIALLY_CLOSED
+    position whose symbol is NOT in that set, AND that's already older
+    than config.HOLDINGS_SYNC_GUARD_MINUTES (protects a position that
+    filled moments ago from being force-closed before Dhan's own
+    positions/holdings feed has had a chance to catch up — same
+    settlement-lag idea as import_broker_holdings' own
+    _RECENT_CLOSE_REIMPORT_GUARD_HOURS, just on the opposite side of the
+    same race), is force-closed here: qty_open -> 0, status -> CLOSED,
+    realized_pnl left untouched (0 contribution — there's no broker-
+    confirmed exit fill/price to book a real P&L against, unlike a normal
+    sell), and the cash this system speculatively deducted at "fill" time
+    (record_real_fill) is refunded so cash_available doesn't stay
+    permanently short for shares that were never actually held.
+
+    PENDING_EXIT is deliberately excluded (unlike OPEN/PARTIALLY_CLOSED)
+    — a position already mid-exit has its own dedicated orphan-repair path
+    (_repair_orphaned_pending_exits in execution/reconcile.py) that reverts
+    it back to a live status once its SELL order is confirmed dead; running
+    this ghost-check on it too would race that logic.
+
+    Idempotent and safe to call every cycle: a position already CLOSED by
+    this pass (or any other path) is excluded by the status filter, so it
+    is never touched twice. Never raises — mirrors import_broker_holdings'
+    own "must never block the rest of the cycle" contract.
+    """
+    from datetime import timedelta
+    from execution import dhan_client
+
+    try:
+        holdings = dhan_client.get_holdings(db)
+    except Exception as e:  # noqa: BLE001 — never block a reconcile cycle over this
+        logger.warning("holdings_sync_reconcile: could not fetch Dhan holdings: %s", e)
+        return {"closed": 0, "symbols": []}
+    try:
+        live_positions = dhan_client.get_positions(db)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("holdings_sync_reconcile: could not fetch Dhan positions: %s", e)
+        return {"closed": 0, "symbols": []}
+
+    def _get(row: dict, *keys, default=None):
+        for k in keys:
+            if k in row and row[k] not in (None, ""):
+                return row[k]
+        return default
+
+    def _qty(row: dict, *keys) -> int:
+        raw = _get(row, *keys, default=0)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 0
+
+    broker_symbols: set[str] = set()
+    for row in holdings or []:
+        if not isinstance(row, dict):
+            continue
+        sym = _get(row, "tradingSymbol", "trading_symbol", "symbol")
+        qty = _qty(row, "totalQty", "total_qty", "quantity")
+        if sym and qty > 0:
+            broker_symbols.add(str(sym).upper().strip())
+    for row in live_positions or []:
+        if not isinstance(row, dict):
+            continue
+        sym = _get(row, "tradingSymbol", "trading_symbol", "symbol")
+        # Dhan's positions payload can carry both a long buy qty and a
+        # short sell qty on the same row (netQty is the settled figure,
+        # positiveQty/buyQty is the alternate spelling seen on some SDK
+        # versions) — any of these being > 0 means the account currently
+        # has exposure in this symbol, which is all this check needs.
+        qty = max(
+            _qty(row, "netQty", "net_qty"),
+            _qty(row, "positiveQty", "positive_qty", "buyQty", "buy_qty"),
+        )
+        if sym and qty > 0:
+            broker_symbols.add(str(sym).upper().strip())
+
+    now = datetime.now(timezone.utc)
+    guard_cutoff = now - timedelta(minutes=config.HOLDINGS_SYNC_GUARD_MINUTES)
+
+    candidates = (
+        db.query(models.TradePosition)
+        .filter(
+            models.TradePosition.mode == "REAL",
+            models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")),
+        )
+        .all()
+    )
+
+    closed_symbols: list[str] = []
+    account = None
+    for position in candidates:
+        symbol = (position.symbol or "").upper().strip()
+        if symbol in broker_symbols:
+            continue
+        opened_at = position.opened_at
+        if opened_at is not None and opened_at.tzinfo is None:
+            opened_at = opened_at.replace(tzinfo=timezone.utc)
+        if opened_at is not None and opened_at > guard_cutoff:
+            continue  # too recent — broker feed may just not have caught up yet
+
+        qty_open = position.qty_open or 0
+        refund = round((position.avg_entry_price or 0.0) * qty_open, 2)
+
+        position.qty_open = 0
+        position.status = "CLOSED"
+        position.closed_at = now
+        db.add(models.TradePositionEvent(
+            position_id=position.id, event_type="GHOST_CLOSED",
+            detail=(
+                f"holdings_sync_reconcile: {symbol} not found in Dhan holdings or live "
+                f"positions (checked {len(broker_symbols)} broker symbols) — force-closed "
+                f"{qty_open} shares as a ghost/never-actually-held position, cash refunded "
+                f"₹{refund:,.2f} at avg entry ₹{position.avg_entry_price}"
+            ),
+        ))
+        logger.warning(
+            "holdings_sync_reconcile: force-closed ghost position %s (id=%d) — "
+            "%d shares not found at broker, refunding ₹%.2f",
+            symbol, position.id, qty_open, refund,
+        )
+        if account is None:
+            account = get_account(db, "REAL")
+        account.cash_available += refund
+        closed_symbols.append(symbol)
+
+    if closed_symbols:
+        if account is not None:
+            account.current_equity = account.cash_available + _open_positions_market_value(db, "REAL")
+            account.updated_at = now
+        db.commit()
+        log_action(
+            db, actor="system", action="HOLDINGS_SYNC_CLOSED", mode="REAL",
+            detail=f"force-closed {len(closed_symbols)} ghost position(s) not found at broker: "
+                   f"{', '.join(closed_symbols)}",
+        )
+
+    return {"closed": len(closed_symbols), "symbols": closed_symbols}
+
+
 def try_fill_entry(db: Session, order: models.TradeOrder, tick: Tick, stop_price: float, target_price: float) -> bool:
     """DEMO-only. Returns True and records a fill + opens/adds-to a
     position if the current tick would fill this pending limit BUY order;

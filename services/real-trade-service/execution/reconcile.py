@@ -26,7 +26,9 @@ from sqlalchemy.orm import Session
 import models
 from execution import dhan_client
 from notifier import notify_async
-from portfolio.portfolio import record_real_fill, record_real_exit_fill, import_broker_holdings
+from portfolio.portfolio import (
+    record_real_fill, record_real_exit_fill, import_broker_holdings, holdings_sync_reconcile,
+)
 
 logger = logging.getLogger("real-trade-reconcile")
 
@@ -241,7 +243,8 @@ async def reconcile_real_orders(db: Session) -> dict:
     rest of the fill (or a cancel of the remainder) gets picked up on a
     later cycle instead of silently stopping after the first partial."""
     tally = {"checked": 0, "entries_filled": 0, "partial_fills": 0, "exits_confirmed": 0,
-             "dead_orders": 0, "errors": 0, "positions_unstuck": 0, "holdings_imported": 0}
+             "dead_orders": 0, "errors": 0, "positions_unstuck": 0, "holdings_imported": 0,
+             "ghost_positions_closed": 0}
 
     _repair_orphaned_pending_exits(db, tally)
 
@@ -257,6 +260,25 @@ async def reconcile_real_orders(db: Session) -> dict:
         tally["holdings_imported"] = import_broker_holdings(db)
     except Exception as e:  # noqa: BLE001 — must never block the rest of the cycle
         logger.warning("reconcile: import_broker_holdings failed: %s", e)
+
+    # 2026-09-08 fix (see portfolio.holdings_sync_reconcile's own docstring
+    # for the full incident writeup — Stockky's DB showing 19 OPEN REAL
+    # positions against only 4 real Dhan holdings): the mirror-image of
+    # import_broker_holdings above. Runs every cycle, same self-heal
+    # treatment and same "must never block the cycle" contract.
+    try:
+        ghost_result = holdings_sync_reconcile(db)
+        tally["ghost_positions_closed"] = ghost_result["closed"]
+        if ghost_result["closed"]:
+            await notify_async(
+                f"🧹 *Holdings sync* — force-closed {ghost_result['closed']} ghost "
+                f"position(s) not found at Dhan (holdings or live positions):\n"
+                f"{', '.join(ghost_result['symbols'])}\n"
+                f"These were tracked as OPEN here but Dhan's own account doesn't hold "
+                f"them — cash refunded, no P&L booked."
+            )
+    except Exception as e:  # noqa: BLE001 — must never block the rest of the cycle
+        logger.warning("reconcile: holdings_sync_reconcile failed: %s", e)
 
     pending_orders = db.query(models.TradeOrder).filter(
         models.TradeOrder.mode == "REAL", models.TradeOrder.status.in_(("PLACED", "PARTIAL"))

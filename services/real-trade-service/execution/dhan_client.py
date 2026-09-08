@@ -430,6 +430,37 @@ def is_insufficient_funds_error(message: str) -> bool:
     return any(marker in m for marker in _INSUFFICIENT_FUNDS_MARKERS)
 
 
+# 2026-09-08 fix — Bug B from the WELSPLSOL/session investigation: 3 same-day
+# exits (Coffee Day Enterprises, Hyundai Motor India, Bandhan Bank), all at
+# 3:27 PM IST, rejected with Dhan/NSE's own end-of-day cutoff message for
+# fresh intraday orders — well-known to sit around 15:20-15:25 IST, ahead of
+# the exchange's own auto square-off. This had ZERO special handling and fell
+# into exit.py's generic catch-all branch, which just retried identically
+# every cycle and only ever said "N consecutive rejections" — no indication
+# that the real cause is a hard exchange-side cutoff that retrying the exact
+# same INTRADAY order can never get past today, however many more cycles run.
+# NOT the same failure as eod_squareoff being disabled — confirmed live via
+# GET /status/REAL that eod_squareoff is enabled and already ran today
+# (last_run present), so these three simply opened/re-evaluated after 15:15
+# and hit the cutoff before EOD squareoff's own next pass could catch them.
+# Kept as its own detector (same idiom as CDSL/insufficient-funds above) so
+# exit.py can say what's actually going on instead of a bare "check Dhan
+# directly", and so it doesn't need a human step at all — same-day product
+# type only applies for the rest of today; tomorrow this position is no
+# longer same-day and _send_real_sell will naturally send it as CNC instead
+# (which then needs CDSL eDIS clearance, same as any other holding — see
+# is_cdsl_edis_error above).
+_INTRADAY_CUTOFF_MARKERS = (
+    "cannot be placed at this time", "intraday orders cannot be placed",
+    "square off time", "square-off time", "market is closed for intraday",
+)
+
+
+def is_intraday_cutoff_error(message: str) -> bool:
+    m = (message or "").lower()
+    return any(marker in m for marker in _INTRADAY_CUTOFF_MARKERS)
+
+
 # ── CDSL eDIS / TPIN flow (DhanHQ v2, verified against
 # https://dhanhq.co/docs/v2/edis/ on 2026-09-07 — this IS the current v2
 # path, unlike the deprecated v1 assumption an earlier pass here made) ──────

@@ -404,6 +404,52 @@ def _send_real_sell(
                     "Insufficient-funds block persists for %s (%s) — alert "
                     "suppressed, still within cooldown.", position.symbol, reason,
                 )
+        elif dhan_client.is_intraday_cutoff_error(str(e)):
+            # 2026-09-08 fix: see dhan_client.is_intraday_cutoff_error's
+            # docstring — this is Dhan/NSE's own hard end-of-day cutoff for
+            # fresh INTRADAY orders (~15:20-15:25 IST), not a recoverable
+            # rejection. Retrying the identical order later today can never
+            # succeed, so — unlike the generic branch below — this doesn't
+            # count toward EXIT_REJECT_STREAK_ESCALATE_AT at all; escalating
+            # "N consecutive rejections" for something that is expected to
+            # keep failing until tomorrow just trains everyone to ignore the
+            # alert. One clear notification per position per day instead
+            # (reuses the same cooldown idiom as CDSL/funds above), and the
+            # position is left OPEN and untouched: tomorrow it's no longer
+            # same-day, so _send_real_sell will naturally send it as CNC
+            # (which then needs CDSL eDIS clearance like any other holding).
+            snap_key = f"intraday_cutoff_alert_last_{position.id}"
+            last = load_snapshot(db, snap_key) or {}
+            last_at_raw = last.get("at")
+            due = True
+            if last_at_raw:
+                try:
+                    last_at = datetime.fromisoformat(last_at_raw)
+                    elapsed_min = (datetime.now(timezone.utc) - last_at).total_seconds() / 60.0
+                    due = elapsed_min >= CDSL_ALERT_COOLDOWN_MIN
+                except Exception:
+                    due = True
+            if due:
+                notify_sync(
+                    f"⏰ *EXIT BLOCKED — past today's intraday cutoff* — "
+                    f"{position.symbol} ×{qty} ({reason})\n"
+                    "Dhan/NSE stop accepting fresh INTRADAY orders shortly "
+                    "before market close (~15:20-15:25 IST) — this isn't a "
+                    "credentials/eDIS issue, and retrying today won't help. "
+                    "Position remains open overnight; tomorrow this is no "
+                    "longer a same-day trade so the exit will be sent as a "
+                    "regular delivery (CNC) sell instead — which will need "
+                    "the usual CDSL 'Verify Holdings' TPIN step, same as any "
+                    "other holding.\n"
+                    f"(Further alerts for this position suppressed for "
+                    f"{CDSL_ALERT_COOLDOWN_MIN} min — retries continue silently.)"
+                )
+                save_snapshot(db, snap_key, {"at": datetime.now(timezone.utc).isoformat()})
+            else:
+                logger.info(
+                    "Intraday-cutoff block persists for %s (%s) — alert "
+                    "suppressed, still within cooldown.", position.symbol, reason,
+                )
         else:
             # BUG FIX (2026-09-07): unlike the invalid-IP and CDSL branches
             # above, this generic branch had no cooldown and no escalation —

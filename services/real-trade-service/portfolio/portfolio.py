@@ -122,6 +122,28 @@ def import_broker_holdings(db: Session) -> int:
     position in OPEN/PARTIALLY_CLOSED/PENDING_EXIT — safe to call every
     cycle (see reconcile_real_orders), never double-imports.
 
+    BUG FIX (2026-09-08): the CLOSED status was never excluded here, only
+    the three "still live" statuses above. Sequence that broke: this
+    system fully sells a position -> record_real_exit_fill() marks it
+    CLOSED -> next cycle, THIS function runs again (unconditionally,
+    before exit checks) and re-fetches Dhan's holdings snapshot -> if
+    that snapshot still lists the symbol (broker-side settlement/holdings
+    -feed lag after a same-day sell — not instant), the already_tracked
+    query above found nothing (CLOSED wasn't in its filter) and created a
+    brand-new phantom OPEN position for a stock that was already fully
+    sold. exit_engine then re-evaluated it, tried to sell shares that no
+    longer existed, Dhan rejected with "insufficient holding quantity" /
+    "scrip limit insufficient", and that got misrouted into a "CDSL
+    authorization required" alert for an already-closed position (see
+    live case: WELSPLSOL showed Orders-tab SELL 15/15 Success while
+    Telegram simultaneously claimed it was still eDIS-blocked for the
+    same qty). Fix: also treat a CLOSED position as "already tracked" —
+    i.e. don't re-import — if it closed within the settlement-lag
+    window (same UTC calendar day), via _RECENT_CLOSE_REIMPORT_GUARD_HOURS
+    below. An older CLOSED position (a prior day's fully-exited trade)
+    still falls through and gets re-imported normally, e.g. if the user
+    manually re-buys the same symbol later outside this app.
+
     Deliberately does NOT touch account.cash_available: these shares were
     never bought through this system's own ledger, so there's no matching
     cash deduction to make — this is monitoring/exit management only, not
@@ -136,6 +158,13 @@ def import_broker_holdings(db: Session) -> int:
     """
     from entry_engine.entry import FLAT_STOP_PCT, FLAT_TARGET_PCT
     from execution import dhan_client
+    from datetime import timedelta
+
+    # How long a just-CLOSED position stays protected from re-import even
+    # though Dhan's holdings feed may still list it (settlement-lag
+    # window). 24h comfortably covers same-day T+1 lag without
+    # permanently blocking a genuine later re-buy of the same symbol.
+    _RECENT_CLOSE_REIMPORT_GUARD_HOURS = 24
 
     try:
         holdings = dhan_client.get_holdings(db)
@@ -179,6 +208,25 @@ def import_broker_holdings(db: Session) -> int:
             models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED", "PENDING_EXIT")),
         ).first()
         if already_tracked is not None:
+            continue
+
+        # See BUG FIX (2026-09-08) in the docstring above: guard against
+        # re-importing a symbol we JUST closed ourselves, before Dhan's
+        # holdings feed has caught up to the sell.
+        recent_close_guard = now - timedelta(hours=_RECENT_CLOSE_REIMPORT_GUARD_HOURS)
+        recently_closed = db.query(models.TradePosition).filter(
+            models.TradePosition.mode == "REAL",
+            models.TradePosition.symbol == symbol,
+            models.TradePosition.status == "CLOSED",
+            models.TradePosition.closed_at.isnot(None),
+            models.TradePosition.closed_at >= recent_close_guard,
+        ).first()
+        if recently_closed is not None:
+            logger.info(
+                "import_broker_holdings: skipping re-import of %s — closed by this "
+                "system at %s, within the %dh settlement-lag guard window.",
+                symbol, recently_closed.closed_at, _RECENT_CLOSE_REIMPORT_GUARD_HOURS,
+            )
             continue
 
         stop_price = round(avg_price * (1 - FLAT_STOP_PCT / 100.0), 2)

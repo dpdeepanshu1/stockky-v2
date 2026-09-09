@@ -1,0 +1,27 @@
+# Catalyst Alert — staggered mid-session (avoid colliding with scheduler/surprise)
+# 10:15, 11:15, 13:15, 15:15 IST ≈ 04:45, 05:45, 07:45, 09:45 UTC
+name: Catalyst Alert Scanner
+
+on:
+  schedule:
+    - cron: "45 4,5,7,9 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  run-catalyst-alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Trigger Catalyst Check
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+        run: |
+          set +e
+          GW="${API_GATEWAY_URL%/}"
+          [ -n "$GW" ] || { echo "API_GATEWAY_URL missing"; exit 1; }
+          case "$GW" in http://*|https://*) ;; *) echo "URL must include https://"; exit 1;; esac
+          curl -sS -m 30 "$GW/health?warm=true" || true
+          sleep 5
+          curl -sS -m 120 -X POST "$GW/catalysts/alert?force=true&notify=true&batch_size=20" \
+            || curl -sS -m 120 -X POST "$GW/api/catalyst/check" \
+            || echo "Catalyst endpoint not available"

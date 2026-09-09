@@ -1,0 +1,142 @@
+# Weekend Additional-Data Hydrator
+# Fills fundamentals + technical snapshot + events into the data-feed (merge, never wipe).
+# Hourly slices Sat–Sun so free-tier quotas are not burned in one shot.
+# Manual "Run workflow" can force a full pass (slow, intentional).
+name: Weekend Additional Data Hydrator
+
+on:
+  schedule:
+    # Every hour Sat–Sun UTC (covers full IST weekend + buffer)
+    - cron: "15 * * * 6,0"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "slice = current hour chunk; full = entire universe (slow)"
+        required: false
+        default: "slice"
+        type: choice
+        options:
+          - slice
+          - full
+      hour_idx:
+        description: "Optional slice index 0–47 (empty = auto from UTC hour)"
+        required: false
+        default: ""
+
+jobs:
+  hydrate:
+    runs-on: ubuntu-latest
+    # Long window: full universe with ~18s delay can take many hours
+    timeout-minutes: 360
+    steps:
+      - name: IST timestamp
+        run: echo "IST $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M %Z')"
+
+      - name: Wake & warm services
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+          MARKET_DATA_URL: ${{ secrets.MARKET_DATA_URL }}
+          ANALYSIS_URL: ${{ secrets.ANALYSIS_INTELLIGENCE_URL }}
+          DECISION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
+          NOTIFICATION_URL: ${{ secrets.NOTIFICATION_SCHEDULER_URL }}
+        run: |
+          set +e
+          GW="${API_GATEWAY_URL%/}"
+          [ -n "$GW" ] || { echo "API_GATEWAY_URL secret missing"; exit 1; }
+
+          warm() {
+            echo "Warm ping…"
+            curl -sS -m 45 -X POST "$GW/wake-all" >/dev/null 2>&1 || true
+            curl -sS -m 30 "$GW/health?warm=true" >/dev/null 2>&1 || true
+            curl -sS -m 20 "$GW/ops/keepalive" >/dev/null 2>&1 || true
+            for U in "$MARKET_DATA_URL" "$ANALYSIS_URL" "$DECISION_URL" "$NOTIFICATION_URL"; do
+              [ -z "$U" ] && continue
+              base="${U%/}"
+              # strip trailing /notification if present for health
+              base="${base%/notification}"
+              curl -sS -m 25 "${base}/health?warm=true" >/dev/null 2>&1 || true
+              curl -sS -m 25 "${base}/scheduler/health" >/dev/null 2>&1 || true
+            done
+          }
+
+          warm
+          sleep 20
+          warm
+          sleep 15
+          echo "Services warmed"
+
+      - name: Run hydrator (gateway preferred)
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+          NOTIFICATION_URL: ${{ secrets.NOTIFICATION_SCHEDULER_URL }}
+          MODE: ${{ github.event.inputs.mode || 'slice' }}
+          HOUR_IDX: ${{ github.event.inputs.hour_idx || '' }}
+        run: |
+          set -euo pipefail
+          GW="${API_GATEWAY_URL%/}"
+          NS="${NOTIFICATION_URL%/}"
+          NS="${NS%/notification}"
+
+          MODE="${MODE:-slice}"
+          echo "Mode=$MODE hour_idx=${HOUR_IDX:-auto}"
+
+          if [ "$MODE" = "full" ]; then
+            # Prefer gateway background job (survives GHA step if we poll)
+            echo "Starting FULL refill via API gateway…"
+            RESP=$(curl -sS -m 120 -X POST "$GW/data-feed/refill-additional?force=true" || true)
+            echo "$RESP"
+            # Poll up to ~5 hours
+            for i in $(seq 1 600); do
+              sleep 30
+              ST=$(curl -sS -m 30 "$GW/data-feed/refill-additional/status" || echo '{}')
+              echo "poll $i: $ST"
+              STATUS=$(echo "$ST" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || echo "")
+              if [ "$STATUS" = "done" ] || [ "$STATUS" = "stopped" ] || [ "$STATUS" = "error" ] || [ "$STATUS" = "idle" ]; then
+                echo "Finished with status=$STATUS"
+                break
+              fi
+              # Keep services warm
+              if [ $((i % 10)) -eq 0 ]; then
+                curl -sS -m 20 "$GW/ops/keepalive" >/dev/null 2>&1 || true
+              fi
+            done
+          else
+            # Hourly slice via scheduler hydrate endpoint.
+            # As of the background-job fix, this call returns almost
+            # instantly (job runs in a background thread on the service),
+            # so poll /hydrate/weekend/status for completion instead of
+            # holding a long-lived curl connection open.
+            Q=""
+            if [ -n "$HOUR_IDX" ]; then
+              Q="?hour_idx=${HOUR_IDX}"
+            fi
+            URL="${NS}/scheduler/hydrate/weekend${Q}"
+            STATUS_URL="${NS}/scheduler/hydrate/weekend/status"
+            echo "POST $URL"
+            curl -sS -m 60 -X POST "$URL" || {
+              echo "Scheduler hydrate trigger failed — retrying once"
+              sleep 30
+              curl -sS -m 60 -X POST "$URL" || true
+            }
+            echo "Polling $STATUS_URL"
+            for i in $(seq 1 120); do
+              sleep 15
+              ST=$(curl -sS -m 20 "$STATUS_URL" || echo '{}')
+              echo "poll $i: $ST"
+              JOBSTATUS=$(echo "$ST" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || echo "")
+              if [ "$JOBSTATUS" = "done" ] || [ "$JOBSTATUS" = "error" ] || [ "$JOBSTATUS" = "stalled" ]; then
+                echo "Finished with status=$JOBSTATUS"
+                break
+              fi
+            done
+          fi
+
+      - name: Summary
+        if: always()
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+        run: |
+          GW="${API_GATEWAY_URL%/}"
+          curl -sS -m 30 "$GW/data-feed/refill-additional/status" || true
+          curl -sS -m 30 "$GW/data-feed/meta" || true
+          echo "Done"

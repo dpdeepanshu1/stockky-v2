@@ -1,0 +1,66 @@
+{
+  "enabled": true,
+  "top_features": [
+    {
+      "feature": "atr_pct",
+      "mean_abs_shap": 0.2093222737312317
+    },
+    {
+      "feature": "ema20_over_ema50",
+      "mean_abs_shap": 0.10052439570426941
+    },
+    {
+      "feature": "ema50_over_ema200",
+      "mean_abs_shap": 0.0996689423918724
+    },
+    {
+      "feature": "dist_from_20d_low_pct",
+      "mean_abs_shap": 0.07663380354642868
+    },
+    {
+      "feature": "macd_hist",
+      "mean_abs_shap": 0.06217728555202484
+    },
+    {
+      "feature": "volume_ratio_20",
+      "mean_abs_shap": 0.05894447863101959
+    },
+    {
+      "feature": "adx_14",
+      "mean_abs_shap": 0.05875115096569061
+    },
+    {
+      "feature": "bb_pct",
+      "mean_abs_shap": 0.04957130551338196
+    },
+    {
+      "feature": "close_over_ema20",
+      "mean_abs_shap": 0.049286291003227234
+    },
+    {
+      "feature": "dist_from_20d_high_pct",
+      "mean_abs_shap": 0.04502580314874649
+    },
+    {
+      "feature": "golden_cross",
+      "mean_abs_shap": 0.04170113429427147
+    },
+    {
+      "feature": "rsi_14",
+      "mean_abs_shap": 0.03299063816666603
+    },
+    {
+      "feature": "recent_event_score",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "days_to_next_earnings",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "earnings_surprise_flag",
+      "mean_abs_shap": 0.0
+    }
+  ],
+  "n_samples": 400
+}

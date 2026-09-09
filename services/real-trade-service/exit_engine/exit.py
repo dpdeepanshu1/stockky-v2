@@ -413,10 +413,22 @@ def _send_real_sell(
                 "live holdings to sync qty_open", position.symbol, qty,
             )
             try:
-                from execution.dhan_client import get_dhan_client
-                dhan = get_dhan_client(db)
-                holdings_resp = dhan.get_holdings()
-                holdings = (holdings_resp or {}).get("data") or []
+                # BUG FIX (2026-09-09, found this session): this previously
+                # called `get_dhan_client(db).get_holdings()` — but
+                # `get_dhan_client` does not exist anywhere in
+                # execution/dhan_client.py (there is only `_get_sdk_client`,
+                # a private helper). That import has been raising
+                # ImportError on every single retry since the sync branch
+                # was added, silently caught by the `except Exception as
+                # sync_e` below and logged as "holdings sync failed" —
+                # meaning qty_open was NEVER actually corrected and the
+                # oversell error kept repeating forever with the stale
+                # qty. `dhan_client.get_holdings(db)` (module-level
+                # function, already imported as `dhan_client` at the top
+                # of this file, same call pattern as
+                # `dhan_client.is_oversell_error` right above) returns the
+                # holdings list directly — no `.get("data")` unwrap needed.
+                holdings = dhan_client.get_holdings(db) or []
                 broker_qty = 0
                 for h in holdings:
                     sym = (h.get("tradingSymbol") or "").upper().replace(" ", "")
@@ -456,6 +468,36 @@ def _send_real_sell(
                     "exit SELL %s: oversell — holdings sync failed (%s), retry next cycle",
                     position.symbol, sync_e,
                 )
+                # BUG FIX (2026-09-09): the sync above silently failing
+                # (e.g. the ImportError this session's fix removed) had
+                # NO alert path at all — a position could stay stuck with
+                # a stale qty_open indefinitely and nothing would ever
+                # surface it. Same throttled-alert idiom as the other
+                # branches here, so a future sync failure (holdings API
+                # down, bad credentials, etc.) is visible within one
+                # cooldown window instead of failing quietly forever.
+                snap_key = f"oversell_sync_fail_alert_last_{position.id}"
+                last = load_snapshot(db, snap_key) or {}
+                due = True
+                if last.get("at"):
+                    try:
+                        elapsed_min = (
+                            datetime.now(timezone.utc) -
+                            datetime.fromisoformat(last["at"])
+                        ).total_seconds() / 60.0
+                        due = elapsed_min >= CDSL_ALERT_COOLDOWN_MIN
+                    except Exception:
+                        due = True
+                if due:
+                    notify_sync(
+                        f"⚠️ *Qty sync failed* — {position.symbol} ×{qty} ({reason})\n"
+                        f"Broker rejected SELL as oversell, but fetching live "
+                        f"holdings to reconcile also failed: {str(sync_e)[:200]}\n"
+                        f"qty_open is still stale — will keep retrying, but "
+                        f"this needs a look if it repeats.\n"
+                        f"(Alerts suppressed for {CDSL_ALERT_COOLDOWN_MIN} min.)"
+                    )
+                    save_snapshot(db, snap_key, {"at": datetime.now(timezone.utc).isoformat()})
 
         elif dhan_client.is_exchange_not_allowed_error(str(e)):
             # 2026-09-09 fix: EXCH:16387 "Security not allowed to trade in

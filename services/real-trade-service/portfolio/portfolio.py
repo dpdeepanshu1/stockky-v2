@@ -320,10 +320,24 @@ def holdings_sync_reconcile(db: Session) -> dict:
     it back to a live status once its SELL order is confirmed dead; running
     this ghost-check on it too would race that logic.
 
+    2026-09-09 addition (same session): the full-ghost-close check above
+    only ever fired when the broker reports ZERO of a symbol. A symbol
+    that's still held but in a SMALLER quantity than qty_open (partial
+    sell placed outside this app, a BO/CO leg partially reversed, etc.)
+    used to pass straight through untouched — this was the "ANDHRAPAP
+    still shows qty 4 (Dhan holds 2) even after clicking Reconcile"
+    report. Broker qty is now tracked per-symbol (not just presence), so
+    a position whose broker qty is positive but LESS than qty_open gets
+    qty_open capped down to match (status flipped OPEN -> PARTIALLY_CLOSED
+    where relevant) with the same avg-entry-price cash refund logic as a
+    full ghost close, just scaled to the missing shares only. A broker
+    qty >= qty_open is left alone (nothing stale to fix).
+
     Idempotent and safe to call every cycle: a position already CLOSED by
-    this pass (or any other path) is excluded by the status filter, so it
-    is never touched twice. Never raises — mirrors import_broker_holdings'
-    own "must never block the rest of the cycle" contract.
+    this pass (or any other path) is excluded by the status filter, and a
+    qty_open already capped to match the broker has nothing left to sync
+    on the next pass. Never raises — mirrors import_broker_holdings' own
+    "must never block the rest of the cycle" contract.
     """
     from datetime import timedelta
     from execution import dhan_client
@@ -352,14 +366,31 @@ def holdings_sync_reconcile(db: Session) -> dict:
         except (TypeError, ValueError):
             return 0
 
-    broker_symbols: set[str] = set()
+    # 2026-09-09 fix (this session): this used to be a bare `set()` of
+    # symbols Dhan reports, which only ever let this function answer
+    # "does the broker still hold ANY of this symbol?" — a position that
+    # was PARTIALLY sold outside this app (manually via the broker's own
+    # app, a same-day BO/CO leg, a CDSL auto-square-off, etc.) still has
+    # its symbol in that set, so it fell straight through the `continue`
+    # below and was never corrected. That's the exact "ANDHRAPAP still
+    # shows qty 4 after Reconcile" bug: Dhan holds 2, Stockky's DB still
+    # has qty_open=4, and because 4 > 0 the symbol was never a "ghost" so
+    # this function silently did nothing to it, cycle after cycle,
+    # Reconcile click after Reconcile click. Tracking the actual qty (not
+    # just presence) lets the loop below cap qty_open DOWN to what the
+    # broker really holds, the same correction exit_engine/exit.py's
+    # oversell branch already makes reactively (only ever triggered by a
+    # failed SELL attempt) — this makes it proactive, on every reconcile,
+    # so a stale qty is fixed before it ever causes an oversell rejection.
+    broker_qty_by_symbol: dict[str, int] = {}
     for row in holdings or []:
         if not isinstance(row, dict):
             continue
         sym = _get(row, "tradingSymbol", "trading_symbol", "symbol")
         qty = _qty(row, "totalQty", "total_qty", "quantity")
         if sym and qty > 0:
-            broker_symbols.add(str(sym).upper().strip())
+            key = str(sym).upper().strip()
+            broker_qty_by_symbol[key] = max(broker_qty_by_symbol.get(key, 0), qty)
     for row in live_positions or []:
         if not isinstance(row, dict):
             continue
@@ -374,7 +405,9 @@ def holdings_sync_reconcile(db: Session) -> dict:
             _qty(row, "positiveQty", "positive_qty", "buyQty", "buy_qty"),
         )
         if sym and qty > 0:
-            broker_symbols.add(str(sym).upper().strip())
+            key = str(sym).upper().strip()
+            broker_qty_by_symbol[key] = max(broker_qty_by_symbol.get(key, 0), qty)
+    broker_symbols: set[str] = set(broker_qty_by_symbol.keys())
 
     now = datetime.now(timezone.utc)
     guard_cutoff = now - timedelta(minutes=config.HOLDINGS_SYNC_GUARD_MINUTES)
@@ -389,15 +422,53 @@ def holdings_sync_reconcile(db: Session) -> dict:
     )
 
     closed_symbols: list[str] = []
+    synced_symbols: list[str] = []
     account = None
     for position in candidates:
         symbol = (position.symbol or "").upper().strip()
-        if symbol in broker_symbols:
-            continue
         opened_at = position.opened_at
         if opened_at is not None and opened_at.tzinfo is None:
             opened_at = opened_at.replace(tzinfo=timezone.utc)
-        if opened_at is not None and opened_at > guard_cutoff:
+        too_recent = opened_at is not None and opened_at > guard_cutoff
+
+        if symbol in broker_symbols:
+            # Broker still holds SOME of this symbol — not a ghost — but
+            # it may hold LESS than qty_open (partial external sell).
+            # Cap qty_open down to match; never raise it (a broker qty
+            # >= ours just means our own not-yet-reconciled buy hasn't
+            # settled into the feed yet, nothing to fix here).
+            if too_recent:
+                continue  # too recent — broker feed may just not have caught up yet
+            broker_have = broker_qty_by_symbol.get(symbol, 0)
+            qty_open = position.qty_open or 0
+            if broker_have >= qty_open or qty_open <= 0:
+                continue
+            diff = qty_open - broker_have
+            refund = round((position.avg_entry_price or 0.0) * diff, 2)
+            position.qty_open = broker_have
+            if position.status == "OPEN" and broker_have < qty_open:
+                position.status = "PARTIALLY_CLOSED"
+            db.add(models.TradePositionEvent(
+                position_id=position.id, event_type="QTY_SYNCED",
+                detail=(
+                    f"holdings_sync_reconcile: {symbol} qty_open was {qty_open}, broker "
+                    f"holds {broker_have} — capped down by {diff} share(s) (sold outside "
+                    f"this app or never fully settled), cash refunded ₹{refund:,.2f} at "
+                    f"avg entry ₹{position.avg_entry_price}"
+                ),
+            ))
+            logger.warning(
+                "holdings_sync_reconcile: synced qty_open for %s (id=%d): %d -> %d "
+                "(broker holds %d), refunding ₹%.2f",
+                symbol, position.id, qty_open, broker_have, broker_have, refund,
+            )
+            if account is None:
+                account = get_account(db, "REAL")
+            account.cash_available += refund
+            synced_symbols.append(symbol)
+            continue
+
+        if too_recent:
             continue  # too recent — broker feed may just not have caught up yet
 
         qty_open = position.qty_open or 0
@@ -425,18 +496,25 @@ def holdings_sync_reconcile(db: Session) -> dict:
         account.cash_available += refund
         closed_symbols.append(symbol)
 
-    if closed_symbols:
+    if closed_symbols or synced_symbols:
         if account is not None:
             account.current_equity = account.cash_available + _open_positions_market_value(db, "REAL")
             account.updated_at = now
         db.commit()
-        log_action(
-            db, actor="system", action="HOLDINGS_SYNC_CLOSED", mode="REAL",
-            detail=f"force-closed {len(closed_symbols)} ghost position(s) not found at broker: "
-                   f"{', '.join(closed_symbols)}",
-        )
+        if closed_symbols:
+            log_action(
+                db, actor="system", action="HOLDINGS_SYNC_CLOSED", mode="REAL",
+                detail=f"force-closed {len(closed_symbols)} ghost position(s) not found at broker: "
+                       f"{', '.join(closed_symbols)}",
+            )
+        if synced_symbols:
+            log_action(
+                db, actor="system", action="HOLDINGS_SYNC_QTY_CAPPED", mode="REAL",
+                detail=f"capped qty_open for {len(synced_symbols)} position(s) with partial "
+                       f"external sells: {', '.join(synced_symbols)}",
+            )
 
-    return {"closed": len(closed_symbols), "symbols": closed_symbols}
+    return {"closed": len(closed_symbols), "symbols": closed_symbols, "synced": synced_symbols}
 
 
 def try_fill_entry(db: Session, order: models.TradeOrder, tick: Tick, stop_price: float, target_price: float) -> bool:

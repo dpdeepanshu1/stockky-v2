@@ -1199,16 +1199,21 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
             continue
 
         # Elevate conviction_score for high-conviction signals
-        # Upper circuit (69.7% win) → score 75; High conviction (55.7% win) → score 65
-        # Standard volume shock (48.1% win) → nominal MIN_CONVICTION
+        # 2026-09-09 calibration fix: scores raised so Gate 6 composite floor (50)
+        # is reachable at typical RR (2.0) and mid drift.
+        # Math: composite = conviction*0.50 + rr_norm*0.35 + drift*0.15
+        # UC  (69.7% win): score 85 → composite ~57 at RR=2.0, mid drift ✅
+        # HC  (55.7% win): score 75 → composite ~52 at RR=2.0, mid drift ✅
+        # Base (48.1% win): score 60 → composite ~50 at RR=3.0, fresh drift ✅
+        # (was UC=75, HC=65, base=55 — all blocked by composite floor at typical RR)
         if result.get("upper_circuit"):
-            score = max(MIN_CONVICTION, 75.0)
+            score = max(MIN_CONVICTION, 85.0)
             decision_label = "VOLUME_SHOCK_UPPER_CIRCUIT"
         elif result.get("high_conviction"):
-            score = max(MIN_CONVICTION, 65.0)
+            score = max(MIN_CONVICTION, 75.0)
             decision_label = "VOLUME_SHOCK_HIGH_CONVICTION"
         else:
-            score = MIN_CONVICTION
+            score = max(MIN_CONVICTION, 60.0)
             decision_label = "VOLUME_SHOCK"
 
         payload = {

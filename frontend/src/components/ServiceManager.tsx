@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, wakeService, SystemServiceStatus } from "../api";
+import { api, wakeService, SystemServiceStatus, apiUrl } from "../api";
+import { getRealTradeApiUrl } from "../realTradeApi";
 import BottomSheet from "./BottomSheet";
 
 interface ServiceManagerProps {
@@ -31,6 +32,8 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
   const [waking, setWaking] = useState<Record<string, boolean>>({});
   const [isWakingAll, setIsWakingAll] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [isResetting, setIsResetting] = useState(false);
+  const [resetResult, setResetResult] = useState<{ ok: boolean; detail: string } | null>(null);
 
   const fetchServices = async () => {
     setLoading(true);
@@ -96,6 +99,75 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
     setTimeout(() => setStatusMessage(null), 4000);
   };
 
+  // Reset all circuit breakers (api-gateway) + real-trade session state
+  // Safe: no data deleted, no positions closed, no orders cancelled.
+  // Only clears half-open/open breaker state so the gateway can reach
+  // market-data-service again after a cold-start timeout storm.
+  const handleReset = async () => {
+    if (isResetting) return;
+    setIsResetting(true);
+    setResetResult(null);
+    setStatusMessage("Resetting circuit breakers…");
+    const results: string[] = [];
+    let anyFailed = false;
+
+    // 1. Reset api-gateway circuit breakers
+    try {
+      const resp = await fetch(apiUrl("/ops/circuit-reset"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (data?.ok) {
+        results.push(`✅ Api Gateway: reset ${data.count ?? "?"} breaker(s)`);
+      } else {
+        results.push(`⚠️ Api Gateway: ${data?.error ?? "unknown error"}`);
+        anyFailed = true;
+      }
+    } catch (e: any) {
+      results.push(`❌ Api Gateway: ${e?.message ?? "unreachable"}`);
+      anyFailed = true;
+    }
+
+    // 2. Reset real-trade-service circuit breakers
+    try {
+      const rtBase = getRealTradeApiUrl().replace(/\/$/, "");
+      const token = sessionStorage.getItem("rt_token") || localStorage.getItem("rt_token") || "";
+      const resp2 = await fetch(`${rtBase}/resilience/reset`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      });
+      const data2 = await resp2.json().catch(() => ({}));
+      if (data2?.ok) {
+        results.push(`✅ Real Trade: reset ${data2.count ?? "?"} breaker(s)`);
+      } else {
+        results.push(`⚠️ Real Trade: ${data2?.detail ?? "skipped (no token)"}`);
+      }
+    } catch {
+      results.push("⚠️ Real Trade reset: skipped (not reachable)");
+    }
+
+    // 3. Keepalive ping to wake market-data-service
+    try {
+      await fetch(apiUrl("/ops/keepalive"), { method: "GET" });
+      results.push("✅ Keepalive ping sent");
+    } catch {
+      results.push("⚠️ Keepalive ping failed (non-critical)");
+    }
+
+    // 3. Refresh service health after reset
+    await new Promise((r) => setTimeout(r, 1500));
+    await fetchServices();
+
+    setResetResult({
+      ok: !anyFailed,
+      detail: results.join("\n"),
+    });
+    setStatusMessage(null);
+    setIsResetting(false);
+    setTimeout(() => setResetResult(null), 12000);
+  };
+
   return (
     <BottomSheet isOpen={true} onClose={onClose} desktopMaxWidth="sm:max-w-lg">
       <div className="p-5">
@@ -141,8 +213,34 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
           <button type="button" className="btn-terminal text-xs" onClick={handleWakeAll} disabled={isWakingAll}>
             {isWakingAll ? "Waking…" : "Wake all"}
           </button>
+          <button
+            type="button"
+            className="btn-terminal text-xs"
+            onClick={handleReset}
+            disabled={isResetting}
+            title="Reset circuit breakers — fixes Api Gateway Half-open / Market Data Closed. No data deleted."
+            style={{
+              borderColor: "rgba(246,70,93,0.5)",
+              color: isResetting ? "var(--text-mist)" : "var(--sell)",
+            }}
+          >
+            {isResetting ? "Resetting…" : "⚡ Reset Failures"}
+          </button>
         </div>
         {statusMessage && <p className="mono text-xs text-mist mb-2">{statusMessage}</p>}
+        {resetResult && (
+          <div
+            className="mono text-xs mb-3 p-2 rounded"
+            style={{
+              background: resetResult.ok ? "rgba(14,203,129,0.08)" : "rgba(246,70,93,0.08)",
+              border: `1px solid ${resetResult.ok ? "rgba(14,203,129,0.3)" : "rgba(246,70,93,0.3)"}`,
+              color: resetResult.ok ? "var(--buy)" : "var(--sell)",
+              whiteSpace: "pre-line",
+            }}
+          >
+            {resetResult.detail}
+          </div>
+        )}
 
         {loading && entries.length === 0 ? (
           <p className="mono text-xs text-mist">Loading topology…</p>

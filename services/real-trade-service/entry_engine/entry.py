@@ -630,21 +630,31 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # side effects until Gate 6 has ranked this cycle's full approved batch
         # — see config.py's ENTRY_CYCLE_QUALITY_FILTER_ENABLED docstring.
         composite_score = _composite_quality_score(cand.conviction_score, rr, drift_pct, max_drift_pct)
+        is_upper_circuit = (cand.decision_label or "").upper() == "VOLUME_SHOCK_UPPER_CIRCUIT"
         approved_entries.append({
             "cand": cand, "decision": decision,
             "entry_price": entry_price, "stop_price": stop_price, "target_price": target_price,
             "rr": rr, "adj_risk_pct": adj_risk_pct, "is_regime_override": is_regime_override,
             "composite_score": composite_score,
+            "is_upper_circuit": is_upper_circuit,
         })
 
     # ── Gate 6: cycle-level cross-candidate quality ranking ─────────────────
     # Only ever narrows what was already risk-approved — never overrides
     # gates 1-5 or risk_engine, and never turns a WAIT/REJECT into an ENTER.
+    # 2026-09-09 fix: UPPER_CIRCUIT candidates (69.7% backtest win rate) bypass
+    # the composite floor — their signal strength is established by the backtest,
+    # not by the R:R/drift blend that composite measures. They still count toward
+    # ENTRY_MAX_NEW_PER_CYCLE and must rank above non-UC entries when slots are
+    # limited (sorted by composite_score desc, UC scores now 85 so they sort first).
     if approved_entries and config.ENTRY_CYCLE_QUALITY_FILTER_ENABLED:
         approved_entries.sort(key=lambda e: e["composite_score"], reverse=True)
         selected = [
             e for i, e in enumerate(approved_entries)
-            if i < config.ENTRY_MAX_NEW_PER_CYCLE and e["composite_score"] >= config.ENTRY_MIN_COMPOSITE_SCORE
+            if i < config.ENTRY_MAX_NEW_PER_CYCLE and (
+                e["composite_score"] >= config.ENTRY_MIN_COMPOSITE_SCORE
+                or e["is_upper_circuit"]  # UC bypasses floor — 69.7% win rate
+            )
         ]
         selected_ids = {id(e) for e in selected}
         skipped = [e for e in approved_entries if id(e) not in selected_ids]

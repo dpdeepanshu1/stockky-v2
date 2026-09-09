@@ -404,6 +404,89 @@ def _send_real_sell(
                     "Insufficient-funds block persists for %s (%s) — alert "
                     "suppressed, still within cooldown.", position.symbol, reason,
                 )
+        elif dhan_client.is_oversell_error(str(e)):
+            # 2026-09-09 fix: "sell more than the quantity you currently hold"
+            # — our qty_open is stale vs broker demat. Fetch live holdings,
+            # sync qty_open, ghost-close if broker shows 0. Never streak.
+            logger.warning(
+                "exit SELL %s: oversell rejected (our qty=%s) — fetching "
+                "live holdings to sync qty_open", position.symbol, qty,
+            )
+            try:
+                from execution.dhan_client import get_dhan_client
+                dhan = get_dhan_client(db)
+                holdings_resp = dhan.get_holdings()
+                holdings = (holdings_resp or {}).get("data") or []
+                broker_qty = 0
+                for h in holdings:
+                    sym = (h.get("tradingSymbol") or "").upper().replace(" ", "")
+                    our_sym = position.symbol.upper().replace(" ", "")
+                    if sym == our_sym or sym.startswith(our_sym):
+                        broker_qty = int(h.get("availableQty") or h.get("totalQty") or 0)
+                        break
+                if broker_qty <= 0:
+                    logger.warning(
+                        "exit SELL %s: broker holds 0 — ghost-closing (id=%s)",
+                        position.symbol, position.id,
+                    )
+                    close_position(db, position, tick, position.qty_open, "oversell_ghost_close")
+                    notify_sync(
+                        f"🔄 *Position synced* — {position.symbol} ×{qty} ({reason})\n"
+                        f"Dhan holds 0 shares but Stockky had qty={qty} open. "
+                        f"Force-closed as ghost (broker already exited)."
+                    )
+                elif broker_qty < position.qty_open:
+                    logger.warning(
+                        "exit SELL %s: broker holds %s < our %s — capping qty_open",
+                        position.symbol, broker_qty, position.qty_open,
+                    )
+                    position.qty_open = broker_qty
+                    db.flush()
+                    notify_sync(
+                        f"🔄 *Qty synced* — {position.symbol}: "
+                        f"was {qty}, broker holds {broker_qty}. Retrying next cycle."
+                    )
+                else:
+                    logger.warning(
+                        "exit SELL %s: oversell but broker holds %s >= ours — timing issue, retry",
+                        position.symbol, broker_qty,
+                    )
+            except Exception as sync_e:
+                logger.warning(
+                    "exit SELL %s: oversell — holdings sync failed (%s), retry next cycle",
+                    position.symbol, sync_e,
+                )
+
+        elif dhan_client.is_exchange_not_allowed_error(str(e)):
+            # 2026-09-09 fix: EXCH:16387 "Security not allowed to trade in
+            # this market" — T+1 settlement not done yet, exchange intraday
+            # window also closed. Nothing works today; leave open, retry
+            # tomorrow when CNC is valid. One alert per cooldown window.
+            snap_key = f"exch_not_allowed_alert_last_{position.id}"
+            last = load_snapshot(db, snap_key) or {}
+            due = True
+            if last.get("at"):
+                try:
+                    elapsed_min = (
+                        datetime.now(timezone.utc) -
+                        datetime.fromisoformat(last["at"])
+                    ).total_seconds() / 60.0
+                    due = elapsed_min >= CDSL_ALERT_COOLDOWN_MIN
+                except Exception:
+                    due = True
+            if due:
+                notify_sync(
+                    f"⏰ *EXIT BLOCKED — T+1 pending* — "
+                    f"{position.symbol} ×{qty} ({reason})\n"
+                    f"Stock bought today hasn't settled to demat yet (T+1) "
+                    f"and the intraday window is also closed. "
+                    f"Will retry tomorrow as CNC (needs CDSL eDIS/TPIN).\n"
+                    f"(Alerts suppressed for {CDSL_ALERT_COOLDOWN_MIN} min.)"
+                )
+                save_snapshot(db, snap_key, {"at": datetime.now(timezone.utc).isoformat()})
+            else:
+                logger.info("EXCH:16387 block for %s — alert suppressed.", position.symbol)
+
         elif dhan_client.is_intraday_cutoff_error(str(e)):
             # 2026-09-08 fix: see dhan_client.is_intraday_cutoff_error's
             # docstring — this is Dhan/NSE's own hard end-of-day cutoff for

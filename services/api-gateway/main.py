@@ -168,6 +168,16 @@ async def _start_shared_http():
         logger.info("Boot feed-job heal: %s", result)
     except Exception as e:
         logger.warning("Startup warning (feed-job heal, non-fatal): %s", e)
+    # 2026-09-09 fix: reset circuit breakers on every startup so a half-open/open
+    # state from a previous container run (or a cold-start timeout storm) does not
+    # permanently block the api-gateway from reaching market-data-service.
+    # Safe: breakers re-open themselves if the downstream is genuinely down.
+    try:
+        from circuit_breaker import reset_all_breakers
+        names = reset_all_breakers()
+        logger.info("Startup: reset %d circuit breaker(s): %s", len(names), names)
+    except Exception as e:
+        logger.warning("Startup warning (circuit-breaker reset, non-fatal): %s", e)
 
 
 @app.on_event("shutdown")

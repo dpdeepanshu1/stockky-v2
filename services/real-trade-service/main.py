@@ -921,6 +921,19 @@ async def resilience_status_route(
         "dynamic_universe_last": du_last,
     }
 
+# ── Routes: Circuit-Breaker Reset (2026-09-09) ───────────────────────────────
+@app.post("/resilience/reset")
+async def resilience_reset_route(admin: str = Depends(require_admin)):
+    """Reset all real-trade circuit breakers to CLOSED. No data deleted."""
+    from resilience.circuit_breaker import api_gateway_breaker, market_data_breaker, event_service_breaker
+    reset = []
+    for br in (api_gateway_breaker, market_data_breaker, event_service_breaker):
+        br._failures = 0
+        br._opened_at = None
+        reset.append(br.name)
+    logger.info("resilience/reset: cleared breakers %s", reset)
+    return {"ok": True, "reset": reset, "count": len(reset)}
+
 
 # ── Routes: Auto-Pilot (2026-08-27) ──────────────────────────────────────────
 # Toggle only — the actual loop lives in execution/auto_pilot.py, started

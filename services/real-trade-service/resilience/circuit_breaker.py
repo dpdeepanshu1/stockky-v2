@@ -175,20 +175,27 @@ class CircuitBreaker:
 # real-trade-service instead of constructing new instances — a single shared
 # instance is what makes the failure count accumulate correctly.
 
+# 2026-09-09 calibration: raised failure_threshold 3→10 and cooldown to
+# reduce Telegram alert spam. With threshold=3 and a 45s autopilot cycle,
+# a single bad market-open window generated 60+ consecutive-failure alerts
+# before the upstream recovered. Threshold=10 means the breaker still trips
+# fast enough to protect the upstream but doesn't alert on every transient
+# timeout storm. Cooldown raised to give cold-start free-tier services time
+# to wake before the first probe fires.
 api_gateway_breaker = CircuitBreaker(
     "api-gateway",
-    failure_threshold=3,
-    cooldown_s=90.0,
+    failure_threshold=10,
+    cooldown_s=120.0,
 )
 
 market_data_breaker = CircuitBreaker(
     "market-data-service",
-    failure_threshold=3,
-    cooldown_s=45.0,
+    failure_threshold=10,
+    cooldown_s=60.0,
 )
 
 event_service_breaker = CircuitBreaker(
     "event-service",
-    failure_threshold=3,
-    cooldown_s=60.0,
+    failure_threshold=10,
+    cooldown_s=90.0,
 )

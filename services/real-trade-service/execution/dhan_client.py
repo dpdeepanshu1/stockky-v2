@@ -461,6 +461,55 @@ def is_intraday_cutoff_error(message: str) -> bool:
     return any(marker in m for marker in _INTRADAY_CUTOFF_MARKERS)
 
 
+# 2026-09-09 fix — "RMS:<id>:You are trying to sell more than the quantity
+# you currently hold." — fired when Stockky's qty_open is out of sync with
+# what Dhan's CDSL demat actually shows. Root cause: a partial exit was
+# acknowledged by Dhan but the fill-reconcile loop didn't reduce qty_open
+# in the DB, so the next cycle tries to sell the original full quantity
+# again. The correct response is NOT to retry with the same qty — that will
+# always reject. Instead: fetch the actual available qty from Dhan holdings,
+# cap the SELL to what's there, and if nothing is left, force-close the
+# position as ghost (broker already exited it). If the holdings fetch itself
+# fails, leave the position open and retry next cycle (same as CDSL branch).
+_OVERSELL_MARKERS = (
+    "sell more than the quantity",
+    "sell more than quantity",
+    "trying to sell more",
+    "cannot sell more",
+)
+
+
+def is_oversell_error(message: str) -> bool:
+    m = (message or "").lower()
+    return any(marker in m for marker in _OVERSELL_MARKERS)
+
+
+# 2026-09-09 fix — "EXCH:16387:Security is not allowed to trade in this
+# market." — fired for HYUNDAI, BANDHANBNK and similar stocks bought today
+# when exit.py tries to sell them as CNC from holdings. These stocks were
+# bought intraday (T+0) and haven't settled to demat yet (T+1), AND the
+# position opened after the INTRADAY cutoff window so the INTRADAY product
+# type is no longer valid either. Dhan rejects the CNC SELL because the
+# security isn't in CDSL holdings yet, and the INTRADAY SELL because the
+# exchange cutoff has passed. Neither branch was recognised before — both
+# fell into the generic catch-all and retried forever.
+# Correct handling: these are "stuck until tomorrow" just like the intraday
+# cutoff case — leave them open overnight; tomorrow they're T+1 settled,
+# CNC will work, and CDSL eDIS/TPIN covers the demat validation.
+_EXCHANGE_NOT_ALLOWED_MARKERS = (
+    "security is not allowed to trade",
+    "not allowed to trade in this market",
+    "exch:16387",
+    "scrip is not tradeable",
+    "scrip not tradeable",
+)
+
+
+def is_exchange_not_allowed_error(message: str) -> bool:
+    m = (message or "").lower()
+    return any(marker in m for marker in _EXCHANGE_NOT_ALLOWED_MARKERS)
+
+
 # ── CDSL eDIS / TPIN flow (DhanHQ v2, verified against
 # https://dhanhq.co/docs/v2/edis/ on 2026-09-07 — this IS the current v2
 # path, unlike the deprecated v1 assumption an earlier pass here made) ──────

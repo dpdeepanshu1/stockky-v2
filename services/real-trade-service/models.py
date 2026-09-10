@@ -83,6 +83,15 @@ class TradeGateState(Base):
     eod_squareoff_enabled_at = Column(DateTime, nullable=True)
     eod_squareoff_last_run = Column(String(10), nullable=True)
 
+    # 2026-09-10 (session22, user request): fourth scheduled feature, same
+    # idiom as the three above — end-of-day re-scan that queues an
+    # "overnight priority" list for tomorrow's pre-pick instead of placing
+    # any order today. See config.py's EOD_SIGNAL_SCAN_* block and
+    # auto_pilot.py's _eod_signal_scan.
+    eod_signal_scan_enabled = Column(Boolean, nullable=False, default=False)
+    eod_signal_scan_enabled_at = Column(DateTime, nullable=True)
+    eod_signal_scan_last_run = Column(String(10), nullable=True)
+
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
@@ -154,6 +163,22 @@ class TradeCandidate(Base):
     # trace back to the catalyst's horizon_class for catalyst-aware exits.
     # NULL for all other source tracks — no behavior change.
     watchlist_entry_id = Column(Integer, ForeignKey("trade_watchlist.id"), nullable=True)
+    # 2026-09-10 (session22, user request): set True only for candidates
+    # injected by auto_pilot._prepick from the previous evening's EOD signal
+    # scan snapshot (see resilience/local_cache + config.EOD_SIGNAL_SCAN_*).
+    # False for every normal candidate. entry_engine reads this to apply
+    # config.ENTRY_OVERNIGHT_PRIORITY_BONUS to Gate 6's ranking only — it
+    # changes nothing about gates 1-5 or risk_engine.
+    overnight_priority = Column(Boolean, nullable=False, default=False)
+    # 2026-09-11 (session23, user request): set by auto_pilot._prepick via
+    # market_context.sector_signal when config.US_SECTOR_SIGNAL_ENABLED is
+    # on. A small, capped +/-config.US_SECTOR_BONUS_CAP points, derived from
+    # how this candidate's NSE sector's closest US sector ETF closed
+    # overnight. 0.0 (the default) for every candidate when the feature is
+    # off, unmapped, or data is unavailable — never a gate, only a Gate 6
+    # ranking nudge in entry_engine/entry.py, same posture as
+    # overnight_priority above.
+    us_sector_bonus = Column(Float, nullable=False, default=0.0)
 
     __table_args__ = (Index("ix_trade_candidates_mode_symbol", "mode", "symbol"),)
 

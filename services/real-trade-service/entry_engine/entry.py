@@ -675,6 +675,26 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # side effects until Gate 6 has ranked this cycle's full approved batch
         # — see config.py's ENTRY_CYCLE_QUALITY_FILTER_ENABLED docstring.
         raw_composite_score = _composite_quality_score(cand.conviction_score, rr, drift_pct, max_drift_pct)
+        # 2026-09-10 (session22, user request): candidates carried over by
+        # auto_pilot's EOD signal scan (see _prepick /
+        # _requeue_overnight_priority_candidates) already survived a full
+        # day's price action plus a second end-of-day re-scan of the source
+        # feeds — more confirmation than an intraday candidate gets. Give
+        # them a flat ranking bonus for Gate 6 only; every individual gate
+        # above (extension/drift caps, risk_engine, cash) still applies to
+        # them exactly like any other candidate.
+        is_overnight_priority = bool(getattr(cand, "overnight_priority", False))
+        if is_overnight_priority:
+            raw_composite_score = min(100.0, raw_composite_score + config.ENTRY_OVERNIGHT_PRIORITY_BONUS)
+        # 2026-09-11 (session23, user request): small, capped +/- nudge from
+        # how this candidate's NSE sector's closest US sector ETF closed
+        # overnight (see market_context/sector_signal.py and config's
+        # US_SECTOR_SIGNAL_ENABLED). 0.0 for every candidate when the
+        # feature is off/unmapped/no data — same "ranking nudge only,
+        # never a gate" posture as the overnight-priority bonus above.
+        us_sector_bonus = float(getattr(cand, "us_sector_bonus", 0.0) or 0.0)
+        if us_sector_bonus:
+            raw_composite_score = max(0.0, min(100.0, raw_composite_score + us_sector_bonus))
         is_upper_circuit = (cand.decision_label or "").upper() == "VOLUME_SHOCK_UPPER_CIRCUIT"
         # BUG FIX (2026-09-10): comment at Gate 6 said "UC scores now 85
         # so they sort first" but _composite_quality_score() was never told
@@ -702,6 +722,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             "composite_score": composite_score,
             "raw_composite_score": raw_composite_score,
             "is_upper_circuit": is_upper_circuit,
+            "is_overnight_priority": is_overnight_priority,
+            "us_sector_bonus": us_sector_bonus,
         })
 
         # BUG FIX (2026-09-10, session21c audit): reserved_cash exists to make
@@ -837,6 +859,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         db.flush()
         _raw = e.get("raw_composite_score", e["composite_score"])
         _uc_note = f" [UC floor→{e['composite_score']:.0f}]" if e.get("is_upper_circuit") and _raw < e["composite_score"] else ""
+        _op_note = f" [overnight-priority +{config.ENTRY_OVERNIGHT_PRIORITY_BONUS:.0f}]" if e.get("is_overnight_priority") else ""
+        _sb = e.get("us_sector_bonus", 0.0)
+        _sb_note = f" [US-sector {'+' if _sb >= 0 else ''}{_sb:.1f}]" if _sb else ""
         db.add(models.TradeOrderEvent(
             order_id=order.id, event_type="PLACED",
             detail=(
@@ -844,7 +869,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 f"target ₹{target_price:.2f} | R:R {rr:.2f} | "
                 f"conviction {cand.conviction_score} | adj_risk {adj_risk_pct:.2f}% | "
                 f"regime_score {market_score} (gate={threshold},{threshold_src}) | "
-                f"composite {_raw:.1f}{_uc_note}"
+                f"composite {_raw:.1f}{_uc_note}{_op_note}{_sb_note}"
                 f"{' | REGIME OVERRIDE' if is_regime_override else ''} | "
                 f"valid {config.ENTRY_VALIDITY_MINUTES}m"
             ),

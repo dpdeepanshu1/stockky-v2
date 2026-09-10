@@ -345,33 +345,147 @@ async def _full_tick_body(mode: str) -> None:
 # <feature>_last_run date column so a Render restart can't cause a re-fire.
 # ══════════════════════════════════════════════════════════════════════════
 
+_OVERNIGHT_SNAPSHOT_KEY_PREFIX = "overnight_priority"
+
+
 async def _prepick(db, mode: str) -> None:
     """~09:00 pre-open: warm the candidate queue so the strongest names are
     ready to enter the instant the market opens. Deliberately does NOT run the
     entry evaluator (that would consume candidates while the market is shut) —
-    it only refreshes/queues them; enter-at-open does the actual entering."""
+    it only refreshes/queues them; enter-at-open does the actual entering.
+
+    2026-09-10 (session22, user request): also re-queues yesterday's EOD
+    signal-scan picks (see _eod_signal_scan below) as fresh, high-priority
+    TradeCandidate rows so they get bought first thing at today's open
+    instead of waiting to be rediscovered by the normal intraday scan."""
     from candidate_engine.candidates import refresh_candidates
     n = await refresh_candidates(db, mode)
     logger.info("[schedule] pre-pick %s: refreshed %s candidates", mode, n)
+
+    overnight_added = await _requeue_overnight_priority_candidates(db, mode)
+
+    # 2026-09-11 (session23, user request): apply the overnight US-sector
+    # signal to every still-unconsumed candidate for this mode (this
+    # morning's fresh ones plus anything just re-queued above). Best-effort
+    # and entirely additive — see market_context/sector_signal.py's
+    # docstring. Off by default (config.US_SECTOR_SIGNAL_ENABLED).
+    if config.US_SECTOR_SIGNAL_ENABLED:
+        try:
+            from market_context.sector_signal import (
+                refresh_us_sector_snapshot, sector_bonus_for_symbol,
+            )
+            sector_returns = refresh_us_sector_snapshot(db)
+            if sector_returns:
+                pending = (
+                    db.query(models.TradeCandidate)
+                    .filter_by(mode=mode, consumed=False)
+                    .all()
+                )
+                for c in pending:
+                    c.us_sector_bonus = sector_bonus_for_symbol(c.symbol, sector_returns)
+                db.commit()
+                logger.info(
+                    "[schedule] pre-pick %s: applied US sector signal to %d candidate(s)",
+                    mode, len(pending),
+                )
+        except Exception:
+            logger.exception("[schedule] pre-pick %s: US sector signal failed (non-fatal)", mode)
+
     # ENRICHMENT (2026-09-02): previously just a bare count. Now lists the
     # actual queued symbols + signal price (top 10) so the Telegram alert
     # is useful on its own, matching the SELL-notification enrichment.
-    lines = [f"🌅 *Pre-pick — {mode}*\nQueued {n} candidate(s) before the open."]
-    if n:
+    total = n + overnight_added
+    lines = [f"🌅 *Pre-pick — {mode}*\nQueued {total} candidate(s) before the open."]
+    if overnight_added:
+        lines.append(f"  🌙 {overnight_added} carried over from last evening's EOD signal scan (priority).")
+    if total:
         top = (
             db.query(models.TradeCandidate)
             .filter_by(mode=mode, consumed=False)
-            .order_by(models.TradeCandidate.received_at.desc())
+            .order_by(models.TradeCandidate.overnight_priority.desc(), models.TradeCandidate.received_at.desc())
             .limit(10)
             .all()
         )
         for c in top:
             price_txt = f"₹{c.signal_price:.2f}" if c.signal_price is not None else "—"
-            lines.append(f"  • {c.symbol} @ {price_txt}")
-        if n > len(top):
-            lines.append(f"  ...and {n - len(top)} more")
+            tag = " 🌙" if getattr(c, "overnight_priority", False) else ""
+            lines.append(f"  • {c.symbol} @ {price_txt}{tag}")
+        if total > len(top):
+            lines.append(f"  ...and {total - len(top)} more")
     lines.append("They'll be evaluated for entry when the market opens.")
     await notify_async("\n".join(lines))
+
+
+async def _requeue_overnight_priority_candidates(db, mode: str) -> int:
+    """Reads the snapshot _eod_signal_scan saved last evening (if any, and
+    if not already consumed / not stale) and inserts a fresh TradeCandidate
+    row per symbol, flagged overnight_priority=True. Returns how many were
+    added. Never raises — a missing/corrupt/stale snapshot is just treated
+    as "nothing to carry over", same posture as every other resilience-cache
+    read in this codebase (best-effort, never blocks the real pre-pick)."""
+    from resilience.local_cache import load_snapshot, save_snapshot
+
+    key = f"{_OVERNIGHT_SNAPSHOT_KEY_PREFIX}:{mode}"
+    try:
+        snap = load_snapshot(db, key)
+    except Exception:
+        logger.exception("[schedule] pre-pick %s: overnight-priority snapshot read failed", mode)
+        return 0
+    if not snap:
+        return 0
+
+    today = ist_today_str()
+    if snap.get("consumed"):
+        return 0
+    # Only carry over a snapshot from a PRIOR trading day — never today's own
+    # (defends against a same-day double pre-pick somehow re-reading it, and
+    # against an old, never-cleared snapshot with no trading_date at all).
+    trading_date = snap.get("trading_date")
+    if not trading_date or trading_date >= today:
+        return 0
+
+    picks = snap.get("candidates") or []
+    if not picks:
+        return 0
+
+    already_queued = {
+        c.symbol for c in
+        db.query(models.TradeCandidate).filter_by(mode=mode, consumed=False).all()
+    }
+
+    added = 0
+    for p in picks:
+        symbol = p.get("symbol")
+        if not symbol or symbol in already_queued:
+            continue
+        db.add(models.TradeCandidate(
+            mode=mode,
+            symbol=symbol,
+            source_tab="eod_signal_scan",
+            decision_label=p.get("decision_label"),
+            conviction_score=p.get("conviction_score"),
+            signal_price=p.get("signal_price"),
+            raw_payload=p.get("raw_payload"),
+            overnight_priority=True,
+        ))
+        already_queued.add(symbol)
+        added += 1
+
+    if added:
+        db.commit()
+        logger.info(
+            "[schedule] pre-pick %s: re-queued %d overnight-priority candidate(s) "
+            "from %s's EOD signal scan", mode, added, trading_date,
+        )
+    # Mark the snapshot consumed either way (even 0-added, e.g. every symbol
+    # was already open/queued) so a later pre-pick run today can't re-apply
+    # it a second time.
+    try:
+        snap["consumed"] = True
+        save_snapshot(db, key, snap)
+    except Exception:
+        logger.exception("[schedule] pre-pick %s: failed to mark overnight-priority snapshot consumed", mode)
+    return added
 
 
 async def _enter_at_open(db, mode: str, gate_armed: bool) -> None:
@@ -393,7 +507,8 @@ async def _enter_at_open(db, mode: str, gate_armed: bool) -> None:
 
 
 async def _eod_squareoff(db, mode: str) -> None:
-    """~15:15 before the close: flatten every open position for this mode so
+    """~15:00 before the close (moved from 15:15 on 2026-09-10, session22 —
+    see config.EOD_SQUAREOFF_TIME_IST): flatten every open position for this mode so
     nothing is carried overnight (intraday square-off). Reuses the exact manual-
     close paths: DEMO closes at the live tick; REAL sends a MARKET sell to Dhan."""
     from portfolio.portfolio import open_positions as _pf_open_positions, close_position as _pf_close_position
@@ -476,6 +591,183 @@ async def _eod_squareoff(db, mode: str) -> None:
     )
 
 
+_EOD_SCAN_POSITIVE_LABELS = {
+    "BUY NOW", "PREPARE TO BUY",
+    "VOLUME_SHOCK", "VOLUME_SHOCK_HIGH_CONVICTION", "VOLUME_SHOCK_UPPER_CIRCUIT",
+}
+
+
+async def _eod_signal_scan(db, mode: str, gate_armed: bool) -> None:
+    """~15:05, right after EOD square-off (user request, 2026-09-10 session22):
+    "at market close, pick some stocks based on end-of-day signals (positive
+    news/results/events/momentum into the close) so we can buy immediately at
+    tomorrow's open instead of waiting to rediscover them."
+
+    Re-scans the normal source feeds one more time (catching anything —
+    results, board outcomes, bulk deals — that only landed late in the day)
+    via the same refresh_candidates() every other cycle uses, keeps the top
+    config.EOD_SIGNAL_SCAN_MAX_CANDIDATES by conviction among candidates with
+    a genuinely positive decision label.
+
+    2026-09-11 (session23, user request): "if it looks good, place the order
+    that day — better than the next morning's open, which is more volatile
+    and we might miss it." Two tiers within that pick list:
+      - conviction >= config.EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION (top
+        config.EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES of those): handed to the
+        normal entry pipeline (entry_engine.entry.evaluate_mode) for a
+        same-day fill attempt, RIGHT NOW — every existing gate (extension/
+        drift caps, risk_engine, regime gate, cash) still applies in full,
+        nothing is bypassed. If gate_armed is False, or a candidate is
+        picked but doesn't actually fill (gate-rejected, out of cash, etc.),
+        it automatically falls back into the overnight-priority queue below
+        instead of being lost.
+      - everything else in the pick list: saved to the resilience cache for
+        tomorrow's _prepick to re-queue as overnight_priority candidates
+        (see _requeue_overnight_priority_candidates above and
+        config.ENTRY_OVERNIGHT_PRIORITY_BONUS in entry.py), exactly as
+        before — still places NO order today, since minutes before the
+        15:30 close is never worth entering for these lower-conviction
+        picks (no time for the setup to work)."""
+    from candidate_engine.candidates import refresh_candidates
+    from resilience.local_cache import save_snapshot
+
+    await refresh_candidates(db, mode)
+
+    pool = (
+        db.query(models.TradeCandidate)
+        .filter_by(mode=mode, consumed=False)
+        .all()
+    )
+    # Sort in Python (desc, None treated as lowest) — avoids relying on
+    # NULLS LAST ordering syntax, which SQLAlchemy renders differently
+    # across the oracledb/psycopg2 dialects this service supports.
+    pool.sort(key=lambda c: (c.conviction_score if c.conviction_score is not None else -1), reverse=True)
+    picked = []
+    for c in pool:
+        label = (c.decision_label or "").upper()
+        conviction = c.conviction_score or 0
+        if label not in _EOD_SCAN_POSITIVE_LABELS:
+            continue
+        if conviction < config.EOD_SIGNAL_SCAN_MIN_CONVICTION:
+            continue
+        picked.append(c)
+        if len(picked) >= config.EOD_SIGNAL_SCAN_MAX_CANDIDATES:
+            break
+
+    # picked is already sorted by conviction desc (inherited from pool) —
+    # take the top N that clear the stricter same-day-entry bar.
+    same_day_entry = [
+        c for c in picked
+        if (c.conviction_score or 0) >= config.EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION
+    ][: config.EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES]
+    same_day_ids = {c.id for c in same_day_entry}
+    queue_only = [c for c in picked if c.id not in same_day_ids]
+
+    # Everything except same_day_entry is done for today — consume it now
+    # with a logged decision (same posture as before this change), rather
+    # than leaving it unconsumed for a normal cycle to silently WAIT (and
+    # mis-attribute) minutes from now. same_day_entry stays UNCONSUMED here
+    # on purpose so entry_evaluate (below) picks it up.
+    for c in pool:
+        if c.id in same_day_ids:
+            continue
+        c.consumed = True
+        db.add(models.TradeDecision(
+            mode=mode, candidate_id=c.id, symbol=c.symbol, decision_type="ENTRY",
+            action="WAIT",
+            reasoning=(
+                "EOD signal scan: market is closing, not evaluated for entry today."
+                + (" Selected as an overnight-priority pick for tomorrow's open."
+                   if c in queue_only else " Not selected as an overnight-priority pick.")
+            ),
+        ))
+    db.commit()
+
+    entered_symbols: set[str] = set()
+    if same_day_entry and gate_armed:
+        from entry_engine.entry import evaluate_mode as entry_evaluate
+        try:
+            entry_result = await entry_evaluate(db, mode, gate_armed)
+            entered_symbols = {
+                d.get("symbol") for d in entry_result.get("entry_details", [])
+                if d.get("action") == "ENTER"
+            }
+        except Exception:
+            logger.exception(
+                "[schedule] EOD signal scan %s: same-day entry evaluation failed "
+                "(candidates fall back to overnight-priority queue)", mode,
+            )
+    elif same_day_entry and not gate_armed:
+        logger.info(
+            "[schedule] EOD signal scan %s: %d high-conviction pick(s) skipped "
+            "same-day entry — mode disarmed, falling back to overnight-priority queue",
+            mode, len(same_day_entry),
+        )
+
+    # Anything in same_day_entry that didn't actually fill (disarmed, gate
+    # rejection, out of cash, exception above) falls back into the normal
+    # overnight-priority queue instead of being lost, and gets explicitly
+    # consumed here if entry_evaluate didn't already do so.
+    fallback_queue = list(queue_only)
+    for c in same_day_entry:
+        if c.symbol not in entered_symbols:
+            if not c.consumed:
+                c.consumed = True
+                db.add(models.TradeDecision(
+                    mode=mode, candidate_id=c.id, symbol=c.symbol, decision_type="ENTRY",
+                    action="WAIT",
+                    reasoning=(
+                        "EOD signal scan: qualified for same-day entry "
+                        f"(conviction {c.conviction_score} >= "
+                        f"{config.EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION:.0f}) but did not "
+                        "fill today — carried over as an overnight-priority pick for "
+                        "tomorrow's open instead."
+                    ),
+                ))
+            fallback_queue.append(c)
+    db.commit()
+
+    key = f"{_OVERNIGHT_SNAPSHOT_KEY_PREFIX}:{mode}"
+    save_snapshot(db, key, {
+        "trading_date": ist_today_str(),
+        "consumed": False,
+        "candidates": [
+            {
+                "symbol": c.symbol,
+                "decision_label": c.decision_label,
+                "conviction_score": c.conviction_score,
+                "signal_price": c.signal_price,
+                "raw_payload": c.raw_payload,
+            }
+            for c in fallback_queue
+        ],
+    })
+
+    logger.info(
+        "[schedule] EOD signal scan %s: %d candidate(s) scanned, %d selected "
+        "(%d same-day entry attempted, %d entered, %d queued/carried for tomorrow)",
+        mode, len(pool), len(picked), len(same_day_entry), len(entered_symbols), len(fallback_queue),
+    )
+    lines = [f"🌙 *EOD signal scan — {mode}*"]
+    if same_day_entry:
+        lines.append(
+            f"⚡ {len(same_day_entry)} high-conviction pick(s) "
+            f"(≥{config.EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION:.0f}) evaluated for same-day entry:"
+        )
+        for c in same_day_entry:
+            price_txt = f"₹{c.signal_price:.2f}" if c.signal_price is not None else "—"
+            tag = "✅ entered today" if c.symbol in entered_symbols else "⏭ didn't fill — carried to tomorrow"
+            lines.append(f"  • {c.symbol} @ {price_txt} (conviction {c.conviction_score}) — {tag}")
+    if queue_only:
+        lines.append(f"Queued {len(queue_only)} more overnight-priority pick(s) for tomorrow's open:")
+        for c in queue_only:
+            price_txt = f"₹{c.signal_price:.2f}" if c.signal_price is not None else "—"
+            lines.append(f"  • {c.symbol} @ {price_txt} ({c.decision_label}, conviction {c.conviction_score})")
+    if not picked:
+        lines.append("No candidate cleared the overnight-priority bar today — nothing queued.")
+    await notify_async("\n".join(lines))
+
+
 async def _schedule_tick(mode: str) -> None:
     """One pass of the time-trigger loop for a mode. Each feature is gated by
     its per-mode toggle + armed, fires once/day, and is time-of-day bound.
@@ -550,7 +842,7 @@ async def _schedule_tick_body(mode: str) -> None:
             getattr(gate, "eod_squareoff_enabled", False)
             and getattr(gate, "eod_squareoff_last_run", None) != today
             and is_market_open_ist()
-            and ist_time_at_or_after(parse_hhmm(config.EOD_SQUAREOFF_TIME_IST, 15, 15))
+            and ist_time_at_or_after(parse_hhmm(config.EOD_SQUAREOFF_TIME_IST, 15, 0))
         ):
             gate.eod_squareoff_last_run = today
             db.commit()
@@ -559,6 +851,24 @@ async def _schedule_tick_body(mode: str) -> None:
             except Exception:
                 logger.exception("[schedule] EOD square-off failed for %s", mode)
                 await notify_async(f"⚠️ *EOD square-off error — {mode}* — see server logs.")
+
+        # ── EOD signal scan (during hours, right after square-off) ────────
+        # 2026-09-10 (session22, user request). Independent toggle from
+        # square-off on purpose — an admin may want positions flattened
+        # without the extra source-feed re-scan, or vice versa.
+        if (
+            getattr(gate, "eod_signal_scan_enabled", False)
+            and getattr(gate, "eod_signal_scan_last_run", None) != today
+            and is_market_open_ist()
+            and ist_time_at_or_after(parse_hhmm(config.EOD_SIGNAL_SCAN_TIME_IST, 15, 5))
+        ):
+            gate.eod_signal_scan_last_run = today
+            db.commit()
+            try:
+                await _eod_signal_scan(db, mode, gate.armed)
+            except Exception:
+                logger.exception("[schedule] EOD signal scan failed for %s", mode)
+                await notify_async(f"⚠️ *EOD signal scan error — {mode}* — see server logs.")
     except Exception:
         logger.exception("[schedule] tick failed for %s", mode)
     finally:

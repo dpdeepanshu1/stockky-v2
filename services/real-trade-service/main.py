@@ -161,7 +161,7 @@ class FeatureToggleRequest(BaseModel):
     on or off for a mode. feature must be one of the three known keys; enabled
     is the desired per-mode state, which takes effect immediately (this is
     the sole gate — no env kill-switch anymore)."""
-    feature: str   # "prepick" | "enter_at_open" | "eod_squareoff"
+    feature: str   # "prepick" | "enter_at_open" | "eod_squareoff" | "eod_signal_scan"
     enabled: bool
 
 
@@ -285,6 +285,15 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
                 "enabled": bool(getattr(gate, "eod_squareoff_enabled", False)),
                 "time_ist": config.EOD_SQUAREOFF_TIME_IST,
                 "last_run": getattr(gate, "eod_squareoff_last_run", None),
+            },
+            # 2026-09-10 (session22, user request): fourth scheduled feature —
+            # see execution/auto_pilot.py's _eod_signal_scan / models.py's
+            # TradeCandidate.overnight_priority. Same getattr(...) posture as
+            # the three above for the same additive-migration reason.
+            "eod_signal_scan": {
+                "enabled": bool(getattr(gate, "eod_signal_scan_enabled", False)),
+                "time_ist": config.EOD_SIGNAL_SCAN_TIME_IST,
+                "last_run": getattr(gate, "eod_signal_scan_last_run", None),
             },
         },
         "account": {
@@ -1090,6 +1099,10 @@ _FEATURE_COLUMNS = {
     "prepick": ("prepick_enabled", "prepick_enabled_at"),
     "enter_at_open": ("enter_at_open_enabled", "enter_at_open_enabled_at"),
     "eod_squareoff": ("eod_squareoff_enabled", "eod_squareoff_enabled_at"),
+    # 2026-09-10 (session22): fourth scheduled feature — see the
+    # scheduled_automation block in /status/{mode} above and
+    # execution/auto_pilot.py's _eod_signal_scan.
+    "eod_signal_scan": ("eod_signal_scan_enabled", "eod_signal_scan_enabled_at"),
 }
 
 

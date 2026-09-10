@@ -104,6 +104,9 @@ export interface GateStatus {
     prepick: ScheduledFeatureState;
     enter_at_open: ScheduledFeatureState;
     eod_squareoff: ScheduledFeatureState;
+    // 2026-09-10 (session22): EOD re-scan that queues an overnight-priority
+    // list for tomorrow's pre-pick instead of placing any order today.
+    eod_signal_scan: ScheduledFeatureState;
   };
   account: {
     starting_capital: number | null;
@@ -380,14 +383,15 @@ export const realTradeApi = {
   disableAutoPilot: (mode: "DEMO" | "REAL") =>
     rtRequest<{ ok: boolean; mode: string; auto_pilot_enabled: boolean }>(`/autopilot/${mode}/disable`, { method: "POST" }),
 
-  // Scheduled automation (2026-08-31) — flip one of the three time-of-day
+  // Scheduled automation (2026-08-31) — flip one of the time-of-day
   // features on/off for a mode. This toggle is the SOLE on/off authority
   // (the separate server-side env_on kill-switch was removed 2026-09-01 at
   // the admin's request) — flipping it here is immediately effective, no
-  // Render env var / redeploy required.
+  // Render env var / redeploy required. "eod_signal_scan" added 2026-09-10
+  // (session22) — see ScheduledFeatureState above.
   setFeature: (
     mode: "DEMO" | "REAL",
-    feature: "prepick" | "enter_at_open" | "eod_squareoff",
+    feature: "prepick" | "enter_at_open" | "eod_squareoff" | "eod_signal_scan",
     enabled: boolean,
   ) =>
     rtRequest<{ ok: boolean; mode: string; feature: string; enabled: boolean }>(

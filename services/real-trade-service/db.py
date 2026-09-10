@@ -141,6 +141,7 @@ def init_schema() -> None:
     _ensure_watchlist_link_columns(eng, dialect())
     _fix_stale_dhan_token_expiry(eng)
     _ensure_account_columns(eng, dialect())
+    _ensure_candidate_overnight_column(eng, dialect())
 
 
 # 2026-08-27 data fixup: docker-compose.yml/.env.example/.env.oracle.example
@@ -292,6 +293,10 @@ def _ensure_gate_state_columns(engine, dialect_name: str) -> None:
             ("eod_squareoff_enabled", "ALTER TABLE trade_gate_state ADD (eod_squareoff_enabled NUMBER(1) DEFAULT 0 NOT NULL)"),
             ("eod_squareoff_enabled_at", "ALTER TABLE trade_gate_state ADD (eod_squareoff_enabled_at TIMESTAMP)"),
             ("eod_squareoff_last_run", "ALTER TABLE trade_gate_state ADD (eod_squareoff_last_run VARCHAR2(10))"),
+            # 2026-09-10 (session22): fourth scheduled feature — see models.py.
+            ("eod_signal_scan_enabled", "ALTER TABLE trade_gate_state ADD (eod_signal_scan_enabled NUMBER(1) DEFAULT 0 NOT NULL)"),
+            ("eod_signal_scan_enabled_at", "ALTER TABLE trade_gate_state ADD (eod_signal_scan_enabled_at TIMESTAMP)"),
+            ("eod_signal_scan_last_run", "ALTER TABLE trade_gate_state ADD (eod_signal_scan_last_run VARCHAR2(10))"),
         ]
     else:
         adds = [
@@ -306,6 +311,10 @@ def _ensure_gate_state_columns(engine, dialect_name: str) -> None:
             ("eod_squareoff_enabled", "ALTER TABLE trade_gate_state ADD COLUMN eod_squareoff_enabled BOOLEAN DEFAULT FALSE NOT NULL"),
             ("eod_squareoff_enabled_at", "ALTER TABLE trade_gate_state ADD COLUMN eod_squareoff_enabled_at TIMESTAMP"),
             ("eod_squareoff_last_run", "ALTER TABLE trade_gate_state ADD COLUMN eod_squareoff_last_run VARCHAR(10)"),
+            # 2026-09-10 (session22): fourth scheduled feature — see models.py.
+            ("eod_signal_scan_enabled", "ALTER TABLE trade_gate_state ADD COLUMN eod_signal_scan_enabled BOOLEAN DEFAULT FALSE NOT NULL"),
+            ("eod_signal_scan_enabled_at", "ALTER TABLE trade_gate_state ADD COLUMN eod_signal_scan_enabled_at TIMESTAMP"),
+            ("eod_signal_scan_last_run", "ALTER TABLE trade_gate_state ADD COLUMN eod_signal_scan_last_run VARCHAR(10)"),
         ]
 
     for col_name, sql in adds:
@@ -320,6 +329,44 @@ def _ensure_gate_state_columns(engine, dialect_name: str) -> None:
             if "already exists" in m.lower() or "ORA-01430" in m:
                 continue
             logger.warning("real-trade-db: could not add trade_gate_state.%s: %s", col_name, e)
+
+
+# Same additive-migration idiom as _ensure_manual_order_columns above —
+# trade_candidates existed before overnight_priority was added to models.py
+# (2026-09-10, session22 — EOD signal scan / overnight-priority feature).
+def _ensure_candidate_overnight_column(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        existing = {c["name"] for c in inspect(engine).get_columns("trade_candidates")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect trade_candidates columns: %s", e)
+        return
+
+    if dialect_name == "oracle":
+        adds = [
+            ("overnight_priority", "ALTER TABLE trade_candidates ADD (overnight_priority NUMBER(1) DEFAULT 0 NOT NULL)"),
+            # 2026-09-11 (session23): see models.py TradeCandidate.us_sector_bonus.
+            ("us_sector_bonus", "ALTER TABLE trade_candidates ADD (us_sector_bonus BINARY_DOUBLE DEFAULT 0 NOT NULL)"),
+        ]
+    else:
+        adds = [
+            ("overnight_priority", "ALTER TABLE trade_candidates ADD COLUMN overnight_priority BOOLEAN DEFAULT FALSE NOT NULL"),
+            ("us_sector_bonus", "ALTER TABLE trade_candidates ADD COLUMN us_sector_bonus DOUBLE PRECISION DEFAULT 0 NOT NULL"),
+        ]
+
+    for col_name, sql in adds:
+        if col_name in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added trade_candidates.%s", col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add trade_candidates.%s: %s", col_name, e)
 
 
 # Every trade_* model uses `id = Column(Integer, primary_key=True,

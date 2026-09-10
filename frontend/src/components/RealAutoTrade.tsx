@@ -988,7 +988,7 @@ export default function RealAutoTrade() {
   };
 
   const doToggleFeature = async (
-    feature: "prepick" | "enter_at_open" | "eod_squareoff",
+    feature: "prepick" | "enter_at_open" | "eod_squareoff" | "eod_signal_scan",
     currentlyEnabled: boolean,
   ) => {
     setFeatureBusy(feature); setError(null);
@@ -1993,7 +1993,8 @@ export default function RealAutoTrade() {
                     <div className="px-3 py-2 border-b border-slate bg-graphite/40">
                       <p className="font-display tabular-nums text-[11px] text-paper">⏰ Scheduled Automation</p>
                       <p className="font-display tabular-nums text-[9px] text-mist mt-0.5">
-                        Pre-pick the best stocks before the open, auto-enter at market open, and square off before close.
+                        Pre-pick the best stocks before the open, auto-enter at market open, square off before close,
+                        {" "}and scan for tomorrow's overnight-priority picks right after that.
                         {" "}Fires once per trading day. Test in DEMO before enabling for REAL.
                       </p>
                     </div>
@@ -2005,6 +2006,8 @@ export default function RealAutoTrade() {
                           desc: "Run one full entry cycle just after the open so pre-picked names get entered at the early price." },
                         { key: "eod_squareoff" as const, icon: "🌆", title: "EOD square-off",
                           desc: "Close every open position before the close so nothing is carried overnight (intraday square-off)." },
+                        { key: "eod_signal_scan" as const, icon: "🌙", title: "EOD signal scan",
+                          desc: "Right after square-off, re-scan for strong positive signals (news/results/events/momentum) and queue the best few as an overnight-priority pick — bought first thing at tomorrow's open, not today." },
                       ]).map(f => {
                         const st = status.scheduled_automation![f.key];
                         const on = st.enabled;

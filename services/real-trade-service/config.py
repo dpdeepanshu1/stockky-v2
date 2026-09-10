@@ -224,6 +224,20 @@ ENTRY_COMPOSITE_RR_CEILING = float(os.getenv("ENTRY_COMPOSITE_RR_CEILING", "4.0"
 # unaffected — they keep the full cooldown.
 ENTRY_GATE6_REQUEUE_MINUTES = int(os.getenv("ENTRY_GATE6_REQUEUE_MINUTES", "15"))
 
+# 2026-09-10 (session22): candidates re-queued overnight by the EOD signal
+# scan (see auto_pilot._eod_signal_scan / _prepick and config's
+# EOD_SIGNAL_SCAN_* block below) get a flat bonus added to their raw
+# composite score before Gate 6 ranks the cycle. Rationale: these candidates
+# already survived a full day's price action (today's move didn't fade into
+# the close) AND a second, end-of-day re-scan of the source feeds (catching
+# results/board/bulk-block catalysts that landed AFTER the candidate was
+# first seen this morning) — that's strictly more confirmation than an
+# intraday candidate gets, so it earns a modest ranking boost, not a floor
+# bypass like UPPER_CIRCUIT's. Still has to clear every individual gate
+# (extension/drift caps, risk_engine, cash) fresh at tomorrow's open — the
+# bonus only affects Gate 6's cross-candidate ranking, never gates 1-5.
+ENTRY_OVERNIGHT_PRIORITY_BONUS = float(os.getenv("ENTRY_OVERNIGHT_PRIORITY_BONUS", "12.0"))
+
 # ── Decision 2: conservative risk defaults (seed values only — admin can
 #    edit via UI while disarmed; risk_engine always reads the live DB row,
 #    never these constants directly, once trade_risk_config exists) ────────
@@ -268,19 +282,97 @@ AUTO_PILOT_NOTIFY_HEARTBEAT = os.getenv("AUTO_PILOT_NOTIFY_HEARTBEAT", "false").
 #                     market is shut).
 #      ENTER_AT_OPEN  ~09:20 just after open: run one full entry cycle so the
 #                     pre-picked names get entered at the early/optimum price.
-#      EOD_SQUAREOFF  ~15:15 before close: close all open positions for the mode
+#      EOD_SQUAREOFF  ~15:00 before close: close all open positions for the mode
 #                     so nothing is carried overnight (intraday square-off).
+#      EOD_SIGNAL_SCAN ~15:05, right after square-off: a SEPARATE, later
+#                     re-scan of the source feeds (catches results/board/
+#                     bulk-block catalysts and volume-shock momentum that
+#                     only showed up late in the day) — does NOT place any
+#                     order today (never worth entering minutes before
+#                     close), it queues the strongest names as an
+#                     "overnight priority" list for tomorrow's PREPICK/
+#                     ENTER_AT_OPEN so they're bought first thing at the
+#                     next open instead of waiting to be rediscovered.
 # 2026-09-01: the three *_ENABLED env kill-switches (PREPICK_ENABLED,
 # ENTER_AT_OPEN_ENABLED, EOD_SQUAREOFF_ENABLED) were removed at the admin's
 # request — the per-mode dashboard toggle (TradeGateState.prepick_enabled
-# etc.) is now the SOLE on/off authority for these three features. Only the
+# etc.) is now the SOLE on/off authority for these features. Only the
 # time-of-day vars remain here.
 PREPICK_TIME_IST = os.getenv("PREPICK_TIME_IST", "09:00")
 ENTER_AT_OPEN_TIME_IST = os.getenv("ENTER_AT_OPEN_TIME_IST", "09:20")
-EOD_SQUAREOFF_TIME_IST = os.getenv("EOD_SQUAREOFF_TIME_IST", "15:15")
+# 2026-09-10 (session22, user request): moved from 15:15 to 15:00. Two
+# reasons: (1) decision #33 (session21e, live Dhan order-book evidence)
+# found that SELLs placed close to Dhan's intraday cutoff generated a large
+# retry-storm of failed orders (205 failed vs 12 success) — firing
+# square-off 15 minutes earlier gives materially more buffer before that
+# cutoff for slow fills/partial retries to complete cleanly instead of
+# racing the clock. (2) it leaves a clean ~15-25 minute window before the
+# 15:30 close for EOD_SIGNAL_SCAN below to run against still-live prices
+# without any risk of re-entering something square-off just flattened.
+EOD_SQUAREOFF_TIME_IST = os.getenv("EOD_SQUAREOFF_TIME_IST", "15:00")
+EOD_SIGNAL_SCAN_TIME_IST = os.getenv("EOD_SIGNAL_SCAN_TIME_IST", "15:05")
 
 # How often the time-trigger loop wakes to check the clock (seconds).
 SCHEDULE_CHECK_INTERVAL_SECONDS = max(20, int(os.getenv("SCHEDULE_CHECK_INTERVAL_SECONDS", "60")))
+
+# ── EOD signal scan (2026-09-10, session22 — user request) ─────────────────
+# "When market closes for the day, pick some stocks based on end-of-day
+# signals (positive news/results/events, momentum into the close) so they
+# can be bought first thing next morning instead of waiting to be
+# rediscovered" — this is the config for that feature. It is entirely
+# additive: it runs candidate_engine.candidates.refresh_candidates() one
+# more time near the close (a normal, already-existing scan — nothing new
+# is fetched here that today's earlier cycles didn't already know how to
+# fetch), then keeps only the top few by conviction as an "overnight
+# priority" list consumed by tomorrow's pre-pick. See auto_pilot.py's
+# _eod_signal_scan / _prepick and models.py's TradeCandidate.overnight_priority.
+EOD_SIGNAL_SCAN_MAX_CANDIDATES = int(os.getenv("EOD_SIGNAL_SCAN_MAX_CANDIDATES", "5"))
+# Below this conviction score, a late-day candidate isn't strong enough to
+# carry as an overnight priority pick — matches the same conviction scale
+# (0-100) the rest of entry_engine/candidate_engine already use.
+EOD_SIGNAL_SCAN_MIN_CONVICTION = float(os.getenv("EOD_SIGNAL_SCAN_MIN_CONVICTION", "60.0"))
+
+# 2026-09-11 (session23, user request): "if the system stock looks good it
+# can place an order that day too — better than next day's open, which is
+# more volatile and we might miss the move." Adds a SECOND, stricter tier
+# on top of the queue-only behaviour above: among the picks that already
+# cleared EOD_SIGNAL_SCAN_MIN_CONVICTION, the ones at/above this bar are
+# handed to the normal entry pipeline (entry_engine.entry.evaluate_mode)
+# for evaluation RIGHT NOW at ~15:05, instead of only being snapshotted for
+# tomorrow. This does NOT bypass any gate — extension/drift caps,
+# risk_engine, regime gate, and cash checks all still apply exactly as they
+# do to any other candidate; it only decides which candidates get a same-day
+# shot at all. Deliberately set well above EOD_SIGNAL_SCAN_MIN_CONVICTION
+# (75 vs 60) because a same-day fill has ~20-25 minutes of live trading left
+# and becomes an overnight position once taken (square-off for the day has
+# already run) — both real risks that a next-morning entry doesn't carry.
+# Anything picked for this tier that doesn't actually fill today (gate
+# rejection, disarmed mode, insufficient cash) automatically falls back
+# into the normal overnight-priority queue for tomorrow rather than being
+# lost — see auto_pilot._eod_signal_scan.
+EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION = float(os.getenv("EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION", "75.0"))
+EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES = int(os.getenv("EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES", "2"))
+
+# ── US sector overnight signal (2026-09-11, session23 — user request) ──────
+# "We can take some idea from the US stock market sector-wise, or on some
+# point based on that, predict something early" — used ONLY at PREPICK
+# (~09:00 IST), which is safely after the US session has closed for the
+# night (NYSE/NASDAQ close ~02:00-02:30 IST during EDT, ~03:00-03:30 IST
+# during EST). Fetches a handful of US sector ETFs (see
+# market_context/sector_signal.py) via the yfinance dependency this service
+# already uses elsewhere (surprise_premarket.py), maps each candidate's
+# NSE sector to the closest US sector ETF via a static table (only covers
+# the major NSE sectoral-index constituents — an unmapped symbol simply
+# gets no bonus, never a penalty for being unmapped), and adds a small,
+# CAPPED bonus/penalty to that candidate's ranking score at Gate 6 — same
+# "ranking nudge, not a gate bypass" posture as ENTRY_OVERNIGHT_PRIORITY_BONUS
+# above. Off by default until proven in DEMO.
+US_SECTOR_SIGNAL_ENABLED = os.getenv("US_SECTOR_SIGNAL_ENABLED", "false").lower() == "true"
+# Max points added/subtracted at the extreme (a sector ETF at
+# +/-US_SECTOR_BONUS_FULL_SCALE_PCT% or beyond gets the full +/-cap;
+# scaled linearly in between, capped both ends).
+US_SECTOR_BONUS_CAP = float(os.getenv("US_SECTOR_BONUS_CAP", "6.0"))
+US_SECTOR_BONUS_FULL_SCALE_PCT = float(os.getenv("US_SECTOR_BONUS_FULL_SCALE_PCT", "1.5"))
 
 # ── Telegram — direct bot notifications for fills/exits/auto-pilot ticks.
 #    Separate from notification-scheduler-service's own Telegram config on

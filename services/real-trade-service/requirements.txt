@@ -22,3 +22,9 @@ dhanhq==2.0.2
 oracledb==2.5.1
 python-dateutil==2.9.0  # §1 live_quotes timestamp parsing in market_feed/feed.py
 pyotp==2.9.0  # §2 Dhan TOTP auto-refresh in auth/dhan_credentials.py
+# 2026-09-11 (session23): US sector overnight signal (market_context/
+# sector_signal.py) — same version market-data-service already pins for its
+# own yfinance usage (surprise_premarket.py etc). Only used at PREPICK
+# (~09:00 IST) to fetch a handful of US sector ETF closes; gated off by
+# default via config.US_SECTOR_SIGNAL_ENABLED.
+yfinance==1.5.2

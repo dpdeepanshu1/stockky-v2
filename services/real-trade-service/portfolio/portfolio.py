@@ -424,8 +424,49 @@ def holdings_sync_reconcile(db: Session) -> dict:
     closed_symbols: list[str] = []
     synced_symbols: list[str] = []
     account = None
+    # BUG FIX (2026-09-10, session21c audit): local import (not top-level —
+    # exit_engine.exit imports from this module at module scope, so a
+    # top-level import here would be circular).
+    from exit_engine.exit import _has_pending_real_sell
     for position in candidates:
         symbol = (position.symbol or "").upper().strip()
+
+        # BUG FIX (2026-09-10, session21c audit): the PENDING_EXIT exclusion
+        # on the candidates query above (see this function's own docstring)
+        # only protects a FULL exit in flight — record_real_exit_sent's
+        # full=False path (a partial target-hit exit) deliberately leaves
+        # the position at OPEN/PARTIALLY_CLOSED, so it was never excluded
+        # here, and this function has no other way to tell "shares are
+        # missing because our own SELL just filled at the broker" apart
+        # from "shares are missing for some other reason" (manual sell
+        # outside this app, a reversed leg, etc.).
+        #
+        # Reachable window: exit_engine sends a partial SELL (MARKET order —
+        # NSE typically fills these within the same second) earlier in this
+        # same cycle (cycle_runner runs the exit stage before the reconcile
+        # stage). By the time THIS function's own Dhan holdings/positions
+        # calls run, moments later in the SAME reconcile_real_orders() call,
+        # the broker may already reflect the reduced quantity — while the
+        # TradeOrder row is still "PLACED" because the pending_orders loop
+        # further down in reconcile_real_orders() (which is what actually
+        # books the fill via record_real_exit_fill) hasn't reached it yet.
+        #
+        # Without this check, this function would mis-read that gap as an
+        # "external partial sell" and cap qty_open down + refund cash at
+        # avg_entry_price (cost basis) right here — and then the pending-
+        # orders loop, moments later, would ALSO book the same fill via
+        # record_real_exit_fill (qty_open -= qty_closed again, cash +=
+        # exit_price*qty_closed again): the position's qty_open gets
+        # decremented twice for one real-world sell, and cash_available is
+        # credited twice (once at the wrong cost-basis figure, once at the
+        # correct exit price) — silently corrupting both qty and cash for
+        # every partial REAL exit this ever raced, not just an edge case.
+        # Skipping here is always safe: the in-flight SELL is already being
+        # handled by the pending-orders loop this same cycle (or the next
+        # one), which is the ONLY path allowed to book a confirmed fill.
+        if _has_pending_real_sell(db, symbol):
+            continue
+
         opened_at = position.opened_at
         if opened_at is not None and opened_at.tzinfo is None:
             opened_at = opened_at.replace(tzinfo=timezone.utc)

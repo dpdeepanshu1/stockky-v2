@@ -317,6 +317,37 @@ async def evaluate_manual_order(
         preview["pnl"] = pnl
         preview["status"] = "CLOSED" if position.status == "CLOSED" else "PARTIALLY_CLOSED"
     else:
+        # BUG FIX (2026-09-10, session21c audit): same missing-guard class of
+        # bug as auto_pilot._eod_squareoff (see that file's Fix 5 for the
+        # full incident reasoning). A partial target-hit exit sent by the
+        # fast-exit/full-cycle tick moments before this manual confirm lands
+        # deliberately leaves the position OPEN/PARTIALLY_CLOSED (full=False
+        # — see record_real_exit_sent's docstring) and position.qty_open is
+        # only decremented once reconcile_real_orders() confirms the fill —
+        # never at send time. _resolve_position() above matches OPEN/
+        # PARTIALLY_CLOSED, so it still returns this position with its
+        # pre-partial-exit qty_open while that first SELL is still working
+        # at the broker. Without this check, a manual SELL confirm landing
+        # in that window would fire a SECOND MARKET SELL over shares a
+        # pending order already has working — the same oversell risk
+        # exit_engine.evaluate_mode() already guards against for its own
+        # automatic SELLs. The per-mode lock (held by the caller —
+        # main.py's /manual-order/{mode}/confirm) rules out a concurrent
+        # SEND from another tick; it does not rule out an EARLIER tick's
+        # send still awaiting broker confirmation, which is exactly what
+        # this checks.
+        from exit_engine.exit import _has_pending_real_sell
+        if _has_pending_real_sell(db, symbol):
+            log_action(db, actor=admin or "admin", action="MANUAL_ORDER_REJECTED", mode=mode,
+                       detail=f"{symbol} SELL x{qty}: a SELL is already placed and awaiting broker fill confirmation.")
+            preview["ok"] = False
+            preview["status"] = "REJECTED"
+            preview["reason"] = "pending_sell"
+            preview["detail"] = (
+                f"A SELL for {symbol} is already sent to Dhan and awaiting fill confirmation — "
+                "wait for it to settle before selling more."
+            )
+            return preview
         full = qty >= position.qty_open
         sent = _send_real_sell(db, position, qty, "manual_sell", full=full,
                                 execution_source="MANUAL", confirmed_by=admin)

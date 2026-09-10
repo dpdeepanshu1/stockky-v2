@@ -401,7 +401,7 @@ async def _eod_squareoff(db, mode: str) -> None:
     if not positions:
         logger.info("[schedule] EOD square-off %s: no open positions", mode)
         return
-    closed, sent, failed = 0, 0, 0
+    closed, sent, failed, skipped = 0, 0, 0, 0
     if mode == "DEMO":
         from market_feed.feed import get_quotes
         syms = list({p.symbol for p in positions})
@@ -418,8 +418,44 @@ async def _eod_squareoff(db, mode: str) -> None:
                 logger.exception("[schedule] EOD close failed for %s %s", mode, p.symbol)
                 failed += 1
     else:  # REAL
-        from exit_engine.exit import _send_real_sell
+        from exit_engine.exit import _send_real_sell, _has_pending_real_sell
+        # BUG FIX (2026-09-10, session21 audit): missing duplicate-send guard
+        # — a sequential double-sell race, not a threading one (this loop
+        # runs single-threaded under the schedule tick's own per-mode lock,
+        # so no other tick can interleave with it).
+        #
+        # record_real_exit_sent's own docstring (portfolio.py) is explicit
+        # that a PARTIAL exit (full=False — e.g. a target-hit partial fired
+        # by the fast-exit or full-cycle tick shortly before close) leaves
+        # the position status at OPEN/PARTIALLY_CLOSED on purpose, so the
+        # remainder stays live for further evaluation; only the in-flight
+        # TradeOrder row (status PLACED/PARTIAL) tracks that a SELL is
+        # already working at the broker, and exit_engine's own
+        # evaluate_mode() never sends a second SELL without checking
+        # _has_pending_real_sell() first. p.qty_open is likewise only ever
+        # decremented once reconcile_real_orders() confirms the fill against
+        # Dhan's own trade book — never at send time — so a position with a
+        # partial SELL still in flight is returned by open_positions() with
+        # its PRE-partial-exit qty_open intact.
+        #
+        # This loop called _send_real_sell directly, with no equivalent
+        # check: if that partial SELL was still awaiting broker confirmation
+        # when EOD square-off ran, this would send a SECOND MARKET SELL for
+        # the position's full (stale) qty_open while the first partial SELL
+        # was still working — two live SELL orders outstanding for
+        # overlapping shares at once (an oversell that can get one order
+        # broker-rejected, or — worse — filled short). Skipping a position
+        # here is safe: the pending SELL is already flattening it, and the
+        # next fast-exit tick (or reconcile) picks up wherever it lands.
         for p in positions:
+            if _has_pending_real_sell(db, p.symbol):
+                logger.info(
+                    "[schedule] EOD square-off %s: skipping %s — a SELL is "
+                    "already placed and awaiting broker fill confirmation",
+                    mode, p.symbol,
+                )
+                skipped += 1
+                continue
             try:
                 if _send_real_sell(db, p, p.qty_open, "eod_squareoff", full=True):
                     sent += 1
@@ -428,11 +464,15 @@ async def _eod_squareoff(db, mode: str) -> None:
             except Exception:
                 logger.exception("[schedule] EOD real-sell failed for %s %s", mode, p.symbol)
                 failed += 1
-    logger.info("[schedule] EOD square-off %s: closed=%s sent=%s failed=%s", mode, closed, sent, failed)
+    logger.info(
+        "[schedule] EOD square-off %s: closed=%s sent=%s failed=%s skipped=%s",
+        mode, closed, sent, failed, skipped,
+    )
     await notify_async(
         f"🌆 *EOD square-off — {mode}*\n"
         + (f"Closed {closed} position(s)." if mode == "DEMO" else f"Sent {sent} sell order(s) to Dhan.")
         + (f" {failed} could not be closed (no price / broker reject) — check manually." if failed else "")
+        + (f" {skipped} skipped — SELL already pending broker confirmation (will settle on its own)." if skipped else "")
     )
 
 

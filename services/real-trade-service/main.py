@@ -1139,9 +1139,42 @@ async def _self_heal_orders(db: Session, mode: str) -> None:
     """
     try:
         if mode == "DEMO":
+            # BUG FIX (2026-09-10, session21 audit): this branch called
+            # check_pending_fills/expire_stale_orders with no lock at all,
+            # while the REAL branch right below was already fixed for the
+            # exact same class of race (see that branch's BUG FIX comment).
+            # This path fires on every GET /positions/DEMO and
+            # GET /orders/DEMO poll — i.e. continuously from an open
+            # dashboard tab — so it can (and does) land at the same instant
+            # as a manual Run Cycle or an in-flight auto-pilot tick for
+            # DEMO, both of which also call check_pending_fills via
+            # cycle_runner.run_cycle_core. try_fill_entry's own guard
+            # (`order.status != "PLACED"`) is a plain in-memory read against
+            # whatever a session already has loaded — it is not a
+            # SELECT-FOR-UPDATE, so two concurrent sessions can each load
+            # the same PLACED BUY order before either commits, both pass
+            # the check, and both fill it: the position gets the qty added
+            # twice and the DEMO account's cash_available gets debited
+            # twice for shares that were only ever bought once. Now takes
+            # the SAME per-mode threading.Lock as the REAL branch, with the
+            # same non-blocking, skip-if-busy semantics — this is a
+            # best-effort catch-up on a read path, never an error, and the
+            # very next poll retries.
+            from execution.auto_pilot import _get_lock
             from entry_engine.entry import check_pending_fills, expire_stale_orders
-            await check_pending_fills(db, mode)
-            await expire_stale_orders(db, mode)
+            lock = _get_lock(mode)
+            if lock.acquire(blocking=False):
+                try:
+                    await check_pending_fills(db, mode)
+                    await expire_stale_orders(db, mode)
+                finally:
+                    lock.release()
+            else:
+                logger.info(
+                    "self-heal (%s) skipped this pass — a cycle is already in "
+                    "progress and holds the lock; next read retries.",
+                    mode,
+                )
         else:
             from execution.auto_pilot import _get_lock
             from execution.reconcile import reconcile_real_orders

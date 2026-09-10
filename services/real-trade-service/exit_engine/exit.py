@@ -54,7 +54,7 @@ from execution import dhan_client
 from market_feed.feed import get_quotes
 from notifier import notify_sync
 from portfolio.portfolio import (
-    close_position, open_positions, refresh_unrealized, record_real_exit_sent,
+    close_position, force_close_real_position, open_positions, refresh_unrealized, record_real_exit_sent,
 )
 from resilience.local_cache import load_snapshot, save_snapshot
 from tz_utils import as_aware, ist_today_str
@@ -441,7 +441,15 @@ def _send_real_sell(
                         "exit SELL %s: broker holds 0 — ghost-closing (id=%s)",
                         position.symbol, position.id,
                     )
-                    close_position(db, position, tick, position.qty_open, "oversell_ghost_close")
+                    # BUG FIX (2026-09-10, session21 audit): this called
+                    # close_position() — DEMO-only, raises on any REAL
+                    # position, which this always is — so the ghost-close
+                    # never actually happened; see
+                    # portfolio.force_close_real_position's docstring for
+                    # the full incident. force_close_real_position is the
+                    # REAL-mode equivalent, added this session specifically
+                    # for this call site.
+                    force_close_real_position(db, position, "oversell_ghost_close")
                     notify_sync(
                         f"🔄 *Position synced* — {position.symbol} ×{qty} ({reason})\n"
                         f"Dhan holds 0 shares but Stockky had qty={qty} open. "

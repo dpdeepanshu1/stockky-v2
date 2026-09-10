@@ -371,6 +371,29 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     # AFTER the loop below finishes, so the ranking sees this cycle's full
     # candidate batch, not just whichever happened to be evaluated first.
     approved_entries: list[dict] = []
+    # BUG FIX (2026-09-10, session21 audit): guards against TWO unconsumed
+    # TradeCandidate rows for the SAME symbol landing in the same cycle's
+    # batch — e.g. a standard-track candidate still unconsumed from a
+    # moment ago plus an admin's manual "queue from Scan Market" click for
+    # the same symbol, or (pre-fix) evaluate_watchlist_entries' own dedup
+    # only ever checked other watchlist-sourced rows (watchlist_entry_id
+    # is not null), never a standard/manual candidate already unconsumed
+    # for that symbol. Nothing before this point in the pipeline prevents
+    # that: candidate_engine's cooldown dedup only stops a NEW row from
+    # being inserted while one is already queued, it does not collapse
+    # two rows that already exist; and risk_engine's no-pyramiding check
+    # is computed once per candidate against the DB's existing positions,
+    # which are still empty for both rows until an order actually fills —
+    # so both candidates could independently clear every gate and risk
+    # check, both get staged into approved_entries, and (for REAL) both
+    # get placed as separate BUY orders at Dhan for the same symbol in
+    # the same cycle. Tracked here and enforced right before staging
+    # (below) so at most one candidate per symbol survives into
+    # approved_entries/Gate 6 per cycle; whichever row is processed
+    # first this cycle wins (received_at ascending, per the query above),
+    # the other is WAIT'd and re-evaluated fresh next cycle like any
+    # other WAIT.
+    staged_symbols: set[str] = set()
 
     for idx, cand in enumerate(candidates):
         try:
@@ -622,6 +645,28 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": result.reason, "risk_verdict": result.verdict.value})
             continue
+
+        # ── Gate 5.5: same-symbol duplicate guard (within this cycle) ──────────
+        # See staged_symbols' declaration above the loop for the full incident
+        # this closes. Checked here — after risk_evaluate has APPROVED this
+        # candidate, right before it would be staged — so a legitimately
+        # rejected/waited duplicate still gets its normal WAIT/REJECT reason;
+        # only a candidate that would otherwise have produced a second
+        # same-symbol entry this cycle is caught by this specific message.
+        if cand.symbol in staged_symbols:
+            decision.action = "WAIT"
+            decision.reasoning = (
+                f"Another candidate for {cand.symbol} was already approved and staged "
+                "for entry earlier this same cycle — refusing a second BUY for the same "
+                "symbol in one cycle (duplicate candidate rows, e.g. a manual queue plus "
+                "an auto-sourced row). Re-evaluated fresh next cycle if still applicable."
+            )
+            waited += 1
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT",
+                                   "reasoning": decision.reasoning, "risk_verdict": decision.risk_verdict})
+            continue
+        staged_symbols.add(cand.symbol)
 
         # ── Approved — stage for this cycle's cross-candidate ranking ──────────
         # 2026-09-08 fix: used to place the order immediately right here. Now

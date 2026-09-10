@@ -545,7 +545,27 @@ def try_fill_entry(db: Session, order: models.TradeOrder, tick: Tick, stop_price
                                    detail=f"Simulated DEMO fill @ {fill_price}"))
     db.add(models.TradeFill(order_id=order.id, qty=order.qty, price=fill_price, filled_at=now))
 
-    position = db.query(models.TradePosition).filter_by(mode="DEMO", symbol=order.symbol, status="OPEN").first()
+    # BUG FIX (2026-09-10, session21 audit): this used to filter status="OPEN"
+    # only. open_positions()/held_exposure_positions() both treat PARTIALLY_
+    # CLOSED as still-live (a position with an existing partial exit still
+    # holds real shares), and risk_engine's no-pyramiding check is built on
+    # that same "OPEN or PARTIALLY_CLOSED" definition — so with
+    # allow_pyramiding=True, a fresh BUY fill for a symbol whose existing
+    # position had already taken a partial target-hit exit (status
+    # PARTIALLY_CLOSED, not OPEN) found nothing here and opened a SECOND,
+    # entirely separate TradePosition row for the same symbol instead of
+    # averaging into the existing one. Two live rows for one symbol then
+    # race each other through exit_engine (each independently evaluated for
+    # stop/target) and confuse any single-row lookup (e.g.
+    # record_real_exit_fill/close_position's own by-symbol queries use
+    # .first(), so a SELL could silently apply to the wrong one). Matching
+    # the status set risk_engine already treats as "this symbol has
+    # exposure" closes the gap.
+    position = db.query(models.TradePosition).filter(
+        models.TradePosition.mode == "DEMO",
+        models.TradePosition.symbol == order.symbol,
+        models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")),
+    ).first()
     if position is None:
         position = models.TradePosition(
             mode="DEMO", symbol=order.symbol, status="OPEN",
@@ -682,7 +702,20 @@ def record_real_fill(db: Session, order: models.TradeOrder, fill_price: float, f
                                    detail=f"{detail_verb} @ {fill_price} x{filled_qty}"))
     db.add(models.TradeFill(order_id=order.id, qty=filled_qty, price=fill_price, filled_at=now))
 
-    position = db.query(models.TradePosition).filter_by(mode="REAL", symbol=order.symbol, status="OPEN").first()
+    # BUG FIX (2026-09-10, session21 audit): same class of bug as
+    # try_fill_entry's DEMO path above — status="OPEN" only missed an
+    # existing PARTIALLY_CLOSED position (one that already had a partial
+    # target-hit exit), so a pyramiding-enabled REAL BUY fill for that
+    # symbol opened a duplicate TradePosition row instead of averaging into
+    # the existing one. See that fix's comment for the full incident
+    # reasoning; the fix is identical here — match the same "still live"
+    # status set risk_engine's no-pyramiding check and open_positions()/
+    # held_exposure_positions() already use.
+    position = db.query(models.TradePosition).filter(
+        models.TradePosition.mode == "REAL",
+        models.TradePosition.symbol == order.symbol,
+        models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")),
+    ).first()
     if position is None:
         position = models.TradePosition(
             mode="REAL", symbol=order.symbol, status="OPEN",
@@ -788,6 +821,64 @@ def record_real_exit_fill(db: Session, position: models.TradePosition, exit_pric
                action="POSITION_CLOSED" if position.status == "CLOSED" else "POSITION_PARTIAL_EXIT",
                mode="REAL", detail=f"{position.symbol} {reason} qty={qty_closed} pnl={pnl:+.2f} (broker-confirmed)")
     return pnl
+
+
+def force_close_real_position(db: Session, position: models.TradePosition, note: str) -> float:
+    """REAL-only. Force-closes a REAL position with NO broker-confirmed exit
+    fill/price to book against — used when the broker itself reports the
+    position no longer exists (zero holdings) rather than via a normal SELL
+    fill. Mirrors holdings_sync_reconcile()'s own full-ghost-close branch
+    (see that function's docstring for the original "19 OPEN vs 4 real
+    holdings" incident this idiom comes from): qty_open -> 0, status ->
+    CLOSED, realized_pnl left untouched (0 contribution — there's no
+    broker-confirmed exit price to book a real P&L against), and the cash
+    this system speculatively deducted at "fill" time is refunded so
+    cash_available doesn't stay permanently short for shares that are no
+    longer actually held.
+
+    BUG FIX (2026-09-10, session21 audit): exit_engine's oversell-error
+    handler in _send_real_sell (is_oversell_error branch — "broker holds 0,
+    ghost-closing") previously called portfolio.close_position() for this.
+    close_position() is explicitly DEMO-only (`if position.mode != "DEMO":
+    raise RuntimeError(...)`, first line), and _send_real_sell is only ever
+    invoked on REAL positions (evaluate_mode's REAL branch, manual_engine.py's
+    REAL confirm-SELL) — so that call raised a RuntimeError every single
+    time, which was then silently swallowed by that branch's own
+    `except Exception as sync_e` handler and logged as a generic "holdings
+    sync failed". Net effect: a REAL position the broker had already fully
+    exited was NEVER actually ghost-closed by this path — qty_open stayed
+    stale indefinitely, the same oversell SELL kept getting rejected every
+    cycle, and the alert the admin received ("Qty sync failed... close_position
+    is DEMO-only in this phase.") gave no hint the real fix was already
+    written and just needed a REAL-mode version. This function is that
+    REAL-mode version, and exit.py's oversell branch now calls it directly.
+    Returns 0.0 always (a ghost-close never has a realized P&L to report)."""
+    if position.mode != "REAL":
+        raise RuntimeError("force_close_real_position is REAL-only — use close_position() for DEMO.")
+    now = datetime.now(timezone.utc)
+    qty_open = position.qty_open or 0
+    refund = round((position.avg_entry_price or 0.0) * qty_open, 2)
+
+    position.qty_open = 0
+    position.status = "CLOSED"
+    position.closed_at = now
+    db.add(models.TradePositionEvent(
+        position_id=position.id, event_type="GHOST_CLOSED",
+        detail=(
+            f"{note}: force-closed {qty_open} shares (broker reports 0 held), "
+            f"cash refunded ₹{refund:,.2f} at avg entry ₹{position.avg_entry_price}"
+        ),
+    ))
+    db.flush()
+
+    account = get_account(db, "REAL")
+    account.cash_available += refund
+    account.current_equity = account.cash_available + _open_positions_market_value(db, "REAL")
+    account.updated_at = now
+    db.commit()
+    log_action(db, actor="system", action="POSITION_CLOSED", mode="REAL",
+               detail=f"{position.symbol} {note} qty={qty_open} (ghost-close, no broker fill/P&L)")
+    return 0.0
 
 
 def _open_positions_market_value(db: Session, mode: str) -> float:

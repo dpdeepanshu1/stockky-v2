@@ -53,6 +53,7 @@ from exit_engine.exit import _send_real_sell
 from market_feed.feed import get_quotes
 from portfolio.portfolio import close_position, get_account, held_exposure_positions, record_real_order_sent, try_fill_entry
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
+from tz_utils import is_market_open_ist
 
 logger = logging.getLogger("real-trade-manual")
 
@@ -100,7 +101,24 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
             for p in positions
         ),
         trading_globally_paused=not gate_armed,
-        market_is_open=True,  # same Phase-3 TODO as entry_engine — wire to market_feed's real market-hours check
+        # 2026-09-10 fix (audit follow-up): this was hardcoded True with a
+        # comment claiming "same Phase-3 TODO as entry_engine" — but
+        # entry_engine/entry.py's own _account_state already wires
+        # is_market_open_ist() (see that file), so the comment was stale;
+        # only this module still had the placeholder. Confirmed safe to
+        # wire in for real: risk_evaluate() (which reads this field) is
+        # only ever called from this module's BUY path — the SELL path
+        # below never constructs an AccountState or calls risk_evaluate at
+        # all (see the module docstring: SELL bypasses it entirely), so
+        # this change affects manual BUY confirmations only, matching
+        # entry_engine's existing automatic-BUY behavior exactly. Also
+        # matches risk_engine/engine.py's own documented design: check #2
+        # (market hours) is one of only two checks (with #9, volatility)
+        # that intentionally still apply even to a SELL that does reach
+        # risk_evaluate() — it's an exchange-hours reality, not a
+        # risk-policy gate, so it isn't the kind of "never block an exit"
+        # check the SELL-bypass design principle is protecting against.
+        market_is_open=is_market_open_ist(),
     )
 
 

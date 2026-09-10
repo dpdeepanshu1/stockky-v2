@@ -77,6 +77,7 @@ from sqlalchemy.orm import Session
 import config
 import models
 import pipeline_status as pstat
+from tz_utils import as_aware
 from portfolio.portfolio import held_exposure_positions
 
 logger = logging.getLogger("real-trade-candidates")
@@ -1199,12 +1200,21 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
             continue
 
         # Elevate conviction_score for high-conviction signals
-        # 2026-09-09 calibration fix: scores raised so Gate 6 composite floor (50)
-        # is reachable at typical RR (2.0) and mid drift.
-        # Math: composite = conviction*0.50 + rr_norm*0.35 + drift*0.15
-        # UC  (69.7% win): score 85 → composite ~57 at RR=2.0, mid drift ✅
-        # HC  (55.7% win): score 75 → composite ~52 at RR=2.0, mid drift ✅
-        # Base (48.1% win): score 60 → composite ~50 at RR=3.0, fresh drift ✅
+        # 2026-09-09 calibration fix (session20 update — see
+        # CHANGES_2026-09-09_GATE6_RR_WEIGHT_STRUCTURAL_FIX.md): the original
+        # same-day version of this comment assumed RR could reach ~3.0 for a
+        # "fresh drift" base-tier pass — it can't. _atr_stop_target_pct()
+        # fixes R:R at exactly 2.0:1 (ATR case) or 2.03:1 (flat fallback) for
+        # every candidate by construction, so composite weights were
+        # rebalanced off the dead RR term (see config.py
+        # ENTRY_COMPOSITE_WEIGHT_* comment) instead of chasing an RR value
+        # that never actually occurs. Current math:
+        # composite = conviction*0.65 + rr_norm*0.10 + drift_safety*0.25
+        # UC  (69.7% win): score 85 → bypasses composite floor entirely (Gate 6)
+        # HC  (55.7% win): score 75 → composite ~49-74 depending on drift; clears
+        #                   the 50 floor unless drift is past ~95% of the gate limit
+        # Base (48.1% win): score 60 → composite ~39-64 depending on drift; clears
+        #                   the 50 floor once drift is under ~44% of the gate limit
         # (was UC=75, HC=65, base=55 — all blocked by composite floor at typical RR)
         if result.get("upper_circuit"):
             score = max(MIN_CONVICTION, 85.0)
@@ -1274,7 +1284,29 @@ def _recently_candidated_symbols(db: Session, mode: str, hours: Optional[float] 
     shows 2-day decay, but the move itself plays out within hours of the
     signal. A 6h dedupe window means a stock that was regime-blocked at
     9:30am won't re-qualify until 3:30pm (market close). At 2h it can
-    re-enter the watchlist later the same session if conditions improve."""
+    re-enter the watchlist later the same session if conditions improve.
+
+    2026-09-09 fix (session20 — "why didn't a single stock enter all day"
+    investigation): every TradeCandidate is marked consumed=True the moment
+    entry_engine.evaluate_mode looks at it (see entry.py, top of the
+    per-candidate loop), REGARDLESS of whether it was entered, WAIT'd by an
+    earlier gate, or WAIT'd only by Gate 6's cycle-level concentration
+    filter. Gate 6's own WAIT message promises a skipped candidate is
+    "re-evaluated fresh next cycle" — but with the plain received_at lookup
+    below, that symbol still counts as "recently candidated" and stays
+    excluded from refresh_candidates() for the FULL 6h/2h cooldown, same as
+    a symbol that failed a real quality gate. So a genuinely good setup that
+    simply lost this cycle's top-3 cut (or the session before the earlier
+    50-floor fix, structurally could never clear it) got benched for hours,
+    not re-evaluated next cycle as documented — consistent with the pasted
+    session20 dashboard showing almost every symbol WAIT'd exactly once for
+    the rest of the session, never re-appearing. Gate 1-5/risk_engine WAITs
+    and actual ENTERs still get the full cooldown (that's the real
+    duplicate-row protection this function exists for); only a pure Gate 6
+    skip gets shrunk to ENTRY_GATE6_REQUEUE_MINUTES so it can genuinely
+    come back around next auto-pilot tick. Falls back to the original
+    full-cooldown set (fail-safe, not fail-open) if the extra lookup
+    itself errors."""
     cooldown = hours if hours is not None else config.CANDIDATE_DEDUPE_COOLDOWN_HOURS
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=cooldown)
@@ -1284,10 +1316,70 @@ def _recently_candidated_symbols(db: Session, mode: str, hours: Optional[float] 
                     models.TradeCandidate.received_at >= cutoff)
             .all()
         )
-        return {r[0] for r in rows}
+        excluded = {r[0] for r in rows}
     except Exception as e:
         logger.debug("_recently_candidated_symbols failed (non-fatal, dedupe skipped): %s", e)
         return set()
+
+    if not excluded:
+        return excluded
+
+    try:
+        gate6_cutoff = datetime.now(timezone.utc) - timedelta(
+            minutes=config.ENTRY_GATE6_REQUEUE_MINUTES
+        )
+        # Latest decision per symbol within the full cooldown window —
+        # ordered so the loop below only keeps the first (most recent) row
+        # it sees per symbol.
+        decision_rows = (
+            db.query(models.TradeDecision.symbol, models.TradeDecision.action,
+                     models.TradeDecision.reasoning, models.TradeDecision.created_at)
+            .join(models.TradeCandidate, models.TradeDecision.candidate_id == models.TradeCandidate.id)
+            .filter(models.TradeCandidate.mode == mode,
+                    # Match main.py's own dashboard-query convention (see its
+                    # "latest_decisions" block): decision_type/candidate_id
+                    # filtered explicitly rather than relying on the join
+                    # alone. No current caller creates an EXIT decision with
+                    # candidate_id set (exit_engine.py never writes
+                    # TradeDecision rows at all today, and manual_engine.py's
+                    # ENTRY decisions leave candidate_id NULL) — but the
+                    # model comment lists EXIT as a valid decision_type, so
+                    # this is defense-in-depth against a future EXIT path
+                    # that starts setting candidate_id, not a live bug fix.
+                    models.TradeDecision.decision_type == "ENTRY",
+                    models.TradeDecision.candidate_id.isnot(None),
+                    models.TradeDecision.symbol.in_(excluded),
+                    models.TradeCandidate.received_at >= cutoff)
+            .order_by(models.TradeDecision.symbol, models.TradeDecision.created_at.desc())
+            .all()
+        )
+        latest_by_symbol: dict[str, tuple] = {}
+        for sym, action, reasoning, created_at in decision_rows:
+            if sym not in latest_by_symbol:
+                latest_by_symbol[sym] = (action, reasoning, created_at)
+
+        # tz_utils.as_aware() is this codebase's own established fix for
+        # exactly this comparison (see its module docstring: the same
+        # naive-vs-aware TypeError already crashed GET /status/REAL and
+        # POST /dhan/connect before that module existed). Using it here
+        # instead of ad-hoc tzinfo-stripping keeps this file consistent
+        # with the other 7 modules that already rely on it, rather than a
+        # second, only-locally-reasoned-about way of handling the same bug.
+        for sym, (action, reasoning, created_at) in latest_by_symbol.items():
+            is_gate6_skip = (
+                action == "WAIT"
+                and reasoning
+                and "composite quality score" in reasoning
+            )
+            aware_created_at = as_aware(created_at)
+            if is_gate6_skip and aware_created_at is not None and aware_created_at < gate6_cutoff:
+                excluded.discard(sym)
+    except Exception as e:
+        # Fail-safe: keep the full-cooldown exclusion set as computed above
+        # rather than risk re-queuing a symbol that shouldn't be.
+        logger.debug("gate6 requeue-shrink lookup failed (non-fatal, using full cooldown): %s", e)
+
+    return excluded
 
 
 async def refresh_candidates(db: Session, mode: str) -> int:

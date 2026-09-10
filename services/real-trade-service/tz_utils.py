@@ -38,8 +38,13 @@ def is_market_open_ist(now: Optional[datetime] = None) -> bool:
     holiday with no ticks simply produces WAIT/no-price outcomes rather
     than a bad order. Good enough for gating a background loop; NOT a
     substitute for a real trading-calendar check inside the risk engine
-    itself (that remains a Phase 3 TODO, same as the other
-    `market_is_open=True` placeholders across this service)."""
+    itself (that remains a Phase 3 TODO — exchange-holiday awareness, not
+    the weekday/hours check this function already does; as of 2026-09-10
+    this function is wired into every account-state builder in the service
+    that feeds risk_engine.evaluate() — entry_engine.py, manual_engine.py,
+    and main.py's risk_engine_check dry-run route — the only intentional
+    exception is offline_test_harness.py's synthetic DEMO account, which
+    fixes it True on purpose for deterministic offline test output)."""
     ist_now = (now or datetime.now(timezone.utc)).astimezone(IST)
     if ist_now.weekday() >= 5:  # Saturday=5, Sunday=6
         return False

@@ -664,11 +664,28 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     for e in skipped:
         decision = e["decision"]
         decision.action = "WAIT"
+        # 2026-09-09 fix (session20): this used to say "not among top N, OR
+        # below floor" for every skipped candidate regardless of which one
+        # actually applied — leaving no way to tell, from the message alone,
+        # whether a candidate lost out to stronger competition this cycle or
+        # never had a chance to clear the floor at all. State the real reason.
+        below_floor = (
+            e["composite_score"] < config.ENTRY_MIN_COMPOSITE_SCORE
+            and not e["is_upper_circuit"]
+        )
+        if below_floor:
+            why = (
+                f"below the {config.ENTRY_MIN_COMPOSITE_SCORE:.0f} composite floor "
+                "(setup quality itself, not competition from other candidates)"
+            )
+        else:
+            why = (
+                f"not among this cycle's top {config.ENTRY_MAX_NEW_PER_CYCLE} candidates "
+                "(cleared the floor but ranked below stronger setups this cycle)"
+            )
         decision.reasoning = (
             f"Risk-approved (composite quality score {e['composite_score']:.1f}/100 — "
-            f"conviction/R:R/drift-safety blend) but not among this cycle's top "
-            f"{config.ENTRY_MAX_NEW_PER_CYCLE} candidates, or below the "
-            f"{config.ENTRY_MIN_COMPOSITE_SCORE:.0f} composite floor. Concentrating capital in "
+            f"conviction/R:R/drift-safety blend) but {why}. Concentrating capital in "
             "the strongest setups this cycle rather than every setup that merely cleared the "
             "individual gates — re-evaluated fresh next cycle."
         )

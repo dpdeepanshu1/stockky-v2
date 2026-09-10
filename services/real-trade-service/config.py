@@ -181,13 +181,48 @@ ENTRY_MIN_COMPOSITE_SCORE = float(os.getenv("ENTRY_MIN_COMPOSITE_SCORE", "50.0")
 # close price still is to the original signal — a candidate that's already
 # run far from its signal is chasing, even if it still numerically clears
 # the drift gate).
-ENTRY_COMPOSITE_WEIGHT_CONVICTION = float(os.getenv("ENTRY_COMPOSITE_WEIGHT_CONVICTION", "0.50"))
-ENTRY_COMPOSITE_WEIGHT_RR = float(os.getenv("ENTRY_COMPOSITE_WEIGHT_RR", "0.35"))
-ENTRY_COMPOSITE_WEIGHT_DRIFT = float(os.getenv("ENTRY_COMPOSITE_WEIGHT_DRIFT", "0.15"))
+# 2026-09-09 reweight (session20 — see CHANGES_2026-09-09_GATE6_RR_WEIGHT_
+# STRUCTURAL_FIX.md): rr_norm was carrying 35% of the composite on the
+# assumption R:R varies meaningfully between setups (up toward the 4.0
+# ceiling for a great one). It doesn't — _atr_stop_target_pct() derives
+# target_pct as stop_pct * (ATR_TARGET_MULTIPLIER/ATR_STOP_MULTIPLIER), a
+# FIXED 2.0:1 ratio (3.0/1.5) for every ATR-based candidate and 2.03:1 for
+# the flat fallback (6.5/3.2), always — never higher, regardless of setup
+# quality. Since MIN_REWARD_RISK_RATIO is also 2.0, rr_norm is ~0 for
+# virtually every candidate that ever reaches Gate 6, every cycle, by
+# construction — not because the setups are weak. That made the 50-point
+# floor arithmetically unreachable for anything below HIGH_CONVICTION even
+# after the same-day conviction-score bump above (base tier tops out at
+# conviction(60)*0.50 + ~0 + drift(15) = 45, never 50, at ANY drift value —
+# confirmed against live session20 data: 30+ risk-approved candidates all
+# stuck at composite 40-47.5, zero entries all day). Rebalanced weight off
+# the non-discriminating RR term and onto drift-safety, which does vary
+# per-candidate and is exactly what Gate 6's own docstring says it should
+# reward. RR keeps a small (10%) weight rather than 0 in case a future fix
+# to _atr_stop_target_pct (e.g. technical-level-based targets) makes it
+# genuinely variable again — no need to touch this file when that happens.
+ENTRY_COMPOSITE_WEIGHT_CONVICTION = float(os.getenv("ENTRY_COMPOSITE_WEIGHT_CONVICTION", "0.65"))
+ENTRY_COMPOSITE_WEIGHT_RR = float(os.getenv("ENTRY_COMPOSITE_WEIGHT_RR", "0.10"))
+ENTRY_COMPOSITE_WEIGHT_DRIFT = float(os.getenv("ENTRY_COMPOSITE_WEIGHT_DRIFT", "0.25"))
 # R:R at or above this is scored as "excellent" (100/100 on that sub-score) —
 # not a hard ceiling on trades, only on how much extra composite credit an
 # already-generous R:R keeps earning past this point.
 ENTRY_COMPOSITE_RR_CEILING = float(os.getenv("ENTRY_COMPOSITE_RR_CEILING", "4.0"))
+
+# 2026-09-09 fix (session20 — see candidate_engine/candidates.py's
+# _recently_candidated_symbols docstring for the full incident): a candidate
+# WAIT'd ONLY by Gate 6's cycle-level concentration filter (risk-approved,
+# just not in this cycle's top ENTRY_MAX_NEW_PER_CYCLE, or below the
+# composite floor) is marked consumed immediately, same as an ENTER or a
+# real gate-1-5/risk_engine WAIT. Without this, that symbol was silently
+# excluded from re-candidacy for the full CANDIDATE_DEDUPE_COOLDOWN_HOURS
+# (6h) / volume_shock's 2h — contradicting Gate 6's own WAIT message, which
+# tells the dashboard it's "re-evaluated fresh next cycle". This is how
+# soon (in minutes) such a symbol becomes eligible again — set close to
+# AUTO_PILOT_INTERVAL_SECONDS (180s default) with headroom, not to the
+# multi-hour dedupe window. Gate 1-5/risk_engine WAITs and real ENTERs are
+# unaffected — they keep the full cooldown.
+ENTRY_GATE6_REQUEUE_MINUTES = int(os.getenv("ENTRY_GATE6_REQUEUE_MINUTES", "15"))
 
 # ── Decision 2: conservative risk defaults (seed values only — admin can
 #    edit via UI while disarmed; risk_engine always reads the live DB row,

@@ -25,7 +25,7 @@ from auth.admin_auth import (
 from auth import dhan_credentials
 from audit.logger import log_action
 from db import get_db, init_schema
-from tz_utils import as_aware, iso_utc
+from tz_utils import as_aware, iso_utc, is_market_open_ist
 from portfolio.portfolio import open_positions as _pf_open_positions, close_position as _pf_close_position
 from execution import dhan_client
 from risk_engine.engine import AccountState, OrderIntent, evaluate as risk_evaluate
@@ -681,7 +681,15 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
             for p in open_positions
         ),
         trading_globally_paused=not gate.armed,
-        market_is_open=True,  # Phase 2: wire to market_feed's real market-hours check
+        # 2026-09-10 fix (audit follow-up): same fix as manual_engine.py's
+        # _account_state — this dry-run endpoint exists specifically so an
+        # admin can "verify the 9 checks behave as expected" (see this
+        # function's own docstring); a hardcoded True made check #2 always
+        # report as passing regardless of actual market hours, which is
+        # the opposite of an accurate dry run. entry_engine/entry.py has
+        # wired the real value in since it was written — only this
+        # endpoint and manual_engine.py still had the placeholder.
+        market_is_open=is_market_open_ist(),
     )
     intent = OrderIntent(
         mode=mode, symbol=body.symbol.upper(), side=body.side.upper(),

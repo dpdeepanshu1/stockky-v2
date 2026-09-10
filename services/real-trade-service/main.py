@@ -822,8 +822,21 @@ async def run_cycle(mode: str, admin: Optional[str] = Depends(require_admin_if_r
     execution/reconcile.py — reconciliation runs every REAL cycle right
     alongside DEMO's check_pending_fills, in the same slot.
 
-    This is a manual trigger, not a scheduler — see the module note in
-    startup() for why continuous background scheduling isn't wired yet."""
+    BUG FIX (2026-09-10, decision #32): auto_pilot.py's per-mode
+    threading.Lock was never acquired here, making this route race freely
+    against the auto-pilot timer and the fast-exit loop. A manual "Run
+    Cycle" click and an auto-pilot full-cycle tick landing at the same
+    instant for the same mode would both run run_cycle_core concurrently:
+    two concurrent candidate evaluations → duplicate entry orders for the
+    same candidate; two concurrent exit evaluations → duplicate SELL
+    orders for the same position. Now acquires the SAME per-mode lock
+    auto_pilot uses (via auto_pilot._get_lock), with a non-blocking
+    acquire so a mid-flight auto-pilot cycle returns HTTP 409 immediately
+    rather than queueing up behind it for up to AUTO_PILOT_INTERVAL_SECONDS.
+    The lock is threading.Lock (see auto_pilot.py's module docstring point 4
+    for why it is threading.Lock and not asyncio.Lock), so the acquire/
+    release is done synchronously in a to_thread wrapper, same as the
+    auto-pilot tick functions use — the main event loop is never blocked."""
     mode = mode.upper()
     if mode not in ("DEMO", "REAL"):
         raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
@@ -831,8 +844,23 @@ async def run_cycle(mode: str, admin: Optional[str] = Depends(require_admin_if_r
     if not gate.armed:
         raise HTTPException(status_code=409, detail=f"{mode} is not armed — arm it before running a cycle.")
 
+    from execution.auto_pilot import _get_lock
     from cycle_runner import run_cycle_core
-    return await run_cycle_core(db, mode, gate.armed, trigger="manual")
+    import asyncio
+
+    lock = _get_lock(mode)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A cycle for {mode} is already in progress (auto-pilot or a prior manual trigger). "
+                "Try again once the current cycle finishes."
+            ),
+        )
+    try:
+        return await run_cycle_core(db, mode, gate.armed, trigger="manual")
+    finally:
+        lock.release()
 
 
 # ── Routes: Pipeline dashboard (2026-08-27) ──────────────────────────────────

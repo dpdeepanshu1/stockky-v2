@@ -629,13 +629,33 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # needs, and defers the actual entered/reserved_cash/order-placement
         # side effects until Gate 6 has ranked this cycle's full approved batch
         # — see config.py's ENTRY_CYCLE_QUALITY_FILTER_ENABLED docstring.
-        composite_score = _composite_quality_score(cand.conviction_score, rr, drift_pct, max_drift_pct)
+        raw_composite_score = _composite_quality_score(cand.conviction_score, rr, drift_pct, max_drift_pct)
         is_upper_circuit = (cand.decision_label or "").upper() == "VOLUME_SHOCK_UPPER_CIRCUIT"
+        # BUG FIX (2026-09-10): comment at Gate 6 said "UC scores now 85
+        # so they sort first" but _composite_quality_score() was never told
+        # about UPPER_CIRCUIT and computed the same blended score as any
+        # other candidate — a low-conviction UC with poor drift (e.g. already
+        # at the band edge) could score 35 and sort BELOW non-UC candidates
+        # that cleared the 50 floor, violating the stated design where UC
+        # always sorts ahead. Gate 6's floor-bypass (is_upper_circuit check
+        # in the filter below) already ensures they enter regardless of their
+        # own score, but the sort itself was still wrong: a UC candidate
+        # at position 4 of 6 (i.e. beyond ENTRY_MAX_NEW_PER_CYCLE=3) would
+        # be dropped by the max-per-cycle cap while weaker non-UC candidates
+        # ahead of it in the sort were selected. Now UC candidates are always
+        # assigned composite_score = max(raw_score, 85) so they ALWAYS sort
+        # ahead of any non-UC candidate with a score below 85 — 85 matches
+        # the value the original comment promised, and still respects
+        # relative ordering between multiple UC candidates (both stay at 85
+        # unless their raw score was already above 85, in which case the
+        # higher raw score is kept).
+        composite_score = max(raw_composite_score, 85.0) if is_upper_circuit else raw_composite_score
         approved_entries.append({
             "cand": cand, "decision": decision,
             "entry_price": entry_price, "stop_price": stop_price, "target_price": target_price,
             "rr": rr, "adj_risk_pct": adj_risk_pct, "is_regime_override": is_regime_override,
             "composite_score": composite_score,
+            "raw_composite_score": raw_composite_score,
             "is_upper_circuit": is_upper_circuit,
         })
 
@@ -726,6 +746,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         )
         db.add(order)
         db.flush()
+        _raw = e.get("raw_composite_score", e["composite_score"])
+        _uc_note = f" [UC floor→{e['composite_score']:.0f}]" if e.get("is_upper_circuit") and _raw < e["composite_score"] else ""
         db.add(models.TradeOrderEvent(
             order_id=order.id, event_type="PLACED",
             detail=(
@@ -733,7 +755,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 f"target ₹{target_price:.2f} | R:R {rr:.2f} | "
                 f"conviction {cand.conviction_score} | adj_risk {adj_risk_pct:.2f}% | "
                 f"regime_score {market_score} (gate={threshold},{threshold_src}) | "
-                f"composite {e['composite_score']:.1f}"
+                f"composite {_raw:.1f}{_uc_note}"
                 f"{' | REGIME OVERRIDE' if is_regime_override else ''} | "
                 f"valid {config.ENTRY_VALIDITY_MINUTES}m"
             ),

@@ -128,6 +128,15 @@ _STARTUP_DELAY_SECONDS = 20
 # eagerly instead of lazily; kept lazy anyway to avoid touching every call
 # site's assumption that _get_lock(mode) is idempotent per mode.
 _mode_locks: dict = {}
+# BUG FIX (2026-09-10): _get_lock's lazy-init check was not itself thread-safe.
+# Two worker threads arriving at `if mode not in _mode_locks` at the same
+# instant (e.g. the DEMO full-cycle and the DEMO fast-exit worker threads both
+# starting for the first time) could each find the key absent, then each insert
+# a DIFFERENT threading.Lock — the second write overwrites the first, so the
+# two threads hold references to two different lock objects and the mutual
+# exclusion is void. A lightweight meta-lock serialises the dict writes
+# without touching the per-mode lock lifetime at all.
+_mode_locks_meta: threading.Lock = threading.Lock()
 
 import os as _os
 EXIT_CHECK_INTERVAL_SECONDS = max(
@@ -136,10 +145,15 @@ EXIT_CHECK_INTERVAL_SECONDS = max(
 
 
 def _get_lock(mode: str) -> threading.Lock:
-    """Return (creating if needed) the per-mode threading.Lock."""
-    if mode not in _mode_locks:
-        _mode_locks[mode] = threading.Lock()
-    return _mode_locks[mode]
+    """Return (creating if needed) the per-mode threading.Lock.
+
+    BUG FIX (2026-09-10): guarded by _mode_locks_meta so two threads can
+    never simultaneously insert different Lock objects for the same mode.
+    """
+    with _mode_locks_meta:
+        if mode not in _mode_locks:
+            _mode_locks[mode] = threading.Lock()
+        return _mode_locks[mode]
 
 
 def _run_coro_in_new_loop(coro_func, *args) -> None:

@@ -140,6 +140,7 @@ def init_schema() -> None:
     _backfill_broker_imported_flag(eng)
     _ensure_watchlist_link_columns(eng, dialect())
     _fix_stale_dhan_token_expiry(eng)
+    _ensure_account_columns(eng, dialect())
 
 
 # 2026-08-27 data fixup: docker-compose.yml/.env.example/.env.oracle.example
@@ -225,6 +226,44 @@ def _ensure_manual_order_columns(engine, dialect_name: str) -> None:
             if "already exists" in m.lower() or "ORA-01430" in m:
                 continue
             logger.warning("real-trade-db: could not add trade_orders.%s: %s", col_name, e)
+
+
+# Same additive-migration idiom as _ensure_manual_order_columns above —
+# trade_accounts existed before realized_pnl_total was added to models.py
+# (2026-09-09, needed by the dashboard's PortfolioSummary all-time P&L
+# readout — see main.py's /status/{mode} and portfolio.py's
+# record_real_exit_fill / close_position). On any already-deployed DB this
+# column must be added once; on first boot create_all() creates it directly.
+def _ensure_account_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        existing = {c["name"] for c in inspect(engine).get_columns("trade_accounts")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect trade_accounts columns: %s", e)
+        return
+
+    if dialect_name == "oracle":
+        adds = [
+            ("realized_pnl_total", "ALTER TABLE trade_accounts ADD (realized_pnl_total FLOAT DEFAULT 0.0 NOT NULL)"),
+        ]
+    else:
+        adds = [
+            ("realized_pnl_total", "ALTER TABLE trade_accounts ADD COLUMN realized_pnl_total FLOAT DEFAULT 0.0 NOT NULL"),
+        ]
+
+    for col_name, sql in adds:
+        if col_name in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added trade_accounts.%s", col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add trade_accounts.%s: %s", col_name, e)
 
 
 # Same additive-migration idiom as _ensure_manual_order_columns above —

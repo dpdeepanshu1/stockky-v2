@@ -461,6 +461,43 @@ def is_intraday_cutoff_error(message: str) -> bool:
     return any(marker in m for marker in _INTRADAY_CUTOFF_MARKERS)
 
 
+# BUG FIX (2026-09-10, session21e real-trade-service audit — live-evidence-
+# driven, found via the actual Dhan order book rather than code reading):
+# "RMS:<id>:Order rejected as this stock is not allowed to be traded in
+# Intraday." — a rejection distinct from both is_intraday_cutoff_error
+# above (that's a TIME-of-day restriction, same message regardless of
+# symbol) and is_cdsl_edis_error (that's a SETTLEMENT-timing restriction on
+# CNC same-day sells). This one is a permanent, PER-SECURITY restriction:
+# some NSE securities (trade-to-trade / ASM / GSM surveillance stocks) can
+# never be traded with product_type="INTRADAY" at all, any time of day, any
+# day — only CNC (delivery) is allowed for them. This had NO detector before
+# this fix, so it fell into exit.py's generic catch-all branch: retried
+# every cycle, streak-escalated as if it might eventually succeed, with no
+# indication of the real (permanent-for-today) cause.
+#
+# This is a serious gap for _send_real_sell's own same-day logic
+# specifically: a SAME-DAY stop-loss/target hit on one of these securities
+# was completely unexitable that day — CNC fails (CDSL hasn't settled the
+# same-day buy yet) AND INTRADAY fails (this restriction) — with no
+# fallback, meaning the position's stop-loss protection silently does
+# nothing until the position ages into "not same-day" and a CNC sell
+# becomes viable (which does work once CDSL settles, since T2T only
+# blocks intraday trading, not delivery trading). Handled exactly like
+# is_intraday_cutoff_error above: not recoverable today, so it doesn't
+# count toward the generic reject-streak escalation, and repeatedly
+# resending it is exactly as wasteful as the time-cutoff case — exit.py
+# reuses the same per-position "stop hammering Dhan for the rest of today"
+# suppression for both.
+_SECURITY_INTRADAY_RESTRICTED_MARKERS = (
+    "not allowed to be traded in intraday", "not allowed to trade in intraday",
+)
+
+
+def is_security_intraday_restricted_error(message: str) -> bool:
+    m = (message or "").lower()
+    return any(marker in m for marker in _SECURITY_INTRADAY_RESTRICTED_MARKERS)
+
+
 # 2026-09-09 fix — "RMS:<id>:You are trying to sell more than the quantity
 # you currently hold." — fired when Stockky's qty_open is out of sync with
 # what Dhan's CDSL demat actually shows. Root cause: a partial exit was

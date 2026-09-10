@@ -245,7 +245,28 @@ def _send_real_sell(
     it since both surface as a same-day SELL rejection. broker_imported is
     checked FIRST and forces CNC unconditionally, because a holding this
     system never bought itself is never a same-day round trip regardless of
-    what opened_at says."""
+    what opened_at says.
+
+    2026-09-10 fix (session21e, live-evidence-driven): the intraday-cutoff
+    branch below already knew a rejection there "can never succeed" again
+    today, but only throttled the *alert* about it — nothing stopped the
+    *resend* itself. Live Dhan order-book evidence: dozens of "Intraday
+    orders cannot be placed at this time" rejections clustered right around
+    EOD_SQUAREOFF_TIME_IST (15:15) firing and then the 45s fast-exit loop
+    (EXIT_CHECK_INTERVAL_SECONDS) resending the same doomed SELL for the
+    same still-open position every cycle for the ~10-15 minutes left before
+    close — very plausibly most of a 205-failed-orders count in one session.
+    Now short-circuits before ever calling Dhan again for a position that
+    already hit the cutoff earlier this IST day (see the snapshot check
+    right below the same-day/product_type decision above)."""
+    _cutoff_key = f"intraday_cutoff_hit_{position.id}_{ist_today_str()}"
+    if load_snapshot(db, _cutoff_key):
+        logger.info(
+            "Skipping SELL for %s (%s) — already hit today's intraday "
+            "cutoff earlier this session; will retry tomorrow as CNC.",
+            position.symbol, reason,
+        )
+        return False
     if position.broker_imported:
         same_day_position = False
     else:
@@ -562,6 +583,13 @@ def _send_real_sell(
                     due = elapsed_min >= CDSL_ALERT_COOLDOWN_MIN
                 except Exception:
                     due = True
+            # 2026-09-10 fix (session21e): set the resend-suppression flag
+            # checked at the top of this function, regardless of whether
+            # this particular call is the one that also fires the (still
+            # cooldown-throttled) Telegram alert below — the two concerns
+            # are independent: "have we already told a human" vs "should we
+            # still be hammering Dhan with this."
+            save_snapshot(db, _cutoff_key, {"hit": True})
             if due:
                 notify_sync(
                     f"⏰ *EXIT BLOCKED — past today's intraday cutoff* — "
@@ -575,13 +603,67 @@ def _send_real_sell(
                     "the usual CDSL 'Verify Holdings' TPIN step, same as any "
                     "other holding.\n"
                     f"(Further alerts for this position suppressed for "
-                    f"{CDSL_ALERT_COOLDOWN_MIN} min — retries continue silently.)"
+                    f"{CDSL_ALERT_COOLDOWN_MIN} min. As of the 2026-09-10 "
+                    f"fix, Dhan is no longer resent this doomed order every "
+                    f"cycle either — this position is simply skipped for the "
+                    f"rest of today.)"
                 )
                 save_snapshot(db, snap_key, {"at": datetime.now(timezone.utc).isoformat()})
             else:
                 logger.info(
                     "Intraday-cutoff block persists for %s (%s) — alert "
                     "suppressed, still within cooldown.", position.symbol, reason,
+                )
+
+        elif dhan_client.is_security_intraday_restricted_error(str(e)):
+            # BUG FIX (2026-09-10, session21e — see
+            # dhan_client.is_security_intraday_restricted_error's docstring
+            # for the full mechanism). Unlike the time-cutoff branch above,
+            # this can fire at ANY time of day — it's a permanent per-
+            # security restriction (T2T/ASM/GSM surveillance stocks can
+            # never use product_type="INTRADAY"), not a market-close-
+            # approaching one. Same treatment: doesn't count toward the
+            # generic reject-streak escalation, one throttled alert instead
+            # of an alert (or a doomed Dhan resend) every cycle, and the
+            # resend-suppression flag is the same _cutoff_key used above —
+            # from this service's perspective both are "nothing this
+            # service can do about this SAME-DAY exit; wait for tomorrow's
+            # CNC sell," they just have different root causes worth
+            # explaining differently to a human.
+            snap_key = f"intraday_restricted_alert_last_{position.id}"
+            last = load_snapshot(db, snap_key) or {}
+            last_at_raw = last.get("at")
+            due = True
+            if last_at_raw:
+                try:
+                    last_at = datetime.fromisoformat(last_at_raw)
+                    elapsed_min = (datetime.now(timezone.utc) - last_at).total_seconds() / 60.0
+                    due = elapsed_min >= CDSL_ALERT_COOLDOWN_MIN
+                except Exception:
+                    due = True
+            save_snapshot(db, _cutoff_key, {"hit": True})
+            if due:
+                notify_sync(
+                    f"⏰ *EXIT BLOCKED — {position.symbol} can't trade Intraday* — "
+                    f"{position.symbol} ×{qty} ({reason})\n"
+                    "Dhan rejected this as a security-level restriction, not "
+                    "a timing one: this stock can't use product_type=INTRADAY "
+                    "at all (likely a trade-to-trade/surveillance stock), and "
+                    "it was bought TODAY so a regular delivery (CNC) sell "
+                    "can't go through yet either — CDSL hasn't settled the "
+                    "buy. Nothing to do until tomorrow: this stops being a "
+                    "same-day trade and the exit goes out as CNC instead "
+                    "(needs the usual CDSL 'Verify Holdings' TPIN step). "
+                    "This position is skipped — not resent — for the rest "
+                    "of today.\n"
+                    f"(Further alerts for this position suppressed for "
+                    f"{CDSL_ALERT_COOLDOWN_MIN} min.)"
+                )
+                save_snapshot(db, snap_key, {"at": datetime.now(timezone.utc).isoformat()})
+            else:
+                logger.info(
+                    "Security-intraday-restricted block persists for %s (%s) — "
+                    "alert suppressed, still within cooldown.", position.symbol, reason,
                 )
         else:
             # BUG FIX (2026-09-07): unlike the invalid-IP and CDSL branches

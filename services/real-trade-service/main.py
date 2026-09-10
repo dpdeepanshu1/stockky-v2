@@ -1530,8 +1530,29 @@ async def manual_close_position(
                         "fill confirmation — wait for it to settle before closing again."
                     ),
                 )
-            full = qty >= position.qty_open
-            if not _send_real_sell(db, position, qty, "manual_close", full=full):
+            # BUG FIX (2026-09-10, session21d real-trade-service audit):
+            # _send_real_sell is a plain synchronous function — it calls
+            # dhan_client.get_security_id (which can trigger a full security-
+            # master reload: an httpx GET + pandas parse of Dhan's whole NSE
+            # scrip list on a cold/expired cache) and dhan_client.place_order
+            # (a synchronous dhanhq SDK call), both real network I/O. Calling
+            # it directly here ran that network I/O straight on the shared
+            # main event loop while this coroutine sat "awaiting" nothing —
+            # the same class of block auto_pilot.py's event-loop-isolation
+            # fix (see that module's docstring point 4) exists to prevent,
+            # just via a different route than /cycle/run or
+            # /manual-order/confirm (already fixed this session). Runs it on
+            # a worker thread instead; safe for the same reason those fixes
+            # are — this coroutine does nothing else with `db` until the
+            # awaited call returns.
+            import asyncio as _asyncio
+
+            def _run_close_send_sync() -> bool:
+                full = qty >= position.qty_open
+                return _send_real_sell(db, position, qty, "manual_close", full=full)
+
+            sent = await _asyncio.to_thread(_run_close_send_sync)
+            if not sent:
                 raise HTTPException(status_code=502, detail="Dhan rejected the manual close order — see server logs.")
             log_action(db, actor=admin or "admin", action="MANUAL_CLOSE_SENT", mode=mode,
                        detail=f"{position.symbol} qty={qty} sent to Dhan, awaiting confirmation")
@@ -1587,8 +1608,17 @@ async def manual_cancel_order(
             raise HTTPException(status_code=409, detail=f"Order is {order.status} — nothing to cancel.")
 
         if mode == "REAL" and order.dhan_order_id:
+            # BUG FIX (2026-09-10, session21d real-trade-service audit):
+            # dhan_client.cancel_order is a synchronous dhanhq SDK call
+            # (real network I/O) invoked directly on the shared main event
+            # loop — same class of block as the manual-close fix just above
+            # and the /cycle/run, /manual-order/confirm fixes earlier this
+            # session. Runs it on a worker thread instead.
+            import asyncio as _asyncio
             try:
-                dhan_client.cancel_order(db, is_armed=True, dhan_order_id=order.dhan_order_id)
+                await _asyncio.to_thread(
+                    dhan_client.cancel_order, db, is_armed=True, dhan_order_id=order.dhan_order_id
+                )
             except Exception as e:
                 raise HTTPException(status_code=502, detail=f"Dhan rejected the cancel: {e}")
 
@@ -1632,7 +1662,22 @@ async def manual_reconcile(mode: str, admin: Optional[str] = Depends(require_adm
             ),
         )
     try:
-        result = await reconcile_real_orders(db)
+        # BUG FIX (2026-09-10, session21d real-trade-service audit):
+        # reconcile_real_orders() is `async def` but its actual work
+        # (dhan_client.get_order_list, import_broker_holdings,
+        # holdings_sync_reconcile, every db.query/commit) is entirely
+        # synchronous underneath — awaiting it directly here ran all of
+        # that network I/O + DB work straight on the shared main event
+        # loop. The exact same function, called from auto_pilot's ticks,
+        # already runs on a worker thread (see that module's docstring
+        # point 4); this manual trigger route never got the same
+        # treatment. Runs it the same way.
+        import asyncio as _asyncio
+
+        def _run_reconcile_sync():
+            return _asyncio.run(reconcile_real_orders(db))
+
+        result = await _asyncio.to_thread(_run_reconcile_sync)
     finally:
         lock.release()
     return {"ok": True, "mode": mode, **result}

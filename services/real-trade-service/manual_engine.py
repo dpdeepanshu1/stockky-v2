@@ -244,10 +244,27 @@ async def evaluate_manual_order(
         else:
             try:
                 security_id = dhan_client.get_security_id(db, symbol)
+                # BUG FIX (2026-09-10, session21c real-trade-service audit):
+                # this used to send price=reference_price (tick.price)
+                # regardless of order_type. For order_type=="LIMIT" that's
+                # correct — reference_price IS the limit. But for a manual
+                # "Buy at Market" ticket (order_type=="MARKET"), this sent a
+                # nonzero price alongside a MARKET order — inconsistent with
+                # the rest of this codebase's own established convention
+                # (see dhan_client.place_order's module comment: "MARKET
+                # orders correctly send price=0 (no limit) — never touch
+                # that", and every _send_real_sell MARKET SELL, which always
+                # sends price=0). entry_engine never hits this because it
+                # only ever places LIMIT orders (config.ENTRY_ORDER_TYPE).
+                # A stray nonzero price on a MARKET order risks an outright
+                # Dhan rejection ("price should not be set for a MARKET
+                # order") or, worse, being silently misread as a price cap —
+                # neither of which this manual BUY path was prepared for.
+                order_price = 0 if order_type == "MARKET" else reference_price
                 broker_result = dhan_client.place_order(
                     db, is_armed=gate_armed, security_id=security_id,
                     exchange_segment=dhan_client.NSE_EQ_SEGMENT, transaction_type="BUY",
-                    quantity=approved_qty, order_type=order_type, price=reference_price,
+                    quantity=approved_qty, order_type=order_type, price=order_price,
                     product_type=product_type,
                 )
                 dhan_order_id = str(broker_result.get("orderId") or broker_result.get("order_id") or "")

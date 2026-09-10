@@ -786,7 +786,32 @@ async def manual_order_confirm(
         )
     try:
         from manual_engine import evaluate_manual_order
-        return await evaluate_manual_order(db, mode, gate.armed, body, confirm=True, admin=admin)
+        # BUG FIX (2026-09-10, session21c real-trade-service audit): this
+        # awaited evaluate_manual_order() directly on the shared main event
+        # loop — every db.query/db.commit inside it (and inside
+        # risk_evaluate, dhan_client.place_order's httpx call, etc.) is
+        # synchronous and blocks that loop for its duration, exactly the
+        # failure mode auto_pilot.py's "EVENT-LOOP ISOLATION" fix (see that
+        # module's docstring point 4) exists to prevent for the background
+        # loops. A slow manual BUY/SELL confirm (remote-DB round trips, a
+        # slow Dhan API call) landing here could fail /health and every
+        # other concurrent HTTP request the exact same way decision #28
+        # diagnosed for the old un-isolated auto-pilot tick — this route
+        # was simply never updated to match when that fix went in. Runs the
+        # whole body on a worker thread with its own event loop instead,
+        # same idiom as auto_pilot._run_coro_in_new_loop; the `db` Session
+        # is safe to hand across this boundary because the main thread does
+        # nothing else with it until this awaited call returns (FastAPI's
+        # get_db dependency closes it afterward, on the main thread, as
+        # usual).
+        import asyncio as _asyncio
+
+        def _run_confirm_sync():
+            return _asyncio.run(
+                evaluate_manual_order(db, mode, gate.armed, body, confirm=True, admin=admin)
+            )
+
+        return await _asyncio.to_thread(_run_confirm_sync)
     finally:
         lock.release()
 
@@ -887,7 +912,29 @@ async def run_cycle(mode: str, admin: Optional[str] = Depends(require_admin_if_r
             ),
         )
     try:
-        return await run_cycle_core(db, mode, gate.armed, trigger="manual")
+        # BUG FIX (2026-09-10, session21c real-trade-service audit): this
+        # docstring already claimed "the main event loop is never blocked",
+        # matching auto_pilot.py's own event-loop-isolation fix — but the
+        # code underneath never actually did that: `import asyncio` above
+        # was unused, and run_cycle_core was awaited directly on the shared
+        # main loop, exactly like the auto-pilot tick DID before that fix
+        # (see auto_pilot.py's module docstring point 4 for the original
+        # incident this caused: a slow cycle — remote-Oracle round trips
+        # across many open positions — blocking /health long enough to fail
+        # the healthcheck window while the process was demonstrably alive).
+        # The background loops were fixed; this manual-trigger route,
+        # sharing the exact same run_cycle_core body, was not. Runs the
+        # whole cycle on a worker thread with its own event loop instead,
+        # same idiom as auto_pilot._run_coro_in_new_loop / _run_full_tick_sync.
+        # The `db` Session is safe to hand across this boundary because the
+        # main thread does nothing else with it until this awaited call
+        # returns (FastAPI's get_db dependency closes it afterward, on the
+        # main thread, as usual) — same reasoning already applied to
+        # /manual-order/{mode}/confirm above.
+        def _run_cycle_sync():
+            return asyncio.run(run_cycle_core(db, mode, gate.armed, trigger="manual"))
+
+        return await asyncio.to_thread(_run_cycle_sync)
     finally:
         lock.release()
 
@@ -1453,7 +1500,36 @@ async def manual_close_position(
                        detail=f"{position.symbol} qty={qty} pnl={pnl:+.2f}")
             return {"ok": True, "mode": mode, "symbol": position.symbol, "qty_closed": qty, "pnl": pnl}
         else:
-            from exit_engine.exit import _send_real_sell
+            from exit_engine.exit import _send_real_sell, _has_pending_real_sell
+            # BUG FIX (2026-09-10, session21c real-trade-service audit):
+            # missing the same guard manual_engine.evaluate_manual_order's
+            # SELL path already carries (see that fix's comment for the
+            # full incident reasoning) and auto_pilot._eod_squareoff also
+            # carries — this route sent a SELL with no check at all for an
+            # earlier SELL still awaiting broker fill confirmation. The
+            # per-mode lock above only rules out a SIMULTANEOUS send (e.g.
+            # an exit-cycle tick sending its own SELL for this same
+            # position right now); it does NOT rule out an EARLIER tick's
+            # SELL that already finished sending (and released the lock)
+            # but hasn't been broker-confirmed yet — record_real_exit_sent's
+            # full=False path (a partial target-hit exit) deliberately
+            # leaves the position OPEN/PARTIALLY_CLOSED with qty_open only
+            # decremented once reconcile_real_orders() confirms the fill,
+            # so this route's own position lookup above would still show
+            # the pre-partial-exit qty_open while that first SELL is still
+            # working at the broker. A dashboard "Close Position" click
+            # landing in that window would fire a SECOND MARKET SELL over
+            # shares already covered by a pending order — an oversell risk
+            # with real money. Refuse cleanly instead, same as the manual
+            # ticket's own SELL confirm does.
+            if _has_pending_real_sell(db, position.symbol):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"A SELL for {position.symbol} is already sent to Dhan and awaiting "
+                        "fill confirmation — wait for it to settle before closing again."
+                    ),
+                )
             full = qty >= position.qty_open
             if not _send_real_sell(db, position, qty, "manual_close", full=full):
                 raise HTTPException(status_code=502, detail="Dhan rejected the manual close order — see server logs.")

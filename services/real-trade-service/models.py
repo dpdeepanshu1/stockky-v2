@@ -469,6 +469,30 @@ class WatchlistEntry(Base):
     )
 
 
+# ── Intraday-restricted securities (2026-09-11 fix) ─────────────────────────
+# Dhan's scrip master carries no "is this symbol allowed to trade INTRADAY"
+# flag (T2T/ASM/GSM surveillance restrictions are an exchange-level, often
+# temporary status that doesn't show up in the CSV — see execution/
+# dhan_client.py's security-cache module note). The only ground truth this
+# service actually has is experience: exit_engine already detects the
+# rejection reactively (is_security_intraday_restricted_error) when a
+# same-day SELL bounces. This table turns that one-time detection into a
+# standing, queryable fact so candidate_engine/entry_engine/manual_engine can
+# proactively avoid re-picking or re-buying a symbol already known to hit it,
+# instead of only ever finding out after a position is already stuck same-day.
+# Not scoped by mode — DEMO never talks to Dhan, so every row here originates
+# from a REAL rejection, but the underlying exchange restriction applies to
+# the symbol regardless of which mode is trading it.
+class IntradayRestrictedSecurity(Base):
+    __tablename__ = "trade_intraday_restricted"
+
+    symbol = Column(String(32), primary_key=True)
+    first_detected_at = Column(DateTime, nullable=False, default=_now)
+    last_detected_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+    hit_count = Column(Integer, nullable=False, default=1)
+    last_detail = Column(String(255), nullable=True)
+
+
 # ── Resilience — last-known-good cache (real-trade-service's own outbound
 # calls and open-positions snapshot per cycle) ───────────────────────────────
 class ResilienceCache(Base):

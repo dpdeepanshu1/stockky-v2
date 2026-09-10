@@ -45,6 +45,19 @@ API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "https://stockky-api-gateway.onre
 # circuit breaker even when api-gateway (Tier 1) is unhealthy.
 EVENT_URL = os.getenv("EVENT_URL", "https://stockky-event-tracker.onrender.com").rstrip("/")
 
+# 2026-09-11 fix — needed for the volume-shock quality gate (see
+# candidate_engine/candidates.py's _quality_gate_fund_tech). Mirrors the
+# exact same ANALYSIS_INTELLIGENCE_URL / TECHNICAL_URL / FUNDAMENTAL_URL
+# pattern decision-prediction-service and api-gateway already use — this
+# service just never defined them because nothing here called into
+# analysis-intelligence-service before now. docker-compose.yml sets
+# TECHNICAL_URL/FUNDAMENTAL_URL explicitly for the container network; the
+# onrender.com defaults below match the Render-hosted deployment already
+# used by ANALYSIS_INTELLIGENCE_URL elsewhere in this codebase.
+_ANALYSIS_INTELLIGENCE_URL = os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com").rstrip("/")
+TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/technical").rstrip("/")
+FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/fundamental").rstrip("/")
+
 # ── Admin auth (Layer 1) ─────────────────────────────────────────────────────
 # Argon2id hash of the admin password — generate once with:
 #   python -c "from argon2 import PasswordHasher; print(PasswordHasher().hash('yourpassword'))"
@@ -455,6 +468,39 @@ CANDIDATE_MIN_CONVICTION            = float(os.getenv("CANDIDATE_MIN_CONVICTION"
 CANDIDATE_MIN_BULLISH_TF            = int(os.getenv("CANDIDATE_MIN_BULLISH_TF", "4"))   # LAST_REVIEWED: 2026-09-03
 CANDIDATE_DOWNTREND_6M_PCT          = float(os.getenv("CANDIDATE_DOWNTREND_6M_PCT", "-10.0")) # LAST_REVIEWED: 2026-09-03
 CANDIDATE_OVEREXTENDED_52W_TOP_PCT  = float(os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT", "12.0")) # LAST_REVIEWED: 2026-09-03
+
+# ── Volume-shock quality gate (2026-09-11 fix) ─────────────────────────────
+# User-reported bug: the volume-shock track (candidate_engine._refresh_
+# volume_shock_candidates) added EVERY symbol that cleared the pure price/
+# volume breakout check (_volume_shock_analysis) straight onto the
+# watchlist — no fundamental or technical quality check at all, so a stock
+# with terrible fundamentals or a broken technical picture got the same
+# watchlist slot as a genuinely tradeable one, and the watchlist ended up
+# both noisy and full of low-quality names.
+#
+# See candidate_engine/candidates.py's _quality_gate_fund_tech() for the
+# actual gate logic. Two parts:
+#   1. Absolute "not bad" floor on fundamental_score/technical_score (each
+#      0-100, from analysis-intelligence-service) — deliberately low, this
+#      is a "not bad" bar, not a "great stock" bar.
+#   2. Sector-relative floor: a stock must not sit at the bottom of ITS
+#      OWN sector's candidates this cycle (not the whole market) — see
+#      VOLUME_SHOCK_SECTOR_MIN_PEERS/PCTL_FLOOR below. Skipped when a
+#      sector doesn't have enough same-cycle peers to make "adaptive"
+#      meaningful; the absolute floors still apply either way.
+VOLUME_SHOCK_QUALITY_GATE_ENABLED   = os.getenv("VOLUME_SHOCK_QUALITY_GATE_ENABLED", "true").lower() == "true"
+VOLUME_SHOCK_FUND_ABS_FLOOR         = float(os.getenv("VOLUME_SHOCK_FUND_ABS_FLOOR", "35"))
+VOLUME_SHOCK_TECH_ABS_FLOOR         = float(os.getenv("VOLUME_SHOCK_TECH_ABS_FLOOR", "35"))
+VOLUME_SHOCK_SECTOR_MIN_PEERS       = int(os.getenv("VOLUME_SHOCK_SECTOR_MIN_PEERS", "3"))
+VOLUME_SHOCK_SECTOR_PCTL_FLOOR      = float(os.getenv("VOLUME_SHOCK_SECTOR_PCTL_FLOOR", "30"))
+# Bound on how many symbols get fund/technical HTTP lookups per cycle —
+# analysis-intelligence-service calls are the most expensive step in this
+# gate; cap so a huge volume-shock universe day can't turn one cycle into
+# hundreds of extra outbound calls. Candidates beyond this cap are still
+# subject to the underlying price/volume checks, just not the quality gate
+# — same "don't silently guess" spirit as the rest of this module, applied
+# to cost control rather than a trading decision.
+VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS = int(os.getenv("VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS", "40"))
 
 # ── Adaptive threshold engine configuration ───────────────────────────────────
 # Controls how adaptive_thresholds.py computes the live regime gate.

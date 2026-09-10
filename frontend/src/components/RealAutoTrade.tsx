@@ -57,6 +57,58 @@ function fmtDateTimeIst(iso: string | null | undefined): string {
   } catch { return iso; }
 }
 
+// 2026-09-11 fix — user ask: "in live dhan tab today order details block if
+// something sell something when do final sell mention the final sell price
+// and originally buy price and based on that calculate total profit or loss
+// should be display in one line ... after that stock in one line."
+// Groups the flat liveDhanOrders list by symbol (preserving each symbol's
+// first-seen position so the block's overall ordering doesn't jump around),
+// and for any symbol with at least one filled BUY and one filled SELL,
+// computes a volume-weighted avg buy price, avg sell price (the "final
+// sell" — if a symbol sold in two tranches this is the blended exit, which
+// is the honest number when there isn't one single "the" sell price), the
+// matched (closed) quantity, and the resulting realized P&L on that
+// matched quantity.
+function groupDhanOrdersBySymbol(orders: any[]): Array<{
+  symbol: string;
+  orders: any[];
+  buyAvgPrice: number | null;
+  sellAvgPrice: number | null;
+  matchedQty: number;
+  pnl: number | null;
+}> {
+  const bySymbol = new Map<string, any[]>();
+  for (const o of orders) {
+    const sym = o.tradingSymbol || o.symbol || "—";
+    if (!bySymbol.has(sym)) bySymbol.set(sym, []);
+    bySymbol.get(sym)!.push(o);
+  }
+
+  const FILLED = new Set(["TRADED", "FILLED", "COMPLETE"]);
+  const out: ReturnType<typeof groupDhanOrdersBySymbol> = [];
+  for (const [symbol, symOrders] of bySymbol.entries()) {
+    let buyQty = 0, buyValue = 0, sellQty = 0, sellValue = 0;
+    for (const o of symOrders) {
+      const side = (o.transactionType || o.side || "").toUpperCase();
+      const status = (o.orderStatus || o.status || "").toUpperCase();
+      if (!FILLED.has(status)) continue;
+      const qty = Number(o.quantity || o.tradedQuantity || 0);
+      const price = Number(o.averageTradedPrice || o.price || 0);
+      if (qty <= 0 || price <= 0) continue;
+      if (side === "BUY") { buyQty += qty; buyValue += qty * price; }
+      else if (side === "SELL") { sellQty += qty; sellValue += qty * price; }
+    }
+    const buyAvgPrice = buyQty > 0 ? buyValue / buyQty : null;
+    const sellAvgPrice = sellQty > 0 ? sellValue / sellQty : null;
+    const matchedQty = Math.min(buyQty, sellQty);
+    const pnl = (buyAvgPrice != null && sellAvgPrice != null && matchedQty > 0)
+      ? (sellAvgPrice - buyAvgPrice) * matchedQty
+      : null;
+    out.push({ symbol, orders: symOrders, buyAvgPrice, sellAvgPrice, matchedQty, pnl });
+  }
+  return out;
+}
+
 // Safe number extraction from Dhan SDK fund object (handles typos and casing)
 function pickNum(obj: any, ...keys: string[]): number | null {
   for (const k of keys) {
@@ -1589,34 +1641,46 @@ export default function RealAutoTrade() {
                     )}
                   </div>
 
-                  {/* Live orders from Dhan */}
+                  {/* Live orders from Dhan — 2026-09-11 fix: grouped by
+                      symbol with a buy/sell/P&L summary line after any
+                      symbol that has a completed round trip today (see
+                      groupDhanOrdersBySymbol). */}
                   <div className="bg-graphite border border-slate rounded-2xl p-4">
                     <SectionHdr>Today's orders at Dhan ({liveDhanOrders.length})</SectionHdr>
                     {liveDhanOrders.length === 0 ? (
                       <p className="font-display tabular-nums text-[11px] text-mist">No orders placed today.</p>
                     ) : (
-                      <div className="space-y-1.5 max-h-60 overflow-y-auto">
-                        {liveDhanOrders.map((o, i) => {
-                          const sym = o.tradingSymbol || o.symbol || "—";
-                          const side = o.transactionType || o.side || "";
-                          const qty = Number(o.quantity || 0);
-                          const price = Number(o.price || o.averageTradedPrice || 0);
-                          const status = (o.orderStatus || o.status || "").toUpperCase();
-                          const statusColor = status === "TRADED" || status === "FILLED" ? "text-signal-buy"
-                            : status === "REJECTED" || status === "CANCELLED" ? "text-signal-sell"
-                            : "text-signal-hold";
-                          return (
-                            <div key={i} className="flex items-center justify-between bg-ink rounded-xl px-3 py-1.5 border border-slate">
-                              <div className="flex items-center gap-2 font-display tabular-nums text-[11px]">
-                                <span className={`font-bold ${side === "BUY" ? "text-signal-buy" : "text-signal-sell"}`}>{side}</span>
-                                <span className="text-paper">{sym}</span>
-                                <span className="text-mist">×{qty}</span>
-                                {price > 0 && <span className="text-mist">@ ₹{price.toFixed(2)}</span>}
+                      <div className="space-y-3 max-h-60 overflow-y-auto">
+                        {groupDhanOrdersBySymbol(liveDhanOrders).map((grp) => (
+                          <div key={grp.symbol} className="space-y-1.5">
+                            {grp.orders.map((o, i) => {
+                              const side = o.transactionType || o.side || "";
+                              const qty = Number(o.quantity || 0);
+                              const price = Number(o.price || o.averageTradedPrice || 0);
+                              const status = (o.orderStatus || o.status || "").toUpperCase();
+                              const statusColor = status === "TRADED" || status === "FILLED" ? "text-signal-buy"
+                                : status === "REJECTED" || status === "CANCELLED" ? "text-signal-sell"
+                                : "text-signal-hold";
+                              return (
+                                <div key={i} className="flex items-center justify-between bg-ink rounded-xl px-3 py-1.5 border border-slate">
+                                  <div className="flex items-center gap-2 font-display tabular-nums text-[11px]">
+                                    <span className={`font-bold ${side === "BUY" ? "text-signal-buy" : "text-signal-sell"}`}>{side}</span>
+                                    <span className="text-paper">{grp.symbol}</span>
+                                    <span className="text-mist">×{qty}</span>
+                                    {price > 0 && <span className="text-mist">@ ₹{price.toFixed(2)}</span>}
+                                  </div>
+                                  <span className={`font-display tabular-nums text-[10px] ${statusColor}`}>{status}</span>
+                                </div>
+                              );
+                            })}
+                            {grp.pnl != null && (
+                              <div className={`font-display tabular-nums text-[10px] px-3 ${grp.pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
+                                {grp.symbol}: bought @ ₹{grp.buyAvgPrice!.toFixed(2)} → sold @ ₹{grp.sellAvgPrice!.toFixed(2)}
+                                {" "}×{grp.matchedQty} = {grp.pnl >= 0 ? "profit" : "loss"} ₹{Math.abs(grp.pnl).toFixed(2)}
                               </div>
-                              <span className={`font-display tabular-nums text-[10px] ${statusColor}`}>{status}</span>
-                            </div>
-                          );
-                        })}
+                            )}
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>

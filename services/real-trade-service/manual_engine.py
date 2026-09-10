@@ -50,6 +50,7 @@ import models
 from audit.logger import log_action
 from execution import dhan_client
 from exit_engine.exit import _send_real_sell
+from intraday_eligibility import is_restricted as is_intraday_restricted
 from market_feed.feed import get_quotes
 from portfolio.portfolio import close_position, get_account, held_exposure_positions, record_real_order_sent, try_fill_entry
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
@@ -150,6 +151,24 @@ async def evaluate_manual_order(
         return {"ok": False, "reason": "invalid_request", "detail": "qty must be positive."}
     if order_type not in ("LIMIT", "MARKET"):
         return {"ok": False, "reason": "invalid_request", "detail": "order_type must be LIMIT or MARKET."}
+
+    # 2026-09-11 fix — see intraday_eligibility.py module docstring. A
+    # manual BUY ticket explicitly asking for product_type=INTRADAY/MIS on
+    # a symbol already known (from a real, previously-observed Dhan
+    # rejection) to be unable to use that product type would just place an
+    # order that can never actually go through as intraday. Caught here,
+    # before even pricing the ticket, so the user sees it as a clear reject
+    # reason instead of a confusing broker-side failure later.
+    if side == "BUY" and product_type in ("INTRADAY", "MIS") and is_intraday_restricted(db, symbol):
+        return {
+            "ok": False, "reason": "intraday_restricted",
+            "detail": (
+                f"{symbol} is on the known intraday-restricted list — Dhan has "
+                f"previously rejected an INTRADAY order for this symbol (likely "
+                f"a trade-to-trade/surveillance stock). Use product_type=CNC "
+                f"instead if you want to hold this one."
+            ),
+        }
 
     ticks = await get_quotes([symbol])
     tick = ticks.get(symbol)

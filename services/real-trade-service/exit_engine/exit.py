@@ -630,6 +630,22 @@ def _send_real_sell(
             # service can do about this SAME-DAY exit; wait for tomorrow's
             # CNC sell," they just have different root causes worth
             # explaining differently to a human.
+            # 2026-09-11 fix: feed this detection into the persistent
+            # restricted-symbols list (intraday_eligibility.py) so
+            # candidate_engine/manual_engine can proactively avoid this
+            # symbol going forward instead of only reacting after the fact
+            # every single time it gets bought again. Best-effort — must
+            # never block the alert/skip handling below on a DB hiccup.
+            try:
+                from intraday_eligibility import record_restriction
+                record_restriction(db, position.symbol, reason)
+            except Exception as _rie:
+                logger.warning(
+                    "Failed to record intraday restriction for %s (%s) — "
+                    "continuing with alert/skip handling anyway.",
+                    position.symbol, _rie,
+                )
+
             snap_key = f"intraday_restricted_alert_last_{position.id}"
             last = load_snapshot(db, snap_key) or {}
             last_at_raw = last.get("at")

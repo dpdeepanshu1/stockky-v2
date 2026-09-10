@@ -79,6 +79,7 @@ import models
 import pipeline_status as pstat
 from tz_utils import as_aware
 from portfolio.portfolio import held_exposure_positions
+from shared_adaptive import percentile_rank
 
 logger = logging.getLogger("real-trade-candidates")
 
@@ -325,6 +326,95 @@ async def _fetch_delivery(client: httpx.AsyncClient, symbol: str) -> Optional[di
     except Exception as e:
         logger.debug("delivery %s failed: %s", symbol, e)
     return None
+
+
+# ── 2026-09-11 fix: volume-shock quality gate ────────────────────────────────
+# User-reported bug: the volume-shock track added every symbol that cleared
+# the pure price/volume breakout check straight to the watchlist, with zero
+# fundamental or technical quality check. See config.py's VOLUME_SHOCK_*
+# comment block for the full rationale; this is the implementation.
+async def _fetch_fund_tech_score(client: httpx.AsyncClient, symbol: str) -> dict:
+    """Best-effort fundamental_score/technical_score/sector fetch for the
+    quality gate. Any failure or timeout on either call returns None for
+    that field rather than raising — a slow/unhealthy analysis-intelligence
+    call must never kill the whole candidate cycle, and missing data is
+    handled leniently by _quality_gate_fund_tech below, not treated as an
+    automatic reject."""
+    fund_score = tech_score = sector = None
+    try:
+        r = await client.get(f"{config.FUNDAMENTAL_URL}/analyze/{symbol}", timeout=12.0)
+        if r.status_code == 200:
+            fj = r.json()
+            fund_score = fj.get("fundamental_score")
+            sector = fj.get("sector_normalized") or fj.get("sector")
+    except Exception as e:
+        logger.info("quality_gate: fundamental fetch failed for %s (%s)", symbol, e)
+    try:
+        r = await client.get(f"{config.TECHNICAL_URL}/analyze/{symbol}", timeout=12.0)
+        if r.status_code == 200:
+            tj = r.json()
+            tech_score = tj.get("technical_score")
+    except Exception as e:
+        logger.info("quality_gate: technical fetch failed for %s (%s)", symbol, e)
+    return {"symbol": symbol, "fundamental_score": fund_score, "technical_score": tech_score, "sector": sector}
+
+
+def _quality_gate_fund_tech(scored: dict, sector_peers: list) -> tuple:
+    """
+    The actual "fundamental and technically ok, at least not bad" +
+    "adaptive threshold, sector-wise not overall" gate. Two parts, BOTH
+    must pass:
+
+      1. Absolute floor on each pillar that actually HAS data (missing
+         data is not treated as a fail — analysis-intelligence not having
+         fresh fundamentals for a symbol is common and shouldn't reject an
+         otherwise fine technical breakout on its own).
+      2. Sector-relative floor: this cycle's OTHER same-sector candidates
+         (not the whole market) are the comparison window — a stock
+         sitting at the bottom of its own sector's batch this cycle is
+         rejected even if it clears the absolute floor. Skipped when the
+         batch doesn't have enough same-sector peers to make "adaptive"
+         meaningful (config.VOLUME_SHOCK_SECTOR_MIN_PEERS) — falls back to
+         the absolute floor alone in that case. Deliberately NOT using
+         shared_adaptive.hybrid_gate's default thin-sample behavior
+         (refuse outright below min_sample) here: that's tuned for a
+         richer historical-peer decision (relative_strength_vs_sector,
+         10-day returns across many prior sessions). This gate's peer
+         window is only ever THIS cycle's batch, which is naturally small
+         (often 1-3 candidates per sector) — refusing outright whenever a
+         sector is under-represented in a single cycle would empty the
+         watchlist most days, not just guard against noise.
+
+    Returns (passes: bool, note: str).
+    """
+    fs, ts = scored.get("fundamental_score"), scored.get("technical_score")
+    if fs is not None and fs < config.VOLUME_SHOCK_FUND_ABS_FLOOR:
+        return False, f"fundamental_score {fs:.0f} < floor {config.VOLUME_SHOCK_FUND_ABS_FLOOR:.0f}"
+    if ts is not None and ts < config.VOLUME_SHOCK_TECH_ABS_FLOOR:
+        return False, f"technical_score {ts:.0f} < floor {config.VOLUME_SHOCK_TECH_ABS_FLOOR:.0f}"
+
+    quality = [v for v in (fs, ts) if v is not None]
+    if not quality:
+        return True, "no fundamental/technical data available — floor check skipped"
+    quality_score = sum(quality) / len(quality)
+
+    peer_scores = []
+    for p in sector_peers:
+        pf, pt = p.get("fundamental_score"), p.get("technical_score")
+        pq = [v for v in (pf, pt) if v is not None]
+        if pq:
+            peer_scores.append(sum(pq) / len(pq))
+
+    if len(peer_scores) < config.VOLUME_SHOCK_SECTOR_MIN_PEERS:
+        return True, f"fund/tech ok (sector sample too thin for relative check: {len(peer_scores)} peer(s))"
+
+    pctl = percentile_rank(quality_score, peer_scores)
+    if pctl < config.VOLUME_SHOCK_SECTOR_PCTL_FLOOR:
+        return False, (
+            f"sector-relative pctl={pctl:.0f} < floor {config.VOLUME_SHOCK_SECTOR_PCTL_FLOOR:.0f} "
+            f"({len(peer_scores)} sector peers)"
+        )
+    return True, f"fund/tech ok, sector pctl={pctl:.0f} ({len(peer_scores)} peers)"
 
 
 # ── 2026-09-01 incident fix: bulk quote pre-warming ──────────────────────────
@@ -1043,6 +1133,26 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
     # fresh duplicate row every single cycle.
     rows = [r for r in rows if r["symbol"] not in exclude_syms]
 
+    # 2026-09-11 fix — see intraday_eligibility.py module docstring. Drop
+    # symbols already known (from a real, previously-observed Dhan
+    # rejection) to be unable to use product_type=INTRADAY, so this service
+    # stops re-picking a stock it already learned can get stuck unexitable
+    # on a same-day round trip.
+    try:
+        from intraday_eligibility import get_restricted_symbols
+        _restricted = get_restricted_symbols(db)
+    except Exception as _ie:
+        logger.warning("candidate_engine: restricted-symbols lookup failed (%s), skipping filter this cycle", _ie)
+        _restricted = set()
+    if _restricted:
+        _before = len(rows)
+        rows = [r for r in rows if r["symbol"] not in _restricted]
+        if _before != len(rows):
+            logger.info(
+                "candidate_engine: dropped %d candidate(s) known intraday-restricted (mode=%s)",
+                _before - len(rows), mode,
+            )
+
     if not rows:
         logger.info(
             "candidate_engine: all %d candidates already have open positions or are in cooldown (mode=%s)",
@@ -1153,9 +1263,27 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
     except Exception:
         pass
 
+    # 2026-09-11 fix — see intraday_eligibility.py. Same restricted-symbols
+    # drop as the standard track above, applied here too since this is the
+    # track that was adding every volume-shock mover with no filter at all.
+    try:
+        from intraday_eligibility import get_restricted_symbols
+        _restricted = get_restricted_symbols(db)
+    except Exception as _ie:
+        logger.warning("candidate_engine: restricted-symbols lookup failed (%s), skipping filter this cycle", _ie)
+        _restricted = set()
+
     async with httpx.AsyncClient() as client:
         candidates = await _fetch_volume_shock_universe(client)
         candidates = [s for s in candidates if s not in exclude_symbols]
+        if _restricted:
+            _before = len(candidates)
+            candidates = [s for s in candidates if s not in _restricted]
+            if _before != len(candidates):
+                logger.info(
+                    "candidate_engine: volume_shock dropped %d symbol(s) known intraday-restricted (mode=%s)",
+                    _before - len(candidates), mode,
+                )
         if not candidates:
             return 0
 
@@ -1182,6 +1310,11 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
     inserted = 0
     skipped  = 0
     no_quote_count = 0
+    quality_rejected = 0
+
+    # ── First pass: keep only symbols that cleared the price/volume
+    # breakout check, same as before. ─────────────────────────────────────
+    passed: list[tuple] = []
     for sym, result in zip(vs_tasks.keys(), vs_results):
         if isinstance(result, Exception):
             logger.warning("volume_shock analysis error for %s: %s", sym, result)
@@ -1198,6 +1331,54 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
             if "no quote" in reject.lower() or "insufficient" in reject.lower():
                 no_quote_count += 1
             continue
+
+        passed.append((sym, result))
+
+    # ── Second pass (2026-09-11 fix): fundamental/technical quality gate —
+    # see config.py's VOLUME_SHOCK_QUALITY_GATE_* comment block. Only run
+    # for symbols that already cleared the price/volume check, and capped
+    # at VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS to bound extra outbound
+    # calls on a big volume-shock day.
+    quality_scores: dict = {}
+    if config.VOLUME_SHOCK_QUALITY_GATE_ENABLED and passed:
+        gate_symbols = [sym for sym, _ in passed][:config.VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS]
+        try:
+            async with httpx.AsyncClient() as qclient:
+                qsem = asyncio.Semaphore(CANDIDATE_ANALYSIS_CONCURRENCY)
+
+                async def _limited_qt(symbol: str) -> dict:
+                    async with qsem:
+                        return await _fetch_fund_tech_score(qclient, symbol)
+
+                qtasks = {sym: asyncio.create_task(_limited_qt(sym)) for sym in gate_symbols}
+                qresults = await asyncio.gather(*qtasks.values(), return_exceptions=True)
+            for sym, qr in zip(qtasks.keys(), qresults):
+                if isinstance(qr, Exception):
+                    logger.info("quality_gate: scoring failed for %s (%s)", sym, qr)
+                    continue
+                quality_scores[sym] = qr
+        except Exception as e:
+            logger.warning("candidate_engine: quality-gate scoring pass failed entirely (%s) — skipping gate this cycle", e)
+            quality_scores = {}
+
+    # Group by sector so each symbol is compared only against its own
+    # sector's candidates from THIS cycle (see _quality_gate_fund_tech).
+    by_sector: dict = {}
+    for sym, qr in quality_scores.items():
+        by_sector.setdefault(qr.get("sector") or "UNKNOWN", []).append(qr)
+
+    for sym, result in passed:
+        qr = quality_scores.get(sym)
+        if qr is not None:
+            sector_peers = [p for p in by_sector.get(qr.get("sector") or "UNKNOWN", []) if p.get("symbol") != sym]
+            gate_ok, gate_note = _quality_gate_fund_tech(qr, sector_peers)
+            if not gate_ok:
+                logger.info(
+                    "VOLUME_SHOCK CANDIDATE REJECTED %s (mode=%s) | quality gate: %s", sym, mode, gate_note
+                )
+                skipped += 1
+                quality_rejected += 1
+                continue
 
         # Elevate conviction_score for high-conviction signals
         # 2026-09-09 calibration fix (session20 update — see
@@ -1257,8 +1438,8 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
         db.commit()
 
     logger.info(
-        "candidate_engine: volume_shock inserted=%d skipped=%d mode=%s",
-        inserted, skipped, mode,
+        "candidate_engine: volume_shock inserted=%d skipped=%d (quality_gate_rejected=%d) mode=%s",
+        inserted, skipped, quality_rejected, mode,
     )
     # Same systemic-failure diagnostic as the standard track above — see that
     # note for why this is checked explicitly instead of left to blend into

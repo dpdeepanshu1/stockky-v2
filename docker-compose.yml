@@ -251,6 +251,12 @@ services:
       API_GATEWAY_URL: http://api-gateway:8000
       MARKET_DATA_URL: http://market-data-service:8001
       EVENT_URL: http://analysis-intelligence-service:8000/event
+      # 2026-09-11 fix: needed for the volume-shock quality gate
+      # (candidate_engine/candidates.py's fundamental/technical checks) —
+      # previously undefined here, so it silently fell back to config.py's
+      # onrender.com default even inside the docker-compose network.
+      TECHNICAL_URL: http://analysis-intelligence-service:8000/technical
+      FUNDAMENTAL_URL: http://analysis-intelligence-service:8000/fundamental
       NOTIFICATION_SERVICE_URL: http://notification-scheduler-service:8000/notification
       PORT: "8005"
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}

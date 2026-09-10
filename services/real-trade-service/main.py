@@ -1001,14 +1001,22 @@ async def watchlist_entries_route(
                 "symbol": r.symbol,
                 "catalyst_type": r.catalyst_type,
                 "catalyst_price": r.catalyst_price,
-                "catalyst_ts": r.catalyst_ts.isoformat() if r.catalyst_ts else None,
+                # 2026-09-11 fix: this pair used to call bare `.isoformat()`
+                # on DB-sourced datetimes — see tz_utils.iso_utc's docstring
+                # for why that's wrong (naive-UTC value gets misread by the
+                # browser as local time, showing the wrong clock time and
+                # sometimes the wrong date once converted to IST). Every
+                # other timestamp route in this file already goes through
+                # iso_utc; this endpoint was missed. Fixed by routing both
+                # fields through the same helper.
+                "catalyst_ts": iso_utc(r.catalyst_ts),
                 "horizon_class": r.horizon_class,
                 "entry_band_pct": r.entry_band_pct,
                 "source_tier": r.source_tier,
                 "conviction_score": r.conviction_score,
                 "status": r.status,
                 "missed_reason": r.missed_reason,
-                "expires_at": r.expires_at.isoformat() if r.expires_at else None,
+                "expires_at": iso_utc(r.expires_at),
             }
             for r in rows
         ],

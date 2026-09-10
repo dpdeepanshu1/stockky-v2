@@ -26,12 +26,35 @@ function fmtHms(totalSeconds: number): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+// 2026-09-11 fix: these used to call toLocaleTimeString/toLocaleDateString
+// with no `timeZone` option, so the displayed clock time depended on the
+// VIEWER'S BROWSER/OS timezone, not IST — wrong for anyone not physically
+// set to IST, and silently "correct-looking but wrong" for most everyone
+// else too, since a browser set to e.g. UTC would show a 5.5h-off time
+// with no indication anything was off. This is a NSE trading dashboard —
+// every timestamp on it means IST or it means nothing. Pinning
+// `timeZone: "Asia/Kolkata"` explicitly makes the displayed time correct
+// regardless of the viewer's own device settings.
 function fmtTime(iso: string): string {
-  try { return new Date(iso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }); } catch { return iso; }
+  try { return new Date(iso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" }); } catch { return iso; }
 }
 
 function fmtDate(iso: string): string {
-  try { return new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short" }); } catch { return iso; }
+  try { return new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short", timeZone: "Asia/Kolkata" }); } catch { return iso; }
+}
+
+// Combined date + time + explicit "IST" label — for anywhere the person
+// needs to know WHICH DAY a catalyst/signal/order was picked up, not just
+// the time (a signal detected 11:58pm yesterday and one detected 12:02am
+// today show the same clock time otherwise).
+function fmtDateTimeIst(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    const date = d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", timeZone: "Asia/Kolkata" });
+    const time = d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" });
+    return `${date}, ${time} IST`;
+  } catch { return iso; }
 }
 
 // Safe number extraction from Dhan SDK fund object (handles typos and casing)
@@ -379,8 +402,25 @@ function CatalystWatchlistPanel({ mode }: { mode: Mode }) {
                   <span>Horizon: {e.horizon_class}</span>
                   <span>Band: {(e.entry_band_pct * 100).toFixed(1)}%</span>
                   {e.conviction_score != null && <span>Conviction: {e.conviction_score}</span>}
-                  {e.catalyst_ts && <span>Detected {fmtTime(e.catalyst_ts)}</span>}
+                  {e.catalyst_ts && <span>Detected {fmtDateTimeIst(e.catalyst_ts)}</span>}
+                  {e.expires_at && <span>Expires {fmtDateTimeIst(e.expires_at)}</span>}
                 </div>
+                {(() => {
+                  // 2026-09-11 — surface staleness explicitly rather than
+                  // silently showing an old catalyst as if it were fresh.
+                  // A catalyst/news/result signal loses most of its trading
+                  // relevance after the day it fired; flag anything older
+                  // than "yesterday" so it's obviously not a same-day pick.
+                  if (!e.catalyst_ts) return null;
+                  const ageMs = Date.now() - new Date(e.catalyst_ts).getTime();
+                  const ageDays = ageMs / (1000 * 60 * 60 * 24);
+                  if (ageDays <= 1.5) return null;
+                  return (
+                    <p className="font-display tabular-nums text-[9px] text-signal-hold mt-1">
+                      ⏱ Stale — detected {Math.floor(ageDays)}d ago, not today/yesterday
+                    </p>
+                  );
+                })()}
                 {e.missed_reason && (
                   <p className="font-display tabular-nums text-[10px] text-signal-sell mt-1.5">⚠ {e.missed_reason}</p>
                 )}

@@ -704,6 +704,39 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             "is_upper_circuit": is_upper_circuit,
         })
 
+        # BUG FIX (2026-09-10, session21c audit): reserved_cash exists to make
+        # _account_state's cash_available (line ~297: account.cash_available -
+        # reserved_cash) reflect what earlier candidates THIS SAME CYCLE have
+        # already tentatively committed, so candidate #2 in a batch doesn't get
+        # sized as if candidate #1 (already staged) never happened. That only
+        # works if the increment lands here — the moment a candidate is staged,
+        # while the per-candidate loop above is still running and will call
+        # _account_state again for the NEXT candidate. The increment used to be
+        # deferred to the "for e in selected" loop below, which only starts
+        # running AFTER this entire per-candidate loop has already finished —
+        # every _account_state() call this cycle had already happened by then,
+        # so every candidate was sized against the FULL account.cash_available
+        # with reserved_cash permanently 0, no matter how many earlier
+        # candidates in the same cycle had already been staged for the same
+        # pool of cash. Concretely: with ₹100,000 cash and three ₹50,000
+        # candidates, each was independently approved (each individually fits
+        # under ₹100,000 per risk_engine's cash_available_cap check), and if
+        # Gate 6 selected more than one of them, the second and third REAL
+        # placement would be sent to Dhan and rejected for insufficient funds
+        # — a risk-approved entry failing at the broker for a reason this
+        # system's own sizing was supposed to prevent. Reserving here, as soon
+        # as a candidate is staged, means the NEXT candidate evaluated in this
+        # same loop sees the reduced cash and sizes (or rejects on
+        # cash_available_cap) accordingly — conservative if a staged candidate
+        # later gets bumped by Gate 6's ranking (see below), but undersizing a
+        # later candidate is a far smaller problem than sending a doomed order
+        # to the broker. Gate 6 itself runs after this entire loop finishes, so
+        # a candidate it later drops (see "for e in skipped" below) can't be
+        # un-reserved in time to matter — nothing left in this cycle reads
+        # reserved_cash for sizing once the loop below has started — so it's
+        # deliberately not released for skipped candidates either.
+        reserved_cash += (result.approved_qty or proposed_qty) * entry_price
+
     # ── Gate 6: cycle-level cross-candidate quality ranking ─────────────────
     # Only ever narrows what was already risk-approved — never overrides
     # gates 1-5 or risk_engine, and never turns a WAIT/REJECT into an ENTER.
@@ -775,7 +808,18 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 "of normal risk sizing instead of blocking every entry until the regime recovers."
             )
         entered        += 1
-        reserved_cash  += decision.proposed_qty * entry_price
+        # 2026-09-10 session21c audit fix: NOT incremented again here — this
+        # candidate's cash was already reserved the moment it was staged in
+        # the loop above (see that fix's comment). Incrementing a second time
+        # here would double-reserve it against nothing (there are no more
+        # _account_state() calls left this cycle for it to protect), silently
+        # inflating reserved_cash and, via account_state's max(0.0, ...)
+        # floor, eventually making cash_available look artificially lower
+        # than it really is for any LATER cycle that (incorrectly) carried
+        # this variable forward — it doesn't today (reserved_cash is function-
+        # local, reset to 0.0 every call), but doubling it here served no
+        # purpose even within this cycle, since the loop that reads it is
+        # already finished.
         db.add(decision)
         db.flush()
 

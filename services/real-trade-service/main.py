@@ -747,6 +747,21 @@ async def manual_order_confirm(
     mode: str, body: ManualOrderRequest,
     admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
 ):
+    """BUG FIX (2026-09-10, decision #32 follow-up): this route wrote
+    TradeOrder/TradeDecision rows and (for REAL) called dhan_client.place_order
+    / exit_engine._send_real_sell completely unguarded — the same class of
+    race /cycle/run/{mode} was fixed for, but here it can duplicate a REAL
+    broker order directly: a manual BUY confirm landing mid-cycle races
+    entry_engine's own candidate evaluation for the same symbol (account_state
+    is read before either side has committed, so both can pass the
+    no-pyramiding/position-count checks and both place a BUY); a manual SELL
+    confirm races exit_engine sending its own SELL for the same position,
+    which would hit Dhan with two SELL orders for shares that only exist
+    once. Now takes the same per-mode lock as /cycle/run/{mode}, non-blocking,
+    409 if a cycle currently holds it — evaluate_manual_order's own
+    "re-derive everything from current DB state" design (see its docstring)
+    means the retry after a 409 sees accurate state, not stale preview
+    numbers."""
     mode = mode.upper()
     if mode not in ("DEMO", "REAL"):
         raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
@@ -758,8 +773,22 @@ async def manual_order_confirm(
         # risk-taking and must go through the same "armed" gate as
         # everything else that can open a position.
         raise HTTPException(status_code=409, detail=f"{mode} is not armed — arm it before sending a manual BUY.")
-    from manual_engine import evaluate_manual_order
-    return await evaluate_manual_order(db, mode, gate.armed, body, confirm=True, admin=admin)
+
+    from execution.auto_pilot import _get_lock
+    lock = _get_lock(mode)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A cycle for {mode} is already in progress (auto-pilot or a prior manual trigger). "
+                "Try again once the current cycle finishes."
+            ),
+        )
+    try:
+        from manual_engine import evaluate_manual_order
+        return await evaluate_manual_order(db, mode, gate.armed, body, confirm=True, admin=admin)
+    finally:
+        lock.release()
 
 
 class ManualCandidateRequest(BaseModel):
@@ -1087,6 +1116,26 @@ async def _self_heal_orders(db: Session, mode: str) -> None:
 
     Never raises — a self-heal failure must not block the positions/orders
     list from returning; the next read just retries.
+
+    BUG FIX (2026-09-10, decision #32 follow-up): this REAL branch called
+    reconcile_real_orders() with no lock at all — the same class of race
+    /cycle/run/{mode} was just fixed for, except worse: this path fires on
+    every single GET /positions/{mode} and GET /orders/{mode} poll, i.e.
+    continuously from the dashboard, so it could (and would) race a
+    manual Run Cycle or an in-flight auto-pilot tick constantly, not just
+    on a rare coincidence. reconcile_real_orders() calls
+    record_real_fill/record_real_exit_fill and holdings_sync_reconcile,
+    all of which mutate TradePosition/TradeOrder/cash rows — two
+    concurrent passes over the same PLACED order or PENDING_EXIT position
+    can double-book a fill or double-refund/close a position exactly like
+    the entry/exit duplication /cycle/run/{mode} guards against. Now
+    takes the SAME per-mode threading.Lock (auto_pilot._get_lock) with a
+    non-blocking acquire, matching /cycle/run/{mode}'s pattern — but
+    unlike that route, a busy lock here is not an error: this is a
+    best-effort catch-up on a read path, so it just skips reconciling
+    this pass (whatever cycle/tick currently holds the lock will do the
+    same work) and the very next poll retries. Never blocks, never
+    raises, never returns 409 to the dashboard.
     """
     try:
         if mode == "DEMO":
@@ -1094,8 +1143,20 @@ async def _self_heal_orders(db: Session, mode: str) -> None:
             await check_pending_fills(db, mode)
             await expire_stale_orders(db, mode)
         else:
+            from execution.auto_pilot import _get_lock
             from execution.reconcile import reconcile_real_orders
-            await reconcile_real_orders(db)
+            lock = _get_lock(mode)
+            if lock.acquire(blocking=False):
+                try:
+                    await reconcile_real_orders(db)
+                finally:
+                    lock.release()
+            else:
+                logger.info(
+                    "self-heal (%s) skipped this pass — a cycle is already in "
+                    "progress and holds the reconcile lock; next read retries.",
+                    mode,
+                )
     except Exception as e:  # noqa: BLE001
         logger.warning("self-heal (%s) failed, returning state as-is: %s", mode, e)
 
@@ -1312,37 +1373,62 @@ async def manual_close_position(
     whether the automatic exit cycle would currently trigger on it.
     Always allowed regardless of armed state, same policy as
     dhan_client.cancel_order: exiting a position is never something the
-    system should refuse just because trading is disarmed."""
+    system should refuse just because trading is disarmed.
+
+    BUG FIX (2026-09-10, decision #32 follow-up): this route called
+    _send_real_sell (REAL) / _pf_close_position (DEMO) with no lock at
+    all — a manual close landing at the same instant as auto-pilot's exit
+    tick or a full cycle evaluating this SAME position would send two
+    independent SELL orders for it (once via this route, once via
+    exit_engine), the exact duplicate-order race /cycle/run/{mode} was
+    fixed for. Now takes the same per-mode lock, non-blocking, 409 if a
+    cycle currently holds it. The position/qty lookup moves inside the
+    locked section so a retry after a 409 re-reads current qty_open
+    rather than acting on a value read before the race window."""
     mode = mode.upper()
-    position = db.query(models.TradePosition).filter_by(id=position_id, mode=mode).first()
-    if position is None:
-        raise HTTPException(status_code=404, detail="Position not found")
-    if position.status not in ("OPEN", "PARTIALLY_CLOSED"):
-        raise HTTPException(status_code=409, detail=f"Position is {position.status} — nothing to close.")
 
-    qty = body.qty or position.qty_open
-    qty = min(qty, position.qty_open)
-    if qty <= 0:
-        raise HTTPException(status_code=400, detail="qty must be positive")
+    from execution.auto_pilot import _get_lock
+    lock = _get_lock(mode)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A cycle for {mode} is already in progress (auto-pilot or a prior manual trigger). "
+                "Try again once the current cycle finishes."
+            ),
+        )
+    try:
+        position = db.query(models.TradePosition).filter_by(id=position_id, mode=mode).first()
+        if position is None:
+            raise HTTPException(status_code=404, detail="Position not found")
+        if position.status not in ("OPEN", "PARTIALLY_CLOSED"):
+            raise HTTPException(status_code=409, detail=f"Position is {position.status} — nothing to close.")
 
-    if mode == "DEMO":
-        from market_feed.feed import get_quotes
-        ticks = await get_quotes([position.symbol])
-        tick = ticks.get(position.symbol)
-        if tick is None:
-            raise HTTPException(status_code=503, detail=f"No current price available for {position.symbol} — try again shortly.")
-        pnl = _pf_close_position(db, position, tick, qty, "manual_close")
-        log_action(db, actor=admin or "admin", action="MANUAL_CLOSE", mode=mode,
-                   detail=f"{position.symbol} qty={qty} pnl={pnl:+.2f}")
-        return {"ok": True, "mode": mode, "symbol": position.symbol, "qty_closed": qty, "pnl": pnl}
-    else:
-        from exit_engine.exit import _send_real_sell
-        full = qty >= position.qty_open
-        if not _send_real_sell(db, position, qty, "manual_close", full=full):
-            raise HTTPException(status_code=502, detail="Dhan rejected the manual close order — see server logs.")
-        log_action(db, actor=admin or "admin", action="MANUAL_CLOSE_SENT", mode=mode,
-                   detail=f"{position.symbol} qty={qty} sent to Dhan, awaiting confirmation")
-        return {"ok": True, "mode": mode, "symbol": position.symbol, "qty_sent": qty, "status": "pending_broker_confirmation"}
+        qty = body.qty or position.qty_open
+        qty = min(qty, position.qty_open)
+        if qty <= 0:
+            raise HTTPException(status_code=400, detail="qty must be positive")
+
+        if mode == "DEMO":
+            from market_feed.feed import get_quotes
+            ticks = await get_quotes([position.symbol])
+            tick = ticks.get(position.symbol)
+            if tick is None:
+                raise HTTPException(status_code=503, detail=f"No current price available for {position.symbol} — try again shortly.")
+            pnl = _pf_close_position(db, position, tick, qty, "manual_close")
+            log_action(db, actor=admin or "admin", action="MANUAL_CLOSE", mode=mode,
+                       detail=f"{position.symbol} qty={qty} pnl={pnl:+.2f}")
+            return {"ok": True, "mode": mode, "symbol": position.symbol, "qty_closed": qty, "pnl": pnl}
+        else:
+            from exit_engine.exit import _send_real_sell
+            full = qty >= position.qty_open
+            if not _send_real_sell(db, position, qty, "manual_close", full=full):
+                raise HTTPException(status_code=502, detail="Dhan rejected the manual close order — see server logs.")
+            log_action(db, actor=admin or "admin", action="MANUAL_CLOSE_SENT", mode=mode,
+                       detail=f"{position.symbol} qty={qty} sent to Dhan, awaiting confirmation")
+            return {"ok": True, "mode": mode, "symbol": position.symbol, "qty_sent": qty, "status": "pending_broker_confirmation"}
+    finally:
+        lock.release()
 
 
 @app.post("/orders/{mode}/{order_id}/cancel")
@@ -1354,26 +1440,57 @@ async def manual_cancel_order(
     Dhan PART_TRADED — where only the unfilled remainder gets cancelled;
     whatever already filled stays booked). Always allowed regardless of
     armed state (matches dhan_client.cancel_order's own policy: backing
-    out of a pending order is never gated by arming)."""
+    out of a pending order is never gated by arming).
+
+    BUG FIX (2026-09-10, decision #32 follow-up): the local
+    order.status = "CANCELLED" write below was unconditional and used the
+    `order` object read at the top of this request — if a reconcile pass
+    (auto-pilot tick, a Run Cycle, or another admin action) committed a
+    FILLED/PARTIAL status for this same order in the gap between that read
+    and this write, this request would silently stomp it back to
+    CANCELLED, leaving the order looking cancelled here while the shares
+    were actually filled and booked at the broker (cash moved, position
+    opened) — a misleading, hard-to-notice divergence between this
+    system's own records and reality, even though it doesn't double-send
+    anything to Dhan. Same per-mode lock as the other manual routes above
+    closes the gap: the order is re-read fresh for its status check right
+    after acquiring the lock, so a concurrent reconcile's write is always
+    visible before this route decides whether there's still anything to
+    cancel."""
     mode = mode.upper()
-    order = db.query(models.TradeOrder).filter_by(id=order_id, mode=mode).first()
-    if order is None:
-        raise HTTPException(status_code=404, detail="Order not found")
-    if order.status not in ("PLACED", "PARTIAL"):
-        raise HTTPException(status_code=409, detail=f"Order is {order.status} — nothing to cancel.")
 
-    if mode == "REAL" and order.dhan_order_id:
-        try:
-            dhan_client.cancel_order(db, is_armed=True, dhan_order_id=order.dhan_order_id)
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Dhan rejected the cancel: {e}")
+    from execution.auto_pilot import _get_lock
+    lock = _get_lock(mode)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A cycle for {mode} is already in progress (auto-pilot or a prior manual trigger). "
+                "Try again once the current cycle finishes."
+            ),
+        )
+    try:
+        db.expire_all()  # force a fresh read — a concurrent reconcile may have just committed
+        order = db.query(models.TradeOrder).filter_by(id=order_id, mode=mode).first()
+        if order is None:
+            raise HTTPException(status_code=404, detail="Order not found")
+        if order.status not in ("PLACED", "PARTIAL"):
+            raise HTTPException(status_code=409, detail=f"Order is {order.status} — nothing to cancel.")
 
-    order.status = "CANCELLED"
-    order.updated_at = datetime.now(timezone.utc)
-    db.add(models.TradeOrderEvent(order_id=order.id, event_type="CANCELLED", detail="Manually cancelled by admin"))
-    db.commit()
-    log_action(db, actor=admin or "admin", action="MANUAL_CANCEL", mode=mode, detail=f"order {order.id} ({order.symbol})")
-    return {"ok": True, "mode": mode, "order_id": order.id, "status": "CANCELLED"}
+        if mode == "REAL" and order.dhan_order_id:
+            try:
+                dhan_client.cancel_order(db, is_armed=True, dhan_order_id=order.dhan_order_id)
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=f"Dhan rejected the cancel: {e}")
+
+        order.status = "CANCELLED"
+        order.updated_at = datetime.now(timezone.utc)
+        db.add(models.TradeOrderEvent(order_id=order.id, event_type="CANCELLED", detail="Manually cancelled by admin"))
+        db.commit()
+        log_action(db, actor=admin or "admin", action="MANUAL_CANCEL", mode=mode, detail=f"order {order.id} ({order.symbol})")
+        return {"ok": True, "mode": mode, "order_id": order.id, "status": "CANCELLED"}
+    finally:
+        lock.release()
 
 
 @app.post("/reconcile/{mode}")
@@ -1381,12 +1498,34 @@ async def manual_reconcile(mode: str, admin: Optional[str] = Depends(require_adm
     """Manual trigger for the same broker reconciliation that also runs
     automatically at the end of every REAL Run Cycle — exposed on its own
     so a stuck/PLACED order can be re-checked against Dhan without waiting
-    for (or re-running) a full cycle."""
+    for (or re-running) a full cycle.
+
+    BUG FIX (2026-09-10, decision #32 follow-up): this endpoint called
+    reconcile_real_orders() completely unguarded — a click here could run
+    concurrently with a manual Run Cycle or an in-flight auto-pilot tick
+    for the same mode, double-booking a fill or double-closing a position
+    exactly like the /cycle/run/{mode} race. Now takes the same per-mode
+    lock, non-blocking, and returns 409 immediately if a cycle already
+    holds it — same contract as /cycle/run/{mode}, so the admin gets an
+    explicit "try again" instead of a silent race."""
     mode = mode.upper()
     if mode != "REAL":
         return {"ok": True, "mode": mode, "note": "DEMO has nothing to reconcile — fills are simulated, not broker-confirmed."}
+    from execution.auto_pilot import _get_lock
     from execution.reconcile import reconcile_real_orders
-    result = await reconcile_real_orders(db)
+    lock = _get_lock(mode)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A cycle for {mode} is already in progress (auto-pilot or a prior manual trigger). "
+                "Try again once the current cycle finishes."
+            ),
+        )
+    try:
+        result = await reconcile_real_orders(db)
+    finally:
+        lock.release()
     return {"ok": True, "mode": mode, **result}
 
 
@@ -1398,12 +1537,31 @@ async def manual_holdings_sync(mode: str, admin: Optional[str] = Depends(require
     (manual_reconcile above, or every REAL Run Cycle). Exposed on its own
     so a known DB-vs-broker mismatch (e.g. Stockky showing more OPEN
     positions than Dhan's own Portfolio page) can be fixed immediately
-    without waiting for or re-running everything else reconcile does."""
+    without waiting for or re-running everything else reconcile does.
+
+    BUG FIX (2026-09-10, decision #32 follow-up): same unguarded race as
+    manual_reconcile above — holdings_sync_reconcile force-closes
+    positions and refunds cash, so it must not run concurrently with a
+    cycle that's also touching those same rows. Same lock, same
+    non-blocking acquire, same 409-on-busy contract."""
     mode = mode.upper()
     if mode != "REAL":
         return {"ok": True, "mode": mode, "note": "DEMO positions are simulated — nothing to sync against a broker."}
+    from execution.auto_pilot import _get_lock
     from portfolio.portfolio import holdings_sync_reconcile
-    result = holdings_sync_reconcile(db)
+    lock = _get_lock(mode)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A cycle for {mode} is already in progress (auto-pilot or a prior manual trigger). "
+                "Try again once the current cycle finishes."
+            ),
+        )
+    try:
+        result = holdings_sync_reconcile(db)
+    finally:
+        lock.release()
     return {"ok": True, "mode": mode, **result}
 
 

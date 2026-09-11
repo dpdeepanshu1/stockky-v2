@@ -207,6 +207,15 @@ services:
       PREDICTION_URL: http://decision-prediction-service:8000/prediction
       TRAINING_URL: http://decision-prediction-service:8000/training
       NOTIFICATION_URL: http://notification-scheduler-service:8000/notification
+      # 2026-09-11: overnight-orchestrator proxy routes (/ops/overnight/*)
+      # use a separate env var from NOTIFICATION_URL above (different
+      # sub-app mount — /scheduler, not /notification — see api-gateway/
+      # main.py's SCHEDULER_URL). Without this, it silently fell back to
+      # the old Render URL default and every Settings-page poll (every
+      # 20s) was hitting notification-scheduler-service-x8vc.onrender.com
+      # instead of the local Oracle container.
+      NOTIFICATION_SCHEDULER_URL: http://notification-scheduler-service:8000/notification
+      SCHEDULER_URL: http://notification-scheduler-service:8000/scheduler
       UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}
       UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
       DATABASE_URL: ${DATABASE_URL:-}

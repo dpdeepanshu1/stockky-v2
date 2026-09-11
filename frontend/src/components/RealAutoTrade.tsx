@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl,
   getSessionToken, setSessionToken, setSessionExpiredHandler,
@@ -741,6 +741,41 @@ export default function RealAutoTrade() {
   const [liveDhanOrders, setLiveDhanOrders] = useState<any[]>([]);
   const [liveLoading, setLiveLoading] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
+
+  // 2026-09-11 fix — user ask: "if we sell something why it shows here"
+  // (in Demat holdings). Dhan's holdings API reflects the broker's demat
+  // book, which for a delivery (CNC) sell doesn't drop the quantity until
+  // T+1 settlement — so a stock sold this morning correctly still appears
+  // in holdings this afternoon, still showing its *unrealized* P&L against
+  // the live LTP as if nothing happened, which is what actually looked
+  // wrong. This computes today's filled sell qty/avg price per symbol so
+  // the holdings table can mark that quantity as sold and show its
+  // realized P&L instead of pretending it's still an open position.
+  const soldTodayBySymbol = useMemo(() => {
+    const map = new Map<string, { qty: number; avgPrice: number }>();
+    const FILLED = new Set(["TRADED", "FILLED", "COMPLETE"]);
+    const bySymbol = new Map<string, any[]>();
+    for (const o of liveDhanOrders) {
+      const sym = o.tradingSymbol || o.symbol || "—";
+      if (!bySymbol.has(sym)) bySymbol.set(sym, []);
+      bySymbol.get(sym)!.push(o);
+    }
+    for (const [sym, symOrders] of bySymbol.entries()) {
+      let qty = 0, value = 0;
+      for (const o of symOrders) {
+        const side = (o.transactionType || o.side || "").toUpperCase();
+        const status = (o.orderStatus || o.status || "").toUpperCase();
+        if (side !== "SELL" || !FILLED.has(status)) continue;
+        const q = Number(o.quantity || o.tradedQuantity || 0);
+        const p = Number(o.averageTradedPrice || o.price || 0);
+        if (q <= 0 || p <= 0) continue;
+        qty += q;
+        value += q * p;
+      }
+      if (qty > 0) map.set(sym, { qty, avgPrice: value / qty });
+    }
+    return map;
+  }, [liveDhanOrders]);
 
   // Service positions/orders
   const [positions, setPositions] = useState<Position[]>([]);
@@ -1717,17 +1752,46 @@ export default function RealAutoTrade() {
                           <tbody>
                             {liveHoldings.map((h, i) => {
                               const sym = h.tradingSymbol || h.symbol || "—";
-                              const qty = Number(h.totalQty || h.quantity || 0);
+                              const totalQty = Number(h.totalQty || h.quantity || 0);
                               const avg = Number(h.avgCostPrice || h.averageBuyPrice || 0);
                               const ltp = Number(h.lastTradedPrice || h.ltp || 0);
-                              const pnl = (ltp - avg) * qty;
+                              const sold = soldTodayBySymbol.get(sym);
+                              const soldQty = sold ? Math.min(sold.qty, totalQty) : 0;
+                              const remainingQty = totalQty - soldQty;
+                              const unrealizedPnl = remainingQty > 0 ? (ltp - avg) * remainingQty : null;
+                              const realizedPnl = soldQty > 0 ? (sold!.avgPrice - avg) * soldQty : null;
                               return (
                                 <tr key={i} className="border-b border-slate hover:bg-ink">
-                                  <td className="py-1.5 pr-3 text-paper font-bold">{sym}</td>
-                                  <td className="text-right pr-3 text-mist">{qty}</td>
+                                  <td className="py-1.5 pr-3 text-paper font-bold">
+                                    {sym}
+                                    {soldQty > 0 && (
+                                      <span className="block font-normal text-[9px] text-signal-hold">
+                                        sold {soldQty} today
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="text-right pr-3 text-mist">
+                                    {remainingQty}
+                                    {soldQty > 0 && (
+                                      <span className="block text-[9px] text-mist">
+                                        ({totalQty} total · settling)
+                                      </span>
+                                    )}
+                                  </td>
                                   <td className="text-right pr-3 text-mist">₹{avg.toFixed(2)}</td>
-                                  <td className="text-right pr-3 text-mist">₹{ltp.toFixed(2)}</td>
-                                  <td className={`text-right ${pnlColor(pnl)}`}>{pnl >= 0 ? "+" : ""}{fmtInr(pnl, 0)}</td>
+                                  <td className="text-right pr-3 text-mist">{remainingQty > 0 ? `₹${ltp.toFixed(2)}` : "—"}</td>
+                                  <td className="text-right">
+                                    {unrealizedPnl != null && (
+                                      <div className={pnlColor(unrealizedPnl)}>
+                                        {unrealizedPnl >= 0 ? "+" : ""}{fmtInr(unrealizedPnl, 0)}
+                                      </div>
+                                    )}
+                                    {realizedPnl != null && (
+                                      <div className={`text-[9px] ${pnlColor(realizedPnl)}`}>
+                                        {realizedPnl >= 0 ? "+" : ""}{fmtInr(realizedPnl, 0)} realized
+                                      </div>
+                                    )}
+                                  </td>
                                 </tr>
                               );
                             })}

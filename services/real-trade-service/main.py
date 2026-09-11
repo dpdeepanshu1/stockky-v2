@@ -455,6 +455,16 @@ async def dhan_edis_status(admin: str = Depends(require_admin), db: Session = De
     return dhan_client.edis_inquire(db, isin=isin)
 
 
+@app.get("/dhan/edis/summary")
+async def dhan_edis_summary(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """Dashboard-friendly rollup of the daily CDSL eDIS check — this is what
+    the Real Trade overview page's green/red badge polls, right next to the
+    Dhan connection status. See dhan_client.edis_verification_summary for
+    the three possible verified_today states (True/False/None) and why
+    None is returned instead of guessing on an unparseable response."""
+    return dhan_client.edis_verification_summary(db)
+
+
 @app.get("/dhan/network-check")
 async def dhan_network_check(admin: str = Depends(require_admin)):
     """Answers the question a Dhan 'Invalid IP' rejection can't on its own:

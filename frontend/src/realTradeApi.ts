@@ -148,6 +148,15 @@ export interface DhanStatus {
   seconds_remaining: number | null;
 }
 
+export interface DhanEdisSummary {
+  verified_today: boolean | null;
+  checked_at: string;
+  detail: string;
+  holdings_total: number;
+  holdings_pending: number;
+  pending_symbols: string[];
+}
+
 export interface Position {
   id: number; symbol: string; status: string; qty_open: number; avg_entry_price: number;
   current_stop: number | null; current_target: number | null;
@@ -366,6 +375,34 @@ export const realTradeApi = {
   dhanAccount: () => rtRequest<DhanStatus & { funds: any | null; funds_error: string | null }>("/dhan/account"),
   dhanNetworkCheck: () =>
     rtRequest<{ outbound_ip: string | null; checked_at: string; note: string }>("/dhan/network-check"),
+
+  dhanEdisSummary: () => rtRequest<DhanEdisSummary>("/dhan/edis/summary"),
+  dhanEdisRequestTpin: () =>
+    rtRequest<{ ok: boolean; detail: string; requested_at: string }>("/dhan/edis/request-tpin"),
+
+  // Deliberately NOT rtRequest — that helper JSON.parse()s every response
+  // and throws on anything else, but this endpoint returns raw HTML (CDSL's
+  // self-submitting redirect form) by design. Also, unlike every other
+  // call here, this one can't just be opened as a plain browser navigation
+  // (<a href> / window.open(url)) — /dhan/edis/authorize-form requires the
+  // same Bearer session header as every other real-trade route, and a top-
+  // level navigation never carries a custom Authorization header. So the
+  // caller must fetch the HTML here (authenticated, like any other API
+  // call) and then document.write() it into a popup window itself — that
+  // still satisfies "must run in an actual browser" (the form's onload JS
+  // executes there and redirects to CDSL for the T-PIN entry) without
+  // needing the navigation itself to be authenticated.
+  dhanEdisAuthorizeFormHtml: async (): Promise<string> => {
+    const base = getRealTradeApiUrl();
+    if (!base) throw new Error("Real Trade service URL isn't set.");
+    const token = getSessionToken();
+    const resp = await fetch(`${base}/dhan/edis/authorize-form`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    const html = await resp.text();
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}: ${html.slice(0, 150)}`);
+    return html;
+  },
 
   updateRiskConfig: (mode: "DEMO" | "REAL", patch: Record<string, number | boolean>) =>
     rtRequest<{ ok: boolean }>("/risk-config", { method: "POST", body: JSON.stringify({ mode, ...patch }) }),

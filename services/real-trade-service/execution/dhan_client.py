@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Optional
 
@@ -647,6 +648,107 @@ def edis_inquire(db: Session, isin: str = "ALL") -> dict:
     )
     resp.raise_for_status()
     return resp.json() or {}
+
+
+# Candidate field-name spellings seen across Dhan API versions/docs for the
+# per-holding approved-vs-total quantity pair. Kept as a list rather than
+# hardcoding one pair because this endpoint's exact response shape hasn't
+# been captured from a live call yet (no network access while writing this)
+# — if the real payload uses a name not listed here, _edis_row_status below
+# falls through to "unknown" instead of guessing, so the dashboard badge
+# never shows a confident green/red on a misread.
+_EDIS_APPROVED_KEYS = ("aprvdQty", "approvedQty", "approved_qty", "aprvd_qty")
+_EDIS_TOTAL_KEYS = ("totalQty", "total_qty", "dpQty", "dp_qty")
+
+
+def _first_present(row: dict, keys: tuple) -> Optional[float]:
+    for k in keys:
+        if k in row and row[k] is not None:
+            try:
+                return float(row[k])
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def edis_verification_summary(db: Session) -> dict:
+    """Summarize edis_inquire("ALL") into the single question the Settings/
+    Real Trade dashboard actually wants answered: "is today's CDSL
+    authorization already done for every current holding?" Three possible
+    outcomes, deliberately kept distinct rather than collapsed into a
+    boolean — showing a confident green/red on a response this function
+    can't actually parse would be worse than saying so:
+
+      verified_today = True   — every holding has approved >= total qty.
+      verified_today = False  — at least one holding still needs auth;
+                                 pending_symbols lists which.
+      verified_today = None   — inquire call failed, returned no holdings
+                                 to check (nothing to verify either way),
+                                 or came back in a shape none of the known
+                                 field-name variants match. `detail`
+                                 explains which.
+
+    NOTE: the exact field names Dhan's v2 edis/inquire response uses for
+    per-holding approved/total qty haven't been confirmed against a live
+    response yet (see _EDIS_APPROVED_KEYS/_EDIS_TOTAL_KEYS above) — if this
+    keeps returning verified_today=None with detail="unrecognized shape",
+    capture one real response body and add its actual key names to those
+    tuples.
+    """
+    checked_at = datetime.now(timezone.utc).isoformat()
+    try:
+        raw = edis_inquire(db, isin="ALL")
+    except DhanNotConnectedError as e:
+        return {"verified_today": None, "checked_at": checked_at, "detail": str(e),
+                "holdings_total": 0, "holdings_pending": 0, "pending_symbols": []}
+    except Exception as e:
+        return {"verified_today": None, "checked_at": checked_at,
+                "detail": f"eDIS inquire call failed: {e}",
+                "holdings_total": 0, "holdings_pending": 0, "pending_symbols": []}
+
+    # Response may be a bare list, or wrapped under a common container key —
+    # handle both without assuming which this account/version returns.
+    rows = raw if isinstance(raw, list) else (
+        raw.get("data") or raw.get("holdings") or raw.get("result") or []
+        if isinstance(raw, dict) else []
+    )
+    if not rows:
+        return {"verified_today": None, "checked_at": checked_at,
+                "detail": "No holdings returned by eDIS inquire (nothing to authorize, or unrecognized response shape).",
+                "holdings_total": 0, "holdings_pending": 0, "pending_symbols": []}
+
+    pending = []
+    unrecognized = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            unrecognized += 1
+            continue
+        approved = _first_present(row, _EDIS_APPROVED_KEYS)
+        total = _first_present(row, _EDIS_TOTAL_KEYS)
+        if approved is None or total is None:
+            unrecognized += 1
+            continue
+        if approved < total:
+            label = row.get("isin") or row.get("tradingSymbol") or row.get("symbol") or "unknown"
+            pending.append(label)
+
+    if unrecognized == len(rows):
+        return {"verified_today": None, "checked_at": checked_at,
+                "detail": "eDIS inquire returned holdings but in an unrecognized shape — "
+                          "field names didn't match any known variant. Check manually via "
+                          "GET /dhan/edis/status?isin=ALL and update _EDIS_APPROVED_KEYS/"
+                          "_EDIS_TOTAL_KEYS in dhan_client.py once you see the real keys.",
+                "holdings_total": len(rows), "holdings_pending": 0, "pending_symbols": []}
+
+    return {
+        "verified_today": len(pending) == 0,
+        "checked_at": checked_at,
+        "detail": "All holdings authorized for sale today." if not pending
+                  else f"{len(pending)} holding(s) still need today's T-PIN authorization.",
+        "holdings_total": len(rows),
+        "holdings_pending": len(pending),
+        "pending_symbols": pending,
+    }
 
 
 def get_outbound_ip() -> Optional[str]:

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl,
   getSessionToken, setSessionToken, setSessionExpiredHandler,
-  type GateStatus, type AuditLogRow, type Position, type OrderRow, type CycleResult, type DhanStatus,
+  type GateStatus, type AuditLogRow, type Position, type OrderRow, type CycleResult, type DhanStatus, type DhanEdisSummary,
   type PipelineStatus, type CandidateRow, type WatchlistEntry, type ResilienceStatus,
 } from "../realTradeApi";
 import ManualTradeTicket from "./trading/ManualTradeTicket";
@@ -708,6 +708,8 @@ export default function RealAutoTrade() {
   const [dhanToken, setDhanToken] = useState("");
   const [dhanAccount, setDhanAccount] = useState<(DhanStatus & { funds: any; funds_error: string | null }) | null>(null);
   const [networkCheck, setNetworkCheck] = useState<{ outbound_ip: string | null; note: string } | null>(null);
+  const [edisSummary, setEdisSummary] = useState<DhanEdisSummary | null>(null);
+  const [edisBusy, setEdisBusy] = useState(false);
   const [networkCheckBusy, setNetworkCheckBusy] = useState(false);
   const [showDhanForm, setShowDhanForm] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -785,9 +787,16 @@ export default function RealAutoTrade() {
         try {
           const d = await realTradeApi.dhanAccount();
           setDhanAccount(d.connected ? d : null);
-        } catch { setDhanAccount(null); }
+          if (d.connected) {
+            try { setEdisSummary(await realTradeApi.dhanEdisSummary()); }
+            catch { setEdisSummary(null); }
+          } else {
+            setEdisSummary(null);
+          }
+        } catch { setDhanAccount(null); setEdisSummary(null); }
       } else {
         setDhanAccount(null);
+        setEdisSummary(null);
       }
     } catch (e: any) {
       setError(e?.message || "Failed to load status");
@@ -977,6 +986,30 @@ export default function RealAutoTrade() {
   const doConfirmRisk = async () => {
     try { await realTradeApi.confirmRiskConfig(mode); await loadStatus(mode); }
     catch (e: any) { setError(e?.message || "Failed to confirm risk config"); }
+  };
+
+  const doEdisRequestTpin = async () => {
+    setEdisBusy(true);
+    try {
+      const r = await realTradeApi.dhanEdisRequestTpin();
+      setError(null);
+      alert(r.detail); // one-time SMS prompt — a toast would disappear before they read it
+    } catch (e: any) {
+      setError(e?.message || "T-PIN request failed");
+    } finally { setEdisBusy(false); }
+  };
+
+  const doEdisAuthorize = async () => {
+    setEdisBusy(true);
+    try {
+      const html = await realTradeApi.dhanEdisAuthorizeFormHtml();
+      const win = window.open("", "_blank");
+      if (!win) { setError("Popup blocked — allow popups for this site, then try again."); return; }
+      win.document.write(html);
+      win.document.close();
+    } catch (e: any) {
+      setError(e?.message || "Could not open CDSL authorization form");
+    } finally { setEdisBusy(false); }
   };
 
   const doNetworkCheck = async () => {
@@ -1339,6 +1372,48 @@ export default function RealAutoTrade() {
                         {dhanAccount.token_issued_at && `Issued ${fmtDate(dhanAccount.token_issued_at)} ${fmtTime(dhanAccount.token_issued_at)} · `}
                         Countdown reflects Dhan's own expiry when a regenerated token reports one, otherwise assumes {dhanAccount.token_hard_cap_hours ?? 24}h as a safety ceiling.
                       </p>
+
+                      {/* Daily CDSL eDIS / T-PIN check — a valid Dhan token alone doesn't
+                          mean sells will go through; CDSL separately requires this once-a-day
+                          authorization per holding. Distinct from the token badge above on
+                          purpose (green Dhan connection + red eDIS is a real, common state). */}
+                      <div className={`rounded-xl px-3 py-2 border ${
+                        edisSummary?.verified_today === true ? "bg-signal-buy/5 border-signal-buy/20"
+                        : edisSummary?.verified_today === false ? "bg-signal-sell/5 border-signal-sell/20"
+                        : "bg-ink border-slate"
+                      }`}>
+                        <div className="flex items-center justify-between">
+                          <span className="font-display tabular-nums text-[10px] uppercase tracking-widest text-mist">Daily eDIS (CDSL)</span>
+                          <span className={`font-display tabular-nums text-[10px] px-2 py-0.5 rounded-full border ${
+                            edisSummary?.verified_today === true ? "bg-signal-buy/10 border-signal-buy/30 text-signal-buy"
+                            : edisSummary?.verified_today === false ? "bg-signal-sell/10 border-signal-sell/30 text-signal-sell"
+                            : "bg-slate/20 border-slate text-mist"
+                          }`}>
+                            {edisSummary?.verified_today === true ? "🟢 Verified today"
+                              : edisSummary?.verified_today === false ? "🔴 Not verified"
+                              : edisSummary ? "⚠ Unknown" : "— Checking…"}
+                          </span>
+                        </div>
+                        <p className="font-display tabular-nums text-[9px] text-mist mt-1">
+                          {edisSummary?.detail ?? "Loading eDIS status…"}
+                        </p>
+                        {edisSummary?.verified_today !== true && (
+                          <div className="flex gap-2 mt-2">
+                            <button onClick={() => void doEdisRequestTpin()} disabled={edisBusy}
+                              className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-signal-hold/10 border border-signal-hold/30 text-signal-hold disabled:opacity-40">
+                              {edisBusy ? "Working…" : "1. Request T-PIN"}
+                            </button>
+                            <button onClick={() => void doEdisAuthorize()} disabled={edisBusy}
+                              className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-signal-prepare/10 border border-signal-prepare/30 text-signal-prepare disabled:opacity-40">
+                              {edisBusy ? "Working…" : "2. Authorize on CDSL"}
+                            </button>
+                            <button onClick={() => void loadStatus(mode)} disabled={edisBusy}
+                              className="font-display tabular-nums text-[10px] text-mist hover:text-paper disabled:opacity-40">
+                              ↻ Re-check
+                            </button>
+                          </div>
+                        )}
+                      </div>
 
                       {dhanAccount.funds_error ? (
                         <p className="font-display tabular-nums text-[11px] text-signal-sell bg-signal-sell/5 rounded-xl px-3 py-2 border border-signal-sell/20">

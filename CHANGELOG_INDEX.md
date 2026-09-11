@@ -6,6 +6,9 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION24_ROOT_DEDUP_CLEANUP.md` — removed root-level duplicates left
+  behind by a previous zip repackage (files were already archived but
+  never deleted from root)
 - 2026-09-11 — quality gate, intraday-restriction list, Dhan P&L summary,
   overnight orchestrator, Reset Failures fix (this session — see the PR/
   commit this shipped in, not yet filed as its own archive note)

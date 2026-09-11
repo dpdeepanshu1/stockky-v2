@@ -61,27 +61,38 @@ function fmtDateTimeIst(iso: string | null | undefined): string {
 // something sell something when do final sell mention the final sell price
 // and originally buy price and based on that calculate total profit or loss
 // should be display in one line ... after that stock in one line."
-// Groups the flat liveDhanOrders list by symbol (preserving each symbol's
-// first-seen position so the block's overall ordering doesn't jump around),
-// and for any symbol with at least one filled BUY and one filled SELL,
-// computes a volume-weighted avg buy price, avg sell price (the "final
-// sell" — if a symbol sold in two tranches this is the blended exit, which
-// is the honest number when there isn't one single "the" sell price), the
-// matched (closed) quantity, and the resulting realized P&L on that
-// matched quantity.
-function groupDhanOrdersBySymbol(orders: any[]): Array<{
+//
+// 2026-09-11 follow-up fix — the first version only matched a SELL against
+// a BUY placed *today*. In practice most sells are of shares bought on an
+// earlier day (already sitting in the demat holdings), so buyQty was 0,
+// pnl came out null, and the summary line silently never appeared for
+// exactly the case in the screenshot (SELL-only orders for CFEL/JMA/
+// MEDICAPQ). Now falls back to the demat holding's avg cost price for the
+// buy side whenever today's orders don't contain a filled BUY for that
+// symbol, so a SELL-only day still gets its buy/sell/P&L line.
+// Also: a PENDING sell has no averageTradedPrice yet, so it's shown as a
+// normal row with no P&L line until it actually fills.
+function groupDhanOrdersBySymbol(orders: any[], holdings: any[] = []): Array<{
   symbol: string;
   orders: any[];
   buyAvgPrice: number | null;
   sellAvgPrice: number | null;
   matchedQty: number;
   pnl: number | null;
+  buySource: "today" | "holding" | null;
 }> {
   const bySymbol = new Map<string, any[]>();
   for (const o of orders) {
     const sym = o.tradingSymbol || o.symbol || "—";
     if (!bySymbol.has(sym)) bySymbol.set(sym, []);
     bySymbol.get(sym)!.push(o);
+  }
+
+  const holdingBySymbol = new Map<string, number>();
+  for (const h of holdings) {
+    const sym = h.tradingSymbol || h.symbol || "—";
+    const avg = Number(h.avgCostPrice || h.averageBuyPrice || 0);
+    if (avg > 0) holdingBySymbol.set(sym, avg);
   }
 
   const FILLED = new Set(["TRADED", "FILLED", "COMPLETE"]);
@@ -98,13 +109,23 @@ function groupDhanOrdersBySymbol(orders: any[]): Array<{
       if (side === "BUY") { buyQty += qty; buyValue += qty * price; }
       else if (side === "SELL") { sellQty += qty; sellValue += qty * price; }
     }
-    const buyAvgPrice = buyQty > 0 ? buyValue / buyQty : null;
+
+    let buyAvgPrice = buyQty > 0 ? buyValue / buyQty : null;
+    let buySource: "today" | "holding" | null = buyAvgPrice != null ? "today" : null;
+
+    // No BUY today but there was a fill on the SELL side — the shares came
+    // from an existing holding bought earlier, so use its avg cost price.
+    if (buyAvgPrice == null && sellQty > 0 && holdingBySymbol.has(symbol)) {
+      buyAvgPrice = holdingBySymbol.get(symbol)!;
+      buySource = "holding";
+    }
+
     const sellAvgPrice = sellQty > 0 ? sellValue / sellQty : null;
-    const matchedQty = Math.min(buyQty, sellQty);
+    const matchedQty = buySource === "holding" ? sellQty : Math.min(buyQty, sellQty);
     const pnl = (buyAvgPrice != null && sellAvgPrice != null && matchedQty > 0)
       ? (sellAvgPrice - buyAvgPrice) * matchedQty
       : null;
-    out.push({ symbol, orders: symOrders, buyAvgPrice, sellAvgPrice, matchedQty, pnl });
+    out.push({ symbol, orders: symOrders, buyAvgPrice, sellAvgPrice, matchedQty, pnl, buySource });
   }
   return out;
 }
@@ -1726,7 +1747,7 @@ export default function RealAutoTrade() {
                       <p className="font-display tabular-nums text-[11px] text-mist">No orders placed today.</p>
                     ) : (
                       <div className="space-y-3 max-h-60 overflow-y-auto">
-                        {groupDhanOrdersBySymbol(liveDhanOrders).map((grp) => (
+                        {groupDhanOrdersBySymbol(liveDhanOrders, liveHoldings).map((grp) => (
                           <div key={grp.symbol} className="space-y-1.5">
                             {grp.orders.map((o, i) => {
                               const side = o.transactionType || o.side || "";
@@ -1750,7 +1771,8 @@ export default function RealAutoTrade() {
                             })}
                             {grp.pnl != null && (
                               <div className={`font-display tabular-nums text-[10px] px-3 ${grp.pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
-                                {grp.symbol}: bought @ ₹{grp.buyAvgPrice!.toFixed(2)} → sold @ ₹{grp.sellAvgPrice!.toFixed(2)}
+                                {grp.symbol}: bought @ ₹{grp.buyAvgPrice!.toFixed(2)}
+                                {grp.buySource === "holding" ? " (holding)" : ""} → sold @ ₹{grp.sellAvgPrice!.toFixed(2)}
                                 {" "}×{grp.matchedQty} = {grp.pnl >= 0 ? "profit" : "loss"} ₹{Math.abs(grp.pnl).toFixed(2)}
                               </div>
                             )}

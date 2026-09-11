@@ -1,0 +1,282 @@
+# Automatically send the daily scan universe into training between ~12 AM – 6 AM IST
+# and optionally trigger a training run.
+#
+# IST 00:30–05:30 ≈ UTC 19:00–00:00 previous day (UTC+5:30)
+# Uses POST /scan/start (async parallel scan) + status poll — NOT POST /scan
+# (GET /scan is legacy sequential and does not accept POST → was 405).
+
+name: Overnight Universe → Training
+
+on:
+  schedule:
+    - cron: "0 19 * * 1-5"   # 00:30 IST
+    - cron: "0 21 * * 1-5"   # 02:30 IST
+    - cron: "0 23 * * 1-5"   # 04:30 IST
+    - cron: "0 0 * * 2-6"    # 05:30 IST
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force run outside window"
+        required: false
+        default: "true"
+
+jobs:
+  universe-to-training:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Wake services
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+          MARKET_DATA_URL: ${{ secrets.MARKET_DATA_URL }}
+          DECISION_PREDICTION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
+        run: |
+          set +e
+          for url in "$API_GATEWAY_URL" "$MARKET_DATA_URL" "$DECISION_PREDICTION_URL"; do
+            if [ -n "$url" ]; then
+              echo "Waking $url"
+              curl -fsS -m 30 "${url%/}/health?warm=true" || curl -fsS -m 30 "${url%/}/health" || curl -fsS -m 30 "${url%/}/" || true
+            fi
+          done
+          sleep 12
+
+      - name: Start parallel scan + poll until done
+        id: scan
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+        run: |
+          set -euo pipefail
+          GW="${API_GATEWAY_URL%/}"
+          if [ -z "$GW" ]; then
+            echo "API_GATEWAY_URL secret missing"
+            exit 1
+          fi
+
+          echo "Starting scan via POST /scan/start?force_refresh=true&lite=false"
+          START=$(curl -fsS -m 90 -X POST \
+            "$GW/scan/start?force_refresh=true&lite=false" \
+            -H "Content-Type: application/json" || true)
+          echo "start response: $START"
+          echo "$START" > start.json
+
+          TASK_ID=$(python3 -c "import json; d=json.load(open('start.json')); print(d.get('task_id') or d.get('id') or '')" 2>/dev/null || true)
+          if [ -z "$TASK_ID" ]; then
+            echo "No task_id — trying alternate /api/scan/stream is not suitable for batch JSON; falling back to last scan + universe"
+            curl -fsS -m 60 "$GW/scan/last" > scan.json || echo '{}' > scan.json
+            # Merge universe so training never gets empty symbols
+            UNI=$(curl -fsS -m 60 "$GW/scan/universe" || echo '{}')
+            python3 - <<'PY'
+          import json
+          try:
+              scan = json.load(open("scan.json"))
+          except Exception:
+              scan = {}
+          try:
+              uni = json.load(open("/dev/stdin"))
+          except Exception:
+              uni = {}
+          symbols = uni.get("symbols") or uni.get("universe") or []
+          if symbols and not (scan.get("all_results") or scan.get("results") or scan.get("recommendations")):
+              scan["universe"] = symbols
+              scan.setdefault("results", [])
+          json.dump(scan, open("scan.json", "w"))
+          print("fallback scan.json keys:", list(scan.keys()), "universe", len(scan.get("universe") or []))
+          PY
+          <<< "$UNI"
+            exit 0
+          fi
+
+          echo "task_id=$TASK_ID — polling /scan/status until done (max ~90 min)"
+          FINAL="{}"
+          for i in $(seq 1 180); do
+            sleep 30
+            ST=$(curl -fsS -m 45 "$GW/scan/status/$TASK_ID" || echo '{}')
+            echo "poll $i: $(echo "$ST" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status'), d.get('processed'), '/', d.get('total'))" 2>/dev/null || echo raw)"
+            STATUS=$(echo "$ST" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || echo "")
+            if [ "$STATUS" = "done" ] || [ "$STATUS" = "error" ] || [ "$STATUS" = "cancelled" ] || [ "$STATUS" = "unknown" ]; then
+              FINAL="$ST"
+              break
+            fi
+            # keep gateway warm
+            if [ $((i % 6)) -eq 0 ]; then
+              curl -fsS -m 20 "$GW/ops/keepalive" >/dev/null 2>&1 || curl -fsS -m 15 "$GW/health" >/dev/null 2>&1 || true
+            fi
+          done
+
+          echo "$FINAL" > status.json
+          # Normalize into scan.json shape expected by training step
+          python3 << 'PY'
+          import json
+          st = json.load(open("status.json"))
+          result = st.get("result") if isinstance(st.get("result"), dict) else {}
+          rows = (
+              result.get("all_results")
+              or result.get("recommendations")
+              or result.get("results")
+              or st.get("all_results")
+              or st.get("results")
+              or []
+          )
+          out = {
+              "all_results": rows,
+              "results": rows,
+              "recommendations": result.get("recommendations") or rows,
+              "universe": result.get("universe") or [],
+              "scanned": result.get("scanned") or st.get("processed"),
+              "universe_size": result.get("universe_size") or st.get("total"),
+              "status": st.get("status"),
+              "task_id": st.get("task_id"),
+          }
+          # If still empty, try last scan
+          if not rows:
+              try:
+                  last = json.load(open("scan.json")) if False else {}
+              except Exception:
+                  last = {}
+          json.dump(out, open("scan.json", "w"))
+          print("scan.json rows:", len(rows), "status:", out.get("status"))
+          PY
+
+          # If still empty rows, pull /scan/last
+          python3 << 'PY'
+          import json, urllib.request, os
+          data = json.load(open("scan.json"))
+          rows = data.get("all_results") or data.get("results") or []
+          if rows:
+              raise SystemExit(0)
+          gw = os.environ["API_GATEWAY_URL"].rstrip("/")
+          try:
+              with urllib.request.urlopen(gw + "/scan/last", timeout=60) as r:
+                  last = json.loads(r.read().decode())
+          except Exception as e:
+              print("scan/last failed:", e)
+              last = {}
+          res = last.get("result") if isinstance(last.get("result"), dict) else last
+          rows = res.get("all_results") or res.get("results") or res.get("recommendations") or []
+          if rows:
+              data["all_results"] = rows
+              data["results"] = rows
+              data["recommendations"] = res.get("recommendations") or rows
+          uni = res.get("universe") or data.get("universe") or []
+          if uni:
+              data["universe"] = uni
+          json.dump(data, open("scan.json", "w"))
+          print("after last-scan merge rows:", len(data.get("all_results") or []))
+          PY
+
+      - name: Send full universe to training
+        env:
+          DECISION_PREDICTION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+        run: |
+          set -e
+          if [ -z "$DECISION_PREDICTION_URL" ]; then
+            echo "DECISION_PREDICTION_URL secret missing"
+            exit 1
+          fi
+          # Ensure universe list exists even if scan rows thin
+          if [ -n "$API_GATEWAY_URL" ]; then
+            curl -fsS -m 60 "${API_GATEWAY_URL%/}/scan/universe" -o universe.json || echo '{}' > universe.json
+          else
+            echo '{}' > universe.json
+          fi
+          python3 << 'PY'
+          import json, os, urllib.request
+          base = os.environ["DECISION_PREDICTION_URL"].rstrip("/")
+          symbols, decisions, scores = [], {}, {}
+          try:
+              with open("scan.json") as f:
+                  data = json.load(f)
+              rows = data.get("all_results") or data.get("recommendations") or data.get("results") or []
+              for r in rows:
+                  if not isinstance(r, dict):
+                      continue
+                  sym = (r.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "")
+                  if not sym:
+                      continue
+                  symbols.append(sym)
+                  if r.get("decision"):
+                      decisions[sym] = r["decision"]
+                  sc = r.get("combined_score", r.get("score"))
+                  if isinstance(sc, (int, float)):
+                      scores[sym] = float(sc)
+              for s in data.get("universe") or []:
+                  u = str(s).upper().replace(".NS", "").replace(".BO", "")
+                  if u and u not in symbols:
+                      symbols.append(u)
+          except Exception as e:
+              print("Could not parse scan.json:", e)
+              data = {}
+
+          try:
+              uni = json.load(open("universe.json"))
+              for s in uni.get("symbols") or uni.get("universe") or []:
+                  u = str(s).upper().replace(".NS", "").replace(".BO", "")
+                  if u and u not in symbols:
+                      symbols.append(u)
+          except Exception as e:
+              print("universe.json:", e)
+
+          if not symbols:
+              print("No symbols found – skip ingest")
+              raise SystemExit(0)
+
+          payload = {
+              "symbols": symbols,
+              "decisions": decisions,
+              "scores": scores,
+              "source": "daily_scan",
+              "retention_hours": 48,
+              "trigger_training": True,
+          }
+          url = f"{base}/training/api/universe/train-from-universe"
+          req = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=120) as resp:
+                  print("Ingest response:", resp.read().decode())
+          except Exception as e:
+              print("Primary ingest failed:", e)
+              # Fallback ingest path
+              url2 = f"{base}/api/universe/train-from-universe"
+              req2 = urllib.request.Request(
+                  url2,
+                  data=json.dumps(payload).encode(),
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(req2, timeout=120) as resp:
+                      print("Ingest fallback:", resp.read().decode())
+              except Exception as e2:
+                  print("Ingest fallback failed:", e2)
+          PY
+
+      - name: Purge expired samples
+        env:
+          DECISION_PREDICTION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
+        run: |
+          if [ -n "$DECISION_PREDICTION_URL" ]; then
+            D="${DECISION_PREDICTION_URL%/}"
+            curl -fsS -m 30 -X DELETE \
+              "$D/training/api/universe/purge-expired" || \
+            curl -fsS -m 30 -X DELETE \
+              "$D/api/universe/purge-expired" || true
+          fi
+
+      - name: Evaluate T+1 and T+5 outcomes (closed-loop fuel)
+        env:
+          DECISION_PREDICTION_URL: ${{ secrets.DECISION_PREDICTION_URL }}
+        run: |
+          set +e
+          D="${DECISION_PREDICTION_URL%/}"
+          [ -z "$D" ] && exit 0
+          curl -fsS -m 30 "$D/health" || true
+          sleep 8
+          curl -fsS -m 180 -X POST "$D/training/api/evaluate/t1?max_batch=80" || curl -fsS -m 180 -X POST "$D/api/evaluate/t1?max_batch=80" || true
+          sleep 5
+          curl -fsS -m 180 -X POST "$D/training/api/evaluate/t5?max_batch=80" || curl -fsS -m 180 -X POST "$D/api/evaluate/t5?max_batch=80" || true

@@ -103,6 +103,14 @@ NEWS_URL = os.getenv("NEWS_URL", f"{_AI.rstrip('/')}/news")
 MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
 TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_AI.rstrip('/')}/technical")
 FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_AI.rstrip('/')}/fundamental")
+# 2026-09-11: base URL for the overnight-orchestrator proxy routes below —
+# same service as NOTIFICATION_URL, different sub-app mount (scheduler/
+# main.py is mounted at /scheduler, not /notification — see that service's
+# main.py).
+_NS_BASE = _NS.rstrip('/')
+if _NS_BASE.endswith("/notification"):
+    _NS_BASE = _NS_BASE[: -len("/notification")]
+SCHEDULER_URL = os.getenv("SCHEDULER_URL", f"{_NS_BASE}/scheduler")
 EVENT_URL = os.getenv("EVENT_URL", f"{_AI.rstrip('/')}/event")
 PREDICTION_URL = os.getenv("PREDICTION_URL", f"{_DP.rstrip('/')}/prediction")
 
@@ -8628,6 +8636,67 @@ async def ops_circuit_status():
     try:
         from circuit_breaker import all_snapshots
         return {"ok": True, "breakers": all_snapshots()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
+# ── Overnight orchestrator proxy (2026-09-11) ────────────────────────────────
+# Thin proxy to notification-scheduler-service's /scheduler/overnight/*
+# routes (see that service's scheduler/overnight_orchestrator.py) so the
+# frontend Settings page only ever needs to know about api-gateway, the
+# same way it already reaches every other backend feature — it never needs
+# its own separate stored URL for the scheduler service the way real-trade
+# does (that one's a different trust boundary; this one isn't).
+@app.get("/ops/overnight/status")
+async def ops_overnight_status():
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(f"{SCHEDULER_URL}/overnight/status")
+            return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
+@app.get("/ops/overnight/config")
+async def ops_overnight_get_config():
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(f"{SCHEDULER_URL}/overnight/config")
+            return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
+@app.post("/ops/overnight/config")
+async def ops_overnight_set_config(
+    enabled: Optional[bool] = None,
+    datafeed_time: Optional[str] = None,
+    premarket_time: Optional[str] = None,
+    rest_between_steps_sec: Optional[int] = None,
+):
+    try:
+        params = {}
+        if enabled is not None:
+            params["enabled"] = enabled
+        if datafeed_time is not None:
+            params["datafeed_time"] = datafeed_time
+        if premarket_time is not None:
+            params["premarket_time"] = premarket_time
+        if rest_between_steps_sec is not None:
+            params["rest_between_steps_sec"] = rest_between_steps_sec
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(f"{SCHEDULER_URL}/overnight/config", params=params)
+            return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
+@app.post("/ops/overnight/run")
+async def ops_overnight_run(phase: str = "datafeed"):
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(f"{SCHEDULER_URL}/overnight/run", params={"phase": phase})
+            return r.json()
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}
 

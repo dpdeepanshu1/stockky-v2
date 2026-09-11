@@ -169,8 +169,12 @@ services:
       ORACLE_WALLET_PASSWORD: ${ORACLE_WALLET_PASSWORD:-}
       ORACLE_WALLET_DIR: /oracle_wallet
       TNS_ADMIN: /oracle_wallet
+      # 2026-09-11: overnight orchestrator's enabled/schedule toggle
+      # persists here -- see overnight_orchestrator.py's module docstring.
+      SCHEDULER_STATE_DIR: /data
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
+      - ./data/scheduler-state:/data
     depends_on:
       - api-gateway
     restart: unless-stopped

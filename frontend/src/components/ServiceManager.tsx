@@ -26,6 +26,25 @@ const DESCRIPTIONS: Record<string, string> = {
   "fundamental-analysis": "Fundamentals + peer relative.",
 };
 
+// 2026-09-11 fix — user report: "Reset failure button not working well
+// yesterday, I use it but not work well nothing happen." Root cause: none
+// of the three fetch() calls in handleReset() below had a timeout. The
+// button exists specifically to recover from a broken api-gateway — but
+// that's exactly the situation where a plain fetch() to it can hang for a
+// long time (TCP connects, server just never responds) instead of failing
+// fast, leaving the button stuck on "Resetting…" with no visible result —
+// which looks exactly like "nothing happened". Every fetch below is now
+// bounded so the button always resolves within a few seconds either way.
+async function fetchWithTimeout(url: string, opts: RequestInit, timeoutMs = 8000): Promise<Response> {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 export default function ServiceManager({ onClose }: ServiceManagerProps) {
   const [services, setServices] = useState<Record<string, SystemServiceStatus>>({});
   const [loading, setLoading] = useState(true);
@@ -113,10 +132,10 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
 
     // 1. Reset api-gateway circuit breakers
     try {
-      const resp = await fetch(apiUrl("/ops/circuit-reset"), {
+      const resp = await fetchWithTimeout(apiUrl("/ops/circuit-reset"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-      });
+      }, 8000);
       const data = await resp.json().catch(() => ({}));
       if (data?.ok) {
         results.push(`✅ Api Gateway: reset ${data.count ?? "?"} breaker(s)`);
@@ -125,7 +144,8 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
         anyFailed = true;
       }
     } catch (e: any) {
-      results.push(`❌ Api Gateway: ${e?.message ?? "unreachable"}`);
+      const timedOut = e?.name === "AbortError";
+      results.push(`❌ Api Gateway: ${timedOut ? "timed out (8s) — still down" : (e?.message ?? "unreachable")}`);
       anyFailed = true;
     }
 
@@ -133,23 +153,24 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
     try {
       const rtBase = getRealTradeApiUrl().replace(/\/$/, "");
       const token = sessionStorage.getItem("rt_token") || localStorage.getItem("rt_token") || "";
-      const resp2 = await fetch(`${rtBase}/resilience/reset`, {
+      const resp2 = await fetchWithTimeout(`${rtBase}/resilience/reset`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      });
+      }, 8000);
       const data2 = await resp2.json().catch(() => ({}));
       if (data2?.ok) {
         results.push(`✅ Real Trade: reset ${data2.count ?? "?"} breaker(s)`);
       } else {
         results.push(`⚠️ Real Trade: ${data2?.detail ?? "skipped (no token)"}`);
       }
-    } catch {
-      results.push("⚠️ Real Trade reset: skipped (not reachable)");
+    } catch (e: any) {
+      const timedOut = e?.name === "AbortError";
+      results.push(`⚠️ Real Trade reset: ${timedOut ? "timed out (8s)" : "skipped (not reachable)"}`);
     }
 
     // 3. Keepalive ping to wake market-data-service
     try {
-      await fetch(apiUrl("/ops/keepalive"), { method: "GET" });
+      await fetchWithTimeout(apiUrl("/ops/keepalive"), { method: "GET" }, 8000);
       results.push("✅ Keepalive ping sent");
     } catch {
       results.push("⚠️ Keepalive ping failed (non-critical)");

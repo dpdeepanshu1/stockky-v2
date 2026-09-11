@@ -133,6 +133,53 @@ def symbol_master_sync_status():
         return {"ok": False, "error": str(e)[:300]}
 
 
+# ── Overnight orchestrator (2026-09-11) — see overnight_orchestrator.py's
+# module docstring. Replaces the Render-era premarket/midnight GitHub
+# Actions workflows now that this stack runs 24/7 on Oracle. ────────────────
+@app.get("/overnight/status")
+def overnight_status():
+    from overnight_orchestrator import get_status
+    return get_status()
+
+
+@app.get("/overnight/config")
+def overnight_get_config():
+    from overnight_orchestrator import load_config
+    return load_config()
+
+
+@app.post("/overnight/config")
+def overnight_set_config(
+    enabled: Optional[bool] = None,
+    datafeed_time: Optional[str] = None,
+    premarket_time: Optional[str] = None,
+    rest_between_steps_sec: Optional[int] = None,
+):
+    """Settings-page toggle + schedule editor. All fields optional — only
+    the ones passed are changed."""
+    from overnight_orchestrator import save_config
+    patch = {}
+    if enabled is not None:
+        patch["enabled"] = enabled
+    if datafeed_time is not None:
+        patch["datafeed_time"] = datafeed_time
+    if premarket_time is not None:
+        patch["premarket_time"] = premarket_time
+    if rest_between_steps_sec is not None:
+        patch["rest_between_steps_sec"] = rest_between_steps_sec
+    return {"ok": True, "config": save_config(patch)}
+
+
+@app.post("/overnight/run")
+def overnight_run(phase: str = "datafeed"):
+    """Manual 'run now' button — bypasses the enabled toggle and the
+    scheduled time entirely, same phases the nightly loop runs."""
+    from overnight_orchestrator import start_phase_background
+    if phase not in ("datafeed", "premarket"):
+        return {"ok": False, "error": "phase must be 'datafeed' or 'premarket'"}
+    return start_phase_background(phase)
+
+
 @app.on_event("startup")
 async def start_loop():
     global _task
@@ -155,3 +202,10 @@ async def start_loop():
         logger.info("scheduler neon keep-alive started (%ss)", _NEON_INTERVAL)
     except Exception as e:
         logger.warning("scheduler loop start failed: %s", e)
+
+    try:
+        from overnight_orchestrator import scheduling_loop
+        asyncio.create_task(scheduling_loop())
+        logger.info("scheduler: overnight orchestrator loop started")
+    except Exception as e:
+        logger.warning("overnight orchestrator loop start failed: %s", e)

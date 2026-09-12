@@ -20,8 +20,23 @@
 | — | Super Order exit reconciliation monitor | ✅ DONE (this session) | `orders/reconcile.py` — polls `dhan_client.get_super_order_list()` every trading-loop tick (runs even while disarmed), detects TARGET_LEG/STOP_LOSS_LEG fills + dead ENTRY_LEG rejections, closes the `ScalpPosition` row, calls `ledger.release_capital()`. Wired into `main.py`'s `_trading_loop()` (runs first, before the armed-gate check) and exposed as `POST /reconcile` for an on-demand pass. **Fill-price extraction on the exit legs is a best-effort guess** (Dhan's public sample payload doesn't show `averageTradedPrice` on nested `legDetails` entries) — flagged loudly in the module docstring; eyeball the first few real TARGET_HIT/STOP_HIT rows against Dhan's own app. |
 | 8 | Frontend "Position Stocks" tab | ✅ DONE (this session) | `frontend/src/positionStocksApi.ts` (own client/own localStorage URL key, mirrors `realTradeApi.ts`'s isolation pattern) + `frontend/src/components/PositionStocksTab.tsx` (armed/market/WS/kill-switch strip, arm/disarm/kill/sync/reconcile buttons, capital ledger card, 5m/15m/60m screener grouped view, open + closed-today position lists). Wired into `App.tsx`: new `"positionstocks"` tab, nav item (📈 Position Stocks), command-palette entry. |
 | 9 | RISK_PER_TRADE_PCT from user | ✅ DONE | **User confirmed 2%.** `config.py`: `RISK_PER_TRADE_PCT=2.0`, `RISK_PER_TRADE_PCT_CONFIRMED=True`. Startup warning and frontend banner no longer fire. |
+| 10 | Master module enable/disable toggle | ✅ DONE (session 4) | `models.py`: `ScalpGateState.service_enabled` (default True), independent of `is_armed`. `main.py`: `POST /service/enable`, `POST /service/disable`, `service_enabled` added to `/status`. Frontend: "Module" status tile + Enable/Pause buttons in `PositionStocksTab.tsx`. Reconciliation + EOD squareoff ignore this flag by design (§3.7 "no exceptions"). |
+| 11 | 1-minute screening window | ✅ DONE (session 4) | `config.py`: `SCAN_WINDOWS_MINUTES = [1, 5, 15, 60]`, `MIN_PCT_CHANGE_1M` (default 0.5%). `screening/engine.py`: `_WINDOW_THRESHOLDS` now has a 4th entry, feeds the same composite-ranking step. Frontend: window filter + grouped screener view both include "1m" (grid widened to 4 cols). |
 
----
+### Deploy fixes applied (carried over from session 3, confirmed intact in this zip)
+- `requirements.txt`: `python-oracledb` → `oracledb==2.5.1` (invalid package name fixed).
+- `docker-compose.yml`: added the missing `${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro`
+  volume mount plus explicit `ORACLE_WALLET_DIR`/`TNS_ADMIN` env vars (was causing `DPY-4026` on boot).
+- `RISK_PER_TRADE_PCT=2.0` / `RISK_PER_TRADE_PCT_CONFIRMED=true` set directly in the compose block.
+
+### Bug fixed this session (found while wiring the toggle in)
+- `main.py`'s trading loop previously checked `gate.is_armed` *before* the EOD squareoff
+  check, so a disarmed service with open positions would silently skip the hard 3:00 PM
+  flat sweep — exactly the case tracking doc §3.7 ("no exceptions") exists to prevent.
+  Reordered: reconciliation → EOD squareoff check (both now fully unconditional) →
+  `service_enabled` gate → `is_armed` gate → screening/entry.
+
+
 
 ## Files created this session
 
@@ -135,15 +150,24 @@ see the table above for those.
 
 ## Next steps (in priority order)
 
-1. **First live Super Order** — with `FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE=true` (default),
-   arm the service during market hours and watch the very first real entry fire at
-   qty=1. Confirm the fill shape matches expectations, then flip the override off.
-   This is the only step left that genuinely requires the live deployed VM + market
-   hours — it can't be done from a sandbox.
-2. Run `cd frontend && npm install && npm run build` once on the VM to get a real,
-   fully-resolved build (belt-and-suspenders after session 3's syntax/type checks).
-3. Watch the first few real TARGET_HIT/STOP_HIT exits and cross-check `realized_pnl`
+1. **Check `scalp_gate_state` for the migration caveat** (see §3.11 in TRACKING.md) —
+   if any prior boot got far enough to create tables before crashing, the new
+   `service_enabled` column needs a manual `ALTER TABLE`. Otherwise `create_all()`
+   creates it correctly on first successful boot; no action needed.
+2. **Redeploy and confirm clean boot** — this is the first deploy attempt since the
+   `DPY-4026`/`oracledb` fixes from session 3; nothing has been confirmed booting
+   successfully yet. Watch for `init_tables()` completing and the WS client connecting.
+3. **First live Super Order** — with `FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE=true` (default),
+   arm the service during market hours (and make sure the module is enabled — new in
+   session 4, defaults to enabled) and watch the very first real entry fire at qty=1.
+   Confirm the fill shape matches expectations, then flip the override off. This is the
+   only step left that genuinely requires the live deployed VM + market hours.
+4. Run `cd frontend && npm install && npm run build` once on the VM to get a real,
+   fully-resolved build (belt-and-suspenders after session 3/4's syntax/type checks).
+5. Watch the first few real TARGET_HIT/STOP_HIT exits and cross-check `realized_pnl`
    against Dhan's own order history (open item #3, exit-leg fill price).
+6. Once live, watch how often the new 1m window actually fires vs. 5m/15m/60m —
+   tune `MIN_PCT_CHANGE_1M` up if it's mostly noise (§3.12 flags this as likely).
 
 ---
 
@@ -152,3 +176,8 @@ see the table above for those.
 Attach `TRACKING.md` + the latest repo zip in a new conversation.
 Everything needed to continue is captured here — no re-derivation needed. Just say
 which of the "Next steps" above to continue from, or describe what's changed.
+
+Each time you come back to this project, expect this loop: read this file +
+TRACKING.md first, report back what's done vs. what's next in plain terms, then work
+through the next step(s) and hand back an updated zip in the same structure —
+repeating step by step rather than dumping everything at once.

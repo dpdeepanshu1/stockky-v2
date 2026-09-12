@@ -12,7 +12,7 @@ import {
   type ScalpStatus, type ScalpPositionRow, type ScalpCandidateRow, type ScalpLedgerState,
 } from "../positionStocksApi";
 
-type Window = "5m" | "15m" | "60m";
+type Window = "1m" | "5m" | "15m" | "60m";
 
 function fmtInr(n: number | null | undefined, decimals = 0): string {
   if (n == null || Number.isNaN(n)) return "—";
@@ -76,7 +76,7 @@ export default function PositionStocksTab() {
 
   const saveApiUrl = () => { setPositionStocksApiUrl(apiUrlInput); void loadAll(); };
 
-  const doAction = async (action: "arm" | "disarm" | "kill" | "sync" | "reconcile") => {
+  const doAction = async (action: "arm" | "disarm" | "kill" | "sync" | "reconcile" | "service_enable" | "service_disable") => {
     setBusy(action); setError(null);
     try {
       if (action === "arm") await positionStocksApi.arm();
@@ -84,6 +84,8 @@ export default function PositionStocksTab() {
       else if (action === "kill") { await positionStocksApi.kill(); setConfirmKill(false); }
       else if (action === "sync") await positionStocksApi.syncLedger();
       else if (action === "reconcile") await positionStocksApi.reconcile();
+      else if (action === "service_enable") await positionStocksApi.serviceEnable();
+      else if (action === "service_disable") await positionStocksApi.serviceDisable();
       await loadAll();
     } catch (e: any) {
       setError(e?.message || `${action} failed`);
@@ -97,7 +99,7 @@ export default function PositionStocksTab() {
     [candidates, windowFilter]
   );
   const grouped = useMemo(() => {
-    const g: Record<Window, ScalpCandidateRow[]> = { "5m": [], "15m": [], "60m": [] };
+    const g: Record<Window, ScalpCandidateRow[]> = { "1m": [], "5m": [], "15m": [], "60m": [] };
     for (const c of filteredCandidates) g[c.window]?.push(c);
     return g;
   }, [filteredCandidates]);
@@ -138,7 +140,7 @@ export default function PositionStocksTab() {
       )}
 
       {/* ── Top control strip ── */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
         <div className="bg-graphite border border-slate rounded-2xl p-3">
           <p className="text-[9px] text-mist uppercase tracking-widest mb-1">Armed</p>
           <p className={`font-display tabular-nums font-bold text-sm ${status?.armed ? "text-signal-buy" : "text-signal-avoid"}`}>
@@ -163,9 +165,31 @@ export default function PositionStocksTab() {
             {status?.daily_loss_kill_switch ? "TRIPPED" : "clear"}
           </p>
         </div>
+        <div className="bg-graphite border border-slate rounded-2xl p-3">
+          <p className="text-[9px] text-mist uppercase tracking-widest mb-1">Module</p>
+          <p className={`font-display tabular-nums font-bold text-sm ${status?.service_enabled ? "text-signal-buy" : "text-signal-avoid"}`}>
+            {status?.service_enabled ? "ENABLED" : "PAUSED"}
+          </p>
+        </div>
       </div>
 
+      {status && !status.service_enabled && (
+        <div className="rounded-xl border border-signal-avoid/40 bg-signal-avoid/10 px-3 py-2 font-display tabular-nums text-[11px] text-signal-avoid">
+          Module paused — screening and new entries are stopped. Exit reconciliation and the 3:00 PM EOD square-off keep running for any open positions.
+        </div>
+      )}
+
       <div className="flex flex-wrap gap-2">
+        <button
+          disabled={busy !== null || status?.service_enabled}
+          onClick={() => doAction("service_enable")}
+          className="px-4 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 font-display tabular-nums text-xs text-signal-buy disabled:opacity-40"
+        >{busy === "service_enable" ? "Enabling…" : "Enable Module"}</button>
+        <button
+          disabled={busy !== null || !status?.service_enabled}
+          onClick={() => doAction("service_disable")}
+          className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-paper disabled:opacity-40"
+        >{busy === "service_disable" ? "Pausing…" : "Pause Module"}</button>
         <button
           disabled={busy !== null || status?.armed}
           onClick={() => doAction("arm")}
@@ -235,7 +259,7 @@ export default function PositionStocksTab() {
         <div className="flex items-center justify-between mb-2">
           <p className="dash-section-title">Live Screener</p>
           <div className="flex gap-1">
-            {(["all", "5m", "15m", "60m"] as const).map(w => (
+            {(["all", "1m", "5m", "15m", "60m"] as const).map(w => (
               <button
                 key={w}
                 onClick={() => setWindowFilter(w)}
@@ -247,8 +271,8 @@ export default function PositionStocksTab() {
           </div>
         </div>
         {windowFilter === "all" ? (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {(["5m", "15m", "60m"] as Window[]).map(w => (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {(["1m", "5m", "15m", "60m"] as Window[]).map(w => (
               <div key={w}>
                 <p className="text-[9px] text-mist uppercase tracking-widest mb-1">{w} window</p>
                 <CandidateList rows={grouped[w]} />

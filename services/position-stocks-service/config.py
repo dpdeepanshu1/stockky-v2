@@ -83,7 +83,11 @@ ANGELONE_WS_RECONNECT_BACKOFF_MAX_S = _get_float(
 SCAN_UNIVERSE_SOURCE = os.getenv("SCAN_UNIVERSE_SOURCE", "all_nse_eq")
 
 # ── Screening windows ────────────────────────────────────────────────────────
-SCAN_WINDOWS_MINUTES = [5, 15, 60]
+SCAN_WINDOWS_MINUTES = [1, 5, 15, 60]
+# 1m added 2026-09-12: a much shorter/noisier window than 5m, so its
+# threshold defaults meaningfully lower than 5m's — tune via env once you've
+# seen how much noise vs. signal it surfaces in practice.
+MIN_PCT_CHANGE_1M = _get_float("MIN_PCT_CHANGE_1M", 0.5)
 MIN_PCT_CHANGE_5M = _get_float("MIN_PCT_CHANGE_5M", 1.0)
 MIN_PCT_CHANGE_15M = _get_float("MIN_PCT_CHANGE_15M", 1.5)
 MIN_PCT_CHANGE_60M = _get_float("MIN_PCT_CHANGE_60M", 2.5)

@@ -8,19 +8,34 @@ Lifecycle:
     3. Warn loudly if RISK_PER_TRADE_PCT_CONFIRMED=false
   background loop (every 10s during market hours):
     4. Reconcile exits — poll Dhan's super order book for TARGET_LEG/
-       STOP_LOSS_LEG fills on OPEN positions, release capital (runs even
-       while disarmed, so exits already in flight are never orphaned)
-    5. Run screening scan
-    6. Attempt entry on top candidate(s)
-    7. Check EOD squareoff gate at 3:00 PM IST
+       STOP_LOSS_LEG fills on OPEN positions, release capital (runs
+       unconditionally — regardless of service_enabled/is_armed — so
+       exits already in flight are never orphaned)
+    5. EOD squareoff check at 3:00 PM IST — ALSO unconditional (2026-09-12
+       fix: previously this only ran if gate.is_armed was True, meaning a
+       disarmed service with open positions would silently skip the hard
+       flat-by-3pm sweep — the exact "no exceptions" case tracking doc §3.7
+       exists to prevent. Moved ahead of both the service_enabled and
+       is_armed checks below.)
+    6. service_enabled gate — if the whole module is toggled off
+       (POST /service/disable), screening + entry stop here; reconciliation
+       and EOD squareoff above still ran.
+    7. is_armed gate — if not armed, screening still stops here too (no
+       point scanning if entries can't fire), but EOD/reconciliation above
+       already ran regardless.
+    8. Run screening scan (now across 1m/5m/15m/60m windows)
+    9. Attempt entry on top candidate(s)
   shutdown:
-    7. Stop WS client gracefully
+    stop WS client gracefully
 
 API endpoints:
   GET  /health                       — liveness probe
   GET  /status                       — full state dump
   POST /arm                          — arm the service (enable real orders)
   POST /disarm                       — disarm
+  POST /service/enable                — re-enable the whole module (screening+entries)
+  POST /service/disable               — pause the whole module (screening+entries);
+                                          exit reconciliation + EOD squareoff still run
   GET  /positions                    — open scalp positions
   GET  /candidates                   — latest screener output (no entry)
   GET  /ledger                       — capital ledger state
@@ -134,15 +149,23 @@ async def _trading_loop() -> None:
                     logger.error("position-stocks: reconciliation error: %s", e, exc_info=True)
 
                 gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
-                if gate is None or not gate.is_armed:
-                    continue
 
-                # EOD squareoff gate
+                # EOD squareoff gate — unconditional (2026-09-12 fix): this used
+                # to sit after the is_armed check below, so a disarmed service
+                # with open positions silently skipped the hard 3pm flat sweep.
+                # Runs regardless of service_enabled/is_armed, same reasoning as
+                # exit reconciliation above — see main.py's module docstring.
                 today = ist_today_str()
                 eod_fired = gate and gate.eod_squareoff_fired_date == today
                 if ist_time_at_or_after(_EOD_SQUAREOFF_TIME) and not eod_fired:
                     logger.info("position-stocks: EOD squareoff time reached — running sweep")
                     eod_squareoff.run_eod_squareoff(db)
+                    continue
+
+                if gate is None or not gate.service_enabled:
+                    continue
+
+                if not gate.is_armed:
                     continue
 
                 # Don't enter new positions after EOD squareoff time
@@ -200,6 +223,7 @@ def status(db: Session = Depends(get_db)):
     return {
         "armed": gate.is_armed,
         "armed_at": gate.armed_at,
+        "service_enabled": gate.service_enabled,
         "first_live_order_done": gate.first_live_order_done,
         "orders_placed_today": gate.orders_placed_today,
         "daily_loss_kill_switch": gate.daily_loss_kill_switch_tripped,
@@ -231,6 +255,32 @@ def disarm(db: Session = Depends(get_db)):
     db.commit()
     logger.warning("position-stocks-service: DISARMED")
     return {"status": "disarmed"}
+
+
+@app.post("/service/enable")
+def service_enable(db: Session = Depends(get_db)):
+    """Re-enable the whole module (screening + entries). Independent of
+    is_armed — this only controls whether the module runs at all, not
+    whether it's allowed to place real orders once running."""
+    gate = _get_gate(db)
+    gate.service_enabled = True
+    db.commit()
+    logger.warning("position-stocks-service: module ENABLED (service_enabled=true)")
+    return {"status": "enabled"}
+
+
+@app.post("/service/disable")
+def service_disable(db: Session = Depends(get_db)):
+    """Pause the whole module (screening + entries stop). Exit
+    reconciliation and the EOD square-off sweep keep running regardless —
+    open real-money positions are never left unmanaged just because the
+    module is toggled off (tracking doc §3.7: "no exceptions")."""
+    gate = _get_gate(db)
+    gate.service_enabled = False
+    db.commit()
+    logger.warning("position-stocks-service: module DISABLED (service_enabled=false) — "
+                    "reconciliation + EOD squareoff still active")
+    return {"status": "disabled"}
 
 
 @app.post("/kill")

@@ -109,13 +109,34 @@ class ScalpGateState(Base):
     """Single-row-per-mode operational state: armed/disarmed, EOD sweep
     fired-today guard, daily-loss kill-switch tripped flag. Mirrors
     real-trade-service's own gate-state-machine pattern (main.py's
-    _check_and_expire_gates) at a much smaller scale."""
+    _check_and_expire_gates) at a much smaller scale.
+
+    service_enabled (added 2026-09-12) is a coarser, separate switch from
+    is_armed: is_armed only gates whether real orders can be PLACED;
+    service_enabled gates the whole module — screening AND entries — and
+    is checked independently in main.py's trading loop, so you can pause
+    Position Stocks entirely (maintenance, ruling it out while debugging
+    something else) without losing/re-setting the is_armed flag. Defaults
+    to True so existing/fresh rows behave exactly as before this field
+    existed. Exit reconciliation and the EOD square-off sweep intentionally
+    ignore this flag (and is_armed) — open real-money positions must never
+    be left unmanaged just because the module is toggled off (tracking doc
+    §3.7: "no exceptions").
+
+    NOTE: SQLAlchemy's create_all() only creates missing TABLES, never
+    ALTERs existing ones — if scalp_gate_state already exists in a live DB
+    without this column, it needs a manual
+    `ALTER TABLE scalp_gate_state ADD service_enabled NUMBER(1) DEFAULT 1` (Oracle)
+    or `... ADD COLUMN service_enabled BOOLEAN DEFAULT TRUE` (Postgres) before
+    the next deploy — see STATUS.md's Next steps.
+    """
     __tablename__ = "scalp_gate_state"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     mode = Column(String(8), nullable=False, unique=True, default="REAL")
     is_armed = Column(Boolean, nullable=False, default=False)
     armed_at = Column(DateTime, nullable=True)
+    service_enabled = Column(Boolean, nullable=False, default=True)
     eod_squareoff_fired_date = Column(String(10), nullable=True)  # 'YYYY-MM-DD'
     daily_loss_kill_switch_tripped = Column(Boolean, nullable=False, default=False)
     daily_loss_kill_switch_tripped_date = Column(String(10), nullable=True)

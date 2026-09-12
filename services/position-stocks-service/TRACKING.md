@@ -1,10 +1,10 @@
 # Position Stocks — Project Tracking Document
 **Purpose of this doc:** continuity anchor. If chat context/limits reset, attach this doc + the latest Stockky zip in a new conversation and work continues from exactly here — nothing re-derived from scratch.
 
-**Last updated:** 2026-09-12 (session 3)
-**Status:** All of §5 (steps 1–9) now complete — the last open item, risk-per-trade %,
-is confirmed at **2%** (§3.5/§5.9). One deploy-blocking bug found and fixed this
-session (see §7). Not yet smoke-tested against a live Dhan/Angel One session. User
+**Last updated:** 2026-09-12 (session 4)
+**Status:** All of §5 (steps 1–9) complete; two new items added and completed this
+session (§5.10, §5.11 — master module enable/disable toggle, 1-minute screening
+window). Still not yet smoke-tested against a live Dhan/Angel One session. User
 wants to go straight to REAL money live testing (no DEMO/paper phase) once deployed —
 see STATUS.md for the full up-to-date checklist and next steps; this file stays the
 static architecture record, STATUS.md is the living progress tracker.
@@ -95,6 +95,43 @@ constant per trade.
 ### 3.10 Rollout
 - **User's explicit choice: go straight to REAL money, live market, no DEMO/paper phase** — based on weeks of hands-on trust with `real-trade-service`. Risk flagged once (new untested order-type path); proceeding per user's decision.
 
+### 3.11 Master module toggle — ✅ implemented (session 4)
+- New `ScalpGateState.service_enabled` (default `True`), independent of `is_armed`.
+- `is_armed` only gates whether real orders can be **placed**; `service_enabled` gates
+  the **whole module** — screening and entries both stop when it's off — so the
+  service can be paused entirely (maintenance, ruling it out while debugging
+  something unrelated) without losing/re-setting the arm state.
+- New endpoints `POST /service/enable` / `POST /service/disable`, surfaced in
+  `/status` as `service_enabled`, and in the frontend as a "Module" status tile +
+  Enable/Pause buttons on `PositionStocksTab.tsx`.
+- Exit reconciliation and the EOD square-off sweep **ignore this flag** (and
+  `is_armed`) by design — open real-money positions must never be left unmanaged
+  just because the module is toggled off (§3.7's "no exceptions" rule).
+- **Ordering fix, same session:** `main.py`'s trading loop previously ran the EOD
+  squareoff check *after* the `is_armed` check, meaning a disarmed service with open
+  positions would silently skip the hard 3pm flat sweep. Moved EOD squareoff (and
+  reconciliation, already unconditional) ahead of both the `service_enabled` and
+  `is_armed` gates.
+- **Migration note:** SQLAlchemy's `create_all()` only creates missing tables, never
+  ALTERs existing ones. If `scalp_gate_state` already exists in the deployed DB
+  (i.e. a prior boot got far enough to run `init_tables()` before crashing), it needs
+  a manual `ALTER TABLE scalp_gate_state ADD service_enabled NUMBER(1) DEFAULT 1`
+  (Oracle) before this deploys cleanly. Per §7's deploy log, no boot has gotten past
+  `init_tables()` successfully yet, so this is very likely a non-issue — but check the
+  table before redeploying, just in case.
+
+### 3.12 1-minute screening window — ✅ implemented (session 4)
+- Added as a 4th window alongside 5m/15m/60m: `SCAN_WINDOWS_MINUTES = [1, 5, 15, 60]`,
+  `config.MIN_PCT_CHANGE_1M` (default 0.5%, meaningfully lower than 5m's 1.0% since a
+  1-minute move needs less %-change to be notable).
+- Intentionally the noisiest/fastest-triggering window — most likely to fire on a
+  single flickering tick rather than real momentum. Threshold is a starting point;
+  tune based on what it actually surfaces once live.
+- Feeds the same composite-score ranking step as the other three windows — no
+  special-casing in the entry/capital-sizing path.
+- Frontend: `PositionStocksTab.tsx`'s window filter and grouped screener view both
+  updated to include "1m" (grid widened to 4 columns to fit it).
+
 ---
 
 ## 4. DB objects (built)
@@ -116,7 +153,11 @@ constant per trade.
 6. ✅ `ScalpCapitalLedger` + 50/50 enforcement logic.
 7. ✅ 3:00 PM square-off sweep. Exit-reconciliation monitor (`orders/reconcile.py`) also built (polls Dhan's super order book for TARGET_LEG/STOP_LOSS_LEG fills, closes positions + releases capital automatically). Shared Dhan order-rate guard (§3.8) — **built this session**, no longer deferred.
 8. ✅ "Position Stocks" frontend tab.
-9. ✅ Risk-per-trade % — **confirmed by user: 2%.** No open items left in §5.
+9. ✅ Risk-per-trade % — **confirmed by user: 2%.**
+10. ✅ Master module enable/disable toggle (§3.11) — `service_enabled`, `/service/enable`,
+    `/service/disable`, frontend Module tile + buttons.
+11. ✅ 1-minute screening window (§3.12) — 4th window alongside 5m/15m/60m, own threshold,
+    wired through screener + frontend. No open items left in §5.
 
 ---
 

@@ -2,13 +2,19 @@
 screening/engine.py — in-memory rolling-window screener.
 
 Consumes ticks from feed/ws_client.py ring buffers.
-Computes rolling pct-change over 5m/15m/60m windows O(1) per tick
+Computes rolling pct-change over 1m/5m/15m/60m windows O(1) per tick
 (scan the deque backward until we find the reference price at the window
 boundary — no DB read on the hot path).
 
-Runs ALL THREE windows simultaneously and feeds one shared ranking step
+Runs ALL FOUR windows simultaneously and feeds one shared ranking step
 (composite score) so the best candidate wins regardless of which window
-surfaced it.
+surfaced it. The 1m window (added 2026-09-12) is intentionally the
+noisiest/fastest-triggering of the four — its own threshold
+(config.MIN_PCT_CHANGE_1M) defaults meaningfully lower than 5m's to
+reflect that a 1-minute move needs a smaller %-change to be notable than
+a 5-minute one, but it's also the window most likely to fire on a single
+flickering tick rather than real momentum — tune its threshold based on
+what it actually surfaces in practice.
 
 Gates applied per candidate:
   1. Min pct-change per window (config.MIN_PCT_CHANGE_*M)
@@ -39,6 +45,7 @@ logger = logging.getLogger("position-stocks-screener")
 
 # Per-window thresholds keyed by window minutes
 _WINDOW_THRESHOLDS = {
+    1:  config.MIN_PCT_CHANGE_1M,
     5:  config.MIN_PCT_CHANGE_5M,
     15: config.MIN_PCT_CHANGE_15M,
     60: config.MIN_PCT_CHANGE_60M,
@@ -96,7 +103,7 @@ class Candidate:
 
 
 def scan(open_symbols: Optional[Set[str]] = None) -> List[Candidate]:
-    """Run a full scan across all subscribed symbols and all three windows.
+    """Run a full scan across all subscribed symbols and all four windows.
     Returns a list of Candidate objects sorted by composite_score descending.
     open_symbols: set of symbol strings already holding a scalp position.
     """

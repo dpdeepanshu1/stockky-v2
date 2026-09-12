@@ -51,6 +51,7 @@ async function psRequest<T>(path: string, init?: RequestInit): Promise<T> {
 export interface ScalpStatus {
   armed: boolean;
   armed_at: string | null;
+  service_enabled: boolean;
   first_live_order_done: boolean;
   orders_placed_today: number;
   daily_loss_kill_switch: boolean;
@@ -66,7 +67,7 @@ export interface ScalpPositionRow {
   id: number;
   symbol: string;
   status: "OPEN" | "TARGET_HIT" | "STOP_HIT" | "EOD_SQUAREOFF" | "MANUAL_EXIT" | "ERROR";
-  window_source: "5m" | "15m" | "60m";
+  window_source: "1m" | "5m" | "15m" | "60m";
   entry_price: number;
   quantity: number;
   target_price: number;
@@ -83,7 +84,7 @@ export interface ScalpPositionRow {
 
 export interface ScalpCandidateRow {
   symbol: string;
-  window: "5m" | "15m" | "60m";
+  window: "1m" | "5m" | "15m" | "60m";
   pct_change: number;
   current_ltp: number;
   composite_score: number;
@@ -107,6 +108,9 @@ export const positionStocksApi = {
   arm: () => psRequest<{ status: string }>("/arm", { method: "POST" }),
   disarm: () => psRequest<{ status: string }>("/disarm", { method: "POST" }),
   kill: () => psRequest<{ status: string }>("/kill", { method: "POST" }),
+
+  serviceEnable: () => psRequest<{ status: string }>("/service/enable", { method: "POST" }),
+  serviceDisable: () => psRequest<{ status: string }>("/service/disable", { method: "POST" }),
 
   positions: () => psRequest<ScalpPositionRow[]>("/positions"),
   candidates: () => psRequest<ScalpCandidateRow[]>("/candidates"),

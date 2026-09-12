@@ -614,28 +614,32 @@ def edis_get_form(
     the redirect-to-CDSL + TPIN entry to happen; there is nothing to
     "complete" purely server-side.
 
-    Dhan v2 /edis/form requires client-id in the request body alongside
-    access-token in the header. For bulk=True the isin/qty/exchange/segment
-    fields must be omitted (Dhan rejects with 400 if they are present);
-    for bulk=False they are required instead."""
+    2026-09-12 fix: the previous version sent {"clientId": ..., "bulk": True}
+    for bulk mode and omitted isin/qty/exchange/segment entirely, believing
+    Dhan rejected those fields when present. That was backwards and caused
+    every bulk call to fail with DH-905 "Missing required fields". Per
+    Dhan's actual documented schema (https://dhanhq.co/docs/v2/edis/,
+    verified 2026-09-12), /edis/form has NO clientId field at all — the
+    account is identified purely by the access-token header — and the
+    request body always carries isin + qty + exchange + segment + bulk
+    together, with bulk=True being what tells Dhan to authorize the whole
+    portfolio rather than just the one isin/qty pair. So the fields below
+    are always sent; for bulk=True the isin/qty are harmless placeholders
+    ("" / 0) since bulk short-circuits them server-side."""
     creds = dhan_credentials.get_decrypted_credentials(db)
     if creds is None:
         raise DhanNotConnectedError("No Dhan credentials stored — connect Dhan first.")
-    client_id, access_token = creds
+    _client_id, access_token = creds  # clientId is not part of this request; the
+    # access-token header alone identifies the account (Dhan echoes dhanClientId
+    # back in the response instead).
 
-    # Dhan v2 bulk vs single-position payload shapes are mutually exclusive.
-    # bulk=True  -> send only clientId + bulk (no isin/qty/exchange/segment)
-    # bulk=False -> send clientId + isin + qty + exchange + segment (no bulk)
-    if bulk:
-        body: dict = {"clientId": client_id, "bulk": True}
-    else:
-        body = {
-            "clientId": client_id,
-            "isin": isin,
-            "qty": qty,
-            "exchange": exchange,
-            "segment": segment,
-        }
+    body = {
+        "isin": isin,
+        "qty": qty,
+        "exchange": exchange,
+        "segment": segment,
+        "bulk": bulk,
+    }
 
     resp = httpx.post(
         f"{_DHAN_REST_BASE}/edis/form",

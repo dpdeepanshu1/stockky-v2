@@ -356,3 +356,36 @@ services:
 # slightly exceed 2 vCPU since these are mostly I/O-bound and never all
 # peak at once); mem_limit sum ≈ 5.1 GB, leaving ~7 GB free for the OS,
 # Docker, the Oracle wallet's TLS buffers, and a safety margin against OOM.
+
+  position-stocks-service:
+    build: ./services/position-stocks-service
+    ports:
+      - "8006:8006"
+    env_file:
+      - .env
+    environment:
+      - PORT=8006
+      # Inherits DATABASE_URL, ORACLE_*, DHAN_CREDENTIAL_ENC_KEY,
+      # ANGELONE_CLIENT_ID/MPIN/API_KEY/TOTP_SECRET/STATIC_IP from .env
+      # Service-specific overrides (set in .env or here):
+      # RISK_PER_TRADE_PCT=1.5
+      # RISK_PER_TRADE_PCT_CONFIRMED=false   ← set true once you've decided the %
+      # FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE=true
+      # POSITION_STOCKS_DAILY_ORDER_BUDGET=300
+      # MAX_DAILY_LOSS_PCT_OF_POOL=4.0
+      # EOD_SQUAREOFF_TIME_IST=15:00
+    depends_on:
+      - real-trade-service
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8006/health', timeout=5) or sys.exit(0)"]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+      start_period: 60s
+    logging: *default-logging
+    # Separate from real-trade-service's CPU/mem budget — runs its own
+    # event loop and WS connection independently.
+    cpus: "0.30"
+    mem_limit: 400m
+    mem_reservation: 128m

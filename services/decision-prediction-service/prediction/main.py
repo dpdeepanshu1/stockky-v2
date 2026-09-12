@@ -163,7 +163,7 @@ def model_info():
         "technical_features": TECHNICAL_COLUMNS,
         "fundamental_features": FUNDAMENTAL_COLUMNS,
         "news_features": NEWS_COLUMNS,
-        "note": "Live /predict uses latest fund+news. Retrain with pred_train.py after compute_feature_frame fix.",
+        "note": "Live /predict uses latest fund+news. compute_feature_frame's golden_cross fixed to match this path's definition (transient 5-bar cross, not a persistent EMA50>EMA200 state) — retrain with pred_train.py to pick up the corrected training feature.",
     }
     _m = get_ml_model()
     if _m is not None:

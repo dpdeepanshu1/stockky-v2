@@ -178,11 +178,23 @@ async def _alert_if_open_positions_while_gate_off(db, mode: str) -> None:
         if last is not None and (now - last) < timedelta(minutes=GATE_OFF_ALERT_COOLDOWN_MIN):
             return
         _gate_off_alert_last_sent[mode] = now
+        # 2026-09-12 fix: DEMO's gate/auto_pilot can ONLY go off via an
+        # explicit action — manual /disarm, /emergency-pause, or
+        # /autopilot/DEMO/disable (see main.py's _check_and_expire_gates
+        # and auth/dhan_credentials.py: the Dhan token-expiry / invalid-IP
+        # auto-disarm paths are all hard-gated to mode == "REAL" and never
+        # touch DEMO). "Re-authenticate" is a Dhan/REAL-only remedy and was
+        # confusingly appearing in the DEMO alert too, where there is
+        # nothing to re-authenticate. REAL keeps the original wording since
+        # a Dhan token/session re-auth genuinely can be the fix there.
+        re_enable_hint = (
+            "Re-authenticate and re-arm" if mode == "REAL" else "Re-arm and re-enable Auto-Pilot"
+        )
         await notify_async(
             f"⚠️ *Auto-Pilot not evaluating exits — {mode}*\n"
             f"Gate is disarmed or auto_pilot_enabled is off, but there are open "
             f"{mode} positions. Stops/targets will NOT be checked until this is "
-            f"re-armed/re-enabled. Re-authenticate and re-arm, or close positions "
+            f"re-armed/re-enabled. {re_enable_hint}, or close positions "
             f"manually if this is unexpected."
         )
     except Exception:

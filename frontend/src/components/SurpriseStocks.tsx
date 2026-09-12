@@ -376,8 +376,21 @@ export default function SurpriseStocks({
       setError(err?.message || "Scan failed");
       console.error("Surprise scan failed", err);
     } finally {
-      setLoading(false);
-      scanAbort.current = null;
+      // BUG FIX: when a new scan supersedes this one (fetchSurpriseStocks
+      // called again while this call is still in flight), this call's
+      // AbortController is aborted and its stream throws AbortError —
+      // caught above with an early `return`, which still runs this
+      // `finally`. That happens *asynchronously*, after the new call has
+      // already installed its own AbortController on scanAbort.current
+      // and started loading. Unconditionally doing `setLoading(false)` /
+      // `scanAbort.current = null` here would then stomp on the NEW call's
+      // in-flight state — killing its loading spinner and nulling the ref
+      // it needs to be abortable. Only clear shared state if this call's
+      // controller is still the current one (i.e. nothing newer started).
+      if (scanAbort.current === ac) {
+        setLoading(false);
+        scanAbort.current = null;
+      }
     }
   }, []);
 

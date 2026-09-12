@@ -277,7 +277,18 @@ def compute_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
         out["dist_from_20d_low_pct"] = (close - roll_low) / roll_low.replace(0, np.nan) * 100
         atr = ta.volatility.AverageTrueRange(work["High"], work["Low"], close, window=14).average_true_range()
         out["atr_pct"] = atr / close.replace(0, np.nan) * 100
-        out["golden_cross"] = (ema50 > ema200).astype(float)
+        # BUG FIX (train/serve skew): this used to be `(ema50 > ema200)` — a
+        # persistent state ("is EMA50 currently above EMA200"), whereas the
+        # live inference path (compute_technical_features, used by main.py's
+        # /predict) defines golden_cross as a transient event — "did EMA50
+        # cross above EMA200 within the last 5 bars". The model trains on
+        # one definition and gets served the other at inference, corrupting
+        # this feature's learned weight. main.py's /model/info even carried
+        # a standing note about this ("Retrain with pred_train.py after
+        # compute_feature_frame fix") that was never acted on. Match the
+        # live definition exactly.
+        cross = ((ema50 > ema200) & (ema50.shift(1) <= ema200.shift(1))).astype(int)
+        out["golden_cross"] = cross.rolling(5).max().fillna(0.0)
     except Exception:
         for col in TECHNICAL_COLUMNS:
             if col not in out.columns:

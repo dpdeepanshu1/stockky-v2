@@ -75,9 +75,25 @@ def _file_key_path(key: str) -> str:
     return os.path.join(_STATE_DIR, safe + ".json")
 
 def _state_get(key: str):
+    # BUG FIX (2026-09-12, session 28): both branches below called themselves
+    # (`_state_get(key)` / `_state_set(...)`) instead of the Redis client
+    # (`_redis.get(...)` / `_redis.set(...)`), so USE_REDIS never actually
+    # reached Redis — every call recursed into itself until Python's
+    # recursion limit raised RecursionError (caught by the bare `except
+    # Exception`), then silently fell through to the local-file path. Since
+    # this script runs "single-shot mode, driven by GitHub Actions cron" —
+    # a fresh container per invocation — the /tmp file fallback does not
+    # persist across runs either, so every dedup key (OPEN_MSG_KEY,
+    # LAST_SCAN_KEY, STATE_KEY decision-change tracking, etc.) has been
+    # silently resetting to "unset" on every single cron tick regardless of
+    # USE_REDIS, which is exactly the condition that produces duplicate
+    # "market opens" / EOD summary notifications and a broken
+    # should_skip_scan() cooldown.
     if _redis is not None:
         try:
-            return _state_get(key)
+            val = _redis.get(key)
+            if val is not None:
+                return val.decode() if isinstance(val, bytes) else val
         except Exception:
             pass
     path = _file_key_path(key)
@@ -94,9 +110,9 @@ def _state_set(key: str, value, ex=None):
     if _redis is not None:
         try:
             if ex:
-                _state_set(key, raw, ex=ex)
+                _redis.set(key, raw, ex=ex)
             else:
-                _state_set(key, raw)
+                _redis.set(key, raw)
             return
         except Exception as e:
             logger.debug("redis set fail: %s", e)

@@ -31,7 +31,13 @@ class InsightGenerator:
             results[str(name)] = {
                 'count': len(group),
                 'success_rate': success_rate,
-                'avg_return': group.get('t1_return', 0).mean()
+                # BUG FIX: group.get('t1_return', 0) returns the literal int 0
+                # (not a Series) when the column is missing, and 0.mean() raises
+                # AttributeError — this crashed analyze_parameter_performance
+                # any time the input frame lacked t1_return, which the rest of
+                # this function already treats as a normal, expected case (see
+                # the t1_success guard just above). Guard the same way.
+                'avg_return': group['t1_return'].mean() if 't1_return' in group.columns else 0
             }
 
         return results
@@ -53,8 +59,11 @@ class InsightGenerator:
                 'count': len(regime_df),
                 't1_success_rate': regime_df['t1_success'].mean() if 't1_success' in regime_df.columns else 0,
                 't5_success_rate': regime_df['t5_success'].mean() if 't5_success' in regime_df.columns else 0,
-                'avg_t1_return': regime_df.get('t1_return', 0).mean(),
-                'avg_t5_return': regime_df.get('t5_return', 0).mean()
+                # Same fix as analyze_parameter_performance above — .get(col, 0)
+                # returns a bare int when the column is absent, and int.mean()
+                # crashes.
+                'avg_t1_return': regime_df['t1_return'].mean() if 't1_return' in regime_df.columns else 0,
+                'avg_t5_return': regime_df['t5_return'].mean() if 't5_return' in regime_df.columns else 0
             }
 
         return results

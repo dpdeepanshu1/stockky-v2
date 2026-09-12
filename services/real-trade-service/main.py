@@ -27,7 +27,10 @@ from auth import dhan_credentials
 from audit.logger import log_action
 from db import get_db, init_schema
 from tz_utils import as_aware, iso_utc, is_market_open_ist
-from portfolio.portfolio import open_positions as _pf_open_positions, close_position as _pf_close_position
+from portfolio.portfolio import (
+    close_position as _pf_close_position,
+    held_exposure_positions as _pf_held_exposure_positions,
+)
 from execution import dhan_client
 from risk_engine.engine import AccountState, OrderIntent, evaluate as risk_evaluate
 
@@ -733,7 +736,16 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
     if account_row is None or risk_row is None:
         raise HTTPException(status_code=404, detail=f"No account/risk-config for mode={mode}")
 
-    open_positions = _pf_open_positions(db, mode)
+    # 2026-09-12 fix (audit finding, minor): this used to call
+    # _pf_open_positions() (excludes PENDING_EXIT), same gap
+    # manual_engine.py's/entry_engine.py's own _account_state already fixed
+    # elsewhere — a symbol mid-exit (SELL sent to Dhan, unconfirmed) would
+    # look exposure-free to this dry-run's no-pyramiding/portfolio-risk
+    # preview even though it's still real, in-flight exposure. This
+    # endpoint never places an order itself, so the blast radius was
+    # "the preview can be stale," not real money — but there's no reason
+    # for the dry run to disagree with what the real path already uses.
+    open_positions = _pf_held_exposure_positions(db, mode)
     account_state = AccountState(
         equity=account_row.current_equity,
         risk_per_trade_pct=risk_row.risk_per_trade_pct,

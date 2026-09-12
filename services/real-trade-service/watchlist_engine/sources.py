@@ -162,16 +162,21 @@ def _normalize_tier1(payload: dict) -> list[dict]:
         sym = (item.get("symbol") or "").upper()
         if not sym:
             continue
+        # BUG FIX (2026-09-12): ipo_scanner.py's rows never carry a top-level
+        # "score" or "cmp"/"price" field — see the matching fix (and full
+        # explanation) in candidate_engine/candidates.py's _rows_from_ipo().
+        # The real fields are "ipo_score" and "current_price"; "score"/"cmp"/
+        # "price" kept as fallbacks only. This function doesn't hard-reject
+        # on conviction_score the way _rows_from_ipo() does, but a permanently
+        # None conviction_score/catalyst_price for every IPO row here was
+        # still silently wrong data reaching the watchlist.
         out.append({
             "symbol":          sym,
             "catalyst_type":   "ipo",
-            # real-trade-service's own candidate_engine/candidates.py
-            # _rows_from_ipo() reads price as item.get("cmp") or
-            # item.get("price") — cmp first — mirrored here.
-            "catalyst_price":  item.get("cmp") or item.get("price"),
+            "catalyst_price":  item.get("current_price") or item.get("cmp") or item.get("price"),
             "catalyst_ts":     _parse_ts(item.get("listing_date")),
             "source_tier":     1,
-            "conviction_score": item.get("score"),
+            "conviction_score": item.get("ipo_score") if item.get("ipo_score") is not None else item.get("score"),
         })
 
     return out

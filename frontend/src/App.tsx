@@ -594,7 +594,13 @@ export default function App() {
       } catch {}
       setLiveScanRows([]);
       setScanTransport(null);
-      scanAbortRef.current = null;
+      // BUG FIX: only clear the ref if it's still THIS call's controller.
+      // Same race as SurpriseStocks.tsx's fetchSurpriseStocks — if a newer
+      // scan superseded this one (clearScanActivity() aborted this call and
+      // installed a new controller before this call's own unwind reached
+      // here), unconditionally nulling scanAbortRef.current would wipe out
+      // the NEW scan's controller, leaving it unabortable.
+      if (scanAbortRef.current === ac) scanAbortRef.current = null;
       setView({ mode: "scan", data: result });
       setStatusMessage(
         partial || earlyExit
@@ -610,7 +616,9 @@ export default function App() {
         } catch {}
         setLiveScanRows([]);
         setScanTransport(null);
-        scanAbortRef.current = null;
+        // Same guard as the success path above — don't clear a newer call's
+        // controller out from under it.
+        if (scanAbortRef.current === ac) scanAbortRef.current = null;
         if (rows.length) {
           setView({ mode: "scan", data: result });
           setStatusMessage("⏹ Stream aborted — partial results kept");

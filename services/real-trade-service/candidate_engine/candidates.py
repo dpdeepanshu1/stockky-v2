@@ -968,7 +968,23 @@ def _rows_from_ipo(payload: Any) -> list[dict]:
         if not isinstance(item, dict) or not item.get("symbol"):
             continue
         decision = (item.get("decision") or "").upper()
-        score = float(item.get("score") or 0)
+        # BUG FIX (2026-09-12): ipo_scanner.py's get_ipo_list() never emits a
+        # top-level "score" or "cmp"/"price" field — verified directly
+        # against ipo_scanner.py, which writes result["ipo_score"] (the
+        # 0-100 conviction number _decision_for_score/_build_ipo_suggestion
+        # use) and result["current_price"]/result["buy_suggestion"]["price"]
+        # (never "cmp" or a bare "price" key at the row's top level). Reading
+        # "score" here meant `float(item.get("score") or 0)` was ALWAYS 0.0
+        # for every real IPO row, so `score < MIN_CONVICTION` (default 55)
+        # rejected every single IPO candidate regardless of its actual
+        # ipo_score/decision — this source has been silently contributing
+        # zero candidates since the 2026-09-02 "results vs items" fix above
+        # was written (that fix corrected the wrapper key but not the
+        # per-row field names). "score"/"cmp"/"price" kept as fallbacks in
+        # case an older cached payload or a future schema change reintroduces
+        # them, but ipo_score/current_price are checked first since they're
+        # what the service actually emits today.
+        score = float(item.get("ipo_score") if item.get("ipo_score") is not None else (item.get("score") or 0))
         if decision not in _ACTIONABLE_DECISIONS or score < MIN_CONVICTION:
             continue
         out.append({
@@ -976,7 +992,7 @@ def _rows_from_ipo(payload: Any) -> list[dict]:
             "source_tab":       "ipo",
             "decision_label":   item.get("decision"),
             "conviction_score": score,
-            "signal_price":     item.get("cmp") or item.get("price"),
+            "signal_price":     item.get("current_price") or item.get("cmp") or item.get("price"),
             "raw_payload":      item,
         })
     return out
@@ -1227,9 +1243,28 @@ def _rows_from_surprise(payload: Any) -> list[dict]:
     for item in items or []:
         if not isinstance(item, dict) or not item.get("symbol"):
             continue
+        # BUG FIX (2026-09-12): api-gateway's surprise_scanner.py's
+        # SurpriseStockEngine.score_stock() never sets a "decision" field on
+        # its hits (verified directly against surprise_scanner.py — the hit
+        # dict carries symbol/score/tier/price/cmp/etc., but no
+        # "decision"/"BUY NOW"/"PREPARE TO BUY" anywhere in that module). So
+        # `decision = (item.get("decision") or "").upper()` was ALWAYS "",
+        # which can never be in _ACTIONABLE_DECISIONS — every single
+        # surprise-scan candidate has been silently rejected here regardless
+        # of score, since this function was written. The very next line
+        # already shows the original intent: decision_label falls back to
+        # "BUY NOW" when absent, i.e. this source was meant to be treated as
+        # actionable purely on score (score_stock()'s own tier logic already
+        # gates entry into `results` at MIN_SCORE=65/breakout or
+        # BUILDING_MIN_SCORE=35+change%/building — see surprise_scanner.py —
+        # so a further absolute score floor here, not a decision-string
+        # match, is this source's real quality gate). Only enforce the
+        # decision match when the field is actually present (future-proofing
+        # if this source ever starts emitting one); otherwise fall through to
+        # the score check alone.
         decision = (item.get("decision") or "").upper()
         score = float(item.get("score") or item.get("surprise_score") or 0)
-        if decision not in _ACTIONABLE_DECISIONS or score < MIN_CONVICTION:
+        if (decision and decision not in _ACTIONABLE_DECISIONS) or score < MIN_CONVICTION:
             continue
         out.append({
             "symbol":           item["symbol"].upper(),

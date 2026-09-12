@@ -59,6 +59,19 @@ export function useStockkyRealtime(onMessage?: (msg: RealtimeMessage) => void) {
   onMsgRef.current = onMessage;
   const retries = useRef(0);
   const watchedRef = useRef<Set<string>>(new Set());
+  // BUG FIX: closing the socket in the effect cleanup (below, on unmount)
+  // fires this same `ws.onclose` handler, which used to unconditionally
+  // schedule a reconnect via setTimeout(() => connect()). That reconnect
+  // outlives the component — it creates a brand-new WebSocket, assigns it
+  // to wsRef.current (a ref no one reads anymore since the hook instance
+  // is gone), and then keeps re-scheduling itself every time it closes,
+  // since nothing about the ref or closures knows the component unmounted.
+  // Net effect: every unmount of a component using this hook leaked one
+  // self-perpetuating WebSocket connection. Guard reconnect scheduling
+  // behind this ref, set true only in the unmount cleanup's intentional
+  // close, so a real network-drop close (unmountingRef still false) still
+  // reconnects normally.
+  const unmountingRef = useRef(false);
 
   const connect = useCallback(() => {
     const base = getApiUrl();
@@ -103,8 +116,13 @@ export function useStockkyRealtime(onMessage?: (msg: RealtimeMessage) => void) {
       ws.onclose = () => {
         setConnected(false);
         wsRef.current = null;
-        // Retry only while tab visible
-        if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        // Retry only while tab visible, and only if this close wasn't the
+        // unmount cleanup intentionally tearing the socket down.
+        if (
+          !unmountingRef.current &&
+          typeof document !== "undefined" &&
+          document.visibilityState === "visible"
+        ) {
           const delay = Math.min(15000, 1500 * Math.pow(1.5, retries.current++));
           setTimeout(() => connect(), delay);
         }
@@ -152,6 +170,7 @@ export function useStockkyRealtime(onMessage?: (msg: RealtimeMessage) => void) {
     document.addEventListener("visibilitychange", onVis);
 
     return () => {
+      unmountingRef.current = true;
       clearInterval(ping);
       document.removeEventListener("visibilitychange", onVis);
       try {

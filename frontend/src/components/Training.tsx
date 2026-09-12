@@ -77,8 +77,21 @@ export default function Training() {
       const data = await api.getTrainingStatus();
       setStatus(data);
 
-      // If UI thinks training is running but backend lock is gone → finish
-      if (training && !data.training_in_progress) {
+      // If UI thinks training is running but backend lock is gone → finish.
+      // BUG FIX: this used to check the `training` state variable, but
+      // fetchStatus is a plain function redefined every render, and the
+      // callers that matter here — the fast 5s poll started inside
+      // startTraining(), and the idle 60s poll set up once on mount — each
+      // capture whichever `fetchStatus` closure existed at the moment their
+      // setInterval was created, permanently frozen to that render's
+      // `training` value (typically `false`, from just before training
+      // actually started). That silently defeated exactly the safety net
+      // this comment describes: the fast poll's `training` check was
+      // always false, so this branch could never fire from it. trainingActiveRef
+      // is a ref (always current, not closure-captured) already kept in
+      // sync with the same lifecycle elsewhere in this file — use that
+      // instead so this check reflects the live state at call time.
+      if (trainingActiveRef.current && !data.training_in_progress) {
         setTraining(false);
         trainingActiveRef.current = false;
         // Show reason if backend finished without model

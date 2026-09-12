@@ -1553,7 +1553,14 @@ export default function App() {
                     Error
                   </p>
                   <p className="text-sm text-signal-sell break-words">{view.message}</p>
-                  {view.message.includes("timeout") || view.message.includes("reach") && (
+                  {/* BUG FIX: `&&` binds tighter than `||` in JS, so this was
+                      `A || (B && <p>)` — when the message contains "timeout"
+                      (A true) the whole expression evaluated to the boolean
+                      `true` itself (React renders booleans as nothing),
+                      silently swallowing this hint in exactly the most common
+                      error case it's meant for. Only the "reach" branch ever
+                      actually rendered the paragraph. Parenthesize the OR. */}
+                  {(view.message.includes("timeout") || view.message.includes("reach")) && (
                     <p className="text-xs text-mist/60 mt-2">
                       ⏳ Free‑tier services may take up to 60 seconds to wake up on the first request.
                       Wait a moment and try again.

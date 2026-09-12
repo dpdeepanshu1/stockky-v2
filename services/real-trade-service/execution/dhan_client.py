@@ -614,24 +614,55 @@ def edis_get_form(
     the redirect-to-CDSL + TPIN entry to happen; there is nothing to
     "complete" purely server-side.
 
-    2026-09-12 fix: the previous version sent {"clientId": ..., "bulk": True}
-    for bulk mode and omitted isin/qty/exchange/segment entirely, believing
-    Dhan rejected those fields when present. That was backwards and caused
-    every bulk call to fail with DH-905 "Missing required fields". Per
-    Dhan's actual documented schema (https://dhanhq.co/docs/v2/edis/,
-    verified 2026-09-12), /edis/form has NO clientId field at all — the
-    account is identified purely by the access-token header — and the
-    request body always carries isin + qty + exchange + segment + bulk
-    together, with bulk=True being what tells Dhan to authorize the whole
-    portfolio rather than just the one isin/qty pair. So the fields below
-    are always sent; for bulk=True the isin/qty are harmless placeholders
-    ("" / 0) since bulk short-circuits them server-side."""
+    2026-09-12 fix (round 1): the previous version sent {"clientId": ...,
+    "bulk": True} for bulk mode and omitted isin/qty/exchange/segment
+    entirely, believing Dhan rejected those fields when present. That was
+    backwards — /edis/form has NO clientId field at all (the access-token
+    header alone identifies the account) — but round 1 then left
+    isin="" / qty=0 as bulk-mode placeholders, which is itself invalid:
+    Dhan's DH-905 is a combined "missing required fields, bad values for
+    parameters" error, and an empty-string ISIN / zero qty trips the
+    "bad value" half even though every field is technically present.
+
+    2026-09-12 fix (round 2): verified against a working reference
+    implementation (github.com/prashantpiyush/dhan-edis, which completes
+    the full CDSL round-trip) — bulk=True does NOT mean isin/qty can be
+    empty. It still needs a real isin + qty from an actual holding as an
+    "anchor" for the request; bulk=True is what then extends the
+    authorization to the whole portfolio rather than just that one
+    holding. So when the caller asks for bulk mode without supplying its
+    own isin/qty (the normal dashboard "Authorize on CDSL" case), pull the
+    first current holding via get_holdings() and use its isin/qty as the
+    anchor. bulk=False keeps using whatever isin/qty the caller passed in,
+    unchanged from before."""
     creds = dhan_credentials.get_decrypted_credentials(db)
     if creds is None:
         raise DhanNotConnectedError("No Dhan credentials stored — connect Dhan first.")
     _client_id, access_token = creds  # clientId is not part of this request; the
     # access-token header alone identifies the account (Dhan echoes dhanClientId
     # back in the response instead).
+
+    if bulk and not isin:
+        holdings = get_holdings(db)
+        if not holdings:
+            raise RuntimeError(
+                "No demat holdings found — there is nothing for CDSL eDIS to "
+                "authorize yet (bulk authorization needs at least one holding "
+                "to anchor the request)."
+            )
+        anchor = holdings[0]
+        isin = anchor.get("isin") or ""
+        qty = (
+            anchor.get("availableQty")
+            or anchor.get("totalQty")
+            or anchor.get("dpQty")
+            or 1
+        )
+        if not isin:
+            raise RuntimeError(
+                f"Dhan holding is missing an isin field, cannot anchor bulk "
+                f"eDIS request: {anchor}"
+            )
 
     body = {
         "isin": isin,

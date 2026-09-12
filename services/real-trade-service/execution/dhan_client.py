@@ -612,18 +612,46 @@ def edis_get_form(
     position. This function only fetches the form — it must be rendered
     in an actual browser (see /dhan/edis/authorize-form in main.py) for
     the redirect-to-CDSL + TPIN entry to happen; there is nothing to
-    "complete" purely server-side."""
+    "complete" purely server-side.
+
+    Dhan v2 /edis/form requires client-id in the request body alongside
+    access-token in the header. For bulk=True the isin/qty/exchange/segment
+    fields must be omitted (Dhan rejects with 400 if they are present);
+    for bulk=False they are required instead."""
     creds = dhan_credentials.get_decrypted_credentials(db)
     if creds is None:
         raise DhanNotConnectedError("No Dhan credentials stored — connect Dhan first.")
-    _client_id, access_token = creds
+    client_id, access_token = creds
+
+    # Dhan v2 bulk vs single-position payload shapes are mutually exclusive.
+    # bulk=True  -> send only clientId + bulk (no isin/qty/exchange/segment)
+    # bulk=False -> send clientId + isin + qty + exchange + segment (no bulk)
+    if bulk:
+        body: dict = {"clientId": client_id, "bulk": True}
+    else:
+        body = {
+            "clientId": client_id,
+            "isin": isin,
+            "qty": qty,
+            "exchange": exchange,
+            "segment": segment,
+        }
+
     resp = httpx.post(
         f"{_DHAN_REST_BASE}/edis/form",
         headers={"Content-Type": "application/json", "access-token": access_token},
-        json={"isin": isin, "qty": qty, "exchange": exchange, "segment": segment, "bulk": bulk},
+        json=body,
         timeout=15.0,
     )
-    resp.raise_for_status()
+    if not resp.is_success:
+        # Surface the actual Dhan error body in logs/UI instead of a generic 400
+        try:
+            detail = resp.json()
+        except Exception:
+            detail = resp.text[:300]
+        raise RuntimeError(
+            f"Dhan /edis/form returned HTTP {resp.status_code}: {detail}"
+        )
     data = resp.json() or {}
     html = data.get("edisFormHtml")
     if not html:

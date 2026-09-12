@@ -47,3 +47,14 @@ ALTER TABLE scalp_gate_state ADD service_enabled NUMBER(1) DEFAULT 1;
 ```
 Per the deploy log (TRACKING.md §7), no boot has gotten past `init_tables()`
 successfully yet, so this is very likely a non-issue — but worth checking first.
+
+## Update (same session, continued): migration caveat + real build, both resolved
+- `db.py::init_tables()` now calls a new `_ensure_columns()` after `create_all()` —
+  idempotent, inspector-based, dialect-aware (Oracle/Postgres) column migration.
+  Covers `scalp_gate_state.service_enabled` today; add a tuple to
+  `_COLUMN_MIGRATIONS` for any future column added to an existing model. Removes
+  the manual "check before you deploy" step entirely.
+- Ran a real `npm install` (177 packages, registry reachable this session) +
+  `npm run build` (`tsc && vite build`) — **zero TypeScript errors**, build
+  succeeded. This is a genuine full-type-resolution build, not the syntax-only
+  parse used in prior sessions when the registry wasn't reachable.

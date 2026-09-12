@@ -105,11 +105,72 @@ def get_db():
 
 def init_tables() -> None:
     """Create scalp_* tables if they don't exist. Never touches trade_* tables
-    (this service never writes models for those — see models.py)."""
+    (this service never writes models for those — see models.py).
+
+    Also runs _ensure_columns() after create_all(): SQLAlchemy's create_all()
+    only creates missing TABLES, it never ALTERs an existing one — so a table
+    created by an older version of models.py (e.g. scalp_gate_state before
+    service_enabled existed) would otherwise need a manual ALTER TABLE before
+    every deploy that adds a column. _ensure_columns() makes that automatic
+    and idempotent instead (2026-09-12, session 4)."""
     import models  # local import: avoids circular import at module load time
     engine = get_engine()
     if engine is None:
         logger.error("init_tables: no engine — skipping (DB not configured).")
         return
     models.Base.metadata.create_all(engine)
+    _ensure_columns(engine)
     logger.info("position-stocks-service: scalp_* tables ensured.")
+
+
+# Columns added to models.py after a table may already have been created in a
+# live DB. Each entry: (table, column, Oracle DDL type, Postgres DDL type,
+# default SQL literal). Add a new tuple here whenever a column is added to an
+# existing model — never remove old entries, they're harmless no-ops once
+# applied everywhere.
+_COLUMN_MIGRATIONS = [
+    ("scalp_gate_state", "service_enabled", "NUMBER(1)", "BOOLEAN", "1", "TRUE"),
+]
+
+
+def _ensure_columns(engine) -> None:
+    """Idempotent: for each (table, column) in _COLUMN_MIGRATIONS, check via
+    SQLAlchemy's inspector whether the column already exists on the live
+    table; if not, ALTER TABLE ... ADD COLUMN with a NOT NULL default so
+    existing rows get a sane value. Safe to run on every boot — a no-op once
+    the column exists everywhere. Never touches trade_* tables."""
+    from sqlalchemy import inspect, text
+
+    is_oracle = dialect() == "oracle"
+    inspector = inspect(engine)
+    for table, column, oracle_type, pg_type, oracle_default, pg_default in _COLUMN_MIGRATIONS:
+        try:
+            if not inspector.has_table(table):
+                # Table doesn't exist yet at all — create_all() will make it
+                # with the column already present next time it's called on a
+                # fresh table; nothing to migrate.
+                continue
+            existing_cols = {c["name"].lower() for c in inspector.get_columns(table)}
+            if column.lower() in existing_cols:
+                continue
+
+            if is_oracle:
+                ddl = f"ALTER TABLE {table} ADD {column} {oracle_type} DEFAULT {oracle_default} NOT NULL"
+            else:
+                ddl = f"ALTER TABLE {table} ADD COLUMN {column} {pg_type} DEFAULT {pg_default} NOT NULL"
+
+            with engine.begin() as conn:
+                conn.execute(text(ddl))
+            logger.warning(
+                "position-stocks-service: migrated — added missing column "
+                "%s.%s (table pre-dated this field).", table, column,
+            )
+        except Exception as e:
+            # Never let a migration failure crash startup — log loudly and
+            # continue; worst case the column is still missing and whatever
+            # queries it will surface that clearly, rather than the whole
+            # service failing to boot over a DDL edge case.
+            logger.error(
+                "position-stocks-service: _ensure_columns failed for %s.%s: %s",
+                table, column, e, exc_info=True,
+            )

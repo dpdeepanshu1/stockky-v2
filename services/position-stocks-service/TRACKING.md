@@ -2,11 +2,15 @@
 **Purpose of this doc:** continuity anchor. If chat context/limits reset, attach this doc + the latest Stockky zip in a new conversation and work continues from exactly here — nothing re-derived from scratch.
 
 **Last updated:** 2026-09-12 (session 4)
-**Status:** All of §5 (steps 1–9) complete; two new items added and completed this
-session (§5.10, §5.11 — master module enable/disable toggle, 1-minute screening
-window). Still not yet smoke-tested against a live Dhan/Angel One session. User
-wants to go straight to REAL money live testing (no DEMO/paper phase) once deployed —
-see STATUS.md for the full up-to-date checklist and next steps; this file stays the
+**Status:** All of §5 (steps 1–11) complete. This session also: (a) turned the
+`service_enabled` migration caveat into an automatic, idempotent DB migration
+(`db.py::_ensure_columns()`) instead of a manual step, and (b) ran a real
+`npm install && npm run build` against the actual npm registry and confirmed
+zero TypeScript errors on the new frontend code. Still not yet smoke-tested against
+a live Dhan/Angel One session — redeploy, first live order, and 1m-window tuning all
+require the live VM + market hours and can't be done from a sandbox. User wants to go
+straight to REAL money live testing (no DEMO/paper phase) once deployed — see
+STATUS.md for the full up-to-date checklist and next steps; this file stays the
 static architecture record, STATUS.md is the living progress tracker.
 
 ---
@@ -112,13 +116,14 @@ constant per trade.
   positions would silently skip the hard 3pm flat sweep. Moved EOD squareoff (and
   reconciliation, already unconditional) ahead of both the `service_enabled` and
   `is_armed` gates.
-- **Migration note:** SQLAlchemy's `create_all()` only creates missing tables, never
-  ALTERs existing ones. If `scalp_gate_state` already exists in the deployed DB
-  (i.e. a prior boot got far enough to run `init_tables()` before crashing), it needs
-  a manual `ALTER TABLE scalp_gate_state ADD service_enabled NUMBER(1) DEFAULT 1`
-  (Oracle) before this deploys cleanly. Per §7's deploy log, no boot has gotten past
-  `init_tables()` successfully yet, so this is very likely a non-issue — but check the
-  table before redeploying, just in case.
+- **Migration note — RESOLVED session 4 (was a manual caveat, now automatic):**
+  SQLAlchemy's `create_all()` only creates missing tables, never ALTERs existing ones.
+  `db.py`'s `init_tables()` now also runs `_ensure_columns()` — an idempotent,
+  inspector-based check that ALTERs any table missing a column added to `models.py`
+  since the table was first created. Currently covers
+  `scalp_gate_state.service_enabled`; future column additions just need one entry
+  added to `db.py`'s `_COLUMN_MIGRATIONS` list, no more manual `ALTER TABLE` steps
+  or "check before you deploy" caveats.
 
 ### 3.12 1-minute screening window — ✅ implemented (session 4)
 - Added as a 4th window alongside 5m/15m/60m: `SCAN_WINDOWS_MINUTES = [1, 5, 15, 60]`,

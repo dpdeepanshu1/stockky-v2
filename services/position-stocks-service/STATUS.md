@@ -150,24 +150,38 @@ see the table above for those.
 
 ## Next steps (in priority order)
 
-1. **Check `scalp_gate_state` for the migration caveat** (see §3.11 in TRACKING.md) —
-   if any prior boot got far enough to create tables before crashing, the new
-   `service_enabled` column needs a manual `ALTER TABLE`. Otherwise `create_all()`
-   creates it correctly on first successful boot; no action needed.
+1. ~~Check `scalp_gate_state` for the migration caveat~~ — **RESOLVED session 4.**
+   `db.py`'s `init_tables()` now runs `_ensure_columns()` after `create_all()`: an
+   idempotent inspector-based check that ALTERs any table missing a column
+   models.py has added since it was first created (currently just
+   `scalp_gate_state.service_enabled`). Safe to run on every boot, dialect-aware
+   (Oracle `NUMBER(1)` / Postgres `BOOLEAN`), logs loudly if it actually migrates
+   something, never crashes startup on a DDL failure. No manual ALTER needed —
+   future column additions just need one line added to `db.py`'s
+   `_COLUMN_MIGRATIONS` list.
 2. **Redeploy and confirm clean boot** — this is the first deploy attempt since the
    `DPY-4026`/`oracledb` fixes from session 3; nothing has been confirmed booting
    successfully yet. Watch for `init_tables()` completing and the WS client connecting.
+   **Requires your VM — can't be done from this sandbox.**
 3. **First live Super Order** — with `FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE=true` (default),
    arm the service during market hours (and make sure the module is enabled — new in
    session 4, defaults to enabled) and watch the very first real entry fire at qty=1.
-   Confirm the fill shape matches expectations, then flip the override off. This is the
-   only step left that genuinely requires the live deployed VM + market hours.
-4. Run `cd frontend && npm install && npm run build` once on the VM to get a real,
-   fully-resolved build (belt-and-suspenders after session 3/4's syntax/type checks).
+   Confirm the fill shape matches expectations, then flip the override off.
+   **Requires your VM + live market hours — can't be done from this sandbox.**
+4. ~~Run `npm install && npm run build`~~ — **RESOLVED session 4.** Sandbox networking
+   now reaches the real npm registry (`registry.npmjs.org`) — ran a genuine
+   `npm install` (177 packages) + `npm run build` (`tsc && vite build`) against the
+   real `@types/react`/Tailwind config, not a stub. **Zero TypeScript errors, build
+   succeeded** (`dist/assets/index-*.js`, 997.71 kB / 268.62 kB gzip — a pre-existing
+   single-chunk-size warning, unrelated to this session's changes, not something to
+   fix now). This confirms `positionStocksApi.ts` and `PositionStocksTab.tsx` are
+   genuinely clean against real type resolution, not just a syntax parse.
 5. Watch the first few real TARGET_HIT/STOP_HIT exits and cross-check `realized_pnl`
    against Dhan's own order history (open item #3, exit-leg fill price).
+   **Requires live trades — can't be done from this sandbox.**
 6. Once live, watch how often the new 1m window actually fires vs. 5m/15m/60m —
    tune `MIN_PCT_CHANGE_1M` up if it's mostly noise (§3.12 flags this as likely).
+   **Requires live market data — can't be done from this sandbox.**
 
 ---
 

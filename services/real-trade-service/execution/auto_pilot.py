@@ -93,7 +93,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import config
@@ -137,6 +139,54 @@ _mode_locks: dict = {}
 # exclusion is void. A lightweight meta-lock serialises the dict writes
 # without touching the per-mode lock lifetime at all.
 _mode_locks_meta: threading.Lock = threading.Lock()
+
+# 2026-09-12 fix (audit finding — MEDICAPQ stop never fired): both tick
+# bodies below silently `return` when the gate isn't armed or
+# auto_pilot_enabled is False, WITHOUT sending an alert — so a position that
+# genuinely needs exit_engine to run every cycle (a stop breach, a gap-down)
+# can sit unattended indefinitely with no visible signal that autopilot
+# stopped covering it, until someone happens to check the dashboard. This
+# does not change when/whether autopilot runs (arming is never bypassed —
+# see point 3 in the module docstring); it only makes the "gate is off AND
+# there is open exposure that needed evaluating" state observable. Throttled
+# per mode (same idea as exit.py's CDSL_ALERT_COOLDOWN_MIN) so a gate left
+# off on purpose overnight/over a weekend doesn't spam Telegram every tick.
+GATE_OFF_ALERT_COOLDOWN_MIN = int(os.getenv("AUTO_PILOT_GATE_OFF_ALERT_COOLDOWN_MIN", "30"))
+_gate_off_alert_last_sent: dict = {}  # mode -> aware datetime of last alert
+
+
+async def _alert_if_open_positions_while_gate_off(db, mode: str) -> None:
+    """Best-effort, non-blocking. Called from the tick bodies' early-return
+    branch (gate not armed / auto_pilot_enabled False) — checks whether this
+    mode has open exposure that exit_engine is NOT currently evaluating as a
+    result, and sends a throttled Telegram alert if so. Never raises —
+    a failure here must never turn a skipped tick into a crashed one."""
+    try:
+        has_open = (
+            db.query(models.TradePosition.id)
+            .filter(
+                models.TradePosition.mode == mode,
+                models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")),
+            )
+            .first()
+            is not None
+        )
+        if not has_open:
+            return
+        now = datetime.now(timezone.utc)
+        last = _gate_off_alert_last_sent.get(mode)
+        if last is not None and (now - last) < timedelta(minutes=GATE_OFF_ALERT_COOLDOWN_MIN):
+            return
+        _gate_off_alert_last_sent[mode] = now
+        await notify_async(
+            f"⚠️ *Auto-Pilot not evaluating exits — {mode}*\n"
+            f"Gate is disarmed or auto_pilot_enabled is off, but there are open "
+            f"{mode} positions. Stops/targets will NOT be checked until this is "
+            f"re-armed/re-enabled. Re-authenticate and re-arm, or close positions "
+            f"manually if this is unexpected."
+        )
+    except Exception:
+        logger.exception("gate-off-with-open-positions alert failed for %s", mode)
 
 import os as _os
 EXIT_CHECK_INTERVAL_SECONDS = max(
@@ -246,6 +296,11 @@ async def _exit_only_tick_body(mode: str) -> None:
             # for the same class of bug) — getattr keeps this safe on
             # first boot against an existing DB before the additive
             # migration in init_schema() has run.
+            # 2026-09-12 fix (audit finding — MEDICAPQ stop never fired):
+            # this early-return used to be completely silent even when
+            # positions were open and needed evaluating. See
+            # _alert_if_open_positions_while_gate_off's docstring above.
+            await _alert_if_open_positions_while_gate_off(db, mode)
             return
         if not is_market_open_ist():
             return
@@ -309,6 +364,11 @@ async def _full_tick_body(mode: str) -> None:
             # for the same class of bug) — getattr keeps this safe on
             # first boot against an existing DB before the additive
             # migration in init_schema() has run.
+            # 2026-09-12 fix (audit finding — MEDICAPQ stop never fired):
+            # same silent-early-return gap as _exit_only_tick_body above —
+            # the full-cycle tick early-returns here too, so it needs the
+            # same alert.
+            await _alert_if_open_positions_while_gate_off(db, mode)
             return
         if not is_market_open_ist():
             return

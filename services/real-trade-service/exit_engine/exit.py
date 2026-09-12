@@ -140,6 +140,24 @@ def _load_profile(db: Session, position) -> dict:
     from watchlist_engine.decay import exit_profile_for
 
     if getattr(position, "watchlist_entry_id", None) is None:
+        # 2026-09-12 fix (audit finding): volume_shock candidates never go
+        # through the watchlist engine — candidate_engine's
+        # _refresh_volume_shock_candidates never sets watchlist_entry_id on
+        # them — so every volume_shock position used to land here and get
+        # the 10-day/6-day-warn global defaults below, even though the
+        # backtest note baked into every volume_shock candidate payload
+        # (time_stop_hint: EOD+1) says the edge decays in ~2 days. That
+        # backtest field is descriptive only (nothing ever read it); the
+        # fix is to recognize source_tab="volume_shock" here (now threaded
+        # position <- order <- candidate, see models.py's source_tab
+        # docstrings) and route it to the "short" horizon exit profile
+        # (5-day hold, 3-day warn) the same way a watchlist-sourced short-
+        # horizon catalyst would get — tighter than the global default, and
+        # the closest existing profile to "exit fast", without inventing a
+        # brand-new one-off schedule for a single catalyst type.
+        if getattr(position, "source_tab", None) == "volume_shock":
+            profile = exit_profile_for("short")
+            return {**profile, "horizon_class": "short"}
         # Manual or pre-upgrade position — use existing global defaults.
         return {
             "trail_atr_schedule":    TRAIL_ATR_SCHEDULE,

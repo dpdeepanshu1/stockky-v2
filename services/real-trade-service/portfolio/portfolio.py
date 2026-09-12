@@ -620,6 +620,10 @@ def try_fill_entry(db: Session, order: models.TradeOrder, tick: Tick, stop_price
             # through so exit_engine._load_profile can apply the right
             # catalyst-aware exit profile. NULL for non-watchlist orders.
             watchlist_entry_id=getattr(order, "watchlist_entry_id", None),
+            # 2026-09-12 fix: thread source_tab through too, so
+            # exit_engine._load_profile can recognize a volume_shock-origin
+            # position even with no watchlist_entry_id. NULL for manual orders.
+            source_tab=getattr(order, "source_tab", None),
         )
         db.add(position)
         db.flush()
@@ -768,6 +772,10 @@ def record_real_fill(db: Session, order: models.TradeOrder, fill_price: float, f
             # through so exit_engine._load_profile applies the catalyst-aware
             # exit profile. NULL for non-watchlist orders.
             watchlist_entry_id=getattr(order, "watchlist_entry_id", None),
+            # 2026-09-12 fix: thread source_tab through too, so
+            # exit_engine._load_profile can recognize a volume_shock-origin
+            # position even with no watchlist_entry_id. NULL for manual orders.
+            source_tab=getattr(order, "source_tab", None),
         )
         db.add(position)
         db.flush()

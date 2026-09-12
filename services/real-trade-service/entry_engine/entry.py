@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -89,6 +90,19 @@ _ACTIONABLE_DECISIONS = {
 # ── Adaptive regime cache (2-minute TTL to avoid DB hit every candidate) ─────
 _regime_cache: dict = {"score": None, "threshold": None, "source": None, "ts": 0.0}
 _REGIME_TTL_S = 120.0
+# 2026-09-12 fix (audit finding): auto_pilot.py's 2026-09-10 event-loop-
+# isolation change moved DEMO/REAL full-cycle ticks onto separate OS
+# threads (see that file's module docstring, "Known residual" section,
+# which explicitly named this cache as the one place the change mattered).
+# _regime_cache is a plain module-level dict read/written without any lock,
+# so two threads could each see it as stale, both fetch, then both write —
+# last-writer-wins. That was flagged there as benign (worst case: one
+# wasted duplicate fetch, never a correctness issue for order placement or
+# sizing) but is trivially fixable, so it's fixed here: a threading.Lock
+# around the read-check-write block below. This does NOT change the
+# TTL/staleness semantics at all — it only serializes which thread gets to
+# be the one that refreshes the cache when it's stale.
+_regime_cache_lock = threading.Lock()
 
 
 async def _get_market_regime(db: Session) -> tuple[bool, int, int, str]:
@@ -104,14 +118,15 @@ async def _get_market_regime(db: Session) -> tuple[bool, int, int, str]:
     """
     import time as _t
     now = _t.time()
-    if (
-        _regime_cache["score"] is not None
-        and (now - _regime_cache["ts"]) < _REGIME_TTL_S
-    ):
-        score     = _regime_cache["score"]
-        threshold = _regime_cache["threshold"]
-        source    = _regime_cache["source"]
-        return score >= threshold, score, threshold, source
+    with _regime_cache_lock:
+        if (
+            _regime_cache["score"] is not None
+            and (now - _regime_cache["ts"]) < _REGIME_TTL_S
+        ):
+            score     = _regime_cache["score"]
+            threshold = _regime_cache["threshold"]
+            source    = _regime_cache["source"]
+            return score >= threshold, score, threshold, source
 
     score     = 50
     threshold = REGIME_MIN_SCORE_STATIC
@@ -138,7 +153,8 @@ async def _get_market_regime(db: Session) -> tuple[bool, int, int, str]:
     except Exception as e:
         logger.debug("adaptive threshold fetch failed (using static): %s", e)
 
-    _regime_cache.update({"score": score, "threshold": threshold, "source": source, "ts": _t.time()})
+    with _regime_cache_lock:
+        _regime_cache.update({"score": score, "threshold": threshold, "source": source, "ts": _t.time()})
     return score >= threshold, score, threshold, source
 
 
@@ -854,6 +870,13 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             # 2026-09-02 Short-Term Trading Upgrade: carry the watchlist origin
             # forward so portfolio.py can stamp the resulting TradePosition.
             watchlist_entry_id=getattr(cand, "watchlist_entry_id", None),
+            # 2026-09-12 fix: carry the candidate's source_tab forward too,
+            # same reasoning — lets exit_engine._load_profile recognize a
+            # volume_shock-origin position even when it has no
+            # watchlist_entry_id (volume_shock candidates never go through
+            # the watchlist engine — see candidate_engine's
+            # _refresh_volume_shock_candidates).
+            source_tab=getattr(cand, "source_tab", None),
         )
         db.add(order)
         db.flush()

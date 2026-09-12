@@ -73,6 +73,13 @@ def record_market_score(db: Session, score: int) -> None:
             db.rollback()
         except Exception:
             pass
+    # 2026-09-12 fix (audit finding): _prune_old_scores was defined but never
+    # called anywhere, so market_regime_history grew unboundedly (~125
+    # rows/day at the ~120s regime-cache TTL across market hours). Same
+    # self-prune-on-every-write pattern adaptive_market_params.py's own
+    # record_metric() already uses — call it here too, right after the
+    # insert. Best-effort/non-fatal, same as the insert above.
+    _prune_old_scores(db)
 
 
 def _prune_old_scores(db: Session) -> None:

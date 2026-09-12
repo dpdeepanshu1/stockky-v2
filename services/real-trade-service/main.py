@@ -1381,6 +1381,45 @@ async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin
     return out
 
 
+# 2026-09-12 fix (audit finding — no win rate / closed-positions endpoint):
+# TradePosition already carries realized_pnl, closed_at, and status="CLOSED"
+# for every closed trade, but nothing exposed it — the dashboard had no way
+# to compute win rate (closed trades with positive P&L / total closed
+# trades) short of querying the DB directly. This is read-only history, so
+# unlike /positions/{mode} above it does NOT call _self_heal_orders or fetch
+# live prices — a closed position's price never changes again.
+@app.get("/positions/{mode}/history")
+async def list_closed_positions(
+    mode: str, limit: int = 100,
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    mode = mode.upper()
+    limit = min(max(limit, 1), 500)
+    rows = (
+        db.query(models.TradePosition)
+        .filter(models.TradePosition.mode == mode, models.TradePosition.status == "CLOSED")
+        .order_by(models.TradePosition.closed_at.desc())
+        .limit(limit)
+        .all()
+    )
+    positions = [{
+        "id": p.id, "symbol": p.symbol, "qty_open": p.qty_open,
+        "avg_entry_price": p.avg_entry_price, "realized_pnl": p.realized_pnl,
+        "opened_at": iso_utc(p.opened_at), "closed_at": iso_utc(p.closed_at),
+        "source_tab": getattr(p, "source_tab", None),
+    } for p in rows]
+    total = len(positions)
+    wins = sum(1 for p in rows if (p.realized_pnl or 0) > 0)
+    return {
+        "positions": positions,
+        "total": total,
+        "wins": wins,
+        # None (not 0.0) when there's nothing closed yet — a 0% win rate on
+        # zero trades is a different, misleading claim from "no data".
+        "win_rate": round(wins / total, 4) if total else None,
+    }
+
+
 @app.get("/orders/{mode}")
 async def list_orders(mode: str, limit: int = 50, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     mode = mode.upper()

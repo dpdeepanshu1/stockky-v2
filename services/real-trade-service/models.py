@@ -255,6 +255,13 @@ class TradeOrder(Base):
     # so portfolio.py's fill handlers can stamp the resulting TradePosition
     # without an extra join. NULL for manual/non-watchlist orders.
     watchlist_entry_id = Column(Integer, ForeignKey("trade_watchlist.id"), nullable=True)
+    # 2026-09-12 fix (audit finding — volume_shock time_stop): copied from
+    # the originating TradeCandidate.source_tab at order-creation time
+    # (entry_engine, same spot watchlist_entry_id is copied), so
+    # portfolio.py's fill handlers can stamp the resulting TradePosition
+    # without an extra join back through TradeDecision -> TradeCandidate.
+    # NULL for manual orders (manual_engine never sets this).
+    source_tab = Column(String(32), nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
@@ -329,6 +336,22 @@ class TradePosition(Base):
     # manual_engine, where opened_at is trustworthy and the existing
     # same-day/CNC logic is correct as-is.
     broker_imported = Column(Boolean, nullable=False, default=False)
+
+    # 2026-09-12 fix (audit finding — volume_shock candidates were getting
+    # the 10-day global time-stop instead of the intended EOD+1 exit):
+    # copied from TradeOrder.source_tab (itself copied from the originating
+    # TradeCandidate.source_tab) at position-open time in portfolio.py's
+    # try_fill_entry / record_real_fill. watchlist_entry_id is NULL for
+    # volume_shock candidates (they never go through the watchlist engine —
+    # see candidate_engine._refresh_volume_shock_candidates), so
+    # exit_engine._load_profile could not tell a volume_shock position apart
+    # from a plain manual trade and fell through to the 10-day/6-day-warn
+    # global defaults. This column lets _load_profile route
+    # source_tab="volume_shock" positions to the "short" horizon exit
+    # profile (5-day hold) even with no watchlist_entry_id. NULL for manual
+    # trades, broker-imported holdings, and pre-migration rows — all of
+    # which keep falling back to the existing global-default behavior.
+    source_tab = Column(String(32), nullable=True)
 
     __table_args__ = (Index("ix_trade_positions_mode_symbol_status", "mode", "symbol", "status"),)
 

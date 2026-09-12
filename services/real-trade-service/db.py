@@ -142,6 +142,7 @@ def init_schema() -> None:
     _fix_stale_dhan_token_expiry(eng)
     _ensure_account_columns(eng, dialect())
     _ensure_candidate_overnight_column(eng, dialect())
+    _ensure_source_tab_columns(eng, dialect())
 
 
 # 2026-08-27 data fixup: docker-compose.yml/.env.example/.env.oracle.example
@@ -509,6 +510,45 @@ def _ensure_watchlist_link_columns(engine, dialect_name: str) -> None:
             sql = f"ALTER TABLE {table_name} ADD ({col_name} NUMBER(10))"
         else:
             sql = f"ALTER TABLE {table_name} ADD COLUMN {col_name} INTEGER"
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added %s.%s", table_name, col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add %s.%s: %s", table_name, col_name, e)
+
+
+# Same additive-migration idiom as _ensure_watchlist_link_columns above —
+# 2026-09-12 fix (audit finding — volume_shock 10-day time-stop bug, see
+# models.py TradePosition.source_tab docstring): trade_orders and
+# trade_positions both existed before source_tab was added, so an
+# already-deployed DB needs this column added by hand, once. Nullable and
+# NULL for every pre-existing row — exit_engine._load_profile only special-
+# cases source_tab="volume_shock" and falls back to prior behavior for
+# NULL/anything else, so this is a pure addition with no read-path change
+# for existing data.
+def _ensure_source_tab_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    targets = [
+        ("trade_orders",    "source_tab"),
+        ("trade_positions", "source_tab"),
+    ]
+    for table_name, col_name in targets:
+        try:
+            existing = {c["name"] for c in inspect(engine).get_columns(table_name)}
+        except Exception as e:
+            logger.warning("real-trade-db: could not inspect %s columns: %s", table_name, e)
+            continue
+        if col_name in existing:
+            continue
+        if dialect_name == "oracle":
+            sql = f"ALTER TABLE {table_name} ADD ({col_name} VARCHAR2(32))"
+        else:
+            sql = f"ALTER TABLE {table_name} ADD COLUMN {col_name} VARCHAR(32)"
         try:
             with engine.begin() as conn:
                 conn.execute(text(sql))

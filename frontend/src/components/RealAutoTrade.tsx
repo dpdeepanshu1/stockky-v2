@@ -1059,10 +1059,33 @@ export default function RealAutoTrade() {
     setEdisBusy(true);
     try {
       const html = await realTradeApi.dhanEdisAuthorizeFormHtml();
-      const win = window.open("", "_blank");
-      if (!win) { setError("Popup blocked — allow popups for this site, then try again."); return; }
-      win.document.write(html);
-      win.document.close();
+      // Remove any leftover iframe from a previous attempt
+      document.getElementById("__cdsl_edis_frame__")?.remove();
+      const frame = document.createElement("iframe");
+      frame.id = "__cdsl_edis_frame__";
+      // srcdoc executes the form's onload JS in-page without needing a popup —
+      // the form auto-submits and CDSL's own page loads inside the iframe
+      // where you enter your T-PIN and OTP manually.
+      frame.srcdoc = html;
+      frame.style.cssText =
+        "position:fixed;inset:0;width:100%;height:100%;border:none;z-index:9999;background:#fff";
+      // Close button overlay so user can dismiss without Escape
+      const closeBtn = document.createElement("button");
+      closeBtn.textContent = "✕  Close CDSL";
+      closeBtn.style.cssText =
+        "position:fixed;top:12px;right:16px;z-index:10000;padding:6px 14px;" +
+        "background:#1a1a2e;color:#fff;border:none;border-radius:6px;" +
+        "font-size:13px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)";
+      const cleanup = () => {
+        frame.remove();
+        closeBtn.remove();
+        window.removeEventListener("keydown", onKey);
+      };
+      closeBtn.onclick = cleanup;
+      const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") cleanup(); };
+      window.addEventListener("keydown", onKey);
+      document.body.appendChild(frame);
+      document.body.appendChild(closeBtn);
     } catch (e: any) {
       setError(e?.message || "Could not open CDSL authorization form");
     } finally { setEdisBusy(false); }

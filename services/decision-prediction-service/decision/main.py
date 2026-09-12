@@ -425,7 +425,14 @@ def _extract_event_signals(events: dict | None) -> dict:
                 delta += 5
                 reasons.append(f"🏦 Insider buying: {txn.get('insider', 'insider')} bought {shares:,} shares")
                 break
-        elif "sell" in txn_type and "sale" in txn_type:
+        elif "sell" in txn_type or "sale" in txn_type:
+            # BUG FIX (2026-09-12, session 28): was `and`, requiring both substrings
+            # in the same string simultaneously. Real NSE "Transaction" values are
+            # typically "Sale" or "Market Sale" — contains "sale" but never "sell" —
+            # so the AND condition could essentially never match, and insider-selling
+            # risk has never been reflected in event_score_delta. Every other place
+            # in this codebase that checks the same field (event_depth.py's
+            # insider_selling and bulk_block_sell logic) correctly uses `or`.
             delta -= 3
             reasons.append(f"🏦 Insider selling: {txn.get('insider', 'insider')} sold shares")
             break
@@ -1640,7 +1647,32 @@ async def decide_batch(request: Request):
 
     async def one(sym: str):
         async with sem:
-            return await decide(sym, force=force)
+            # BUG FIX (2026-09-12, session 28): `decide()` is a FastAPI route
+            # function with `background_tasks: BackgroundTasks = None`. That
+            # default is only ever overridden by FastAPI's own dependency
+            # injection when the route is invoked through the ASGI request
+            # cycle — calling it directly here, as a plain coroutine, left
+            # background_tasks as literal None. _decide_impl() unconditionally
+            # calls `background_tasks.add_task(...)` whenever the decision is
+            # BUY_NOW/PREPARE_TO_BUY with a valid close price, which raised
+            # AttributeError on None — caught by _decide_impl's own broad
+            # except block, which silently returned the DO_NOT_BUY/confidence
+            # "Low" fallback payload instead of the real decision. In effect,
+            # EVERY actionable (BUY_NOW/PREPARE_TO_BUY) result produced via
+            # this batch endpoint was being downgraded to DO NOT BUY before
+            # ever reaching the caller — the opposite of the docstring's
+            # claim that this "does not change scoring". Passing a real
+            # BackgroundTasks instance (and running it explicitly afterward,
+            # since there's no ASGI response cycle here to run it for us)
+            # fixes both the crash and the side effect of recording batch
+            # predictions to the training service, which never happened either.
+            bg = BackgroundTasks()
+            result = await decide(sym, force=force, background_tasks=bg)
+            try:
+                await bg()
+            except Exception as bg_err:
+                logger.warning("decide_batch: background task failed for %s: %s", sym, bg_err)
+            return result
 
     results = await asyncio.gather(*(one(s) for s in symbols), return_exceptions=True)
     out = []

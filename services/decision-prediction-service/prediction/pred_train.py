@@ -906,16 +906,42 @@ def main():
     # Time-based split: fit, calibration, test
     cutoff_calib = dataset["date"].quantile(0.64, interpolation="lower")
     cutoff_test = dataset["date"].quantile(0.8, interpolation="lower")
-    fit_mask = dataset["date"] < cutoff_calib
-    calib_mask = (dataset["date"] >= cutoff_calib) & (dataset["date"] < cutoff_test)
+
+    # BUG FIX: purge/embargo gap at each split boundary.
+    # Every row's label is computed from the close price LOOKAHEAD_DAYS
+    # trading days *after* that row's own date (see build_dataset()). A fit
+    # row dated just before cutoff_calib therefore has a label baked from a
+    # price that falls inside the calibration window — the model trains on
+    # calibration-period returns through that overlap, and the same problem
+    # repeats at the calib/test boundary. The walk-forward branch above
+    # already guards against exactly this via WalkForwardSplitter's
+    # embargo_days, but this final split (the one that actually produces
+    # model.pkl) had no such gap. Purge the last LOOKAHEAD_DAYS trading days
+    # before each cutoff from the earlier side so no label window crosses it.
+    unique_dates = pd.Series(dataset["date"].unique()).sort_values().reset_index(drop=True)
+
+    def _embargo_start(cutoff):
+        pos = int(unique_dates.searchsorted(cutoff))
+        purge_pos = max(0, pos - LOOKAHEAD_DAYS)
+        return unique_dates.iloc[purge_pos]
+
+    embargo_calib_start = _embargo_start(cutoff_calib)
+    embargo_test_start = _embargo_start(cutoff_test)
+
+    fit_mask = dataset["date"] < embargo_calib_start
+    calib_mask = (dataset["date"] >= cutoff_calib) & (dataset["date"] < embargo_test_start)
     test_mask = dataset["date"] >= cutoff_test
 
     X_fit, y_fit = X[fit_mask], y[fit_mask]
     X_calib, y_calib = X[calib_mask], y[calib_mask]
     X_test, y_test = X[test_mask], y[test_mask]
 
-    logger.info("Time-based 3-way split — calibration cutoff: %s, test cutoff: %s",
-                cutoff_calib.date(), cutoff_test.date())
+    logger.info(
+        "Time-based 3-way split — calibration cutoff: %s (embargo from %s), "
+        "test cutoff: %s (embargo from %s)",
+        cutoff_calib.date(), embargo_calib_start.date(),
+        cutoff_test.date(), embargo_test_start.date(),
+    )
     logger.info(
         "Fit:   %d rows (%s to %s), positive rate %.1f%%",
         len(X_fit),

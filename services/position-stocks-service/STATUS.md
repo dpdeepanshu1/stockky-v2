@@ -19,7 +19,7 @@
 | 7 | 3:00 PM square-off sweep + order budget guard | ✅ DONE | `orders/eod_squareoff.py`; order budget counter in ScalpGateState; Redis guard deferred (see Open Items) |
 | — | Super Order exit reconciliation monitor | ✅ DONE (this session) | `orders/reconcile.py` — polls `dhan_client.get_super_order_list()` every trading-loop tick (runs even while disarmed), detects TARGET_LEG/STOP_LOSS_LEG fills + dead ENTRY_LEG rejections, closes the `ScalpPosition` row, calls `ledger.release_capital()`. Wired into `main.py`'s `_trading_loop()` (runs first, before the armed-gate check) and exposed as `POST /reconcile` for an on-demand pass. **Fill-price extraction on the exit legs is a best-effort guess** (Dhan's public sample payload doesn't show `averageTradedPrice` on nested `legDetails` entries) — flagged loudly in the module docstring; eyeball the first few real TARGET_HIT/STOP_HIT rows against Dhan's own app. |
 | 8 | Frontend "Position Stocks" tab | ✅ DONE (this session) | `frontend/src/positionStocksApi.ts` (own client/own localStorage URL key, mirrors `realTradeApi.ts`'s isolation pattern) + `frontend/src/components/PositionStocksTab.tsx` (armed/market/WS/kill-switch strip, arm/disarm/kill/sync/reconcile buttons, capital ledger card, 5m/15m/60m screener grouped view, open + closed-today position lists). Wired into `App.tsx`: new `"positionstocks"` tab, nav item (📈 Position Stocks), command-palette entry. |
-| 9 | RISK_PER_TRADE_PCT from user | ⏳ OPEN | User has not yet confirmed the % of scalp pool to risk per trade. Placeholder 1.5% active — now also surfaced as a warning banner in the new frontend tab, not just the startup log line. |
+| 9 | RISK_PER_TRADE_PCT from user | ✅ DONE | **User confirmed 2%.** `config.py`: `RISK_PER_TRADE_PCT=2.0`, `RISK_PER_TRADE_PCT_CONFIRMED=True`. Startup warning and frontend banner no longer fire. |
 
 ---
 
@@ -94,16 +94,15 @@ see the table above for those.
 
 ## Open items
 
-1. **RISK_PER_TRADE_PCT** — user must confirm the % of scalp pool to risk per trade.
-   Until then, `RISK_PER_TRADE_PCT=1.5` (placeholder) and `RISK_PER_TRADE_PCT_CONFIRMED=false`
-   — service logs a loud warning on every startup, and the frontend tab now also shows
-   this as a banner at the top of the Position Stocks page. **This is the one thing
-   genuinely still needed from the user before this can be trusted at real position size.**
+1. ~~RISK_PER_TRADE_PCT~~ — **RESOLVED session 3: user confirmed 2%.**
 
-2. **Shared Redis order counter** (tracking doc §3.8) — the shared Dhan account-wide
-   order budget is currently enforced per-service only (ScalpGateState.orders_placed_today).
-   A shared Redis counter that both real-trade-service and position-stocks-service increment
-   is deferred. Low urgency until order volumes get large.
+2. ~~Shared order counter~~ — **RESOLVED session 3.** Built as a DB-backed counter
+   instead of Redis (deliberate deviation, reasoned in `capital/shared_order_budget.py`'s
+   docstring: this codebase's Redis layer is optional/off-by-default, so a real-money
+   rate guard was built against the one piece of infra both services unconditionally
+   share — the same physical DB). Table `stockky_shared_order_budget`. Wired into
+   `orders/entry.py` (gated), `orders/eod_squareoff.py` (unconditional record, never
+   blocks a forced exit), `/status` endpoint, and real-trade-service's manual-order path.
 
 3. **Exit-leg fill price is a best-effort guess** (see `orders/reconcile.py` docstring) —
    Dhan's public API sample doesn't document an `averageTradedPrice` field on the nested
@@ -114,27 +113,37 @@ see the table above for those.
    Dhan's own order history for those same trades** — if they match, this is a non-issue;
    if not, the field name needs adjusting (quick fix, one function).
 
-4. **No frontend test run yet** — `node_modules` isn't present in this sandbox (no
-   network egress), so `PositionStocksTab.tsx`/`positionStocksApi.ts`/`App.tsx` were
-   checked for brace/paren balance and structural consistency with the existing
-   `RealAutoTrade.tsx`/`realTradeApi.ts` pattern, but never run through `tsc` or Vite.
-   **Run `npm install && npm run build` (or `vite dev`) once on your machine/VM before
-   deploying** to catch anything a static read-through would miss.
+4. **Frontend: type-checked, not build-tested.** Session 3: sandbox has no real npm
+   registry egress (metadata resolves, tarball downloads 403), so a full
+   `npm install && npm run build` still hasn't run. Instead ran the real TypeScript
+   parser/compiler against the new files: `positionStocksApi.ts` and
+   `PositionStocksTab.tsx` passed a strict, isolated `tsc` type-check against
+   stubbed React types with **zero real errors** (two stub-artifact false positives
+   confirmed by matching identical already-shipped patterns in `RealAutoTrade.tsx`:
+   inline `onChange={e => ...}` handlers and `key={...}` on custom components). Full
+   `App.tsx` (2100 lines) passed a real syntax-only parse (`ts.createSourceFile`,
+   zero errors) and its four new-tab wiring points (import, `Tab` union member, two
+   nav-array entries, ternary render branch) were manually diffed against the
+   existing `realtrade` tab's identical shape — all consistent. **Still recommend
+   running `npm install && npm run build` once on your VM before deploying** to catch
+   anything type-resolution against the real `@types/react`/Tailwind config would
+   catch that a stub can't (e.g. genuine prop-type mismatches against real React's
+   generics) — but structurally and syntactically this is now much more confidently
+   clean than a static read-through alone.
 
 ---
 
 ## Next steps (in priority order)
 
-1. **Get RISK_PER_TRADE_PCT from the user** (open item #1, tracking doc §3.5/§5.9) —
-   the last real open item. Once given, set `RISK_PER_TRADE_PCT=<value>` and
-   `RISK_PER_TRADE_PCT_CONFIRMED=true` in the service's env and redeploy.
-2. **Build + smoke-test the frontend** (`cd frontend && npm install && npm run build`)
-   and eyeball `PositionStocksTab.tsx` against a running (or at least DEMO-armed)
-   `position-stocks-service` instance.
-3. **First live Super Order** — with `FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE=true` (default),
+1. **First live Super Order** — with `FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE=true` (default),
    arm the service during market hours and watch the very first real entry fire at
    qty=1. Confirm the fill shape matches expectations, then flip the override off.
-4. Shared Redis order-count guard (open item #2) — deferred, low urgency.
+   This is the only step left that genuinely requires the live deployed VM + market
+   hours — it can't be done from a sandbox.
+2. Run `cd frontend && npm install && npm run build` once on the VM to get a real,
+   fully-resolved build (belt-and-suspenders after session 3's syntax/type checks).
+3. Watch the first few real TARGET_HIT/STOP_HIT exits and cross-check `realized_pnl`
+   against Dhan's own order history (open item #3, exit-leg fill price).
 
 ---
 

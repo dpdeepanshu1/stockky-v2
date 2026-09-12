@@ -1,21 +1,20 @@
 # Position Stocks — Project Tracking Document
 **Purpose of this doc:** continuity anchor. If chat context/limits reset, attach this doc + the latest Stockky zip in a new conversation and work continues from exactly here — nothing re-derived from scratch.
 
-**Last updated:** 2026-09-12 (session 2)
-**Status:** Steps 1–8 of §5 implemented (backend fully built, including the exit-reconciliation
-monitor added this session; frontend "Position Stocks" tab now built too). Only real
-open item left: user must confirm `RISK_PER_TRADE_PCT` (§3.5/§5.9). Not yet deployed
-or smoke-tested against a live Dhan/Angel One session. User wants to go straight to
-REAL money live testing (no DEMO/paper phase) once deployed — see STATUS.md for the
-full up-to-date checklist and next steps; this file stays the static architecture
-record, STATUS.md is the living progress tracker.
+**Last updated:** 2026-09-12 (session 3)
+**Status:** All of §5 (steps 1–9) now complete — the last open item, risk-per-trade %,
+is confirmed at **2%** (§3.5/§5.9). One deploy-blocking bug found and fixed this
+session (see §7). Not yet smoke-tested against a live Dhan/Angel One session. User
+wants to go straight to REAL money live testing (no DEMO/paper phase) once deployed —
+see STATUS.md for the full up-to-date checklist and next steps; this file stays the
+static architecture record, STATUS.md is the living progress tracker.
 
 ---
 
 ## 1. Background — existing system (context, not the new work)
 
-- **Stockky v2**: microservices platform for Indian stock scanning/analysis/auto-trading. Python FastAPI backend, React/TS frontend. Repo: `github.com/dpdeepanshu1/stockky-v2`. Deployed via docker-compose on an Oracle Cloud VM, directory `~/stockky-v2`.
-- Services: `api-gateway`, `market-data-service`, `analysis-intelligence-service`, `decision-prediction-service`, `notification-scheduler-service`, `real-trade-service`, `frontend`.
+- **Stockky v2**: microservices platform for Indian stock scanning/analysis/auto-trading. Python FastAPI backend, React/TS frontend. Repo: `github.com/dpdeepanshu1/stockky-v2`. Deployed via docker-compose on an Oracle Cloud VM (aarch64/ARM), directory `~/stockky-v2`.
+- Services: `api-gateway`, `market-data-service`, `analysis-intelligence-service`, `decision-prediction-service`, `notification-scheduler-service`, `real-trade-service`, `frontend`, and now `position-stocks-service`.
 - `real-trade-service` already trades **real money live on Dhan** and has been running for weeks. It uses:
   - `execution/dhan_client.py` — plain `place_order()` / `cancel_order()`, no Super Order usage anywhere.
   - Entries: `order_type="LIMIT"`, `product_type="CNC"` (held for days).
@@ -41,87 +40,125 @@ Inspired by Groww's "Price change > 1%" screener (5 min / 15 min / 1 hour window
 ## 3. Final architecture decisions (all confirmed by user)
 
 ### 3.1 Isolation
-- New standalone container: `position-stocks-service`. Own process, own event loop, own docker-compose entry.
+- Standalone container: `position-stocks-service`. Own process, own event loop, own docker-compose entry.
 - No runtime imports from `real-trade-service`. Dhan auth / security-id-cache / order-placement helpers are **duplicated** into this service's own module (copied logic, not shared code) — a bug or slowdown in one can never touch the other.
 - Own `/health` endpoint, own circuit breaker, own daily-loss kill switch (tighter threshold than the core system, since scalping is higher variance).
 
 ### 3.2 Data feed — Angel One WebSocket (FREE)
 - **User rejected Dhan's Data API (₹499/mo, confirmed via user's own screenshot of `web.dhan.co/index/profile` — flat subscription, not trade-count-waived as some third-party sites claimed).**
 - Decision: use **Angel One SmartAPI WebSocket (`smartWebSocketV2`)** instead — genuinely free, no subscription.
-- Reuse existing `AngelOneSession` login flow (already gets `feed_token`) and existing `angelone_scrip_master.py` symbol→token map.
-- **New build required**: a true persistent WS client (binary frame parsing, subscribe/heartbeat/reconnect) to replace the fake "ws_feed" (currently just REST polling every 3s). This is the one genuinely new piece of low-level infrastructure in this project.
-- Important structural note: data comes from **Angel One** (symbol → AngelOne token), but orders execute on **Dhan** (symbol → Dhan `security_id`). The service needs both maps side by side, keyed by the same clean symbol string, so a signal found via the Angel One feed resolves immediately to the right Dhan security for order placement.
+- Reuses existing `AngelOneSession` login flow (already gets `feed_token`) and existing `angelone_scrip_master.py` symbol→token map.
+- Built: a true persistent WS client (binary frame parsing, subscribe/heartbeat/reconnect) replacing the old fake "ws_feed" (REST polling every 3s). `feed/ws_client.py`.
+- Data comes from **Angel One** (symbol → AngelOne token), orders execute on **Dhan** (symbol → Dhan `security_id`) — the service keeps both maps side by side, keyed by the same clean symbol string.
 
 ### 3.3 Screening engine
 - In-memory per-symbol ring buffer: (timestamp, LTP, volume). O(1) rolling %-change computation over trailing 5m/15m/1h per tick — no DB read on the hot path.
 - Gates layered on top: min liquidity/avg volume, max bid-ask spread, exclude symbols already in an open scalp position, exclude illiquid/penny stocks.
-- Runs **all three windows simultaneously** as independent candidate sources feeding one shared ranking step (composite score, similar spirit to `real-trade-service`'s existing Gate 6) — not "always prefer 5-min." Best candidate(s) win regardless of which window surfaced them.
+- Runs **all three windows simultaneously** as independent candidate sources feeding one shared ranking step (composite score) — best candidate(s) win regardless of which window surfaced them.
 
 ### 3.4 Order execution — Dhan Super Order (bracket), FREE, chosen over manual OCO
-- Confirmed: Super Order is part of Dhan's **Trading API**, which is unconditionally free (unlike the Data API).
-- One call places entry + target + stoploss legs atomically — faster and safer than a manual 3-order OCO (no race-condition window between entry fill and exit legs going live).
-- **Verified directly from the `dhanhq` Python SDK source (`_super_order.py`):**
-  - `place_super_order(security_id, exchange_segment, transaction_type, quantity, order_type, product_type, price, targetPrice, stopLossPrice, trailingJump, tag)`.
-  - `price` (entry reference) **must be > 0**, even when `order_type="MARKET"` — Dhan validates `targetPrice`/`stopLossPrice` against this reference (`targetPrice > price` and `stopLossPrice < price` for a BUY, reversed for SELL). Plan: pass the current Angel One LTP as this reference price at the moment of firing; actual fill still executes at market via `order_type="MARKET"`.
-  - `product_type` must be **`"INTRA"`** — NOT `"CNC"` (which `real-trade-service` uses for its multi-day-hold entries). INTRA is required since scalp positions must close same day, and it uses less margin.
-  - Order types confirmed available in the SDK: `LIMIT`, `MARKET`, `SL` (`STOP_LOSS`), `SLM` (`STOP_LOSS_MARKET`).
-  - Modification support exists per-leg (`ENTRY_LEG` / `TARGET_LEG` / `STOP_LOSS_LEG`) via `modify_super_order()` — useful later for trailing-stop logic if wanted.
-- **This is a genuinely new code path — never called anywhere in this codebase before.** User has chosen to go straight to real money without a DEMO/paper phase. Recommended (not mandatory) mitigation: fire the very first live Super Order at minimum quantity to observe Dhan's actual response/behavior before trusting it at normal position size.
+- Super Order is part of Dhan's **Trading API**, unconditionally free (unlike the Data API).
+- One call places entry + target + stoploss legs atomically.
+- `product_type` = **`"INTRA"`** — NOT `"CNC"` (real-trade-service's multi-day-hold type).
+- `price` (entry reference) must be > 0 even when `order_type="MARKET"`; Dhan validates target/SL against it. Plan: pass the current Angel One LTP as this reference at fire time; actual fill still executes at market.
+- Recommended (not mandatory) first-live-trade safety valve implemented: `FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE` forces qty=1 on the very first live Super Order.
 
-### 3.5 Capital sizing — adaptive, risk-based
-- Not a flat rupee amount per trade. Formula:
-  `position_value = (fixed % of the scalp pool risked per trade) ÷ (that stock's own adaptive stoploss %)`
-- A volatile stock with a wider adaptive stop automatically gets a smaller position; a calmer stock gets a bigger one — rupee-at-risk stays roughly constant per trade.
-- **OPEN ITEM — still needed from user:** what % of the scalp pool should be risked per single trade (e.g. 1%, 2%)? Not needed to finalize architecture, but needed before the sizing formula has real numbers.
+### 3.5 Capital sizing — adaptive, risk-based — ✅ CONFIRMED
+`position_value = (fixed % of the scalp pool risked per trade) ÷ (that stock's own adaptive stoploss %)`
+
+**Confirmed by user this session: 2% of the scalp pool risked per single trade.**
+`config.RISK_PER_TRADE_PCT = 2.0`, `config.RISK_PER_TRADE_PCT_CONFIRMED = True`. The
+startup warning in `main.py` (which fired on every boot while this was an open item)
+is now silent. A volatile stock with a wider adaptive stop automatically gets a
+smaller position; a calmer stock gets a bigger one — rupee-at-risk stays roughly
+constant per trade.
 
 ### 3.6 Capital split
-- 50/50 with `real-trade-service`, enforced entirely in software via a new `ScalpCapitalLedger` table — **Dhan itself does not segregate a single account's funds into pools.** Both services independently check their own ledger's remaining allowance before sizing any order, cross-checked against Dhan's live fund-limit API so neither can overspend into the other's half.
+- 50/50 with `real-trade-service`, enforced entirely in software via `ScalpCapitalLedger` — Dhan itself does not segregate a single account's funds into pools. Both services independently check their own ledger's remaining allowance, cross-checked against Dhan's live fund-limit API.
 
 ### 3.7 Position limits & hold time
 - Max **5** concurrent scalp positions. Min **1** preferred but never forced onto a bad/absent signal.
-- No fixed hold timer — adaptive target/SL, exits the instant either triggers (via Super Order's own bracket legs).
-- Hard **3:00 PM IST** square-off sweep force-closes anything still open, MARKET order, no exceptions (same shape as `real-trade-service`'s own `EOD_SQUAREOFF_TIME_IST`, currently 15:00, but this cutoff is independent and specific to this pool).
+- No fixed hold timer — adaptive target/SL, exits the instant either triggers (Super Order's own bracket legs).
+- Hard **3:00 PM IST** square-off sweep force-closes anything still open, MARKET order, no exceptions.
 
-### 3.8 Shared broker-side constraint
-- Dhan's account-wide order cap (~5,000–7,000 orders/day per Dhan support docs) is **shared** between `real-trade-service` and this new service — same account. Plan: a shared Redis counter incremented by both services on every order call, with this service given its own conservative sub-ceiling, so a busy scalp day can never starve `real-trade-service`'s ability to place its own orders.
+### 3.8 Shared broker-side constraint — ✅ implemented
+- Dhan's account-wide order cap (~5,000–7,000 orders/day) is shared between `real-trade-service` and this service (same Dhan account).
+- **Built as a DB-backed counter, not Redis** (deviation from the original plan, flagged and reasoned in `capital/shared_order_budget.py`'s docstring): this codebase's Redis layer is Upstash-based and optional/off-by-default, so a real-money order-rate guard was made to depend on the one piece of infrastructure both services unconditionally share instead — the same physical Postgres/Oracle DB. Table `stockky_shared_order_budget`, identical module duplicated into both services (`capital/shared_order_budget.py` in position-stocks-service, `execution/shared_order_budget.py` in real-trade-service).
+- Soft rate governor, not a financial ledger: one read + one upsert per order attempt, fails **open** (allows the order) on any DB error — a broken rate-governor must never itself block a real exit.
+- Forced exits (EOD squareoff, manual kill-switch closes) call `record_order_unconditional()` — tracked for visibility, never gated, matching §3.7's "no exceptions" rule.
+- Wired into: `orders/entry.py` (gated, checked before capital is reserved), `orders/eod_squareoff.py` (unconditional record), `main.py`'s `/status` endpoint (`shared_order_budget` field), and real-trade-service's manual-BUY path (`manual_engine.py`, gated) and manual/auto-SELL paths (unconditional record, matching that codebase's existing "exits always allowed" convention).
 
 ### 3.9 Dashboard
-- New frontend tab: **"Position Stocks."**
+- Frontend tab: **"Position Stocks"** (`positionStocksApi.ts` + `PositionStocksTab.tsx`, wired into `App.tsx`).
 - Live screener grouped by window (5m/15m/1h), open scalp positions with live P&L, today's pool P&L, remaining scalp capital, manual kill switch.
 
 ### 3.10 Rollout
-- **User's explicit choice: go straight to REAL money, live market, no DEMO/paper phase** — based on weeks of hands-on trust with `real-trade-service`. Noted once as a risk (new untested order-type path) above; proceeding per user's decision.
+- **User's explicit choice: go straight to REAL money, live market, no DEMO/paper phase** — based on weeks of hands-on trust with `real-trade-service`. Risk flagged once (new untested order-type path); proceeding per user's decision.
 
 ---
 
-## 4. New DB objects planned (not yet created)
+## 4. DB objects (built)
 - `ScalpPosition` — open/closed scalp trade records, separate from `real-trade-service`'s `TradePosition` table.
 - `ScalpCapitalLedger` — this pool's allocated/available cash, independent of the core system's ledger.
-- `ScalpCandidateLog` — audit trail of scanned candidates and why each was taken/skipped (mirrors the diagnostic value of `real-trade-service`'s WAIT-reason logging).
+- `ScalpCandidateLog` — audit trail of scanned candidates and why each was taken/skipped.
+- `ScalpGateState` — armed/disarmed, kill-switch, first-live-order-done, EOD-fired-date, daily order count.
+- `stockky_shared_order_budget` — cross-service Dhan order-rate counter (§3.8), lives outside both services' own `models.py`.
 - All writes async/non-blocking — DB slowness may delay logging, never a trade decision.
 
 ---
 
-## 5. Implementation steps — status (see STATUS.md for full detail on each)
+## 5. Implementation steps — status
 1. ✅ Scope `position-stocks-service` folder structure + docker-compose entry.
-2. ✅ Build the Angel One true-WS client (replacing the fake polling one, reusing existing session/token-map code).
-3. ✅ Build the Dhan symbol→security_id side-map reuse (duplicate the relevant piece of `dhan_client.py`'s cache logic, not import it).
-4. ✅ Build the rolling-window screening engine + composite ranking.
-5. ✅ Build the Super Order integration (entry + target + SL), sandboxed/minimum-qty first live test.
-6. ✅ Build `ScalpCapitalLedger` + the 50/50 enforcement logic.
-7. ✅ Build the 3:00 PM square-off sweep. Shared Redis order-count guard still deferred (see STATUS.md open items — low urgency).
-   Also added, unplanned but necessary: the Super Order exit reconciliation monitor (`orders/reconcile.py`) — polls
-   Dhan's super order book for TARGET_LEG/STOP_LOSS_LEG fills and closes positions + releases capital automatically.
-8. ✅ Build the "Position Stocks" frontend tab (`positionStocksApi.ts` + `PositionStocksTab.tsx`, wired into `App.tsx`).
-9. ⏳ OPEN — get the risk-per-trade % from user to finalize capital sizing formula (§3.5). Placeholder 1.5% active,
-   surfaced as a warning both in the startup log and the frontend tab.
+2. ✅ Angel One true-WS client.
+3. ✅ Dhan symbol→security_id side-map (duplicated cache logic).
+4. ✅ Rolling-window screening engine + composite ranking.
+5. ✅ Super Order integration (entry + target + SL), min-qty-first-live-order safety valve.
+6. ✅ `ScalpCapitalLedger` + 50/50 enforcement logic.
+7. ✅ 3:00 PM square-off sweep. Exit-reconciliation monitor (`orders/reconcile.py`) also built (polls Dhan's super order book for TARGET_LEG/STOP_LOSS_LEG fills, closes positions + releases capital automatically). Shared Dhan order-rate guard (§3.8) — **built this session**, no longer deferred.
+8. ✅ "Position Stocks" frontend tab.
+9. ✅ Risk-per-trade % — **confirmed by user: 2%.** No open items left in §5.
 
 ---
 
 ## 6. How to resume this if context resets
-Attach this document **plus the latest Stockky repo zip** in a new conversation. Everything needed to continue — decisions made, code already verified (file/line references above), and exactly what's still open — is captured here. No need to re-explain the plan or re-derive the architecture; just say which of the numbered steps in §5 to continue from.
+Attach this document **plus the latest Stockky repo zip** in a new conversation. Everything needed to continue — decisions made, code already verified (file/line references above), and exactly what's still open — is captured here.
 
-**As of session 2, `services/position-stocks-service/STATUS.md` inside the zip is the
-live, more-detailed progress tracker** (file-by-file, with exact open items and a
-prioritized next-steps list) — read that first, this document second for the
-original architecture rationale. Both travel together in every zip from now on.
+**`services/position-stocks-service/STATUS.md` inside the zip is the live,
+more-detailed progress tracker** (file-by-file, exact open items, prioritized
+next-steps list) — read that first, this document second for architecture
+rationale. Both travel together in every zip from now on.
+
+---
+
+## 7. Deploy issues found & fixed (session log)
+
+- **2026-09-12, session 3 — `python-oracledb` invalid package name.**
+  `services/position-stocks-service/requirements.txt` pinned
+  `python-oracledb>=2.2.0` — not a real PyPI package (pip: "Could not find a
+  version that satisfies the requirement... versions: none"). The correct
+  package (and import name, used correctly everywhere in `oracle_compat.py`)
+  is `oracledb`. Fixed to `oracledb==2.5.1`, matching the exact pin every
+  other Stockky service already uses. Confirmed via grep this was the only
+  occurrence of the wrong name anywhere in the repo. Deploy target is an
+  Oracle Cloud VM on **aarch64/ARM** — worth remembering for any future new
+  service's requirements.txt, since not every PyPI package ships aarch64
+  wheels (this one does, once named correctly).
+
+- **2026-09-12, session 3 (same day, later) — missing Oracle wallet volume
+  mount in docker-compose.yml.** Container started, connected to
+  `oracle_compat`'s DSN builder fine, but crashed on the very first DB call
+  (`init_tables()`) with `DPY-4026: file '/oracle_wallet/tnsnames.ora' is
+  missing or unreadable`. Root cause: `position-stocks-service`'s
+  docker-compose block never got the
+  `${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro` volume
+  mount that every other backend service has — so `/oracle_wallet` existed
+  as an empty path inside the container with no wallet files in it at all.
+  `oracle_compat.py` was already resolving `ORACLE_WALLET_DIR`/`TNS_ADMIN`
+  to the correct path (confirmed from the traceback), it just had nothing
+  real mounted there. Fixed: added the volume mount, plus explicit
+  `ORACLE_WALLET_DIR=/oracle_wallet` and `TNS_ADMIN=/oracle_wallet` env vars
+  (matching every other service's block exactly, rather than leaving it to
+  depend on `.env` happening to define those container-internal-path keys).
+  Also took the opportunity to set `RISK_PER_TRADE_PCT=2.0` /
+  `RISK_PER_TRADE_PCT_CONFIRMED=true` directly in the compose block instead
+  of leaving them as commented-out placeholders.

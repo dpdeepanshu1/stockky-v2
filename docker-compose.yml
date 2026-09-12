@@ -365,15 +365,35 @@ services:
       - .env
     environment:
       - PORT=8006
-      # Inherits DATABASE_URL, ORACLE_*, DHAN_CREDENTIAL_ENC_KEY,
-      # ANGELONE_CLIENT_ID/MPIN/API_KEY/TOTP_SECRET/STATIC_IP from .env
-      # Service-specific overrides (set in .env or here):
-      # RISK_PER_TRADE_PCT=1.5
-      # RISK_PER_TRADE_PCT_CONFIRMED=false   ← set true once you've decided the %
-      # FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE=true
-      # POSITION_STOCKS_DAILY_ORDER_BUDGET=300
-      # MAX_DAILY_LOSS_PCT_OF_POOL=4.0
-      # EOD_SQUAREOFF_TIME_IST=15:00
+      # Inherits DATABASE_URL, ORACLE_DSN/USER/PASSWORD, DHAN_CREDENTIAL_ENC_KEY,
+      # ANGELONE_CLIENT_ID/MPIN/API_KEY/TOTP_SECRET/STATIC_IP from .env (same
+      # mechanism market-data-service already relies on for its own ANGELONE_*
+      # vars — env_file passes .env's raw keys straight through).
+      #
+      # 2026-09-12 fix: ORACLE_WALLET_DIR/TNS_ADMIN and the wallet volume mount
+      # below were missing entirely from this block. oracle_compat.py resolves
+      # the wallet dir from os.environ directly (not from config.py's Python
+      # default), so it was already reading "/oracle_wallet" correctly via
+      # whatever .env happened to contain — but nothing was ever mounted at
+      # that path in the container, so tnsnames.ora/ewallet.pem didn't exist
+      # there and every DB connection attempt failed with DPY-4026. Every
+      # other service in this file sets these two explicitly AND mounts the
+      # wallet — this block just never got either piece when the service was
+      # added. Explicit here now (not left to .env) for the same reason every
+      # other service does it explicitly: it's a container-internal path, not
+      # a host-specific value that belongs in .env.
+      - ORACLE_WALLET_DIR=/oracle_wallet
+      - TNS_ADMIN=/oracle_wallet
+      # Confirmed by user (tracking doc §3.5/§5.9): 2% of the scalp pool
+      # risked per trade.
+      - RISK_PER_TRADE_PCT=2.0
+      - RISK_PER_TRADE_PCT_CONFIRMED=true
+      # - FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE=true
+      # - POSITION_STOCKS_DAILY_ORDER_BUDGET=300
+      # - MAX_DAILY_LOSS_PCT_OF_POOL=4.0
+      # - EOD_SQUAREOFF_TIME_IST=15:00
+    volumes:
+      - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
     depends_on:
       - real-trade-service
     restart: unless-stopped

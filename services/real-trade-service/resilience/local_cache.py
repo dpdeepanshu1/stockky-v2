@@ -139,10 +139,24 @@ def reconcile_on_startup(db) -> None:
             if not snap:
                 continue
 
+            # 2026-09-12 fix (audit finding): this used to filter
+            # status="OPEN" only, but snapshot_open_positions() is fed from
+            # portfolio.open_positions(), which deliberately includes BOTH
+            # "OPEN" and "PARTIALLY_CLOSED" (a partial target-hit exit still
+            # has real shares needing exit evaluation — see that function's
+            # own docstring). Comparing against "OPEN" alone meant any
+            # position that had already taken a partial exit before this
+            # restart was present in the snapshot but silently absent from
+            # live_symbols — a guaranteed spurious RECONCILE_MISMATCH on
+            # every single startup for as long as that position stayed
+            # PARTIALLY_CLOSED, not a real drift. Matching the same status
+            # set the snapshot itself uses fixes the false alarm without
+            # weakening the actual mismatch check.
             live_symbols = {
                 p.symbol
                 for p in db.query(models.TradePosition)
-                .filter_by(mode=mode, status="OPEN")
+                .filter(models.TradePosition.mode == mode,
+                        models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")))
                 .all()
             }
             snap_symbols = {row["symbol"] for row in snap.get("positions", [])}

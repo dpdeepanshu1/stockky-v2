@@ -1059,33 +1059,31 @@ export default function RealAutoTrade() {
     setEdisBusy(true);
     try {
       const html = await realTradeApi.dhanEdisAuthorizeFormHtml();
-      // Remove any leftover iframe from a previous attempt
-      document.getElementById("__cdsl_edis_frame__")?.remove();
-      const frame = document.createElement("iframe");
-      frame.id = "__cdsl_edis_frame__";
-      // srcdoc executes the form's onload JS in-page without needing a popup —
-      // the form auto-submits and CDSL's own page loads inside the iframe
-      // where you enter your T-PIN and OTP manually.
-      frame.srcdoc = html;
-      frame.style.cssText =
-        "position:fixed;inset:0;width:100%;height:100%;border:none;z-index:9999;background:#fff";
-      // Close button overlay so user can dismiss without Escape
-      const closeBtn = document.createElement("button");
-      closeBtn.textContent = "✕  Close CDSL";
-      closeBtn.style.cssText =
-        "position:fixed;top:12px;right:16px;z-index:10000;padding:6px 14px;" +
-        "background:#1a1a2e;color:#fff;border:none;border-radius:6px;" +
-        "font-size:13px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)";
-      const cleanup = () => {
-        frame.remove();
-        closeBtn.remove();
-        window.removeEventListener("keydown", onKey);
-      };
-      closeBtn.onclick = cleanup;
-      const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") cleanup(); };
-      window.addEventListener("keydown", onKey);
-      document.body.appendChild(frame);
-      document.body.appendChild(closeBtn);
+      // 2026-09-12 fix: this used to inject an <iframe srcdoc="..."> in-page.
+      // That can never work — CDSL's own page (edis.cdslindia.com) sends
+      // X-Frame-Options / CSP frame-ancestors specifically to refuse being
+      // loaded inside anyone else's iframe (anti-clickjacking, protecting
+      // the TPIN-entry page). Chrome surfaces that as "edis.cdslindia.com
+      // refused to connect" — not a bug in the fetched HTML, a hard block
+      // on framing at all. CDSL has to be the top-level document of its
+      // own window instead, which is exactly what realTradeApi.ts's own
+      // comment on dhanEdisAuthorizeFormHtml already describes: open a
+      // blank popup and write the self-submitting form's HTML directly
+      // into it. The form's onload JS then redirects that popup itself
+      // (top-level navigation inside its own window, not a frame) to
+      // CDSL's TPIN page, which CDSL allows.
+      const popup = window.open("", "_blank", "width=480,height=720");
+      if (!popup) {
+        setError(
+          "Popup blocked — allow popups for this site in your browser, " +
+          "then click '2. Authorize on CDSL' again."
+        );
+        return;
+      }
+      popup.document.open();
+      popup.document.write(html);
+      popup.document.close();
+      setError(null);
     } catch (e: any) {
       setError(e?.message || "Could not open CDSL authorization form");
     } finally { setEdisBusy(false); }

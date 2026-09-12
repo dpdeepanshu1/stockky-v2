@@ -140,7 +140,43 @@ def build_oracle_engine(url: str = "", **pool_overrides):
         os.environ.get("ORACLE_DSN", "from-url"),
         os.environ.get("ORACLE_WALLET_DIR") or os.environ.get("TNS_ADMIN") or "none",
     )
-    return create_engine(url, **kwargs), url
+    eng = create_engine(url, **kwargs)
+    _attach_call_timeout(eng)
+    return eng, url
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUG FIX (2026-09-12): every Oracle round trip — including pool_pre_ping's own
+# health-check SELECT — was unbounded. If the network path to Autonomous DB
+# goes silently dead (no RST, just a black hole), a blocking call made
+# synchronously inside an `async def` FastAPI route (e.g. api-gateway's
+# /surprise/ipo/list -> kv_get -> _neon_get) freezes the ENTIRE single-worker
+# event loop for as long as the hang lasts — every other route on that
+# process queues up and only drains once the hang clears, which looks exactly
+# like a flapping circuit breaker on the calling service ("call failed ()",
+# an empty message because it's an httpx ReadTimeout on the client side,
+# repeating every ~cooldown_s while the underlying cause is never a fast
+# failure). python-oracledb's Connection.call_timeout bounds every single
+# round trip (network + DB) in milliseconds; once it fires, oracledb raises
+# promptly instead of hanging, which the existing broad except/return-None
+# fallbacks in kv_cache.py already handle gracefully.
+# ORACLE_CALL_TIMEOUT_MS default 8000 (8s) is intentionally well under the
+# 25s Tier-1 HTTP timeout real-trade-service uses, so a stalled DB round trip
+# fails fast enough that the caller gets a clean fallback response instead of
+# tripping its own client-side timeout.
+def _attach_call_timeout(eng) -> None:
+    try:
+        from sqlalchemy import event
+        timeout_ms = int(os.environ.get("ORACLE_CALL_TIMEOUT_MS", "8000"))
+
+        @event.listens_for(eng, "connect")
+        def _set_call_timeout(dbapi_connection, connection_record):  # noqa: ANN001
+            try:
+                dbapi_connection.call_timeout = timeout_ms
+            except Exception as e:  # pragma: no cover - defensive, never fatal
+                _log.debug("could not set oracledb call_timeout: %s", e)
+    except Exception as e:  # pragma: no cover - defensive, never fatal
+        _log.warning("_attach_call_timeout setup failed (non-fatal): %s", e)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

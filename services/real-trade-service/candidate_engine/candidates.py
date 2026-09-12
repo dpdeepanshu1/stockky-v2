@@ -80,6 +80,7 @@ import pipeline_status as pstat
 from tz_utils import as_aware
 from portfolio.portfolio import held_exposure_positions
 from shared_adaptive import percentile_rank
+import adaptive_market_params as amp
 
 logger = logging.getLogger("real-trade-candidates")
 
@@ -109,6 +110,72 @@ OVEREXTENDED_52W_TOP_PCT = float(os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT",
 
 # ATR cap: slightly tightened (7% vs 8%) for safer sizing in volatile conditions.
 MAX_ATR_PCT = float(os.getenv("CANDIDATE_MAX_ATR_PCT", "7.0"))
+
+# ── 2026-09-11 addition: cycle-scoped adaptive parameter cache ────────────
+# MAX_ATR_PCT above is read directly (no `db` in scope) by both
+# _multi_tf_analysis's check 5 and _volume_shock_analysis's ATR check —
+# threading a DB session through every nested async call just to make one
+# number adaptive would touch ~10 function signatures for no real benefit.
+# Instead, refresh_candidates() (which DOES have `db`, once per cycle)
+# calls _refresh_cycle_adaptive_params(db) before either track runs, which
+# updates these module-level globals. Every read of _adaptive_max_atr_pct
+# elsewhere in this file sees this cycle's value; before the first refresh
+# ever runs (e.g. import time, tests) it's just the static MAX_ATR_PCT
+# constant above, so nothing breaks if this is never called.
+_adaptive_max_atr_pct: float = MAX_ATR_PCT
+_adaptive_max_atr_pct_source: str = "static (not yet refreshed this run)"
+_adaptive_fund_floor: float = config.VOLUME_SHOCK_FUND_ABS_FLOOR
+_adaptive_tech_floor: float = config.VOLUME_SHOCK_TECH_ABS_FLOOR
+_adaptive_min_market_cap_cr: float = config.MIN_MARKET_CAP_CR_STATIC
+_adaptive_rsi_oversold: float = 30.0
+_adaptive_rsi_overbought: float = 70.0
+_adaptive_extended_1m_pct: float = 0.18
+_adaptive_extended_short_pct: float = 0.05
+_adaptive_trend_weight: float = 1.0
+_adaptive_meanrev_weight: float = 1.0
+_adaptive_params_source: str = "static (not yet refreshed this run)"
+
+
+def _refresh_cycle_adaptive_params(db: Session) -> None:
+    """Called once per refresh_candidates() cycle — see module-level
+    cache comment above. Best-effort: any failure here just leaves the
+    previous cycle's (or the static default) values in place."""
+    global _adaptive_max_atr_pct, _adaptive_max_atr_pct_source
+    global _adaptive_fund_floor, _adaptive_tech_floor
+    global _adaptive_min_market_cap_cr, _adaptive_params_source
+    global _adaptive_rsi_oversold, _adaptive_rsi_overbought
+    global _adaptive_extended_1m_pct, _adaptive_extended_short_pct
+    global _adaptive_trend_weight, _adaptive_meanrev_weight
+    try:
+        atr_val, atr_src = amp.adaptive_max_atr_pct(db)
+        fund_val, fund_src = amp.adaptive_quality_floor(db, config.VOLUME_SHOCK_FUND_ABS_FLOOR)
+        tech_val, tech_src = amp.adaptive_quality_floor(db, config.VOLUME_SHOCK_TECH_ABS_FLOOR)
+        mcap_val, mcap_src = amp.adaptive_min_market_cap_cr(db)
+        rsi_os, rsi_ob, rsi_src = amp.adaptive_rsi_bounds(db)
+        ext_1m, ext_short, ext_src = amp.adaptive_extension_thresholds(db)
+        trend_w, meanrev_w, weight_src = amp.adaptive_signal_weights(db)
+        _adaptive_max_atr_pct = atr_val
+        _adaptive_max_atr_pct_source = atr_src
+        _adaptive_fund_floor = fund_val
+        _adaptive_tech_floor = tech_val
+        _adaptive_min_market_cap_cr = mcap_val
+        _adaptive_rsi_oversold = rsi_os
+        _adaptive_rsi_overbought = rsi_ob
+        _adaptive_extended_1m_pct = ext_1m
+        _adaptive_extended_short_pct = ext_short
+        _adaptive_trend_weight = trend_w
+        _adaptive_meanrev_weight = meanrev_w
+        _adaptive_params_source = (
+            f"atr={atr_src} floor={fund_src} mcap={mcap_src} rsi={rsi_src} "
+            f"ext={ext_src} weights={weight_src}"
+        )
+        logger.debug(
+            "candidate_engine: adaptive params refreshed — max_atr_pct=%.2f fund_floor=%.1f "
+            "tech_floor=%.1f min_market_cap_cr=%.0f (%s)",
+            atr_val, fund_val, tech_val, mcap_val, _adaptive_params_source,
+        )
+    except Exception as e:
+        logger.warning("candidate_engine: adaptive param refresh failed (%s), keeping prior values", e)
 
 # Minimum stock price: sub-₹20 stocks = operator risk + wide spreads + illiquid
 MIN_STOCK_PRICE = float(os.getenv("CANDIDATE_MIN_STOCK_PRICE", "20.0"))
@@ -340,35 +407,114 @@ async def _fetch_fund_tech_score(client: httpx.AsyncClient, symbol: str) -> dict
     call must never kill the whole candidate cycle, and missing data is
     handled leniently by _quality_gate_fund_tech below, not treated as an
     automatic reject."""
-    fund_score = tech_score = sector = None
+    fund_score = tech_score = sector = market_cap_cr = adx = None
     try:
         r = await client.get(f"{config.FUNDAMENTAL_URL}/analyze/{symbol}", timeout=12.0)
         if r.status_code == 200:
             fj = r.json()
             fund_score = fj.get("fundamental_score")
             sector = fj.get("sector_normalized") or fj.get("sector")
+            # 2026-09-11 addition: market_cap floor for the quality gate.
+            # fundamental service returns this in INR (rupees), same
+            # convention yfinance uses — convert to crore (1 cr = 1e7) to
+            # match config.MARKET_CAP_*_CR / MIN_MARKET_CAP_CR_* units.
+            # "raw.market_cap" fallback covers a cached/older response from
+            # before market_cap was added as a top-level field.
+            raw_mcap = fj.get("market_cap")
+            if raw_mcap is None:
+                raw_mcap = (fj.get("raw") or {}).get("market_cap")
+            if raw_mcap:
+                try:
+                    market_cap_cr = float(raw_mcap) / 1e7
+                except (TypeError, ValueError):
+                    market_cap_cr = None
     except Exception as e:
         logger.info("quality_gate: fundamental fetch failed for %s (%s)", symbol, e)
     try:
-        r = await client.get(f"{config.TECHNICAL_URL}/analyze/{symbol}", timeout=12.0)
+        # 2026-09-11 addition: pass this cycle's adaptive RSI bounds,
+        # extension-threshold cutoffs, and trend/mean-reversion signal
+        # weights through to the technical service — see technical/
+        # main.py's analyze() for the corresponding params and its
+        # fallback-to-static behavior when these aren't sent.
+        r = await client.get(
+            f"{config.TECHNICAL_URL}/analyze/{symbol}",
+            params={
+                "rsi_oversold": _adaptive_rsi_oversold,
+                "rsi_overbought": _adaptive_rsi_overbought,
+                "extended_1m_pct": _adaptive_extended_1m_pct,
+                "extended_short_pct": _adaptive_extended_short_pct,
+                "trend_weight": _adaptive_trend_weight,
+                "meanrev_weight": _adaptive_meanrev_weight,
+            },
+            timeout=12.0,
+        )
         if r.status_code == 200:
             tj = r.json()
             tech_score = tj.get("technical_score")
+            adx = tj.get("adx")
     except Exception as e:
         logger.info("quality_gate: technical fetch failed for %s (%s)", symbol, e)
-    return {"symbol": symbol, "fundamental_score": fund_score, "technical_score": tech_score, "sector": sector}
+    return {
+        "symbol": symbol,
+        "fundamental_score": fund_score,
+        "technical_score": tech_score,
+        "sector": sector,
+        "market_cap_cr": market_cap_cr,
+        "adx": adx,
+    }
+
+
+async def _fetch_market_cap_cr(client: httpx.AsyncClient, symbol: str) -> float | None:
+    """
+    2026-09-11 gap-closure addition. Lightweight companion to
+    _fetch_fund_tech_score, for the standard track below — that track
+    doesn't call the fundamental service at all today (its own
+    _multi_tf_analysis is candle/price/volume-only), so the market-cap
+    floor that already applies to the volume_shock track was silently
+    NOT applied here. This is intentionally a market-cap-ONLY fetch
+    rather than reusing the full _fetch_fund_tech_score: the standard
+    track already has its own technical evaluation
+    (_multi_tf_analysis) and doesn't need a second, redundant call to
+    the technical service just to get a market cap number.
+    """
+    try:
+        r = await client.get(f"{config.FUNDAMENTAL_URL}/analyze/{symbol}", timeout=12.0)
+        if r.status_code != 200:
+            return None
+        fj = r.json()
+        raw_mcap = fj.get("market_cap") or (fj.get("raw") or {}).get("market_cap")
+        if not raw_mcap:
+            return None
+        return float(raw_mcap) / 1e7
+    except Exception as e:
+        logger.info("standard_track: market_cap fetch failed for %s (%s)", symbol, e)
+        return None
 
 
 def _quality_gate_fund_tech(scored: dict, sector_peers: list) -> tuple:
     """
     The actual "fundamental and technically ok, at least not bad" +
-    "adaptive threshold, sector-wise not overall" gate. Two parts, BOTH
-    must pass:
+    "adaptive threshold, sector-wise not overall" gate. Three parts, ALL
+    that have data must pass:
 
       1. Absolute floor on each pillar that actually HAS data (missing
          data is not treated as a fail — analysis-intelligence not having
          fresh fundamentals for a symbol is common and shouldn't reject an
-         otherwise fine technical breakout on its own).
+         otherwise fine technical breakout on its own). fund/tech floors
+         are read from the module-level _adaptive_fund_floor/
+         _adaptive_tech_floor globals (see _refresh_cycle_adaptive_params)
+         rather than the static config constants directly, so this gate
+         tightens/loosens with the market regime automatically — see
+         adaptive_market_params.adaptive_quality_floor.
+      1b. Market-cap floor (2026-09-11 addition): excludes micro/nano-cap
+         names regardless of how well they score — a stock can clear
+         fund/tech on pure numbers while still being a name with almost no
+         institutional participation and easy manipulation on light
+         volume. Floor is also adaptive (regime-tilted) — see
+         adaptive_market_params.adaptive_min_market_cap_cr. Missing
+         market-cap data is NOT treated as a fail, same leniency as the
+         fund/tech floors above — analysis-intelligence not resolving a
+         market cap for a symbol shouldn't reject it outright.
       2. Sector-relative floor: this cycle's OTHER same-sector candidates
          (not the whole market) are the comparison window — a stock
          sitting at the bottom of its own sector's batch this cycle is
@@ -388,10 +534,20 @@ def _quality_gate_fund_tech(scored: dict, sector_peers: list) -> tuple:
     Returns (passes: bool, note: str).
     """
     fs, ts = scored.get("fundamental_score"), scored.get("technical_score")
-    if fs is not None and fs < config.VOLUME_SHOCK_FUND_ABS_FLOOR:
-        return False, f"fundamental_score {fs:.0f} < floor {config.VOLUME_SHOCK_FUND_ABS_FLOOR:.0f}"
-    if ts is not None and ts < config.VOLUME_SHOCK_TECH_ABS_FLOOR:
-        return False, f"technical_score {ts:.0f} < floor {config.VOLUME_SHOCK_TECH_ABS_FLOOR:.0f}"
+    fund_floor = _adaptive_fund_floor
+    tech_floor = _adaptive_tech_floor
+    if fs is not None and fs < fund_floor:
+        return False, f"fundamental_score {fs:.0f} < floor {fund_floor:.0f}"
+    if ts is not None and ts < tech_floor:
+        return False, f"technical_score {ts:.0f} < floor {tech_floor:.0f}"
+
+    mcap = scored.get("market_cap_cr")
+    mcap_floor = _adaptive_min_market_cap_cr
+    if mcap is not None and mcap < mcap_floor:
+        return False, (
+            f"market_cap ₹{mcap:,.0f}cr ({amp.market_cap_tier(mcap)}) "
+            f"< floor ₹{mcap_floor:,.0f}cr"
+        )
 
     quality = [v for v in (fs, ts) if v is not None]
     if not quality:
@@ -414,7 +570,7 @@ def _quality_gate_fund_tech(scored: dict, sector_peers: list) -> tuple:
             f"sector-relative pctl={pctl:.0f} < floor {config.VOLUME_SHOCK_SECTOR_PCTL_FLOOR:.0f} "
             f"({len(peer_scores)} sector peers)"
         )
-    return True, f"fund/tech ok, sector pctl={pctl:.0f} ({len(peer_scores)} peers)"
+    return True, f"fund/tech ok, sector pctl={pctl:.0f} ({len(peer_scores)} peers), mcap={amp.market_cap_tier(mcap)}"
 
 
 # ── 2026-09-01 incident fix: bulk quote pre-warming ──────────────────────────
@@ -722,10 +878,16 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
         atr_val = _compute_atr_from_candles(candles_1m_for_atr)
         if atr_val and atr_val > 0:
             atr_pct = round(atr_val / current_price * 100, 2)
-            if atr_pct > MAX_ATR_PCT:
+            # 2026-09-11: adaptive cap (see _refresh_cycle_adaptive_params /
+            # adaptive_market_params.adaptive_max_atr_pct) instead of the
+            # fixed MAX_ATR_PCT constant — falls back to that same static
+            # value until enough history exists, so behavior is unchanged
+            # on a fresh deploy.
+            if atr_pct > _adaptive_max_atr_pct:
                 return {
                     "reject_reason": (
-                        f"ATR {atr_pct:.1f}% > cap {MAX_ATR_PCT}%. "
+                        f"ATR {atr_pct:.1f}% > cap {_adaptive_max_atr_pct:.1f}% "
+                        f"({_adaptive_max_atr_pct_source}). "
                         "Too volatile to produce a safe position size within the "
                         "1% per-trade risk cap. High ATR in a weak market usually "
                         "means the stock has broken structure — not worth the risk."
@@ -954,10 +1116,13 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict
     atr_val = _compute_atr_from_candles(candles[:-1])
     if atr_val and atr_val > 0 and current_price > 0:
         atr_pct = round(atr_val / current_price * 100, 2)
-        if atr_pct > MAX_ATR_PCT:
+        # 2026-09-11: adaptive cap — see comment on the equivalent check in
+        # _multi_tf_analysis above.
+        if atr_pct > _adaptive_max_atr_pct:
             return {
                 "reject_reason": (
-                    f"Pre-shock ATR {atr_pct:.1f}% > cap {MAX_ATR_PCT}%. "
+                    f"Pre-shock ATR {atr_pct:.1f}% > cap {_adaptive_max_atr_pct:.1f}% "
+                    f"({_adaptive_max_atr_pct_source}). "
                     "Too volatile to produce a safe position size within the "
                     "1% per-trade risk cap."
                 ),
@@ -1182,7 +1347,23 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
             r["symbol"]: asyncio.create_task(_limited_mtf(r["symbol"]))
             for r in rows
         }
+        # 2026-09-11 gap-closure addition: run the market-cap fetch
+        # concurrently alongside the MTF tasks above (same semaphore, same
+        # client) rather than as a separate sequential pass afterward —
+        # keeps this from adding real wall-clock time to the cycle.
+        async def _limited_mcap(symbol: str) -> float | None:
+            async with sem:
+                return await _fetch_market_cap_cr(client, symbol)
+
+        mcap_tasks = {
+            r["symbol"]: asyncio.create_task(_limited_mcap(r["symbol"]))
+            for r in rows
+        }
         tf_results = await asyncio.gather(*tf_tasks.values(), return_exceptions=True)
+        mcap_results = await asyncio.gather(*mcap_tasks.values(), return_exceptions=True)
+        mcap_map: dict[str, float | None] = {}
+        for sym, result in zip(mcap_tasks.keys(), mcap_results):
+            mcap_map[sym] = None if isinstance(result, Exception) else result
         tf_map: dict[str, dict] = {}
         data_starved_count = 0
         for sym, result in zip(tf_tasks.keys(), tf_results):
@@ -1222,6 +1403,21 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
             skipped += 1
             continue
 
+        # 2026-09-11 gap-closure addition: the market-cap floor already
+        # enforced on the volume_shock track (see _quality_gate_fund_tech)
+        # was silently NOT applied here — this track had zero market-cap
+        # filtering at all. Missing data (fundamental service down/slow,
+        # or nothing resolvable for this symbol) is NOT treated as a
+        # reject, same leniency as the volume_shock gate.
+        mcap_cr = mcap_map.get(sym)
+        if mcap_cr is not None and mcap_cr < _adaptive_min_market_cap_cr:
+            logger.info(
+                "CANDIDATE REJECTED %s (mode=%s) | market_cap ₹%.0fcr (%s) < floor ₹%.0fcr",
+                sym, mode, mcap_cr, amp.market_cap_tier(mcap_cr), _adaptive_min_market_cap_cr,
+            )
+            skipped += 1
+            continue
+
         # Enrich payload with MTF summary for dashboard audit trail
         payload = dict(r.get("raw_payload") or {})
         payload["_mtf"] = {
@@ -1229,6 +1425,7 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
             "tf_returns":    tf.get("tf_returns"),
             "atr_pct":       tf.get("atr_pct"),
             "market_note":   tf.get("market_note", ""),
+            "market_cap_cr": mcap_cr,
         }
 
         db.add(models.TradeCandidate(
@@ -1334,6 +1531,22 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
 
         passed.append((sym, result))
 
+    # 2026-09-11 addition: record this cycle's average pre-shock ATR%
+    # across the batch that cleared the price/volume check — this is what
+    # adaptive_market_params.adaptive_max_atr_pct's percentile is computed
+    # over (see that module's docstring). Recording the PASSED population
+    # (not the full unfiltered universe, and not only the ones that go on
+    # to clear the quality gate) matches what the ATR cap itself is
+    # actually gating: real volume-shock candidates, regardless of
+    # fund/tech quality. Best-effort — a failure here never blocks the
+    # cycle, same guarantee as every other adaptive_market_params call.
+    try:
+        atr_samples = [r.get("atr_pct") for _, r in passed if r.get("atr_pct") is not None]
+        if atr_samples:
+            amp.record_metric(db, "universe_atr_pct", sum(atr_samples) / len(atr_samples))
+    except Exception as e:
+        logger.debug("candidate_engine: universe_atr_pct recording failed (non-fatal): %s", e)
+
     # ── Second pass (2026-09-11 fix): fundamental/technical quality gate —
     # see config.py's VOLUME_SHOCK_QUALITY_GATE_* comment block. Only run
     # for symbols that already cleared the price/volume check, and capped
@@ -1360,6 +1573,19 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
         except Exception as e:
             logger.warning("candidate_engine: quality-gate scoring pass failed entirely (%s) — skipping gate this cycle", e)
             quality_scores = {}
+
+    # 2026-09-11 addition: record this cycle's average ADX across the
+    # quality-gate batch — this is what adaptive_signal_weights' regime
+    # read (adaptive_market_params.py) is computed over: a genuine
+    # "is the market trending or range-bound right now" measure, distinct
+    # from market_score (which measures bullish/bearish direction, not
+    # trendiness). Best-effort, same guarantee as the ATR recording above.
+    try:
+        adx_samples = [qr.get("adx") for qr in quality_scores.values() if qr.get("adx") is not None]
+        if adx_samples:
+            amp.record_metric(db, "universe_adx", sum(adx_samples) / len(adx_samples))
+    except Exception as e:
+        logger.debug("candidate_engine: universe_adx recording failed (non-fatal): %s", e)
 
     # Group by sector so each symbol is compared only against its own
     # sector's candidates from THIS cycle (see _quality_gate_fund_tech).
@@ -1587,6 +1813,14 @@ async def refresh_candidates(db: Session, mode: str) -> int:
     # clear the no-pyramiding risk check) while its previous exit was still
     # in flight. See portfolio/portfolio.py's held_exposure_positions().
     open_syms = {p.symbol for p in held_exposure_positions(db, mode)}
+
+    # 2026-09-11 addition: refresh the adaptive ATR-cap/quality-floor/
+    # market-cap-floor cache once per cycle, before either track runs —
+    # see the module-level cache comment above MAX_ATR_PCT for why this
+    # is a global refresh rather than threading `db` through every nested
+    # analysis function.
+    _refresh_cycle_adaptive_params(db)
+
     # Standard track: 6h dedupe cooldown (avoids duplicate cards for slow-moving signals)
     cooldown_syms = _recently_candidated_symbols(db, mode)
     exclude = open_syms | cooldown_syms

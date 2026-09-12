@@ -432,12 +432,46 @@ def root():
             "endpoints": ["/health", "/analyze/{symbol}"]}
 
 @app.get("/analyze/{symbol}")
-def analyze(symbol: str, force: bool = False):
+def analyze(
+    symbol: str,
+    force: bool = False,
+    # 2026-09-11 addition: these four were hardcoded constants (RSI
+    # 30/70, extension chase-risk 18%/5%) with no way for a caller to
+    # supply a regime-adjusted value. real-trade-service's
+    # adaptive_market_params.py now computes these from its own rolling
+    # live-market history and passes them in on every call from the
+    # quality gate (candidate_engine.candidates._fetch_fund_tech_score);
+    # any OTHER caller that doesn't pass them gets the exact same static
+    # defaults as before — this is purely additive, never a behavior
+    # change for existing callers.
+    rsi_oversold: float = 30.0,
+    rsi_overbought: float = 70.0,
+    extended_1m_pct: float = 0.18,
+    extended_short_pct: float = 0.05,
+    # 2026-09-11 addition: multipliers on the trend-following (EMA stack,
+    # MACD) vs mean-reversion (RSI, Bollinger Band) score deltas below —
+    # see adaptive_market_params.adaptive_signal_weights for how
+    # real-trade-service computes these from a live, rolling measure of
+    # "is the market trending or range-bound right now." 1.0 = unchanged
+    # from the original fixed scoring for any caller that doesn't pass
+    # these (fully backward compatible).
+    trend_weight: float = 1.0,
+    meanrev_weight: float = 1.0,
+):
     sym = normalize_symbol(symbol)
+    # force=True and/or non-default threshold overrides must bypass the
+    # plain per-symbol cache below — otherwise a cached response computed
+    # under yesterday's thresholds (or under someone else's override)
+    # would get served back regardless of what THIS call asked for.
+    _using_overrides = (
+        rsi_oversold != 30.0 or rsi_overbought != 70.0
+        or extended_1m_pct != 0.18 or extended_short_pct != 0.05
+        or trend_weight != 1.0 or meanrev_weight != 1.0
+    )
     cache_key = f"tech_analysis:{sym}"
 
     # Bypass local memory/Upstash cache when force=True (sniper / real-time)
-    if not force:
+    if not force and not _using_overrides:
         cached = _cache_get(cache_key)
         if cached:
             return cached
@@ -524,12 +558,12 @@ def analyze(symbol: str, force: bool = False):
     score   = 50
     reasons = []
 
-    if rsi_val < 30:
-        score += 12
-        reasons.append(f"RSI at {rsi_val:.1f} — oversold")
-    elif rsi_val > 70:
-        score -= 12
-        reasons.append(f"RSI at {rsi_val:.1f} — overbought")
+    if rsi_val < rsi_oversold:
+        score += 12 * meanrev_weight
+        reasons.append(f"RSI at {rsi_val:.1f} — oversold (adaptive floor {rsi_oversold:.0f}, weight {meanrev_weight:.2f}x)")
+    elif rsi_val > rsi_overbought:
+        score -= 12 * meanrev_weight
+        reasons.append(f"RSI at {rsi_val:.1f} — overbought (adaptive ceiling {rsi_overbought:.0f}, weight {meanrev_weight:.2f}x)")
     else:
         reasons.append(f"RSI at {rsi_val:.1f} — neutral")
 
@@ -537,32 +571,32 @@ def analyze(symbol: str, force: bool = False):
         bullish_cross = prev_macd < prev_sig and macd_val > macd_s_val
         bearish_cross = prev_macd > prev_sig and macd_val < macd_s_val
         if bullish_cross:
-            score += 15
-            reasons.append("MACD bullish crossover")
+            score += 15 * trend_weight
+            reasons.append(f"MACD bullish crossover (weight {trend_weight:.2f}x)")
         elif bearish_cross:
-            score -= 15
-            reasons.append("MACD bearish crossover")
+            score -= 15 * trend_weight
+            reasons.append(f"MACD bearish crossover (weight {trend_weight:.2f}x)")
         elif macd_val > macd_s_val:
-            score += 5
+            score += 5 * trend_weight
             reasons.append("MACD above signal line")
         else:
-            score -= 5
+            score -= 5 * trend_weight
             reasons.append("MACD below signal line")
     else:
         reasons.append("MACD: insufficient data")
 
     if data_length >= 30:
         if close_val > ema20_val > ema50_val > ema200_val:
-            score += 15
-            reasons.append("Bullish EMA stack")
+            score += 15 * trend_weight
+            reasons.append(f"Bullish EMA stack (weight {trend_weight:.2f}x)")
         elif close_val < ema20_val < ema50_val < ema200_val:
-            score -= 15
-            reasons.append("Bearish EMA stack")
+            score -= 15 * trend_weight
+            reasons.append(f"Bearish EMA stack (weight {trend_weight:.2f}x)")
         elif close_val > ema200_val:
-            score += 5
+            score += 5 * trend_weight
             reasons.append("Above 200 EMA")
         else:
-            score -= 5
+            score -= 5 * trend_weight
             reasons.append("Below 200 EMA")
     else:
         reasons.append("EMA trend: insufficient data")
@@ -570,10 +604,10 @@ def analyze(symbol: str, force: bool = False):
     if data_length >= 20:
         sma20 = float(close.tail(20).mean())
         if close_val > sma20:
-            score += 8
+            score += 8 * trend_weight
             reasons.append("Above 20-day SMA")
         else:
-            score -= 8
+            score -= 8 * trend_weight
             reasons.append("Below 20-day SMA")
     else:
         reasons.append("Short-term momentum: insufficient data")
@@ -591,11 +625,11 @@ def analyze(symbol: str, force: bool = False):
         bb_range = bb_up - bb_lo if bb_up != bb_lo else 1
         bb_pct   = (close_val - bb_lo) / bb_range * 100
         if bb_pct < 20:
-            score += 8
-            reasons.append(f"Near lower BB ({bb_pct:.0f}%)")
+            score += 8 * meanrev_weight
+            reasons.append(f"Near lower BB ({bb_pct:.0f}%, weight {meanrev_weight:.2f}x)")
         elif bb_pct > 80:
-            score -= 8
-            reasons.append(f"Near upper BB ({bb_pct:.0f}%)")
+            score -= 8 * meanrev_weight
+            reasons.append(f"Near upper BB ({bb_pct:.0f}%, weight {meanrev_weight:.2f}x)")
     else:
         reasons.append("Bollinger Bands: insufficient data")
 
@@ -630,15 +664,15 @@ def analyze(symbol: str, force: bool = False):
     try:
         if data_length >= 22:
             ret_21d  = float(close.iloc[-1] / close.iloc[-21] - 1.0)
-            extended = ret_21d > 0.18  # >18% in ~1 month — unchanged threshold
+            extended = ret_21d > extended_1m_pct
         if data_length >= 5:
             # ~3 trading days — short enough to catch a bulk-deal/results pop
             # that the 21-day window structurally cannot flag until it's
             # already a month old.
             ret_3d = float(close.iloc[-1] / close.iloc[-4] - 1.0)
-            extended_short = ret_3d > 0.05  # >5% in ~3 sessions
+            extended_short = ret_3d > extended_short_pct
             if extended_short:
-                reasons.append(f"Extended short-term: +{ret_3d*100:.1f}% over ~3 sessions — chase risk")
+                reasons.append(f"Extended short-term: +{ret_3d*100:.1f}% over ~3 sessions (adaptive cutoff {extended_short_pct*100:.0f}%) — chase risk")
     except Exception:
         pass  # fail-open: missing/short history just leaves both flags False
 
@@ -709,10 +743,22 @@ def analyze(symbol: str, force: bool = False):
         "extended": bool(extended),
         "extended_short": bool(extended_short),
         "data_insufficient": data_length < 30,
+        # 2026-09-11 addition: surfaces what this specific call actually
+        # used, for debugging/audit — 1.0/1.0 and 30.0/70.0/0.18/0.05 mean
+        # "static defaults, no overrides sent."
+        "adaptive_params_used": {
+            "rsi_oversold": rsi_oversold, "rsi_overbought": rsi_overbought,
+            "extended_1m_pct": extended_1m_pct, "extended_short_pct": extended_short_pct,
+            "trend_weight": trend_weight, "meanrev_weight": meanrev_weight,
+        },
         "reasons": reasons,
     }
 
-    _cache_set(cache_key, result)
+    # 2026-09-11: don't poison the shared per-symbol cache with a result
+    # computed under non-default (adaptive) thresholds — only cache the
+    # plain static-default computation, same as before this change.
+    if not _using_overrides:
+        _cache_set(cache_key, result)
     return result
 
 if __name__ == "__main__":

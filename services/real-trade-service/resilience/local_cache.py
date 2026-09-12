@@ -32,17 +32,44 @@ def _now() -> datetime:
 # ── Generic key-value snapshot ───────────────────────────────────────────────
 
 def save_snapshot(db, key: str, payload: dict) -> None:
-    """Upsert a JSON payload under `key` in trade_resilience_cache."""
+    """Upsert a JSON payload under `key` in trade_resilience_cache.
+
+    BUG FIX (2026-09-12): concurrent callers writing the SAME key raced on a
+    classic check-then-act — two sessions could both see no existing row via
+    the query below, both try to INSERT, and the loser's commit failed with
+    a UNIQUE-constraint IntegrityError that was silently swallowed by the
+    bare `except Exception` — dropping that write entirely instead of
+    falling back to an UPDATE. Surfaced by market_feed.feed's new
+    cross-thread periodic ATR flush (real OS threads can legitimately race
+    to flush "market_feed:atr_cache" around the same moment), but the same
+    race existed for any other durable key any concurrent caller might hit.
+    On that specific conflict, roll back and retry once as a plain UPDATE
+    against the row the other session just committed.
+    """
+    import models
+    from sqlalchemy.exc import IntegrityError
+
+    payload_json = json.dumps(payload, default=str)
     try:
-        import models
         row = db.query(models.ResilienceCache).filter_by(key=key).first()
         if row is None:
             row = models.ResilienceCache(key=key, payload_json="{}")
             db.add(row)
-        row.payload_json = json.dumps(payload, default=str)
+        row.payload_json = payload_json
         row.updated_at = _now()
         db.commit()
+    except IntegrityError:
+        db.rollback()
+        try:
+            db.query(models.ResilienceCache).filter_by(key=key).update(
+                {"payload_json": payload_json, "updated_at": _now()}
+            )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.warning("local_cache.save_snapshot[%s]: retry-after-conflict failed: %s", key, exc)
     except Exception as exc:
+        db.rollback()
         logger.warning("local_cache.save_snapshot[%s]: %s", key, exc)
 
 

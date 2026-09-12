@@ -107,10 +107,73 @@ def _compute_atr_from_candles(candles: list) -> Optional[float]:
 
 
 def _store_atr(symbol: str, atr: float) -> None:
+    global _ATR_DIRTY_COUNT
     clean = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
-    if clean and atr > 0:
-        with _ATR_LOCK:
-            _ATR_CACHE[clean] = atr
+    if not (clean and atr > 0):
+        return
+    should_flush = False
+    with _ATR_LOCK:
+        _ATR_CACHE[clean] = atr
+        # BUG FIX (2026-09-12): entry_engine/exit_engine read this cache from
+        # auto_pilot's dedicated worker thread (its own event loop, per the
+        # 2026-09-10 fix), while _bg_refresh_atr writes here from the main
+        # event-loop thread. _ATR_CACHE itself was already lock-protected;
+        # the dirty counter increment+threshold-check below was not — two
+        # real OS threads could race on a bare `+= 1`, silently undercounting
+        # and pushing flushes further apart than _ATR_FLUSH_EVERY intends.
+        # Folding it into the same _ATR_LOCK section makes the whole
+        # "increment, then decide whether to flush" step atomic.
+        _ATR_DIRTY_COUNT += 1
+        if _ATR_DIRTY_COUNT >= _ATR_FLUSH_EVERY:
+            _ATR_DIRTY_COUNT = 0
+            should_flush = True
+    if should_flush:
+        _schedule_atr_flush()
+
+
+def _schedule_atr_flush() -> None:
+    """Kick off a periodic flush without blocking the caller's event loop.
+    BUG FIX (2026-09-12): _flush_atr_cache_periodic() does synchronous
+    SQLAlchemy I/O (session open, query, commit). _store_atr is called
+    synchronously from _bg_refresh_atr, an async task — calling that DB work
+    inline would stall whichever event loop happens to be running it (main
+    loop or auto_pilot's worker-thread loop), the exact class of bug fixed
+    in api-gateway's /surprise/ipo/list earlier this session. When a loop is
+    running, offload the actual DB work to a thread via asyncio.to_thread and
+    fire-and-forget (any failure is already swallowed inside the target
+    function, so an un-awaited task is safe). Outside a running loop (e.g.
+    a sync test harness), just run it inline — there is no loop to block."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _flush_atr_cache_periodic()
+        return
+    task = loop.create_task(asyncio.to_thread(_flush_atr_cache_periodic))
+
+    def _log_if_failed(t: "asyncio.Task") -> None:
+        if not t.cancelled() and t.exception() is not None:
+            logger.warning("scheduled ATR flush task failed: %s", t.exception())
+
+    task.add_done_callback(_log_if_failed)
+
+
+def _flush_atr_cache_periodic() -> None:
+    """Opportunistic flush triggered from _store_atr once _ATR_FLUSH_EVERY new
+    values have accumulated. Opens its own short-lived DB session — _store_atr
+    is called from deep inside background price-refresh callbacks that don't
+    carry a `db` session, so this can't just reuse flush_atr_cache_to_db(db)
+    directly. Any failure here is swallowed: losing a periodic flush just
+    means the next one (or the next restart's cold-start) catches up."""
+    try:
+        from db import get_session_factory
+        Session = get_session_factory()
+        db = Session()
+        try:
+            flush_atr_cache_to_db(db)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("_flush_atr_cache_periodic failed (non-fatal): %s", e)
 
 
 def _cached_atr(symbol: str) -> Optional[float]:
@@ -118,6 +181,51 @@ def _cached_atr(symbol: str) -> Optional[float]:
     clean = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
     with _ATR_LOCK:
         return _ATR_CACHE.get(clean)
+
+
+# ATR cache persistence — flush to resilience DB every N updates so
+# a service restart doesn't cold-miss all symbols and trigger a
+# 50-concurrent-history-fetch storm (the root cause of 495s cycles).
+_ATR_DIRTY_COUNT = 0
+_ATR_FLUSH_EVERY = 10   # flush after this many new ATR values written
+_ATR_CACHE_KEY   = "market_feed:atr_cache"
+
+
+def load_atr_cache_from_db(db) -> None:
+    """Call once at startup (from main.py) to warm _ATR_CACHE from the DB.
+    Non-fatal — a missing snapshot just means a cold start."""
+    global _ATR_CACHE
+    try:
+        from resilience.local_cache import load_snapshot
+        snap = load_snapshot(db, _ATR_CACHE_KEY)
+        if snap and isinstance(snap.get("atrs"), dict):
+            with _ATR_LOCK:
+                _ATR_CACHE.update({
+                    k: float(v) for k, v in snap["atrs"].items()
+                    if isinstance(v, (int, float)) and v > 0
+                })
+            logger.info(
+                "ATR cache warmed from DB: %d symbol(s) loaded",
+                len(snap["atrs"]),
+            )
+    except Exception as e:
+        logger.warning("load_atr_cache_from_db failed (non-fatal): %s", e)
+
+
+def flush_atr_cache_to_db(db) -> None:
+    """Persist current _ATR_CACHE snapshot to the resilience DB.
+    Non-fatal — a flush failure just means the cache won't survive the
+    next restart (graceful degradation back to cold-start behaviour)."""
+    global _ATR_DIRTY_COUNT
+    try:
+        from resilience.local_cache import save_snapshot
+        with _ATR_LOCK:
+            snapshot = dict(_ATR_CACHE)
+        save_snapshot(db, _ATR_CACHE_KEY, {"atrs": snapshot})
+        _ATR_DIRTY_COUNT = 0
+        logger.debug("ATR cache flushed to DB: %d symbol(s)", len(snapshot))
+    except Exception as e:
+        logger.warning("flush_atr_cache_to_db failed (non-fatal): %s", e)
 
 
 async def _bg_refresh_atr(client: httpx.AsyncClient, symbol: str) -> None:

@@ -618,6 +618,13 @@ def analyze(symbol: str, force: bool = False):
         "fundamental_score": score,
         "valuation": valuation_note,
         "sector": f.get("sector"),
+        # 2026-09-11 addition: market_cap was already fetched into `f` above
+        # (used internally for the FCF-yield calc) but never surfaced as its
+        # own top-level field — only reachable via the "raw" passthrough
+        # below, which callers shouldn't have to reach into for something
+        # this basic. real-trade-service's candidate quality gate needs this
+        # directly for its market-cap floor/tier check.
+        "market_cap": market_cap,
         "peer_relative_score": peer_rel.get("score") if isinstance(peer_rel, dict) else None,
         "peer_relative": peer_rel if isinstance(peer_rel, dict) else None,
         "peer_list": peer_list,

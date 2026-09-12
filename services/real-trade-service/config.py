@@ -502,6 +502,61 @@ VOLUME_SHOCK_SECTOR_PCTL_FLOOR      = float(os.getenv("VOLUME_SHOCK_SECTOR_PCTL_
 # to cost control rather than a trading decision.
 VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS = int(os.getenv("VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS", "40"))
 
+# ── Market-cap filter (2026-09-11 addition) ────────────────────────────────
+# User request: "on volume stock pick... add only those which is fundamental
+# and technically ok" was missing a market-cap floor entirely — a stock
+# could clear the fund/tech quality gate above on pure score despite being
+# a micro/nano-cap with essentially no institutional participation, wide
+# spreads, and easy price manipulation on light volume.
+#
+# Tier bands below are approximate INR-crore buckets in common retail/
+# analyst use, NOT SEBI's exact rank-based percentile cutoffs (SEBI defines
+# large-cap as NSE/BSE rank 1-100 by full market cap, mid-cap 101-250,
+# small-cap 251+ — cumulative full-universe ranking, re-set every 6 months,
+# which this service doesn't compute). Good enough for a practical filter;
+# override via env if your own scan universe skews differently.
+MARKET_CAP_LARGE_CR = float(os.getenv("MARKET_CAP_LARGE_CR", "20000"))
+MARKET_CAP_MID_CR   = float(os.getenv("MARKET_CAP_MID_CR", "5000"))
+MARKET_CAP_SMALL_CR = float(os.getenv("MARKET_CAP_SMALL_CR", "500"))
+# Absolute floor — enforced regardless of regime/adaptive tilt (see
+# adaptive_market_params.adaptive_min_market_cap_cr). This is a structural
+# liquidity/manipulation-risk floor, same category as RISK_MIN_STOCK_PRICE
+# in risk_engine/engine.py, not a tactical call — sub-₹500cr names have the
+# thinnest institutional coverage and are most exposed to pump-and-dump/
+# operator activity on NSE.
+MIN_MARKET_CAP_CR_ABSOLUTE_FLOOR = float(os.getenv("CANDIDATE_MIN_MARKET_CAP_CR_ABSOLUTE_FLOOR", "500"))
+# Static fallback (used until adaptive_market_params has 30 distinct days
+# of self-recorded history, or if it errors) and base value the regime tilt
+# is applied around.
+#
+# 2026-09-11 CALIBRATION NOTE: this sandbox has no access to NSE/Dhan
+# historical data APIs to run an actual 6-month backtest (network egress
+# here is restricted to pypi/npm/github, confirmed while building this) —
+# so this starting value is grounded in verified CURRENT published market
+# data, not a from-scratch backtest:
+#   - Nifty 50 ~23,200-23,300 (11-Sep-2026), a 3-month low, -13.67% YTD
+#     price return through 9-Sep-2026 (independent tracker estimate) —
+#     WORSE than the -7% 6m figure this file's own Aug-28 header used, i.e.
+#     the correction that was already being defended against has deepened.
+#   - India VIX ~11.5-11.9 (11-Sep-2026) vs its own 52-week range of
+#     8.72-28.91 — LOW/calm, far from its own high. Options-market fear is
+#     NOT elevated despite the index being weak: a grinding decline, not a
+#     panic/capitulation event.
+#   - NSE 500 breadth: 274/500 stocks above their 200-day SMA (early-Sep
+#     reading), down from 301 the prior month — deteriorating but still a
+#     majority-positive breadth, not a collapse.
+# Net read: a real but orderly correction, not a volatility spike. That
+# combination argues for a MODERATE tilt toward higher-quality/larger names
+# (raise the floor somewhat from the absolute ₹500cr minimum) rather than
+# either ignoring the correction or applying full panic-regime defensiveness
+# a VIX spike would call for. ₹1,500cr as the static base reflects that
+# middle ground — comfortably past micro-cap risk, still well below
+# large-cap, leaving room for the midcap/smallcap outperformance this
+# file's own Aug-28 header already documented (Midcap100 +12.88% 1Y vs
+# Nifty -1.08% at the time) once the adaptive tilt below loosens it back
+# down in a stronger reading.
+MIN_MARKET_CAP_CR_STATIC = float(os.getenv("CANDIDATE_MIN_MARKET_CAP_CR", "1500"))
+
 # ── Adaptive threshold engine configuration ───────────────────────────────────
 # Controls how adaptive_thresholds.py computes the live regime gate.
 ADAPTIVE_HISTORY_DAYS      = int(os.getenv("ADAPTIVE_HISTORY_DAYS", "90"))

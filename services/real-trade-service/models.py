@@ -430,6 +430,25 @@ class MarketRegimeHistory(Base):
     __table_args__ = (Index("ix_market_regime_history_recorded_at", "recorded_at"),)
 
 
+# 2026-09-11 addition: generalizes the single-metric pattern above (which
+# only ever tracked market_score) to any measured quantity, for
+# adaptive_market_params.py. One row per (metric_name, recorded_at) reading
+# — e.g. "universe_atr_pct" (this cycle's average pre-shock ATR% across the
+# volume-shock candidate batch). Same rolling-percentile-with-warm-up-
+# fallback contract as MarketRegimeHistory/adaptive_thresholds.py.
+class AdaptiveMetricSnapshot(Base):
+    __tablename__ = "trade_adaptive_metric_history"
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    metric_name = Column(String(64), nullable=False)
+    value       = Column(Float, nullable=False)
+    recorded_at = Column(DateTime, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("ix_adaptive_metric_history_name_recorded", "metric_name", "recorded_at"),
+    )
+
+
 # ── Short-Term Trading Upgrade (2026-09-02) ─────────────────────────────────
 # Watchlist: catalyst detection (Stage 1) is now separate from entry timing
 # (Stage 2). watchlist_engine.watchlist writes one row per detected catalyst

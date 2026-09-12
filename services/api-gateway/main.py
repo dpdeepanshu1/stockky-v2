@@ -16,6 +16,7 @@ import uuid
 import threading
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from starlette.concurrency import run_in_threadpool
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 from typing import List, Optional, Set, Dict, Union, Any
@@ -7471,10 +7472,20 @@ async def api_ipo_list(display_days: Optional[int] = Query(None)):
     display_days optionally narrows the (up to ~1 year wide) scanned universe
     down to listings within the last N days for display, without re-scanning
     — defaults to ~30 days (IPO_CHECKER_DEFAULT_DISPLAY_DAYS). Pass a large
-    value (e.g. 365) to see everything the scan actually found."""
+    value (e.g. 365) to see everything the scan actually found.
+
+    BUG FIX (2026-09-12): get_ipo_list() does a synchronous kv_get(), which on
+    a cache-miss falls through to a blocking Oracle/Neon round trip. Calling
+    that directly inside this `async def` route blocked api-gateway's whole
+    (single-worker) event loop for as long as the DB call took/hung — every
+    other route queued behind it. Now bounded by oracle_compat's
+    ORACLE_CALL_TIMEOUT_MS AND offloaded to a worker thread via
+    run_in_threadpool, so a slow/stuck DB round trip no longer stalls other
+    requests; the existing except below still guarantees a clean fallback
+    response either way."""
     try:
         from ipo_scanner import get_ipo_list
-        return get_ipo_list(display_days=display_days)
+        return await run_in_threadpool(get_ipo_list, display_days=display_days)
     except Exception as e:
         return {"results": [], "generated_at": None, "error": str(e)[:160]}
 
@@ -7491,7 +7502,9 @@ async def api_ipo_audit():
     """
     try:
         from ipo_scanner import get_ipo_feed_audit
-        return get_ipo_feed_audit()
+        # Same fix as /surprise/ipo/list — offload the blocking DB-backed call
+        # so it can't stall the shared event loop (see 2026-09-12 note there).
+        return await run_in_threadpool(get_ipo_feed_audit)
     except Exception as e:
         return {"ok": False, "error": str(e)[:200], "rows": []}
 
@@ -9433,11 +9446,27 @@ async def audit_missing_feed_data(limit: int = 500, cache: bool = True):
     Memoised for AUDIT_TTL_SEC (pass cache=false to force a recount) — this walks
     every tracked symbol checking five fields each, and the DB Health tab
     refetches it on every mount, which was most of that tab's load time.
+
+    BUG FIX (2026-09-12): on a cache miss (first call after AUDIT_TTL_SEC
+    expiry, cache=false, or a cold start) the full per-symbol walk below used
+    to run synchronously inline in this async route — same class of bug as
+    /surprise/ipo/list earlier this session, except this one can iterate up
+    to `limit` symbols (callers pass up to 5000) each doing their own
+    store/DB lookup, making it the single heaviest blocking call in this
+    file. Now offloaded to a worker thread via run_in_threadpool so a slow
+    cache-miss audit can't stall every other route on the shared event loop.
     """
     if cache:
         hit = _audit_cache_get(f"feed_audit:{limit}")
         if hit is not None:
             return hit
+    return await run_in_threadpool(_compute_feed_audit, limit)
+
+
+def _compute_feed_audit(limit: int) -> dict:
+    """The actual (synchronous, DB/store-backed) audit walk — see the
+    run_in_threadpool BUG FIX note on audit_missing_feed_data above for why
+    this lives in its own plain function instead of running inline there."""
     store = _feed_store()
     symbols: list = []
     try:

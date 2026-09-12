@@ -14,6 +14,7 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -78,6 +79,22 @@ async def startup() -> None:
             _db.close()
     except Exception as _e:
         logger.debug("startup position reconcile failed (non-fatal): %s", _e)
+    # ATR cache persistence (2026-09-12): warm market_feed's in-memory ATR
+    # cache from the last snapshot so a restart doesn't cold-miss every
+    # symbol and trigger a concurrent-history-fetch storm (495s cycles).
+    # Same pattern/session handling as the reconcile step above — non-fatal,
+    # a missing/failed snapshot just means a normal cold start.
+    try:
+        from db import get_session_factory as _get_session_factory_atr
+        from market_feed.feed import load_atr_cache_from_db
+        _Session2 = _get_session_factory_atr()
+        _db2 = _Session2()
+        try:
+            load_atr_cache_from_db(_db2)
+        finally:
+            _db2.close()
+    except Exception as _e:
+        logger.debug("startup ATR cache warm failed (non-fatal): %s", _e)
     from execution import auto_pilot
     auto_pilot.start()
     # Adaptive threshold staleness check — logs + Telegram warning if any
@@ -88,6 +105,26 @@ async def startup() -> None:
     except Exception as _e:
         logger.debug("adaptive staleness check failed (non-fatal): %s", _e)
     logger.info("real-trade-service ready (adaptive thresholds + all improvements active)")
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    # Best-effort final ATR cache flush (2026-09-12) so a graceful stop/deploy
+    # doesn't lose the up-to-_ATR_FLUSH_EVERY-1 most recent ATR updates that
+    # hadn't hit the periodic flush threshold yet. Non-fatal — an interrupted
+    # or failed flush just falls back to the periodic in-loop flush / next
+    # cold-start behaviour, same safety net as everywhere else in this file.
+    try:
+        from db import get_session_factory as _get_session_factory_atr
+        from market_feed.feed import flush_atr_cache_to_db
+        _Session3 = _get_session_factory_atr()
+        _db3 = _Session3()
+        try:
+            flush_atr_cache_to_db(_db3)
+        finally:
+            _db3.close()
+    except Exception as _e:
+        logger.debug("shutdown ATR cache flush failed (non-fatal): %s", _e)
 
 
 def _seed_defaults() -> None:
@@ -330,8 +367,15 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
 # ── Routes: Layer 1 auth (gate 1) ───────────────────────────────────────────
 @app.post("/auth/login")
 async def login(body: LoginRequest, db: Session = Depends(get_db)):
+    # BUG FIX (2026-09-12): Argon2id verify() is deliberately CPU-heavy
+    # (~100-300ms) and was running inline on this single-worker service's
+    # only event loop. A burst of login attempts — malicious or just a
+    # mistyped password retried a few times — would stall every other
+    # request (including /health, which the docker healthcheck depends on)
+    # for that long per attempt. Same fix pattern as the DB-blocking routes
+    # fixed earlier: offload the actual CPU-bound work to a thread.
     try:
-        ok = verify_admin_password(body.username, body.password)
+        ok = await run_in_threadpool(verify_admin_password, body.username, body.password)
     except AdminAuthError as e:
         raise HTTPException(status_code=500, detail=str(e))
     if not ok:
@@ -1376,6 +1420,26 @@ async def get_adaptive_status(db: Session = Depends(get_db)):
     except Exception as e:
         return {"error": str(e), "adaptive_active": False,
                 "static_fallback": config.ENTRY_REGIME_MIN_SCORE}
+
+@app.get("/adaptive/market-params/status")
+async def get_adaptive_market_params_status(db: Session = Depends(get_db)):
+    """
+    2026-09-11 addition. Shows the current adaptive values (and their
+    static fallbacks + how much self-recorded history backs each one) for
+    CANDIDATE_MAX_ATR_PCT, the fund/tech quality floors, and the market-
+    cap floor — the three parameters adaptive_market_params.py drives.
+    Companion to /adaptive/status above (that one only ever covered the
+    single regime-gate metric). No auth required — read-only diagnostics.
+    """
+    try:
+        from adaptive_market_params import adaptive_params_status
+        return adaptive_params_status(db)
+    except Exception as e:
+        return {
+            "error": str(e),
+            "candidate_max_atr_pct": {"value": config.CANDIDATE_MAX_ATR_PCT, "source": "static (error)"},
+            "min_market_cap_cr": {"value": config.MIN_MARKET_CAP_CR_STATIC, "source": "static (error)"},
+        }
 
 @app.get("/candidates/{mode}")
 async def list_candidates(

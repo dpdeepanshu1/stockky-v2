@@ -100,13 +100,10 @@ MAX_STOP_PCT = _get_float("MAX_STOP_PCT", 5.0)
 MAX_CONCURRENT_SCALP_POSITIONS = _get_int("MAX_CONCURRENT_SCALP_POSITIONS", 5)
 MIN_PREFERRED_SCALP_POSITIONS = _get_int("MIN_PREFERRED_SCALP_POSITIONS", 1)
 
-# ── Risk / capital sizing (OPEN ITEM — placeholder until user confirms) ────
-# See tracking doc §3.5 / §5 item 9: user still needs to give the %
-# of the scalp pool to risk per trade. 1.5% is a conservative placeholder
-# ONLY — main.py logs a loud warning on every startup until this is
-# explicitly confirmed and this default is intentionally overridden.
-RISK_PER_TRADE_PCT = _get_float("RISK_PER_TRADE_PCT", 1.5)
-RISK_PER_TRADE_PCT_CONFIRMED = _get_bool("RISK_PER_TRADE_PCT_CONFIRMED", False)
+# ── Risk / capital sizing (CONFIRMED by user, tracking doc §3.5 / §5 item 9) ─
+# User confirmed 2% of the scalp pool risked per single trade.
+RISK_PER_TRADE_PCT = _get_float("RISK_PER_TRADE_PCT", 2.0)
+RISK_PER_TRADE_PCT_CONFIRMED = _get_bool("RISK_PER_TRADE_PCT_CONFIRMED", True)
 
 # ── Capital split with real-trade-service ───────────────────────────────────
 SCALP_POOL_CAPITAL_SHARE_PCT = _get_float("SCALP_POOL_CAPITAL_SHARE_PCT", 50.0)

@@ -374,6 +374,16 @@ services:
       # mechanism market-data-service already relies on for its own ANGELONE_*
       # vars — env_file passes .env's raw keys straight through).
       #
+      # Admin auth (session 8 — see auth/admin_auth.py): listed explicitly
+      # here, not left to env_file, for the SAME reason real-trade-service's
+      # block lists them explicitly below — makes it obvious at a glance
+      # that this service shares the ONE admin password with real-trade-
+      # service via the SAME .env keys, rather than needing a second set.
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH:-}
+      - ADMIN_PASSWORD_HASH_B64=${ADMIN_PASSWORD_HASH_B64:-}
+      - SESSION_SECRET=${SESSION_SECRET:-}
+      #
       # 2026-09-12 fix: ORACLE_WALLET_DIR/TNS_ADMIN and the wallet volume mount
       # below were missing entirely from this block. oracle_compat.py resolves
       # the wallet dir from os.environ directly (not from config.py's Python

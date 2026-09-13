@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   positionStocksApi, getPositionStocksApiUrl, setPositionStocksApiUrl,
+  getSessionToken, setSessionToken, setSessionExpiredHandler,
   type ScalpStatus, type ScalpPositionRow, type ScalpCandidateRow, type ScalpLedgerState,
   type ScalpTradeHistory, type DhanLiveOrders, type ScalpCycleResult,
 } from "../positionStocksApi";
@@ -56,6 +57,33 @@ export default function PositionStocksTab() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmKill, setConfirmKill] = useState(false);
+
+  // ── Admin login (same admin username/password as Real Automatic Trade) ──
+  const [loggedIn, setLoggedIn] = useState(!!getSessionToken());
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("");
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loginLoading, setLoginLoading] = useState(false);
+
+  useEffect(() => {
+    setSessionExpiredHandler(() => setLoggedIn(false));
+    return () => setSessionExpiredHandler(null);
+  }, []);
+
+  const doLogin = async () => {
+    setLoginLoading(true); setLoginError(null);
+    try {
+      const res = await positionStocksApi.login(username, password);
+      setSessionToken(res.token); setLoggedIn(true); setPassword("");
+    } catch (e: any) {
+      setLoginError(e?.message || "Login failed");
+    } finally { setLoginLoading(false); }
+  };
+
+  const doLogout = async () => {
+    try { await positionStocksApi.logout(); } catch { /* token may already be expired — fine */ }
+    setSessionToken(null); setLoggedIn(false);
+  };
 
   const loadAll = useCallback(async () => {
     if (!getPositionStocksApiUrl()) return;
@@ -163,6 +191,37 @@ export default function PositionStocksTab() {
         </div>
       )}
 
+      {/* ── Admin login (required for every action button below) ── */}
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        {!loggedIn ? (
+          <>
+            <p className="dash-section-title mb-2">Admin login required</p>
+            <p className="font-display tabular-nums text-[10px] text-mist mb-2">
+              Same admin username/password as Real Automatic Trade.
+            </p>
+            {loginError && (
+              <p className="font-display tabular-nums text-[11px] text-signal-sell mb-2">{loginError}</p>
+            )}
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input className="flex-1 bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-xs text-paper focus:outline-none focus:border-slate"
+                placeholder="Admin username" value={username} onChange={e => setUsername(e.target.value)} />
+              <input type="password" className="flex-1 bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-xs text-paper focus:outline-none focus:border-slate"
+                placeholder="Password" value={password} onChange={e => setPassword(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && void doLogin()} />
+              <button onClick={() => void doLogin()} disabled={loginLoading || !password}
+                className="px-4 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 font-display tabular-nums text-xs text-signal-buy disabled:opacity-40 whitespace-nowrap">
+                {loginLoading ? "Logging in…" : "Log In"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="flex items-center justify-between">
+            <p className="font-display tabular-nums text-xs text-signal-buy">● Admin session active ({username})</p>
+            <button onClick={() => void doLogout()} className="font-display tabular-nums text-[11px] text-mist hover:text-paper">Log out</button>
+          </div>
+        )}
+      </div>
+
       {/* ── Top control strip ── */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <div className="bg-graphite border border-slate rounded-2xl p-3">
@@ -231,54 +290,54 @@ export default function PositionStocksTab() {
 
       <div className="flex flex-wrap gap-2">
         <button
-          disabled={busy !== null || status?.service_enabled}
+          disabled={!loggedIn || busy !== null || status?.service_enabled}
           onClick={() => doAction("service_enable")}
           className="px-4 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 font-display tabular-nums text-xs text-signal-buy disabled:opacity-40"
         >{busy === "service_enable" ? "Enabling…" : "Enable Module"}</button>
         <button
-          disabled={busy !== null || !status?.service_enabled}
+          disabled={!loggedIn || busy !== null || !status?.service_enabled}
           onClick={() => doAction("service_disable")}
           className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-paper disabled:opacity-40"
         >{busy === "service_disable" ? "Pausing…" : "Pause Module"}</button>
         <button
-          disabled={busy !== null || status?.armed}
+          disabled={!loggedIn || busy !== null || status?.armed}
           onClick={() => doAction("arm")}
           className="px-4 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 font-display tabular-nums text-xs text-signal-buy disabled:opacity-40"
         >{busy === "arm" ? "Arming…" : "Arm"}</button>
         <button
-          disabled={busy !== null || !status?.armed}
+          disabled={!loggedIn || busy !== null || !status?.armed}
           onClick={() => doAction("disarm")}
           className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-paper disabled:opacity-40"
         >{busy === "disarm" ? "Disarming…" : "Disarm"}</button>
         <button
-          disabled={busy !== null || status?.auto_pilot_enabled}
+          disabled={!loggedIn || busy !== null || status?.auto_pilot_enabled}
           onClick={() => doAction("autopilot_enable")}
           className="px-4 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 font-display tabular-nums text-xs text-signal-buy disabled:opacity-40"
         >{busy === "autopilot_enable" ? "Enabling…" : "Enable Auto-Pilot"}</button>
         <button
-          disabled={busy !== null || !status?.auto_pilot_enabled}
+          disabled={!loggedIn || busy !== null || !status?.auto_pilot_enabled}
           onClick={() => doAction("autopilot_disable")}
           className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-paper disabled:opacity-40"
         >{busy === "autopilot_disable" ? "Disabling…" : "Disable Auto-Pilot"}</button>
         <button
-          disabled={busy !== null || !status?.armed || !status?.service_enabled}
+          disabled={!loggedIn || busy !== null || !status?.armed || !status?.service_enabled}
           onClick={() => doAction("run_cycle")}
           className="px-4 py-2 rounded-xl bg-signal-prepare/20 border border-signal-prepare/40 font-display tabular-nums text-xs text-signal-prepare disabled:opacity-40"
         >{busy === "run_cycle" ? "Running…" : "Run Cycle Now"}</button>
         <button
-          disabled={busy !== null}
+          disabled={!loggedIn || busy !== null}
           onClick={() => doAction("sync")}
           className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-mist disabled:opacity-40"
         >{busy === "sync" ? "Syncing…" : "Sync Capital from Dhan"}</button>
         <button
-          disabled={busy !== null}
+          disabled={!loggedIn || busy !== null}
           onClick={() => doAction("reconcile")}
           className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-mist disabled:opacity-40"
         >{busy === "reconcile" ? "Checking…" : "Check Exits Now"}</button>
 
         {!confirmKill ? (
           <button
-            disabled={busy !== null}
+            disabled={!loggedIn || busy !== null}
             onClick={() => setConfirmKill(true)}
             className="px-4 py-2 rounded-xl bg-signal-sell/20 border border-signal-sell/40 font-display tabular-nums text-xs text-signal-sell disabled:opacity-40 ml-auto"
           >Kill Switch</button>
@@ -290,6 +349,13 @@ export default function PositionStocksTab() {
           </div>
         )}
       </div>
+
+      {!loggedIn && (
+        <p className="font-display tabular-nums text-[10px] text-mist -mt-2">
+          Log in above to enable the buttons — all actions on this tab now require the same admin password as Real Automatic Trade.
+        </p>
+      )}
+
 
       {/* ── Capital ledger ── */}
       <div className="bg-graphite border border-slate rounded-2xl p-4">

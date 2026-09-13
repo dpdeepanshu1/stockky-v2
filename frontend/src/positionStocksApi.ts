@@ -9,6 +9,12 @@
 // service's real-money controls through a shared client.
 
 const STORAGE_URL_KEY = "stockky:position_stocks_api_url";
+// Deliberately a SEPARATE localStorage key from real-trade-service's
+// "stockky:real_trade_session_token" — same admin password, same
+// ADMIN_PASSWORD_HASH/SESSION_SECRET on the backend, but each service's
+// session token is issued (and expires) independently, matching the two
+// services' separate trust boundaries.
+const STORAGE_TOKEN_KEY = "stockky:position_stocks_session_token";
 
 export function getPositionStocksApiUrl(): string {
   const stored = localStorage.getItem(STORAGE_URL_KEY);
@@ -22,7 +28,24 @@ export function setPositionStocksApiUrl(url: string) {
   else localStorage.removeItem(STORAGE_URL_KEY);
 }
 
-async function psRequest<T>(path: string, init?: RequestInit): Promise<T> {
+export function getSessionToken(): string | null {
+  return localStorage.getItem(STORAGE_TOKEN_KEY);
+}
+
+export function setSessionToken(token: string | null) {
+  if (token) localStorage.setItem(STORAGE_TOKEN_KEY, token);
+  else localStorage.removeItem(STORAGE_TOKEN_KEY);
+}
+
+// Mirrors realTradeApi.ts's sessionExpiredHandler hook — lets the dashboard
+// hear about a token expiring mid-poll (not just on an explicit login/logout
+// click) so "Admin session active" never goes stale against reality.
+let sessionExpiredHandler: (() => void) | null = null;
+export function setSessionExpiredHandler(fn: (() => void) | null) {
+  sessionExpiredHandler = fn;
+}
+
+async function psRequest<T>(path: string, init?: RequestInit, requireAuth = false): Promise<T> {
   const base = getPositionStocksApiUrl();
   if (!base) {
     throw new Error("Position Stocks service URL isn't set. Open Position Stocks → Settings and paste its URL.");
@@ -31,6 +54,13 @@ async function psRequest<T>(path: string, init?: RequestInit): Promise<T> {
     "Content-Type": "application/json",
     ...(init?.headers as Record<string, string> | undefined),
   };
+  if (requireAuth) {
+    const token = getSessionToken();
+    if (!token) {
+      throw new Error("Admin login required. Log in above with the same admin password used for Real Automatic Trade.");
+    }
+    headers["Authorization"] = `Bearer ${token}`;
+  }
   const resp = await fetch(`${base}${path}`, { ...init, headers });
   const raw = await resp.text();
   let data: any = null;
@@ -42,6 +72,10 @@ async function psRequest<T>(path: string, init?: RequestInit): Promise<T> {
     }
   }
   if (!resp.ok) {
+    if (resp.status === 401 && requireAuth) {
+      setSessionToken(null);
+      sessionExpiredHandler?.();
+    }
     const detail = (data && data.detail) || resp.statusText;
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
@@ -163,28 +197,42 @@ export interface DhanLiveOrders {
 export const positionStocksApi = {
   health: () => psRequest<{ status: string; service: string }>("/health"),
 
+  // Same admin username/password as Real Automatic Trade — verified against
+  // the SAME ADMIN_PASSWORD_HASH/ADMIN_USERNAME env this service now shares
+  // with real-trade-service (see backend auth/admin_auth.py).
+  login: (username: string, password: string) =>
+    psRequest<{ token: string; expires_at: string }>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  logout: () => psRequest<{ status: string }>("/auth/logout", { method: "POST" }, true),
+
   status: () => psRequest<ScalpStatus>("/status"),
 
-  arm: () => psRequest<{ status: string }>("/arm", { method: "POST" }),
-  disarm: () => psRequest<{ status: string }>("/disarm", { method: "POST" }),
-  kill: () => psRequest<{ status: string }>("/kill", { method: "POST" }),
+  // Every route below that mutates state now requires admin login
+  // (backend session 8: auth/admin_auth.py) — requireAuth=true attaches
+  // the Bearer token and throws a clear "log in" error if there isn't one,
+  // instead of the request silently 401-ing with no explanation.
+  arm: () => psRequest<{ status: string }>("/arm", { method: "POST" }, true),
+  disarm: () => psRequest<{ status: string }>("/disarm", { method: "POST" }, true),
+  kill: () => psRequest<{ status: string }>("/kill", { method: "POST" }, true),
 
-  serviceEnable: () => psRequest<{ status: string }>("/service/enable", { method: "POST" }),
-  serviceDisable: () => psRequest<{ status: string }>("/service/disable", { method: "POST" }),
+  serviceEnable: () => psRequest<{ status: string }>("/service/enable", { method: "POST" }, true),
+  serviceDisable: () => psRequest<{ status: string }>("/service/disable", { method: "POST" }, true),
 
-  autopilotEnable: () => psRequest<{ status: string }>("/autopilot/enable", { method: "POST" }),
-  autopilotDisable: () => psRequest<{ status: string }>("/autopilot/disable", { method: "POST" }),
-  runCycle: () => psRequest<ScalpCycleResult>("/cycle/run", { method: "POST" }),
+  autopilotEnable: () => psRequest<{ status: string }>("/autopilot/enable", { method: "POST" }, true),
+  autopilotDisable: () => psRequest<{ status: string }>("/autopilot/disable", { method: "POST" }, true),
+  runCycle: () => psRequest<ScalpCycleResult>("/cycle/run", { method: "POST" }, true),
 
   positions: () => psRequest<ScalpPositionRow[]>("/positions"),
   tradeHistory: (limit = 200) => psRequest<ScalpTradeHistory>(`/trades/history?limit=${limit}`),
   candidates: () => psRequest<ScalpCandidateRow[]>("/candidates"),
 
   ledger: () => psRequest<ScalpLedgerState>("/ledger"),
-  syncLedger: () => psRequest<{ status: string; total_allocated_capital: number }>("/ledger/sync", { method: "POST" }),
+  syncLedger: () => psRequest<{ status: string; total_allocated_capital: number }>("/ledger/sync", { method: "POST" }, true),
 
   wsStatus: () => psRequest<{ connected: boolean; subscribed_symbols?: number; last_tick_at?: string | null; reconnect_attempts?: number }>("/ws-status"),
   dhanLiveOrders: () => psRequest<DhanLiveOrders>("/dhan/live-orders"),
 
-  reconcile: () => psRequest<{ status: string; positions_closed: number }>("/reconcile", { method: "POST" }),
+  reconcile: () => psRequest<{ status: string; positions_closed: number }>("/reconcile", { method: "POST" }, true),
 };

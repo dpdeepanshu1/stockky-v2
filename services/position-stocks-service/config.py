@@ -176,3 +176,28 @@ MIN_MARKET_CAP_CR = _get_float("MIN_MARKET_CAP_CR", 500.0)  # ₹500 crore floor
 SHARED_DAILY_ORDER_BUDGET = _get_int("SHARED_DAILY_ORDER_BUDGET", 5000)
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# ── Admin auth (Layer 1) — SAME mechanism, SAME env vars as real-trade-
+# service's config.py (auth/admin_auth.py docstring there has the full
+# rationale). Deliberately not imported from real-trade-service (this
+# service duplicates everything per the isolation note at the top of this
+# file) — but it reads the exact same ADMIN_USERNAME / ADMIN_PASSWORD_HASH
+# (or _B64) / SESSION_SECRET keys out of the SAME .env, so logging in with
+# your one admin password works identically on both services' dashboards.
+# Generate the hash once with:
+#   python -c "from argon2 import PasswordHasher; print(PasswordHasher().hash('yourpassword'))"
+# See real-trade-service/config.py's comment for why ADMIN_PASSWORD_HASH_B64
+# exists (docker-compose .env $ interpolation) — same applies here.
+_ADMIN_HASH_B64 = os.getenv("ADMIN_PASSWORD_HASH_B64", "")
+if _ADMIN_HASH_B64 and not os.getenv("ADMIN_PASSWORD_HASH"):
+    try:
+        import base64 as _b64
+        ADMIN_PASSWORD_HASH = _b64.b64decode(_ADMIN_HASH_B64).decode("utf-8").strip()
+    except Exception:
+        ADMIN_PASSWORD_HASH = ""
+else:
+    ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+
+SESSION_SECRET = os.getenv("SESSION_SECRET", "")
+SESSION_IDLE_TIMEOUT_MINUTES = _get_int("SESSION_IDLE_TIMEOUT_MINUTES", 30)

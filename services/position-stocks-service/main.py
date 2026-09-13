@@ -37,6 +37,12 @@ Lifecycle:
     stop WS client gracefully
 
 API endpoints:
+  POST /auth/login                   — admin login (SAME username/password as
+                                          real-trade-service — see auth/admin_auth.py).
+                                          Returns a Bearer token; every mutating
+                                          route below requires it.
+  POST /auth/logout                  — confirms token validity; stateless (frontend
+                                          just drops the token locally)
   GET  /health                       — liveness probe
   GET  /status                       — full state dump
   POST /arm                          — arm the service (enable real orders)
@@ -80,9 +86,13 @@ logger = logging.getLogger("position-stocks-main")
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 import db as _db
+from auth.admin_auth import (
+    require_admin, verify_admin_password, issue_session_token, AdminAuthError,
+)
 from capital import ledger, shared_order_budget
 from execution import dhan_client
 from feed import ws_client
@@ -107,6 +117,14 @@ async def lifespan(app: FastAPI):
             "RISK_PER_TRADE_PCT=%.1f%%. Set RISK_PER_TRADE_PCT_CONFIRMED=true and "
             "RISK_PER_TRADE_PCT=<your chosen %> in env before going live.",
             config.RISK_PER_TRADE_PCT,
+        )
+
+    if not config.ADMIN_PASSWORD_HASH or not config.SESSION_SECRET:
+        logger.warning(
+            "⚠️  ADMIN_PASSWORD_HASH and/or SESSION_SECRET is not set — every "
+            "arm/disarm/enable/kill/etc. request will 401 until the SAME "
+            "ADMIN_PASSWORD_HASH (or _B64) / SESSION_SECRET already used by "
+            "real-trade-service's .env is present for this service too."
         )
 
     # Start the Angel One WebSocket feed
@@ -274,10 +292,45 @@ def _get_gate(db: Session) -> ScalpGateState:
     return row
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "position-stocks-service"}
+
+
+@app.post("/auth/login")
+def login(body: LoginRequest):
+    """Same admin username/password as real-trade-service — verified against
+    the SAME ADMIN_PASSWORD_HASH / ADMIN_USERNAME env vars. Generic 401 on
+    any failure (wrong username, wrong password, or auth not configured on
+    this deploy) so a caller can never distinguish which — avoids username
+    enumeration, matches real-trade-service's /auth/login behavior."""
+    try:
+        ok = verify_admin_password(body.username, body.password)
+    except AdminAuthError as e:
+        logger.error("position-stocks: login attempted but auth not configured: %s", e)
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    if not ok:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    token, expires_at = issue_session_token(body.username)
+    logger.info("position-stocks-service: admin login (%s)", body.username)
+    return {"token": token, "expires_at": expires_at}
+
+
+@app.post("/auth/logout")
+def logout(admin: str = Depends(require_admin)):
+    """Stateless JWT — there is no server-side session row to clear here
+    (position-stocks-service doesn't persist an admin_authenticated gate
+    flag the way real-trade-service does), so this just confirms the token
+    was valid; the frontend drops it locally. The token remains technically
+    valid until its short SESSION_IDLE_TIMEOUT_MINUTES expiry either way."""
+    logger.info("position-stocks-service: admin logout (%s)", admin)
+    return {"status": "logged_out"}
 
 
 @app.get("/status")
@@ -304,7 +357,7 @@ def status(db: Session = Depends(get_db)):
 
 
 @app.post("/arm")
-def arm(db: Session = Depends(get_db)):
+def arm(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     gate = _get_gate(db)
     if gate.is_armed:
         return {"status": "already_armed"}
@@ -316,7 +369,7 @@ def arm(db: Session = Depends(get_db)):
 
 
 @app.post("/disarm")
-def disarm(db: Session = Depends(get_db)):
+def disarm(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     gate = _get_gate(db)
     gate.is_armed = False
     db.commit()
@@ -325,7 +378,7 @@ def disarm(db: Session = Depends(get_db)):
 
 
 @app.post("/service/enable")
-def service_enable(db: Session = Depends(get_db)):
+def service_enable(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Re-enable the whole module (screening + entries). Independent of
     is_armed — this only controls whether the module runs at all, not
     whether it's allowed to place real orders once running."""
@@ -337,7 +390,7 @@ def service_enable(db: Session = Depends(get_db)):
 
 
 @app.post("/service/disable")
-def service_disable(db: Session = Depends(get_db)):
+def service_disable(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Pause the whole module (screening + entries stop). Exit
     reconciliation and the EOD square-off sweep keep running regardless —
     open real-money positions are never left unmanaged just because the
@@ -351,7 +404,7 @@ def service_disable(db: Session = Depends(get_db)):
 
 
 @app.post("/autopilot/enable")
-def autopilot_enable(db: Session = Depends(get_db)):
+def autopilot_enable(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Resume automatic entries each cycle. Screening keeps running either
     way once armed+service_enabled+market-open — this only controls
     whether the loop acts on what it finds."""
@@ -363,7 +416,7 @@ def autopilot_enable(db: Session = Depends(get_db)):
 
 
 @app.post("/autopilot/disable")
-def autopilot_disable(db: Session = Depends(get_db)):
+def autopilot_disable(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Stop automatic entries. Screening/candidates keep updating live so
     you can watch what the engine would do without it acting — use
     POST /cycle/run for a one-off manual push while auto-pilot is off."""
@@ -375,7 +428,7 @@ def autopilot_disable(db: Session = Depends(get_db)):
 
 
 @app.post("/cycle/run")
-async def cycle_run(db: Session = Depends(get_db)):
+async def cycle_run(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Force one scan+entry cycle right now, bypassing the 10s timer and
     auto_pilot_enabled (still requires is_armed + service_enabled — a
     paused/disarmed service won't fire a manual cycle either, same
@@ -396,7 +449,7 @@ async def cycle_run(db: Session = Depends(get_db)):
 
 
 @app.post("/kill")
-def kill(db: Session = Depends(get_db)):
+def kill(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Manual kill switch: disarm + trip daily loss kill switch."""
     gate = _get_gate(db)
     gate.is_armed = False
@@ -512,7 +565,7 @@ def get_ledger(db: Session = Depends(get_db)):
 
 
 @app.post("/ledger/sync")
-def sync_ledger(db: Session = Depends(get_db)):
+def sync_ledger(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     total = ledger.sync_from_broker(db)
     return {"status": "synced", "total_allocated_capital": total}
 
@@ -545,7 +598,7 @@ def dhan_live_orders(db: Session = Depends(get_db)):
 
 
 @app.post("/reconcile")
-def reconcile_route(db: Session = Depends(get_db)):
+def reconcile_route(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Force an exit-reconciliation pass right now (same check the
     background loop runs every 10s) — useful right after a manual Dhan-side
     action, or to confirm a fill immediately instead of waiting for the

@@ -8,3 +8,7 @@ cryptography>=42.0.0
 oracledb==2.5.1
 dhanhq>=2.0.2
 pytz
+# Admin auth (auth/admin_auth.py) — SAME libs/versions real-trade-service
+# pins for the identical Argon2id-hash + signed-JWT mechanism.
+argon2-cffi==23.1.0
+pyjwt==2.8.0

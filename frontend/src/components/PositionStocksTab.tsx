@@ -10,6 +10,7 @@ import {
   getSessionToken, setSessionToken, setSessionExpiredHandler,
   type ScalpStatus, type ScalpPositionRow, type ScalpCandidateRow, type ScalpLedgerState,
   type ScalpTradeHistory, type DhanLiveOrders, type ScalpCycleResult, type DhanAccountStatus,
+  type ScalpCandidateLogRow,
 } from "../positionStocksApi";
 
 type Window = "1m" | "5m" | "15m" | "60m";
@@ -126,6 +127,14 @@ export default function PositionStocksTab() {
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [dhanAccount, setDhanAccount] = useState<DhanAccountStatus | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
+  const [candidateLog, setCandidateLog] = useState<ScalpCandidateLogRow[]>([]);
+  const [candidateLogError, setCandidateLogError] = useState<string | null>(null);
+
+  // Sub-tabs — the page used to be one long scroll of every section at
+  // once; grouped into tabs so each screen only shows what's relevant to
+  // that task (arming/health/risk vs. screener vs. positions vs. history).
+  type SubTab = "overview" | "screener" | "positions" | "history" | "dhanorders" | "settings";
+  const [subTab, setSubTab] = useState<SubTab>("overview");
 
   const [loggedIn, setLoggedIn] = useState(!!getSessionToken());
   const [username, setUsername] = useState("admin");
@@ -174,6 +183,19 @@ export default function PositionStocksTab() {
     }
   }, []);
 
+  // Candidate audit log (backend session 12: GET /candidates/log) — why a
+  // candidate was entered or skipped, including quality-gate scores. Pure
+  // DB read, cheap enough to poll on the same cadence as everything else.
+  const loadCandidateLog = useCallback(async () => {
+    if (!getPositionStocksApiUrl()) return;
+    try {
+      const rows = await positionStocksApi.candidatesLog(100);
+      setCandidateLog(rows); setCandidateLogError(null);
+    } catch (e: any) {
+      setCandidateLogError(e?.message || "Failed to load candidate log");
+    }
+  }, []);
+
   const loadDhanLive = useCallback(async () => {
     try {
       const d = await positionStocksApi.dhanLiveOrders();
@@ -206,11 +228,13 @@ export default function PositionStocksTab() {
     void loadAll();
     void loadDhanLive();
     void loadDhanAccount();
+    void loadCandidateLog();
     const t = setInterval(() => void loadAll(), 15_000);
     const td = setInterval(() => void loadDhanLive(), 30_000);
     const ta = setInterval(() => void loadDhanAccount(), 30_000);
-    return () => { clearInterval(t); clearInterval(td); clearInterval(ta); };
-  }, [loadAll, loadDhanLive, loadDhanAccount]);
+    const tc = setInterval(() => void loadCandidateLog(), 15_000);
+    return () => { clearInterval(t); clearInterval(td); clearInterval(ta); clearInterval(tc); };
+  }, [loadAll, loadDhanLive, loadDhanAccount, loadCandidateLog]);
 
   const saveApiUrl = () => { setPositionStocksApiUrl(apiUrlInput); void loadAll(); };
 
@@ -323,6 +347,32 @@ export default function PositionStocksTab() {
         )}
       </div>
 
+      {/* ── Sub-tab nav ── */}
+      <div className="flex flex-wrap gap-1 border-b border-slate pb-2">
+        {([
+          { id: "overview", label: "Overview" },
+          { id: "screener", label: "Screener" },
+          { id: "positions", label: `Positions (${openPositions.length})` },
+          { id: "history", label: "Trade History" },
+          { id: "dhanorders", label: "Dhan Live Orders" },
+          { id: "settings", label: "Settings" },
+        ] as { id: SubTab; label: string }[]).map(t => (
+          <button
+            key={t.id}
+            onClick={() => setSubTab(t.id)}
+            className={`px-3 py-1.5 rounded-lg font-display tabular-nums text-[11px] uppercase tracking-wide border transition-colors ${
+              subTab === t.id
+                ? "bg-signal-prepare/20 border-signal-prepare/40 text-signal-prepare"
+                : "border-transparent text-mist hover:text-paper"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {subTab === "overview" && (
+      <>
       {/* ── Arming sequence ── */}
       <div className="bg-graphite border border-slate rounded-2xl p-4">
         <p className="dash-section-title mb-3">Arming Sequence</p>
@@ -603,7 +653,11 @@ export default function PositionStocksTab() {
           )}
         </div>
       </div>
+      </>
+      )}
 
+      {subTab === "screener" && (
+      <>
       {/* ── Live screener ── */}
       <div className="bg-graphite border border-slate rounded-2xl p-4">
         <div className="flex items-center justify-between mb-3">
@@ -631,6 +685,68 @@ export default function PositionStocksTab() {
         )}
       </div>
 
+      {/* ── Candidate log (why entered/skipped) ── */}
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <p className="dash-section-title">Candidate Log — Why Entered / Skipped</p>
+          <button onClick={() => void loadCandidateLog()}
+            className="px-3 py-1 rounded-lg bg-graphite border border-slate font-display tabular-nums text-[10px] text-mist">
+            Refresh
+          </button>
+        </div>
+        {candidateLogError ? (
+          <p className="font-display tabular-nums text-[11px] text-signal-sell">{candidateLogError}</p>
+        ) : candidateLog.length === 0 ? (
+          <p className="font-display tabular-nums text-xs text-mist">No candidates logged yet this session.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px] font-display tabular-nums">
+              <thead>
+                <tr className="text-mist text-left border-b border-slate">
+                  <th className="py-1 pr-3">Symbol</th>
+                  <th className="py-1 pr-3">Window</th>
+                  <th className="py-1 pr-3">%Chg</th>
+                  <th className="py-1 pr-3">Score</th>
+                  <th className="py-1 pr-3">Decision</th>
+                  <th className="py-1 pr-3">Reason</th>
+                  <th className="py-1 pr-3">Fund</th>
+                  <th className="py-1 pr-3">Tech</th>
+                  <th className="py-1 pr-3">Mcap ₹cr</th>
+                  <th className="py-1 pr-3">Catalyst</th>
+                  <th className="py-1">When</th>
+                </tr>
+              </thead>
+              <tbody>
+                {candidateLog.slice(0, 50).map(c => (
+                  <tr key={c.id} className="border-b border-slate/50">
+                    <td className="py-1 pr-3 text-paper font-bold">{c.symbol}</td>
+                    <td className="py-1 pr-3 text-mist">{c.window_source}</td>
+                    <td className={`py-1 pr-3 ${c.pct_change >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
+                      {c.pct_change >= 0 ? "+" : ""}{c.pct_change.toFixed(2)}%
+                    </td>
+                    <td className="py-1 pr-3 text-mist">{c.composite_score != null ? c.composite_score.toFixed(1) : "—"}</td>
+                    <td className={`py-1 pr-3 font-bold ${c.decision === "ENTERED" ? "text-signal-buy" : "text-signal-hold"}`}>{c.decision}</td>
+                    <td className="py-1 pr-3 text-mist">{c.reason ?? "—"}</td>
+                    <td className="py-1 pr-3 text-mist">{c.fundamental_score != null ? c.fundamental_score.toFixed(0) : "—"}</td>
+                    <td className="py-1 pr-3 text-mist">{c.technical_score != null ? c.technical_score.toFixed(0) : "—"}</td>
+                    <td className="py-1 pr-3 text-mist">{c.market_cap_cr != null ? c.market_cap_cr.toFixed(0) : "—"}</td>
+                    <td className="py-1 pr-3 text-mist">{c.has_positive_catalyst == null ? "—" : c.has_positive_catalyst ? "Yes" : "No"}</td>
+                    <td className="py-1 text-mist">{fmtDateTimeIst(c.created_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="font-display tabular-nums text-[9px] text-mist mt-2">
+          Full audit trail of every scanned candidate the quality gate looked at and why it was taken or skipped — not just the final screener output above.
+        </p>
+      </div>
+      </>
+      )}
+
+      {subTab === "positions" && (
+      <>
       {/* ── Open positions ── */}
       <div className="bg-graphite border border-slate rounded-2xl p-4">
         <p className="dash-section-title mb-3">Open Positions ({openPositions.length}/5)</p>
@@ -651,6 +767,11 @@ export default function PositionStocksTab() {
         )}
       </div>
 
+      </>
+      )}
+
+      {subTab === "history" && (
+      <>
       {/* ── Trade history ── */}
       <div className="bg-graphite border border-slate rounded-2xl p-4">
         <p className="dash-section-title mb-3">Trade History — Buy vs Sell, Win Rate</p>
@@ -745,6 +866,11 @@ export default function PositionStocksTab() {
         )}
       </div>
 
+      </>
+      )}
+
+      {subTab === "dhanorders" && (
+      <>
       {/* ── Live Dhan Orders ── */}
       <div className="bg-graphite border border-slate rounded-2xl p-4">
         <div className="flex items-center justify-between mb-3">
@@ -797,8 +923,13 @@ export default function PositionStocksTab() {
         </p>
       </div>
 
+      </>
+      )}
+
+      {subTab === "settings" && (
+      <>
       {/* ── Settings ── */}
-      <details className="bg-graphite border border-slate rounded-2xl p-4">
+      <details open className="bg-graphite border border-slate rounded-2xl p-4">
         <summary className="font-display tabular-nums text-xs text-mist cursor-pointer">▶ Settings</summary>
         <p className="font-display tabular-nums text-[10px] text-mist mt-2 mb-1">Position Stocks service URL</p>
         <div className="flex gap-2">
@@ -810,6 +941,8 @@ export default function PositionStocksTab() {
           <button onClick={saveApiUrl} className="px-4 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 font-display tabular-nums text-xs text-signal-buy">Save</button>
         </div>
       </details>
+      </>
+      )}
     </div>
   );
 }

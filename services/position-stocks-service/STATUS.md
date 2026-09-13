@@ -6,6 +6,20 @@
 
 ---
 
+## Files modified this session (session 12)
+
+```
+services/position-stocks-service/
+├── screening/engine.py              ← FIXED: liquidity gate `pass` → `continue`
+├── main.py                          ← NEW: GET /candidates/log
+├── STATUS.md                        ← this file, updated
+└── TRACKING.md                      ← updated with session 12 entry
+
+frontend/src/
+├── positionStocksApi.ts             ← NEW: ScalpCandidateLogRow type + candidatesLog()
+└── components/PositionStocksTab.tsx ← restructured into 6 sub-tabs + new Candidate Log table
+```
+
 ## Completed steps (tracking doc §5)
 
 | Step | Item | Status | Notes |
@@ -29,6 +43,10 @@
 | 16 | Circuit breaker reset bug | ✅ FIXED (session 7) | `resilience/circuit_breaker.py`'s `is_open()` was resetting a locally-shadowed `_failure_count` instead of the module-level one (missing from its `global` declaration) — the failure count never actually cleared after the 60s reset window, so one failure right after reset would immediately re-trip the breaker. Fixed. |
 | 17 | Dead code cleanup (both services) | ✅ DONE (session 7) | `pyflakes`-driven pass found unused imports/variables in `main.py`, `screening/engine.py`, `execution/dhan_client.py`, `feed/angelone_session.py`, `feed/scrip_master.py`, `feed/ws_client.py`. Both services now pass `pyflakes` with zero findings repo-wide. |
 | 18 | Shared Dhan order-rate guard — actually built | ✅ DONE (session 7) | §3.8 had been described as complete for several sessions with **zero actual code** anywhere in the repo (confirmed via repo-wide search). Built for real on both services this session — see TRACKING.md §3.14 for full detail. New `SharedOrderBudget` model (both services' `models.py`), `capital/shared_order_budget.py` (position-stocks) / `execution/shared_order_budget.py` (real-trade), wired into `orders/entry.py` (gated) + `orders/eod_squareoff.py` (unconditional) on this service, and `manual_engine.py` (gated, manual BUY only) + `exit_engine.py`'s `_send_real_sell` (unconditional) on real-trade-service. |
+| 19 | `daily_loss_kill_switch_tripped` model/migration mismatch | ✅ FIXED (session 11) | See TRACKING.md's session-11 entry — migration-only field with no matching ORM `Column`, so `/ledger` 500'd no matter how many times the DB got migrated. Fixed in `models.py`. |
+| 20 | Frontend sub-tabs | ✅ DONE (session 12) | `PositionStocksTab.tsx` was one continuous scroll; now 6 sub-tabs (Overview/Screener/Positions/Trade History/Dhan Live Orders/Settings). Admin auth + critical banners stay above the tabs. Pure reorg, no behavior change. |
+| 21 | Liquidity-gate bug (screening engine) | ✅ FIXED (session 12) | `screening/engine.py`'s min-avg-volume gate (§3.3) computed the check but the branch was a bare `pass` — never actually skipped a low-activity symbol. Fixed to `continue`. Same class of bug as #18 above (documented gate, no real enforcement). |
+| 22 | `GET /candidates/log` | ✅ DONE (session 12) | Flagged since session 6 as a cheap, ready-to-build follow-up (pure DB read of `ScalpCandidateLog`, no external calls) — see "Next steps" #9 below, now resolved. Frontend: new "Candidate Log" table on the Screener sub-tab. |
 
 ### Deploy fixes applied (carried over from session 3, confirmed intact in this zip)
 - `requirements.txt`: `python-oracledb` → `oracledb==2.5.1` (invalid package name fixed).
@@ -259,15 +277,9 @@ position-stocks-service`) as the next diagnostic step.
    this is the first time this dashboard surfaces broker-side data directly, so
    it's worth a manual cross-check the first few times.
    **Requires live trades — can't be done from this sandbox.**
-9. **Natural follow-up, not yet built:** a `GET /candidates/log` endpoint exposing
-   recent `ScalpCandidateLog` rows (including the session-6 quality fields) so the
-   dashboard can show *why* a candidate was entered or skipped, not just the final
-   outcome. Flagged in TRACKING.md §3.13 as scoped out of session 6 to keep that
-   session's `/candidates` screener view fast — this would be a pure DB read
-   (no external calls), so it's cheap to add whenever it's wanted next.
-   (Correction, session 7: this item does NOT require live data — it's buildable
-   from a sandbox anytime; a stray "requires live data" line here was left over
-   from copy-pasting the item above it.)
+9. ~~Natural follow-up, not yet built: a `GET /candidates/log` endpoint~~ —
+   **DONE session 12.** Built, plus a "Candidate Log" table on the frontend's
+   new Screener sub-tab. See TRACKING.md §3.15.
 10. **Verify the shared Dhan order-rate guard on next deploy (session 7)** — new
     on both services this session (see TRACKING.md §3.14). Check `/status`'s
     `shared_order_budget` field on position-stocks-service after a few real

@@ -214,6 +214,24 @@ export interface DhanLiveOrders {
   orders: DhanLiveOrder[];
 }
 
+// Backend session 12: GET /candidates/log — the natural follow-up flagged in
+// STATUS.md's Next Steps since session 6, now built. Surfaces why a candidate
+// was entered/skipped, including the quality-gate's fund/tech/catalyst fields.
+export interface ScalpCandidateLogRow {
+  id: number;
+  symbol: string;
+  window_source: "1m" | "5m" | "15m" | "60m";
+  pct_change: number;
+  composite_score: number | null;
+  decision: "ENTERED" | "SKIPPED";
+  reason: string | null;
+  fundamental_score: number | null;
+  technical_score: number | null;
+  market_cap_cr: number | null;
+  has_positive_catalyst: boolean | null;
+  created_at: string;
+}
+
 export const positionStocksApi = {
   health: () => psRequest<{ status: string; service: string }>("/health"),
 
@@ -247,6 +265,7 @@ export const positionStocksApi = {
   positions: () => psRequest<ScalpPositionRow[]>("/positions"),
   tradeHistory: (limit = 200) => psRequest<ScalpTradeHistory>(`/trades/history?limit=${limit}`),
   candidates: () => psRequest<ScalpCandidateRow[]>("/candidates"),
+  candidatesLog: (limit = 100) => psRequest<ScalpCandidateLogRow[]>(`/candidates/log?limit=${limit}`),
 
   ledger: () => psRequest<ScalpLedgerState>("/ledger"),
   syncLedger: () => psRequest<{ status: string; total_allocated_capital: number }>("/ledger/sync", { method: "POST" }, true),

@@ -60,6 +60,9 @@ API endpoints:
   GET  /trades/history                — full trade ledger with summary stats (win rate,
                                           total P&L), paginated
   GET  /candidates                   — latest screener output (no entry)
+  GET  /candidates/log                — recent ScalpCandidateLog rows (why a
+                                          candidate was entered/skipped, incl.
+                                          quality-gate scores) — audit trail
   GET  /ledger                       — capital ledger state
   POST /ledger/sync                  — force sync from Dhan
   POST /kill                         — manual kill switch (like /disarm + kill)
@@ -99,7 +102,7 @@ from auth import dhan_credentials_ro
 from capital import ledger, shared_order_budget
 from execution import dhan_client
 from feed import ws_client
-from models import ScalpGateState, ScalpPosition
+from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
 from orders import eod_squareoff, reconcile
 from orders.entry import attempt_entry, log_quality_reject
 from resilience import circuit_breaker
@@ -565,6 +568,41 @@ def candidates():
             "tick_activity": c.tick_activity,
         }
         for c in results[:20]
+    ]
+
+
+@app.get("/candidates/log")
+def candidates_log(
+    db: Session = Depends(get_db),
+    limit: int = 100,
+    decision_filter: Optional[str] = None,
+):
+    """Recent ScalpCandidateLog rows — why a candidate was entered or
+    skipped, including the session-6 quality-gate fields (fundamental/
+    technical score, market cap, positive-catalyst flag). Pure DB read, no
+    external calls — flagged in TRACKING.md §3.13 / STATUS.md next-steps
+    as a cheap natural follow-up to the quality gate, built session 12.
+    `decision_filter` optionally narrows to "ENTERED" or "SKIPPED"."""
+    q = db.query(ScalpCandidateLog).order_by(ScalpCandidateLog.created_at.desc())
+    if decision_filter:
+        q = q.filter_by(decision=decision_filter.upper())
+    rows = q.limit(max(1, min(limit, 500))).all()
+    return [
+        {
+            "id": r.id,
+            "symbol": r.symbol,
+            "window_source": r.window_source,
+            "pct_change": r.pct_change,
+            "composite_score": r.composite_score,
+            "decision": r.decision,
+            "reason": r.reason,
+            "fundamental_score": r.fundamental_score,
+            "technical_score": r.technical_score,
+            "market_cap_cr": r.market_cap_cr,
+            "has_positive_catalyst": r.has_positive_catalyst,
+            "created_at": r.created_at,
+        }
+        for r in rows
     ]
 
 

@@ -1,8 +1,21 @@
 # Position Stocks — Project Tracking Document
 **Purpose of this doc:** continuity anchor. If chat context/limits reset, attach this doc + the latest Stockky zip in a new conversation and work continues from exactly here — nothing re-derived from scratch.
 
-**Last updated:** 2026-09-12 (session 7)
-**Status:** Session 7 was a full audit pass across BOTH position-stocks-service
+**Last updated:** 2026-09-13 (session 12)
+**Status:** Session 12 did what the user asked for directly: (1) added sub-tabs
+to the Position Stocks frontend page (it was one long scroll of every section
+at once — now Overview / Screener / Positions / Trade History / Dhan Live
+Orders / Settings), (2) a full audit pass ("check every wiring/mapping, any
+open or empty function") that found one real bug — `screening/engine.py`'s
+liquidity gate computed a real threshold check but the branch below it was a
+bare `pass`, so it never actually skipped a low-activity symbol; the gate
+documented in §3.3 was doing nothing. Fixed (see §3.15). Also built the
+`GET /candidates/log` endpoint that STATUS.md had flagged since session 6 as
+a cheap, ready-to-build follow-up and surfaced it as a new "Candidate Log"
+table on the Screener sub-tab. Everything else from sessions 1-11 (below)
+is unchanged. Full detail in §3.15.
+
+**Status (session 7, prior):** Session 7 was a full audit pass across BOTH position-stocks-service
 and real-trade-service ("check every wiring and mapping, open or incomplete
 code") — found and fixed a real circuit-breaker reset bug, cleaned up dead
 code repo-wide (pyflakes now clean on both services), and — the significant
@@ -243,6 +256,14 @@ of anything it couldn't catch (logic bugs, doc-vs-code mismatches).
   breaker instead of needing 5 fresh consecutive failures, defeating the
   "half-open, try again" design. Fixed by adding `_failure_count` to the
   `global` declaration.
+### 3.15 Dashboard sub-tabs, `/candidates/log`, liquidity-gate bug fix (session 12)
+See the session-12 changelog entry below for full detail — summarized here
+for the architecture record: frontend reorganized into 6 sub-tabs (no
+behavior change, pure grouping); `screening/engine.py`'s liquidity gate
+fixed (`pass` → `continue`, it was never actually skipping low-activity
+symbols despite §3.3 documenting it as a real gate); `GET /candidates/log`
+built (STATUS.md next-step #9, now done).
+
 - **Dead code cleanup (pyflakes-driven, both services):** unused imports in
   `main.py` (`os`, `typing.List`), `screening/engine.py` (`time`),
   `execution/dhan_client.py` (`config`, plus a dead `global` declaration on a
@@ -463,6 +484,68 @@ rationale. Both travel together in every zip from now on.
     `PositionStocksTab.tsx`/`positionStocksApi.ts`) — first time this
     service's session log has run a full project-wide type-check rather
     than just compiling the touched files.
+
+- **2026-09-13, session 12 — sub-tabs, `/candidates/log`, and a real
+  liquidity-gate bug found by the audit pass.**
+  - **Frontend sub-tabs.** `PositionStocksTab.tsx` was one continuous scroll
+    (Admin auth → Arming Sequence → Dhan Account → status grid → System
+    Health → Risk Configuration → banners → action buttons → capital pool
+    → Live Screener → Open Positions → Closed Today → Trade History → Live
+    Dhan Orders → Settings). Admin auth and the critical banners (kill-switch
+    tripped, risk-not-confirmed, fetch error) stay above the tabs since they
+    matter regardless of what you're looking at; everything else is now
+    grouped into six tabs: **Overview** (arming sequence, Dhan account,
+    status grid, system health, risk config, status banners, last-cycle
+    banner, action buttons, capital pool card), **Screener** (live screener
+    + new Candidate Log), **Positions** (open + closed today),
+    **Trade History**, **Dhan Live Orders**, **Settings**. Pure UI
+    reorganization — no section's content or polling behavior changed, they
+    just render conditionally on `subTab` instead of all at once.
+  - **Real bug found (audit pass): `screening/engine.py`'s liquidity gate
+    never gated anything.** §3.3 of this doc documents "min liquidity/avg
+    volume" as one of the screener's gates. The code computed
+    `tick_count < max(1, int(config.MIN_AVG_VOLUME / 5000))` correctly, but
+    the body of that `if` was a bare `pass` with a comment "skip strict gate
+    for now — log-only until calibrated" — it didn't even log, and every
+    symbol proceeded to the window checks regardless of tick activity. Same
+    shape as session 7's shared-order-budget finding: a gate described as
+    existing in the tracking doc with no actual enforcement behind it. Fixed
+    by changing `pass` to `continue` so a symbol below the liquidity floor
+    is actually skipped (all four windows) rather than just noted and
+    ignored.
+  - **Built `GET /candidates/log`** — STATUS.md's Next Steps #9 flagged this
+    since session 6 as a "natural follow-up, not yet built... a pure DB read
+    (no external calls), cheap to add whenever it's wanted next." Added: a
+    paginated (`limit`, default 100, max 500) read of `ScalpCandidateLog`
+    ordered newest-first, optional `decision_filter` ("ENTERED"/"SKIPPED"),
+    returning symbol/window/pct_change/composite_score/decision/reason plus
+    the session-6 quality fields (fundamental_score, technical_score,
+    market_cap_cr, has_positive_catalyst). Frontend: new `candidatesLog()`
+    client method + `ScalpCandidateLogRow` type in `positionStocksApi.ts`,
+    and a "Candidate Log — Why Entered / Skipped" table on the Screener
+    sub-tab, polled on the same 15s cadence as the rest of the dashboard.
+  - **Audit scope covered, nothing else found:** `py_compile` across every
+    `.py` file in the service (clean), a manual AST-based unused-
+    import/undefined-name pass (only false positives on `from __future__
+    import annotations`, same as pyflakes would report — no `pyflakes`
+    binary available in this sandbox, network disabled), and a manual
+    read-through of `main.py` (routes/lifespan/trading loop), `models.py`
+    vs `db.py`'s `_COLUMN_MIGRATIONS` (re-confirmed the session-11 pairing
+    is still consistent — all 10 entries have a matching Column), `orders/
+    entry.py`, `orders/adaptive.py`, `orders/reconcile.py`, and `screening/
+    quality_gate.py`. All wired correctly; no other open/empty/dead code
+    found this session.
+  - **Frontend verification:** real npm install wasn't reachable this
+    session (registry returned 403 — sandbox networking differs run to
+    run), so verification fell back to: `esbuild` (bundler, present in this
+    sandbox) compiling `PositionStocksTab.tsx` standalone with zero errors,
+    plus an isolated `tsc --noEmit` pass on both `PositionStocksTab.tsx` and
+    `positionStocksApi.ts` — clean except the expected isolated-compile
+    artifacts (missing `react`/`../positionStocksApi` module resolution
+    outside the real project, the `key`-prop false positive already
+    documented in session 3's notes, and `import.meta.env` needing vite's
+    client types) — no structural or logic errors. Recommend a real `npm
+    install && npm run build` on the VM before/after deploy same as always.
 
 - **2026-09-13, session 11 — the REAL root cause of the `/ledger` 500
   (`AttributeError: 'ScalpCapitalLedger' object has no attribute

@@ -126,11 +126,20 @@ def scan(open_symbols: Optional[Set[str]] = None) -> List[Candidate]:
             continue
 
         tick_count = _volume_accum.get(symbol, 0)
-        # Rough liquidity gate: require at least 1 tick per 10s on average
-        # over the last 5 minutes (= 30 ticks). Very rough, tune later.
+        # Liquidity gate: require at least 1 tick per 10s on average over the
+        # last 5 minutes (= 30 ticks), scaled by MIN_AVG_VOLUME. Very rough
+        # proxy (WS mode-1 gives no real volume), tune later.
+        #
+        # BUG FIX (session 12): this gate was documented in §3.3 of the
+        # tracking doc ("min liquidity/avg volume") and computed here, but
+        # the branch below the check was a bare `pass` — it never actually
+        # skipped the symbol. Every symbol passed through regardless of tick
+        # activity, i.e. the liquidity floor did nothing. Same class of bug
+        # as session 7's shared-order-budget "ghost feature": described as
+        # implemented, no actual gating code behind it. Fixed by skipping the
+        # symbol (all windows) when it doesn't clear the floor.
         if tick_count < max(1, int(config.MIN_AVG_VOLUME / 5000)):
-            # MIN_AVG_VOLUME is in shares/day; map to tick frequency heuristic
-            pass  # skip strict gate for now — log-only until calibrated
+            continue
 
         for win_minutes, threshold in _WINDOW_THRESHOLDS.items():
             pct = _rolling_pct_change(symbol, win_minutes)

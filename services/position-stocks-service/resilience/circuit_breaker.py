@@ -35,7 +35,7 @@ def record_success() -> None:
 
 
 def is_open() -> bool:
-    global _open_since
+    global _failure_count, _open_since
     if _open_since == 0.0:
         return False
     if time.time() - _open_since > _RESET_TIMEOUT_S:

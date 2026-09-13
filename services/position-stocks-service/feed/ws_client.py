@@ -90,7 +90,7 @@ def _parse_ltp_frame(data: bytes) -> Optional[tuple]:
     if len(data) < 52:
         return None
     try:
-        sub_type   = data[0]
+        # sub_type = data[0]    # feed mode — always 1 (LTP) since that's all we subscribe to
         # exch_type = data[1]   # not needed for routing by symbol
         token_raw  = data[2:28].rstrip(b"\x00").decode("ascii", errors="ignore").strip()
         # sequence  = struct.unpack_from("<q", data, 28)[0]  # not needed

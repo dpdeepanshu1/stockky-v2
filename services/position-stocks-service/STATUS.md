@@ -22,6 +22,13 @@
 | 9 | RISK_PER_TRADE_PCT from user | ✅ DONE | **User confirmed 2%.** `config.py`: `RISK_PER_TRADE_PCT=2.0`, `RISK_PER_TRADE_PCT_CONFIRMED=True`. Startup warning and frontend banner no longer fire. |
 | 10 | Master module enable/disable toggle | ✅ DONE (session 4) | `models.py`: `ScalpGateState.service_enabled` (default True), independent of `is_armed`. `main.py`: `POST /service/enable`, `POST /service/disable`, `service_enabled` added to `/status`. Frontend: "Module" status tile + Enable/Pause buttons in `PositionStocksTab.tsx`. Reconciliation + EOD squareoff ignore this flag by design (§3.7 "no exceptions"). |
 | 11 | 1-minute screening window | ✅ DONE (session 4) | `config.py`: `SCAN_WINDOWS_MINUTES = [1, 5, 15, 60]`, `MIN_PCT_CHANGE_1M` (default 0.5%). `screening/engine.py`: `_WINDOW_THRESHOLDS` now has a 4th entry, feeds the same composite-ranking step. Frontend: window filter + grouped screener view both include "1m" (grid widened to 4 cols). |
+| 12 | Auto-Pilot toggle + manual Run Cycle | ✅ DONE (session 6) | `models.py`: `auto_pilot_enabled` (independent of `is_armed`/`service_enabled`). `main.py`: shared `_run_cycle(db, trigger)` used by both the 10s loop and `POST /cycle/run`; `POST /autopilot/enable`/`disable`; `asyncio.Lock` prevents overlap. Frontend: Auto-Pilot tile + buttons, Run Cycle Now button + result banner. |
+| 13 | Quality gate (fund/tech/news/bulk-deal) | ✅ DONE (session 6) | New `screening/quality_gate.py` — best-effort, ≤2.5s timeout, fail-open, applied only to top `QUALITY_GATE_TOP_N` (default 3) candidates. Reuses analysis-intelligence-service's existing fundamental/technical/event endpoints (same ones real-trade-service's own quality gate uses). Logged to `ScalpCandidateLog`'s new columns for full audit. |
+| 14 | Live Dhan order tracking | ✅ DONE (session 6) | New `GET /dhan/live-orders` — calls existing `dhan_client.get_super_order_list()`, filters to `tag="SCALP"`. Frontend: Live Dhan Order Activity panel, own 30s poll + manual refresh. |
+| 15 | Trade history dashboard (buy/sell/P&L) | ✅ DONE (session 6) | New `GET /trades/history` — summary (win rate, total P&L, best/worst) + full trade list with `exit_price` (previously missing from `/positions` entirely despite the column existing since session 1 — now added there too). Frontend: Trade History section with summary cards + table. |
+| 16 | Circuit breaker reset bug | ✅ FIXED (session 7) | `resilience/circuit_breaker.py`'s `is_open()` was resetting a locally-shadowed `_failure_count` instead of the module-level one (missing from its `global` declaration) — the failure count never actually cleared after the 60s reset window, so one failure right after reset would immediately re-trip the breaker. Fixed. |
+| 17 | Dead code cleanup (both services) | ✅ DONE (session 7) | `pyflakes`-driven pass found unused imports/variables in `main.py`, `screening/engine.py`, `execution/dhan_client.py`, `feed/angelone_session.py`, `feed/scrip_master.py`, `feed/ws_client.py`. Both services now pass `pyflakes` with zero findings repo-wide. |
+| 18 | Shared Dhan order-rate guard — actually built | ✅ DONE (session 7) | §3.8 had been described as complete for several sessions with **zero actual code** anywhere in the repo (confirmed via repo-wide search). Built for real on both services this session — see TRACKING.md §3.14 for full detail. New `SharedOrderBudget` model (both services' `models.py`), `capital/shared_order_budget.py` (position-stocks) / `execution/shared_order_budget.py` (real-trade), wired into `orders/entry.py` (gated) + `orders/eod_squareoff.py` (unconditional) on this service, and `manual_engine.py` (gated, manual BUY only) + `exit_engine.py`'s `_send_real_sell` (unconditional) on real-trade-service. |
 
 ### Deploy fixes applied (carried over from session 3, confirmed intact in this zip)
 - `requirements.txt`: `python-oracledb` → `oracledb==2.5.1` (invalid package name fixed).
@@ -107,7 +114,58 @@ see the table above for those.
 
 ---
 
-## Open items
+## 🔴 First deploy attempt — broken, root cause found (session 5, 2026-09-12)
+
+User deployed this service for the first time and reported: every button on the
+Position Stocks tab looks disabled/non-functional, a red banner shows nginx's own
+`405 Not Allowed` error page verbatim, and the top strip shows `DISARMED` /
+`CLOSED` / `DOWN` / `PAUSED` / a "RISK_PER_TRADE_PCT not confirmed" warning —
+all at once, on first load, before touching any button.
+
+**Root cause: not a code bug in this service — a missing reverse-proxy route.**
+`deploy/nginx-stockky.conf` (the VM-level nginx in front of everything) only ever
+had three location blocks: `/` (frontend), `/api/` (api-gateway :8000), and
+`/realtrade/` (real-trade-service :8005). **It never got a `/positionstocks/`
+block routing to port 8006** when this service was built in earlier sessions —
+that step was missed.
+
+What that caused, concretely: whatever URL was pasted into the Position Stocks
+Settings box, if it pointed at the same nginx-fronted domain, fell through to the
+`/` block — the frontend container's own static-file server. Nginx's default
+static handler only serves `GET`/`HEAD`; every `POST` (`/arm`, `/disarm`,
+`/service/enable`, `/service/disable`, `/kill`, `/ledger/sync`, `/reconcile`) hit
+that handler and got its stock `405 Not Allowed` page back verbatim — which is
+exactly the banner in the screenshot. The `GET` calls (`/status`, `/positions`,
+`/candidates`, `/ledger`) would instead have fallen through to the SPA's
+`index.html` (200 OK, but HTML instead of JSON) — so `/status` never actually
+returned real data, which is why `armed`, `service_enabled`, and `risk_confirmed`
+all read as `false`/undefined in the frontend (`status` was effectively `null`)
+and every tile/banner derived from it looked "off" simultaneously. This was one
+root cause showing up in five places, not five separate bugs.
+
+**Fixed this session:** added the missing `stockky_position_stocks` upstream
+(`127.0.0.1:8006`) and a `location /positionstocks/` block to
+`deploy/nginx-stockky.conf`, mirroring the existing `/realtrade/` pattern exactly
+(same trailing-slash strip behavior, same header/timeout settings, own trust
+boundary).
+
+**Action needed on your VM (not something I can do from here):**
+1. Replace `/etc/nginx/sites-available/stockky` with the updated
+   `deploy/nginx-stockky.conf` from this zip.
+2. `sudo nginx -t && sudo systemctl reload nginx`
+3. In the Position Stocks tab's Settings, set the service URL to
+   `https://stockky.duckdns.org/positionstocks` (no trailing slash — the app
+   appends paths like `/status` itself, and nginx's trailing-slash `proxy_pass`
+   strips the `/positionstocks` prefix before forwarding, same as `/realtrade/`).
+4. Reload the tab. All tiles/buttons should reflect real backend state once
+   `/status` actually returns JSON instead of nginx's fallback.
+
+If after this fix anything is *still* wrong, that's the point to suspect an actual
+code bug (e.g. a CORS issue, or the container itself not booting) rather than the
+routing gap — check the container logs directly (`docker compose logs
+position-stocks-service`) as the next diagnostic step.
+
+
 
 1. ~~RISK_PER_TRADE_PCT~~ — **RESOLVED session 3: user confirmed 2%.**
 
@@ -150,6 +208,13 @@ see the table above for those.
 
 ## Next steps (in priority order)
 
+0. **Reload the VM nginx config and re-point the Settings URL** (session 5 —
+   see the 🔴 section above and TRACKING.md §7). This blocks everything else:
+   `sudo cp deploy/nginx-stockky.conf /etc/nginx/sites-available/stockky && sudo nginx -t && sudo systemctl reload nginx`,
+   then set the Position Stocks Settings URL to
+   `https://stockky.duckdns.org/positionstocks`. Confirm the tab shows real
+   `armed`/`market`/`ws`/`module` state instead of the all-blank/405 view
+   before touching anything below.
 1. ~~Check `scalp_gate_state` for the migration caveat~~ — **RESOLVED session 4.**
    `db.py`'s `init_tables()` now runs `_ensure_columns()` after `create_all()`: an
    idempotent inspector-based check that ALTERs any table missing a column
@@ -182,6 +247,46 @@ see the table above for those.
 6. Once live, watch how often the new 1m window actually fires vs. 5m/15m/60m —
    tune `MIN_PCT_CHANGE_1M` up if it's mostly noise (§3.12 flags this as likely).
    **Requires live market data — can't be done from this sandbox.**
+7. **Set the analysis-intelligence-service URLs for the quality gate (session 6)**
+   — `ANALYSIS_INTELLIGENCE_URL` (or the individual `FUNDAMENTAL_URL`/
+   `TECHNICAL_URL`/`EVENT_URL` overrides) in the service's env. Without these set
+   correctly, `screening/quality_gate.py` fails open silently (every candidate
+   passes through unfiltered, which is safe but means the fund/tech/news signal
+   isn't actually doing anything) — check the logs for "quality_gate: ... fetch
+   failed" lines after deploy to confirm it's actually reaching the service.
+8. **Verify the Live Dhan Order Activity panel and Trade History numbers against
+   what you see in Dhan's own app** once real orders start flowing (session 6) —
+   this is the first time this dashboard surfaces broker-side data directly, so
+   it's worth a manual cross-check the first few times.
+   **Requires live trades — can't be done from this sandbox.**
+9. **Natural follow-up, not yet built:** a `GET /candidates/log` endpoint exposing
+   recent `ScalpCandidateLog` rows (including the session-6 quality fields) so the
+   dashboard can show *why* a candidate was entered or skipped, not just the final
+   outcome. Flagged in TRACKING.md §3.13 as scoped out of session 6 to keep that
+   session's `/candidates` screener view fast — this would be a pure DB read
+   (no external calls), so it's cheap to add whenever it's wanted next.
+   (Correction, session 7: this item does NOT require live data — it's buildable
+   from a sandbox anytime; a stray "requires live data" line here was left over
+   from copy-pasting the item above it.)
+10. **Verify the shared Dhan order-rate guard on next deploy (session 7)** — new
+    on both services this session (see TRACKING.md §3.14). Check `/status`'s
+    `shared_order_budget` field on position-stocks-service after a few real
+    orders, and watch real-trade-service's logs for
+    "SHARED Dhan order budget exhausted" or "shared_order_budget... failed
+    (failing open)" lines to confirm the guard is actually reachable and
+    counting, not silently no-op'ing. **Requires live trades on both
+    services — can't be done from this sandbox.**
+11. **Out of scope but worth knowing:** session 7's `pyflakes` audit also ran
+    across real-trade-service's ENTIRE codebase (not just the files touched
+    for the shared-budget wiring) and found a sizeable pre-existing backlog of
+    unused imports/variables in files this session never touched (`notifier.py`,
+    `auth/admin_auth.py`, `offline_test_harness.py`, `adaptive_thresholds.py`,
+    `market_feed/feed.py`, `watchlist_engine/dynamic_universe.py`, `db.py`,
+    `execution/auto_pilot.py`, `execution/reconcile.py`, `execution/dhan_client.py`,
+    a couple of `scripts/`). None of this session's actual edits appear in that
+    list — confirmed clean. Left untouched deliberately: real-trade-service
+    trades real money live, and a repo-wide cleanup pass there deserves its own
+    dedicated, careful session rather than being folded into this one.
 
 ---
 

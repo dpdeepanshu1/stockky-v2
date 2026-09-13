@@ -30,7 +30,6 @@ from typing import Optional
 import httpx
 from sqlalchemy.orm import Session
 
-import config
 from auth import dhan_credentials_ro
 
 logger = logging.getLogger("position-stocks-dhan-client")
@@ -213,7 +212,6 @@ def _load_security_cache(db: Session) -> None:
 
 
 def get_security_id(db: Session, symbol: str) -> str:
-    global _security_cache_loaded_at
     now = time.time()
     if not _security_cache or (now - _security_cache_loaded_at) > _SECURITY_CACHE_TTL_SECONDS:
         _load_security_cache(db)

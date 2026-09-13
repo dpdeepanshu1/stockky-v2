@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 import config
-from capital import ledger
+from capital import ledger, shared_order_budget
 from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
 from tz_utils import ist_today_str
@@ -82,6 +82,10 @@ def run_eod_squareoff(db: Session) -> int:
                 product_type=config.SCALP_PRODUCT_TYPE,
                 tag="EOD_SQUAREOFF",
             )
+            # Unconditional — tracked for visibility into the shared budget's
+            # real usage, but never gates a forced exit (tracking doc §3.7
+            # "no exceptions", applied to the shared guard too).
+            shared_order_budget.record_order_unconditional(db)
 
             # Mark closed — exit price unknown here (will be reconciled from
             # Dhan positions on next sync), use entry_price as placeholder

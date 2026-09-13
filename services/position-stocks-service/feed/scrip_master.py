@@ -18,8 +18,6 @@ from typing import Dict, List, Optional
 
 import httpx
 
-import config
-
 logger = logging.getLogger("position-stocks-scrip-master")
 
 SCRIP_MASTER_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"

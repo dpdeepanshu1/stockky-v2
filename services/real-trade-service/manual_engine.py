@@ -48,7 +48,7 @@ from sqlalchemy.orm import Session
 import config
 import models
 from audit.logger import log_action
-from execution import dhan_client
+from execution import dhan_client, shared_order_budget
 from exit_engine.exit import _send_real_sell
 from intraday_eligibility import is_restricted as is_intraday_restricted
 from market_feed.feed import get_quotes
@@ -280,6 +280,22 @@ async def evaluate_manual_order(
                 # order") or, worse, being silently misread as a price cap —
                 # neither of which this manual BUY path was prepared for.
                 order_price = 0 if order_type == "MARKET" else reference_price
+                # Shared cross-service Dhan account-wide order-rate guard —
+                # found missing during a session 7 audit of position-stocks-
+                # service despite being documented as built; see
+                # execution/shared_order_budget.py's docstring. Checked here,
+                # right before the real Dhan call, and ONLY for this manual
+                # BUY ticket — the automatic entry path is not gated by this.
+                # Fails open on any internal error (never blocks a real order
+                # over its own malfunction); a genuinely exhausted budget
+                # raises so the existing except-block below turns it into a
+                # clean REJECTED status, same as any other manual-BUY failure.
+                if not shared_order_budget.check_and_reserve(db):
+                    raise RuntimeError(
+                        "Shared Dhan account-wide order budget exhausted for today "
+                        "(shared with position-stocks-service) — try again tomorrow "
+                        "or raise SHARED_DAILY_ORDER_BUDGET."
+                    )
                 broker_result = dhan_client.place_order(
                     db, is_armed=gate_armed, security_id=security_id,
                     exchange_segment=dhan_client.NSE_EQ_SEGMENT, transaction_type="BUY",

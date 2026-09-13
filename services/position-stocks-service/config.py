@@ -136,4 +136,43 @@ DAILY_ORDER_BUDGET = _get_int("POSITION_STOCKS_DAILY_ORDER_BUDGET", 300)
 # ── Daily loss kill switch (tighter than real-trade-service's, by design) ──
 MAX_DAILY_LOSS_PCT_OF_POOL = _get_float("MAX_DAILY_LOSS_PCT_OF_POOL", 4.0)
 
+# ── Quality gate — fundamental/technical/news pre-check (session 6) ────────
+# Applied ONLY to the top few candidates the fast price/volume screen already
+# ranked highest — never the whole scan universe — so it stays "quick" as
+# requested: the expensive calls happen for a handful of symbols per cycle,
+# not hundreds. Mirrors real-trade-service's candidate_engine/candidates.py
+# quality-gate pattern and reuses the SAME shared analysis-intelligence-service
+# endpoints (this is a shared read-only backend, not real-trade-service's own
+# state — calling it doesn't violate this service's real-trade isolation).
+# Every call is best-effort with a short timeout and fails OPEN (missing data
+# is leniently treated as "unknown", never an automatic reject) — a slow or
+# unhealthy analysis-intelligence-service must never stall or block the scalp
+# loop, matching this service's core isolation promise.
+QUALITY_GATE_ENABLED = _get_bool("QUALITY_GATE_ENABLED", True)
+QUALITY_GATE_TOP_N = _get_int("QUALITY_GATE_TOP_N", 3)
+# Deliberately much shorter than real-trade-service's 12-60s timeouts — this
+# loop ticks every 10s, so anything slower than a couple seconds isn't "quick".
+QUALITY_GATE_TIMEOUT_S = _get_float("QUALITY_GATE_TIMEOUT_S", 2.5)
+
+_ANALYSIS_INTELLIGENCE_URL = os.getenv(
+    "ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com"
+).rstrip("/")
+TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/technical").rstrip("/")
+FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/fundamental").rstrip("/")
+EVENT_URL = os.getenv("EVENT_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/event").rstrip("/")
+
+# Lenient floors — same philosophy as real-trade-service's VOLUME_SHOCK_*
+# quality gate: only reject when data IS available and clearly below floor;
+# missing/timed-out data never rejects on its own.
+MIN_FUNDAMENTAL_SCORE = _get_float("MIN_FUNDAMENTAL_SCORE", 40.0)
+MIN_TECHNICAL_SCORE = _get_float("MIN_TECHNICAL_SCORE", 40.0)
+MIN_MARKET_CAP_CR = _get_float("MIN_MARKET_CAP_CR", 500.0)  # ₹500 crore floor — excludes micro-caps
+
+# ── Shared Dhan account-wide order-rate budget (tracking doc §3.8) ─────────
+# Dhan's own account-wide cap is roughly 5,000-7,000 orders/day, shared with
+# real-trade-service (same Dhan account). This is a soft, fail-open governor
+# — see capital/shared_order_budget.py's docstring and models.py's
+# SharedOrderBudget for the full rationale.
+SHARED_DAILY_ORDER_BUDGET = _get_int("SHARED_DAILY_ORDER_BUDGET", 5000)
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

@@ -272,6 +272,10 @@ services:
       FUNDAMENTAL_URL: http://analysis-intelligence-service:8000/fundamental
       NOTIFICATION_SERVICE_URL: http://notification-scheduler-service:8000/notification
       PORT: "8005"
+      # SHARED_DAILY_ORDER_BUDGET: "5000"  # optional override — shared with
+      # position-stocks-service via the same Dhan account (session 7 audit
+      # finding, execution/shared_order_budget.py); 5000 is config.py's
+      # default so this line is informational unless you need to change it.
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
       ADMIN_PASSWORD_HASH_B64: ${ADMIN_PASSWORD_HASH_B64:-}
@@ -388,6 +392,19 @@ services:
       # risked per trade.
       - RISK_PER_TRADE_PCT=2.0
       - RISK_PER_TRADE_PCT_CONFIRMED=true
+      # Quality gate (session 6) — fast, fail-open fundamental/technical/news
+      # pre-check on the top few screened candidates before entry. Same
+      # shared analysis-intelligence-service endpoints every other Stockky
+      # service already points at (see TRACKING.md §3.13). If this service
+      # is down or these vars are wrong, the quality gate simply passes
+      # every candidate through unfiltered — never blocks the scalp loop.
+      - TECHNICAL_URL=http://analysis-intelligence-service:8000/technical
+      - FUNDAMENTAL_URL=http://analysis-intelligence-service:8000/fundamental
+      - EVENT_URL=http://analysis-intelligence-service:8000/event
+      # - QUALITY_GATE_ENABLED=true
+      # - QUALITY_GATE_TOP_N=3
+      # - QUALITY_GATE_TIMEOUT_S=2.5
+      # - SHARED_DAILY_ORDER_BUDGET=5000
       # - FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE=true
       # - POSITION_STOCKS_DAILY_ORDER_BUDGET=300
       # - MAX_DAILY_LOSS_PCT_OF_POOL=4.0
@@ -396,6 +413,7 @@ services:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
     depends_on:
       - real-trade-service
+      - analysis-intelligence-service
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8006/health', timeout=5) or sys.exit(0)"]

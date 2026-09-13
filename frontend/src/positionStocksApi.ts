@@ -52,6 +52,9 @@ export interface ScalpStatus {
   armed: boolean;
   armed_at: string | null;
   service_enabled: boolean;
+  auto_pilot_enabled: boolean;
+  last_cycle_run_at: string | null;
+  last_cycle_run_trigger: "AUTO" | "MANUAL" | null;
   first_live_order_done: boolean;
   orders_placed_today: number;
   daily_loss_kill_switch: boolean;
@@ -69,6 +72,7 @@ export interface ScalpPositionRow {
   status: "OPEN" | "TARGET_HIT" | "STOP_HIT" | "EOD_SQUAREOFF" | "MANUAL_EXIT" | "ERROR";
   window_source: "1m" | "5m" | "15m" | "60m";
   entry_price: number;
+  exit_price: number | null;
   quantity: number;
   target_price: number;
   stop_price: number;
@@ -100,6 +104,62 @@ export interface ScalpLedgerState {
   daily_loss_kill_switch_tripped: boolean;
 }
 
+export interface ScalpCycleResult {
+  status: string;
+  reconciled: number;
+  eod_fired: boolean;
+  candidates_seen: number;
+  entered_symbol: string | null;
+  skipped_reason: string | null;
+}
+
+export interface ScalpTradeHistorySummary {
+  total_trades: number;
+  wins: number;
+  losses: number;
+  win_rate_pct: number | null;
+  total_pnl: number;
+  best_trade: { symbol: string; pnl: number } | null;
+  worst_trade: { symbol: string; pnl: number } | null;
+}
+
+export interface ScalpTradeRow {
+  id: number;
+  symbol: string;
+  status: string;
+  window_source: string;
+  entry_price: number;
+  exit_price: number | null;
+  quantity: number;
+  realized_pnl: number | null;
+  realized_pnl_pct: number | null;
+  opened_at: string;
+  closed_at: string | null;
+  dhan_super_order_id: string | null;
+}
+
+export interface ScalpTradeHistory {
+  summary: ScalpTradeHistorySummary;
+  trades: ScalpTradeRow[];
+}
+
+export interface DhanLiveOrder {
+  orderId?: string;
+  tradingSymbol?: string;
+  transactionType?: string;
+  orderStatus?: string;
+  legName?: string;
+  quantity?: number;
+  price?: number;
+  triggerPrice?: number;
+  [key: string]: unknown; // pass through whatever else Dhan returns, unfiltered
+}
+
+export interface DhanLiveOrders {
+  count: number;
+  orders: DhanLiveOrder[];
+}
+
 export const positionStocksApi = {
   health: () => psRequest<{ status: string; service: string }>("/health"),
 
@@ -112,13 +172,19 @@ export const positionStocksApi = {
   serviceEnable: () => psRequest<{ status: string }>("/service/enable", { method: "POST" }),
   serviceDisable: () => psRequest<{ status: string }>("/service/disable", { method: "POST" }),
 
+  autopilotEnable: () => psRequest<{ status: string }>("/autopilot/enable", { method: "POST" }),
+  autopilotDisable: () => psRequest<{ status: string }>("/autopilot/disable", { method: "POST" }),
+  runCycle: () => psRequest<ScalpCycleResult>("/cycle/run", { method: "POST" }),
+
   positions: () => psRequest<ScalpPositionRow[]>("/positions"),
+  tradeHistory: (limit = 200) => psRequest<ScalpTradeHistory>(`/trades/history?limit=${limit}`),
   candidates: () => psRequest<ScalpCandidateRow[]>("/candidates"),
 
   ledger: () => psRequest<ScalpLedgerState>("/ledger"),
   syncLedger: () => psRequest<{ status: string; total_allocated_capital: number }>("/ledger/sync", { method: "POST" }),
 
   wsStatus: () => psRequest<{ connected: boolean; subscribed_symbols?: number; last_tick_at?: string | null; reconnect_attempts?: number }>("/ws-status"),
+  dhanLiveOrders: () => psRequest<DhanLiveOrders>("/dhan/live-orders"),
 
   reconcile: () => psRequest<{ status: string; positions_closed: number }>("/reconcile", { method: "POST" }),
 };

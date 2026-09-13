@@ -125,20 +125,32 @@ def init_tables() -> None:
 
 # Columns added to models.py after a table may already have been created in a
 # live DB. Each entry: (table, column, Oracle DDL type, Postgres DDL type,
-# default SQL literal). Add a new tuple here whenever a column is added to an
-# existing model — never remove old entries, they're harmless no-ops once
-# applied everywhere.
+# oracle_default_or_None, pg_default_or_None). When both defaults are None,
+# the column is added as nullable with no default (for optional/nullable
+# fields like audit data) instead of NOT NULL DEFAULT ... Add a new tuple
+# here whenever a column is added to an existing model — never remove old
+# entries, they're harmless no-ops once applied everywhere.
 _COLUMN_MIGRATIONS = [
     ("scalp_gate_state", "service_enabled", "NUMBER(1)", "BOOLEAN", "1", "TRUE"),
+    ("scalp_gate_state", "auto_pilot_enabled", "NUMBER(1)", "BOOLEAN", "1", "TRUE"),
+    ("scalp_gate_state", "last_cycle_run_at", "TIMESTAMP", "TIMESTAMP", None, None),
+    ("scalp_gate_state", "last_cycle_run_trigger", "VARCHAR2(16)", "VARCHAR(16)", None, None),
+    ("scalp_candidate_log", "fundamental_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    ("scalp_candidate_log", "technical_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    ("scalp_candidate_log", "market_cap_cr", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    ("scalp_candidate_log", "has_positive_catalyst", "NUMBER(1)", "BOOLEAN", None, None),
 ]
 
 
 def _ensure_columns(engine) -> None:
     """Idempotent: for each (table, column) in _COLUMN_MIGRATIONS, check via
     SQLAlchemy's inspector whether the column already exists on the live
-    table; if not, ALTER TABLE ... ADD COLUMN with a NOT NULL default so
-    existing rows get a sane value. Safe to run on every boot — a no-op once
-    the column exists everywhere. Never touches trade_* tables."""
+    table; if not, ALTER TABLE ... ADD COLUMN. When a default is given, adds
+    it NOT NULL with that default so existing rows get a sane value; when
+    both defaults are None, adds it as a plain nullable column (for optional
+    audit-style fields where NULL correctly means "unknown"/"not recorded
+    yet"). Safe to run on every boot — a no-op once the column exists
+    everywhere. Never touches trade_* tables."""
     from sqlalchemy import inspect, text
 
     is_oracle = dialect() == "oracle"
@@ -154,10 +166,15 @@ def _ensure_columns(engine) -> None:
             if column.lower() in existing_cols:
                 continue
 
+            nullable = oracle_default is None and pg_default is None
             if is_oracle:
-                ddl = f"ALTER TABLE {table} ADD {column} {oracle_type} DEFAULT {oracle_default} NOT NULL"
+                ddl = f"ALTER TABLE {table} ADD {column} {oracle_type}"
+                if not nullable:
+                    ddl += f" DEFAULT {oracle_default} NOT NULL"
             else:
-                ddl = f"ALTER TABLE {table} ADD COLUMN {column} {pg_type} DEFAULT {pg_default} NOT NULL"
+                ddl = f"ALTER TABLE {table} ADD COLUMN {column} {pg_type}"
+                if not nullable:
+                    ddl += f" DEFAULT {pg_default} NOT NULL"
 
             with engine.begin() as conn:
                 conn.execute(text(ddl))

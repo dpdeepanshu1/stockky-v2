@@ -92,7 +92,14 @@ class ScalpPosition(Base):
 class ScalpCandidateLog(Base):
     """Audit trail of every scanned candidate and why it was taken or
     skipped — mirrors the diagnostic value of real-trade-service's own
-    WAIT-reason logging in candidate_engine/candidates.py."""
+    WAIT-reason logging in candidate_engine/candidates.py.
+
+    fundamental_score/technical_score/market_cap_cr/has_positive_catalyst
+    (added session 6) come from screening/quality_gate.py's best-effort
+    check, run only on the top few candidates before entry — see that
+    module's docstring. All nullable: the quality gate is lenient by design,
+    so a None here means "data unavailable that cycle", not "checked and
+    bad"."""
     __tablename__ = "scalp_candidate_log"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -102,6 +109,10 @@ class ScalpCandidateLog(Base):
     composite_score = Column(Float, nullable=True)
     decision = Column(String(16), nullable=False)  # "ENTERED" | "SKIPPED"
     reason = Column(Text, nullable=True)
+    fundamental_score = Column(Float, nullable=True)
+    technical_score = Column(Float, nullable=True)
+    market_cap_cr = Column(Float, nullable=True)
+    has_positive_catalyst = Column(Boolean, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now, index=True)
 
 
@@ -111,8 +122,8 @@ class ScalpGateState(Base):
     real-trade-service's own gate-state-machine pattern (main.py's
     _check_and_expire_gates) at a much smaller scale.
 
-    service_enabled (added 2026-09-12) is a coarser, separate switch from
-    is_armed: is_armed only gates whether real orders can be PLACED;
+    service_enabled (added 2026-09-12, session 4) is a coarser, separate switch
+    from is_armed: is_armed only gates whether real orders can be PLACED;
     service_enabled gates the whole module — screening AND entries — and
     is checked independently in main.py's trading loop, so you can pause
     Position Stocks entirely (maintenance, ruling it out while debugging
@@ -123,12 +134,24 @@ class ScalpGateState(Base):
     be left unmanaged just because the module is toggled off (tracking doc
     §3.7: "no exceptions").
 
-    NOTE: SQLAlchemy's create_all() only creates missing TABLES, never
-    ALTERs existing ones — if scalp_gate_state already exists in a live DB
-    without this column, it needs a manual
-    `ALTER TABLE scalp_gate_state ADD service_enabled NUMBER(1) DEFAULT 1` (Oracle)
-    or `... ADD COLUMN service_enabled BOOLEAN DEFAULT TRUE` (Postgres) before
-    the next deploy — see STATUS.md's Next steps.
+    auto_pilot_enabled (added session 6) is a third, finer switch, mirroring
+    real-trade-service's is_armed/auto_pilot_enabled split: screening still
+    runs (so /candidates stays live) whenever armed+service_enabled+market
+    open, regardless of this flag — only the AUTOMATIC entry attempt each
+    cycle is gated by it. Turning auto-pilot off lets you watch what the
+    screener would do without it acting on anything. The manual
+    `POST /cycle/run` endpoint deliberately bypasses this flag (but still
+    requires is_armed) — same as real-trade-service's manual cycle trigger
+    working regardless of auto-pilot state. Defaults to True so behavior is
+    unchanged for anyone who hasn't touched it yet.
+
+    NOTE ON SCHEMA CHANGES: SQLAlchemy's create_all() only creates missing
+    TABLES, never ALTERs existing ones. As of session 5 this is no longer a
+    manual step — db.py's init_tables() runs _ensure_columns() right after
+    create_all(), an idempotent, dialect-aware migration that adds any
+    column here missing from an already-deployed table automatically on
+    boot. Add a new column here, then add one tuple to db.py's
+    _COLUMN_MIGRATIONS — no manual ALTER TABLE needed.
     """
     __tablename__ = "scalp_gate_state"
 
@@ -137,10 +160,49 @@ class ScalpGateState(Base):
     is_armed = Column(Boolean, nullable=False, default=False)
     armed_at = Column(DateTime, nullable=True)
     service_enabled = Column(Boolean, nullable=False, default=True)
+    auto_pilot_enabled = Column(Boolean, nullable=False, default=True)
+    last_cycle_run_at = Column(DateTime, nullable=True)
+    last_cycle_run_trigger = Column(String(16), nullable=True)  # "AUTO" | "MANUAL"
     eod_squareoff_fired_date = Column(String(10), nullable=True)  # 'YYYY-MM-DD'
     daily_loss_kill_switch_tripped = Column(Boolean, nullable=False, default=False)
     daily_loss_kill_switch_tripped_date = Column(String(10), nullable=True)
     orders_placed_today = Column(Integer, nullable=False, default=0)
     orders_placed_today_date = Column(String(10), nullable=True)
     first_live_order_done = Column(Boolean, nullable=False, default=False)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class SharedOrderBudget(Base):
+    """Cross-service Dhan account-wide order-rate counter (tracking doc §3.8).
+
+    NOTE ON A PRE-EXISTING GAP FOUND SESSION 7: TRACKING.md/STATUS.md have
+    described this feature as fully built since an earlier session, but
+    until session 7 no such file, table, or wiring actually existed
+    anywhere in the repo — documentation had drifted ahead of the code.
+    This is the real implementation.
+
+    Dhan's account-wide order cap (~5,000-7,000 orders/day) is shared
+    between real-trade-service and this service (same Dhan account) —
+    neither service's own per-service budget (this service's
+    `DAILY_ORDER_BUDGET`, real-trade-service's own limits) knows about the
+    other's order volume. This table is the one thing both already
+    unconditionally share: the same physical Postgres/Oracle DB. Built as a
+    DB-backed counter rather than Redis because this codebase's Redis layer
+    is Upstash-based and optional/off-by-default — a real-money order-rate
+    guard shouldn't depend on optional infrastructure.
+
+    One row per calendar day (IST). `capital/shared_order_budget.py` (this
+    service) and `execution/shared_order_budget.py` (real-trade-service,
+    duplicated logic, not imported — same isolation rationale as everywhere
+    else in this file) both read/increment the same row. Soft governor, not
+    a financial ledger: one read + one upsert per order attempt, fails OPEN
+    on any DB error — a broken rate-governor must never itself block a real
+    exit. Table name deliberately NOT prefixed `scalp_` (unlike every other
+    table in this file) since it's explicitly meant to be shared, not
+    scoped to this service."""
+    __tablename__ = "stockky_shared_order_budget"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_date = Column(String(10), nullable=False, unique=True, index=True)  # 'YYYY-MM-DD' IST
+    orders_placed_today = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)

@@ -50,7 +50,7 @@ from sqlalchemy.orm import Session
 
 import models
 from audit.logger import log_action
-from execution import dhan_client
+from execution import dhan_client, shared_order_budget
 from market_feed.feed import get_quotes
 from notifier import notify_sync
 from portfolio.portfolio import (
@@ -316,6 +316,10 @@ def _send_real_sell(
             raise RuntimeError(
                 f"Dhan accepted the SELL but returned no order id: {result}"
             )
+        # Unconditional — tracked for visibility into the shared cross-service
+        # budget's real usage, but never gates an exit ("exits always
+        # allowed" convention, same as the is_armed=True passed above).
+        shared_order_budget.record_order_unconditional(db)
 
         order = models.TradeOrder(
             mode="REAL", symbol=position.symbol, side="SELL", order_type="MARKET",

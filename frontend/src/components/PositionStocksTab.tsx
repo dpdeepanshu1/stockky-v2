@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   positionStocksApi, getPositionStocksApiUrl, setPositionStocksApiUrl,
   type ScalpStatus, type ScalpPositionRow, type ScalpCandidateRow, type ScalpLedgerState,
+  type ScalpTradeHistory, type DhanLiveOrders, type ScalpCycleResult,
 } from "../positionStocksApi";
 
 type Window = "1m" | "5m" | "15m" | "60m";
@@ -47,6 +48,10 @@ export default function PositionStocksTab() {
   const [positions, setPositions] = useState<ScalpPositionRow[]>([]);
   const [candidates, setCandidates] = useState<ScalpCandidateRow[]>([]);
   const [ledger, setLedger] = useState<ScalpLedgerState | null>(null);
+  const [tradeHistory, setTradeHistory] = useState<ScalpTradeHistory | null>(null);
+  const [dhanLive, setDhanLive] = useState<DhanLiveOrders | null>(null);
+  const [dhanLiveError, setDhanLiveError] = useState<string | null>(null);
+  const [lastCycleResult, setLastCycleResult] = useState<ScalpCycleResult | null>(null);
   const [windowFilter, setWindowFilter] = useState<Window | "all">("all");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -55,28 +60,44 @@ export default function PositionStocksTab() {
   const loadAll = useCallback(async () => {
     if (!getPositionStocksApiUrl()) return;
     try {
-      const [s, p, c, l] = await Promise.all([
+      const [s, p, c, l, h] = await Promise.all([
         positionStocksApi.status(),
         positionStocksApi.positions(),
         positionStocksApi.candidates(),
         positionStocksApi.ledger(),
+        positionStocksApi.tradeHistory(200),
       ]);
-      setStatus(s); setPositions(p); setCandidates(c); setLedger(l);
+      setStatus(s); setPositions(p); setCandidates(c); setLedger(l); setTradeHistory(h);
       setError(null);
     } catch (e: any) {
       setError(e?.message || "Failed to reach position-stocks-service");
     }
   }, []);
 
+  const loadDhanLive = useCallback(async () => {
+    try {
+      const d = await positionStocksApi.dhanLiveOrders();
+      setDhanLive(d);
+      setDhanLiveError(null);
+    } catch (e: any) {
+      setDhanLiveError(e?.message || "Failed to fetch live Dhan orders");
+    }
+  }, []);
+
   useEffect(() => {
     void loadAll();
+    void loadDhanLive();
     const t = setInterval(() => void loadAll(), 15_000);
-    return () => clearInterval(t);
-  }, [loadAll]);
+    // Dhan's own order-book API is hit directly (not cached DB state) —
+    // poll it less aggressively than the rest of the dashboard to stay
+    // well clear of any broker-side rate limit.
+    const td = setInterval(() => void loadDhanLive(), 30_000);
+    return () => { clearInterval(t); clearInterval(td); };
+  }, [loadAll, loadDhanLive]);
 
   const saveApiUrl = () => { setPositionStocksApiUrl(apiUrlInput); void loadAll(); };
 
-  const doAction = async (action: "arm" | "disarm" | "kill" | "sync" | "reconcile" | "service_enable" | "service_disable") => {
+  const doAction = async (action: "arm" | "disarm" | "kill" | "sync" | "reconcile" | "service_enable" | "service_disable" | "autopilot_enable" | "autopilot_disable" | "run_cycle") => {
     setBusy(action); setError(null);
     try {
       if (action === "arm") await positionStocksApi.arm();
@@ -86,6 +107,9 @@ export default function PositionStocksTab() {
       else if (action === "reconcile") await positionStocksApi.reconcile();
       else if (action === "service_enable") await positionStocksApi.serviceEnable();
       else if (action === "service_disable") await positionStocksApi.serviceDisable();
+      else if (action === "autopilot_enable") await positionStocksApi.autopilotEnable();
+      else if (action === "autopilot_disable") await positionStocksApi.autopilotDisable();
+      else if (action === "run_cycle") { const r = await positionStocksApi.runCycle(); setLastCycleResult(r); }
       await loadAll();
     } catch (e: any) {
       setError(e?.message || `${action} failed`);
@@ -140,7 +164,7 @@ export default function PositionStocksTab() {
       )}
 
       {/* ── Top control strip ── */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <div className="bg-graphite border border-slate rounded-2xl p-3">
           <p className="text-[9px] text-mist uppercase tracking-widest mb-1">Armed</p>
           <p className={`font-display tabular-nums font-bold text-sm ${status?.armed ? "text-signal-buy" : "text-signal-avoid"}`}>
@@ -171,11 +195,37 @@ export default function PositionStocksTab() {
             {status?.service_enabled ? "ENABLED" : "PAUSED"}
           </p>
         </div>
+        <div className="bg-graphite border border-slate rounded-2xl p-3">
+          <p className="text-[9px] text-mist uppercase tracking-widest mb-1">Auto-Pilot</p>
+          <p className={`font-display tabular-nums font-bold text-sm ${status?.auto_pilot_enabled ? "text-signal-buy" : "text-signal-hold"}`}>
+            {status?.auto_pilot_enabled ? "ON" : "OFF"}
+          </p>
+        </div>
       </div>
 
       {status && !status.service_enabled && (
         <div className="rounded-xl border border-signal-avoid/40 bg-signal-avoid/10 px-3 py-2 font-display tabular-nums text-[11px] text-signal-avoid">
           Module paused — screening and new entries are stopped. Exit reconciliation and the 3:00 PM EOD square-off keep running for any open positions.
+        </div>
+      )}
+
+      {status && status.service_enabled && !status.auto_pilot_enabled && (
+        <div className="rounded-xl border border-signal-hold/40 bg-signal-hold/10 px-3 py-2 font-display tabular-nums text-[11px] text-signal-hold">
+          Auto-Pilot is off — the screener is still scanning live (see below) but won't act on anything automatically. Use "Run Cycle Now" for a one-off manual push.
+        </div>
+      )}
+
+      <p className="font-display tabular-nums text-[9px] text-mist">
+        Last cycle: {fmtDateTimeIst(status?.last_cycle_run_at)}
+        {status?.last_cycle_run_trigger ? ` (${status.last_cycle_run_trigger})` : ""}
+      </p>
+
+      {lastCycleResult && (
+        <div className="rounded-xl border border-slate bg-graphite px-3 py-2 font-display tabular-nums text-[11px] text-paper">
+          Manual cycle: {lastCycleResult.candidates_seen} candidate(s) seen
+          {lastCycleResult.entered_symbol ? ` · entered ${lastCycleResult.entered_symbol}` : ""}
+          {lastCycleResult.eod_fired ? " · EOD squareoff fired" : ""}
+          {lastCycleResult.skipped_reason ? ` · skipped: ${lastCycleResult.skipped_reason}` : ""}
         </div>
       )}
 
@@ -200,6 +250,21 @@ export default function PositionStocksTab() {
           onClick={() => doAction("disarm")}
           className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-paper disabled:opacity-40"
         >{busy === "disarm" ? "Disarming…" : "Disarm"}</button>
+        <button
+          disabled={busy !== null || status?.auto_pilot_enabled}
+          onClick={() => doAction("autopilot_enable")}
+          className="px-4 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 font-display tabular-nums text-xs text-signal-buy disabled:opacity-40"
+        >{busy === "autopilot_enable" ? "Enabling…" : "Enable Auto-Pilot"}</button>
+        <button
+          disabled={busy !== null || !status?.auto_pilot_enabled}
+          onClick={() => doAction("autopilot_disable")}
+          className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-paper disabled:opacity-40"
+        >{busy === "autopilot_disable" ? "Disabling…" : "Disable Auto-Pilot"}</button>
+        <button
+          disabled={busy !== null || !status?.armed || !status?.service_enabled}
+          onClick={() => doAction("run_cycle")}
+          className="px-4 py-2 rounded-xl bg-signal-prepare/20 border border-signal-prepare/40 font-display tabular-nums text-xs text-signal-prepare disabled:opacity-40"
+        >{busy === "run_cycle" ? "Running…" : "Run Cycle Now"}</button>
         <button
           disabled={busy !== null}
           onClick={() => doAction("sync")}
@@ -312,6 +377,132 @@ export default function PositionStocksTab() {
         )}
       </div>
 
+      {/* ── Trade History (full ledger + win rate / total P&L) ── */}
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        <p className="dash-section-title mb-2">Trade History — Buy vs Sell, Win Rate</p>
+        {tradeHistory ? (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+              <div>
+                <p className="text-[9px] text-mist uppercase tracking-widest">Total Trades</p>
+                <p className="font-display tabular-nums font-bold text-sm text-paper">{tradeHistory.summary.total_trades}</p>
+              </div>
+              <div>
+                <p className="text-[9px] text-mist uppercase tracking-widest">Win Rate</p>
+                <p className="font-display tabular-nums font-bold text-sm text-paper">
+                  {tradeHistory.summary.win_rate_pct != null ? `${tradeHistory.summary.win_rate_pct}%` : "—"}
+                  <span className="text-[10px] text-mist ml-1">({tradeHistory.summary.wins}W / {tradeHistory.summary.losses}L)</span>
+                </p>
+              </div>
+              <div>
+                <p className="text-[9px] text-mist uppercase tracking-widest">Total P&L</p>
+                <p className={`font-display tabular-nums font-bold text-sm ${tradeHistory.summary.total_pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
+                  {fmtInr(tradeHistory.summary.total_pnl)}
+                </p>
+              </div>
+              <div>
+                <p className="text-[9px] text-mist uppercase tracking-widest">Best / Worst</p>
+                <p className="font-display tabular-nums text-[11px] text-paper">
+                  {tradeHistory.summary.best_trade ? (
+                    <span className="text-signal-buy">{tradeHistory.summary.best_trade.symbol} {fmtInr(tradeHistory.summary.best_trade.pnl)}</span>
+                  ) : "—"}
+                  {" / "}
+                  {tradeHistory.summary.worst_trade ? (
+                    <span className="text-signal-sell">{tradeHistory.summary.worst_trade.symbol} {fmtInr(tradeHistory.summary.worst_trade.pnl)}</span>
+                  ) : "—"}
+                </p>
+              </div>
+            </div>
+            {tradeHistory.trades.length === 0 ? (
+              <p className="font-display tabular-nums text-xs text-mist">No trades recorded yet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11px] font-display tabular-nums">
+                  <thead>
+                    <tr className="text-mist text-left border-b border-slate">
+                      <th className="py-1 pr-3">Symbol</th>
+                      <th className="py-1 pr-3">Window</th>
+                      <th className="py-1 pr-3">Buy Price</th>
+                      <th className="py-1 pr-3">Sell Price</th>
+                      <th className="py-1 pr-3">Qty</th>
+                      <th className="py-1 pr-3">P&L</th>
+                      <th className="py-1 pr-3">Status</th>
+                      <th className="py-1">Closed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tradeHistory.trades.slice(0, 50).map(t => (
+                      <tr key={t.id} className="border-b border-slate/50">
+                        <td className="py-1 pr-3 text-paper">{t.symbol}</td>
+                        <td className="py-1 pr-3 text-mist">{t.window_source}</td>
+                        <td className="py-1 pr-3 text-paper">₹{t.entry_price.toFixed(2)}</td>
+                        <td className="py-1 pr-3 text-paper">{t.exit_price != null ? `₹${t.exit_price.toFixed(2)}` : "—"}</td>
+                        <td className="py-1 pr-3 text-mist">{t.quantity}</td>
+                        <td className={`py-1 pr-3 ${t.realized_pnl != null && t.realized_pnl >= 0 ? "text-signal-buy" : t.realized_pnl != null ? "text-signal-sell" : "text-mist"}`}>
+                          {t.realized_pnl != null ? `${fmtInr(t.realized_pnl)} (${(t.realized_pnl_pct ?? 0).toFixed(2)}%)` : "—"}
+                        </td>
+                        <td className={`py-1 pr-3 ${statusColor(t.status)}`}>{t.status}</td>
+                        <td className="py-1 text-mist">{fmtDateTimeIst(t.closed_at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="font-display tabular-nums text-xs text-mist">Loading trade history…</p>
+        )}
+      </div>
+
+      {/* ── Live Dhan Orders (broker-side truth, not this service's DB view) ── */}
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        <div className="flex items-center justify-between mb-2">
+          <p className="dash-section-title">Live Dhan Order Activity</p>
+          <button
+            onClick={() => void loadDhanLive()}
+            className="px-3 py-1 rounded-lg bg-graphite border border-slate font-display tabular-nums text-[10px] text-mist"
+          >Refresh</button>
+        </div>
+        {dhanLiveError ? (
+          <p className="font-display tabular-nums text-[11px] text-signal-sell">{dhanLiveError}</p>
+        ) : !dhanLive ? (
+          <p className="font-display tabular-nums text-xs text-mist">Loading…</p>
+        ) : dhanLive.orders.length === 0 ? (
+          <p className="font-display tabular-nums text-xs text-mist">No live scalp orders on Dhan right now.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px] font-display tabular-nums">
+              <thead>
+                <tr className="text-mist text-left border-b border-slate">
+                  <th className="py-1 pr-3">Symbol</th>
+                  <th className="py-1 pr-3">Leg</th>
+                  <th className="py-1 pr-3">Side</th>
+                  <th className="py-1 pr-3">Qty</th>
+                  <th className="py-1 pr-3">Price</th>
+                  <th className="py-1">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dhanLive.orders.map((o, i) => (
+                  <tr key={`${o.orderId ?? i}-${o.legName ?? ""}`} className="border-b border-slate/50">
+                    <td className="py-1 pr-3 text-paper">{String(o.tradingSymbol ?? "—")}</td>
+                    <td className="py-1 pr-3 text-mist">{String(o.legName ?? "—")}</td>
+                    <td className="py-1 pr-3 text-mist">{String(o.transactionType ?? "—")}</td>
+                    <td className="py-1 pr-3 text-mist">{String(o.quantity ?? "—")}</td>
+                    <td className="py-1 pr-3 text-paper">{o.price != null ? `₹${o.price}` : "—"}</td>
+                    <td className="py-1 text-paper">{String(o.orderStatus ?? "—")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="font-display tabular-nums text-[9px] text-mist mt-2">
+          Pulled directly from Dhan's super-order book — this is broker-side truth, independent of the positions list above (which reflects this service's own DB and can lag by up to one reconciliation cycle).
+        </p>
+      </div>
+
       {/* ── Settings (change URL) ── */}
       <details className="bg-graphite border border-slate rounded-2xl p-4">
         <summary className="font-display tabular-nums text-xs text-mist cursor-pointer">Settings</summary>
@@ -354,8 +545,9 @@ function PositionRow({ p }: { p: ScalpPositionRow }) {
         <span className="font-display tabular-nums font-bold text-sm text-paper">{p.symbol}</span>
         <span className={`font-display tabular-nums text-[10px] uppercase ${statusColor(p.status)}`}>{p.status}</span>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
-        <div><span className="text-mist">Entry </span><span className="tabular-nums text-paper">₹{p.entry_price.toFixed(2)}</span></div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 text-[11px]">
+        <div><span className="text-mist">Buy </span><span className="tabular-nums text-paper">₹{p.entry_price.toFixed(2)}</span></div>
+        <div><span className="text-mist">Sell </span><span className="tabular-nums text-paper">{p.exit_price != null ? `₹${p.exit_price.toFixed(2)}` : "—"}</span></div>
         <div><span className="text-mist">Qty </span><span className="tabular-nums text-paper">{p.quantity}</span></div>
         <div><span className="text-mist">Target </span><span className="tabular-nums text-signal-buy">₹{p.target_price.toFixed(2)} ({p.adaptive_target_pct.toFixed(1)}%)</span></div>
         <div><span className="text-mist">Stop </span><span className="tabular-nums text-signal-sell">₹{p.stop_price.toFixed(2)} ({p.adaptive_stop_pct.toFixed(1)}%)</span></div>

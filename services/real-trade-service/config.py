@@ -563,3 +563,8 @@ ADAPTIVE_HISTORY_DAYS      = int(os.getenv("ADAPTIVE_HISTORY_DAYS", "90"))
 ADAPTIVE_MIN_HISTORY_DAYS  = int(os.getenv("ADAPTIVE_MIN_HISTORY_DAYS", "30"))
 ADAPTIVE_PERCENTILE        = float(os.getenv("ADAPTIVE_PERCENTILE", "20.0"))
 ADAPTIVE_STALE_THRESHOLD_DAYS = int(os.getenv("ADAPTIVE_STALE_THRESHOLD_DAYS", "30"))
+
+# ── Shared Dhan account-wide order-rate budget (session 7 audit finding —
+# shared with position-stocks-service via the same Dhan account and the
+# same physical DB; see execution/shared_order_budget.py) ────────────────────
+SHARED_DAILY_ORDER_BUDGET = int(os.getenv("SHARED_DAILY_ORDER_BUDGET", "5000"))

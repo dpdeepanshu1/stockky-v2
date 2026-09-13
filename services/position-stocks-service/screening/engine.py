@@ -33,7 +33,6 @@ The highest-scoring symbol(s) bubble up to the entry layer.
 from __future__ import annotations
 
 import logging
-import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set

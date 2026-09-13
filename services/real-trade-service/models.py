@@ -543,3 +543,21 @@ class ResilienceCache(Base):
     key = Column(String(64), primary_key=True)
     payload_json = Column(Text, nullable=False)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class SharedOrderBudget(Base):
+    """Cross-service Dhan account-wide order-rate counter, shared with
+    position-stocks-service (same Dhan account, same physical DB — see that
+    service's models.py::SharedOrderBudget and
+    capital/shared_order_budget.py for the full rationale). Mapped here to
+    the SAME table name with matching columns/types so both services'
+    create_all() calls agree on its shape regardless of which one boots
+    first. See execution/shared_order_budget.py for how this service reads/
+    writes it. Table name deliberately NOT prefixed `trade_` (unlike every
+    other table in this file) since it's explicitly meant to be shared."""
+    __tablename__ = "stockky_shared_order_budget"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_date = Column(String(10), nullable=False, unique=True, index=True)  # 'YYYY-MM-DD' IST
+    orders_placed_today = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)

@@ -24,11 +24,12 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 import config
-from capital import ledger
+from capital import ledger, shared_order_budget
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening.engine import Candidate
+from screening.quality_gate import QualitySignal
 from tz_utils import ist_today_str
 
 logger = logging.getLogger("position-stocks-entry")
@@ -54,6 +55,7 @@ def _log_candidate(
     decision: str,
     reason: str,
     composite_score: Optional[float] = None,
+    quality: Optional[QualitySignal] = None,
 ) -> None:
     log = ScalpCandidateLog(
         symbol=candidate.symbol,
@@ -62,38 +64,57 @@ def _log_candidate(
         composite_score=composite_score or candidate.composite_score,
         decision=decision,
         reason=reason,
+        fundamental_score=quality.fundamental_score if quality else None,
+        technical_score=quality.technical_score if quality else None,
+        market_cap_cr=quality.market_cap_cr if quality else None,
+        has_positive_catalyst=quality.has_positive_catalyst if quality else None,
     )
     db.add(log)
     db.commit()
 
 
+def log_quality_reject(db: Session, candidate: Candidate, quality: QualitySignal, reason: str) -> None:
+    """Record a candidate skipped by the quality gate BEFORE attempt_entry
+    was even called (main.py's trading loop checks quality for the top-N
+    candidates first) — keeps the audit trail (ScalpCandidateLog) complete
+    for candidates that never reached the capital/Dhan checks inside
+    attempt_entry."""
+    _log_candidate(db, candidate, "SKIPPED", f"QUALITY_GATE:{reason}", quality=quality)
+
+
 def attempt_entry(
     db: Session,
     candidate: Candidate,
+    quality: Optional[QualitySignal] = None,
 ) -> Optional[ScalpPosition]:
     """Try to enter a position for the given candidate.
-    Returns the ScalpPosition if entered, None otherwise (also logs why)."""
+    Returns the ScalpPosition if entered, None otherwise (also logs why).
+    `quality` (added session 6) is the best-effort fundamental/technical/
+    news signal from screening/quality_gate.py, already checked by the
+    caller — passed through here purely so it's recorded on the
+    ScalpCandidateLog row alongside the entry/skip decision, for a full
+    audit trail of what was known about a symbol at decision time."""
 
     gate = _get_gate_state(db)
 
     if not gate.is_armed:
-        _log_candidate(db, candidate, "SKIPPED", "SERVICE_NOT_ARMED")
+        _log_candidate(db, candidate, "SKIPPED", "SERVICE_NOT_ARMED", quality=quality)
         return None
 
     if gate.daily_loss_kill_switch_tripped:
-        _log_candidate(db, candidate, "SKIPPED", "DAILY_LOSS_KILL_SWITCH")
+        _log_candidate(db, candidate, "SKIPPED", "DAILY_LOSS_KILL_SWITCH", quality=quality)
         return None
 
     # Order budget guard
     today = ist_today_str()
     if gate.orders_placed_today_date == today and gate.orders_placed_today >= config.DAILY_ORDER_BUDGET:
-        _log_candidate(db, candidate, "SKIPPED", f"ORDER_BUDGET_EXHAUSTED:{gate.orders_placed_today}")
+        _log_candidate(db, candidate, "SKIPPED", f"ORDER_BUDGET_EXHAUSTED:{gate.orders_placed_today}", quality=quality)
         return None
 
     # Max concurrent positions
     open_count = _count_open_positions(db)
     if open_count >= config.MAX_CONCURRENT_SCALP_POSITIONS:
-        _log_candidate(db, candidate, "SKIPPED", f"MAX_POSITIONS:{open_count}")
+        _log_candidate(db, candidate, "SKIPPED", f"MAX_POSITIONS:{open_count}", quality=quality)
         return None
 
     # Compute adaptive levels
@@ -102,7 +123,7 @@ def attempt_entry(
     # Reserve capital (also checks kill switch again in the ledger)
     position_value = ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct)
     if position_value is None:
-        _log_candidate(db, candidate, "SKIPPED", "INSUFFICIENT_CAPITAL")
+        _log_candidate(db, candidate, "SKIPPED", "INSUFFICIENT_CAPITAL", quality=quality)
         return None
 
     # Resolve Dhan security_id
@@ -110,7 +131,7 @@ def attempt_entry(
         security_id = dhan_client.get_security_id(db, candidate.symbol)
     except dhan_client.SecurityNotResolvedError as e:
         ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-        _log_candidate(db, candidate, "SKIPPED", f"SECURITY_NOT_FOUND:{e}")
+        _log_candidate(db, candidate, "SKIPPED", f"SECURITY_NOT_FOUND:{e}", quality=quality)
         return None
 
     # Quantity
@@ -125,6 +146,20 @@ def attempt_entry(
             "once you've confirmed a clean fill.", quantity,
         )
         quantity = 1
+
+    # Shared cross-service Dhan account-wide order-rate guard (tracking doc
+    # §3.8) — checked here, right before the real Dhan call, not earlier:
+    # everything above this point (max positions, capital, security
+    # resolution) can still reject a candidate for reasons that have
+    # nothing to do with order-rate, and none of those should count against
+    # the shared budget. Separate from this service's OWN order budget
+    # checked above — Dhan's real account-wide cap is shared with
+    # real-trade-service too. Fails open on any error (see
+    # shared_order_budget.py's docstring).
+    if not shared_order_budget.check_and_reserve(db):
+        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+        _log_candidate(db, candidate, "SKIPPED", "SHARED_ORDER_BUDGET_EXHAUSTED", quality=quality)
+        return None
 
     # Place the order
     dhan_super_order_id = None
@@ -165,7 +200,7 @@ def attempt_entry(
         error_msg = str(e)
         logger.error("position-stocks entry: order placement failed for %s: %s", candidate.symbol, e)
         ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-        _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED:{error_msg}")
+        _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED:{error_msg}", quality=quality)
         return None
 
     # Mark first-live-order done
@@ -202,7 +237,8 @@ def attempt_entry(
 
     _log_candidate(db, candidate, "ENTERED",
                    f"SUPER_ORDER={dhan_super_order_id or 'plain_order'}",
-                   composite_score=candidate.composite_score)
+                   composite_score=candidate.composite_score,
+                   quality=quality)
     logger.info(
         "position-stocks ENTERED %s x%d @ ₹%.2f target=₹%.2f stop=₹%.2f "
         "(window=%s score=%.3f super_order=%s)",

@@ -141,6 +141,13 @@ class AngelOneSession:
             )
 
     def rest_headers(self) -> dict:
+        # AUDIT FIX: _resolve_client_public_ip() can block on a live
+        # httpx.get() call (on IP cache miss). rest_headers() is only used
+        # for SmartAPI REST calls (not the WS connect path), so callers
+        # should treat this as a potentially-blocking helper and offload via
+        # asyncio.to_thread() if called from an async context. The cached
+        # path (ANGELONE_STATIC_IP set, or IP fetched < 15 min ago) is
+        # effectively instant; only the first call after a 15-min gap blocks.
         return {
             "Authorization":    f"Bearer {self.token}",
             "X-PrivateKey":     self.api_key,

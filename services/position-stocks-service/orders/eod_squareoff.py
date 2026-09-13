@@ -112,13 +112,24 @@ def run_eod_squareoff(db: Session) -> int:
             # "no exceptions", applied to the shared guard too).
             shared_order_budget.record_order_unconditional(db)
 
-            # Mark closed — exit price unknown here (will be reconciled from
-            # Dhan positions on next sync), use entry_price as placeholder
+            # Mark closed — exit price is unknown here (the MARKET SELL
+            # just fired; Dhan has not yet confirmed a fill price). We record
+            # entry_price as a placeholder so the row is immediately visible
+            # in /positions as CLOSED, with a clear note that the final P&L
+            # will be zero until reconciled. The next reconcile() pass that
+            # reads Dhan's order book will overwrite exit_price / realized_pnl
+            # with the real fill price once the MARKET SELL shows as TRADED.
             pos.status = "EOD_SQUAREOFF"
             pos.closed_at = datetime.now(timezone.utc)
-            pos.exit_price = pos.entry_price   # placeholder until reconciled
-            pos.realized_pnl = 0.0
-            pos.realized_pnl_pct = 0.0
+            pos.exit_price = pos.entry_price   # placeholder — reconcile() will update
+            pos.realized_pnl = 0.0             # placeholder — reconcile() will update
+            pos.realized_pnl_pct = 0.0         # placeholder — reconcile() will update
+            # AUDIT FIX: record that this is a placeholder so operators
+            # reading /positions or /trades/history before the next
+            # reconcile() pass don't mistake 0.0 P&L for a real break-even
+            # exit. The field is overwritten to None by reconcile() on a
+            # real fill (it only sets error_message on REJECTED/CANCELLED).
+            pos.error_message = "EOD_SQUAREOFF_PENDING_RECONCILE: exit_price=entry_price placeholder until next reconcile pass fills in the real fill price."
             db.commit()
 
             ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=0.0)

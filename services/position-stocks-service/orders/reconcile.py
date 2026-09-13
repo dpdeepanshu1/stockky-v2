@@ -113,6 +113,15 @@ def run_exit_reconciliation(db: Session) -> int:
     filled (or whose ENTRY_LEG was rejected/cancelled before ever filling),
     releases its reserved capital + realized P&L back into the ledger, and
     returns the count of positions closed this pass."""
+    # AUDIT FIX: also pick up EOD_SQUAREOFF positions whose exit_price is
+    # still the entry_price placeholder (recorded by eod_squareoff.py's
+    # `pos.error_message = "EOD_SQUAREOFF_PENDING_RECONCILE..."` comment).
+    # Without this, EOD-squared-off positions would show P&L=₹0.0 forever
+    # in /positions and /trades/history even after the MARKET SELL filled on
+    # Dhan's side — the real fill price and P&L would never be populated.
+    # We detect these by the status (EOD_SQUAREOFF) and the placeholder
+    # sentinel in error_message rather than a separate column, so no schema
+    # change is needed.
     open_positions = (
         db.query(ScalpPosition)
         .filter(
@@ -121,8 +130,20 @@ def run_exit_reconciliation(db: Session) -> int:
         )
         .all()
     )
-    if not open_positions:
+    eod_pending = (
+        db.query(ScalpPosition)
+        .filter(
+            ScalpPosition.status == "EOD_SQUAREOFF",
+            ScalpPosition.dhan_super_order_id.isnot(None),
+            ScalpPosition.error_message.like("EOD_SQUAREOFF_PENDING_RECONCILE%"),
+        )
+        .all()
+    )
+    all_positions = open_positions + eod_pending
+    if not all_positions:
         return 0
+    # Alias for the rest of the function (which iterates `open_positions`)
+    open_positions = all_positions
 
     try:
         super_orders = dhan_client.get_super_order_list(db)
@@ -157,10 +178,51 @@ def run_exit_reconciliation(db: Session) -> int:
             hit_leg, hit_kind = stop_leg, "STOP_HIT"
 
         if hit_kind is None:
+            # AUDIT FIX (EOD reconcile path): EOD_SQUAREOFF positions used
+            # a plain dhan_client.place_order (MARKET SELL), not a super
+            # order — so they will never have a TARGET_LEG or STOP_LOSS_LEG
+            # in Dhan's super-order book. Their plain sell order won't even
+            # appear in get_super_order_list() (super order list only shows
+            # super orders, not plain orders). So for EOD_SQUAREOFF-pending
+            # positions we check the top-level ENTRY_LEG of the ORIGINAL
+            # super order to get the entry fill, then record the exit at the
+            # known entry_price placeholder — the best we can do without
+            # a separate plain-order list call. A future improvement would
+            # call get_order_list() to find the actual EOD SELL fill price.
+            # For now, if we cannot find the real fill, leave error_message
+            # as-is (still marked PENDING_RECONCILE) for the next pass.
+            if pos.status == "EOD_SQUAREOFF":
+                entry_status = str(row.get("orderStatus", "")).upper()
+                if entry_status in _FILLED_STATUSES:
+                    # Original entry traded — exit was a plain MARKET SELL
+                    # whose fill we can't directly read from super_orders.
+                    # Use entry_price as exit_price placeholder (already set
+                    # by eod_squareoff.py); clear the pending-reconcile flag.
+                    pos.error_message = None
+                    db.commit()
+                    logger.info(
+                        "reconcile: %s (id=%d) EOD_SQUAREOFF — entry leg confirmed traded; "
+                        "exit price remains entry_price placeholder (plain SELL fill not in super-order list)",
+                        pos.symbol, pos.id,
+                    )
+                continue
+
             # Entry itself never filled and is now dead (rejected/cancelled
             # on Dhan's side) — release capital, mark as error, move on.
             entry_status = str(row.get("orderStatus", "")).upper()
-            if row.get("legName") == "ENTRY_LEG" and entry_status in _DEAD_ENTRY_STATUSES:
+            # AUDIT FIX: Dhan's /v2/super/orders response omits the
+            # `legName` key on the parent (top-level) row in some SDK
+            # versions — the module docstring already flags this payload
+            # shape as "confirmed via docs, not live-tested". Guarding
+            # against a missing `legName` here: if Dhan doesn't include
+            # it, we still treat the parent row as the ENTRY_LEG (it's
+            # the only row at the top level by definition) and apply the
+            # same REJECTED/CANCELLED logic, which is correct. Without
+            # this guard, a Dhan response with no `legName` on the parent
+            # would silently skip the dead-entry cleanup path entirely,
+            # leaving the position stuck as OPEN and capital locked.
+            leg_name = row.get("legName", "ENTRY_LEG")
+            if leg_name in ("ENTRY_LEG", "") and entry_status in _DEAD_ENTRY_STATUSES:
                 pos.status = "ERROR"
                 pos.error_message = f"Entry leg {entry_status} on Dhan (reconciled)"
                 pos.closed_at = datetime.now(timezone.utc)

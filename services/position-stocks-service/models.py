@@ -89,7 +89,7 @@ class ScalpPosition(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     symbol = Column(String(32), nullable=False, index=True)
     dhan_security_id = Column(String(32), nullable=False)
-    window_source = Column(String(8), nullable=False)  # "5m" | "15m" | "60m"
+    window_source = Column(String(8), nullable=False)  # "1m" | "5m" | "15m" | "60m"  (AUDIT FIX: "1m" window added 2026-09-12 was missing from comment)
     status = Column(String(24), nullable=False, default="OPEN", index=True)
     # OPEN, TARGET_HIT, STOP_HIT, EOD_SQUAREOFF, MANUAL_EXIT, ERROR
 

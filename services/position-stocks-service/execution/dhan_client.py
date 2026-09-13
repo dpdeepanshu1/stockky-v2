@@ -347,19 +347,43 @@ def place_super_order(
         transaction_type, security_id, quantity, ref_price, target_price, stop_loss_price,
         order_type, product_type,
     )
-    resp = client.place_super_order(
-        security_id=security_id,
-        exchange_segment=exchange_segment,
-        transaction_type=transaction_type,
-        quantity=quantity,
-        order_type=order_type,
-        product_type=product_type,
-        price=ref_price,
-        targetPrice=target_price,
-        stopLossPrice=stop_loss_price,
-        trailingJump=trailing_jump,
-        tag=tag,
-    )
+    # AUDIT FIX: dhanhq 2.0.x's place_super_order() does not accept a `tag`
+    # kwarg — the SDK simply doesn't forward it and raises TypeError on some
+    # versions. Attempt with `tag` first (future-compatible); fall back to
+    # without if the SDK rejects it. The tag is informational (used by
+    # /dhan/live-orders to distinguish SCALP from real-trade-service orders)
+    # — losing it is not a trading-safety failure, just a visibility gap.
+    try:
+        resp = client.place_super_order(
+            security_id=security_id,
+            exchange_segment=exchange_segment,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            order_type=order_type,
+            product_type=product_type,
+            price=ref_price,
+            targetPrice=target_price,
+            stopLossPrice=stop_loss_price,
+            trailingJump=trailing_jump,
+            tag=tag,
+        )
+    except TypeError:
+        logger.info(
+            "position-stocks: place_super_order: SDK rejected `tag` kwarg — "
+            "retrying without it (dhanhq <2.1 compatibility)"
+        )
+        resp = client.place_super_order(
+            security_id=security_id,
+            exchange_segment=exchange_segment,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            order_type=order_type,
+            product_type=product_type,
+            price=ref_price,
+            targetPrice=target_price,
+            stopLossPrice=stop_loss_price,
+            trailingJump=trailing_jump,
+        )
     return _extract_data(resp) or {}
 
 

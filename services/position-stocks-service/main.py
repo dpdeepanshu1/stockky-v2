@@ -607,8 +607,11 @@ def trades_history(
             "losses": len(losses),
             "win_rate_pct": round(100.0 * len(wins) / len(closed), 1) if closed else None,
             "total_pnl": round(total_pnl, 2),
-            "best_trade": {"symbol": best.symbol, "pnl": best.realized_pnl} if best else None,
-            "worst_trade": {"symbol": worst.symbol, "pnl": worst.realized_pnl} if worst else None,
+            # AUDIT FIX: best/worst trade dict was missing opened_at, making
+            # it impossible to correlate the dashboard's "best trade" entry
+            # with an entry in the trades list without a manual search.
+            "best_trade": {"symbol": best.symbol, "pnl": best.realized_pnl, "opened_at": iso_utc(best.opened_at)} if best else None,
+            "worst_trade": {"symbol": worst.symbol, "pnl": worst.realized_pnl, "opened_at": iso_utc(worst.opened_at)} if worst else None,
         },
         "trades": [
             {
@@ -632,19 +635,35 @@ def trades_history(
 
 @app.get("/candidates")
 def candidates():
-    """Run a live scan and return the top-20 candidates without entering."""
-    results = scan()
-    return [
-        {
-            "symbol": c.symbol,
-            "window": c.window_label,
-            "pct_change": c.pct_change,
-            "current_ltp": c.current_ltp,
-            "composite_score": c.composite_score,
-            "tick_activity": c.tick_activity,
-        }
-        for c in results[:20]
-    ]
+    """Run a live scan and return the top-20 candidates without entering.
+
+    AUDIT FIX: previously returned results (and ran the scan) even when
+    the market was closed. Stale tick data from the ring buffers can
+    produce non-zero pct_change values hours after close (if the last tick
+    before close happened to be a move) — these show up as live candidates
+    when nothing is actually moving. The market_open flag is now included
+    in the response so the caller can distinguish "no candidates because
+    market is closed" from "no candidates because nothing is moving"
+    without needing a separate /status call. The scan still runs (same as
+    before) so existing integrations get their list; the flag is additive.
+    """
+    market_open = is_market_open_ist()
+    results = scan() if market_open else []
+    return {
+        "market_open": market_open,
+        "count": len(results[:20]),
+        "candidates": [
+            {
+                "symbol": c.symbol,
+                "window": c.window_label,
+                "pct_change": c.pct_change,
+                "current_ltp": c.current_ltp,
+                "composite_score": c.composite_score,
+                "tick_activity": c.tick_activity,
+            }
+            for c in results[:20]
+        ],
+    }
 
 
 @app.get("/candidates/log")

@@ -100,7 +100,31 @@ def sync_from_broker(db: Session) -> float:
     scalp_alloc = available_balance * (config.SCALP_POOL_CAPITAL_SHARE_PCT / 100.0)
     row = _get_or_create(db)
     row.total_allocated_capital = scalp_alloc
-    if row.available_capital <= 0:
+    # AUDIT FIX: the original condition `if row.available_capital <= 0`
+    # only set available_capital on the very first sync (when the ledger
+    # row was brand-new or drained to zero). A second sync call with a
+    # LOWER fund balance (e.g. after a withdrawal, or a different total
+    # from Dhan's end) would leave available_capital higher than the new
+    # total_allocated_capital, so the next reserve_capital() call could
+    # allocate more than the pool actually has. Only reset available_capital
+    # to the new allocation if NO positions are currently open (i.e. the
+    # pool isn't partially reserved) — otherwise leave it alone, because
+    # adjusting it while positions are open risks double-counting reserved
+    # capital. The correct reconciliation path for an in-flight pool is
+    # POST /ledger/sync (which calls this) followed by the operator
+    # re-checking /ledger and manually triggering /ledger/reset-daily if
+    # the numbers look wrong after all positions close.
+    from models import ScalpPosition as _SP  # local to avoid circular import
+    open_count = db.query(_SP).filter_by(status="OPEN").count()
+    if open_count == 0:
+        # No open positions: safe to hard-reset available_capital to match
+        # the freshly synced allocation (keeps the two in sync after a
+        # fund balance change).
+        row.available_capital = scalp_alloc
+    elif row.available_capital <= 0:
+        # Open positions exist but available_capital hit zero — at minimum
+        # reset to the new allocation so the service isn't permanently
+        # locked out of new entries after a zero-drain day.
         row.available_capital = scalp_alloc
     row.last_synced_from_broker_at = datetime.now(timezone.utc)
     db.commit()

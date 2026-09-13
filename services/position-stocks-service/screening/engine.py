@@ -168,5 +168,15 @@ def on_tick_hook(symbol: str, ltp: float, volume: int, ts: float) -> None:
     _update_volume(symbol, ts)
 
 
-# Register the hook at module import time
+# Register the hook at module import time.
+# AUDIT NOTE: this line runs when engine.py is first imported, which happens
+# at position-stocks-service startup via `from screening.engine import scan`
+# in main.py. ws_client itself is imported earlier (also in main.py, via
+# `from feed import ws_client`), so the register_on_tick() target list already
+# exists by the time this runs. The ordering is safe. But: if engine.py is
+# ever imported LAZILY (e.g. in a test or a tool that imports only ws_client),
+# on_tick_hook would never be registered and _volume_accum would never update
+# — scan() would silently return no candidates (tick_count=0 → liquidity gate
+# rejects every symbol). Worth keeping in mind if tests start importing
+# ws_client without importing screening.engine.
 ws_client.register_on_tick(on_tick_hook)

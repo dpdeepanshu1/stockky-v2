@@ -216,6 +216,14 @@ services:
       # instead of the local Oracle container.
       NOTIFICATION_SCHEDULER_URL: http://notification-scheduler-service:8000/notification
       SCHEDULER_URL: http://notification-scheduler-service:8000/scheduler
+      # AUDIT FIX: position-stocks-service runs on port 8006 in the compose
+      # network but was never wired into api-gateway's environment block.
+      # Any gateway route proxying to it (or admin UI calling it via the
+      # gateway) would silently fall back to config.service_urls.py's
+      # localhost:8006 default — correct inside the compose network, but
+      # wrong on Render and fragile in general. Explicit here for the same
+      # reason every other internal service URL is explicit.
+      POSITION_STOCKS_SERVICE_URL: http://position-stocks-service:8006
       UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}
       UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
       DATABASE_URL: ${DATABASE_URL:-}
@@ -419,6 +427,25 @@ services:
       # - POSITION_STOCKS_DAILY_ORDER_BUDGET=300
       # - MAX_DAILY_LOSS_PCT_OF_POOL=4.0
       # - EOD_SQUAREOFF_TIME_IST=15:00
+      # AUDIT FIX: DHAN_CREDENTIAL_ENC_KEY was missing from this block.
+      # Without it, auth/dhan_credentials_ro.py raises "not configured" on
+      # every Dhan call (get_funds, place_order, get_super_order_list) —
+      # the service starts, passes /health, and logs no startup error, but
+      # is completely unable to check capital, place entries, or reconcile
+      # exits. It MUST match real-trade-service's key (same Dhan account).
+      - DHAN_CREDENTIAL_ENC_KEY=${DHAN_CREDENTIAL_ENC_KEY:-}
+      # AUDIT FIX: ANGELONE_* vars were also missing. feed/angelone_session.py
+      # checks is_configured() on startup and logs an error if any of the four
+      # required fields are empty — but the WS task still starts and returns
+      # "running: true" from /ws-status while never actually connecting, so
+      # the dashboard shows the feed as active when it isn't. Passing them
+      # through from .env explicitly (same pattern real-trade-service uses for
+      # DHAN_* above) makes the misconfiguration visible at the compose level.
+      - ANGELONE_CLIENT_ID=${ANGELONE_CLIENT_ID:-}
+      - ANGELONE_MPIN=${ANGELONE_MPIN:-}
+      - ANGELONE_API_KEY=${ANGELONE_API_KEY:-}
+      - ANGELONE_TOTP_SECRET=${ANGELONE_TOTP_SECRET:-}
+      - ANGELONE_STATIC_IP=${ANGELONE_STATIC_IP:-}
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
     depends_on:

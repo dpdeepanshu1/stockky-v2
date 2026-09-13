@@ -83,4 +83,14 @@ def get_all_urls():
         "training": TRAINING_URL,
         "notification": NOTIFICATION_URL,
         "vite_api": VITE_API_URL,
+        "position_stocks": POSITION_STOCKS_SERVICE_URL,
     }
+
+# ── position-stocks-service (port 8006, scalp-trading module) ───────────────
+# AUDIT FIX: this service existed and was wired into docker-compose on port
+# 8006, but no POSITION_STOCKS_SERVICE_URL constant was ever added here.
+# Any caller (api-gateway proxy, frontend env, other services) wanting to
+# proxy requests to it had no canonical config entry to reference.
+POSITION_STOCKS_SERVICE_URL = _base(
+    os.getenv("POSITION_STOCKS_SERVICE_URL", "http://localhost:8006")
+)

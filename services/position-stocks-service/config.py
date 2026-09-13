@@ -73,7 +73,14 @@ ANGELONE_WS_URL = os.getenv(
 ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION = _get_int(
     "ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION", 1000
 )
-ANGELONE_WS_HEARTBEAT_INTERVAL_S = _get_float("ANGELONE_WS_HEARTBEAT_INTERVAL_S", 25.0)
+ANGELONE_WS_HEARTBEAT_INTERVAL_S = _get_float("ANGELONE_WS_HEARTBEAT_INTERVAL_S", 10.0)
+# BUG FIX (session14, live-tested): was 25.0. AngelOne's own reference
+# client (smartapi-python's SmartWebSocketV2) sends its "ping" heartbeat
+# every 10s, not 25s. Tightening to match exactly, since the 25s interval
+# didn't prevent the observed ~120s disconnect cycle either way — this
+# alone may not be the full fix (see feed/ws_client.py's close_code/reason
+# logging added this session for the real diagnosis), but matching the
+# documented reference behavior exactly is the correct baseline regardless.
 ANGELONE_WS_RECONNECT_BACKOFF_S = _get_float("ANGELONE_WS_RECONNECT_BACKOFF_S", 3.0)
 ANGELONE_WS_RECONNECT_BACKOFF_MAX_S = _get_float(
     "ANGELONE_WS_RECONNECT_BACKOFF_MAX_S", 60.0

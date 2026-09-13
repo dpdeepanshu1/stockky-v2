@@ -252,13 +252,32 @@ async def _ws_loop() -> None:
                     # and the reconnect happened completely silently. This
                     # `else` (executes whenever the for-loop completes
                     # without `break`/exception) makes that visible.
+                    #
+                    # session14 follow-up (live-tested): switching the
+                    # heartbeat from a protocol ping to `ws.send("ping")`
+                    # did NOT stop the disconnect — it still recurred at a
+                    # suspiciously exact ~120s regardless. That rules out
+                    # "wrong heartbeat frame type" as the (whole) cause and
+                    # points at AngelOne's server enforcing its own
+                    # connection lifetime — plausibly specific to
+                    # no-tick-data / market-closed connections, since nothing
+                    # client-side (including active 25s heartbeats) should
+                    # produce a clean close at a fixed interval on its own.
+                    # Logging the close code/reason now instead of guessing
+                    # again — this is the actual evidence needed to tell
+                    # "AngelOne enforces a hard idle-session cap" apart from
+                    # "something else is still wrong here".
                     logger.warning(
-                        "position-stocks WS: server closed the connection cleanly — reconnecting in %ss",
-                        backoff,
+                        "position-stocks WS: server closed the connection cleanly "
+                        "(close_code=%s, close_reason=%r) — reconnecting in %ss",
+                        ws.close_code, ws.close_reason, backoff,
                     )
 
         except ConnectionClosed as e:
-            logger.warning("position-stocks WS: connection closed (%s) — reconnecting in %ss", e, backoff)
+            logger.warning(
+                "position-stocks WS: connection closed (%s, code=%s, reason=%r) — reconnecting in %ss",
+                e, getattr(e, "code", None), getattr(e, "reason", None), backoff,
+            )
         except Exception as e:
             logger.error("position-stocks WS: error (%s) — reconnecting in %ss", e, backoff)
 

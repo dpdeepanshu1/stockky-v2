@@ -705,3 +705,44 @@ rationale. Both travel together in every zip from now on.
     still clean (no new columns added this session). NOT yet re-verified
     against a second live deploy — do that next before trusting the WS
     heartbeat fix actually stops the ~123s reconnect cycle in practice.
+
+- **2026-09-13, session 14 (continued) — heartbeat-frame-type fix alone did
+  NOT stop the ~120s WS reconnect cycle; live logs proved it.** The user's
+  second live test showed `WS: connected` → `WS: server closed the
+  connection cleanly` at 15:17:53 (exactly 120s after 15:15:53) and again
+  at 15:19:56 (exactly 120s after 15:17:56) — WITH the app-level
+  `ws.send("ping")` heartbeat already active. That rules out "wrong
+  heartbeat frame type" as the sole cause; a fixed, exact 120s interval
+  strongly suggests AngelOne's server enforcing its own connection
+  lifetime (plausibly specific to idle/no-tick-data connections while the
+  market is closed) rather than anything reacting to our heartbeats.
+  Rather than guess another fix blind, added real diagnostics: both the
+  clean-close `else` branch and the `except ConnectionClosed` branch now
+  log `ws.close_code`/`ws.close_reason` (or `e.code`/`e.reason`), which
+  will show the actual reason AngelOne gives for the close next time this
+  runs. Also tightened `ANGELONE_WS_HEARTBEAT_INTERVAL_S` from 25.0 to
+  10.0 to exactly match AngelOne's own reference client
+  (smartapi-python's `SmartWebSocketV2.HEART_BEAT_INTERVAL`) as a
+  legitimate baseline correction — but flagged honestly to the user that
+  this alone may not fully resolve it if the cause is server-side. Next
+  live test should be read for the close_code/reason values, and ideally
+  re-run during actual market hours (09:15–15:30 IST) — a connection
+  carrying real tick data is a meaningfully different test than an idle
+  one, and would definitively separate "AngelOne caps idle connections"
+  from "still broken even with live data".
+  - Also found two workflow (not code) issues in the user's own terminal
+    session, unrelated to the fixes above: (1) `unzip`/`cp` both failed
+    ("cannot find or open" / "cannot stat") because the zip wasn't at
+    `~` when the script ran, yet the container still showed session14's
+    new log line — meaning the deploy must have already succeeded in an
+    earlier, unlogged run of the same script; going forward the deploy
+    script should verify the zip exists AND verify the running
+    container's actual file content (not just trust log output) before
+    declaring success. (2) The user is running the example curl script
+    with the literal placeholder `YOUR_ADMIN_PASSWORD` still in it, so
+    `/auth/login` correctly 401s and returns `{"detail": ...}` — which
+    has neither `token` nor `access_token`, hence the `KeyError`. This
+    was never a wrong-JSON-key bug in the example script; it's the
+    unsubstituted placeholder. Needs to be far more obvious in the next
+    version of the test script (e.g. fail loudly with a clear message
+    instead of a bare Python traceback).

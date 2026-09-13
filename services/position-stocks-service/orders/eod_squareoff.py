@@ -77,10 +77,27 @@ def run_eod_squareoff(db: Session) -> int:
                     except Exception:
                         pass  # leg may already be filled/cancelled — not fatal
 
-            # Always place a plain MARKET SELL to guarantee flat
+            # Always place a plain MARKET SELL to guarantee flat.
+            #
+            # AUDIT FIX (this session): this previously passed
+            # is_armed=gate.is_armed. dhan_client.place_order() raises
+            # DhanNotArmedError whenever is_armed is False, with NO
+            # exemption for SELL — unlike real-trade-service's risk engine
+            # and manual_engine.py, which explicitly exempt SELL/exit
+            # orders from the armed gate (see risk_engine/engine.py's
+            # evaluate() docstring: "Exits must never be blocked..."). So a
+            # disarmed service (e.g. after /disarm or /kill, or simply
+            # never re-armed that morning) with open positions would hit
+            # this exact EOD sweep, silently fail every closing SELL with
+            # DhanNotArmedError (caught below, logged, position left OPEN),
+            # and leave real-money positions unflattened past 3pm — exactly
+            # the "no exceptions" scenario tracking doc §3.7 exists to rule
+            # out. Forcing True here: flattening at EOD must never be
+            # gated by the arm switch, same as cancel_order/
+            # cancel_super_order already are unconditionally allowed above.
             dhan_client.place_order(
                 db,
-                is_armed=gate.is_armed,   # cancel is allowed disarmed, but sell needs arm
+                is_armed=True,
                 security_id=pos.dhan_security_id,
                 exchange_segment=config.SCALP_EXCHANGE_SEGMENT,
                 transaction_type="SELL",

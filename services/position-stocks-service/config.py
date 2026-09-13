@@ -109,6 +109,14 @@ MAX_STOP_PCT = _get_float("MAX_STOP_PCT", 5.0)
 
 # ── Position limits ──────────────────────────────────────────────────────────
 MAX_CONCURRENT_SCALP_POSITIONS = _get_int("MAX_CONCURRENT_SCALP_POSITIONS", 5)
+# AUDIT NOTE (this session): declared and exposed (nowhere else — not even
+# in GET /status), but not read by screening/engine.py, orders/entry.py, or
+# anywhere else in this service. Whatever behavior this knob was meant to
+# drive (e.g. relaxing thresholds to keep at least this many positions
+# open) was never implemented. Left as a config value rather than removed
+# or guessed at — wiring it up means deciding new trading logic, which
+# isn't a safe call to make without knowing the originally intended
+# semantics. Flagging here so it isn't mistaken for working.
 MIN_PREFERRED_SCALP_POSITIONS = _get_int("MIN_PREFERRED_SCALP_POSITIONS", 1)
 
 # ── Risk / capital sizing (CONFIRMED by user, tracking doc §3.5 / §5 item 9) ─

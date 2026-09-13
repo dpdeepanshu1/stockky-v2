@@ -145,6 +145,23 @@ _COLUMN_MIGRATIONS = [
     ("scalp_gate_state", "auto_pilot_enabled", "NUMBER(1)", "BOOLEAN", "1", "TRUE"),
     ("scalp_gate_state", "last_cycle_run_at", "TIMESTAMP", "TIMESTAMP", None, None),
     ("scalp_gate_state", "last_cycle_run_trigger", "VARCHAR2(16)", "VARCHAR(16)", None, None),
+    # AUDIT FIX (this session): daily_loss_kill_switch_tripped/_date,
+    # orders_placed_today/_date, and first_live_order_done are all declared
+    # on ScalpGateState (models.py) and actively read/written throughout
+    # main.py and orders/entry.py (order-budget guard, first-live-order
+    # safety valve, kill-switch checks) — but were never added here. Any
+    # scalp_gate_state table created before these fields existed on the
+    # model is missing the actual DB columns, so every SELECT/UPDATE that
+    # touches a ScalpGateState row (i.e. almost every request this service
+    # handles) fails at the DB level, not merely with a Python
+    # AttributeError. Same bug class already fixed for scalp_capital_ledger
+    # below (session 9) — that fix only covered one of the two tables that
+    # needed it.
+    ("scalp_gate_state", "daily_loss_kill_switch_tripped", "NUMBER(1)", "BOOLEAN", "0", "FALSE"),
+    ("scalp_gate_state", "daily_loss_kill_switch_tripped_date", "VARCHAR2(10)", "VARCHAR(10)", None, None),
+    ("scalp_gate_state", "orders_placed_today", "NUMBER(10)", "INTEGER", "0", "0"),
+    ("scalp_gate_state", "orders_placed_today_date", "VARCHAR2(10)", "VARCHAR(10)", None, None),
+    ("scalp_gate_state", "first_live_order_done", "NUMBER(1)", "BOOLEAN", "0", "FALSE"),
     ("scalp_candidate_log", "fundamental_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "technical_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "market_cap_cr", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),

@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 import config
 from execution import dhan_client
 from models import ScalpCapitalLedger
-from tz_utils import ist_today_str
+from tz_utils import ist_today_str, iso_utc
 
 logger = logging.getLogger("position-stocks-ledger")
 
@@ -203,6 +203,10 @@ def get_state(db: Session) -> dict:
         "available_capital": row.available_capital,
         "realized_pnl_today": row.realized_pnl_today,
         "realized_pnl_total": row.realized_pnl_total,
-        "last_synced_from_broker_at": row.last_synced_from_broker_at,
+        # AUDIT FIX (this session): same raw-datetime gap as main.py's
+        # other endpoints — see the comment on GET /status for the full
+        # reasoning. Without iso_utc(), this timestamp displays off by
+        # +5:30 (IST) in any frontend consuming it.
+        "last_synced_from_broker_at": iso_utc(row.last_synced_from_broker_at),
         "daily_loss_kill_switch_tripped": row.daily_loss_kill_switch_tripped,
     }

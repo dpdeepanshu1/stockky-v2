@@ -65,6 +65,9 @@ API endpoints:
                                           quality-gate scores) — audit trail
   GET  /ledger                       — capital ledger state
   POST /ledger/sync                  — force sync from Dhan
+  POST /ledger/reset-daily            — manual/emergency reset of today's P&L
+                                          + kill switch (normal case is handled
+                                          automatically by the lazy daily reset)
   POST /kill                         — manual kill switch (like /disarm + kill)
   GET  /ws-status                    — WebSocket feed status
   GET  /dhan/live-orders              — raw live Dhan super-order book for this
@@ -108,7 +111,9 @@ from orders.entry import attempt_entry, log_quality_reject
 from resilience import circuit_breaker
 from screening import quality_gate
 from screening.engine import scan
-from tz_utils import ist_today_str, ist_time_at_or_after, is_market_open_ist, parse_hhmm
+from tz_utils import (
+    ist_today_str, ist_time_at_or_after, is_market_open_ist, parse_hhmm, iso_utc,
+)
 
 
 # ── Startup / shutdown ───────────────────────────────────────────────────────
@@ -377,10 +382,18 @@ def status(db: Session = Depends(get_db)):
     gate = _get_gate(db)
     return {
         "armed": gate.is_armed,
-        "armed_at": gate.armed_at,
+        # AUDIT FIX (this session): every DateTime field below was returned
+        # raw. tz_utils.py's own docstring is explicit that this must
+        # always go through iso_utc() — a naive datetime read back from the
+        # DB serializes with no UTC offset, so the browser parses it as
+        # local time and every timestamp on the dashboard shows up wrong
+        # by exactly +5:30 (IST). real-trade-service's main.py does this
+        # correctly throughout; this service's main.py never adopted it
+        # despite duplicating tz_utils.py verbatim.
+        "armed_at": iso_utc(gate.armed_at),
         "service_enabled": gate.service_enabled,
         "auto_pilot_enabled": gate.auto_pilot_enabled,
-        "last_cycle_run_at": gate.last_cycle_run_at,
+        "last_cycle_run_at": iso_utc(gate.last_cycle_run_at),
         "last_cycle_run_trigger": gate.last_cycle_run_trigger,
         "first_live_order_done": gate.first_live_order_done,
         "orders_placed_today": gate.orders_placed_today,
@@ -526,8 +539,8 @@ def positions(db: Session = Depends(get_db)):
             "adaptive_stop_pct": r.adaptive_stop_pct,
             "realized_pnl": r.realized_pnl,
             "realized_pnl_pct": r.realized_pnl_pct,
-            "opened_at": r.opened_at,
-            "closed_at": r.closed_at,
+            "opened_at": iso_utc(r.opened_at),
+            "closed_at": iso_utc(r.closed_at),
             "is_first_live_order": r.is_first_live_order,
             "dhan_super_order_id": r.dhan_super_order_id,
         }
@@ -578,8 +591,8 @@ def trades_history(
                 "quantity": r.quantity,
                 "realized_pnl": r.realized_pnl,
                 "realized_pnl_pct": r.realized_pnl_pct,
-                "opened_at": r.opened_at,
-                "closed_at": r.closed_at,
+                "opened_at": iso_utc(r.opened_at),
+                "closed_at": iso_utc(r.closed_at),
                 "dhan_super_order_id": r.dhan_super_order_id,
             }
             for r in rows
@@ -633,7 +646,7 @@ def candidates_log(
             "technical_score": r.technical_score,
             "market_cap_cr": r.market_cap_cr,
             "has_positive_catalyst": r.has_positive_catalyst,
-            "created_at": r.created_at,
+            "created_at": iso_utc(r.created_at),
         }
         for r in rows
     ]
@@ -648,6 +661,18 @@ def get_ledger(db: Session = Depends(get_db)):
 def sync_ledger(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     total = ledger.sync_from_broker(db)
     return {"status": "synced", "total_allocated_capital": total}
+
+
+@app.post("/ledger/reset-daily")
+def reset_ledger_daily(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """AUDIT FIX (this session): capital/ledger.py's reset_daily() has
+    always existed and its own docstring describes it as "an admin route
+    for testing or an emergency override" — but no such route was ever
+    added here. The automatic lazy reset-on-date-change (_maybe_lazy_reset_daily)
+    already covers the normal midnight-rollover case, so this is only for
+    the manual/emergency case the function was written for."""
+    ledger.reset_daily(db)
+    return {"status": "ledger_daily_reset"}
 
 
 @app.get("/ws-status")

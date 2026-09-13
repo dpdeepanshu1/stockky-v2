@@ -9,7 +9,7 @@ import {
   positionStocksApi, getPositionStocksApiUrl, setPositionStocksApiUrl,
   getSessionToken, setSessionToken, setSessionExpiredHandler,
   type ScalpStatus, type ScalpPositionRow, type ScalpCandidateRow, type ScalpLedgerState,
-  type ScalpTradeHistory, type DhanLiveOrders, type ScalpCycleResult,
+  type ScalpTradeHistory, type DhanLiveOrders, type ScalpCycleResult, type DhanAccountStatus,
 } from "../positionStocksApi";
 
 type Window = "1m" | "5m" | "15m" | "60m";
@@ -21,6 +21,23 @@ function fmtInr(n: number | null | undefined, decimals = 0): string {
   if (abs >= 1_00_00_000) return `${sign}₹${(abs / 1_00_00_000).toFixed(1)}Cr`;
   if (abs >= 1_00_000) return `${sign}₹${(abs / 1_00_000).toFixed(1)}L`;
   return `${sign}₹${abs.toLocaleString("en-IN", { maximumFractionDigits: decimals })}`;
+}
+
+function fmtHms(totalSeconds: number): string {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+// Same safe-extraction helper as RealAutoTrade.tsx — Dhan's fund object has
+// inconsistent casing/typos (e.g. "availabelBalance") across SDK versions.
+function pickNum(obj: any, ...keys: string[]): number | null {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (typeof v === "number") return v;
+    if (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v))) return Number(v);
+  }
+  return null;
 }
 
 function fmtDateTimeIst(iso: string | null | undefined): string {
@@ -76,6 +93,22 @@ function CBadge({ cb }: { cb: ScalpStatus["circuit_breaker"] | undefined }) {
   );
 }
 
+// Arming sequence step — same visual language as Real Automatic Trade's
+// gate checklist, so the two tabs read as one system rather than two
+// differently-styled dashboards.
+function GateStep({ n, label, done }: { n: number; label: string; done: boolean }) {
+  return (
+    <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border transition-colors ${
+      done ? "bg-signal-buy/5 border-signal-buy/20" : "bg-graphite border-slate"
+    }`}>
+      <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${
+        done ? "bg-signal-buy/20 text-signal-buy" : "bg-ink text-mist"
+      }`}>{done ? "✓" : n}</div>
+      <span className={`text-[11px] font-display tabular-nums ${done ? "text-signal-buy" : "text-mist"}`}>{label}</span>
+    </div>
+  );
+}
+
 export default function PositionStocksTab() {
   const [apiUrlInput, setApiUrlInput] = useState(getPositionStocksApiUrl());
   const [status, setStatus] = useState<ScalpStatus | null>(null);
@@ -91,6 +124,8 @@ export default function PositionStocksTab() {
   const [error, setError] = useState<string | null>(null);
   const [confirmKill, setConfirmKill] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+  const [dhanAccount, setDhanAccount] = useState<DhanAccountStatus | null>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
 
   const [loggedIn, setLoggedIn] = useState(!!getSessionToken());
   const [username, setUsername] = useState("admin");
@@ -108,6 +143,7 @@ export default function PositionStocksTab() {
     try {
       const res = await positionStocksApi.login(username, password);
       setSessionToken(res.token); setLoggedIn(true); setPassword("");
+      void loadDhanAccount();
     } catch (e: any) {
       setLoginError(e?.message || "Login failed");
     } finally { setLoginLoading(false); }
@@ -147,13 +183,34 @@ export default function PositionStocksTab() {
     }
   }, []);
 
+  // Dhan Account card (client ID, token countdown, live funds) — same shared
+  // account real-trade-service's Real Automatic Trade tab already shows;
+  // requires admin auth (it's a live Dhan API call, not just a DB read).
+  const loadDhanAccount = useCallback(async () => {
+    if (!getSessionToken()) return;
+    try {
+      const d = await positionStocksApi.dhanAccount();
+      setDhanAccount(d);
+    } catch {
+      // Non-fatal — the rest of the dashboard doesn't depend on this card,
+      // and a 401 here is already handled by the shared session-expired hook.
+    }
+  }, []);
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
   useEffect(() => {
     void loadAll();
     void loadDhanLive();
+    void loadDhanAccount();
     const t = setInterval(() => void loadAll(), 15_000);
     const td = setInterval(() => void loadDhanLive(), 30_000);
-    return () => { clearInterval(t); clearInterval(td); };
-  }, [loadAll, loadDhanLive]);
+    const ta = setInterval(() => void loadDhanAccount(), 30_000);
+    return () => { clearInterval(t); clearInterval(td); clearInterval(ta); };
+  }, [loadAll, loadDhanLive, loadDhanAccount]);
 
   const saveApiUrl = () => { setPositionStocksApiUrl(apiUrlInput); void loadAll(); };
 
@@ -175,6 +232,10 @@ export default function PositionStocksTab() {
       setError(e?.message || `${action} failed`);
     } finally { setBusy(null); }
   };
+
+  const dhanTokenSecondsRemaining = dhanAccount?.token_expires_at
+    ? Math.max(0, Math.floor((new Date(dhanAccount.token_expires_at).getTime() - nowTick) / 1000))
+    : null;
 
   const openPositions = useMemo(() => positions.filter(p => p.status === "OPEN"), [positions]);
   const closedToday = useMemo(() => positions.filter(p => p.status !== "OPEN"), [positions]);
@@ -262,6 +323,80 @@ export default function PositionStocksTab() {
         )}
       </div>
 
+      {/* ── Arming sequence ── */}
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        <p className="dash-section-title mb-3">Arming Sequence</p>
+        <div className="grid grid-cols-2 gap-2">
+          <GateStep n={1} label="Admin authenticated" done={loggedIn} />
+          <GateStep n={2} label="Dhan connected" done={!!dhanAccount?.connected} />
+          <GateStep n={3} label="Risk config confirmed" done={!!status?.risk_confirmed} />
+          <GateStep n={4} label="Armed" done={!!status?.armed} />
+        </div>
+      </div>
+
+      {/* ── Dhan account ── */}
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <p className="dash-section-title">Dhan Account</p>
+          <span className={`font-display tabular-nums text-[10px] px-2 py-0.5 rounded-full border ${
+            dhanAccount?.connected ? "bg-signal-buy/10 border-signal-buy/30 text-signal-buy" : "bg-signal-sell/10 border-signal-sell/30 text-signal-sell"
+          }`}>
+            {dhanAccount?.connected ? "🟢 Connected" : loggedIn ? "🔴 Disconnected" : "— Log in to check"}
+          </span>
+        </div>
+        {dhanAccount?.connected ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2 text-[11px] font-display tabular-nums text-mist">
+              <div>Client ID <span className="text-paper ml-1">{dhanAccount.client_id_masked}</span></div>
+              <div>Token <span className={`ml-1 ${(dhanTokenSecondsRemaining ?? 0) < 7200 ? "text-signal-sell" : "text-signal-buy"}`}>
+                {dhanTokenSecondsRemaining != null
+                  ? (dhanTokenSecondsRemaining <= 0 ? "expired" : `${fmtHms(dhanTokenSecondsRemaining)} left`)
+                  : "—"}
+              </span></div>
+            </div>
+            <p className="font-display tabular-nums text-[9px] text-mist -mt-2">
+              This is the SAME Dhan account/token Real Automatic Trade uses — position-stocks-service only
+              ever reads it, it never saves or refreshes a token itself. Manage the connection from the Real
+              Automatic Trade tab.
+            </p>
+
+            {dhanAccount.funds_error ? (
+              <p className="font-display tabular-nums text-[11px] text-signal-sell bg-signal-sell/5 rounded-xl px-3 py-2 border border-signal-sell/20">
+                ⚠ Live funds check failed: {dhanAccount.funds_error}
+              </p>
+            ) : dhanAccount.funds ? (
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { label: "Available", keys: ["availabelBalance", "availableBalance", "availableCash"] },
+                  { label: "Utilized", keys: ["utilizedAmount", "utilisedAmount"] },
+                  { label: "Withdrawable", keys: ["withdrawableBalance"] },
+                  { label: "SOD Limit", keys: ["sodLimit"] },
+                  { label: "Collateral", keys: ["collateralAmount"] },
+                  { label: "Blocked", keys: ["blockedPayoutAmount"] },
+                ].map(f => {
+                  const v = pickNum(dhanAccount.funds, ...f.keys);
+                  return (
+                    <div key={f.label} className="bg-ink border border-slate rounded-xl p-2">
+                      <p className="font-display tabular-nums text-[9px] uppercase tracking-widest text-mist">{f.label}</p>
+                      <p className="font-display tabular-nums text-sm font-bold text-paper mt-0.5">{fmtInr(v, 0)}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+            <button onClick={() => void loadDhanAccount()} className="font-display tabular-nums text-[10px] text-signal-prepare hover:text-signal-prepare">
+              ↻ Refresh
+            </button>
+          </div>
+        ) : (
+          <p className="font-display tabular-nums text-[11px] text-mist">
+            {loggedIn
+              ? "No Dhan account connected yet — connect it from the Real Automatic Trade tab (both services share the same account)."
+              : "Log in above to check the Dhan connection."}
+          </p>
+        )}
+      </div>
+
       {/* ── 6-cell status grid ── */}
       <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
         {[
@@ -326,6 +461,35 @@ export default function PositionStocksTab() {
             </p>
           </div>
         </div>
+      </div>
+
+      {/* ── Risk configuration (read-only — env/config-driven for this
+          service, unlike Real Automatic Trade's editable DB row; see
+          config.py) ── */}
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        <p className="dash-section-title mb-3">Risk Configuration</p>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="bg-ink border border-slate rounded-xl p-2">
+            <p className="font-display tabular-nums text-[9px] uppercase tracking-widest text-mist">Risk / Trade (%)</p>
+            <p className="font-display tabular-nums text-sm font-bold text-paper mt-0.5">{status?.risk_per_trade_pct ?? "—"}</p>
+          </div>
+          <div className="bg-ink border border-slate rounded-xl p-2">
+            <p className="font-display tabular-nums text-[9px] uppercase tracking-widest text-mist">Max Daily Loss (%)</p>
+            <p className="font-display tabular-nums text-sm font-bold text-paper mt-0.5">{status?.max_daily_loss_pct_of_pool ?? "—"}</p>
+          </div>
+          <div className="bg-ink border border-slate rounded-xl p-2">
+            <p className="font-display tabular-nums text-[9px] uppercase tracking-widest text-mist">Max Positions</p>
+            <p className="font-display tabular-nums text-sm font-bold text-paper mt-0.5">{status?.max_concurrent_scalp_positions ?? "—"}</p>
+          </div>
+          <div className="bg-ink border border-slate rounded-xl p-2">
+            <p className="font-display tabular-nums text-[9px] uppercase tracking-widest text-mist">Pool Split of Dhan Balance (%)</p>
+            <p className="font-display tabular-nums text-sm font-bold text-paper mt-0.5">{status?.scalp_pool_capital_share_pct ?? "—"}</p>
+          </div>
+        </div>
+        <p className="font-display tabular-nums text-[9px] text-mist mt-2">
+          Set via env on this service, not editable from this dashboard — change RISK_PER_TRADE_PCT /
+          MAX_DAILY_LOSS_PCT_OF_POOL / MAX_CONCURRENT_SCALP_POSITIONS / SCALP_POOL_CAPITAL_SHARE_PCT and redeploy.
+        </p>
       </div>
 
       {/* ── Status banners ── */}

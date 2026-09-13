@@ -98,6 +98,26 @@ export interface ScalpStatus {
   market_open: boolean;
   risk_per_trade_pct: number;
   risk_confirmed: boolean;
+  max_daily_loss_pct_of_pool: number;
+  max_concurrent_scalp_positions: number;
+  scalp_pool_capital_share_pct: number;
+}
+
+// Same shape as real-trade-service's DhanStatus — both services show a
+// Dhan Account card off the one shared account/token, see backend
+// auth/dhan_credentials_ro.connection_status docstring.
+export interface DhanAccountStatus {
+  connected: boolean;
+  client_id_masked: string | null;
+  token_issued_at: string | null;
+  token_expires_at: string | null;
+  token_valid: boolean;
+  token_hard_cap_hours: number | null;
+  days_remaining: number | null;
+  hours_remaining: number | null;
+  seconds_remaining: number | null;
+  funds: Record<string, unknown> | null;
+  funds_error: string | null;
 }
 
 export interface ScalpPositionRow {
@@ -233,6 +253,7 @@ export const positionStocksApi = {
 
   wsStatus: () => psRequest<{ connected: boolean; subscribed_symbols?: number; last_tick_at?: string | null; reconnect_attempts?: number }>("/ws-status"),
   dhanLiveOrders: () => psRequest<DhanLiveOrders>("/dhan/live-orders"),
+  dhanAccount: () => psRequest<DhanAccountStatus>("/dhan/account", {}, true),
 
   reconcile: () => psRequest<{ status: string; positions_closed: number }>("/reconcile", { method: "POST" }, true),
 };

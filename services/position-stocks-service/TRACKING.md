@@ -412,3 +412,54 @@ rationale. Both travel together in every zip from now on.
   nginx on the VM and update the Position Stocks Settings URL to
   `https://stockky.duckdns.org/positionstocks`** — not yet re-verified
   against a live reload.
+
+- **2026-09-13, session 10 — dashboard parity with Real Automatic Trade
+  (Dhan Account card, Arming Sequence, Risk Configuration).** User asked
+  for the Position Stocks tab to show the same Dhan-account-level detail
+  Real Automatic Trade's Overview tab shows (screenshotted). Added:
+  - `auth/dhan_credentials_ro.py`: new read-only `connection_status(db)` —
+    verbatim mirror of real-trade-service's `dhan_credentials.connection_status`
+    (masked client ID, token issued/expiry, hours/days/seconds remaining,
+    24h hard-cap clamp). Still never writes to `trade_credentials` — see
+    the file's existing module docstring for why that stays exclusively
+    real-trade-service's job.
+  - `main.py`: new `GET /dhan/account` (admin-only) — same response shape
+    as real-trade-service's `/dhan/account` (connection/token status +
+    a live `dhan_client.get_funds()` call, funds failing doesn't hide
+    connection state). `GET /status` extended with
+    `max_daily_loss_pct_of_pool`, `max_concurrent_scalp_positions`,
+    `scalp_pool_capital_share_pct` for a Risk Configuration card.
+  - Frontend (`PositionStocksTab.tsx` + `positionStocksApi.ts`): new
+    `DhanAccountStatus` type + `dhanAccount()` call; three new cards —
+    Arming Sequence (4-step checklist: admin authenticated / Dhan
+    connected / risk config confirmed / armed — matching Real Automatic
+    Trade's `GateStep` visual language), Dhan Account (client ID, live
+    ticking token countdown, funds grid: Available/Utilized/Withdrawable/
+    SOD Limit/Collateral/Blocked), and Risk Configuration (read-only —
+    unlike Real Automatic Trade's, these knobs are env/config-driven here,
+    not an editable DB row, so the card says so and points at the four
+    env vars to change instead of rendering input fields for values that
+    would just 404/no-op on save).
+  - **Deliberately NOT ported:** CDSL eDIS verification. That flow exists
+    to authorize delivery holdings for sale; this service places intraday
+    MIS scalp orders, which don't go through that CDSL check the same way
+    real-trade-service's delivery sells do — adding a decorative eDIS badge
+    here would show status for a check this module's order flow doesn't
+    actually depend on. Flagged for the user to confirm; easy to add later
+    if scalp exits ever need it.
+  - **Re: the ledger `/ledger` 500 (`AttributeError:
+    'ScalpCapitalLedger' object has no attribute
+    'daily_loss_kill_switch_tripped'`) in the container log the user
+    attached this session:** confirmed NOT a live bug — session 9's fix
+    (the column added to both `models.py` and `_COLUMN_MIGRATIONS` in
+    `db.py`) is already present and correct in the code the user is
+    running. The log's timestamps (13 Sep, same day) show it was captured
+    against a container that hadn't yet been rebuilt/redeployed from that
+    fix. No code change needed here; redeploying this zip's
+    `position-stocks-service` resolves it.
+  - **Verification:** `py_compile` + `pyflakes` clean across every `.py`
+    file in `position-stocks-service` (not just touched files). Frontend:
+    `npx tsc --noEmit` clean across the ENTIRE frontend project (not just
+    `PositionStocksTab.tsx`/`positionStocksApi.ts`) — first time this
+    service's session log has run a full project-wide type-check rather
+    than just compiling the touched files.

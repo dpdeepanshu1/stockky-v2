@@ -66,6 +66,8 @@ API endpoints:
   GET  /ws-status                    — WebSocket feed status
   GET  /dhan/live-orders              — raw live Dhan super-order book for this
                                           service's tagged orders (broker-side truth)
+  GET  /dhan/account                  — Dhan connection/token status + live funds,
+                                          same shared account real-trade-service owns
   POST /reconcile                    — force an exit-reconciliation pass now
 """
 from __future__ import annotations
@@ -93,6 +95,7 @@ import db as _db
 from auth.admin_auth import (
     require_admin, verify_admin_password, issue_session_token, AdminAuthError,
 )
+from auth import dhan_credentials_ro
 from capital import ledger, shared_order_budget
 from execution import dhan_client
 from feed import ws_client
@@ -353,6 +356,12 @@ def status(db: Session = Depends(get_db)):
         "market_open": is_market_open_ist(),
         "risk_per_trade_pct": config.RISK_PER_TRADE_PCT,
         "risk_confirmed": config.RISK_PER_TRADE_PCT_CONFIRMED,
+        # Read-only risk-config snapshot for the dashboard's Risk Configuration
+        # card (mirrors Real Auto Trade's, but these knobs are env/config-driven
+        # here, not a DB row an admin edits in-app — see config.py).
+        "max_daily_loss_pct_of_pool": config.MAX_DAILY_LOSS_PCT_OF_POOL,
+        "max_concurrent_scalp_positions": config.MAX_CONCURRENT_SCALP_POSITIONS,
+        "scalp_pool_capital_share_pct": config.SCALP_POOL_CAPITAL_SHARE_PCT,
     }
 
 
@@ -573,6 +582,27 @@ def sync_ledger(admin: str = Depends(require_admin), db: Session = Depends(get_d
 @app.get("/ws-status")
 def ws_status_route():
     return ws_client.ws_status()
+
+
+@app.get("/dhan/account")
+def dhan_account(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """Dhan Account card for this dashboard — same shape as real-trade-
+    service's GET /dhan/account (see auth/dhan_credentials_ro.connection_status
+    docstring for why). Connection/token state is always available (DB-only,
+    read from the row real-trade-service owns); funds is a live Dhan call
+    that proves the shared token still actually works right now, not just
+    that it hasn't expired on paper. A failed funds call does not hide the
+    connection state — the dashboard can show "connected but funds call
+    failed: <reason>" instead of going blank."""
+    status = dhan_credentials_ro.connection_status(db)
+    funds = None
+    funds_error = None
+    if status["connected"]:
+        try:
+            funds = dhan_client.get_funds(db)
+        except Exception as e:
+            funds_error = str(e)[:300]
+    return {**status, "funds": funds, "funds_error": funds_error}
 
 
 @app.get("/dhan/live-orders")

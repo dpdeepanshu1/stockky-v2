@@ -149,6 +149,14 @@ _COLUMN_MIGRATIONS = [
     ("scalp_candidate_log", "technical_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "market_cap_cr", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "has_positive_catalyst", "NUMBER(1)", "BOOLEAN", None, None),
+    # BUG FIX (2026-09-13, session 9): scalp_capital_ledger was created before
+    # daily_loss_kill_switch_tripped / daily_loss_kill_switch_tripped_date were
+    # added to the model. The row exists (inserted on first boot) but lacks
+    # these columns, so every access to row.daily_loss_kill_switch_tripped raised
+    # AttributeError -> 500 on GET /ledger. Adding them here lets _ensure_columns()
+    # ALTER TABLE idempotently on the next boot, same pattern as gate_state above.
+    ("scalp_capital_ledger", "daily_loss_kill_switch_tripped", "NUMBER(1)", "BOOLEAN", "0", "FALSE"),
+    ("scalp_capital_ledger", "daily_loss_kill_switch_tripped_date", "VARCHAR2(10)", "VARCHAR(10)", None, None),
 ]
 
 

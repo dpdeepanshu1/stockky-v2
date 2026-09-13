@@ -6,6 +6,115 @@
 
 ---
 
+## Session 17 (this session, continued) — deeper logic audit, 4 more real bugs
+
+Went past infra/wiring into the actual trading-logic math and cross-module
+state consistency. Found and fixed four more real bugs (none of them
+overlapping with Session 16's event-loop fixes above):
+
+1. **`orders/entry.py` — quantity floor could spend more real money than
+   the ledger ever reserved.** `quantity = max(1, int(position_value /
+   current_ltp))` floors to at least 1 share, but when the risk-sized
+   `position_value` is smaller than one share's price (small pool and/or a
+   high-priced stock), that 1 share costs MORE than what
+   `ledger.reserve_capital()` already deducted from `available_capital`.
+   E.g. ₹3,333 reserved, but a ₹4,500 stock still needs qty=1 — the real
+   Dhan order commits ₹1,167 more real rupees than the ledger ever
+   accounted for, silently overstating `available_capital` afterwards, and
+   since this pool is a software-enforced half of one real, shared Dhan
+   account, that unaccounted overspend could eat into real-trade-service's
+   half with neither ledger reflecting it. Fixed with a new
+   `ledger.reserve_additional()` that tops up the real shortfall before
+   the order goes out (or skips the entry with `INSUFFICIENT_CAPITAL_FOR_MIN_QTY`
+   if even that isn't available).
+
+2. **`orders/reconcile.py` — a missing fill price could record a phantom
+   100%-loss exit.** `_extract_leg_price()`'s last resort, when every price
+   field Dhan might return came back empty, was a hard `0.0` — and the
+   caller used that directly as `exit_price` with no sanity check:
+   `realized_pnl = (0 - entry_price) * quantity` records a fake total-loss
+   exit as real, permanent trade history, wrongly starves `release_capital()`
+   of the capital that should've come back, and could trip the daily-loss
+   kill switch over a data-shape gap that has nothing to do with an actual
+   loss. Fixed: falls back to the position's own known target/stop trigger
+   price (never null, and realistic — a Super Order leg fills at/near its
+   own trigger by construction) instead of 0.0.
+
+3. **`main.py`'s `/dhan/live-orders` — could leak real-trade-service's own
+   real orders into this service's view.** real-trade-service places its
+   own orders with NO tag at all (`dhan_client.place_order`'s `tag` param
+   defaults to `None`, and `entry_engine/entry.py` never passes one). The
+   old filter (`o.get("tag", "SCALP")` — defaulting a MISSING key to
+   `"SCALP"`) would wrongly fold an untagged real-trade-service order into
+   this service's "SCALP" view if Dhan's response omits the `tag` key
+   entirely for untagged orders (plausible, unverified without a live
+   payload) — the exact cross-service leak the docstring says can't
+   happen. Fixed to default missing-tag orders to EXCLUDED, with a
+   fallback to show everything unfiltered (with a log line) only if NOT
+   ONE order in the whole response carries a `tag` key at all (meaning
+   Dhan doesn't distinguish the two services here regardless).
+
+4. **`capital/ledger.py` — the real daily-loss trip never reached the
+   gate's copy of the kill switch.** models.py's own docstring already
+   flags `ScalpCapitalLedger.daily_loss_kill_switch_tripped` and
+   `ScalpGateState.daily_loss_kill_switch_tripped` as "two entirely
+   disconnected copies of the same concept," and session13 fixed them
+   drifting apart on RESET — but nothing fixed them drifting apart on
+   TRIP. `release_capital()`'s real trading-loss trip (the actual daily-
+   loss-cap path, as opposed to the manual `/kill` route which sets the
+   gate's copy directly) only ever set the ledger's own copy. Since
+   `GET /status` — the dashboard's Status/Risk card — reads ONLY the
+   gate's copy, an operator would see "Daily Loss Kill Switch: not
+   tripped" on the main status card even while the ledger had already
+   correctly stopped every new entry at the capital-reservation step
+   (entries were never actually at risk either way —
+   `reserve_capital()` checks the ledger's own copy directly — this closes
+   an operator-visibility gap, not a trading-safety one). Fixed:
+   `release_capital()` now mirrors the trip onto `ScalpGateState` too.
+
+## Session 16 (this session) — full re-audit, mapping/wiring check
+
+Read every file in this service again end-to-end (main.py's routing/wiring,
+capital/, execution/, feed/, orders/, screening/, auth/, resilience/,
+oracle_compat.py, db.py, tz_utils.py, models.py) plus positionStocksApi.ts /
+PositionStocksTab.tsx for frontend↔backend field/route mismatches. No
+mismatches found this pass — every route in main.py has a matching client
+call with matching response field names, and every response field the
+frontend reads exists in the backend's return dict.
+
+**One real, previously-missed bug found and fixed** — the same class of bug
+already fixed twice earlier this session (`feed/ws_client.py`'s
+`get_all_nse_eq()` call, `feed/angelone_session.py`'s `_login()` IP lookup),
+but in the three call sites that actually matter most:
+
+`main.py`'s `_run_cycle()` is `async def` and runs on this service's single
+event loop, but called three plain-`sync` functions **directly** (no
+`asyncio.to_thread`), each of which makes real, blocking network calls:
+- `reconcile.run_exit_reconciliation(db)` → `dhan_client.get_super_order_list()`
+  (blocking Dhan API call) — ran every 10s tick, unconditionally.
+- `eod_squareoff.run_eod_squareoff(db)` → per-position blocking
+  `cancel_super_order`/`place_order` Dhan calls — fires once, but with
+  several open positions at exactly 3pm.
+- `attempt_entry(db, candidate, quality=quality)` → `dhan_client.place_super_order`/
+  `place_order` (the real-money order placement itself) — the most important
+  of the three, since it's the actual entry path.
+
+Each one blocked the ENTIRE process (every other route this service was
+handling — `/health`, `/status`, `/arm`, `/kill`, etc.) for however long that
+Dhan round trip took, every time it ran. Fixed by wrapping all three in
+`asyncio.to_thread(...)` in `main.py::_run_cycle`, same fix shape as the two
+already applied earlier this session. `screening.engine.scan()` was checked
+too and is correctly left un-threaded — it's pure in-memory, no I/O.
+
+Also re-confirmed (no changes needed): `screening/quality_gate.py` already
+uses a real `httpx.AsyncClient` correctly; `resilience/circuit_breaker.py`,
+`capital/shared_order_budget.py`, `capital/ledger.py`, `auth/admin_auth.py`,
+`db.py`'s column-migration list, and `oracle_compat.py`'s DDL-error-swallow
+list all match the rest of the codebase's conventions with no drift found.
+Confirmed still-open, not-safety-relevant, left for you to decide: `config.py`'s
+`MIN_PREFERRED_SCALP_POSITIONS` (declared, never wired into any gating logic)
+and `feed/angelone_session.py`'s `rest_headers()` (dead code, no caller).
+
 ## Files modified this session (session 12)
 
 ```

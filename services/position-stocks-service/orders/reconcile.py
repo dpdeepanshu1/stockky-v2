@@ -51,7 +51,28 @@ _FILLED_STATUSES = {"TRADED", "FILLED", "EXECUTED", "COMPLETE"}
 _DEAD_ENTRY_STATUSES = {"REJECTED", "CANCELLED"}
 
 
-def _extract_leg_price(leg: dict, parent_row: dict) -> float:
+def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 0.0) -> float:
+    """own_fallback_price: this position's OWN target_price or stop_price
+    (whichever leg actually fired — passed in by the caller, which already
+    knows hit_kind). A Dhan Super Order's TARGET_LEG/STOP_LOSS_LEG fills
+    at (or essentially at) that pre-set trigger price by construction, so
+    it is a realistic last-resort estimate — unlike the hard 0.0 this
+    function used to fall through to.
+
+    BUG FIX (this session): every price field this function tries
+    (averageTradedPrice/tradedPrice/avgPrice/avgTradedPrice on the leg,
+    the leg's own `price`, then the parent row's averageTradedPrice) can
+    plausibly be absent from Dhan's real response — the module docstring
+    already flags this as unverified against live payloads. The previous
+    fallback was a hard 0.0, which run_exit_reconciliation() then used
+    directly as `exit_price` with no sanity check: realized_pnl =
+    (0 - entry_price) * quantity records a phantom 100%-loss exit as
+    real, permanent data — corrupting the trade ledger, wrongly returning
+    far too little capital via release_capital(), and potentially
+    tripping the daily-loss kill switch over a data-shape gap that has
+    nothing to do with an actual trading loss. own_fallback_price (this
+    position's own known, never-null target/stop price) is used instead
+    of 0.0 whenever every real field comes back empty."""
     for key in ("averageTradedPrice", "tradedPrice", "avgPrice", "avgTradedPrice"):
         v = leg.get(key)
         if v:
@@ -65,13 +86,25 @@ def _extract_leg_price(leg: dict, parent_row: dict) -> float:
             return float(v)
         except (TypeError, ValueError):
             pass
-    # Last resort — better than crashing, but flagged in the log as a
-    # low-confidence fill price.
-    fallback = parent_row.get("averageTradedPrice") or 0.0
-    try:
-        return float(fallback)
-    except (TypeError, ValueError):
-        return 0.0
+    parent_price = parent_row.get("averageTradedPrice")
+    if parent_price:
+        try:
+            return float(parent_price)
+        except (TypeError, ValueError):
+            pass
+    # Last resort: this position's own target/stop trigger price rather
+    # than a hard 0.0 — see docstring above. Both columns are NOT NULL on
+    # ScalpPosition, so own_fallback_price is only 0.0 here if the caller
+    # explicitly passed 0.0 (it never should).
+    if own_fallback_price:
+        logger.warning(
+            "reconcile: no real fill price found in Dhan's response for this "
+            "leg — using this position's own trigger price ₹%.2f as a "
+            "low-confidence estimate instead of recording a phantom loss.",
+            own_fallback_price,
+        )
+        return float(own_fallback_price)
+    return 0.0
 
 
 def run_exit_reconciliation(db: Session) -> int:
@@ -140,7 +173,10 @@ def run_exit_reconciliation(db: Session) -> int:
                 )
             continue
 
-        exit_price = _extract_leg_price(hit_leg, row)
+        exit_price = _extract_leg_price(
+            hit_leg, row,
+            own_fallback_price=(pos.target_price if hit_kind == "TARGET_HIT" else pos.stop_price),
+        )
         realized_pnl = (exit_price - pos.entry_price) * pos.quantity
         realized_pnl_pct = (
             (exit_price - pos.entry_price) / pos.entry_price * 100.0

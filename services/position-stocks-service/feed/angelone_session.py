@@ -99,7 +99,15 @@ class AngelOneSession:
                 "ANGELONE_API_KEY, ANGELONE_TOTP_SECRET env vars."
             )
         otp = pyotp.TOTP(self.totp_secret).now()
-        client_public_ip = _resolve_client_public_ip()
+        # AUDIT FIX (continued session): _resolve_client_public_ip() can
+        # call _get_outbound_ip()'s blocking httpx.get() (cached for 15
+        # min, but still a real synchronous network call on a cache miss).
+        # This function is async and runs on the main event loop — a
+        # blocking call here stalls every other request this service is
+        # handling for however long that call takes, same event-loop-
+        # stall class of bug fixed just above in ws_client.py's
+        # _ws_loop(). Offloading to a worker thread instead.
+        client_public_ip = await asyncio.to_thread(_resolve_client_public_ip)
         async with httpx.AsyncClient(timeout=20.0) as client:
             r = await client.post(
                 f"{_BASE}/rest/auth/angelbroking/user/v1/loginByPassword",

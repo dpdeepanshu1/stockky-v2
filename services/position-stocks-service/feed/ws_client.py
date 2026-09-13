@@ -168,7 +168,17 @@ async def _ws_loop() -> None:
                 continue
 
             # Build the subscription list
-            symbol_token_map = get_all_nse_eq()
+            # AUDIT FIX (continued session): get_all_nse_eq() can trigger
+            # scrip_master._load_sync()'s blocking httpx.get() (on first
+            # call, or once every REFRESH_INTERVAL_S/24h thereafter) — a
+            # synchronous network call made directly inside this async
+            # loop would stall the ENTIRE event loop (including every
+            # FastAPI request this service is handling — health checks,
+            # /status, arm/disarm) for however long that HTTP call takes.
+            # Same failure mode real-trade-service's auto_pilot.py already
+            # documents fixing for its own background loop ("EVENT-LOOP
+            # ISOLATION"). Offloading to a worker thread instead.
+            symbol_token_map = await asyncio.to_thread(get_all_nse_eq)
             _build_reverse_map(symbol_token_map)
             _subscribed_tokens = list(symbol_token_map.values())
             logger.info("position-stocks WS: subscribing to %d NSE-EQ tokens", len(_subscribed_tokens))

@@ -186,7 +186,20 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     # OPEN row blocks its symbol from ever being re-scanned plus keeps its
     # capital stuck reserved.
     try:
-        n_closed = reconcile.run_exit_reconciliation(db)
+        # AUDIT FIX (this session): run_exit_reconciliation() is a plain
+        # sync function that calls dhan_client.get_super_order_list(),
+        # which makes a real, blocking (synchronous requests/httpx-under-
+        # the-SDK) network call to Dhan. Calling it directly here — inside
+        # an `async def` that IS the single event loop this whole FastAPI
+        # process runs on — freezes every other request this service is
+        # handling (GET /health, GET /status, arm/disarm, etc.) for
+        # however long that Dhan round trip takes, every single 10s tick.
+        # Exact same "event-loop isolation" failure mode already found and
+        # fixed twice earlier this session in feed/ws_client.py and
+        # feed/angelone_session.py — those two calls were occasional
+        # (cache-miss/login only); this one fires on every cycle.
+        # Offloading to a worker thread instead, same fix shape.
+        n_closed = await asyncio.to_thread(reconcile.run_exit_reconciliation, db)
         summary["reconciled"] = n_closed
         if n_closed:
             logger.info("position-stocks: reconciled %d exit(s)", n_closed)
@@ -202,7 +215,15 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     eod_fired = gate and gate.eod_squareoff_fired_date == today
     if ist_time_at_or_after(_EOD_SQUAREOFF_TIME) and not eod_fired:
         logger.info("position-stocks: EOD squareoff time reached — running sweep")
-        eod_squareoff.run_eod_squareoff(db)
+        # AUDIT FIX (this session): same event-loop-stall bug as the
+        # reconciliation call above — run_eod_squareoff() places real,
+        # blocking Dhan cancel/MARKET-SELL calls per open position,
+        # synchronously, inside this coroutine. With several open
+        # positions this could block every other request this service
+        # handles for multiple seconds at exactly 3pm — the busiest,
+        # highest-stakes moment for this endpoint to be unresponsive
+        # (e.g. an admin hitting /kill or checking /status right then).
+        await asyncio.to_thread(eod_squareoff.run_eod_squareoff, db)
         summary["eod_fired"] = True
         return summary
 
@@ -249,7 +270,16 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
             log_quality_reject(db, candidate, quality, reason)
             continue
 
-        result = attempt_entry(db, candidate, quality=quality)
+        # AUDIT FIX (this session): same event-loop-stall bug again —
+        # attempt_entry() places a real, blocking Dhan Super Order call
+        # (execution/dhan_client.place_super_order/place_order) plus a
+        # possible security-master reload (blocking httpx.get on cache
+        # miss/expiry) on the entry path. This is the single most
+        # important call site to get right of the three fixed this
+        # session — it's the one that places real money on the line, and
+        # it ran unthreaded on every single armed/enabled/market-open
+        # cycle, not just occasionally.
+        result = await asyncio.to_thread(attempt_entry, db, candidate, quality=quality)
         if result:
             circuit_breaker.record_success()
             summary["entered_symbol"] = candidate.symbol
@@ -719,7 +749,32 @@ def dhan_live_orders(db: Session = Depends(get_db)):
         logger.error("position-stocks: /dhan/live-orders fetch failed: %s", e, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Dhan fetch failed: {e}")
 
-    scalp_orders = [o for o in orders if not isinstance(o, dict) or o.get("tag", "SCALP") == "SCALP"]
+    # BUG FIX (this session): real-trade-service places its own orders with
+    # NO tag at all (execution/dhan_client.place_order's `tag` param
+    # defaults to None and entry_engine/entry.py never passes one) — so if
+    # Dhan's response simply omits the `tag` key entirely for an untagged
+    # order (rather than echoing `"tag": null`), the previous filter
+    # (`o.get("tag", "SCALP")` — defaulting a MISSING key to "SCALP") would
+    # wrongly fold that real-trade-service order into this view, exactly
+    # the cross-service leak the docstring above promises can't happen.
+    # Default missing-tag orders to EXCLUDED instead (fail toward hiding,
+    # not toward mislabeling another service's real order as our own) —
+    # unless NOT ONE order in the whole response carries a `tag` key at
+    # all, which would mean Dhan doesn't return tags for this account/plan
+    # at all, and a strict filter would just hide everything from both
+    # services with no way to tell them apart anyway; in that one case,
+    # show everything unfiltered with a clear log line instead.
+    has_any_tag_field = any(isinstance(o, dict) and "tag" in o for o in orders)
+    if has_any_tag_field:
+        scalp_orders = [o for o in orders if not isinstance(o, dict) or o.get("tag") == "SCALP"]
+    else:
+        logger.info(
+            "position-stocks: /dhan/live-orders — no order in Dhan's response "
+            "carries a 'tag' field at all; cannot distinguish this service's "
+            "orders from real-trade-service's here, so showing all orders "
+            "unfiltered rather than hiding everything."
+        )
+        scalp_orders = orders
     return {"count": len(scalp_orders), "orders": scalp_orders}
 
 

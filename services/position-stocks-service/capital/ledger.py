@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 import config
 from execution import dhan_client
-from models import ScalpCapitalLedger
+from models import ScalpCapitalLedger, ScalpGateState
 from tz_utils import ist_today_str, iso_utc
 
 logger = logging.getLogger("position-stocks-ledger")
@@ -147,6 +147,43 @@ def reserve_capital(
     return position_value
 
 
+def reserve_additional(db: Session, additional_amount: float) -> bool:
+    """Top up an already-reserved amount by `additional_amount` more.
+
+    BUG FIX (this session): orders/entry.py floors quantity to at least 1
+    share (`max(1, int(position_value / current_ltp))`). When the
+    risk-sized `position_value` from reserve_capital() above is SMALLER
+    than one share's price (a small pool, or a high-priced stock, or
+    both), that floor makes the real order cost MORE than what was
+    already deducted from available_capital — e.g. ₹3,333 reserved but a
+    ₹4,500 stock still needs qty=1, so the real Dhan order commits ₹1,167
+    more real rupees than the ledger ever accounted for. Silently letting
+    that through would mean available_capital overstates what's actually
+    still free — and since this pool is a SOFTWARE-enforced half of one
+    real, shared Dhan account, an unaccounted overspend here can eat into
+    real-trade-service's half without either service's ledger ever
+    reflecting it. This function lets entry.py reserve exactly the real
+    shortfall before placing the order (or, if there isn't enough
+    available_capital left to cover it, entry.py skips the trade instead
+    of placing an order the ledger can't actually back).
+    Does NOT re-check the daily-loss kill switch or
+    total_allocated_capital>0 — those were already verified by the
+    reserve_capital() call this tops up."""
+    if additional_amount <= 0:
+        return True
+    row = _get_or_create(db)
+    if additional_amount > row.available_capital:
+        return False
+    row.available_capital -= additional_amount
+    db.commit()
+    logger.info(
+        "ledger.reserve_additional: topped up reservation by ₹%.2f "
+        "(min-quantity-floor shortfall), remaining ₹%.2f",
+        additional_amount, row.available_capital,
+    )
+    return True
+
+
 def release_capital(
     db: Session,
     *,
@@ -170,6 +207,30 @@ def release_capital(
                 "(%.1f%% of pool ₹%.2f). No new entries today.",
                 row.realized_pnl_today, loss_pct, row.total_allocated_capital,
             )
+            # BUG FIX (this session): this only ever set the LEDGER's own
+            # copy of the flag. models.py's own docstring on
+            # ScalpGateState.daily_loss_kill_switch_tripped already
+            # documents these as "two entirely disconnected copies of the
+            # same concept" and session13 fixed them drifting apart on
+            # RESET (the lazy reset-on-date-change) — but nothing ever
+            # fixed them drifting apart on TRIP: this is the actual real
+            # trading-loss trip path (as opposed to the manual /kill
+            # route, which sets the gate's copy directly), and it left
+            # gate.daily_loss_kill_switch_tripped permanently False. Since
+            # GET /status (the dashboard's Status/Risk card) reads ONLY
+            # the gate's copy — not the ledger's, which GET /ledger shows
+            # separately — an operator would see "Daily Loss Kill Switch:
+            # not tripped" on the main status card even while the ledger
+            # has already correctly stopped every new entry at the
+            # capital-reservation step. Entries were never actually at
+            # risk either way (reserve_capital() above already checks the
+            # ledger's own copy directly, independent of the gate) — this
+            # fixes the dashboard/operator-visibility gap, not a trading
+            # safety gap.
+            gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
+            if gate is not None and not gate.daily_loss_kill_switch_tripped:
+                gate.daily_loss_kill_switch_tripped = True
+                gate.daily_loss_kill_switch_tripped_date = row.daily_loss_kill_switch_tripped_date
 
     db.commit()
     logger.info(

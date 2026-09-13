@@ -64,6 +64,24 @@ inferred — no live testing was possible outside market hours.
    manual/emergency path the function was written for didn't exist. Added
    `POST /ledger/reset-daily` (admin-gated) in `main.py`.
 
+5. **`feed/ws_client.py` — blocking HTTP call inside the async WS loop.**
+   `get_all_nse_eq()` can trigger `scrip_master._load_sync()`'s
+   synchronous `httpx.get()` (on first call, or once every 24h
+   thereafter) — called directly inside `_ws_loop()` with no
+   `await`/thread-offload, this stalls the single event loop (and every
+   other request this service is handling — `/health`, `/status`,
+   arm/disarm) for however long that HTTP call takes. Same class of bug
+   real-trade-service's `auto_pilot.py` already documents fixing for its
+   own background loop ("EVENT-LOOP ISOLATION"). Fixed by wrapping the
+   call in `asyncio.to_thread()`.
+
+6. **`feed/angelone_session.py` — same blocking-call issue in session
+   refresh.** `_login()` is `async` but called `_resolve_client_public_ip()`
+   synchronously, which can hit `_get_outbound_ip()`'s blocking
+   `httpx.get()` on a cache miss (15-min TTL, so this fires at least once
+   per session, more on a cold start). Same event-loop-stall risk as #5.
+   Fixed the same way.
+
 ## Flagged, not changed
 
 - **`config.MIN_PREFERRED_SCALP_POSITIONS`** is declared, defaults to 1,
@@ -80,13 +98,13 @@ inferred — no live testing was possible outside market hours.
   explained in `screening/engine.py`'s own docstring: the spread gate is
   deliberately deferred until real bid/ask data is available (WS mode 1 is
   LTP-only). Not a bug — an intentional, documented deferral.
-- **`feed/scrip_master.py`'s `_load_sync()`** makes a blocking
-  `httpx.get()` call and is invoked from inside the async `_ws_loop()` via
-  `get_all_nse_eq()` with no `await`/thread-offload. This blocks the event
-  loop for the duration of that HTTP call (once per `REFRESH_INTERVAL_S`,
-  24h, or on first load). Noted but not changed this session — didn't want
-  to touch startup/reconnect timing without being able to test it live
-  against a real WS connection.
+- **`feed/scrip_master.py`'s `_load_sync()`** made a blocking
+  `httpx.get()` call and was invoked from inside the async `_ws_loop()`
+  via `get_all_nse_eq()` — fixed above (item #5), see there.
+- **`feed/angelone_session.py`'s `rest_headers()`** is dead code — never
+  called anywhere in this service (checked via grep). Harmless, left
+  as-is; flagging in case it's meant to be wired to something that never
+  landed.
 
 ## Not re-verified live
 

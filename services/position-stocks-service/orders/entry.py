@@ -157,6 +157,32 @@ def attempt_entry(
         )
         quantity = 1
 
+    # BUG FIX (this session): quantity is floored to at least 1 share above
+    # (and may be forced to exactly 1 by the first-live-order override) —
+    # but reserve_capital() above only ever deducted the risk-SIZED
+    # `position_value` from the ledger, which can be SMALLER than what
+    # `quantity` shares actually cost (a small pool and/or a high-priced
+    # stock). Placing the real order anyway would spend more real rupees
+    # than the ledger ever accounted for, silently overstating
+    # available_capital afterwards — and since this pool is a
+    # software-enforced half of one real, shared Dhan account, that
+    # unaccounted overspend can eat into real-trade-service's half without
+    # either ledger reflecting it. Reserve the real shortfall (if any)
+    # before placing the order; skip the entry if even that isn't
+    # available rather than place an order the ledger can't actually back.
+    actual_cost = quantity * candidate.current_ltp
+    if actual_cost > position_value:
+        shortfall = actual_cost - position_value
+        if not ledger.reserve_additional(db, shortfall):
+            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            _log_candidate(
+                db, candidate, "SKIPPED",
+                f"INSUFFICIENT_CAPITAL_FOR_MIN_QTY:shortfall={shortfall:.2f}",
+                quality=quality,
+            )
+            return None
+        position_value = actual_cost
+
     # Shared cross-service Dhan account-wide order-rate guard (tracking doc
     # §3.8) — checked here, right before the real Dhan call, not earlier:
     # everything above this point (max positions, capital, security

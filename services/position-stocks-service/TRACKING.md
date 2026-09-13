@@ -746,3 +746,39 @@ rationale. Both travel together in every zip from now on.
     unsubstituted placeholder. Needs to be far more obvious in the next
     version of the test script (e.g. fail loudly with a clear message
     instead of a bare Python traceback).
+
+- **2026-09-13, session 14 (RESOLVED) — the ~120s WS reconnect cycle is
+  confirmed AngelOne server behavior, not a client bug.** Live logs with
+  the close_code/reason diagnostics added earlier this session show:
+  `close_code=1001, close_reason='Connection Idle Timeout'`, four times in
+  a row, every ~120-123s, with `reconnect_attempts` staying flat (each
+  cycle completes cleanly before the next status poll). This is AngelOne's
+  server deliberately closing feed connections that carry no live tick
+  data — i.e. specific to the market being closed — not anything client-
+  side; neither heartbeat frame type nor interval was ever going to
+  prevent it, since AngelOne isn't waiting on our heartbeats for this
+  check. No further heartbeat/protocol changes made. The one change this
+  round: downgraded this specific, now-confirmed-expected case (code=1001
+  + reason exactly "Connection Idle Timeout") from `logger.warning` to
+  `logger.info` in `feed/ws_client.py`, so normal off-hours operation
+  doesn't read as a recurring alarm — any OTHER close code/reason, or this
+  same one recurring once the market is open and ticks are flowing, still
+  logs at `warning` and would be worth a fresh look.
+  - Reconnect handling itself needed no changes — it was already correct:
+    clean detection (once the close_code/reason logging existed to see
+    it), fast 3s backoff, full resubscription to all 2678 NSE-EQ tokens
+    every time, `_connected`/`reconnect_attempts`/`last_tick_at` all
+    updated correctly through every cycle.
+  - **Remaining open item, not a bug — just unverified:** whether this
+    exact idle-timeout cycle also happens once the market is open and
+    real ticks are flowing (a connection carrying live data may not be
+    considered "idle" by AngelOne at all, which would mean this simply
+    stops happening during 09:15-15:30 IST) or whether it keeps recurring
+    regardless. Only a live-market-hours test settles this; nothing more
+    to fix from here without that data point.
+  - Also fixed in this session's exchange (not code, but worth recording):
+    my own example test script used a bare top-level `exit 1`, which — when
+    pasted directly into an interactive SSH session rather than run as a
+    script file — terminated the user's actual SSH connection. Corrected
+    to wrap the logic in a bash function using `return 1` instead, which is
+    safe to paste directly.

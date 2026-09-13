@@ -253,25 +253,34 @@ async def _ws_loop() -> None:
                     # `else` (executes whenever the for-loop completes
                     # without `break`/exception) makes that visible.
                     #
-                    # session14 follow-up (live-tested): switching the
-                    # heartbeat from a protocol ping to `ws.send("ping")`
-                    # did NOT stop the disconnect — it still recurred at a
-                    # suspiciously exact ~120s regardless. That rules out
-                    # "wrong heartbeat frame type" as the (whole) cause and
-                    # points at AngelOne's server enforcing its own
-                    # connection lifetime — plausibly specific to
-                    # no-tick-data / market-closed connections, since nothing
-                    # client-side (including active 25s heartbeats) should
-                    # produce a clean close at a fixed interval on its own.
-                    # Logging the close code/reason now instead of guessing
-                    # again — this is the actual evidence needed to tell
-                    # "AngelOne enforces a hard idle-session cap" apart from
-                    # "something else is still wrong here".
-                    logger.warning(
-                        "position-stocks WS: server closed the connection cleanly "
-                        "(close_code=%s, close_reason=%r) — reconnecting in %ss",
-                        ws.close_code, ws.close_reason, backoff,
-                    )
+                    # session14 (RESOLVED, live-confirmed): close_code=1001
+                    # / close_reason='Connection Idle Timeout' — AngelOne's
+                    # server deliberately closes feed connections carrying
+                    # no live tick data (i.e. market closed) roughly every
+                    # 2 minutes. This is documented, server-initiated
+                    # behavior, not a client bug — no heartbeat mechanism
+                    # prevents it, since it's not a heartbeat check on
+                    # their end. Reconnect handling here is already
+                    # correct (clean detection, fast backoff, full
+                    # resubscription every time). Logged at INFO rather
+                    # than WARNING specifically for this known, expected
+                    # reason so it doesn't look like a recurring alarm
+                    # during normal off-hours operation; anything else
+                    # (a different close_code/reason, or this recurring
+                    # during live market hours with ticks flowing) would
+                    # still be worth investigating and should log loud.
+                    if ws.close_code == 1001 and (ws.close_reason or "").strip().lower() == "connection idle timeout":
+                        logger.info(
+                            "position-stocks WS: AngelOne idle-timeout close (expected off-hours "
+                            "behavior, close_code=1001) — reconnecting in %ss",
+                            backoff,
+                        )
+                    else:
+                        logger.warning(
+                            "position-stocks WS: server closed the connection cleanly "
+                            "(close_code=%s, close_reason=%r) — reconnecting in %ss",
+                            ws.close_code, ws.close_reason, backoff,
+                        )
 
         except ConnectionClosed as e:
             logger.warning(

@@ -463,3 +463,33 @@ rationale. Both travel together in every zip from now on.
     `PositionStocksTab.tsx`/`positionStocksApi.ts`) — first time this
     service's session log has run a full project-wide type-check rather
     than just compiling the touched files.
+
+- **2026-09-13, session 11 — the REAL root cause of the `/ledger` 500
+  (`AttributeError: 'ScalpCapitalLedger' object has no attribute
+  'daily_loss_kill_switch_tripped'`), finally fixed.** Session 10 claimed
+  this was just a stale/pre-redeploy log — that was WRONG. The user
+  redeployed session 10b's zip (confirmed by the screenshot: the new Dhan
+  Account / Arming Sequence cards were rendering) and got the exact same
+  traceback, live. Root cause: session 9's earlier "fix" only added
+  `daily_loss_kill_switch_tripped(_date)` to db.py's `_COLUMN_MIGRATIONS`
+  (which ALTERs the DB table) — it never actually added these two fields
+  as `Column(...)` attributes on the `ScalpCapitalLedger` class in
+  `models.py`. A database-level ALTER TABLE does nothing for a Python
+  ORM instance's attributes; those come from the mapped class definition
+  SQLAlchemy generates at import time, not from reflecting the live table.
+  So `row.daily_loss_kill_switch_tripped` in `capital/ledger.py` (used in
+  `reserve_capital`, `release_capital`, `reset_daily`, `get_state`) was
+  ALWAYS going to raise `AttributeError` no matter how many times the DB
+  column got migrated or the container got redeployed — the column
+  existing in Postgres/Oracle was never the missing piece. Fixed by
+  actually adding both fields to `ScalpCapitalLedger` in `models.py`
+  (`Boolean`/`String(10)`, matching db.py's DDL types exactly). Also
+  wrote a small `ast`-based script and ran it against every
+  `_COLUMN_MIGRATIONS` entry vs. every model class to confirm this exact
+  class of bug (migration-only field with no matching ORM Column) isn't
+  hiding anywhere else in this service — all 10 entries now check out
+  clean. Lesson for future sessions: `_COLUMN_MIGRATIONS` and the model
+  class are two separate places that must BOTH be updated for a new
+  field — a migration-only or model-only change looks fine in isolation
+  and passes `py_compile`/`pyflakes` either way, but only fails at
+  runtime the moment that specific attribute is actually touched.

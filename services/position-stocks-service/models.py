@@ -49,6 +49,22 @@ class ScalpCapitalLedger(Base):
     realized_pnl_today = Column(Float, nullable=False, default=0.0)
     realized_pnl_total = Column(Float, nullable=False, default=0.0)
     last_synced_from_broker_at = Column(DateTime, nullable=True)
+    # BUG FIX (2026-09-13, session 11): daily_loss_kill_switch_tripped /
+    # daily_loss_kill_switch_tripped_date were added to db.py's
+    # _COLUMN_MIGRATIONS (so the DB column exists) and are read/written
+    # throughout capital/ledger.py (reserve_capital, release_capital,
+    # reset_daily, get_state) — but were NEVER actually declared as Column
+    # attributes on THIS class. A DB-level ALTER TABLE does nothing for a
+    # SQLAlchemy ORM instance's Python attributes; those come from the
+    # mapped class definition, not table reflection. So every
+    # row.daily_loss_kill_switch_tripped access kept raising AttributeError
+    # (-> 500 on GET /ledger) even after the DB column existed and even
+    # across a fresh redeploy — the previous fix only did half the job.
+    # Adding them here (matching db.py's oracle/pg DDL types: NUMBER(1)/
+    # BOOLEAN <-> Boolean, VARCHAR2(10)/VARCHAR(10) <-> String(10)) is
+    # what actually resolves it.
+    daily_loss_kill_switch_tripped = Column(Boolean, nullable=False, default=False)
+    daily_loss_kill_switch_tripped_date = Column(String(10), nullable=True)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 

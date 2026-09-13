@@ -1,7 +1,7 @@
 # Position Stocks — Project Tracking Document
 **Purpose of this doc:** continuity anchor. If chat context/limits reset, attach this doc + the latest Stockky zip in a new conversation and work continues from exactly here — nothing re-derived from scratch.
 
-**Last updated:** 2026-09-13 (session 13)
+**Last updated:** 2026-09-13 (session 14)
 **Status:** Session 12 did what the user asked for directly: (1) added sub-tabs
 to the Position Stocks frontend page (it was one long scroll of every section
 at once — now Overview / Screener / Positions / Trade History / Dhan Live
@@ -653,3 +653,55 @@ rationale. Both travel together in every zip from now on.
     closed at time of writing) — see the Ubuntu verification commands
     provided alongside this zip for a market-closed, no-order-placement
     smoke test of the whole service.
+
+- **2026-09-13, session 14 — 3 more real bugs found from an actual live
+  deploy (session 13's fixes running against the real Angel One/Dhan
+  connection, market closed).**
+  - **WS reconnecting every ~123s, silently, no log line.** Root cause:
+    the heartbeat sent `await ws.ping()` — a raw WebSocket protocol
+    control frame — but AngelOne's feed gateway expects an
+    application-level text `"ping"` message (their own reference client
+    sends `wsapp.send("ping")`, not a protocol ping), so the pings never
+    registered as keep-alive traffic server-side and the idle connection
+    was dropped roughly every 2 minutes regardless. Fixed:
+    `await ws.send("ping")` instead of `await ws.ping()`. Also fixed the
+    silence itself — `async for message in ws` exits WITHOUT raising when
+    the server closes cleanly (only genuinely abnormal closes raise
+    `ConnectionClosed`), so the existing `except ConnectionClosed`/
+    `except Exception` handlers never fired for this case; added an
+    `else:` clause on the `async for` (fires when the loop ends without a
+    `break`) that logs the clean-close case so this is never silently
+    invisible again.
+  - **`ScalpGateState.daily_loss_kill_switch_tripped` — a second, fully
+    disconnected copy of the exact bug fixed on `ScalpCapitalLedger` last
+    session, on a different table.** `entry.py`'s early gate check reads
+    THIS copy (`ScalpGateState`, set by `/kill`), completely independent
+    of the ledger's own copy my previous fix addressed. Nothing ever
+    reset it — confirmed live: a fresh deploy came up with
+    `daily_loss_kill_switch_tripped=True` on the gate (`/status`) while
+    the ledger's copy was correctly `False` (`/ledger`) — the two had
+    drifted, and the gate's copy would have permanently blocked every
+    future entry (even after re-arming) until someone edited the DB by
+    hand. Fixed with the same lazy reset-on-date-change pattern, applied
+    to all three places that independently fetch `ScalpGateState`
+    (`main.py::_get_gate`, `orders/entry.py::_get_gate_state`,
+    `orders/eod_squareoff.py::_get_gate_state`) since there's no shared
+    helper between them. No new column needed — `daily_loss_kill_switch_
+    tripped_date` (already stored) doubles as the reset marker: only
+    clears when that date isn't today, so a same-day manual `/kill` still
+    correctly holds for the rest of the day. `is_armed` is untouched by
+    this reset (confirmed by test — a re-arm still requires an explicit
+    `/arm` call either way, this only clears the kill-switch flag itself).
+  - Frontend needed no change for this: `PositionStocksTab.tsx` already
+    ORs the two kill-switch fields together
+    (`status?.daily_loss_kill_switch || ledger?.daily_loss_kill_switch_
+    tripped`) — the dashboard was defensively correct, only the backend's
+    "never resets" bug on the gate's copy was the actual problem.
+  - **Verification:** functional in-memory-SQLite tests of the gate lazy
+    reset confirmed for all 3 call sites, confirmed a same-day trip is
+    correctly NOT cleared (that would defeat `/kill`'s purpose), confirmed
+    `is_armed` isn't touched by the reset. Full re-run of `py_compile`,
+    `import main`, and the `_COLUMN_MIGRATIONS` consistency check — all
+    still clean (no new columns added this session). NOT yet re-verified
+    against a second live deploy — do that next before trusting the WS
+    heartbeat fix actually stops the ~123s reconnect cycle in practice.

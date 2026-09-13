@@ -33,6 +33,14 @@ def _get_gate_state(db: Session) -> ScalpGateState:
         db.add(row)
         db.commit()
         db.refresh(row)
+    # BUG FIX (session13, found via live testing): lazy reset of
+    # gate.daily_loss_kill_switch_tripped — see main.py's
+    # _maybe_lazy_reset_gate_kill_switch() for the full story.
+    if row.daily_loss_kill_switch_tripped and row.daily_loss_kill_switch_tripped_date != ist_today_str():
+        row.daily_loss_kill_switch_tripped = False
+        row.daily_loss_kill_switch_tripped_date = None
+        db.commit()
+        logger.info("gate: lazy daily reset applied to gate.daily_loss_kill_switch_tripped")
     return row
 
 

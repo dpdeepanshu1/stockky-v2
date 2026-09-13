@@ -295,7 +295,40 @@ def _get_gate(db: Session) -> ScalpGateState:
         db.add(row)
         db.commit()
         db.refresh(row)
+    _maybe_lazy_reset_gate_kill_switch(db, row)
     return row
+
+
+def _maybe_lazy_reset_gate_kill_switch(db: Session, gate: ScalpGateState) -> None:
+    """BUG FIX (session13, found via live testing): ScalpGateState carries
+    its OWN separate `daily_loss_kill_switch_tripped` column — a second,
+    entirely disconnected copy of the same concept fixed on
+    ScalpCapitalLedger last session. entry.py's early gate check
+    (`if gate.daily_loss_kill_switch_tripped: skip`) reads THIS copy, and
+    /kill sets it — but nothing ever cleared it, so one manual /kill call
+    (or the field simply never having been reset since it was added)
+    permanently blocks every future entry, even after re-arming, with no
+    way to see why short of reading the DB directly. Confirmed live: a
+    fresh deploy came up with `daily_loss_kill_switch_tripped=True` on the
+    gate while the ledger's own copy was correctly `False` — the two had
+    drifted. Applying the exact same lazy reset-on-date-change fix here:
+    the field's own `_tripped_date` already tells us which day it was
+    tripped on, so no new column is needed — if that date isn't today,
+    clear it."""
+    if not gate.daily_loss_kill_switch_tripped:
+        return
+    today = ist_today_str()
+    if gate.daily_loss_kill_switch_tripped_date == today:
+        return
+    prev_date = gate.daily_loss_kill_switch_tripped_date
+    gate.daily_loss_kill_switch_tripped = False
+    gate.daily_loss_kill_switch_tripped_date = None
+    db.commit()
+    logger.info(
+        "gate: lazy daily reset applied to gate.daily_loss_kill_switch_tripped "
+        "(was tripped on %s, today is %s)",
+        prev_date, today,
+    )
 
 
 class LoginRequest(BaseModel):

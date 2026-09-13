@@ -205,11 +205,23 @@ async def _ws_loop() -> None:
                     if not _running:
                         break
 
-                    # Heartbeat (ping frame)
+                    # BUG FIX (session13, live-tested): this used to be
+                    # `await ws.ping()` — a raw WebSocket protocol control
+                    # frame. AngelOne's feed gateway (like their own
+                    # reference smartapi-python client) listens for an
+                    # APPLICATION-level text "ping" message on the data
+                    # channel, not a protocol-layer ping — a protocol ping
+                    # never reaches whatever idle-connection logic runs on
+                    # their end. Symptom confirmed live: the connection was
+                    # silently dropped and cleanly reconnected roughly
+                    # every ~123s (no error/warning logged, because the
+                    # server closes gracefully rather than erroring —
+                    # see the "else" branch added below for why that used
+                    # to be invisible in the logs too).
                     now = time.time()
                     if now - last_heartbeat >= heartbeat_interval:
                         try:
-                            await ws.ping()
+                            await ws.send("ping")
                             last_heartbeat = now
                         except Exception:
                             pass
@@ -228,9 +240,22 @@ async def _ws_loop() -> None:
                                         cb(symbol, ltp, _last_volume.get(symbol, 0), ts)
                                     except Exception as e:
                                         logger.debug("on_tick callback error: %s", e)
-                    # Text frames (status/error messages from server)
+                    # Text frames (status/error messages from server, incl. "pong")
                     elif isinstance(message, str):
-                        logger.debug("position-stocks WS text frame: %s", message[:200])
+                        if message != "pong":
+                            logger.debug("position-stocks WS text frame: %s", message[:200])
+                else:
+                    # BUG FIX (session13, live-tested): `async for` over a
+                    # websockets connection exits this loop WITHOUT raising
+                    # when the server closes cleanly — so the `except
+                    # ConnectionClosed` below never fired for that case,
+                    # and the reconnect happened completely silently. This
+                    # `else` (executes whenever the for-loop completes
+                    # without `break`/exception) makes that visible.
+                    logger.warning(
+                        "position-stocks WS: server closed the connection cleanly — reconnecting in %ss",
+                        backoff,
+                    )
 
         except ConnectionClosed as e:
             logger.warning("position-stocks WS: connection closed (%s) — reconnecting in %ss", e, backoff)

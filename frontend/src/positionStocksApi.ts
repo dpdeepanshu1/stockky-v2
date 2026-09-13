@@ -269,6 +269,14 @@ export const positionStocksApi = {
 
   ledger: () => psRequest<ScalpLedgerState>("/ledger"),
   syncLedger: () => psRequest<{ status: string; total_allocated_capital: number }>("/ledger/sync", { method: "POST" }, true),
+  // AUDIT FIX (this session): the backend route (POST /ledger/reset-daily)
+  // has existed for a while — an explicit manual/emergency reset of today's
+  // P&L + kill switch, on top of the automatic lazy reset-on-date-change —
+  // but no client method or button ever called it. It was only reachable
+  // via a raw HTTP request, never from the dashboard. Added here + wired to
+  // a confirm-guarded button in PositionStocksTab.tsx, same confirm pattern
+  // as Kill Switch.
+  resetLedgerDaily: () => psRequest<{ status: string }>("/ledger/reset-daily", { method: "POST" }, true),
 
   wsStatus: () => psRequest<{ connected: boolean; subscribed_symbols?: number; last_tick_at?: string | null; reconnect_attempts?: number }>("/ws-status"),
   dhanLiveOrders: () => psRequest<DhanLiveOrders>("/dhan/live-orders"),

@@ -782,3 +782,49 @@ rationale. Both travel together in every zip from now on.
     script file — terminated the user's actual SSH connection. Corrected
     to wrap the logic in a bash function using `return 1` instead, which is
     safe to paste directly.
+
+- **2026-09-13, session 18 — full re-audit; found and documented several
+  real fixes (session 16/17 era) that were made in code but never written
+  up here or in STATUS.md; fixed one new gap.** Note: sessions 15-17's
+  entries were never appended to this log (only to STATUS.md) — see
+  STATUS.md's Session 17/16 sections for that work directly; this entry
+  covers session 18 only.
+  - **Documented (not new code, verified correct by reading it): the
+    `orders/eod_squareoff.py` fix forcing `is_armed=True` on the EOD
+    flatten-all closing SELL.** Before this fix (already present in the
+    code, just undocumented), a disarmed service with open positions would
+    silently fail every EOD closing SELL with `DhanNotArmedError` and leave
+    real-money positions unflattened past 3pm — the exact "no exceptions"
+    case this doc's §3.7 exists to prevent. This was the most safety-
+    relevant undocumented fix found this session.
+  - **Documented: the `iso_utc()` timestamp fix** across `/status`,
+    `/positions`, `/trades/history`, `/candidates/log`, and `/ledger` in
+    main.py and capital/ledger.py. Previously several DateTime fields
+    serialized without a UTC offset, so the browser parsed them as local
+    time — every dashboard timestamp was off by +5:30 (IST). Confirmed
+    `iso_utc()` is now applied consistently at every call site that returns
+    a DB-sourced datetime to the frontend.
+  - **Documented: the `reserve_additional()` quantity-floor fix** (orders/
+    entry.py + capital/ledger.py) and the **`/dhan/live-orders` tag-leak
+    fix** (main.py) and the **gate-mirror-on-trip fix** (capital/ledger.py's
+    `release_capital()`) — all confirmed correctly implemented, matching
+    what STATUS.md's Session 17 section already described.
+  - **New gap found and fixed:** `POST /ledger/reset-daily` existed on the
+    backend with zero frontend wiring — no `positionStocksApi.ts` method,
+    no button in `PositionStocksTab.tsx`. Added `resetLedgerDaily()` to the
+    API client and a confirm-guarded "Reset Daily Ledger" button in the
+    Overview tab's action row (same two-step confirm UX as Kill Switch).
+  - **Re-confirmed clean, no changes:** screening/engine.py's liquidity
+    gate, orders/adaptive.py, resilience/circuit_breaker.py's state machine
+    + call sites, feed/ws_client.py's WS status + idle-timeout handling,
+    feed/scrip_master.py, screening/quality_gate.py, auth/admin_auth.py,
+    auth/dhan_credentials_ro.py, db.py's Oracle autoincrement backfill,
+    oracle_compat.py. deploy/nginx-stockky.conf and docker-compose.yml's
+    position-stocks-service block both still have the fixes from earlier
+    sessions intact (spot-checked, not modified).
+  - **Verification:** `py_compile` + `pyflakes` clean across every `.py`
+    file in the service. AST-based `_COLUMN_MIGRATIONS` vs. `models.py`
+    consistency check re-run against all 16 entries — clean. Real `npm
+    install` (177 packages) + `npm run build` (`tsc && vite build`) against
+    the real `@types/react`/Tailwind config — zero TypeScript errors, build
+    succeeded.

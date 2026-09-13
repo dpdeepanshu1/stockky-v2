@@ -6,6 +6,88 @@
 
 ---
 
+## Session 18 (this session) — full re-audit; documented undocumented fixes; 1 new gap fixed
+
+Re-read every backend file end-to-end (main.py, capital/, execution/, feed/,
+orders/, screening/, auth/, resilience/, oracle_compat.py, db.py, tz_utils.py,
+models.py, config.py) plus positionStocksApi.ts / PositionStocksTab.tsx again,
+independent of session 16/17's own pass. `py_compile` and `pyflakes` clean
+across the whole service; re-ran the `_COLUMN_MIGRATIONS` vs. `models.py`
+consistency check (AST-based) against all 16 entries — clean.
+
+**Found: several real fixes already present in the code from a prior session
+were never written up here or in TRACKING.md.** Documenting them now so the
+history is accurate (all verified correct by reading the code, not just
+trusting the inline comments):
+- **`orders/eod_squareoff.py` — a real safety bug, now fixed.** The EOD
+  flatten-all sweep's closing SELL used to pass `is_armed=gate.is_armed`
+  through to `dhan_client.place_order()`, which raises `DhanNotArmedError`
+  whenever not armed, with no exemption for SELL/exit orders (unlike every
+  other exit path in this service and in real-trade-service, which
+  correctly treat exits as ungated). A disarmed service with open positions
+  — e.g. after `/disarm` or `/kill`, or simply never re-armed that morning —
+  would hit the EOD sweep, silently fail every closing SELL
+  (`DhanNotArmedError`, caught and logged), and leave real-money positions
+  **unflattened past 3pm**. Now forced to `is_armed=True` for this call
+  specifically, matching `cancel_order`/`cancel_super_order` already being
+  unconditionally allowed above it in the same function.
+- **Timestamp fix across `/status`, `/positions`, `/trades/history`,
+  `/candidates/log`, and `/ledger`.** Every DateTime field is now correctly
+  passed through `tz_utils.iso_utc()` before going into a JSON response.
+  Previously several of these returned a raw, offset-naive datetime, which
+  the browser then parsed as local time instead of UTC — every timestamp on
+  the dashboard (armed_at, last_cycle_run_at, opened_at, closed_at,
+  created_at, last_synced_from_broker_at) rendered off by exactly +5:30
+  (IST). Verified `iso_utc()` is now used consistently at every one of
+  these call sites — no stray raw `.isoformat()` calls remain on a
+  DB-sourced datetime anywhere in main.py or capital/ledger.py.
+- **`orders/entry.py` / `capital/ledger.py` — quantity-floor capital
+  shortfall fix (`reserve_additional`)** — confirmed correctly implemented
+  and wired: when `max(1, int(position_value / current_ltp))` forces a real
+  order to cost more than the risk-sized amount already reserved, the real
+  shortfall is now topped up (or the entry is skipped) before the order is
+  placed, instead of silently letting `available_capital` drift from reality.
+- **`main.py`'s `/dhan/live-orders` — tag-leak fix** — confirmed correct:
+  missing-tag orders now default to EXCLUDED (not folded into "SCALP"),
+  with a fallback to show everything unfiltered only if literally no order
+  in the response carries a `tag` key at all.
+- **`capital/ledger.py`'s `release_capital()`** — confirmed the real
+  trading-loss kill-switch trip now correctly mirrors onto
+  `ScalpGateState` too, not just the ledger's own copy (closes the
+  dashboard-visibility gap where `/status` could read "not tripped" while
+  `/ledger` correctly showed the trip).
+
+**New gap found and fixed this session:** `POST /ledger/reset-daily` has
+existed on the backend for a while (admin-gated, calls `ledger.reset_daily()`
+— an explicit manual/emergency reset of today's P&L + kill switch, on top of
+the automatic lazy reset-on-date-change) but had **zero frontend wiring** —
+no client method in `positionStocksApi.ts`, no button anywhere in
+`PositionStocksTab.tsx`. It was only reachable via a raw HTTP call. Fixed:
+added `positionStocksApi.resetLedgerDaily()` and a confirm-guarded "Reset
+Daily Ledger" button next to Kill Switch in the Overview tab's action row
+(same two-step confirm pattern, since it clears real trading state on
+demand).
+
+**Also re-confirmed, no changes needed:** `screening/engine.py`'s liquidity
+gate (session 12 fix still correct — `continue`, not `pass`), `orders/
+adaptive.py`, `resilience/circuit_breaker.py`'s state machine and its two
+call sites in main.py, `feed/ws_client.py`'s WS status fields and idle-
+timeout handling (session 13/14 fixes still correct), `feed/scrip_master.py`,
+`screening/quality_gate.py`, `auth/admin_auth.py`, `auth/dhan_credentials_ro.py`,
+`db.py`'s Oracle autoincrement backfill, `oracle_compat.py`. Still open,
+not safety-relevant, left for you to decide (unchanged from session 16):
+`config.py`'s `MIN_PREFERRED_SCALP_POSITIONS` (declared, never wired into
+any gating logic) and `feed/angelone_session.py`'s `rest_headers()` (dead
+code, no caller).
+
+**Verification:** `py_compile` + `pyflakes` clean repo-wide (this service).
+Real `npm install` (177 packages) + `npm run build` (`tsc && vite build`)
+against the real `@types/react`/Tailwind config — zero TypeScript errors,
+build succeeded (`dist/assets/index-*.js`, 1,025.85 kB / 273.93 kB gzip —
+the pre-existing single-chunk-size warning, unrelated to this session).
+
+---
+
 ## Session 17 (this session, continued) — deeper logic audit, 4 more real bugs
 
 Went past infra/wiring into the actual trading-logic math and cross-module
@@ -333,81 +415,61 @@ position-stocks-service`) as the next diagnostic step.
 
 ---
 
-## Next steps (in priority order)
+## Next steps (in priority order, current as of session 18)
 
-0. **Reload the VM nginx config and re-point the Settings URL** (session 5 —
-   see the 🔴 section above and TRACKING.md §7). This blocks everything else:
-   `sudo cp deploy/nginx-stockky.conf /etc/nginx/sites-available/stockky && sudo nginx -t && sudo systemctl reload nginx`,
-   then set the Position Stocks Settings URL to
-   `https://stockky.duckdns.org/positionstocks`. Confirm the tab shows real
-   `armed`/`market`/`ws`/`module` state instead of the all-blank/405 view
-   before touching anything below.
-1. ~~Check `scalp_gate_state` for the migration caveat~~ — **RESOLVED session 4.**
-   `db.py`'s `init_tables()` now runs `_ensure_columns()` after `create_all()`: an
-   idempotent inspector-based check that ALTERs any table missing a column
-   models.py has added since it was first created (currently just
-   `scalp_gate_state.service_enabled`). Safe to run on every boot, dialect-aware
-   (Oracle `NUMBER(1)` / Postgres `BOOLEAN`), logs loudly if it actually migrates
-   something, never crashes startup on a DDL failure. No manual ALTER needed —
-   future column additions just need one line added to `db.py`'s
-   `_COLUMN_MIGRATIONS` list.
-2. **Redeploy and confirm clean boot** — this is the first deploy attempt since the
-   `DPY-4026`/`oracledb` fixes from session 3; nothing has been confirmed booting
-   successfully yet. Watch for `init_tables()` completing and the WS client connecting.
-   **Requires your VM — can't be done from this sandbox.**
-3. **First live Super Order** — with `FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE=true` (default),
-   arm the service during market hours (and make sure the module is enabled — new in
-   session 4, defaults to enabled) and watch the very first real entry fire at qty=1.
-   Confirm the fill shape matches expectations, then flip the override off.
-   **Requires your VM + live market hours — can't be done from this sandbox.**
-4. ~~Run `npm install && npm run build`~~ — **RESOLVED session 4.** Sandbox networking
-   now reaches the real npm registry (`registry.npmjs.org`) — ran a genuine
-   `npm install` (177 packages) + `npm run build` (`tsc && vite build`) against the
-   real `@types/react`/Tailwind config, not a stub. **Zero TypeScript errors, build
-   succeeded** (`dist/assets/index-*.js`, 997.71 kB / 268.62 kB gzip — a pre-existing
-   single-chunk-size warning, unrelated to this session's changes, not something to
-   fix now). This confirms `positionStocksApi.ts` and `PositionStocksTab.tsx` are
-   genuinely clean against real type resolution, not just a syntax parse.
-5. Watch the first few real TARGET_HIT/STOP_HIT exits and cross-check `realized_pnl`
-   against Dhan's own order history (open item #3, exit-leg fill price).
-   **Requires live trades — can't be done from this sandbox.**
-6. Once live, watch how often the new 1m window actually fires vs. 5m/15m/60m —
-   tune `MIN_PCT_CHANGE_1M` up if it's mostly noise (§3.12 flags this as likely).
-   **Requires live market data — can't be done from this sandbox.**
-7. **Set the analysis-intelligence-service URLs for the quality gate (session 6)**
-   — `ANALYSIS_INTELLIGENCE_URL` (or the individual `FUNDAMENTAL_URL`/
-   `TECHNICAL_URL`/`EVENT_URL` overrides) in the service's env. Without these set
-   correctly, `screening/quality_gate.py` fails open silently (every candidate
-   passes through unfiltered, which is safe but means the fund/tech/news signal
-   isn't actually doing anything) — check the logs for "quality_gate: ... fetch
-   failed" lines after deploy to confirm it's actually reaching the service.
-8. **Verify the Live Dhan Order Activity panel and Trade History numbers against
-   what you see in Dhan's own app** once real orders start flowing (session 6) —
-   this is the first time this dashboard surfaces broker-side data directly, so
-   it's worth a manual cross-check the first few times.
-   **Requires live trades — can't be done from this sandbox.**
-9. ~~Natural follow-up, not yet built: a `GET /candidates/log` endpoint~~ —
-   **DONE session 12.** Built, plus a "Candidate Log" table on the frontend's
-   new Screener sub-tab. See TRACKING.md §3.15.
-10. **Verify the shared Dhan order-rate guard on next deploy (session 7)** — new
-    on both services this session (see TRACKING.md §3.14). Check `/status`'s
-    `shared_order_budget` field on position-stocks-service after a few real
-    orders, and watch real-trade-service's logs for
-    "SHARED Dhan order budget exhausted" or "shared_order_budget... failed
-    (failing open)" lines to confirm the guard is actually reachable and
-    counting, not silently no-op'ing. **Requires live trades on both
-    services — can't be done from this sandbox.**
-11. **Out of scope but worth knowing:** session 7's `pyflakes` audit also ran
-    across real-trade-service's ENTIRE codebase (not just the files touched
-    for the shared-budget wiring) and found a sizeable pre-existing backlog of
-    unused imports/variables in files this session never touched (`notifier.py`,
-    `auth/admin_auth.py`, `offline_test_harness.py`, `adaptive_thresholds.py`,
-    `market_feed/feed.py`, `watchlist_engine/dynamic_universe.py`, `db.py`,
-    `execution/auto_pilot.py`, `execution/reconcile.py`, `execution/dhan_client.py`,
-    a couple of `scripts/`). None of this session's actual edits appear in that
-    list — confirmed clean. Left untouched deliberately: real-trade-service
-    trades real money live, and a repo-wide cleanup pass there deserves its own
-    dedicated, careful session rather than being folded into this one.
+Everything below requires your live VM / market hours and can't be verified
+from this sandbox. All code-level work identified through session 18's audit
+is done — this list is now purely about live verification, not open bugs.
+
+1. **Redeploy this zip and confirm clean boot.** Watch for `init_tables()`
+   completing (including the `_ensure_columns()` migration log lines, which
+   should be no-ops by now on an already-migrated DB) and the WS client
+   connecting. Confirm the Position Stocks tab shows real `armed`/`market`/
+   `ws`/`module` state.
+2. **Re-verify dashboard timestamps read correctly** (session 18's `iso_utc`
+   documentation fix) — armed_at, last_cycle_run_at, position opened_at/
+   closed_at, candidate log created_at, ledger last_synced_from_broker_at
+   should all show in your local timezone correctly, not off by +5:30.
+3. **Exercise the new "Reset Daily Ledger" button once** (session 18) in a
+   safe moment (e.g. right after a deploy, before arming) to confirm it
+   round-trips correctly — should clear `realized_pnl_today` and the kill
+   switch without touching `available_capital`.
+4. **First live Super Order** — with `FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE=true`
+   (default), arm the service during market hours and watch the very first
+   real entry fire at qty=1. Confirm the fill shape matches expectations,
+   then flip the override off.
+5. **Confirm the EOD squareoff fix actually flattens positions when
+   disarmed** (session 18's most safety-relevant fix) — if you get the
+   chance, deliberately leave the service disarmed with an open position
+   near 3pm once (small size) and confirm the SELL still fires instead of
+   silently failing. Not urgent to force, but worth keeping in mind the old
+   behavior would have failed silently here.
+6. Watch the first few real TARGET_HIT/STOP_HIT exits and cross-check
+   `realized_pnl` against Dhan's own order history (exit-leg fill price is
+   still a best-effort field-name guess — see `orders/reconcile.py`'s
+   docstring).
+7. Once live, watch how often the 1m window actually fires vs. 5m/15m/60m —
+   tune `MIN_PCT_CHANGE_1M` up if it's mostly noise.
+8. **Set the analysis-intelligence-service URLs for the quality gate** —
+   `ANALYSIS_INTELLIGENCE_URL` (or the individual `FUNDAMENTAL_URL`/
+   `TECHNICAL_URL`/`EVENT_URL` overrides) in the service's env, if not
+   already set. Without these, `screening/quality_gate.py` fails open
+   silently (safe, but the fund/tech/news signal isn't doing anything) —
+   check logs for "quality_gate: ... fetch failed" to confirm it's reaching
+   the service.
+9. **Verify the shared Dhan order-rate guard** — check `/status`'s
+   `shared_order_budget` field after a few real orders, and watch
+   real-trade-service's logs for "SHARED Dhan order budget exhausted" or a
+   "failing open" line to confirm it's actually reachable and counting.
+10. **Out of scope, worth knowing:** real-trade-service still has a
+    pre-existing `pyflakes` backlog in files no session has touched
+    (`notifier.py`, `auth/admin_auth.py`, `offline_test_harness.py`,
+    `adaptive_thresholds.py`, `market_feed/feed.py`,
+    `watchlist_engine/dynamic_universe.py`, `db.py`,
+    `execution/auto_pilot.py`, `execution/reconcile.py`,
+    `execution/dhan_client.py`, a couple of `scripts/`) — left alone
+    deliberately since it trades real money live and deserves its own
+    dedicated session.
 
 ---
 

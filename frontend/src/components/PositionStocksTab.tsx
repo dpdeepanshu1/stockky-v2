@@ -124,6 +124,12 @@ export default function PositionStocksTab() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmKill, setConfirmKill] = useState(false);
+  // AUDIT FIX (this session): backend POST /ledger/reset-daily existed with
+  // no frontend wiring at all — see positionStocksApi.ts's resetLedgerDaily
+  // comment. Same confirm-guard pattern as confirmKill, since this clears
+  // today's realized P&L + kill switch on demand (an emergency/manual
+  // override on top of the automatic midnight reset).
+  const [confirmResetDaily, setConfirmResetDaily] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [dhanAccount, setDhanAccount] = useState<DhanAccountStatus | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -245,6 +251,7 @@ export default function PositionStocksTab() {
       else if (action === "disarm") await positionStocksApi.disarm();
       else if (action === "kill") { await positionStocksApi.kill(); setConfirmKill(false); }
       else if (action === "sync") await positionStocksApi.syncLedger();
+      else if (action === "reset_daily") { await positionStocksApi.resetLedgerDaily(); setConfirmResetDaily(false); }
       else if (action === "reconcile") await positionStocksApi.reconcile();
       else if (action === "service_enable") await positionStocksApi.serviceEnable();
       else if (action === "service_disable") await positionStocksApi.serviceDisable();
@@ -601,6 +608,18 @@ export default function PositionStocksTab() {
           className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-mist disabled:opacity-40">
           {busy === "reconcile" ? "Checking…" : "Check Exits Now"}
         </button>
+        {!confirmResetDaily ? (
+          <button disabled={!loggedIn || busy !== null} onClick={() => setConfirmResetDaily(true)}
+            className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-mist disabled:opacity-40">
+            Reset Daily Ledger
+          </button>
+        ) : (
+          <div className="flex items-center gap-2">
+            <span className="font-display tabular-nums text-[11px] text-signal-sell">Clear today's P&amp;L + kill switch?</span>
+            <button onClick={() => doAction("reset_daily")} className="px-3 py-2 rounded-xl bg-signal-sell/30 border border-signal-sell font-display tabular-nums text-xs text-signal-sell">Confirm</button>
+            <button onClick={() => setConfirmResetDaily(false)} className="px-3 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-mist">Cancel</button>
+          </div>
+        )}
         {!confirmKill ? (
           <button disabled={!loggedIn || busy !== null} onClick={() => setConfirmKill(true)}
             className="px-4 py-2 rounded-xl bg-signal-sell/20 border border-signal-sell/40 font-display tabular-nums text-xs text-signal-sell disabled:opacity-40 ml-auto">

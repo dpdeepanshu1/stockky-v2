@@ -311,6 +311,25 @@ async def _trading_loop() -> None:
                 with factory() as db:
                     await _run_cycle(db, trigger="AUTO")
 
+            # AUDIT FIX (this session): record_success() was previously only
+            # called from inside _run_cycle when a candidate actually cleared
+            # every gate and got ENTERED — never merely because a cycle ran
+            # to completion without raising. Since candidate-free cycles are
+            # the overwhelming common case (most 10s ticks find nothing to
+            # enter), a single earlier failure spree could leave
+            # circuit_breaker.status()'s reported `state` stuck at
+            # "half_open" indefinitely — is_open() itself still correctly
+            # stops blocking calls once the cooldown elapses (so this was
+            # never a trading-safety gap), but the dashboard's circuit-
+            # breaker badge could misreport an unhealthy state forever after
+            # one blip, even while the loop is running cleanly. A circuit
+            # breaker's success signal should mean "the protected call
+            # completed without error", not "the call's business outcome was
+            # a trade" — recording success here (any cycle that reaches this
+            # point without an exception) matches that standard semantic and
+            # lets a healthy loop actually report "closed" again.
+            circuit_breaker.record_success()
+
         except asyncio.CancelledError:
             break
         except Exception as e:

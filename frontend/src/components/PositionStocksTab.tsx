@@ -175,7 +175,7 @@ export default function PositionStocksTab() {
       const [s, p, c, l, h] = await Promise.all([
         positionStocksApi.status(),
         positionStocksApi.positions(),
-        positionStocksApi.candidates(),
+        positionStocksApi.candidates().then(r => r.candidates),
         positionStocksApi.ledger().catch(() => null),   // don't let /ledger 500 kill the whole poll
         positionStocksApi.tradeHistory(200),
       ]);

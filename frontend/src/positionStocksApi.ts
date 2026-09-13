@@ -149,6 +149,21 @@ export interface ScalpCandidateRow {
   tick_activity: number;
 }
 
+// AUDIT FIX (this session): GET /candidates was changed in an earlier
+// session to wrap the candidate list in an object ({market_open, count,
+// candidates: [...]}) so callers can tell "no candidates because market
+// is closed" apart from "no candidates because nothing is moving" — but
+// this client's candidates() method (and every caller of it) was never
+// updated to match, and kept typing/treating the response as a bare
+// ScalpCandidateRow[]. At runtime the response is this object, not an
+// array, so any caller doing array methods (e.g. .filter()) directly on
+// it throws. This is the real shape now.
+export interface ScalpCandidatesResponse {
+  market_open: boolean;
+  count: number;
+  candidates: ScalpCandidateRow[];
+}
+
 export interface ScalpLedgerState {
   total_allocated_capital: number;
   available_capital: number;
@@ -264,7 +279,7 @@ export const positionStocksApi = {
 
   positions: () => psRequest<ScalpPositionRow[]>("/positions"),
   tradeHistory: (limit = 200) => psRequest<ScalpTradeHistory>(`/trades/history?limit=${limit}`),
-  candidates: () => psRequest<ScalpCandidateRow[]>("/candidates"),
+  candidates: () => psRequest<ScalpCandidatesResponse>("/candidates"),
   candidatesLog: (limit = 100) => psRequest<ScalpCandidateLogRow[]>(`/candidates/log?limit=${limit}`),
 
   ledger: () => psRequest<ScalpLedgerState>("/ledger"),

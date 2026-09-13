@@ -88,8 +88,15 @@ class DhanNotArmedError(Exception):
 
 
 def _get_sdk_client(db: Session):
-    """Build a fresh dhanhq 2.0.2 SDK client from real-trade-service's
-    stored (and owned) credentials, read via dhan_credentials_ro."""
+    """Build a fresh dhanhq SDK client from real-trade-service's stored (and
+    owned) credentials, read via dhan_credentials_ro.
+
+    SDK version compatibility (2026-09-13, session 8):
+      dhanhq <2.1  — constructor is dhanhq(client_id, access_token)
+      dhanhq ≥2.1  — constructor is dhanhq(DhanContext(client_id, access_token))
+    We probe for DhanContext first (the new style); if it doesn't exist we fall
+    back to the old two-arg form. This keeps the code forward-compatible while
+    still working with pinned 2.0.2 in environments that haven't upgraded."""
     creds = dhan_credentials_ro.get_decrypted_credentials(db)
     if creds is None:
         raise DhanNotConnectedError(
@@ -102,7 +109,12 @@ def _get_sdk_client(db: Session):
         from dhanhq import dhanhq  # noqa: PLC0415
     except ImportError as e:
         raise RuntimeError("dhanhq SDK not installed — check requirements.txt") from e
-    return dhanhq(client_id, access_token)
+    try:
+        from dhanhq import DhanContext  # noqa: PLC0415 — dhanhq ≥2.1
+        return dhanhq(DhanContext(client_id, access_token))
+    except ImportError:
+        # dhanhq <2.1 (e.g. pinned 2.0.2) — old two-arg positional form
+        return dhanhq(client_id, access_token)
 
 
 def _extract_data(response: dict, key: str = "data"):

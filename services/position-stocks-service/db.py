@@ -112,7 +112,15 @@ def init_tables() -> None:
     created by an older version of models.py (e.g. scalp_gate_state before
     service_enabled existed) would otherwise need a manual ALTER TABLE before
     every deploy that adds a column. _ensure_columns() makes that automatic
-    and idempotent instead (2026-09-12, session 4)."""
+    and idempotent instead (2026-09-12, session 4).
+
+    Also runs _ensure_oracle_autoincrement() on Oracle: SQLAlchemy's
+    create_all() emits GENERATED AS IDENTITY on a brand-new table, but if the
+    table was created by an older deploy (or by a manual CREATE TABLE without
+    the clause), subsequent INSERTs send id=NULL and Oracle raises ORA-01400.
+    The fix mirrors real-trade-service's db.py — a SEQUENCE + BEFORE INSERT
+    TRIGGER is attached for any scalp_* table whose `id` column lacks an
+    Oracle IDENTITY column (2026-09-13, session 8)."""
     import models  # local import: avoids circular import at module load time
     engine = get_engine()
     if engine is None:
@@ -120,6 +128,8 @@ def init_tables() -> None:
         return
     models.Base.metadata.create_all(engine)
     _ensure_columns(engine)
+    if dialect() == "oracle":
+        _ensure_oracle_autoincrement(engine, models.Base)
     logger.info("position-stocks-service: scalp_* tables ensured.")
 
 
@@ -191,3 +201,83 @@ def _ensure_columns(engine) -> None:
                 "position-stocks-service: _ensure_columns failed for %s.%s: %s",
                 table, column, e, exc_info=True,
             )
+
+
+def _ensure_oracle_autoincrement(engine, base) -> None:
+    """BUG FIX (2026-09-13, session 8): ORA-01400 'cannot insert NULL into ID'.
+
+    On Oracle, SQLAlchemy's create_all() only emits GENERATED AS IDENTITY the
+    FIRST time it creates a table. If the scalp_* tables were created by an
+    older deploy (or manually, without the IDENTITY clause), every INSERT
+    thereafter sends id=NULL and Oracle raises ORA-01400. Fix: for every
+    scalp_* table with an `id` PK, if it has no IDENTITY column yet, create a
+    SEQUENCE + BEFORE INSERT TRIGGER that populates :NEW.id when it is NULL.
+    Idempotent: a table that already has a working IDENTITY or trigger is left
+    untouched. Mirrors real-trade-service/db.py's _ensure_oracle_autoincrement
+    verbatim (same isolation rationale — duplicated, not imported)."""
+    from sqlalchemy import text
+
+    tables_with_id_pk = {
+        t.name
+        for t in base.metadata.sorted_tables
+        if "id" in {c.name for c in t.primary_key.columns}
+    }
+    with engine.connect() as conn:
+        for table in [t.name for t in base.metadata.sorted_tables]:
+            if table not in tables_with_id_pk:
+                logger.info(
+                    "position-stocks oracle autoincrement: skipping %s — PK is not `id`",
+                    table,
+                )
+                continue
+            try:
+                has_identity = conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM user_tab_identity_cols "
+                        "WHERE table_name = UPPER(:t) AND column_name = 'ID'"
+                    ),
+                    {"t": table},
+                ).scalar()
+            except Exception as e:
+                logger.warning("position-stocks oracle identity check failed for %s: %s", table, e)
+                continue
+            if has_identity:
+                continue  # IDENTITY column already present — nothing to do
+
+            seq_name = f"{table}_id_seq"
+            trg_name = f"trg_{table}_bi"
+            try:
+                start_at = conn.execute(
+                    text(f"SELECT NVL(MAX(id), 0) + 1 FROM {table}")  # noqa: S608
+                ).scalar() or 1
+            except Exception:
+                start_at = 1
+
+            _oc.exec_ddl_safe(
+                engine,
+                f"CREATE SEQUENCE {seq_name} START WITH {int(start_at)} "
+                f"INCREMENT BY 1 NOCACHE NOCYCLE",
+                "oracle",
+            )
+            try:
+                with engine.begin() as trg_conn:
+                    # exec_driver_sql (NOT text()) is required: :NEW.id is
+                    # Oracle trigger correlation syntax — text() would misparse
+                    # it as a SQLAlchemy bind parameter and raise "a value is
+                    # required for bind parameter 'NEW'", silently preventing
+                    # the trigger from ever being created.
+                    trg_conn.exec_driver_sql(
+                        f"CREATE OR REPLACE TRIGGER {trg_name} "
+                        f"BEFORE INSERT ON {table} FOR EACH ROW "
+                        f"WHEN (NEW.id IS NULL) "
+                        f"BEGIN SELECT {seq_name}.NEXTVAL INTO :NEW.id FROM dual; END;"
+                    )
+                logger.info(
+                    "position-stocks-db: attached %s / %s to %s (Oracle autoincrement backfill)",
+                    seq_name, trg_name, table,
+                )
+            except Exception as e:
+                logger.warning(
+                    "position-stocks-db: could not attach autoincrement trigger to %s: %s",
+                    table, e,
+                )

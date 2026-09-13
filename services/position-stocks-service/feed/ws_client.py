@@ -45,6 +45,7 @@ import logging
 import struct
 import time
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from typing import Callable, Dict, Optional
 
 import websockets
@@ -133,10 +134,23 @@ _ws_task: Optional[asyncio.Task] = None
 _running = False
 _subscribed_tokens: list[str] = []
 
+# BUG FIX (session13 audit): ws_status() previously only reported
+# running/subscribed_symbols/task_done — none of which distinguish "the
+# background task is alive" from "we actually have a live WS connection
+# receiving ticks", which is what the frontend (PositionStocksTab.tsx /
+# positionStocksApi.ts's WSStatus type) has always expected: connected,
+# last_tick_at, reconnect_attempts. _running just means start() was called
+# once; it stays True through every disconnect/backoff/reconnect cycle, so
+# the dashboard's "WS Feed: LIVE/DOWN" badge and reconnect-attempt counter
+# could never have reflected reality. Tracking these three explicitly.
+_connected = False
+_reconnect_attempts = 0
+_last_tick_at: Optional[float] = None  # unix seconds of the most recent parsed tick, any symbol
+
 
 async def _ws_loop() -> None:
     """Persistent WS loop with exponential-backoff reconnect."""
-    global _subscribed_tokens
+    global _subscribed_tokens, _connected, _reconnect_attempts, _last_tick_at
     session = get_session()
     backoff = config.ANGELONE_WS_RECONNECT_BACKOFF_S
     max_backoff = config.ANGELONE_WS_RECONNECT_BACKOFF_MAX_S
@@ -147,6 +161,8 @@ async def _ws_loop() -> None:
             await session.ensure_session()
             if not session.token or not session.feed_token or not session.client_id:
                 logger.error("position-stocks WS: AngelOne session not ready — retrying in %ss", backoff)
+                _connected = False
+                _reconnect_attempts += 1
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
                 continue
@@ -173,6 +189,8 @@ async def _ws_loop() -> None:
             ) as ws:
                 logger.info("position-stocks WS: connected")
                 backoff = config.ANGELONE_WS_RECONNECT_BACKOFF_S  # reset on success
+                _connected = True
+                _reconnect_attempts = 0
 
                 # Subscribe in chunks of 1000 (AngelOne cap per message)
                 chunk_size = config.ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION
@@ -201,6 +219,7 @@ async def _ws_loop() -> None:
                         parsed = _parse_ltp_frame(message)
                         if parsed:
                             token_str, ltp, ts = parsed
+                            _last_tick_at = ts
                             symbol = _token_to_symbol.get(token_str)
                             if symbol:
                                 _tick_buffers[symbol].append((ts, ltp))
@@ -218,7 +237,9 @@ async def _ws_loop() -> None:
         except Exception as e:
             logger.error("position-stocks WS: error (%s) — reconnecting in %ss", e, backoff)
 
+        _connected = False
         if _running:
+            _reconnect_attempts += 1
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, max_backoff)
 
@@ -235,8 +256,9 @@ async def start() -> None:
 
 
 async def stop() -> None:
-    global _running
+    global _running, _connected
     _running = False
+    _connected = False
     if _ws_task and not _ws_task.done():
         _ws_task.cancel()
         try:
@@ -247,8 +269,22 @@ async def stop() -> None:
 
 
 def ws_status() -> dict:
+    # BUG FIX (session13 audit): the frontend (positionStocksApi.ts's
+    # WSStatus type / PositionStocksTab.tsx's "WS Feed" card) has always
+    # read `connected`, `last_tick_at`, and `reconnect_attempts` — none of
+    # which this function returned. `running` only reflects that start()
+    # was called once (it stays True through every disconnect/backoff
+    # cycle), so the dashboard's LIVE/DOWN badge was actually reading
+    # `status?.ws?.connected` as always-undefined -> always "DOWN", and the
+    # reconnect counter and last-tick timestamp never appeared at all.
     return {
         "running": _running,
+        "connected": _connected,
         "subscribed_symbols": len(_token_to_symbol),
         "task_done": _ws_task.done() if _ws_task else True,
+        "reconnect_attempts": _reconnect_attempts,
+        "last_tick_at": (
+            datetime.fromtimestamp(_last_tick_at, tz=timezone.utc).isoformat()
+            if _last_tick_at else None
+        ),
     }

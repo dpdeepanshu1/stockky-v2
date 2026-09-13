@@ -45,11 +45,42 @@ def _get_or_create(db: Session) -> ScalpCapitalLedger:
             available_capital=0.0,
             realized_pnl_today=0.0,
             realized_pnl_total=0.0,
+            pnl_last_reset_date=ist_today_str(),
         )
         db.add(row)
         db.commit()
         db.refresh(row)
+    _maybe_lazy_reset_daily(db, row)
     return row
+
+
+def _maybe_lazy_reset_daily(db: Session, row: ScalpCapitalLedger) -> None:
+    """BUG FIX (session13 audit): reset_daily() existed but nothing ever
+    called it — no scheduler, no startup hook — so realized_pnl_today
+    accumulated across days forever and a tripped daily-loss kill switch
+    never cleared on its own. Rather than rely on a scheduled job (which
+    would miss the reset entirely if the service happened to be down at
+    midnight), every read/write of the ledger row lazily checks whether
+    IST's calendar date has moved on since the last reset and, if so,
+    performs the same reset reset_daily() already implements before
+    returning the row. available_capital is untouched — that carries over
+    day to day by design."""
+    today = ist_today_str()
+    if row.pnl_last_reset_date == today:
+        return
+    prev_reset_date = row.pnl_last_reset_date
+    was_tripped = row.daily_loss_kill_switch_tripped
+    prev_pnl = row.realized_pnl_today
+    row.realized_pnl_today = 0.0
+    row.daily_loss_kill_switch_tripped = False
+    row.daily_loss_kill_switch_tripped_date = None
+    row.pnl_last_reset_date = today
+    db.commit()
+    logger.info(
+        "ledger: lazy daily reset applied (last_reset=%s -> %s) — "
+        "cleared realized_pnl_today (was ₹%.2f), kill_switch_tripped (was %s)",
+        prev_reset_date, today, prev_pnl, was_tripped,
+    )
 
 
 def sync_from_broker(db: Session) -> float:
@@ -78,19 +109,6 @@ def sync_from_broker(db: Session) -> float:
         available_balance, scalp_alloc,
     )
     return scalp_alloc
-
-
-def compute_position_value(adaptive_stop_pct: float) -> float:
-    """Adaptive position sizing (tracking doc §3.5):
-      position_value = (RISK_PER_TRADE_PCT% of scalp pool) / adaptive_stop_pct
-    A wider stop → smaller position; a tighter stop → larger.
-    Returns position_value in rupees."""
-    if adaptive_stop_pct <= 0:
-        return 0.0
-    # NOTE: we use total_allocated_capital as the pool size.
-    # The in-memory computation uses the row's stored value — no live
-    # Dhan call on the hot path.
-    return 0.0  # placeholder; resolved inside reserve_capital()
 
 
 def reserve_capital(
@@ -162,14 +180,20 @@ def release_capital(
 
 
 def reset_daily(db: Session) -> None:
-    """Called at EOD / next-day startup to reset daily P&L and kill switch.
-    Does NOT reset available_capital (that carries over)."""
-    row = _get_or_create(db)
+    """Manual/explicit reset of daily P&L and kill switch — e.g. an admin
+    route for testing or an emergency override. Does NOT reset
+    available_capital (that carries over). Note: this is no longer the
+    only way the daily reset happens — _get_or_create() now also performs
+    it lazily on the first ledger access after IST's calendar date rolls
+    over (see _maybe_lazy_reset_daily), so this function is a manual
+    trigger on top of that automatic path, not a replacement for it."""
+    row = _get_or_create(db)  # also applies the lazy reset if due
     row.realized_pnl_today = 0.0
     row.daily_loss_kill_switch_tripped = False
     row.daily_loss_kill_switch_tripped_date = None
+    row.pnl_last_reset_date = ist_today_str()
     db.commit()
-    logger.info("ledger.reset_daily: daily P&L and kill switch reset")
+    logger.info("ledger.reset_daily: daily P&L and kill switch reset (manual trigger)")
 
 
 def get_state(db: Session) -> dict:

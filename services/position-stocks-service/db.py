@@ -157,6 +157,10 @@ _COLUMN_MIGRATIONS = [
     # ALTER TABLE idempotently on the next boot, same pattern as gate_state above.
     ("scalp_capital_ledger", "daily_loss_kill_switch_tripped", "NUMBER(1)", "BOOLEAN", "0", "FALSE"),
     ("scalp_capital_ledger", "daily_loss_kill_switch_tripped_date", "VARCHAR2(10)", "VARCHAR(10)", None, None),
+    # BUG FIX (session13 audit): backs capital/ledger.py's lazy daily reset
+    # (reset_daily() was previously dead code, never called — see models.py
+    # comment on this column for the full story).
+    ("scalp_capital_ledger", "pnl_last_reset_date", "VARCHAR2(10)", "VARCHAR(10)", None, None),
 ]
 
 

@@ -65,6 +65,17 @@ class ScalpCapitalLedger(Base):
     # what actually resolves it.
     daily_loss_kill_switch_tripped = Column(Boolean, nullable=False, default=False)
     daily_loss_kill_switch_tripped_date = Column(String(10), nullable=True)
+    # BUG FIX (session13 audit): reset_daily() existed in capital/ledger.py
+    # but was never called anywhere in the service — no scheduler, no
+    # startup hook — so once the daily-loss kill switch tripped it stayed
+    # tripped forever, and realized_pnl_today accumulated across days
+    # instead of resetting, silently corrupting the loss-limit math for
+    # every day after the first trip. Fixed with a lazy reset-on-date-
+    # change check (this field tracks the IST date realized_pnl_today/
+    # kill-switch were last valid for) run on every ledger read/write
+    # instead of a scheduler, so it self-heals even if the service was
+    # down across midnight.
+    pnl_last_reset_date = Column(String(10), nullable=True)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 

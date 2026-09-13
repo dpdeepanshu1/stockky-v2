@@ -1,7 +1,7 @@
 # Position Stocks — Project Tracking Document
 **Purpose of this doc:** continuity anchor. If chat context/limits reset, attach this doc + the latest Stockky zip in a new conversation and work continues from exactly here — nothing re-derived from scratch.
 
-**Last updated:** 2026-09-13 (session 12)
+**Last updated:** 2026-09-13 (session 13)
 **Status:** Session 12 did what the user asked for directly: (1) added sub-tabs
 to the Position Stocks frontend page (it was one long scroll of every section
 at once — now Overview / Screener / Positions / Trade History / Dhan Live
@@ -576,3 +576,80 @@ rationale. Both travel together in every zip from now on.
   field — a migration-only or model-only change looks fine in isolation
   and passes `py_compile`/`pyflakes` either way, but only fails at
   runtime the moment that specific attribute is actually touched.
+
+- **2026-09-13, session 13 — 3 real bugs found in the previous session's
+  audit but never actually written into any file/zip; implemented +
+  verified here, plus a clean continued audit.**
+  - **`feed/ws_client.py`'s `ws_status()` never reported connection state.**
+    It returned `{running, subscribed_symbols, task_done}` — but the
+    frontend (`positionStocksApi.ts`'s `WSStatus` type / the "WS Feed" card
+    in `PositionStocksTab.tsx`) has always read `connected`, `last_tick_at`,
+    `reconnect_attempts`, none of which existed. `running` only reflects
+    that `start()` was called once and stays `True` through every
+    disconnect/backoff cycle, so the LIVE/DOWN badge was reading an
+    always-undefined field → always rendered DOWN, with no reconnect
+    counter or last-tick timestamp ever shown. Fixed: added `_connected`,
+    `_reconnect_attempts`, `_last_tick_at` module state, wired through
+    `_ws_loop()` (set True + reset counter on successful connect; set False
+    + increment counter on every disconnect/backoff/retry branch,
+    including the "AngelOne session not ready" path), updated `stop()`,
+    rewrote `ws_status()` to emit all fields the frontend expects
+    (`last_tick_at` as an ISO-8601 UTC string via `datetime.fromtimestamp`).
+  - **`capital/ledger.py`'s `reset_daily()` was dead code — never called
+    anywhere in the service.** No scheduler, no startup hook, no admin
+    route. Consequence: once the daily-loss kill switch tripped it stayed
+    tripped forever, and `realized_pnl_today` accumulated across every
+    day after the first trip instead of resetting — a real-money
+    correctness bug. Fixed with a lazy reset-on-IST-date-change check
+    (`_maybe_lazy_reset_daily`, called from `_get_or_create()` so every
+    ledger read/write self-heals, even if the service was down across
+    midnight — no scheduler dependency). Backed by a new
+    `pnl_last_reset_date` column (`models.py` + `db.py`'s
+    `_COLUMN_MIGRATIONS`) that tracks the last IST date the daily fields
+    were valid for. `reset_daily()` itself is kept as an explicit
+    manual/admin trigger layered on top, not removed.
+  - **Removed dead code:** `compute_position_value()` in `capital/ledger.py`
+    — a stub that always returned `0.0` and was never called; the real
+    sizing math lives inline in `reserve_capital()` (its own docstring
+    already said so).
+  - **`resilience/circuit_breaker.py` had the same class of bug as the WS
+    status one.** `status()` returned `{open, failure_count, open_since}`
+    but the frontend's `CBadge` component (typed in `positionStocksApi.ts`)
+    has always expected `{state, consecutive_failures, failure_threshold,
+    cooldown_s, seconds_until_retry}` — so the circuit-breaker badge on the
+    dashboard has never rendered real state, only the `if (!cb)` fallback.
+    Rewrote to emit that exact shape (matching real-trade-service's own
+    `CircuitBreaker.to_dict()`). While rewriting, also fixed the same
+    half-open re-arm bug real-trade-service's breaker documented fixing
+    for itself: the old `is_open()` silently reset `_failure_count`/
+    `_open_since` to 0 the instant the cooldown elapsed, so a FAILED
+    half-open probe call started counting from zero again instead of
+    re-opening the breaker — meaning a struggling upstream that kept
+    failing every probe would only ever look "half_open" with
+    `seconds_until_retry` stuck at 0, never re-open for another cooldown.
+    Now a failure recorded while already tripped re-arms `_open_since` for
+    a fresh cooldown window, matching the correct state machine
+    (closed → open → half_open → closed-or-reopen).
+  - **Continued the file-by-file audit** (`execution/dhan_client.py`,
+    `capital/shared_order_budget.py`, `auth/dhan_credentials_ro.py`,
+    `feed/angelone_session.py`, `feed/scrip_master.py`,
+    `auth/admin_auth.py`, `orders/eod_squareoff.py`, `config.py`,
+    `oracle_compat.py`, `tz_utils.py`) — all confirmed correctly wired,
+    no further bugs found.
+  - **Verification:** re-ran the session-11 `ast`-based `_COLUMN_MIGRATIONS`
+    vs. model-class consistency check against all 11 entries (10 + the new
+    `pnl_last_reset_date`) — clean. `py_compile` across every `.py` file in
+    the service. Real Python imports (not just `py_compile`) of every
+    touched module plus a full `import main` (FastAPI app construction) —
+    all clean with the service's actual deps installed. Functional
+    in-memory-SQLite tests: (1) ledger — reserve → release with a >4% loss
+    trips the kill switch; rewinding `pnl_last_reset_date` to a past date
+    and re-reading the ledger correctly auto-clears the kill switch and
+    `realized_pnl_today` while leaving `available_capital` untouched; (2)
+    circuit breaker — 3 failures trips OPEN, cooldown elapses to
+    HALF_OPEN, a failed probe correctly re-OPENS for a fresh cooldown
+    (not stuck), a subsequent successful probe correctly CLOSES. NOT
+    live-tested against the real Angel One WS / Dhan account (market
+    closed at time of writing) — see the Ubuntu verification commands
+    provided alongside this zip for a market-closed, no-order-placement
+    smoke test of the whole service.

@@ -6,10 +6,63 @@
 
 ---
 
-## Session 18 (this session) — full re-audit; documented undocumented fixes; 1 new gap fixed
+## Session 19 (this session) — Run Cycle stage/timing breakdown + full re-audit; 1 new gap fixed
+
+**Feature (requested):** `_run_cycle()` in `main.py` now records a
+stage-by-stage breakdown — `reconcile_exits`, `eod_squareoff`, `gate_checks`,
+`scan`, `quality_gate`, `entry_attempt` — each with its own `duration_ms`,
+plus `total_duration_ms` for the whole cycle. The `scan` stage returns the
+top 10 ranked candidates (symbol/window/%change/LTP/score); the
+`quality_gate` stage returns every checked candidate's pass/fail + reason +
+fundamental/technical/market-cap scores; `entry_attempt` names the exact
+symbol attempted and whether it entered. Returned as-is from the existing
+`POST /cycle/run` — no new endpoint, no behavior change to trading logic
+(instrumentation only, verified with `py_compile`). Frontend: replaced the
+old one-line "Last manual cycle: N candidates..." text on the Overview tab
+with a new `RunCycleResultPanel` component showing the full stage list,
+per-stage timing, and stock names — same visual language as the existing
+pipeline dashboard cards. `ScalpCycleResult` types in `positionStocksApi.ts`
+updated to match (`ScalpCycleStage`, `ScalpCycleStageCandidate`,
+`ScalpCycleStageChecked`).
+
+**Audit (requested — "audit position stock tab fully"):** re-read
+`execution/dhan_client.py`, `capital/shared_order_budget.py`, `config.py`,
+`tz_utils.py`, and `models.py` end-to-end (all confirmed clean, no changes)
+plus main.py's `/status` route against every frontend consumer.
+
+**New gap found and fixed:** `GET /status` has always returned
+`shared_order_budget` (`capital/shared_order_budget.py`'s cross-service Dhan
+order-rate counter — shared with Real Automatic Trade, same Dhan account)
+but no frontend type or display ever consumed it — the shared account-wide
+order cap was completely invisible on this dashboard, same "built on the
+backend, never wired to the tab" pattern session 12 (candidate log) and
+session 18 (reset-daily button) each found once already. Added the field to
+`ScalpStatus` and a "Shared Dhan Order Budget" tile to the System Health
+grid (Overview tab), amber-highlighted once remaining budget drops under
+10%.
+
+**Re-confirmed correct, no changes:** `execution/dhan_client.py` (tick
+rounding, security-id cache/collision handling, super-order tag fallback),
+`capital/shared_order_budget.py` (fail-open behavior, `check_and_reserve` vs
+`record_order_unconditional` call sites in `orders/entry.py` and
+`orders/eod_squareoff.py`), `config.py` (env parsing, isolation from
+real-trade-service), `tz_utils.py` (holiday list still in sync with
+real-trade-service's copy — both list `2026-09-14` as Ganesh Chaturthi),
+`models.py` (every column referenced elsewhere in the service is actually
+declared).
+
+**Verification:** `python3 -m py_compile main.py` clean. Isolated `tsc
+--noEmit` on `PositionStocksTab.tsx` + `positionStocksApi.ts`: zero new
+errors beyond the same three pre-existing, already-documented false
+positives (missing `node_modules`/`react` types, one `key`-prop artifact) —
+no real `npm install`/`npm run build` this session (sandbox network
+disabled).
+
+## Session 18 — full re-audit; documented undocumented fixes; 1 new gap fixed
 
 Re-read every backend file end-to-end (main.py, capital/, execution/, feed/,
 orders/, screening/, auth/, resilience/, oracle_compat.py, db.py, tz_utils.py,
+
 models.py, config.py) plus positionStocksApi.ts / PositionStocksTab.tsx again,
 independent of session 16/17's own pass. `py_compile` and `pyflakes` clean
 across the whole service; re-ran the `_COLUMN_MIGRATIONS` vs. `models.py`

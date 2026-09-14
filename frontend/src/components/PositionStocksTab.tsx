@@ -157,6 +157,98 @@ function PipelineArrow() {
   return <div className="hidden sm:flex items-center text-mist text-lg px-1 select-none">→</div>;
 }
 
+function fmtMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
+// AUDIT ADD (this session): renders the full stage-by-stage breakdown a
+// Run Cycle (manual OR the last automatic tick) actually did — what each
+// stage took, and which stock(s) it looked at / picked. Requested
+// specifically so "Run Cycle Now" shows more than a one-line tally.
+function RunCycleResultPanel({ result }: { result: ScalpCycleResult }) {
+  return (
+    <div className="bg-graphite border border-slate rounded-2xl p-4">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <p className="dash-section-title">
+          Run Cycle Result — {result.trigger === "MANUAL" ? "manual click" : "automatic tick"}
+        </p>
+        <div className="flex items-center gap-3 font-display tabular-nums text-[10px]">
+          <span className="text-paper">{fmtDateTimeIst(result.started_at)}</span>
+          <span className="text-signal-prepare">total {fmtMs(result.total_duration_ms)}</span>
+        </div>
+      </div>
+
+      {/* ── Headline: what actually happened ── */}
+      <div className="flex flex-wrap gap-2 mb-3">
+        <span className="px-2 py-1 rounded-lg bg-ink border border-slate font-display tabular-nums text-[10px] text-mist">
+          {result.candidates_seen} candidate(s) seen
+        </span>
+        {result.entered_symbol && (
+          <span className="px-2 py-1 rounded-lg bg-signal-buy/15 border border-signal-buy/40 font-display tabular-nums text-[10px] text-signal-buy">
+            ENTERED {result.entered_symbol}
+          </span>
+        )}
+        {result.eod_fired && (
+          <span className="px-2 py-1 rounded-lg bg-signal-hold/15 border border-signal-hold/40 font-display tabular-nums text-[10px] text-signal-hold">
+            EOD squareoff fired
+          </span>
+        )}
+        {result.skipped_reason && (
+          <span className="px-2 py-1 rounded-lg bg-signal-avoid/15 border border-signal-avoid/40 font-display tabular-nums text-[10px] text-signal-avoid">
+            skipped: {result.skipped_reason}
+          </span>
+        )}
+      </div>
+
+      {/* ── Stage-by-stage timing ── */}
+      <div className="space-y-1.5">
+        {result.stages.map((stage, i) => (
+          <div key={i} className="rounded-xl border border-slate bg-ink p-2.5">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <span className="w-4 h-4 rounded-full bg-graphite text-mist flex items-center justify-center text-[9px] font-bold flex-shrink-0">{i + 1}</span>
+                <span className="font-display tabular-nums text-[11px] text-paper">{stage.label}</span>
+              </div>
+              <span className="font-display tabular-nums text-[10px] text-signal-prepare">{fmtMs(stage.duration_ms)}</span>
+            </div>
+            {stage.detail && (
+              <p className="font-display tabular-nums text-[10px] text-mist mt-1 leading-relaxed">{stage.detail}</p>
+            )}
+
+            {/* Scan stage: top candidates surfaced, by symbol */}
+            {stage.candidates && stage.candidates.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {stage.candidates.map((c, j) => (
+                  <span key={j} className="px-1.5 py-0.5 rounded-md bg-graphite border border-slate font-display tabular-nums text-[9px] text-paper">
+                    {c.symbol} <span className="text-mist">{c.window}</span> {c.pct_change >= 0 ? "+" : ""}{c.pct_change}%
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Quality gate stage: pass/fail per symbol checked */}
+            {stage.checked && stage.checked.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {stage.checked.map((c, j) => (
+                  <div key={j} className="flex items-center gap-1.5 flex-wrap">
+                    <span className={`px-1.5 py-0.5 rounded-md border font-display tabular-nums text-[9px] ${
+                      c.passed ? "bg-signal-buy/15 border-signal-buy/40 text-signal-buy" : "bg-signal-avoid/15 border-signal-avoid/40 text-signal-avoid"
+                    }`}>
+                      {c.passed ? "✓" : "✗"} {c.symbol}
+                    </span>
+                    {c.reason && <span className="font-display tabular-nums text-[9px] text-mist">{c.reason}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function PositionStocksTab() {
   const [apiUrlInput, setApiUrlInput] = useState(getPositionStocksApiUrl());
   const [status, setStatus] = useState<ScalpStatus | null>(null);
@@ -587,6 +679,20 @@ export default function PositionStocksTab() {
             <p className="font-display tabular-nums text-xs text-paper">{status?.orders_placed_today ?? "—"}</p>
           </div>
           <div>
+            {/* AUDIT ADD (this session): backend has returned this since the
+                shared_order_budget feature was built (capital/shared_order_budget.py)
+                but no frontend field or display ever consumed it — the Dhan
+                account-wide order cap this service shares with Real Automatic
+                Trade was invisible on this dashboard. */}
+            <p className="text-[9px] text-mist uppercase tracking-widest">Shared Dhan Order Budget</p>
+            <p className={`font-display tabular-nums text-xs ${
+              status?.shared_order_budget && status.shared_order_budget.remaining < status.shared_order_budget.budget * 0.1
+                ? "text-signal-hold" : "text-paper"
+            }`}>
+              {status?.shared_order_budget ? `${status.shared_order_budget.used_today}/${status.shared_order_budget.budget}` : "—"}
+            </p>
+          </div>
+          <div>
             <p className="text-[9px] text-mist uppercase tracking-widest">First Live Order</p>
             <p className={`font-display tabular-nums text-xs ${status?.first_live_order_done ? "text-signal-buy" : "text-mist"}`}>
               {status?.first_live_order_done ? "Done ✓" : "Not yet"}
@@ -696,14 +802,7 @@ export default function PositionStocksTab() {
         </div>
       )}
 
-      {lastCycleResult && (
-        <div className="rounded-xl border border-slate bg-graphite px-3 py-2 font-display tabular-nums text-[11px] text-paper">
-          Last manual cycle: {lastCycleResult.candidates_seen} candidate(s) seen
-          {lastCycleResult.entered_symbol ? ` · entered ${lastCycleResult.entered_symbol}` : ""}
-          {lastCycleResult.eod_fired ? " · EOD squareoff fired" : ""}
-          {lastCycleResult.skipped_reason ? ` · skipped: ${lastCycleResult.skipped_reason}` : ""}
-        </div>
-      )}
+      {lastCycleResult && <RunCycleResultPanel result={lastCycleResult} />}
 
       {/* ── Action buttons ── */}
       <div className="flex flex-wrap gap-2">

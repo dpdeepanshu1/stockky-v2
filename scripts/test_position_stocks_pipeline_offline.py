@@ -106,6 +106,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 
 # ── 50 liquid NSE large/mid-cap symbols (yfinance ".NS" suffix added below) ──
 # Not a curated "good stocks" list — just a broad, liquid sample so the
@@ -314,7 +317,12 @@ def main() -> int:
         asyncio.run(session.ensure_session())
         interval_code = _ANGELONE_INTERVAL_MAP.get(args.interval, "ONE_MINUTE")
         base_url = "https://apiconnect.angelone.in"
-        to_dt = datetime.now()
+        # AngelOne's fromdate/todate are plain "YYYY-MM-DD HH:MM" strings with
+        # no timezone field — it interprets them as IST wall-clock, always.
+        # datetime.now() alone returns the CONTAINER's local time, which on
+        # most cloud hosts is UTC, not IST — silently shifting the requested
+        # window by 5:30h. Anchor explicitly to IST before dropping tzinfo.
+        to_dt = datetime.now(IST).replace(tzinfo=None)
         from_dt = to_dt - timedelta(days=args.days)
         token_map = scrip_master.get_tokens_bulk(symbols)
         for i, sym in enumerate(symbols, 1):
@@ -378,7 +386,10 @@ def main() -> int:
             idx += 1
         candidates = engine.scan(open_symbols=set())
         cp_s = time.perf_counter() - cp_t0
-        cp_date = datetime.fromtimestamp(all_ticks[idx - 1][0]).strftime("%Y-%m-%d %H:%M") if idx else "n/a"
+        cp_date = (
+            datetime.fromtimestamp(all_ticks[idx - 1][0], tz=IST).strftime("%Y-%m-%d %H:%M")
+            if idx else "n/a"
+        )
         checkpoint_results.append((idx, candidates, cp_s))
         _log(f"  checkpoint @ tick {idx}/{len(all_ticks)} ({cp_date} IST): "
              f"{len(candidates)} candidate(s) found in {cp_s * 1000:.1f}ms")

@@ -80,6 +80,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -176,15 +177,43 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     top candidates → attempt entry on the first that passes. Shared by the
     background loop (trigger="AUTO") and POST /cycle/run (trigger="MANUAL")
     so the two can never drift apart in behavior. Returns a small summary
-    dict for the manual endpoint's response; the background loop ignores it."""
-    summary = {"reconciled": 0, "eod_fired": False, "candidates_seen": 0,
-               "entered_symbol": None, "skipped_reason": None}
+    dict for the manual endpoint's response; the background loop ignores it.
+
+    AUDIT ADD (this session): every stage below now records its own
+    wall-clock duration (time.perf_counter(), ms) into summary["stages"],
+    plus which symbol(s) it looked at / decided on. This was requested
+    specifically for the "Run Cycle Now" button on the Position Stocks tab
+    — previously a manual cycle only ever reported a 4-field tally
+    (candidates_seen/entered_symbol/eod_fired/skipped_reason) with zero
+    visibility into how long each stage took or which stocks were actually
+    considered along the way. The background AUTO loop pays the same tiny
+    bookkeeping cost (a few perf_counter() calls, no extra I/O) so the two
+    triggers keep sharing one code path exactly as before."""
+    cycle_started = time.perf_counter()
+    summary = {
+        "trigger": trigger,
+        "started_at": iso_utc(datetime.now(timezone.utc)),
+        "reconciled": 0, "eod_fired": False, "candidates_seen": 0,
+        "entered_symbol": None, "skipped_reason": None,
+        "stages": [],       # ordered list of {name, label, duration_ms, detail, ...}
+        "total_duration_ms": 0.0,
+    }
+
+    def _stage(name: str, label: str, t0: float, **extra) -> None:
+        entry = {"name": name, "label": label, "duration_ms": round((time.perf_counter() - t0) * 1000, 1)}
+        entry.update(extra)
+        summary["stages"].append(entry)
+
+    def _finalize() -> dict:
+        summary["total_duration_ms"] = round((time.perf_counter() - cycle_started) * 1000, 1)
+        return summary
 
     # Reconcile exits first, and unconditionally — a position's TARGET_LEG/
     # STOP_LOSS_LEG can fill on Dhan's side whether or not this service is
     # currently armed/enabled/auto-piloting for NEW entries, and an orphaned
     # OPEN row blocks its symbol from ever being re-scanned plus keeps its
     # capital stuck reserved.
+    _t = time.perf_counter()
     try:
         # AUDIT FIX (this session): run_exit_reconciliation() is a plain
         # sync function that calls dhan_client.get_super_order_list(),
@@ -203,8 +232,11 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
         summary["reconciled"] = n_closed
         if n_closed:
             logger.info("position-stocks: reconciled %d exit(s)", n_closed)
+        _stage("reconcile_exits", "Reconcile Exits", _t,
+               detail=f"{n_closed} position(s) closed via Dhan fill" if n_closed else "No exits to reconcile")
     except Exception as e:
         logger.error("position-stocks: reconciliation error: %s", e, exc_info=True)
+        _stage("reconcile_exits", "Reconcile Exits", _t, detail=f"Error: {e}")
 
     gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
 
@@ -213,6 +245,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     # reconciliation above (tracking doc §3.7: "no exceptions").
     today = ist_today_str()
     eod_fired = gate and gate.eod_squareoff_fired_date == today
+    _t = time.perf_counter()
     if ist_time_at_or_after(_EOD_SQUAREOFF_TIME) and not eod_fired:
         logger.info("position-stocks: EOD squareoff time reached — running sweep")
         # AUDIT FIX (this session): same event-loop-stall bug as the
@@ -225,20 +258,28 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
         # (e.g. an admin hitting /kill or checking /status right then).
         await asyncio.to_thread(eod_squareoff.run_eod_squareoff, db)
         summary["eod_fired"] = True
-        return summary
+        _stage("eod_squareoff", "EOD Squareoff", _t, detail="3:00 PM IST reached — flattened all open positions")
+        return _finalize()
+    _stage("eod_squareoff", "EOD Squareoff Check", _t,
+           detail="Already fired today" if eod_fired else "Not yet due")
 
+    _t = time.perf_counter()
     if gate is None or not gate.service_enabled:
         summary["skipped_reason"] = "SERVICE_DISABLED"
-        return summary
+        _stage("gate_checks", "Gate Checks", _t, detail="Module disabled — screening/entry stopped here")
+        return _finalize()
 
     if not gate.is_armed:
         summary["skipped_reason"] = "NOT_ARMED"
-        return summary
+        _stage("gate_checks", "Gate Checks", _t, detail="Not armed — screening/entry stopped here")
+        return _finalize()
 
     # Don't enter new positions after EOD squareoff time
     if ist_time_at_or_after(_EOD_SQUAREOFF_TIME):
         summary["skipped_reason"] = "PAST_EOD_TIME"
-        return summary
+        _stage("gate_checks", "Gate Checks", _t, detail="Past EOD squareoff time — no new entries")
+        return _finalize()
+    _stage("gate_checks", "Gate Checks", _t, detail="service_enabled + armed + before EOD — cleared to screen")
 
     # Get open symbols to exclude from candidates
     open_syms = {
@@ -246,10 +287,22 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
         for p in db.query(ScalpPosition).filter_by(status="OPEN").all()
     }
 
+    _t = time.perf_counter()
     candidates = scan(open_symbols=open_syms)
     summary["candidates_seen"] = len(candidates)
+    # Top 10 by composite score, just for visibility on the Run Cycle
+    # result — the full ranked list can be much longer (every symbol that
+    # cleared its window's %-change + activity floor); this is what a
+    # human actually wants to eyeball, not a wall of every passer.
+    _stage("scan", "Scan (all 4 windows)", _t,
+           detail=f"{len(candidates)} symbol(s) cleared a window's %-change + activity floor",
+           candidates=[
+               {"symbol": c.symbol, "window": c.window_label, "pct_change": round(c.pct_change, 2),
+                "current_ltp": c.current_ltp, "composite_score": round(c.composite_score, 2)}
+               for c in candidates[:10]
+           ])
     if not candidates:
-        return summary
+        return _finalize()
 
     # Screening runs regardless of auto_pilot_enabled (so /candidates stays
     # live) — only the automatic ENTRY is gated by it. A manual /cycle/run
@@ -257,19 +310,36 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     # manual cycle trigger working regardless of auto-pilot state).
     if trigger == "AUTO" and not gate.auto_pilot_enabled:
         summary["skipped_reason"] = "AUTO_PILOT_OFF"
-        return summary
+        return _finalize()
 
     # Quality-gate the top few ranked candidates (fast, best-effort, fail-
     # open — see screening/quality_gate.py) and enter the first that passes.
+    _t = time.perf_counter()
     top_n = candidates[: max(1, config.QUALITY_GATE_TOP_N)]
+    checked = []
+    entered_candidate = None
     for candidate in top_n:
         quality = await quality_gate.check(candidate.symbol)
         ok, reason = quality.passes()
+        checked.append({
+            "symbol": candidate.symbol, "window": candidate.window_label,
+            "passed": ok, "reason": reason,
+            "fundamental_score": quality.fundamental_score, "technical_score": quality.technical_score,
+            "market_cap_cr": quality.market_cap_cr,
+        })
         if not ok:
             logger.info("position-stocks: quality gate skipped %s — %s", candidate.symbol, reason)
             log_quality_reject(db, candidate, quality, reason)
             continue
+        entered_candidate = (candidate, quality)
+        break  # only ever try one candidate per cycle, same as before
+    _stage("quality_gate", "Quality Gate", _t,
+           detail=f"{sum(1 for c in checked if c['passed'])}/{len(checked)} checked candidate(s) passed",
+           checked=checked)
 
+    if entered_candidate:
+        candidate, quality = entered_candidate
+        _t = time.perf_counter()
         # AUDIT FIX (this session): same event-loop-stall bug again —
         # attempt_entry() places a real, blocking Dhan Super Order call
         # (execution/dhan_client.place_super_order/place_order) plus a
@@ -284,12 +354,17 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
             circuit_breaker.record_success()
             summary["entered_symbol"] = candidate.symbol
         # Note: attempt_entry logs SKIPPED reasons internally either way
-        break  # only ever try one candidate per cycle, same as before
+        _stage("entry_attempt", "Entry Attempt", _t,
+               symbol=candidate.symbol,
+               detail=f"ENTERED {candidate.symbol}" if result else f"{candidate.symbol} did not clear entry (see logs — capital/budget/risk gate)")
+    else:
+        _stage("entry_attempt", "Entry Attempt", time.perf_counter(),
+               detail="No candidate cleared the Quality Gate this cycle — nothing to enter")
 
     gate.last_cycle_run_at = datetime.now(timezone.utc)
     gate.last_cycle_run_trigger = trigger
     db.commit()
-    return summary
+    return _finalize()
 
 
 async def _trading_loop() -> None:

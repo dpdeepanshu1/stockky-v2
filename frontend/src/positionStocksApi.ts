@@ -93,6 +93,10 @@ export interface ScalpStatus {
   orders_placed_today: number;
   daily_loss_kill_switch: boolean;
   eod_squareoff_fired_date: string | null;
+  // AUDIT ADD (this session): backend has always returned this (capital/
+  // shared_order_budget.py's status()) but no frontend field ever typed or
+  // rendered it — see PositionStocksTab.tsx's System Health grid.
+  shared_order_budget: { used_today: number; budget: number; remaining: number };
   circuit_breaker: { state: "closed" | "open" | "half_open"; consecutive_failures: number; failure_threshold: number; cooldown_s: number; seconds_until_retry: number | null };
   ws: { connected: boolean; subscribed_symbols?: number; last_tick_at?: string | null; reconnect_attempts?: number };
   market_open: boolean;
@@ -186,13 +190,49 @@ export interface ScalpLedgerState {
   daily_loss_kill_switch_tripped: boolean;
 }
 
+// AUDIT ADD (this session): backend now returns a full stage-by-stage
+// breakdown of what happened during the cycle — how long each stage took
+// and which stock(s) it looked at / decided on. See main.py::_run_cycle's
+// docstring for why (requested for the "Run Cycle Now" button specifically).
+export interface ScalpCycleStageCandidate {
+  symbol: string;
+  window: "1m" | "5m" | "15m" | "60m";
+  pct_change: number;
+  current_ltp: number;
+  composite_score: number;
+}
+
+export interface ScalpCycleStageChecked {
+  symbol: string;
+  window: "1m" | "5m" | "15m" | "60m";
+  passed: boolean;
+  reason: string | null;
+  fundamental_score: number | null;
+  technical_score: number | null;
+  market_cap_cr: number | null;
+}
+
+export interface ScalpCycleStage {
+  name: string;
+  label: string;
+  duration_ms: number;
+  detail?: string;
+  symbol?: string;
+  candidates?: ScalpCycleStageCandidate[];
+  checked?: ScalpCycleStageChecked[];
+}
+
 export interface ScalpCycleResult {
   status: string;
+  trigger: "AUTO" | "MANUAL";
+  started_at: string;
+  total_duration_ms: number;
   reconciled: number;
   eod_fired: boolean;
   candidates_seen: number;
   entered_symbol: string | null;
   skipped_reason: string | null;
+  stages: ScalpCycleStage[];
 }
 
 export interface ScalpTradeHistorySummary {

@@ -263,6 +263,14 @@ def attempt_entry(
         adaptive_target_pct=levels.target_pct,
         adaptive_stop_pct=levels.stop_pct,
         dhan_super_order_id=dhan_super_order_id,
+        # AUDIT FIX (session22 cont'd): dhan_entry_order_id was declared on
+        # the model but never written anywhere, so it was always NULL even
+        # though the frontend/API now expose it. Per Dhan's super-order
+        # response shape (see reconcile.py's docstring), the top-level
+        # orderId of a super order IS the ENTRY_LEG's order id — there is
+        # no separate id Dhan issues for it — so it's set equal to
+        # dhan_super_order_id here rather than left to default to NULL.
+        dhan_entry_order_id=dhan_super_order_id,
         capital_risked=position_value,
         is_first_live_order=is_first,
         opened_at=datetime.now(timezone.utc),

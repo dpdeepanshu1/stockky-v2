@@ -160,6 +160,8 @@ export interface ScalpPositionRow {
   closed_at: string | null;
   is_first_live_order: boolean;
   dhan_super_order_id: string | null;
+  dhan_entry_order_id: string | null;
+  dhan_exit_order_id: string | null;
 }
 
 export interface ScalpCandidateRow {
@@ -271,6 +273,8 @@ export interface ScalpTradeRow {
   opened_at: string;
   closed_at: string | null;
   dhan_super_order_id: string | null;
+  dhan_entry_order_id: string | null;
+  dhan_exit_order_id: string | null;
 }
 
 export interface ScalpTradeHistory {

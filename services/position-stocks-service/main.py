@@ -738,6 +738,8 @@ def positions(db: Session = Depends(get_db)):
             "closed_at": iso_utc(r.closed_at),
             "is_first_live_order": r.is_first_live_order,
             "dhan_super_order_id": r.dhan_super_order_id,
+            "dhan_entry_order_id": r.dhan_entry_order_id,
+            "dhan_exit_order_id": r.dhan_exit_order_id,
         }
         for r in rows
     ]
@@ -792,6 +794,8 @@ def trades_history(
                 "opened_at": iso_utc(r.opened_at),
                 "closed_at": iso_utc(r.closed_at),
                 "dhan_super_order_id": r.dhan_super_order_id,
+                "dhan_entry_order_id": r.dhan_entry_order_id,
+                "dhan_exit_order_id": r.dhan_exit_order_id,
             }
             for r in rows
         ],

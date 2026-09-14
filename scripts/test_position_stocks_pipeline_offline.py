@@ -352,26 +352,35 @@ def main() -> int:
         _log("No usable bars for any symbol — nothing to replay. Exiting.")
         return 1
 
-    t_start, t_end = all_ticks[0][0], all_ticks[-1][0]
-    checkpoint_marks = [
-        t_start + (t_end - t_start) * (i + 1) / args.checkpoints
+    # Checkpoints are spaced by TICK INDEX, not wall-clock time. Real trading
+    # sessions only cover ~6.25h/day with ~18h gaps between them (overnight +
+    # weekends) — no ticks exist in those gaps at all. Evenly-spaced
+    # wall-clock marks land inside those empty gaps more often than not,
+    # which just repeats the previous checkpoint's tick index (and its
+    # candidates) with nothing new to show — this is why an earlier version
+    # of this script could print the same "tick N/M" checkpoint twice in a
+    # row. Index-based spacing guarantees each checkpoint covers a distinct,
+    # evenly-sized slice of the actual replayed ticks.
+    checkpoint_indices = [
+        min(len(all_ticks), (len(all_ticks) * (i + 1)) // args.checkpoints)
         for i in range(args.checkpoints)
     ]
 
     stage2_t0 = time.perf_counter()
     idx = 0
     checkpoint_results = []
-    for mark in checkpoint_marks:
+    for target_idx in checkpoint_indices:
         cp_t0 = time.perf_counter()
-        while idx < len(all_ticks) and all_ticks[idx][0] <= mark:
+        while idx < target_idx:
             ts, sym, ltp = all_ticks[idx]
             ws_client._tick_buffers[sym].append((ts, ltp))
             engine.on_tick_hook(sym, ltp, 0, ts)
             idx += 1
         candidates = engine.scan(open_symbols=set())
         cp_s = time.perf_counter() - cp_t0
-        checkpoint_results.append((mark, candidates, cp_s))
-        _log(f"  checkpoint @ tick {idx}/{len(all_ticks)}: "
+        cp_date = datetime.fromtimestamp(all_ticks[idx - 1][0]).strftime("%Y-%m-%d %H:%M") if idx else "n/a"
+        checkpoint_results.append((idx, candidates, cp_s))
+        _log(f"  checkpoint @ tick {idx}/{len(all_ticks)} ({cp_date} IST): "
              f"{len(candidates)} candidate(s) found in {cp_s * 1000:.1f}ms")
     stage2_s = time.perf_counter() - stage2_t0
     _log(f"\nStage 2 (tick replay + {args.checkpoints} scan() calls): {stage2_s:.2f}s total\n")

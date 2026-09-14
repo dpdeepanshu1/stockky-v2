@@ -369,7 +369,40 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
 
 async def _trading_loop() -> None:
     """Background coroutine: runs _run_cycle(trigger="AUTO") every
-    _SCAN_INTERVAL_S during market hours."""
+    _SCAN_INTERVAL_S during market hours.
+
+    AUDIT CONFIRMED (this session, per explicit request — see
+    real-trade-service/main.py's _check_and_expire_gates() docstring for
+    the reference behavior this was checked against): admin-session
+    expiry/logout has ZERO effect on this loop. Verified by reading every
+    line this loop touches:
+      - This function takes no `admin`/token parameter and never calls
+        auth/admin_auth.require_admin() or decode_session_token() — it
+        reads gate.is_armed / gate.service_enabled / gate.auto_pilot_enabled
+        straight from the DB (ScalpGateState, via _run_cycle -> _get_gate),
+        every single tick, independent of any browser session.
+      - Unlike real-trade-service (which HAD to explicitly decouple
+        `armed` from admin_authenticated on 2026-08-28 after finding they
+        were tied together), this service never had a persisted
+        `admin_authenticated` gate field to begin with — auth/admin_auth.py
+        is a fully stateless JWT check applied only as a FastAPI
+        Depends() on the handful of routes that MUTATE state (POST
+        /arm, /disarm, /service/enable|disable, /autopilot/enable|disable,
+        /cycle/run, /kill, /ledger/*, /reconcile). Every GET read route
+        (/status, /positions, /candidates, /candidates/log, /trades/history,
+        /ledger, /ws-status) requires no auth at all.
+      - grep-confirmed: the ONLY three places `gate.is_armed` is ever
+        assigned are POST /arm (True), POST /disarm (False), POST /kill
+        (False) — all three explicit admin actions, none reachable from a
+        session simply expiring. Same for auto_pilot_enabled/service_enabled
+        (POST /autopilot/enable|disable, /service/enable|disable only).
+    Net effect: once armed + service enabled + auto-pilot on, this loop
+    keeps screening and entering through market hours with the dashboard
+    closed and nobody logged in — stopping ONLY on an explicit admin
+    /disarm, /service/disable, /autopilot/disable, or /kill call (or a
+    genuine gate: daily-loss kill switch, circuit breaker open, market
+    closed). This already matches real-trade-service's tested guarantee;
+    nothing needed to change here."""
     while True:
         try:
             await asyncio.sleep(_SCAN_INTERVAL_S)
@@ -504,6 +537,21 @@ def logout(admin: str = Depends(require_admin)):
 @app.get("/status")
 def status(db: Session = Depends(get_db)):
     gate = _get_gate(db)
+    # AUDIT ADD (this session): position-stocks-service has NO notification
+    # channel at all (no Telegram/webhook — unlike real-trade-service's
+    # notify_async, which posts a "closed=X sent=Y failed=Z — check
+    # manually" message after its own EOD square-off). orders/eod_squareoff.py
+    # marks eod_squareoff_fired_date as done for the day even when one or
+    # more positions failed to flatten (same once-per-day, no-auto-retry
+    # design as real-trade-service's _eod_squareoff — confirmed intentional,
+    # not changing it) — but with zero notification infra here, a failed
+    # flatten had NO operator-facing signal beyond a server log line nobody
+    # is watching. This computes the one fact the dashboard needs to make
+    # that visible on its own: real, open, real-money positions still sitting
+    # OPEN after the EOD sweep has already run for today.
+    eod_stragglers = 0
+    if gate.eod_squareoff_fired_date == ist_today_str() and ist_time_at_or_after(_EOD_SQUAREOFF_TIME):
+        eod_stragglers = db.query(ScalpPosition).filter_by(status="OPEN").count()
     return {
         "armed": gate.is_armed,
         # AUDIT FIX (this session): every DateTime field below was returned
@@ -523,6 +571,7 @@ def status(db: Session = Depends(get_db)):
         "orders_placed_today": gate.orders_placed_today,
         "daily_loss_kill_switch": gate.daily_loss_kill_switch_tripped,
         "eod_squareoff_fired_date": gate.eod_squareoff_fired_date,
+        "eod_squareoff_stragglers": eod_stragglers,
         "shared_order_budget": shared_order_budget.status(db),
         "circuit_breaker": circuit_breaker.status(),
         "ws": ws_client.ws_status(),

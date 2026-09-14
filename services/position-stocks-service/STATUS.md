@@ -6,7 +6,57 @@
 
 ---
 
-## Session 19 (this session) — Run Cycle stage/timing breakdown + full re-audit; 1 new gap fixed
+## Session 20 (this session) — confirmed auto-pilot is admin-session-independent (matches real-trade-service); deeper audit; 1 new visibility gap fixed
+
+**Requested check: does admin session expiry/logout stop Auto-Pilot?** No —
+verified line-by-line and confirmed already correct, matching
+real-trade-service's tested reference behavior
+(`main.py::_check_and_expire_gates`'s 2026-08-28 fix there). This service
+never had the coupling bug to begin with: `auth/admin_auth.py` is fully
+stateless (JWT, no persisted `admin_authenticated` DB row), applied only as
+a `Depends()` guard on the handful of *mutating* routes (`/arm`, `/disarm`,
+`/service/enable|disable`, `/autopilot/enable|disable`, `/cycle/run`,
+`/kill`, `/ledger/*`, `/reconcile`) — every read route (`/status`,
+`/positions`, `/candidates`, etc.) requires no auth. `_trading_loop()` (the
+background AUTO cycle) takes no admin/token parameter and never touches
+auth at all; it reads `gate.is_armed` / `service_enabled` /
+`auto_pilot_enabled` straight from the DB every tick. grep-confirmed the
+*only* three places `is_armed` is ever assigned are the three explicit
+admin actions above — none reachable from a session simply expiring. Added
+an explicit docstring on `_trading_loop()` recording this verification (with
+the grep evidence) so a future audit doesn't have to re-derive it. No code
+change needed — behavior was already correct.
+
+**Further audit (requested "audit more"):** full re-read of
+`capital/ledger.py`, `orders/eod_squareoff.py`, `orders/reconcile.py`,
+`resilience/circuit_breaker.py` — all confirmed correct and correctly wired
+(`circuit_breaker.record_failure()`/`record_success()` call sites in
+`_trading_loop` checked; ledger's daily-loss trip mirroring, lazy reset, and
+`reserve_additional()` shortfall-cover logic all consistent).
+
+Cross-checked `orders/eod_squareoff.py`'s once-per-day guard (fires even if
+one or more MARKET SELLs fail, no auto-retry that day) against
+real-trade-service's `execution/auto_pilot.py::_eod_squareoff` — **same
+design, confirmed intentional, not a divergence**: both mark the day's
+sweep "done" unconditionally and rely on an operator noticing a failure,
+rather than auto-retrying every cycle. real-trade-service surfaces failures
+via `notify_async` (Telegram); this service has **no notification channel
+at all**.
+
+**New gap found and fixed:** because of the above, a failed EOD flatten in
+this service had zero operator-facing signal beyond a server log line and a
+per-position `error_message` nobody is prompted to read. Added
+`eod_squareoff_stragglers` to `GET /status` (computed: today's sweep already
+fired AND ≥1 position still `OPEN`) and a red banner at the very top of the
+Overview tab — `⚠ N position(s) still OPEN after today's 3:00 PM EOD
+square-off...`. No schema change, no retry-behavior change (kept consistent
+with the tested real-trade-service pattern) — pure read-time visibility.
+
+**Verification:** `python3 -m py_compile` clean on every touched/reviewed
+file. Isolated `tsc --noEmit` on the two touched frontend files: zero new
+errors beyond the same pre-existing, already-documented false positives.
+
+## Session 19 — Run Cycle stage/timing breakdown + full re-audit; 1 new gap fixed
 
 **Feature (requested):** `_run_cycle()` in `main.py` now records a
 stage-by-stage breakdown — `reconcile_exits`, `eod_squareoff`, `gate_checks`,

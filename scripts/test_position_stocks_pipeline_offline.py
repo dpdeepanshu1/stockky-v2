@@ -21,11 +21,25 @@ Pipeline tab's thresholds next to real output instead of guessing.
 
 WHAT IS REAL vs SYNTHETIC
 ──────────────────────────
-REAL (via yfinance, works any day, including today's holiday):
+Two data sources are supported — pick with --data-source (default: angelone):
+
+  --data-source angelone (DEFAULT — this is the broker the deployed
+  service actually trades through, so it's the more faithful test, and it
+  needs no extra pip installs: it reuses feed/angelone_session.py and
+  feed/scrip_master.py exactly as main.py does, over the same httpx/pyotp
+  your requirements.txt already installs). Needs ANGELONE_CLIENT_ID,
+  ANGELONE_MPIN, ANGELONE_API_KEY, ANGELONE_TOTP_SECRET set in your
+  environment — the same ones the live service uses. Pulls real 1-minute
+  historical candles via AngelOne's SmartAPI getCandleData endpoint for
+  the last `--days` days (default 5, so a holiday/weekend still has a
+  completed session in range).
+
+  --data-source yfinance (fallback, no broker credentials needed, but
+  requires `pip install yfinance` separately — see USAGE below).
+
+Either way:
   - Actual OHLCV bars for every symbol requested, most recent available
-    session(s) (yfinance serves the last COMPLETED session's intraday
-    bars even when today's market is closed — it does not require the
-    market to be open right now).
+    session(s) — neither source requires the market to be open right now.
   - Every threshold, every score, every gate decision: config.py's real
     MIN_PCT_CHANGE_1M/5M/15M/60M, MIN_AVG_VOLUME, MIN_FUNDAMENTAL_SCORE,
     MIN_TECHNICAL_SCORE, MIN_MARKET_CAP_CR, QUALITY_GATE_TOP_N — read
@@ -40,12 +54,12 @@ REAL (via yfinance, works any day, including today's holiday):
     --skip-quality-gate this stage is skipped entirely.
 
 SYNTHETIC (clearly labeled, and the one place this harness is NOT a 1:1
-stand-in for live conditions):
+stand-in for live conditions, regardless of which --data-source you use):
   - The live WS feed pushes a tick roughly every time LTP changes — often
-    many per second. yfinance only gives one bar per `--interval` (1
-    minute, by default). To avoid engine.py's tick-activity/liquidity gate
-    (a ticks-per-5-minutes proxy for volume) reading artificially low just
-    because of this sampling gap, each historical bar is expanded into
+    many per second. Both data sources above only give one bar per minute.
+    To avoid engine.py's tick-activity/liquidity gate (a ticks-per-5-
+    minutes proxy for volume) reading artificially low just because of
+    this sampling gap, each historical bar is expanded into
     `--ticks-per-bar` evenly-spaced synthetic ticks (default 12 — one
     every ~5s across a 1-minute bar) with linearly-interpolated price from
     that bar's open to its close. This density is a deliberate choice to
@@ -57,8 +71,9 @@ stand-in for live conditions):
 USAGE
 ──────
     cd services/position-stocks-service
-    pip install yfinance   # not a runtime dependency of the deployed
-                            # service — only needed to run this script
+
+    # Default: AngelOne historical candles (needs your usual ANGELONE_*
+    # env vars already set — no extra pip installs):
     python3 ../../scripts/test_position_stocks_pipeline_offline.py
 
     # Fewer symbols, skip the network-dependent quality-gate stage:
@@ -69,6 +84,13 @@ USAGE
     # (defaults to whatever config.py/ANALYSIS_INTELLIGENCE_URL resolves to):
     python3 ../../scripts/test_position_stocks_pipeline_offline.py \\
         --analysis-intelligence-url https://analysis-intelligence-service.onrender.com
+
+    # Fallback data source (no AngelOne creds needed, but requires a venv
+    # since most Debian/Ubuntu Pythons are PEP-668 "externally managed"):
+    python3 -m venv /tmp/harness-venv
+    /tmp/harness-venv/bin/pip install yfinance
+    /tmp/harness-venv/bin/python3 ../../scripts/test_position_stocks_pipeline_offline.py \\
+        --data-source yfinance
 
 Must be run with position-stocks-service's own directory as the working
 directory (or pass --service-dir) so `import config` etc. resolve to the
@@ -81,6 +103,7 @@ import asyncio
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -100,22 +123,31 @@ DEFAULT_SYMBOLS = [
     "ONGC", "SHREECEM", "VEDANTA", "PIDILITIND",
 ]
 
+# AngelOne SmartAPI historical-candle interval codes — see
+# https://smartapi.angelbroking.com/docs/Historical (getCandleData).
+_ANGELONE_INTERVAL_MAP = {
+    "1m": "ONE_MINUTE", "3m": "THREE_MINUTE", "5m": "FIVE_MINUTE",
+    "10m": "TEN_MINUTE", "15m": "FIFTEEN_MINUTE", "30m": "THIRTY_MINUTE",
+    "1h": "ONE_HOUR", "1d": "ONE_DAY",
+}
+
 
 def _log(msg: str) -> None:
     print(msg, flush=True)
 
 
 def _load_service_modules(service_dir: Path):
-    """Import config / feed.ws_client / screening.engine / screening.quality_gate
-    from the REAL position-stocks-service source tree — same modules main.py
+    """Import config / feed.ws_client / feed.angelone_session /
+    feed.scrip_master / screening.engine / screening.quality_gate from the
+    REAL position-stocks-service source tree — same modules main.py
     imports, not copies. Nothing at import time needs a DB, Dhan, or Angel
     One credentials (see those modules' own docstrings) so this is safe to
     import standalone."""
     sys.path.insert(0, str(service_dir))
     import config  # noqa
-    from feed import ws_client  # noqa
+    from feed import ws_client, angelone_session, scrip_master  # noqa
     from screening import engine, quality_gate  # noqa
-    return config, ws_client, engine, quality_gate
+    return config, ws_client, angelone_session, scrip_master, engine, quality_gate
 
 
 @dataclass
@@ -148,6 +180,48 @@ def fetch_symbol_bars(symbol: str, period: str, interval: str) -> Tuple[List[Bar
     return bars, time.perf_counter() - t0
 
 
+def fetch_symbol_bars_angelone(
+    symbol: str, token: str, session, base_url: str, interval_code: str,
+    from_dt: datetime, to_dt: datetime,
+) -> Tuple[List[Bar], float]:
+    """Real historical OHLCV via AngelOne's SmartAPI getCandleData — the
+    same broker/account main.py's live feed authenticates against (see
+    feed/angelone_session.py). Returns (bars, fetch_seconds). Works
+    regardless of whether the market is open right now; it just returns
+    whatever completed candles exist in [from_dt, to_dt]."""
+    import httpx
+
+    t0 = time.perf_counter()
+    bars: List[Bar] = []
+    try:
+        resp = httpx.post(
+            f"{base_url}/rest/secure/angelbroking/historical/v1/getCandleData",
+            headers=session.rest_headers(),
+            json={
+                "exchange": "NSE",
+                "symboltoken": token,
+                "interval": interval_code,
+                "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"),
+                "todate": to_dt.strftime("%Y-%m-%d %H:%M"),
+            },
+            timeout=20.0,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if not body.get("status"):
+            _log(f"  ! {symbol}: AngelOne historical API error ({body.get('message')})")
+        else:
+            for row in body.get("data") or []:
+                ts_str, o, h, l, c, v = row  # noqa: E741
+                bars.append(Bar(
+                    ts=datetime.fromisoformat(ts_str).timestamp(),
+                    open=float(o), close=float(c), volume=int(v or 0),
+                ))
+    except Exception as e:
+        _log(f"  ! {symbol}: fetch failed ({e})")
+    return bars, time.perf_counter() - t0
+
+
 def synthesize_ticks(symbol: str, bars: List[Bar], ticks_per_bar: int) -> List[Tuple[float, str, float]]:
     """Expand each real bar into `ticks_per_bar` evenly-spaced synthetic
     ticks, linearly interpolating open->close, so engine.py's tick-count
@@ -173,8 +247,12 @@ def main() -> int:
     ap.add_argument("--symbols", default="", help="Comma-separated NSE symbols (overrides default 50)")
     ap.add_argument("--symbols-file", default="", help="File with one NSE symbol per line")
     ap.add_argument("--count", type=int, default=50, help="Trim symbol list to this many (default 50)")
-    ap.add_argument("--period", default="5d", help="yfinance history period (default 5d, so a holiday/weekend still has a completed session)")
-    ap.add_argument("--interval", default="1m", help="yfinance bar interval (default 1m)")
+    ap.add_argument("--data-source", choices=["angelone", "yfinance"], default="angelone",
+                     help="Historical-data source (default: angelone — your live broker, no extra pip installs)")
+    ap.add_argument("--days", type=int, default=5, help="[angelone] lookback window in days (default 5, so a holiday/weekend still has a completed session)")
+    ap.add_argument("--request-delay", type=float, default=0.4, help="[angelone] seconds to sleep between historical-candle calls, to stay under SmartAPI's rate limit (default 0.4)")
+    ap.add_argument("--period", default="5d", help="[yfinance] history period (default 5d)")
+    ap.add_argument("--interval", default="1m", help="Bar interval — 1m/5m/15m/1h/1d (default 1m). Applies to both data sources.")
     ap.add_argument("--ticks-per-bar", type=int, default=12, help="Synthetic sub-ticks per real bar (default 12) — see module docstring")
     ap.add_argument("--checkpoints", type=int, default=5, help="How many evenly-spaced scan() checkpoints across the session (default 5)")
     ap.add_argument("--skip-quality-gate", action="store_true", help="Skip the network-dependent fundamental/technical/event stage")
@@ -185,17 +263,23 @@ def main() -> int:
         import os
         os.environ["ANALYSIS_INTELLIGENCE_URL"] = args.analysis_intelligence_url
 
-    try:
-        import yfinance  # noqa: F401 — fail fast with one clear message,
-        # not one confusing "fetch failed" line per symbol below.
-    except ImportError:
-        _log("yfinance is not installed. Install it with:\n    pip install yfinance\n"
-             "(this is only needed to run this offline test script — it is NOT a "
-             "runtime dependency of the deployed service).")
-        return 1
+    if args.data_source == "yfinance":
+        try:
+            import yfinance  # noqa: F401 — fail fast with one clear message,
+            # not one confusing "fetch failed" line per symbol below.
+        except ImportError:
+            _log("yfinance is not installed. Either install it in a venv:\n"
+                 "    python3 -m venv /tmp/harness-venv\n"
+                 "    /tmp/harness-venv/bin/pip install yfinance\n"
+                 "    /tmp/harness-venv/bin/python3 <this script> --data-source yfinance\n"
+                 "...or, simpler: drop --data-source yfinance and use the default "
+                 "AngelOne data source instead — it needs no extra installs, just your "
+                 "usual ANGELONE_CLIENT_ID / ANGELONE_MPIN / ANGELONE_API_KEY / "
+                 "ANGELONE_TOTP_SECRET env vars.")
+            return 1
 
     service_dir = Path(args.service_dir).resolve()
-    config, ws_client, engine, quality_gate = _load_service_modules(service_dir)
+    config, ws_client, angelone_session, scrip_master, engine, quality_gate = _load_service_modules(service_dir)
 
     symbols = DEFAULT_SYMBOLS
     if args.symbols_file:
@@ -204,7 +288,8 @@ def main() -> int:
         symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     symbols = symbols[: args.count]
 
-    _log(f"=== position-stocks-service offline pipeline test — {len(symbols)} symbols ===")
+    _log(f"=== position-stocks-service offline pipeline test — {len(symbols)} symbols "
+         f"(data source: {args.data_source}) ===")
     _log(f"Thresholds (from config.py, live values): "
          f"1m>{config.MIN_PCT_CHANGE_1M}% 5m>{config.MIN_PCT_CHANGE_5M}% "
          f"15m>{config.MIN_PCT_CHANGE_15M}% 60m>{config.MIN_PCT_CHANGE_60M}% "
@@ -217,11 +302,40 @@ def main() -> int:
     stage1_t0 = time.perf_counter()
     bars_by_symbol: Dict[str, List[Bar]] = {}
     per_symbol_fetch_s: Dict[str, float] = {}
-    for i, sym in enumerate(symbols, 1):
-        bars, secs = fetch_symbol_bars(sym, args.period, args.interval)
-        bars_by_symbol[sym] = bars
-        per_symbol_fetch_s[sym] = secs
-        _log(f"  [{i}/{len(symbols)}] {sym}: {len(bars)} bars in {secs:.2f}s")
+
+    if args.data_source == "angelone":
+        session = angelone_session.get_session()
+        if not session.is_configured():
+            _log("AngelOne not configured — set ANGELONE_CLIENT_ID, ANGELONE_MPIN, "
+                 "ANGELONE_API_KEY, ANGELONE_TOTP_SECRET in your environment (the same "
+                 "ones the live service uses), or pass --data-source yfinance instead.")
+            return 1
+        _log("Logging in to AngelOne (TOTP)...")
+        asyncio.run(session.ensure_session())
+        interval_code = _ANGELONE_INTERVAL_MAP.get(args.interval, "ONE_MINUTE")
+        base_url = "https://apiconnect.angelone.in"
+        to_dt = datetime.now()
+        from_dt = to_dt - timedelta(days=args.days)
+        token_map = scrip_master.get_tokens_bulk(symbols)
+        for i, sym in enumerate(symbols, 1):
+            token = token_map.get(sym)
+            if not token:
+                _log(f"  [{i}/{len(symbols)}] {sym}: no AngelOne token found (delisted/renamed/typo?), skipping")
+                bars_by_symbol[sym] = []
+                per_symbol_fetch_s[sym] = 0.0
+                continue
+            bars, secs = fetch_symbol_bars_angelone(sym, token, session, base_url, interval_code, from_dt, to_dt)
+            bars_by_symbol[sym] = bars
+            per_symbol_fetch_s[sym] = secs
+            _log(f"  [{i}/{len(symbols)}] {sym}: {len(bars)} bars in {secs:.2f}s")
+            time.sleep(args.request_delay)
+    else:
+        for i, sym in enumerate(symbols, 1):
+            bars, secs = fetch_symbol_bars(sym, args.period, args.interval)
+            bars_by_symbol[sym] = bars
+            per_symbol_fetch_s[sym] = secs
+            _log(f"  [{i}/{len(symbols)}] {sym}: {len(bars)} bars in {secs:.2f}s")
+
     stage1_s = time.perf_counter() - stage1_t0
     ok_symbols = [s for s in symbols if len(bars_by_symbol[s]) >= 2]
     _log(f"\nStage 1 (data fetch): {stage1_s:.1f}s total, "

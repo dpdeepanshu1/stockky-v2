@@ -6,7 +6,104 @@
 
 ---
 
-## Session 20 (this session) — confirmed auto-pilot is admin-session-independent (matches real-trade-service); deeper audit; 1 new visibility gap fixed
+## Session 22 (this session) — deeper audit into the tab's backend data sources; 1 real trading-safety bug fixed (kill-switch reset was incomplete)
+
+**Requested: "audit position stock tab fully" (repeat/continue).** Session
+21 covered `main.py` vs. the frontend field-for-field. This pass went one
+layer deeper into the backend modules that actually produce the data the
+tab displays and the actions its buttons trigger — full re-reads of
+`screening/engine.py`, `orders/adaptive.py`, `capital/ledger.py`, and
+`orders/entry.py` end-to-end.
+
+**1 real bug found and fixed — the "Reset Daily Ledger" button didn't fully
+do what its own confirm dialog promises:** `ScalpGateState` and
+`ScalpCapitalLedger` each carry their OWN separate
+`daily_loss_kill_switch_tripped` column (a long-running theme in this
+service — see session13's and this-session's-prior fixes to the *reset-by-
+date-rollover* and *trip* paths respectively). `orders/entry.py`'s actual
+entry-blocking check reads the **gate's** copy, not the ledger's. `POST
+/kill` sets only the **gate's** copy. But `POST /ledger/reset-daily` (the
+Positions tab's "Reset Daily Ledger" button, confirm text: *"Clear today's
+P&L + kill switch?"*) only ever called `ledger.reset_daily(db)`, which
+clears the **ledger's** copy — never the gate's. Net effect before this fix:
+click Kill Switch, then click Reset Daily Ledger same day — the ledger looks
+reset and (since `GET /status` reads the gate's copy, which was untouched)
+the dashboard's kill-switch banner would ALSO have stayed lit, and every
+subsequent entry attempt would keep silently skipping with
+`DAILY_LOSS_KILL_SWITCH` regardless of what the operator just did. Fixed:
+`POST /ledger/reset-daily` now also clears the gate's copy when it's
+tripped. Deliberately leaves `gate.is_armed` untouched — re-arming after an
+emergency reset stays its own explicit step.
+
+**Re-confirmed clean, no other changes:** `screening/engine.py` (all 4
+windows, liquidity gate, composite scoring — matches its own docstring
+exactly), `orders/adaptive.py` (target/stop formula, tick rounding),
+`capital/ledger.py`'s `sync_from_broker`/`reserve_capital`/
+`reserve_additional`/`release_capital` (the min-qty-floor top-up logic
+from a prior session re-verified sound), `orders/entry.py`'s full 9-step
+safety-check order re-walked against its own docstring — all correct.
+
+**Verification:** `python3 -m py_compile` on every `.py` file in the
+service + a full `pyflakes` pass: both clean. No frontend files touched
+this pass, so no rebuild needed (session 21's clean `npm run build` still
+stands).
+
+## Session 21 (prior) — full Position Stocks tab audit; 2 real frontend bugs fixed; first-ever clean real `npm install && npm run build`
+
+**Requested: "audit position stock tab fully."** Re-read `main.py` end-to-end
+against `positionStocksApi.ts` and `PositionStocksTab.tsx` field-by-field —
+every route, every response field, every consumer — plus a fresh line-by-line
+read of the 1490-line tab component itself (all 8 sub-tabs: Overview,
+Pipeline, Screener, Positions, Trade History, Dhan Live Orders, Charges,
+Settings).
+
+**2 real bugs found and fixed, both stale-hardcoded-value bugs (same shape as
+session 18's `Open Positions (${openPositions.length}/5)` pattern would have
+been, had it existed then):**
+1. **Overview tab header still said "5m / 15m / 60m Scalp Pool"** — the 1m
+   window was added back in session 4, and every other part of the tab
+   (window filter buttons, screener grid, pipeline stage 2 label "Scan (all 4
+   windows)") already reflects 4 windows; only this one hardcoded heading
+   never got updated. Fixed to "1m / 5m / 15m / 60m Scalp Pool".
+2. **Positions tab's "Open Positions (N/5)" header hardcoded `/5`** instead
+   of reading `status.max_concurrent_scalp_positions` (env-configurable,
+   `config.MAX_CONCURRENT_SCALP_POSITIONS`, default 5) — the Pipeline tab's
+   "Entry Decision" stage two sections above already does this correctly
+   (`${openPositions.length}/${status?.max_concurrent_scalp_positions ?? 5}`).
+   If that env var is ever changed from its default, this header would have
+   silently shown a wrong capacity. Fixed to read the live config value the
+   same way.
+
+**1 minor type-accuracy fix (not a runtime bug — field isn't rendered
+today):** `ScalpTradeHistorySummary.best_trade`/`worst_trade` in
+`positionStocksApi.ts` were still typed as `{ symbol, pnl }`, missing
+`opened_at` — which `GET /trades/history` has actually returned since an
+earlier session's "best/worst trade dict was missing opened_at" fix (see
+`main.py`'s `trades_history` docstring). Added `opened_at: string` to both so
+the type matches what the backend sends, in case a future session wires it
+into the UI.
+
+**Everything else re-confirmed correct, no changes:** every `main.py` route
+cross-checked field-for-field against its `positionStocksApi.ts` type and its
+`PositionStocksTab.tsx` consumer(s) — `/status`, `/positions`,
+`/trades/history`, `/candidates`, `/candidates/log`, `/ledger`,
+`/dhan/live-orders`, `/dhan/account`, `/cycle/run`, `/ws-status` all match.
+Charges tab's client-side fee math, capital ledger card, pipeline dashboard's
+5-stage visualization, arming sequence, and all button gating (`disabled=`
+conditions vs. `busy`/`loggedIn`/`status` state) re-read and confirmed
+correct.
+
+**Verification — first time ever without sandbox limitations:** this
+sandbox finally had real npm registry egress. Ran an actual
+`npm install && npm run build` (not just an isolated `tsc` parse against
+stubbed types, which is all every prior session could do) on the full
+frontend — **zero errors, zero warnings beyond an expected chunk-size
+notice** — both before touching anything (confirming the starting state
+really was clean) and again after the two fixes above. Backend:
+`python3 -m py_compile` on every `.py` file in the service, and a full
+`pyflakes` pass — both clean.
+
+## Session 20 (prior) — confirmed auto-pilot is admin-session-independent (matches real-trade-service); deeper audit; 1 new visibility gap fixed
 
 **Requested check: does admin session expiry/logout stop Auto-Pilot?** No —
 verified line-by-line and confirmed already correct, matching

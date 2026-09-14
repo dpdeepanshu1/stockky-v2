@@ -471,7 +471,7 @@ export default function PositionStocksTab() {
   return (
     <div className="page-terminal space-y-4">
       <div className="flex items-center justify-between">
-        <p className="dash-section-title">Position Stocks — 5m / 15m / 60m Scalp Pool</p>
+        <p className="dash-section-title">Position Stocks — 1m / 5m / 15m / 60m Scalp Pool</p>
         <span className="font-display tabular-nums text-[9px] text-mist">
           {lastRefreshed ? `Updated ${lastRefreshed.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "Refreshing…"}
         </span>
@@ -1066,7 +1066,7 @@ export default function PositionStocksTab() {
       <>
       {/* ── Open positions ── */}
       <div className="bg-graphite border border-slate rounded-2xl p-4">
-        <p className="dash-section-title mb-3">Open Positions ({openPositions.length}/5)</p>
+        <p className="dash-section-title mb-3">Open Positions ({openPositions.length}/{status?.max_concurrent_scalp_positions ?? 5})</p>
         {openPositions.length === 0 ? (
           <p className="font-display tabular-nums text-xs text-mist">No open scalp positions.</p>
         ) : (

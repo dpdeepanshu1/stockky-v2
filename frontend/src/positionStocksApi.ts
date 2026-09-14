@@ -246,8 +246,16 @@ export interface ScalpTradeHistorySummary {
   losses: number;
   win_rate_pct: number | null;
   total_pnl: number;
-  best_trade: { symbol: string; pnl: number } | null;
-  worst_trade: { symbol: string; pnl: number } | null;
+  // AUDIT FIX (this session): backend's GET /trades/history has included
+  // opened_at on best_trade/worst_trade since the "missing opened_at"
+  // fix (see main.py's trades_history docstring) so the dashboard could
+  // correlate the summary card with a row in the trades table below —
+  // but this type never grew the field to match, so it was invisible to
+  // any future caller relying on the type instead of reading main.py.
+  // Not currently rendered (best/worst only show symbol+pnl today), but
+  // the type should reflect what the backend actually sends.
+  best_trade: { symbol: string; pnl: number; opened_at: string } | null;
+  worst_trade: { symbol: string; pnl: number; opened_at: string } | null;
 }
 
 export interface ScalpTradeRow {

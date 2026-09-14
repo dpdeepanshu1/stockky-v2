@@ -879,13 +879,46 @@ def sync_ledger(admin: str = Depends(require_admin), db: Session = Depends(get_d
 
 @app.post("/ledger/reset-daily")
 def reset_ledger_daily(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
-    """AUDIT FIX (this session): capital/ledger.py's reset_daily() has
+    """AUDIT FIX (prior session): capital/ledger.py's reset_daily() has
     always existed and its own docstring describes it as "an admin route
     for testing or an emergency override" — but no such route was ever
     added here. The automatic lazy reset-on-date-change (_maybe_lazy_reset_daily)
     already covers the normal midnight-rollover case, so this is only for
-    the manual/emergency case the function was written for."""
+    the manual/emergency case the function was written for.
+
+    AUDIT FIX (this session — real bug, not just visibility): this only
+    ever called ledger.reset_daily(db), which clears ScalpCapitalLedger's
+    OWN copy of daily_loss_kill_switch_tripped. But the copy that actually
+    blocks new entries is ScalpGateState's separate copy — orders/entry.py
+    ::attempt_entry()'s early-exit check reads `gate.daily_loss_kill_switch_
+    tripped`, not the ledger's. POST /kill sets ONLY the gate's copy
+    (never the ledger's); a real trading-loss trip sets the ledger's copy
+    and, since a prior session's fix, syncs it to the gate's copy too — but
+    nothing ever made this reset route symmetric with either trip path.
+    Net effect: click Kill Switch, then click "Reset Daily Ledger" (whose
+    own confirm dialog literally says "Clear today's P&L + kill switch?")
+    same day, and the dashboard's kill-switch banner clears (GET /status
+    reads the gate's copy... which is now correctly reset below) — but
+    before this fix, every subsequent entry attempt would have kept
+    silently skipping with reason=DAILY_LOSS_KILL_SWITCH regardless,
+    because the gate's copy was still tripped. Same "two disconnected
+    copies" class of bug main.py's _maybe_lazy_reset_gate_kill_switch and
+    ledger.py's release_capital() docstrings already describe being fixed
+    on the RESET-by-date-rollover and TRIP paths respectively — this was
+    the remaining gap, on the manual RESET-now path. Deliberately does NOT
+    touch gate.is_armed — a kill switch trip also disarms, and re-arming
+    after an emergency reset stays a separate, explicit admin decision."""
     ledger.reset_daily(db)
+    gate = _get_gate(db)
+    if gate.daily_loss_kill_switch_tripped:
+        gate.daily_loss_kill_switch_tripped = False
+        gate.daily_loss_kill_switch_tripped_date = None
+        db.commit()
+        logger.warning(
+            "position-stocks-service: manual ledger/reset-daily also cleared "
+            "gate.daily_loss_kill_switch_tripped (was tripped) — new entries "
+            "un-blocked; is_armed left untouched."
+        )
     return {"status": "ledger_daily_reset"}
 
 

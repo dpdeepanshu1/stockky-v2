@@ -1157,7 +1157,14 @@ export default function PositionStocksTab() {
                       <th className="py-1 pr-3">Sell Total</th>
                       <th className="py-1 pr-3">P&L</th>
                       <th className="py-1 pr-3">Status</th>
-                      <th className="py-1">Closed</th>
+                      <th className="py-1 pr-3">Closed</th>
+                      {/* AUDIT ADD (session22 cont'd): the table had no
+                          order-ID column at all — dhan_super_order_id was
+                          only ever shown in the Overview subtab's
+                          PositionRow cards, not here, even though the
+                          backend now returns entry and exit order ids too
+                          (see main.py::trades_history). */}
+                      <th className="py-1">Order IDs</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1178,7 +1185,14 @@ export default function PositionStocksTab() {
                           {t.realized_pnl != null ? `${fmtInr(t.realized_pnl)} (${(t.realized_pnl_pct ?? 0).toFixed(2)}%)` : "—"}
                         </td>
                         <td className={`py-1 pr-3 ${statusColor(t.status)}`}>{t.status}</td>
-                        <td className="py-1 text-mist">{fmtDateTimeIst(t.closed_at)}</td>
+                        <td className="py-1 pr-3 text-mist">{fmtDateTimeIst(t.closed_at)}</td>
+                        <td className="py-1 text-mist text-[9px] leading-tight">
+                          {t.dhan_super_order_id ? <div>Entry {t.dhan_super_order_id}</div> : null}
+                          {t.dhan_exit_order_id && t.dhan_exit_order_id !== t.dhan_super_order_id
+                            ? <div>Exit {t.dhan_exit_order_id}</div>
+                            : null}
+                          {!t.dhan_super_order_id && !t.dhan_exit_order_id ? "—" : null}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1484,6 +1498,17 @@ function PositionRow({ p }: { p: ScalpPositionRow }) {
         {p.closed_at ? ` · Closed ${fmtDateTimeIst(p.closed_at)}` : ""}
         {p.is_first_live_order ? " · 🟡 FIRST LIVE ORDER" : ""}
         {p.dhan_super_order_id ? ` · Order ${p.dhan_super_order_id}` : ""}
+        {/* AUDIT FIX (session22 cont'd): dhan_exit_order_id was captured by
+            reconcile.py for every closed position but never returned by the
+            API or shown here — only the entry/bracket order id was visible,
+            so there was no way to see which specific leg (target or stop)
+            actually filled. Only shown when it's a real, distinct order id
+            (reconcile.py falls back to the super order id itself when
+            Dhan's leg payload omits its own orderId, in which case there's
+            nothing new to show). */}
+        {p.dhan_exit_order_id && p.dhan_exit_order_id !== p.dhan_super_order_id
+          ? ` · Exit Order ${p.dhan_exit_order_id}`
+          : ""}
       </p>
     </div>
   );

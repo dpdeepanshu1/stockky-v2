@@ -195,43 +195,70 @@ def fetch_symbol_bars(symbol: str, period: str, interval: str) -> Tuple[List[Bar
 
 def fetch_symbol_bars_angelone(
     symbol: str, token: str, session, base_url: str, interval_code: str,
-    from_dt: datetime, to_dt: datetime,
+    from_dt: datetime, to_dt: datetime, max_retries: int = 3, retry_delay: float = 2.0,
 ) -> Tuple[List[Bar], float]:
     """Real historical OHLCV via AngelOne's SmartAPI getCandleData — the
     same broker/account main.py's live feed authenticates against (see
     feed/angelone_session.py). Returns (bars, fetch_seconds). Works
     regardless of whether the market is open right now; it just returns
-    whatever completed candles exist in [from_dt, to_dt]."""
+    whatever completed candles exist in [from_dt, to_dt].
+
+    AUDIT NOTE: AngelOne's historical-candle endpoint rate-limits more
+    strictly than the rest of SmartAPI — in practice this can mean 403s
+    (not the 429 you'd expect from a clean rate limiter) on a fraction of
+    calls even at a conservative --request-delay, and which symbols get
+    hit looks essentially random from call to call. Retrying with a longer
+    backoff clears it almost every time, so that's what this does instead
+    of giving up on the first 403/429/5xx — a real network outage or an
+    actually-invalid token will still exhaust all retries and get logged."""
     import httpx
 
     t0 = time.perf_counter()
     bars: List[Bar] = []
-    try:
-        resp = httpx.post(
-            f"{base_url}/rest/secure/angelbroking/historical/v1/getCandleData",
-            headers=session.rest_headers(),
-            json={
-                "exchange": "NSE",
-                "symboltoken": token,
-                "interval": interval_code,
-                "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"),
-                "todate": to_dt.strftime("%Y-%m-%d %H:%M"),
-            },
-            timeout=20.0,
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        if not body.get("status"):
-            _log(f"  ! {symbol}: AngelOne historical API error ({body.get('message')})")
-        else:
-            for row in body.get("data") or []:
-                ts_str, o, h, l, c, v = row  # noqa: E741
-                bars.append(Bar(
-                    ts=datetime.fromisoformat(ts_str).timestamp(),
-                    open=float(o), close=float(c), volume=int(v or 0),
-                ))
-    except Exception as e:
-        _log(f"  ! {symbol}: fetch failed ({e})")
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = httpx.post(
+                f"{base_url}/rest/secure/angelbroking/historical/v1/getCandleData",
+                headers=session.rest_headers(),
+                json={
+                    "exchange": "NSE",
+                    "symboltoken": token,
+                    "interval": interval_code,
+                    "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"),
+                    "todate": to_dt.strftime("%Y-%m-%d %H:%M"),
+                },
+                timeout=20.0,
+            )
+            if resp.status_code in (403, 429) and attempt < max_retries:
+                # Near-certainly rate-limiting, not a real auth/permission
+                # failure — session.rest_headers() already carries a valid
+                # bearer token (we just used it successfully on other
+                # symbols in this same run). Back off and retry rather than
+                # silently dropping the symbol.
+                _log(f"  ~ {symbol}: HTTP {resp.status_code} (likely rate-limited), "
+                     f"retrying in {retry_delay:.1f}s ({attempt}/{max_retries})...")
+                time.sleep(retry_delay)
+                continue
+            resp.raise_for_status()
+            body = resp.json()
+            if not body.get("status"):
+                _log(f"  ! {symbol}: AngelOne historical API error ({body.get('message')})")
+            else:
+                for row in body.get("data") or []:
+                    ts_str, o, h, l, c, v = row  # noqa: E741
+                    bars.append(Bar(
+                        ts=datetime.fromisoformat(ts_str).timestamp(),
+                        open=float(o), close=float(c), volume=int(v or 0),
+                    ))
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries:
+                time.sleep(retry_delay)
+    if last_err is not None:
+        _log(f"  ! {symbol}: fetch failed after {max_retries} attempts ({last_err})")
     return bars, time.perf_counter() - t0
 
 
@@ -259,11 +286,13 @@ def main() -> int:
     ap.add_argument("--service-dir", default=".", help="Path to position-stocks-service/ (default: cwd)")
     ap.add_argument("--symbols", default="", help="Comma-separated NSE symbols (overrides default 50)")
     ap.add_argument("--symbols-file", default="", help="File with one NSE symbol per line")
-    ap.add_argument("--count", type=int, default=50, help="Trim symbol list to this many (default 50)")
+    ap.add_argument("--count", type=int, default=50, help="Trim symbol list to at most this many (default 50 — the built-in list only has 50 symbols; pass --symbols/--symbols-file for more)")
     ap.add_argument("--data-source", choices=["angelone", "yfinance"], default="angelone",
                      help="Historical-data source (default: angelone — your live broker, no extra pip installs)")
     ap.add_argument("--days", type=int, default=5, help="[angelone] lookback window in days (default 5, so a holiday/weekend still has a completed session)")
-    ap.add_argument("--request-delay", type=float, default=0.4, help="[angelone] seconds to sleep between historical-candle calls, to stay under SmartAPI's rate limit (default 0.4)")
+    ap.add_argument("--request-delay", type=float, default=1.0, help="[angelone] seconds to sleep between historical-candle calls (default 1.0 — AngelOne's historical endpoint rate-limits more strictly than the rest of SmartAPI; failed calls are retried automatically regardless, see --retry-delay/--max-retries)")
+    ap.add_argument("--max-retries", type=int, default=3, help="[angelone] retry attempts per symbol on HTTP 403/429/error before giving up (default 3)")
+    ap.add_argument("--retry-delay", type=float, default=2.0, help="[angelone] seconds to back off before retrying a failed/rate-limited call (default 2.0)")
     ap.add_argument("--period", default="5d", help="[yfinance] history period (default 5d)")
     ap.add_argument("--interval", default="1m", help="Bar interval — 1m/5m/15m/1h/1d (default 1m). Applies to both data sources.")
     ap.add_argument("--ticks-per-bar", type=int, default=12, help="Synthetic sub-ticks per real bar (default 12) — see module docstring")
@@ -342,7 +371,10 @@ def main() -> int:
                 bars_by_symbol[sym] = []
                 per_symbol_fetch_s[sym] = 0.0
                 continue
-            bars, secs = fetch_symbol_bars_angelone(sym, token, session, base_url, interval_code, from_dt, to_dt)
+            bars, secs = fetch_symbol_bars_angelone(
+                sym, token, session, base_url, interval_code, from_dt, to_dt,
+                max_retries=args.max_retries, retry_delay=args.retry_delay,
+            )
             bars_by_symbol[sym] = bars
             per_symbol_fetch_s[sym] = secs
             _log(f"  [{i}/{len(symbols)}] {sym}: {len(bars)} bars in {secs:.2f}s")

@@ -114,16 +114,26 @@ IST = ZoneInfo("Asia/Kolkata")
 # Not a curated "good stocks" list — just a broad, liquid sample so the
 # screener/quality-gate stages have enough real symbols to say something
 # meaningful about timing and gate behavior. Override with --symbols/--symbols-file.
+#
+# MAINTENANCE: this is a static list, so it WILL drift as corporate actions
+# happen (renames, demergers, delistings) — e.g. this list originally had
+# "TATAMOTORS", which stopped resolving after Tata Motors' Oct-Nov 2025
+# passenger/commercial demerger (the passenger-vehicle successor trades as
+# TMPV), and "VEDANTA", which was simply the wrong ticker all along (Vedanta
+# Limited trades as VEDL, not VEDANTA). If a future run logs "no AngelOne
+# token found" for a symbol here, it's almost always one of these two
+# things — check the company's current NSE ticker rather than assuming the
+# harness is broken.
 DEFAULT_SYMBOLS = [
     "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "HINDUNILVR",
     "ITC", "SBIN", "BHARTIARTL", "KOTAKBANK", "LT", "AXISBANK",
     "BAJFINANCE", "ASIANPAINT", "MARUTI", "SUNPHARMA", "TITAN", "WIPRO",
     "ULTRACEMCO", "NESTLEIND", "HCLTECH", "NTPC", "POWERGRID", "M&M",
-    "TATAMOTORS", "TATASTEEL", "JSWSTEEL", "ADANIENT", "ADANIPORTS",
+    "TMPV", "TATASTEEL", "JSWSTEEL", "ADANIENT", "ADANIPORTS",
     "COALINDIA", "BAJAJFINSV", "HDFCLIFE", "SBILIFE", "GRASIM", "DRREDDY",
     "CIPLA", "DIVISLAB", "EICHERMOT", "HEROMOTOCO", "BAJAJ-AUTO",
     "BRITANNIA", "TECHM", "INDUSINDBK", "APOLLOHOSP", "UPL", "BPCL",
-    "ONGC", "SHREECEM", "VEDANTA", "PIDILITIND",
+    "ONGC", "SHREECEM", "VEDL", "PIDILITIND",
 ]
 
 # AngelOne SmartAPI historical-candle interval codes — see

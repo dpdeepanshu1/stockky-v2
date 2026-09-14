@@ -27,28 +27,81 @@ IST = ZoneInfo("Asia/Kolkata")
 _MARKET_OPEN = _time(9, 15)
 _MARKET_CLOSE = _time(15, 30)
 
+# ── NSE/BSE trading holidays ─────────────────────────────────────────────
+# AUDIT FIX (2026-09-14, live incident): is_market_open_ist() below used to
+# check ONLY weekday + hours — zero exchange-holiday awareness. Today,
+# 2026-09-14, is Ganesh Chaturthi (an NSE/BSE trading holiday), but since
+# it's a Monday inside 09:15-15:30 IST, the old check returned True all
+# day, so auto_pilot.py kept attempting cycles on a day the exchange was
+# actually closed, and notification-scheduler-service separately fired its
+# own scan/notify messages for the same reason (its own stale holiday
+# list, see that service's scheduler/run_once.py).
+#
+# Root cause was two-fold: (1) this function never consulted ANY holiday
+# list, and (2) the other holiday lists that DO exist elsewhere in this
+# repo were themselves stale/wrong and also missing 2026-09-14. Fixed both:
+# this function now consults the local set below, verified against NSE's
+# official 2026 trading-holiday circular (cross-checked via the Zerodha
+# holiday calendar, which mirrors NSE's list) as of 2026-09-14. This is the
+# only exchange-holiday check in this service's request path, so every
+# is_market_open_ist()/is_ist_weekday() call site (cycle_runner.py,
+# auto_pilot.py, dynamic_universe.py, entry_engine.py, manual_engine.py)
+# gets holiday-awareness "for free" from this one fix.
+#
+# MAINTENANCE: there is still no shared import path between services (each
+# is a separately-deployed container — see config.py's isolation note), so
+# this exact list is duplicated in FOUR places and must be updated in ALL
+# of them every year, or this exact bug recurs:
+#   - services/real-trade-service/tz_utils.py          (this file)
+#   - services/position-stocks-service/tz_utils.py      (identical copy)
+#   - services/api-gateway/nse_holidays.py              (_NSE_HOLIDAYS)
+#   - services/notification-scheduler-service/scheduler/run_once.py (HOLIDAYS_2026)
+# Run scripts/check_holiday_lists_sync.py after editing any one of them —
+# it fails loudly if the four have drifted apart again.
+_NSE_HOLIDAYS_2026 = {
+    "2026-01-15",  # Maharashtra Municipal Corporation elections
+    "2026-01-26",  # Republic Day
+    "2026-03-03",  # Holi
+    "2026-03-26",  # Ram Navami
+    "2026-03-31",  # Mahavir Jayanti
+    "2026-04-03",  # Good Friday
+    "2026-04-14",  # Dr. Ambedkar Jayanti
+    "2026-05-01",  # Maharashtra Day
+    "2026-05-28",  # Bakri Eid (Eid ul-Adha)
+    "2026-06-26",  # Muharram
+    "2026-09-14",  # Ganesh Chaturthi — the date missing that caused this fix
+    "2026-10-02",  # Gandhi Jayanti
+    "2026-10-20",  # Dussehra
+    "2026-11-10",  # Diwali Balipratipada
+    "2026-11-24",  # Guru Nanak Jayanti
+    "2026-12-25",  # Christmas
+}
+
+
+def is_nse_holiday(now: Optional[datetime] = None) -> bool:
+    """True if the given (or current) IST calendar date is an NSE/BSE
+    trading holiday. See _NSE_HOLIDAYS_2026 above for source and the
+    multi-file maintenance note."""
+    ist_dt = (now or datetime.now(timezone.utc)).astimezone(IST)
+    return ist_dt.strftime("%Y-%m-%d") in _NSE_HOLIDAYS_2026
+
 
 def is_market_open_ist(now: Optional[datetime] = None) -> bool:
-    """Best-effort NSE market-hours check: Mon–Fri, 09:15–15:30 IST.
-    Deliberately does NOT know about exchange holidays (that list lives in
-    notification-scheduler-service/scheduler/run_once.py's HOLIDAYS_2026,
-    a separate service with no shared import path here) — auto-pilot will
-    still attempt a cycle on a holiday, but every order it could place
-    still goes through market_feed's live quote + the risk engine, so a
-    holiday with no ticks simply produces WAIT/no-price outcomes rather
-    than a bad order. Good enough for gating a background loop; NOT a
-    substitute for a real trading-calendar check inside the risk engine
-    itself (that remains a Phase 3 TODO — exchange-holiday awareness, not
-    the weekday/hours check this function already does; as of 2026-09-10
-    this function is wired into every account-state builder in the service
-    that feeds risk_engine.evaluate() — entry_engine.py, manual_engine.py,
-    and main.py's risk_engine_check dry-run route — the only intentional
-    exception is offline_test_harness.py's synthetic DEMO account, which
-    fixes it True on purpose for deterministic offline test output)."""
-    ist_now = (now or datetime.now(timezone.utc)).astimezone(IST)
-    if ist_now.weekday() >= 5:  # Saturday=5, Sunday=6
+    """NSE market-hours check: Mon–Fri, 09:15–15:30 IST, EXCLUDING NSE/BSE
+    trading holidays (_NSE_HOLIDAYS_2026 above — fixed 2026-09-14; this
+    used to be weekday+hours only, see the AUDIT FIX comment above for the
+    incident that caused the fix). This function is wired into every
+    account-state builder in the service that feeds risk_engine.evaluate()
+    — entry_engine.py, manual_engine.py, and main.py's risk_engine_check
+    dry-run route — the only intentional exception is
+    offline_test_harness.py's synthetic DEMO account, which fixes it True
+    on purpose for deterministic offline test output."""
+    ist_dt = (now or datetime.now(timezone.utc)).astimezone(IST)
+    if ist_dt.weekday() >= 5:  # Saturday=5, Sunday=6
         return False
-    return _MARKET_OPEN <= ist_now.time() <= _MARKET_CLOSE
+    if ist_dt.strftime("%Y-%m-%d") in _NSE_HOLIDAYS_2026:
+        return False
+    return _MARKET_OPEN <= ist_dt.time() <= _MARKET_CLOSE
 
 
 def as_aware(dt: Optional[datetime]) -> Optional[datetime]:

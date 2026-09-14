@@ -99,6 +99,7 @@ async def refresh_watchlist(db: Session, mode: str) -> int:
             symbol=sym,
             catalyst_type=ctype,
             catalyst_price=float(catalyst_price),
+            catalyst_price_source=c.get("catalyst_price_source"),
             catalyst_ts=ts,
             horizon_class=profile["horizon_class"],
             decay_half_life_days=profile["decay_half_life_days"],

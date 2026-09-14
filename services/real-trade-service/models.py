@@ -489,6 +489,24 @@ class WatchlistEntry(Base):
 
     catalyst_type = Column(String(16), nullable=False)    # "bulk_block"|"insider"|"results"|"board"|"ipo"|"volume_shock"
     catalyst_price = Column(Float, nullable=False, default=0.0)  # 0.0 = unknown (Tier 3 rows set on first sight)
+    # AUDIT FIX (this session): a diagnostic gap found while investigating a
+    # run of "missed" board/bulk_block/results catalysts that overran their
+    # entry_band_pct by a moderate, consistent margin even though the
+    # per-cycle trigger pass (entry_engine.evaluate_watchlist_entries) runs
+    # every AUTO_PILOT_INTERVAL_SECONDS (~3 min) — too fast to explain a
+    # multi-percent overrun by our own polling latency alone. The likely
+    # cause: watchlist_engine/sources.py's Tier 1 normalizer sets
+    # catalyst_price = item.get("price") or item.get("close") — for any hot-
+    # pick item whose live "price" field is absent, catalyst_price silently
+    # becomes the PREVIOUS trading day's close instead of a live tick. Any
+    # overnight gap is then counted as "move since catalyst" even though it
+    # happened before we ever saw the catalyst, making entry_band_pct look
+    # too tight when the real issue is a stale reference price. This column
+    # records which one was actually used so a future calibration pass (see
+    # scripts/calibrate_decay_profiles.py) can separate genuine
+    # too-tight-band misses from stale-price misses instead of conflating
+    # them — it does not change any entry/trigger decision by itself.
+    catalyst_price_source = Column(String(16), nullable=True)  # "live"|"close"|"unknown"|None (Tier 3 / pre-migration rows)
     catalyst_ts = Column(DateTime, nullable=False, default=_now)
 
     horizon_class = Column(String(8), nullable=False)     # "short" | "mid" | "long"

@@ -142,10 +142,20 @@ def _normalize_tier1(payload: dict) -> list[dict]:
             sym = (item.get("symbol") or "").upper()
             if not sym:
                 continue
+            # See models.py WatchlistEntry.catalyst_price_source docstring:
+            # "close" here means the live "price" field was absent and we
+            # fell back to the previous day's close, which can make a
+            # later band-check overrun look like a too-tight band when it's
+            # really a stale reference price (an overnight gap counted as
+            # "move since catalyst").
+            price_source = "live" if item.get("price") is not None else (
+                "close" if item.get("close") is not None else "unknown"
+            )
             out.append({
                 "symbol":          sym,
                 "catalyst_type":   ctype,
                 "catalyst_price":  item.get("price") or item.get("close"),
+                "catalyst_price_source": price_source,
                 "catalyst_ts":     _batch_ts,
                 "source_tier":     1,
                 "conviction_score": item.get("score"),
@@ -162,6 +172,7 @@ def _normalize_tier1(payload: dict) -> list[dict]:
         sym = (item.get("symbol") or "").upper()
         if not sym:
             continue
+        ipo_price = item.get("current_price") or item.get("cmp") or item.get("price")
         # BUG FIX (2026-09-12): ipo_scanner.py's rows never carry a top-level
         # "score" or "cmp"/"price" field — see the matching fix (and full
         # explanation) in candidate_engine/candidates.py's _rows_from_ipo().
@@ -173,7 +184,8 @@ def _normalize_tier1(payload: dict) -> list[dict]:
         out.append({
             "symbol":          sym,
             "catalyst_type":   "ipo",
-            "catalyst_price":  item.get("current_price") or item.get("cmp") or item.get("price"),
+            "catalyst_price":  ipo_price,
+            "catalyst_price_source": "live" if ipo_price is not None else "unknown",
             "catalyst_ts":     _parse_ts(item.get("listing_date")),
             "source_tier":     1,
             "conviction_score": item.get("ipo_score") if item.get("ipo_score") is not None else item.get("score"),
@@ -202,6 +214,7 @@ def _classify_tier2(payload: dict) -> list[dict]:
             "symbol":          sym,
             "catalyst_type":   tags[0],
             "catalyst_price":  item.get("price"),
+            "catalyst_price_source": "live" if item.get("price") is not None else "unknown",
             "catalyst_ts":     _parse_ts(item.get("ts") or item.get("detected_at")),
             "source_tier":     2,
             "conviction_score": None,
@@ -227,6 +240,7 @@ async def _tier3_volume_shock() -> list[dict]:
                 "symbol":           s.upper(),
                 "catalyst_type":    "volume_shock",
                 "catalyst_price":   None,
+                "catalyst_price_source": None,  # set to "live" in entry.py once the first real tick establishes it
                 "catalyst_ts":      None,
                 "source_tier":      3,
                 "conviction_score": None,

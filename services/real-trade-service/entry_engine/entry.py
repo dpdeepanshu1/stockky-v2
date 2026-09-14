@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 import config
 import models
 from audit.logger import log_action
-from execution import dhan_client
+from execution import dhan_client, shared_order_budget
 from market_feed.feed import get_quotes, get_preview_quotes, MARKET_DATA_URL
 from notifier import notify_async
 from portfolio.portfolio import get_account, held_exposure_positions, record_real_order_sent
@@ -902,6 +902,33 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         if mode == "REAL":
             try:
                 security_id   = dhan_client.get_security_id(db, cand.symbol)
+                # AUDIT FIX (this session): the shared cross-service Dhan
+                # account-wide order-rate guard (execution/shared_order_budget.py)
+                # was wired into manual_engine.py's manual BUY path and into
+                # exit_engine.py's exits, but never into this — the AUTOMATIC
+                # entry path, by far the highest-volume order-placement route
+                # in this service (every auto-pilot cycle, for every symbol
+                # that clears risk_evaluate). Since the entire point of the
+                # shared budget is to catch real-trade-service +
+                # position-stocks-service combined approaching Dhan's real
+                # account-wide order cap (manual_engine.py's own comment: "the
+                # automatic entry path is not gated by this" — true, but that
+                # left the highest-volume path uncovered, undermining most of
+                # what the shared guard exists for), leaving this path out
+                # meant the two services' combined order volume was never
+                # actually being tracked/gated for the case that matters most.
+                # Checked here, right before the real Dhan call — same
+                # fail-open behavior and same failure-handling shape as
+                # manual_engine.py's identical check (a RuntimeError here
+                # is caught by the except block just below and turned into a
+                # clean REJECTED/WAIT outcome, same as any other Dhan
+                # placement failure).
+                if not shared_order_budget.check_and_reserve(db):
+                    raise RuntimeError(
+                        "Shared Dhan account-wide order budget exhausted for today "
+                        "(shared with position-stocks-service) — try again tomorrow "
+                        "or raise SHARED_DAILY_ORDER_BUDGET."
+                    )
                 broker_result = dhan_client.place_order(
                     db, is_armed=gate_armed,
                     security_id=security_id,
@@ -1170,6 +1197,7 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
         #     next market session for intraday-created entries).
         if row.catalyst_price == 0.0:
             row.catalyst_price = price
+            row.catalyst_price_source = "live"  # AUDIT FIX (this session): this branch always sets it from a real tick fetched this cycle — see models.py's docstring
             row.updated_at = now
             db.commit()
             if row.source_tier == 3:

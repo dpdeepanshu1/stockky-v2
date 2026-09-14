@@ -12,6 +12,13 @@ import {
   type ScalpTradeHistory, type DhanLiveOrders, type ScalpCycleResult, type DhanAccountStatus,
   type ScalpCandidateLogRow,
 } from "../positionStocksApi";
+// Cross-service, read-only: real-trade-service's own account bookkeeping,
+// used only to populate the "Real Trade Service" side of CapitalSplitCard
+// below (see that component's docstring for why this is a best-effort,
+// non-blocking call — this dashboard must keep working even if real-
+// trade-service's URL isn't configured in this browser).
+import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
+import CapitalSplitCard from "./CapitalSplitCard";
 
 type Window = "1m" | "5m" | "15m" | "60m";
 
@@ -135,6 +142,11 @@ export default function PositionStocksTab() {
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [candidateLog, setCandidateLog] = useState<ScalpCandidateLogRow[]>([]);
   const [candidateLogError, setCandidateLogError] = useState<string | null>(null);
+  // Real Trade Service's own account figures, fetched cross-service purely
+  // to populate CapitalSplitCard (see that component's docstring) — this
+  // dashboard's own data (status/ledger/dhanAccount above) never depends on it.
+  const [rtCashAvailable, setRtCashAvailable] = useState<number | null>(null);
+  const [rtAccountError, setRtAccountError] = useState<string | null>(null);
 
   // Sub-tabs — the page used to be one long scroll of every section at
   // once; grouped into tabs so each screen only shows what's relevant to
@@ -225,6 +237,28 @@ export default function PositionStocksTab() {
     }
   }, []);
 
+  // Real Trade Service's account figures, for the Capital Split card below.
+  // No admin login required — gateStatus() is a public read (see
+  // realTradeApi.ts) — and no auth token is shared between the two
+  // services anyway, so this only ever needs real-trade-service's own URL
+  // to be configured somewhere in this browser (Real Automatic Trade tab's
+  // own Settings). Best-effort: if that URL isn't set, or the service is
+  // unreachable, the card just shows the computed reference split instead.
+  const loadRealTradeAccount = useCallback(async () => {
+    if (!getRealTradeApiUrl()) {
+      setRtAccountError("Real Trade Service URL not configured in this browser.");
+      return;
+    }
+    try {
+      const s = await realTradeApi.gateStatus("REAL");
+      setRtCashAvailable(s.account.cash_available);
+      setRtAccountError(null);
+    } catch (e: any) {
+      setRtCashAvailable(null);
+      setRtAccountError(e?.message || "Failed to reach Real Trade Service");
+    }
+  }, []);
+
   useEffect(() => {
     const id = window.setInterval(() => setNowTick(Date.now()), 1000);
     return () => window.clearInterval(id);
@@ -235,12 +269,14 @@ export default function PositionStocksTab() {
     void loadDhanLive();
     void loadDhanAccount();
     void loadCandidateLog();
+    void loadRealTradeAccount();
     const t = setInterval(() => void loadAll(), 15_000);
     const td = setInterval(() => void loadDhanLive(), 30_000);
     const ta = setInterval(() => void loadDhanAccount(), 30_000);
     const tc = setInterval(() => void loadCandidateLog(), 15_000);
-    return () => { clearInterval(t); clearInterval(td); clearInterval(ta); clearInterval(tc); };
-  }, [loadAll, loadDhanLive, loadDhanAccount, loadCandidateLog]);
+    const tr = setInterval(() => void loadRealTradeAccount(), 30_000);
+    return () => { clearInterval(t); clearInterval(td); clearInterval(ta); clearInterval(tc); clearInterval(tr); };
+  }, [loadAll, loadDhanLive, loadDhanAccount, loadCandidateLog, loadRealTradeAccount]);
 
   const saveApiUrl = () => { setPositionStocksApiUrl(apiUrlInput); void loadAll(); };
 
@@ -453,6 +489,17 @@ export default function PositionStocksTab() {
           </p>
         )}
       </div>
+
+      {/* ── Capital split (this service + Real Trade Service) ── */}
+      <CapitalSplitCard
+        totalBalance={pickNum(dhanAccount?.funds, "availabelBalance", "availableBalance", "availableCash")}
+        splitPct={status?.scalp_pool_capital_share_pct ?? null}
+        positionStocksAllocated={ledger?.total_allocated_capital ?? null}
+        positionStocksAvailable={ledger?.available_capital ?? null}
+        realTradeCashAvailable={rtCashAvailable}
+        realTradeError={rtAccountError}
+        highlight="position_stocks"
+      />
 
       {/* ── 6-cell status grid ── */}
       <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">

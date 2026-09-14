@@ -236,12 +236,33 @@ def main():
                 # suggestion.
                 current_band = current["entry_band_pct"]
                 live_overruns, stale_overruns = [], []
+                # AUDIT FIX (this session): before drawing any conclusion about
+                # entry_band_pct from these overruns, separate out misses whose
+                # catalyst_price came from a stale previous-close fallback
+                # rather than a live tick (see models.py WatchlistEntry.
+                # catalyst_price_source docstring) — those overruns are
+                # contaminated by an overnight gap counted as "move since
+                # catalyst" and say nothing reliable about whether the band
+                # itself is too tight. Rows from before this migration have
+                # catalyst_price_source=None ("unknown") and are folded into
+                # live_overruns as before (no regression for existing data).
+                close_fallback_overruns = 0
                 for e in missed:
                     m = _MISSED_REASON_RE.search(e.missed_reason or "")
                     if not m:
                         continue
                     o = float(m.group(1)) / 100
+                    if getattr(e, "catalyst_price_source", None) == "close":
+                        close_fallback_overruns += 1
+                        continue
                     (live_overruns if e.entry_band_pct == current_band else stale_overruns).append(o)
+
+                if close_fallback_overruns:
+                    print(f"  -> {close_fallback_overruns}/{len(missed)} misses had catalyst_price_source="
+                          f"\"close\" (stale previous-close reference, not a live tick — see sources.py's "
+                          f"Tier 1 normalizer) — excluded from the band suggestion below; these say "
+                          f"nothing about whether entry_band_pct is too tight, only that the reference "
+                          f"price itself was stale")
 
                 if stale_overruns:
                     print(f"  -> {len(stale_overruns)}/{len(missed)} misses were evaluated under an "

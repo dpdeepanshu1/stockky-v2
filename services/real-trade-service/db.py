@@ -143,6 +143,7 @@ def init_schema() -> None:
     _ensure_account_columns(eng, dialect())
     _ensure_candidate_overnight_column(eng, dialect())
     _ensure_source_tab_columns(eng, dialect())
+    _ensure_catalyst_price_source_column(eng, dialect())
 
 
 # 2026-08-27 data fixup: docker-compose.yml/.env.example/.env.oracle.example
@@ -558,6 +559,39 @@ def _ensure_source_tab_columns(engine, dialect_name: str) -> None:
             if "already exists" in m.lower() or "ORA-01430" in m:
                 continue
             logger.warning("real-trade-db: could not add %s.%s: %s", table_name, col_name, e)
+
+
+# AUDIT FIX (this session): trade_watchlist predates catalyst_price_source
+# (see models.py's WatchlistEntry docstring for why this column exists) —
+# same additive-migration idiom as every _ensure_* fn above. Nullable, no
+# default: every pre-existing row reads as NULL ("unknown, pre-migration"),
+# which is exactly correct — we genuinely don't know whether those rows'
+# catalyst_price came from a live tick or a stale close, and NULL says so
+# rather than guessing.
+def _ensure_catalyst_price_source_column(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    table_name, col_name = "trade_watchlist", "catalyst_price_source"
+    try:
+        existing = {c["name"] for c in inspect(engine).get_columns(table_name)}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect %s columns: %s", table_name, e)
+        return
+    if col_name in existing:
+        return
+    if dialect_name == "oracle":
+        sql = f"ALTER TABLE {table_name} ADD ({col_name} VARCHAR2(16))"
+    else:
+        sql = f"ALTER TABLE {table_name} ADD COLUMN {col_name} VARCHAR(16)"
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+        logger.info("real-trade-db: added %s.%s", table_name, col_name)
+    except Exception as e:
+        m = str(e)
+        if "already exists" in m.lower() or "ORA-01430" in m:
+            return
+        logger.warning("real-trade-db: could not add %s.%s: %s", table_name, col_name, e)
 
 
 def _ensure_oracle_autoincrement(engine, base) -> None:

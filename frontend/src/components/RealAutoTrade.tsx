@@ -6,6 +6,12 @@ import {
   type PipelineStatus, type CandidateRow, type WatchlistEntry, type ResilienceStatus,
 } from "../realTradeApi";
 import ManualTradeTicket from "./trading/ManualTradeTicket";
+// Cross-service, read-only: position-stocks-service's own capital ledger
+// and split percentage, used only to populate the "Position Stocks" side
+// of CapitalSplitCard below (see that component's docstring for why this
+// is a best-effort, non-blocking call).
+import { positionStocksApi, getPositionStocksApiUrl } from "../positionStocksApi";
+import CapitalSplitCard from "./CapitalSplitCard";
 
 type Mode = "DEMO" | "REAL";
 type Tab = "overview" | "live" | "positions" | "orders" | "watchlist" | "pipeline" | "charges" | "log";
@@ -728,6 +734,13 @@ export default function RealAutoTrade() {
   const [dhanClientId, setDhanClientId] = useState("");
   const [dhanToken, setDhanToken] = useState("");
   const [dhanAccount, setDhanAccount] = useState<(DhanStatus & { funds: any; funds_error: string | null }) | null>(null);
+  // Position Stocks Service's own capital ledger + split pct, fetched
+  // cross-service purely to populate CapitalSplitCard below (see that
+  // component's docstring) — nothing else on this dashboard depends on it.
+  const [psAllocated, setPsAllocated] = useState<number | null>(null);
+  const [psAvailable, setPsAvailable] = useState<number | null>(null);
+  const [psSplitPct, setPsSplitPct] = useState<number | null>(null);
+  const [psError, setPsError] = useState<string | null>(null);
   const [networkCheck, setNetworkCheck] = useState<{ outbound_ip: string | null; note: string } | null>(null);
   const [edisSummary, setEdisSummary] = useState<DhanEdisSummary | null>(null);
   const [edisBusy, setEdisBusy] = useState(false);
@@ -912,6 +925,30 @@ export default function RealAutoTrade() {
     }
   };
 
+  // Position Stocks Service's capital ledger + split pct, for the Capital
+  // Split card below. Both GET /ledger and GET /status on that service are
+  // public reads (no admin session needed there) — this only ever needs
+  // position-stocks-service's own URL to be configured somewhere in this
+  // browser (its own Settings tab). Best-effort: if that URL isn't set, or
+  // the service is unreachable, the card falls back to a computed 50/50
+  // reference split instead.
+  const loadPositionStocksLedger = async () => {
+    if (!getPositionStocksApiUrl()) {
+      setPsError("Position Stocks Service URL not configured in this browser.");
+      return;
+    }
+    try {
+      const [l, s] = await Promise.all([positionStocksApi.ledger(), positionStocksApi.status()]);
+      setPsAllocated(l.total_allocated_capital);
+      setPsAvailable(l.available_capital);
+      setPsSplitPct(s.scalp_pool_capital_share_pct);
+      setPsError(null);
+    } catch (e: any) {
+      setPsAllocated(null); setPsAvailable(null);
+      setPsError(e?.message || "Failed to reach Position Stocks Service");
+    }
+  };
+
   useEffect(() => {
     if (getRealTradeApiUrl()) void loadStatus(mode);
   }, [mode, loadStatus]);
@@ -941,6 +978,7 @@ export default function RealAutoTrade() {
   useEffect(() => {
     if ((activeTab === "live" || activeTab === "charges") && mode === "REAL" && loggedIn) {
       void loadLiveDhanData();
+      void loadPositionStocksLedger();
     }
     if (activeTab === "log") void loadAudit();
   }, [activeTab, mode, loggedIn]);
@@ -1713,6 +1751,19 @@ export default function RealAutoTrade() {
                   {/* Balance allocation */}
                   {dhanAccount?.funds && (
                     <BalanceAllocation funds={dhanAccount.funds} positions={livePositions} />
+                  )}
+
+                  {/* Capital split (this service + Position Stocks Service) */}
+                  {dhanAccount?.funds && (
+                    <CapitalSplitCard
+                      totalBalance={pickNum(dhanAccount.funds, "availabelBalance", "availableBalance", "availableCash")}
+                      splitPct={psSplitPct}
+                      positionStocksAllocated={psAllocated}
+                      positionStocksAvailable={psAvailable}
+                      positionStocksError={psError}
+                      realTradeCashAvailable={status?.account?.cash_available ?? null}
+                      highlight="real_trade"
+                    />
                   )}
 
                   {/* Live positions */}

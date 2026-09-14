@@ -42,10 +42,40 @@ DAILY_PICKS_KEY = "stockky:scheduler:picks:"
 LAST_SCAN_KEY = "stockky:scheduler:last_scan_timestamp"
 START_MSG_KEY = "stockky:scheduler:start_msg:"
 
+# AUDIT FIX (2026-09-14, live incident): this list was missing 2026-09-14
+# (Ganesh Chaturthi) entirely, and several other entries were simply wrong
+# dates (e.g. "2026-03-02" for Holi, which actually falls on 2026-03-03;
+# "2026-04-02" and "2026-04-10", which aren't holidays at all; "2026-10-22"
+# for Dussehra, which actually falls on 2026-10-20). is_holiday() below
+# correctly skipped scans/notifications on the dates it recognized, but
+# since today wasn't one of the dates in this list, this script ran its
+# full scan + sent notifications on a day the exchange was actually
+# closed — the same root cause as position-stocks-service's/real-trade-
+# service's is_market_open_ist() having zero holiday awareness at all (see
+# those services' tz_utils.py). Replaced with the verified official 2026
+# NSE trading-holiday list (cross-checked against the Zerodha holiday
+# calendar, which mirrors NSE's circular) as of 2026-09-14. This list is
+# duplicated in three other places with no shared import path between
+# services — see api-gateway/nse_holidays.py's _NSE_HOLIDAYS and
+# position-stocks-service/real-trade-service's tz_utils.py; run
+# scripts/check_holiday_lists_sync.py after editing any one of them.
 HOLIDAYS_2026 = [
-    "2026-01-26", "2026-03-02", "2026-03-31", "2026-04-02",
-    "2026-04-10", "2026-04-14", "2026-05-01", "2026-08-15",
-    "2026-10-02", "2026-10-22", "2026-11-14", "2026-11-15", "2026-12-25",
+    "2026-01-15",  # Maharashtra Municipal Corporation elections
+    "2026-01-26",  # Republic Day
+    "2026-03-03",  # Holi
+    "2026-03-26",  # Ram Navami
+    "2026-03-31",  # Mahavir Jayanti
+    "2026-04-03",  # Good Friday
+    "2026-04-14",  # Dr. Ambedkar Jayanti
+    "2026-05-01",  # Maharashtra Day
+    "2026-05-28",  # Bakri Eid (Eid ul-Adha)
+    "2026-06-26",  # Muharram
+    "2026-09-14",  # Ganesh Chaturthi — the date missing that caused this fix
+    "2026-10-02",  # Gandhi Jayanti
+    "2026-10-20",  # Dussehra
+    "2026-11-10",  # Diwali Balipratipada
+    "2026-11-24",  # Guru Nanak Jayanti
+    "2026-12-25",  # Christmas
 ]
 
 _redis = None

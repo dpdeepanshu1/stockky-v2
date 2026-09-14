@@ -93,6 +93,11 @@ export interface ScalpStatus {
   orders_placed_today: number;
   daily_loss_kill_switch: boolean;
   eod_squareoff_fired_date: string | null;
+  // AUDIT ADD (this session): non-zero only after today's EOD squareoff has
+  // already run AND at least one position is still OPEN — i.e. the forced
+  // 3pm flatten failed for it (no notification channel exists in this
+  // service to alert on that any other way — see main.py's GET /status).
+  eod_squareoff_stragglers: number;
   // AUDIT ADD (this session): backend has always returned this (capital/
   // shared_order_budget.py's status()) but no frontend field ever typed or
   // rendered it — see PositionStocksTab.tsx's System Health grid.

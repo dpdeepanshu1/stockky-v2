@@ -550,6 +550,17 @@ export default function PositionStocksTab() {
 
       {subTab === "overview" && (
       <>
+      {/* AUDIT ADD (this session): highest-priority real-money banner on the
+          whole tab — deliberately placed first, above the arming sequence,
+          since this service has no Telegram/webhook notification channel
+          (unlike real-trade-service's notify_async EOD alert) to surface
+          this any other way. See GET /status's eod_squareoff_stragglers. */}
+      {!!status?.eod_squareoff_stragglers && (
+        <div className="rounded-xl border border-signal-sell/50 bg-signal-sell/15 px-3 py-2 font-display tabular-nums text-[11px] text-signal-sell">
+          ⚠ {status.eod_squareoff_stragglers} position(s) still OPEN after today's 3:00 PM EOD square-off —
+          the forced flatten failed for at least one. Check the Positions tab and close manually if needed.
+        </div>
+      )}
       {/* ── Arming sequence ── */}
       <div className="bg-graphite border border-slate rounded-2xl p-4">
         <p className="dash-section-title mb-3">Arming Sequence</p>

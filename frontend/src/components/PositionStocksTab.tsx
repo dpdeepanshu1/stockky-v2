@@ -117,6 +117,46 @@ function GateStep({ n, label, done }: { n: number; label: string; done: boolean 
   );
 }
 
+// AUDIT ADD (this session): one stage of the Run Cycle / Auto-Pilot
+// pipeline dashboard — WS Feed → Scan → Liquidity Gate → Rank → Quality
+// Gate → Entry. `metric` is the live number that stage is currently
+// producing (subscribed symbol count, candidates surfaced, etc.); `detail`
+// lines are the static configured rule(s) that stage enforces, pulled from
+// status.pipeline_config so they can never drift from what the backend is
+// actually doing.
+function PipelineStage({
+  n, title, metric, metricLabel, detail, active,
+}: {
+  n: number; title: string; metric?: string | number | null; metricLabel?: string;
+  detail: string[]; active: boolean;
+}) {
+  return (
+    <div className={`rounded-xl border p-3 flex-1 min-w-[150px] ${active ? "bg-signal-buy/5 border-signal-buy/20" : "bg-ink border-slate"}`}>
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <div className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold flex-shrink-0 ${
+          active ? "bg-signal-buy/20 text-signal-buy" : "bg-graphite text-mist"
+        }`}>{n}</div>
+        <p className="font-display tabular-nums text-[10px] uppercase tracking-widest text-mist">{title}</p>
+      </div>
+      {metric != null && (
+        <p className={`font-display tabular-nums text-lg font-bold ${active ? "text-signal-buy" : "text-paper"}`}>
+          {metric}
+          {metricLabel && <span className="text-[9px] text-mist ml-1 font-normal">{metricLabel}</span>}
+        </p>
+      )}
+      <div className="mt-1 space-y-0.5">
+        {detail.map((d, i) => (
+          <p key={i} className="font-display tabular-nums text-[9px] text-mist leading-tight">{d}</p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PipelineArrow() {
+  return <div className="hidden sm:flex items-center text-mist text-lg px-1 select-none">→</div>;
+}
+
 export default function PositionStocksTab() {
   const [apiUrlInput, setApiUrlInput] = useState(getPositionStocksApiUrl());
   const [status, setStatus] = useState<ScalpStatus | null>(null);
@@ -151,7 +191,7 @@ export default function PositionStocksTab() {
   // Sub-tabs — the page used to be one long scroll of every section at
   // once; grouped into tabs so each screen only shows what's relevant to
   // that task (arming/health/risk vs. screener vs. positions vs. history).
-  type SubTab = "overview" | "screener" | "positions" | "history" | "dhanorders" | "settings";
+  type SubTab = "overview" | "pipeline" | "screener" | "positions" | "history" | "dhanorders" | "charges" | "settings";
   const [subTab, setSubTab] = useState<SubTab>("overview");
 
   const [loggedIn, setLoggedIn] = useState(!!getSessionToken());
@@ -394,10 +434,12 @@ export default function PositionStocksTab() {
       <div className="flex flex-wrap gap-1 border-b border-slate pb-2">
         {([
           { id: "overview", label: "Overview" },
+          { id: "pipeline", label: "Pipeline" },
           { id: "screener", label: "Screener" },
           { id: "positions", label: `Positions (${openPositions.length})` },
           { id: "history", label: "Trade History" },
           { id: "dhanorders", label: "Dhan Live Orders" },
+          { id: "charges", label: "Charges" },
           { id: "settings", label: "Settings" },
         ] as { id: SubTab; label: string }[]).map(t => (
           <button
@@ -722,6 +764,97 @@ export default function PositionStocksTab() {
       </>
       )}
 
+      {subTab === "pipeline" && (
+      <>
+      {/* ── Run Cycle / Auto-Pilot pipeline dashboard ── */}
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <p className="dash-section-title">Run Cycle / Auto-Pilot — how a trade actually gets picked</p>
+          <div className="flex items-center gap-3 font-display tabular-nums text-[10px]">
+            <span className={status?.auto_pilot_enabled ? "text-signal-buy" : "text-mist"}>
+              ● Auto-Pilot {status?.auto_pilot_enabled ? "ON" : "OFF"}
+            </span>
+            <span className={status?.market_open ? "text-signal-buy" : "text-signal-hold"}>
+              ● Market {status?.market_open ? "Open" : "Closed"}
+            </span>
+          </div>
+        </div>
+        <p className="font-display tabular-nums text-[11px] text-mist mb-3">
+          When Auto-Pilot is ON and the market is open, this whole pipeline runs automatically every{" "}
+          <span className="text-paper font-bold">{status?.pipeline_config?.scan_interval_s ?? 10}s</span> — that's
+          the "Run Cycle" a manual click on the Overview tab also triggers on demand, once, right away.
+          Last automatic/manual run: <span className="text-paper">{status?.last_cycle_run_at ? fmtDateTimeIst(status.last_cycle_run_at) : "never yet"}</span>
+          {status?.last_cycle_run_trigger && <span className="text-mist"> ({status.last_cycle_run_trigger})</span>}.
+        </p>
+
+        <div className="flex flex-col sm:flex-row gap-1.5 items-stretch">
+          <PipelineStage
+            n={1} title="WS Feed" active={!!status?.ws?.connected}
+            metric={status?.ws?.subscribed_symbols ?? "—"} metricLabel="symbols live"
+            detail={[
+              "Every NSE-EQ stock, one shared WebSocket (LTP mode).",
+              status?.ws?.last_tick_at ? `Last tick: ${fmtDateTimeIst(status.ws.last_tick_at)}` : "No tick yet.",
+            ]}
+          />
+          <PipelineArrow />
+          <PipelineStage
+            n={2} title="Scan (all 4 windows)" active={(candidates?.length ?? 0) > 0}
+            metric={candidates?.length ?? 0} metricLabel="passed"
+            detail={[
+              `1m ≥ ${status?.pipeline_config?.windows["1m"] ?? "0.5"}%  ·  5m ≥ ${status?.pipeline_config?.windows["5m"] ?? "1.0"}%`,
+              `15m ≥ ${status?.pipeline_config?.windows["15m"] ?? "1.5"}%  ·  60m ≥ ${status?.pipeline_config?.windows["60m"] ?? "2.5"}%`,
+              `+ min activity floor (≈${status?.pipeline_config?.min_avg_volume ?? 50000} avg vol proxy)`,
+            ]}
+          />
+          <PipelineArrow />
+          <PipelineStage
+            n={3} title="Composite Rank" active={(candidates?.length ?? 0) > 0}
+            metric={candidates?.length ? `Top ${status?.pipeline_config?.quality_gate_top_n ?? 3}` : "—"}
+            detail={[
+              "score = %change × min(activity / floor, 3×)",
+              "Every passing symbol across all windows, ranked into one list — best score wins regardless of which window found it.",
+            ]}
+          />
+          <PipelineArrow />
+          <PipelineStage
+            n={4} title="Quality Gate" active={status?.pipeline_config?.quality_gate_enabled ?? true}
+            metric={candidateLog.length ? candidateLog.filter(c => c.decision === "ENTERED").length : "—"}
+            metricLabel={`entered / ${candidateLog.length || 0} logged`}
+            detail={[
+              `Fundamental ≥ ${status?.pipeline_config?.min_fundamental_score ?? 40}, Technical ≥ ${status?.pipeline_config?.min_technical_score ?? 40}`,
+              `Market cap ≥ ₹${status?.pipeline_config?.min_market_cap_cr ?? 500}cr (excludes micro-caps)`,
+              "Checked against analysis-intelligence-service, best-effort with timeout.",
+            ]}
+          />
+          <PipelineArrow />
+          <PipelineStage
+            n={5} title="Entry Decision" active={openPositions.length > 0}
+            metric={`${openPositions.length}/${status?.max_concurrent_scalp_positions ?? 5}`} metricLabel="open slots used"
+            detail={[
+              `Risk ${status?.risk_per_trade_pct ?? "—"}% of pool per trade`,
+              ledger ? `Pool available: ${fmtInr(ledger.available_capital)}` : "Pool capital not loaded.",
+              status?.daily_loss_kill_switch ? "⚠ Daily loss kill-switch TRIPPED — no new entries." : "Kill-switch clear.",
+            ]}
+          />
+        </div>
+      </div>
+
+      {/* ── Why the shortlist stays narrow ── */}
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        <p className="dash-section-title mb-2">Why the list stays short (narrowed down, not the whole market)</p>
+        <p className="font-display tabular-nums text-[11px] text-mist leading-relaxed">
+          Every NSE-EQ symbol is scanned every cycle (Stage 1+2 above) — nothing is skipped — but only symbols
+          clearing <span className="text-paper">all</span> of: the window's %-change floor, the activity/liquidity
+          floor, and not already an open position, ever become a "candidate". Of those, only the top{" "}
+          <span className="text-paper">{status?.pipeline_config?.quality_gate_top_n ?? 3}</span> by composite score
+          go to the Quality Gate (Stage 4) — which then narrows further on fundamentals/technicals/market-cap/catalyst.
+          What survives all of that is what actually gets sized and sent to Dhan. See the Candidate Log below the
+          Screener tab for the full "entered vs skipped, and why" trail — it's the audit record of every one of those decisions.
+        </p>
+      </div>
+      </>
+      )}
+
       {subTab === "screener" && (
       <>
       {/* ── Live screener ── */}
@@ -783,7 +916,7 @@ export default function PositionStocksTab() {
                 </tr>
               </thead>
               <tbody>
-                {candidateLog.slice(0, 50).map(c => (
+                {candidateLog.map(c => (
                   <tr key={c.id} className="border-b border-slate/50">
                     <td className="py-1 pr-3 text-paper font-bold">{c.symbol}</td>
                     <td className="py-1 pr-3 text-mist">{c.window_source}</td>
@@ -899,22 +1032,30 @@ export default function PositionStocksTab() {
                     <tr className="text-mist text-left border-b border-slate">
                       <th className="py-1 pr-3">Symbol</th>
                       <th className="py-1 pr-3">Window</th>
+                      <th className="py-1 pr-3">Qty</th>
                       <th className="py-1 pr-3">Buy ₹</th>
                       <th className="py-1 pr-3">Sell ₹</th>
-                      <th className="py-1 pr-3">Qty</th>
+                      <th className="py-1 pr-3">Buy Total</th>
+                      <th className="py-1 pr-3">Sell Total</th>
                       <th className="py-1 pr-3">P&L</th>
                       <th className="py-1 pr-3">Status</th>
                       <th className="py-1">Closed</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {tradeHistory.trades.slice(0, 50).map(t => (
+                    {tradeHistory.trades.map(t => (
                       <tr key={t.id} className="border-b border-slate/50">
                         <td className="py-1 pr-3 text-paper font-bold">{t.symbol}</td>
                         <td className="py-1 pr-3 text-mist">{t.window_source}</td>
+                        <td className="py-1 pr-3 text-mist">{t.quantity}</td>
                         <td className="py-1 pr-3 text-paper">₹{t.entry_price.toFixed(2)}</td>
                         <td className="py-1 pr-3 text-paper">{t.exit_price != null ? `₹${t.exit_price.toFixed(2)}` : "—"}</td>
-                        <td className="py-1 pr-3 text-mist">{t.quantity}</td>
+                        {/* AUDIT ADD (this session): buy/sell VALUE (price × qty), not
+                            just per-share price — "total price" the user actually paid/
+                            received on the leg, same distinction real-trade-service's
+                            Charges tab makes between per-share price and order value. */}
+                        <td className="py-1 pr-3 text-mist">{fmtInr(t.entry_price * t.quantity)}</td>
+                        <td className="py-1 pr-3 text-mist">{t.exit_price != null ? fmtInr(t.exit_price * t.quantity) : "—"}</td>
                         <td className={`py-1 pr-3 ${t.realized_pnl != null && t.realized_pnl >= 0 ? "text-signal-buy" : t.realized_pnl != null ? "text-signal-sell" : "text-mist"}`}>
                           {t.realized_pnl != null ? `${fmtInr(t.realized_pnl)} (${(t.realized_pnl_pct ?? 0).toFixed(2)}%)` : "—"}
                         </td>
@@ -992,6 +1133,164 @@ export default function PositionStocksTab() {
       </>
       )}
 
+      {subTab === "charges" && (() => {
+        // AUDIT ADD (this session), ported from Real Automatic Trade's
+        // Charges tab — same Dhan NSE-equity rate card, but this service's
+        // orders are ALWAYS intraday (config.SCALP_PRODUCT_TYPE = "INTRA",
+        // never "CNC" — see main.py's /status pipeline_config), so there's
+        // no delivery/intraday branch to pick here, unlike real-trade-
+        // service which trades both. Built from dhanLive (Dhan's own
+        // super-order-leg book, broker-side truth) — an ENTRY_LEG that
+        // TRADED is the BUY, whichever of TARGET_LEG/STOP_LOSS_LEG actually
+        // TRADED is the SELL.
+        const BROKERAGE_CAP = 20;
+        const BROKERAGE_PCT = 0.03 / 100;
+        const STT_INTRA_PCT = 0.025 / 100; // both sides, intraday
+        const EXCHANGE_PCT = 0.00345 / 100;
+        const SEBI_PCT = 0.0001 / 100;
+        const GST_PCT = 0.18;
+        const STAMP_INTRA_PCT = 0.003 / 100; // buy side only
+
+        interface ChargeBreakdown {
+          brokerage: number; stt: number; exchange: number; sebi: number; gst: number; stamp: number; total: number;
+        }
+        function calcCharges(buyVal: number, sellVal: number): ChargeBreakdown {
+          const turnover = buyVal + sellVal;
+          const brokerage = Math.min(buyVal * BROKERAGE_PCT, BROKERAGE_CAP) + Math.min(sellVal * BROKERAGE_PCT, BROKERAGE_CAP);
+          const stt = turnover * STT_INTRA_PCT;
+          const exchange = turnover * EXCHANGE_PCT;
+          const sebi = turnover * SEBI_PCT;
+          const gst = (brokerage + exchange) * GST_PCT;
+          const stamp = buyVal * STAMP_INTRA_PCT;
+          return { brokerage, stt, exchange, sebi, gst, stamp, total: brokerage + stt + exchange + sebi + gst + stamp };
+        }
+
+        interface LegCharge { symbol: string; leg: string; side: string; qty: number; price: number; charges: ChargeBreakdown; }
+        const filledLegs = (dhanLive?.orders ?? []).filter(o => {
+          const qty = Number(o.quantity || 0);
+          const price = Number(o.price || 0);
+          const st = String(o.orderStatus ?? "").toUpperCase();
+          return qty > 0 && price > 0 && (st === "TRADED" || st === "FILLED" || st === "COMPLETE");
+        });
+        const legCharges: LegCharge[] = filledLegs.map(o => {
+          const side = String(o.transactionType ?? "").toUpperCase();
+          const qty = Number(o.quantity || 0);
+          const price = Number(o.price || 0);
+          const val = qty * price;
+          return {
+            symbol: String(o.tradingSymbol ?? "—"), leg: String(o.legName ?? "—"), side, qty, price,
+            charges: calcCharges(side === "BUY" ? val : 0, side === "SELL" ? val : 0),
+          };
+        });
+        const totalBrokerage = legCharges.reduce((s, o) => s + o.charges.brokerage, 0);
+        const totalSTT = legCharges.reduce((s, o) => s + o.charges.stt, 0);
+        const totalExchange = legCharges.reduce((s, o) => s + o.charges.exchange, 0);
+        const totalSEBI = legCharges.reduce((s, o) => s + o.charges.sebi, 0);
+        const totalGST = legCharges.reduce((s, o) => s + o.charges.gst, 0);
+        const totalStamp = legCharges.reduce((s, o) => s + o.charges.stamp, 0);
+        const grandTotal = legCharges.reduce((s, o) => s + o.charges.total, 0);
+
+        return (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <p className="dash-section-title">Dhan charges — Position Stocks (intraday only)</p>
+              <button onClick={() => void loadDhanLive()}
+                className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-ink border border-slate text-mist">
+                ↻ Refresh
+              </button>
+            </div>
+
+            <div className="bg-graphite border border-slate rounded-2xl p-4">
+              <p className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-2">Live Dhan order book, right now</p>
+              <div className="grid grid-cols-2 gap-2 mb-3">
+                <div className="bg-ink border border-slate rounded-xl p-3">
+                  <p className="text-[9px] text-mist uppercase tracking-widest">Total charges</p>
+                  <p className="font-display tabular-nums font-bold text-sm text-signal-sell">-{fmtInr(grandTotal, 2)}</p>
+                  <p className="text-[9px] text-mist mt-0.5">{legCharges.length} filled legs</p>
+                </div>
+                <div className="bg-ink border border-slate rounded-xl p-3">
+                  <p className="text-[9px] text-mist uppercase tracking-widest">Brokerage + GST</p>
+                  <p className="font-display tabular-nums font-bold text-sm text-signal-sell">-{fmtInr(totalBrokerage + totalGST, 2)}</p>
+                  <p className="text-[9px] text-mist mt-0.5">₹20 cap per leg, 18% GST</p>
+                </div>
+              </div>
+              {ledger && (
+                <div className="bg-ink border border-slate rounded-xl p-3 mb-3">
+                  <div className="flex items-center justify-between font-display tabular-nums text-[11px] text-mist mb-1">
+                    <span>Realized P&L today (price only)</span>
+                    <span className={ledger.realized_pnl_today >= 0 ? "text-signal-buy" : "text-signal-sell"}>
+                      {ledger.realized_pnl_today >= 0 ? "+" : ""}{fmtInr(ledger.realized_pnl_today, 2)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between font-display tabular-nums text-[11px] text-mist mb-1">
+                    <span>− Charges (this order book snapshot)</span>
+                    <span className="text-signal-sell">-{fmtInr(grandTotal, 2)}</span>
+                  </div>
+                  <div className="flex items-center justify-between font-display tabular-nums text-xs font-bold border-t border-slate pt-1.5 mt-1">
+                    <span className="text-paper">Net (approx, after these charges)</span>
+                    <span className={(ledger.realized_pnl_today - grandTotal) >= 0 ? "text-signal-buy" : "text-signal-sell"}>
+                      {(ledger.realized_pnl_today - grandTotal) >= 0 ? "+" : ""}{fmtInr(ledger.realized_pnl_today - grandTotal, 2)}
+                    </span>
+                  </div>
+                </div>
+              )}
+              <div className="border-t border-slate pt-3">
+                <p className="font-display tabular-nums text-[10px] text-mist mb-2 uppercase tracking-widest">Full breakdown</p>
+                <div className="space-y-1.5 font-display tabular-nums text-[11px]">
+                  {[
+                    { label: "Brokerage", val: totalBrokerage, note: "₹20 or 0.03%/leg, whichever lower" },
+                    { label: "STT", val: totalSTT, note: "0.025% intraday, both sides" },
+                    { label: "Exchange Txn", val: totalExchange, note: "0.00345% NSE" },
+                    { label: "SEBI charges", val: totalSEBI, note: "0.0001% on turnover" },
+                    { label: "GST", val: totalGST, note: "18% on brokerage + exchange fees" },
+                    { label: "Stamp duty", val: totalStamp, note: "0.003% intraday (buy side)" },
+                  ].map(row => (
+                    <div key={row.label} className="flex items-center justify-between">
+                      <div><span className="text-paper">{row.label}</span><span className="text-mist text-[9px] ml-2">{row.note}</span></div>
+                      <span className={row.val > 0 ? "text-signal-sell" : "text-mist"}>{row.val > 0 ? `-${fmtInr(row.val, 2)}` : "—"}</span>
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-between border-t border-slate pt-2 mt-1">
+                    <span className="font-bold text-paper">Total charges</span>
+                    <span className="font-bold text-signal-sell">-{fmtInr(grandTotal, 2)}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {legCharges.length > 0 ? (
+              <div className="bg-graphite border border-slate rounded-2xl p-4">
+                <p className="dash-section-title mb-3">Per-leg charges</p>
+                <div className="space-y-2">
+                  {legCharges.map((oc, i) => (
+                    <div key={i} className="bg-ink border border-slate rounded-xl p-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center gap-2">
+                          <span className={`font-display tabular-nums text-xs font-bold ${oc.side === "BUY" ? "text-signal-buy" : "text-signal-sell"}`}>{oc.side}</span>
+                          <span className="font-display tabular-nums text-sm font-bold text-paper">{oc.symbol}</span>
+                          <span className="font-display tabular-nums text-[9px] text-mist">{oc.leg} · MIS</span>
+                        </div>
+                        <span className="font-display tabular-nums text-xs text-signal-sell font-bold">-{fmtInr(oc.charges.total, 2)}</span>
+                      </div>
+                      <div className="flex gap-3 font-display tabular-nums text-[10px] text-mist">
+                        <span>Qty <span className="text-paper">{oc.qty}</span></span>
+                        <span>Price <span className="text-paper">₹{oc.price.toFixed(2)}</span></span>
+                        <span>Value <span className="text-paper">{fmtInr(oc.qty * oc.price, 0)}</span></span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="bg-graphite border border-slate rounded-2xl p-6 text-center">
+                <p className="font-display tabular-nums text-sm text-mist">No filled legs in the current Dhan order book snapshot.</p>
+                <p className="font-display tabular-nums text-[10px] text-mist mt-1">Refresh Dhan Live Orders first, or check the Trade History tab for older closed trades (charges aren't retroactively computed there).</p>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {subTab === "settings" && (
       <>
       {/* ── Settings ── */}
@@ -1043,10 +1342,17 @@ function PositionRow({ p }: { p: ScalpPositionRow }) {
           <span className={`font-display tabular-nums text-[10px] uppercase font-bold ${statusColor(p.status)}`}>{p.status}</span>
         </div>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 text-[11px]">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-[11px]">
         <div><span className="text-mist">Buy </span><span className="tabular-nums text-paper">₹{p.entry_price.toFixed(2)}</span></div>
         <div><span className="text-mist">Sell </span><span className="tabular-nums text-paper">{p.exit_price != null ? `₹${p.exit_price.toFixed(2)}` : "—"}</span></div>
         <div><span className="text-mist">Qty </span><span className="tabular-nums text-paper">{p.quantity}</span></div>
+        {/* AUDIT ADD (this session): order value (price × qty) — the actual
+            rupee amount bought/sold, distinct from the per-share price
+            already shown above, same distinction Trade History's Buy/Sell
+            Total columns make. */}
+        <div><span className="text-mist">Total </span><span className="tabular-nums text-paper">
+          {fmtInr(p.entry_price * p.quantity)}{p.exit_price != null ? ` → ${fmtInr(p.exit_price * p.quantity)}` : ""}
+        </span></div>
         <div><span className="text-mist">Target </span><span className="tabular-nums text-signal-buy">₹{p.target_price.toFixed(2)} <span className="text-[9px]">({p.adaptive_target_pct.toFixed(1)}%)</span></span></div>
         <div><span className="text-mist">Stop </span><span className="tabular-nums text-signal-sell">₹{p.stop_price.toFixed(2)} <span className="text-[9px]">({p.adaptive_stop_pct.toFixed(1)}%)</span></span></div>
       </div>

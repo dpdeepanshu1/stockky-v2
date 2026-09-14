@@ -1433,12 +1433,27 @@ async def list_closed_positions(
 
 
 @app.get("/orders/{mode}")
-async def list_orders(mode: str, limit: int = 50, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+async def list_orders(mode: str, days: int = 2, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+    # AUDIT FIX (this session): this used to take `limit: int = 50` and
+    # hard-clamp to `min(max(limit, 1), 200)` — the frontend always asked
+    # for exactly 100, so the Orders tab could never show more than the
+    # newest 100 orders no matter how many actually happened, with no way
+    # to tell "that's everything" from "there's more we're not showing".
+    # Time-boxed instead: return every order from the last `days` days (2
+    # by default) in full, uncapped by count — a couple of days of orders
+    # for one trading account is never going to be large enough to need a
+    # row cap, and the frontend can now show an honest "N orders in the
+    # last 2 days" instead of a silently-truncated top-100.
+    days = min(max(days, 1), 30)  # sanity bound on the query itself, not on the result set
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     mode = mode.upper()
     await _self_heal_orders(db, mode)
     rows = (
-        db.query(models.TradeOrder).filter_by(mode=mode)
-        .order_by(models.TradeOrder.created_at.desc()).limit(min(max(limit, 1), 200)).all()
+        db.query(models.TradeOrder).filter(
+            models.TradeOrder.mode == mode,
+            models.TradeOrder.created_at >= cutoff,
+        )
+        .order_by(models.TradeOrder.created_at.desc()).all()
     )
     # Only bother pricing orders still "in flight" (waiting on a limit fill,
     # in full or in part) — a FILLED/CANCELLED/REJECTED/EXPIRED order's

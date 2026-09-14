@@ -877,7 +877,7 @@ export default function RealAutoTrade() {
       // 100 (not 20) so the "All" orders sub-tab has real history to show —
       // "Today" is just a client-side filter over this same fetch, not a
       // separate call.
-      const [p, o] = await Promise.all([realTradeApi.positions(m), realTradeApi.orders(m, 100)]);
+      const [p, o] = await Promise.all([realTradeApi.positions(m), realTradeApi.orders(m, 2)]);
       setPositions(p);
       setOrders(o);
     } catch { /* best-effort */ }
@@ -2053,7 +2053,7 @@ export default function RealAutoTrade() {
                   className={`font-display tabular-nums text-[10px] px-3 py-1.5 rounded-xl border ${orderRange === "all"
                     ? "bg-signal-buy/10 border-signal-buy/40 text-signal-buy"
                     : "bg-graphite border-slate text-mist"}`}>
-                  All ({orders.length})
+                  Last 2 days ({orders.length})
                 </button>
               </div>
               {visibleOrders.length === 0 ? (

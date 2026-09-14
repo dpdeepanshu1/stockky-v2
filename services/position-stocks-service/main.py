@@ -460,6 +460,28 @@ def status(db: Session = Depends(get_db)):
         "max_daily_loss_pct_of_pool": config.MAX_DAILY_LOSS_PCT_OF_POOL,
         "max_concurrent_scalp_positions": config.MAX_CONCURRENT_SCALP_POSITIONS,
         "scalp_pool_capital_share_pct": config.SCALP_POOL_CAPITAL_SHARE_PCT,
+        # AUDIT ADD (this session): the frontend's pipeline dashboard needs
+        # the actual live scan/quality-gate thresholds (screening/engine.py,
+        # screening/quality_gate.py, config.py) to explain what Run Cycle /
+        # Auto-Pilot are actually doing right now — hardcoding these numbers
+        # into the frontend would silently drift from reality the next time
+        # someone tunes an env var. Read-only, additive, no behavior change.
+        "pipeline_config": {
+            "scan_interval_s": _SCAN_INTERVAL_S,
+            "windows": {
+                "1m":  config.MIN_PCT_CHANGE_1M,
+                "5m":  config.MIN_PCT_CHANGE_5M,
+                "15m": config.MIN_PCT_CHANGE_15M,
+                "60m": config.MIN_PCT_CHANGE_60M,
+            },
+            "min_avg_volume": config.MIN_AVG_VOLUME,
+            "quality_gate_enabled": config.QUALITY_GATE_ENABLED,
+            "quality_gate_top_n": config.QUALITY_GATE_TOP_N,
+            "min_fundamental_score": config.MIN_FUNDAMENTAL_SCORE,
+            "min_technical_score": config.MIN_TECHNICAL_SCORE,
+            "min_market_cap_cr": config.MIN_MARKET_CAP_CR,
+            "scalp_product_type": config.SCALP_PRODUCT_TYPE,
+        },
     }
 
 

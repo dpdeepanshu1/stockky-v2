@@ -479,8 +479,11 @@ export const realTradeApi = {
   positions: (mode: "DEMO" | "REAL") =>
     rtRequest<Position[]>(`/positions/${mode}`, {}, mode === "REAL"),
 
-  orders: (mode: "DEMO" | "REAL", limit = 50) =>
-    rtRequest<OrderRow[]>(`/orders/${mode}?limit=${limit}`, {}, mode === "REAL"),
+  // AUDIT FIX (this session): was `limit = 50` (backend clamped to 200
+  // regardless). Time-boxed now — see main.py's list_orders docstring —
+  // `days` (default 2) returns every order in that window, uncapped.
+  orders: (mode: "DEMO" | "REAL", days = 2) =>
+    rtRequest<OrderRow[]>(`/orders/${mode}?days=${days}`, {}, mode === "REAL"),
 
   candidates: (mode: "DEMO" | "REAL", limit = 40) =>
     rtRequest<CandidateRow[]>(`/candidates/${mode}?limit=${limit}`, {}, mode === "REAL"),

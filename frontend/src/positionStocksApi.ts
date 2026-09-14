@@ -101,6 +101,19 @@ export interface ScalpStatus {
   max_daily_loss_pct_of_pool: number;
   max_concurrent_scalp_positions: number;
   scalp_pool_capital_share_pct: number;
+  // AUDIT ADD (this session): live scan/quality-gate config for the
+  // Pipeline dashboard — see backend main.py's /status docstring.
+  pipeline_config?: {
+    scan_interval_s: number;
+    windows: { "1m": number; "5m": number; "15m": number; "60m": number };
+    min_avg_volume: number;
+    quality_gate_enabled: boolean;
+    quality_gate_top_n: number;
+    min_fundamental_score: number;
+    min_technical_score: number;
+    min_market_cap_cr: number;
+    scalp_product_type: string;
+  };
 }
 
 // Same shape as real-trade-service's DhanStatus — both services show a

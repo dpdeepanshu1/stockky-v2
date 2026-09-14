@@ -638,6 +638,52 @@ export default function PositionStocksTab() {
         </p>
       </div>
 
+      {/* AUDIT MOVE (this session): Status banners, "Last manual cycle",
+          and all Action buttons (Enable/Pause Module, Arm/Disarm,
+          Auto-Pilot toggle, Run Cycle Now, Sync Capital, Check Exits,
+          Reset Daily Ledger, Kill Switch) moved to the Pipeline subtab —
+          they control the exact pipeline that tab now visualizes, so
+          they belong right next to it rather than on Overview. See
+          subTab === "pipeline" below. */}
+
+      {/* ── Capital ledger ── */}
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        <p className="dash-section-title mb-3">Scalp Capital Pool (50% split, software-enforced)</p>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div>
+            <p className="text-[9px] text-mist uppercase tracking-widest">Allocated</p>
+            <p className="font-display tabular-nums font-bold text-sm text-paper">{fmtInr(ledger?.total_allocated_capital)}</p>
+          </div>
+          <div>
+            <p className="text-[9px] text-mist uppercase tracking-widest">Available</p>
+            <p className="font-display tabular-nums font-bold text-sm text-paper">{fmtInr(ledger?.available_capital)}</p>
+          </div>
+          <div>
+            <p className="text-[9px] text-mist uppercase tracking-widest">P&L Today</p>
+            <p className={`font-display tabular-nums font-bold text-sm ${(ledger?.realized_pnl_today ?? 0) >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
+              {fmtInr(ledger?.realized_pnl_today)}
+            </p>
+          </div>
+          <div>
+            <p className="text-[9px] text-mist uppercase tracking-widest">P&L Total</p>
+            <p className={`font-display tabular-nums font-bold text-sm ${(ledger?.realized_pnl_total ?? 0) >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
+              {fmtInr(ledger?.realized_pnl_total)}
+            </p>
+          </div>
+        </div>
+        <CapitalBar allocated={ledger?.total_allocated_capital ?? 0} available={ledger?.available_capital ?? 0} />
+        <div className="flex items-center justify-between mt-3">
+          <p className="font-display tabular-nums text-[9px] text-mist">Last synced from Dhan: {fmtDateTimeIst(ledger?.last_synced_from_broker_at)}</p>
+          {ledger?.daily_loss_kill_switch_tripped && (
+            <span className="font-display tabular-nums text-[9px] text-signal-sell font-bold uppercase">Kill switch active</span>
+          )}
+        </div>
+      </div>
+      </>
+      )}
+
+      {subTab === "pipeline" && (
+      <>
       {/* ── Status banners ── */}
       {status && !status.service_enabled && (
         <div className="rounded-xl border border-signal-avoid/40 bg-signal-avoid/10 px-3 py-2 font-display tabular-nums text-[11px] text-signal-avoid">
@@ -728,44 +774,6 @@ export default function PositionStocksTab() {
         </p>
       )}
 
-      {/* ── Capital ledger ── */}
-      <div className="bg-graphite border border-slate rounded-2xl p-4">
-        <p className="dash-section-title mb-3">Scalp Capital Pool (50% split, software-enforced)</p>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div>
-            <p className="text-[9px] text-mist uppercase tracking-widest">Allocated</p>
-            <p className="font-display tabular-nums font-bold text-sm text-paper">{fmtInr(ledger?.total_allocated_capital)}</p>
-          </div>
-          <div>
-            <p className="text-[9px] text-mist uppercase tracking-widest">Available</p>
-            <p className="font-display tabular-nums font-bold text-sm text-paper">{fmtInr(ledger?.available_capital)}</p>
-          </div>
-          <div>
-            <p className="text-[9px] text-mist uppercase tracking-widest">P&L Today</p>
-            <p className={`font-display tabular-nums font-bold text-sm ${(ledger?.realized_pnl_today ?? 0) >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
-              {fmtInr(ledger?.realized_pnl_today)}
-            </p>
-          </div>
-          <div>
-            <p className="text-[9px] text-mist uppercase tracking-widest">P&L Total</p>
-            <p className={`font-display tabular-nums font-bold text-sm ${(ledger?.realized_pnl_total ?? 0) >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
-              {fmtInr(ledger?.realized_pnl_total)}
-            </p>
-          </div>
-        </div>
-        <CapitalBar allocated={ledger?.total_allocated_capital ?? 0} available={ledger?.available_capital ?? 0} />
-        <div className="flex items-center justify-between mt-3">
-          <p className="font-display tabular-nums text-[9px] text-mist">Last synced from Dhan: {fmtDateTimeIst(ledger?.last_synced_from_broker_at)}</p>
-          {ledger?.daily_loss_kill_switch_tripped && (
-            <span className="font-display tabular-nums text-[9px] text-signal-sell font-bold uppercase">Kill switch active</span>
-          )}
-        </div>
-      </div>
-      </>
-      )}
-
-      {subTab === "pipeline" && (
-      <>
       {/* ── Run Cycle / Auto-Pilot pipeline dashboard ── */}
       <div className="bg-graphite border border-slate rounded-2xl p-4">
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">

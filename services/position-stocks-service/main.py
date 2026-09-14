@@ -800,41 +800,62 @@ def dhan_live_orders(db: Session = Depends(get_db)):
     which is useful for spotting a reconciliation lag or a leg that filled
     on Dhan's side before this service's next 10s poll picks it up.
     Read-only — no arm check needed (get_super_order_list itself doesn't
-    require armed). Filters to orders tagged "SCALP" when Dhan returns a
-    tag field, so this never shows real-trade-service's own orders even
-    though both use the same Dhan account."""
+    require armed).
+
+    AUDIT FIX (this session): the previous filter here relied entirely on
+    Dhan echoing back a "tag" field ("SCALP" vs real-trade-service's
+    untagged orders) — and in production Dhan's super-order-list response
+    for this account/plan carries NO "tag" field on ANY order at all (see
+    the "cannot distinguish this service's orders..." log line this
+    produced), so that filter always fell through to its own documented
+    last resort of showing every order from BOTH services unfiltered.
+    That made this endpoint (and the Charges tab built on top of it)
+    silently include real-trade-service's orders too, contaminating both.
+
+    Fixed by making OUR OWN DB the authoritative filter instead of
+    depending on anything Dhan chooses to echo back: every super order
+    this service ever placed has its id recorded in
+    ScalpPosition.dhan_super_order_id at entry time (orders/entry.py) — so
+    a Dhan order only belongs in this view if its orderId matches one we
+    actually placed ourselves. This works whether or not Dhan ever adds
+    tag support, and can never fold in a real-trade-service order by
+    mistake (real-trade-service's own ids are simply never in our table).
+    The old tag-based check is kept only as a belt-and-suspenders extra:
+    if Dhan DOES tag orders on some future account/plan, an order tagged
+    "SCALP" is included even in the rare case our own DB row for it
+    hasn't committed yet (e.g. a same-cycle race)."""
     try:
         orders = dhan_client.get_super_order_list(db)
     except Exception as e:
         logger.error("position-stocks: /dhan/live-orders fetch failed: %s", e, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Dhan fetch failed: {e}")
 
-    # BUG FIX (this session): real-trade-service places its own orders with
-    # NO tag at all (execution/dhan_client.place_order's `tag` param
-    # defaults to None and entry_engine/entry.py never passes one) — so if
-    # Dhan's response simply omits the `tag` key entirely for an untagged
-    # order (rather than echoing `"tag": null`), the previous filter
-    # (`o.get("tag", "SCALP")` — defaulting a MISSING key to "SCALP") would
-    # wrongly fold that real-trade-service order into this view, exactly
-    # the cross-service leak the docstring above promises can't happen.
-    # Default missing-tag orders to EXCLUDED instead (fail toward hiding,
-    # not toward mislabeling another service's real order as our own) —
-    # unless NOT ONE order in the whole response carries a `tag` key at
-    # all, which would mean Dhan doesn't return tags for this account/plan
-    # at all, and a strict filter would just hide everything from both
-    # services with no way to tell them apart anyway; in that one case,
-    # show everything unfiltered with a clear log line instead.
-    has_any_tag_field = any(isinstance(o, dict) and "tag" in o for o in orders)
-    if has_any_tag_field:
-        scalp_orders = [o for o in orders if not isinstance(o, dict) or o.get("tag") == "SCALP"]
-    else:
+    our_order_ids = {
+        row[0] for row in
+        db.query(ScalpPosition.dhan_super_order_id)
+        .filter(ScalpPosition.dhan_super_order_id.isnot(None))
+        .all()
+    }
+
+    def _is_ours(o) -> bool:
+        if not isinstance(o, dict):
+            return False
+        if str(o.get("orderId") or "") in our_order_ids:
+            return True
+        # Fallback only — see docstring. Never the sole line of defense.
+        return o.get("tag") == "SCALP"
+
+    scalp_orders = [o for o in orders if _is_ours(o)]
+    if not our_order_ids and not any(isinstance(o, dict) and "tag" in o for o in orders):
+        # Neither our own DB nor Dhan's response gives us anything to filter
+        # on (a genuinely fresh account with zero positions ever placed) —
+        # showing nothing here is correct (we've placed nothing), not a bug,
+        # but worth a clear log line instead of silently returning empty.
         logger.info(
-            "position-stocks: /dhan/live-orders — no order in Dhan's response "
-            "carries a 'tag' field at all; cannot distinguish this service's "
-            "orders from real-trade-service's here, so showing all orders "
-            "unfiltered rather than hiding everything."
+            "position-stocks: /dhan/live-orders — no locally-tracked "
+            "super-order ids yet and Dhan returned no 'tag' field either; "
+            "showing zero orders (this service hasn't placed any yet)."
         )
-        scalp_orders = orders
     return {"count": len(scalp_orders), "orders": scalp_orders}
 
 

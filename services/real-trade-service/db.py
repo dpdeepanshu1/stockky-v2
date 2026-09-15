@@ -146,6 +146,7 @@ def init_schema() -> None:
     _ensure_source_tab_columns(eng, dialect())
     _ensure_catalyst_price_source_column(eng, dialect())
     _ensure_hot_path_indexes(eng, dialect())
+    _ensure_exit_retry_columns(eng, dialect())
 
 
 # 2026-08-27 data fixup: docker-compose.yml/.env.example/.env.oracle.example
@@ -423,6 +424,47 @@ def _ensure_position_columns(engine, dialect_name: str) -> None:
         adds = [
             ("initial_stop_distance", "ALTER TABLE trade_positions ADD COLUMN initial_stop_distance FLOAT"),
             ("broker_imported", "ALTER TABLE trade_positions ADD COLUMN broker_imported BOOLEAN DEFAULT FALSE NOT NULL"),
+        ]
+
+    for col_name, sql in adds:
+        if col_name in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added trade_positions.%s", col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add trade_positions.%s: %s", col_name, e)
+
+
+# 2026-09-15 fix (session40 — see models.py TradePosition.consecutive_exit_
+# failures docstring for the full DATAMATICS incident). Same additive-
+# migration idiom as _ensure_position_columns above — trade_positions
+# existed before these columns were added to models.py, so on any
+# already-deployed DB they must be added by hand, once. Both nullable/
+# zero-defaulted so every existing row simply starts at "never failed",
+# which is correct — this is a from-now-on counter, not a backfill.
+def _ensure_exit_retry_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        existing = {c["name"] for c in inspect(engine).get_columns("trade_positions")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect trade_positions columns (exit-retry): %s", e)
+        return
+
+    if dialect_name == "oracle":
+        adds = [
+            ("consecutive_exit_failures", "ALTER TABLE trade_positions ADD (consecutive_exit_failures NUMBER(5) DEFAULT 0 NOT NULL)"),
+            ("last_exit_failure_at", "ALTER TABLE trade_positions ADD (last_exit_failure_at TIMESTAMP)"),
+        ]
+    else:
+        adds = [
+            ("consecutive_exit_failures", "ALTER TABLE trade_positions ADD COLUMN consecutive_exit_failures INTEGER DEFAULT 0 NOT NULL"),
+            ("last_exit_failure_at", "ALTER TABLE trade_positions ADD COLUMN last_exit_failure_at TIMESTAMP"),
         ]
 
     for col_name, sql in adds:

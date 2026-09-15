@@ -399,6 +399,21 @@ class TradePosition(Base):
     # which keep falling back to the existing global-default behavior.
     source_tab = Column(String(32), nullable=True)
 
+    # 2026-09-15 fix (session40 — DATAMATICS position 81, 89 consecutive
+    # REJECTED zero-fill exit-SELL attempts over ~4.5h with no backoff and
+    # no operator alert — see exit_engine/exit.py._send_real_sell's
+    # cooldown gate and execution/reconcile.py's dead-SELL handling for
+    # where these are written). Tracks consecutive broker-rejected,
+    # zero-fill SELL attempts for THIS position so repeated rejections
+    # trigger an escalating cooldown (instead of retrying every single
+    # cycle forever) and a one-time CRITICAL alert once a threshold is
+    # crossed. Reset to 0 / NULL the moment any fill (full or partial) is
+    # booked for this position's SELL. NULL/0 for every pre-migration row
+    # and every position that has never had a SELL rejected — no behavior
+    # change for the normal case.
+    consecutive_exit_failures = Column(Integer, nullable=False, default=0)
+    last_exit_failure_at = Column(DateTime, nullable=True)
+
     __table_args__ = (Index("ix_trade_positions_mode_symbol_status", "mode", "symbol", "status"),)
 
 

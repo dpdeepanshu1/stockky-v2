@@ -440,6 +440,21 @@ EXIT_PARTIAL_FRACTION               = float(os.getenv("EXIT_PARTIAL_FRACTION", "
 EXIT_MAX_HOLD_DAYS                  = int(os.getenv("EXIT_MAX_HOLD_DAYS", "10"))
 EXIT_EARLY_WARN_DAYS                = int(os.getenv("EXIT_EARLY_WARN_DAYS", "6"))
 
+# 2026-09-15 fix (session40 — DATAMATICS position 81, 89 consecutive
+# REJECTED zero-fill exit-SELL attempts over ~4.5h, see
+# models.py TradePosition.consecutive_exit_failures docstring for the full
+# incident). A SELL that dies with zero fill at the broker used to be
+# retried again on the very next cycle, forever, with no backoff and no
+# alert — indistinguishable in the logs from a healthy retry loop even
+# after dozens of identical rejections. These three settings back that
+# off: cooldown doubles (capped at the max) with each consecutive
+# rejection for the SAME position, and an operator alert fires once the
+# streak crosses the threshold (and again every additional multiple of it,
+# so a very long stuck streak doesn't go silent after the first alert).
+EXIT_RETRY_BASE_COOLDOWN_SECONDS    = int(os.getenv("EXIT_RETRY_BASE_COOLDOWN_SECONDS", "60"))
+EXIT_RETRY_MAX_COOLDOWN_SECONDS     = int(os.getenv("EXIT_RETRY_MAX_COOLDOWN_SECONDS", "900"))
+EXIT_RETRY_ALERT_THRESHOLD          = int(os.getenv("EXIT_RETRY_ALERT_THRESHOLD", "5"))
+
 #
 # REGIME-DEPENDENT (review monthly or on material market-regime shift):
 #   These are tactical thresholds tied to current market conditions. They were

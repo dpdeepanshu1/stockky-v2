@@ -285,19 +285,68 @@ def _send_real_sell(
             position.symbol, reason,
         )
         return False
+    # 2026-09-15 fix (session38 — DATAMATICS "insufficient funds" SELL
+    # rejections, 20 consecutive over ~2h). Root cause: this used to decide
+    # sell_product_type purely from "was this position opened today?" and
+    # assumed same-day == safe-to-net-as-INTRADAY. That assumption is false
+    # for this service's automated entry path (entry_engine/entry.py), which
+    # has ALWAYS bought product_type="CNC" — never MIS/INTRADAY, entirely
+    # implicitly (dhan_client.place_order's default, never passed
+    # explicitly, so nothing ever recorded it). A same-day CNC BUY has no
+    # matching MIS position at Dhan to net a same-day INTRADAY SELL against
+    # — Dhan prices it as a brand-new naked short instead, which needs full
+    # margin, hence "insufficient funds, please add ₹X". Confirmed this WAS
+    # our own exit_engine (not a manual Dhan-app "Repeat Order" retry, as
+    # first suspected): this exact log line is emitted only from here, and
+    # DATAMATICS position 81's opened_at (04:39:49 UTC = ~10:09 IST) matches
+    # an auto-entry earlier the same session, not an import or manual trade.
+    #
+    # Fix: mirror what the position was ACTUALLY bought as
+    # (TradePosition.entry_product_type, threaded from TradeOrder.
+    # product_type at fill time — see portfolio.record_real_fill) instead of
+    # re-deriving a guess from opened_at. broker_imported still takes
+    # priority (unchanged — those never went through a Stockky BUY at all).
+    # entry_product_type is NULL for every position opened before this
+    # migration, so those fall back to the exact previous same-day heuristic
+    # — this change only takes effect for positions bought after this
+    # deploy, never retroactively.
+    #
+    # Note this does NOT make a same-day CNC exit succeed — Dhan won't allow
+    # that either way until T+1 settlement (the "Validate Qty from CDSL"
+    # case, already handled below with its own throttled alert explaining
+    # the TPIN step). What it fixes is sending the WRONG rejection: instead
+    # of silently retrying a margin-draining naked-short attempt every exit
+    # cycle (each retry priced at that moment's LTP, which is very likely
+    # what showed up in the Dhan app as a repeatedly re-quoted order), a
+    # same-day CNC position now correctly hits the already-safe, already-
+    # explained CDSL-pending path and simply waits for next-day settlement.
     if position.broker_imported:
-        same_day_position = False
+        sell_product_type = "CNC"
+        _pt_basis = "broker_imported"
+    elif position.entry_product_type in ("INTRADAY", "MIS"):
+        sell_product_type = "INTRADAY"
+        _pt_basis = "entry_product_type"
+    elif position.entry_product_type == "CNC":
+        sell_product_type = "CNC"
+        _pt_basis = "entry_product_type"
     else:
-        same_day_position = ist_today_str(as_aware(position.opened_at)) == ist_today_str()
-    sell_product_type = "INTRADAY" if same_day_position else "CNC"
+        # Pre-migration position — entry_product_type unknown. Unchanged
+        # fallback to the original same-day heuristic.
+        same_day_position = (
+            ist_today_str(as_aware(position.opened_at)) == ist_today_str()
+        )
+        sell_product_type = "INTRADAY" if same_day_position else "CNC"
+        _pt_basis = "same_day_fallback(entry_product_type unknown)"
     # 2026-09-07: permanent visibility into this decision — session21's
     # investigation had to reconstruct this after the fact from a DB query
     # because nothing logged it at decision time. Now every attempt (success
     # or failure) leaves this line in the logs.
     logger.info(
-        "exit SELL %s x%s (%s): opened_at=%s -> IST day %s (today=%s) -> product_type=%s",
+        "exit SELL %s x%s (%s): opened_at=%s -> IST day %s (today=%s) -> "
+        "product_type=%s (basis=%s, entry_product_type=%s)",
         position.symbol, qty, reason, position.opened_at,
         ist_today_str(as_aware(position.opened_at)), ist_today_str(), sell_product_type,
+        _pt_basis, position.entry_product_type,
     )
     try:
         security_id = dhan_client.get_security_id(db, position.symbol)

@@ -238,6 +238,11 @@ async def evaluate_manual_order(
             valid_until=datetime.now(timezone.utc) + timedelta(minutes=config.ENTRY_VALIDITY_MINUTES),
             status="PLACED", execution_source="MANUAL",
             confirmed_by=admin, confirmed_at=datetime.now(timezone.utc) if admin else None,
+            # 2026-09-15 fix (session38): record what this manual ticket
+            # actually chose (CNC by default, or explicit INTRADAY/MIS) so
+            # exit_engine can later mirror it instead of guessing from
+            # same-day-ness — see models.py TradeOrder.product_type.
+            product_type=product_type,
         )
         db.add(order)
         db.flush()

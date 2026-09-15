@@ -776,6 +776,14 @@ def record_real_fill(db: Session, order: models.TradeOrder, fill_price: float, f
             # exit_engine._load_profile can recognize a volume_shock-origin
             # position even with no watchlist_entry_id. NULL for manual orders.
             source_tab=getattr(order, "source_tab", None),
+            # 2026-09-15 fix (session38): thread the BUY order's actual
+            # product_type through to the position, same pattern as
+            # watchlist_entry_id/source_tab above — see models.py
+            # TradePosition.entry_product_type's docstring. NULL for orders
+            # placed before this migration (getattr default), which makes
+            # exit_engine fall back to its previous same-day heuristic for
+            # those, unchanged.
+            entry_product_type=getattr(order, "product_type", None),
         )
         db.add(position)
         db.flush()

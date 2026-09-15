@@ -33,7 +33,7 @@ Placeholder URLs for easy replace:
 - Clear All + Backup / View Backup for paper trades
 - Groww-style paper trading
 - Dark/Light mode, modern UI, pipeline progress, mobile responsive
-- Aggressive Redis + graceful degradation
+- Aggressivee Redis + graceful degradation
 - GitHub Actions for retrain, evaluations, scanner, wake-up
 
 ## Local Run

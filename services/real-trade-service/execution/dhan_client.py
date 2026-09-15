@@ -78,27 +78,86 @@ NSE_EQ_SEGMENT = "NSE_EQ"
 # base-10 operations with no binary rounding error anywhere in the chain.
 # The result is converted back to float only at the very end, once it is
 # already guaranteed to be an exact multiple of TICK_SIZE.
+#
+# SESSION41 FIX (STATUS.md/session41 open item #5): TICK_SIZE=0.05 was a
+# flat constant, but NSE's tick size is actually price-linked, reviewed
+# monthly off the security's own closing price (NSE circular effective
+# 2024-06-10, revised further 2025-04-15 — confirmed via NSE circulars and
+# broker notices, e.g. Zerodha/5paisa/HDFC Securities coverage). A candidate
+# priced below ₹250 needs a ₹0.01 tick, not ₹0.05 — round_to_tick(price,
+# tick_size=0.05) was silently over-rounding those (e.g. a genuine ₹87.13
+# target gets forced to ₹87.15), and is_valid_tick_price(price, 0.05) could
+# reject a perfectly valid ₹87.13 order outright. Same story in the other
+# direction for high-priced stocks (>₹1,000), where the real tick is now
+# coarser than 0.05. TICK_SIZE stays as the >₹250–₹1,000 band default (the
+# single most common band for this service's candidates) for any caller
+# that still passes it explicitly, but round_to_tick/is_valid_tick_price now
+# resolve the correct band from the price itself unless a caller overrides.
 TICK_SIZE = 0.05
 _TICK_SIZE_DEC = Decimal("0.05")
 
+# NSE price-linked tick bands (cash/equity segment), upper-bound exclusive.
+# Source: NSE circular effective 2024-06-10 (introduced the <₹250 = ₹0.01
+# band) and the 2025-04-15 revision (added the >₹1,000 bands). Reviewed
+# monthly by NSE off the security's prior-month closing price — this is a
+# best-effort approximation from the LIVE reference price this service
+# already has on hand (current LTP / candidate price), not NSE's own
+# monthly-review closing price, so it can occasionally be one band off for
+# a security that crossed a band boundary since NSE's last monthly review.
+# That's an acceptable trade-off: it is still far closer than the old flat
+# ₹0.05 for every price, and Dhan/the exchange remain the final authority
+# — a wrong guess here surfaces as a normal tick-multiple rejection, same
+# as any other Dhan-side validation failure, never a silent bad fill.
+_TICK_SIZE_BANDS: list[tuple[float, float]] = [
+    (250.0, 0.01),
+    (1000.0, 0.05),
+    (5000.0, 0.10),
+    (10000.0, 0.50),
+    (20000.0, 1.00),
+    (float("inf"), 5.00),
+]
 
-def round_to_tick(price: float, tick_size: float = TICK_SIZE) -> float:
-    """Round `price` to the nearest valid exchange tick (default ₹0.05).
-    Uses Decimal arithmetic (not binary float) end-to-end so the result is
-    an EXACT multiple of tick_size, not just something that happens to
-    display that way after a float round() — see the 2026-09-07 fix note
-    above for why the float version could still fail Dhan's tick check on
-    a price that looked perfectly clean. Returns the input unchanged if
-    it's <= 0 (nothing to round) or tick_size is invalid."""
+
+def tick_size_for_price(price: float) -> float:
+    """Best-effort NSE price-band tick size for `price` — see
+    _TICK_SIZE_BANDS' comment above for the source and the monthly-review
+    caveat. Falls back to the flat TICK_SIZE default for anything
+    non-numeric or <= 0 (nothing meaningful to band)."""
     try:
         price_f = float(price)
-        if price_f <= 0 or tick_size <= 0:
+    except (TypeError, ValueError):
+        return TICK_SIZE
+    if price_f <= 0:
+        return TICK_SIZE
+    for upper_bound, band_tick in _TICK_SIZE_BANDS:
+        if price_f < upper_bound:
+            return band_tick
+    return TICK_SIZE
+
+
+def round_to_tick(price: float, tick_size: Optional[float] = None) -> float:
+    """Round `price` to the nearest valid exchange tick. Uses Decimal
+    arithmetic (not binary float) end-to-end so the result is an EXACT
+    multiple of tick_size, not just something that happens to display that
+    way after a float round() — see the 2026-09-07 fix note above for why
+    the float version could still fail Dhan's tick check on a price that
+    looked perfectly clean. When `tick_size` is not given (the normal
+    case), it is resolved from `price`'s own NSE price band (session41 fix
+    — see tick_size_for_price above) instead of always using the flat
+    ₹0.05 default. Returns the input unchanged if it's <= 0 (nothing to
+    round) or tick_size is invalid."""
+    try:
+        price_f = float(price)
+        if price_f <= 0:
+            return price_f
+        resolved_tick = tick_size if tick_size is not None else tick_size_for_price(price_f)
+        if resolved_tick <= 0:
             return price_f
         # str(price_f) — not Decimal(price_f) — so we start from the exact
         # decimal digits a human/JSON would see, not price_f's underlying
         # binary approximation.
         price_dec = Decimal(str(price_f))
-        tick_dec = Decimal(str(tick_size))
+        tick_dec = Decimal(str(resolved_tick))
         ticks = (price_dec / tick_dec).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         result = (ticks * tick_dec).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         return float(result)
@@ -106,15 +165,18 @@ def round_to_tick(price: float, tick_size: float = TICK_SIZE) -> float:
         return price
 
 
-def is_valid_tick_price(price: float, tick_size: float = TICK_SIZE) -> bool:
+def is_valid_tick_price(price: float, tick_size: Optional[float] = None) -> bool:
     """True if `price` is an exact multiple of tick_size, checked in Decimal
     to avoid the same binary-float drift round_to_tick() guards against.
     Used as a last-instant guard in place_order() so a bad price is caught
     and logged here — with a clear reason — instead of only surfacing later
-    as an opaque exchange rejection."""
+    as an opaque exchange rejection. `tick_size` resolves from `price`'s own
+    NSE price band when not given (session41 fix), matching round_to_tick."""
     try:
-        price_dec = Decimal(str(float(price)))
-        tick_dec = Decimal(str(tick_size))
+        price_f = float(price)
+        resolved_tick = tick_size if tick_size is not None else tick_size_for_price(price_f)
+        price_dec = Decimal(str(price_f))
+        tick_dec = Decimal(str(resolved_tick))
         if price_dec <= 0 or tick_dec <= 0:
             return True
         remainder = (price_dec / tick_dec) % 1
@@ -1007,11 +1069,12 @@ def place_order(
             )
         price = 0.0
     elif order_type == "LIMIT" and price:
+        _band_tick = tick_size_for_price(price)
         tick_safe_price = round_to_tick(price)
         if tick_safe_price != price:
             logger.info(
                 "place_order: rounded LIMIT price ₹%.4f -> ₹%.2f to a valid %.2f tick "
-                "(caller did not pre-round)", price, tick_safe_price, TICK_SIZE,
+                "(caller did not pre-round)", price, tick_safe_price, _band_tick,
             )
         price = tick_safe_price
         # 2026-09-07 fix: last-instant guard, checked in Decimal (see
@@ -1025,7 +1088,7 @@ def place_order(
         if not is_valid_tick_price(price):
             raise ValueError(
                 f"Refusing to place LIMIT order at ₹{price} — not a valid "
-                f"₹{TICK_SIZE} tick multiple after rounding. This should be "
+                f"₹{_band_tick} tick multiple after rounding. This should be "
                 f"unreachable; report as a bug in the caller's price math."
             )
 

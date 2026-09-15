@@ -244,3 +244,18 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")
 SESSION_IDLE_TIMEOUT_MINUTES = _get_int("SESSION_IDLE_TIMEOUT_MINUTES", 30)
+
+# ── Notifications (session41 fix — STATUS.md open item #7) ─────────────
+# SAME env vars / SAME notification-scheduler-service routing convention
+# as real-trade-service's config.py + notifier.py, duplicated here per
+# this file's isolation note at the top (this service must not import
+# real-trade-service at runtime). Lets the existing CRITICAL log lines in
+# execution/dhan_client.py and orders/reconcile.py (order-type mismatches,
+# dead EOD SELLs, unresolvable legacy exit-order backfills) actually reach
+# a human instead of sitting log-only.
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+NOTIFICATION_SERVICE_URL = os.getenv(
+    "NOTIFICATION_SERVICE_URL",
+    "http://notification-scheduler-service:8000/notification",
+).rstrip("/")

@@ -30,6 +30,7 @@ from typing import Optional
 import httpx
 from sqlalchemy.orm import Session
 
+import notifier
 from auth import dhan_credentials_ro
 
 logger = logging.getLogger("position-stocks-dhan-client")
@@ -45,18 +46,58 @@ TICK_SIZE = 0.05
 _TICK_SIZE_DEC = Decimal("0.05")
 _VALID_ORDER_TYPES = {"MARKET", "LIMIT", "STOP_LOSS", "STOP_LOSS_MARKET"}
 
+# SESSION41 FIX (STATUS.md open item #5 — "TICK_SIZE is hardcoded to 0.05
+# for all stocks"): confirmed against NSE's actual price-linked tick
+# circular (effective 2024-06-10, revised 2025-04-15) that this WAS wrong
+# for any candidate priced below ₹250 (real tick ₹0.01, not ₹0.05) and for
+# anything above ₹1,000 (real tick coarser than ₹0.05). Duplicated
+# verbatim from real-trade-service/execution/dhan_client.py's identical
+# session41 fix, per this module's own duplication-on-purpose convention
+# (see this file's top docstring) — see that file's comment for the full
+# source citation and the "best-effort from live price, not NSE's monthly-
+# review closing price" caveat.
+_TICK_SIZE_BANDS: list[tuple[float, float]] = [
+    (250.0, 0.01),
+    (1000.0, 0.05),
+    (5000.0, 0.10),
+    (10000.0, 0.50),
+    (20000.0, 1.00),
+    (float("inf"), 5.00),
+]
 
-def round_to_tick(price: float, tick_size: float = TICK_SIZE) -> float:
+
+def tick_size_for_price(price: float) -> float:
+    """Best-effort NSE price-band tick size for `price` — see
+    _TICK_SIZE_BANDS' comment above. Falls back to the flat TICK_SIZE
+    default for anything non-numeric or <= 0."""
+    try:
+        price_f = float(price)
+    except (TypeError, ValueError):
+        return TICK_SIZE
+    if price_f <= 0:
+        return TICK_SIZE
+    for upper_bound, band_tick in _TICK_SIZE_BANDS:
+        if price_f < upper_bound:
+            return band_tick
+    return TICK_SIZE
+
+
+def round_to_tick(price: float, tick_size: Optional[float] = None) -> float:
     """Round `price` to the nearest valid exchange tick, in Decimal (not
     binary float) end-to-end — see real-trade-service's dhan_client.py
     2026-09-07 fix comment for why binary float rounding can still fail
-    Dhan's tick-multiple check on a price that looks perfectly clean."""
+    Dhan's tick-multiple check on a price that looks perfectly clean. When
+    `tick_size` is not given, it is resolved from `price`'s own NSE price
+    band (session41 fix) instead of always using the flat ₹0.05 default."""
     try:
         price_f = float(price)
-        if price_f <= 0 or tick_size <= 0:
+        if price_f <= 0:
+            return price_f
+        resolved_tick = tick_size if tick_size is not None else tick_size_for_price(price_f)
+        if resolved_tick <= 0:
             return price_f
         price_dec = Decimal(str(price_f))
-        tick_dec = Decimal(str(tick_size))
+        tick_dec = Decimal(str(resolved_tick))
         ticks = (price_dec / tick_dec).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         result = (ticks * tick_dec).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         return float(result)
@@ -64,10 +105,14 @@ def round_to_tick(price: float, tick_size: float = TICK_SIZE) -> float:
         return price
 
 
-def is_valid_tick_price(price: float, tick_size: float = TICK_SIZE) -> bool:
+def is_valid_tick_price(price: float, tick_size: Optional[float] = None) -> bool:
+    """`tick_size` resolves from `price`'s own NSE price band when not
+    given (session41 fix), matching round_to_tick."""
     try:
-        price_dec = Decimal(str(float(price)))
-        tick_dec = Decimal(str(tick_size))
+        price_f = float(price)
+        resolved_tick = tick_size if tick_size is not None else tick_size_for_price(price_f)
+        price_dec = Decimal(str(price_f))
+        tick_dec = Decimal(str(resolved_tick))
         if price_dec <= 0 or tick_dec <= 0:
             return True
         remainder = (price_dec / tick_dec) % 1
@@ -314,16 +359,17 @@ def place_order(
             )
         price = 0.0
     elif order_type == "LIMIT" and price:
+        _band_tick = tick_size_for_price(price)
         tick_safe_price = round_to_tick(price)
         if tick_safe_price != price:
             logger.info(
                 "place_order: rounded LIMIT price ₹%.4f -> ₹%.2f to a valid %.2f tick",
-                price, tick_safe_price, TICK_SIZE,
+                price, tick_safe_price, _band_tick,
             )
         price = tick_safe_price
         if not is_valid_tick_price(price):
             raise ValueError(
-                f"Refusing to place LIMIT order at ₹{price} — not a valid ₹{TICK_SIZE} "
+                f"Refusing to place LIMIT order at ₹{price} — not a valid ₹{_band_tick} "
                 f"tick multiple after rounding."
             )
 
@@ -368,19 +414,23 @@ def place_order(
                 ).upper()
                 broker_price = broker_row.get("price")
                 if broker_order_type and broker_order_type != order_type:
-                    logger.critical(
-                        "position-stocks: place_order: BROKER ORDER TYPE MISMATCH for "
-                        "order %s (%s %s x%s) — sent order_type=%s but Dhan reports "
-                        "orderType=%s (price=%s) — investigate immediately.",
-                        placed_order_id, transaction_type, security_id, quantity,
-                        order_type, broker_order_type, broker_price,
+                    msg = (
+                        f"place_order: BROKER ORDER TYPE MISMATCH for order "
+                        f"{placed_order_id} ({transaction_type} {security_id} "
+                        f"x{quantity}) — sent order_type={order_type} but Dhan "
+                        f"reports orderType={broker_order_type} (price={broker_price}) "
+                        f"— investigate immediately."
                     )
+                    logger.critical("position-stocks: %s", msg)
+                    notifier.notify_critical(msg)
                 elif order_type == "MARKET" and broker_price not in (None, 0, 0.0):
-                    logger.critical(
-                        "position-stocks: place_order: BROKER PRICE MISMATCH for MARKET "
-                        "order %s (%s %s x%s) — sent price=0 but Dhan reports price=%s.",
-                        placed_order_id, transaction_type, security_id, quantity, broker_price,
+                    msg = (
+                        f"place_order: BROKER PRICE MISMATCH for MARKET order "
+                        f"{placed_order_id} ({transaction_type} {security_id} "
+                        f"x{quantity}) — sent price=0 but Dhan reports price={broker_price}."
                     )
+                    logger.critical("position-stocks: %s", msg)
+                    notifier.notify_critical(msg)
         except Exception as e:  # noqa: BLE001 — verification must never break a real placement
             logger.warning(
                 "position-stocks: place_order: post-placement verification failed for "
@@ -542,7 +592,30 @@ def place_super_order(
     # tick when order_type=="LIMIT" originally, but the caller's price can
     # still carry binary-float WS-feed artifacts (see round_to_tick's own
     # docstring) — rounding here closes that gap.
+    #
+    # SESSION41 FIX (STATUS.md open item #6): this path is not currently
+    # exercised by any caller (orders/entry.py only ever sends MARKET), but
+    # was flagged as "re-check if you ever switch to LIMIT entries" — so
+    # add the same fail-loudly guard place_order() already has, instead of
+    # relying solely on the SDK's own ValueError text (which fires deep
+    # inside a third-party call and gives no symbol/side context in the
+    # traceback). This is additive safety, not a behaviour change for
+    # MARKET, which returns above before reaching this branch.
+    if order_type_upper == "LIMIT" and not price:
+        raise ValueError(
+            f"place_super_order: order_type=LIMIT requires a positive price "
+            f"({transaction_type} {security_id} x{quantity}) — refusing to "
+            f"call the SDK with price={price!r}, which would only surface "
+            f"as an opaque 'Missing required parameters' ValueError from "
+            f"inside the SDK with no symbol context."
+        )
     ref_price = round_to_tick(price) if price else price
+    if order_type_upper == "LIMIT" and not is_valid_tick_price(ref_price):
+        raise ValueError(
+            f"place_super_order: refusing to place LIMIT entry for "
+            f"{security_id} at ₹{ref_price} — not a valid "
+            f"₹{tick_size_for_price(ref_price)} tick multiple after rounding."
+        )
 
     logger.info(
         "position-stocks: Placing REAL Super Order: %s %s x%s ref=%s target=%s stop=%s (%s, %s)",

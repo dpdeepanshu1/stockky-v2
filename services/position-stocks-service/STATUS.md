@@ -6,7 +6,84 @@
 
 ---
 
-## Session 28 (this session) — real bug found in the WS tick buffer's sizing: count-capped, not time-bounded, silently starves the 15m/60m windows on exactly the highest-frequency movers
+## Session 41b (this session) — closed the 4 previously-deliberate "known gaps" from session41's no-buy fix
+
+Session41 fixed the MARKET Super Order SDK-bypass bug (root cause of the
+persistent BUY failures) and flagged 4 items as "known gaps, deliberately
+not fixed / out of scope" plus asked for live verification of items that
+can't be tested from this sandbox (no real Dhan account/market access
+here — still true this session). This session closed all 4 gaps:
+
+**#7 — no notification channel (fixed):** added `notifier.py` (straight
+port of real-trade-service's own notifier.py — same Telegram /
+notification-scheduler-service routing, same env vars, so both services'
+alerts land in the same chat via the same Alert-panel config). Wired
+`notifier.notify_critical()` into every existing `logger.critical(...)`
+call site — 2 in `execution/dhan_client.py` (broker order-type/price
+mismatch on a plain order), 3 in `orders/reconcile.py` (EOD flat-SELL
+broker mismatch, dead zero-fill EOD SELL, and the new legacy-backfill
+alert below). Added `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` /
+`NOTIFICATION_SERVICE_URL` to `config.py`.
+
+**#5 — TICK_SIZE hardcoded to 0.05 for all stocks (confirmed wrong,
+fixed):** checked NSE's actual price-linked tick circular (effective
+2024-06-10, revised 2025-04-15) — real tick sizes are banded: <₹250 =
+₹0.01, ₹250–1,000 = ₹0.05, ₹1,000–5,000 = ₹0.10, ₹5,000–10,000 = ₹0.50,
+₹10,000–20,000 = ₹1.00, >₹20,000 = ₹5.00. A flat ₹0.05 was silently
+over/under-rounding target/stop prices for any candidate outside the
+₹250–1,000 band — exactly the failure mode flagged ("if a very low-priced
+candidate keeps failing target/stop tick validation"). Added
+`tick_size_for_price()` (band lookup off the live reference price this
+service already has — NSE's own review is monthly off closing price, so
+this is a best-effort approximation, documented as such) to **both**
+`position-stocks-service` and `real-trade-service`'s `execution/
+dhan_client.py` (kept identical per their intentional-duplication
+convention). `round_to_tick()`/`is_valid_tick_price()` now auto-resolve
+the correct band when no explicit `tick_size` is passed; every call site
+that referenced the old flat `TICK_SIZE` constant in a log/error message
+now reports the actual resolved band tick instead.
+
+**#6 — LIMIT path in `place_super_order()` untouched (hardened, not a
+live bug):** confirmed this path is correct as documented — the SDK's own
+client-side validation is exactly what LIMIT entries want, unlike MARKET.
+Not currently reachable (only caller sends MARKET), so nothing was
+actually broken. Added an explicit fail-loud pre-check anyway (positive
+price + valid tick, checked and raised with full symbol/side context)
+ahead of the SDK call, so a future switch to LIMIT entries fails with a
+clear, attributable error instead of the SDK's own bare `ValueError`
+surfacing with no context.
+
+**#4 — pre-session40 EOD_SQUAREOFF rows with no `dhan_exit_order_id`
+(partially fixed, rest is a genuine hard limit, not negligence):** added
+`_backfill_legacy_eod_exit_order_ids()` to `orders/reconcile.py`, run
+before the existing real-fill reconciliation each pass. Best-effort
+matches a legacy row (security_id + quantity + SELL, not already claimed)
+against `dhan_client.get_order_list()`. **Documented hard constraint:**
+that endpoint only returns the CURRENT trading day's orders — Dhan
+exposes no broker order-history endpoint to this SDK for prior days — so
+only a legacy row whose EOD square-off happened earlier the SAME day can
+ever be resolved this way; a row from an actually prior trading day is
+permanently unresolvable through this API. Rather than continue silently
+leaving those on the stale entry-price placeholder forever, added a
+once-per-position (process-lifetime) CRITICAL alert via the new
+notifier so they surface for manual review against Dhan's own contract
+notes, instead of quietly falling through.
+
+**Not done this session (unchanged from session41, still genuinely
+untestable here):** items #1-3 from session41 (MARKET Super Order SDK
+bypass correctness, `client.dhan_http` attribute availability on the real
+deployed dhanhq version, session40's EOD fixes) remain live-unverified —
+this sandbox has no real Dhan account/market access. **Next step is still
+the same: redeploy and watch a live Run Cycle / EOD sweep.** Item #8
+(QUALITY_GATE `SKIPPED` rows) was never a bug.
+
+**Verification:** `python3 -m py_compile` and `pyflakes` clean on every
+touched file in both services (position-stocks-service and
+real-trade-service); no new warnings beyond each service's existing,
+already-documented pre-session41 pyflakes baseline (unused `config`/
+`pandas` imports, unused `global` declarations — unrelated, pre-existing).
+
+## Session 28 — real bug found in the WS tick buffer's sizing: count-capped, not time-bounded, silently starves the 15m/60m windows on exactly the highest-frequency movers
 
 **"Check other is in position stocks tab" — continued sweep for any
 remaining issue.** With `main.py`/frontend/`orders/`/`capital/ledger.py`
@@ -441,7 +518,7 @@ design, confirmed intentional, not a divergence**: both mark the day's
 sweep "done" unconditionally and rely on an operator noticing a failure,
 rather than auto-retrying every cycle. real-trade-service surfaces failures
 via `notify_async` (Telegram); this service has **no notification channel
-at all**.
+at all** (see session 41 below — this gap is now closed).
 
 **New gap found and fixed:** because of the above, a failed EOD flatten in
 this service had zero operator-facing signal beyond a server log line and a

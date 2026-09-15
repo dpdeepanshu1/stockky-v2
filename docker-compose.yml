@@ -422,6 +422,14 @@ services:
       # a host-specific value that belongs in .env.
       - ORACLE_WALLET_DIR=/oracle_wallet
       - TNS_ADMIN=/oracle_wallet
+      # Session41b fix (STATUS.md open item #7 — no notification channel):
+      # TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are already inherited raw from
+      # .env via env_file above (same mechanism as ADMIN_*/ANGELONE_* —
+      # nothing new needed there). NOTIFICATION_SERVICE_URL listed
+      # explicitly here too, matching real-trade-service's own block below,
+      # so both services' notifier.py route through the exact same
+      # notification-scheduler-service instance.
+      - NOTIFICATION_SERVICE_URL=http://notification-scheduler-service:8000/notification
       # Confirmed by user (tracking doc §3.5/§5.9): 2% of the scalp pool
       # risked per trade.
       - RISK_PER_TRADE_PCT=2.0

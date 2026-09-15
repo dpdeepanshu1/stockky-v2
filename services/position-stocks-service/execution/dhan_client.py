@@ -256,6 +256,21 @@ def get_positions(db: Session) -> list:
     return data if isinstance(data, list) else []
 
 
+def get_order_list(db: Session) -> list:
+    """Read-only — no arm check. Returns all PLAIN (non-super) orders for
+    the day, i.e. the same order book place_order()'s own post-placement
+    verification reads inline. Added session40 alongside real-trade-
+    service's identically-named function so orders/reconcile.py can look
+    up a plain EOD_SQUAREOFF MARKET SELL's real fill by dhan_exit_order_id
+    — get_super_order_list() (used for the normal TARGET_LEG/STOP_LOSS_LEG
+    exit path) never contains plain orders, so that lookup was previously
+    impossible from this module."""
+    client = _get_sdk_client(db)
+    resp = client.get_order_list()
+    data = _extract_data(resp)
+    return data if isinstance(data, list) else []
+
+
 # ── Order placement (plain — fallback if USE_SUPER_ORDER=false) ──────────
 def place_order(
     db: Session,

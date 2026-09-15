@@ -156,6 +156,19 @@ FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE = _get_bool("FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE
 # ── EOD square-off ───────────────────────────────────────────────────────────
 EOD_SQUAREOFF_TIME_IST = os.getenv("EOD_SQUAREOFF_TIME_IST", "15:00")
 
+# 2026-09-15 fix (session40 — mirrors real-trade-service's DATAMATICS-storm
+# hardening, applied here even though this service's EOD sweep runs at most
+# ONCE per day per config.EOD_SQUAREOFF_TIME_IST guard, not in a fast
+# every-45s retry loop, so the open-ended-retry-storm failure mode itself
+# doesn't apply the same way. What DOES apply: a single flat-SELL attempt
+# that fails on a transient blip (not one of the three classified permanent-
+# for-today rejection types already handled in eod_squareoff.py) used to be
+# given up on immediately, leaving a real position OPEN past hard-flat time
+# with zero further attempts until tomorrow's sweep. These settings bound a
+# small in-call retry for genuinely transient failures only.
+EOD_SELL_RETRY_ATTEMPTS = _get_int("EOD_SELL_RETRY_ATTEMPTS", 3)
+EOD_SELL_RETRY_DELAY_SECONDS = float(os.getenv("EOD_SELL_RETRY_DELAY_SECONDS", "2.0"))
+
 # ── Arming ──────────────────────────────────────────────────────────────────
 # Starts DISARMED — must be armed explicitly via POST /arm after startup.
 _STARTUP_ARMED_DEFAULT = False

@@ -877,6 +877,13 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             # the watchlist engine — see candidate_engine's
             # _refresh_volume_shock_candidates).
             source_tab=getattr(cand, "source_tab", None),
+            # 2026-09-15 fix (session38): this automated entry path has
+            # always bought CNC (dhan_client.place_order's default — never
+            # passed explicitly a few lines below), but that fact was never
+            # persisted anywhere, so exit_engine couldn't later tell CNC and
+            # INTRADAY-bought positions apart. Now explicit and stored — see
+            # models.py TradeOrder.product_type's docstring.
+            product_type="CNC",
         )
         db.add(order)
         db.flush()
@@ -937,6 +944,11 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     quantity=decision.proposed_qty,
                     order_type=config.ENTRY_ORDER_TYPE,
                     price=entry_price,
+                    # 2026-09-15 fix (session38): made explicit instead of
+                    # relying on place_order's CNC default — matches
+                    # order.product_type set above, so the two never drift
+                    # apart if place_order's default ever changes.
+                    product_type="CNC",
                 )
                 dhan_order_id = str(
                     broker_result.get("orderId") or broker_result.get("order_id") or ""

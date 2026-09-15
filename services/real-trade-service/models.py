@@ -245,6 +245,24 @@ class TradeOrder(Base):
     # column is what record_real_exit_fill and the partial-exit
     # breakeven-stop logic key off of instead (see reconcile.py, 2026-08-27).
     exit_reason = Column(String(32), nullable=True)
+    # 2026-09-15 fix (session38 — DATAMATICS "insufficient funds" SELL
+    # rejections): the actual product_type ("CNC" | "INTRADAY"/"MIS") sent
+    # to Dhan for THIS order. Never persisted before this fix — entry.py
+    # (always CNC, implicit via dhan_client.place_order's default — never
+    # passed explicitly) and manual_engine.py (explicit, user-chosen) both
+    # decided a product_type at placement time but threw it away once the
+    # order was sent. exit_engine._send_real_sell had no way to know what
+    # the opening BUY actually used, so it guessed from opened_at's
+    # same-day-ness instead — wrong whenever a same-day position was
+    # actually bought CNC (the automated entry path's only mode: see
+    # entry_engine/entry.py, which never passes product_type and so always
+    # gets dhan_client.place_order's CNC default). A same-day CNC BUY has
+    # no matching MIS position at Dhan, so an INTRADAY SELL against it
+    # prices as a fresh naked short and gets margin-rejected. Set at BUY
+    # placement time (entry.py/manual_engine.py); NULL for pre-fix orders
+    # and for SELL orders (which don't need it — see TradePosition.
+    # entry_product_type, which is what exit.py actually reads).
+    product_type = Column(String(16), nullable=True)
     # Cumulative qty this order has ever had booked into a TradeFill /
     # position / account by reconcile_real_orders — NOT the same as
     # TradeFill rows summed (kept as its own column so reconcile can do a
@@ -352,6 +370,18 @@ class TradePosition(Base):
     # manual_engine, where opened_at is trustworthy and the existing
     # same-day/CNC logic is correct as-is.
     broker_imported = Column(Boolean, nullable=False, default=False)
+
+    # 2026-09-15 fix (session38): copied from the opening BUY TradeOrder's
+    # new `product_type` column (portfolio.record_real_fill /
+    # try_fill_entry) at position-open time. Lets exit_engine._send_real_sell
+    # mirror what was ACTUALLY bought instead of guessing from opened_at's
+    # same-day-ness — see TradeOrder.product_type's docstring for the full
+    # incident. NULL for every position opened before this migration (and
+    # for broker_imported holdings, which don't go through a Stockky BUY at
+    # all) — exit.py falls back to the pre-fix same-day heuristic only when
+    # this is NULL, so no behavior changes for positions already open when
+    # this ships.
+    entry_product_type = Column(String(16), nullable=True)
 
     # 2026-09-12 fix (audit finding — volume_shock candidates were getting
     # the 10-day global time-stop instead of the intended EOD+1 exit):

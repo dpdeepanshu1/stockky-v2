@@ -137,6 +137,7 @@ def init_schema() -> None:
     _ensure_manual_order_columns(eng, dialect())
     _ensure_gate_state_columns(eng, dialect())
     _ensure_position_columns(eng, dialect())
+    _ensure_product_type_columns(eng, dialect())
     _backfill_broker_imported_flag(eng)
     _ensure_watchlist_link_columns(eng, dialect())
     _fix_stale_dhan_token_expiry(eng)
@@ -492,6 +493,53 @@ def _backfill_broker_imported_flag(engine) -> None:
 # handles them; only the FK-carrying columns on pre-existing tables need this.
 # All three are nullable and default NULL, so every pre-existing row and every
 # future non-watchlist row is completely unaffected.
+# 2026-09-15 fix (session38 — DATAMATICS "insufficient funds" SELL
+# rejections). See models.py TradeOrder.product_type / TradePosition.
+# entry_product_type docstrings for the full incident. Both columns are
+# nullable and left NULL on existing rows — exit_engine falls back to its
+# previous same-day heuristic for any position that already has no
+# entry_product_type recorded, so this migration changes nothing for
+# positions already open when it ships; it only takes effect for BUYs
+# placed after this deploy.
+def _ensure_product_type_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        order_cols = {c["name"] for c in inspect(engine).get_columns("trade_orders")}
+        position_cols = {c["name"] for c in inspect(engine).get_columns("trade_positions")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect columns for product_type migration: %s", e)
+        return
+
+    if dialect_name == "oracle":
+        adds = [
+            ("trade_orders", order_cols, "product_type",
+             "ALTER TABLE trade_orders ADD (product_type VARCHAR2(16))"),
+            ("trade_positions", position_cols, "entry_product_type",
+             "ALTER TABLE trade_positions ADD (entry_product_type VARCHAR2(16))"),
+        ]
+    else:
+        adds = [
+            ("trade_orders", order_cols, "product_type",
+             "ALTER TABLE trade_orders ADD COLUMN product_type VARCHAR(16)"),
+            ("trade_positions", position_cols, "entry_product_type",
+             "ALTER TABLE trade_positions ADD COLUMN entry_product_type VARCHAR(16)"),
+        ]
+
+    for table, existing, col_name, sql in adds:
+        if col_name in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added %s.%s", table, col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add %s.%s: %s", table, col_name, e)
+
+
 def _ensure_watchlist_link_columns(engine, dialect_name: str) -> None:
     from sqlalchemy import inspect, text
 

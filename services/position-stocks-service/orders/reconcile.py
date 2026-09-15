@@ -41,6 +41,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+import notifier
 from capital import ledger
 from execution import dhan_client
 from models import ScalpPosition
@@ -109,6 +110,118 @@ def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 
 
 _DEAD_EXIT_STATUSES = {"REJECTED", "CANCELLED"}
 
+# run_exit_reconciliation ticks every ~10s (see main.py's trading loop) —
+# without this, an unresolvable legacy row would re-fire notify_critical
+# every single tick forever. Process-lifetime dedup only (resets on
+# restart): a rare duplicate alert after a redeploy is a far better
+# trade-off than a Telegram flood every 10 seconds.
+_backfill_unresolved_notified: set[int] = set()
+
+
+def _backfill_legacy_eod_exit_order_ids(db: Session, eod_pending: list[ScalpPosition]) -> int:
+    """SESSION41 FIX (STATUS.md open item #4): positions already sitting in
+    EOD_SQUAREOFF with a placeholder P&L from BEFORE session40 added
+    dhan_exit_order_id capture have no exit-order id to look up, so
+    _reconcile_eod_pending's real-fill lookup below can never resolve them
+    — they were being left on the entry-price placeholder forever.
+
+    HARD CONSTRAINT (documented on dhan_client.get_order_list, unchanged
+    by this fix): Dhan's plain order-list endpoint only returns the
+    CURRENT trading day's orders — there is no broker order-history
+    endpoint available to this SDK for prior days. That means this
+    function can only ever backfill a legacy row whose EOD square-off
+    happened earlier TODAY (e.g. this reconciliation loop itself caught
+    the position before dhan_exit_order_id existed, or a genuinely old row
+    happens to get re-examined the same day it closed). Rows from a prior
+    trading day are permanently unresolvable this way — the best this
+    function can do for those is stop silently ignoring them and instead
+    say so loudly (once per pass), which is the actual, honestly-scoped
+    fix here rather than pretending to reconstruct broker history that
+    Dhan doesn't expose.
+
+    Matching heuristic for the same-day case: among today's plain orders,
+    find a SELL on this position's own security_id, for exactly this
+    position's quantity, not already claimed as another position's
+    dhan_exit_order_id this pass — preferring one already FILLED/TRADED.
+    This is a best-effort match, not a guaranteed-correct one (two
+    same-day EOD SELLs on the same symbol/qty would be ambiguous) — every
+    backfilled id is logged at INFO with exactly what matched, so a wrong
+    guess is auditable, and the existing broker orderType/price
+    cross-check in _reconcile_eod_pending still runs on it afterward as a
+    second layer of defense.
+
+    Returns the count of legacy rows successfully backfilled (which the
+    caller should now be able to resolve via _reconcile_eod_pending in the
+    same pass)."""
+    legacy = [p for p in eod_pending if not p.dhan_exit_order_id]
+    if not legacy:
+        return 0
+
+    try:
+        plain_orders = dhan_client.get_order_list(db)
+    except Exception as e:
+        logger.warning("reconcile: legacy EOD backfill — failed to fetch plain order list: %s", e)
+        return 0
+
+    already_claimed = {
+        str(p.dhan_exit_order_id) for p in eod_pending if p.dhan_exit_order_id
+    }
+    backfilled = 0
+    for pos in legacy:
+        matches = [
+            row for row in plain_orders
+            if str(row.get("transactionType") or row.get("transaction_type") or "").upper() == "SELL"
+            and str(row.get("securityId") or row.get("security_id") or "") == str(pos.dhan_security_id)
+            and int(row.get("quantity") or 0) == int(pos.quantity)
+            and str(row.get("orderId") or row.get("order_id") or "") not in already_claimed
+        ]
+        if not matches:
+            continue
+        # Prefer an already-filled leg if more than one same-day candidate
+        # matches; otherwise take the first (matches deterministic order.
+        matches.sort(
+            key=lambda r: str(r.get("orderStatus") or r.get("order_status") or "").upper()
+            not in _FILLED_STATUSES
+        )
+        chosen = matches[0]
+        oid = str(chosen.get("orderId") or chosen.get("order_id") or "")
+        if not oid:
+            continue
+        pos.dhan_exit_order_id = oid
+        db.commit()
+        already_claimed.add(oid)
+        backfilled += 1
+        logger.info(
+            "reconcile: legacy EOD backfill — matched %s (id=%d, qty=%d) to Dhan "
+            "order %s (status=%s) from today's order list; handing off to the "
+            "normal real-fill reconciliation pass.",
+            pos.symbol, pos.id, pos.quantity, oid,
+            chosen.get("orderStatus") or chosen.get("order_status"),
+        )
+
+    unresolved = [
+        p for p in legacy
+        if not p.dhan_exit_order_id and p.id not in _backfill_unresolved_notified
+    ]
+    if unresolved:
+        msg = (
+            f"reconcile: legacy EOD backfill — {len(unresolved)} pre-session40 "
+            f"EOD_SQUAREOFF position(s) still have no dhan_exit_order_id and "
+            f"could not be matched in today's Dhan order list "
+            f"({', '.join(f'{p.symbol}(id={p.id})' for p in unresolved[:10])}"
+            f"{'...' if len(unresolved) > 10 else ''}). These are from a prior "
+            f"trading day — Dhan's order-list endpoint only covers today, so "
+            f"they cannot be auto-resolved and will keep using the stale "
+            f"entry-price placeholder P&L. Needs manual review against Dhan's "
+            f"own trade book / contract notes for the dates in question. "
+            f"(This alert fires once per position per service restart.)"
+        )
+        logger.critical(msg)
+        notifier.notify_critical(msg)
+        _backfill_unresolved_notified.update(p.id for p in unresolved)
+
+    return backfilled
+
 
 def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int:
     """2026-09-15 fix (session40 — the "future improvement" flagged in
@@ -124,15 +237,17 @@ def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int
     Same defense-in-depth this service's dhan_client.place_order() and
     real-trade-service's reconcile.py already apply: also cross-checks
     Dhan's own reported orderType/price for this SELL against what was
-    actually requested (MARKET/0) and logs CRITICAL on a mismatch — this
-    service has no notification channel (see main.py's own note on that),
-    so a loud log line is the whole alert path here, same as every other
-    CRITICAL in this module.
+    actually requested (MARKET/0) and logs CRITICAL on a mismatch — as of
+    session41 this also fires a Telegram alert via notifier.py (see that
+    module), not just a log line.
 
     Positions with no dhan_exit_order_id (pre-session40 rows, or a case
     where _fire_flat_sell's retries were all exhausted with no order ever
-    accepted) are left untouched for the caller's existing placeholder
+    accepted) are left untouched here for the caller's existing placeholder
     fallback — this function only handles the case it can actually resolve.
+    See _backfill_legacy_eod_exit_order_ids below (session41) for a
+    best-effort attempt to resolve the pre-session40 rows too, run by the
+    caller before this function.
     """
     candidates = [p for p in eod_pending if p.dhan_exit_order_id]
     if not candidates:
@@ -159,19 +274,23 @@ def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int
         broker_order_type = str(row.get("orderType") or row.get("order_type") or "").upper()
         broker_price = row.get("price")
         if broker_order_type and broker_order_type != "MARKET":
-            logger.critical(
-                "reconcile: EOD flat-SELL BROKER ORDER TYPE MISMATCH for %s (id=%d, "
-                "order %s) — sent MARKET but Dhan reports orderType=%s (price=%s). "
-                "This position's flat-close is not what this service believes it is "
-                "— investigate immediately.",
-                pos.symbol, pos.id, pos.dhan_exit_order_id, broker_order_type, broker_price,
+            msg = (
+                f"reconcile: EOD flat-SELL BROKER ORDER TYPE MISMATCH for "
+                f"{pos.symbol} (id={pos.id}, order {pos.dhan_exit_order_id}) — sent "
+                f"MARKET but Dhan reports orderType={broker_order_type} "
+                f"(price={broker_price}). This position's flat-close is not what "
+                f"this service believes it is — investigate immediately."
             )
+            logger.critical(msg)
+            notifier.notify_critical(msg)
         elif broker_price not in (None, 0, 0.0):
-            logger.critical(
-                "reconcile: EOD flat-SELL BROKER PRICE MISMATCH for %s (id=%d, order %s) "
-                "— sent price=0 (MARKET) but Dhan reports price=%s.",
-                pos.symbol, pos.id, pos.dhan_exit_order_id, broker_price,
+            msg = (
+                f"reconcile: EOD flat-SELL BROKER PRICE MISMATCH for {pos.symbol} "
+                f"(id={pos.id}, order {pos.dhan_exit_order_id}) — sent price=0 "
+                f"(MARKET) but Dhan reports price={broker_price}."
             )
+            logger.critical(msg)
+            notifier.notify_critical(msg)
 
         status = str(row.get("orderStatus") or row.get("order_status") or "").upper()
         if status in _FILLED_STATUSES:
@@ -227,12 +346,14 @@ def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int
             pos.error_message = f"EOD_SQUAREOFF_SELL_DEAD: order {pos.dhan_exit_order_id} came back {status} with zero fill — position may still be open at the broker, needs manual review."
             db.commit()
             resolved += 1
-            logger.critical(
-                "reconcile: %s (id=%d) EOD flat-SELL order %s came back %s with ZERO "
-                "fill — position marked ERROR, likely still open at the broker past "
-                "hard-flat time. Needs manual review.",
-                pos.symbol, pos.id, pos.dhan_exit_order_id, status,
+            msg = (
+                f"reconcile: {pos.symbol} (id={pos.id}) EOD flat-SELL order "
+                f"{pos.dhan_exit_order_id} came back {status} with ZERO fill — "
+                f"position marked ERROR, likely still open at the broker past "
+                f"hard-flat time. Needs manual review."
             )
+            logger.critical(msg)
+            notifier.notify_critical(msg)
     return resolved
 
 
@@ -268,6 +389,14 @@ def run_exit_reconciliation(db: Session) -> int:
         )
         .all()
     )
+    # SESSION41 FIX: before resolving real fills, best-effort backfill
+    # dhan_exit_order_id on any pre-session40 legacy row that doesn't have
+    # one yet — see _backfill_legacy_eod_exit_order_ids' docstring for the
+    # matching heuristic and its documented same-day-only limitation. Runs
+    # BEFORE _reconcile_eod_pending so a row it successfully backfills is
+    # picked up by the real-fill lookup in this same pass, not next cycle.
+    _backfill_legacy_eod_exit_order_ids(db, eod_pending)
+
     # 2026-09-15 fix (session40): resolve EOD-pending positions' REAL flat-
     # SELL fill first, via get_order_list()/dhan_exit_order_id — see
     # _reconcile_eod_pending's docstring. Positions it resolves (real fill

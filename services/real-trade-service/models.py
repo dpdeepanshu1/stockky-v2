@@ -180,7 +180,16 @@ class TradeCandidate(Base):
     # overnight_priority above.
     us_sector_bonus = Column(Float, nullable=False, default=0.0)
 
-    __table_args__ = (Index("ix_trade_candidates_mode_symbol", "mode", "symbol"),)
+    # SESSION 33 AUDIT FIX: entry_engine.evaluate_mode's hot-path query
+    # (filter_by(mode=mode, consumed=False).order_by(received_at.asc())),
+    # run every auto-pilot tick forever, had no supporting index — see
+    # db.py's _ensure_hot_path_indexes for the additive migration this
+    # table needs on an already-deployed DB (create_all() only adds an
+    # index to a table it's also creating for the first time).
+    __table_args__ = (
+        Index("ix_trade_candidates_mode_symbol", "mode", "symbol"),
+        Index("ix_trade_candidates_mode_consumed_recv", "mode", "consumed", "received_at"),
+    )
 
 
 # ── Entry/exit decisions (the "why", separate from the resulting order) ────
@@ -264,6 +273,13 @@ class TradeOrder(Base):
     source_tab = Column(String(32), nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+    # SESSION 33 AUDIT FIX: GET /orders/{mode} (main.py's list_orders) filters
+    # by mode + a created_at cutoff and orders by created_at DESC on every
+    # Orders tab poll — had no supporting index. See db.py's
+    # _ensure_hot_path_indexes for the additive migration this table needs
+    # on an already-deployed DB.
+    __table_args__ = (Index("ix_trade_orders_mode_created", "mode", "created_at"),)
 
 
 class TradeOrderEvent(Base):

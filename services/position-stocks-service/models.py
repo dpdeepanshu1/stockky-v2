@@ -18,6 +18,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Float,
+    Index,
     Integer,
     String,
     Text,
@@ -114,6 +115,14 @@ class ScalpPosition(Base):
     opened_at = Column(DateTime, nullable=False, default=_now)
     closed_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
+
+    # SESSION 33 AUDIT FIX: GET /positions and GET /trades/history (main.py)
+    # both order by opened_at DESC on every dashboard poll — had no
+    # supporting index. See db.py's _ensure_hot_path_indexes for the
+    # additive migration this table needs on an already-deployed DB
+    # (create_all() only adds an index to a table it's also creating for
+    # the first time).
+    __table_args__ = (Index("ix_scalp_positions_opened_at", "opened_at"),)
 
 
 class ScalpCandidateLog(Base):

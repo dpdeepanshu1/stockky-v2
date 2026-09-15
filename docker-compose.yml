@@ -250,11 +250,27 @@ services:
       - decision-prediction-service
     restart: unless-stopped
     healthcheck:
+      # SESSION 33 fix: same false-unhealthy pattern already fixed below for
+      # real-trade-service. api-gateway's /health check shares this
+      # container's single asyncio event loop with synchronous, sometimes-
+      # slow outbound work run right on that loop — NSE cookie/index
+      # scraping (nseindia.com), yfinance market-movers fetches, and Oracle
+      # calls (see the boot logs: "Error fetching indices", "Fetching fresh
+      # market movers data from yfinance"). A legitimately busy stretch of
+      # that work can stall /health for longer than the old interval(30s) x
+      # retries(3) = 90s window, which is exactly what was observed:
+      # `docker compose ps` showed this container unhealthy while its own
+      # logs proved it was alive and successfully serving real requests
+      # (200s on /market/indices, /market/top-gainers, etc.) in the same
+      # window. Not a crash — widened to the same interval(20s) x
+      # retries(6) = 120s tolerance window real-trade-service uses, so a
+      # normal-length NSE/yfinance fetch doesn't false-trip it, while a
+      # genuinely dead process is still caught within ~2 minutes.
       test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health', timeout=5) or sys.exit(0)"]
-      interval: 30s
+      interval: 20s
       timeout: 10s
-      retries: 3
-      start_period: 30s
+      retries: 6
+      start_period: 60s
     logging: *default-logging
     # Pure async I/O fan-out/proxy — CPU-light, but every request passes
     # through it, so it still gets a solid share.

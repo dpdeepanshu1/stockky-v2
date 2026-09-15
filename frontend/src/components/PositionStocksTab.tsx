@@ -1383,7 +1383,8 @@ export default function PositionStocksTab() {
       {subTab === "charges" && (() => {
         // AUDIT ADD (this session), ported from Real Automatic Trade's
         // Charges tab — same Dhan NSE-equity rate card, but this service's
-        // orders are ALWAYS intraday (config.SCALP_PRODUCT_TYPE = "INTRA",
+        // orders are ALWAYS intraday (config.SCALP_PRODUCT_TYPE = "INTRADAY",
+        // FIXED session38 — was "INTRA", an invalid Dhan productType enum value,
         // never "CNC" — see main.py's /status pipeline_config), so there's
         // no delivery/intraday branch to pick here, unlike real-trade-
         // service which trades both. Built from dhanLive (Dhan's own

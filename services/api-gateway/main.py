@@ -3564,6 +3564,13 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
 # function docstring below for the failure this caused.
 _nifty50_fetch_lock = threading.Lock()
 
+# SESSION 33c fix: last successful movers fetch, kept independent of the
+# per-day cache_key above so a pre-open/closed-market request always has
+# something real to fall back to instead of an empty list. Mirrors the
+# indices endpoint's INDICES_LAST_KNOWN pattern (get_market_indices, above).
+MARKET_MOVERS_LAST_KNOWN = "stockky:market_movers_last_known"
+
+
 def _get_nifty50_data() -> List[dict]:
     today = datetime.now().strftime("%Y-%m-%d")
     cache_key = f"{MARKET_MOVERS_CACHE_PREFIX}{today}"
@@ -3571,6 +3578,42 @@ def _get_nifty50_data() -> List[dict]:
     if cached and isinstance(cached, list) and len(cached) > 0:
         logger.info("Serving cached market movers data for %s", today)
         return cached
+
+    # SESSION 33c fix (audit finding): this function used to go straight to
+    # a ~150-symbol yfinance fetch on ANY cache miss, using
+    # `ticker.history(period="1d", interval="1m")` per symbol — i.e.
+    # TODAY's 1-minute intraday candles. Before the 09:15 IST session
+    # opens (the "preopen"/08:30-09:15 warm window this dashboard itself
+    # labels "PRE-OPEN"), NO symbol has any 1-minute bar for today yet, so
+    # every single one of those ~150 requests is *guaranteed* to return an
+    # empty DataFrame -> hist.empty -> None -> data == []. Because an empty
+    # list is falsy, the cache-read check above (`if cached and ...`)
+    # never treats it as a hit, so this expensive full fetch re-ran on
+    # EVERY poll of /market/top-gainers /-losers /-most-active during the
+    # entire pre-open window — hammering Yahoo with ~150 requests per poll
+    # for something that cannot possibly succeed yet. That request volume
+    # is a plausible contributor to get_market_indices()'s intermittent
+    # "Index data temporarily unavailable" 503s (same yfinance backend,
+    # same container IP, more likely to get rate-limited/throttled).
+    # Fix: outside the "open" session phase, skip the guaranteed-empty
+    # fetch entirely and serve the last successful day's data (clearly
+    # marked stale) instead — same last-known-fallback shape
+    # get_market_indices already uses.
+    phase = _market_session_phase_ist()
+    if phase != "open":
+        last_known = _redis_get(MARKET_MOVERS_LAST_KNOWN)
+        if last_known and isinstance(last_known, list) and len(last_known) > 0:
+            logger.info(
+                "Market session phase=%s — serving last-known movers instead of "
+                "a guaranteed-empty pre-open/closed yfinance 1m-interval fetch",
+                phase,
+            )
+            return last_known
+        logger.info(
+            "Market session phase=%s and no last-known movers cached yet — "
+            "returning empty rather than a guaranteed-empty fetch", phase,
+        )
+        return []
 
     # Fix (30 Aug 2026): test_20260830_134442.log — market/top-gainers and
     # market/top-losers both timed out at 25.00s, back to back, right after
@@ -3648,6 +3691,11 @@ def _get_nifty50_data() -> List[dict]:
                 if res:
                     data.append(res)
         _redis_set(cache_key, data, ttl=86400)
+        if data:
+            # SESSION 33c fix: keep a rolling last-known copy so the next
+            # pre-open/closed-market window (see the phase check above) has
+            # real data to serve instead of an empty list.
+            _redis_set(MARKET_MOVERS_LAST_KNOWN, data, ttl=7 * 86400)
         return data
 
 # ── Pydantic models ──────────────────────────────────────────────────────────

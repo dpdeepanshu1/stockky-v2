@@ -360,6 +360,7 @@ async def evaluate_manual_order(
     estimated_pnl = round((reference_price - position.avg_entry_price) * qty, 2)
     preview = {
         "ok": True, "mode": mode, "symbol": symbol, "side": "SELL", "position_id": position.id,
+        "order_type": order_type,
         "qty_available": position.qty_open, "qty_requested": req.qty, "approved_qty": qty,
         "exit_price_estimate": reference_price, "estimated_pnl": estimated_pnl,
     }
@@ -406,8 +407,16 @@ async def evaluate_manual_order(
             )
             return preview
         full = qty >= position.qty_open
+        # 2026-09-15 fix (session39): order_type/reference_price were
+        # validated and priced above like any other ticket field but never
+        # actually reached Dhan for a SELL — _send_real_sell used to hardcode
+        # MARKET regardless of what this ticket asked for, so a manual LIMIT
+        # sell silently went out as MARKET every time. Now passed through;
+        # every AUTOMATIC exit call site elsewhere in exit.py still omits
+        # both args and is unaffected.
         sent = _send_real_sell(db, position, qty, "manual_sell", full=full,
-                                execution_source="MANUAL", confirmed_by=admin)
+                                execution_source="MANUAL", confirmed_by=admin,
+                                order_type=order_type, limit_price=reference_price)
         if not sent:
             log_action(db, actor=admin or "admin", action="MANUAL_ORDER_REJECTED", mode=mode,
                        detail=f"{symbol} SELL x{qty}: Dhan rejected the order — see server logs.")

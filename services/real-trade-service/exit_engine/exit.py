@@ -223,10 +223,30 @@ def _send_real_sell(
     full: bool = True,
     execution_source: str = "AUTO",
     confirmed_by: Optional[str] = None,
+    order_type: str = "MARKET",
+    limit_price: Optional[float] = None,
 ) -> bool:
-    """Place a MARKET SELL at Dhan for `qty` shares of an open REAL position.
-    MARKET (not LIMIT) — an exit's purpose is capital protection; a limit
+    """Place a SELL at Dhan for `qty` shares of an open REAL position.
+    Defaults to MARKET — every AUTOMATIC exit call site (emergency/stop/
+    target/time_stop/eod_squareoff) relies on this default and must never
+    pass order_type: an exit's purpose is capital protection, and a limit
     sell that never fills defeats that.
+
+    2026-09-15 fix (session39 — manual SELL silently downgraded to MARKET):
+    this function used to hardcode order_type="MARKET"/price=0 unconditionally,
+    so a manual Stockky "Sell" ticket explicitly requesting LIMIT (order_type
+    validated up top of evaluate_manual_order, then thrown away the moment the
+    SELL branch called this function with no way to pass it through) still
+    went out as a MARKET order every time — see manual_engine.py's
+    evaluate_manual_order docstring for the live evidence that surfaced this.
+    order_type/limit_price are now accepted and threaded through to
+    dhan_client.place_order for MANUAL sells ONLY (manual_engine.py passes
+    the ticket's actual order_type; every automatic caller below still omits
+    both args and gets the unchanged MARKET/0 behavior described above).
+    order_type="LIMIT" with no limit_price is treated as a request error by
+    the caller (manual_engine.py validates this before calling in); here it
+    simply falls back to MARKET/0 as a last-resort safety net rather than
+    ever sending a LIMIT order with no price.
 
     Returns True only if Dhan accepted and returned an order id.
     On failure the position is left untouched so exit_engine retries next cycle.
@@ -348,6 +368,19 @@ def _send_real_sell(
         ist_today_str(as_aware(position.opened_at)), ist_today_str(), sell_product_type,
         _pt_basis, position.entry_product_type,
     )
+    # 2026-09-15 fix (session39): resolve what actually gets sent. Every
+    # automatic call site omits both new args, so effective_order_type is
+    # always "MARKET" / effective_price is always 0 for them — unchanged
+    # behavior. A LIMIT request with no usable price has no safe order to
+    # send, so it falls back to MARKET/0 rather than ever placing a LIMIT
+    # order with price 0 (manual_engine.py is expected to reject that case
+    # before ever calling in, this is just a defense-in-depth floor).
+    effective_order_type = (order_type or "MARKET").upper()
+    if effective_order_type == "LIMIT" and limit_price:
+        effective_price = dhan_client.round_to_tick(limit_price)
+    else:
+        effective_order_type = "MARKET"
+        effective_price = 0
     try:
         security_id = dhan_client.get_security_id(db, position.symbol)
         result = dhan_client.place_order(
@@ -356,8 +389,8 @@ def _send_real_sell(
             exchange_segment=dhan_client.NSE_EQ_SEGMENT,
             transaction_type="SELL",
             quantity=qty,
-            order_type="MARKET",
-            price=0,
+            order_type=effective_order_type,
+            price=effective_price,
             product_type=sell_product_type,
         )
         dhan_order_id = str(result.get("orderId") or result.get("order_id") or "")
@@ -371,8 +404,9 @@ def _send_real_sell(
         shared_order_budget.record_order_unconditional(db)
 
         order = models.TradeOrder(
-            mode="REAL", symbol=position.symbol, side="SELL", order_type="MARKET",
+            mode="REAL", symbol=position.symbol, side="SELL", order_type=effective_order_type,
             qty=qty, status="PLACED", dhan_order_id=dhan_order_id,
+            limit_price=(effective_price if effective_order_type == "LIMIT" else None),
             execution_source=execution_source,
             confirmed_by=confirmed_by,
             confirmed_at=datetime.now(timezone.utc) if confirmed_by else None,
@@ -382,7 +416,11 @@ def _send_real_sell(
         db.flush()
         db.add(models.TradeOrderEvent(
             order_id=order.id, event_type="PLACED",
-            detail=f"{reason}: MARKET SELL {qty} sent to Dhan ({sell_product_type})",
+            detail=(
+                f"{reason}: {effective_order_type} SELL {qty}"
+                f"{f' @ {effective_price}' if effective_order_type == 'LIMIT' else ''}"
+                f" sent to Dhan ({sell_product_type})"
+            ),
         ))
         record_real_exit_sent(db, position, dhan_order_id, qty, reason, full=full)
         # 2026-09-07: a successful placement means any prior repeated-
@@ -396,8 +434,11 @@ def _send_real_sell(
         # its own without needing to open the dashboard.
         _stop_txt = f"₹{position.current_stop:.2f}" if position.current_stop is not None else "—"
         _target_txt = f"₹{position.current_target:.2f}" if position.current_target is not None else "—"
+        _order_type_txt = (
+            f"LIMIT @ ₹{effective_price}" if effective_order_type == "LIMIT" else "MARKET"
+        )
         notify_sync(
-            f"📤 *SELL sent* — {position.symbol} ×{qty} ({reason})\n"
+            f"📤 *SELL sent* — {position.symbol} ×{qty} ({reason}, {_order_type_txt})\n"
             f"Entry: ₹{position.avg_entry_price:.2f} | Stop: {_stop_txt} | Target: {_target_txt}\n"
             f"Unrealized P&L: ₹{position.unrealized_pnl:,.2f}\n"
             "Awaiting broker fill confirmation."

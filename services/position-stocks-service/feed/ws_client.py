@@ -15,15 +15,28 @@ We use mode 1 (LTP) — we only need last traded price + volume for the
 rolling-window screener. That gives us the fastest parse path and lowest
 bandwidth.
 
-Binary frame layout (mode 1, all little-endian):
+Binary frame layout (mode 1, all little-endian, 51 bytes total):
   Byte 0:      subscription_type (1=LTP, 2=Quote, 3=SnapQuote)
   Byte 1:      exchange_type     (1=NSE_CM, 2=NSE_FO, ...)
-  Bytes 2-27:  token             (char[26], null-padded)
-  Bytes 28-35: sequence_number   (int64)
-  Bytes 36-43: exchange_feed_time (int64, unix seconds)
-  Bytes 44-51: LTP               (int64, price * 100)
-  Bytes 52-59: LTT               (int64, unix seconds) — mode 1 only has these
+  Bytes 2-26:  token             (char[25], null-padded)
+  Bytes 27-34: sequence_number   (int64)
+  Bytes 35-42: exchange_feed_time (int64, unix seconds)
+  Bytes 43-50: LTP               (int64, price * 100)
   (additional fields in mode 2/3 not used here)
+
+  BUG FIX (this session — root-caused the "connected forever, zero ticks
+  ever parsed, last_tick_at always null" symptom): the field offsets
+  below were previously off by one byte (token sliced as 26 bytes,
+  `data[2:28]`, instead of the correct 25, `data[2:27]`), which cascaded
+  into every field after it — LTP was read from offset 44 instead of 43,
+  and the length guard required >=52 bytes. AngelOne's real mode-1 LTP
+  frame is exactly 51 bytes (confirmed against a synthetic frame built to
+  their documented layout), so every single incoming tick failed that
+  `len(data) < 52` guard and was discarded before parsing even began —
+  silently, with no exception and no log line, since the guard fires
+  before the try block. The WS connection itself was healthy the whole
+  time (connect/subscribe/idle-timeout-reconnect all worked correctly);
+  this was the only reason no tick ever reached the screening engine.
 
 Subscribe message (JSON):
   {
@@ -116,15 +129,15 @@ def get_last_ltp(symbol: str) -> Optional[float]:
 # ── Binary frame parser (mode 1 LTP) ────────────────────────────────────────
 def _parse_ltp_frame(data: bytes) -> Optional[tuple]:
     """Returns (token_str, ltp_float, ts_float) or None on parse error."""
-    if len(data) < 52:
+    if len(data) < 51:
         return None
     try:
         # sub_type = data[0]    # feed mode — always 1 (LTP) since that's all we subscribe to
         # exch_type = data[1]   # not needed for routing by symbol
-        token_raw  = data[2:28].rstrip(b"\x00").decode("ascii", errors="ignore").strip()
-        # sequence  = struct.unpack_from("<q", data, 28)[0]  # not needed
-        # feed_time = struct.unpack_from("<q", data, 36)[0]  # not needed
-        ltp_raw    = struct.unpack_from("<q", data, 44)[0]   # price * 100
+        token_raw  = data[2:27].rstrip(b"\x00").decode("ascii", errors="ignore").strip()
+        # sequence  = struct.unpack_from("<q", data, 27)[0]  # not needed
+        # feed_time = struct.unpack_from("<q", data, 35)[0]  # not needed
+        ltp_raw    = struct.unpack_from("<q", data, 43)[0]   # price * 100
         ltp        = ltp_raw / 100.0
         ts         = time.time()
         if ltp <= 0:

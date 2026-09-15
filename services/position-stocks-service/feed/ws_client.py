@@ -58,9 +58,37 @@ from feed.scrip_master import get_all_nse_eq
 logger = logging.getLogger("position-stocks-ws-client")
 
 # ── Tick storage ────────────────────────────────────────────────────────────
-# Ring buffer of (timestamp_float, ltp_float) per symbol, max 3600 entries
-# (1 tick/sec × 1h). O(1) append, O(window) scan for pct-change.
-_MAX_TICKS = 3_600
+# AUDIT FIX (this session — "check for any other remaining issue,
+# consider very high/frequent stock price change"): this buffer used to
+# be a hard COUNT cap, `deque(maxlen=3_600)`, on the explicit (and, per
+# this module's own then-docstring, deliberately stated) assumption of
+# "1 tick/sec × 1h". screening/engine.py's `_rolling_pct_change()` scans
+# this buffer backward looking for a tick at least `window_minutes` old
+# to use as the reference price for its 1m/5m/15m/60m %-change windows —
+# it silently returns None (that window simply produces no candidate)
+# whenever it can't find one old enough. A real, liquid, actively-moving
+# NSE stock — precisely the kind this scalp strategy is built to catch —
+# can push WS ticks far faster than 1/sec during a volatile burst (every
+# trade generates a tick in mode-1 LTP), which drains the buffer's actual
+# TIME depth below 60 (or even 15) minutes well before it fills on tick
+# COUNT. Net effect: on exactly the busiest, most volatile stretches for
+# exactly the stocks this strategy targets, the 60m window (and, in a
+# severe burst, 15m too) could silently stop producing candidates —
+# nothing errors, nothing logs, the window just quietly goes dark.
+#
+# Fixed by making the buffer genuinely TIME-bounded instead of tick-rate-
+# assumption-bounded: every append now also prunes anything older than
+# _MAX_BUFFER_AGE_S (65 min — a small safety margin over the longest
+# screening window, 60m, so `_rolling_pct_change`'s backward scan always
+# has room to find a boundary tick right up to that window's edge). This
+# is the same time-window-pruning pattern screening/engine.py's own
+# `_update_volume()` already uses for its tick-timestamp list, just
+# applied here too. `_MAX_TICKS` is kept, raised generously, purely as a
+# memory-safety backstop against unbounded growth in a pathological case
+# (e.g. corrupted/non-monotonic timestamps defeating the age prune) — in
+# normal operation the time prune keeps the buffer far below it.
+_MAX_TICKS = 50_000
+_MAX_BUFFER_AGE_S = 65 * 60  # slightly over the longest screening window (60m)
 _tick_buffers: Dict[str, deque] = defaultdict(lambda: deque(maxlen=_MAX_TICKS))
 _last_volume:  Dict[str, int]   = {}   # latest volume per symbol from feed
 
@@ -244,7 +272,19 @@ async def _ws_loop() -> None:
                             _last_tick_at = ts
                             symbol = _token_to_symbol.get(token_str)
                             if symbol:
-                                _tick_buffers[symbol].append((ts, ltp))
+                                buf = _tick_buffers[symbol]
+                                buf.append((ts, ltp))
+                                # AUDIT FIX (this session): time-bounded
+                                # prune — see the module-level comment by
+                                # _MAX_BUFFER_AGE_S for the full reasoning.
+                                # O(k) where k is the number of stale
+                                # entries evicted this call, not the whole
+                                # buffer, since popleft() only removes from
+                                # the front and every prior append already
+                                # enforced this same cutoff.
+                                cutoff = ts - _MAX_BUFFER_AGE_S
+                                while buf and buf[0][0] < cutoff:
+                                    buf.popleft()
                                 for cb in _on_tick_callbacks:
                                     try:
                                         cb(symbol, ltp, _last_volume.get(symbol, 0), ts)

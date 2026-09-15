@@ -91,6 +91,7 @@ export interface ScalpStatus {
   last_cycle_run_trigger: "AUTO" | "MANUAL" | null;
   first_live_order_done: boolean;
   orders_placed_today: number;
+  orders_placed_today_budget: number;
   daily_loss_kill_switch: boolean;
   eod_squareoff_fired_date: string | null;
   // AUDIT ADD (this session): non-zero only after today's EOD squareoff has

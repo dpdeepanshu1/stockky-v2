@@ -6,7 +6,310 @@
 
 ---
 
-## Session 22 (this session) — deeper audit into the tab's backend data sources; 1 real trading-safety bug fixed (kill-switch reset was incomplete)
+## Session 28 (this session) — real bug found in the WS tick buffer's sizing: count-capped, not time-bounded, silently starves the 15m/60m windows on exactly the highest-frequency movers
+
+**"Check other is in position stocks tab" — continued sweep for any
+remaining issue.** With `main.py`/frontend/`orders/`/`capital/ledger.py`
+now covered across sessions 23-27, this pass read `screening/engine.py`
+(the actual candidate-scanning logic feeding every entry decision) in
+full for the first time this series, and traced it back into
+`feed/ws_client.py`'s tick storage.
+
+**Real bug found and fixed:** the per-symbol tick ring buffer was
+`deque(maxlen=3_600)` — a hard COUNT cap, and the module's own docstring
+was explicit that this assumed "1 tick/sec × 1h". `screening/engine.py`'s
+`_rolling_pct_change()` scans this buffer backward for a tick old enough
+to anchor each of the 1m/5m/15m/60m %-change windows, and silently
+returns `None` (that window just produces no candidate, no error, no
+log) whenever it can't find one far back enough. A genuinely liquid,
+actively-moving NSE stock — exactly what this scalp strategy is built to
+catch — can push WS ticks well faster than 1/sec during a volatile
+burst (every trade fires a tick in mode-1 LTP), which drains the
+buffer's actual TIME depth below 60 (or even 15) minutes long before it
+fills on tick COUNT. Net effect: on exactly the busiest, most volatile
+stretches, for exactly the stocks this strategy targets, the 60m window
+(and in a severe burst, 15m too) could silently go dark — no signal this
+was happening anywhere.
+
+Fixed by making the buffer genuinely time-bounded: every tick append now
+also prunes anything older than 65 minutes (a small margin over the
+longest screening window) — same time-window-pruning pattern
+`screening/engine.py`'s own `_update_volume()` already uses for its tick-
+timestamp list, just applied to the price buffer too. `_MAX_TICKS` is
+kept as a memory-safety backstop only, raised to 50,000 (in normal
+operation the time-prune keeps the buffer far below it; it only bites in
+a pathological case like corrupted/non-monotonic timestamps defeating
+the age check).
+
+**Verified with a real functional test** (not live): simulated a
+sustained 10 ticks/sec burst for 65 minutes on one symbol — under the
+OLD design this would have evicted everything older than 6 minutes,
+permanently blinding the 15m/60m windows for that symbol during exactly
+this kind of burst. Confirmed the buffer now retains the full 65 minutes
+of history (39,000 entries, well under the 50,000 backstop) and that
+`_rolling_pct_change(symbol, 60)` returns a real number instead of
+`None`. `py_compile` clean on `feed/ws_client.py` and every file touched
+this whole thread (re-verified together).
+
+**Note on scope:** this touches `feed/`, which the user's original scope
+note (session 22b) said was already deep-audited in sessions 19/19b-d/21/22
+and not to re-walk — flagging that this is a deliberate exception, made
+because this session's explicit ask ("check other... in position stocks
+tab") reopened the search, and this bug is directly on-point for the
+high-frequency-price-change theme this whole audit thread has been
+tracking. Nothing else in `feed/ws_client.py` was touched.
+
+## Session 27 (prior) — final open-items sweep: 1 more small real gap fixed, everything else confirmed already-known/already-flagged
+
+**"Check if any other issue/bug/remaining task/open code in position
+tab"** — swept the whole service (`grep -rn "TODO\|FIXME\|XXX\|not yet\|
+future improvement\|ASSUMPTION FLAGGED"`) plus every route in `main.py`
+not yet individually re-checked this run (`/arm`, `/disarm`, `/service/
+enable|disable`, `/autopilot/enable|disable`, `/cycle/run`, `/kill`,
+`/ledger*`, `/ws-status`, `/dhan/account`, `/dhan/live-orders`,
+`/reconcile`) — all correct, nothing new.
+
+**1 more small real gap found and fixed:** `orders_placed_today` (this
+service's own daily Super-Order count, capped by `config.
+DAILY_ORDER_BUDGET`=300, checked in `orders/entry.py` before every entry)
+was shown on the dashboard as a bare number with no denominator — unlike
+`shared_order_budget` right next to it, which correctly shows `used/
+budget`. Once the cap is hit, new entries silently stop with
+`ORDER_BUDGET_EXHAUSTED` in the candidate log; nothing on the main status
+card gave any warning it was approaching or had hit that ceiling. Fixed:
+`GET /status` now also returns `orders_placed_today_budget`
+(`config.DAILY_ORDER_BUDGET`), and the "Orders Today" tile shows
+`{used}/{budget}` with the same near-exhausted color cue as the Shared
+Dhan Order Budget tile right next to it.
+
+**Everything else surfaced by the grep sweep is already known/flagged,
+not new:** `reconcile.py`'s own "ASSUMPTION FLAGGED FOR LIVE
+VERIFICATION" docstring note (Dhan's nested-leg `averageTradedPrice`
+field — inherently unverifiable without a live fill, already has a
+same-file fallback chain); `reconcile.py`'s EOD-path "future improvement"
+note (plain-SELL fill price for EOD squareoffs — already documented
+limitation, `exit_price`/`capital_risked` both now anchored to the real
+entry fill as of sessions 25-26, only the exit leg of that specific path
+remains a placeholder); the manual single-position-exit gap (flagged
+session 24, still awaiting your go-ahead — this is a real-money feature
+addition, not a bug, holding off without explicit confirmation).
+`dhan_client.get_positions()` remains confirmed dead code (harmless,
+previously noted, not touched).
+
+**Verification:** `py_compile` clean on `main.py`. Real `npm install` +
+`npm run build` — zero TypeScript errors.
+
+## Session 26 (prior) — the capital_risked staleness gap flagged last session, now fixed
+
+**"Do the remaining task"** — the `capital_risked` staleness gap flagged
+(not fixed) at the end of session 25.
+
+**Fixed:** `capital/ledger.py` gets a new `reconcile_position_cost(db,
+delta)` function. `orders/reconcile.py`'s entry-price-correction block
+(added last session) now also recomputes `pos.capital_risked` as
+`quantity * real_entry_price` and pushes the delta through the ledger, so
+`available_capital` stays consistent with what the position will actually
+return at exit. A positive delta (real Dhan fill cost MORE than this pool
+had reserved) is allowed to push `available_capital` negative rather than
+being silently clamped — those rupees were genuinely already spent on
+Dhan's shared account regardless of what the software pool "has", so a
+negative balance is the honest signal of real overspend eating into
+real-trade-service's half (same class of risk `reserve_additional()`'s
+docstring already describes for the separate min-quantity-floor case at
+entry time). Does not touch the daily-loss kill switch — that still trips
+off `realized_pnl_today` at actual exit, not off an in-flight cost
+correction on a still-open position.
+
+**Verified with a real functional test** (SQLite in-memory, mocked
+`dhan_client.get_super_order_list`, not live): seeded a position with a
+₹100.00 estimated entry / ₹10,000 reserved / qty 100, simulated Dhan's
+real fill at ₹103.50 (a 3.5% run-up during the quality-gate delay),
+confirmed the reconcile pass corrects `entry_price`→103.50,
+`capital_risked`→₹10,350, and `available_capital` drops by exactly the
+₹350 delta. Then simulated the TARGET_LEG filling at ₹106.00 and confirmed
+`capital_risked + realized_pnl` at exit equals exactly `exit_price *
+quantity` = ₹10,600 — the true sale proceeds — where before this fix it
+would have under-returned by the same ₹350, permanently. `py_compile`
+clean on both touched files.
+
+## Session 25 (prior) — buy/sell audited again specifically for high-volatility/fast-moving-stock scenarios; 1 more real bug fixed (entry_price never corrected to the actual fill)
+
+**Requested: audit buy/sell again, specifically for "very high and frequent
+change in stock" scenarios** — i.e. what happens to this strategy's numbers
+when a candidate's price is still moving significantly between the moment
+it's scanned and the moment the order actually lands on Dhan.
+
+**1 real bug found and fixed:** `pos.entry_price` was written exactly once
+— in `orders/entry.py`, to `candidate.current_ltp`, the price sampled at
+scan time — and **never corrected afterwards**, anywhere. Every
+`realized_pnl`/`realized_pnl_pct` calc in `orders/reconcile.py` is
+`(exit_price - pos.entry_price) * quantity`, so a stale entry reference
+silently mis-states every trade's booked P&L. This isn't hypothetical: between
+the scan tick and the real Dhan order, up to `QUALITY_GATE_TOP_N` (3)
+candidates each go through `screening/quality_gate.py`'s fundamental +
+technical + event checks — each with its own multi-second timeout
+(`QUALITY_GATE_TIMEOUT_S`, "a couple seconds", sequential per candidate,
+per that module's own docstring) — before the first passing one is
+entered. On a calm stock a few seconds of drift barely matters; on the
+fast-moving, volatile names this scalp strategy specifically targets, it
+can be real money. Dhan's own response already carries the true fill
+price (`averageTradedPrice` on the ENTRY_LEG) — `reconcile.py` was already
+reading that same field as an EXIT-side fallback, just never applying it
+to the entry side. Fixed: `run_exit_reconciliation()` now corrects
+`pos.entry_price` to Dhan's real average fill price as soon as the entry
+leg confirms traded (idempotent — only writes when the value actually
+differs), for both still-OPEN positions and EOD_SQUAREOFF-pending ones
+(whose placeholder `exit_price` is bumped in lockstep so that path's
+already-known phantom-zero-P&L limitation stays anchored to the real fill
+instead of the stale estimate). Does not touch `capital_risked`/the
+ledger — see flag below.
+
+**1 related gap flagged, not fixed (same root cause, bigger/riskier
+change):** `capital_risked` (and the quantity/shortfall check right above
+it in `orders/entry.py`) is *also* computed off `candidate.current_ltp`,
+and is never reconciled against Dhan's real fill cost either. Correcting
+`entry_price` (done above) fixes P&L reporting; it does not fix capital
+accounting — on a fast mover, the real rupees Dhan actually spent on
+`quantity` shares can differ from what `ledger.reserve_capital()`/
+`reserve_additional()` deducted from the pool. This is the same class of
+staleness as the bug just fixed, but touching it means touching the
+shared capital ledger and its daily-loss-kill-switch math (session 22's
+territory) — didn't want to make that change without your sign-off.
+Flagging for a future session if you want it addressed.
+
+**Other volatility scenarios checked, no issues found:**
+`target_price`/`stop_price` are absolute levels submitted to Dhan at
+order placement — by design they don't (and shouldn't) drift with LTP
+after that; that's how a bracket Super Order is supposed to work, not a
+bug. `orders/adaptive.py`'s formula itself has no time-based staleness
+(pure function of `pct_change` + `current_ltp` at call time). Re-checked
+`orders/entry.py`'s existing quantity/shortfall guard (session-prior audit
+fix) — still correct, just now understood to be capped by the same stale-
+price ceiling as the capital-accounting gap above.
+
+**Verification:** `python3 -m py_compile` clean on `orders/reconcile.py`
+(the only file touched this session).
+
+## Session 24 (prior) — full buy/sell (entry/exit) order-placement audit; 1 real bug fixed (Super Order reference-price tick rounding), 1 gap flagged (no manual single-position exit)
+
+**Requested: "check the buy sell process fully in Position tab."** Read
+`orders/entry.py` (buy/entry), `orders/adaptive.py` (target/stop
+computation), `capital/ledger.py` (reserve/release), `execution/
+dhan_client.py`'s `place_order`/`place_super_order`/`cancel_order`/
+`cancel_super_order`, `orders/reconcile.py` (exit-fill detection), and
+`orders/eod_squareoff.py` (forced exit) end-to-end, specifically for the
+order-placement math and API-call correctness — a level deeper than
+session 23's tab/wiring pass.
+
+**1 real bug found and fixed:** `execution/dhan_client.py::place_super_order()`
+only ran the entry reference `price` through `round_to_tick()` when
+`order_type=="LIMIT"` — but this service's only caller
+(`orders/entry.py`) always places Super Orders with `order_type="MARKET"`,
+passing the raw, unrounded live LTP straight from the WS ring buffer
+(`screening/engine.py`'s `buf[-1][1]`) as `price`. This function's own
+docstring already states Dhan validates `targetPrice`/`stopLossPrice`
+against this reference price **regardless of order_type** — i.e. Dhan's
+tick-multiple check on `price` isn't LIMIT-only. `target_price`/
+`stop_price` already go through `round_to_tick()` via `orders/
+adaptive.py::compute()`, but the reference price they're validated
+against did not, on the one order type this service ever actually uses.
+A live LTP is normally already tick-valid (exchanges only trade in tick
+multiples), but binary-float artifacts surviving the WS feed's tick
+parsing (the exact failure mode `round_to_tick()`'s own docstring warns
+about) could still produce something like `1234.3499999998` instead of
+`1234.35`, which would fail Dhan's check on the entry itself. Fixed:
+`ref_price` is now rounded unconditionally whenever it's non-zero, not
+just for LIMIT orders — no behavior change for already-clean prices.
+
+**1 gap flagged, not built (bigger than a bug fix, real-money feature —
+flagging for your call):** `ScalpPosition.status`'s `MANUAL_EXIT` value is
+declared in the model comment and typed in the frontend's status union,
+but nothing anywhere in the backend ever sets it — there is no manual
+"close this one position now" route or button. Today the only ways to
+exit a position early are: wait for TARGET_HIT/STOP_HIT (automatic), wait
+for the 3pm EOD sweep, or hit Kill Switch (which disarms the WHOLE
+service and trips the daily kill switch, blocking all new entries for the
+rest of the day just to exit one bad position). If you want a scoped
+manual-exit-one-position endpoint (place a MARKET SELL for a single OPEN
+row, same "always allowed even when not armed" pattern as
+`cancel_order`/EOD's forced SELL, without touching `is_armed` or the kill
+switch), say so and I'll build it next session.
+
+**Re-confirmed correct, no changes:** `orders/adaptive.py`'s target/stop
+formula and clipping bands; `capital/ledger.py`'s `reserve_capital`/
+`reserve_additional`/`release_capital`/daily-loss-trip math (re-read
+line-by-line, matches its own docstring exactly); `orders/reconcile.py`'s
+leg-price fallback chain and the EOD-pending reconcile path (both already
+flag their own known limitations honestly — not re-litigated); `orders/
+eod_squareoff.py`'s unconditional `is_armed=True` on the forced SELL
+(session 18's fix, still correct) and its cancel-legs-then-market-sell
+sequence. `execution/dhan_client.get_positions()` confirmed dead code
+(declared, never called anywhere) — same class of finding as `config.py`'s
+`MIN_PREFERRED_SCALP_POSITIONS` and `feed/angelone_session.py`'s
+`rest_headers()`, left alone, not urgent.
+
+**Verification:** `python3 -m py_compile` clean on every touched file
+(`execution/dhan_client.py`) and every file re-read this session. No
+frontend files touched.
+
+## Session 23 (prior) — full Position Stocks tab re-audit; 2 more real (non-safety) frontend bugs found and fixed
+
+**Requested: "audit position stock tab fully" (repeat/continue).** Note:
+session 22b's own work (order-id wiring gap — `dhan_exit_order_id` captured
+by `orders/reconcile.py` but never returned by `/positions`/`/trades/
+history` or shown anywhere in `PositionStocksTab.tsx`, plus `/dhan/live-
+orders`' filter switched from Dhan's unreliable `tag` field to this
+service's own `dhan_super_order_id` table as the authoritative source —
+see the "AUDIT FIX (session22 cont'd)" comments in `main.py` and the tab)
+was done in code but never written up here — catching that up now for the
+record; no changes made to it this session, re-confirmed correct by
+reading it. This session went back over `main.py` end-to-end against
+`positionStocksApi.ts` and a full line-by-line re-read of
+`PositionStocksTab.tsx` (1500+ lines) looking specifically for wiring gaps
+and stale/mislabeled UI, per the user's scope note: `execution/`,
+`screening/`, `capital/`, `feed/`, `resilience/`, `auth/` were NOT
+re-walked this pass (already deep-audited across sessions 19/19b-d/21/22)
+— scope was main.py + the tab's own frontend logic only.
+
+**2 real bugs found and fixed, both frontend-only, neither safety-critical:**
+1. **"Closed Today (N)" showed positions closed on ANY day, not just
+   today.** `closedToday` was `positions.filter(p => p.status !== "OPEN")`
+   with zero date filtering. `GET /positions` returns the last 50 rows by
+   `opened_at` — on a quiet trading day (or shortly after a fresh deploy)
+   that list can easily include positions that actually closed yesterday
+   or earlier, all shown under a header and empty-state text that both
+   claim "today". Fixed: now filters each closed position's own
+   `closed_at` (falling back to `opened_at` only if `closed_at` is somehow
+   missing) against today's IST calendar date
+   (`toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" })`), computed
+   fresh each render so it rolls over correctly at midnight IST.
+2. **`armed_at` — backend has always returned it, nothing ever rendered
+   it.** Same "built on the backend, never wired to the tab" pattern this
+   service's audits keep finding (candidate log/session 6, reset-daily
+   button/session 18, shared order budget/session 19, order ids/session
+   22b). `GET /status`'s `armed_at` is typed on `ScalpStatus` but no
+   component read it. Added "Armed since `<time>`" under the Arming
+   Sequence card, shown only while armed.
+
+**Re-confirmed correct, no changes:** every other `main.py` route
+cross-checked field-for-field against its `positionStocksApi.ts` type and
+`PositionStocksTab.tsx` consumer(s) again (`/status`'s full field list
+including `pipeline_config`'s fallback defaults, which still match
+`config.py` exactly: 0.5/1.0/1.5/2.5% windows, 50000 min volume, top-3
+quality gate, 40/40 fund/tech floors, ₹500cr market-cap floor, 5 max
+positions); `ws_status()`'s shape against the WS Feed card and System
+Health grid (session 13's fix still correct); `CapitalSplitCard.tsx`
+(shared with Real Automatic Trade) re-read, no issues; Charges tab's
+client-side fee math re-checked against Dhan's published NSE-equity
+intraday rate card, still correct.
+
+**Verification:** `python3 -m py_compile` clean on every `.py` file in the
+service (unchanged this session — only `PositionStocksTab.tsx` touched).
+Real `npm install` (177 packages) + `npm run build` (`tsc && vite build`)
+against the actual `@types/react`/Tailwind config — zero TypeScript
+errors, build succeeded.
+
+## Session 22 (prior) — deeper audit into the tab's backend data sources; 1 real trading-safety bug fixed (kill-switch reset was incomplete)
 
 **Requested: "audit position stock tab fully" (repeat/continue).** Session
 21 covered `main.py` vs. the frontend field-for-field. This pass went one
@@ -615,12 +918,22 @@ position-stocks-service`) as the next diagnostic step.
 
 ---
 
-## Next steps (in priority order, current as of session 18)
+## Next steps (in priority order, current as of session 18; session 30 added item 0)
 
 Everything below requires your live VM / market hours and can't be verified
 from this sandbox. All code-level work identified through session 18's audit
 is done — this list is now purely about live verification, not open bugs.
 
+0. **New from session 30 — verify the circuit-breaker/entry-gate change on
+   a real cycle.** The breaker check moved from gating the whole
+   `_run_cycle()` to gating only the entry attempt inside it (so reconcile/
+   EOD can never again be silently skipped by a tripped breaker). Confirm
+   in practice: if the breaker ever trips (5 consecutive `_run_cycle`
+   exceptions), `GET /status`'s `circuit_breaker.state` should show `open`
+   while `last_cycle_run_at` keeps advancing every ~10s (proof reconcile/
+   EOD/scan are still running) and `POST /cycle/run` / the Run Cycle
+   summary shows `skipped_reason: "CIRCUIT_BREAKER_OPEN"` instead of
+   silently doing nothing.
 1. **Redeploy this zip and confirm clean boot.** Watch for `init_tables()`
    completing (including the `_ensure_columns()` migration log lines, which
    should be no-ops by now on an already-migrated DB) and the WS client

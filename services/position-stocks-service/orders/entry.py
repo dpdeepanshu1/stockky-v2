@@ -28,6 +28,7 @@ from capital import ledger, shared_order_budget
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
+from screening import intraday_eligibility
 from screening.engine import Candidate
 from screening.quality_gate import QualitySignal
 from tz_utils import ist_today_str
@@ -234,9 +235,48 @@ def attempt_entry(
             )
     except Exception as e:
         error_msg = str(e)
-        logger.error("position-stocks entry: order placement failed for %s: %s", candidate.symbol, e)
-        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-        _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED:{error_msg}", quality=quality)
+        # AUDIT FIX (2026-09-15): classify the BUY-side rejection too — if
+        # Dhan rejects the entry itself as "not allowed to be traded in
+        # Intraday", record the restriction immediately so this symbol is
+        # filtered out of future cycles before capital is ever reserved for
+        # it. Previously, a BUY rejection just fell into the generic
+        # ORDER_FAILED path with no diagnosis and no learning.
+        if dhan_client.is_security_intraday_restricted_error(error_msg):
+            logger.error(
+                "position-stocks entry: BUY rejected — %s is INTRADAY_RESTRICTED "
+                "(T2T/ASM/GSM). Recording restriction to exclude from future cycles. "
+                "Error: %s", candidate.symbol, error_msg,
+            )
+            try:
+                intraday_eligibility.record_restriction(
+                    db, candidate.symbol,
+                    detail=f"BUY rejection: {error_msg[:200]}",
+                )
+            except Exception as rec_e:
+                logger.warning(
+                    "position-stocks entry: could not record restriction for %s: %s",
+                    candidate.symbol, rec_e,
+                )
+            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INTRADAY_RESTRICTED:{error_msg}", quality=quality)
+        elif dhan_client.is_intraday_cutoff_error(error_msg):
+            logger.warning(
+                "position-stocks entry: BUY rejected — INTRADAY_CUTOFF: exchange window "
+                "closed for today. Will retry tomorrow. Error: %s", error_msg,
+            )
+            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INTRADAY_CUTOFF:{error_msg}", quality=quality)
+        elif dhan_client.is_insufficient_funds_error(error_msg):
+            logger.error(
+                "position-stocks entry: BUY rejected — INSUFFICIENT_FUNDS. "
+                "Error: %s", error_msg,
+            )
+            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INSUFFICIENT_FUNDS:{error_msg}", quality=quality)
+        else:
+            logger.error("position-stocks entry: order placement failed for %s: %s", candidate.symbol, e)
+            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED:{error_msg}", quality=quality)
         return None
 
     # Mark first-live-order done

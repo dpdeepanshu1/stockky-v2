@@ -264,6 +264,59 @@ def release_capital(
     )
 
 
+def reconcile_position_cost(db: Session, *, delta: float) -> None:
+    """AUDIT FIX (this session — the flagged "capital_risked has the same
+    staleness as entry_price" follow-up from the prior audit pass):
+    capital_risked is reserved at entry time from the same pre-order LTP
+    estimate as entry_price (`orders/entry.py`'s `position_value`), and
+    was never corrected once Dhan's real average fill price became known
+    — same root cause as the entry_price bug fixed last session, just on
+    the capital-accounting side instead of the P&L-reporting side. Once
+    orders/reconcile.py corrects a position's entry_price and
+    capital_risked to the real fill (quantity * real_entry_price), the
+    ledger's available_capital needs the matching adjustment so the two
+    stay consistent — otherwise release_capital() at exit would return
+    (stale capital_risked + now-correct realized_pnl), which no longer
+    nets to the real sale proceeds (exit_price * quantity) the way it's
+    supposed to.
+
+    `delta` = new_real_cost - old_capital_risked, computed by the caller.
+    Positive delta (the real Dhan fill cost MORE than what this pool
+    reserved for it) further deducts the shortfall from available_capital
+    — those rupees were already spent for real on Dhan's shared account
+    regardless of whether this software pool "has" them, so this can
+    legitimately push available_capital negative. That's the honest
+    signal of a real overspend eating into real-trade-service's half of
+    the same account (the exact risk reserve_additional()'s docstring
+    already describes for the separate min-quantity-floor case) — NOT a
+    bug to hide by clamping at zero. Negative delta (the real fill cost
+    LESS than reserved) returns the freed-up excess back to the pool,
+    same as any other capital release.
+
+    Does NOT touch the daily-loss kill switch — that trips off
+    realized_pnl_today in release_capital() at actual exit time, not off
+    an in-flight cost correction on a still-open position."""
+    if delta == 0:
+        return
+    row = _get_or_create(db)
+    row.available_capital -= delta
+    db.commit()
+    if row.available_capital < 0:
+        logger.warning(
+            "ledger.reconcile_position_cost: available_capital went "
+            "negative (₹%.2f) after a ₹%.2f real-fill-cost correction — "
+            "the real Dhan entry cost more than this pool had reserved "
+            "for it.",
+            row.available_capital, delta,
+        )
+    else:
+        logger.info(
+            "ledger.reconcile_position_cost: available_capital adjusted "
+            "by ₹%.2f for a real-fill-cost correction, now ₹%.2f",
+            -delta, row.available_capital,
+        )
+
+
 def reset_daily(db: Session) -> None:
     """Manual/explicit reset of daily P&L and kill switch — e.g. an admin
     route for testing or an emergency override. Does NOT reset

@@ -233,3 +233,28 @@ class SharedOrderBudget(Base):
     trade_date = Column(String(10), nullable=False, unique=True, index=True)  # 'YYYY-MM-DD' IST
     orders_placed_today = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class ScalpIntradayRestrictedSecurity(Base):
+    """Learned list of NSE securities Dhan has rejected as 'not allowed to
+    be traded in Intraday' (T2T / ASM / GSM surveillance stocks).
+
+    DESIGN: mirrors real-trade-service's IntradayRestrictedSecurity
+    (trade_intraday_restricted) exactly, but lives in a separate table
+    (scalp_intraday_restricted) so this service's init_tables() can create
+    and own it without ever touching a table real-trade-service manages.
+
+    Built from real rejections only — there is no static eligibility flag
+    in Dhan's scrip master, so this list is seeded entirely from live SELL
+    rejections this service observes in orders/eod_squareoff.py and
+    orders/entry.py, then consulted in _run_cycle() before a new BUY so
+    known-restricted symbols are filtered from candidates before capital
+    or a Dhan call is committed to them.
+    """
+    __tablename__ = "scalp_intraday_restricted"
+
+    symbol = Column(String(32), primary_key=True)
+    first_detected_at = Column(DateTime, nullable=False, default=_now)
+    last_detected_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+    hit_count = Column(Integer, nullable=False, default=1)
+    last_detail = Column(String(255), nullable=True)

@@ -70,31 +70,37 @@ stand-in for live conditions, regardless of which --data-source you use):
 
 USAGE
 ──────
-    cd services/position-stocks-service
-
-    # Default: AngelOne historical candles (needs your usual ANGELONE_*
-    # env vars already set — no extra pip installs):
-    python3 ../../scripts/test_position_stocks_pipeline_offline.py
+    # Run from the repo root — service-dir is auto-detected from the script's
+    # own location (scripts/ → ../services/position-stocks-service/), so no
+    # cd or --service-dir flag is needed:
+    cd ~/stockky-v2
+    python3 scripts/test_position_stocks_pipeline_offline.py
 
     # Fewer symbols, skip the network-dependent quality-gate stage:
-    python3 ../../scripts/test_position_stocks_pipeline_offline.py \\
+    python3 scripts/test_position_stocks_pipeline_offline.py \\
         --count 15 --skip-quality-gate
 
     # Point the quality gate at your deployed analysis-intelligence-service
     # (defaults to whatever config.py/ANALYSIS_INTELLIGENCE_URL resolves to):
-    python3 ../../scripts/test_position_stocks_pipeline_offline.py \\
+    python3 scripts/test_position_stocks_pipeline_offline.py \\
         --analysis-intelligence-url https://analysis-intelligence-service.onrender.com
 
     # Fallback data source (no AngelOne creds needed, but requires a venv
     # since most Debian/Ubuntu Pythons are PEP-668 "externally managed"):
     python3 -m venv /tmp/harness-venv
     /tmp/harness-venv/bin/pip install yfinance
-    /tmp/harness-venv/bin/python3 ../../scripts/test_position_stocks_pipeline_offline.py \\
+    /tmp/harness-venv/bin/python3 scripts/test_position_stocks_pipeline_offline.py \\
         --data-source yfinance
 
-Must be run with position-stocks-service's own directory as the working
-directory (or pass --service-dir) so `import config` etc. resolve to the
-real modules, exactly like main.py does.
+    # Override service dir explicitly if needed (e.g. the service tree lives
+    # somewhere other than the sibling services/ folder):
+    python3 scripts/test_position_stocks_pipeline_offline.py \\
+        --service-dir /path/to/position-stocks-service
+
+Can be run from any working directory — the script auto-locates the
+position-stocks-service source tree relative to its own path
+(<repo>/scripts/ → <repo>/services/position-stocks-service/).
+Pass --service-dir to override.
 """
 from __future__ import annotations
 
@@ -283,7 +289,17 @@ def synthesize_ticks(symbol: str, bars: List[Bar], ticks_per_bar: int) -> List[T
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--service-dir", default=".", help="Path to position-stocks-service/ (default: cwd)")
+    _default_service_dir = str(
+        Path(__file__).resolve().parent.parent / "services" / "position-stocks-service"
+    )
+    ap.add_argument(
+        "--service-dir",
+        default=_default_service_dir,
+        help=(
+            "Path to position-stocks-service/ "
+            f"(default: auto-detected as {_default_service_dir})"
+        ),
+    )
     ap.add_argument("--symbols", default="", help="Comma-separated NSE symbols (overrides default 50)")
     ap.add_argument("--symbols-file", default="", help="File with one NSE symbol per line")
     ap.add_argument("--count", type=int, default=50, help="Trim symbol list to at most this many (default 50 — the built-in list only has 50 symbols; pass --symbols/--symbols-file for more)")

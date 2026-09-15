@@ -67,6 +67,9 @@ API endpoints:
   GET  /candidates/log                — recent ScalpCandidateLog rows (why a
                                           candidate was entered/skipped, incl.
                                           quality-gate scores) — audit trail
+  GET  /candidates/restricted        — learned intraday-restricted symbol list
+                                          (seeded from live Dhan SELL rejections,
+                                          filtered out of candidates every cycle)
   GET  /ledger                       — capital ledger state
   POST /ledger/sync                  — force sync from Dhan
   POST /ledger/reset-daily            — manual/emergency reset of today's P&L
@@ -110,7 +113,7 @@ from auth import dhan_credentials_ro
 from capital import ledger, shared_order_budget
 from execution import dhan_client
 from feed import ws_client
-from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
+from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition
 from orders import eod_squareoff, reconcile
 from orders.entry import attempt_entry, log_quality_reject
 from resilience import circuit_breaker
@@ -953,6 +956,34 @@ def candidates_log(
             "market_cap_cr": r.market_cap_cr,
             "has_positive_catalyst": r.has_positive_catalyst,
             "created_at": iso_utc(r.created_at),
+        }
+        for r in rows
+    ]
+
+
+@app.get("/candidates/restricted")
+def candidates_restricted(db: Session = Depends(get_db)):
+    """Learned intraday-restricted symbol list (screening/intraday_eligibility.py
+    / ScalpIntradayRestrictedSecurity) — seeded entirely from live Dhan SELL
+    rejections this service has actually observed (orders/eod_squareoff.py,
+    orders/entry.py), then consulted every cycle to filter these symbols out
+    of new candidates before capital or a Dhan call is committed to them
+    (see main.py's candidate-filtering block above). This route only ever
+    surfaces what's already been recorded for the Screener tab's Restricted
+    Symbols panel — it never writes anything itself. Pure DB read, no
+    external calls, same shape as /candidates/log."""
+    rows = (
+        db.query(ScalpIntradayRestrictedSecurity)
+        .order_by(ScalpIntradayRestrictedSecurity.last_detected_at.desc())
+        .all()
+    )
+    return [
+        {
+            "symbol": r.symbol,
+            "first_detected_at": iso_utc(r.first_detected_at),
+            "last_detected_at": iso_utc(r.last_detected_at),
+            "hit_count": r.hit_count,
+            "last_detail": r.last_detail,
         }
         for r in rows
     ]

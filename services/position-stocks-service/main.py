@@ -32,7 +32,11 @@ Lifecycle:
    10. auto_pilot_enabled gate — only the AUTOMATIC entry attempt is gated
        by this (added session 6); the background loop stops here if it's
        off, but a manual POST /cycle/run bypasses this specific check.
-   11. Attempt entry on the first candidate that clears the quality gate.
+   11. Attempt entry on the first candidate that clears the quality gate —
+       gated by circuit_breaker.is_open() (session 30 fix: this check used
+       to live in the background loop, before _run_cycle() was even
+       called, which meant a tripped breaker also skipped steps 4/5 above
+       — moved here so reconcile/EOD stay unconditional no matter what).
   shutdown:
     stop WS client gracefully
 
@@ -110,7 +114,7 @@ from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
 from orders import eod_squareoff, reconcile
 from orders.entry import attempt_entry, log_quality_reject
 from resilience import circuit_breaker
-from screening import quality_gate
+from screening import intraday_eligibility, quality_gate
 from screening.engine import scan
 from tz_utils import (
     ist_today_str, ist_time_at_or_after, is_market_open_ist, parse_hhmm, iso_utc,
@@ -304,6 +308,34 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     if not candidates:
         return _finalize()
 
+    # AUDIT FIX (2026-09-15): filter out symbols that Dhan has previously
+    # rejected as "not allowed to be traded in Intraday" (T2T/ASM/GSM
+    # surveillance stocks). Previously there was no such filter — this service
+    # would BUY a stock that its own EOD squareoff then couldn't SELL intraday,
+    # stranding the position every single day it was picked. The restricted set
+    # is built entirely from real Dhan SELL rejections (eod_squareoff.py ->
+    # intraday_eligibility.record_restriction()) — no static list, same
+    # approach as real-trade-service's own intraday_eligibility.py (session21e).
+    # Fail-open: if the DB fetch fails, restricted_syms is empty and all
+    # candidates pass through — better to try a buy than block everything.
+    _t = time.perf_counter()
+    restricted_syms = intraday_eligibility.get_restricted_symbols(db)
+    if restricted_syms:
+        before = len(candidates)
+        candidates = [c for c in candidates if c.symbol not in restricted_syms]
+        filtered = before - len(candidates)
+        _stage("intraday_filter", "Intraday Eligibility Filter", _t,
+               detail=(f"Removed {filtered} known-intraday-restricted symbol(s) from {before} candidate(s)"
+                       if filtered else f"No restricted symbols in {before} candidate(s)"),
+               restricted_count=len(restricted_syms))
+    else:
+        _stage("intraday_filter", "Intraday Eligibility Filter", _t,
+               detail="No known-restricted symbols on record — all candidates pass through",
+               restricted_count=0)
+    if not candidates:
+        summary["skipped_reason"] = "ALL_CANDIDATES_INTRADAY_RESTRICTED"
+        return _finalize()
+
     # Screening runs regardless of auto_pilot_enabled (so /candidates stays
     # live) — only the automatic ENTRY is gated by it. A manual /cycle/run
     # deliberately bypasses this one check (mirroring real-trade-service's
@@ -316,10 +348,29 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     # open — see screening/quality_gate.py) and enter the first that passes.
     _t = time.perf_counter()
     top_n = candidates[: max(1, config.QUALITY_GATE_TOP_N)]
+    # AUDIT FIX (session 30): quality_gate.check() was awaited one candidate
+    # at a time inside a plain `for` loop. Each individual check is now
+    # internally concurrent (session 29's fund/tech gather fix), but across
+    # candidates it was still fully serial — worst case (the first N-1
+    # candidates all reject) the cycle paid N * (single-candidate-check
+    # latency) before ever reaching entry. This is exactly the "several
+    # candidates each go through quality_gate.py's checks... sequentially"
+    # cost flagged back in session 25 as the source of scan-to-fill price
+    # drift (later corrected after the fact in sessions 25/26, never
+    # shortened at the source). Fetch all top_n candidates' quality signals
+    # concurrently up front, then walk the results in the SAME priority
+    # order as before to pick the first passer — identical pass/fail logic
+    # and "only ever try one candidate per cycle" behavior, but worst-case
+    # wait drops from sum(check_i) to max(check_i) across the batch.
+    # Trade-off: this now always pays for QUALITY_GATE_TOP_N HTTP round
+    # trips instead of stopping early at the first pass — each call is a
+    # couple-second-timeout best-effort GET (config.QUALITY_GATE_TIMEOUT_S),
+    # so the extra network cost is small next to the latency win, and
+    # matches this module's own "fail-open, always fast" design intent.
+    quality_results = await asyncio.gather(*(quality_gate.check(c.symbol) for c in top_n))
     checked = []
     entered_candidate = None
-    for candidate in top_n:
-        quality = await quality_gate.check(candidate.symbol)
+    for candidate, quality in zip(top_n, quality_results):
         ok, reason = quality.passes()
         checked.append({
             "symbol": candidate.symbol, "window": candidate.window_label,
@@ -340,23 +391,42 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     if entered_candidate:
         candidate, quality = entered_candidate
         _t = time.perf_counter()
-        # AUDIT FIX (this session): same event-loop-stall bug again —
-        # attempt_entry() places a real, blocking Dhan Super Order call
-        # (execution/dhan_client.place_super_order/place_order) plus a
-        # possible security-master reload (blocking httpx.get on cache
-        # miss/expiry) on the entry path. This is the single most
-        # important call site to get right of the three fixed this
-        # session — it's the one that places real money on the line, and
-        # it ran unthreaded on every single armed/enabled/market-open
-        # cycle, not just occasionally.
-        result = await asyncio.to_thread(attempt_entry, db, candidate, quality=quality)
-        if result:
-            circuit_breaker.record_success()
-            summary["entered_symbol"] = candidate.symbol
-        # Note: attempt_entry logs SKIPPED reasons internally either way
-        _stage("entry_attempt", "Entry Attempt", _t,
-               symbol=candidate.symbol,
-               detail=f"ENTERED {candidate.symbol}" if result else f"{candidate.symbol} did not clear entry (see logs — capital/budget/risk gate)")
+        # AUDIT FIX (session 30): circuit_breaker.is_open() now gates right
+        # here — the actual real-money Dhan call — instead of gating the
+        # entire _run_cycle() invocation from outside (see _trading_loop()
+        # below). Previously, once the breaker tripped open, the AUTO loop
+        # skipped calling _run_cycle() at all for up to _RESET_TIMEOUT_S
+        # (60s, longer if the half-open probe also fails) — which meant
+        # exit reconciliation and EOD squareoff, both explicitly documented
+        # elsewhere in this service (tracking doc §3.7, sessions 14/18) as
+        # "unconditional, no exceptions," were silently skipped too, for as
+        # long as the breaker stayed open. A real position whose TARGET_LEG/
+        # STOP_LOSS_LEG filled on Dhan's side during that window would sit
+        # un-reconciled, and a breaker still open right at 3pm would have
+        # skipped the EOD flatten-all sweep entirely — exactly the
+        # safety-relevant gap this doc's "no exceptions" rule exists to
+        # prevent. Gating only the entry attempt (the one call that's
+        # actually failure-prone / worth protecting) preserves the
+        # breaker's real purpose — stop hammering a failing Dhan
+        # connection with new entry orders — without silently pausing the
+        # exits/EOD sweep that must always run.
+        if circuit_breaker.is_open():
+            cb = circuit_breaker.status()
+            summary["skipped_reason"] = "CIRCUIT_BREAKER_OPEN"
+            _stage("entry_attempt", "Entry Attempt", _t,
+                   symbol=candidate.symbol,
+                   detail=(f"Circuit breaker OPEN ({cb['consecutive_failures']} consecutive failures, "
+                           f"~{cb['seconds_until_retry']:.0f}s until retry) — skipping entry, "
+                           f"reconcile/EOD still ran this cycle"))
+        else:
+            result = await asyncio.to_thread(attempt_entry, db, candidate, quality=quality)
+            if result:
+                circuit_breaker.record_success()
+                summary["entered_symbol"] = candidate.symbol
+            # Note: attempt_entry logs SKIPPED reasons internally either way
+            _stage("entry_attempt", "Entry Attempt", _t,
+                   symbol=candidate.symbol,
+                   detail=f"ENTERED {candidate.symbol}" if result else f"{candidate.symbol} did not clear entry (see logs — capital/budget/risk gate)")
     else:
         _stage("entry_attempt", "Entry Attempt", time.perf_counter(),
                detail="No candidate cleared the Quality Gate this cycle — nothing to enter")
@@ -400,14 +470,21 @@ async def _trading_loop() -> None:
     keeps screening and entering through market hours with the dashboard
     closed and nobody logged in — stopping ONLY on an explicit admin
     /disarm, /service/disable, /autopilot/disable, or /kill call (or a
-    genuine gate: daily-loss kill switch, circuit breaker open, market
-    closed). This already matches real-trade-service's tested guarantee;
+    genuine gate: daily-loss kill switch, market closed). A tripped
+    circuit breaker no longer stops the loop itself (see session 30 fix
+    inside _run_cycle) — it only blocks the entry-attempt step; reconcile/
+    EOD/scan/quality-gate still run every tick regardless of breaker
+    state. This already matches real-trade-service's tested guarantee;
     nothing needed to change here."""
     while True:
         try:
             await asyncio.sleep(_SCAN_INTERVAL_S)
-            if circuit_breaker.is_open():
-                continue
+            # AUDIT FIX (session 30): this used to also `continue` (skipping
+            # _run_cycle entirely) when circuit_breaker.is_open() — moved
+            # into _run_cycle() itself, gating only the entry attempt, so a
+            # tripped breaker can never silently skip the unconditional
+            # exit-reconciliation / EOD-squareoff steps. See _run_cycle()'s
+            # entry-attempt block for the full reasoning.
             if not is_market_open_ist():
                 continue
 
@@ -569,6 +646,17 @@ def status(db: Session = Depends(get_db)):
         "last_cycle_run_trigger": gate.last_cycle_run_trigger,
         "first_live_order_done": gate.first_live_order_done,
         "orders_placed_today": gate.orders_placed_today,
+        # AUDIT FIX (this session — "check for any other remaining
+        # issue/bug"): orders_placed_today was shown with no denominator
+        # anywhere, unlike shared_order_budget (which correctly shows
+        # used/budget). orders/entry.py has always enforced this service's
+        # OWN daily cap (config.DAILY_ORDER_BUDGET, separate from the
+        # cross-service shared_order_budget below) before every order —
+        # once hit, new entries silently stop with reason
+        # ORDER_BUDGET_EXHAUSTED in the candidate log, with nothing on the
+        # main status card warning the operator it's approaching or has
+        # hit that ceiling. Exposing the threshold, not just the count.
+        "orders_placed_today_budget": config.DAILY_ORDER_BUDGET,
         "daily_loss_kill_switch": gate.daily_loss_kill_switch_tripped,
         "eod_squareoff_fired_date": gate.eod_squareoff_fired_date,
         "eod_squareoff_stragglers": eod_stragglers,

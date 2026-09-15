@@ -178,6 +178,12 @@ _COLUMN_MIGRATIONS = [
     # (reset_daily() was previously dead code, never called — see models.py
     # comment on this column for the full story).
     ("scalp_capital_ledger", "pnl_last_reset_date", "VARCHAR2(10)", "VARCHAR(10)", None, None),
+    # AUDIT FIX (2026-09-15): scalp_intraday_restricted is a brand-new table
+    # (models.ScalpIntradayRestrictedSecurity). create_all() will CREATE it
+    # on the next boot — no column migrations needed for a new table.
+    # symbol is the PK (not an `id` column), so _ensure_oracle_autoincrement()
+    # skips it automatically — correct. Add column entries here if new
+    # columns are ever added to that table on a running deployment.
 ]
 
 

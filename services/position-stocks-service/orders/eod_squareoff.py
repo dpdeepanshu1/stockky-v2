@@ -21,6 +21,7 @@ import config
 from capital import ledger, shared_order_budget
 from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
+from screening import intraday_eligibility
 from tz_utils import ist_today_str
 
 logger = logging.getLogger("position-stocks-eod")
@@ -136,8 +137,72 @@ def run_eod_squareoff(db: Session) -> int:
             closed += 1
             logger.info("EOD squareoff: closed %s (id=%d)", pos.symbol, pos.id)
         except Exception as e:
-            logger.error("EOD squareoff: failed to close %s (id=%d): %s", pos.symbol, pos.id, e)
-            pos.error_message = f"EOD_SQUAREOFF_FAILED: {e}"
+            err_str = str(e)
+            # AUDIT FIX (2026-09-15): previously all SELL failures landed in
+            # one generic catch — retried identically next cycle with no
+            # diagnosis. Screenshots confirmed three distinct rejection types
+            # firing from this service's own EOD sweep. Classify them:
+            #
+            # 1. INTRADAY_CUTOFF: "Intraday orders cannot be placed at this
+            #    time" — the exchange window has closed for today. The position
+            #    is not permanently stuck; tomorrow it's a delivery holding and
+            #    CNC will work. Don't count against a permanent restriction.
+            #
+            # 2. SECURITY_INTRADAY_RESTRICTED: "not allowed to be traded in
+            #    Intraday" — T2T/ASM/GSM surveillance stock. This SELL will
+            #    NEVER succeed as INTRA on any future attempt. Record it so
+            #    screening/_run_cycle() excludes it from future BUY candidates.
+            #    The position is stranded until manual intervention or T+1
+            #    settlement lets a CNC SELL clear.
+            #
+            # 3. INSUFFICIENT_FUNDS: Dhan's RMS treating an INTRA SELL as a
+            #    new naked short because there is no matching MIS position to
+            #    net against (common when the BUY itself was rejected but the
+            #    EOD sweep still finds an OPEN DB row). Log clearly.
+            #
+            # 4. Everything else: generic failure — same log as before.
+            if dhan_client.is_intraday_cutoff_error(err_str):
+                logger.warning(
+                    "EOD squareoff: %s (id=%d) — INTRADAY_CUTOFF: exchange window "
+                    "closed for today. Position left OPEN; a CNC sell will be possible "
+                    "tomorrow once settlement clears. Error: %s",
+                    pos.symbol, pos.id, err_str,
+                )
+                pos.error_message = f"EOD_SQUAREOFF_INTRADAY_CUTOFF: {err_str}"
+            elif dhan_client.is_security_intraday_restricted_error(err_str):
+                logger.error(
+                    "EOD squareoff: %s (id=%d) — SECURITY_INTRADAY_RESTRICTED: "
+                    "this symbol cannot be traded INTRA ever. Recording restriction "
+                    "so future cycles skip it as a BUY candidate. Position left OPEN "
+                    "— requires manual CNC sell or T+1 delivery settlement. Error: %s",
+                    pos.symbol, pos.id, err_str,
+                )
+                pos.error_message = f"EOD_SQUAREOFF_INTRADAY_RESTRICTED: {err_str}"
+                try:
+                    intraday_eligibility.record_restriction(
+                        db, pos.symbol,
+                        detail=f"EOD SELL rejection: {err_str[:200]}",
+                    )
+                except Exception as rec_e:
+                    logger.warning(
+                        "EOD squareoff: could not record restriction for %s: %s",
+                        pos.symbol, rec_e,
+                    )
+            elif dhan_client.is_insufficient_funds_error(err_str):
+                logger.error(
+                    "EOD squareoff: %s (id=%d) — INSUFFICIENT_FUNDS: Dhan RMS "
+                    "margin shortfall on INTRA SELL (likely no matching MIS position "
+                    "to net against — BUY may have been rejected but DB row persists). "
+                    "Error: %s",
+                    pos.symbol, pos.id, err_str,
+                )
+                pos.error_message = f"EOD_SQUAREOFF_INSUFFICIENT_FUNDS: {err_str}"
+            else:
+                logger.error(
+                    "EOD squareoff: failed to close %s (id=%d): %s",
+                    pos.symbol, pos.id, err_str,
+                )
+                pos.error_message = f"EOD_SQUAREOFF_FAILED: {err_str}"
             db.commit()
 
     gate.eod_squareoff_fired_date = today

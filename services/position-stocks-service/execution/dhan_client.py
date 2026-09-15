@@ -338,9 +338,25 @@ def place_super_order(
         raise DhanNotArmedError("position-stocks-service is not armed — refusing to place super order.")
     client = _get_sdk_client(db)
 
-    ref_price = price
-    if order_type == "LIMIT" and ref_price:
-        ref_price = round_to_tick(ref_price)
+    # AUDIT FIX (this session): ref_price was only rounded to a valid tick
+    # when order_type=="LIMIT" — but this service's only caller
+    # (orders/entry.py) always places Super Orders with order_type="MARKET",
+    # passing the raw, unrounded live LTP straight from the WS feed's ring
+    # buffer (screening/engine.py's `buf[-1][1]`) as `price`. This
+    # function's own docstring is explicit that Dhan validates
+    # targetPrice/stopLossPrice AGAINST this reference price regardless of
+    # order_type — i.e. Dhan's tick-multiple check on `price` applies here
+    # too, not just for LIMIT orders. A live LTP is normally already tick-
+    # valid (exchanges only trade in tick multiples), but binary-float
+    # artifacts surviving the WS feed's tick parsing (see round_to_tick's
+    # own docstring: "binary float rounding can still fail Dhan's tick-
+    # multiple check on a price that looks perfectly clean") could still
+    # produce something like 1234.3499999998 instead of 1234.35 — which
+    # would fail Dhan's check on the ENTRY itself, unlike target_price/
+    # stop_price which already go through round_to_tick via
+    # orders/adaptive.py::compute(). Rounding unconditionally here closes
+    # that gap without changing behavior for genuinely clean prices.
+    ref_price = round_to_tick(price) if price else price
 
     logger.info(
         "position-stocks: Placing REAL Super Order: %s %s x%s ref=%s target=%s stop=%s (%s, %s)",
@@ -402,3 +418,51 @@ def cancel_super_order(db: Session, *, order_id: str, order_leg: str) -> dict:
     logger.info("position-stocks: Cancelling REAL super order %s leg=%s", order_id, order_leg)
     resp = client.cancel_super_order(order_id, order_leg)
     return _extract_data(resp) or {}
+
+
+# ── Rejection classifiers (mirrors real-trade-service/execution/dhan_client.py) ─
+# Added this session after screenshots confirmed all three rejection types fire
+# on SELL attempts from this service too — the classifiers already exist in
+# real-trade-service but were never ported here, so eod_squareoff.py and future
+# exit paths had no way to distinguish them from generic failures.
+
+_INTRADAY_CUTOFF_MARKERS = (
+    "cannot be placed at this time", "intraday orders cannot be placed",
+    "square off time", "square-off time", "market is closed for intraday",
+)
+
+_SECURITY_INTRADAY_RESTRICTED_MARKERS = (
+    "not allowed to be traded in intraday", "not allowed to trade in intraday",
+)
+
+_INSUFFICIENT_FUNDS_MARKERS = (
+    "insufficient funds", "insufficient fund", "add rs.", "add funds",
+)
+
+
+def is_intraday_cutoff_error(message: str) -> bool:
+    """True when Dhan rejects because the exchange intraday window has
+    closed for today (~15:20-15:25 IST). Retrying the same INTRADAY order
+    cannot succeed for the rest of today — caller should note the reason
+    and stop hammering Dhan until the next trading day."""
+    m = (message or "").lower()
+    return any(marker in m for marker in _INTRADAY_CUTOFF_MARKERS)
+
+
+def is_security_intraday_restricted_error(message: str) -> bool:
+    """True when Dhan rejects because the symbol is on T2T/ASM/GSM
+    surveillance — can NEVER be traded INTRADAY regardless of time of day.
+    Caller should record the symbol in ScalpIntradayRestrictedSecurity so
+    future cycles skip it before even trying to buy."""
+    m = (message or "").lower()
+    return any(marker in m for marker in _SECURITY_INTRADAY_RESTRICTED_MARKERS)
+
+
+def is_insufficient_funds_error(message: str) -> bool:
+    """True when Dhan's RMS margin engine rejects for a funds shortfall.
+    For INTRA SELL orders, this usually means Dhan is treating the order
+    as a new short (no matching MIS position to net against), not a
+    position close — the position_value capital is tied up, but the
+    account's free margin is insufficient for the gross exposure."""
+    m = (message or "").lower()
+    return any(marker in m for marker in _INSUFFICIENT_FUNDS_MARKERS)

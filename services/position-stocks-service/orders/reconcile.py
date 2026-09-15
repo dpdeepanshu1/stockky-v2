@@ -166,6 +166,76 @@ def run_exit_reconciliation(db: Session) -> int:
             # will pick it up.
             continue
 
+        # AUDIT FIX (this session — "check buy/sell for every scenario,
+        # consider very high and frequent price change"): entry_price was
+        # set exactly once, in orders/entry.py, to the pre-order LTP
+        # sampled at scan/decision time — and never corrected afterwards.
+        # Every realized_pnl / realized_pnl_pct this function computes
+        # below is (exit_price - pos.entry_price) * quantity, so a stale
+        # entry reference silently mis-states booked P&L. On a genuinely
+        # calm stock this barely matters; on the fast-moving, volatile
+        # names this scalp strategy specifically targets, the real
+        # ENTRY_LEG's average traded price (`row["averageTradedPrice"]`,
+        # already being read a few lines below via `_extract_leg_price`'s
+        # parent-row fallback for the EXIT side — the entry side just
+        # never used it) can differ meaningfully from that LTP snapshot:
+        # queueing/network latency between the scan tick and Dhan
+        # receiving the MARKET order, plus the order's own market impact
+        # on a thin/fast-moving name. Correcting it here, as soon as
+        # Dhan's response confirms a real fill, before it's ever used in a
+        # P&L calc — idempotent (only writes when the value actually
+        # changed) and applies to both still-OPEN positions and
+        # EOD_SQUAREOFF-pending ones (whose exit_price is a placeholder
+        # copy of entry_price — see eod_squareoff.py — so it's bumped in
+        # lockstep to keep that placeholder's phantom P&L at exactly zero,
+        # same as before, just anchored to the real fill instead of the
+        # estimate). Does NOT touch capital_risked/the ledger — that's a
+        # separate, already-reserved software allocation and out of this
+        # fix's scope.
+        if pos.status in ("OPEN", "EOD_SQUAREOFF"):
+            entry_status_now = str(row.get("orderStatus", "")).upper()
+            if entry_status_now in _FILLED_STATUSES:
+                raw_fill = row.get("averageTradedPrice")
+                real_entry_price: Optional[float] = None
+                if raw_fill:
+                    try:
+                        real_entry_price = float(raw_fill)
+                    except (TypeError, ValueError):
+                        real_entry_price = None
+                if real_entry_price and abs(real_entry_price - pos.entry_price) > 1e-6:
+                    old_entry_price = pos.entry_price
+                    pos.entry_price = real_entry_price
+                    if pos.status == "EOD_SQUAREOFF" and pos.exit_price == old_entry_price:
+                        pos.exit_price = real_entry_price
+
+                    # AUDIT FIX (this session): the previously-flagged
+                    # follow-up — capital_risked was reserved off the same
+                    # stale pre-order LTP estimate as entry_price, and had
+                    # the same "never corrected" gap. Now that the real
+                    # fill price is known, recompute the real cost and
+                    # push the delta through the ledger so
+                    # available_capital stays consistent with what this
+                    # position will actually return at exit (see
+                    # capital/ledger.py::reconcile_position_cost's
+                    # docstring for the full reasoning, including why a
+                    # positive delta is allowed to push available_capital
+                    # negative rather than being silently clamped).
+                    old_capital_risked = pos.capital_risked
+                    real_capital_cost = pos.quantity * real_entry_price
+                    delta = real_capital_cost - old_capital_risked
+                    pos.capital_risked = real_capital_cost
+                    db.commit()
+                    if delta != 0:
+                        ledger.reconcile_position_cost(db, delta=delta)
+
+                    logger.info(
+                        "reconcile: %s (id=%d) entry_price corrected ₹%.2f -> ₹%.2f, "
+                        "capital_risked ₹%.2f -> ₹%.2f (Dhan's real avg fill vs "
+                        "pre-order LTP estimate)",
+                        pos.symbol, pos.id, old_entry_price, real_entry_price,
+                        old_capital_risked, real_capital_cost,
+                    )
+
         leg_details = row.get("legDetails") or []
         target_leg = next((l for l in leg_details if l.get("legName") == "TARGET_LEG"), None)
         stop_leg = next((l for l in leg_details if l.get("legName") == "STOP_LOSS_LEG"), None)

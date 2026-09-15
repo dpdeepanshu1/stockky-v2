@@ -437,7 +437,25 @@ export default function PositionStocksTab() {
     : null;
 
   const openPositions = useMemo(() => positions.filter(p => p.status === "OPEN"), [positions]);
-  const closedToday = useMemo(() => positions.filter(p => p.status !== "OPEN"), [positions]);
+  // AUDIT FIX (this session): this used to be `positions.filter(p => p.status
+  // !== "OPEN")` with zero date filtering — GET /positions returns the last
+  // 50 rows ordered by opened_at desc, so on a quiet day (or after a fresh
+  // deploy with few trades since) this section's "Closed Today (N)" header
+  // and its "No positions closed yet today" empty state could both show
+  // positions that actually closed on an earlier calendar day, mislabeled
+  // as today's. Now actually filters on the position's own closed_at (IST
+  // calendar date), falling back to opened_at only in the arguably-
+  // impossible case a non-OPEN row has no closed_at.
+  const todayIst = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  const closedToday = useMemo(
+    () => positions.filter(p => {
+      if (p.status === "OPEN") return false;
+      const ts = p.closed_at ?? p.opened_at;
+      if (!ts) return false;
+      return new Date(ts).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }) === todayIst;
+    }),
+    [positions, todayIst]
+  );
   const filteredCandidates = useMemo(
     () => windowFilter === "all" ? candidates : candidates.filter(c => c.window === windowFilter),
     [candidates, windowFilter]
@@ -570,6 +588,19 @@ export default function PositionStocksTab() {
           <GateStep n={3} label="Risk config confirmed" done={!!status?.risk_confirmed} />
           <GateStep n={4} label="Armed" done={!!status?.armed} />
         </div>
+        {/* AUDIT FIX (this session): backend GET /status has always returned
+            armed_at (gate.armed_at, iso_utc'd) and it's typed on ScalpStatus,
+            but no component ever rendered it — same "built on the backend,
+            never wired to the tab" pattern this service's audits keep
+            finding (candidate log, shared order budget, reset-daily button,
+            order ids). Surfacing it here since it's exactly the kind of
+            fact this card already exists to answer ("is it armed, and
+            since when"). */}
+        {status?.armed && status?.armed_at && (
+          <p className="font-display tabular-nums text-[9px] text-mist mt-2">
+            Armed since {fmtDateTimeIst(status.armed_at)}
+          </p>
+        )}
       </div>
 
       {/* ── Dhan account ── */}
@@ -686,8 +717,25 @@ export default function PositionStocksTab() {
             </p>
           </div>
           <div>
+            {/* AUDIT FIX (this session): this used to show a bare count
+                with no denominator — orders/entry.py has always enforced
+                this service's own daily order cap (config.DAILY_ORDER_
+                BUDGET, separate from the shared Dhan-account-wide budget
+                tile below), but the dashboard gave no visibility into how
+                close it was, so hitting it just looked like entries
+                silently stopping. Now shown the same used/budget way as
+                Shared Dhan Order Budget, with the same near-exhausted
+                color cue. */}
             <p className="text-[9px] text-mist uppercase tracking-widest">Orders Today</p>
-            <p className="font-display tabular-nums text-xs text-paper">{status?.orders_placed_today ?? "—"}</p>
+            <p className={`font-display tabular-nums text-xs ${
+              status?.orders_placed_today_budget && status.orders_placed_today !== undefined &&
+              (status.orders_placed_today_budget - status.orders_placed_today) < status.orders_placed_today_budget * 0.1
+                ? "text-signal-hold" : "text-paper"
+            }`}>
+              {status?.orders_placed_today !== undefined && status?.orders_placed_today_budget
+                ? `${status.orders_placed_today}/${status.orders_placed_today_budget}`
+                : (status?.orders_placed_today ?? "—")}
+            </p>
           </div>
           <div>
             {/* AUDIT ADD (this session): backend has returned this since the

@@ -75,8 +75,8 @@ class QualitySignal:
         return True, ", ".join(reasons) if reasons else "no red flags"
 
 
-async def _fetch_fund_tech(client: httpx.AsyncClient, symbol: str) -> tuple[Optional[float], Optional[float], Optional[float]]:
-    fund_score = market_cap_cr = tech_score = None
+async def _fetch_fundamental(client: httpx.AsyncClient, symbol: str) -> tuple[Optional[float], Optional[float]]:
+    fund_score = market_cap_cr = None
     try:
         r = await client.get(f"{config.FUNDAMENTAL_URL}/analyze/{symbol}", timeout=config.QUALITY_GATE_TIMEOUT_S)
         if r.status_code == 200:
@@ -90,14 +90,36 @@ async def _fetch_fund_tech(client: httpx.AsyncClient, symbol: str) -> tuple[Opti
                     market_cap_cr = None
     except Exception as e:
         logger.info("quality_gate: fundamental fetch failed for %s (%s)", symbol, e)
+    return fund_score, market_cap_cr
 
+
+async def _fetch_technical(client: httpx.AsyncClient, symbol: str) -> Optional[float]:
+    tech_score = None
     try:
         r = await client.get(f"{config.TECHNICAL_URL}/analyze/{symbol}", timeout=config.QUALITY_GATE_TIMEOUT_S)
         if r.status_code == 200:
             tech_score = r.json().get("technical_score")
     except Exception as e:
         logger.info("quality_gate: technical fetch failed for %s (%s)", symbol, e)
+    return tech_score
 
+
+async def _fetch_fund_tech(client: httpx.AsyncClient, symbol: str) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Runs the fundamental and technical calls concurrently, not sequentially.
+    FIXED session 29: these were two independent `await`s back to back inside
+    one function — real latency was fund_time + tech_time, not max(fund_time,
+    tech_time), even though the module docstring and `check()`'s docstring both
+    describe all three checks as running "concurrently". Combined with
+    `_fetch_event_signal()` running alongside via the outer `asyncio.gather()`
+    in `check()`, the true per-candidate wait was max(fund_time + tech_time,
+    event_time) — silently up to ~2x QUALITY_GATE_TIMEOUT_S longer than
+    intended on a timeout, directly compounding the scan-time-LTP entry-price
+    staleness already tracked from session 25/26 (more wall-clock time between
+    the screener's price snapshot and the real fill)."""
+    (fund_score, market_cap_cr), tech_score = await asyncio.gather(
+        _fetch_fundamental(client, symbol),
+        _fetch_technical(client, symbol),
+    )
     return fund_score, tech_score, market_cap_cr
 
 

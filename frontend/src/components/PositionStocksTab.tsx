@@ -11,6 +11,7 @@ import {
   type ScalpStatus, type ScalpPositionRow, type ScalpCandidateRow, type ScalpLedgerState,
   type ScalpTradeHistory, type DhanLiveOrders, type ScalpCycleResult, type DhanAccountStatus,
   type ScalpCandidateLogRow,
+  type ScalpIntradayRestrictedRow,
 } from "../positionStocksApi";
 // Cross-service, read-only: real-trade-service's own account bookkeeping,
 // used only to populate the "Real Trade Service" side of CapitalSplitCard
@@ -274,6 +275,8 @@ export default function PositionStocksTab() {
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [candidateLog, setCandidateLog] = useState<ScalpCandidateLogRow[]>([]);
   const [candidateLogError, setCandidateLogError] = useState<string | null>(null);
+  const [restrictedSymbols, setRestrictedSymbols] = useState<ScalpIntradayRestrictedRow[]>([]);
+  const [restrictedSymbolsError, setRestrictedSymbolsError] = useState<string | null>(null);
   // Real Trade Service's own account figures, fetched cross-service purely
   // to populate CapitalSplitCard (see that component's docstring) — this
   // dashboard's own data (status/ledger/dhanAccount above) never depends on it.
@@ -346,6 +349,22 @@ export default function PositionStocksTab() {
     }
   }, []);
 
+  // Learned intraday-restricted symbol list (GET /candidates/restricted) —
+  // symbols Dhan has actually rejected as "not allowed to trade in
+  // Intraday" (T2T/ASM/GSM surveillance), recorded by orders/eod_squareoff.py
+  // and orders/entry.py, then filtered out of every future cycle's
+  // candidates before capital or a Dhan call is committed to them. No
+  // static list — this is purely a record of what's already been learned.
+  const loadRestrictedSymbols = useCallback(async () => {
+    if (!getPositionStocksApiUrl()) return;
+    try {
+      const rows = await positionStocksApi.candidatesRestricted();
+      setRestrictedSymbols(rows); setRestrictedSymbolsError(null);
+    } catch (e: any) {
+      setRestrictedSymbolsError(e?.message || "Failed to load restricted symbols");
+    }
+  }, []);
+
   const loadDhanLive = useCallback(async () => {
     try {
       const d = await positionStocksApi.dhanLiveOrders();
@@ -401,14 +420,16 @@ export default function PositionStocksTab() {
     void loadDhanLive();
     void loadDhanAccount();
     void loadCandidateLog();
+    void loadRestrictedSymbols();
     void loadRealTradeAccount();
     const t = setInterval(() => void loadAll(), 15_000);
     const td = setInterval(() => void loadDhanLive(), 30_000);
     const ta = setInterval(() => void loadDhanAccount(), 30_000);
     const tc = setInterval(() => void loadCandidateLog(), 15_000);
+    const tir = setInterval(() => void loadRestrictedSymbols(), 30_000);
     const tr = setInterval(() => void loadRealTradeAccount(), 30_000);
-    return () => { clearInterval(t); clearInterval(td); clearInterval(ta); clearInterval(tc); clearInterval(tr); };
-  }, [loadAll, loadDhanLive, loadDhanAccount, loadCandidateLog, loadRealTradeAccount]);
+    return () => { clearInterval(t); clearInterval(td); clearInterval(ta); clearInterval(tc); clearInterval(tir); clearInterval(tr); };
+  }, [loadAll, loadDhanLive, loadDhanAccount, loadCandidateLog, loadRestrictedSymbols, loadRealTradeAccount]);
 
   const saveApiUrl = () => { setPositionStocksApiUrl(apiUrlInput); void loadAll(); };
 
@@ -1105,6 +1126,52 @@ export default function PositionStocksTab() {
         )}
         <p className="font-display tabular-nums text-[9px] text-mist mt-2">
           Full audit trail of every scanned candidate the quality gate looked at and why it was taken or skipped — not just the final screener output above.
+        </p>
+      </div>
+
+      {/* ── Learned intraday-restricted symbols (T2T/ASM/GSM) ── */}
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <p className="dash-section-title">Intraday-Restricted Symbols</p>
+          <button onClick={() => void loadRestrictedSymbols()}
+            className="px-3 py-1 rounded-lg bg-graphite border border-slate font-display tabular-nums text-[10px] text-mist">
+            Refresh
+          </button>
+        </div>
+        {restrictedSymbolsError ? (
+          <p className="font-display tabular-nums text-[11px] text-signal-sell">{restrictedSymbolsError}</p>
+        ) : restrictedSymbols.length === 0 ? (
+          <p className="font-display tabular-nums text-xs text-mist">No restricted symbols learned yet — none of Dhan's SELL rejections so far have been intraday-eligibility related.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px] font-display tabular-nums">
+              <thead>
+                <tr className="text-mist text-left border-b border-slate">
+                  <th className="py-1 pr-3">Symbol</th>
+                  <th className="py-1 pr-3">Hits</th>
+                  <th className="py-1 pr-3">First Seen</th>
+                  <th className="py-1 pr-3">Last Seen</th>
+                  <th className="py-1">Last Rejection Detail</th>
+                </tr>
+              </thead>
+              <tbody>
+                {restrictedSymbols.map(r => (
+                  <tr key={r.symbol} className="border-b border-slate/50">
+                    <td className="py-1 pr-3 text-paper font-bold">{r.symbol}</td>
+                    <td className="py-1 pr-3 text-signal-sell">{r.hit_count}</td>
+                    <td className="py-1 pr-3 text-mist">{fmtDateTimeIst(r.first_detected_at)}</td>
+                    <td className="py-1 pr-3 text-mist">{fmtDateTimeIst(r.last_detected_at)}</td>
+                    <td className="py-1 text-mist">{r.last_detail ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="font-display tabular-nums text-[9px] text-mist mt-2">
+          Symbols Dhan has actually rejected as "not allowed to trade in Intraday" (T2T/ASM/GSM surveillance) — learned
+          from live SELL rejections, not a static list. These are filtered out of every future cycle's candidates
+          before capital or a Dhan call is committed to them.
         </p>
       </div>
       </>

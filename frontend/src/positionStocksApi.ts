@@ -318,6 +318,20 @@ export interface ScalpCandidateLogRow {
   created_at: string;
 }
 
+// Learned intraday-restricted symbol list — seeded from live Dhan SELL
+// rejections this service has actually observed (orders/eod_squareoff.py,
+// orders/entry.py), then filtered out of new candidates every cycle before
+// capital or a Dhan call is committed to them. See screening/
+// intraday_eligibility.py and GET /candidates/restricted for the backend
+// side; this is a pure read, no static/known list.
+export interface ScalpIntradayRestrictedRow {
+  symbol: string;
+  first_detected_at: string;
+  last_detected_at: string;
+  hit_count: number;
+  last_detail: string | null;
+}
+
 export const positionStocksApi = {
   health: () => psRequest<{ status: string; service: string }>("/health"),
 
@@ -352,6 +366,7 @@ export const positionStocksApi = {
   tradeHistory: (limit = 200) => psRequest<ScalpTradeHistory>(`/trades/history?limit=${limit}`),
   candidates: () => psRequest<ScalpCandidatesResponse>("/candidates"),
   candidatesLog: (limit = 100) => psRequest<ScalpCandidateLogRow[]>(`/candidates/log?limit=${limit}`),
+  candidatesRestricted: () => psRequest<ScalpIntradayRestrictedRow[]>("/candidates/restricted"),
 
   ledger: () => psRequest<ScalpLedgerState>("/ledger"),
   syncLedger: () => psRequest<{ status: string; total_allocated_capital: number }>("/ledger/sync", { method: "POST" }, true),

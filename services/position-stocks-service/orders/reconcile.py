@@ -107,6 +107,135 @@ def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 
     return 0.0
 
 
+_DEAD_EXIT_STATUSES = {"REJECTED", "CANCELLED"}
+
+
+def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int:
+    """2026-09-15 fix (session40 — the "future improvement" flagged in
+    run_exit_reconciliation's dead-code comment below, now implemented):
+    resolves each EOD_SQUAREOFF_PENDING_RECONCILE position's REAL plain
+    MARKET SELL fill via dhan_client.get_order_list() +
+    pos.dhan_exit_order_id (captured by eod_squareoff.py's
+    _fire_flat_sell), instead of leaving exit_price/realized_pnl at the
+    entry_price/₹0.0 placeholder forever. Runs BEFORE the super-order pass
+    below so a position this resolves never also falls through into that
+    pass's own (now-superseded) placeholder-only EOD_SQUAREOFF branch.
+
+    Same defense-in-depth this service's dhan_client.place_order() and
+    real-trade-service's reconcile.py already apply: also cross-checks
+    Dhan's own reported orderType/price for this SELL against what was
+    actually requested (MARKET/0) and logs CRITICAL on a mismatch — this
+    service has no notification channel (see main.py's own note on that),
+    so a loud log line is the whole alert path here, same as every other
+    CRITICAL in this module.
+
+    Positions with no dhan_exit_order_id (pre-session40 rows, or a case
+    where _fire_flat_sell's retries were all exhausted with no order ever
+    accepted) are left untouched for the caller's existing placeholder
+    fallback — this function only handles the case it can actually resolve.
+    """
+    candidates = [p for p in eod_pending if p.dhan_exit_order_id]
+    if not candidates:
+        return 0
+
+    try:
+        plain_orders = dhan_client.get_order_list(db)
+    except Exception as e:
+        logger.warning("reconcile: EOD-pending — failed to fetch plain order list: %s", e)
+        return 0
+
+    by_id: dict[str, dict] = {}
+    for row in plain_orders:
+        oid = str(row.get("orderId") or row.get("order_id") or "")
+        if oid:
+            by_id[oid] = row
+
+    resolved = 0
+    for pos in candidates:
+        row = by_id.get(str(pos.dhan_exit_order_id))
+        if row is None:
+            continue  # not visible yet — next pass, keep the placeholder for now
+
+        broker_order_type = str(row.get("orderType") or row.get("order_type") or "").upper()
+        broker_price = row.get("price")
+        if broker_order_type and broker_order_type != "MARKET":
+            logger.critical(
+                "reconcile: EOD flat-SELL BROKER ORDER TYPE MISMATCH for %s (id=%d, "
+                "order %s) — sent MARKET but Dhan reports orderType=%s (price=%s). "
+                "This position's flat-close is not what this service believes it is "
+                "— investigate immediately.",
+                pos.symbol, pos.id, pos.dhan_exit_order_id, broker_order_type, broker_price,
+            )
+        elif broker_price not in (None, 0, 0.0):
+            logger.critical(
+                "reconcile: EOD flat-SELL BROKER PRICE MISMATCH for %s (id=%d, order %s) "
+                "— sent price=0 (MARKET) but Dhan reports price=%s.",
+                pos.symbol, pos.id, pos.dhan_exit_order_id, broker_price,
+            )
+
+        status = str(row.get("orderStatus") or row.get("order_status") or "").upper()
+        if status in _FILLED_STATUSES:
+            raw_fill = row.get("averageTradedPrice") or row.get("average_traded_price")
+            try:
+                real_exit_price = float(raw_fill) if raw_fill else None
+            except (TypeError, ValueError):
+                real_exit_price = None
+            if real_exit_price is None:
+                logger.warning(
+                    "reconcile: EOD flat-SELL for %s (id=%d, order %s) reports %s but no "
+                    "fill price — leaving placeholder for next pass.",
+                    pos.symbol, pos.id, pos.dhan_exit_order_id, status,
+                )
+                continue
+
+            real_pnl = (real_exit_price - pos.entry_price) * pos.quantity
+            real_pnl_pct = (
+                (real_exit_price - pos.entry_price) / pos.entry_price * 100.0
+                if pos.entry_price else 0.0
+            )
+            pos.exit_price = real_exit_price
+            pos.realized_pnl = real_pnl
+            pos.realized_pnl_pct = real_pnl_pct
+            pos.error_message = None
+            db.commit()
+
+            # EOD's own placeholder release already returned capital_risked
+            # with realized_pnl=0.0 (see eod_squareoff.py) — book the real
+            # P&L now via the same release_capital() path with
+            # position_value=0.0 so it lands exactly once, in
+            # available_capital/realized_pnl_today/realized_pnl_total, and
+            # re-runs the same daily-loss-kill-switch check a normal exit
+            # would.
+            ledger.release_capital(db, position_value=0.0, realized_pnl=real_pnl)
+            resolved += 1
+            logger.info(
+                "reconcile: %s (id=%d) EOD_SQUAREOFF — real fill resolved @ ₹%.2f, "
+                "P&L ₹%.2f (%.2f%%) (was entry_price placeholder)",
+                pos.symbol, pos.id, real_exit_price, real_pnl, real_pnl_pct,
+            )
+        elif status in _DEAD_EXIT_STATUSES:
+            # The flat SELL itself died with zero fill, even after
+            # _fire_flat_sell's bounded retry — this position is still
+            # genuinely open at the broker past hard-flat time and cannot
+            # be auto-retried again until tomorrow's sweep (this service
+            # has no continuous exit-retry loop the way real-trade-
+            # service's exit_engine does). Surface it loudly rather than
+            # leaving it silently mislabeled EOD_SQUAREOFF with a ₹0.0
+            # placeholder P&L that looks like a real, closed, break-even
+            # trade.
+            pos.status = "ERROR"
+            pos.error_message = f"EOD_SQUAREOFF_SELL_DEAD: order {pos.dhan_exit_order_id} came back {status} with zero fill — position may still be open at the broker, needs manual review."
+            db.commit()
+            resolved += 1
+            logger.critical(
+                "reconcile: %s (id=%d) EOD flat-SELL order %s came back %s with ZERO "
+                "fill — position marked ERROR, likely still open at the broker past "
+                "hard-flat time. Needs manual review.",
+                pos.symbol, pos.id, pos.dhan_exit_order_id, status,
+            )
+    return resolved
+
+
 def run_exit_reconciliation(db: Session) -> int:
     """Check every locally-OPEN scalp position against Dhan's live super
     order book. Closes any position whose TARGET_LEG or STOP_LOSS_LEG has
@@ -139,6 +268,20 @@ def run_exit_reconciliation(db: Session) -> int:
         )
         .all()
     )
+    # 2026-09-15 fix (session40): resolve EOD-pending positions' REAL flat-
+    # SELL fill first, via get_order_list()/dhan_exit_order_id — see
+    # _reconcile_eod_pending's docstring. Positions it resolves (real fill
+    # booked, or marked ERROR on a dead zero-fill SELL) are dropped from
+    # eod_pending below so the legacy placeholder-only branch further down
+    # (which only ever looks at the ORIGINAL super order's ENTRY_LEG, never
+    # the actual exit) doesn't reprocess and re-log them as still-placeholder.
+    _reconcile_eod_pending(db, eod_pending)
+    eod_pending = [
+        p for p in eod_pending
+        if p.status == "EOD_SQUAREOFF"
+        and (p.error_message or "").startswith("EOD_SQUAREOFF_PENDING_RECONCILE")
+    ]
+
     all_positions = open_positions + eod_pending
     if not all_positions:
         return 0
@@ -253,14 +396,17 @@ def run_exit_reconciliation(db: Session) -> int:
             # order — so they will never have a TARGET_LEG or STOP_LOSS_LEG
             # in Dhan's super-order book. Their plain sell order won't even
             # appear in get_super_order_list() (super order list only shows
-            # super orders, not plain orders). So for EOD_SQUAREOFF-pending
-            # positions we check the top-level ENTRY_LEG of the ORIGINAL
-            # super order to get the entry fill, then record the exit at the
-            # known entry_price placeholder — the best we can do without
-            # a separate plain-order list call. A future improvement would
-            # call get_order_list() to find the actual EOD SELL fill price.
-            # For now, if we cannot find the real fill, leave error_message
-            # as-is (still marked PENDING_RECONCILE) for the next pass.
+            # super orders, not plain orders). This point is only reached
+            # for an EOD_SQUAREOFF position at all now if
+            # _reconcile_eod_pending above could NOT resolve it (no
+            # dhan_exit_order_id — a pre-session40 row, or the flat SELL
+            # never got accepted at all) — the real-fill path (session40)
+            # lives there now, using get_order_list()/dhan_exit_order_id.
+            # This remains a fallback: check the top-level ENTRY_LEG of the
+            # ORIGINAL super order to get the entry fill, then leave the
+            # exit at the known entry_price placeholder. If we cannot find
+            # the real fill, leave error_message as-is (still marked
+            # PENDING_RECONCILE) for the next pass.
             if pos.status == "EOD_SQUAREOFF":
                 entry_status = str(row.get("orderStatus", "")).upper()
                 if entry_status in _FILLED_STATUSES:
@@ -272,7 +418,8 @@ def run_exit_reconciliation(db: Session) -> int:
                     db.commit()
                     logger.info(
                         "reconcile: %s (id=%d) EOD_SQUAREOFF — entry leg confirmed traded; "
-                        "exit price remains entry_price placeholder (plain SELL fill not in super-order list)",
+                        "exit price remains entry_price placeholder (no dhan_exit_order_id "
+                        "to resolve the real flat-SELL fill via get_order_list())",
                         pos.symbol, pos.id,
                     )
                 continue

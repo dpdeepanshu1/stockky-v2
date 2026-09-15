@@ -43,6 +43,7 @@ _security_collision_count = 0
 NSE_EQ_SEGMENT = "NSE_EQ"
 TICK_SIZE = 0.05
 _TICK_SIZE_DEC = Decimal("0.05")
+_VALID_ORDER_TYPES = {"MARKET", "LIMIT", "STOP_LOSS", "STOP_LOSS_MARKET"}
 
 
 def round_to_tick(price: float, tick_size: float = TICK_SIZE) -> float:
@@ -270,11 +271,34 @@ def place_order(
     validity: str = "DAY",
     tag: Optional[str] = None,
 ) -> dict:
+    """2026-09-15 fix (session40 — same hardening as real-trade-service's
+    dhan_client.place_order(), applied here for consistency; see that
+    function's docstring for the full DATAMATICS-incident writeup this
+    closes). This is the lower-traffic fallback path (USE_SUPER_ORDER=false
+    — the primary path is place_super_order() below), but it carries the
+    exact same risk: a caller passing order_type="MARKET"/price=0 has no
+    way to verify the SDK actually placed a MARKET order rather than
+    something else."""
     if not is_armed:
         raise DhanNotArmedError("position-stocks-service is not armed — refusing to place order.")
+
+    order_type = (order_type or "").upper()
+    if order_type not in _VALID_ORDER_TYPES:
+        raise ValueError(
+            f"place_order: refusing to send unrecognized order_type={order_type!r} "
+            f"to Dhan — must be one of {sorted(_VALID_ORDER_TYPES)}."
+        )
+
     client = _get_sdk_client(db)
 
-    if order_type == "LIMIT" and price:
+    if order_type == "MARKET":
+        if price:
+            logger.warning(
+                "position-stocks: place_order: order_type=MARKET but caller passed "
+                "nonzero price=%s — forcing price to 0.", price,
+            )
+        price = 0.0
+    elif order_type == "LIMIT" and price:
         tick_safe_price = round_to_tick(price)
         if tick_safe_price != price:
             logger.info(
@@ -288,10 +312,14 @@ def place_order(
                 f"tick multiple after rounding."
             )
 
-    logger.info(
-        "position-stocks: Placing REAL order: %s %s x%s @ %s (%s, %s)",
-        transaction_type, security_id, quantity, price, order_type, product_type,
-    )
+    outbound = {
+        "security_id": security_id, "exchange_segment": exchange_segment,
+        "transaction_type": transaction_type, "quantity": quantity,
+        "order_type": order_type, "product_type": product_type,
+        "price": price, "validity": validity, "tag": tag,
+    }
+    logger.info("position-stocks: place_order: outbound payload -> %s", outbound)
+
     resp = client.place_order(
         security_id=security_id,
         exchange_segment=exchange_segment,
@@ -303,7 +331,48 @@ def place_order(
         validity=validity,
         tag=tag,
     )
-    return _extract_data(resp) or {}
+    result = _extract_data(resp) or {}
+
+    # Best-effort, non-blocking post-placement verification — same
+    # rationale as real-trade-service's dhan_client.place_order(). Never
+    # raises; the order is already live at the broker regardless.
+    placed_order_id = str(result.get("orderId") or result.get("order_id") or "")
+    if placed_order_id:
+        try:
+            list_resp = client.get_order_list()
+            broker_rows = _extract_data(list_resp)
+            broker_rows = broker_rows if isinstance(broker_rows, list) else []
+            broker_row = next(
+                (r for r in broker_rows
+                 if str(r.get("orderId") or r.get("order_id") or "") == placed_order_id),
+                None,
+            )
+            if broker_row is not None:
+                broker_order_type = str(
+                    broker_row.get("orderType") or broker_row.get("order_type") or ""
+                ).upper()
+                broker_price = broker_row.get("price")
+                if broker_order_type and broker_order_type != order_type:
+                    logger.critical(
+                        "position-stocks: place_order: BROKER ORDER TYPE MISMATCH for "
+                        "order %s (%s %s x%s) — sent order_type=%s but Dhan reports "
+                        "orderType=%s (price=%s) — investigate immediately.",
+                        placed_order_id, transaction_type, security_id, quantity,
+                        order_type, broker_order_type, broker_price,
+                    )
+                elif order_type == "MARKET" and broker_price not in (None, 0, 0.0):
+                    logger.critical(
+                        "position-stocks: place_order: BROKER PRICE MISMATCH for MARKET "
+                        "order %s (%s %s x%s) — sent price=0 but Dhan reports price=%s.",
+                        placed_order_id, transaction_type, security_id, quantity, broker_price,
+                    )
+        except Exception as e:  # noqa: BLE001 — verification must never break a real placement
+            logger.warning(
+                "position-stocks: place_order: post-placement verification failed for "
+                "order %s (non-fatal, order is already live): %s", placed_order_id, e,
+            )
+
+    return result
 
 
 def cancel_order(db: Session, *, is_armed: bool, dhan_order_id: str) -> dict:

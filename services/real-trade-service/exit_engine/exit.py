@@ -48,6 +48,8 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+import config
+
 import models
 from audit.logger import log_action
 from execution import dhan_client, shared_order_budget
@@ -305,6 +307,36 @@ def _send_real_sell(
             position.symbol, reason,
         )
         return False
+
+    # 2026-09-15 fix (session40 — DATAMATICS position 81, 89 consecutive
+    # REJECTED zero-fill SELL attempts over ~4.5h, see models.py
+    # TradePosition.consecutive_exit_failures docstring for the full
+    # incident). Unlike the intraday-cutoff case above (a known,
+    # unretryable-until-tomorrow condition with its own dedicated flag),
+    # this is a GENERIC backstop for any reason a SELL keeps dying with
+    # zero fill: every consecutive rejection for this position doubles the
+    # cooldown (capped at EXIT_RETRY_MAX_COOLDOWN_SECONDS) before this
+    # function will send another SELL for it, instead of resending on
+    # every single cycle forever. reconcile.py's dead-SELL handling is
+    # what increments consecutive_exit_failures/last_exit_failure_at (and
+    # fires the operator alert once the streak crosses
+    # EXIT_RETRY_ALERT_THRESHOLD) and what resets both back to 0/None the
+    # moment a fill is actually booked.
+    if position.consecutive_exit_failures and position.last_exit_failure_at:
+        cooldown_seconds = min(
+            config.EXIT_RETRY_MAX_COOLDOWN_SECONDS,
+            config.EXIT_RETRY_BASE_COOLDOWN_SECONDS * (2 ** (position.consecutive_exit_failures - 1)),
+        )
+        elapsed_seconds = (datetime.now(timezone.utc) - as_aware(position.last_exit_failure_at)).total_seconds()
+        if elapsed_seconds < cooldown_seconds:
+            logger.info(
+                "Skipping SELL for %s (%s) — in backoff after %d consecutive broker "
+                "rejection(s) with zero fill (%.0fs remaining of a %.0fs cooldown); "
+                "will retry once the cooldown elapses.",
+                position.symbol, reason, position.consecutive_exit_failures,
+                cooldown_seconds - elapsed_seconds, cooldown_seconds,
+            )
+            return False
     # 2026-09-15 fix (session38 — DATAMATICS "insufficient funds" SELL
     # rejections, 20 consecutive over ~2h). Root cause: this used to decide
     # sell_product_type purely from "was this position opened today?" and

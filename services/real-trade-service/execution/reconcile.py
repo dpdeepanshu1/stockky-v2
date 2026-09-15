@@ -19,16 +19,19 @@ as "leave it PLACED/PENDING_EXIT for next cycle", never as a fill.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
+import config
 import models
 from execution import dhan_client
 from notifier import notify_async
 from portfolio.portfolio import (
     record_real_fill, record_real_exit_fill, import_broker_holdings, holdings_sync_reconcile,
 )
+from resilience.local_cache import load_snapshot, save_snapshot
 
 logger = logging.getLogger("real-trade-reconcile")
 
@@ -139,6 +142,18 @@ async def _book_fill_delta(
         db.commit()
         return
 
+    # 2026-09-15 fix (session40 — see models.py TradePosition.
+    # consecutive_exit_failures docstring): a real fill (full or partial)
+    # for this position's SELL proves the exit backoff/escalation this
+    # counter exists for is no longer needed — reset it the moment any
+    # fill is booked, not just on a full CLOSED, so a position that
+    # finally gets a partial fill after a rejection streak immediately
+    # goes back to normal-cadence retries for its remainder instead of
+    # staying in backoff.
+    if position.consecutive_exit_failures or position.last_exit_failure_at:
+        position.consecutive_exit_failures = 0
+        position.last_exit_failure_at = None
+
     # BUG FIX (2026-08-27): this used to read Dhan's own `remarks` field as
     # "the reason" — broker text, not our trading logic's reason
     # (stop_hit/target_hit_partial/time_stop). Use what exit_engine
@@ -159,6 +174,50 @@ async def _book_fill_delta(
             f"{pnl_emoji} *SELL filled* — {order.symbol}\n"
             f"{delta_qty} shares @ ₹{fill_price:.2f}\n"
             f"P&L: ₹{pnl:+,.2f}"
+        )
+
+
+async def _track_exit_failure_and_maybe_alert(
+    db: Session, position: models.TradePosition, order: models.TradeOrder, status: str,
+) -> None:
+    """2026-09-15 fix (session40 — DATAMATICS position 81, 89 consecutive
+    REJECTED zero-fill SELL attempts over ~4.5h with no backoff and no
+    operator alert — see models.py TradePosition.consecutive_exit_failures
+    docstring for the full incident). Called once per dead (REJECTED/
+    CANCELLED, zero-fill) SELL. Increments the position's failure streak
+    and, once it crosses EXIT_RETRY_ALERT_THRESHOLD (and again on every
+    further multiple of it, so a very long stuck streak doesn't go silent
+    after the first alert), sends a loud operator notification — repeated
+    identical rejections this many times in a row is a signal something
+    structural is wrong (wrong order type/price/product reaching the
+    broker, a genuinely unsellable position, etc.), not routine broker
+    flakiness. exit_engine/exit.py._send_real_sell reads these same two
+    fields to back off how often it will even try again."""
+    position.consecutive_exit_failures = (position.consecutive_exit_failures or 0) + 1
+    position.last_exit_failure_at = datetime.now(timezone.utc)
+    db.commit()
+
+    n = position.consecutive_exit_failures
+    threshold = config.EXIT_RETRY_ALERT_THRESHOLD
+    if threshold > 0 and n >= threshold and n % threshold == 0:
+        cooldown_seconds = min(
+            config.EXIT_RETRY_MAX_COOLDOWN_SECONDS,
+            config.EXIT_RETRY_BASE_COOLDOWN_SECONDS * (2 ** (n - 1)),
+        )
+        await notify_async(
+            f"🚨 *Exit SELL stuck* — {position.symbol}\n"
+            f"{n} consecutive broker rejections with ZERO fill (latest: {status}, "
+            f"order {order.dhan_order_id}).\n"
+            f"Backing off to a {cooldown_seconds:.0f}s cooldown before the next retry. "
+            f"This many identical rejections in a row usually means something structural "
+            f"(wrong order type/price/product reaching the broker, or the position is "
+            f"genuinely unsellable right now) — please check manually rather than assume "
+            f"it will eventually clear on its own."
+        )
+        logger.critical(
+            "reconcile: position %s (%s) has %d consecutive dead-zero-fill SELL attempts "
+            "(latest status=%s, order=%s) — alerted operator, cooldown=%.0fs",
+            position.id, position.symbol, n, status, order.dhan_order_id, cooldown_seconds,
         )
 
 
@@ -307,6 +366,40 @@ async def reconcile_real_orders(db: Session) -> dict:
         if broker_row is None:
             continue  # not visible yet — check again next cycle, never assume
 
+        # 2026-09-15 fix (session40 — see dhan_client.place_order's
+        # docstring for the full DATAMATICS incident this complements).
+        # dhan_client.place_order already checks this once, right after
+        # placement — this is the durable, every-cycle version: for as
+        # long as an order stays PLACED/PARTIAL, re-verify on every
+        # reconcile pass that Dhan's own order_type/price for it still
+        # matches what this service's own record says it sent. Alerted
+        # once per order (dedup via the snapshot cache — a mismatch that
+        # persists across cycles must not re-alert every single pass).
+        broker_order_type = str(
+            _get(broker_row, "orderType", "order_type", default="")
+        ).upper()
+        broker_order_price = _get(broker_row, "price", default=None)
+        if broker_order_type and broker_order_type != (order.order_type or "").upper():
+            _mismatch_key = f"ordertype_mismatch_alerted_order_{order.id}"
+            if not load_snapshot(db, _mismatch_key):
+                save_snapshot(db, _mismatch_key, {"alerted_at": str(datetime.now(timezone.utc))})
+                logger.critical(
+                    "reconcile: BROKER ORDER TYPE MISMATCH — order %s (%s %s, our record "
+                    "says order_type=%s) but Dhan's order book reports orderType=%s "
+                    "(price=%s). This order was placed differently than this service "
+                    "believes — investigate immediately.",
+                    order.dhan_order_id, order.side, order.symbol, order.order_type,
+                    broker_order_type, broker_order_price,
+                )
+                await notify_async(
+                    f"🚨 *Broker order-type mismatch* — {order.symbol} {order.side}\n"
+                    f"order {order.dhan_order_id}: we sent order_type={order.order_type}, "
+                    f"but Dhan's own order book reports orderType={broker_order_type} "
+                    f"(price={broker_order_price}).\n"
+                    f"This means an order is being placed differently than this service "
+                    f"believes — please investigate."
+                )
+
         status = str(_get(broker_row, "orderStatus", "order_status", default="")).upper()
 
         # filledQty is Dhan v2 GET /orders' actual field name (confirmed against
@@ -371,12 +464,24 @@ async def reconcile_real_orders(db: Session) -> dict:
                 dead_position = db.query(models.TradePosition).filter_by(
                     mode="REAL", symbol=order.symbol, status="PENDING_EXIT"
                 ).first()
+                if dead_position is None:
+                    # Partial exits never set PENDING_EXIT — same
+                    # OPEN/PARTIALLY_CLOSED lookup as _book_fill_delta's
+                    # SELL branch above, so a dead zero-fill SELL against
+                    # the remainder of an already-partially-exited
+                    # position still gets its failure streak tracked below.
+                    dead_position = db.query(models.TradePosition).filter(
+                        models.TradePosition.mode == "REAL",
+                        models.TradePosition.symbol == order.symbol,
+                        models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")),
+                    ).first()
                 if dead_position is not None:
                     _restore_orphaned_position(
                         db, dead_position,
                         f"SELL order {order.dhan_order_id} came back {status.lower()} with zero fill",
                     )
                     tally["positions_unstuck"] += 1
+                    await _track_exit_failure_and_maybe_alert(db, dead_position, order, status)
             dead_status = "REJECTED" if status == "REJECTED" else "CANCELLED"
             order.status = dead_status
             note = f" (after {order.filled_qty_so_far} of {order.qty} already filled)" if order.filled_qty_so_far else ""

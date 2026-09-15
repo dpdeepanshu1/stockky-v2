@@ -912,6 +912,9 @@ def get_order_list(db: Session) -> list:
     return []
 
 
+_VALID_ORDER_TYPES = {"MARKET", "LIMIT", "STOP_LOSS", "STOP_LOSS_MARKET"}
+
+
 def place_order(
     db: Session,
     *,
@@ -926,14 +929,84 @@ def place_order(
     validity: str = "DAY",
     tag: Optional[str] = None,
 ) -> dict:
-    """Places a REAL order. is_armed MUST be True — second lock per module docstring."""
+    """Places a REAL order. is_armed MUST be True — second lock per module docstring.
+
+    2026-09-15 fix (session40 — DATAMATICS position 81 exit-SELL rejection
+    storm, 89 consecutive REJECTED zero-fill attempts over ~4.5h): every
+    caller in this codebase (exit.py, entry.py, manual_engine.py) already
+    calls this function with order_type="MARKET", price=0 for a market
+    exit/entry — that part was always correct. What this fix closes is
+    that place_order() used to trust the dhanhq SDK's own place_order()
+    to correctly translate `order_type="MARKET"` + `price=0` into an
+    actual MARKET order at Dhan, with no way for this service to see or
+    verify what request body the SDK actually built and sent. If the SDK
+    (any version, including a future one this service upgrades to) ever
+    mis-maps that order_type string — or a caller's price argument is
+    stale/nonzero despite order_type="MARKET" — the exchange-side symptom
+    is indistinguishable from a normal broker rejection: same
+    "REJECTED, zero fill" shape logged here, silently retried forever by
+    exit_engine with no way to tell "genuinely unfillable" apart from
+    "we're sending the wrong order every single time".
+
+    Three independent hardening layers, defense-in-depth (none of them
+    require trusting the SDK's internal order_type handling):
+      1. `order_type` is validated against Dhan's own documented enum
+         (_VALID_ORDER_TYPES) BEFORE ever reaching the SDK — an
+         unrecognized value now fails loudly here instead of silently
+         reaching Dhan and getting mapped however the SDK's internal
+         (unauditable, closed-source-to-us) dispatch logic decides.
+      2. order_type="MARKET" now FORCES price to exactly 0.0 here,
+         unconditionally — previously this was only a code-comment
+         convention ("MARKET orders correctly send price=0 — never touch
+         that") that every caller happened to honor; a stale/nonzero
+         price argument reaching this function for a MARKET order can no
+         longer leak through as a real limit price.
+      3. The exact outbound payload (every field this function is about
+         to hand the SDK) is logged BEFORE the call, and the broker's own
+         order-type/price for the just-placed order is checked immediately
+         after via get_order_list() and logged at CRITICAL if it doesn't
+         match what was requested — instead of only finding out from a
+         human re-reading Dhan's order book after the fact. This is
+         best-effort and NEVER blocks or fails the placement itself (the
+         order is already live at the broker by the time this check runs)
+         — it only makes a mismatch immediately visible in the logs/alerts
+         instead of requiring someone to notice it independently.
+
+    See execution/reconcile.py's per-cycle orderType verification for the
+    second, durable half of this fix (covers orders reconcile sees later,
+    not just the one just placed), and exit_engine/exit.py's cooldown gate
+    (TradePosition.consecutive_exit_failures) for why a real position can
+    no longer be re-sold every single cycle forever after repeated
+    zero-fill rejections without an escalating backoff and an operator
+    alert.
+    """
     if not is_armed:
         raise DhanNotArmedError("Real trading is not armed — refusing to place order.")
+
+    order_type = (order_type or "").upper()
+    if order_type not in _VALID_ORDER_TYPES:
+        raise ValueError(
+            f"place_order: refusing to send unrecognized order_type={order_type!r} "
+            f"to Dhan — must be one of {sorted(_VALID_ORDER_TYPES)}. This should be "
+            f"unreachable; report as a bug in the caller."
+        )
+
     client = _get_sdk_client(db)
 
     # Defense-in-depth: see TICK_SIZE/round_to_tick module comment above.
-    # MARKET orders correctly send price=0 (no limit) — never touch that.
-    if order_type == "LIMIT" and price:
+    if order_type == "MARKET":
+        # Hard override, not just a convention every caller has to honor —
+        # see the 2026-09-15 fix note above. A MARKET order has no limit
+        # price by definition; any nonzero value the caller passed is
+        # discarded (and logged) rather than trusted.
+        if price:
+            logger.warning(
+                "place_order: order_type=MARKET but caller passed nonzero price=%s "
+                "— forcing price to 0 (MARKET orders never carry a limit price).",
+                price,
+            )
+        price = 0.0
+    elif order_type == "LIMIT" and price:
         tick_safe_price = round_to_tick(price)
         if tick_safe_price != price:
             logger.info(
@@ -956,10 +1029,23 @@ def place_order(
                 f"unreachable; report as a bug in the caller's price math."
             )
 
-    logger.info(
-        "Placing REAL order: %s %s x%s @ %s (%s, %s)",
-        transaction_type, security_id, quantity, price, order_type, product_type,
-    )
+    outbound = {
+        "security_id": security_id,
+        "exchange_segment": exchange_segment,
+        "transaction_type": transaction_type,
+        "quantity": quantity,
+        "order_type": order_type,
+        "product_type": product_type,
+        "price": price,
+        "validity": validity,
+        "tag": tag,
+    }
+    # Full outbound payload, logged BEFORE the SDK call — this is the
+    # exact set of fields this function is asking the SDK to place, so a
+    # later "what did we actually ask Dhan for" question never has to be
+    # reconstructed from behavior/guesswork again.
+    logger.info("place_order: outbound payload -> %s", outbound)
+
     resp = client.place_order(
         security_id=security_id,
         exchange_segment=exchange_segment,
@@ -971,7 +1057,55 @@ def place_order(
         validity=validity,
         tag=tag,
     )
-    return _extract_data(resp) or {}
+    result = _extract_data(resp) or {}
+
+    # Best-effort, non-blocking verification: ask Dhan's own order list for
+    # what it recorded for the order we just placed, and compare its
+    # orderType/price against what we intended. Never raises — the order
+    # is already live at the broker regardless of what this finds, so a
+    # verification failure must never look like a placement failure to the
+    # caller. Logged at CRITICAL (not just warning) because a mismatch
+    # here means this service is placing a materially different order
+    # than it believes it is, on every occurrence, with real money.
+    placed_order_id = str(result.get("orderId") or result.get("order_id") or "")
+    if placed_order_id:
+        try:
+            broker_rows = get_order_list(db)
+            broker_row = next(
+                (r for r in broker_rows
+                 if str(r.get("orderId") or r.get("order_id") or "") == placed_order_id),
+                None,
+            )
+            if broker_row is not None:
+                broker_order_type = str(
+                    broker_row.get("orderType") or broker_row.get("order_type") or ""
+                ).upper()
+                broker_price = broker_row.get("price")
+                if broker_order_type and broker_order_type != order_type:
+                    logger.critical(
+                        "place_order: BROKER ORDER TYPE MISMATCH for order %s (%s %s x%s) — "
+                        "sent order_type=%s but Dhan's own order list reports orderType=%s "
+                        "(broker price=%s). This service is placing a different order than "
+                        "it believes it is — investigate immediately, do not assume this is "
+                        "a one-off.",
+                        placed_order_id, transaction_type, security_id, quantity,
+                        order_type, broker_order_type, broker_price,
+                    )
+                elif order_type == "MARKET" and broker_price not in (None, 0, 0.0):
+                    logger.critical(
+                        "place_order: BROKER PRICE MISMATCH for MARKET order %s (%s %s x%s) — "
+                        "sent price=0 but Dhan's own order list reports price=%s. A MARKET "
+                        "order should never carry a nonzero broker-side price — investigate "
+                        "immediately.",
+                        placed_order_id, transaction_type, security_id, quantity, broker_price,
+                    )
+        except Exception as e:  # noqa: BLE001 — verification must never break a real placement
+            logger.warning(
+                "place_order: post-placement broker verification failed for order %s "
+                "(non-fatal, order is already live): %s", placed_order_id, e,
+            )
+
+    return result
 
 
 def cancel_order(db: Session, *, is_armed: bool, dhan_order_id: str) -> dict:

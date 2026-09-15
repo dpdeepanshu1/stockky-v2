@@ -130,6 +130,7 @@ def init_tables() -> None:
     _ensure_columns(engine)
     if dialect() == "oracle":
         _ensure_oracle_autoincrement(engine, models.Base)
+    _ensure_hot_path_indexes(engine, dialect())
     logger.info("position-stocks-service: scalp_* tables ensured.")
 
 
@@ -236,6 +237,25 @@ def _ensure_columns(engine) -> None:
                 "position-stocks-service: _ensure_columns failed for %s.%s: %s",
                 table, column, e, exc_info=True,
             )
+
+
+# SESSION 33 AUDIT FIX (index/performance): same create_all() limitation as
+# _ensure_columns above — it only ever adds an index to a table it is ALSO
+# creating for the first time, never retrofits one onto a table that already
+# exists. scalp_positions predates this index. GET /positions and
+# GET /trades/history (main.py) both run `order_by(ScalpPosition.
+# opened_at.desc())` on every dashboard poll — /trades/history additionally
+# filters by status when status_filter is given, but the unfiltered
+# order-by-opened_at scan is the one that runs on every plain poll and had
+# zero index support. Uses the same create_index_sql/exec_ddl_safe idiom
+# api-gateway's hotpicks_schema.py already uses: CREATE INDEX IF NOT EXISTS
+# on Postgres, plain CREATE INDEX on Oracle with ORA-00955/ORA-01408
+# swallowed by exec_ddl_safe on a re-run.
+def _ensure_hot_path_indexes(engine, dialect_name: str) -> None:
+    index_name, table, cols = "ix_scalp_positions_opened_at", "scalp_positions", "opened_at"
+    sql = _oc.create_index_sql(dialect_name, index_name, table, cols)
+    _oc.exec_ddl_safe(engine, sql, dialect_name)
+    logger.info("position-stocks-service: ensured index %s on %s", index_name, table)
 
 
 def _ensure_oracle_autoincrement(engine, base) -> None:

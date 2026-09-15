@@ -144,6 +144,7 @@ def init_schema() -> None:
     _ensure_candidate_overnight_column(eng, dialect())
     _ensure_source_tab_columns(eng, dialect())
     _ensure_catalyst_price_source_column(eng, dialect())
+    _ensure_hot_path_indexes(eng, dialect())
 
 
 # 2026-08-27 data fixup: docker-compose.yml/.env.example/.env.oracle.example
@@ -592,6 +593,42 @@ def _ensure_catalyst_price_source_column(engine, dialect_name: str) -> None:
         if "already exists" in m.lower() or "ORA-01430" in m:
             return
         logger.warning("real-trade-db: could not add %s.%s: %s", table_name, col_name, e)
+
+
+# SESSION 33 AUDIT FIX (index/performance): create_all(checkfirst=True) only
+# ever adds an index to a table it is ALSO creating for the first time — it
+# never retrofits an index onto a table that already exists (same limitation
+# documented above for columns; SQLAlchemy diffs table names only). Both of
+# these tables predate the Index(...) declarations now in models.py, so on
+# any already-deployed DB neither index actually exists yet, even though the
+# model file claims them.
+#
+# trade_orders — GET /orders/{mode} (main.py's list_orders) filters by mode
+# and a created_at cutoff, then orders by created_at DESC, on every Orders
+# tab poll. No supporting index -> full table scan, growing slower every day
+# as orders accumulate.
+#
+# trade_candidates — entry_engine.evaluate_mode's `filter_by(mode=mode,
+# consumed=False).order_by(received_at.asc())` is the query auto_pilot's
+# full cycle runs every tick, forever (AUTO_PILOT_INTERVAL_SECONDS, see
+# execution/auto_pilot.py) — almost certainly the single most-executed query
+# in this service. Also had no supporting index.
+#
+# Uses the same create_index_sql/exec_ddl_safe idiom api-gateway's
+# hotpicks_schema.py / surprise_schema.py already use elsewhere in this
+# codebase: CREATE INDEX IF NOT EXISTS on Postgres, plain CREATE INDEX on
+# Oracle (no IF NOT EXISTS before 23c) with ORA-00955/ORA-01408 swallowed by
+# exec_ddl_safe on a re-run. Online on Oracle — no downtime, no table lock
+# for the duration real-trade-service would notice.
+def _ensure_hot_path_indexes(engine, dialect_name: str) -> None:
+    indexes = [
+        ("ix_trade_orders_mode_created", "trade_orders", "mode, created_at"),
+        ("ix_trade_candidates_mode_consumed_recv", "trade_candidates", "mode, consumed, received_at"),
+    ]
+    for index_name, table, cols in indexes:
+        sql = _oc.create_index_sql(dialect_name, index_name, table, cols)
+        _oc.exec_ddl_safe(engine, sql, dialect_name)
+        logger.info("real-trade-db: ensured index %s on %s", index_name, table)
 
 
 def _ensure_oracle_autoincrement(engine, base) -> None:

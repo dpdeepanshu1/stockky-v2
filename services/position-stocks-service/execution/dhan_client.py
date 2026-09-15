@@ -266,7 +266,7 @@ def place_order(
     quantity: int,
     order_type: str,
     price: float,
-    product_type: str = "INTRA",
+    product_type: str = "INTRADAY",
     validity: str = "DAY",
     tag: Optional[str] = None,
 ) -> dict:
@@ -331,7 +331,7 @@ def place_super_order(
     target_price: float,
     stop_loss_price: float,
     trailing_jump: float = 0.0,
-    product_type: str = "INTRA",
+    product_type: str = "INTRADAY",
     tag: Optional[str] = None,
 ) -> dict:
     if not is_armed:

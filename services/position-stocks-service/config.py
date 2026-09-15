@@ -128,7 +128,22 @@ RISK_PER_TRADE_PCT_CONFIRMED = _get_bool("RISK_PER_TRADE_PCT_CONFIRMED", True)
 SCALP_POOL_CAPITAL_SHARE_PCT = _get_float("SCALP_POOL_CAPITAL_SHARE_PCT", 50.0)
 
 # ── Order execution ──────────────────────────────────────────────────────────
-SCALP_PRODUCT_TYPE = os.getenv("SCALP_PRODUCT_TYPE", "INTRA")  # NOT "CNC"
+SCALP_PRODUCT_TYPE = os.getenv("SCALP_PRODUCT_TYPE", "INTRADAY")  # NOT "CNC"
+# BUG FIX (session38): this previously defaulted to "INTRA", which is not
+# a value Dhan's actual REST API accepts for productType — the real enum
+# (per Dhan's official API docs and confirmed by real-trade-service's own
+# working code, which consistently uses "INTRADAY" for every same-day
+# round-trip order) is CNC / INTRADAY / MARGIN / MTF / CO / BO. The dhanhq
+# SDK does not validate or translate this locally — it just uppercases
+# whatever string is passed and forwards it straight to Dhan's server,
+# which then rejects the ENTIRE super-order payload with a generic
+# catch-all error ("Missing required fields, bad values for parameters
+# etc.") that gives no indication which field was actually wrong. Live-
+# confirmed: every single entry attempt for this service failed with
+# exactly that error, on every candidate, every cycle — consistent with
+# `first_live_order_done` never once flipping true. Not overridden by any
+# env var in docker-compose.yml/.env.example, so this default is what was
+# actually running.
 SCALP_EXCHANGE_SEGMENT = os.getenv("SCALP_EXCHANGE_SEGMENT", "NSE_EQ")
 USE_SUPER_ORDER = _get_bool("USE_SUPER_ORDER", True)
 # First-live-trade safety valve (recommended, not enforced): forces qty=1

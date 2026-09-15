@@ -399,9 +399,68 @@ def cancel_order(db: Session, *, is_armed: bool, dhan_order_id: str) -> dict:
 
 
 # ── Super Order (bracket: entry + target + stoploss in one call) ──────────
-# See tracking doc §3.4. price is the ENTRY reference Dhan validates
-# targetPrice/stopLossPrice against — it does NOT force a LIMIT fill when
-# order_type="MARKET"; the fill executes at market. Pass the current live LTP.
+# See tracking doc §3.4.
+#
+# 2026-09-15 fix (session41 — LIVE EVIDENCE: this session's candidate log
+# showed a 100% BUY failure rate — every quality-gate-passing candidate was
+# SKIPPED with "ORDER_FAILED:Dhan API error: Invalid Price for orderType"
+# or "ORDER_FAILED:For BUY: targetPrice must be > price." This is why no
+# scalp positions were ever opening). This module's own prior comment here
+# asserted "price is the ENTRY reference Dhan validates targetPrice/
+# stopLossPrice against — it does NOT force a LIMIT fill when
+# order_type=MARKET; the fill executes at market. Pass the current live
+# LTP." — that assumption was WRONG, confirmed against both the live
+# rejections above AND Dhan's own dhanhq-py SDK issue tracker (dhan-oss/
+# DhanHQ-py#87): "MARKET orders should not have a price ... the Dhan API
+# server correctly rejects such orders if a price is specified", with the
+# API's own accepted example sending "price": None for a MARKET entry leg
+# alongside a real targetPrice.
+#
+# It gets worse than a parameter tweak, though — confirmed by pulling the
+# ACTUAL pinned SDK source (pip download dhanhq; requirements.txt pins
+# `dhanhq>=2.0.2`, and dhanhq==2.0.2 itself has NO Super Order support at
+# all — no `place_super_order` exists in that release — so a live
+# deployment with USE_SUPER_ORDER enabled must be running whatever newer
+# release pip resolved, e.g. 2.2.0, the version actually inspected here).
+# `SuperOrder.place_super_order()` in that SDK does its OWN client-side
+# validation before ever making an HTTP call:
+#     if not all([..., price]): raise ValueError("Missing required
+#         parameters...")          # price=None or 0 -> always raises here
+#     if price <= 0: raise ValueError("Price must be > 0.")
+#     if transaction_type == "BUY":
+#         if targetPrice > 0 and not (targetPrice > price):
+#             raise ValueError("For BUY: targetPrice must be > price.")
+# i.e. the SDK method itself REFUSES to ever send a MARKET entry leg with
+# no price (price=None/0 always raises "Missing required parameters" or
+# "Price must be > 0." before reaching Dhan at all) — so this service's old
+# price=round_to_tick(candidate.current_ltp) was the ONLY way the code
+# could get past the SDK's own gate, but that nonzero price is exactly
+# what Dhan's SERVER then rejects for a real MARKET order ("Invalid Price
+# for orderType"). This is precisely the bug dhan-oss/DhanHQ-py#87
+# describes: "place_super_order() forces incorrect argument validations
+# ... making it unusable for placing market super orders." There is no
+# parameter combination that satisfies both the SDK's client-side check
+# and Dhan's server-side check simultaneously for a MARKET entry.
+#
+# ("For BUY: targetPrice must be > price." specifically is the SDK's OWN
+# ValueError text above, verbatim — it was firing client-side, before any
+# network call, whenever round_to_tick's tick-granularity rounding of a
+# low-priced candidate's target/ref prices happened to collapse
+# targetPrice to <= price; "Invalid Price for orderType" is Dhan's real
+# server response for every other case, where targetPrice legitimately
+# cleared price and the (broken) SDK let the nonzero-price MARKET request
+# through to the actual API.)
+#
+# Fix: for order_type="MARKET", bypass the SDK's broken convenience
+# wrapper entirely and post directly through its own underlying HTTP
+# client (`client.dhan_http.post(...)`, the exact same plumbing
+# place_super_order() itself uses internally — see dhanhq/dhan_http.py),
+# building the identical payload shape but with "price": None, exactly
+# matching the accepted working example in dhan-oss/DhanHQ-py#87. LIMIT
+# entries (not currently used by this service's only caller,
+# orders/entry.py, but kept correct for completeness) are unaffected by
+# this SDK bug — price > 0 is exactly what the SDK's own validation wants
+# there — and still go through place_super_order() normally.
 def place_super_order(
     db: Session,
     *,
@@ -422,24 +481,67 @@ def place_super_order(
         raise DhanNotArmedError("position-stocks-service is not armed — refusing to place super order.")
     client = _get_sdk_client(db)
 
-    # AUDIT FIX (this session): ref_price was only rounded to a valid tick
-    # when order_type=="LIMIT" — but this service's only caller
-    # (orders/entry.py) always places Super Orders with order_type="MARKET",
-    # passing the raw, unrounded live LTP straight from the WS feed's ring
-    # buffer (screening/engine.py's `buf[-1][1]`) as `price`. This
-    # function's own docstring is explicit that Dhan validates
-    # targetPrice/stopLossPrice AGAINST this reference price regardless of
-    # order_type — i.e. Dhan's tick-multiple check on `price` applies here
-    # too, not just for LIMIT orders. A live LTP is normally already tick-
-    # valid (exchanges only trade in tick multiples), but binary-float
-    # artifacts surviving the WS feed's tick parsing (see round_to_tick's
-    # own docstring: "binary float rounding can still fail Dhan's tick-
-    # multiple check on a price that looks perfectly clean") could still
-    # produce something like 1234.3499999998 instead of 1234.35 — which
-    # would fail Dhan's check on the ENTRY itself, unlike target_price/
-    # stop_price which already go through round_to_tick via
-    # orders/adaptive.py::compute(). Rounding unconditionally here closes
-    # that gap without changing behavior for genuinely clean prices.
+    order_type_upper = (order_type or "").upper()
+
+    if order_type_upper == "MARKET":
+        if price:
+            logger.info(
+                "position-stocks: place_super_order: order_type=MARKET — "
+                "dropping reference price=%s (see 2026-09-15 session41 fix "
+                "note above: the SDK's place_super_order() cannot send a "
+                "MARKET entry leg with no price at all, and Dhan's server "
+                "rejects one WITH a price — routing around the SDK's "
+                "broken wrapper via client.dhan_http.post() directly).",
+                price,
+            )
+        dhan_http = getattr(client, "dhan_http", None)
+        if dhan_http is None:
+            # Only reachable on a pre-2.1-style SDK build with no
+            # dhan_http attribute exposed — and per the module note above,
+            # such a build (dhanhq==2.0.2) has no Super Order support at
+            # all anyway, so USE_SUPER_ORDER should never be true against
+            # one. Fail loudly rather than silently falling through to the
+            # SDK's own broken place_super_order() (which would just
+            # reproduce the exact bug this fix exists to close).
+            raise RuntimeError(
+                "place_super_order: MARKET entry requires client.dhan_http "
+                "(direct HTTP access) to work around a known SDK validation "
+                "bug (dhan-oss/DhanHQ-py#87) — this SDK build doesn't "
+                "expose it. Upgrade dhanhq (this service needs >=2.2.0) or "
+                "set USE_SUPER_ORDER=false to use the plain-order fallback."
+            )
+        payload = {
+            "transactionType": transaction_type.upper(),
+            "exchangeSegment": exchange_segment.upper(),
+            "productType": product_type.upper(),
+            "orderType": "MARKET",
+            "securityId": security_id,
+            "quantity": int(quantity),
+            "price": None,
+            "targetPrice": float(target_price),
+            "stopLossPrice": float(stop_loss_price),
+            "trailingJump": float(trailing_jump),
+        }
+        if tag:
+            payload["correlationId"] = tag
+        logger.info(
+            "position-stocks: Placing REAL Super Order (direct HTTP, MARKET "
+            "entry, SDK bypass): %s %s x%s target=%s stop=%s (%s)",
+            transaction_type, security_id, quantity, target_price, stop_loss_price,
+            product_type,
+        )
+        resp = dhan_http.post("/super/orders", payload)
+        return _extract_data(resp) or {}
+
+    # LIMIT (or any other) entry — the SDK's own client-side validation
+    # (price > 0, targetPrice > price for BUY, etc.) is exactly what we
+    # want here, so go through place_super_order() normally, same as
+    # before this fix.
+    #
+    # AUDIT FIX (prior session): ref_price was only rounded to a valid
+    # tick when order_type=="LIMIT" originally, but the caller's price can
+    # still carry binary-float WS-feed artifacts (see round_to_tick's own
+    # docstring) — rounding here closes that gap.
     ref_price = round_to_tick(price) if price else price
 
     logger.info(

@@ -19,6 +19,7 @@ as "leave it PLACED/PENDING_EXIT for next cycle", never as a fill.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -318,6 +319,18 @@ async def reconcile_real_orders(db: Session) -> dict:
     tally = {"checked": 0, "entries_filled": 0, "partial_fills": 0, "exits_confirmed": 0,
              "dead_orders": 0, "errors": 0, "positions_unstuck": 0, "holdings_imported": 0,
              "ghost_positions_closed": 0}
+    # ADDED (this session — item 5 from the follow-up: "REAL_RECONCILE_MIN_
+    # INTERVAL_SECONDS (20s) may need tuning, but I don't have your actual
+    # Dhan API latency — worth checking logs for how long reconcile_real_
+    # orders calls actually take"). No timing was ever logged, so there was
+    # nothing to check. _t0/_log_duration below log every call's wall-clock
+    # duration at INFO, from every return path, so a quick log grep
+    # ("reconcile_real_orders took") tells you directly whether 20s is
+    # enough headroom or needs raising — no more guessing.
+    _t0 = time.perf_counter()
+
+    def _log_duration(label: str) -> None:
+        logger.info("reconcile_real_orders took %.2fs (%s)", time.perf_counter() - _t0, label)
 
     _repair_orphaned_pending_exits(db, tally)
 
@@ -357,6 +370,7 @@ async def reconcile_real_orders(db: Session) -> dict:
         models.TradeOrder.mode == "REAL", models.TradeOrder.status.in_(("PLACED", "PARTIAL"))
     ).all()
     if not pending_orders:
+        _log_duration("no pending orders")
         return tally
 
     try:
@@ -364,6 +378,7 @@ async def reconcile_real_orders(db: Session) -> dict:
     except Exception as e:  # noqa: BLE001 — a reconcile failure must never crash the cycle
         logger.warning("reconcile: could not fetch Dhan order list: %s", e)
         tally["errors"] += 1
+        _log_duration("order-list fetch failed")
         return tally
 
     by_id: dict[str, dict] = {}
@@ -560,4 +575,5 @@ async def reconcile_real_orders(db: Session) -> dict:
         else:
             tally["exits_confirmed"] += 1
 
+    _log_duration("completed")
     return tally

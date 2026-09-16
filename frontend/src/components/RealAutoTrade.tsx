@@ -990,7 +990,10 @@ export default function RealAutoTrade() {
   // isn't, so this never runs up requests in the background.
   useEffect(() => {
     // Pipeline tab is readable when armed even without login session
-    if (activeTab !== "pipeline" || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn && !status?.armed)) return;
+    // Also polls while the Positions tab is open (session48 addition) so
+    // PipelineLiveStatus can be shown there too — see the Positions tab
+    // render block below.
+    if ((activeTab !== "pipeline" && activeTab !== "positions") || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn && !status?.armed)) return;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -1948,6 +1951,15 @@ export default function RealAutoTrade() {
           ═══════════════════════════════════════════════════════════════ */}
           {activeTab === "positions" && (
             <div className="space-y-3">
+              {/* ADDED (this session — item 1 from the follow-up list):
+                  "Positions tab shows no live run-cycle progress" was
+                  flagged as a genuine open item, not a bug in the Pipeline
+                  tab itself (that one already works). Reusing the same
+                  PipelineLiveStatus component the Pipeline tab renders,
+                  fed by the same poll (now also active while this tab is
+                  open — see the effect above), so you don't have to
+                  switch tabs to see what a running cycle is doing. */}
+              <PipelineLiveStatus pipeline={pipeline} mode={mode} />
               <div className="flex items-center justify-between">
                 <SectionHdr>Open positions — {mode} ({positions.length})</SectionHdr>
                 <div className="flex gap-2">

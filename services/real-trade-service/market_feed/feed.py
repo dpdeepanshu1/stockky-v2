@@ -248,21 +248,25 @@ async def _bg_refresh_atr(client: httpx.AsyncClient, symbol: str) -> None:
 
 
 class Tick:
-    __slots__ = ("symbol", "price", "as_of", "atr", "source", "volume")
+    __slots__ = ("symbol", "price", "as_of", "atr", "source", "volume", "day_high", "day_low")
 
     def __init__(self, symbol: str, price: float, as_of: datetime, atr: Optional[float], source: str,
-                 volume: Optional[int] = None):
-        self.symbol = symbol
-        self.price  = price
-        self.as_of  = as_of
-        self.atr    = atr
-        self.source = source
-        # Traded volume for the session, when the upstream source provides it.
-        # entry_engine/entry.py reads this (via getattr fallback) to compute
-        # avg_traded_value for risk_engine's liquidity floor check (#7) — that
-        # check silently no-ops without it, so keep this populated wherever a
-        # quote source actually returns volume.
-        self.volume = volume
+                 volume: Optional[int] = None,
+                 day_high: Optional[float] = None,
+                 day_low: Optional[float] = None):
+        self.symbol   = symbol
+        self.price    = price
+        self.as_of    = as_of
+        self.atr      = atr
+        self.source   = source
+        self.volume   = volume
+        # Intraday day range — populated from /quote when available.
+        # Used by exit_engine to accelerate breakeven/trail when price is
+        # near the day-high (less upside room), and by entry_engine to
+        # penalise entries that are already extended vs the day range.
+        # 2026-09-15 (session41b): added to fix "buy at wrong time" losses.
+        self.day_high = day_high
+        self.day_low  = day_low
 
 
 async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
@@ -349,6 +353,12 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
         # already in cache.
         atr = _cached_atr(symbol)
 
+        # Parse day range — market-data-service /quote returns day_high/day_low
+        # from AngelOne WS or yfinance OHLC.  Used by exit_engine and entry_engine
+        # for range-position-aware decisions (session41b fix).
+        _day_high = q.get("day_high")
+        _day_low  = q.get("day_low")
+
         return Tick(
             symbol=symbol,
             price=float(price),
@@ -362,6 +372,8 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
             atr=atr,
             source=q.get("source") or "market-data-service",
             volume=int(vol) if vol not in (None, "") else None,
+            day_high=float(_day_high) if _day_high else None,
+            day_low=float(_day_low)  if _day_low  else None,
         )
     except Exception as e:
         logger.debug("get_quote(%s) source-2 failed: %s", symbol, e)

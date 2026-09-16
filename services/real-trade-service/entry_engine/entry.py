@@ -168,6 +168,54 @@ def _atr_stop_target_pct(atr_pct: Optional[float]) -> tuple[float, float]:
     return round(stop_pct, 2), round(target_pct, 2)
 
 
+def _range_adjusted_stop_target(
+    stop_pct: float,
+    target_pct: float,
+    tick,                      # market_feed.Tick — may have day_high/day_low
+    entry_price: float,
+) -> tuple[float, float]:
+    """2026-09-15 (session42): apply intraday range-position adjustment to
+    stop/target BEFORE placing the order, so the position starts with the
+    right levels rather than correcting them after entry via the exit engine.
+
+    near_high (range_pos ≥ 0.80): less upside room → tighter target (0.75×),
+        tighter stop (0.80×) to exit faster on reversal.
+    near_low  (range_pos ≤ 0.20): discount entry → wider target (1.10×).
+    neutral: unchanged.
+    R:R floor (config.ENTRY_MIN_REWARD_RISK) re-enforced after adjustment.
+    Returns (stop_pct, target_pct) — both adjusted and clamped."""
+    dh = getattr(tick, "day_high", None)
+    dl = getattr(tick, "day_low", None)
+    if not dh or not dl or (dh - dl) <= 1e-6 or entry_price <= 0:
+        return stop_pct, target_pct
+
+    rpos = max(0.0, min(1.0, (entry_price - dl) / (dh - dl)))
+
+    if rpos >= 0.80:
+        target_pct = max(MIN_STOP_PCT * config.ENTRY_MIN_REWARD_RISK,
+                         min(target_pct * 0.75, MAX_STOP_PCT * config.ENTRY_MIN_REWARD_RISK))
+        stop_pct   = max(MIN_STOP_PCT, min(stop_pct * 0.80, MAX_STOP_PCT))
+        logger.debug(
+            "entry range-adjust: near-high (pos=%.2f) → stop=%.2f%% target=%.2f%%",
+            rpos, stop_pct, target_pct,
+        )
+    elif rpos <= 0.20:
+        target_pct = max(MIN_STOP_PCT * config.ENTRY_MIN_REWARD_RISK,
+                         min(target_pct * 1.10, MAX_STOP_PCT * config.ENTRY_MIN_REWARD_RISK))
+        logger.debug(
+            "entry range-adjust: near-low (pos=%.2f) → target=%.2f%%",
+            rpos, target_pct,
+        )
+
+    # Re-enforce R:R floor after adjustment
+    min_rr = config.ENTRY_MIN_REWARD_RISK
+    if stop_pct > 0 and (target_pct / stop_pct) < min_rr:
+        target_pct = round(stop_pct * min_rr, 2)
+        target_pct = min(target_pct, MAX_STOP_PCT * min_rr)
+
+    return round(stop_pct, 2), round(target_pct, 2)
+
+
 def _reward_risk_ratio(entry: float, stop: float, target: float) -> float:
     risk   = entry - stop
     reward = target - entry
@@ -499,6 +547,15 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # rounding — they're internal trigger levels compared against a
         # continuous LTP, never sent to the broker as an order price.
         entry_price  = round_to_tick(tick.price * (1 + config.ENTRY_ZONE_UPPER_PCT / 100.0 / 2))
+        # 2026-09-15 (session42): apply range-position adjustment at entry time
+        # so the position starts with correctly calibrated levels. The exit
+        # engine also adjusts breakeven/trail in real-time, but setting the
+        # right initial stop/target here means the order placed with Dhan
+        # already has the correct legs from the start.
+        # Must come AFTER entry_price is computed (range adjustment uses it).
+        stop_pct, target_pct = _range_adjusted_stop_target(
+            stop_pct, target_pct, tick, entry_price
+        )
         # 2026-09-01 fix (R:R-floor false-reject bug): stop_price/target_price
         # used to be computed off tick.price (raw current LTP) while
         # entry_price is tick.price PLUS the ENTRY_ZONE_UPPER_PCT/2 premium
@@ -997,14 +1054,39 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                         "waited": waited, "rejected": rejected,
                         "auto_disarmed": "invalid_ip", "entry_details": entry_details,
                     }
-                decision.reasoning = f"Risk-approved but Dhan placement failed: {ex}"
-                entered       -= 1
-                waited        += 1
-                reserved_cash -= decision.proposed_qty * entry_price  # release reserved capital
-                db.commit()
-                await notify_async(
-                    f"⚠️ *Auto BUY rejected by Dhan* — {cand.symbol}\n{str(ex)[:300]}"
-                )
+                elif dhan_client.is_circuit_limit_error(str(ex)):
+                    # 2026-09-15 fix (session41b): BUY rejected because the
+                    # stock is at or beyond its upper circuit price band.
+                    # Retrying at the same price will always fail.  Skip this
+                    # candidate for the rest of today — it has no intraday
+                    # exit room even if the BUY did somehow fill.
+                    decision.reasoning = (
+                        f"Risk-approved but Dhan rejected — stock at circuit limit "
+                        f"(price outside NSE band). Skipping for today: {ex}"
+                    )
+                    entered       -= 1
+                    waited        += 1
+                    reserved_cash -= decision.proposed_qty * entry_price
+                    db.commit()
+                    logger.warning(
+                        "real-trade entry: %s BUY rejected — circuit limit. "
+                        "Skipping this candidate (no intraday upside/exit room). Error: %s",
+                        cand.symbol, ex,
+                    )
+                    await notify_async(
+                        f"⚠️ *BUY skipped (circuit limit)* — {cand.symbol}\n"
+                        f"Stock is at/beyond its NSE price band — no intraday exit room.\n"
+                        f"{str(ex)[:200]}"
+                    )
+                else:
+                    decision.reasoning = f"Risk-approved but Dhan placement failed: {ex}"
+                    entered       -= 1
+                    waited        += 1
+                    reserved_cash -= decision.proposed_qty * entry_price  # release reserved capital
+                    db.commit()
+                    await notify_async(
+                        f"⚠️ *Auto BUY rejected by Dhan* — {cand.symbol}\n{str(ex)[:300]}"
+                    )
 
         db.add(decision)
         entry_details.append({

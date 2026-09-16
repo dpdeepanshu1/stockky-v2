@@ -17,9 +17,11 @@ fail an order path. Every function swallows its own exceptions.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
-from typing import Optional
+import time
+from collections import OrderedDict
 
 import httpx
 
@@ -35,6 +37,26 @@ _NOTIFICATION_SERVICE_URL = os.getenv(
     "http://notification-scheduler-service:8000/notification",
 ).rstrip("/")
 
+# ── Message deduplication (session42 audit) ───────────────────────────────────
+# Prevents alert storms: identical messages within _DEDUP_WINDOW_S are dropped.
+_DEDUP_WINDOW_S   = 300
+_DEDUP_CACHE_SIZE = 64
+_dedup_cache: OrderedDict[str, float] = OrderedDict()
+
+
+def _should_send(text: str) -> bool:
+    h = hashlib.md5(text.encode("utf-8", errors="replace")).hexdigest()  # noqa: S324
+    now = time.monotonic()
+    last = _dedup_cache.get(h)
+    if last is not None and (now - last) < _DEDUP_WINDOW_S:
+        return False
+    if h in _dedup_cache:
+        _dedup_cache.move_to_end(h)
+    _dedup_cache[h] = now
+    while len(_dedup_cache) > _DEDUP_CACHE_SIZE:
+        _dedup_cache.popitem(last=False)
+    return True
+
 
 def is_configured() -> bool:
     """Always True when notification-scheduler-service is reachable
@@ -45,7 +67,11 @@ def is_configured() -> bool:
 async def notify_async(text: str) -> bool:
     """Fire-and-forget notification. Tries notification-scheduler-service
     first (uses Alert panel Telegram config), falls back to direct Telegram
-    env-var call. Returns False (never raises) on failure."""
+    env-var call. Deduplicates identical messages within 5 minutes.
+    Returns False (never raises) on failure."""
+    if not _should_send(text):
+        logger.debug("notifier: duplicate message suppressed within dedup window")
+        return True
     # Primary: route through notification service
     try:
         async with httpx.AsyncClient(timeout=12.0) as client:
@@ -68,7 +94,11 @@ async def notify_async(text: str) -> bool:
 
 def notify_sync(text: str) -> bool:
     """Synchronous variant for call sites that aren't in an async function
-    (e.g. exit_engine). Same routing logic as notify_async."""
+    (e.g. exit_engine). Same routing logic as notify_async.
+    Deduplicates identical messages within 5 minutes."""
+    if not _should_send(text):
+        logger.debug("notifier: duplicate message suppressed within dedup window")
+        return True
     # Primary: notification service
     try:
         resp = httpx.post(

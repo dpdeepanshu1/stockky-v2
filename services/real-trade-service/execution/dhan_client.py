@@ -561,6 +561,27 @@ def is_security_intraday_restricted_error(message: str) -> bool:
     return any(marker in m for marker in _SECURITY_INTRADAY_RESTRICTED_MARKERS)
 
 
+# 2026-09-15 fix (session41b): circuit-limit (NSE price-band) rejection.
+# "Rate Not Within Ckt Limit X To Y" — the order price is outside the
+# exchange-enforced circuit-breaker band for this symbol.  This is a
+# PERMANENT rejection for the current session: no retry at the same price
+# can succeed.  On BUY side: skip entry, the stock has no intraday upside.
+# On SELL side: nothing to do except wait; log once, do not retry.
+_CIRCUIT_LIMIT_MARKERS = (
+    "rate not within ckt limit", "not within circuit limit",
+    "ckt limit", "circuit limit", "within ckt",
+)
+
+
+def is_circuit_limit_error(message: str) -> bool:
+    """True when Dhan rejects because the order price fell outside the
+    NSE circuit-breaker price band for this symbol.
+    Example: 'RMS:...:Rate Not Within Ckt Limit 395.25 To 592.85'
+    Permanent for the session — callers must NOT retry at the same price."""
+    m = (message or "").lower()
+    return any(marker in m for marker in _CIRCUIT_LIMIT_MARKERS)
+
+
 # 2026-09-09 fix — "RMS:<id>:You are trying to sell more than the quantity
 # you currently hold." — fired when Stockky's qty_open is out of sync with
 # what Dhan's CDSL demat actually shows. Root cause: a partial exit was

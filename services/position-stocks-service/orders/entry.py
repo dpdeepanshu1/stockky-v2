@@ -128,8 +128,11 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", f"MAX_POSITIONS:{open_count}", quality=quality)
         return None
 
-    # Compute adaptive levels
-    levels: AdaptiveLevels = compute_levels(candidate.pct_change, candidate.current_ltp)
+    # Compute adaptive levels — pass symbol so range-aware adjustment can
+    # read today's intraday high/low from the live tick buffer (session41b).
+    levels: AdaptiveLevels = compute_levels(
+        candidate.pct_change, candidate.current_ltp, symbol=candidate.symbol
+    )
 
     # Reserve capital (also checks kill switch again in the ledger)
     position_value = ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct)
@@ -273,6 +276,33 @@ def attempt_entry(
             )
             ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
             _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INSUFFICIENT_FUNDS:{error_msg}", quality=quality)
+        elif dhan_client.is_circuit_limit_error(error_msg):
+            # 2026-09-15 fix (session41b): "Rate Not Within Ckt Limit X To Y"
+            # — the stock has already hit its upper circuit; our BUY price
+            # was outside the allowed band.  Retrying at the same price can
+            # NEVER succeed this session.  Record it as intraday-restricted
+            # (same mechanism as T2T/ASM stocks) so it's excluded from all
+            # future cycles today — a stock at upper circuit has no intraday
+            # exit room even if the BUY did fill.
+            logger.error(
+                "position-stocks entry: BUY rejected — CIRCUIT_LIMIT (stock at upper "
+                "circuit, no intraday exit room). Recording restriction for today. "
+                "Error: %s", error_msg,
+            )
+            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            try:
+                from screening import intraday_eligibility
+                intraday_eligibility.record_restriction(db, candidate.symbol)
+                logger.info(
+                    "position-stocks entry: %s added to intraday-restricted set (circuit limit)",
+                    candidate.symbol,
+                )
+            except Exception as rec_e:
+                logger.warning(
+                    "position-stocks entry: failed to record circuit-limit restriction for %s: %s",
+                    candidate.symbol, rec_e,
+                )
+            _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_CIRCUIT_LIMIT:{error_msg}", quality=quality)
         else:
             logger.error("position-stocks entry: order placement failed for %s: %s", candidate.symbol, e)
             ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)

@@ -76,12 +76,16 @@ logger = logging.getLogger("real-trade-exit")
 PARTIAL_EXIT_FRACTION = float(os.getenv("EXIT_PARTIAL_FRACTION", "0.60"))
 
 # Age → ATR multiplier mapping for trailing stop.
-# Younger positions need more room; older ones should be protecting profit.
-# Format: list of (max_days_inclusive, atr_multiplier).
+# 2026-09-15 calibration (session42): tightened across all phases.
+# Previous: (3→2.0, 7→1.5, 99→1.0) was the intraday-scalp schedule
+# accidentally applied to position stocks held for days/weeks.
+# A stock at day 1 genuinely needs room (volatility is highest on entry);
+# by day 4+ the position should be protecting profit aggressively.
+# Shorter max_days ensure the tightest trail kicks in earlier.
 TRAIL_ATR_SCHEDULE = [
-    (3,  2.0),   # day 0–3:  2×ATR — let the trade breathe through noise
-    (7,  1.5),   # day 4–7:  1.5×ATR — standard, same as original default
-    (99, 1.0),   # day 8+:   1×ATR — tight, protect accumulated gains
+    (2,  1.8),   # day 0–2:  1.8×ATR — let fresh trade breathe a little
+    (5,  1.3),   # day 3–5:  1.3×ATR — protect gains, normal hold period
+    (99, 0.9),   # day 6+:   0.9×ATR — tight, accumulate profit protection
 ]
 
 # Breakeven stop: move stop to entry once unrealized gain >= this many ATRs.
@@ -825,6 +829,44 @@ def _send_real_sell(
                     "Security-intraday-restricted block persists for %s (%s) — "
                     "alert suppressed, still within cooldown.", position.symbol, reason,
                 )
+        elif dhan_client.is_circuit_limit_error(str(e)):
+            # 2026-09-15 fix (session41b): SELL rejected because the stock is
+            # at its LOWER circuit — our SELL price is outside the allowed
+            # band.  This is permanent for the session.  Key differences vs
+            # other permanent rejections:
+            #   - DO NOT add to intraday_restricted (that's for T2T/ASM —
+            #     stocks that are structurally banned from intraday.  A
+            #     circuit-hit is temporary and clears next session).
+            #   - DO fire exactly ONE alert, then suppress for the rest of
+            #     the session (same cooldown idiom as CDSL).
+            #   - DO NOT count toward the generic reject-streak escalation
+            #     (the streak counter is for "we don't know why it's failing";
+            #     circuit limit is fully understood and unrecoverable today).
+            snap_key  = f"circuit_limit_sell_alert_{position.id}"
+            last_snap = load_snapshot(db, snap_key) or {}
+            last_at_raw = last_snap.get("at")
+            due = True
+            if last_at_raw:
+                try:
+                    last_at    = datetime.fromisoformat(last_at_raw)
+                    elapsed_m  = (datetime.now(timezone.utc) - last_at).total_seconds() / 60.0
+                    due        = elapsed_m >= CDSL_ALERT_COOLDOWN_MIN
+                except Exception:
+                    due = True
+            if due:
+                notify_sync(
+                    f"⛔ *SELL blocked — LOWER CIRCUIT* — {position.symbol} ×{qty} ({reason})\n"
+                    f"Stock is at its NSE lower circuit price band — SELL cannot fill today.\n"
+                    f"Position remains open; will retry at next session open (CNC sell).\n"
+                    f"Error: {str(e)[:200]}\n"
+                    f"(Further alerts suppressed for {CDSL_ALERT_COOLDOWN_MIN} min.)"
+                )
+                save_snapshot(db, snap_key, {"at": datetime.now(timezone.utc).isoformat()})
+            else:
+                logger.info(
+                    "Circuit-limit SELL block persists for %s (%s) — "
+                    "alert suppressed, still within cooldown.", position.symbol, reason,
+                )
         else:
             # BUG FIX (2026-09-07): unlike the invalid-IP and CDSL branches
             # above, this generic branch had no cooldown and no escalation —
@@ -1076,7 +1118,14 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
         # ── 3. Time stop (with early warning at EARLY_WARN_DAYS) ─────────────
         # In a choppy market, a non-performing position after MAX_HOLD_DAYS
         # is tying up capital that could be in outperforming midcaps/PSU banks.
-        if held_days >= _max_hold and ltp <= position.avg_entry_price * 1.01:
+        # Condition: held long enough AND price has not reached current_target
+        # (if target is None after partial exit, fire if below 1.01× entry).
+        # session42 audit: previous condition `ltp <= avg_entry_price * 1.01`
+        # let positions 1-5% above entry ride forever — a slow drifter that
+        # never hits its target still ties up capital. Use current_target as
+        # the benchmark: if we're below target after max_hold days, exit.
+        _time_stop_target = position.current_target if position.current_target else position.avg_entry_price * 1.005
+        if held_days >= _max_hold and ltp < _time_stop_target:
             reasoning = (
                 f"Time-stop: held {held_days} days with no meaningful favorable move "
                 f"(LTP ₹{ltp:.2f} vs entry ₹{position.avg_entry_price:.2f}). "
@@ -1123,9 +1172,33 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
         # Creates a free-ride floor: once the trade is meaningfully in profit
         # (defined as 1×ATR gain), we protect that by moving stop to entry.
         # Even if price reverses from here, we exit at breakeven, not a loss.
+        #
+        # 2026-09-15 (session41b): range-position breakeven acceleration.
+        # If the stock is near its DAY HIGH (range_pos ≥ 0.80), there is
+        # very little remaining upside room.  In that case trigger breakeven
+        # at 60% of the normal ATR threshold so we lock in profit sooner
+        # instead of watching it reverse back to entry (VGL/ZENSARTECH pattern).
         if tick.atr and ltp > position.avg_entry_price:
             gain_per_share = ltp - position.avg_entry_price
-            if gain_per_share >= _be_trigger * tick.atr:
+
+            # Compute range_position from Tick.day_high/day_low (populated
+            # from /quote since session41b).  Fall back gracefully if absent.
+            _be_mult = 1.0
+            _range_note = ""
+            _dh = getattr(tick, "day_high", None)
+            _dl = getattr(tick, "day_low", None)
+            if _dh and _dl and (_dh - _dl) > 1e-6:
+                _rpos = max(0.0, min(1.0, (ltp - _dl) / (_dh - _dl)))
+                if _rpos >= 0.80:
+                    # Near day-high — trigger breakeven at 60% of normal threshold
+                    _be_mult   = 0.60
+                    _range_note = f" [range-pos={_rpos:.2f}≥0.80 — near-high: BE trigger accelerated to 60%]"
+                elif _rpos >= 0.65:
+                    # Moderately extended — trigger at 80%
+                    _be_mult   = 0.80
+                    _range_note = f" [range-pos={_rpos:.2f}≥0.65 — extended: BE trigger at 80%]"
+
+            if gain_per_share >= (_be_trigger * _be_mult) * tick.atr:
                 be_level = position.avg_entry_price
                 if position.current_stop is None or position.current_stop < be_level:
                     old_stop = position.current_stop
@@ -1135,16 +1208,17 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                         detail=(
                             f"Stop raised to breakeven ₹{be_level:.2f} "
                             f"(was ₹{old_stop}) — gain ₹{gain_per_share:.2f} "
-                            f"≥ {_be_trigger}×ATR ₹{tick.atr:.2f}. "
+                            f"≥ {_be_trigger * _be_mult:.2f}×ATR ₹{tick.atr:.2f}."
                             f"Trade is now a free ride. [horizon={_horizon or 'manual'}]"
+                            f"{_range_note}"
                         ),
                     ))
                     db.commit()
                     _write_exit_decision(
                         db, position, "TRAIL_STOP",
                         f"Breakeven stop set at ₹{be_level:.2f} — "
-                        f"gain ₹{gain_per_share:.2f} ≥ {_be_trigger}×ATR. "
-                        f"Trade is now risk-free. [horizon={_horizon or 'manual'}]",
+                        f"gain ₹{gain_per_share:.2f} ≥ {_be_trigger * _be_mult:.2f}×ATR. "
+                        f"Trade is now risk-free. [horizon={_horizon or 'manual'}]{_range_note}",
                         ltp,
                     )
                     trailed += 1
@@ -1154,8 +1228,27 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
         # Only trail when price is above entry (never trail a losing position —
         # that would loosen the stop, which is wrong).
         # ATR multiplier tightens as trade ages to protect accumulated profit.
+        #
+        # 2026-09-15 (session41b): range-position trail tightening.
+        # Near the day-high the stop trails tighter (0.7× multiplier) so a
+        # reversal from the top is caught quickly rather than giving back all
+        # the gain (VGL/ZENSARTECH pattern).
         if tick.atr and ltp > position.avg_entry_price:
             trail_mult   = _trail_atr_mult(held_days, schedule=_trail_schedule)
+
+            # Apply range-position adjustment to trail_mult if day range available
+            _dh2 = getattr(tick, "day_high", None)
+            _dl2 = getattr(tick, "day_low", None)
+            _trail_range_note = ""
+            if _dh2 and _dl2 and (_dh2 - _dl2) > 1e-6:
+                _rpos2 = max(0.0, min(1.0, (ltp - _dl2) / (_dh2 - _dl2)))
+                if _rpos2 >= 0.80:
+                    trail_mult = round(trail_mult * 0.70, 3)   # tightest trail near peak
+                    _trail_range_note = f" [range-pos={_rpos2:.2f}≥0.80 — near-high: trail×0.70]"
+                elif _rpos2 >= 0.65:
+                    trail_mult = round(trail_mult * 0.85, 3)
+                    _trail_range_note = f" [range-pos={_rpos2:.2f}≥0.65 — extended: trail×0.85]"
+
             raw_atr_pct  = tick.atr / ltp * 100.0
             # §6 — clamp: if today's ATR looks like a corporate-action jump, skip
             # the trail update entirely this cycle rather than using a distorted ATR.
@@ -1181,14 +1274,14 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                     detail=(
                         f"₹{old_stop} → ₹{trail_candidate} "
                         f"(LTP ₹{ltp}, day {held_days}, {trail_mult}×ATR "
-                        f"= {atr_pct * trail_mult:.2f}%)"
+                        f"= {atr_pct * trail_mult:.2f}%){_trail_range_note}"
                     ),
                 ))
                 db.commit()
                 _write_exit_decision(
                     db, position, "TRAIL_STOP",
                     f"Stop trailed to ₹{trail_candidate:.2f} "
-                    f"({trail_mult}×ATR, day {held_days} held).",
+                    f"({trail_mult}×ATR, day {held_days} held).{_trail_range_note}",
                     ltp,
                 )
                 trailed += 1

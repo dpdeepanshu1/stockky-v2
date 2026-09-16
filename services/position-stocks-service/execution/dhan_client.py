@@ -698,6 +698,20 @@ _INSUFFICIENT_FUNDS_MARKERS = (
     "insufficient funds", "insufficient fund", "add rs.", "add funds",
 )
 
+# 2026-09-15 fix (session41b): eMudhra and similar stocks hit NSE circuit-
+# limit price bands — "Rate Not Within Ckt Limit X To Y" from Dhan's RMS.
+# A circuit-limit rejection means the LIMIT price we sent fell outside the
+# exchange-enforced price band for that symbol. For a BUY this happens when
+# the stock has already hit its upper circuit and our order price is above
+# the allowed upper band.  Retrying at the same price can NEVER succeed (the
+# band only widens at the start of the next session), so we must NOT hammer
+# Dhan with repeated identical orders.  The screener should also avoid
+# picking circuit-hit stocks because there is no room to exit intraday.
+_CIRCUIT_LIMIT_MARKERS = (
+    "rate not within ckt limit", "not within circuit limit",
+    "ckt limit", "circuit limit", "within ckt",
+)
+
 
 def is_intraday_cutoff_error(message: str) -> bool:
     """True when Dhan rejects because the exchange intraday window has
@@ -725,3 +739,18 @@ def is_insufficient_funds_error(message: str) -> bool:
     account's free margin is insufficient for the gross exposure."""
     m = (message or "").lower()
     return any(marker in m for marker in _INSUFFICIENT_FUNDS_MARKERS)
+
+
+def is_circuit_limit_error(message: str) -> bool:
+    """True when Dhan rejects because the order price fell outside the
+    exchange-enforced circuit-breaker band for this symbol.
+    Example: 'RMS:221260915797007:Rate Not Within Ckt Limit 395.25 To 592.85'
+    This is a PERMANENT rejection for the current session — retrying the
+    same price can never succeed.  Callers should:
+      - BUY side: skip the entry; record the symbol so it is avoided for
+        the rest of today (it's already at/near circuit; no intraday upside).
+      - SELL side: there is nothing to do except wait — if the stock has
+        hit its LOWER circuit, the stock may resume later in the session.
+        Log once and do NOT hammer Dhan with retries."""
+    m = (message or "").lower()
+    return any(marker in m for marker in _CIRCUIT_LIMIT_MARKERS)

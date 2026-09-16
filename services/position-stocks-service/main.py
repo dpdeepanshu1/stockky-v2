@@ -670,7 +670,18 @@ def status(db: Session = Depends(get_db)):
     # OPEN after the EOD sweep has already run for today.
     eod_stragglers = 0
     if gate.eod_squareoff_fired_date == ist_today_str() and ist_time_at_or_after(_EOD_SQUAREOFF_TIME):
-        eod_stragglers = db.query(ScalpPosition).filter_by(status="OPEN").count()
+        # BUG FIX (audit follow-up to session41b/42): this only counted
+        # status="OPEN", missing EXIT_LEGS_REJECTED positions — exactly the
+        # stuck-at-EOD case (circuit-limit / surveillance rejection on both
+        # exit legs) that session41b introduced this status for. A position
+        # stuck as EXIT_LEGS_REJECTED after the EOD sweep already ran is a
+        # real, open, real-money position just like an OPEN straggler — it
+        # was silently dropped from this dashboard-facing count.
+        eod_stragglers = (
+            db.query(ScalpPosition)
+            .filter(ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED")))
+            .count()
+        )
     return {
         "armed": gate.is_armed,
         # AUDIT FIX (this session): every DateTime field below was returned

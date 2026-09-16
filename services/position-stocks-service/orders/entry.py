@@ -57,7 +57,17 @@ def _get_gate_state(db: Session) -> ScalpGateState:
 
 
 def _count_open_positions(db: Session) -> int:
-    return db.query(ScalpPosition).filter_by(status="OPEN").count()
+    # BUG FIX (audit follow-up to session41b/42): only counted status="OPEN",
+    # so an EXIT_LEGS_REJECTED position (still holding real capital and real
+    # exposure — its exit legs were rejected, not its entry) was invisible to
+    # the MAX_CONCURRENT_SCALP_POSITIONS gate below. That let the service
+    # open MORE concurrent positions than the configured cap whenever a
+    # stuck position existed, since it didn't count against the limit.
+    return (
+        db.query(ScalpPosition)
+        .filter(ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED")))
+        .count()
+    )
 
 
 def _log_candidate(

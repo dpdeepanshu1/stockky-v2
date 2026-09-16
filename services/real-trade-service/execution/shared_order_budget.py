@@ -21,15 +21,14 @@ default — a real-money order-rate guard shouldn't depend on that.
 FAIL-OPEN, ALWAYS: this is a soft rate governor, not a financial ledger. Any
 DB error is logged and treated as "allow the order" — a broken rate-governor
 must never itself block a real entry or, especially, a real exit. Wired into:
+  - entry_engine/entry.py's automatic REAL BUY path (gated, checked right
+    before the Dhan call)
   - manual_engine.py's manual REAL BUY path (gated, checked right before the
     Dhan call)
   - exit_engine.py's _send_real_sell (unconditional record after a
     successful SELL — covers both AUTO and manual sells, since that's the
     one function both paths already share; matches this codebase's existing
     "exits always allowed" convention)
-The AUTOMATIC entry path (entry_engine/entry.py) is intentionally NOT gated
-by this — only the manual BUY ticket is, matching the original design in
-position-stocks-service's tracking doc, which never mentioned entry_engine.
 """
 from __future__ import annotations
 

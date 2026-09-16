@@ -115,7 +115,18 @@ def sync_from_broker(db: Session) -> float:
     # re-checking /ledger and manually triggering /ledger/reset-daily if
     # the numbers look wrong after all positions close.
     from models import ScalpPosition as _SP  # local to avoid circular import
-    open_count = db.query(_SP).filter_by(status="OPEN").count()
+    # BUG FIX (audit follow-up to session41b/42): only counted status="OPEN".
+    # An EXIT_LEGS_REJECTED position still has capital_risked reserved
+    # (release_capital() is never called for it — see reconcile.py, it only
+    # flips status/error_message) exactly like an OPEN position does. Missing
+    # it here meant open_count could read 0 while capital was still actually
+    # committed to a stuck position, hard-resetting available_capital to the
+    # full allocation and effectively double-spending that reserved capital.
+    open_count = (
+        db.query(_SP)
+        .filter(_SP.status.in_(("OPEN", "EXIT_LEGS_REJECTED")))
+        .count()
+    )
     if open_count == 0:
         # No open positions: safe to hard-reset available_capital to match
         # the freshly synced allocation (keeps the two in sync after a
@@ -315,6 +326,43 @@ def reconcile_position_cost(db: Session, *, delta: float) -> None:
             "by ₹%.2f for a real-fill-cost correction, now ₹%.2f",
             -delta, row.available_capital,
         )
+
+
+def reclaim_premature_release(db: Session, *, capital_risked: float) -> None:
+    """BUG FIX (audit follow-up): orders/eod_squareoff.py releases a
+    position's capital_risked back into available_capital immediately
+    after successfully PLACING the flat MARKET SELL — before Dhan has
+    confirmed any fill — so the position shows CLOSED on the dashboard
+    right away (see its own comment: "exit price is unknown here... We
+    record entry_price as a placeholder"). That is correct for the
+    common case (the SELL later fills, per the placeholder-then-
+    reconcile design), but orders/reconcile.py's _reconcile_eod_pending
+    can also discover the SELL came back REJECTED/CANCELLED with ZERO
+    fill — meaning the position is still genuinely open at the broker,
+    with real capital still at risk there, even though this ledger
+    already gave that capital back as "available" the moment the order
+    was placed. Left uncorrected, available_capital overstates what's
+    actually free by exactly capital_risked, letting a new position be
+    opened against capital that's still committed to the zombie one.
+
+    Called only from that DEAD_EXIT_STATUSES path, once per position
+    (reconcile.py marks the position ERROR right after, so this cannot
+    re-fire for the same row). Mirrors reconcile_position_cost's delta
+    mechanics but is named for what it actually does here: undoing an
+    earlier release_capital() call that turned out to be premature, not
+    correcting a cost estimate. Does NOT touch realized_pnl (no trade
+    actually happened) or the daily-loss kill switch (no loss booked)."""
+    if capital_risked <= 0:
+        return
+    row = _get_or_create(db)
+    row.available_capital -= capital_risked
+    db.commit()
+    logger.warning(
+        "ledger.reclaim_premature_release: EOD flat-SELL never filled — "
+        "reclaiming ₹%.2f that was released early, available=₹%.2f "
+        "(position is still open at the broker; needs manual review)",
+        capital_risked, row.available_capital,
+    )
 
 
 def reset_daily(db: Session) -> None:

@@ -345,6 +345,15 @@ def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int
             pos.status = "ERROR"
             pos.error_message = f"EOD_SQUAREOFF_SELL_DEAD: order {pos.dhan_exit_order_id} came back {status} with zero fill — position may still be open at the broker, needs manual review."
             db.commit()
+            # BUG FIX (audit follow-up): eod_squareoff.py released this
+            # position's capital_risked back to available_capital the
+            # moment it PLACED the flat SELL, before knowing whether it
+            # would fill. It didn't — the position is still genuinely
+            # open at the broker with real capital tied up in it, but
+            # our ledger already counted that capital as free. Reclaim
+            # it so available_capital reflects reality again; see
+            # ledger.reclaim_premature_release's docstring.
+            ledger.reclaim_premature_release(db, capital_risked=pos.capital_risked)
             resolved += 1
             msg = (
                 f"reconcile: {pos.symbol} (id={pos.id}) EOD flat-SELL order "

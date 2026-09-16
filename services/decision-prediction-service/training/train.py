@@ -1098,8 +1098,8 @@ def run_training_pipeline(
         try:
             if os.path.exists(PROGRESS_FILE):
                 os.remove(PROGRESS_FILE)
-        except:
-            pass
+        except Exception as e:
+            logger.debug("progress file cleanup: %s", e)
 
 # ============================================================
 # Entry point for FastAPI background task

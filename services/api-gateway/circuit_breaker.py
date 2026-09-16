@@ -15,6 +15,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger("circuit-breaker")
@@ -25,6 +26,16 @@ DEFAULT_HALF_OPEN_SUCCESS = int(os.getenv("CB_HALF_OPEN_SUCCESS", "2"))
 
 _redis = None
 _redis_init = False
+
+# allow()/record_success()/record_failure() are called synchronously from
+# async route handlers (_cb_get/_cb_post in main.py) on the event loop
+# thread. When CB_REDIS_SYNC=1, _load_remote/_persist used to make blocking
+# upstash_redis HTTP calls (including the one-time client init + ping)
+# inline on that thread — the same "blocking call stalls the event loop"
+# bug class already fixed in ws_client.py / angelone_session.py. All actual
+# Redis I/O now runs on this small background pool instead; the lock only
+# ever guards fast, in-memory local-state updates.
+_redis_io_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cb-redis-io")
 
 
 def _get_redis():
@@ -77,46 +88,56 @@ class CircuitBreaker:
         self._state = "closed"
         self._opened_at = 0.0
         self._last_error: Optional[str] = None
-        self._load_remote()
+        self._schedule_remote_load()
 
     def _rk(self, suffix: str) -> str:
         return f"cb:{self.name}:{suffix}"
 
-    def _load_remote(self) -> None:
+    def _schedule_remote_load(self) -> None:
+        """Throttle-check only (cheap, in-memory) — the actual Redis GETs
+        (and the one-time client init/ping inside _get_redis()) happen on
+        _redis_io_pool so this never blocks the caller."""
         if os.getenv("CB_REDIS_SYNC", "0").lower() not in ("1", "true", "yes"):
-            return
-        r = _get_redis()
-        if not r:
             return
         now = time.time()
         min_iv = float(os.getenv("CB_REDIS_MIN_INTERVAL", "15"))
         if (now - getattr(self, "_last_load_at", 0.0)) < min_iv:
             return
+        self._last_load_at = now
+        try:
+            _redis_io_pool.submit(self._load_remote_blocking)
+        except RuntimeError:
+            pass  # interpreter shutting down; pool already closed
+
+    def _load_remote_blocking(self) -> None:
+        """Runs on a background thread — blocking network calls are fine here."""
+        r = _get_redis()
+        if not r:
+            return
         try:
             st = r.get(self._rk("state"))
             if isinstance(st, bytes):
                 st = st.decode()
-            if st in ("open", "half_open", "closed"):
-                self._state = st
             fails = r.get(self._rk("failures"))
-            if fails is not None:
-                self._failures = int(fails)
             opened = r.get(self._rk("opened_at"))
-            if opened is not None:
-                self._opened_at = float(opened)
-            self._last_load_at = now
+            with self._lock:
+                if st in ("open", "half_open", "closed"):
+                    self._state = st
+                if fails is not None:
+                    self._failures = int(fails)
+                if opened is not None:
+                    self._opened_at = float(opened)
         except Exception as e:
             logger.debug("cb load remote %s: %s", self.name, e)
 
-    def _persist(self) -> None:
-        """Write breaker state to Redis at most once per CB_REDIS_MIN_INTERVAL seconds
-        and only when state/failure count changes. Cuts Upstash command burn on free tier.
+    def _schedule_persist(self) -> None:
+        """Throttle/dedupe (cheap, in-memory, called with self._lock already
+        held by the caller) then hand the actual Redis SETs to the
+        background pool. Only fires at most once per CB_REDIS_MIN_INTERVAL
+        seconds and only when state/failure count changed, to keep Upstash
+        command burn low on the free tier.
         """
-        # Local-only mode (default recommended on free Upstash)
         if os.getenv("CB_REDIS_SYNC", "0").lower() not in ("1", "true", "yes"):
-            return
-        r = _get_redis()
-        if not r:
             return
         now = time.time()
         min_iv = float(os.getenv("CB_REDIS_MIN_INTERVAL", "15"))
@@ -124,14 +145,25 @@ class CircuitBreaker:
         sig = (self._state, self._failures)
         if sig == getattr(self, "_last_persist_sig", None) and (now - last) < min_iv:
             return
+        self._last_persist_at = now
+        self._last_persist_sig = sig
+        ttl = int(max(60, self.recovery_timeout * 3))
+        state_snap, failures_snap, opened_snap = self._state, self._failures, self._opened_at
         try:
-            ttl = int(max(60, self.recovery_timeout * 3))
-            r.set(self._rk("state"), self._state, ex=ttl)
-            r.set(self._rk("failures"), str(self._failures), ex=ttl)
-            if self._opened_at:
-                r.set(self._rk("opened_at"), str(self._opened_at), ex=ttl)
-            self._last_persist_at = now
-            self._last_persist_sig = sig
+            _redis_io_pool.submit(self._persist_blocking, state_snap, failures_snap, opened_snap, ttl)
+        except RuntimeError:
+            pass  # interpreter shutting down; pool already closed
+
+    def _persist_blocking(self, state: str, failures: int, opened_at: float, ttl: int) -> None:
+        """Runs on a background thread — blocking network calls are fine here."""
+        r = _get_redis()
+        if not r:
+            return
+        try:
+            r.set(self._rk("state"), state, ex=ttl)
+            r.set(self._rk("failures"), str(failures), ex=ttl)
+            if opened_at:
+                r.set(self._rk("opened_at"), str(opened_at), ex=ttl)
         except Exception as e:
             logger.debug("cb persist %s: %s", self.name, e)
 
@@ -151,7 +183,7 @@ class CircuitBreaker:
                 "last_error": self._last_error,
                 "failure_threshold": self.failure_threshold,
                 "recovery_timeout": self.recovery_timeout,
-                "redis_backed": bool(_get_redis()),
+                "redis_backed": bool(_redis) if _redis_init else False,
             }
 
     def _maybe_half_open_unlocked(self) -> None:
@@ -163,12 +195,12 @@ class CircuitBreaker:
         if opened and (now - opened) >= self.recovery_timeout:
             self._state = "half_open"
             self._successes_half = 0
-            self._persist()
+            self._schedule_persist()
 
     def allow(self) -> bool:
         with self._lock:
-            # remote load is throttled; local state is authoritative on free tier
-            self._load_remote()
+            # remote load is throttled and non-blocking; local state is authoritative on free tier
+            self._schedule_remote_load()
             self._maybe_half_open_unlocked()
             if self._state == "closed":
                 return True
@@ -195,7 +227,7 @@ class CircuitBreaker:
                     logger.info("circuit %s → closed", self.name)
             else:
                 self._failures = 0
-            self._persist()
+            self._schedule_persist()
 
     def record_failure(self, error: str = "") -> None:
         with self._lock:
@@ -204,7 +236,7 @@ class CircuitBreaker:
                 self._state = "open"
                 self._opened_at = time.time()
                 self._failures = self.failure_threshold
-                self._persist()
+                self._schedule_persist()
                 logger.warning("circuit %s → open (half_open probe failed): %s", self.name, self._last_error)
                 return
             self._failures += 1
@@ -224,7 +256,7 @@ class CircuitBreaker:
                     "circuit %s → open after %s failures: %s",
                     self.name, self._failures, self._last_error,
                 )
-            self._persist()
+            self._schedule_persist()
 
     def reset(self) -> None:
         """Force circuit closed — used by /ops/circuit-reset after intentional warm-up."""
@@ -234,7 +266,7 @@ class CircuitBreaker:
             self._successes_half = 0
             self._opened_at = 0.0
             self._last_error = None
-            self._persist()
+            self._schedule_persist()
             logger.info("circuit %s → closed (manual reset)", self.name)
 
     def call(self, func: Callable, *args, **kwargs):

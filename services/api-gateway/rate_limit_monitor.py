@@ -16,9 +16,22 @@ import os
 import threading
 import time
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Deque, Dict, List, Optional
 
 logger = logging.getLogger("rate-limit-monitor")
+
+# record() is called directly from async route handlers (POST
+# /ops/rate-limits/event, and inline from the data-feed update-batch loop
+# in main.py) on the event loop thread. It used to call self._persist_neon()
+# — a blocking kv_set() — plus blocking Redis lpush/ltrim/expire, inline and
+# unthrottled on EVERY event. That's the same "blocking call stalls the
+# event loop" bug class already fixed in ws_client.py / angelone_session.py
+# / circuit_breaker.py, made worse here by having no throttle at all (a
+# burst of 429s recorded one after another serialised a DB round trip per
+# event on the request thread). The in-memory deque append stays inline
+# (fast, lock-protected); all actual network I/O now runs on this pool.
+_io_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ratelimit-mon-io")
 
 WINDOW_SEC = 3600
 MAX_EVENTS = 500
@@ -166,6 +179,17 @@ class RateLimitMonitor:
         }
         with self._lock:
             self._events.appendleft(event)
+        # Redis mirror + durable Neon aggregate are both network I/O — hand
+        # them to the background pool so record() (called inline from async
+        # route handlers) never blocks the event loop on a DB/Redis round
+        # trip. See module-level comment on _io_pool for why.
+        try:
+            _io_pool.submit(self._persist_background, event)
+        except RuntimeError:
+            pass  # interpreter shutting down; pool already closed
+
+    def _persist_background(self, event: dict) -> None:
+        """Runs on a background thread — blocking network calls are fine here."""
         if self._redis:
             try:
                 self._redis.lpush(REDIS_KEY, json.dumps(event))

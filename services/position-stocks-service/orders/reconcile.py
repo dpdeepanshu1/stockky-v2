@@ -78,15 +78,37 @@ def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 
         v = leg.get(key)
         if v:
             try:
-                return float(v)
+                price = float(v)
             except (TypeError, ValueError):
-                pass
+                continue
+            # DIAGNOSTIC (2026-09-16, additive, no behavior change): this is
+            # exactly the "ASSUMPTION FLAGGED FOR LIVE VERIFICATION" case
+            # from the module docstring — log which key actually resolved
+            # the first time a real fill price is found on a leg, so the
+            # assumption gets confirmed/refuted from the container logs the
+            # next time a TARGET_LEG/STOP_LOSS_LEG fires live, instead of
+            # requiring a manual eyeball-against-Dhan's-app comparison.
+            logger.info(
+                "reconcile: leg fill price resolved via leg['%s']=%.2f "
+                "(confirms this key IS present on Dhan's nested leg dict live)",
+                key, price,
+            )
+            return price
     v = leg.get("price")
     if v:
         try:
-            return float(v)
+            price = float(v)
         except (TypeError, ValueError):
-            pass
+            price = None
+        if price is not None:
+            logger.info(
+                "reconcile: leg fill price NOT found via any averageTradedPrice-"
+                "style key — fell back to leg['price']=%.2f (the leg's static "
+                "trigger price, not a confirmed fill price; refutes the "
+                "averageTradedPrice assumption for this leg shape)",
+                price,
+            )
+            return price
     parent_price = parent_row.get("averageTradedPrice")
     if parent_price:
         try:

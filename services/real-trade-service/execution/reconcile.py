@@ -178,6 +178,7 @@ async def _book_fill_delta(
 
 async def _track_exit_failure_and_maybe_alert(
     db: Session, position: models.TradePosition, order: models.TradeOrder, status: str,
+    rejection_reason: str | None = None, rejection_code: str | None = None,
 ) -> None:
     """2026-09-15 fix (session40 — DATAMATICS position 81, 89 consecutive
     REJECTED zero-fill SELL attempts over ~4.5h with no backoff and no
@@ -191,7 +192,15 @@ async def _track_exit_failure_and_maybe_alert(
     structural is wrong (wrong order type/price/product reaching the
     broker, a genuinely unsellable position, etc.), not routine broker
     flakiness. exit_engine/exit.py._send_real_sell reads these same two
-    fields to back off how often it will even try again."""
+    fields to back off how often it will even try again.
+
+    2026-09-16 (additive diagnostic): rejection_reason/rejection_code are
+    Dhan's own omsErrorDescription/omsErrorCode for this rejection, when the
+    broker's response included them (see execution/reconcile.py's capture
+    point). Purely informational — included in the alert text so a stuck
+    streak's operator alert says WHY, not just HOW MANY, the next time this
+    fires live. Both default to None (unchanged behavior) for any caller
+    that doesn't have them."""
     position.consecutive_exit_failures = (position.consecutive_exit_failures or 0) + 1
     position.last_exit_failure_at = datetime.now(timezone.utc)
     db.commit()
@@ -203,10 +212,15 @@ async def _track_exit_failure_and_maybe_alert(
             config.EXIT_RETRY_MAX_COOLDOWN_SECONDS,
             config.EXIT_RETRY_BASE_COOLDOWN_SECONDS * (2 ** (n - 1)),
         )
+        reason_line = (
+            f"Broker reason: {rejection_reason}{f' [{rejection_code}]' if rejection_code else ''}\n"
+            if rejection_reason else ""
+        )
         await notify_async(
             f"🚨 *Exit SELL stuck* — {position.symbol}\n"
             f"{n} consecutive broker rejections with ZERO fill (latest: {status}, "
             f"order {order.dhan_order_id}).\n"
+            f"{reason_line}"
             f"Backing off to a {cooldown_seconds:.0f}s cooldown before the next retry. "
             f"This many identical rejections in a row usually means something structural "
             f"(wrong order type/price/product reaching the broker, or the position is "
@@ -215,8 +229,9 @@ async def _track_exit_failure_and_maybe_alert(
         )
         logger.critical(
             "reconcile: position %s (%s) has %d consecutive dead-zero-fill SELL attempts "
-            "(latest status=%s, order=%s) — alerted operator, cooldown=%.0fs",
-            position.id, position.symbol, n, status, order.dhan_order_id, cooldown_seconds,
+            "(latest status=%s, order=%s, broker_reason=%s [%s]) — alerted operator, cooldown=%.0fs",
+            position.id, position.symbol, n, status, order.dhan_order_id,
+            rejection_reason, rejection_code, cooldown_seconds,
         )
 
 
@@ -401,6 +416,24 @@ async def reconcile_real_orders(db: Session) -> dict:
 
         status = str(_get(broker_row, "orderStatus", "order_status", default="")).upper()
 
+        # DIAGNOSTIC (2026-09-16, additive, no behavior change): capture Dhan's
+        # own rejection-reason text when the broker's order-book response
+        # includes it, so a REJECTED/CANCELLED order stops being a bare status
+        # string with no "why". Field names per Dhan's documented Postback
+        # payload schema (https://dhanhq.co/docs/v2/postback/), which uses the
+        # same order-object shape as the orderbook GET this module already
+        # polls: `omsErrorCode` / `omsErrorDescription`. Not independently
+        # reconfirmed that GET /orders echoes these two fields identically to
+        # the Postback payload — if they're absent here, `_get` just returns
+        # None like it does for any other missing field, so this is purely
+        # additive: it can only ADD information to the alert/log/event detail
+        # below, never change what already gets logged. Exactly the kind of
+        # data point needed to confirm/refute the DATAMATICS SDK MARKET→LIMIT
+        # theory and the emergency_gap_down retry-cause question the next
+        # time either recurs live.
+        rejection_reason = _get(broker_row, "omsErrorDescription", "omsErrorMessage", default=None)
+        rejection_code = _get(broker_row, "omsErrorCode", default=None)
+
         # filledQty is Dhan v2 GET /orders' actual field name (confirmed against
         # DhanHQ v2 docs/release notes: "filledQty, remainingQuantity and
         # averageTradedPrice is available as part of all GET Order APIs").
@@ -480,12 +513,19 @@ async def reconcile_real_orders(db: Session) -> dict:
                         f"SELL order {order.dhan_order_id} came back {status.lower()} with zero fill",
                     )
                     tally["positions_unstuck"] += 1
-                    await _track_exit_failure_and_maybe_alert(db, dead_position, order, status)
+                    await _track_exit_failure_and_maybe_alert(
+                        db, dead_position, order, status,
+                        rejection_reason=rejection_reason, rejection_code=rejection_code,
+                    )
             dead_status = "REJECTED" if status == "REJECTED" else "CANCELLED"
             order.status = dead_status
             note = f" (after {order.filled_qty_so_far} of {order.qty} already filled)" if order.filled_qty_so_far else ""
+            # DIAGNOSTIC (2026-09-16): append Dhan's own rejection reason/code
+            # when present, additive only — see the capture point above.
+            reason_note = f" — {rejection_reason}" if rejection_reason else ""
+            code_note = f" [{rejection_code}]" if rejection_code else ""
             db.add(models.TradeOrderEvent(order_id=order.id, event_type=dead_status,
-                                           detail=f"Broker reported {status}{note}"))
+                                           detail=f"Broker reported {status}{note}{reason_note}{code_note}"))
             db.commit()
             tally["dead_orders"] += 1
             continue

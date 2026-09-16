@@ -6,6 +6,37 @@
 
 ---
 
+## Session 47 (this session) — closed what could be closed on the "needs live data" list without guessing
+
+Went back through the four items flagged last session as needing live
+data. One resolved outright by code inspection: the `emergency_gap_down`
+exit retries funnel through the exact same `_send_real_sell()` generic
+backoff (session40's `consecutive_exit_failures` cooldown) as every other
+automatic exit reason — traced the call graph directly, no bypass exists.
+This settles the *structural* open question; only the cooldown/threshold
+*tuning* still needs live observation.
+
+Two others got additive diagnostics that will self-resolve the next time
+they fire live instead of needing a manual eyeball-against-Dhan's-app
+check: (1) real-trade-service's `execution/reconcile.py` now captures
+Dhan's own `omsErrorCode`/`omsErrorDescription` rejection-reason fields
+(confirmed real per Dhan's documented Postback schema) on any dead SELL
+and threads them into the `TradeOrderEvent` detail and the operator alert
+— directly targets both the DATAMATICS SDK theory and any future retry
+storm's root cause. (2) position-stocks-service's `orders/reconcile.py`
+now logs which fill-price field key actually resolved the first time a
+real TARGET_LEG/STOP_LOSS_LEG fires, closing the "ASSUMPTION FLAGGED FOR
+LIVE VERIFICATION" item down to "read the next exit's log line" instead
+of a manual comparison. Both changes are purely additive — no return-value,
+fallback-order, or persisted-schema changes. `py_compile`+`pyflakes` clean
+on both touched files. Full writeup:
+`archive/session-notes/CHANGES_2026-09-16_SESSION47_LIVE_DATA_ITEMS_DIAGNOSTICS.md`.
+
+Still genuinely blocked on live data, unchanged: STATUS.md's live-only
+Next Steps items (Super Order test, EOD-disarm flatten test, live
+timestamp check, breaker-open smoke test), and the DATAMATICS theory
+itself pending the diagnostic above actually catching a live incident.
+
 ## Session 46 (this session) — `MIN_PREFERRED_SCALP_POSITIONS` decision made + wired; real-trade-service reconcile-snapshot staleness bug fixed
 
 User made the call on `MIN_PREFERRED_SCALP_POSITIONS` (flagged unwired since

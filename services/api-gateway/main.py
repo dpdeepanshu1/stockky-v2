@@ -7460,7 +7460,11 @@ async def api_surprise_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
     message = "\n".join(lines)
 
     try:
-        resp = httpx.post(
+        # Moved off the event loop via asyncio.to_thread (session55 sweep,
+        # same pattern as evaluate_price_alerts()/_quote_broadcast_loop
+        # below) — httpx.post here is the blocking (sync-client) call.
+        resp = await asyncio.to_thread(
+            httpx.post,
             f"{NOTIFICATION_URL}/notify",
             json={
                 "title": "Surprise Momentum — Top Picks",
@@ -7708,7 +7712,10 @@ async def api_ipo_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
     message = "\n".join(lines)
 
     try:
-        resp = httpx.post(
+        # asyncio.to_thread — see the note on the equivalent httpx.post in
+        # api_surprise_notify_top_picks above.
+        resp = await asyncio.to_thread(
+            httpx.post,
             f"{NOTIFICATION_URL}/notify",
             json={"title": "IPO Tracker — Top Picks", "message": message, "channel": "telegram"},
             timeout=15,
@@ -8970,18 +8977,27 @@ async def api_delete_price_alert(alert_id: str):
 async def api_evaluate_price_alerts():
     """Evaluate alerts vs bulk cache / feed; notify on triggers."""
     from data_feed import evaluate_price_alerts
-    triggered = evaluate_price_alerts()
+    # asyncio.to_thread (session55 sweep, part 2): evaluate_price_alerts()
+    # is a blocking kv_get/kv_set call, and each iteration below can add a
+    # blocking _wake_notification_service() (~httpx.get, up to 5s) plus a
+    # blocking httpx.post — this is a manually-triggered endpoint, but on a
+    # multi-alert trigger it's the same "loop of blocking calls inline on
+    # the event loop" pattern already fixed for /api/feed/batch and
+    # _quote_broadcast_loop, so it gets the same treatment rather than being
+    # left as a single-call exception.
+    triggered = await asyncio.to_thread(evaluate_price_alerts)
     notified = 0
     for t in triggered:
         try:
-            _wake_notification_service()
+            await asyncio.to_thread(_wake_notification_service)
             msg = (
                 f"Price alert: {t.get('symbol')} is ₹{t.get('current_price')} "
                 f"({t.get('direction')} ₹{t.get('target_price')})"
             )
             if t.get("note"):
                 msg += f" — {t.get('note')}"
-            resp = httpx.post(
+            resp = await asyncio.to_thread(
+                httpx.post,
                 f"{NOTIFICATION_URL}/notify",
                 json={"title": f"Price Alert · {t.get('symbol')}", "message": msg, "channel": "all"},
                 timeout=12,
@@ -9024,7 +9040,12 @@ async def hard_reset_database(preserve_days: int = 7):
         except Exception:
             pass
 
-        result = hard_reset_stockky_kv(preserve_days=preserve_days)
+        # asyncio.to_thread (session55 sweep, part 2): hard_reset_stockky_kv
+        # is a blocking Neon write touching every kv row outside
+        # preserve_days — this is a manual admin action, but the write can
+        # run long on a large table, so it still shouldn't stall every other
+        # request for its duration.
+        result = await asyncio.to_thread(hard_reset_stockky_kv, preserve_days=preserve_days)
         try:
             clear_local_data_feed_caches()
         except Exception:
@@ -9061,14 +9082,18 @@ async def hard_reset_database(preserve_days: int = 7):
             # reimplemented: the two blocks below (_kv_cache.kv_delete and
             # _redis.delete) already cover both real ghost-key cleanup paths
             # this service uses, so this was dead weight, not a gap.
+            # asyncio.to_thread: kv_delete is a blocking Neon call, per key
+            # (9 keys) — small/fixed count so this was flagged low-priority,
+            # but it's still a manual admin action worth keeping off the
+            # event loop rather than an exception to the rule swept above.
             try:
                 if _kv_cache is not None:
-                    _kv_cache.kv_delete(gk)
+                    await asyncio.to_thread(_kv_cache.kv_delete, gk)
             except Exception:
                 pass
             try:
                 if _redis:
-                    _redis.delete(gk)
+                    await asyncio.to_thread(_redis.delete, gk)
             except Exception:
                 pass
 
@@ -11425,7 +11450,10 @@ async def api_hotpicks_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
     message = "\n".join(lines)
 
     try:
-        resp = httpx.post(
+        # asyncio.to_thread — see the note on the equivalent httpx.post in
+        # api_surprise_notify_top_picks above.
+        resp = await asyncio.to_thread(
+            httpx.post,
             f"{NOTIFICATION_URL}/notify",
             json={"title": "Stockky Hot Picks — Top Picks", "message": message, "channel": "telegram"},
             timeout=15,

@@ -154,13 +154,21 @@ async def lifespan(app: FastAPI):
 
     # Start background trading loop
     _bg_task = asyncio.create_task(_trading_loop(), name="position-stocks-trading-loop")
+    # BUG FIX (session47): independent fast reconcile/EOD loop — see the
+    # BUG FIX comment above _FAST_RECONCILE_INTERVAL_S.
+    _reconcile_task = asyncio.create_task(_fast_reconcile_loop(), name="position-stocks-fast-reconcile-loop")
 
     yield
 
     # Graceful shutdown
     _bg_task.cancel()
+    _reconcile_task.cancel()
     try:
         await _bg_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await _reconcile_task
     except asyncio.CancelledError:
         pass
     await ws_client.stop()
@@ -188,6 +196,64 @@ _NO_ENTRY_AFTER  = parse_hhmm(os.getenv("ENTRY_NO_AFTER_IST",  "14:30"), 14, 30)
 _SCAN_INTERVAL_S = 10.0   # run screener every 10 seconds
 _cycle_lock = asyncio.Lock()  # prevents the background loop and a manual
                                # POST /cycle/run from overlapping
+
+# BUG FIX (session47 — "reconcile/exits should never wait behind screening"):
+# _run_cycle() already runs reconcile_exits unconditionally as its FIRST
+# stage every _SCAN_INTERVAL_S tick, but that stage still sits behind
+# _cycle_lock together with screening/quality-gate/entry — so its real-world
+# cadence is (sleep + PREVIOUS full cycle's total duration), not a clean
+# 10s, whenever quality-gate's fundamental/technical checks add a few
+# seconds. Adding an independent fast reconcile loop closes that gap the
+# same way real-trade-service's fast-exit tick does: this loop never takes
+# _cycle_lock at all (same lock-free pattern the existing manual POST
+# /reconcile route already used, safely, before this change — see that
+# route's docstring; reconcile.run_exit_reconciliation() only ever acts on
+# Dhan's own confirmed order status per position, so a redundant concurrent
+# call is a no-op for any position the other caller already closed), so it
+# keeps running on its own tight interval regardless of how long screening
+# is taking. _run_cycle()'s own reconcile stage stays as-is (harmless,
+# idempotent, and still useful as a same-cycle catch-up) — this is purely
+# additive.
+_FAST_RECONCILE_INTERVAL_S = max(5.0, float(os.getenv("FAST_RECONCILE_INTERVAL_S", "6")))
+
+
+async def _fast_reconcile_loop() -> None:
+    """Independent of _trading_loop()/_cycle_lock — see the BUG FIX
+    comment above _FAST_RECONCILE_INTERVAL_S. Runs only during market
+    hours; never touches entry/screening, only exit reconciliation (Dhan
+    order-status sync) and, if due, the EOD squareoff sweep — the same two
+    "unconditional, regardless of armed/enabled" stages _run_cycle() itself
+    runs first. A failure here is logged and the loop continues; it must
+    never crash the process or block the slower screening loop."""
+    while True:
+        try:
+            await asyncio.sleep(_FAST_RECONCILE_INTERVAL_S)
+            if not is_market_open_ist():
+                continue
+            factory = _db.get_session_factory()
+            if factory is None:
+                continue
+            with factory() as db:
+                try:
+                    n_closed = await asyncio.to_thread(reconcile.run_exit_reconciliation, db)
+                    if n_closed:
+                        logger.info("position-stocks: fast-reconcile closed %d position(s)", n_closed)
+                except Exception as e:
+                    logger.error("position-stocks: fast-reconcile error: %s", e, exc_info=True)
+                    continue
+                try:
+                    gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
+                    today = ist_today_str()
+                    eod_fired = gate and gate.eod_squareoff_fired_date == today
+                    if ist_time_at_or_after(_EOD_SQUAREOFF_TIME) and not eod_fired:
+                        logger.info("position-stocks: fast-reconcile loop caught EOD squareoff time")
+                        await asyncio.to_thread(eod_squareoff.run_eod_squareoff, db)
+                except Exception as e:
+                    logger.error("position-stocks: fast-reconcile EOD check error: %s", e, exc_info=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("position-stocks: fast-reconcile loop error")
 
 
 async def _run_cycle(db: Session, trigger: str) -> dict:
@@ -304,18 +370,26 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     #   being force-flattened, almost guarantees an EOD-squareoff loss.
     _now_ist = ist_now()
     _now_hhmm = (_now_ist.hour, _now_ist.minute)
-    _no_before_hhmm = (_NO_ENTRY_BEFORE.tm_hour, _NO_ENTRY_BEFORE.tm_min)
-    _no_after_hhmm  = (_NO_ENTRY_AFTER.tm_hour,  _NO_ENTRY_AFTER.tm_min)
+    # BUG FIX (session47): parse_hhmm() returns a datetime.time object, which
+    # has .hour/.minute — NOT .tm_hour/.tm_min (that's the attribute name for
+    # time.struct_time, a completely different type). The old code raised
+    # AttributeError on every single cycle, which killed _run_cycle before it
+    # could do anything (screening, exits, everything downstream), and each
+    # failure tripped the circuit breaker's half-open probe, re-opening it for
+    # another 60s forever. This was the root cause of the repeating
+    # "trading loop error" + "re-OPENING for another 60s" log lines.
+    _no_before_hhmm = (_NO_ENTRY_BEFORE.hour, _NO_ENTRY_BEFORE.minute)
+    _no_after_hhmm  = (_NO_ENTRY_AFTER.hour,  _NO_ENTRY_AFTER.minute)
     if _now_hhmm < _no_before_hhmm:
         summary["skipped_reason"] = "BEFORE_ENTRY_WINDOW"
         _stage("gate_checks", "Gate Checks", _t,
-               detail=f"Before {_NO_ENTRY_BEFORE.tm_hour:02d}:{_NO_ENTRY_BEFORE.tm_min:02d} IST — "
+               detail=f"Before {_NO_ENTRY_BEFORE.hour:02d}:{_NO_ENTRY_BEFORE.minute:02d} IST — "
                       "opening volatility window, no new entries")
         return _finalize()
     if _now_hhmm >= _no_after_hhmm:
         summary["skipped_reason"] = "PAST_ENTRY_CUTOFF"
         _stage("gate_checks", "Gate Checks", _t,
-               detail=f"After {_NO_ENTRY_AFTER.tm_hour:02d}:{_NO_ENTRY_AFTER.tm_min:02d} IST — "
+               detail=f"After {_NO_ENTRY_AFTER.hour:02d}:{_NO_ENTRY_AFTER.minute:02d} IST — "
                       "too close to EOD to enter new positions")
         return _finalize()
     _stage("gate_checks", "Gate Checks", _t, detail="service_enabled + armed + before EOD — cleared to screen")

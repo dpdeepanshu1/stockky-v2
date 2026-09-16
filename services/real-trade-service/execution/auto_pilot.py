@@ -200,13 +200,25 @@ async def _alert_if_open_positions_while_gate_off(db, mode: str) -> None:
         logger.exception("gate-off-with-open-positions alert failed for %s", mode)
 
 import os as _os
+# BUG FIX (session47): floor was 20s (default 45s) and, more importantly,
+# the fast-exit tick shared _get_lock (below) with the full cycle — so
+# whenever a full cycle's slow candidate-screening phase was running (user-
+# reported 3-10 min, driven by quality_gate.py's sequential per-candidate
+# fundamental/technical/event checks), the fast-exit tick's non-blocking
+# acquire failed and it skipped ENTIRELY for the whole cycle duration, not
+# just this one 45s tick. A stock could move well past its stop/target with
+# nothing checking it for minutes — see _get_exit_lock below for the fix.
+# Floor lowered to 5s and default to 8s per explicit request (stops/targets
+# checked every 5-10s during market hours, independent of full-cycle timing).
 EXIT_CHECK_INTERVAL_SECONDS = max(
-    20, int(_os.getenv("EXIT_CHECK_INTERVAL_SECONDS", "45"))
+    5, int(_os.getenv("EXIT_CHECK_INTERVAL_SECONDS", "8"))
 )
 
 
 def _get_lock(mode: str) -> threading.Lock:
-    """Return (creating if needed) the per-mode threading.Lock.
+    """Return (creating if needed) the per-mode ENTRY lock — guards
+    candidate screening + entry (BUY) placement only. See _get_exit_lock
+    below for the independent lock that now guards the exit side.
 
     BUG FIX (2026-09-10): guarded by _mode_locks_meta so two threads can
     never simultaneously insert different Lock objects for the same mode.
@@ -215,6 +227,63 @@ def _get_lock(mode: str) -> threading.Lock:
         if mode not in _mode_locks:
             _mode_locks[mode] = threading.Lock()
         return _mode_locks[mode]
+
+
+# BUG FIX (session47 — "manual reconcile/close never work, adaptive exits
+# never run during a cycle"): previously there was exactly ONE per-mode lock
+# shared by literally everything — the full cycle's slow candidate-screening/
+# entry phase, its own exit/reconcile phase, the fast-exit background tick,
+# and every manual button (Close Position, Cancel Order, Reconcile, Holdings
+# Sync). A full cycle legitimately takes 3-10 minutes (multiple candidates
+# each going through quality_gate.py's sequential multi-second fundamental/
+# technical/event checks before an entry decision) and held that ONE lock
+# for its entire duration — so for that whole window: (1) the fast-exit tick
+# silently skipped every single time (see EXIT_CHECK_INTERVAL_SECONDS above),
+# meaning stop-loss/target were effectively NOT being checked independent of
+# the slow cycle at all, defeating the whole point of an "adaptive" system;
+# (2) every manual Close Position / Reconcile / Cancel / Holdings-Sync click
+# got an immediate 409 "cycle already in progress" — exactly what the
+# dashboard screenshot showed.
+#
+# Fix: split into two independent locks.
+#   - _get_lock (entry_lock, above): candidates + entry (BUY) only — this is
+#     the genuinely slow part, and manual BUY confirm still serializes
+#     against it (a manual BUY racing the screening loop for the same
+#     candidate is the real risk there).
+#   - _get_exit_lock (below): exit evaluation (stop/target/time-stop/
+#     trailing) + reconcile + manual close/cancel/reconcile/holdings-sync.
+#     This critical section is fast (seconds: an order placement + a few DB
+#     writes), so contention on it is brief even under concurrent access —
+#     nothing here ever waits out a multi-minute screening phase again.
+# cycle_runner.py's exit+reconcile stage now acquires _get_exit_lock only
+# around that stage (not the whole cycle), so a full cycle's slow entry
+# phase never blocks exits, and a full cycle's own exit stage still can't
+# race a concurrent manual close/fast-exit-tick for the same position.
+#
+# This reopens a narrow, real race that the single lock used to close for
+# free: entry_lock's BUY-side cash_available -= cost and exit_lock's SELL-
+# side cash_available += proceeds can now commit on two different threads at
+# the same instant (previously impossible — one lock serialized everything).
+# Closed at the DB layer instead: every read-modify-write of cash_available
+# in portfolio/portfolio.py now goes through get_account(..., for_update=True),
+# which takes a SELECT...FOR UPDATE row lock (see that function's docstring)
+# — correct regardless of which of these two Python-level locks either side
+# holds, or whether they hold none at all.
+_exit_mode_locks: dict = {}
+_exit_mode_locks_meta: threading.Lock = threading.Lock()
+
+
+def _get_exit_lock(mode: str) -> threading.Lock:
+    """Return (creating if needed) the per-mode EXIT lock — guards exit
+    evaluation (stop/target/time-stop checks + SELL placement), broker
+    reconcile, and every manual exit-side action (close position, cancel
+    order, reconcile, holdings-sync). Independent of _get_lock (entry lock)
+    — see the module-level comment above this function for the full
+    reasoning. Same lazy-init-race protection pattern as _get_lock."""
+    with _exit_mode_locks_meta:
+        if mode not in _exit_mode_locks:
+            _exit_mode_locks[mode] = threading.Lock()
+        return _exit_mode_locks[mode]
 
 
 def _run_coro_in_new_loop(coro_func, *args) -> None:
@@ -284,10 +353,18 @@ def _run_exit_tick_sync(mode: str) -> None:
     single atomic acquire(blocking=False) instead of a separate check-then-
     acquire (the original two-step form had a narrow TOCTOU gap between the
     peek and the `async with lock:` acquire; this closes it as a side
-    effect of the rewrite, not a separately-scoped fix)."""
-    lock = _get_lock(mode)
+    effect of the rewrite, not a separately-scoped fix).
+
+    BUG FIX (session47): now acquires the EXIT lock (_get_exit_lock), not
+    the entry lock (_get_lock) — see _get_exit_lock's docstring. Previously
+    this used the SAME lock as the full cycle's entire (3-10 min) candidate-
+    screening + entry phase, so this tick skipped for the full duration of
+    every full cycle, not just when an exit/reconcile was actually in
+    flight. The exit lock is only ever held briefly (an order placement + a
+    few DB writes), so skips here are now rare and short-lived."""
+    lock = _get_exit_lock(mode)
     if not lock.acquire(blocking=False):
-        return  # full cycle (or schedule tick) is running — skip, it'll cover exits
+        return  # another exit-side operation (reconcile, manual close, or the full cycle's own exit stage) is running — skip, next tick is 5-10s away
     try:
         _run_coro_in_new_loop(_exit_only_tick_body, mode)
     finally:
@@ -918,7 +995,26 @@ async def _schedule_tick_body(mode: str) -> None:
             gate.eod_squareoff_last_run = today
             db.commit()
             try:
-                await _eod_squareoff(db, mode)
+                # BUG FIX (session47): _eod_squareoff sends real exit orders
+                # (_send_real_sell / close_position) — exactly the kind of
+                # exit-side action that now needs the dedicated exit lock,
+                # not just whatever lock this schedule tick happens to be
+                # running under (the entry lock — see _run_schedule_tick_sync).
+                # Before the entry/exit lock split, one shared lock covered
+                # this automatically; after the split, without this, a
+                # concurrent manual Close Position / fast-exit tick / a full
+                # cycle's own exit stage (all now exit-lock-only) could send
+                # a duplicate SELL for the same position at the same instant
+                # this does. Acquired in the same fixed order used
+                # everywhere else (entry already held, exit taken second) so
+                # this can never deadlock against cycle_runner.py's exit
+                # stage or the manual cancel-order route.
+                exit_lock = _get_exit_lock(mode)
+                exit_lock.acquire()
+                try:
+                    await _eod_squareoff(db, mode)
+                finally:
+                    exit_lock.release()
             except Exception:
                 logger.exception("[schedule] EOD square-off failed for %s", mode)
                 await notify_async(f"⚠️ *EOD square-off error — {mode}* — see server logs.")

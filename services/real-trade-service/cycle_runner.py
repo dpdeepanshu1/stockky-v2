@@ -201,14 +201,32 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
         logger.warning("run_cycle_core: position snapshot failed (non-fatal): %s", exc)
 
     _stage("exit")
-    exit_result = await exit_evaluate(db, mode)
+    # BUG FIX (session47): exit evaluation + reconcile now run inside the
+    # dedicated exit_lock, not merely inside whichever lock the caller
+    # (_run_full_tick_sync / the manual /cycle/run/{mode} route) already
+    # holds for the whole cycle (the entry lock). This is what lets a
+    # manual Close Position / Reconcile / Cancel / Holdings-Sync click, or
+    # the independent fast-exit background tick, actually run concurrently
+    # with this SAME full cycle's slow candidate-screening/entry phase
+    # instead of queuing behind it for minutes — they only ever contend
+    # with this brief exit+reconcile section, never the slow entry section.
+    # See execution/auto_pilot.py's _get_exit_lock docstring for the full
+    # reasoning, including why this reopened (and how it closes) a
+    # cash_available lost-update race between the two lock scopes.
+    from execution.auto_pilot import _get_exit_lock
+    exit_lock = _get_exit_lock(mode)
+    exit_lock.acquire()  # blocking wait — this section is fast (seconds), unlike the entry-side screening phase
+    try:
+        exit_result = await exit_evaluate(db, mode)
 
-    reconcile_result = None
-    if mode == "REAL":
-        _stage("reconcile")
-        from execution.reconcile import reconcile_real_orders
-        reconcile_result = await reconcile_real_orders(db)
-        fills = reconcile_result["entries_filled"]  # REAL "fills" only ever means broker-confirmed, never sent-only
+        reconcile_result = None
+        if mode == "REAL":
+            _stage("reconcile")
+            from execution.reconcile import reconcile_real_orders
+            reconcile_result = await reconcile_real_orders(db)
+            fills = reconcile_result["entries_filled"]  # REAL "fills" only ever means broker-confirmed, never sent-only
+    finally:
+        exit_lock.release()
 
     result = {
         "mode": mode,

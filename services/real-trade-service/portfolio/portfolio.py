@@ -38,8 +38,45 @@ from market_feed.feed import Tick
 logger = logging.getLogger("real-trade-portfolio")
 
 
-def get_account(db: Session, mode: str) -> models.TradeAccount:
-    row = db.query(models.TradeAccount).filter_by(mode=mode).first()
+def get_account(db: Session, mode: str, for_update: bool = False) -> models.TradeAccount:
+    """BUG FIX (session47): every real-money mutation of cash_available in
+    this file is a Python-level read-modify-write (`account.cash_available
+    += refund`), never an atomic SQL UPDATE. That was always safe only
+    because a single per-mode threading.Lock (execution/auto_pilot.py)
+    serialized EVERY entry and exit operation for a mode — no two
+    mutations of the same account row could ever be in flight at once.
+    Splitting that lock into an independent entry_lock/exit_lock pair
+    (session47, to stop exit checks/manual close/reconcile from being
+    blocked for minutes behind a slow candidate-screening entry cycle)
+    reopens a real lost-update race: a full-cycle's entry stage committing
+    `cash_available -= cost` on one thread and a fast-exit-tick or manual
+    close committing `cash_available += proceeds` on another can now both
+    read the same starting value and one commit silently clobbers the
+    other, corrupting the cash balance.
+
+    for_update=True closes this at the DB layer instead of the app layer:
+    SELECT ... FOR UPDATE row-locks this account row so a second
+    transaction trying to read it for its own read-modify-write blocks
+    until the first commits (and then sees the up-to-date value) — correct
+    regardless of which Python-level lock either caller holds, or whether
+    they hold none. Skipped on sqlite (this codebase's own in-memory
+    functional tests only — sqlite doesn't support SELECT ... FOR UPDATE
+    and doesn't need it, since it already serializes writers at the file
+    level); every real deployment target (Oracle, Postgres — see db.py's
+    dialect()) supports it. Every call site that performs a
+    read-modify-write on cash_available passes for_update=True; pure-read
+    or full-overwrite call sites (refresh_unrealized's current_equity
+    recompute, equity_sync's authoritative balance overwrite from Dhan)
+    do not need it and are left as plain reads."""
+    query = db.query(models.TradeAccount).filter_by(mode=mode)
+    if for_update:
+        try:
+            bind_dialect = db.get_bind().dialect.name
+        except Exception:
+            bind_dialect = ""
+        if bind_dialect != "sqlite":
+            query = query.with_for_update()
+    row = query.first()
     if row is None:
         raise RuntimeError(f"No trade_accounts row for mode={mode} — schema not seeded.")
     return row
@@ -504,7 +541,7 @@ def holdings_sync_reconcile(db: Session) -> dict:
                 symbol, position.id, qty_open, broker_have, broker_have, refund,
             )
             if account is None:
-                account = get_account(db, "REAL")
+                account = get_account(db, "REAL", for_update=True)
             account.cash_available += refund
             synced_symbols.append(symbol)
             continue
@@ -533,7 +570,7 @@ def holdings_sync_reconcile(db: Session) -> dict:
             symbol, position.id, qty_open, refund,
         )
         if account is None:
-            account = get_account(db, "REAL")
+            account = get_account(db, "REAL", for_update=True)
         account.cash_available += refund
         closed_symbols.append(symbol)
 
@@ -642,7 +679,7 @@ def try_fill_entry(db: Session, order: models.TradeOrder, tick: Tick, stop_price
         db.add(models.TradePositionEvent(position_id=position.id, event_type="ADDED",
                                           detail=f"+{order.qty} @ {fill_price}"))
 
-    account = get_account(db, "DEMO")
+    account = get_account(db, "DEMO", for_update=True)
     account.cash_available -= fill_price * order.qty
     account.updated_at = now
 
@@ -690,7 +727,7 @@ def close_position(
     # happened, not a stale read of it.
     db.flush()
 
-    account = get_account(db, "DEMO")
+    account = get_account(db, "DEMO", for_update=True)
     proceeds = exit_price * qty_to_close
     account.cash_available += proceeds
     account.realized_pnl_today += pnl
@@ -796,7 +833,7 @@ def record_real_fill(db: Session, order: models.TradeOrder, fill_price: float, f
         db.add(models.TradePositionEvent(position_id=position.id, event_type="ADDED",
                                           detail=f"+{filled_qty} @ {fill_price} (broker-confirmed)"))
 
-    account = get_account(db, "REAL")
+    account = get_account(db, "REAL", for_update=True)
     account.cash_available -= fill_price * filled_qty
     account.updated_at = now
     db.commit()
@@ -867,7 +904,7 @@ def record_real_exit_fill(db: Session, position: models.TradePosition, exit_pric
     ))
     db.flush()
 
-    account = get_account(db, "REAL")
+    account = get_account(db, "REAL", for_update=True)
     account.cash_available += exit_price * qty_closed
     account.realized_pnl_today += pnl
     account.realized_pnl_total += pnl
@@ -928,7 +965,7 @@ def force_close_real_position(db: Session, position: models.TradePosition, note:
     ))
     db.flush()
 
-    account = get_account(db, "REAL")
+    account = get_account(db, "REAL", for_update=True)
     account.cash_available += refund
     account.current_equity = account.cash_available + _open_positions_market_value(db, "REAL")
     account.updated_at = now

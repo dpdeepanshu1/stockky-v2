@@ -847,7 +847,17 @@ async def manual_order_confirm(
     409 if a cycle currently holds it — evaluate_manual_order's own
     "re-derive everything from current DB state" design (see its docstring)
     means the retry after a 409 sees accurate state, not stale preview
-    numbers."""
+    numbers.
+
+    BUG FIX (session47): a BUY and a SELL confirm need to race against
+    DIFFERENT things — a BUY races entry_engine's candidate screening (slow,
+    3-10 min), a SELL races exit_engine's own exit send (fast, seconds). Both
+    used to share the single entry lock, which meant a SELL confirm could sit
+    behind an unrelated in-progress full cycle for the full slow duration
+    even though nothing about a SELL touches the entry side. Now picks the
+    lock by side: BUY -> entry lock (_get_lock), SELL -> exit lock
+    (_get_exit_lock) — see execution/auto_pilot.py's _get_exit_lock
+    docstring for the full split reasoning."""
     mode = mode.upper()
     if mode not in ("DEMO", "REAL"):
         raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
@@ -860,14 +870,17 @@ async def manual_order_confirm(
         # everything else that can open a position.
         raise HTTPException(status_code=409, detail=f"{mode} is not armed — arm it before sending a manual BUY.")
 
-    from execution.auto_pilot import _get_lock
-    lock = _get_lock(mode)
+    from execution.auto_pilot import _get_lock, _get_exit_lock
+    is_sell = body.side.upper() == "SELL"
+    lock = _get_exit_lock(mode) if is_sell else _get_lock(mode)
     if not lock.acquire(blocking=False):
         raise HTTPException(
             status_code=409,
             detail=(
-                f"A cycle for {mode} is already in progress (auto-pilot or a prior manual trigger). "
-                "Try again once the current cycle finishes."
+                (f"An exit for {mode} is already being processed — try again in a moment."
+                 if is_sell else
+                 f"A cycle for {mode} is already in progress (auto-pilot or a prior manual trigger). "
+                 "Try again once the current cycle finishes.")
             ),
         )
     try:
@@ -900,6 +913,7 @@ async def manual_order_confirm(
         return await _asyncio.to_thread(_run_confirm_sync)
     finally:
         lock.release()
+
 
 
 class ManualCandidateRequest(BaseModel):
@@ -1321,9 +1335,16 @@ async def _self_heal_orders(db: Session, mode: str) -> None:
                     mode,
                 )
         else:
-            from execution.auto_pilot import _get_lock
+            # BUG FIX (session47): switched to the dedicated exit lock —
+            # reconcile now runs under it everywhere (see execution/
+            # auto_pilot.py's _get_exit_lock docstring), and this
+            # best-effort self-heal benefits the same way everything else
+            # calling reconcile does: it no longer skips for minutes behind
+            # an unrelated slow entry cycle, only behind another brief
+            # exit-side operation.
+            from execution.auto_pilot import _get_exit_lock
             from execution.reconcile import reconcile_real_orders
-            lock = _get_lock(mode)
+            lock = _get_exit_lock(mode)
             if lock.acquire(blocking=False):
                 try:
                     await reconcile_real_orders(db)
@@ -1636,17 +1657,25 @@ async def manual_close_position(
     fixed for. Now takes the same per-mode lock, non-blocking, 409 if a
     cycle currently holds it. The position/qty lookup moves inside the
     locked section so a retry after a 409 re-reads current qty_open
-    rather than acting on a value read before the race window."""
+    rather than acting on a value read before the race window.
+
+    BUG FIX (session47): switched from the entry lock to the dedicated
+    exit lock (_get_exit_lock) — this route has nothing to do with
+    candidate screening/entry, so it should never queue behind a slow
+    full cycle's entry phase, only behind another exit-side operation
+    (which is brief). See execution/auto_pilot.py's _get_exit_lock
+    docstring for the full split reasoning; cycle_runner.py's own exit
+    stage now acquires this same lock so the two can never race each
+    other for the same position."""
     mode = mode.upper()
 
-    from execution.auto_pilot import _get_lock
-    lock = _get_lock(mode)
+    from execution.auto_pilot import _get_exit_lock
+    lock = _get_exit_lock(mode)
     if not lock.acquire(blocking=False):
         raise HTTPException(
             status_code=409,
             detail=(
-                f"A cycle for {mode} is already in progress (auto-pilot or a prior manual trigger). "
-                "Try again once the current cycle finishes."
+                f"An exit for {mode} is already being processed — try again in a moment."
             ),
         )
     try:
@@ -1761,14 +1790,34 @@ async def manual_cancel_order(
     cancel."""
     mode = mode.upper()
 
-    from execution.auto_pilot import _get_lock
-    lock = _get_lock(mode)
-    if not lock.acquire(blocking=False):
+    # BUG FIX (session47): the order being cancelled could be a resting BUY
+    # (races entry_engine's check_pending_fills, which runs under the entry
+    # lock) or a resting SELL (races reconcile/exit_engine, which now run
+    # under the dedicated exit lock — see execution/auto_pilot.py's
+    # _get_exit_lock docstring). Rather than guess which from the order row
+    # before acquiring anything, this now takes BOTH locks (entry first,
+    # then exit — the same fixed ordering cycle_runner.py uses, so this can
+    # never deadlock against it), non-blocking, 409 if either is busy. This
+    # is intentionally conservative: a cancel is not as time-critical as an
+    # exit, so it's fine for it to wait out a slow entry cycle in the rare
+    # case it's cancelling a resting BUY.
+    from execution.auto_pilot import _get_lock, _get_exit_lock
+    entry_lock = _get_lock(mode)
+    exit_lock = _get_exit_lock(mode)
+    if not entry_lock.acquire(blocking=False):
         raise HTTPException(
             status_code=409,
             detail=(
                 f"A cycle for {mode} is already in progress (auto-pilot or a prior manual trigger). "
                 "Try again once the current cycle finishes."
+            ),
+        )
+    if not exit_lock.acquire(blocking=False):
+        entry_lock.release()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"An exit-side operation for {mode} is already in progress — try again in a moment."
             ),
         )
     try:
@@ -1801,7 +1850,8 @@ async def manual_cancel_order(
         log_action(db, actor=admin or "admin", action="MANUAL_CANCEL", mode=mode, detail=f"order {order.id} ({order.symbol})")
         return {"ok": True, "mode": mode, "order_id": order.id, "status": "CANCELLED"}
     finally:
-        lock.release()
+        exit_lock.release()
+        entry_lock.release()
 
 
 @app.post("/reconcile/{mode}")
@@ -1818,19 +1868,28 @@ async def manual_reconcile(mode: str, admin: Optional[str] = Depends(require_adm
     exactly like the /cycle/run/{mode} race. Now takes the same per-mode
     lock, non-blocking, and returns 409 immediately if a cycle already
     holds it — same contract as /cycle/run/{mode}, so the admin gets an
-    explicit "try again" instead of a silent race."""
+    explicit "try again" instead of a silent race.
+
+    BUG FIX (session47): switched from the entry lock to the dedicated
+    exit lock (_get_exit_lock) — this was the exact route the dashboard
+    screenshot showed failing with "cycle already in progress" while a
+    full cycle's slow candidate-screening phase was running, even though
+    reconcile has nothing to do with candidate screening. cycle_runner.py's
+    own reconcile step now also runs under this same exit lock, so this
+    route only ever contends with another brief exit-side operation, never
+    the slow entry phase. See execution/auto_pilot.py's _get_exit_lock
+    docstring for the full split reasoning."""
     mode = mode.upper()
     if mode != "REAL":
         return {"ok": True, "mode": mode, "note": "DEMO has nothing to reconcile — fills are simulated, not broker-confirmed."}
-    from execution.auto_pilot import _get_lock
+    from execution.auto_pilot import _get_exit_lock
     from execution.reconcile import reconcile_real_orders
-    lock = _get_lock(mode)
+    lock = _get_exit_lock(mode)
     if not lock.acquire(blocking=False):
         raise HTTPException(
             status_code=409,
             detail=(
-                f"A cycle for {mode} is already in progress (auto-pilot or a prior manual trigger). "
-                "Try again once the current cycle finishes."
+                f"An exit-side operation for {mode} is already in progress — try again in a moment."
             ),
         )
     try:
@@ -1869,19 +1928,22 @@ async def manual_holdings_sync(mode: str, admin: Optional[str] = Depends(require
     manual_reconcile above — holdings_sync_reconcile force-closes
     positions and refunds cash, so it must not run concurrently with a
     cycle that's also touching those same rows. Same lock, same
-    non-blocking acquire, same 409-on-busy contract."""
+    non-blocking acquire, same 409-on-busy contract.
+
+    BUG FIX (session47): switched to the dedicated exit lock, same reason
+    and same effect as manual_reconcile above — see execution/
+    auto_pilot.py's _get_exit_lock docstring."""
     mode = mode.upper()
     if mode != "REAL":
         return {"ok": True, "mode": mode, "note": "DEMO positions are simulated — nothing to sync against a broker."}
-    from execution.auto_pilot import _get_lock
+    from execution.auto_pilot import _get_exit_lock
     from portfolio.portfolio import holdings_sync_reconcile
-    lock = _get_lock(mode)
+    lock = _get_exit_lock(mode)
     if not lock.acquire(blocking=False):
         raise HTTPException(
             status_code=409,
             detail=(
-                f"A cycle for {mode} is already in progress (auto-pilot or a prior manual trigger). "
-                "Try again once the current cycle finishes."
+                f"An exit-side operation for {mode} is already in progress — try again in a moment."
             ),
         )
     try:

@@ -560,6 +560,33 @@ def place_super_order(
                 "expose it. Upgrade dhanhq (this service needs >=2.2.0) or "
                 "set USE_SUPER_ORDER=false to use the plain-order fallback."
             )
+        # BUG FIX (session48 followup): Dhan's server validates targetPrice > price even
+        # for MARKET orders when price is None. We don't send price at all (None/null) to
+        # tell Dhan it's market, but targetPrice and stopLossPrice must still be sane.
+        # Also guard against round_to_tick collapsing target to == or < reference price
+        # on very low-priced stocks — add at least 1 tick to ensure targetPrice > price
+        # (Dhan compares against the actual fill price, not our reference, so this is safe).
+        t_price = float(target_price)
+        s_price = float(stop_loss_price)
+        ref     = float(price) if price else 0.0
+        if ref > 0 and t_price <= ref:
+            # targetPrice collapsed to <= reference price after tick-rounding.
+            # Bump by 1 tick so Dhan server won't reject it.
+            band_tick = tick_size_for_price(ref)
+            t_price = round_to_tick(ref + band_tick)
+            logger.warning(
+                "position-stocks: place_super_order MARKET: target=%.2f <= ref=%.2f "
+                "after rounding — bumped to %.2f (1 tick above ref)",
+                target_price, ref, t_price,
+            )
+        if ref > 0 and transaction_type.upper() == "BUY" and s_price >= ref:
+            band_tick = tick_size_for_price(ref)
+            s_price = round_to_tick(ref - band_tick)
+            logger.warning(
+                "position-stocks: place_super_order MARKET: stop=%.2f >= ref=%.2f "
+                "after rounding — clamped to %.2f (1 tick below ref)",
+                stop_loss_price, ref, s_price,
+            )
         payload = {
             "transactionType": transaction_type.upper(),
             "exchangeSegment": exchange_segment.upper(),
@@ -567,9 +594,11 @@ def place_super_order(
             "orderType": "MARKET",
             "securityId": security_id,
             "quantity": int(quantity),
-            "price": None,
-            "targetPrice": float(target_price),
-            "stopLossPrice": float(stop_loss_price),
+            # price=None tells Dhan this is a true MARKET entry (no price peg).
+            # Do NOT send price key at all — some Dhan gateway versions reject
+            # a null price even for MARKET; omitting is always safe.
+            "targetPrice": t_price,
+            "stopLossPrice": s_price,
             "trailingJump": float(trailing_jump),
         }
         if tag:
@@ -577,7 +606,7 @@ def place_super_order(
         logger.info(
             "position-stocks: Placing REAL Super Order (direct HTTP, MARKET "
             "entry, SDK bypass): %s %s x%s target=%s stop=%s (%s)",
-            transaction_type, security_id, quantity, target_price, stop_loss_price,
+            transaction_type, security_id, quantity, t_price, s_price,
             product_type,
         )
         resp = dhan_http.post("/super/orders", payload)

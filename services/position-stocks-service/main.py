@@ -120,7 +120,7 @@ from orders import eod_squareoff, reconcile
 from orders.entry import attempt_entry, log_quality_reject
 from resilience import circuit_breaker
 from screening import intraday_eligibility, quality_gate
-from screening.engine import scan
+from screening.engine import scan, on_tick_hook as _engine_tick_hook
 from tz_utils import (
     ist_today_str, ist_time_at_or_after, is_market_open_ist, parse_hhmm, iso_utc,
     ist_now,
@@ -151,6 +151,11 @@ async def lifespan(app: FastAPI):
 
     # Start the Angel One WebSocket feed
     await ws_client.start()
+    # BUG FIX (session48 followup): on_tick_hook was defined in screening/engine.py
+    # but never registered with ws_client — so _volume_accum stayed 0 for every symbol
+    # and the volume-floor check in scan() filtered ALL candidates on every tick.
+    # Wire it up here at startup so tick activity counts are live from the first frame.
+    ws_client.register_on_tick(_engine_tick_hook)
     logger.info("position-stocks-service: ready on port %d", config.PORT)
 
     # Start background trading loop

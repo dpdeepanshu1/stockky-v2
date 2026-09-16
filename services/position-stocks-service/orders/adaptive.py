@@ -224,6 +224,28 @@ def compute(
     target_price = round_to_tick(current_ltp * (1 + target_pct / 100))
     stop_price   = round_to_tick(current_ltp * (1 - stop_pct   / 100))
 
+    # ── Step 6: Sanity clamp — Dhan rejects super orders where
+    # targetPrice <= entryPrice or stopPrice >= entryPrice (even for
+    # MARKET entries). After tick-rounding on very low-priced stocks,
+    # the rounded values can collapse to equal the LTP; add/subtract
+    # exactly 1 tick to ensure the Dhan server's own leg validation
+    # (targetPrice > entryPrice, stopPrice < entryPrice for BUY) always
+    # holds, regardless of how the caller sends the entry reference price.
+    from execution.dhan_client import tick_size_for_price as _tsz
+    _band = _tsz(current_ltp)
+    if target_price <= current_ltp:
+        target_price = round_to_tick(current_ltp + _band)
+        logger.debug(
+            "adaptive: %s target_price clamped to %.4f (was <= LTP %.4f after rounding)",
+            symbol or "?", target_price, current_ltp,
+        )
+    if stop_price >= current_ltp:
+        stop_price = round_to_tick(current_ltp - _band)
+        logger.debug(
+            "adaptive: %s stop_price clamped to %.4f (was >= LTP %.4f after rounding)",
+            symbol or "?", stop_price, current_ltp,
+        )
+
     return AdaptiveLevels(
         target_pct=round(target_pct, 4),
         stop_pct=round(stop_pct, 4),

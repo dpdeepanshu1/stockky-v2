@@ -232,7 +232,11 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
             continue
 
         tick_count = _volume_accum.get(symbol, 0)
-        if tick_count < max(1, int(config.MIN_AVG_VOLUME / 5000)):
+        # BUG FIX (session48 followup): on_tick_hook is now properly registered at
+        # startup (main.py), so tick_count reflects real activity. Guard: if
+        # MIN_AVG_VOLUME is 0 (disabled), skip the activity floor check entirely.
+        _vol_floor_count = int(config.MIN_AVG_VOLUME / 5000)
+        if _vol_floor_count > 0 and tick_count < _vol_floor_count:
             continue
 
         # ── Range-position multiplier (computed once, shared across windows) ──

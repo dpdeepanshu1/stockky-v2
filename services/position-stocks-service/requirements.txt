@@ -6,7 +6,7 @@ pyotp>=2.9.0
 websockets>=12.0
 cryptography>=42.0.0
 oracledb==2.5.1
-dhanhq>=2.0.2
+dhanhq>=2.2.0
 # pytz removed (AUDIT FIX): tz_utils.py uses stdlib zoneinfo, not pytz — pytz was never imported anywhere in this service.
 # tzdata provides timezone data on systems where /usr/share/zoneinfo may be missing (slim Docker base images).
 tzdata

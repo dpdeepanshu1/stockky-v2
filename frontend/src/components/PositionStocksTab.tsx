@@ -301,6 +301,46 @@ function LivePipelineStatus({ live }: { live: ScalpPipelineStatus | null }) {
           )}
         </div>
       )}
+      {/* Show last completed cycle summary even when idle */}
+      {!live.running && live.last_cycle && (
+        <div className="bg-ink border border-slate rounded-xl p-2.5 space-y-1.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-display tabular-nums text-[10px] text-mist">
+              Last cycle — {live.last_cycle.trigger} at {fmtDateTimeIst(live.last_cycle.started_at)}
+            </span>
+            <span className="font-display tabular-nums text-[10px] text-signal-prepare">
+              {fmtMs(live.last_cycle.total_duration_ms)}
+            </span>
+            {live.last_cycle.candidates_seen > 0 && (
+              <span className="font-display tabular-nums text-[10px] text-paper">
+                {live.last_cycle.candidates_seen} candidate(s) seen
+              </span>
+            )}
+            {live.last_cycle.entered_symbol && (
+              <span className="px-1.5 py-0.5 rounded-md bg-signal-buy/15 border border-signal-buy/40 font-display tabular-nums text-[9px] text-signal-buy">
+                ENTERED {live.last_cycle.entered_symbol}
+              </span>
+            )}
+            {live.last_cycle.skipped_reason && (
+              <span className="font-display tabular-nums text-[9px] text-mist">{live.last_cycle.skipped_reason}</span>
+            )}
+          </div>
+          {/* Show the scan stage candidates from last_cycle if any */}
+          {(() => {
+            const scanStage = live.last_cycle.stages?.find((s: any) => s.name === "scan");
+            if (!scanStage?.candidates?.length) return null;
+            return (
+              <div className="flex flex-wrap gap-1">
+                {scanStage.candidates.map((c: any, j: number) => (
+                  <span key={j} className="px-1.5 py-0.5 rounded-md bg-graphite border border-slate font-display tabular-nums text-[9px] text-paper">
+                    {c.symbol} <span className="text-mist">{c.window}</span> {c.pct_change >= 0 ? "+" : ""}{c.pct_change}%
+                  </span>
+                ))}
+              </div>
+            );
+          })()}
+        </div>
+      )}
     </div>
   );
 }

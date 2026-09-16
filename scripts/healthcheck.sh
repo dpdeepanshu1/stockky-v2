@@ -85,12 +85,12 @@ if [[ "$SERVICE" == "position-stocks" || "$SERVICE" == "all" ]]; then
   LOG=$(curl -sf --max-time 5 "$PS_URL/candidates/log?limit=5" 2>/dev/null || echo "ERROR")
   if [[ "$LOG" != "ERROR" ]]; then
     ok "GET /candidates/log → 200"
-    echo "$LOG" | python3 -c '
+    echo "$LOG" | python3 -c "
 import sys, json
 rows = json.load(sys.stdin)
 for r in rows:
-    print(f"  {r.get(\"symbol\",\"?\"):12s} {r.get(\"window_source\",\"?\"):4s} {r.get(\"decision\",\"?\"):8s} {r.get(\"reason\",\"\")[:60]}")
-'
+    print(f\"  {r.get('symbol','?'):12s} {r.get('window_source','?'):4s} {r.get('decision','?'):8s} {r.get('reason','')[:60]}\")
+"
   fi
 
   # Positions

@@ -6,8 +6,8 @@
 set -euo pipefail
 
 SERVICE="${1:-all}"
-PS_URL="${POSITION_STOCKS_URL:-http://localhost:8002}"
-RT_URL="${REAL_TRADE_URL:-http://localhost:8001}"
+PS_URL="${POSITION_STOCKS_URL:-http://localhost:8006}"
+RT_URL="${REAL_TRADE_URL:-http://localhost:8005}"
 NGINX_URL="${NGINX_URL:-http://localhost}"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -122,21 +122,23 @@ fi
 # ── 5. Service logs (last 20 lines each) ────────────────────────────────────
 hdr "Recent logs (last 20 lines per service)"
 echo "--- position-stocks-service ---"
-docker logs --tail 20 position-stocks-service 2>/dev/null \
+docker logs --tail 20 stockky-v2-position-stocks-service-1 2>/dev/null \
+  || docker logs --tail 20 position-stocks-service 2>/dev/null \
   || docker logs --tail 20 stockky-position-stocks-service-1 2>/dev/null \
   || warn "Could not fetch position-stocks logs (check container name with: docker ps)"
 echo "--- real-trade-service ---"
-docker logs --tail 20 real-trade-service 2>/dev/null \
+docker logs --tail 20 stockky-v2-real-trade-service-1 2>/dev/null \
+  || docker logs --tail 20 real-trade-service 2>/dev/null \
   || docker logs --tail 20 stockky-real-trade-service-1 2>/dev/null \
   || warn "Could not fetch real-trade logs (check container name with: docker ps)"
 
 hdr "Done"
 echo "Tip: tail live logs with:"
-echo "  docker logs -f position-stocks-service"
-echo "  docker logs -f real-trade-service"
+echo "  docker logs -f stockky-v2-position-stocks-service-1"
+echo "  docker logs -f stockky-v2-real-trade-service-1"
 echo ""
 echo "Check frontend build issues with:"
-echo "  docker logs stockky-frontend-1 2>&1 | tail -30"
+echo "  docker logs stockky-v2-frontend-1 2>&1 | tail -30"
 echo ""
 echo "Restart a service without full redeploy:"
 echo "  docker compose restart position-stocks-service"

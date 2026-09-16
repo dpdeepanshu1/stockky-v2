@@ -286,6 +286,56 @@ def _get_exit_lock(mode: str) -> threading.Lock:
         return _exit_mode_locks[mode]
 
 
+# BUG FIX (session47 follow-up — "Positions tab permanently shows 'exit-side
+# operation already in progress'"): splitting the lock (above) assumed the
+# exit-side critical section was uniformly brief ("seconds"). That's true
+# for exit_evaluate() itself (checks live price against stop/target using
+# data already in the DB/tick cache — no broker round trip needed to
+# DECIDE), but reconcile_real_orders() is NOT brief: unconditionally, every
+# single call, it does import_broker_holdings() + holdings_sync_reconcile()
+# (both real Dhan API calls) plus, whenever there's a pending order,
+# dhan_client.get_order_list() — 2-3 real network round trips, easily
+# several seconds with a non-trivial order book (the reported account had
+# 118 orders / 7 open positions). The fast-exit tick now calls
+# reconcile_real_orders() every EXIT_CHECK_INTERVAL_SECONDS (5-10s) *and*
+# main.py's self-heal path tries to call it on every single GET
+# /positions|/orders poll — so the exit lock ended up busy almost
+# continuously, starving the manual Reconcile/Close/Cancel buttons exactly
+# as reported (they got 409 "already in progress" nearly every click).
+#
+# Fix: reconcile_real_orders() itself doesn't need to run on the same tight
+# cadence as exit_evaluate() — fills don't need sub-10-second confirmation,
+# only "prompt". Throttle it to at most once per
+# REAL_RECONCILE_MIN_INTERVAL_SECONDS across ALL automatic callers (the fast
+# tick and the self-heal path share this same throttle), while leaving
+# exit_evaluate() itself running on the full fast cadence, and leaving the
+# manual Reconcile button and every full cycle's own reconcile stage
+# UNTHROTTLED (explicit user action / the authoritative periodic pass must
+# always actually run) — they just also update the shared timestamp so nothing
+# double-fires right after.
+REAL_RECONCILE_MIN_INTERVAL_SECONDS = max(
+    10, int(_os.getenv("REAL_RECONCILE_MIN_INTERVAL_SECONDS", "20"))
+)
+_last_real_reconcile_at: dict = {}  # mode -> aware datetime of last reconcile_real_orders() call (any caller)
+
+
+def _reconcile_due(mode: str) -> bool:
+    """True if an automatic caller (fast tick / self-heal) should run
+    reconcile_real_orders() now. Manual/full-cycle callers should NOT gate
+    on this — they always run, then call _mark_reconciled()."""
+    last = _last_real_reconcile_at.get(mode)
+    if last is None:
+        return True
+    return (datetime.now(timezone.utc) - last) >= timedelta(seconds=REAL_RECONCILE_MIN_INTERVAL_SECONDS)
+
+
+def _mark_reconciled(mode: str) -> None:
+    """Call after ANY caller (automatic or manual) actually runs
+    reconcile_real_orders(), so the throttle above reflects reality
+    regardless of who triggered it."""
+    _last_real_reconcile_at[mode] = datetime.now(timezone.utc)
+
+
 def _run_coro_in_new_loop(coro_func, *args) -> None:
     """Run coro_func(*args) to completion on a brand-new event loop, scoped
     entirely to the CURRENT thread. Must only ever be invoked via
@@ -394,9 +444,10 @@ async def _exit_only_tick_body(mode: str) -> None:
             return
         from exit_engine.exit import evaluate_mode as exit_evaluate
         exit_result = await exit_evaluate(db, mode)
-        if mode == "REAL":
+        if mode == "REAL" and _reconcile_due(mode):
             from execution.reconcile import reconcile_real_orders
             await reconcile_real_orders(db)
+            _mark_reconciled(mode)
         # Notify only if something actually happened (no heartbeat on fast tick)
         exit_ = exit_result or {}
         if any([

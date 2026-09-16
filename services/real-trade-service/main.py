@@ -1342,20 +1342,34 @@ async def _self_heal_orders(db: Session, mode: str) -> None:
             # calling reconcile does: it no longer skips for minutes behind
             # an unrelated slow entry cycle, only behind another brief
             # exit-side operation.
-            from execution.auto_pilot import _get_exit_lock
+            #
+            # BUG FIX (session47 follow-up): this path fires on every
+            # single GET /positions|/orders poll — reconcile_real_orders()
+            # is NOT cheap (2-3 real Dhan API calls every time, see
+            # REAL_RECONCILE_MIN_INTERVAL_SECONDS's comment in
+            # execution/auto_pilot.py) — calling it unconditionally on every
+            # poll, on top of the fast-exit tick already doing the same
+            # every 5-10s, kept the exit lock busy almost continuously and
+            # starved the manual Close/Reconcile/Cancel buttons with
+            # constant 409s. Now gated by the same shared throttle the fast
+            # tick uses, so a poll only actually triggers a reconcile pass
+            # if one hasn't run recently via ANY path.
+            from execution.auto_pilot import _get_exit_lock, _reconcile_due, _mark_reconciled
             from execution.reconcile import reconcile_real_orders
-            lock = _get_exit_lock(mode)
-            if lock.acquire(blocking=False):
-                try:
-                    await reconcile_real_orders(db)
-                finally:
-                    lock.release()
-            else:
-                logger.info(
-                    "self-heal (%s) skipped this pass — a cycle is already in "
-                    "progress and holds the reconcile lock; next read retries.",
-                    mode,
-                )
+            if _reconcile_due(mode):
+                lock = _get_exit_lock(mode)
+                if lock.acquire(blocking=False):
+                    try:
+                        await reconcile_real_orders(db)
+                        _mark_reconciled(mode)
+                    finally:
+                        lock.release()
+                else:
+                    logger.info(
+                        "self-heal (%s) skipped this pass — a cycle is already in "
+                        "progress and holds the reconcile lock; next read retries.",
+                        mode,
+                    )
     except Exception as e:  # noqa: BLE001
         logger.warning("self-heal (%s) failed, returning state as-is: %s", mode, e)
 
@@ -1909,6 +1923,8 @@ async def manual_reconcile(mode: str, admin: Optional[str] = Depends(require_adm
             return _asyncio.run(reconcile_real_orders(db))
 
         result = await _asyncio.to_thread(_run_reconcile_sync)
+        from execution.auto_pilot import _mark_reconciled
+        _mark_reconciled(mode)  # see auto_pilot.py's REAL_RECONCILE_MIN_INTERVAL_SECONDS comment
     finally:
         lock.release()
     return {"ok": True, "mode": mode, **result}

@@ -223,8 +223,10 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
         if mode == "REAL":
             _stage("reconcile")
             from execution.reconcile import reconcile_real_orders
+            from execution.auto_pilot import _mark_reconciled
             reconcile_result = await reconcile_real_orders(db)
             fills = reconcile_result["entries_filled"]  # REAL "fills" only ever means broker-confirmed, never sent-only
+            _mark_reconciled(mode)  # see auto_pilot.py's REAL_RECONCILE_MIN_INTERVAL_SECONDS comment
     finally:
         exit_lock.release()
 

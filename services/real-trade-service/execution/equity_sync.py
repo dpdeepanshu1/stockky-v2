@@ -33,6 +33,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+import config
 from execution import dhan_client
 from portfolio.portfolio import _open_positions_market_value, get_account
 
@@ -121,8 +122,20 @@ def sync_real_equity(db: Session) -> Optional[float]:
 
     account = get_account(db, "REAL")
     market_value = _open_positions_market_value(db, "REAL")
-    account.cash_available = round(balance, 2)
-    account.current_equity = round(balance + market_value, 2)
+
+    # CAPITAL-SPLIT FIX (session52): `balance` above is Dhan's FULL, real
+    # available cash for the shared account — until now this service spent
+    # every rupee of it as if position-stocks-service didn't exist. Keep the
+    # raw figure (broker_cash_available) for risk_engine's total-exposure
+    # check, but this service's own spendable cash/equity are now capped at
+    # its configured share (config.CAPITAL_SHARE_PCT, default 50%) — the
+    # exact same "% of Dhan's current available balance" math position-
+    # stocks-service's capital/ledger.py already applies on its side. See
+    # config.py's CAPITAL_SHARE_PCT comment for the full incident writeup.
+    account.broker_cash_available = round(balance, 2)
+    capped_cash = balance * (config.CAPITAL_SHARE_PCT / 100.0)
+    account.cash_available = round(capped_cash, 2)
+    account.current_equity = round(capped_cash + market_value, 2)
     if not account.starting_capital:
         # First successful sync only — gives max_daily_loss_pct a stable
         # reference point. Never overwritten again here, so a same-day

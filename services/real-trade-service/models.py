@@ -104,6 +104,15 @@ class TradeAccount(Base):
     starting_capital = Column(Float, nullable=False, default=100000.0)
     current_equity = Column(Float, nullable=False, default=100000.0)
     cash_available = Column(Float, nullable=False, default=100000.0)
+    # ADDED (session52, capital-split fix): cash_available above is now
+    # THIS service's capped share (config.CAPITAL_SHARE_PCT, default 50%)
+    # of Dhan's real available balance — see execution/equity_sync.py.
+    # broker_cash_available keeps the RAW, uncapped figure Dhan actually
+    # reported, so risk_engine's new "capital_share_cap" check can compute
+    # the shared account's true total (broker_cash_available + this
+    # service's own open-position market value) without reverse-deriving
+    # it from an already-halved number.
+    broker_cash_available = Column(Float, nullable=False, default=0.0)
     realized_pnl_today = Column(Float, nullable=False, default=0.0)
     realized_pnl_total = Column(Float, nullable=False, default=0.0)
     created_at = Column(DateTime, nullable=False, default=_now)

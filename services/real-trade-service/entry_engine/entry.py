@@ -359,6 +359,18 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
         trading_globally_paused=not gate_armed,
         market_is_open=is_market_open_ist(),
         cash_available=max(0.0, account.cash_available - reserved_cash),
+        # ADDED (session52, capital-split fix) — feeds risk_engine's new
+        # capital_share_cap check. account.broker_cash_available is only
+        # ever synced for REAL (see execution/equity_sync.py); for DEMO it
+        # stays 0.0, which correctly no-ops that check (DEMO doesn't share
+        # a real Dhan account with position-stocks-service, so there's
+        # nothing to split). open_positions_market_value reuses the exact
+        # same avg_entry_price*qty_open formula as portfolio.py's
+        # _open_positions_market_value() — computed inline here since
+        # `positions` (held_exposure_positions) is already fetched above,
+        # avoiding a second DB round trip for the same data.
+        broker_cash_available=account.broker_cash_available,
+        open_positions_market_value=sum(p.avg_entry_price * p.qty_open for p in positions),
     )
 
 

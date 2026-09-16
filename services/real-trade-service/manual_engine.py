@@ -120,6 +120,20 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
         # risk-policy gate, so it isn't the kind of "never block an exit"
         # check the SELL-bypass design principle is protecting against.
         market_is_open=is_market_open_ist(),
+        # BUG FIX (session52, found while wiring the capital-share cap
+        # below): this AccountState never set cash_available at all, so it
+        # silently used the dataclass default of 0.0 — which means
+        # risk_engine's existing check 5b (cash_available_cap) rejected
+        # EVERY manual REAL BUY confirmation unconditionally (order_cost
+        # for any real order is always > 0.0). Wiring the real value in,
+        # same as entry_engine/entry.py's own _account_state already does.
+        cash_available=account.cash_available,
+        # ADDED (session52, capital-split fix) — see entry_engine/entry.py's
+        # _account_state for the full reasoning; identical wiring here so a
+        # manual BUY ticket is held to the exact same shared-account split
+        # as an automatic one.
+        broker_cash_available=account.broker_cash_available,
+        open_positions_market_value=sum(p.avg_entry_price * p.qty_open for p in positions),
     )
 
 

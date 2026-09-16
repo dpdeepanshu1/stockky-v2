@@ -583,3 +583,23 @@ ADAPTIVE_STALE_THRESHOLD_DAYS = int(os.getenv("ADAPTIVE_STALE_THRESHOLD_DAYS", "
 # shared with position-stocks-service via the same Dhan account and the
 # same physical DB; see execution/shared_order_budget.py) ────────────────────
 SHARED_DAILY_ORDER_BUDGET = int(os.getenv("SHARED_DAILY_ORDER_BUDGET", "5000"))
+
+# ── Cross-service capital split (session52 fix) ───────────────────────────────
+# This service and position-stocks-service share ONE real Dhan account.
+# position-stocks-service has always enforced its own half in software
+# (capital/ledger.py: SCALP_POOL_CAPITAL_SHARE_PCT, default 50.0) — but until
+# now nothing on THIS side ever reserved the matching half, so equity_sync.py
+# sized every REAL trade off the account's FULL, uncapped Dhan balance.
+# Confirmed live (2026-09-16): this service held ~93.5% of total shared
+# account equity across 9 open positions, leaving position-stocks-service's
+# ledger starved down to a ₹52 allocation (it only ever gets 50% of whatever
+# cash THIS service hasn't already grabbed).
+#
+# CAPITAL_SHARE_PCT is this service's own half of the shared account. It is
+# a separate env var from position-stocks-service's SCALP_POOL_CAPITAL_
+# SHARE_PCT (the two services don't share Python config) — if you change
+# one, change the other to match so they keep summing to (at most) 100.
+# See execution/equity_sync.py (caps cash_available/current_equity) and
+# risk_engine/engine.py's new "capital_share_cap" check (caps this
+# service's TOTAL exposure — cash + open positions — not just new cash).
+CAPITAL_SHARE_PCT = float(os.getenv("REAL_TRADE_CAPITAL_SHARE_PCT", "50.0"))

@@ -428,6 +428,28 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
         return _finalize()
     _stage("gate_checks", "Gate Checks", _t, detail="service_enabled + armed + before EOD — cleared to screen")
 
+    # BUG FIX (session52 audit — "why is the scalp pool always starved of
+    # capital?"): ledger.sync_from_broker() (refreshes total_allocated_
+    # capital/available_capital from Dhan's live balance) was ONLY ever
+    # wired to the manual POST /ledger/sync admin route — never called
+    # automatically. Confirmed live: the pool's numbers were over an hour
+    # stale, computed from an even-thinner cash snapshot than what was
+    # actually free by the time a candidate needed sizing. real-trade-
+    # service already re-syncs its own equity every cycle (see
+    # execution/equity_sync.py's callers) — this brings position-stocks-
+    # service to the same freshness standard. Runs in a worker thread
+    # (dhan_client.get_funds is a blocking network call) — same event-loop-
+    # isolation fix already applied to every other Dhan call in this
+    # function (reconcile_exits, eod_squareoff above).
+    _t = time.perf_counter()
+    try:
+        new_total = await asyncio.to_thread(ledger.sync_from_broker, db)
+        _stage("ledger_sync", "Capital Sync", _t,
+               detail=f"scalp pool synced from Dhan — total_allocated_capital=₹{new_total:.2f}")
+    except Exception as e:
+        logger.error("position-stocks: ledger sync error: %s", e, exc_info=True)
+        _stage("ledger_sync", "Capital Sync", _t, detail=f"Error: {e} — using last-known ledger values")
+
     # Get open symbols to exclude from candidates.
     # BUG FIX (session42 audit): previously only queried status="OPEN".
     # A position in status EXIT_LEGS_REJECTED has a real Dhan holding that

@@ -251,10 +251,14 @@ def _ensure_account_columns(engine, dialect_name: str) -> None:
     if dialect_name == "oracle":
         adds = [
             ("realized_pnl_total", "ALTER TABLE trade_accounts ADD (realized_pnl_total FLOAT DEFAULT 0.0 NOT NULL)"),
+            # ADDED (session52, capital-split fix) — see models.py's comment
+            # on this column for the full reasoning.
+            ("broker_cash_available", "ALTER TABLE trade_accounts ADD (broker_cash_available FLOAT DEFAULT 0.0 NOT NULL)"),
         ]
     else:
         adds = [
             ("realized_pnl_total", "ALTER TABLE trade_accounts ADD COLUMN realized_pnl_total FLOAT DEFAULT 0.0 NOT NULL"),
+            ("broker_cash_available", "ALTER TABLE trade_accounts ADD COLUMN broker_cash_available FLOAT DEFAULT 0.0 NOT NULL"),
         ]
 
     for col_name, sql in adds:

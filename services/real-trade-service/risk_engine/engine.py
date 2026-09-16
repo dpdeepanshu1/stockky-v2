@@ -58,6 +58,14 @@ MAX_POSITION_CONCENTRATION_PCT = float(
 # in the same cleanup (see below). Collapsed to one knob so retuning the
 # floor only ever requires touching one env var.
 MIN_STOCK_PRICE = float(os.getenv("RISK_MIN_STOCK_PRICE", os.getenv("HARD_FLOOR_PRICE", "20.0")))
+# ── Cross-service capital split (session52 fix — see config.py's
+# CAPITAL_SHARE_PCT comment in the main service config for the full
+# incident writeup). Kept as its own os.getenv() constant here, matching
+# this module's existing style of self-contained env-driven caps, rather
+# than importing config.py — avoids a cross-import for one shared number.
+# MUST match config.py's CAPITAL_SHARE_PCT (both default 50.0).
+CAPITAL_SHARE_PCT = float(os.getenv("REAL_TRADE_CAPITAL_SHARE_PCT", "50.0"))
+
 # Maximum per-share price. Stocks above this threshold require a minimum position
 # value (entry_price / stop_pct) that exceeds the per-trade risk budget at the
 # current account size — they will always hit the "1 share exceeds risk cap"
@@ -132,6 +140,15 @@ class AccountState:
     trading_globally_paused:  bool
     market_is_open:           bool
     cash_available:           float = 0.0
+    # ADDED (session52, capital-split fix). Both default to 0.0 so any
+    # AccountState construction site that doesn't populate them (there are
+    # a couple of admin/dry-run-only ones — see entry_engine/entry.py and
+    # manual_engine.py for the live paths that DO set these) fails the new
+    # capital_share_cap check closed (rejects) rather than open — a missing
+    # value must never silently let an order bypass the split, since that's
+    # exactly the bug this whole fix exists to close.
+    broker_cash_available:      float = 0.0  # RAW Dhan free cash (uncapped, whole shared account)
+    open_positions_market_value: float = 0.0  # this service's OWN open-position value
 
 
 @dataclass
@@ -297,6 +314,37 @@ def evaluate(
                 f"@ ₹{intent.entry_price:.2f}/share)."
             )
         order_risk = abs(intent.entry_price - intent.stop_price) * final_qty
+
+    # ── 5b-ii. Capital-share cap (BUY only) — NEW (session52 fix) ─────────────
+    # account.cash_available (check 5b above) already limits how much of
+    # THIS SERVICE's capped cash share a single order can spend — but that
+    # only throttles NEW cash. It does nothing about capital already
+    # deployed: this service can (and, per the 2026-09-16 incident that
+    # prompted this fix, DID) hold ~93.5% of the entire shared Dhan account
+    # in open positions, since nothing ever checked TOTAL exposure against
+    # the account-wide split. This check closes that gap directly: this
+    # service's own open-position value plus the proposed order must not
+    # push its total exposure past CAPITAL_SHARE_PCT of the shared account's
+    # true total (broker_cash_available, the RAW uncapped Dhan free cash,
+    # plus this service's own open-position value). Rejects outright rather
+    # than downsizing — unlike 5b, there is no partial fill that respects
+    # the split once the existing book alone already exceeds the cap; the
+    # correct fix in that state is "close positions", not "buy fewer shares
+    # of a new one on top of an already-over-cap book".
+    if intent.side == "BUY":
+        order_cost = intent.entry_price * final_qty
+        total_shared_account_value = account.broker_cash_available + account.open_positions_market_value
+        share_cap = total_shared_account_value * (CAPITAL_SHARE_PCT / 100.0)
+        projected_exposure = account.open_positions_market_value + order_cost
+        if total_shared_account_value > 0 and projected_exposure > share_cap:
+            return RiskResult(
+                RiskVerdict.REJECTED, "capital_share_cap",
+                f"This service's exposure (₹{account.open_positions_market_value:,.2f} open "
+                f"+ ₹{order_cost:,.2f} proposed = ₹{projected_exposure:,.2f}) would exceed its "
+                f"{CAPITAL_SHARE_PCT:.0f}% share (₹{share_cap:,.2f}) of the shared Dhan account "
+                f"(₹{total_shared_account_value:,.2f} total). The other half is reserved for "
+                "position-stocks-service. Wait for an existing position to close.",
+            )
 
     # ── 5c. Position concentration cap (BUY only) — NEW ──────────────────────
     # Single position capped at MAX_POSITION_CONCENTRATION_PCT of equity.

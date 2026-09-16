@@ -776,6 +776,15 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
         # wired the real value in since it was written — only this
         # endpoint and manual_engine.py still had the placeholder.
         market_is_open=is_market_open_ist(),
+        # BUG FIX (session52, found while wiring the capital-share cap):
+        # this dry-run AccountState never set cash_available either — same
+        # gap as manual_engine.py, meaning a preview here for a BUY always
+        # hit check 5b's "not enough for even 1 share" rejection regardless
+        # of the account's real cash, disagreeing with what the live path
+        # would actually do. Wired to match entry_engine.py/manual_engine.py.
+        cash_available=account_row.cash_available,
+        broker_cash_available=account_row.broker_cash_available,
+        open_positions_market_value=sum(p.avg_entry_price * p.qty_open for p in open_positions),
     )
     intent = OrderIntent(
         mode=mode, symbol=body.symbol.upper(), side=body.side.upper(),

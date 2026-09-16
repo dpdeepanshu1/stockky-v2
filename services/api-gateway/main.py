@@ -3578,7 +3578,18 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
         }, ttl=LAST_FULL_SCAN_TTL)
 
     if not cancelled:
-        _send_scan_notification(
+        # BUG FIX (session 55, event-loop-blocking-I/O audit): _send_scan_notification()
+        # does a blocking _wake_notification_service() httpx.get (up to 5s) plus
+        # one or two blocking httpx.post calls (up to 15s + 20s) — called inline
+        # here, on the event loop, at the end of every full market scan. Since
+        # this coroutine (run_scan_parallel) runs on the same event loop that
+        # serves every other request this process handles, an unresponsive/slow
+        # notification-scheduler-service could stall the whole API for up to ~40s
+        # right after each scan. Same blocking-I/O-on-event-loop bug class as
+        # circuit_breaker.py/rate_limit_monitor.py/batch_worker.py/the two fixes
+        # above in this file — moved off the event loop via asyncio.to_thread.
+        await asyncio.to_thread(
+            _send_scan_notification,
             final_result.get("recommendations", []),
             final_result["verdict"],
             final_result["scanned"],
@@ -8360,17 +8371,27 @@ async def _quote_broadcast_loop():
         except Exception as e:
             logger.debug("quote loop: %s", e)
         # Real-time price alerts (15-min cooldown per rule)
+        # BUG FIX (session 55, event-loop-blocking-I/O audit): evaluate_price_alerts()
+        # does a blocking kv_get() (and, on any trigger, a blocking kv_set() to
+        # persist the cooldown) — same blocking-I/O-on-event-loop class as
+        # circuit_breaker.py/rate_limit_monitor.py/batch_worker.py, but here it
+        # ran unconditionally every 8-20s of this permanent background loop's
+        # lifetime. The httpx.post() notification call below was also
+        # synchronous/blocking (up to its 8s timeout) right on the event loop.
+        # Both moved to asyncio.to_thread so a slow DB or slow notification
+        # service can't stall every other request this process is serving.
         try:
             from data_feed import evaluate_price_alerts
-            triggered = evaluate_price_alerts()
+            triggered = await asyncio.to_thread(evaluate_price_alerts)
             for t in triggered[:5]:
                 try:
-                    _wake_notification_service()
+                    await asyncio.to_thread(_wake_notification_service)
                     msg = (
                         f"⚡ {t.get('symbol')} ₹{t.get('current_price')} "
                         f"({t.get('direction')} target ₹{t.get('target_price')})"
                     )
-                    httpx.post(
+                    await asyncio.to_thread(
+                        httpx.post,
                         f"{NOTIFICATION_URL}/notify",
                         json={"title": f"Price Alert · {t.get('symbol')}", "message": msg, "channel": "all"},
                         timeout=8,
@@ -9752,6 +9773,17 @@ async def data_feed_update_batch(request: Request):
         from data_feed import save_stock_feed
         n = 0
         rejected = 0
+        # BUG FIX (session 55, event-loop-blocking-I/O audit): this loop used
+        # to call save_stock_feed() — a blocking Neon/durable-KV write —
+        # inline, once per symbol, directly on the event loop with no cap on
+        # `feeds` size. Same bug class already found/fixed in
+        # circuit_breaker.py, rate_limit_monitor.py, and batch_worker.py: a
+        # large POST body (this route, unlike /api/feed/update-batch, has no
+        # DATA_FEED_UPDATE_BATCH_MAX cap) could serialize dozens+ blocking DB
+        # round-trips ahead of every other request this process is handling.
+        # Fix: filter/validate inline (cheap, in-memory), then run all the
+        # actual writes concurrently off the event loop via asyncio.to_thread.
+        to_write: list = []
         for sym, row in feeds.items():
             if not isinstance(row, dict):
                 continue
@@ -9763,8 +9795,18 @@ async def data_feed_update_batch(request: Request):
             if _row_price_over_cap(body):
                 rejected += 1
                 continue
-            save_stock_feed(base, body)
-            n += 1
+            to_write.append((base, body))
+
+        if to_write:
+            results = await asyncio.gather(
+                *[asyncio.to_thread(save_stock_feed, base, body) for base, body in to_write],
+                return_exceptions=True,
+            )
+            for (base, _body), res in zip(to_write, results):
+                if isinstance(res, Exception):
+                    logger.warning("data_feed batch write failed for %s: %s", base, res)
+                else:
+                    n += 1
         return {"ok": True, "status": "SUCCESS", "count": n, "rejected_over_cap": rejected}
     except Exception as e:
         logger.exception("data_feed batch failed")

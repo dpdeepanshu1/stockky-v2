@@ -1842,8 +1842,8 @@ def _get_all_known_symbols() -> Set[str]:
         # after SCAN_UNIVERSE_TARGET was raised to 500 meant symbols in slots
         # 301-500 were scanned by the scanner but rejected as unknown by lookup.
         combined.update(_get_all_nse_securities()[:max(300, SCAN_UNIVERSE_TARGET)])
-    except:
-        pass
+    except Exception as e:
+        logger.debug("known-symbols: _get_all_nse_securities lookup failed: %s", e)
     combined.update(_get_nifty_indices())
     combined.update(_load_watchlist())
     combined.update(_load_searched())
@@ -2127,6 +2127,13 @@ async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> t
     cache_key = f"{FUNDAMENTAL_CACHE_PREFIX}{symbol}"
     cached = _redis_get(cache_key)
     if cached and isinstance(cached, dict) and (cached.get("full") or cached.get("metrics") is not None):
+        # Stale-while-revalidate: if we're inside the soft TTL window (close to
+        # hard expiry), kick off a background refresh now so the cache is warm
+        # by the time it actually expires, instead of only ever refreshing
+        # reactively once a request finds the key already gone.
+        if soft_ttl_should_refresh(_redis, cache_key):
+            if try_refresh_lock(_redis, symbol, ttl_sec=5):
+                asyncio.create_task(_background_refresh_fundamental(symbol, client, cache_key))
         if isinstance(cached.get("full"), dict) and cached["full"].get("fundamental_score") is not None:
             return cached["full"], cached.get("fallback", False)
         return cached.get("metrics"), cached.get("fallback", False)
@@ -2140,6 +2147,29 @@ async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> t
                 return cached2["full"], cached2.get("fallback", False)
             return cached2.get("metrics"), cached2.get("fallback", False)
         return None, True
+    try:
+        return await _refresh_fundamental_upstream(symbol, client, cache_key)
+    finally:
+        # Always release, not just on a 200 — otherwise a non-200 upstream
+        # response (or an exception raised before this point) held the lock
+        # for its full 5s TTL and needlessly staled concurrent requests.
+        release_refresh_lock(_redis, symbol)
+
+
+async def _background_refresh_fundamental(symbol: str, client: httpx.AsyncClient, cache_key: str) -> None:
+    """Fire-and-forget stale-while-revalidate wrapper: refreshes upstream then
+    always releases the lock this call acquired, whatever the outcome."""
+    try:
+        await _refresh_fundamental_upstream(symbol, client, cache_key)
+    finally:
+        release_refresh_lock(_redis, symbol)
+
+
+async def _refresh_fundamental_upstream(symbol: str, client: httpx.AsyncClient, cache_key: str) -> tuple[Optional[dict], bool]:
+    """Fetch fundamental data from upstream and write-through to the short
+    Redis cache + Data Feed. Caller is responsible for the refresh-lock
+    lifecycle (acquire before calling; release in a finally so it happens
+    even on a non-200 response or a raised exception)."""
     try:
         resp = await _cb_get(client, "fundamental", f"{FUNDAMENTAL_URL}/analyze/{symbol}", timeout=35)
         if resp.status_code == 200:
@@ -2166,7 +2196,6 @@ async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> t
                 _feed_store().put_symbol(symbol, payload, ttl=DATA_FEED_TTL)
             except Exception as e:
                 logger.debug("data feed write-through fund: %s", e)
-            release_refresh_lock(_redis, symbol)
             if data.get("fundamental_score") is not None:
                 out = dict(data)
                 out["from_data_feed"] = False
@@ -5949,8 +5978,8 @@ def market_trending():
                 "change": change,
                 "change_pct": change_pct,
             })
-        except:
-            pass
+        except Exception as e:
+            logger.debug("trending-stocks: skipping %s after fetch failure: %s", sym, e)
     return {"data": trending_data, "count": len(trending_data)}
 
 # ── IMPROVED /market/indices with IST time ──────────────────────────────

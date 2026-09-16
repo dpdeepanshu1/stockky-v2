@@ -107,6 +107,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 import db as _db
+import pipeline_status
 from auth.admin_auth import (
     require_admin, verify_admin_password, issue_session_token, AdminAuthError,
 )
@@ -282,11 +283,17 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
         "stages": [],       # ordered list of {name, label, duration_ms, detail, ...}
         "total_duration_ms": 0.0,
     }
+    # ADDED (session48 — "no live process shows and no stock name shows"):
+    # mark the live snapshot running the moment a cycle starts, and update
+    # it as each stage completes below (see _stage()) — see
+    # pipeline_status.py's module docstring for the full reasoning.
+    pipeline_status.start(trigger)
 
     def _stage(name: str, label: str, t0: float, **extra) -> None:
         entry = {"name": name, "label": label, "duration_ms": round((time.perf_counter() - t0) * 1000, 1)}
         entry.update(extra)
         summary["stages"].append(entry)
+        pipeline_status.set_stage(name, label, candidates=extra.get("candidates"))
 
     def _finalize() -> dict:
         summary["total_duration_ms"] = round((time.perf_counter() - cycle_started) * 1000, 1)
@@ -311,6 +318,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
             gate.last_cycle_run_at = datetime.now(timezone.utc)
             gate.last_cycle_run_trigger = trigger
             db.commit()
+        pipeline_status.finish(summary)
         return summary
 
     # Reconcile exits first, and unconditionally — a position's TARGET_LEG/
@@ -764,6 +772,16 @@ def logout(admin: str = Depends(require_admin)):
     valid until its short SESSION_IDLE_TIMEOUT_MINUTES expiry either way."""
     logger.info("position-stocks-service: admin logout (%s)", admin)
     return {"status": "logged_out"}
+
+
+@app.get("/pipeline/status")
+def pipeline_status_route():
+    """ADDED (session48): live "what is the current/last cycle doing right
+    now" snapshot — see pipeline_status.py's module docstring. No auth
+    (matches every other GET read route in this file — see
+    _trading_loop()'s docstring for why every read here is deliberately
+    stateless/public)."""
+    return pipeline_status.snapshot()
 
 
 @app.get("/status")

@@ -10,6 +10,7 @@ import {
   getSessionToken, setSessionToken, setSessionExpiredHandler,
   type ScalpStatus, type ScalpPositionRow, type ScalpCandidateRow, type ScalpLedgerState,
   type ScalpTradeHistory, type DhanLiveOrders, type ScalpCycleResult, type DhanAccountStatus,
+  type ScalpPipelineStatus,
   type ScalpCandidateLogRow,
   type ScalpIntradayRestrictedRow,
 } from "../positionStocksApi";
@@ -250,6 +251,60 @@ function RunCycleResultPanel({ result }: { result: ScalpCycleResult }) {
   );
 }
 
+// ADDED (session48 — "no live process shows and no stock name shows"):
+// live counterpart to RunCycleResultPanel above. That panel only ever
+// rendered a *completed* cycle's result; this one shows what the
+// background AUTO loop (or an in-flight manual click) is doing right now,
+// fed by the new GET /pipeline/status poll. Most ticks finish in
+// single-digit milliseconds with nothing to catch mid-flight — the "Idle"
+// state below is the common, correct, non-broken case — but a tick that
+// reaches Quality Gate makes real outbound HTTP calls and can run for
+// real seconds, which is exactly when this becomes useful. Unlike
+// real-trade-service's equivalent, quality-gate checks here run
+// concurrently (asyncio.gather, see main.py's _run_cycle) rather than one
+// symbol at a time, so there's no single "currently checking symbol X of
+// N" to show — only the most recently completed stage and, once scan has
+// run, which stock(s) it surfaced.
+function LivePipelineStatus({ live }: { live: ScalpPipelineStatus | null }) {
+  if (!live) {
+    return (
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        <p className="dash-section-title mb-2">Live cycle status</p>
+        <p className="font-display tabular-nums text-[11px] text-mist">Loading…</p>
+      </div>
+    );
+  }
+  return (
+    <div className="bg-graphite border border-slate rounded-2xl p-4 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="dash-section-title">Live cycle status</p>
+        {live.running ? (
+          <span className="font-display tabular-nums text-[10px] text-signal-buy flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-signal-buy animate-pulse" />
+            {live.trigger === "AUTO" ? "Auto-Pilot cycle running" : "Cycle running"}
+          </span>
+        ) : (
+          <span className="font-display tabular-nums text-[10px] text-mist">Idle — no cycle running</span>
+        )}
+      </div>
+      {live.running && (
+        <div className="bg-ink border border-slate rounded-xl p-3 space-y-2">
+          <p className="font-display tabular-nums text-xs text-paper">{live.stage_label || live.stage}</p>
+          {live.candidates.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {live.candidates.map((c, j) => (
+                <span key={j} className="px-1.5 py-0.5 rounded-md bg-graphite border border-slate font-display tabular-nums text-[9px] text-paper">
+                  {c.symbol} <span className="text-mist">{c.window}</span> {c.pct_change >= 0 ? "+" : ""}{c.pct_change}%
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function PositionStocksTab() {
   const [apiUrlInput, setApiUrlInput] = useState(getPositionStocksApiUrl());
   const [status, setStatus] = useState<ScalpStatus | null>(null);
@@ -260,6 +315,10 @@ export default function PositionStocksTab() {
   const [dhanLive, setDhanLive] = useState<DhanLiveOrders | null>(null);
   const [dhanLiveError, setDhanLiveError] = useState<string | null>(null);
   const [lastCycleResult, setLastCycleResult] = useState<ScalpCycleResult | null>(null);
+  // ADDED (session48 — "no live process shows and no stock name shows"):
+  // polled snapshot of the current/last cycle from the new GET
+  // /pipeline/status route (see positionStocksApi.ts + pipeline_status.py).
+  const [pipelineLive, setPipelineLive] = useState<ScalpPipelineStatus | null>(null);
   const [windowFilter, setWindowFilter] = useState<Window | "all">("all");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -430,6 +489,27 @@ export default function PositionStocksTab() {
     const tr = setInterval(() => void loadRealTradeAccount(), 30_000);
     return () => { clearInterval(t); clearInterval(td); clearInterval(ta); clearInterval(tc); clearInterval(tir); clearInterval(tr); };
   }, [loadAll, loadDhanLive, loadDhanAccount, loadCandidateLog, loadRestrictedSymbols, loadRealTradeAccount]);
+
+  // ADDED (session48 — "no live process shows and no stock name shows"):
+  // polls GET /pipeline/status every 2s while the Pipeline subtab is open,
+  // same cadence/pattern as real-trade-service's own live pipeline poll.
+  // Stops the moment the tab isn't open, same as every other tab-scoped
+  // poll in this file.
+  useEffect(() => {
+    if (subTab !== "pipeline" || !getPositionStocksApiUrl()) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const p = await positionStocksApi.pipelineStatus();
+        if (!cancelled) setPipelineLive(p);
+      } catch {
+        // best-effort — a failed poll just leaves the last known status showing
+      }
+    };
+    void poll();
+    const id = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [subTab]);
 
   const saveApiUrl = () => { setPositionStocksApiUrl(apiUrlInput); void loadAll(); };
 
@@ -896,6 +976,8 @@ export default function PositionStocksTab() {
           Auto-Pilot off — screener is scanning but won't act automatically. Use "Run Cycle Now" for a manual push.
         </div>
       )}
+
+      <LivePipelineStatus live={pipelineLive} />
 
       {lastCycleResult && <RunCycleResultPanel result={lastCycleResult} />}
 

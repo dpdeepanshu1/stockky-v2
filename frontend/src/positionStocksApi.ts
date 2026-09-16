@@ -243,6 +243,21 @@ export interface ScalpCycleResult {
   stages: ScalpCycleStage[];
 }
 
+// ADDED (session48): shape returned by GET /pipeline/status — see
+// pipeline_status.py's module docstring on the backend for why this
+// didn't exist before.
+export interface ScalpPipelineStatus {
+  running: boolean;
+  trigger: "AUTO" | "MANUAL" | null;
+  started_at: string | null;
+  stage: string | null;
+  stage_label: string | null;
+  stage_started_at: string | null;
+  candidates: ScalpCycleStageCandidate[];
+  last_cycle: ScalpCycleResult | null;
+}
+
+
 export interface ScalpTradeHistorySummary {
   total_trades: number;
   wins: number;
@@ -346,6 +361,10 @@ export const positionStocksApi = {
   logout: () => psRequest<{ status: string }>("/auth/logout", { method: "POST" }, true),
 
   status: () => psRequest<ScalpStatus>("/status"),
+  // ADDED (session48): live "what is the current/last cycle doing right
+  // now" poll — see pipeline_status.py's docstring. No auth, matches every
+  // other GET read route.
+  pipelineStatus: () => psRequest<ScalpPipelineStatus>("/pipeline/status"),
 
   // Every route below that mutates state now requires admin login
   // (backend session 8: auth/admin_auth.py) — requireAuth=true attaches

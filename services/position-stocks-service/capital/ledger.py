@@ -26,6 +26,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import config
@@ -99,7 +100,34 @@ def sync_from_broker(db: Session) -> float:
 
     scalp_alloc = available_balance * (config.SCALP_POOL_CAPITAL_SHARE_PCT / 100.0)
     row = _get_or_create(db)
-    row.total_allocated_capital = scalp_alloc
+
+    # CAPITAL-EROSION FIX (session52 follow-up — "why would the scalp pool
+    # ever go hungry again even after the Option A fix?"): this line used
+    # to unconditionally set total_allocated_capital = scalp_alloc, i.e.
+    # 50% of Dhan's CURRENT FREE CASH, every single sync — including while
+    # this pool already has real money committed to its own open
+    # positions. Placing an order spends Dhan free cash, so the very next
+    # sync would compute a SMALLER scalp_alloc and use it as the new
+    # total_allocated_capital, silently shrinking the pool's risk-sizing
+    # baseline (risk_rupees = total_allocated_capital * RISK_PER_TRADE_PCT
+    # in reserve_capital() below) on every cycle a position stays open —
+    # exactly the same "one side of the split doesn't credit back its own
+    # committed capital" bug already fixed on real-trade-service's side
+    # (see execution/equity_sync.py: current_equity = capped_cash +
+    # market_value, not just capped_cash). Mirrored here: add back what
+    # this pool has ALREADY committed to its own still-open positions
+    # (capital_risked — a cost-basis figure already tracked per position,
+    # no live-LTP dependency needed) so total_allocated_capital reflects
+    # the pool's TRUE 50% share (idle free cash + its own deployed
+    # capital), not just whatever happens to be sitting uncommitted on
+    # Dhan at sync time. Doesn't change anything today (Positions (0) means
+    # own_committed_capital is currently 0) but prevents the pool from
+    # eroding itself the moment it actually starts holding positions.
+    from models import ScalpPosition as _SP  # local to avoid circular import
+    own_committed_capital = db.query(
+        func.coalesce(func.sum(_SP.capital_risked), 0.0)
+    ).filter(_SP.status.in_(("OPEN", "EXIT_LEGS_REJECTED"))).scalar()
+    row.total_allocated_capital = scalp_alloc + own_committed_capital
     # AUDIT FIX: the original condition `if row.available_capital <= 0`
     # only set available_capital on the very first sync (when the ledger
     # row was brand-new or drained to zero). A second sync call with a
@@ -114,7 +142,6 @@ def sync_from_broker(db: Session) -> float:
     # POST /ledger/sync (which calls this) followed by the operator
     # re-checking /ledger and manually triggering /ledger/reset-daily if
     # the numbers look wrong after all positions close.
-    from models import ScalpPosition as _SP  # local to avoid circular import
     # BUG FIX (audit follow-up to session41b/42): only counted status="OPEN".
     # An EXIT_LEGS_REJECTED position still has capital_risked reserved
     # (release_capital() is never called for it — see reconcile.py, it only
@@ -122,20 +149,24 @@ def sync_from_broker(db: Session) -> float:
     # it here meant open_count could read 0 while capital was still actually
     # committed to a stuck position, hard-resetting available_capital to the
     # full allocation and effectively double-spending that reserved capital.
+    # (_SP already imported above for own_committed_capital — reused here.)
     open_count = (
         db.query(_SP)
         .filter(_SP.status.in_(("OPEN", "EXIT_LEGS_REJECTED")))
         .count()
     )
     if open_count == 0:
-        # No open positions: safe to hard-reset available_capital to match
-        # the freshly synced allocation (keeps the two in sync after a
-        # fund balance change).
-        row.available_capital = scalp_alloc
+        # No open positions: own_committed_capital is 0, so total_allocated_
+        # capital == scalp_alloc here anyway — safe to hard-reset
+        # available_capital to match the freshly synced allocation (keeps
+        # the two in sync after a fund balance change).
+        row.available_capital = row.total_allocated_capital
     elif row.available_capital <= 0:
         # Open positions exist but available_capital hit zero — at minimum
-        # reset to the new allocation so the service isn't permanently
-        # locked out of new entries after a zero-drain day.
+        # reset to the freshly synced free-cash slice (own_committed_capital
+        # is already tied up in those positions, not "available") so the
+        # service isn't permanently locked out of new entries after a
+        # zero-drain day.
         row.available_capital = scalp_alloc
     row.last_synced_from_broker_at = datetime.now(timezone.utc)
     db.commit()

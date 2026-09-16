@@ -6,7 +6,39 @@
 
 ---
 
-## Session 47 (this session) — closed what could be closed on the "needs live data" list without guessing
+## Session 52 (this session) — confirmed the capital-split fix + fixed a second, forward-looking capital-erosion bug
+
+Live evidence this session (`/ledger`, `/status/REAL`) confirmed real-trade-service
+had deployed ~93.5% of the shared Dhan account into its own 9 open positions,
+starving position-stocks-service's scalp pool down to ₹52.45 — and that pool's
+own last broker sync was over an hour stale (`sync_from_broker()` was wired only
+to the manual `POST /ledger/sync` admin route, never auto-called). Both root
+causes were fixed as "Option A": real-trade-service's `execution/equity_sync.py`
+now caps its own `cash_available`/`current_equity` at its configured
+`CAPITAL_SHARE_PCT` (default 50%) share of Dhan's raw free cash instead of
+spending the whole account, backed by a real `risk_engine.py` enforcement check
+(`capital_share_cap`, rejects any new BUY that would push total exposure past
+that share of the true shared-account total); position-stocks-service's
+`main.py` now calls `ledger.sync_from_broker()` at the top of every trading
+cycle (worker thread, same event-loop-isolation pattern as its other Dhan
+calls) instead of only on manual trigger.
+
+While verifying that fix held up under repeated cycles, found a second,
+not-yet-triggered bug in `capital/ledger.py`: `sync_from_broker()` was
+unconditionally setting `total_allocated_capital` to 50% of Dhan's *current
+free cash* only — with no credit for capital this pool already has committed
+to its own open positions. Since placing an order spends free cash, the very
+next sync would compute a smaller allocation and use it as the new pool size,
+so the pool would have silently shrunk itself on every cycle a position
+stayed open — the exact same one-sided-split bug session52 just fixed on
+real-trade-service's side, just not yet visible with `Positions (0)`.
+Mirrored the real-trade-service fix here: `total_allocated_capital` now adds
+back `capital_risked` for this pool's own OPEN/EXIT_LEGS_REJECTED positions,
+so the pool's true 50% share (idle free cash + its own deployed capital)
+stays stable regardless of how many of its own positions are currently open.
+`py_compile` + `pyflakes` clean on the touched file.
+
+## Session 47 — closed what could be closed on the "needs live data" list without guessing
 
 Went back through the four items flagged last session as needing live
 data. One resolved outright by code inspection: the `emergency_gap_down`

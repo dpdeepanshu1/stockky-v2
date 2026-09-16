@@ -486,6 +486,21 @@ export default function PositionStocksTab() {
     for (const c of filteredCandidates) g[c.window]?.push(c);
     return g;
   }, [filteredCandidates]);
+  // BUG FIX (this session — "window tabs / refresh button don't do
+  // anything on the Screener tab"): the 1m/5m/15m/60m/ALL buttons above
+  // only ever filtered the "Live Screener" section (grouped/filteredCandidates,
+  // which reads `candidates` from GET /candidates — empty whenever nothing
+  // has cleared the quality gate recently, as in the reported screenshots).
+  // The "Candidate Log — Why Entered / Skipped" table right below it always
+  // rendered the full unfiltered `candidateLog` (GET /candidates/log)
+  // regardless of which window tab was selected, so with the top section
+  // empty, that table was the only visible content and it never changed no
+  // matter which tab was clicked or how many times Refresh was pressed —
+  // exactly the "window not switching" / "refresh not working" symptom.
+  const filteredCandidateLog = useMemo(
+    () => windowFilter === "all" ? candidateLog : candidateLog.filter(c => c.window_source === windowFilter),
+    [candidateLog, windowFilter]
+  );
 
   if (!getPositionStocksApiUrl()) {
     return (
@@ -1082,8 +1097,10 @@ export default function PositionStocksTab() {
         </div>
         {candidateLogError ? (
           <p className="font-display tabular-nums text-[11px] text-signal-sell">{candidateLogError}</p>
-        ) : candidateLog.length === 0 ? (
-          <p className="font-display tabular-nums text-xs text-mist">No candidates logged yet this session.</p>
+        ) : filteredCandidateLog.length === 0 ? (
+          <p className="font-display tabular-nums text-xs text-mist">
+            {windowFilter === "all" ? "No candidates logged yet this session." : `No ${windowFilter} candidates logged yet this session.`}
+          </p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-[11px] font-display tabular-nums">
@@ -1103,7 +1120,7 @@ export default function PositionStocksTab() {
                 </tr>
               </thead>
               <tbody>
-                {candidateLog.map(c => (
+                {filteredCandidateLog.map(c => (
                   <tr key={c.id} className="border-b border-slate/50">
                     <td className="py-1 pr-3 text-paper font-bold">{c.symbol}</td>
                     <td className="py-1 pr-3 text-mist">{c.window_source}</td>

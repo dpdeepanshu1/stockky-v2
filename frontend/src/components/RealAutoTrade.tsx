@@ -1019,6 +1019,27 @@ export default function RealAutoTrade() {
     return () => { cancelled = true; clearInterval(id); };
   }, [activeTab, mode, loggedIn]);
 
+  // BUG FIX (this session — "refresh button not working"/positions tab
+  // looks frozen): unlike the Pipeline (2s) and Watchlist (5s) tabs above,
+  // the Positions tab had NO polling loop at all — it only ever loaded once
+  // on mode/login change, relying entirely on the manual ↻ click for any
+  // update. Combined with the actionMsg banner bug fixed above, a position
+  // whose price/P&L was moving live still looked completely static unless
+  // the user kept clicking refresh by hand. Poll every 10s while the tab is
+  // open, same "stop the moment it isn't" pattern as the other two tabs.
+  useEffect(() => {
+    if (activeTab !== "positions" || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn && !status?.armed)) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const [p, o] = await Promise.all([realTradeApi.positions(mode), realTradeApi.orders(mode, 2)]);
+        if (!cancelled) { setPositions(p); setOrders(o); }
+      } catch { /* best-effort */ }
+    };
+    const id = setInterval(poll, 10_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [activeTab, mode, loggedIn]);
+
   const saveApiUrl = () => { setRealTradeApiUrl(apiUrlInput); void loadStatus(mode); };
 
   const doLogin = async () => {
@@ -1936,7 +1957,20 @@ export default function RealAutoTrade() {
                       {actionBusy === "reconcile" ? "Checking…" : "🔄 Reconcile"}
                     </button>
                   )}
-                  <button onClick={() => void loadPositionsAndOrders(mode)}
+                  {/* BUG FIX (this session — "banner permanently stuck,
+                      refresh button feels broken"): this ↻ button always
+                      fetched fresh positions/orders correctly, but never
+                      touched `actionMsg` — the 409 "exit-side operation
+                      already in progress" text set by a single earlier
+                      Close/Cancel/Reconcile click had no dismiss button and
+                      was only ever cleared at the START of the next such
+                      action (see doClosePosition/doCancelOrder/doReconcile
+                      above). So one transient 409 left the red banner
+                      showing forever, and every click of ↻ silently updated
+                      the list underneath it while the frozen banner made it
+                      look like nothing had happened. Clearing it here makes
+                      refresh visibly do something again. */}
+                  <button onClick={() => { setActionMsg(null); void loadPositionsAndOrders(mode); }}
                     className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-ink border border-slate text-mist">
                     ↻
                   </button>
@@ -1944,8 +1978,15 @@ export default function RealAutoTrade() {
               </div>
 
               {actionMsg && (
-                <div className={`px-3 py-2 rounded-xl border font-display tabular-nums text-xs ${actionMsg.ok ? "bg-signal-buy/5 border-signal-buy/20 text-signal-buy" : "bg-signal-sell/5 border-signal-sell/20 text-signal-sell"}`}>
-                  {actionMsg.text}
+                <div className={`px-3 py-2 rounded-xl border font-display tabular-nums text-xs flex items-center justify-between gap-3 ${actionMsg.ok ? "bg-signal-buy/5 border-signal-buy/20 text-signal-buy" : "bg-signal-sell/5 border-signal-sell/20 text-signal-sell"}`}>
+                  <span>{actionMsg.text}</span>
+                  {/* BUG FIX (this session): no dismiss control existed on
+                      this banner at all — unlike the top-level `error`
+                      banner (which has always had a ✕), a failed
+                      Close/Cancel/Reconcile left this stuck on screen with
+                      no way to clear it short of triggering another one of
+                      those three actions. */}
+                  <button onClick={() => setActionMsg(null)} className="flex-shrink-0 opacity-70 hover:opacity-100">✕</button>
                 </div>
               )}
 

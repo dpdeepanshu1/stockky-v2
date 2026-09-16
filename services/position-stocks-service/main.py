@@ -290,6 +290,27 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
 
     def _finalize() -> dict:
         summary["total_duration_ms"] = round((time.perf_counter() - cycle_started) * 1000, 1)
+        # BUG FIX (this session — "Auto-Pilot ON but Last automatic/manual
+        # run shows ~22 hours old, dashboard looks completely dead"):
+        # gate.last_cycle_run_at/last_cycle_run_trigger were previously only
+        # written at the very bottom of this function, on the single
+        # full-success path (screening ran, quality-gated, entry attempted
+        # either way). Every earlier return — SERVICE_DISABLED, NOT_ARMED,
+        # PAST_EOD_TIME, BEFORE_ENTRY_WINDOW, PAST_ENTRY_CUTOFF,
+        # ALL_CANDIDATES_INTRADAY_RESTRICTED, AUTO_PILOT_OFF, or simply "no
+        # candidates cleared screening this tick" — skipped it entirely.
+        # "No candidates this tick" is the overwhelming common case in a
+        # quiet market, so _trading_loop() could be correctly ticking every
+        # _SCAN_INTERVAL_S all day and the dashboard would still show a
+        # stale timestamp from whenever a candidate last happened to make it
+        # all the way through screening — exactly what was reported. Update
+        # on every call to _finalize() (i.e. every single cycle, AUTO or
+        # MANUAL, regardless of where it stopped) so "Last automatic/manual
+        # run" always reflects that the loop is actually alive.
+        if gate is not None:
+            gate.last_cycle_run_at = datetime.now(timezone.utc)
+            gate.last_cycle_run_trigger = trigger
+            db.commit()
         return summary
 
     # Reconcile exits first, and unconditionally — a position's TARGET_LEG/
@@ -566,9 +587,8 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
         _stage("entry_attempt", "Entry Attempt", time.perf_counter(),
                detail="No candidate cleared the Quality Gate this cycle — nothing to enter")
 
-    gate.last_cycle_run_at = datetime.now(timezone.utc)
-    gate.last_cycle_run_trigger = trigger
-    db.commit()
+    # last_cycle_run_at/trigger are now written inside _finalize() itself
+    # (see its definition above) so every early-return path updates it too.
     return _finalize()
 
 

@@ -97,7 +97,7 @@ async def run_in_batches(
         total, batch_size, batch_count, bool(cache_get),
     )
 
-    def _accept(item: T, result: R) -> None:
+    async def _accept(item: T, result: R) -> None:
         err = classify_result(result) if classify_result else None
         if err is not None:
             out.errors.append(err)
@@ -105,7 +105,13 @@ async def run_in_batches(
             out.results.append(result)
             if cache_set is not None:
                 try:
-                    cache_set(item, result)
+                    # cache_set callbacks (e.g. kv_cache's durable-prefix path)
+                    # can do a blocking Neon/Postgres round-trip. Off-load to a
+                    # worker thread so a scan never stalls the event loop —
+                    # same bug class as the sync-call sites already fixed
+                    # elsewhere in this codebase (ws_client.py,
+                    # angelone_session.py, circuit_breaker.py).
+                    await asyncio.to_thread(cache_set, item, result)
                 except Exception as e:
                     logger.debug("cache_set failed: %s", e)
 
@@ -119,14 +125,25 @@ async def run_in_batches(
         to_fetch: List[T] = []
 
         # ── Split batch: cache hit vs miss ──
-        for item in chunk:
-            hit = None
-            if cache_get is not None:
-                try:
-                    hit = cache_get(item)
-                except Exception as e:
-                    logger.debug("cache_get failed: %s", e)
-                    hit = None
+        # cache_get callbacks may hit a durable store (blocking DB round-trip
+        # on a memory-cache miss) — run every lookup in the chunk concurrently
+        # on worker threads instead of calling cache_get(item) inline, which
+        # would serialize a blocking call per item directly on the event loop
+        # before a single worker task even starts.
+        if cache_get is not None:
+            hits = await asyncio.gather(
+                *(asyncio.to_thread(cache_get, item) for item in chunk),
+                return_exceptions=True,
+            )
+        else:
+            hits = [None] * len(chunk)
+
+        for item, hit in zip(chunk, hits):
+            if isinstance(hit, BaseException):
+                if not isinstance(hit, Exception):
+                    raise hit
+                logger.debug("cache_get failed: %s", hit)
+                hit = None
             if hit is not None:
                 cached_pairs.append((item, hit))
                 out.cache_hits += 1
@@ -137,7 +154,7 @@ async def run_in_batches(
         # Apply cached results first (preserve progress feedback)
         for item, result in cached_pairs:
             out.processed += 1
-            _accept(item, result)
+            await _accept(item, result)
 
         tasks: List[asyncio.Task] = []
         if to_fetch:
@@ -161,7 +178,7 @@ async def run_in_batches(
                         })
                     logger.error("batch item failed %s: %s", item, result)
                     continue
-                _accept(item, result)
+                await _accept(item, result)
 
         elapsed = time.time() - t0
         progress = BatchProgress(

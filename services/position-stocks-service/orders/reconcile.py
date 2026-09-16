@@ -519,6 +519,56 @@ def run_exit_reconciliation(db: Session) -> int:
         elif stop_leg and str(stop_leg.get("orderStatus", "")).upper() in _FILLED_STATUSES:
             hit_leg, hit_kind = stop_leg, "STOP_HIT"
 
+        # 2026-09-15 fix (session41b — DATAMATICS/ZENSARTECH rejection storm):
+        # When BOTH exit legs (TARGET_LEG and STOP_LOSS_LEG) are REJECTED by
+        # Dhan — circuit-limit, surveillance restriction, or similar — the
+        # super order can never self-exit.  Previously this was invisible:
+        # hit_kind stayed None, the position stayed OPEN, and EOD squareoff
+        # fired 60+ identical MARKET SELL orders that also rejected (same
+        # underlying cause) producing the spam we saw in the live order book.
+        #
+        # Detection: if neither leg filled AND at least one exit leg exists
+        # AND its status is REJECTED/CANCELLED, mark the position as
+        # EXIT_LEGS_REJECTED so:
+        #   a) EOD squareoff knows to attempt a plain MARKET SELL once (not
+        #      loop forever) and then give up gracefully.
+        #   b) The dashboard shows the real state instead of "OPEN" forever.
+        #
+        # We only do this for positions in status OPEN (not EOD_SQUAREOFF /
+        # already-handled paths above) to avoid double-processing.
+        if hit_kind is None and pos.status == "OPEN":
+            _DEAD_LEG_STATUSES = ("REJECTED", "CANCELLED", "EXPIRED")
+            target_dead = (
+                target_leg is not None
+                and str(target_leg.get("orderStatus", "")).upper() in _DEAD_LEG_STATUSES
+            )
+            stop_dead = (
+                stop_leg is not None
+                and str(stop_leg.get("orderStatus", "")).upper() in _DEAD_LEG_STATUSES
+            )
+            if target_dead or stop_dead:
+                dead_status = (
+                    str(target_leg.get("orderStatus", "?")).upper() if target_dead
+                    else str(stop_leg.get("orderStatus", "?")).upper()
+                )
+                logger.warning(
+                    "reconcile: %s (id=%d) super-order exit leg(s) REJECTED/CANCELLED "
+                    "(%s) — position cannot self-exit via super order. "
+                    "Marking EXIT_LEGS_REJECTED so EOD squareoff fires a single "
+                    "plain MARKET SELL instead of looping.",
+                    pos.symbol, pos.id, dead_status,
+                )
+                pos.status = "EXIT_LEGS_REJECTED"
+                pos.error_message = (
+                    f"Super-order exit leg(s) {dead_status} by Dhan "
+                    f"(circuit-limit or surveillance). EOD squareoff will attempt a "
+                    f"plain MARKET SELL once."
+                )
+                db.commit()
+                # Fall through — hit_kind is still None, the regular OPEN
+                # handling below will `continue` for this position, and EOD
+                # squareoff will pick it up next time via status="EXIT_LEGS_REJECTED".
+
         if hit_kind is None:
             # AUDIT FIX (EOD reconcile path): EOD_SQUAREOFF positions used
             # a plain dhan_client.place_order (MARKET SELL), not a super

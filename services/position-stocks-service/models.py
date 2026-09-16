@@ -92,7 +92,9 @@ class ScalpPosition(Base):
     dhan_security_id = Column(String(32), nullable=False)
     window_source = Column(String(8), nullable=False)  # "1m" | "5m" | "15m" | "60m"  (AUDIT FIX: "1m" window added 2026-09-12 was missing from comment)
     status = Column(String(24), nullable=False, default="OPEN", index=True)
-    # OPEN, TARGET_HIT, STOP_HIT, EOD_SQUAREOFF, MANUAL_EXIT, ERROR
+    # OPEN, TARGET_HIT, STOP_HIT, EOD_SQUAREOFF, MANUAL_EXIT, ERROR,
+    # EXIT_LEGS_REJECTED (super-order exit legs were rejected by Dhan —
+    # circuit-limit / surveillance; awaiting EOD squareoff plain MARKET SELL)
 
     entry_price = Column(Float, nullable=False)
     quantity = Column(Integer, nullable=False)

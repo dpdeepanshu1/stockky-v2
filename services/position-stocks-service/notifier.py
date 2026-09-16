@@ -22,11 +22,22 @@ env vars.
 
 Deliberately best-effort: a notification failure must NEVER block or
 fail an order path. Every function swallows its own exceptions.
+
+session42 audit: added message deduplication.
+Without it, a rejection storm (DATAMATICS: 60+ SELL rejections) fired
+60+ identical Telegram messages — one per rejection, all the same text.
+The dedup cache keeps a hash of the last N unique messages and their
+send-time. Any message identical to one sent within DEDUP_WINDOW_S is
+dropped silently (the original alert already reached the operator).
+Different messages (different symbol, different error text) always send.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re as _re
+import time
+from collections import OrderedDict
 
 import httpx
 
@@ -36,11 +47,40 @@ logger = logging.getLogger("position-stocks-notifier")
 
 _NOTIFICATION_SERVICE_URL = f"{config.NOTIFICATION_SERVICE_URL}"
 
+# ── Message deduplication ─────────────────────────────────────────────────────
+# Keeps the last _DEDUP_CACHE_SIZE message hashes and when they were sent.
+# Any message with the same hash within DEDUP_WINDOW_S is suppressed.
+_DEDUP_WINDOW_S    = 300   # 5 minutes — one alert per unique message per 5 min
+_DEDUP_CACHE_SIZE  = 64    # max unique messages to track at once
+_dedup_cache: OrderedDict[str, float] = OrderedDict()   # hash → sent_at monotonic
+
+
+def _should_send(text: str) -> bool:
+    """Return True if this message should be sent (not a recent duplicate)."""
+    h = hashlib.md5(text.encode("utf-8", errors="replace")).hexdigest()  # noqa: S324 — non-crypto
+    now = time.monotonic()
+    last = _dedup_cache.get(h)
+    if last is not None and (now - last) < _DEDUP_WINDOW_S:
+        return False   # duplicate within window — suppress
+    # Record / refresh
+    if h in _dedup_cache:
+        _dedup_cache.move_to_end(h)
+    _dedup_cache[h] = now
+    while len(_dedup_cache) > _DEDUP_CACHE_SIZE:
+        _dedup_cache.popitem(last=False)
+    return True
+
 
 def notify_sync(text: str) -> bool:
     """Synchronous, best-effort. Tries notification-scheduler-service
     first (uses the Alert panel's saved Telegram config), falls back to
-    a direct Telegram call using env vars. Never raises."""
+    a direct Telegram call using env vars. Never raises.
+
+    Deduplicates: identical messages within DEDUP_WINDOW_S (5 min) are
+    dropped silently — the original alert already reached the operator."""
+    if not _should_send(text):
+        logger.debug("notifier: duplicate message suppressed within dedup window")
+        return True   # treat as "delivered" — operator was already notified
     try:
         resp = httpx.post(
             f"{_NOTIFICATION_SERVICE_URL}/notify",

@@ -87,6 +87,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -121,6 +122,7 @@ from screening import intraday_eligibility, quality_gate
 from screening.engine import scan
 from tz_utils import (
     ist_today_str, ist_time_at_or_after, is_market_open_ist, parse_hhmm, iso_utc,
+    ist_now,
 )
 
 
@@ -174,6 +176,15 @@ app.add_middleware(
 )
 
 _EOD_SQUAREOFF_TIME = parse_hhmm(config.EOD_SQUAREOFF_TIME_IST, 15, 0)
+
+# session42 audit: two new time gates for entry quality.
+# Before 09:30: first 15 min of NSE session have extreme volatility, wide
+#   spreads, and many false breakouts — tick-buffer data is also too thin
+#   for meaningful range-position or momentum-consistency calculations.
+# After 14:30: less than 30 min to EOD squareoff, not enough time for a
+#   position to reach target before being force-flattened at a loss.
+_NO_ENTRY_BEFORE = parse_hhmm(os.getenv("ENTRY_NO_BEFORE_IST", "09:30"), 9, 30)
+_NO_ENTRY_AFTER  = parse_hhmm(os.getenv("ENTRY_NO_AFTER_IST",  "14:30"), 14, 30)
 _SCAN_INTERVAL_S = 10.0   # run screener every 10 seconds
 _cycle_lock = asyncio.Lock()  # prevents the background loop and a manual
                                # POST /cycle/run from overlapping
@@ -286,12 +297,40 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
         summary["skipped_reason"] = "PAST_EOD_TIME"
         _stage("gate_checks", "Gate Checks", _t, detail="Past EOD squareoff time — no new entries")
         return _finalize()
+
+    # session42 audit: no-entry time windows.
+    # Before 09:30: extreme open volatility, thin tick buffer, false breakouts.
+    # After 14:30: <30 min to EOD — not enough time to reach target before
+    #   being force-flattened, almost guarantees an EOD-squareoff loss.
+    _now_ist = ist_now()
+    _now_hhmm = (_now_ist.hour, _now_ist.minute)
+    _no_before_hhmm = (_NO_ENTRY_BEFORE.tm_hour, _NO_ENTRY_BEFORE.tm_min)
+    _no_after_hhmm  = (_NO_ENTRY_AFTER.tm_hour,  _NO_ENTRY_AFTER.tm_min)
+    if _now_hhmm < _no_before_hhmm:
+        summary["skipped_reason"] = "BEFORE_ENTRY_WINDOW"
+        _stage("gate_checks", "Gate Checks", _t,
+               detail=f"Before {_NO_ENTRY_BEFORE.tm_hour:02d}:{_NO_ENTRY_BEFORE.tm_min:02d} IST — "
+                      "opening volatility window, no new entries")
+        return _finalize()
+    if _now_hhmm >= _no_after_hhmm:
+        summary["skipped_reason"] = "PAST_ENTRY_CUTOFF"
+        _stage("gate_checks", "Gate Checks", _t,
+               detail=f"After {_NO_ENTRY_AFTER.tm_hour:02d}:{_NO_ENTRY_AFTER.tm_min:02d} IST — "
+                      "too close to EOD to enter new positions")
+        return _finalize()
     _stage("gate_checks", "Gate Checks", _t, detail="service_enabled + armed + before EOD — cleared to screen")
 
-    # Get open symbols to exclude from candidates
+    # Get open symbols to exclude from candidates.
+    # BUG FIX (session42 audit): previously only queried status="OPEN".
+    # A position in status EXIT_LEGS_REJECTED has a real Dhan holding that
+    # we can't exit yet (circuit-limit / surveillance) — re-entering the same
+    # symbol would double the exposure in a stock we're already struggling to
+    # exit. Include it in the exclusion set until the position is fully closed.
     open_syms = {
         p.symbol
-        for p in db.query(ScalpPosition).filter_by(status="OPEN").all()
+        for p in db.query(ScalpPosition)
+        .filter(ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED")))
+        .all()
     }
 
     _t = time.perf_counter()

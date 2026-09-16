@@ -69,21 +69,26 @@ def expiry_from(catalyst_ts: datetime, catalyst_type: str) -> datetime:
 EXIT_PROFILES: dict[str, dict] = {
     "short": {
         # ipo, bulk_block, insider, volume_shock — catalyst fades fast.
-        # Tighten trail and time-stop sooner so we lock gains before edge decays.
-        "trail_atr_schedule":    [(1, 2.0), (3, 1.5), (99, 1.0)],
-        "breakeven_atr_trigger": 0.75,   # lock free-ride sooner
-        "max_hold_days":         5,
-        "early_warn_days":       3,
-        "partial_exit_fraction": 0.60,
+        # 2026-09-15 (session42): tightened trail schedule to match the new
+        # module-level TRAIL_ATR_SCHEDULE. Short-horizon trades should protect
+        # gains even more aggressively than the default — breakeven at 0.60×ATR
+        # (was 0.75) and max_hold at 4 days (was 5).
+        "trail_atr_schedule":    [(1, 1.6), (3, 1.2), (99, 0.8)],
+        "breakeven_atr_trigger": 0.60,   # lock free-ride sooner
+        "max_hold_days":         4,
+        "early_warn_days":       2,
+        "partial_exit_fraction": 0.65,   # lock in more at first target
     },
     "mid": {
         # results, board — slower drift, worth more patience.
-        # Give the move room to develop; let more ride in partial exits.
-        "trail_atr_schedule":    [(5, 2.0), (12, 1.5), (99, 1.0)],
-        "breakeven_atr_trigger": 1.0,
-        "max_hold_days":         20,
-        "early_warn_days":       12,
-        "partial_exit_fraction": 0.50,
+        # 2026-09-15 (session42): tightened from (5→2.0, 12→1.5, 99→1.0)
+        # to match the new philosophy. Still looser than "short" but no
+        # longer giving 2×ATR room for 5 full days.
+        "trail_atr_schedule":    [(3, 1.8), (8, 1.3), (99, 0.9)],
+        "breakeven_atr_trigger": 0.90,
+        "max_hold_days":         15,
+        "early_warn_days":       8,
+        "partial_exit_fraction": 0.55,
     },
 }
 

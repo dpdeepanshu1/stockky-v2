@@ -67,6 +67,7 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
                 dhan_client.is_intraday_cutoff_error(err_str)
                 or dhan_client.is_security_intraday_restricted_error(err_str)
                 or dhan_client.is_insufficient_funds_error(err_str)
+                or dhan_client.is_circuit_limit_error(err_str)
             ):
                 # Permanent for today (or permanent, period) — no point
                 # retrying, fail fast so the caller's classification/
@@ -112,7 +113,17 @@ def run_eod_squareoff(db: Session) -> int:
         logger.info("EOD squareoff already fired today (%s) — skipping", today)
         return 0
 
-    open_positions = db.query(ScalpPosition).filter_by(status="OPEN").all()
+    # 2026-09-15 fix (session41b): also pick up EXIT_LEGS_REJECTED positions
+    # (super-order exit legs were rejected — circuit-limit / surveillance).
+    # Those positions cannot self-exit via their super order.  We attempt
+    # ONE plain MARKET SELL here; if it also fails (e.g. stock is frozen at
+    # lower circuit) we log and mark ERROR — we do NOT loop.  The once-per-
+    # day guard (eod_squareoff_fired_date) prevents this from re-running.
+    open_positions = (
+        db.query(ScalpPosition)
+        .filter(ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED")))
+        .all()
+    )
     if not open_positions:
         logger.info("EOD squareoff: no open scalp positions to close")
         gate.eod_squareoff_fired_date = today
@@ -120,7 +131,7 @@ def run_eod_squareoff(db: Session) -> int:
         return 0
 
     logger.warning(
-        "EOD squareoff: closing %d open scalp position(s) at market price",
+        "EOD squareoff: closing %d open/exit-rejected scalp position(s) at market price",
         len(open_positions),
     )
     closed = 0
@@ -255,6 +266,17 @@ def run_eod_squareoff(db: Session) -> int:
                     pos.symbol, pos.id, err_str,
                 )
                 pos.error_message = f"EOD_SQUAREOFF_INSUFFICIENT_FUNDS: {err_str}"
+            elif dhan_client.is_circuit_limit_error(err_str):
+                # 2026-09-15 fix (session41b): stock is at lower circuit —
+                # the SELL price is outside the allowed band.  Cannot fill
+                # today.  Record it; do NOT retry.
+                logger.error(
+                    "EOD squareoff: %s (id=%d) — CIRCUIT_LIMIT: stock may be at "
+                    "lower circuit; SELL price outside band.  Position left OPEN; "
+                    "try a CNC sell tomorrow.  Error: %s",
+                    pos.symbol, pos.id, err_str,
+                )
+                pos.error_message = f"EOD_SQUAREOFF_CIRCUIT_LIMIT: {err_str}"
             else:
                 logger.error(
                     "EOD squareoff: failed to close %s (id=%d): %s",

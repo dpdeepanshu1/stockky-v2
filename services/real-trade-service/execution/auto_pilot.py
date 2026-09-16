@@ -104,7 +104,6 @@ from db import get_session_factory
 from notifier import notify_async
 from tz_utils import (
     is_market_open_ist,
-    ist_now,
     ist_today_str,
     parse_hhmm,
     ist_time_at_or_after,

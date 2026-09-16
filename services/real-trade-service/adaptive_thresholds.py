@@ -34,13 +34,12 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 import config
-from models import Base, MarketRegimeHistory  # MarketRegimeHistory defined in models.py
+from models import MarketRegimeHistory
 
 logger = logging.getLogger("real-trade-adaptive")
 
@@ -216,9 +215,9 @@ def startup_staleness_warning() -> None:
                 f"(set {item['last_reviewed']}, {item['age_days']}d ago)"
             )
         lines.append(
-            f"Re-run market research and update these if the regime has changed. "
-            f"Adaptive gate will self-adjust regardless — this warning is for the "
-            f"non-adaptive constants."
+            "Re-run market research and update these if the regime has changed. "
+            "Adaptive gate will self-adjust regardless — this warning is for the "
+            "non-adaptive constants."
         )
         notify_sync("\n".join(lines))
     except Exception:

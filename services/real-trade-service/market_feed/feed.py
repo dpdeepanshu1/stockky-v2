@@ -37,8 +37,6 @@ from typing import Optional
 
 import httpx
 
-import config
-
 logger = logging.getLogger("real-trade-market-feed")
 
 # Mirrors every other Stockky service's MARKET_DATA_URL env convention
@@ -194,7 +192,6 @@ _ATR_CACHE_KEY   = "market_feed:atr_cache"
 def load_atr_cache_from_db(db) -> None:
     """Call once at startup (from main.py) to warm _ATR_CACHE from the DB.
     Non-fatal — a missing snapshot just means a cold start."""
-    global _ATR_CACHE
     try:
         from resilience.local_cache import load_snapshot
         snap = load_snapshot(db, _ATR_CACHE_KEY)
@@ -335,10 +332,10 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
         quote_task   = asyncio.create_task(
             client.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=8.0)
         )
-        atr_bg_task  = asyncio.create_task(_bg_refresh_atr(client, symbol))
+        asyncio.create_task(_bg_refresh_atr(client, symbol))
 
         r = await quote_task
-        # atr_bg_task runs in the background; we don't await it here.
+        # the ATR refresh task runs in the background; we don't await it here.
 
         if r.status_code != 200:
             return None

@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
 from typing import Optional
 
 import httpx
@@ -49,7 +48,6 @@ _last_run_ts: Optional[float] = None
 
 
 def _due() -> bool:
-    global _last_run_ts
     if _last_run_ts is None:
         return True
     return (time.monotonic() - _last_run_ts) >= REFRESH_INTERVAL_MIN * 60

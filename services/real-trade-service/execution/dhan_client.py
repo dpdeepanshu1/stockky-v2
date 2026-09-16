@@ -29,7 +29,6 @@ from typing import Optional
 import httpx
 from sqlalchemy.orm import Session
 
-import config
 from auth import dhan_credentials
 
 logger = logging.getLogger("real-trade-dhan-client")
@@ -238,7 +237,6 @@ def _load_security_cache(db: Session) -> None:
 
     fresh: dict[str, str] = {}
     try:
-        import pandas as pd
         df = client.fetch_security_list(mode='compact')
         if df is not None and not df.empty:
             for _, row in df.iterrows():
@@ -358,7 +356,6 @@ def _add_security(fresh: dict[str, str], sym: str, sec_id_raw: str) -> None:
 def get_security_id(db: Session, symbol: str) -> str:
     """Returns the Dhan security_id for an NSE-listed symbol. Raises
     SecurityNotResolvedError rather than returning None/guessing."""
-    global _security_cache_loaded_at
     now = time.time()
     if not _security_cache or (now - _security_cache_loaded_at) > _SECURITY_CACHE_TTL_SECONDS:
         _load_security_cache(db)

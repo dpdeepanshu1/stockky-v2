@@ -18,7 +18,7 @@ from typing import Optional
 import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHashError
-from fastapi import Depends, HTTPException, Header
+from fastapi import HTTPException, Header
 
 import config
 

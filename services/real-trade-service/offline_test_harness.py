@@ -313,7 +313,6 @@ async def run(data_dir: Path):
     from watchlist_engine import watchlist as watchlist_mod
     import entry_engine.entry as entry_mod
     from exit_engine import exit as exit_mod
-    from watchlist_engine.decay import CATALYST_PROFILES
 
     # ── Stage 1: watchlist ingestion (REAL sources.py + watchlist.py) ────────
     added = await watchlist_mod.refresh_watchlist(db, MODE)
@@ -325,7 +324,6 @@ async def run(data_dir: Path):
     for r in rows:
         by_type.setdefault(r.catalyst_type, []).append(r.symbol)
     for ctype, syms in by_type.items():
-        tier = {v["horizon_class"] for k, v in CATALYST_PROFILES.items() if k == ctype}
         print(f"    {ctype:14s} ({len(syms):3d} symbols): {', '.join(syms[:8])}{' ...' if len(syms) > 8 else ''}")
 
     if not rows:
@@ -339,7 +337,7 @@ async def run(data_dir: Path):
 
     missed = db.query(models.WatchlistEntry).filter_by(mode=MODE, status="missed").all()
     if missed:
-        print(f"    MISSED (price already ran past entry band, would NOT be bought):")
+        print("    MISSED (price already ran past entry band, would NOT be bought):")
         for r in missed[:10]:
             print(f"      {r.symbol:12s} {r.missed_reason}")
 
@@ -350,12 +348,12 @@ async def run(data_dir: Path):
         .all()
     )
     if queued:
-        print(f"\n    QUEUED for entry (within band, would be evaluated by risk_engine next):")
+        print("\n    QUEUED for entry (within band, would be evaluated by risk_engine next):")
         for c in queued[:15]:
             print(f"      {c.symbol}")
 
     # ── Stage 3: exit-profile lookup (REAL exit_engine.exit) ─────────────────
-    print(f"\n[Stage 3] exit profiles that would apply, by catalyst type:")
+    print("\n[Stage 3] exit profiles that would apply, by catalyst type:")
     seen_horizons = set()
     for row in rows:
         if row.horizon_class in seen_horizons:
@@ -370,7 +368,7 @@ async def run(data_dir: Path):
               f"partial_exit={profile['partial_exit_fraction']:.0%}")
 
     # ── Stage 4: extended / extended_short chase-guard on real 1y candles ───
-    print(f"\n[Stage 4] extended / extended_short flags (real 1y/1d candles):")
+    print("\n[Stage 4] extended / extended_short flags (real 1y/1d candles):")
     hist_dir = data_dir / "history"
     flagged = []
     if hist_dir.exists():

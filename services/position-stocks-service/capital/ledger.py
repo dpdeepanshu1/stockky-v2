@@ -36,6 +36,42 @@ from tz_utils import ist_today_str, iso_utc
 
 logger = logging.getLogger("position-stocks-ledger")
 
+# BUG FIX (session53 — live-diagnosed, 2026-09-16): sync_from_broker() used to
+# check only 2 of Dhan's known available-balance field names ("availabelBalance"
+# — Dhan's own historical typo in the live API, not a typo introduced here —
+# and "availableBalance"). Live evidence: real-trade-service's execution/
+# equity_sync.py checks 5 known field names and successfully resolved a real
+# balance (confirmed live via /status/REAL — cash_available populated) at the
+# exact same time this service's /ledger showed last_synced_from_broker_at
+# stuck over an hour in the past despite cycles running every 10s and reaching
+# the capital-reservation step (proven by fresh INSUFFICIENT_CAPITAL log
+# entries) — meaning Dhan is populating this account's funds response under a
+# key OUTSIDE this narrower 2-key list, so available_balance silently computed
+# to 0 and sync_from_broker() returned early without ever updating
+# total_allocated_capital or the timestamp. This is a different failure mode
+# from the "50/50 split" and "capital erosion" bugs fixed earlier this session
+# — those were about how much capital gets allocated; this one is about the
+# sync never actually happening at all, on any cycle, all day. Mirrors
+# equity_sync.py's exact key list/order/fallback-tracking so both services
+# read Dhan's response the same way.
+_BALANCE_KEYS = (
+    "availabelBalance", "availableBalance", "availableCash",
+    "withdrawableBalance", "sodLimit",
+)
+_last_balance_key: Optional[str] = None
+
+
+def _pick_balance(funds: dict) -> tuple[Optional[float], Optional[str]]:
+    for key in _BALANCE_KEYS:
+        v = funds.get(key)
+        if v is None:
+            continue
+        try:
+            return float(v), key
+        except (TypeError, ValueError):
+            continue
+    return None, None
+
 
 def _get_or_create(db: Session) -> ScalpCapitalLedger:
     row = db.query(ScalpCapitalLedger).filter_by(mode="REAL").first()
@@ -93,10 +129,31 @@ def sync_from_broker(db: Session) -> float:
         logger.error("ledger.sync_from_broker: failed to get funds: %s", e)
         return 0.0
 
-    available_balance = float(funds.get("availabelBalance") or funds.get("availableBalance") or 0.0)
-    if available_balance <= 0:
-        logger.warning("ledger.sync_from_broker: Dhan returned zero/negative available balance")
+    available_balance, matched_key = _pick_balance(funds)
+    if available_balance is None or available_balance <= 0:
+        logger.warning(
+            "ledger.sync_from_broker: no usable available-balance field in "
+            "Dhan funds response (checked %s): %s",
+            _BALANCE_KEYS, funds,
+        )
         return 0.0
+
+    global _last_balance_key
+    if matched_key != _last_balance_key:
+        if _last_balance_key is None:
+            logger.warning(
+                "ledger.sync_from_broker: using Dhan balance field '%s' for "
+                "the scalp pool — verify this reflects a sensible current "
+                "tradeable balance.", matched_key,
+            )
+        else:
+            logger.warning(
+                "ledger.sync_from_broker: Dhan balance field in use changed "
+                "'%s' -> '%s' — the funds response shape shifted; verify the "
+                "new field still reflects a sensible tradeable balance.",
+                _last_balance_key, matched_key,
+            )
+        _last_balance_key = matched_key
 
     scalp_alloc = available_balance * (config.SCALP_POOL_CAPITAL_SHARE_PCT / 100.0)
     row = _get_or_create(db)

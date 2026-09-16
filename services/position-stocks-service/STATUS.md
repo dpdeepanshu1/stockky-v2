@@ -6,7 +6,43 @@
 
 ---
 
-## Session 52 (this session) — confirmed the capital-split fix + fixed a second, forward-looking capital-erosion bug
+## Session 53 (this session) — root-caused why the scalp pool NEVER updated all day, even after session 52's fixes
+
+Ran the diagnostic commands (`/status`, `/ledger`, `/cycle/run`, `/candidates/log`)
+live. `/status` showed everything healthy — armed, service_enabled, auto_pilot,
+market_open all `true`, circuit breaker closed, ws connected, `last_cycle_run_at`
+fresh (cycles running every 10s as expected). But `/ledger`'s
+`last_synced_from_broker_at` was still stuck at `08:29:26` — over an hour
+before that fresh cycle timestamp — even though `/candidates/log` showed fresh
+`INSUFFICIENT_CAPITAL` entries at `08:59`, proving the cycle *did* reach the
+capital-reservation step each time. That combination only makes sense if
+`ledger.sync_from_broker()` was running every cycle but silently no-op'ing.
+
+Root cause: `capital/ledger.py` only checked 2 of Dhan's known
+available-balance field names (`availabelBalance`/`availableBalance`), while
+`real-trade-service/execution/equity_sync.py` checks 5 (also `availableCash`/
+`withdrawableBalance`/`sodLimit`) — and, in the very same diagnostic run,
+real-trade-service's `/status/REAL` was successfully resolving a live balance
+(`cash_available: 4482.3`). That means Dhan is currently populating this
+account's funds response under a key outside position-stocks-service's
+narrower list, so `available_balance` silently computed to `0`, logged a
+warning, and returned early without ever updating `total_allocated_capital`
+or the sync timestamp — on every single cycle, all day, independent of and on
+top of the two capital-split bugs fixed in session 52.
+
+**Fix:** `ledger.py`'s `sync_from_broker()` now mirrors `equity_sync.py`'s
+exact 5-key fallback list (`_BALANCE_KEYS`/`_pick_balance()`), including the
+same matched-key-change warning so a future Dhan response-shape shift is
+visible in the logs instead of silently starving the pool again.
+
+Also confirmed the `PAST_EOD_TIME` result the user hit on a manual `/cycle/run`
+was correct, expected behavior — that request landed at 15:30 IST, after this
+service's hard 3:00 PM IST flat-by policy — not a bug.
+
+`py_compile` + `pyflakes` clean on `capital/ledger.py`. Full writeup:
+`archive/session-notes/CHANGES_2026-09-16_SESSION53_LEDGER_SYNC_KEY_MISMATCH_FIX.md`.
+
+## Session 52 — confirmed the capital-split fix + fixed a second, forward-looking capital-erosion bug
 
 Live evidence this session (`/ledger`, `/status/REAL`) confirmed real-trade-service
 had deployed ~93.5% of the shared Dhan account into its own 9 open positions,

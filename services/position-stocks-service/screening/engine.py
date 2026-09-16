@@ -181,10 +181,17 @@ class Candidate:
         self.window_label = f"{self.window_minutes}m"
 
 
-def scan(open_symbols: Optional[Set[str]] = None) -> List[Candidate]:
+def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False) -> List[Candidate]:
     """Run a full scan across all subscribed symbols and all four windows.
     Returns a list of Candidate objects sorted by composite_score descending.
     open_symbols: set of symbol strings already holding a scalp position.
+    under_preferred: True when open position count is below
+        config.MIN_PREFERRED_SCALP_POSITIONS (see config.py's decision note).
+        Relaxes each window's pct-change RANKING threshold by
+        config.MIN_PREFERRED_THRESHOLD_RELAX_PCT — never touches quality_gate's
+        fundamental/technical/market-cap bar, liquidity floor, spread cap, or
+        any other risk gate. This only changes which candidates get a look;
+        it never lowers what a candidate must clear once looked at.
 
     Composite score = pct_change × volume_weight × range_mult
                                  × consistency_mult × window_conviction_mult
@@ -193,6 +200,20 @@ def scan(open_symbols: Optional[Set[str]] = None) -> List[Candidate]:
     """
     open_symbols = open_symbols or set()
     candidates: List[Candidate] = []
+
+    if under_preferred:
+        _relax = max(0.0, min(config.MIN_PREFERRED_THRESHOLD_RELAX_PCT, 50.0)) / 100.0
+        thresholds = {
+            # 1m keeps its own hard noise floor (0.7%) regardless of relax —
+            # that floor exists to kill single-tick noise, not to gate
+            # position count.
+            1:  max(_WINDOW_THRESHOLDS[1] * (1.0 - _relax), 0.7),
+            5:  _WINDOW_THRESHOLDS[5] * (1.0 - _relax),
+            15: _WINDOW_THRESHOLDS[15] * (1.0 - _relax),
+            60: _WINDOW_THRESHOLDS[60] * (1.0 - _relax),
+        }
+    else:
+        thresholds = _WINDOW_THRESHOLDS
 
     subscribed = list(ws_client._token_to_symbol.values()) or list(
         ws_client._tick_buffers.keys()
@@ -238,7 +259,7 @@ def scan(open_symbols: Optional[Set[str]] = None) -> List[Candidate]:
             if _vwap_dev_pct >= _VWAP_EXTENDED_PCT:
                 _vwap_mult = _VWAP_EXTENDED_MULT   # extended vs session avg
 
-        for win_minutes, threshold in _WINDOW_THRESHOLDS.items():
+        for win_minutes, threshold in thresholds.items():
             pct = _rolling_pct_change(symbol, win_minutes)
             if pct is None or pct < threshold:
                 continue

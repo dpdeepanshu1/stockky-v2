@@ -6,6 +6,61 @@
 
 ---
 
+## Session 46 (this session) — `MIN_PREFERRED_SCALP_POSITIONS` decision made + wired; real-trade-service reconcile-snapshot staleness bug fixed
+
+User made the call on `MIN_PREFERRED_SCALP_POSITIONS` (flagged unwired since
+session 12/16/23): goal stated as "enter quality stock, buy and sell on
+time, maximum profit, lower the loss." Wired it up in a way that never
+weakens any actual risk/quality gate — see `config.py`'s decision-note
+comment for the full reasoning. Concretely, when open positions (OPEN +
+EXIT_LEGS_REJECTED) are below `MIN_PREFERRED_SCALP_POSITIONS`:
+- `screening/engine.py`'s per-window pct-change RANKING thresholds relax by
+  `MIN_PREFERRED_THRESHOLD_RELAX_PCT` (default 15%, 1m's 0.7% noise floor
+  still enforced) — this only changes which candidates get ranked at all.
+- `main.py` widens `QUALITY_GATE_TOP_N` by `MIN_PREFERRED_EXTRA_TOP_N`
+  (default +2) so more ranked candidates get checked against
+  `quality_gate.py`.
+- `MIN_FUNDAMENTAL_SCORE`/`MIN_TECHNICAL_SCORE`/`MIN_MARKET_CAP_CR`,
+  `MAX_SPREAD_PCT`, `RISK_PER_TRADE_PCT`, circuit breaker, and the
+  restricted-symbol filter are all untouched regardless of position count.
+Visible in `GET /status`'s `pipeline_config` block and in the Run Cycle
+scan-stage detail text when active. `py_compile` clean on `config.py`,
+`main.py`, `screening/engine.py`.
+
+**Separately (real-trade-service, not this service, but same delivery):**
+root-caused the live `RECONCILE_MISMATCH` audit entries repeating with an
+identical frozen `snap_as_of` timestamp across many hours and restarts.
+`resilience/local_cache.py`'s `snapshot_open_positions()` derived `mode`
+from `positions[0].mode` and silently skipped writing anything at all when
+`positions` was empty — so the moment a mode's open-position count hit
+zero, the snapshot stopped updating forever, and every later
+`reconcile_on_startup()` compared the day's real live positions against
+that long-stale snapshot, logging a spurious mismatch on every boot. Fixed
+by taking `mode` as an explicit parameter (the caller already has it) and
+always writing, zero-position state included. `py_compile` clean on
+`resilience/local_cache.py` and `cycle_runner.py`.
+
+**Re-confirmed, still genuinely open (no live-data path from this
+sandbox to close any of these further):**
+- DATAMATICS 89-retry Dhan SDK MARKET→LIMIT theory — unverifiable without
+  a live incident to reproduce against.
+- `emergency_gap_down` SELL retry pattern — believed legitimate
+  retry-on-rejection behavior, not confirmed against live Dhan rejection
+  reasons.
+- Exit-leg fill-price field-name guess (`orders/reconcile.py`) — Dhan
+  doesn't document the field on nested TARGET_LEG/STOP_LOSS_LEG objects;
+  only a real filled exit leg can confirm it. The additive diagnostic
+  logging added last session (captures Dhan's rejection-reason text
+  end-to-end) is already in place to help resolve this and the retry
+  question the next time either happens live.
+- `STATUS.md`'s live-only "Next steps" items (Super Order test, EOD-disarm
+  flatten test, live timestamp check, breaker-open smoke test) — all
+  require your live VM/market hours.
+- decision-prediction-service's remaining unaudited surface
+  (`training/evaluate.py`, `trades.py`, `models.py`, `app.py`,
+  `decision/main.py`'s untouched body, the ~20k-line frontend) — unchanged
+  from session 45, still its own dedicated future round.
+
 ## Session 41b (this session) — closed the 4 previously-deliberate "known gaps" from session41's no-buy fix
 
 Session41 fixed the MARKET Super Order SDK-bypass bug (root cause of the

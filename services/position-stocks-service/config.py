@@ -109,15 +109,27 @@ MAX_STOP_PCT = _get_float("MAX_STOP_PCT", 5.0)
 
 # ── Position limits ──────────────────────────────────────────────────────────
 MAX_CONCURRENT_SCALP_POSITIONS = _get_int("MAX_CONCURRENT_SCALP_POSITIONS", 5)
-# AUDIT NOTE (this session): declared and exposed (nowhere else — not even
-# in GET /status), but not read by screening/engine.py, orders/entry.py, or
-# anywhere else in this service. Whatever behavior this knob was meant to
-# drive (e.g. relaxing thresholds to keep at least this many positions
-# open) was never implemented. Left as a config value rather than removed
-# or guessed at — wiring it up means deciding new trading logic, which
-# isn't a safe call to make without knowing the originally intended
-# semantics. Flagging here so it isn't mistaken for working.
+# DECISION (2026-09-16, session46 — user call, goal stated as "enter quality
+# stock, buy and sell on time, maximum profit, lower the loss"): when open
+# positions are BELOW this count, the service tries harder to find a
+# quality entry — but "tries harder" only ever means widening HOW MANY
+# ranked candidates get a shot, never LOWERING the bar any candidate must
+# clear. Concretely, when under-preferred:
+#   1. screening/engine.py's per-window pct-change thresholds relax by
+#      MIN_PREFERRED_THRESHOLD_RELAX_PCT (bounded, floor-protected) — this
+#      only affects which candidates get RANKED at all, it's a signal-
+#      sensitivity knob, not a quality/risk gate.
+#   2. main.py widens QUALITY_GATE_TOP_N by MIN_PREFERRED_EXTRA_TOP_N so
+#      more ranked candidates get checked against quality_gate.py.
+# Explicitly NEVER touched by this: MIN_FUNDAMENTAL_SCORE, MIN_TECHNICAL_SCORE,
+# MIN_MARKET_CAP_CR (screening/quality_gate.py's real quality bar),
+# MAX_SPREAD_PCT, RISK_PER_TRADE_PCT, circuit_breaker, restricted-symbol
+# filtering — every hard risk/capital-safety gate stays exactly as strict
+# as when there ARE enough positions open. Being under-preferred is a
+# reason to look at more candidates, never a reason to accept a worse one.
 MIN_PREFERRED_SCALP_POSITIONS = _get_int("MIN_PREFERRED_SCALP_POSITIONS", 1)
+MIN_PREFERRED_THRESHOLD_RELAX_PCT = _get_float("MIN_PREFERRED_THRESHOLD_RELAX_PCT", 15.0)
+MIN_PREFERRED_EXTRA_TOP_N = _get_int("MIN_PREFERRED_EXTRA_TOP_N", 2)
 
 # ── Risk / capital sizing (CONFIRMED by user, tracking doc §3.5 / §5 item 9) ─
 # User confirmed 2% of the scalp pool risked per single trade.

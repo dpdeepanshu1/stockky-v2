@@ -333,15 +333,27 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
         .all()
     }
 
+    # DECISION (session46): count toward "preferred" using the same set as
+    # the entry exclusion above (OPEN + EXIT_LEGS_REJECTED) — a position
+    # stuck in EXIT_LEGS_REJECTED is still real exposure, so it still counts
+    # as "already have a position here" for this purpose.
+    under_preferred = len(open_syms) < config.MIN_PREFERRED_SCALP_POSITIONS
+
     _t = time.perf_counter()
-    candidates = scan(open_symbols=open_syms)
+    candidates = scan(open_symbols=open_syms, under_preferred=under_preferred)
     summary["candidates_seen"] = len(candidates)
+    summary["under_preferred_positions"] = under_preferred
     # Top 10 by composite score, just for visibility on the Run Cycle
     # result — the full ranked list can be much longer (every symbol that
     # cleared its window's %-change + activity floor); this is what a
     # human actually wants to eyeball, not a wall of every passer.
     _stage("scan", "Scan (all 4 windows)", _t,
-           detail=f"{len(candidates)} symbol(s) cleared a window's %-change + activity floor",
+           detail=(
+               f"{len(candidates)} symbol(s) cleared a window's %-change + activity floor"
+               + (f" (relaxed {config.MIN_PREFERRED_THRESHOLD_RELAX_PCT:.0f}% — "
+                  f"{len(open_syms)}/{config.MIN_PREFERRED_SCALP_POSITIONS} preferred positions open)"
+                  if under_preferred else "")
+           ),
            candidates=[
                {"symbol": c.symbol, "window": c.window_label, "pct_change": round(c.pct_change, 2),
                 "current_ltp": c.current_ltp, "composite_score": round(c.composite_score, 2)}
@@ -389,7 +401,14 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     # Quality-gate the top few ranked candidates (fast, best-effort, fail-
     # open — see screening/quality_gate.py) and enter the first that passes.
     _t = time.perf_counter()
-    top_n = candidates[: max(1, config.QUALITY_GATE_TOP_N)]
+    # DECISION (session46): under-preferred widens how many ranked candidates
+    # get checked against quality_gate.py — never lowers quality_gate's own
+    # bar (MIN_FUNDAMENTAL_SCORE/MIN_TECHNICAL_SCORE/MIN_MARKET_CAP_CR are
+    # untouched). More looks at real candidates, not a lower bar for any one.
+    _effective_top_n = config.QUALITY_GATE_TOP_N + (
+        config.MIN_PREFERRED_EXTRA_TOP_N if under_preferred else 0
+    )
+    top_n = candidates[: max(1, _effective_top_n)]
     # AUDIT FIX (session 30): quality_gate.check() was awaited one candidate
     # at a time inside a plain `for` loop. Each individual check is now
     # internally concurrent (session 29's fund/tech gather fix), but across
@@ -746,6 +765,12 @@ def status(db: Session = Depends(get_db)):
             "min_technical_score": config.MIN_TECHNICAL_SCORE,
             "min_market_cap_cr": config.MIN_MARKET_CAP_CR,
             "scalp_product_type": config.SCALP_PRODUCT_TYPE,
+            # DECISION (session46): MIN_PREFERRED_SCALP_POSITIONS wired up —
+            # see config.py's decision note for exact semantics (widens
+            # candidate breadth only, never lowers quality_gate's bar).
+            "min_preferred_scalp_positions": config.MIN_PREFERRED_SCALP_POSITIONS,
+            "min_preferred_threshold_relax_pct": config.MIN_PREFERRED_THRESHOLD_RELAX_PCT,
+            "min_preferred_extra_top_n": config.MIN_PREFERRED_EXTRA_TOP_N,
         },
     }
 

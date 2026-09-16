@@ -190,7 +190,13 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
     # write failure followed by a restart can be detected by
     # reconcile_on_startup() instead of silently trusting either side.
     try:
-        snapshot_open_positions(db, open_positions(db, mode))
+        # BUG FIX (2026-09-16): pass `mode` explicitly — snapshot_open_positions
+        # used to infer it from positions[0].mode and skip writing entirely
+        # when the list was empty, which let the snapshot go permanently
+        # stale the moment open positions hit zero (see local_cache.py for
+        # the full incident writeup). Passing mode directly lets it always
+        # write, zero-position state included.
+        snapshot_open_positions(db, mode, open_positions(db, mode))
     except Exception as exc:
         logger.warning("run_cycle_core: position snapshot failed (non-fatal): %s", exc)
 

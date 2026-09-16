@@ -88,7 +88,7 @@ def load_snapshot(db, key: str) -> dict | None:
 
 # ── Open-position snapshot (per-cycle safety net) ────────────────────────────
 
-def snapshot_open_positions(db, positions: list) -> None:
+def snapshot_open_positions(db, mode: str, positions: list) -> None:
     """
     Snapshot the current open positions at the top of every cycle_runner pass,
     BEFORE any exit evaluation or order placement. If the DB write later in
@@ -98,10 +98,23 @@ def snapshot_open_positions(db, positions: list) -> None:
     Call this right after `open_positions(db, mode)` in cycle_runner.py.
     One snapshot per mode — key includes the mode so DEMO and REAL don't
     overwrite each other.
+
+    BUG FIX (2026-09-16 — reconcile snapshot going permanently stale):
+    this used to derive `mode` from `positions[0].mode` and early-return
+    with NO write at all whenever `positions` was empty (i.e. zero open
+    positions that cycle). That meant the moment a mode legitimately went
+    to zero open positions, the snapshot simply stopped updating, forever
+    — `as_of` froze at whatever the last non-empty cycle was, even across
+    many hours and many restarts afterward. Every subsequent
+    reconcile_on_startup() then compared *today's* live positions against
+    that long-frozen snapshot and logged a spurious RECONCILE_MISMATCH on
+    every single boot — exactly the repeating
+    `snap_as_of=...T09:32:49...` mismatch seen live, unchanged across
+    restarts spanning 07:49 through 16:25 with a rotating cast of symbols.
+    `mode` is now an explicit parameter (the caller already has it) so we
+    can always write a fresh snapshot — including the true, valid
+    "0 open positions" state — instead of silently skipping the write.
     """
-    if not positions:
-        return
-    mode = positions[0].mode if positions else "unknown"
     payload = {
         "as_of": _now().isoformat(),
         "positions": [

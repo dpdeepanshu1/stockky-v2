@@ -56,6 +56,7 @@ import asyncio
 import json
 import logging
 import struct
+import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -105,6 +106,23 @@ _MAX_BUFFER_AGE_S = 65 * 60  # slightly over the longest screening window (60m)
 _tick_buffers: Dict[str, deque] = defaultdict(lambda: deque(maxlen=_MAX_TICKS))
 _last_volume:  Dict[str, int]   = {}   # latest volume per symbol from feed
 
+# BUG FIX (2026-09-17): _tick_buffers' deques are written by _ws_loop below,
+# which runs as an asyncio task on the event-loop thread, and read by
+# screening/engine.py's scan() and orders/adaptive.py's helpers, which run
+# in FastAPI's worker thread pool (run_in_threadpool) — a genuinely
+# different OS thread. Iterating a deque on one thread while another thread
+# appends/popleft's it raises "RuntimeError: deque mutated during
+# iteration" (seen live: position-stocks-service's /candidates endpoint,
+# _momentum_consistency's list comprehension over buf). A single
+# deque.append() is safe on its own, but a multi-element read (iterate,
+# reversed(), or even `list(buf)`) is not atomic against a concurrent
+# append — the copy itself can be interrupted mid-iteration by the writer.
+# Fix: a per-symbol lock, held briefly (no `await` inside it, on either
+# side) by both the writer (_ws_loop, just below) and the reader
+# (get_tick_buffer) so a snapshot is always taken between ticks, never
+# during one.
+_buffer_locks: Dict[str, threading.Lock] = defaultdict(threading.Lock)
+
 # Registered on-tick callbacks — screening engine registers here
 _on_tick_callbacks: list[Callable] = []
 
@@ -114,9 +132,14 @@ def register_on_tick(cb: Callable) -> None:
     _on_tick_callbacks.append(cb)
 
 
-def get_tick_buffer(symbol: str) -> deque:
-    """Returns the deque of (ts, ltp) tuples for the symbol (read-only view)."""
-    return _tick_buffers[symbol]
+def get_tick_buffer(symbol: str) -> list:
+    """Returns an immutable snapshot list of (ts, ltp) tuples for the
+    symbol. Previously returned the live deque directly (see BUG FIX above
+    for why that raced with the WS ingestion loop) — now returns a plain
+    list copied under the symbol's lock, safe to iterate/index/reverse
+    from any thread with no risk of a concurrent-mutation crash."""
+    with _buffer_locks[symbol]:
+        return list(_tick_buffers[symbol])
 
 
 def get_last_ltp(symbol: str) -> Optional[float]:
@@ -285,19 +308,28 @@ async def _ws_loop() -> None:
                             _last_tick_at = ts
                             symbol = _token_to_symbol.get(token_str)
                             if symbol:
-                                buf = _tick_buffers[symbol]
-                                buf.append((ts, ltp))
-                                # AUDIT FIX (this session): time-bounded
-                                # prune — see the module-level comment by
-                                # _MAX_BUFFER_AGE_S for the full reasoning.
-                                # O(k) where k is the number of stale
-                                # entries evicted this call, not the whole
-                                # buffer, since popleft() only removes from
-                                # the front and every prior append already
-                                # enforced this same cutoff.
-                                cutoff = ts - _MAX_BUFFER_AGE_S
-                                while buf and buf[0][0] < cutoff:
-                                    buf.popleft()
+                                # BUG FIX (2026-09-17): hold the same lock
+                                # get_tick_buffer() reads under (see that
+                                # function's docstring) — append+prune here
+                                # must not overlap with a reader's
+                                # list(deque) snapshot on another thread.
+                                # Held only across these three lines, no
+                                # `await` inside, so this can't stall the
+                                # WS message loop or deadlock.
+                                with _buffer_locks[symbol]:
+                                    buf = _tick_buffers[symbol]
+                                    buf.append((ts, ltp))
+                                    # AUDIT FIX (prior session): time-bounded
+                                    # prune — see the module-level comment by
+                                    # _MAX_BUFFER_AGE_S for the full reasoning.
+                                    # O(k) where k is the number of stale
+                                    # entries evicted this call, not the whole
+                                    # buffer, since popleft() only removes from
+                                    # the front and every prior append already
+                                    # enforced this same cutoff.
+                                    cutoff = ts - _MAX_BUFFER_AGE_S
+                                    while buf and buf[0][0] < cutoff:
+                                        buf.popleft()
                                 for cb in _on_tick_callbacks:
                                     try:
                                         cb(symbol, ltp, _last_volume.get(symbol, 0), ts)

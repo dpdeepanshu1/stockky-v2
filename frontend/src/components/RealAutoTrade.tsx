@@ -1909,7 +1909,11 @@ export default function RealAutoTrade() {
                           const avg = Number(p.averageBuyPrice || p.costPrice || 0);
                           const ltp = Number(p.lastTradedPrice || p.ltp || 0);
                           const pnl = Number(p.unrealizedProfit || p.dayBuyValue || 0);
-                          const product = p.positionType || p.productType || "";
+                          // 2026-09-17 fix: was p.positionType || p.productType — positionType
+                          // ("LONG"/"SHORT") is present on every row and always won, so this
+                          // label showed "LONG" instead of the actual product type (CNC/INTRADAY)
+                          // for every position, delivery included. productType now checked first.
+                          const product = p.productType || p.positionType || "";
                           return (
                             <div key={i} className="bg-ink rounded-xl px-3 py-2 border border-slate">
                               <div className="flex items-center justify-between">

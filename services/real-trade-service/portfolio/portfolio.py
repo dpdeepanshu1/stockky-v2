@@ -321,12 +321,29 @@ async def import_broker_holdings(db: Session) -> int:
     # existing candidate loop below can handle both in one pass.
     # Dhan positions fields: tradingSymbol, positionType/productType,
     # netQty/positiveQty/buyQty (qty held long), averageBuyPrice/costPrice (avg cost).
+    #
+    # 2026-09-17 fix (session63 — the priority order below was STILL wrong
+    # after the 09-17 same-day-delivery patch above claimed to fix it):
+    # Dhan's /v2/positions rows carry TWO distinct fields that must not be
+    # confused — positionType ("LONG"/"SHORT"/"CLOSED", the direction) and
+    # productType ("CNC"/"INTRADAY"/"MARGIN"/"MTF"/"CO"/"BO", the actual
+    # delivery-vs-intraday flag). positionType is present on every single
+    # row (long or intraday alike), so checking it FIRST means _get() always
+    # returns "LONG" and never even reaches productType — the CNC check
+    # below then never matches, and every same-day delivery buy keeps being
+    # silently skipped exactly as before this file's own docstring claims
+    # was fixed. Corrected by checking productType (the real product-type
+    # field) first, with positionType kept only as a last-resort fallback
+    # for a hypothetical row that omits productType entirely (never
+    # observed from Dhan's v2 API in practice, but harmless to keep as a
+    # fail-open fallback since a genuine "LONG"/"SHORT" value will fail the
+    # CNC/DELIVERY check below anyway and just get skipped like MIS rows).
     _extra_rows: list[dict] = []
     for _prow in live_positions_raw or []:
         if not isinstance(_prow, dict):
             continue
         _ptype = (
-            _get(_prow, "positionType", "productType", "product_type") or ""
+            _get(_prow, "productType", "product_type", "positionType") or ""
         ).upper().strip()
         if _ptype not in ("CNC", "DELIVERY"):
             continue  # skip MIS/intraday — only delivery positions need this path

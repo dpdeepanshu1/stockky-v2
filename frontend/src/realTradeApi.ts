@@ -181,6 +181,11 @@ export interface Position {
   pnl_pct: number | null;
   stop_distance_pct: number | null;
   target_distance_pct: number | null;
+  // AUDIT FIX (session64): true for a pre-existing Dhan demat holding this
+  // service picked up via portfolio.import_broker_holdings rather than
+  // bought itself — lets the Positions tab show these as their own
+  // sub-section instead of mixing them in unlabeled with auto-pilot buys.
+  broker_imported: boolean;
 }
 
 export interface OrderRow {

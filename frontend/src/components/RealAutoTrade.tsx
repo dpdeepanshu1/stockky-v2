@@ -151,6 +151,93 @@ function pnlColor(n: number | null | undefined): string {
   return n >= 0 ? "text-signal-buy" : "text-signal-sell";
 }
 
+// AUDIT FIX (session64, issue #8 follow-up — "show demat-imported holdings
+// under Positions in their own sub-section"): factored the existing
+// per-position card out of the old flat positions.map() so it can be
+// reused for both the "Auto-Pilot Positions" group and the new "Demat
+// Positions" group below without duplicating this JSX twice. Rendering is
+// unchanged from before except for the optional "Demat" badge next to the
+// symbol when p.broker_imported is true.
+function PositionCard({
+  p, onClose, closing,
+}: {
+  p: Position;
+  onClose: () => void;
+  closing: boolean;
+}) {
+  return (
+    <div className="bg-graphite border border-slate rounded-2xl p-4">
+      <div className="flex items-start justify-between mb-2">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 shrink-0 rounded-full bg-ink border border-slate flex items-center justify-center font-display text-[11px] font-bold text-mist">
+            {p.symbol.slice(0, 2)}
+          </div>
+          <div>
+            <span className="font-display text-base font-bold text-paper">{p.symbol}</span>
+            <span className="font-display tabular-nums text-[10px] text-mist ml-2">{p.status}</span>
+            {p.broker_imported && (
+              <span className="font-display tabular-nums text-[9px] text-signal-prepare ml-2 px-1.5 py-0.5 rounded border border-signal-prepare/30 bg-signal-prepare/10">
+                DEMAT
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="text-right">
+          <span className={`font-display tabular-nums text-base font-bold ${pnlColor(p.unrealized_pnl)}`}>
+            {p.unrealized_pnl >= 0 ? "+" : ""}{fmtInr(p.unrealized_pnl, 2)}
+          </span>
+          {p.pnl_pct != null && (
+            <span className={`font-display tabular-nums text-[10px] ml-1 ${pnlColor(p.pnl_pct)}`}>
+              ({p.pnl_pct >= 0 ? "+" : ""}{p.pnl_pct}%)
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="grid grid-cols-5 gap-2 font-display tabular-nums text-[10px] text-mist mb-3">
+        <div>Qty<br/><span className="text-paper font-bold">{p.qty_open}</span></div>
+        <div>Entry<br/><span className="text-paper font-bold">₹{p.avg_entry_price}</span></div>
+        <div>Current<br/><span className="text-signal-prepare font-bold">{p.current_price != null ? `₹${p.current_price.toFixed(2)}` : "—"}</span></div>
+        <div>
+          Stop
+          {p.stop_distance_pct != null && <span className="text-mist"> ({p.stop_distance_pct}%)</span>}
+          <br/><span className="text-signal-sell font-bold">{p.current_stop ? `₹${p.current_stop}` : "—"}</span>
+        </div>
+        <div>
+          Target
+          {p.target_distance_pct != null && <span className="text-mist"> ({p.target_distance_pct}%)</span>}
+          <br/><span className="text-signal-buy font-bold">{p.current_target ? `₹${p.current_target}` : "—"}</span>
+        </div>
+      </div>
+      {/* Risk:reward bar with a live marker for where current price sits between stop and target */}
+      {p.current_stop && p.current_target && (
+        <div className="relative h-1.5 rounded-full bg-ink flex overflow-hidden mb-2">
+          <div className="bg-signal-sell/50" style={{ width: "50%" }} />
+          <div className="bg-signal-buy/50" style={{ width: "50%" }} />
+          {p.current_price != null && p.current_target > p.current_stop && (
+            <div
+              className="absolute top-[-2px] w-[3px] h-[9px] bg-white rounded-full"
+              style={{
+                left: `${Math.min(100, Math.max(0, ((p.current_price - p.current_stop) / (p.current_target - p.current_stop)) * 100))}%`,
+              }}
+            />
+          )}
+        </div>
+      )}
+      <div className="flex items-center justify-between">
+        <span className="font-display tabular-nums text-[10px] text-mist">{fmtDate(p.opened_at)} {fmtTime(p.opened_at)}</span>
+        {p.status === "PENDING_EXIT" ? (
+          <span className="font-display tabular-nums text-[10px] text-signal-hold">pending exit…</span>
+        ) : (
+          <button onClick={onClose} disabled={closing}
+            className="font-display tabular-nums text-[10px] px-2 py-1 rounded bg-signal-sell/10 border border-signal-sell/20 text-signal-sell disabled:opacity-40">
+            {closing ? "Closing…" : "Close position"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Status dot ──────────────────────────────────────────────────────────────
 function Dot({ on, pulse }: { on: boolean; pulse?: boolean }) {
   return (
@@ -794,6 +881,10 @@ export default function RealAutoTrade() {
   const [positions, setPositions] = useState<Position[]>([]);
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [orderRange, setOrderRange] = useState<"today" | "all">("today");
+  // AUDIT FIX (session64, issue #8 follow-up): split for the Positions tab's
+  // two sub-sections — see the "Demat Positions" grouping below.
+  const autoPilotPositions = useMemo(() => positions.filter(p => !p.broker_imported), [positions]);
+  const dematPositions = useMemo(() => positions.filter(p => p.broker_imported), [positions]);
 
   const [auditRows, setAuditRows] = useState<AuditLogRow[]>([]);
   const [cycleBusy, setCycleBusy] = useState(false);
@@ -2022,74 +2113,44 @@ export default function RealAutoTrade() {
                   <p className="font-display tabular-nums text-sm text-mist">No open positions.</p>
                 </div>
               ) : (
-                <div className="space-y-2">
-                  {positions.map(p => (
-                    <div key={p.id} className="bg-graphite border border-slate rounded-2xl p-4">
-                      <div className="flex items-start justify-between mb-2">
-                        <div className="flex items-center gap-2.5">
-                          <div className="w-8 h-8 shrink-0 rounded-full bg-ink border border-slate flex items-center justify-center font-display text-[11px] font-bold text-mist">
-                            {p.symbol.slice(0, 2)}
-                          </div>
-                          <div>
-                            <span className="font-display text-base font-bold text-paper">{p.symbol}</span>
-                            <span className="font-display tabular-nums text-[10px] text-mist ml-2">{p.status}</span>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <span className={`font-display tabular-nums text-base font-bold ${pnlColor(p.unrealized_pnl)}`}>
-                            {p.unrealized_pnl >= 0 ? "+" : ""}{fmtInr(p.unrealized_pnl, 2)}
-                          </span>
-                          {p.pnl_pct != null && (
-                            <span className={`font-display tabular-nums text-[10px] ml-1 ${pnlColor(p.pnl_pct)}`}>
-                              ({p.pnl_pct >= 0 ? "+" : ""}{p.pnl_pct}%)
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-5 gap-2 font-display tabular-nums text-[10px] text-mist mb-3">
-                        <div>Qty<br/><span className="text-paper font-bold">{p.qty_open}</span></div>
-                        <div>Entry<br/><span className="text-paper font-bold">₹{p.avg_entry_price}</span></div>
-                        <div>Current<br/><span className="text-signal-prepare font-bold">{p.current_price != null ? `₹${p.current_price.toFixed(2)}` : "—"}</span></div>
-                        <div>
-                          Stop
-                          {p.stop_distance_pct != null && <span className="text-mist"> ({p.stop_distance_pct}%)</span>}
-                          <br/><span className="text-signal-sell font-bold">{p.current_stop ? `₹${p.current_stop}` : "—"}</span>
-                        </div>
-                        <div>
-                          Target
-                          {p.target_distance_pct != null && <span className="text-mist"> ({p.target_distance_pct}%)</span>}
-                          <br/><span className="text-signal-buy font-bold">{p.current_target ? `₹${p.current_target}` : "—"}</span>
-                        </div>
-                      </div>
-                      {/* Risk:reward bar with a live marker for where current price sits between stop and target */}
-                      {p.current_stop && p.current_target && (
-                        <div className="relative h-1.5 rounded-full bg-ink flex overflow-hidden mb-2">
-                          <div className="bg-signal-sell/50" style={{ width: "50%" }} />
-                          <div className="bg-signal-buy/50" style={{ width: "50%" }} />
-                          {p.current_price != null && p.current_target > p.current_stop && (
-                            <div
-                              className="absolute top-[-2px] w-[3px] h-[9px] bg-white rounded-full"
-                              style={{
-                                left: `${Math.min(100, Math.max(0, ((p.current_price - p.current_stop) / (p.current_target - p.current_stop)) * 100))}%`,
-                              }}
-                            />
-                          )}
-                        </div>
-                      )}
-                      <div className="flex items-center justify-between">
-                        <span className="font-display tabular-nums text-[10px] text-mist">{fmtDate(p.opened_at)} {fmtTime(p.opened_at)}</span>
-                        {p.status === "PENDING_EXIT" ? (
-                          <span className="font-display tabular-nums text-[10px] text-signal-hold">pending exit…</span>
-                        ) : (
-                          <button onClick={() => void doClosePosition(p)} disabled={actionBusy === `close:${p.id}`}
-                            className="font-display tabular-nums text-[10px] px-2 py-1 rounded bg-signal-sell/10 border border-signal-sell/20 text-signal-sell disabled:opacity-40">
-                            {actionBusy === `close:${p.id}` ? "Closing…" : "Close position"}
-                          </button>
-                        )}
-                      </div>
+                <>
+                  {/* AUDIT FIX (session64, issue #8 follow-up): split into
+                      "Auto-Pilot Positions" (this service's own BUYs) and
+                      "Demat Positions" (pre-existing Dhan holdings imported
+                      via portfolio.import_broker_holdings — see that
+                      module's docstring) instead of one unlabeled mixed
+                      list. Both groups are evaluated by exit_engine every
+                      cycle exactly the same way (stop/target, partial exit,
+                      trailing) — this is purely a display grouping so it's
+                      clear at a glance which positions came from which
+                      source; broker_imported ones always sell CNC (see
+                      TradePosition.broker_imported) since they were never
+                      bought as an intraday MIS position by this app. */}
+                  {autoPilotPositions.length > 0 && (
+                    <div className="space-y-2">
+                      {dematPositions.length > 0 ? (
+                        <SectionHdr>Auto-Pilot Positions ({autoPilotPositions.length})</SectionHdr>
+                      ) : null}
+                      {autoPilotPositions.map(p => (
+                        <PositionCard key={p.id} p={p} closing={actionBusy === `close:${p.id}`}
+                          onClose={() => void doClosePosition(p)} />
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  )}
+                  {dematPositions.length > 0 && (
+                    <div className="space-y-2">
+                      <SectionHdr>Demat Positions ({dematPositions.length})</SectionHdr>
+                      <p className="font-display tabular-nums text-[10px] text-mist -mt-1">
+                        Pre-existing Dhan holdings, not bought via auto-pilot — now evaluated for
+                        stop/target/partial-exit every cycle just like the positions above.
+                      </p>
+                      {dematPositions.map(p => (
+                        <PositionCard key={p.id} p={p} closing={actionBusy === `close:${p.id}`}
+                          onClose={() => void doClosePosition(p)} />
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}

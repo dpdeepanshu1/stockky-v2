@@ -1550,6 +1550,14 @@ async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin
             # instead of just the raw levels, without duplicating exit_engine's own logic.
             "stop_distance_pct": stop_distance_pct,
             "target_distance_pct": target_distance_pct,
+            # AUDIT FIX (session64, issue #8 follow-up): broker_imported was
+            # already tracked on the row (portfolio.import_broker_holdings
+            # sets it, exit_engine reads it to force CNC) but was never
+            # exposed here — the dashboard had no way to tell a demat holding
+            # this service picked up and is now managing apart from a
+            # position its own entry_engine actually bought. Lets the
+            # Positions tab group/label these as their own sub-section.
+            "broker_imported": bool(p.broker_imported),
         })
     return out
 

@@ -1,8 +1,9 @@
 """
 watchlist_engine/afterhours_scan.py — After-hours news scan (2026-09-17, session57)
 
-Polls Moneycontrol, LiveMint, Economic Times, NDTV Profit, and Business
-Standard RSS/Atom feeds once per
+Polls Moneycontrol, LiveMint, NDTV Profit, and Business Standard RSS/Atom
+feeds (Economic Times removed 2026-09-17, session58 — see the ET / ET-companies
+REMOVED comment on _RSS_FEEDS below) once per
 AFTERHOURS_SCAN_INTERVAL_SECONDS (default 3600s = hourly) between market
 close (~15:45 IST) and pre-market (~08:45 IST next day). Classifies headlines,
 scores and deduplicates by symbol, and upserts into NextDayWatchlistEntry so
@@ -33,9 +34,10 @@ Score formula (0–100):
     news       → 15   (generic positive news)
   source_bonus (how trusted the RSS feed is):
     Moneycontrol   → +10
+    NDTVProfit     → +9
+    BusinessStandard → +9
     LiveMint       → +8
-    ET             → +7
-    ET-companies   → +6
+    (ET/ET-companies removed 2026-09-17, session58 — retired RSS URLs)
   keyword_bonus: +5 per positive catalyst keyword found in headline (capped +15)
   capped at 100.
   A headline containing any negative-outcome keyword (falls, plunges, probe,
@@ -154,16 +156,22 @@ _RSS_FEEDS: list[dict] = [
         "url": "https://www.livemint.com/rss/markets",
         "source_bonus": 8,
     },
-    {
-        "source": "ET",
-        "url": "https://economictimes.indiatimes.com/markets/rss.cms",
-        "source_bonus": 7,
-    },
-    {
-        "source": "ET-companies",
-        "url": "https://economictimes.indiatimes.com/industry/rss.cms",
-        "source_bonus": 6,
-    },
+    # ET / ET-companies REMOVED (2026-09-17, session58 — live-verified):
+    # https://economictimes.indiatimes.com/markets/rss.cms and
+    # .../industry/rss.cms both returned HTTP 200 but with
+    # content-type text/html and <title>The Economic Times</title> —
+    # i.e. ET's normal homepage/section HTML served from Akamai cache
+    # (content-msg: DATA_SERVED_FROM_CACHE), not a bot-detection
+    # interstitial and not a redirect. These two RSS paths have been
+    # retired/repurposed by ET, independent of the User-Agent fix applied
+    # earlier this session (which was the correct diagnosis for actual
+    # bot-gated feeds, just not what was wrong here). Rather than keep
+    # hitting two permanently-dead URLs and logging a warning every
+    # AFTERHOURS_SCAN_INTERVAL_SECONDS tick forever, they're removed
+    # outright. If ET publishes a working RSS URL again, re-add an entry
+    # here with source_bonus 7/6 (unchanged from before) — the rest of
+    # the pipeline (symbol extraction, scoring, dedup) needs no changes
+    # to pick a re-added ET feed back up.
     {
         # 2026-09-17 fix (session57): named in the original design doc but
         # never actually wired in until now. Served as Atom, not RSS 2.0 —
@@ -495,22 +503,27 @@ def _parse_feed_items(root: ET.Element) -> list[dict]:
     return items
 
 
-# RSS/Atom fetch headers (2026-09-17, session58 — live-log fix): every other
-# scraping module in this repo (market-data-service/main.py,
-# market-data-service/bhavcopy.py, api-gateway/main.py's _NSE_CLIENT_HEADERS,
-# api-gateway/ipo_scanner.py, notification-scheduler-service's
-# symbol_master_sync.py, ...) sends a browser User-Agent on outbound scrape
-# requests — this module was the one exception. Confirmed live (2026-09-17):
-# ET and ET-companies both returned HTTP 200 but ET.fromstring() then failed
-# with "syntax error: line 1, column 15" — the unmistakable signature of a
-# bot-detection interstitial HTML page served with a 200 status instead of
-# the actual RSS/XML body (a real error status would have hit raise_for_status()
-# instead). Moneycontrol/LiveMint/NDTVProfit don't gate their RSS the same
-# way, which is why only these two feeds broke. Adding the same
-# Mozilla-Chrome UA the rest of the codebase already uses should let ET/
-# ET-companies serve the real feed instead of the interstitial (a genuine
-# 403 like BusinessStandard's is unaffected either way — that's an explicit
-# block, not a served-but-wrong-content case, and already degrades safely).
+# RSS/Atom fetch headers (2026-09-17, session58): every other scraping
+# module in this repo (market-data-service/main.py, market-data-service/
+# bhavcopy.py, api-gateway/main.py's _NSE_CLIENT_HEADERS, api-gateway/
+# ipo_scanner.py, notification-scheduler-service's symbol_master_sync.py,
+# ...) sends a browser User-Agent on outbound scrape requests — this module
+# was the one exception, so it's added here too for consistency and for any
+# feed that DOES bot-gate on a missing UA.
+#
+# CORRECTION (2026-09-17, later same session — live-verified with curl from
+# the deploy VM after this header was already added): the ET/ET-companies
+# failure this header was originally written to fix was NOT a bot-detection
+# interstitial after all. A direct curl with this exact User-Agent against
+# https://economictimes.indiatimes.com/markets/rss.cms returned HTTP 200,
+# content-type text/html, <title>The Economic Times</title>, and
+# content-msg: DATA_SERVED_FROM_CACHE (genuine Akamai-cached content, not a
+# challenge page) — i.e. that RSS URL has simply been retired/repurposed by
+# ET to serve their normal homepage HTML, independent of any header sent.
+# ET/ET-companies were removed from _RSS_FEEDS below as a result (see the
+# comment there). This header is kept regardless: it's still correct
+# practice for the remaining feeds and for any bot-gated feed added later,
+# just not what was actually wrong with ET.
 _RSS_FETCH_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
     "Accept": "application/rss+xml, application/xml, text/xml, */*",

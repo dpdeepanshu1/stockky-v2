@@ -656,6 +656,16 @@ export default function PositionStocksTab() {
     () => windowFilter === "all" ? candidateLog : candidateLog.filter(c => c.window_source === windowFilter),
     [candidateLog, windowFilter]
   );
+  // AUDIT FIX (session62, issue #5 — "quality gate filtering real movers,
+  // needs admin visibility into what's being dropped"): isolates just the
+  // quality-gate rejections out of the mixed candidateLog (which also logs
+  // SERVICE_NOT_ARMED/INSUFFICIENT_CAPITAL/MAX_POSITIONS/etc skips) so it's
+  // obvious at a glance how many otherwise-real movers the fundamental/
+  // technical/market-cap floor is dropping, and by how much they missed it.
+  const qualityGateDropped = useMemo(
+    () => candidateLog.filter(c => c.decision === "SKIPPED" && c.reason?.startsWith("QUALITY_GATE:")),
+    [candidateLog]
+  );
 
   if (!getPositionStocksApiUrl()) {
     return (
@@ -1242,6 +1252,58 @@ export default function PositionStocksTab() {
           <CandidateList rows={filteredCandidates} />
         )}
       </div>
+
+      {/* ── Quality gate — recently dropped (session62, issue #5) ── */}
+      {qualityGateDropped.length > 0 && (
+        <div className="bg-graphite border border-signal-hold/40 rounded-2xl p-4">
+          <div className="flex items-center justify-between mb-2">
+            <p className="dash-section-title text-signal-hold">
+              Quality Gate — {qualityGateDropped.length} recently dropped
+            </p>
+            <span className="font-display tabular-nums text-[9px] text-mist">
+              Floor: Fund ≥ {status?.pipeline_config?.min_fundamental_score ?? 40}, Tech ≥{" "}
+              {status?.pipeline_config?.min_technical_score ?? 40}, Mcap ≥ ₹
+              {status?.pipeline_config?.min_market_cap_cr ?? 500}cr
+            </span>
+          </div>
+          <p className="font-display tabular-nums text-[10px] text-mist mb-2">
+            Candidates the price/volume screener ranked highly, but the fundamental/technical/market-cap floor
+            rejected before capital was ever checked. If a symbol here looks like a genuine mover, MIN_FUNDAMENTAL_SCORE
+            / MIN_TECHNICAL_SCORE / MIN_MARKET_CAP_CR are tunable env vars on this service (see docker-compose.yml) —
+            no code change needed to loosen the floor.
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px] font-display tabular-nums">
+              <thead>
+                <tr className="text-mist text-left border-b border-slate">
+                  <th className="py-1 pr-3">Symbol</th>
+                  <th className="py-1 pr-3">%Chg</th>
+                  <th className="py-1 pr-3">Fund</th>
+                  <th className="py-1 pr-3">Tech</th>
+                  <th className="py-1 pr-3">Mcap ₹cr</th>
+                  <th className="py-1 pr-3">Why</th>
+                  <th className="py-1">When</th>
+                </tr>
+              </thead>
+              <tbody>
+                {qualityGateDropped.slice(0, 20).map(c => (
+                  <tr key={c.id} className="border-b border-slate/50">
+                    <td className="py-1 pr-3 text-paper font-bold">{c.symbol}</td>
+                    <td className={`py-1 pr-3 ${c.pct_change >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
+                      {c.pct_change >= 0 ? "+" : ""}{c.pct_change.toFixed(2)}%
+                    </td>
+                    <td className="py-1 pr-3 text-mist">{c.fundamental_score != null ? c.fundamental_score.toFixed(0) : "—"}</td>
+                    <td className="py-1 pr-3 text-mist">{c.technical_score != null ? c.technical_score.toFixed(0) : "—"}</td>
+                    <td className="py-1 pr-3 text-mist">{c.market_cap_cr != null ? c.market_cap_cr.toFixed(0) : "—"}</td>
+                    <td className="py-1 pr-3 text-signal-hold">{c.reason?.replace("QUALITY_GATE:", "") ?? "—"}</td>
+                    <td className="py-1 text-mist">{fmtDateTimeIst(c.created_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* ── Candidate log (why entered/skipped) ── */}
       <div className="bg-graphite border border-slate rounded-2xl p-4">

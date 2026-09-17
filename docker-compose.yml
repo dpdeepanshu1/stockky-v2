@@ -450,6 +450,20 @@ services:
       # - QUALITY_GATE_ENABLED=true
       # - QUALITY_GATE_TOP_N=3
       # - QUALITY_GATE_TIMEOUT_S=2.5
+      # AUDIT FIX (session62, issue #5): these three floors existed in
+      # config.py (defaults 40/40/500) but were never listed here, so there
+      # was no discoverable way to tune them without editing source. Live
+      # case that prompted this: FILATFASH (fundamental_score 12) and LIBAS
+      # (22) were rejected by the 40 floor even though they were independent,
+      # real movers (not a capital-shortage rejection) — if the 40 default is
+      # too strict for the momentum-scalp universe this service targets
+      # (small/mid-caps move on volume, not always on a fundamentals score),
+      # lower these here. See the Screener tab's new "Quality Gate — recently
+      # dropped" panel to see exactly which candidates are being rejected and
+      # by how much before changing these.
+      # - MIN_FUNDAMENTAL_SCORE=40
+      # - MIN_TECHNICAL_SCORE=40
+      # - MIN_MARKET_CAP_CR=500
       # - SHARED_DAILY_ORDER_BUDGET=5000
       # - FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE=true
       # - POSITION_STOCKS_DAILY_ORDER_BUDGET=300

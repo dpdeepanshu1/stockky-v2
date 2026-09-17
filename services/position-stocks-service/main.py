@@ -1215,16 +1215,29 @@ def candidates_log(
     db: Session = Depends(get_db),
     limit: int = 100,
     decision_filter: Optional[str] = None,
+    reason_prefix: Optional[str] = None,
 ):
     """Recent ScalpCandidateLog rows — why a candidate was entered or
     skipped, including the session-6 quality-gate fields (fundamental/
     technical score, market cap, positive-catalyst flag). Pure DB read, no
     external calls — flagged in TRACKING.md §3.13 / STATUS.md next-steps
     as a cheap natural follow-up to the quality gate, built session 12.
-    `decision_filter` optionally narrows to "ENTERED" or "SKIPPED"."""
+    `decision_filter` optionally narrows to "ENTERED" or "SKIPPED".
+
+    AUDIT FIX (session62, issue #5 — admin visibility into what the
+    quality gate is dropping): `reason_prefix` optionally narrows further
+    to rows whose `reason` starts with the given text (case-sensitive,
+    matching how `reason` is actually written — e.g. "QUALITY_GATE" isolates
+    every candidate the quality gate itself rejected from every other skip
+    reason (SERVICE_NOT_ARMED, INSUFFICIENT_CAPITAL, MAX_POSITIONS, ...)
+    this same log also records. Without this, finding "what did the
+    fundamental/technical/market-cap floor drop today" meant reading every
+    row's reason text by eye."""
     q = db.query(ScalpCandidateLog).order_by(ScalpCandidateLog.created_at.desc())
     if decision_filter:
         q = q.filter_by(decision=decision_filter.upper())
+    if reason_prefix:
+        q = q.filter(ScalpCandidateLog.reason.like(f"{reason_prefix}%"))
     rows = q.limit(max(1, min(limit, 500))).all()
     return [
         {

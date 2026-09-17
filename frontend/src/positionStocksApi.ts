@@ -392,7 +392,13 @@ export const positionStocksApi = {
   positions: () => psRequest<ScalpPositionRow[]>("/positions"),
   tradeHistory: (limit = 200) => psRequest<ScalpTradeHistory>(`/trades/history?limit=${limit}`),
   candidates: () => psRequest<ScalpCandidatesResponse>("/candidates"),
-  candidatesLog: (limit = 100) => psRequest<ScalpCandidateLogRow[]>(`/candidates/log?limit=${limit}`),
+  // AUDIT FIX (session62, issue #5): reasonPrefix optionally isolates one
+  // class of skip reason (e.g. "QUALITY_GATE") from the full mixed log —
+  // see the matching backend docstring on GET /candidates/log.
+  candidatesLog: (limit = 100, reasonPrefix?: string) =>
+    psRequest<ScalpCandidateLogRow[]>(
+      `/candidates/log?limit=${limit}${reasonPrefix ? `&reason_prefix=${encodeURIComponent(reasonPrefix)}` : ""}`
+    ),
   candidatesRestricted: () => psRequest<ScalpIntradayRestrictedRow[]>("/candidates/restricted"),
 
   ledger: () => psRequest<ScalpLedgerState>("/ledger"),

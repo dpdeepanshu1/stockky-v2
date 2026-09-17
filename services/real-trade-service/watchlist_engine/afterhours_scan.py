@@ -495,13 +495,49 @@ def _parse_feed_items(root: ET.Element) -> list[dict]:
     return items
 
 
+# RSS/Atom fetch headers (2026-09-17, session58 — live-log fix): every other
+# scraping module in this repo (market-data-service/main.py,
+# market-data-service/bhavcopy.py, api-gateway/main.py's _NSE_CLIENT_HEADERS,
+# api-gateway/ipo_scanner.py, notification-scheduler-service's
+# symbol_master_sync.py, ...) sends a browser User-Agent on outbound scrape
+# requests — this module was the one exception. Confirmed live (2026-09-17):
+# ET and ET-companies both returned HTTP 200 but ET.fromstring() then failed
+# with "syntax error: line 1, column 15" — the unmistakable signature of a
+# bot-detection interstitial HTML page served with a 200 status instead of
+# the actual RSS/XML body (a real error status would have hit raise_for_status()
+# instead). Moneycontrol/LiveMint/NDTVProfit don't gate their RSS the same
+# way, which is why only these two feeds broke. Adding the same
+# Mozilla-Chrome UA the rest of the codebase already uses should let ET/
+# ET-companies serve the real feed instead of the interstitial (a genuine
+# 403 like BusinessStandard's is unaffected either way — that's an explicit
+# block, not a served-but-wrong-content case, and already degrades safely).
+_RSS_FETCH_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+}
+
+
 async def _fetch_rss_items(feed: dict) -> list[dict]:
     """Fetch one RSS/Atom feed. Returns [] on any error — never crashes the scan."""
     try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True, headers=_RSS_FETCH_HEADERS) as client:
             resp = await client.get(feed["url"])
             resp.raise_for_status()
-            root = ET.fromstring(resp.text)
+            try:
+                root = ET.fromstring(resp.text)
+            except ET.ParseError as pe:
+                # 2026-09-17 fix (session58): a 200 response that fails to
+                # parse as XML is a bot-detection interstitial, not a
+                # transient glitch — log enough of the body to confirm
+                # that diagnosis at a glance next time, instead of just the
+                # bare ParseError (which by itself gives no way to tell
+                # "wrong content" apart from "malformed feed").
+                snippet = resp.text[:120].replace("\n", " ")
+                logger.warning(
+                    "afterhours-scan: %s returned non-XML content (HTTP %d): %s — body starts: %r",
+                    feed["source"], resp.status_code, pe, snippet,
+                )
+                return []
         items = _parse_feed_items(root)
         logger.debug("afterhours-scan: %s → %d items", feed["source"], len(items))
         return items

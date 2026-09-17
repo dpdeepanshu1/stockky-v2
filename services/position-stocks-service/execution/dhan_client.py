@@ -301,27 +301,6 @@ def get_positions(db: Session) -> list:
     return data if isinstance(data, list) else []
 
 
-def get_holdings(db: Session) -> list:
-    """Read-only — no arm check. Returns demat holdings.
-
-    2026-09-17 addition: this service never had a holdings endpoint at
-    all — the "Demat Holdings" tab only existed in real-trade-service.
-    Same benign-empty handling as real-trade-service's identically-named
-    function: Dhan's SDK reports zero holdings as {status: "failure",
-    remarks: "No holdings available"}, not an empty list, so that
-    specific message is swallowed into [] rather than raised as an
-    error; any other failure still raises."""
-    client = _get_sdk_client(db)
-    resp = client.get_holdings()
-    try:
-        data = _extract_data(resp)
-    except RuntimeError as e:
-        if "no holdings" in str(e).lower():
-            return []
-        raise
-    return data if isinstance(data, list) else []
-
-
 def get_order_list(db: Session) -> list:
     """Read-only — no arm check. Returns all PLAIN (non-super) orders for
     the day, i.e. the same order book place_order()'s own post-placement

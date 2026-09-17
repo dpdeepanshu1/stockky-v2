@@ -379,8 +379,6 @@ export default function PositionStocksTab() {
   const [candidateLogError, setCandidateLogError] = useState<string | null>(null);
   const [restrictedSymbols, setRestrictedSymbols] = useState<ScalpIntradayRestrictedRow[]>([]);
   const [restrictedSymbolsError, setRestrictedSymbolsError] = useState<string | null>(null);
-  const [liveHoldings, setLiveHoldings] = useState<any[]>([]);
-  const [liveHoldingsError, setLiveHoldingsError] = useState<string | null>(null);
   // Real Trade Service's own account figures, fetched cross-service purely
   // to populate CapitalSplitCard (see that component's docstring) — this
   // dashboard's own data (status/ledger/dhanAccount above) never depends on it.
@@ -478,19 +476,6 @@ export default function PositionStocksTab() {
     }
   }, []);
 
-  // 2026-09-17 addition: this service had no holdings endpoint at all
-  // before this fix — see positionStocksApi.holdings()/sellHolding().
-  // Admin-gated (a live Dhan API call), same pattern as loadDhanAccount.
-  const loadLiveHoldings = useCallback(async () => {
-    if (!getSessionToken()) return;
-    try {
-      const r = await positionStocksApi.holdings();
-      setLiveHoldings(r.holdings || []); setLiveHoldingsError(null);
-    } catch (e: any) {
-      setLiveHoldingsError(e?.message || "Failed to fetch demat holdings");
-    }
-  }, []);
-
   // Dhan Account card (client ID, token countdown, live funds) — same shared
   // account real-trade-service's Real Automatic Trade tab already shows;
   // requires admin auth (it's a live Dhan API call, not just a DB read).
@@ -539,16 +524,14 @@ export default function PositionStocksTab() {
     void loadCandidateLog();
     void loadRestrictedSymbols();
     void loadRealTradeAccount();
-    void loadLiveHoldings();
     const t = setInterval(() => void loadAll(), 15_000);
     const td = setInterval(() => void loadDhanLive(), 30_000);
     const ta = setInterval(() => void loadDhanAccount(), 30_000);
     const tc = setInterval(() => void loadCandidateLog(), 15_000);
     const tir = setInterval(() => void loadRestrictedSymbols(), 30_000);
     const tr = setInterval(() => void loadRealTradeAccount(), 30_000);
-    const th = setInterval(() => void loadLiveHoldings(), 30_000);
-    return () => { clearInterval(t); clearInterval(td); clearInterval(ta); clearInterval(tc); clearInterval(tir); clearInterval(tr); clearInterval(th); };
-  }, [loadAll, loadDhanLive, loadDhanAccount, loadCandidateLog, loadRestrictedSymbols, loadRealTradeAccount, loadLiveHoldings]);
+    return () => { clearInterval(t); clearInterval(td); clearInterval(ta); clearInterval(tc); clearInterval(tir); clearInterval(tr); };
+  }, [loadAll, loadDhanLive, loadDhanAccount, loadCandidateLog, loadRestrictedSymbols, loadRealTradeAccount]);
 
   // ADDED (session48 — "no live process shows and no stock name shows"):
   // polls GET /pipeline/status every 2s while the Pipeline subtab is open,
@@ -622,27 +605,6 @@ export default function PositionStocksTab() {
       await loadAll();
     } catch (e: any) {
       setError(e?.message || "Manual exit failed");
-    } finally { setBusy(null); }
-  };
-
-  // 2026-09-17 addition: sells a raw demat holding directly (no
-  // ScalpPosition backing it) via the new /dhan/holdings/sell route.
-  const doSellHolding = async (h: any) => {
-    const sym = h.tradingSymbol || h.symbol || "—";
-    const securityId = String(h.securityId || h.security_id || "");
-    const exchangeSegment = h.exchangeSegment || h.exchange_segment || "NSE_EQ";
-    const qty = Number(h.totalQty || h.quantity || 0);
-    if (!securityId || qty <= 0) {
-      setError(`Can't sell ${sym} — missing security id or quantity from Dhan.`);
-      return;
-    }
-    if (!window.confirm(`Sell ${qty} of ${sym} from demat holdings right now at market price?`)) return;
-    setBusy(`sell_holding_${sym}`); setError(null);
-    try {
-      await positionStocksApi.sellHolding(securityId, exchangeSegment, sym, qty);
-      await loadLiveHoldings();
-    } catch (e: any) {
-      setError(e?.message || `Failed to sell ${sym}`);
     } finally { setBusy(null); }
   };
 
@@ -1498,59 +1460,6 @@ export default function PositionStocksTab() {
           order budget, max concurrent positions, and available capital. It just skips the screener's
           own symbol selection.
         </p>
-      </div>
-
-      {/* ── Demat holdings (2026-09-17 addition) ── */}
-      <div className="bg-graphite border border-slate rounded-2xl p-4">
-        <p className="dash-section-title mb-3">Demat Holdings ({liveHoldings.length})</p>
-        {!loggedIn ? (
-          <p className="font-display tabular-nums text-[11px] text-mist">Log in above to view live demat holdings.</p>
-        ) : liveHoldingsError ? (
-          <p className="font-display tabular-nums text-[11px] text-signal-sell">{liveHoldingsError}</p>
-        ) : liveHoldings.length === 0 ? (
-          <p className="font-display tabular-nums text-[11px] text-mist">No holdings in demat.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full font-display tabular-nums text-[11px]">
-              <thead>
-                <tr className="text-mist border-b border-slate">
-                  <th className="text-left py-1 pr-3">Symbol</th>
-                  <th className="text-right pr-3">Qty</th>
-                  <th className="text-right pr-3">Avg Cost</th>
-                  <th className="text-right pr-3">LTP</th>
-                  <th className="text-right">Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {liveHoldings.map((h, i) => {
-                  const sym = h.tradingSymbol || h.symbol || "—";
-                  const qty = Number(h.totalQty || h.quantity || 0);
-                  const avg = Number(h.avgCostPrice || h.averageBuyPrice || 0);
-                  const ltp = Number(h.lastTradedPrice || h.ltp || 0);
-                  return (
-                    <tr key={i} className="border-b border-slate hover:bg-ink">
-                      <td className="py-1.5 pr-3 text-paper font-bold">{sym}</td>
-                      <td className="text-right pr-3 text-mist">{qty}</td>
-                      <td className="text-right pr-3 text-mist">₹{avg.toFixed(2)}</td>
-                      <td className="text-right pr-3 text-mist">{ltp > 0 ? `₹${ltp.toFixed(2)}` : "—"}</td>
-                      <td className="text-right">
-                        {qty > 0 && (
-                          <button
-                            className="px-2 py-1 rounded-lg bg-signal-sell/20 text-signal-sell hover:bg-signal-sell/30 disabled:opacity-40 text-[10px] font-bold"
-                            disabled={busy === `sell_holding_${sym}`}
-                            onClick={() => void doSellHolding(h)}
-                          >
-                            {busy === `sell_holding_${sym}` ? "Selling…" : "Sell"}
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
       </div>
 
       {/* ── Open positions ── */}

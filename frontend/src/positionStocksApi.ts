@@ -146,8 +146,8 @@ export interface DhanAccountStatus {
 export interface ScalpPositionRow {
   id: number;
   symbol: string;
-  status: "OPEN" | "TARGET_HIT" | "STOP_HIT" | "EOD_SQUAREOFF" | "MANUAL_EXIT" | "ERROR";
-  window_source: "1m" | "5m" | "15m" | "60m";
+  status: "OPEN" | "TARGET_HIT" | "STOP_HIT" | "EOD_SQUAREOFF" | "MANUAL_EXIT" | "EXIT_LEGS_REJECTED" | "ERROR";
+  window_source: "1m" | "5m" | "15m" | "60m" | "MANUAL";
   entry_price: number;
   exit_price: number | null;
   quantity: number;
@@ -321,7 +321,7 @@ export interface DhanLiveOrders {
 export interface ScalpCandidateLogRow {
   id: number;
   symbol: string;
-  window_source: "1m" | "5m" | "15m" | "60m";
+  window_source: "1m" | "5m" | "15m" | "60m" | "MANUAL";
   pct_change: number;
   composite_score: number | null;
   decision: "ENTERED" | "SKIPPED";
@@ -403,4 +403,26 @@ export const positionStocksApi = {
   dhanAccount: () => psRequest<DhanAccountStatus>("/dhan/account", {}, true),
 
   reconcile: () => psRequest<{ status: string; positions_closed: number }>("/reconcile", { method: "POST" }, true),
+
+  // ADDED (this session — "manual control to buy... and manual exit if
+  // needed"): neither existed before. manualBuy sizes automatically when
+  // quantity is omitted (same risk-based sizing an automatic entry uses);
+  // closePosition flattens one open position right now regardless of
+  // whether its own bracket target/stop would currently trigger. See the
+  // backend's main.py POST /positions/manual/buy and
+  // POST /positions/{id}/close docstrings for the full mechanism.
+  manualBuy: (symbol: string, quantity?: number) =>
+    psRequest<{
+      ok: boolean; id: number; symbol: string; quantity: number;
+      entry_price: number; target_price: number; stop_price: number;
+      dhan_super_order_id: string | null;
+    }>("/positions/manual/buy", {
+      method: "POST",
+      body: JSON.stringify({ symbol, quantity: quantity ?? null }),
+    }, true),
+
+  closePosition: (id: number) =>
+    psRequest<{ ok: boolean; status: string; id: number; symbol: string }>(
+      `/positions/${id}/close`, { method: "POST" }, true
+    ),
 };

@@ -90,8 +90,21 @@ class CircuitBreaker:
         }
 
     def record_success(self) -> None:
-        was_degraded = self._failures > 0 or self._opened_at is not None
-        if was_degraded:
+        # BUG FIX (this session — "api-gateway recovered" alert firing with
+        # no matching "DOWN" alert ever seen): this used to alert whenever
+        # self._failures > 0, but the OPEN/"DOWN" alert in record_failure()
+        # below only fires once _failures reaches failure_threshold (10).
+        # A handful of ordinary transient failures (say, 2-9 in a row) that
+        # then succeed is normal, expected network behaviour — the breaker
+        # never actually opened, is_open never returned True, and no caller
+        # ever fell back to degraded sourcing — but the old condition still
+        # declared it "recovered", producing a confusing ✅ alert with no
+        # preceding ⚠️ one. Only alert on an actual recovery: the breaker
+        # had genuinely been OPEN (self._opened_at was set) and is now
+        # closing again. Sub-threshold failure counts still reset to 0
+        # below, silently, same as before — they just don't get announced.
+        was_open = self._opened_at is not None
+        if was_open:
             logger.info("circuit_breaker[%s]: recovered — CLOSED", self.name)
             _alert(f"✅ Stockky: {self.name} recovered — back to full signal quality (Tier 1).")
         self._failures = 0

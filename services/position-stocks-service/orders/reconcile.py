@@ -50,6 +50,15 @@ logger = logging.getLogger("position-stocks-reconcile")
 
 _FILLED_STATUSES = {"TRADED", "FILLED", "EXECUTED", "COMPLETE"}
 _DEAD_ENTRY_STATUSES = {"REJECTED", "CANCELLED"}
+# BUG FIX (this session): both EOD squareoff and the new manual-exit
+# feature (orders/eod_squareoff.py::close_position_now) flatten a
+# position via a plain MARKET SELL + a "<STATUS>_PENDING_RECONCILE"
+# placeholder that this module resolves once Dhan confirms the real fill
+# — see _reconcile_eod_pending's docstring. Every status=="EOD_SQUAREOFF"
+# check in this file now checks membership in this tuple instead, so a
+# manually-exited position's real exit price/P&L gets resolved the same
+# way, rather than being stuck showing ₹0.0 P&L forever.
+_FLAT_SELL_PENDING_STATUSES = ("EOD_SQUAREOFF", "MANUAL_EXIT")
 
 
 def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 0.0) -> float:
@@ -340,19 +349,28 @@ def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int
             pos.error_message = None
             db.commit()
 
-            # EOD's own placeholder release already returned capital_risked
-            # with realized_pnl=0.0 (see eod_squareoff.py) — book the real
-            # P&L now via the same release_capital() path with
-            # position_value=0.0 so it lands exactly once, in
-            # available_capital/realized_pnl_today/realized_pnl_total, and
-            # re-runs the same daily-loss-kill-switch check a normal exit
-            # would.
+            # EOD's own (or close_position_now()'s, for a manual exit)
+            # placeholder release already returned capital_risked with
+            # realized_pnl=0.0 — book the real P&L now via the same
+            # release_capital() path with position_value=0.0 so it lands
+            # exactly once, in available_capital/realized_pnl_today/
+            # realized_pnl_total, and re-runs the same daily-loss-
+            # kill-switch check a normal exit would.
             ledger.release_capital(db, position_value=0.0, realized_pnl=real_pnl)
             resolved += 1
             logger.info(
-                "reconcile: %s (id=%d) EOD_SQUAREOFF — real fill resolved @ ₹%.2f, "
+                "reconcile: %s (id=%d) %s — real fill resolved @ ₹%.2f, "
                 "P&L ₹%.2f (%.2f%%) (was entry_price placeholder)",
-                pos.symbol, pos.id, real_exit_price, real_pnl, real_pnl_pct,
+                pos.symbol, pos.id, pos.status, real_exit_price, real_pnl, real_pnl_pct,
+            )
+            # BUG FIX (this session — "no notification for position stocks
+            # order"): the actual booked P&L for an EOD-squared-off or
+            # manually-exited position was never notified anywhere — only
+            # a CRITICAL failure would page anyone. Notify on the normal,
+            # successful resolution too.
+            notifier.notify_sync(
+                f"✅ <b>{pos.status} — real fill resolved</b> — {pos.symbol} x{pos.quantity}\n"
+                f"Exit ₹{real_exit_price:.2f} | P&L ₹{real_pnl:,.2f} ({real_pnl_pct:.2f}%)"
             )
         elif status in _DEAD_EXIT_STATUSES:
             # The flat SELL itself died with zero fill, even after
@@ -364,8 +382,9 @@ def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int
             # leaving it silently mislabeled EOD_SQUAREOFF with a ₹0.0
             # placeholder P&L that looks like a real, closed, break-even
             # trade.
+            dead_status_prefix = pos.status  # EOD_SQUAREOFF or MANUAL_EXIT, before being overwritten below
             pos.status = "ERROR"
-            pos.error_message = f"EOD_SQUAREOFF_SELL_DEAD: order {pos.dhan_exit_order_id} came back {status} with zero fill — position may still be open at the broker, needs manual review."
+            pos.error_message = f"{dead_status_prefix}_SELL_DEAD: order {pos.dhan_exit_order_id} came back {status} with zero fill — position may still be open at the broker, needs manual review."
             db.commit()
             # BUG FIX (audit follow-up): eod_squareoff.py released this
             # position's capital_risked back to available_capital the
@@ -411,12 +430,23 @@ def run_exit_reconciliation(db: Session) -> int:
         )
         .all()
     )
+    # BUG FIX (this session — added the "manual exit" feature): a manual
+    # close (orders/eod_squareoff.py::close_position_now) uses the exact
+    # same placeholder-then-reconcile pattern as EOD squareoff (plain
+    # MARKET SELL, exit_price=entry_price placeholder, a
+    # "<STATUS>_PENDING_RECONCILE" sentinel in error_message) but under
+    # status="MANUAL_EXIT" instead of "EOD_SQUAREOFF" — this query and
+    # every other status=="EOD_SQUAREOFF" check below it in this function
+    # is generalized to _FLAT_SELL_PENDING_STATUSES so a manually-exited
+    # position's real fill price/P&L gets resolved the same way an
+    # EOD-squared-off one always has, instead of being stuck on the
+    # ₹0.0-P&L placeholder forever.
     eod_pending = (
         db.query(ScalpPosition)
         .filter(
-            ScalpPosition.status == "EOD_SQUAREOFF",
+            ScalpPosition.status.in_(_FLAT_SELL_PENDING_STATUSES),
             ScalpPosition.dhan_super_order_id.isnot(None),
-            ScalpPosition.error_message.like("EOD_SQUAREOFF_PENDING_RECONCILE%"),
+            ScalpPosition.error_message.like("%_PENDING_RECONCILE%"),
         )
         .all()
     )
@@ -438,8 +468,8 @@ def run_exit_reconciliation(db: Session) -> int:
     _reconcile_eod_pending(db, eod_pending)
     eod_pending = [
         p for p in eod_pending
-        if p.status == "EOD_SQUAREOFF"
-        and (p.error_message or "").startswith("EOD_SQUAREOFF_PENDING_RECONCILE")
+        if p.status in _FLAT_SELL_PENDING_STATUSES
+        and (p.error_message or "").startswith(f"{p.status}_PENDING_RECONCILE")
     ]
 
     all_positions = open_positions + eod_pending
@@ -495,7 +525,7 @@ def run_exit_reconciliation(db: Session) -> int:
         # estimate). Does NOT touch capital_risked/the ledger — that's a
         # separate, already-reserved software allocation and out of this
         # fix's scope.
-        if pos.status in ("OPEN", "EOD_SQUAREOFF"):
+        if pos.status in ("OPEN",) + _FLAT_SELL_PENDING_STATUSES:
             entry_status_now = str(row.get("orderStatus", "")).upper()
             if entry_status_now in _FILLED_STATUSES:
                 raw_fill = row.get("averageTradedPrice")
@@ -508,7 +538,7 @@ def run_exit_reconciliation(db: Session) -> int:
                 if real_entry_price and abs(real_entry_price - pos.entry_price) > 1e-6:
                     old_entry_price = pos.entry_price
                     pos.entry_price = real_entry_price
-                    if pos.status == "EOD_SQUAREOFF" and pos.exit_price == old_entry_price:
+                    if pos.status in _FLAT_SELL_PENDING_STATUSES and pos.exit_price == old_entry_price:
                         pos.exit_price = real_entry_price
 
                     # AUDIT FIX (this session): the previously-flagged
@@ -617,20 +647,21 @@ def run_exit_reconciliation(db: Session) -> int:
             # exit at the known entry_price placeholder. If we cannot find
             # the real fill, leave error_message as-is (still marked
             # PENDING_RECONCILE) for the next pass.
-            if pos.status == "EOD_SQUAREOFF":
+            if pos.status in _FLAT_SELL_PENDING_STATUSES:
                 entry_status = str(row.get("orderStatus", "")).upper()
                 if entry_status in _FILLED_STATUSES:
                     # Original entry traded — exit was a plain MARKET SELL
                     # whose fill we can't directly read from super_orders.
                     # Use entry_price as exit_price placeholder (already set
-                    # by eod_squareoff.py); clear the pending-reconcile flag.
+                    # by eod_squareoff.py / close_position_now()); clear the
+                    # pending-reconcile flag.
                     pos.error_message = None
                     db.commit()
                     logger.info(
-                        "reconcile: %s (id=%d) EOD_SQUAREOFF — entry leg confirmed traded; "
+                        "reconcile: %s (id=%d) %s — entry leg confirmed traded; "
                         "exit price remains entry_price placeholder (no dhan_exit_order_id "
                         "to resolve the real flat-SELL fill via get_order_list())",
-                        pos.symbol, pos.id,
+                        pos.symbol, pos.id, pos.status,
                     )
                 continue
 
@@ -685,6 +716,20 @@ def run_exit_reconciliation(db: Session) -> int:
         logger.info(
             "reconcile: %s (id=%d) %s @ ₹%.2f — P&L ₹%.2f (%.2f%%)",
             pos.symbol, pos.id, hit_kind, exit_price, realized_pnl, realized_pnl_pct,
+        )
+        # BUG FIX (this session — "no notification got for position stocks
+        # order on telegram"): notifier.py has existed since session41 but
+        # was ONLY ever wired to CRITICAL failure paths — a normal,
+        # successful TARGET_HIT/STOP_HIT close (the vast majority of this
+        # service's exits) never notified anyone at all, unlike
+        # real-trade-service's exit_engine.py which notifies on every SELL
+        # it sends. Added here so a closed scalp position is always
+        # reported, good or bad.
+        emoji = "🟢" if hit_kind == "TARGET_HIT" else "🔴"
+        notifier.notify_sync(
+            f"{emoji} <b>{hit_kind}</b> — {pos.symbol} x{pos.quantity}\n"
+            f"Entry ₹{pos.entry_price:.2f} → Exit ₹{exit_price:.2f}\n"
+            f"P&L ₹{realized_pnl:,.2f} ({realized_pnl_pct:.2f}%)"
         )
 
     return closed

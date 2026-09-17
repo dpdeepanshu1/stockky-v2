@@ -24,6 +24,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 import config
+import notifier
 from capital import ledger, shared_order_budget
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
@@ -370,5 +371,219 @@ def attempt_entry(
         levels.target_price, levels.stop_price,
         candidate.window_label, candidate.composite_score,
         dhan_super_order_id or "N/A",
+    )
+    # BUG FIX (this session — "no notification got for position stocks
+    # order on telegram"): notifier.py has existed since session41 but was
+    # ONLY ever called for CRITICAL failures (broker mismatches, dead EOD
+    # sells) — a completely normal, successful BUY never notified anyone,
+    # unlike real-trade-service's entry_engine.py which notifies on every
+    # BUY it sends. Mirrors that message shape (see entry_engine.py's
+    # "📤 BUY sent (auto)" notify_async call), best-effort/non-blocking
+    # same as every other notifier.py call in this codebase.
+    notifier.notify_sync(
+        f"📤 <b>BUY placed</b> — {candidate.symbol} x{quantity}\n"
+        f"Entry ₹{candidate.current_ltp:.2f} | Target ₹{levels.target_price:.2f} "
+        f"({levels.target_pct:.2f}%) | Stop ₹{levels.stop_price:.2f} ({levels.stop_pct:.2f}%)\n"
+        f"Window {candidate.window_label} | Capital ₹{position_value:,.2f} "
+        f"| Super Order {dhan_super_order_id or 'N/A'}"
+    )
+    return pos
+
+
+class ManualEntryRejected(Exception):
+    """Raised by attempt_manual_entry() for any rejection the caller (a
+    live admin request, not a background scan) should see as an explicit
+    error response rather than a silently-logged skip — unlike
+    attempt_entry() above (called from the unattended scan loop, where a
+    None return + a ScalpCandidateLog row is the right contract)."""
+
+
+def attempt_manual_entry(
+    db: Session,
+    symbol: str,
+    current_ltp: float,
+    quantity: Optional[int] = None,
+) -> ScalpPosition:
+    """Manual BUY — an admin picks the symbol (and optionally the exact
+    quantity) directly from the dashboard, bypassing the screener/quality
+    gate entirely (this IS the "manual control to buy" feature — the
+    screener only ever proposes candidates automatically; there was no
+    path for an admin to just buy something they're watching).
+
+    Deliberately reuses every safety gate attempt_entry() enforces for an
+    automatic candidate — armed check, daily-loss kill switch, per-day
+    order budget, max-concurrent-positions cap, adaptive target/stop
+    sizing, the shared cross-service Dhan order-rate guard, and the same
+    Super Order (or plain MARKET fallback) placement path — so a manual
+    BUY is exactly as safe as an automatic one, just skipping the
+    window-scan/quality-gate SELECTION step, not any of the RISK checks.
+
+    quantity: if given, sizes the position to exactly this many shares
+    (reserving quantity * current_ltp from the ledger) instead of the
+    automatic risk-based sizing attempt_entry() uses. Still subject to the
+    same available_capital check — an admin can't manually buy more than
+    the ledger has free, same as the automatic path can't.
+
+    Raises ManualEntryRejected with a human-readable reason on any
+    rejection (armed/kill-switch/budget/capital/security-id/Dhan) instead
+    of returning None — this is a live admin action expecting an explicit
+    error, not a background scan skip. Returns the created ScalpPosition
+    on success.
+    """
+    from screening.engine import Candidate
+
+    gate = _get_gate_state(db)
+
+    if not gate.is_armed:
+        raise ManualEntryRejected("Service is not armed — arm it before placing a manual BUY.")
+
+    if gate.daily_loss_kill_switch_tripped:
+        raise ManualEntryRejected("Daily loss kill switch is tripped — no new entries today.")
+
+    today = ist_today_str()
+    if gate.orders_placed_today_date == today and gate.orders_placed_today >= config.DAILY_ORDER_BUDGET:
+        raise ManualEntryRejected(f"Daily order budget exhausted ({gate.orders_placed_today}).")
+
+    open_count = _count_open_positions(db)
+    if open_count >= config.MAX_CONCURRENT_SCALP_POSITIONS:
+        raise ManualEntryRejected(
+            f"Max concurrent positions reached ({open_count}/{config.MAX_CONCURRENT_SCALP_POSITIONS})."
+        )
+
+    if current_ltp <= 0:
+        raise ManualEntryRejected(f"No valid live price for {symbol}.")
+
+    # Adaptive levels — pct_change=0.0 since this is a manual pick, not a
+    # window-scan signal; compute() falls back to ATR-proxy from the tick
+    # buffer when available (the normal case for any actively-traded NSE
+    # symbol this service's WS feed has already ticked), and only falls
+    # back further to a pct_change-derived stop when the buffer is too
+    # thin — see adaptive.py's compute() docstring.
+    levels: AdaptiveLevels = compute_levels(0.0, current_ltp, symbol=symbol)
+
+    if quantity is not None:
+        if quantity <= 0:
+            raise ManualEntryRejected("quantity must be a positive integer.")
+        exact_cost = quantity * current_ltp
+        if not ledger.reserve_additional(db, exact_cost):
+            raise ManualEntryRejected(
+                f"Insufficient capital: need ₹{exact_cost:,.2f} for {quantity} shares of {symbol}."
+            )
+        position_value = exact_cost
+    else:
+        position_value = ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct)
+        if position_value is None:
+            raise ManualEntryRejected("Insufficient available capital (or daily-loss kill switch tripped).")
+        quantity = max(1, int(position_value / current_ltp))
+        actual_cost = quantity * current_ltp
+        if actual_cost > position_value:
+            shortfall = actual_cost - position_value
+            if not ledger.reserve_additional(db, shortfall):
+                ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+                raise ManualEntryRejected(
+                    f"Insufficient capital to cover the minimum 1-share order "
+                    f"(shortfall ₹{shortfall:,.2f})."
+                )
+            position_value = actual_cost
+
+    try:
+        security_id = dhan_client.get_security_id(db, symbol)
+    except dhan_client.SecurityNotResolvedError as e:
+        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+        raise ManualEntryRejected(f"Could not resolve a Dhan security id for {symbol}: {e}")
+
+    if not shared_order_budget.check_and_reserve(db):
+        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+        raise ManualEntryRejected("Shared cross-service Dhan order-rate budget exhausted for today.")
+
+    is_first = not gate.first_live_order_done
+    dhan_super_order_id = None
+    try:
+        if config.USE_SUPER_ORDER:
+            result = dhan_client.place_super_order(
+                db,
+                is_armed=gate.is_armed,
+                security_id=security_id,
+                exchange_segment=config.SCALP_EXCHANGE_SEGMENT,
+                transaction_type="BUY",
+                quantity=quantity,
+                order_type="MARKET",
+                price=current_ltp,
+                target_price=levels.target_price,
+                stop_loss_price=levels.stop_price,
+                trailing_jump=0.0,
+                product_type=config.SCALP_PRODUCT_TYPE,
+                tag="MANUAL",
+            )
+            dhan_super_order_id = str(result.get("orderId") or result.get("id") or "")
+        else:
+            result = dhan_client.place_order(
+                db,
+                is_armed=gate.is_armed,
+                security_id=security_id,
+                exchange_segment=config.SCALP_EXCHANGE_SEGMENT,
+                transaction_type="BUY",
+                quantity=quantity,
+                order_type="MARKET",
+                price=0.0,
+                product_type=config.SCALP_PRODUCT_TYPE,
+                tag="MANUAL",
+            )
+    except Exception as e:
+        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+        db.add(ScalpCandidateLog(
+            symbol=symbol, window_source="MANUAL", pct_change=0.0,
+            composite_score=None, decision="SKIPPED",
+            reason=f"MANUAL_ORDER_FAILED:{e}",
+        ))
+        db.commit()
+        raise ManualEntryRejected(f"Dhan rejected the manual BUY: {e}")
+
+    if is_first:
+        gate.first_live_order_done = True
+    if gate.orders_placed_today_date != today:
+        gate.orders_placed_today = 0
+        gate.orders_placed_today_date = today
+    gate.orders_placed_today += 1
+    db.commit()
+
+    pos = ScalpPosition(
+        symbol=symbol,
+        dhan_security_id=security_id,
+        window_source="MANUAL",
+        status="OPEN",
+        entry_price=current_ltp,
+        quantity=quantity,
+        target_price=levels.target_price,
+        stop_price=levels.stop_price,
+        adaptive_target_pct=levels.target_pct,
+        adaptive_stop_pct=levels.stop_pct,
+        dhan_super_order_id=dhan_super_order_id,
+        dhan_entry_order_id=dhan_super_order_id,
+        capital_risked=position_value,
+        is_first_live_order=is_first,
+        opened_at=datetime.now(timezone.utc),
+    )
+    db.add(pos)
+    db.commit()
+    db.refresh(pos)
+
+    db.add(ScalpCandidateLog(
+        symbol=symbol, window_source="MANUAL", pct_change=0.0,
+        composite_score=None, decision="ENTERED",
+        reason=f"MANUAL_BUY:SUPER_ORDER={dhan_super_order_id or 'plain_order'}",
+    ))
+    db.commit()
+
+    logger.info(
+        "position-stocks MANUAL BUY %s x%d @ ₹%.2f target=₹%.2f stop=₹%.2f super_order=%s",
+        symbol, quantity, current_ltp, levels.target_price, levels.stop_price,
+        dhan_super_order_id or "N/A",
+    )
+    notifier.notify_sync(
+        f"📤 <b>Manual BUY placed</b> — {symbol} x{quantity}\n"
+        f"Entry ₹{current_ltp:.2f} | Target ₹{levels.target_price:.2f} "
+        f"({levels.target_pct:.2f}%) | Stop ₹{levels.stop_price:.2f} ({levels.stop_pct:.2f}%)\n"
+        f"Capital ₹{position_value:,.2f} | Super Order {dhan_super_order_id or 'N/A'}"
     )
     return pos

@@ -117,7 +117,10 @@ from execution import dhan_client
 from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition
 from orders import eod_squareoff, reconcile
-from orders.entry import attempt_entry, log_quality_reject
+from orders.entry import (
+    attempt_entry, attempt_manual_entry, log_quality_reject, ManualEntryRejected,
+)
+from orders.eod_squareoff import close_position_now, ManualCloseRejected
 from resilience import circuit_breaker
 from screening import intraday_eligibility, quality_gate
 from screening.engine import scan, on_tick_hook as _engine_tick_hook
@@ -1361,3 +1364,79 @@ def reconcile_route(admin: str = Depends(require_admin), db: Session = Depends(g
     next tick."""
     closed = reconcile.run_exit_reconciliation(db)
     return {"status": "ok", "positions_closed": closed}
+
+
+# ── Manual controls (this session — "manual control to buy... and manual
+# exit if needed") ────────────────────────────────────────────────────────
+# Neither existed before: this service only ever bought what the screener
+# proposed and only ever closed a position via its own bracket target/stop
+# or the once-a-day EOD sweep. Both routes below reuse every safety gate
+# the automatic path already has (see orders/entry.py::attempt_manual_entry
+# and orders/eod_squareoff.py::close_position_now for the full reasoning)
+# — a manual action is exactly as safe as an automatic one, just skipping
+# the automatic SELECTION step, never any of the RISK checks.
+class ManualBuyRequest(BaseModel):
+    symbol: str
+    quantity: Optional[int] = None  # None = size automatically, like an auto-entry would
+
+
+@app.post("/positions/manual/buy")
+def manual_buy(
+    body: ManualBuyRequest,
+    admin: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    symbol = body.symbol.strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    ltp = ws_client.get_last_ltp(symbol)
+    if not ltp or ltp <= 0:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"No live price available yet for {symbol} — this service only knows "
+                "prices for symbols its own Angel One feed has ticked at least once. "
+                "Wait a moment (if the market is open) or check the symbol spelling."
+            ),
+        )
+
+    try:
+        pos = attempt_manual_entry(db, symbol, ltp, quantity=body.quantity)
+    except ManualEntryRejected as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    return {
+        "ok": True,
+        "id": pos.id,
+        "symbol": pos.symbol,
+        "quantity": pos.quantity,
+        "entry_price": pos.entry_price,
+        "target_price": pos.target_price,
+        "stop_price": pos.stop_price,
+        "dhan_super_order_id": pos.dhan_super_order_id,
+    }
+
+
+@app.post("/positions/{position_id}/close")
+def manual_close(
+    position_id: int,
+    admin: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Manual override — flatten one open scalp position right now,
+    independent of whether its own bracket target/stop would currently
+    trigger. See orders/eod_squareoff.py::close_position_now's docstring
+    for the full mechanism (cancel the bracket legs, plain MARKET SELL,
+    placeholder-then-reconcile for the real fill price)."""
+    db.expire_all()  # pick up any concurrent reconcile-loop write before deciding
+    pos = db.query(ScalpPosition).filter_by(id=position_id).first()
+    if pos is None:
+        raise HTTPException(status_code=404, detail="Position not found")
+
+    try:
+        result = close_position_now(db, pos)
+    except ManualCloseRejected as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    return {"ok": True, "status": "pending_broker_confirmation", **result}

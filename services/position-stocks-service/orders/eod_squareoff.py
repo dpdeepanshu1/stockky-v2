@@ -289,3 +289,102 @@ def run_eod_squareoff(db: Session) -> int:
     db.commit()
     logger.info("EOD squareoff: done — %d/%d closed", closed, len(open_positions))
     return closed
+
+
+class ManualCloseRejected(Exception):
+    """Raised by close_position_now() for a rejection the caller (a live
+    admin request) should surface as an explicit error — same reasoning
+    as entry.py's ManualEntryRejected."""
+
+
+def close_position_now(db: Session, pos: ScalpPosition) -> dict:
+    """Manual override — flatten ONE open scalp position immediately, any
+    time of day, independent of whether its own bracket target/stop would
+    currently trigger. This is the "manual exit if needed" feature (no
+    such path existed before: the only ways a position ever closed were
+    its own Super Order target/stop leg filling, or the once-a-day EOD
+    sweep — there was no way for an admin to just get out of one position
+    right now).
+
+    Deliberately mirrors run_eod_squareoff()'s per-position body above
+    (cancel every Super Order leg first — the entry side may still be
+    resting for a MARKET-priced order that briefly hasn't filled, so this
+    is a no-op-if-already-filled defensive cancel, same as EOD does — then
+    a plain MARKET SELL to guarantee flat) rather than introducing a
+    second, different close mechanism: same proven retry/error-
+    classification path (_fire_flat_sell), same PENDING_RECONCILE
+    placeholder convention that orders/reconcile.py already knows how to
+    resolve once the real fill price is known (see that module's
+    _reconcile_eod_pending — generalized this session to also handle
+    status="MANUAL_EXIT", not just "EOD_SQUAREOFF").
+
+    Always allowed regardless of the armed switch — exiting a position
+    must never be gated by "not armed", same policy eod_squareoff.py's own
+    forced-True is_armed already documents above, and the same policy
+    real-trade-service's manual close route uses.
+
+    Raises ManualCloseRejected with a human-readable reason if the
+    position isn't in a closeable state or Dhan rejects the flat SELL.
+    Returns a small status dict on success (the real fill/P&L is not yet
+    known — same placeholder-then-reconcile flow as EOD squareoff)."""
+    if pos.status not in ("OPEN", "EXIT_LEGS_REJECTED"):
+        raise ManualCloseRejected(f"Position is {pos.status} — nothing to close.")
+
+    if config.USE_SUPER_ORDER and pos.dhan_super_order_id:
+        for leg in ("ENTRY_LEG", "TARGET_LEG", "STOP_LOSS_LEG"):
+            try:
+                dhan_client.cancel_super_order(
+                    db, order_id=pos.dhan_super_order_id, order_leg=leg
+                )
+            except Exception:
+                pass  # leg may already be filled/cancelled — not fatal
+
+    try:
+        sell_result = _fire_flat_sell(db, pos)
+    except Exception as e:
+        err_str = str(e)
+        if dhan_client.is_intraday_cutoff_error(err_str):
+            raise ManualCloseRejected(
+                f"Dhan rejected — intraday order window has closed for today: {err_str}"
+            )
+        if dhan_client.is_security_intraday_restricted_error(err_str):
+            try:
+                intraday_eligibility.record_restriction(
+                    db, pos.symbol, detail=f"Manual exit SELL rejection: {err_str[:200]}",
+                )
+            except Exception:
+                pass
+            raise ManualCloseRejected(
+                f"Dhan rejected — {pos.symbol} is not tradeable intraday (T2T/ASM/GSM "
+                f"surveillance): {err_str}"
+            )
+        if dhan_client.is_insufficient_funds_error(err_str):
+            raise ManualCloseRejected(f"Dhan rejected — insufficient margin for the exit SELL: {err_str}")
+        if dhan_client.is_circuit_limit_error(err_str):
+            raise ManualCloseRejected(f"Dhan rejected — stock is at circuit limit: {err_str}")
+        raise ManualCloseRejected(f"Dhan rejected the manual exit: {err_str}")
+
+    pos.dhan_exit_order_id = str(
+        sell_result.get("orderId") or sell_result.get("order_id") or ""
+    ) or None
+    shared_order_budget.record_order_unconditional(db)
+
+    pos.status = "MANUAL_EXIT"
+    pos.closed_at = datetime.now(timezone.utc)
+    pos.exit_price = pos.entry_price   # placeholder — reconcile() will update, same as EOD squareoff
+    pos.realized_pnl = 0.0
+    pos.realized_pnl_pct = 0.0
+    pos.error_message = "MANUAL_EXIT_PENDING_RECONCILE: exit_price=entry_price placeholder until next reconcile pass fills in the real fill price."
+    db.commit()
+
+    ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=0.0)
+    logger.info("Manual exit: closed %s (id=%d) — awaiting broker fill confirmation", pos.symbol, pos.id)
+
+    from notifier import notify_sync
+    notify_sync(
+        f"📤 <b>Manual EXIT sent</b> — {pos.symbol} x{pos.quantity}\n"
+        f"Entry ₹{pos.entry_price:.2f} | Order {pos.dhan_exit_order_id or 'N/A'}\n"
+        f"Awaiting broker fill confirmation."
+    )
+
+    return {"id": pos.id, "symbol": pos.symbol, "status": "pending_broker_confirmation"}

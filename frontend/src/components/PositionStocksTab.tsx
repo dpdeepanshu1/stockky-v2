@@ -369,6 +369,9 @@ export default function PositionStocksTab() {
   // today's realized P&L + kill switch on demand (an emergency/manual
   // override on top of the automatic midnight reset).
   const [confirmResetDaily, setConfirmResetDaily] = useState(false);
+  // ADDED (this session — manual Buy control on the Positions tab)
+  const [manualBuySymbol, setManualBuySymbol] = useState("");
+  const [manualBuyQty, setManualBuyQty] = useState("");
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [dhanAccount, setDhanAccount] = useState<DhanAccountStatus | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -570,6 +573,38 @@ export default function PositionStocksTab() {
       await loadAll();
     } catch (e: any) {
       setError(e?.message || `${action} failed`);
+    } finally { setBusy(null); }
+  };
+
+  // ADDED (this session — manual Buy / Exit controls on the Positions tab):
+  // separate from doAction() above since these two take arguments (symbol,
+  // optional quantity; a position id) rather than being fixed actions.
+  const doManualBuy = async () => {
+    const symbol = manualBuySymbol.trim().toUpperCase();
+    if (!symbol) { setError("Enter a symbol to buy."); return; }
+    const qty = manualBuyQty.trim() ? parseInt(manualBuyQty.trim(), 10) : undefined;
+    if (manualBuyQty.trim() && (!qty || qty <= 0)) { setError("Quantity must be a positive whole number."); return; }
+    setBusy("manual_buy"); setError(null);
+    try {
+      const r = await positionStocksApi.manualBuy(symbol, qty);
+      setManualBuySymbol(""); setManualBuyQty("");
+      await loadAll();
+      setError(null);
+      // eslint-disable-next-line no-console
+      console.info(`Manual BUY placed: ${r.symbol} x${r.quantity} @ ₹${r.entry_price}`);
+    } catch (e: any) {
+      setError(e?.message || "Manual buy failed");
+    } finally { setBusy(null); }
+  };
+
+  const doClosePosition = async (id: number, symbol: string) => {
+    if (!window.confirm(`Exit ${symbol} right now at market price? This bypasses its own target/stop and cannot be undone.`)) return;
+    setBusy(`close_${id}`); setError(null);
+    try {
+      await positionStocksApi.closePosition(id);
+      await loadAll();
+    } catch (e: any) {
+      setError(e?.message || "Manual exit failed");
     } finally { setBusy(null); }
   };
 
@@ -1318,13 +1353,60 @@ export default function PositionStocksTab() {
 
       {subTab === "positions" && (
       <>
+      {/* ── ADDED (this session): manual controls — Refresh / Check Exits
+          Now (reconcile) / Manual Buy — directly on the Positions tab, so
+          you don't have to switch to Pipeline to reconcile or wait 15s
+          for the next poll to see a fresh price. Manual Exit lives per-row
+          below instead, since it needs a specific position id. */}
+      <div className="bg-graphite border border-slate rounded-2xl p-4">
+        <p className="dash-section-title mb-3">Manual Controls</p>
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <button disabled={busy !== null} onClick={() => void loadAll()}
+            className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-mist disabled:opacity-40">
+            ↻ Refresh
+          </button>
+          <button disabled={!loggedIn || busy !== null} onClick={() => doAction("reconcile")}
+            className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-mist disabled:opacity-40">
+            {busy === "reconcile" ? "Checking…" : "Check Exits Now (Reconcile)"}
+          </button>
+          {lastRefreshed && (
+            <span className="font-display tabular-nums text-[9px] text-mist">
+              Updated {lastRefreshed.toLocaleTimeString()}
+            </span>
+          )}
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <div>
+            <p className="text-[9px] text-mist uppercase tracking-widest mb-1">Symbol</p>
+            <input value={manualBuySymbol} onChange={e => setManualBuySymbol(e.target.value)}
+              placeholder="e.g. RELIANCE" disabled={!loggedIn || busy !== null}
+              className="px-3 py-2 rounded-xl bg-ink border border-slate font-display tabular-nums text-xs text-paper w-36 disabled:opacity-40" />
+          </div>
+          <div>
+            <p className="text-[9px] text-mist uppercase tracking-widest mb-1">Qty (optional — blank = auto-size)</p>
+            <input value={manualBuyQty} onChange={e => setManualBuyQty(e.target.value)}
+              placeholder="auto" inputMode="numeric" disabled={!loggedIn || busy !== null}
+              className="px-3 py-2 rounded-xl bg-ink border border-slate font-display tabular-nums text-xs text-paper w-24 disabled:opacity-40" />
+          </div>
+          <button disabled={!loggedIn || busy !== null || !manualBuySymbol.trim()} onClick={() => void doManualBuy()}
+            className="px-4 py-2 rounded-xl bg-profit/20 border border-profit font-display tabular-nums text-xs text-profit disabled:opacity-40">
+            {busy === "manual_buy" ? "Placing…" : "Buy Now"}
+          </button>
+        </div>
+        <p className="font-display tabular-nums text-[9px] text-mist mt-2">
+          Manual BUY still goes through every real gate an automatic entry does — armed, kill switch,
+          order budget, max concurrent positions, and available capital. It just skips the screener's
+          own symbol selection.
+        </p>
+      </div>
+
       {/* ── Open positions ── */}
       <div className="bg-graphite border border-slate rounded-2xl p-4">
         <p className="dash-section-title mb-3">Open Positions ({openPositions.length}/{status?.max_concurrent_scalp_positions ?? 5})</p>
         {openPositions.length === 0 ? (
           <p className="font-display tabular-nums text-xs text-mist">No open scalp positions.</p>
         ) : (
-          <div className="space-y-2">{openPositions.map(p => <PositionRow key={p.id} p={p} />)}</div>
+          <div className="space-y-2">{openPositions.map(p => <PositionRow key={p.id} p={p} onClose={doClosePosition} busy={busy} loggedIn={loggedIn} />)}</div>
         )}
       </div>
 
@@ -1716,10 +1798,21 @@ function CandidateList({ rows }: { rows: ScalpCandidateRow[] }) {
   );
 }
 
-function PositionRow({ p }: { p: ScalpPositionRow }) {
+function PositionRow({ p, onClose, busy, loggedIn }: {
+  p: ScalpPositionRow;
+  onClose?: (id: number, symbol: string) => void;
+  busy?: string | null;
+  loggedIn?: boolean;
+}) {
   const pnlPct = p.realized_pnl_pct ?? (p.exit_price && p.entry_price
     ? ((p.exit_price - p.entry_price) / p.entry_price) * 100
     : null);
+  // ADDED (this session — "manual exit if needed"): only offer Exit Now
+  // for a position that's actually still open at the broker (OPEN, or
+  // EXIT_LEGS_REJECTED — a position whose bracket legs failed to place
+  // and so has no working target/stop at all, the case that most needs
+  // a manual way out).
+  const canClose = onClose && (p.status === "OPEN" || p.status === "EXIT_LEGS_REJECTED");
   return (
     <div className="border border-slate rounded-xl p-3">
       <div className="flex items-center justify-between mb-2">
@@ -1727,6 +1820,12 @@ function PositionRow({ p }: { p: ScalpPositionRow }) {
         <div className="flex items-center gap-2">
           <span className="font-display tabular-nums text-[10px] text-mist">{p.window_source}</span>
           <span className={`font-display tabular-nums text-[10px] uppercase font-bold ${statusColor(p.status)}`}>{p.status}</span>
+          {canClose && (
+            <button disabled={!loggedIn || busy !== null} onClick={() => onClose!(p.id, p.symbol)}
+              className="px-2 py-1 rounded-lg bg-signal-sell/20 border border-signal-sell font-display tabular-nums text-[10px] text-signal-sell disabled:opacity-40">
+              {busy === `close_${p.id}` ? "Exiting…" : "Exit Now"}
+            </button>
+          )}
         </div>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-[11px]">

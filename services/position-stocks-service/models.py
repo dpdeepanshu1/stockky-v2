@@ -77,6 +77,17 @@ class ScalpCapitalLedger(Base):
     # instead of a scheduler, so it self-heals even if the service was
     # down across midnight.
     pnl_last_reset_date = Column(String(10), nullable=True)
+    # BUG FIX (Issue #2): position-stocks' daily-loss kill switch previously
+    # only watched its OWN realized_pnl_today, while real-trade-service's
+    # losses on the SAME shared Dhan account were invisible to it. A -₹1,436
+    # loss on real-trade's side still left position-stocks freely entering new
+    # positions. This column caches the last-known realized_pnl_today fetched
+    # from real-trade-service's /status/REAL (synced inside sync_from_broker()
+    # at the same cadence, not on the hot entry path). reserve_capital() now
+    # adds this to its own pnl_today before evaluating the kill-switch
+    # threshold — so cross-service losses on the same account are accounted for.
+    peer_realized_pnl_today = Column(Float, nullable=False, default=0.0)
+    peer_pnl_last_synced_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 

@@ -697,6 +697,12 @@ def run_exit_reconciliation(db: Session) -> int:
                 pos.closed_at = datetime.now(timezone.utc)
                 db.commit()
                 ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=0.0)
+                # BUG FIX (Issue #4): symbol lock was never released on the
+                # dead-entry path — capital was freed but the SharedSymbolLock
+                # row was left behind, permanently blocking re-entry into this
+                # symbol (e.g. TREL stuck with held_by_mode=null). Fixed by
+                # mirroring the same release() call every other exit path makes.
+                shared_symbol_lock.release(db, pos.symbol)
                 closed += 1
                 logger.warning(
                     "reconcile: %s (id=%d) entry leg %s — capital released, no trade",

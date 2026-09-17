@@ -179,6 +179,11 @@ _COLUMN_MIGRATIONS = [
     # (reset_daily() was previously dead code, never called — see models.py
     # comment on this column for the full story).
     ("scalp_capital_ledger", "pnl_last_reset_date", "VARCHAR2(10)", "VARCHAR(10)", None, None),
+    # BUG FIX (Issue #2): cross-service PnL sync columns added to
+    # scalp_capital_ledger so reserve_capital()'s daily-loss kill switch
+    # accounts for losses booked by real-trade-service on the same Dhan account.
+    ("scalp_capital_ledger", "peer_realized_pnl_today", "BINARY_DOUBLE", "DOUBLE PRECISION", "0", "0"),
+    ("scalp_capital_ledger", "peer_pnl_last_synced_at", "TIMESTAMP", "TIMESTAMP", None, None),
     # AUDIT FIX (2026-09-15): scalp_intraday_restricted is a brand-new table
     # (models.ScalpIntradayRestrictedSecurity). create_all() will CREATE it
     # on the next boot — no column migrations needed for a new table.

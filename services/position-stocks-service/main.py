@@ -136,6 +136,19 @@ async def lifespan(app: FastAPI):
     # Init DB tables
     _db.init_tables()
 
+    # BUG FIX (Issue #4): clear any stale symbol locks left from a previous
+    # run where release() was never called (e.g. dead-entry path in reconcile.py
+    # before that fix, or a crash mid-exit). Safe at startup — any genuinely
+    # open position still has its OPEN/EXIT_LEGS_REJECTED status row.
+    _startup_session_factory = _db.get_session_factory()
+    with _startup_session_factory() as _startup_db:
+        released = shared_symbol_lock.cleanup_stale(_startup_db)
+        if released:
+            logger.warning(
+                "position-stocks-service startup: cleaned up %d stale symbol lock(s): %s",
+                len(released), released,
+            )
+
     if not config.RISK_PER_TRADE_PCT_CONFIRMED:
         logger.warning(
             "⚠️  RISK_PER_TRADE_PCT_CONFIRMED is not set — using placeholder "
@@ -1314,6 +1327,33 @@ def reset_ledger_daily(admin: str = Depends(require_admin), db: Session = Depend
             "un-blocked; is_armed left untouched."
         )
     return {"status": "ledger_daily_reset"}
+
+
+# BUG FIX (Issue #4): admin endpoint to force-release a stuck symbol lock.
+# Needed when release() was not called on a previous exit (e.g. dead-entry
+# before the reconcile.py fix), leaving the lock row orphaned. The startup
+# cleanup_stale() handles this automatically on redeploy; this endpoint
+# handles it on a running service without a restart.
+@app.delete("/symbol-lock/{symbol}")
+def force_release_symbol_lock(
+    symbol: str,
+    admin: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Admin-only: unconditionally release the symbol lock for `symbol`,
+    regardless of which service holds it. Use to clear stuck locks visible
+    in GET /status's shared_symbol_lock list. Does NOT close any open
+    position — it only removes the lock row so either service can re-enter
+    the symbol. Verify the underlying position is actually flat before
+    calling this."""
+    sym = symbol.strip().upper()
+    released = shared_symbol_lock.force_release(db, sym)
+    if not released:
+        raise HTTPException(status_code=404, detail=f"No symbol lock found for {sym}")
+    logger.warning(
+        "position-stocks: admin force-released symbol lock for %s (admin=%s)", sym, admin,
+    )
+    return {"ok": True, "symbol": sym, "released": True}
 
 
 @app.get("/ws-status")

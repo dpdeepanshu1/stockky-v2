@@ -126,3 +126,75 @@ def status(db: Session) -> list[dict]:
     except Exception as e:
         logger.error("position-stocks: shared_symbol_lock.status failed: %s", e, exc_info=True)
         return []
+
+
+def force_release(db: Session, symbol: str) -> bool:
+    """Admin-only: unconditionally delete the lock row for `symbol`
+    regardless of which service holds it. Used to clear stuck locks
+    (e.g. TREL held_by_mode=null after a dead-entry error that didn't
+    call release()). Returns True if a row was deleted, False if none
+    existed. Never raises."""
+    symbol = symbol.strip().upper()
+    try:
+        row = db.query(SharedSymbolLock).filter_by(symbol=symbol).first()
+        if row is None:
+            return False
+        db.delete(row)
+        db.commit()
+        logger.warning(
+            "position-stocks: shared_symbol_lock.force_release(%s) — "
+            "lock held by %s (mode=%s) cleared by admin",
+            symbol, row.held_by_service, row.held_by_mode,
+        )
+        return True
+    except Exception as e:
+        logger.error(
+            "position-stocks: shared_symbol_lock.force_release(%s) failed: %s",
+            symbol, e, exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return False
+
+
+def cleanup_stale(db: Session) -> list[str]:
+    """BUG FIX (Issue #4): on startup (and optionally on demand), sweep
+    SharedSymbolLock rows held by THIS service and release any whose symbol
+    has no corresponding OPEN or EXIT_LEGS_REJECTED ScalpPosition — meaning
+    the position was closed/errored but release() was never called (exactly
+    the dead-entry bug fixed in reconcile.py). Safe to run at startup
+    because a genuinely open position will always have its status row; a
+    stale lock by definition has none. Returns list of released symbols."""
+    released = []
+    try:
+        from models import ScalpPosition  # local to avoid circular import
+        our_locks = db.query(SharedSymbolLock).filter_by(
+            held_by_service=_SERVICE_NAME
+        ).all()
+        for lock in our_locks:
+            has_open = db.query(ScalpPosition).filter(
+                ScalpPosition.symbol == lock.symbol,
+                ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED")),
+            ).first()
+            if has_open is None:
+                db.delete(lock)
+                released.append(lock.symbol)
+                logger.warning(
+                    "position-stocks: shared_symbol_lock.cleanup_stale: "
+                    "released stale lock for %s (no open position found)",
+                    lock.symbol,
+                )
+        if released:
+            db.commit()
+    except Exception as e:
+        logger.error(
+            "position-stocks: shared_symbol_lock.cleanup_stale failed: %s",
+            e, exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    return released

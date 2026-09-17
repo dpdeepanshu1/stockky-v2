@@ -136,11 +136,24 @@ def sync_real_equity(db: Session) -> Optional[float]:
     capped_cash = balance * (config.CAPITAL_SHARE_PCT / 100.0)
     account.cash_available = round(capped_cash, 2)
     account.current_equity = round(capped_cash + market_value, 2)
-    if not account.starting_capital:
-        # First successful sync only — gives max_daily_loss_pct a stable
-        # reference point. Never overwritten again here, so a same-day
-        # deposit/withdrawal doesn't silently reset the daily-loss
-        # baseline mid-session.
+    # BUG FIX (Issue #3): original condition `if not account.starting_capital`
+    # only catches 0.0 / None — any non-zero placeholder (e.g. 100.0 left over
+    # from an old DB row or a manual set) passes the check and is NEVER
+    # corrected, leaving daily-loss % calculations based on a nonsense baseline.
+    # Fix: also auto-correct when the stored value is implausibly small relative
+    # to the current equity (< 1% of current_equity, floored at ₹500 to avoid
+    # triggering on genuinely tiny test accounts). The admin endpoint
+    # POST /account/reset-starting-capital is the explicit override path for
+    # operators who need to set it to an exact value.
+    if not account.starting_capital or (
+        account.current_equity > 500
+        and account.starting_capital < account.current_equity * 0.01
+    ):
+        logger.warning(
+            "equity_sync: starting_capital (₹%.2f) is unset or implausibly small "
+            "relative to current_equity (₹%.2f) — auto-correcting to current_equity.",
+            account.starting_capital, account.current_equity,
+        )
         account.starting_capital = account.current_equity
     account.updated_at = datetime.now(timezone.utc)
     db.commit()

@@ -343,7 +343,10 @@ async def reconcile_real_orders(db: Session) -> dict:
     # repair above — idempotent (see import_broker_holdings' own
     # already-tracked check), so this is a no-op once a holding is in.
     try:
-        tally["holdings_imported"] = import_broker_holdings(db)
+        # AUDIT FIX (session62): import_broker_holdings is now async — it
+        # batch-fetches a live quote per new symbol (for ATR-adaptive
+        # stop/target, see its own docstring) via market_feed.get_quotes.
+        tally["holdings_imported"] = await import_broker_holdings(db)
     except Exception as e:  # noqa: BLE001 — must never block the rest of the cycle
         logger.warning("reconcile: import_broker_holdings failed: %s", e)
 

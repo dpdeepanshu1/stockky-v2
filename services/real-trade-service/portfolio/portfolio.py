@@ -138,7 +138,7 @@ def held_exposure_positions(db: Session, mode: str) -> list[models.TradePosition
     )
 
 
-def import_broker_holdings(db: Session) -> int:
+async def import_broker_holdings(db: Session) -> int:
     """Bring pre-existing Dhan demat holdings — stocks bought manually, or
     already sitting in the account before Stockky started trading it —
     into this system's own TradePosition table, so the Positions/Orders
@@ -188,15 +188,55 @@ def import_broker_holdings(db: Session) -> int:
     a real fill event.
 
     No proposed_stop/target exists for a position that was never opened
-    via a TradeDecision, so this uses the same flat-percentage fallback
-    entry_engine/exit_engine already fall back to elsewhere
-    (FLAT_STOP_PCT/FLAT_TARGET_PCT) rather than inventing a third
-    convention — applied around the BROKER'S OWN avgCostPrice, not a
-    fresh live price, so the stop/target reflects the actual cost basis.
+    via a TradeDecision. AUDIT FIX (session62, issue #8 — "demat-holdings
+    managed-position feature"): this used to ALWAYS fall back to the flat
+    FLAT_STOP_PCT/FLAT_TARGET_PCT percentages entry_engine uses only when
+    it has no live tick, even though a live tick (and ATR) for the symbol
+    is almost always available by the time a holding shows up here. Now
+    mirrors entry_engine.entry._atr_stop_target_pct exactly: a live
+    quote's ATR gives a volatility-adaptive stop/target (same
+    MIN_STOP_PCT/MAX_STOP_PCT/ATR_STOP_MULTIPLIER/ATR_TARGET_MULTIPLIER
+    this service's own fresh entries use), and only a symbol with no
+    fetchable tick/ATR at import time falls back to the flat percentages
+    — same "informational-only, never blocks the import" fail-open shape
+    as everything else in this function. Applied around the BROKER'S OWN
+    avgCostPrice, not a fresh live price, so the stop/target reflects the
+    actual cost basis.
+
+    AUDIT FIX (session62, same issue): also claims execution.shared_symbol_
+    lock for the symbol before this service starts actively managing it
+    (evaluating stop/target, and — unlike the read-only "Demat holdings"
+    card — potentially auto-SELLing it). Without this, a demat holding
+    that position-stocks-service is ALSO independently managing (it can
+    buy from the same shared Dhan account) would silently get a second,
+    uncoordinated manager here too — the exact AEGISVOPAK class of bug
+    shared_symbol_lock exists to prevent, just entered from the import
+    side instead of the BUY side. If the lock is already held by
+    position-stocks-service, this import is skipped for that symbol (not
+    forced/overridden) — it stays visible in the read-only "Demat
+    holdings" card only, and import is retried on a later cycle in case
+    the other service's claim clears. Fail-open: any lock-check error is
+    logged and treated as claimed (never blocks the import), same
+    convention as every other shared_symbol_lock call site.
     """
-    from entry_engine.entry import FLAT_STOP_PCT, FLAT_TARGET_PCT
+    from entry_engine.entry import (
+        FLAT_STOP_PCT, FLAT_TARGET_PCT, MIN_STOP_PCT, MAX_STOP_PCT,
+        ATR_STOP_MULTIPLIER, ATR_TARGET_MULTIPLIER,
+    )
     from execution import dhan_client
     from datetime import timedelta
+
+    def _atr_stop_target_pct(atr_pct):
+        # Same formula as entry_engine.entry._atr_stop_target_pct — kept as
+        # a local copy rather than importing the underscore-prefixed
+        # function across modules, matching this file's existing idiom of
+        # re-deriving small entry-side constants locally (see FLAT_STOP_PCT
+        # import above) rather than reaching into entry.py's internals.
+        if atr_pct is None or atr_pct <= 0:
+            return FLAT_STOP_PCT, FLAT_TARGET_PCT
+        stop_pct = max(MIN_STOP_PCT, min(atr_pct * ATR_STOP_MULTIPLIER, MAX_STOP_PCT))
+        target_pct = stop_pct * (ATR_TARGET_MULTIPLIER / ATR_STOP_MULTIPLIER)
+        return round(stop_pct, 2), round(target_pct, 2)
 
     # How long a just-CLOSED position stays protected from re-import even
     # though Dhan's holdings feed may still list it (settlement-lag
@@ -216,8 +256,12 @@ def import_broker_holdings(db: Session) -> int:
                 return row[k]
         return default
 
-    imported = 0
     now = datetime.now(timezone.utc)
+    recent_close_guard = now - timedelta(hours=_RECENT_CLOSE_REIMPORT_GUARD_HOURS)
+
+    # ── Pass 1: figure out which symbols actually need importing ──────────
+    # (unchanged eligibility rules), before doing any network I/O for ATR.
+    candidates: list[tuple[str, int, float]] = []
     for row in holdings or []:
         if not isinstance(row, dict):
             continue
@@ -251,7 +295,6 @@ def import_broker_holdings(db: Session) -> int:
         # See BUG FIX (2026-09-08) in the docstring above: guard against
         # re-importing a symbol we JUST closed ourselves, before Dhan's
         # holdings feed has caught up to the sell.
-        recent_close_guard = now - timedelta(hours=_RECENT_CLOSE_REIMPORT_GUARD_HOURS)
         recently_closed = db.query(models.TradePosition).filter(
             models.TradePosition.mode == "REAL",
             models.TradePosition.symbol == symbol,
@@ -267,8 +310,52 @@ def import_broker_holdings(db: Session) -> int:
             )
             continue
 
-        stop_price = round(avg_price * (1 - FLAT_STOP_PCT / 100.0), 2)
-        target_price = round(avg_price * (1 + FLAT_TARGET_PCT / 100.0), 2)
+        candidates.append((symbol, qty, avg_price))
+
+    if not candidates:
+        return 0
+
+    # ── Pass 2: one batch live-quote fetch (for ATR) covering every symbol
+    # that's actually going to be imported this cycle — cheap (this list is
+    # normally empty or a handful of symbols; already-tracked holdings never
+    # reach here) and gives every new import the same adaptive stop/target
+    # a fresh entry_engine BUY would get instead of always the flat
+    # fallback.
+    try:
+        from market_feed.feed import get_quotes
+        ticks = await get_quotes([sym for sym, _, _ in candidates])
+    except Exception as e:  # noqa: BLE001 — ATR is an enhancement, never blocking
+        logger.warning("import_broker_holdings: get_quotes for ATR failed (using flat fallback): %s", e)
+        ticks = {}
+
+    imported = 0
+    for symbol, qty, avg_price in candidates:
+        # AUDIT FIX (session62): claim the cross-service symbol lock before
+        # this service starts managing the holding — see docstring above.
+        # Skipped (not force-imported) if position-stocks-service already
+        # holds it; retried on a later reconcile cycle.
+        if not shared_symbol_lock.try_claim(db, symbol, mode="REAL"):
+            logger.warning(
+                "import_broker_holdings: skipping %s this cycle — symbol lock already "
+                "held by position-stocks-service; will retry once it's released.",
+                symbol,
+            )
+            continue
+
+        tick = ticks.get(symbol)
+        raw_atr_pct = (tick.atr / tick.price * 100.0) if (tick and tick.atr and tick.price) else None
+        try:
+            from return_sanity import clamp_for_atr
+            atr_pct = clamp_for_atr(raw_atr_pct) if raw_atr_pct is not None else None
+        except Exception:
+            atr_pct = raw_atr_pct
+        stop_pct, target_pct = _atr_stop_target_pct(atr_pct)
+        stop_price = round(avg_price * (1 - stop_pct / 100.0), 2)
+        target_price = round(avg_price * (1 + target_pct / 100.0), 2)
+        basis_note = (
+            f"ATR-adaptive {stop_pct}%/{target_pct}% (atr%={atr_pct:.2f})" if atr_pct is not None
+            else f"flat {stop_pct}%/{target_pct}% (no live ATR at import time)"
+        )
         position = models.TradePosition(
             mode="REAL", symbol=symbol, status="OPEN",
             qty_open=qty, avg_entry_price=avg_price, opened_at=now,
@@ -290,12 +377,13 @@ def import_broker_holdings(db: Session) -> int:
         db.add(models.TradePositionEvent(
             position_id=position.id, event_type="OPENED",
             detail=f"Imported from Dhan demat holdings (pre-existing, not bought via this "
-                   f"app): {qty} @ avg cost ₹{avg_price}, flat {FLAT_STOP_PCT}%/{FLAT_TARGET_PCT}% "
-                   f"stop/target since no decision/proposed_stop exists for it",
+                   f"app): {qty} @ avg cost ₹{avg_price}, {basis_note} stop/target since no "
+                   f"decision/proposed_stop exists for it; shared symbol lock claimed.",
         ))
         logger.info(
             "import_broker_holdings: imported %s (%d shares @ avg ₹%.2f) as a new tracked "
-            "REAL position — now visible to /positions and exit_engine", symbol, qty, avg_price,
+            "REAL position — now visible to /positions and exit_engine (%s)",
+            symbol, qty, avg_price, basis_note,
         )
         imported += 1
 

@@ -1230,6 +1230,52 @@ async def resilience_reset_route(admin: str = Depends(require_admin)):
     return {"ok": True, "reset": reset, "count": len(reset)}
 
 
+# BUG FIX (Issue #3): admin endpoint to correct a wrong starting_capital.
+# The automatic fix in equity_sync.py handles the 100.0 placeholder on the
+# next sync cycle. This endpoint lets an operator set it to an exact value
+# (e.g. the actual account balance on the day trading started) without a
+# direct DB write — useful when current_equity has already moved from the
+# true starting point.
+class ResetStartingCapitalRequest(BaseModel):
+    mode: str
+    starting_capital: float
+
+
+@app.post("/account/reset-starting-capital")
+async def reset_starting_capital(
+    req: ResetStartingCapitalRequest,
+    admin: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Admin-only: set starting_capital to an explicit value for a mode.
+    Use when the auto-correction in equity_sync picked the wrong baseline
+    (e.g. you want the P&L % to be relative to your original deposit, not
+    today's equity). Does NOT affect current_equity or cash_available."""
+    mode = req.mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    if req.starting_capital <= 0:
+        raise HTTPException(status_code=400, detail="starting_capital must be positive")
+    account = db.query(models.TradeAccount).filter_by(mode=mode).first()
+    if not account:
+        raise HTTPException(status_code=404, detail=f"No account found for mode {mode}")
+    old = account.starting_capital
+    account.starting_capital = round(req.starting_capital, 2)
+    db.commit()
+    log_action(db, actor=admin, action="RESET_STARTING_CAPITAL", mode=mode,
+               detail=f"old={old} new={account.starting_capital}")
+    logger.info(
+        "account/reset-starting-capital: %s starting_capital ₹%.2f -> ₹%.2f (admin=%s)",
+        mode, old, account.starting_capital, admin,
+    )
+    return {
+        "ok": True,
+        "mode": mode,
+        "old_starting_capital": old,
+        "new_starting_capital": account.starting_capital,
+    }
+
+
 # ── Routes: Auto-Pilot (2026-08-27) ──────────────────────────────────────────
 # Toggle only — the actual loop lives in execution/auto_pilot.py, started
 # once at app startup and running for the lifetime of the process. Turning

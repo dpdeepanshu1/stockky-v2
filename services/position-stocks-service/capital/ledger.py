@@ -109,6 +109,7 @@ def _maybe_lazy_reset_daily(db: Session, row: ScalpCapitalLedger) -> None:
     was_tripped = row.daily_loss_kill_switch_tripped
     prev_pnl = row.realized_pnl_today
     row.realized_pnl_today = 0.0
+    row.peer_realized_pnl_today = 0.0  # Issue #2: reset peer cache on new day
     row.daily_loss_kill_switch_tripped = False
     row.daily_loss_kill_switch_tripped_date = None
     row.pnl_last_reset_date = today
@@ -231,7 +232,48 @@ def sync_from_broker(db: Session) -> float:
         "ledger: synced from broker — total Dhan balance ₹%.2f, scalp pool ₹%.2f",
         available_balance, scalp_alloc,
     )
+    # BUG FIX (Issue #2): sync peer PnL at the same cadence as broker sync
+    # so reserve_capital()'s combined kill-switch check stays current.
+    sync_peer_pnl(db)
     return scalp_alloc
+
+
+def sync_peer_pnl(db: Session) -> Optional[float]:
+    """BUG FIX (Issue #2): fetch real-trade-service's realized_pnl_today and
+    cache it in the ledger row so reserve_capital()'s daily-loss kill switch
+    accounts for losses on the SAME shared Dhan account booked by the peer
+    service. Called from sync_from_broker() at the same cadence — NOT on the
+    hot entry path — to avoid adding latency or a single-point-of-failure to
+    every trade attempt.
+
+    Fails silently (returns None, logs a warning) if real-trade-service is
+    unreachable or returns unexpected data — position-stocks must never be
+    blocked from trading by a connectivity issue with its peer. The last
+    successfully cached value remains in effect until the next successful sync.
+    Returns the fetched peer pnl_today on success, None on failure."""
+    import urllib.request
+    import json as _json
+
+    try:
+        url = f"{config.REAL_TRADE_SERVICE_URL}/status/REAL"
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            data = _json.loads(resp.read())
+        peer_pnl = float(data.get("account", {}).get("realized_pnl_today", 0.0))
+        row = _get_or_create(db)
+        row.peer_realized_pnl_today = peer_pnl
+        row.peer_pnl_last_synced_at = datetime.now(timezone.utc)
+        db.commit()
+        logger.info(
+            "ledger.sync_peer_pnl: real-trade-service realized_pnl_today=₹%.2f cached",
+            peer_pnl,
+        )
+        return peer_pnl
+    except Exception as e:
+        logger.warning(
+            "ledger.sync_peer_pnl: could not fetch real-trade-service pnl "
+            "(using last cached value): %s", e,
+        )
+        return None
 
 
 def reserve_capital(
@@ -247,11 +289,57 @@ def reserve_capital(
         logger.warning("ledger.reserve_capital: daily loss kill switch tripped — refusing entry")
         return None
 
+    # BUG FIX (Issue #2): cross-service daily loss check. The kill switch in
+    # release_capital() only trips from THIS pool's own losses. But real-trade-
+    # service trades the same shared Dhan account, so its losses are real account
+    # drawdown too. Check combined pnl here (own + peer) against the threshold —
+    # if the combined loss already exceeds our limit, refuse the new entry and
+    # trip the switch. peer_realized_pnl_today is 0.0 (safe default) until the
+    # first successful sync_peer_pnl() call.
+    if row.total_allocated_capital > 0:
+        combined_pnl = row.realized_pnl_today + row.peer_realized_pnl_today
+        if combined_pnl < 0:
+            combined_loss_pct = abs(combined_pnl) / row.total_allocated_capital * 100
+            if combined_loss_pct >= config.MAX_DAILY_LOSS_PCT_OF_POOL:
+                logger.warning(
+                    "ledger.reserve_capital: combined daily loss kill switch tripped — "
+                    "own=₹%.2f peer=₹%.2f combined=₹%.2f (%.1f%% of pool ₹%.2f). "
+                    "Refusing entry.",
+                    row.realized_pnl_today, row.peer_realized_pnl_today,
+                    combined_pnl, combined_loss_pct, row.total_allocated_capital,
+                )
+                # Trip the local switch so subsequent calls skip the HTTP+math
+                row.daily_loss_kill_switch_tripped = True
+                row.daily_loss_kill_switch_tripped_date = ist_today_str()
+                gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
+                if gate is not None and not gate.daily_loss_kill_switch_tripped:
+                    gate.daily_loss_kill_switch_tripped = True
+                    gate.daily_loss_kill_switch_tripped_date = row.daily_loss_kill_switch_tripped_date
+                db.commit()
+                return None
+
     if row.total_allocated_capital <= 0:
         logger.warning("ledger.reserve_capital: total_allocated_capital=0 — run sync_from_broker first")
         return None
 
-    risk_rupees = row.total_allocated_capital * (config.RISK_PER_TRADE_PCT / 100.0)
+    # BUG FIX (#1 — position sizing formula ate 100% of pool per trade):
+    # The original formula was:
+    #   risk_rupees    = total_allocated_capital * RISK_PER_TRADE_PCT%
+    #   position_value = risk_rupees / adaptive_stop_pct%
+    # With RISK_PER_TRADE_PCT=2% and MIN_STOP_PCT=2% (the ATR floor),
+    # position_value = pool * 2% / 2% = 100% of pool — for ONE trade.
+    # But MAX_CONCURRENT_SCALP_POSITIONS=5 means the pool must sustain 5
+    # concurrent positions. No division by concurrency existed, so the
+    # first position consumed nearly all available capital, leaving every
+    # subsequent candidate with INSUFFICIENT_CAPITAL even when ~50% of the
+    # pool was still nominally "available". Fixed by dividing risk_rupees
+    # (NOT position_value) by MAX_CONCURRENT_SCALP_POSITIONS first, so
+    # each slot gets its fair share of the pool's risk budget.
+    risk_rupees = (
+        row.total_allocated_capital
+        * (config.RISK_PER_TRADE_PCT / 100.0)
+        / config.MAX_CONCURRENT_SCALP_POSITIONS
+    )
     position_value = risk_rupees / (adaptive_stop_pct / 100.0)
 
     if position_value > row.available_capital:
@@ -264,8 +352,9 @@ def reserve_capital(
     row.available_capital -= position_value
     db.commit()
     logger.info(
-        "ledger.reserve_capital: reserved ₹%.2f (risk ₹%.2f, stop %.2f%%), remaining ₹%.2f",
-        position_value, risk_rupees, adaptive_stop_pct, row.available_capital,
+        "ledger.reserve_capital: reserved ₹%.2f (risk ₹%.2f / %d slots, stop %.2f%%), remaining ₹%.2f",
+        position_value, risk_rupees, config.MAX_CONCURRENT_SCALP_POSITIONS,
+        adaptive_stop_pct, row.available_capital,
     )
     return position_value
 
@@ -463,6 +552,7 @@ def reset_daily(db: Session) -> None:
     trigger on top of that automatic path, not a replacement for it."""
     row = _get_or_create(db)  # also applies the lazy reset if due
     row.realized_pnl_today = 0.0
+    row.peer_realized_pnl_today = 0.0  # Issue #2: reset peer cache on manual reset too
     row.daily_loss_kill_switch_tripped = False
     row.daily_loss_kill_switch_tripped_date = None
     row.pnl_last_reset_date = ist_today_str()
@@ -477,6 +567,8 @@ def get_state(db: Session) -> dict:
         "available_capital": row.available_capital,
         "realized_pnl_today": row.realized_pnl_today,
         "realized_pnl_total": row.realized_pnl_total,
+        "peer_realized_pnl_today": row.peer_realized_pnl_today,  # Issue #2: real-trade-service's pnl
+        "peer_pnl_last_synced_at": iso_utc(row.peer_pnl_last_synced_at),
         # AUDIT FIX (this session): same raw-datetime gap as main.py's
         # other endpoints — see the comment on GET /status for the full
         # reasoning. Without iso_utc(), this timestamp displays off by

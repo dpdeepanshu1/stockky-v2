@@ -37,6 +37,11 @@ Wired into:
   - manual_engine.py's manual REAL BUY path — same claim/release shape
   - exit_engine/exit.py — released once a position's qty_open reaches 0
     (fully flat), not on a partial exit
+  - portfolio.import_broker_holdings() (session62) — claimed before a
+    pre-existing Dhan demat holding starts being actively managed by this
+    service (stop/target evaluation, possible auto-SELL); the import is
+    skipped for that symbol (not overridden) if position-stocks-service
+    already holds the claim
 """
 from __future__ import annotations
 

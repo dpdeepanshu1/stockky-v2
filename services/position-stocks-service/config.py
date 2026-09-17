@@ -271,3 +271,13 @@ NOTIFICATION_SERVICE_URL = os.getenv(
     "NOTIFICATION_SERVICE_URL",
     "http://notification-scheduler-service:8000/notification",
 ).rstrip("/")
+
+# ── Cross-service PnL sync (Issue #2 fix) ──────────────────────────────
+# Used by capital/ledger.py's sync_peer_pnl() to fetch real-trade-service's
+# realized_pnl_today so position-stocks' daily-loss kill switch is aware of
+# losses booked by the PEER service on the same shared Dhan account.
+# Read-only, no auth — only /status/REAL is hit, which is a public endpoint.
+REAL_TRADE_SERVICE_URL = os.getenv(
+    "REAL_TRADE_SERVICE_URL",
+    "http://real-trade-service:8005",
+).rstrip("/")

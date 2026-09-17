@@ -335,6 +335,16 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
                 "time_ist": config.EOD_SIGNAL_SCAN_TIME_IST,
                 "last_run": getattr(gate, "eod_signal_scan_last_run", None),
             },
+            # 2026-09-17 (session56): after-hours news scan. No last_run date
+            # (runs every interval during the window, not once-per-day like
+            # the four above — see models.py + auto_pilot._afterhours_scan_loop).
+            "afterhours_news_scan": {
+                "enabled": bool(getattr(gate, "afterhours_news_scan_enabled", False)),
+                "window_ist": f"{config.AFTERHOURS_SCAN_START_IST}–{config.AFTERHOURS_SCAN_END_IST}",
+                "interval_seconds": config.AFTERHOURS_SCAN_INTERVAL_SECONDS,
+                "finalize_time_ist": config.AFTERHOURS_FINALIZE_TIME_IST,
+                "max_candidates": config.AFTERHOURS_SCAN_MAX_NEXTDAY_CANDIDATES,
+            },
         },
         "account": {
             "starting_capital": account.starting_capital if account else None,
@@ -1211,6 +1221,11 @@ _FEATURE_COLUMNS = {
     # scheduled_automation block in /status/{mode} above and
     # execution/auto_pilot.py's _eod_signal_scan.
     "eod_signal_scan": ("eod_signal_scan_enabled", "eod_signal_scan_enabled_at"),
+    # 2026-09-17 (session56): fifth scheduled feature — after-hours RSS news
+    # scan. Runs 15:45–08:45 IST, hourly, feeds NextDayWatchlistEntry for
+    # tomorrow's _prepick. See execution/auto_pilot.py's _afterhours_scan_loop
+    # and watchlist_engine/afterhours_scan.py.
+    "afterhours_news_scan": ("afterhours_news_scan_enabled", "afterhours_news_scan_enabled_at"),
 }
 
 

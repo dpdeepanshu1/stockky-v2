@@ -92,6 +92,7 @@ IMPROVEMENTS (per improvement plan):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -116,6 +117,7 @@ _full_task: Optional[asyncio.Task] = None
 _exit_task: Optional[asyncio.Task] = None
 _schedule_task: Optional[asyncio.Task] = None
 _totp_task: Optional[asyncio.Task] = None
+_afterhours_task: Optional[asyncio.Task] = None
 _STARTUP_DELAY_SECONDS = 20
 
 # Per-mode locks — prevent concurrent cycles (manual + auto-pilot race).
@@ -563,6 +565,14 @@ async def _prepick(db, mode: str) -> None:
 
     overnight_added = await _requeue_overnight_priority_candidates(db, mode)
 
+    # 2026-09-17 (session56, user request): also inject any NextDayWatchlistEntry
+    # rows for today's trading date that cleared the minimum score bar and haven't
+    # been consumed yet. These come from the after-hours RSS news scan
+    # (_afterhours_scan_loop below). Best-effort — a failure here never blocks
+    # the normal pre-pick.
+    news_injected = await _inject_nextday_watchlist_candidates(db, mode)
+    overnight_added += news_injected
+
     # 2026-09-11 (session23, user request): apply the overnight US-sector
     # signal to every still-unconsumed candidate for this mode (this
     # morning's fresh ones plus anything just re-queued above). Best-effort
@@ -685,6 +695,80 @@ async def _requeue_overnight_priority_candidates(db, mode: str) -> int:
     except Exception:
         logger.exception("[schedule] pre-pick %s: failed to mark overnight-priority snapshot consumed", mode)
     return added
+
+
+async def _inject_nextday_watchlist_candidates(db, mode: str) -> int:
+    """At pre-pick time: read today's NextDayWatchlistEntry rows (from the
+    after-hours RSS news scan), inject each as an overnight-priority
+    TradeCandidate (if it cleared config.AFTERHOURS_SCAN_MIN_INJECT_SCORE),
+    and mark the row consumed. Returns count injected. Never raises."""
+    try:
+        today = ist_today_str()
+        rows = (
+            db.query(models.NextDayWatchlistEntry)
+            .filter_by(mode=mode, market_date=today, consumed=False)
+            .all()
+        )
+        if not rows:
+            return 0
+        already_queued = {
+            c.symbol for c in
+            db.query(models.TradeCandidate).filter_by(mode=mode, consumed=False).all()
+        }
+        now = datetime.now(timezone.utc)
+        injected = 0
+        for row in rows:
+            # Rows that don't meet the bar are still marked consumed so they
+            # don't re-appear on a hypothetical second pre-pick run today.
+            if row.priority_score < config.AFTERHOURS_SCAN_MIN_INJECT_SCORE:
+                row.consumed = True
+                row.consumed_at = now
+                continue
+            if row.symbol in already_queued:
+                row.consumed = True
+                row.consumed_at = now
+                continue
+            # Attempt to create the candidate first; only mark consumed if it succeeds.
+            # (A7 fix: consumed=True AFTER db.flush() — symbol not silently lost on add error)
+            try:
+                db.add(models.TradeCandidate(
+                    mode=mode,
+                    symbol=row.symbol,
+                    source_tab="afterhours_news_scan",
+                    decision_label="BUY NOW",
+                    conviction_score=row.priority_score,
+                    signal_price=None,
+                    raw_payload=json.dumps({
+                        "catalyst_type": row.catalyst_type,
+                        "source": row.catalyst_source,
+                        "headline": row.headline,
+                    }),
+                    overnight_priority=True,
+                ))
+                db.flush()  # surface constraint errors before marking consumed
+                row.consumed = True
+                row.consumed_at = now
+                already_queued.add(row.symbol)
+                injected += 1
+            except Exception as add_err:
+                db.rollback()
+                logger.warning(
+                    "[schedule] pre-pick %s: could not inject NextDayWatchlist candidate %s — skipping: %s",
+                    mode, row.symbol, add_err,
+                )
+        db.commit()
+        if injected:
+            logger.info(
+                "[schedule] pre-pick %s: injected %d after-hours news candidate(s) "
+                "from NextDayWatchlistEntry (market_date=%s)", mode, injected, today,
+            )
+        return injected
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "[schedule] pre-pick %s: NextDayWatchlistEntry injection failed (non-fatal)", mode
+        )
+        return 0
 
 
 async def _enter_at_open(db, mode: str, gate_armed: bool) -> None:
@@ -1186,6 +1270,120 @@ async def _totp_refresh_loop() -> None:
         await asyncio.sleep(config.DHAN_TOTP_REFRESH_CHECK_INTERVAL_SECONDS)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# After-hours news scan loop (2026-09-17, session56)
+#
+# Runs 24/7 (started unconditionally at boot like _totp_refresh_loop), but
+# only does real work during the after-hours window defined by
+# config.AFTERHOURS_SCAN_START_IST → config.AFTERHOURS_SCAN_END_IST, and
+# only when gate.afterhours_news_scan_enabled is True for that mode. The
+# finalize pass fires once per day at AFTERHOURS_FINALIZE_TIME_IST.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _is_afterhours_window_active() -> bool:
+    """True if current IST time is in the after-hours scan window
+    (15:45–08:45 next morning). The window spans midnight, so we check:
+    time >= START (15:45) OR time < END (08:45)."""
+    from tz_utils import ist_now, parse_hhmm
+    now_t = ist_now().time()
+    start_t = parse_hhmm(config.AFTERHOURS_SCAN_START_IST, 15, 45)
+    end_t   = parse_hhmm(config.AFTERHOURS_SCAN_END_IST, 8, 45)
+    # Window spans midnight: active from start until end (next day)
+    return now_t >= start_t or now_t < end_t
+
+
+# Per-mode flag: has the finalize pass fired today?
+_afterhours_finalize_last_run: dict = {}  # mode -> IST date str "YYYY-MM-DD"
+
+
+async def _afterhours_scan_body(mode: str) -> None:
+    """One after-hours scan tick for a mode. Called from worker thread."""
+    from tz_utils import ist_today_str, ist_now, parse_hhmm
+    from watchlist_engine.afterhours_scan import run_afterhours_scan, finalize_nextday_watchlist
+
+    Session = get_session_factory()
+    db = Session()
+    try:
+        gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
+        if gate is None or not getattr(gate, "afterhours_news_scan_enabled", False):
+            return
+        if not _is_afterhours_window_active():
+            return
+        # A10 fix: is_ist_weekday() guard removed — Sat/Sun nights are valid scan
+        # windows for Monday open. market_date calculation below already skips weekends.
+
+        # Determine market_date: the next upcoming trading date.
+        # After close (15:45+) → target tomorrow; before open (<08:45) → target today.
+        # timedelta and ZoneInfo are available at module scope (datetime imported at top).
+        from zoneinfo import ZoneInfo
+        now_t = ist_now().time()
+        start_t = parse_hhmm(config.AFTERHOURS_SCAN_START_IST, 15, 45)
+        if now_t >= start_t:
+            # After today's close — target the next weekday
+            tomorrow = datetime.now(ZoneInfo("Asia/Kolkata")) + timedelta(days=1)
+            while tomorrow.weekday() >= 5:   # skip Sat (5) and Sun (6)
+                tomorrow += timedelta(days=1)
+            market_date = tomorrow.strftime("%Y-%m-%d")
+        else:
+            # Before open — target today
+            market_date = ist_today_str()
+
+        # ── Finalize pass (once per day, at/after AFTERHOURS_FINALIZE_TIME_IST) ──
+        finalize_t = parse_hhmm(config.AFTERHOURS_FINALIZE_TIME_IST, 8, 45)
+        today = ist_today_str()
+        if (
+            now_t >= finalize_t
+            and _afterhours_finalize_last_run.get(mode) != today
+            and market_date == today  # only finalize for today's target
+        ):
+            _afterhours_finalize_last_run[mode] = today
+            shortlist = await finalize_nextday_watchlist(db, mode, market_date)
+            if shortlist:
+                await notify_async(
+                    f"📋 *After-hours watchlist finalized — {mode}*\n"
+                    f"Top {len(shortlist)} symbol(s) ready for today's open:\n"
+                    + "\n".join(f"  • {s}" for s in shortlist)
+                )
+            return  # finalize is the last action before open — no scan this tick
+
+        # ── Regular scan pass ─────────────────────────────────────────────────
+        written = await run_afterhours_scan(db, mode, market_date)
+        if written:
+            logger.info(
+                "[afterhours] scan tick [%s]: %d row(s) upserted for market_date=%s",
+                mode, written, market_date,
+            )
+    except Exception as e:
+        logger.exception("afterhours scan tick failed for %s", mode)
+        await notify_async(f"⚠️ *After-hours scan error — {mode}*\n{str(e)[:200]}")
+    finally:
+        db.close()
+
+
+def _run_afterhours_tick_sync(mode: str) -> None:
+    """Worker-thread wrapper — same pattern as the other tick bodies."""
+    _run_coro_in_new_loop(_afterhours_scan_body, mode)
+
+
+async def _afterhours_scan_loop() -> None:
+    """After-hours news scan loop. Runs 24/7; does nothing outside the
+    15:45–08:45 window or when the toggle is off. Interval from config."""
+    await asyncio.sleep(_STARTUP_DELAY_SECONDS + 25)
+    logger.info(
+        "Auto-pilot AFTERHOURS SCAN loop running (interval=%ss, window=%s–%s IST)",
+        config.AFTERHOURS_SCAN_INTERVAL_SECONDS,
+        config.AFTERHOURS_SCAN_START_IST,
+        config.AFTERHOURS_SCAN_END_IST,
+    )
+    while True:
+        for mode in ("DEMO", "REAL"):
+            try:
+                await asyncio.to_thread(_run_afterhours_tick_sync, mode)
+            except Exception:
+                logger.exception("afterhours scan loop: unexpected error for %s", mode)
+        await asyncio.sleep(config.AFTERHOURS_SCAN_INTERVAL_SECONDS)
+
+
 def start() -> None:
     """Idempotent — safe to call from startup() even if hot-reloaded."""
     global _full_task, _exit_task, _schedule_task, _totp_task
@@ -1212,3 +1410,11 @@ def start() -> None:
         _totp_task = asyncio.create_task(_totp_refresh_loop())
         logger.info("Auto-pilot TOTP refresh background task created (check=%ss).",
                     config.DHAN_TOTP_REFRESH_CHECK_INTERVAL_SECONDS)
+    # After-hours news scan loop — harmless no-op while toggle is off;
+    # becomes active at 15:45 IST when afterhours_news_scan_enabled=True.
+    if _afterhours_task is None or _afterhours_task.done():
+        _afterhours_task = asyncio.create_task(_afterhours_scan_loop())
+        logger.info(
+            "Auto-pilot AFTERHOURS SCAN background task created (interval=%ss).",
+            config.AFTERHOURS_SCAN_INTERVAL_SECONDS,
+        )

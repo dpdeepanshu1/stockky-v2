@@ -366,6 +366,36 @@ EOD_SIGNAL_SCAN_MIN_CONVICTION = float(os.getenv("EOD_SIGNAL_SCAN_MIN_CONVICTION
 EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION = float(os.getenv("EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION", "75.0"))
 EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES = int(os.getenv("EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES", "2"))
 
+# ── After-hours news scan (2026-09-17, session56 — user request) ────────────
+# After market close, poll Moneycontrol/LiveMint/ET RSS feeds hourly, classify
+# headlines by catalyst type, score and deduplicate by symbol, and persist into
+# NextDayWatchlistEntry for the next trading day's _prepick to consume as
+# high-priority candidates. All features controlled by the single DB toggle
+# gate.afterhours_news_scan_enabled (DEFAULT OFF — same pattern as every other
+# scheduled feature). No order placement — only pre-seeds the candidate queue.
+#
+# Active window: AFTERHOURS_SCAN_START_IST (default 15:45) to
+#   AFTERHOURS_SCAN_END_IST (default 08:45 next day). The loop fires every
+#   AFTERHOURS_SCAN_INTERVAL_SECONDS (default 3600 = hourly). A final
+#   "finalize" pass runs at AFTERHOURS_FINALIZE_TIME_IST (default 08:45) to
+#   trim to the top-N shortlist before the open.
+AFTERHOURS_SCAN_START_IST     = os.getenv("AFTERHOURS_SCAN_START_IST", "15:45")
+AFTERHOURS_SCAN_END_IST       = os.getenv("AFTERHOURS_SCAN_END_IST", "08:45")
+AFTERHOURS_FINALIZE_TIME_IST  = os.getenv("AFTERHOURS_FINALIZE_TIME_IST", "08:45")
+AFTERHOURS_SCAN_INTERVAL_SECONDS = max(
+    300, int(os.getenv("AFTERHOURS_SCAN_INTERVAL_SECONDS", "3600"))
+)  # floor 5 min — RSS feeds are NOT rate-limited like quote APIs, but no point scanning faster than 5 min
+AFTERHOURS_SCAN_MAX_NEXTDAY_CANDIDATES = int(
+    os.getenv("AFTERHOURS_SCAN_MAX_NEXTDAY_CANDIDATES", "8")
+)  # top-N kept after finalize pass; rest are marked consumed (discarded)
+# Minimum priority_score a NextDayWatchlistEntry must have to be injected as
+# a TradeCandidate by _prepick. Set conservatively — the score formula tops
+# at 100; 30 means at least a weak-news hit on a decent source, 50 means a
+# real catalyst (results/bulk/insider) on a trusted feed.
+AFTERHOURS_SCAN_MIN_INJECT_SCORE = float(
+    os.getenv("AFTERHOURS_SCAN_MIN_INJECT_SCORE", "30.0")
+)
+
 # ── US sector overnight signal (2026-09-11, session23 — user request) ──────
 # "We can take some idea from the US stock market sector-wise, or on some
 # point based on that, predict something early" — used ONLY at PREPICK

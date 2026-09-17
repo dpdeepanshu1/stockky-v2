@@ -15,6 +15,7 @@ as given and does not re-check it against the DB itself.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from sqlalchemy.orm import Session
@@ -139,45 +140,71 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
         except Exception:
             pass
 
-    # ── Dynamic watchlist upgrade (2026-09-03) ──────────────────────────────
-    # Best-effort, market-hours-gated, throttled internally to once per
-    # ~20 min (see REFRESH_INTERVAL_MIN) — safe to call every cycle since it
-    # no-ops cheaply outside its own refresh window. Widens/shrinks the
-    # event tracker's "auto" subscriptions based on current market activity
-    # BEFORE the watchlist stage below, so Tier 2 sees the widened universe
-    # the same cycle it changes, not one cycle late.
-    _stage("dynamic_universe")
-    try:
-        du_result = await refresh_dynamic_universe(db)
-        if du_result is not None:
-            from resilience.local_cache import save_snapshot
-            from datetime import datetime, timezone
-            save_snapshot(db, "dynamic_universe_last", {
-                **du_result, "mode": mode,
-                "synced_at": datetime.now(timezone.utc).isoformat(),
-            })
-    except Exception as exc:
-        logger.warning("run_cycle_core: dynamic universe refresh failed (non-fatal): %s", exc)
+    # PERF (2026-09-16): the dynamic_universe→watchlist chain and the
+    # candidates refresh used to run fully sequentially, but neither depends
+    # on the other's output — refresh_candidates() never reads anything
+    # watchlist/dynamic_universe writes, and the only real ordering
+    # constraint is dynamic_universe must finish before watchlist (so Tier 2
+    # sees the widened universe the same cycle) and BOTH must finish before
+    # entry_evaluate below (so watchlist-sourced TradeCandidate rows are
+    # already present for entry's single unconsumed-candidates pass). That
+    # constraint is satisfied by chaining dynamic_universe→watchlist inside
+    # one task and awaiting both tasks (via asyncio.gather) before entry
+    # runs — it does not require watchlist to finish before candidates
+    # starts. Running them concurrently overlaps their network-bound work
+    # (dynamic_universe's subscription calls + watchlist's catalyst-source
+    # fetch vs candidates' hot_picks/ipo/surprise + MTF/volume-shock
+    # analysis) instead of stacking it.
+    # Safe to share one `db` Session here for the same reason as
+    # candidate_engine/candidates.py's standard/shock parallelization (see
+    # that module's refresh_candidates() comment): every DB read/write in
+    # both chains below is a synchronous (non-awaited) call confined to an
+    # unbroken stretch with no `await` in between, so the asyncio scheduler
+    # can never interleave them mid-write even while the two tasks run
+    # concurrently.
+    async def _dynamic_universe_and_watchlist() -> dict:
+        # ── Dynamic watchlist upgrade (2026-09-03) ──────────────────────────
+        # Best-effort, market-hours-gated, throttled internally to once per
+        # ~20 min (see REFRESH_INTERVAL_MIN) — safe to call every cycle since
+        # it no-ops cheaply outside its own refresh window. Widens/shrinks the
+        # event tracker's "auto" subscriptions based on current market
+        # activity BEFORE the watchlist stage below, so Tier 2 sees the
+        # widened universe the same cycle it changes, not one cycle late.
+        _stage("dynamic_universe")
+        try:
+            du_result = await refresh_dynamic_universe(db)
+            if du_result is not None:
+                from resilience.local_cache import save_snapshot
+                from datetime import datetime, timezone
+                save_snapshot(db, "dynamic_universe_last", {
+                    **du_result, "mode": mode,
+                    "synced_at": datetime.now(timezone.utc).isoformat(),
+                })
+        except Exception as exc:
+            logger.warning("run_cycle_core: dynamic universe refresh failed (non-fatal): %s", exc)
 
-    # ── Short-Term Trading Upgrade (2026-09-02) ─────────────────────────────
-    # Stage 1 (watchlist ingestion) + Stage 2 (band-check trigger pass) run
-    # BEFORE the existing candidate refresh, so any watchlist-sourced
-    # TradeCandidate rows queued this cycle are already present when
-    # entry_evaluate does its single pass over unconsumed candidates below —
-    # one entry pipeline, not two. Each step is independently best-effort:
-    # a failure here should never block the existing candidate/entry/exit
-    # flow that already works today.
-    _stage("watchlist")
-    try:
-        await refresh_watchlist(db, mode)
-        expire_stale_entries(db, mode)
-        watchlist_result = await evaluate_watchlist_entries(db, mode)
-    except Exception as exc:
-        logger.warning("run_cycle_core: watchlist stage failed (non-fatal): %s", exc)
-        watchlist_result = {"error": str(exc)}
+        # ── Short-Term Trading Upgrade (2026-09-02) ─────────────────────────
+        # Stage 1 (watchlist ingestion) + Stage 2 (band-check trigger pass).
+        # Each step is independently best-effort: a failure here should never
+        # block the existing candidate/entry/exit flow that already works
+        # today.
+        _stage("watchlist")
+        try:
+            await refresh_watchlist(db, mode)
+            expire_stale_entries(db, mode)
+            return await evaluate_watchlist_entries(db, mode)
+        except Exception as exc:
+            logger.warning("run_cycle_core: watchlist stage failed (non-fatal): %s", exc)
+            return {"error": str(exc)}
 
-    _stage("candidates")
-    new_candidates = await refresh_candidates(db, mode)
+    async def _candidates() -> int:
+        _stage("candidates")
+        return await refresh_candidates(db, mode)
+
+    watchlist_result, new_candidates = await asyncio.gather(
+        _dynamic_universe_and_watchlist(), _candidates()
+    )
+
     _stage("entry")
     entry_result = await entry_evaluate(db, mode, gate_armed)
     _stage("fills")

@@ -16,7 +16,9 @@ of calls at upstream data providers all at once:
   Phase "datafeed"  (default 00:30 IST) — full Data Feed run, then
                     repair-all for anything left incomplete.
   Phase "premarket" (default 07:00 IST) — premarket feed + repair for
-                    Hot Picks, Surprise, and IPO Tracker.
+                    Hot Picks, Surprise, and IPO Tracker, PLUS (2026-09-17)
+                    a one-shot Surprise scan, Catalyst alert sweep, and
+                    T+1/T+5 outcome evaluation — see below.
 
 The enabled/disabled toggle and the two trigger times are runtime-
 configurable (see /overnight/config) and persisted to a small JSON file
@@ -24,6 +26,19 @@ under STATE_DIR so they survive a container restart. Job status is
 in-memory only, same tradeoff weekend_hydrator.py/symbol_master_sync.py
 already make in this service — a mid-run restart loses progress but the
 next scheduled/manual run simply starts fresh.
+
+2026-09-17 update — explicit user request: real-trade-service's and
+position-stocks-service's auto_pilot loops are already the only things
+that should be touching anything during live market hours; nothing else
+should add load or risk of interference while they're running. The
+previous version of this migration (market_hours_jobs.py) ran the
+surprise-scanner/catalyst-alert/evaluate-outcomes workflows repeatedly
+THROUGHOUT market hours (hourly, 4x/day, 2x/day) — that file has been
+removed. Those 3 jobs now run exactly ONCE each, as the last 3 steps of
+THIS premarket phase, before market open — so all data/feeds/predictions
+are fresh and healthy for the whole day, and nothing fires again until
+tomorrow's premarket run. No new background activity happens during
+market hours at all.
 """
 from __future__ import annotations
 
@@ -41,6 +56,14 @@ import httpx
 logger = logging.getLogger("overnight-orchestrator")
 
 API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "http://api-gateway:8000").rstrip("/")
+# decision-prediction-service is a separate container from api-gateway (see
+# docker-compose.yml) -- only evaluate_outcomes below needs this, everything
+# else in this file talks to api-gateway only. /training is where
+# training/app.py's evaluate routes are mounted (services/decision-
+# prediction-service/main.py).
+DECISION_PREDICTION_URL = os.getenv(
+    "DECISION_PREDICTION_URL", "http://decision-prediction-service:8000"
+).rstrip("/")
 IST = ZoneInfo("Asia/Kolkata")
 
 STATE_DIR = os.getenv("SCHEDULER_STATE_DIR", "/data")
@@ -127,10 +150,10 @@ def _log_step(msg: str) -> None:
         _JOB["updated_epoch"] = time.time()
 
 
-def _post(path: str, timeout: float = 60.0, params: Optional[dict] = None) -> dict:
+def _post(path: str, timeout: float = 60.0, params: Optional[dict] = None, base: str = API_GATEWAY_URL) -> dict:
     try:
         with httpx.Client(timeout=timeout) as client:
-            r = client.post(f"{API_GATEWAY_URL}{path}", params=params)
+            r = client.post(f"{base}{path}", params=params)
             try:
                 return r.json()
             except Exception:
@@ -139,10 +162,10 @@ def _post(path: str, timeout: float = 60.0, params: Optional[dict] = None) -> di
         return {"ok": False, "error": str(e)[:200]}
 
 
-def _get(path: str, timeout: float = 30.0) -> dict:
+def _get(path: str, timeout: float = 30.0, base: str = API_GATEWAY_URL) -> dict:
     try:
         with httpx.Client(timeout=timeout) as client:
-            r = client.get(f"{API_GATEWAY_URL}{path}")
+            r = client.get(f"{base}{path}")
             try:
                 return r.json()
             except Exception:
@@ -220,6 +243,55 @@ def _repair_loop(post_path: str, label: str, rest_sec: float, max_iterations: in
     return results
 
 
+def _run_surprise_scan_step() -> dict:
+    """One-shot fresh (uncached) surprise scan — was surprise-scanner.yml,
+    previously hourly all through market hours, now runs exactly once here
+    so the surprise tab is current before open and untouched after."""
+    _log_step("premarket: surprise scan (one-shot)")
+    result = _get("/api/surprise/scan", timeout=120.0)
+    stocks = result.get("stocks")
+    count = len(stocks) if isinstance(stocks, list) else None
+    _log_step(f"premarket: surprise scan complete (stocks={count if count is not None else 'n/a'})")
+    return result
+
+
+def _run_catalyst_alert_step(batch_size: int = 20) -> dict:
+    """One-shot catalyst sweep — was catalyst-alert.yml, previously 4x/day
+    during market hours, now runs exactly once here."""
+    _log_step(f"premarket: catalyst alert sweep (one-shot, batch_size={batch_size})")
+    trigger = _post(
+        "/catalysts/alert", timeout=60.0,
+        params={"force": "true", "notify": "true", "batch_size": batch_size},
+    )
+    if not trigger.get("ok", True) and "error" in trigger:
+        _log_step(f"premarket: catalyst trigger failed ({trigger.get('error')}) — polling status anyway")
+    final = _poll_until_done("/catalysts/alert/status", max_polls=40, label="catalyst_alert")
+    _log_step("premarket: catalyst alert complete")
+    return {"trigger": trigger, "final": final}
+
+
+def _run_evaluate_outcomes_step(max_batch: int = 80) -> dict:
+    """One-shot T+1 then T+5 outcome evaluation against
+    decision-prediction-service (a different service from api-gateway) —
+    was evaluate-outcomes.yml, previously 2x/day, now runs exactly once
+    here. Both evaluate endpoints run sync=True server-side by default, so
+    the POST itself returns real counts, no polling needed."""
+    _log_step(f"premarket: evaluate outcomes T+1 (one-shot, max_batch={max_batch})")
+    t1 = _post(
+        "/training/api/evaluate/t1", timeout=150.0,
+        params={"max_batch": max_batch}, base=DECISION_PREDICTION_URL,
+    )
+    _log_step(f"premarket: evaluate T+1 done ({t1.get('succeeded', t1.get('status', 'n/a'))})")
+    time.sleep(5)
+    _log_step(f"premarket: evaluate outcomes T+5 (one-shot, max_batch={max_batch})")
+    t5 = _post(
+        "/training/api/evaluate/t5", timeout=150.0,
+        params={"max_batch": max_batch}, base=DECISION_PREDICTION_URL,
+    )
+    _log_step(f"premarket: evaluate T+5 done ({t5.get('succeeded', t5.get('status', 'n/a'))})")
+    return {"t1": t1, "t5": t5}
+
+
 def _run_premarket_phase(rest_sec: float) -> dict:
     out: dict = {}
 
@@ -241,6 +313,15 @@ def _run_premarket_phase(rest_sec: float) -> dict:
     out["ipo_scan"] = _poll_until_done("/surprise/ipo/status", label="ipo premarket scan")
     _rest(rest_sec, "before ipo repair")
     out["ipo_repair"] = _repair_loop("/ipo/repair-batch", "ipo", rest_sec)
+    _rest(rest_sec, "before surprise scan (one-shot)")
+
+    # 2026-09-17: the 3 former market-hours-repeating jobs, now one-shot,
+    # right here, before market open — nothing touches these again today.
+    out["surprise_scan"] = _run_surprise_scan_step()
+    _rest(rest_sec, "before catalyst alert (one-shot)")
+    out["catalyst_alert"] = _run_catalyst_alert_step()
+    _rest(rest_sec, "before evaluate outcomes (one-shot)")
+    out["evaluate_outcomes"] = _run_evaluate_outcomes_step()
 
     _log_step("premarket: phase complete")
     return out

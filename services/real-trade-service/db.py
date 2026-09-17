@@ -146,6 +146,8 @@ def init_schema() -> None:
     _ensure_catalyst_price_source_column(eng, dialect())
     _ensure_hot_path_indexes(eng, dialect())
     _ensure_exit_retry_columns(eng, dialect())
+    _ensure_afterhours_gate_column(eng, dialect())
+    _ensure_nextday_watchlist_indexes(eng, dialect())
 
 
 # 2026-08-27 data fixup: docker-compose.yml/.env.example/.env.oracle.example
@@ -802,3 +804,78 @@ def _ensure_oracle_autoincrement(engine, base) -> None:
                 )
             except Exception as e:
                 logger.warning("real-trade-db: could not attach autoincrement trigger to %s: %s", table, e)
+
+
+# ── After-hours gate columns (2026-09-17, session56) ────────────────────────
+# trade_gate_state existed before afterhours_news_scan_enabled /
+# afterhours_news_scan_enabled_at were added to models.py — on any
+# already-deployed DB these columns must be added by the migration below.
+# Same additive-migration idiom as every _ensure_* above.
+def _ensure_afterhours_gate_column(engine, dialect_name: str) -> None:
+    # Matches the _ensure_candidate_overnight_column pattern: Oracle uses
+    # ADD (col TYPE DEFAULT val NOT NULL) with parentheses; Postgres uses
+    # ADD COLUMN col TYPE DEFAULT val NOT NULL. Each column gets its own
+    # engine.begin() so an ORA-01430 (column already exists) on one never
+    # poisons the other — same approach as every other _ensure_* function.
+    from sqlalchemy import inspect, text
+
+    try:
+        existing = {c["name"] for c in inspect(engine).get_columns("trade_gate_state")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect trade_gate_state columns: %s", e)
+        return
+
+    if dialect_name == "oracle":
+        adds = [
+            (
+                "afterhours_news_scan_enabled",
+                "ALTER TABLE trade_gate_state ADD (afterhours_news_scan_enabled NUMBER(1) DEFAULT 0 NOT NULL)",
+            ),
+            (
+                "afterhours_news_scan_enabled_at",
+                "ALTER TABLE trade_gate_state ADD (afterhours_news_scan_enabled_at TIMESTAMP NULL)",
+            ),
+        ]
+    else:
+        adds = [
+            (
+                "afterhours_news_scan_enabled",
+                "ALTER TABLE trade_gate_state ADD COLUMN afterhours_news_scan_enabled BOOLEAN DEFAULT FALSE NOT NULL",
+            ),
+            (
+                "afterhours_news_scan_enabled_at",
+                "ALTER TABLE trade_gate_state ADD COLUMN afterhours_news_scan_enabled_at TIMESTAMP NULL",
+            ),
+        ]
+
+    for col_name, sql in adds:
+        if col_name in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added trade_gate_state.%s", col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add trade_gate_state.%s: %s", col_name, e)
+
+
+# ── NextDayWatchlist indexes (2026-09-17, session56) ────────────────────────
+# trade_nextday_watchlist is a new table — create_all(checkfirst=True) will
+# create it fresh on any DB that doesn't have it yet. On Oracle we also need
+# to ensure the explicit indexes defined in models.py are present (they're
+# part of Table metadata so create_all covers Postgres automatically, but
+# Oracle's implicit index from a UniqueConstraint may differ from a plain
+# Index — safer to call exec_ddl_safe explicitly for both dialects).
+def _ensure_nextday_watchlist_indexes(engine, dialect_name: str) -> None:
+    indexes = [
+        ("ix_nextday_watchlist_mode_date_consumed", "trade_nextday_watchlist", "mode, market_date, consumed"),
+        ("ix_nextday_watchlist_mode_sym_date", "trade_nextday_watchlist", "mode, symbol, market_date"),
+    ]
+    import oracle_compat as _oc
+    for index_name, table, cols in indexes:
+        sql = _oc.create_index_sql(dialect_name, index_name, table, cols)
+        _oc.exec_ddl_safe(engine, sql, dialect_name)
+        logger.info("real-trade-db: ensured index %s on %s", index_name, table)

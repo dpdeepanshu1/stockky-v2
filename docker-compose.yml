@@ -157,6 +157,10 @@ services:
       - .env
     environment:
       API_GATEWAY_URL: http://api-gateway:8000
+      # 2026-09-17: overnight_orchestrator.py's premarket phase calls
+      # decision-prediction-service directly for the one-shot T+1/T+5
+      # evaluate-outcomes step (NOT via api-gateway, a different service).
+      DECISION_PREDICTION_URL: http://decision-prediction-service:8000
       UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}
       UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
       DATABASE_URL: ${DATABASE_URL:-}

@@ -92,6 +92,20 @@ class TradeGateState(Base):
     eod_signal_scan_enabled_at = Column(DateTime, nullable=True)
     eod_signal_scan_last_run = Column(String(10), nullable=True)
 
+    # 2026-09-17 (session56, user request): fifth scheduled feature —
+    # after-hours news scan. Polls Moneycontrol/LiveMint/ET RSS feeds hourly
+    # between market close and next pre-open, classifies headlines, scores
+    # symbols, and upserts into NextDayWatchlistEntry so _prepick can pull
+    # them at 09:00 as pre-seeded candidates.
+    # Unlike the four above, this feature runs OUTSIDE market hours
+    # (15:45–08:45 IST window), so there is no _last_run date guard — the
+    # scan runs on every AFTERHOURS_SCAN_INTERVAL_SECONDS tick while the
+    # window is active. A final "finalize" pass runs at ~08:45 to lock the
+    # top-N ranking before the open. The feature is DEFAULT OFF; the DB
+    # toggle is the sole authority (same pattern as the four above).
+    afterhours_news_scan_enabled = Column(Boolean, nullable=False, default=False)
+    afterhours_news_scan_enabled_at = Column(DateTime, nullable=True)
+
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
@@ -649,3 +663,47 @@ class SharedOrderBudget(Base):
     trade_date = Column(String(10), nullable=False, unique=True, index=True)  # 'YYYY-MM-DD' IST
     orders_placed_today = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+# ── After-hours news → next-day watchlist (2026-09-17, session56) ───────────
+# Separate from WatchlistEntry (intraday, same-day decay per watchlist_engine/
+# decay.py) — this table persists overnight and survives until market_date's
+# _prepick run converts its rows into TradeCandidate rows. watchlist_engine/
+# afterhours_scan.py writes here; auto_pilot._prepick reads here.
+#
+# Design contract:
+#   - One row per (mode, symbol, market_date) — upsert on conflict, keep
+#     highest priority_score. Multiple headlines for the same symbol on the
+#     same night are merged (best score wins).
+#   - consumed=False until _prepick injects the row as a TradeCandidate.
+#     Once consumed, the row stays for audit (same as WatchlistEntry's
+#     status field).
+#   - market_date is the IST trading date this row targets (tomorrow's date
+#     at scan time). _prepick only reads rows where market_date == today
+#     and consumed=False.
+class NextDayWatchlistEntry(Base):
+    __tablename__ = "trade_nextday_watchlist"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mode = Column(String(8), nullable=False)   # "DEMO" | "REAL"
+    symbol = Column(String(32), nullable=False)
+
+    catalyst_type = Column(String(24), nullable=False)   # "results"|"bulk_block"|"insider"|"board"|"news"
+    catalyst_source = Column(String(64), nullable=True)  # "Moneycontrol"|"LiveMint"|"ET"|"NSE-bulk-deals"
+    headline = Column(Text, nullable=True)               # best/first matching headline
+    priority_score = Column(Float, nullable=False, default=0.0)
+    # market_date: IST trading date this entry is FOR (not when it was collected)
+    market_date = Column(String(10), nullable=False)     # "YYYY-MM-DD"
+    collected_at = Column(DateTime, nullable=False, default=_now)
+
+    consumed = Column(Boolean, nullable=False, default=False)
+    consumed_at = Column(DateTime, nullable=True)
+
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        # Hot-path: _prepick queries mode + market_date + consumed=False
+        Index("ix_nextday_watchlist_mode_date_consumed", "mode", "market_date", "consumed"),
+        # Upsert-dedup: one row per (mode, symbol, market_date)
+        Index("ix_nextday_watchlist_mode_sym_date", "mode", "symbol", "market_date"),
+    )

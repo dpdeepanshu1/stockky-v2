@@ -1484,12 +1484,26 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
     return inserted, seen_symbols
 
 
-async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbols: set) -> int:
+async def _refresh_volume_shock_candidates(
+    db: Session, mode: str, exclude_symbols: set,
+    late_exclude_event: "asyncio.Event | None" = None,
+    late_exclude_holder: "dict[str, set] | None" = None,
+) -> int:
     """Option A (Issue 1 fix) — the new, fully-independent momentum-breakout
     track. Never touches _multi_tf_analysis(), the standard rows list, or
     its dedup — a symbol already handled (inserted OR rejected) by the
     standard track this cycle is skipped here so it's never proposed twice
-    under two different source_tabs in one cycle."""
+    under two different source_tabs in one cycle.
+
+    PERF (2026-09-16): `late_exclude_event`/`late_exclude_holder` let this
+    run concurrently with the standard track (see refresh_candidates()) —
+    the standard-track exclusion (standard_seen) is no longer baked into
+    `exclude_symbols` up front (it isn't known yet when both tracks start
+    together); instead this function awaits the event right before its own
+    insert loop, so the same "never propose a symbol standard already
+    handled" guarantee still holds at the point that actually matters (the
+    DB write), just applied a little later than before.
+    """
     try:
         pstat.set_source(mode, "volume_shock")
     except Exception:
@@ -1628,7 +1642,23 @@ async def _refresh_volume_shock_candidates(db: Session, mode: str, exclude_symbo
     for sym, qr in quality_scores.items():
         by_sector.setdefault(qr.get("sector") or "UNKNOWN", []).append(qr)
 
+    # PERF (2026-09-16): wait for the standard track's seen-symbols set —
+    # see this function's docstring. `passed` was already built above from
+    # this track's own (fully independent) network/analysis phase, so this
+    # wait is normally near-instant: by the time this track's analysis
+    # finishes, the standard track (running concurrently) has usually
+    # already set the event too. Worst case, this blocks briefly until
+    # standard's own insert step runs — still far less than the old fully
+    # sequential "await standard entirely, then start shock" ordering.
+    late_seen: set = set()
+    if late_exclude_event is not None:
+        await late_exclude_event.wait()
+        late_seen = (late_exclude_holder or {}).get("seen", set())
+
     for sym, result in passed:
+        if sym in late_seen:
+            skipped += 1
+            continue
         qr = quality_scores.get(sym)
         if qr is not None:
             sector_peers = [p for p in by_sector.get(qr.get("sector") or "UNKNOWN", []) if p.get("symbol") != sym]
@@ -1860,16 +1890,56 @@ async def refresh_candidates(db: Session, mode: str) -> int:
     cooldown_syms = _recently_candidated_symbols(db, mode)
     exclude = open_syms | cooldown_syms
 
-    standard_inserted, standard_seen = await _refresh_standard_candidates(db, mode, exclude)
-
     # Volume-shock track: 2h dedupe cooldown — intraday moves play out within
     # hours; a 6h window would block re-evaluation for the rest of the session
     # if the signal was regime-blocked at open. 2h lets it re-qualify after
     # the regime gate clears (e.g. post-market-score fix deployment today).
     shock_cooldown_syms = _recently_candidated_symbols(db, mode, hours=2.0)
-    shock_exclude = open_syms | shock_cooldown_syms | standard_seen
-    shock_inserted = await _refresh_volume_shock_candidates(
-        db, mode, exclude_symbols=shock_exclude
+
+    # PERF (2026-09-16): these two tracks used to run fully sequentially
+    # (await standard, THEN await shock) even though neither track's fetch+
+    # analysis phase (all httpx network I/O) depends on the other's output —
+    # only the FINAL insert step needs standard_seen, so shock never proposes
+    # a symbol standard already handled under a different source_tab this
+    # cycle (see _refresh_volume_shock_candidates' docstring). Running them
+    # as concurrent tasks overlaps their network-bound phases (hot_picks/ipo/
+    # surprise fetch + MTF/mcap analysis for standard; universe fetch + quote
+    # prefetch + volume-shock/quality analysis for shock) instead of stacking
+    # them, while `late_exclude_event`/`late_exclude_holder` make shock's own
+    # insert loop wait for standard_seen right before it writes — so the
+    # dedup guarantee is unchanged, only the wall-clock overlap improves.
+    # Safe to share one `db` Session here: both tracks only touch `db` in
+    # synchronous (non-awaited) query/add/commit calls, each confined to a
+    # single unbroken stretch with no `await` in between (verified in both
+    # functions below) — the asyncio scheduler can only switch tasks at an
+    # `await` point, so these synchronous DB sections can never interleave
+    # with each other even though the tasks run "concurrently".
+    # Trade-off: shock's own early exclude_symbols no longer includes
+    # standard_seen (that filter now happens only right before shock's
+    # insert), so on a cycle where the two tracks' universes genuinely
+    # overlap, shock may spend a few extra API calls analyzing a symbol
+    # standard also picked up, before discarding it at insert time. In
+    # practice the two universes (hot_picks/ipo/surprise vs volume-shock
+    # movers) rarely overlap much, so this is a small, bounded cost for a
+    # real reduction in cycle wall-clock time.
+    standard_seen_event = asyncio.Event()
+    standard_seen_holder: dict[str, set] = {}
+
+    async def _run_standard_track() -> tuple[int, set]:
+        inserted, seen = await _refresh_standard_candidates(db, mode, exclude)
+        standard_seen_holder["seen"] = seen
+        standard_seen_event.set()
+        return inserted, seen
+
+    standard_task = asyncio.create_task(_run_standard_track())
+    shock_task = asyncio.create_task(
+        _refresh_volume_shock_candidates(
+            db, mode,
+            exclude_symbols=open_syms | shock_cooldown_syms,
+            late_exclude_event=standard_seen_event,
+            late_exclude_holder=standard_seen_holder,
+        )
     )
+    (standard_inserted, standard_seen), shock_inserted = await asyncio.gather(standard_task, shock_task)
 
     return standard_inserted + shock_inserted

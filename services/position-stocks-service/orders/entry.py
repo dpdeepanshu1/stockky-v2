@@ -7,13 +7,19 @@ Dhan Super Order (or plain order fallback) → DB record.
 Safety checks (in order):
   1. is_armed guard
   2. Max concurrent positions check
-  3. Capital reserve (also enforces daily loss kill switch)
-  4. Dhan security_id resolution
-  5. Quantity computation (position_value / current_ltp, min 1)
-  6. FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE → force qty=1 on first-ever order
-  7. Super Order placement (or plain MARKET fallback)
-  8. DB record write
-  9. Candidate log write
+  3. Cross-service symbol lock
+  4. Range/high-low hard gate — reject entries sitting at today's high
+     (config.MAX_ENTRY_RANGE_POSITION) — see _range_gate_reject()
+  5. Same-symbol re-entry guard — reject buying back a just-closed symbol
+     within the cooldown unless price has genuinely pulled back
+     (config.SYMBOL_REENTRY_COOLDOWN_MINUTES) — see _reentry_guard_reject()
+  6. Capital reserve (also enforces daily loss kill switch)
+  7. Dhan security_id resolution
+  8. Quantity computation (position_value / current_ltp, min 1)
+  9. FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE → force qty=1 on first-ever order
+  10. Super Order placement (or plain MARKET fallback)
+  11. DB record write
+  12. Candidate log write
 """
 from __future__ import annotations
 
@@ -32,9 +38,91 @@ from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility
 from screening.engine import Candidate
 from screening.quality_gate import QualitySignal
-from tz_utils import ist_today_str
+from tz_utils import as_aware, ist_today_str
 
 logger = logging.getLogger("position-stocks-entry")
+
+
+def _range_gate_reject(symbol: str, current_ltp: float) -> Optional[str]:
+    """Hard price/high-low-awareness gate (this session).
+
+    screening/engine.py's range_mult and orders/adaptive.py's near-high
+    adjustment both already know about today's intraday range, but they
+    only ever SOFTEN a candidate (lower score, tighter target) — nothing
+    actually stopped a buy from going through when the stock is sitting
+    right at its high for the day, which is the exact "buy on the high
+    point" pattern flagged this session. Reject outright when LTP is
+    within the top (1 - MAX_ENTRY_RANGE_POSITION) of today's observed
+    tick range, but only once there's enough real tick depth
+    (MIN_TICKS_FOR_RANGE_GATE) to trust that range — thin/early-session
+    data fails OPEN (never rejects), matching every other gate here.
+    Returns a skip reason string, or None if the entry is allowed.
+    """
+    try:
+        from feed import ws_client
+        buf = ws_client.get_tick_buffer(symbol)
+        prices = [p for _t, p in buf if p > 0]
+        if len(prices) < config.MIN_TICKS_FOR_RANGE_GATE:
+            return None
+        day_low, day_high = min(prices), max(prices)
+        span = day_high - day_low
+        if span <= 1e-6:
+            return None
+        range_pos = max(0.0, min(1.0, (current_ltp - day_low) / span))
+        if range_pos >= config.MAX_ENTRY_RANGE_POSITION:
+            return (
+                f"NEAR_DAY_HIGH:range_pos={range_pos:.2f} "
+                f">= floor={config.MAX_ENTRY_RANGE_POSITION:.2f} "
+                f"(day_low={day_low:.2f} day_high={day_high:.2f})"
+            )
+        return None
+    except Exception as e:
+        logger.debug("entry: range gate check failed for %s: %s", symbol, e)
+        return None
+
+
+def _reentry_guard_reject(db: Session, symbol: str, current_ltp: float) -> Optional[str]:
+    """Same-symbol re-entry guard (this session).
+
+    Finds the most recently CLOSED position for this symbol. If it closed
+    within SYMBOL_REENTRY_COOLDOWN_MINUTES, only allows a fresh entry when
+    current_ltp has pulled back at least SYMBOL_REENTRY_MIN_PULLBACK_PCT
+    below that exit price — i.e. this is a genuine new dip, not the same
+    move being chased a second time at/above the price we just sold at
+    (the NAHARINDUS pattern: sell at ₹139.79, buy back 7 minutes later at
+    ₹139.50, then stop out). No prior closed trade, or cooldown already
+    elapsed, or a real pullback present → allowed (returns None).
+    """
+    last = (
+        db.query(ScalpPosition)
+        .filter(ScalpPosition.symbol == symbol)
+        .filter(ScalpPosition.status.notin_(("OPEN", "EXIT_LEGS_REJECTED")))
+        .filter(ScalpPosition.closed_at.isnot(None))
+        .order_by(ScalpPosition.closed_at.desc())
+        .first()
+    )
+    if last is None or last.exit_price is None:
+        return None
+
+    closed_at = as_aware(last.closed_at)
+    if closed_at is None:
+        return None
+
+    elapsed_minutes = (datetime.now(timezone.utc) - closed_at).total_seconds() / 60.0
+    if elapsed_minutes >= config.SYMBOL_REENTRY_COOLDOWN_MINUTES:
+        return None
+
+    pullback_floor = last.exit_price * (1 - config.SYMBOL_REENTRY_MIN_PULLBACK_PCT / 100.0)
+    if current_ltp <= pullback_floor:
+        # Real dip below where we last exited — a legitimately new setup.
+        return None
+
+    return (
+        f"REENTRY_COOLDOWN:closed {elapsed_minutes:.1f}m ago @ ₹{last.exit_price:.2f} "
+        f"({last.status}), now ₹{current_ltp:.2f} hasn't pulled back "
+        f"{config.SYMBOL_REENTRY_MIN_PULLBACK_PCT:.1f}% "
+        f"(needs <= ₹{pullback_floor:.2f}, cooldown {config.SYMBOL_REENTRY_COOLDOWN_MINUTES}m)"
+    )
 
 
 def _get_gate_state(db: Session) -> ScalpGateState:
@@ -149,6 +237,29 @@ def attempt_entry(
     # (confirmed cause of the AEGISVOPAK broker order-type mismatch).
     if not shared_symbol_lock.try_claim(db, candidate.symbol):
         _log_candidate(db, candidate, "SKIPPED", "SYMBOL_HELD_BY_OTHER_SERVICE", quality=quality)
+        return None
+
+    # AUDIT FIX (this session): hard high/low-awareness gate — reject a
+    # candidate sitting right at today's high outright, before any capital
+    # is committed. See _range_gate_reject()'s docstring.
+    range_reject = _range_gate_reject(candidate.symbol, candidate.current_ltp)
+    if range_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        # Deliberately its own "RANGE_GATE:" prefix, not "QUALITY_GATE:" —
+        # the dashboard's Quality Gate panel's floor text describes the
+        # fundamental/technical/market-cap floor specifically
+        # (config.MIN_FUNDAMENTAL_SCORE etc.); mixing this in under that
+        # label would misattribute the reject reason to the wrong gate.
+        _log_candidate(db, candidate, "SKIPPED", f"RANGE_GATE:{range_reject}", quality=quality)
+        return None
+
+    # AUDIT FIX (this session): same-symbol re-entry guard — reject buying
+    # back into a symbol we just closed at/above the price we exited at,
+    # within the cooldown window. See _reentry_guard_reject()'s docstring.
+    reentry_reject = _reentry_guard_reject(db, candidate.symbol, candidate.current_ltp)
+    if reentry_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", reentry_reject, quality=quality)
         return None
 
     # Compute adaptive levels — pass symbol so range-aware adjustment can

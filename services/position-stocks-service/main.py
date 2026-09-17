@@ -931,6 +931,14 @@ def status(db: Session = Depends(get_db)):
             "min_preferred_scalp_positions": config.MIN_PREFERRED_SCALP_POSITIONS,
             "min_preferred_threshold_relax_pct": config.MIN_PREFERRED_THRESHOLD_RELAX_PCT,
             "min_preferred_extra_top_n": config.MIN_PREFERRED_EXTRA_TOP_N,
+            # AUDIT ADD (this session — high/low & price-awareness fix):
+            # surface the new hard range gate and same-symbol re-entry
+            # cooldown so the dashboard can explain "why didn't it buy" /
+            # "why didn't it re-buy" the same way it already explains the
+            # quality-gate floor above.
+            "max_entry_range_position": config.MAX_ENTRY_RANGE_POSITION,
+            "symbol_reentry_cooldown_minutes": config.SYMBOL_REENTRY_COOLDOWN_MINUTES,
+            "symbol_reentry_min_pullback_pct": config.SYMBOL_REENTRY_MIN_PULLBACK_PCT,
         },
     }
 

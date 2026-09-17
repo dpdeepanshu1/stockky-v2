@@ -223,6 +223,39 @@ MIN_FUNDAMENTAL_SCORE = _get_float("MIN_FUNDAMENTAL_SCORE", 40.0)
 MIN_TECHNICAL_SCORE = _get_float("MIN_TECHNICAL_SCORE", 40.0)
 MIN_MARKET_CAP_CR = _get_float("MIN_MARKET_CAP_CR", 500.0)  # ₹500 crore floor — excludes micro-caps
 
+# ── Entry range-position hard gate (this session — "buy/sell timing ... not
+# high low aware or price aware") ───────────────────────────────────────────
+# screening/engine.py already applies a SOFT range-position penalty to
+# composite_score (0.50×/0.75× near the day-high) and orders/adaptive.py
+# already tightens target/stop near the day-high — but neither of those
+# actually stops a candidate sitting AT the day's high from being bought;
+# they only make it less likely to rank first / give it a smaller target.
+# If nothing better is available that cycle, a candidate right at its peak
+# for the day could still be entered — textbook "buy on the high point".
+# This is a genuine hard floor, checked in orders/entry.py right before an
+# order is placed: reject outright (not just deprioritise) when LTP is
+# within the top (1 - MAX_ENTRY_RANGE_POSITION) of today's observed
+# high/low range. Fails OPEN (never rejects) when there isn't enough real
+# tick depth to trust the range yet, same philosophy as every other gate
+# in this service.
+MAX_ENTRY_RANGE_POSITION = _get_float("MAX_ENTRY_RANGE_POSITION", 0.92)
+MIN_TICKS_FOR_RANGE_GATE = _get_int("MIN_TICKS_FOR_RANGE_GATE", 10)
+
+# ── Same-symbol re-entry guard (this session) ───────────────────────────────
+# Root cause of the reported "takes a trade, makes profit, exits, then buys
+# again right away and makes a loss" pattern — live example in the user's
+# own trade history: NAHARINDUS sold at ₹139.79 (TARGET_HIT, 01:47pm), then
+# bought again at ₹139.50 only 7 minutes later (01:54pm) — essentially the
+# SAME price the first trade just took profit at, not a fresh dip — and
+# that one stopped out. Nothing previously distinguished "a genuinely new
+# signal on a symbol we haven't touched" from "the same symbol re-firing
+# the instant its last trade closed, at/above the price we just exited".
+# Both conditions below must be true to allow a re-entry within the
+# cooldown window — enough time must have passed, OR price must have
+# pulled back meaningfully below the last exit (a real dip worth taking):
+SYMBOL_REENTRY_COOLDOWN_MINUTES = _get_int("SYMBOL_REENTRY_COOLDOWN_MINUTES", 30)
+SYMBOL_REENTRY_MIN_PULLBACK_PCT = _get_float("SYMBOL_REENTRY_MIN_PULLBACK_PCT", 1.0)
+
 # ── Shared Dhan account-wide order-rate budget (tracking doc §3.8) ─────────
 # Dhan's own account-wide cap is roughly 5,000-7,000 orders/day, shared with
 # real-trade-service (same Dhan account). This is a soft, fail-open governor

@@ -117,6 +117,11 @@ export interface GateStatus {
       interval_seconds: number;
       finalize_time_ist: string;
       max_candidates: number;
+      // 2026-09-17 (session58): manual-trigger verification — set by every
+      // tick, scheduled or manual, so this is one accurate "last run"
+      // indicator regardless of which path fired it.
+      last_run_at: string | null;
+      last_run_ok: boolean | null;
     };
   };
   account: {
@@ -471,6 +476,16 @@ export const realTradeApi = {
 
   runCycle: (mode: "DEMO" | "REAL") =>
     rtRequest<CycleResult>(`/cycle/run/${mode}`, { method: "POST" }, mode === "REAL"),
+
+  // 2026-09-17 (session58, user request): manual "run now" for the
+  // after-hours news scan — bypasses the enabled toggle and the 15:45–08:45
+  // window on the server (see execution/auto_pilot.py's manual=True branch).
+  runAfterhoursScanManual: (mode: "DEMO" | "REAL") =>
+    rtRequest<{ ok: boolean; mode: string; ran: boolean; reason: string | null; market_date: string | null; written: number; finalized: boolean }>(
+      `/afterhours/run-manual/${mode}`,
+      { method: "POST" },
+      mode === "REAL",
+    ),
 
   pipelineStatus: (mode: "DEMO" | "REAL") =>
     rtRequest<PipelineStatus>(`/pipeline/status/${mode}`, {}, mode === "REAL"),

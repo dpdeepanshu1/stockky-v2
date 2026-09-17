@@ -114,6 +114,17 @@ class TradeGateState(Base):
     # scheduled feature's guard.
     afterhours_finalize_last_run = Column(String(10), nullable=True)  # "YYYY-MM-DD"
 
+    # 2026-09-17 (session58, user request): manual-trigger verification.
+    # Set after EVERY tick of the after-hours scan — scheduled (the
+    # background loop tick) or manual (the new POST /afterhours/run-manual
+    # button) — so the frontend can show a single "last run" indicator that
+    # is accurate regardless of which path fired it. _ok is None until the
+    # very first run; True/False afterward (False on any exception raised
+    # by that tick, mirroring the scan/finalize try/except in
+    # execution/auto_pilot.py's _afterhours_scan_body).
+    afterhours_scan_last_run_at = Column(DateTime, nullable=True)
+    afterhours_scan_last_run_ok = Column(Boolean, nullable=True)
+
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 

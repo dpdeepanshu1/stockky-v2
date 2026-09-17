@@ -797,6 +797,7 @@ export default function RealAutoTrade() {
 
   const [auditRows, setAuditRows] = useState<AuditLogRow[]>([]);
   const [cycleBusy, setCycleBusy] = useState(false);
+  const [afterhoursRunBusy, setAfterhoursRunBusy] = useState(false);
   const [autoPilotBusy, setAutoPilotBusy] = useState(false);
   const [featureBusy, setFeatureBusy] = useState<string | null>(null);
   const [cycleResult, setCycleResult] = useState<CycleResult | null>(null);
@@ -1249,6 +1250,20 @@ export default function RealAutoTrade() {
       await loadStatus(mode);
     } catch (e: any) { setError(e?.message || "Auto-Pilot toggle failed"); }
     finally { setAutoPilotBusy(false); }
+  };
+
+  // 2026-09-17 (session58, user request): manual "run now" for the
+  // after-hours news scan. Server bypasses the enabled toggle and the
+  // 15:45–08:45 window for this path (an explicit manual override), so the
+  // button works regardless of ON/OFF state above — matches how "Run Cycle"
+  // works regardless of Auto-Pilot's own state.
+  const doRunAfterhoursScan = async () => {
+    setAfterhoursRunBusy(true); setError(null);
+    try {
+      await realTradeApi.runAfterhoursScanManual(mode);
+      await loadStatus(mode);
+    } catch (e: any) { setError(e?.message || "After-hours scan failed"); }
+    finally { setAfterhoursRunBusy(false); }
   };
 
   const doToggleFeature = async (
@@ -2440,6 +2455,14 @@ export default function RealAutoTrade() {
                         const ah = status.scheduled_automation!.afterhours_news_scan!;
                         const on = ah.enabled;
                         const busy = featureBusy === "afterhours_news_scan";
+                        // 2026-09-17 (session58): verification symbol — green
+                        // dot + timestamp if the last run (scheduled OR
+                        // manual, whichever was most recent) completed ok,
+                        // red dot + timestamp if it errored, grey "Never run"
+                        // if last_run_at is still null (fresh deploy / never
+                        // fired yet).
+                        const lastRunAt = ah.last_run_at ? new Date(ah.last_run_at) : null;
+                        const lastRunOk = ah.last_run_ok;
                         return (
                           <div className={`flex items-start justify-between gap-3 px-3 py-2.5 ${on ? "bg-signal-buy/[0.04]" : ""}`}>
                             <div className="min-w-0">
@@ -2455,18 +2478,40 @@ export default function RealAutoTrade() {
                                 {" "}catalyst news, ranks by symbol, and finalizes the top {ah.max_candidates} at{" "}
                                 {ah.finalize_time_ist} IST for tomorrow's pre-pick. No order is placed here.
                               </p>
+                              <div className="flex items-center gap-1.5 mt-1.5">
+                                <span
+                                  className={`inline-block w-1.5 h-1.5 rounded-full ${
+                                    lastRunAt == null ? "bg-mist" : lastRunOk ? "bg-signal-buy" : "bg-signal-sell"
+                                  }`}
+                                />
+                                <p className="font-display tabular-nums text-[9px] text-mist">
+                                  {lastRunAt == null
+                                    ? "Never run yet"
+                                    : `${lastRunOk ? "Last run OK" : "Last run FAILED"} · ${lastRunAt.toLocaleString()}`}
+                                </p>
+                              </div>
                             </div>
-                            <button
-                              onClick={() => void doToggleFeature("afterhours_news_scan", on)}
-                              disabled={!armed || busy}
-                              className={`shrink-0 px-3 py-1.5 rounded-xl font-display tabular-nums text-[11px] disabled:opacity-40 ${
-                                on
-                                  ? "bg-signal-sell/10 border border-signal-sell/30 text-signal-sell"
-                                  : "bg-signal-buy/10 border border-signal-buy/30 text-signal-buy"
-                              }`}
-                            >
-                              {busy ? "…" : on ? "Turn Off" : "Turn On"}
-                            </button>
+                            <div className="shrink-0 flex flex-col items-end gap-1.5">
+                              <button
+                                onClick={() => void doToggleFeature("afterhours_news_scan", on)}
+                                disabled={!armed || busy}
+                                className={`px-3 py-1.5 rounded-xl font-display tabular-nums text-[11px] disabled:opacity-40 ${
+                                  on
+                                    ? "bg-signal-sell/10 border border-signal-sell/30 text-signal-sell"
+                                    : "bg-signal-buy/10 border border-signal-buy/30 text-signal-buy"
+                                }`}
+                              >
+                                {busy ? "…" : on ? "Turn Off" : "Turn On"}
+                              </button>
+                              <button
+                                onClick={() => void doRunAfterhoursScan()}
+                                disabled={afterhoursRunBusy}
+                                title="Run the after-hours scan right now, regardless of the toggle above or the 15:45–08:45 window."
+                                className="px-3 py-1.5 rounded-xl font-display tabular-nums text-[11px] disabled:opacity-40 bg-signal-prepare/10 border border-signal-prepare/30 text-signal-prepare"
+                              >
+                                {afterhoursRunBusy ? "Running…" : "▶ Run Now"}
+                              </button>
+                            </div>
                           </div>
                         );
                       })()}

@@ -148,6 +148,7 @@ def init_schema() -> None:
     _ensure_exit_retry_columns(eng, dialect())
     _ensure_afterhours_gate_column(eng, dialect())
     _ensure_nextday_watchlist_indexes(eng, dialect())
+    _ensure_afterhours_last_run_columns(eng, dialect())
 
 
 # 2026-08-27 data fixup: docker-compose.yml/.env.example/.env.oracle.example
@@ -853,6 +854,56 @@ def _ensure_afterhours_gate_column(engine, dialect_name: str) -> None:
             (
                 "afterhours_finalize_last_run",
                 "ALTER TABLE trade_gate_state ADD COLUMN afterhours_finalize_last_run VARCHAR(10) NULL",
+            ),
+        ]
+
+    for col_name, sql in adds:
+        if col_name in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added trade_gate_state.%s", col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add trade_gate_state.%s: %s", col_name, e)
+
+
+# ── After-hours scan last-run columns (2026-09-17, session58) ──────────────
+# trade_gate_state existed before afterhours_scan_last_run_at /
+# afterhours_scan_last_run_ok were added to models.py — additive migration,
+# same idiom as _ensure_afterhours_gate_column above.
+def _ensure_afterhours_last_run_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        existing = {c["name"] for c in inspect(engine).get_columns("trade_gate_state")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect trade_gate_state columns: %s", e)
+        return
+
+    if dialect_name == "oracle":
+        adds = [
+            (
+                "afterhours_scan_last_run_at",
+                "ALTER TABLE trade_gate_state ADD (afterhours_scan_last_run_at TIMESTAMP NULL)",
+            ),
+            (
+                "afterhours_scan_last_run_ok",
+                "ALTER TABLE trade_gate_state ADD (afterhours_scan_last_run_ok NUMBER(1) NULL)",
+            ),
+        ]
+    else:
+        adds = [
+            (
+                "afterhours_scan_last_run_at",
+                "ALTER TABLE trade_gate_state ADD COLUMN afterhours_scan_last_run_at TIMESTAMP NULL",
+            ),
+            (
+                "afterhours_scan_last_run_ok",
+                "ALTER TABLE trade_gate_state ADD COLUMN afterhours_scan_last_run_ok BOOLEAN NULL",
             ),
         ]
 

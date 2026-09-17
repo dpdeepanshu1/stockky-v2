@@ -344,6 +344,16 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
                 "interval_seconds": config.AFTERHOURS_SCAN_INTERVAL_SECONDS,
                 "finalize_time_ist": config.AFTERHOURS_FINALIZE_TIME_IST,
                 "max_candidates": config.AFTERHOURS_SCAN_MAX_NEXTDAY_CANDIDATES,
+                # 2026-09-17 (session58, user request): manual-trigger
+                # verification — set by EVERY tick (scheduled or manual), so
+                # this reflects whichever ran most recently. getattr(...)
+                # default for the same additive-migration reason as
+                # everything else in this block.
+                "last_run_at": (
+                    getattr(gate, "afterhours_scan_last_run_at", None).isoformat()
+                    if getattr(gate, "afterhours_scan_last_run_at", None) else None
+                ),
+                "last_run_ok": getattr(gate, "afterhours_scan_last_run_ok", None),
             },
         },
         "account": {
@@ -1056,6 +1066,46 @@ async def run_cycle(mode: str, admin: Optional[str] = Depends(require_admin_if_r
         return await asyncio.to_thread(_run_cycle_sync)
     finally:
         lock.release()
+
+
+@app.post("/afterhours/run-manual/{mode}")
+async def run_afterhours_scan_manual(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+    """Manual "run now" trigger for the after-hours news scan (2026-09-17,
+    session58, user request) — added to the Overview tab next to the
+    scheduled toggle so the user can fire a scan on demand instead of
+    waiting for the next AFTERHOURS_SCAN_INTERVAL_SECONDS tick or the
+    15:45–08:45 IST window. Does NOT require the afterhours_news_scan
+    toggle to be on, or the current time to be inside the window — both
+    checks are explicitly bypassed for this path (see
+    execution.auto_pilot._afterhours_scan_body's manual=True branch), same
+    as how /cycle/run/{mode} lets a manual click run outside auto-pilot's
+    own schedule. Does NOT require the mode to be armed either — this only
+    scans RSS feeds and writes NextDayWatchlistEntry rows, it never places
+    an order, so there's no reason to gate it behind arming (unlike
+    /cycle/run/{mode}).
+
+    Runs on a worker thread with its own event loop, same idiom as
+    /cycle/run/{mode} and every auto-pilot tick body — never awaited
+    directly on the main event loop."""
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
+    if gate is None:
+        raise HTTPException(status_code=404, detail=f"no gate row for {mode}")
+
+    import asyncio
+    from execution.auto_pilot import run_afterhours_scan_manual_sync
+
+    result = await asyncio.to_thread(run_afterhours_scan_manual_sync, mode)
+    if result.get("reason") == "already_in_progress":
+        raise HTTPException(
+            status_code=409,
+            detail=f"An after-hours scan for {mode} is already in progress (scheduled tick or a prior manual trigger). Try again shortly.",
+        )
+    log_action(db, actor=admin or "admin", action="AFTERHOURS_SCAN_MANUAL", mode=mode,
+               detail=f"ran={result.get('ran')} written={result.get('written')} market_date={result.get('market_date')}")
+    return {"ok": bool(result.get("ran")), **result}
 
 
 # ── Routes: Pipeline dashboard (2026-08-27) ──────────────────────────────────

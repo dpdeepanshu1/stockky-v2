@@ -1329,57 +1329,76 @@ def _is_afterhours_window_active() -> bool:
 # Per-mode flag: has the finalize pass fired today?
 
 
+def _compute_afterhours_market_date(now_t=None):
+    """Shared market-date helper (2026-09-17, session58) — extracted out of
+    _afterhours_scan_body so the manual-trigger path (run_afterhours_scan_manual,
+    below) computes the exact same target date as the scheduled tick instead of
+    duplicating (and risking drifting from) this logic. Determines the next
+    upcoming trading date: after close (15:45+ IST) → target tomorrow; before
+    open (<08:45 IST) → target today. Skips weekends and tz_utils.is_nse_holiday()
+    dates on both branches (session57 fix — see the original inline comment this
+    was extracted from for the Balipratipada/Diwali incident this covers).
+    `now_t` lets a caller pass an already-computed ist_now().time() (the
+    scheduled tick already has one); defaults to computing it fresh, which is
+    what the manual trigger does."""
+    from zoneinfo import ZoneInfo
+    from tz_utils import ist_now, is_nse_holiday
+
+    if now_t is None:
+        now_t = ist_now().time()
+    start_t = parse_hhmm(config.AFTERHOURS_SCAN_START_IST, 15, 45)
+    if now_t >= start_t:
+        tomorrow = datetime.now(ZoneInfo("Asia/Kolkata")) + timedelta(days=1)
+        while tomorrow.weekday() >= 5 or is_nse_holiday(tomorrow):
+            tomorrow += timedelta(days=1)
+        return tomorrow.strftime("%Y-%m-%d")
+    else:
+        candidate = datetime.now(ZoneInfo("Asia/Kolkata"))
+        while candidate.weekday() >= 5 or is_nse_holiday(candidate):
+            candidate += timedelta(days=1)
+        return candidate.strftime("%Y-%m-%d")
 
 
-async def _afterhours_scan_body(mode: str) -> None:
-    """One after-hours scan tick for a mode. Called from worker thread."""
+async def _afterhours_scan_body(mode: str, manual: bool = False) -> dict:
+    """One after-hours scan tick for a mode. Called from worker thread.
+
+    `manual=True` (2026-09-17, session58) is the new manual-trigger path used
+    by POST /afterhours/run-manual/{mode}: it bypasses the
+    afterhours_news_scan_enabled toggle and the 15:45–08:45 window check (a
+    manual "run it now" click is an explicit override of both — same posture
+    as how /cycle/run/{mode} already lets a manual click run outside
+    auto-pilot's own schedule), but otherwise executes the exact same
+    finalize-or-scan body so results are identical either way. Every tick —
+    scheduled or manual — now records gate.afterhours_scan_last_run_at/_ok so
+    the frontend has one accurate "last run" indicator regardless of which
+    path fired it. Returns a small result dict for the manual caller to hand
+    back to the HTTP response; the scheduled path (which doesn't read the
+    return value) is unaffected by this change."""
     from tz_utils import ist_today_str, ist_now, parse_hhmm, is_nse_holiday
     from watchlist_engine.afterhours_scan import run_afterhours_scan, finalize_nextday_watchlist
 
     Session = get_session_factory()
     db = Session()
+    result = {"mode": mode, "ran": False, "reason": None, "market_date": None,
+              "written": 0, "finalized": False}
     try:
         gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
-        if gate is None or not getattr(gate, "afterhours_news_scan_enabled", False):
-            return
-        if not _is_afterhours_window_active():
-            return
+        if gate is None:
+            result["reason"] = "gate_not_found"
+            return result
+        if not manual:
+            if not getattr(gate, "afterhours_news_scan_enabled", False):
+                result["reason"] = "feature_disabled"
+                return result
+            if not _is_afterhours_window_active():
+                result["reason"] = "outside_window"
+                return result
         # A10 fix: is_ist_weekday() guard removed — Sat/Sun nights are valid scan
         # windows for Monday open. market_date calculation below already skips weekends.
 
-        # Determine market_date: the next upcoming trading date.
-        # After close (15:45+) → target tomorrow; before open (<08:45) → target today.
-        # timedelta and ZoneInfo are available at module scope (datetime imported at top).
-        from zoneinfo import ZoneInfo
         now_t = ist_now().time()
-        start_t = parse_hhmm(config.AFTERHOURS_SCAN_START_IST, 15, 45)
-        if now_t >= start_t:
-            # After today's close — target the next actual trading date.
-            # 2026-09-17 fix (session57): this only ever skipped Sat (5) /
-            # Sun (6) via .weekday(), same "weekend-only" gap tz_utils.py's
-            # own AUDIT FIX note (2026-09-14, Ganesh Chaturthi incident)
-            # already fixed for is_market_open_ist() — but that fix was
-            # never applied here, so a scan run on e.g. the eve of Diwali
-            # Balipratipada (2026-11-10, a Tuesday) would have targeted the
-            # holiday itself as market_date, pre-seeding NextDayWatchlistEntry
-            # rows for a day the exchange never opens; they'd then sit
-            # unconsumed until the day after, one cycle stale. Now also
-            # skips tz_utils.is_nse_holiday() dates, using the same holiday
-            # list _prepick/_schedule_loop rely on elsewhere in this file.
-            tomorrow = datetime.now(ZoneInfo("Asia/Kolkata")) + timedelta(days=1)
-            while tomorrow.weekday() >= 5 or is_nse_holiday(tomorrow):
-                tomorrow += timedelta(days=1)
-            market_date = tomorrow.strftime("%Y-%m-%d")
-        else:
-            # Before open — target today, unless today itself turns out to
-            # be a weekend/holiday (e.g. this tick is running during the
-            # early-morning hours of the holiday itself, not the evening
-            # before it) — same fix as above, applied to this branch too so
-            # both paths agree on what counts as a valid market_date.
-            candidate = datetime.now(ZoneInfo("Asia/Kolkata"))
-            while candidate.weekday() >= 5 or is_nse_holiday(candidate):
-                candidate += timedelta(days=1)
-            market_date = candidate.strftime("%Y-%m-%d")
+        market_date = _compute_afterhours_market_date(now_t)
+        result["market_date"] = market_date
 
         # ── Finalize pass (once per day, at/after AFTERHOURS_FINALIZE_TIME_IST) ──
         finalize_t = parse_hhmm(config.AFTERHOURS_FINALIZE_TIME_IST, 8, 45)
@@ -1395,6 +1414,8 @@ async def _afterhours_scan_body(mode: str) -> None:
             # Telegram notification — same guard pattern every other
             # scheduled feature's _last_run column already uses.
             gate.afterhours_finalize_last_run = today
+            gate.afterhours_scan_last_run_at = ist_now()
+            gate.afterhours_scan_last_run_ok = True
             db.commit()
             shortlist = await finalize_nextday_watchlist(db, mode, market_date)
             if shortlist:
@@ -1403,7 +1424,9 @@ async def _afterhours_scan_body(mode: str) -> None:
                     f"Top {len(shortlist)} symbol(s) ready for today's open:\n"
                     + "\n".join(f"  • {s}" for s in shortlist)
                 )
-            return  # finalize is the last action before open — no scan this tick
+            result["ran"] = True
+            result["finalized"] = True
+            return result  # finalize is the last action before open — no scan this tick
 
         # ── Regular scan pass ─────────────────────────────────────────────────
         written = await run_afterhours_scan(db, mode, market_date)
@@ -1412,16 +1435,85 @@ async def _afterhours_scan_body(mode: str) -> None:
                 "[afterhours] scan tick [%s]: %d row(s) upserted for market_date=%s",
                 mode, written, market_date,
             )
+        gate.afterhours_scan_last_run_at = ist_now()
+        gate.afterhours_scan_last_run_ok = True
+        db.commit()
+        result["ran"] = True
+        result["written"] = written or 0
+        return result
     except Exception as e:
         logger.exception("afterhours scan tick failed for %s", mode)
         await notify_async(f"⚠️ *After-hours scan error — {mode}*\n{str(e)[:200]}")
+        try:
+            # Best-effort: roll back whatever this attempt left dangling
+            # before recording the failure, so the UPDATE below doesn't
+            # itself fail on a poisoned transaction.
+            db.rollback()
+            gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
+            if gate is not None:
+                from tz_utils import ist_now as _ist_now
+                gate.afterhours_scan_last_run_at = _ist_now()
+                gate.afterhours_scan_last_run_ok = False
+                db.commit()
+        except Exception:
+            logger.exception("afterhours scan: also failed to record last_run failure for %s", mode)
+        result["reason"] = str(e)[:200]
+        return result
     finally:
         db.close()
 
 
 def _run_afterhours_tick_sync(mode: str) -> None:
-    """Worker-thread wrapper — same pattern as the other tick bodies."""
-    _run_coro_in_new_loop(_afterhours_scan_body, mode)
+    """Worker-thread wrapper — same pattern as the other tick bodies.
+    2026-09-17 (session58): now takes the same non-blocking
+    _get_afterhours_lock a manual trigger uses, so a scheduled tick that
+    lands mid-manual-run simply skips (there's another one along in
+    AFTERHOURS_SCAN_INTERVAL_SECONDS) instead of running concurrently
+    against a manual click writing the same gate row / NextDayWatchlistEntry
+    rows for the same mode."""
+    lock = _get_afterhours_lock(mode)
+    if not lock.acquire(blocking=False):
+        logger.info("afterhours scan: skipping scheduled tick for %s — a run is already in progress", mode)
+        return
+    try:
+        _run_coro_in_new_loop(_afterhours_scan_body, mode)
+    finally:
+        lock.release()
+
+
+# ── Manual trigger (2026-09-17, session58, user request) ────────────────────
+# Dedicated lock (not the entry/exit locks _get_lock / _get_exit_lock — this
+# never touches orders, so there's no reason to contend with those) so a
+# manual click can't overlap either the scheduled afterhours loop's own tick
+# for the same mode or a second manual click fired before the first returns.
+_afterhours_mode_locks: dict = {}
+_afterhours_locks_init_lock = threading.Lock()
+
+
+def _get_afterhours_lock(mode: str) -> threading.Lock:
+    with _afterhours_locks_init_lock:
+        if mode not in _afterhours_mode_locks:
+            _afterhours_mode_locks[mode] = threading.Lock()
+        return _afterhours_mode_locks[mode]
+
+
+def run_afterhours_scan_manual_sync(mode: str) -> dict:
+    """Synchronous worker-thread entry point for POST /afterhours/run-manual/{mode}.
+    Non-blocking lock acquire — mirrors /cycle/run/{mode}'s contract: if a
+    scan for this mode is already in progress (the scheduled loop's own tick,
+    or a previous manual click still running), return immediately instead of
+    queueing, so the caller isn't left hanging for up to
+    AFTERHOURS_SCAN_INTERVAL_SECONDS. Must be called via
+    `await asyncio.to_thread(run_afterhours_scan_manual_sync, mode)` from the
+    FastAPI route — never awaited directly on the main loop (same reasoning
+    as every other tick body in this module — see the module docstring)."""
+    lock = _get_afterhours_lock(mode)
+    if not lock.acquire(blocking=False):
+        return {"mode": mode, "ran": False, "reason": "already_in_progress"}
+    try:
+        return asyncio.run(_afterhours_scan_body(mode, manual=True))
+    finally:
+        lock.release()
 
 
 async def _afterhours_scan_loop() -> None:

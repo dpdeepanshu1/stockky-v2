@@ -280,6 +280,23 @@ async def import_broker_holdings(db: Session) -> int:
         logger.warning("import_broker_holdings: could not fetch Dhan holdings: %s", e)
         return 0
 
+    # 2026-09-17 fix (session XX — same-day delivery gap): Dhan's get_holdings()
+    # only returns SETTLED demat holdings (T+1). A stock bought today via CNC
+    # (delivery) doesn't appear in holdings until tomorrow — so a same-day
+    # delivery buy was invisible to this function and never imported, meaning
+    # no stop/target checks, no auto-pilot management, no P&L until T+1.
+    # Fix: also read get_positions() and union in any CNC-type rows whose
+    # symbol isn't already covered by holdings (a settled holding takes
+    # priority — it has a more accurate avg cost from the broker's own books).
+    # positionType (Dhan v2) or productType (some SDK versions) == "CNC"
+    # identifies delivery positions. Same fail-open contract as everything else
+    # here: a failed get_positions() call is logged and skipped, never blocking.
+    try:
+        live_positions_raw = dhan_client.get_positions(db)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("import_broker_holdings: could not fetch Dhan live positions (same-day CNC delivery check skipped): %s", e)
+        live_positions_raw = []
+
     def _get(row: dict, *keys, default=None):
         for k in keys:
             if k in row and row[k] not in (None, ""):
@@ -289,10 +306,74 @@ async def import_broker_holdings(db: Session) -> int:
     now = datetime.now(timezone.utc)
     recent_close_guard = now - timedelta(hours=_RECENT_CLOSE_REIMPORT_GUARD_HOURS)
 
+    # Build a set of symbols already covered by settled holdings so we don't
+    # double-import from live positions (holdings avg cost is more accurate).
+    _holdings_symbols: set[str] = set()
+    for _row in holdings or []:
+        if not isinstance(_row, dict):
+            continue
+        _raw = _get(_row, "tradingSymbol", "trading_symbol", "symbol")
+        if _raw:
+            _holdings_symbols.add(str(_raw).upper().strip())
+
+    # Build a synthetic "extra_rows" list from CNC live-positions rows NOT
+    # already in settled holdings — same shape as holdings rows so the
+    # existing candidate loop below can handle both in one pass.
+    # Dhan positions fields: tradingSymbol, positionType/productType,
+    # netQty/positiveQty/buyQty (qty held long), averageBuyPrice/costPrice (avg cost).
+    _extra_rows: list[dict] = []
+    for _prow in live_positions_raw or []:
+        if not isinstance(_prow, dict):
+            continue
+        _ptype = (
+            _get(_prow, "positionType", "productType", "product_type") or ""
+        ).upper().strip()
+        if _ptype not in ("CNC", "DELIVERY"):
+            continue  # skip MIS/intraday — only delivery positions need this path
+        _raw_sym = _get(_prow, "tradingSymbol", "trading_symbol", "symbol")
+        if not _raw_sym:
+            continue
+        _sym = str(_raw_sym).upper().strip()
+        if _sym in _holdings_symbols:
+            continue  # already covered by settled holdings
+        # Use netBuyQty → positiveQty → buyQty → netQty in that order of
+        # preference; netQty can be net of short sells so we want the raw
+        # long-side quantity where possible.
+        _qty_raw = (
+            _get(_prow, "netBuyQty", "net_buy_qty")
+            or _get(_prow, "positiveQty", "positive_qty", "buyQty", "buy_qty")
+            or _get(_prow, "netQty", "net_qty")
+        )
+        # avg cost: averageBuyPrice → costPrice → buyAvg
+        _avg_raw = _get(_prow, "averageBuyPrice", "average_buy_price", "costPrice", "cost_price", "buyAvg")
+        if not _qty_raw or not _avg_raw:
+            continue
+        try:
+            _qty_int = int(float(_qty_raw))
+            _avg_float = float(_avg_raw)
+        except (TypeError, ValueError):
+            continue
+        if _qty_int <= 0 or _avg_float <= 0:
+            continue
+        # Re-shape to match the holdings row schema so the common candidate
+        # loop below needs no branching.
+        _extra_rows.append({
+            "tradingSymbol": _sym,
+            "totalQty": _qty_int,
+            "avgCostPrice": _avg_float,
+            "_source": "live_positions_cnc",  # for logging only
+        })
+        logger.debug(
+            "import_broker_holdings: found same-day CNC delivery position %s (%d @ ₹%.2f) "
+            "in get_positions — will import if not already tracked.",
+            _sym, _qty_int, _avg_float,
+        )
+
     # ── Pass 1: figure out which symbols actually need importing ──────────
     # (unchanged eligibility rules), before doing any network I/O for ATR.
+    # Now iterates over BOTH settled holdings AND same-day CNC live positions.
     candidates: list[tuple[str, int, float]] = []
-    for row in holdings or []:
+    for row in list(holdings or []) + _extra_rows:
         if not isinstance(row, dict):
             continue
         # Dhan v2's confirmed field names (dhanhq.co/docs/v2/portfolio) are
@@ -340,7 +421,7 @@ async def import_broker_holdings(db: Session) -> int:
             )
             continue
 
-        candidates.append((symbol, qty, avg_price))
+        candidates.append((symbol, qty, avg_price, row))
 
     if not candidates:
         return 0
@@ -353,13 +434,13 @@ async def import_broker_holdings(db: Session) -> int:
     # fallback.
     try:
         from market_feed.feed import get_quotes
-        ticks = await get_quotes([sym for sym, _, _ in candidates])
+        ticks = await get_quotes([sym for sym, _, _, _ in candidates])
     except Exception as e:  # noqa: BLE001 — ATR is an enhancement, never blocking
         logger.warning("import_broker_holdings: get_quotes for ATR failed (using flat fallback): %s", e)
         ticks = {}
 
     imported = 0
-    for symbol, qty, avg_price in candidates:
+    for symbol, qty, avg_price, position_row in candidates:
         # AUDIT FIX (session62): claim the cross-service symbol lock before
         # this service starts managing the holding — see docstring above.
         # Skipped (not force-imported) if position-stocks-service already
@@ -404,16 +485,22 @@ async def import_broker_holdings(db: Session) -> int:
         )
         db.add(position)
         db.flush()
+        _is_same_day_cnc = position_row.get("_source") == "live_positions_cnc"
+        _src_label = (
+            "same-day CNC delivery position (not yet settled into demat holdings, T+1)"
+            if _is_same_day_cnc
+            else "pre-existing Dhan demat holding (not bought via this app)"
+        )
         db.add(models.TradePositionEvent(
             position_id=position.id, event_type="OPENED",
-            detail=f"Imported from Dhan demat holdings (pre-existing, not bought via this "
-                   f"app): {qty} @ avg cost ₹{avg_price}, {basis_note} stop/target since no "
+            detail=f"Imported from Dhan as {_src_label}: "
+                   f"{qty} @ avg cost ₹{avg_price}, {basis_note} stop/target since no "
                    f"decision/proposed_stop exists for it; shared symbol lock claimed.",
         ))
         logger.info(
             "import_broker_holdings: imported %s (%d shares @ avg ₹%.2f) as a new tracked "
-            "REAL position — now visible to /positions and exit_engine (%s)",
-            symbol, qty, avg_price, basis_note,
+            "REAL position [%s] — now visible to /positions and exit_engine (%s)",
+            symbol, qty, avg_price, _src_label, basis_note,
         )
         imported += 1
 

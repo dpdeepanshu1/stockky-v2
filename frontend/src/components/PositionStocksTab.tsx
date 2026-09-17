@@ -1842,6 +1842,32 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
         <div><span className="text-mist">Target </span><span className="tabular-nums text-signal-buy">₹{p.target_price.toFixed(2)} <span className="text-[9px]">({p.adaptive_target_pct.toFixed(1)}%)</span></span></div>
         <div><span className="text-mist">Stop </span><span className="tabular-nums text-signal-sell">₹{p.stop_price.toFixed(2)} <span className="text-[9px]">({p.adaptive_stop_pct.toFixed(1)}%)</span></span></div>
       </div>
+      {/* AUDIT ADD (session60): live current price / unrealized P&L for an
+          OPEN position — mirrors real-trade-service's Positions tab, which
+          has always shown Current + a live +/-% next to Entry/Stop/Target.
+          Only rendered for OPEN rows since current_price is only populated
+          server-side while a position is open. "—" when this service's
+          Angel One feed hasn't ticked the symbol yet (same fail-open
+          convention as the rest of this dashboard). */}
+      {p.status === "OPEN" && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] mt-2 pt-2 border-t border-slate/50">
+          <div><span className="text-mist">Current </span><span className="tabular-nums text-paper">{p.current_price != null ? `₹${p.current_price.toFixed(2)}` : "—"}</span></div>
+          <div><span className="text-mist">Value </span><span className="tabular-nums text-paper">{p.current_amount != null ? fmtInr(p.current_amount) : "—"}</span></div>
+          <div>
+            <span className="text-mist">Unrealized </span>
+            {p.unrealized_pnl != null ? (
+              <span className={`tabular-nums font-bold ${p.unrealized_pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
+                {fmtInr(p.unrealized_pnl)} ({p.unrealized_pnl_pct?.toFixed(2)}%)
+              </span>
+            ) : <span className="tabular-nums text-paper">—</span>}
+          </div>
+          <div><span className="text-mist">To target/stop </span><span className="tabular-nums text-paper">
+            {p.target_distance_pct != null && p.stop_distance_pct != null
+              ? `${p.target_distance_pct.toFixed(1)}% / ${p.stop_distance_pct.toFixed(1)}%`
+              : "—"}
+          </span></div>
+        </div>
+      )}
       {p.realized_pnl != null && (
         <p className={`font-display tabular-nums text-xs mt-2 font-bold ${p.realized_pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
           P&L {fmtInr(p.realized_pnl)} {pnlPct != null ? `(${pnlPct.toFixed(2)}%)` : ""}

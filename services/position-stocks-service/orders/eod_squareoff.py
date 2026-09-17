@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 import config
-from capital import ledger, shared_order_budget
+from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
 from screening import intraday_eligibility
@@ -203,6 +203,14 @@ def run_eod_squareoff(db: Session) -> int:
             db.commit()
 
             ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=0.0)
+            # AUDIT FIX (session60): flat SELL fired — release the symbol
+            # lock now, not only on TARGET_HIT/STOP_HIT reconcile. The flat
+            # SELL is a forced, unconditional exit (same as the shared
+            # order-budget's "no exceptions" note above); leaving the lock
+            # held until the next reconcile pass confirms the fill would
+            # needlessly block a re-entry (by either service) for longer
+            # than the position is actually still open.
+            shared_symbol_lock.release(db, pos.symbol)
             closed += 1
             logger.info("EOD squareoff: closed %s (id=%d)", pos.symbol, pos.id)
         except Exception as e:
@@ -378,6 +386,10 @@ def close_position_now(db: Session, pos: ScalpPosition) -> dict:
     db.commit()
 
     ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=0.0)
+    # AUDIT FIX (session60): same optimistic release as the EOD sweep above
+    # — reconcile.py's dead-status branch re-claims it if this SELL turns
+    # out to have died with zero fill.
+    shared_symbol_lock.release(db, pos.symbol)
     logger.info("Manual exit: closed %s (id=%d) — awaiting broker fill confirmation", pos.symbol, pos.id)
 
     from notifier import notify_sync

@@ -31,8 +31,7 @@ from portfolio.portfolio import (
     close_position as _pf_close_position,
     held_exposure_positions as _pf_held_exposure_positions,
 )
-from execution import dhan_client
-from risk_engine.engine import AccountState, OrderIntent, evaluate as risk_evaluate
+from execution import dhan_client, shared_symbol_lock
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("real-trade-service")
@@ -384,6 +383,13 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
             "updated_at": iso_utc(risk.updated_at) if risk else None,
             "updated_by": risk.updated_by if risk else None,
         } if risk else None,
+        # AUDIT ADD (session60): every symbol either service currently
+        # holds a claim on, for REAL only (DEMO never touches the shared
+        # broker account so it never claims/releases this lock). Surfaces
+        # the exact cross-service state that was invisible before, which is
+        # what let the AEGISVOPAK double-buy go unnoticed until Dhan itself
+        # rejected a mismatched SELL. See execution/shared_symbol_lock.py.
+        "shared_symbol_lock": shared_symbol_lock.status(db) if mode == "REAL" else None,
     }
 
 

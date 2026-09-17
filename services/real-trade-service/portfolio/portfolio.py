@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 import config
 import models
 from audit.logger import log_action
+from execution import shared_symbol_lock
 from market_feed.feed import Tick
 
 logger = logging.getLogger("real-trade-portfolio")
@@ -889,6 +890,13 @@ def record_real_exit_fill(db: Session, position: models.TradePosition, exit_pric
     if position.qty_open <= 0:
         position.status = "CLOSED"
         position.closed_at = now
+        # AUDIT FIX (session60): position is now fully flat (broker-
+        # confirmed) — release this service's cross-service symbol lock
+        # claim so the symbol becomes buyable again by either service. Not
+        # released on a partial exit (status stays PARTIALLY_CLOSED below)
+        # since this service still genuinely holds shares of it. See
+        # execution/shared_symbol_lock.py.
+        shared_symbol_lock.release(db, position.symbol)
     else:
         position.status = "PARTIALLY_CLOSED"
         if reason == "target_hit_partial":
@@ -956,6 +964,12 @@ def force_close_real_position(db: Session, position: models.TradePosition, note:
     position.qty_open = 0
     position.status = "CLOSED"
     position.closed_at = now
+    # AUDIT FIX (session60): broker confirms zero holdings — this
+    # service's claim on the symbol is definitely stale, release it. If
+    # position-stocks-service already holds a legitimate claim on the same
+    # symbol (a real duplicate that predates this fix), release() only
+    # ever touches rows this service itself holds, so it's a no-op there.
+    shared_symbol_lock.release(db, position.symbol)
     db.add(models.TradePositionEvent(
         position_id=position.id, event_type="GHOST_CLOSED",
         detail=(

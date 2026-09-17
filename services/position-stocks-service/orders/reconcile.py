@@ -42,7 +42,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 import notifier
-from capital import ledger
+from capital import ledger, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpPosition
 
@@ -395,6 +395,17 @@ def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int
             # it so available_capital reflects reality again; see
             # ledger.reclaim_premature_release's docstring.
             ledger.reclaim_premature_release(db, capital_risked=pos.capital_risked)
+            # AUDIT FIX (session60): eod_squareoff.py released this
+            # symbol's cross-service lock optimistically when it fired the
+            # flat SELL, before knowing whether it would fill — mirrors the
+            # capital reclaim just above. The SELL died with zero fill, so
+            # the position is still genuinely open at the broker; re-claim
+            # the lock so a duplicate buy (by either service) can't slip in
+            # while this position sits in ERROR awaiting manual review.
+            # Best-effort — if another service raced in and already holds
+            # it, that's now a real conflict for a human to resolve
+            # manually anyway, not something this call could have prevented.
+            shared_symbol_lock.try_claim(db, pos.symbol)
             resolved += 1
             msg = (
                 f"reconcile: {pos.symbol} (id={pos.id}) EOD flat-SELL order "
@@ -712,6 +723,10 @@ def run_exit_reconciliation(db: Session) -> int:
         db.commit()
 
         ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=realized_pnl)
+        # AUDIT FIX (session60): position is now fully flat — release this
+        # service's cross-service symbol lock claim so the symbol becomes
+        # buyable again by either service. See capital/shared_symbol_lock.py.
+        shared_symbol_lock.release(db, pos.symbol)
         closed += 1
         logger.info(
             "reconcile: %s (id=%d) %s @ ₹%.2f — P&L ₹%.2f (%.2f%%)",

@@ -684,6 +684,30 @@ class SharedOrderBudget(Base):
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
+class SharedSymbolLock(Base):
+    """Cross-service claim on a symbol currently held at the broker, shared
+    with position-stocks-service (same Dhan account, same physical DB —
+    see that service's models.py::SharedSymbolLock and
+    capital/shared_symbol_lock.py for the full rationale: Dhan holds one
+    consolidated position per symbol with no concept of which service's
+    shares are whose, which is what let AEGISVOPAK get bought by both
+    services on the same day and produce a broker order-type mismatch on
+    exit). Mapped here to the SAME table name with matching columns/types
+    so both services' create_all() calls agree on its shape regardless of
+    which one boots first. See execution/shared_symbol_lock.py for how
+    this service reads/writes it. Table name deliberately NOT prefixed
+    `trade_` (unlike every other table in this file) since it's explicitly
+    meant to be shared."""
+    __tablename__ = "stockky_shared_symbol_lock"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(32), nullable=False, unique=True, index=True)
+    held_by_service = Column(String(32), nullable=False)  # "position-stocks-service" | "real-trade-service"
+    held_by_mode = Column(String(8), nullable=True)  # this service's REAL/DEMO; null when held by position-stocks-service
+    claimed_at = Column(DateTime, nullable=False, default=_now)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
 # ── After-hours news → next-day watchlist (2026-09-17, session56) ───────────
 # Separate from WatchlistEntry (intraday, same-day decay per watchlist_engine/
 # decay.py) — this table persists overnight and survives until market_date's

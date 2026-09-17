@@ -48,7 +48,7 @@ from sqlalchemy.orm import Session
 import config
 import models
 from audit.logger import log_action
-from execution import dhan_client, shared_order_budget
+from execution import dhan_client, shared_order_budget, shared_symbol_lock
 from exit_engine.exit import _send_real_sell
 from intraday_eligibility import is_restricted as is_intraday_restricted
 from market_feed.feed import get_quotes
@@ -315,6 +315,17 @@ async def evaluate_manual_order(
                         "(shared with position-stocks-service) — try again tomorrow "
                         "or raise SHARED_DAILY_ORDER_BUDGET."
                     )
+                # AUDIT FIX (session60): same cross-service symbol lock as
+                # entry_engine/entry.py's automatic path — a manual BUY is
+                # exactly as capable of colliding with a position-stocks-
+                # service holding as an automatic one. See
+                # execution/shared_symbol_lock.py.
+                if not shared_symbol_lock.try_claim(db, symbol, mode="REAL"):
+                    raise RuntimeError(
+                        f"{symbol} is already held by position-stocks-service on the "
+                        "shared Dhan account — buying it here too would create a "
+                        "duplicate broker position."
+                    )
                 broker_result = dhan_client.place_order(
                     db, is_armed=gate_armed, security_id=security_id,
                     exchange_segment=dhan_client.NSE_EQ_SEGMENT, transaction_type="BUY",
@@ -332,6 +343,10 @@ async def evaluate_manual_order(
             except Exception as e:  # noqa: BLE001 — must surface as a clean rejection, never a 500
                 logger.error("Manual REAL BUY failed for %s: %s", symbol, e)
                 order.status = "REJECTED"
+                # AUDIT FIX (session60): release the symbol claim taken
+                # above on ANY placement failure, same as entry_engine's
+                # equivalent except block.
+                shared_symbol_lock.release(db, symbol)
                 db.add(models.TradeOrderEvent(order_id=order.id, event_type="REJECTED",
                                                detail=f"Dhan placement failed: {e}"))
                 db.commit()

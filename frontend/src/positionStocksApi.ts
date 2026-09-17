@@ -157,6 +157,14 @@ export interface ScalpPositionRow {
   adaptive_stop_pct: number;
   realized_pnl: number | null;
   realized_pnl_pct: number | null;
+  // AUDIT FIX (session60): live fields, OPEN positions only — None/absent
+  // for closed rows or a symbol this service's feed hasn't ticked yet.
+  current_price: number | null;
+  current_amount: number | null;
+  unrealized_pnl: number | null;
+  unrealized_pnl_pct: number | null;
+  target_distance_pct: number | null;
+  stop_distance_pct: number | null;
   opened_at: string;
   closed_at: string | null;
   is_first_live_order: boolean;

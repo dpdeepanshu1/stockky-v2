@@ -112,7 +112,7 @@ from auth.admin_auth import (
     require_admin, verify_admin_password, issue_session_token, AdminAuthError,
 )
 from auth import dhan_credentials_ro
-from capital import ledger, shared_order_budget
+from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition
@@ -875,6 +875,11 @@ def status(db: Session = Depends(get_db)):
         "eod_squareoff_fired_date": gate.eod_squareoff_fired_date,
         "eod_squareoff_stragglers": eod_stragglers,
         "shared_order_budget": shared_order_budget.status(db),
+        # AUDIT ADD (session60): every symbol either service currently
+        # holds a claim on — surfaces the exact state that was invisible
+        # before, which is what let the AEGISVOPAK double-buy go unnoticed
+        # until Dhan itself rejected a mismatched SELL.
+        "shared_symbol_lock": shared_symbol_lock.status(db),
         "circuit_breaker": circuit_breaker.status(),
         "ws": ws_client.ws_status(),
         "market_open": is_market_open_ist(),
@@ -1025,10 +1030,52 @@ def kill(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
 def positions(db: Session = Depends(get_db)):
     """Open + recent scalp positions. Includes exit_price (added session 6)
     so the dashboard can show buy price vs. sell price side by side, not
-    just the realized P&L that was derived from them."""
+    just the realized P&L that was derived from them.
+
+    AUDIT FIX (session60): this endpoint had no current_price/unrealized
+    P&L/target-distance fields at all — real-trade-service's own
+    /positions/{mode} has carried this since an earlier session (see its
+    `_live_prices` + pnl_pct/stop_distance_pct/target_distance_pct block),
+    but this service's Positions tab was never given the equivalent, so a
+    user watching an OPEN scalp position here saw entry price, target and
+    stop as static numbers with no way to tell how close either was to
+    being hit or what the position was worth right now. Mirrors
+    real-trade-service's pattern but sources the live price from this
+    service's own Angel One tick feed (ws_client.get_last_ltp) rather than
+    market_feed.feed.get_quotes — this service was never wired to that
+    module and has always used ws_client for its own live prices (see
+    manual_buy() above). Best-effort only: a symbol this service's feed
+    hasn't ticked yet just shows current_price=None / unrealized_pnl=None,
+    exactly like real-trade-service's '—' fallback — never raises, never
+    blocks the endpoint."""
     rows = db.query(ScalpPosition).order_by(ScalpPosition.opened_at.desc()).limit(50).all()
-    return [
-        {
+    out = []
+    for r in rows:
+        ltp = None
+        if r.status == "OPEN":
+            try:
+                ltp = ws_client.get_last_ltp(r.symbol)
+            except Exception as e:
+                logger.warning("positions: live LTP lookup failed for %s (display-only, non-fatal): %s", r.symbol, e)
+                ltp = None
+            if not ltp or ltp <= 0:
+                ltp = None
+
+        unrealized_pnl = None
+        unrealized_pnl_pct = None
+        current_amount = None
+        target_distance_pct = None
+        stop_distance_pct = None
+        if ltp is not None and r.entry_price:
+            unrealized_pnl = round((ltp - r.entry_price) * r.quantity, 2)
+            unrealized_pnl_pct = round((ltp - r.entry_price) / r.entry_price * 100.0, 2)
+            current_amount = round(ltp * r.quantity, 2)
+            if r.target_price:
+                target_distance_pct = round((r.target_price - ltp) / ltp * 100.0, 2)
+            if r.stop_price:
+                stop_distance_pct = round((ltp - r.stop_price) / ltp * 100.0, 2)
+
+        out.append({
             "id": r.id,
             "symbol": r.symbol,
             "status": r.status,
@@ -1042,15 +1089,22 @@ def positions(db: Session = Depends(get_db)):
             "adaptive_stop_pct": r.adaptive_stop_pct,
             "realized_pnl": r.realized_pnl,
             "realized_pnl_pct": r.realized_pnl_pct,
+            # Live, OPEN-position-only fields (None for closed rows/rows
+            # with no tick yet — same fail-open convention as real-trade-service)
+            "current_price": ltp,
+            "current_amount": current_amount,
+            "unrealized_pnl": unrealized_pnl,
+            "unrealized_pnl_pct": unrealized_pnl_pct,
+            "target_distance_pct": target_distance_pct,
+            "stop_distance_pct": stop_distance_pct,
             "opened_at": iso_utc(r.opened_at),
             "closed_at": iso_utc(r.closed_at),
             "is_first_live_order": r.is_first_live_order,
             "dhan_super_order_id": r.dhan_super_order_id,
             "dhan_entry_order_id": r.dhan_entry_order_id,
             "dhan_exit_order_id": r.dhan_exit_order_id,
-        }
-        for r in rows
-    ]
+        })
+    return out
 
 
 @app.get("/trades/history")

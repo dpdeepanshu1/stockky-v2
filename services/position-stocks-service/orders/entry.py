@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 import config
 import notifier
-from capital import ledger, shared_order_budget
+from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
@@ -139,6 +139,18 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", f"MAX_POSITIONS:{open_count}", quality=quality)
         return None
 
+    # AUDIT FIX (session60): cross-service symbol lock — this service and
+    # real-trade-service share one Dhan account, which holds a single
+    # consolidated position per symbol with no concept of which service's
+    # shares are whose. Checked here, before any capital is reserved,
+    # because it's a cheap DB read and a duplicate-symbol buy should be
+    # skipped as early as possible, not discovered after capital's already
+    # committed. See capital/shared_symbol_lock.py for full context
+    # (confirmed cause of the AEGISVOPAK broker order-type mismatch).
+    if not shared_symbol_lock.try_claim(db, candidate.symbol):
+        _log_candidate(db, candidate, "SKIPPED", "SYMBOL_HELD_BY_OTHER_SERVICE", quality=quality)
+        return None
+
     # Compute adaptive levels — pass symbol so range-aware adjustment can
     # read today's intraday high/low from the live tick buffer (session41b).
     levels: AdaptiveLevels = compute_levels(
@@ -156,6 +168,7 @@ def attempt_entry(
         security_id = dhan_client.get_security_id(db, candidate.symbol)
     except dhan_client.SecurityNotResolvedError as e:
         ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+        shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", f"SECURITY_NOT_FOUND:{e}", quality=quality)
         return None
 
@@ -190,6 +203,7 @@ def attempt_entry(
         shortfall = actual_cost - position_value
         if not ledger.reserve_additional(db, shortfall):
             ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            shared_symbol_lock.release(db, candidate.symbol)
             _log_candidate(
                 db, candidate, "SKIPPED",
                 f"INSUFFICIENT_CAPITAL_FOR_MIN_QTY:shortfall={shortfall:.2f}",
@@ -209,6 +223,7 @@ def attempt_entry(
     # shared_order_budget.py's docstring).
     if not shared_order_budget.check_and_reserve(db):
         ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+        shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", "SHARED_ORDER_BUDGET_EXHAUSTED", quality=quality)
         return None
 
@@ -318,6 +333,13 @@ def attempt_entry(
             logger.error("position-stocks entry: order placement failed for %s: %s", candidate.symbol, e)
             ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
             _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED:{error_msg}", quality=quality)
+        # AUDIT FIX (session60): every branch above releases capital on a
+        # failed BUY — the symbol claim taken above (before adaptive
+        # levels were even computed) must be released here too, or a
+        # failed order permanently locks this symbol out for this service
+        # (real-trade-service is unaffected either way, since it never
+        # held the lock).
+        shared_symbol_lock.release(db, candidate.symbol)
         return None
 
     # Mark first-live-order done
@@ -453,6 +475,20 @@ def attempt_manual_entry(
     if current_ltp <= 0:
         raise ManualEntryRejected(f"No valid live price for {symbol}.")
 
+    # AUDIT FIX (session60): same cross-service symbol lock as attempt_entry()
+    # — a manual BUY is exactly as capable of colliding with a
+    # real-trade-service holding as an automatic one, and this is the
+    # admin-facing path, so it gets an explicit rejection rather than a
+    # silent skip.
+    symbol = symbol.strip().upper()
+    if not shared_symbol_lock.try_claim(db, symbol):
+        raise ManualEntryRejected(
+            f"{symbol} is already held by real-trade-service on the shared Dhan "
+            "account — buying it here too would create a duplicate broker "
+            "position. Close it on the other service first if you want to "
+            "re-enter it here."
+        )
+
     # Adaptive levels — pct_change=0.0 since this is a manual pick, not a
     # window-scan signal; compute() falls back to ATR-proxy from the tick
     # buffer when available (the normal case for any actively-traded NSE
@@ -466,6 +502,7 @@ def attempt_manual_entry(
             raise ManualEntryRejected("quantity must be a positive integer.")
         exact_cost = quantity * current_ltp
         if not ledger.reserve_additional(db, exact_cost):
+            shared_symbol_lock.release(db, symbol)
             raise ManualEntryRejected(
                 f"Insufficient capital: need ₹{exact_cost:,.2f} for {quantity} shares of {symbol}."
             )
@@ -473,6 +510,7 @@ def attempt_manual_entry(
     else:
         position_value = ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct)
         if position_value is None:
+            shared_symbol_lock.release(db, symbol)
             raise ManualEntryRejected("Insufficient available capital (or daily-loss kill switch tripped).")
         quantity = max(1, int(position_value / current_ltp))
         actual_cost = quantity * current_ltp
@@ -480,6 +518,7 @@ def attempt_manual_entry(
             shortfall = actual_cost - position_value
             if not ledger.reserve_additional(db, shortfall):
                 ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+                shared_symbol_lock.release(db, symbol)
                 raise ManualEntryRejected(
                     f"Insufficient capital to cover the minimum 1-share order "
                     f"(shortfall ₹{shortfall:,.2f})."
@@ -490,10 +529,12 @@ def attempt_manual_entry(
         security_id = dhan_client.get_security_id(db, symbol)
     except dhan_client.SecurityNotResolvedError as e:
         ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+        shared_symbol_lock.release(db, symbol)
         raise ManualEntryRejected(f"Could not resolve a Dhan security id for {symbol}: {e}")
 
     if not shared_order_budget.check_and_reserve(db):
         ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+        shared_symbol_lock.release(db, symbol)
         raise ManualEntryRejected("Shared cross-service Dhan order-rate budget exhausted for today.")
 
     is_first = not gate.first_live_order_done
@@ -531,6 +572,7 @@ def attempt_manual_entry(
             )
     except Exception as e:
         ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+        shared_symbol_lock.release(db, symbol)
         db.add(ScalpCandidateLog(
             symbol=symbol, window_source="MANUAL", pct_change=0.0,
             composite_score=None, decision="SKIPPED",

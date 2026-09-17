@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 import config
 import models
 from audit.logger import log_action
-from execution import dhan_client, shared_order_budget
+from execution import dhan_client, shared_order_budget, shared_symbol_lock
 from market_feed.feed import get_quotes, get_preview_quotes, MARKET_DATA_URL
 from notifier import notify_async
 from portfolio.portfolio import get_account, held_exposure_positions, record_real_order_sent
@@ -1005,6 +1005,22 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                         "(shared with position-stocks-service) — try again tomorrow "
                         "or raise SHARED_DAILY_ORDER_BUDGET."
                     )
+                # AUDIT FIX (session60): cross-service symbol lock — this
+                # service and position-stocks-service share one Dhan
+                # account, which holds a single consolidated position per
+                # symbol with no concept of which service's shares are
+                # whose. Confirmed cause of the AEGISVOPAK broker
+                # order-type mismatch. Claimed here, right before the real
+                # Dhan call; released below if this placement is REJECTED,
+                # and by expire_stale_orders() if it's later EXPIRED
+                # unfilled, and by exit_engine once the resulting position
+                # is fully flat. See execution/shared_symbol_lock.py.
+                if not shared_symbol_lock.try_claim(db, cand.symbol, mode="REAL"):
+                    raise RuntimeError(
+                        f"{cand.symbol} is already held by position-stocks-service on the "
+                        "shared Dhan account — buying it here too would create a "
+                        "duplicate broker position."
+                    )
                 broker_result = dhan_client.place_order(
                     db, is_armed=gate_armed,
                     security_id=security_id,
@@ -1036,6 +1052,13 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             except Exception as ex:
                 logger.error("REAL order placement failed for %s: %s", cand.symbol, ex)
                 order.status = "REJECTED"
+                # AUDIT FIX (session60): release the symbol claim taken
+                # above on ANY placement failure (including our own
+                # "already held by the other service" RuntimeError above,
+                # which is a harmless no-op release since try_claim never
+                # actually gave us that row) — otherwise a rejected order
+                # permanently locks this symbol out for this service.
+                shared_symbol_lock.release(db, cand.symbol)
                 db.add(models.TradeOrderEvent(
                     order_id=order.id, event_type="REJECTED",
                     detail=f"Dhan placement failed: {ex}",
@@ -1213,6 +1236,14 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
         was_partial = order.status == "PARTIAL"
         order.status     = "EXPIRED"
         order.updated_at = now
+        # AUDIT FIX (session60): only release the symbol claim if NOTHING
+        # filled — a partial fill means real shares are already sitting in
+        # a live TradePosition for this symbol, which still needs the lock
+        # held until exit_engine closes it out. Releasing here in that case
+        # would let position-stocks-service buy the same symbol while this
+        # service still genuinely holds shares of it.
+        if mode == "REAL" and not was_partial:
+            shared_symbol_lock.release(db, order.symbol)
         fill_note = f" {order.filled_qty_so_far}/{order.qty} had already filled." if was_partial else ""
         db.add(models.TradeOrderEvent(
             order_id=order.id, event_type="EXPIRED",

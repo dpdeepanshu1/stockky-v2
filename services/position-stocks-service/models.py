@@ -246,6 +246,44 @@ class SharedOrderBudget(Base):
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
+class SharedSymbolLock(Base):
+    """Cross-service claim on a symbol currently held at the broker.
+
+    THE BUG THIS FIXES (session60): both this service and real-trade-service
+    trade through the SAME Dhan account. Dhan holds one consolidated
+    position per symbol at the broker — it has no concept of "these N
+    shares are position-stocks-service's" vs "these are real-trade-service's".
+    Nothing was stopping both services from independently BUYing the same
+    symbol (confirmed: AEGISVOPAK was bought by both services on the same
+    day). Once that happens, each service's own local row (qty, entry
+    price, stop/target) points at a share of one real, merged broker
+    position, and a later SELL sized/priced from only one side's local
+    record can mismatch what Dhan's own order book reports for that
+    symbol — exactly the "Broker order-type mismatch" Telegram alert this
+    was diagnosed from.
+
+    One row per symbol CURRENTLY held by either service (not one row per
+    day, unlike SharedOrderBudget above) — deleted once the holding side
+    reports the position fully flat. `capital/shared_symbol_lock.py` (this
+    service) and `execution/shared_symbol_lock.py` (real-trade-service,
+    duplicated logic, not imported — same isolation rationale as
+    SharedOrderBudget) both check/claim/release the same row. FAIL-OPEN
+    on any DB error, same as SharedOrderBudget: a broken lock must never
+    itself block a real entry or a real exit — worst case on failure is a
+    reversion to today's actual (buggy) behavior, not a new way to get
+    stuck. Table name deliberately NOT prefixed `scalp_`, for the same
+    reason as stockky_shared_order_budget: it is explicitly shared, not
+    scoped to this service."""
+    __tablename__ = "stockky_shared_symbol_lock"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(32), nullable=False, unique=True, index=True)
+    held_by_service = Column(String(32), nullable=False)  # "position-stocks-service" | "real-trade-service"
+    held_by_mode = Column(String(8), nullable=True)  # real-trade-service's REAL/DEMO; null for this service (REAL-only)
+    claimed_at = Column(DateTime, nullable=False, default=_now)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
 class ScalpIntradayRestrictedSecurity(Base):
     """Learned list of NSE securities Dhan has rejected as 'not allowed to
     be traded in Intraday' (T2T / ASM / GSM surveillance stocks).

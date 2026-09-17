@@ -470,59 +470,105 @@ async def import_broker_holdings(db: Session) -> int:
             )
             continue
 
-        tick = ticks.get(symbol)
-        raw_atr_pct = (tick.atr / tick.price * 100.0) if (tick and tick.atr and tick.price) else None
+        # AUDIT FIX (session65 — exception isolation): everything from here
+        # down for THIS candidate is now wrapped in its own try/except, and
+        # committed on its own, instead of sharing one db.commit() at the
+        # very end of the loop for the whole batch.
+        #
+        # Before this fix: an exception anywhere in this per-candidate body
+        # (a bad/unexpected ATR value, a DB constraint violation, a
+        # transient hiccup in return_sanity.clamp_for_atr, etc.) propagated
+        # all the way out of import_broker_holdings() uncaught. That's only
+        # caught by reconcile.py's OUTER try/except around the whole
+        # import_broker_holdings(db) call — but by the time it's caught
+        # there, this entire for-loop has already unwound, so every OTHER
+        # candidate queued for import in the same batch is abandoned too,
+        # not just the one that actually failed. Two real holdings (e.g.
+        # RIR and ANUHPHR) landing in the same import batch meant one bad
+        # candidate silently blocked BOTH from ever being imported — no
+        # stop/target tracking, no exit-cycle management, no inclusion in
+        # P&L/equity, nothing — with only a generic "import_broker_holdings
+        # failed: <exc>" warning in the logs and zero per-symbol detail.
+        #
+        # It also wasn't just about the propagation point: with the OLD
+        # single end-of-loop db.commit(), a LATER candidate's failed
+        # db.flush() leaves the session in a failed-transaction state that
+        # (without an explicit db.rollback()) can silently invalidate every
+        # EARLIER candidate in the same batch that had already been
+        # flush()ed but not yet committed — the "one bad apple kills the
+        # whole batch" failure shape, just one step further downstream than
+        # the uncaught-exception issue above. Committing per-candidate means
+        # an earlier candidate's success is durable the instant it happens,
+        # completely independent of what any later candidate in the same
+        # batch does.
+        #
+        # The shared_symbol_lock claim above is deliberately NOT released on
+        # a failure here — this service already owns that symbol's lock, so
+        # leaving it claimed just means the retry next cycle skips straight
+        # to this try block instead of re-claiming, and no other manager can
+        # race in in the meantime.
         try:
-            from return_sanity import clamp_for_atr
-            atr_pct = clamp_for_atr(raw_atr_pct) if raw_atr_pct is not None else None
-        except Exception:
-            atr_pct = raw_atr_pct
-        stop_pct, target_pct = _atr_stop_target_pct(atr_pct)
-        stop_price = round(avg_price * (1 - stop_pct / 100.0), 2)
-        target_price = round(avg_price * (1 + target_pct / 100.0), 2)
-        basis_note = (
-            f"ATR-adaptive {stop_pct}%/{target_pct}% (atr%={atr_pct:.2f})" if atr_pct is not None
-            else f"flat {stop_pct}%/{target_pct}% (no live ATR at import time)"
-        )
-        position = models.TradePosition(
-            mode="REAL", symbol=symbol, status="OPEN",
-            qty_open=qty, avg_entry_price=avg_price, opened_at=now,
-            current_stop=stop_price, current_target=target_price,
-            initial_stop_distance=abs(avg_price - stop_price),
-            # 2026-09-09 fix: opened_at above is the IMPORT moment, not the
-            # real purchase date (Dhan's holdings API doesn't give us that) —
-            # exit_engine._send_real_sell used to read opened_at=="today" as
-            # "this was bought and is being sold same-day" and sell it
-            # product_type="INTRADAY". For a real demat holding with no
-            # matching MIS position, Dhan treats that as opening a fresh
-            # short and margin-rejects it ("insufficient funds") instead of
-            # squaring off. broker_imported=True tells exit.py to always use
-            # CNC for this position, independent of opened_at.
-            broker_imported=True,
-        )
-        db.add(position)
-        db.flush()
-        _is_same_day_cnc = position_row.get("_source") == "live_positions_cnc"
-        _src_label = (
-            "same-day CNC delivery position (not yet settled into demat holdings, T+1)"
-            if _is_same_day_cnc
-            else "pre-existing Dhan demat holding (not bought via this app)"
-        )
-        db.add(models.TradePositionEvent(
-            position_id=position.id, event_type="OPENED",
-            detail=f"Imported from Dhan as {_src_label}: "
-                   f"{qty} @ avg cost ₹{avg_price}, {basis_note} stop/target since no "
-                   f"decision/proposed_stop exists for it; shared symbol lock claimed.",
-        ))
-        logger.info(
-            "import_broker_holdings: imported %s (%d shares @ avg ₹%.2f) as a new tracked "
-            "REAL position [%s] — now visible to /positions and exit_engine (%s)",
-            symbol, qty, avg_price, _src_label, basis_note,
-        )
-        imported += 1
+            tick = ticks.get(symbol)
+            raw_atr_pct = (tick.atr / tick.price * 100.0) if (tick and tick.atr and tick.price) else None
+            try:
+                from return_sanity import clamp_for_atr
+                atr_pct = clamp_for_atr(raw_atr_pct) if raw_atr_pct is not None else None
+            except Exception:
+                atr_pct = raw_atr_pct
+            stop_pct, target_pct = _atr_stop_target_pct(atr_pct)
+            stop_price = round(avg_price * (1 - stop_pct / 100.0), 2)
+            target_price = round(avg_price * (1 + target_pct / 100.0), 2)
+            basis_note = (
+                f"ATR-adaptive {stop_pct}%/{target_pct}% (atr%={atr_pct:.2f})" if atr_pct is not None
+                else f"flat {stop_pct}%/{target_pct}% (no live ATR at import time)"
+            )
+            position = models.TradePosition(
+                mode="REAL", symbol=symbol, status="OPEN",
+                qty_open=qty, avg_entry_price=avg_price, opened_at=now,
+                current_stop=stop_price, current_target=target_price,
+                initial_stop_distance=abs(avg_price - stop_price),
+                # 2026-09-09 fix: opened_at above is the IMPORT moment, not the
+                # real purchase date (Dhan's holdings API doesn't give us that) —
+                # exit_engine._send_real_sell used to read opened_at=="today" as
+                # "this was bought and is being sold same-day" and sell it
+                # product_type="INTRADAY". For a real demat holding with no
+                # matching MIS position, Dhan treats that as opening a fresh
+                # short and margin-rejects it ("insufficient funds") instead of
+                # squaring off. broker_imported=True tells exit.py to always use
+                # CNC for this position, independent of opened_at.
+                broker_imported=True,
+            )
+            db.add(position)
+            db.flush()
+            _is_same_day_cnc = position_row.get("_source") == "live_positions_cnc"
+            _src_label = (
+                "same-day CNC delivery position (not yet settled into demat holdings, T+1)"
+                if _is_same_day_cnc
+                else "pre-existing Dhan demat holding (not bought via this app)"
+            )
+            db.add(models.TradePositionEvent(
+                position_id=position.id, event_type="OPENED",
+                detail=f"Imported from Dhan as {_src_label}: "
+                       f"{qty} @ avg cost ₹{avg_price}, {basis_note} stop/target since no "
+                       f"decision/proposed_stop exists for it; shared symbol lock claimed.",
+            ))
+            db.commit()
+            logger.info(
+                "import_broker_holdings: imported %s (%d shares @ avg ₹%.2f) as a new tracked "
+                "REAL position [%s] — now visible to /positions and exit_engine (%s)",
+                symbol, qty, avg_price, _src_label, basis_note,
+            )
+            imported += 1
+        except Exception as e:  # noqa: BLE001 — one bad candidate must never block the rest of the batch
+            db.rollback()
+            logger.warning(
+                "import_broker_holdings: skipping %s this cycle — failed to import (%s: %s); "
+                "shared symbol lock stays claimed, will retry this same symbol next cycle since "
+                "it's still not tracked as a position.",
+                symbol, type(e).__name__, e,
+            )
+            continue
 
-    if imported:
-        db.commit()
     return imported
 
 

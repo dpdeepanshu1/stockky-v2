@@ -715,6 +715,34 @@ async def _inject_nextday_watchlist_candidates(db, mode: str) -> int:
             c.symbol for c in
             db.query(models.TradeCandidate).filter_by(mode=mode, consumed=False).all()
         }
+
+        # 2026-09-17 fix (session56 audit): best-effort preview-price lookup so
+        # injected candidates get a real signal_price instead of None. Without
+        # this, entry_engine/entry.py's _entry_drift_ok() treats a None
+        # signal_price as "no drift to check" and skips the anti-chasing gate
+        # entirely — a news-sourced candidate could then be bought however far
+        # the price has already run since the headline broke, with zero band
+        # protection. get_preview_quotes() is explicitly documented as
+        # non-tradeable/display-only (never used to size or place an order),
+        # which is exactly the right posture here too: we only want it as a
+        # drift-gate reference point, not to size the trade.
+        injectable_symbols = [
+            row.symbol for row in rows
+            if row.priority_score >= config.AFTERHOURS_SCAN_MIN_INJECT_SCORE
+            and row.symbol not in already_queued
+        ]
+        preview_prices: dict = {}
+        if injectable_symbols:
+            try:
+                from market_feed.feed import get_preview_quotes
+                previews = await get_preview_quotes(injectable_symbols)
+                preview_prices = {sym: t.price for sym, t in previews.items() if t and t.price}
+            except Exception:
+                logger.exception(
+                    "[schedule] pre-pick %s: preview-price lookup for after-hours candidates "
+                    "failed (non-fatal — signal_price will stay None for these)", mode,
+                )
+
         now = datetime.now(timezone.utc)
         injected = 0
         for row in rows:
@@ -723,13 +751,20 @@ async def _inject_nextday_watchlist_candidates(db, mode: str) -> int:
             if row.priority_score < config.AFTERHOURS_SCAN_MIN_INJECT_SCORE:
                 row.consumed = True
                 row.consumed_at = now
+                db.commit()
                 continue
             if row.symbol in already_queued:
                 row.consumed = True
                 row.consumed_at = now
+                db.commit()
                 continue
-            # Attempt to create the candidate first; only mark consumed if it succeeds.
-            # (A7 fix: consumed=True AFTER db.flush() — symbol not silently lost on add error)
+            # 2026-09-17 fix (session56 audit): commit PER ROW instead of once
+            # after the whole loop. Previously a single bad symbol's flush
+            # error triggered db.rollback(), which — because nothing earlier
+            # in the loop had been committed yet — silently wiped out every
+            # already-processed symbol from this same pre-pick tick, not just
+            # the failing one. Committing immediately after each success means
+            # a later failure can only ever roll back its own row.
             try:
                 db.add(models.TradeCandidate(
                     mode=mode,
@@ -737,7 +772,7 @@ async def _inject_nextday_watchlist_candidates(db, mode: str) -> int:
                     source_tab="afterhours_news_scan",
                     decision_label="BUY NOW",
                     conviction_score=row.priority_score,
-                    signal_price=None,
+                    signal_price=preview_prices.get(row.symbol),
                     raw_payload=json.dumps({
                         "catalyst_type": row.catalyst_type,
                         "source": row.catalyst_source,
@@ -745,9 +780,9 @@ async def _inject_nextday_watchlist_candidates(db, mode: str) -> int:
                     }),
                     overnight_priority=True,
                 ))
-                db.flush()  # surface constraint errors before marking consumed
                 row.consumed = True
                 row.consumed_at = now
+                db.commit()
                 already_queued.add(row.symbol)
                 injected += 1
             except Exception as add_err:
@@ -756,7 +791,6 @@ async def _inject_nextday_watchlist_candidates(db, mode: str) -> int:
                     "[schedule] pre-pick %s: could not inject NextDayWatchlist candidate %s — skipping: %s",
                     mode, row.symbol, add_err,
                 )
-        db.commit()
         if injected:
             logger.info(
                 "[schedule] pre-pick %s: injected %d after-hours news candidate(s) "
@@ -1293,7 +1327,8 @@ def _is_afterhours_window_active() -> bool:
 
 
 # Per-mode flag: has the finalize pass fired today?
-_afterhours_finalize_last_run: dict = {}  # mode -> IST date str "YYYY-MM-DD"
+
+
 
 
 async def _afterhours_scan_body(mode: str) -> None:
@@ -1333,10 +1368,16 @@ async def _afterhours_scan_body(mode: str) -> None:
         today = ist_today_str()
         if (
             now_t >= finalize_t
-            and _afterhours_finalize_last_run.get(mode) != today
+            and gate.afterhours_finalize_last_run != today
             and market_date == today  # only finalize for today's target
         ):
-            _afterhours_finalize_last_run[mode] = today
+            # 2026-09-17 fix (session56 audit): persisted to the gate row
+            # (was an in-memory module dict) so a restart between finalize
+            # time and market open can't re-fire this and re-send the
+            # Telegram notification — same guard pattern every other
+            # scheduled feature's _last_run column already uses.
+            gate.afterhours_finalize_last_run = today
+            db.commit()
             shortlist = await finalize_nextday_watchlist(db, mode, market_date)
             if shortlist:
                 await notify_async(
@@ -1386,7 +1427,7 @@ async def _afterhours_scan_loop() -> None:
 
 def start() -> None:
     """Idempotent — safe to call from startup() even if hot-reloaded."""
-    global _full_task, _exit_task, _schedule_task, _totp_task
+    global _full_task, _exit_task, _schedule_task, _totp_task, _afterhours_task
     if _full_task is None or _full_task.done():
         _full_task = asyncio.create_task(_full_cycle_loop())
         logger.info("Auto-pilot FULL CYCLE background task created.")

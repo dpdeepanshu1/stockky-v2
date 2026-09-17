@@ -264,6 +264,14 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
     now = datetime.now(timezone.utc)
     written = 0
 
+    # 2026-09-17 fix (session56 audit): commit PER SYMBOL instead of once
+    # after the whole loop. The previous shape called db.flush() per symbol
+    # but db.commit() only once at the end — so if any one symbol's upsert
+    # raised (constraint error etc.), the except block's db.rollback() wiped
+    # out every other symbol already processed earlier in this same pass,
+    # not just the failing one, while the log line still reported the
+    # pre-rollback "written" count as if it had succeeded. Committing right
+    # after each symbol means a later failure can only roll back its own row.
     for symbol, hit in best.items():
         try:
             existing_row = (
@@ -283,7 +291,7 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
                     collected_at=now,
                     consumed=False,
                 ))
-                db.flush()   # surface constraint errors before commit
+                db.commit()
                 written += 1
             elif hit["score"] > existing_row.priority_score:
                 existing_row.priority_score = hit["score"]
@@ -291,6 +299,7 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
                 existing_row.catalyst_source = hit["source"]
                 existing_row.headline = hit["headline"]
                 existing_row.updated_at = now
+                db.commit()
                 written += 1
         except Exception as e:
             db.rollback()
@@ -300,7 +309,6 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
             )
             continue
 
-    db.commit()
     logger.info(
         "afterhours-scan [%s %s]: %d symbol(s) scored → %d rows upserted",
         mode, market_date, len(best), written,

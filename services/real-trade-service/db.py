@@ -835,6 +835,10 @@ def _ensure_afterhours_gate_column(engine, dialect_name: str) -> None:
                 "afterhours_news_scan_enabled_at",
                 "ALTER TABLE trade_gate_state ADD (afterhours_news_scan_enabled_at TIMESTAMP NULL)",
             ),
+            (
+                "afterhours_finalize_last_run",
+                "ALTER TABLE trade_gate_state ADD (afterhours_finalize_last_run VARCHAR2(10) NULL)",
+            ),
         ]
     else:
         adds = [
@@ -845,6 +849,10 @@ def _ensure_afterhours_gate_column(engine, dialect_name: str) -> None:
             (
                 "afterhours_news_scan_enabled_at",
                 "ALTER TABLE trade_gate_state ADD COLUMN afterhours_news_scan_enabled_at TIMESTAMP NULL",
+            ),
+            (
+                "afterhours_finalize_last_run",
+                "ALTER TABLE trade_gate_state ADD COLUMN afterhours_finalize_last_run VARCHAR(10) NULL",
             ),
         ]
 

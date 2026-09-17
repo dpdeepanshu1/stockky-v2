@@ -107,6 +107,17 @@ export interface GateStatus {
     // 2026-09-10 (session22): EOD re-scan that queues an overnight-priority
     // list for tomorrow's pre-pick instead of placing any order today.
     eod_signal_scan: ScheduledFeatureState;
+    // 2026-09-17 (session56): after-hours RSS news scan. Different shape from
+    // the four above — it runs on a recurring interval during a window
+    // (15:45–08:45 IST) rather than once at a fixed time_ist, so there's no
+    // single last_run date to show.
+    afterhours_news_scan?: {
+      enabled: boolean;
+      window_ist: string;
+      interval_seconds: number;
+      finalize_time_ist: string;
+      max_candidates: number;
+    };
   };
   account: {
     starting_capital: number | null;
@@ -425,10 +436,11 @@ export const realTradeApi = {
   // (the separate server-side env_on kill-switch was removed 2026-09-01 at
   // the admin's request) — flipping it here is immediately effective, no
   // Render env var / redeploy required. "eod_signal_scan" added 2026-09-10
-  // (session22) — see ScheduledFeatureState above.
+  // (session22) — see ScheduledFeatureState above. "afterhours_news_scan"
+  // added 2026-09-17 (session56) — see the afterhours_news_scan field above.
   setFeature: (
     mode: "DEMO" | "REAL",
-    feature: "prepick" | "enter_at_open" | "eod_squareoff" | "eod_signal_scan",
+    feature: "prepick" | "enter_at_open" | "eod_squareoff" | "eod_signal_scan" | "afterhours_news_scan",
     enabled: boolean,
   ) =>
     rtRequest<{ ok: boolean; mode: string; feature: string; enabled: boolean }>(

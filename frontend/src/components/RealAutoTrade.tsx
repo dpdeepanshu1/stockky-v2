@@ -1252,7 +1252,7 @@ export default function RealAutoTrade() {
   };
 
   const doToggleFeature = async (
-    feature: "prepick" | "enter_at_open" | "eod_squareoff" | "eod_signal_scan",
+    feature: "prepick" | "enter_at_open" | "eod_squareoff" | "eod_signal_scan" | "afterhours_news_scan",
     currentlyEnabled: boolean,
   ) => {
     setFeatureBusy(feature); setError(null);
@@ -2431,6 +2431,45 @@ export default function RealAutoTrade() {
                           </div>
                         );
                       })}
+                      {/* 2026-09-17 (session56): after-hours RSS news scan. Rendered
+                          separately from the .map() above because its status shape
+                          (window_ist/interval_seconds/finalize_time_ist) differs from
+                          the once-a-day features' (time_ist/last_run) — it runs on a
+                          recurring interval across an overnight window instead. */}
+                      {status.scheduled_automation!.afterhours_news_scan && (() => {
+                        const ah = status.scheduled_automation!.afterhours_news_scan!;
+                        const on = ah.enabled;
+                        const busy = featureBusy === "afterhours_news_scan";
+                        return (
+                          <div className={`flex items-start justify-between gap-3 px-3 py-2.5 ${on ? "bg-signal-buy/[0.04]" : ""}`}>
+                            <div className="min-w-0">
+                              <p className="font-display tabular-nums text-[11px] text-paper">
+                                📰 After-hours news scan{" "}
+                                <span className="text-mist">· {ah.window_ist} IST</span>{" "}
+                                {on
+                                  ? <span className="text-signal-buy">ON</span>
+                                  : <span className="text-mist">OFF</span>}
+                              </p>
+                              <p className="font-display tabular-nums text-[9px] text-mist mt-0.5">
+                                Scans Moneycontrol/LiveMint/ET every {Math.round(ah.interval_seconds / 60)} min for
+                                {" "}catalyst news, ranks by symbol, and finalizes the top {ah.max_candidates} at{" "}
+                                {ah.finalize_time_ist} IST for tomorrow's pre-pick. No order is placed here.
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => void doToggleFeature("afterhours_news_scan", on)}
+                              disabled={!armed || busy}
+                              className={`shrink-0 px-3 py-1.5 rounded-xl font-display tabular-nums text-[11px] disabled:opacity-40 ${
+                                on
+                                  ? "bg-signal-sell/10 border border-signal-sell/30 text-signal-sell"
+                                  : "bg-signal-buy/10 border border-signal-buy/30 text-signal-buy"
+                              }`}
+                            >
+                              {busy ? "…" : on ? "Turn Off" : "Turn On"}
+                            </button>
+                          </div>
+                        );
+                      })()}
                     </div>
                     {!armed && (
                       <p className="font-display tabular-nums text-[9px] text-mist px-3 py-2 border-t border-slate">

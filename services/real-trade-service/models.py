@@ -105,6 +105,14 @@ class TradeGateState(Base):
     # toggle is the sole authority (same pattern as the four above).
     afterhours_news_scan_enabled = Column(Boolean, nullable=False, default=False)
     afterhours_news_scan_enabled_at = Column(DateTime, nullable=True)
+    # 2026-09-17 fix (session56 audit): the finalize pass's once-per-day guard
+    # was originally an in-memory module dict in auto_pilot.py, which broke
+    # the "each feature fires at most once per IST trading day, tracked by a
+    # persisted _last_run column" contract this table otherwise guarantees —
+    # a restart between ~08:45 and market open could re-fire the finalize
+    # notification. Persisted here so it survives restarts like every other
+    # scheduled feature's guard.
+    afterhours_finalize_last_run = Column(String(10), nullable=True)  # "YYYY-MM-DD"
 
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 

@@ -532,6 +532,19 @@ export const realTradeApi = {
       `/orders/${mode}/${orderId}/cancel`, { method: "POST" }, mode === "REAL"
     ),
 
+  // 2026-09-17 addition: sells a raw Dhan demat holding directly, by
+  // security_id/quantity as reported by /dhan/holdings — no matching
+  // TradePosition row required. REAL-only (a demat holding is a REAL
+  // Dhan-account concept).
+  sellHolding: (securityId: string, exchangeSegment: string, symbol: string, quantity: number) =>
+    rtRequest<{ ok: boolean; symbol: string; qty: number; dhan_order_id?: string | null; order_id?: number }>(
+      `/dhan/holdings/sell`,
+      { method: "POST", body: JSON.stringify({
+        security_id: securityId, exchange_segment: exchangeSegment, symbol, quantity,
+      }) },
+      true
+    ),
+
   reconcile: (mode: "DEMO" | "REAL") =>
     rtRequest<{ ok: boolean; checked?: number; entries_filled?: number; exits_confirmed?: number; dead_orders?: number; errors?: number; positions_unstuck?: number; holdings_imported?: number; note?: string }>(
       `/reconcile/${mode}`, { method: "POST" }, mode === "REAL"

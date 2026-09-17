@@ -304,21 +304,19 @@ def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int
 
         broker_order_type = str(row.get("orderType") or row.get("order_type") or "").upper()
         broker_price = row.get("price")
-        if broker_order_type and broker_order_type != "MARKET":
+        # 2026-09-17 fix: Dhan always echoes a MARKET order back in the
+        # order book as a "LIMIT" order with a computed protection price —
+        # normal NSE-equity broker behavior, not a sign this flat-close
+        # went wrong. This fired on every single EOD flat-sell before this
+        # fix. Only alert when the broker's order type is something other
+        # than this expected MARKET->LIMIT echo.
+        if broker_order_type and broker_order_type not in ("MARKET", "LIMIT"):
             msg = (
                 f"reconcile: EOD flat-SELL BROKER ORDER TYPE MISMATCH for "
                 f"{pos.symbol} (id={pos.id}, order {pos.dhan_exit_order_id}) — sent "
                 f"MARKET but Dhan reports orderType={broker_order_type} "
                 f"(price={broker_price}). This position's flat-close is not what "
                 f"this service believes it is — investigate immediately."
-            )
-            logger.critical(msg)
-            notifier.notify_critical(msg)
-        elif broker_price not in (None, 0, 0.0):
-            msg = (
-                f"reconcile: EOD flat-SELL BROKER PRICE MISMATCH for {pos.symbol} "
-                f"(id={pos.id}, order {pos.dhan_exit_order_id}) — sent price=0 "
-                f"(MARKET) but Dhan reports price={broker_price}."
             )
             logger.critical(msg)
             notifier.notify_critical(msg)

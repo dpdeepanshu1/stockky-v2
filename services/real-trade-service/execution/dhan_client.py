@@ -1162,7 +1162,22 @@ def place_order(
                     broker_row.get("orderType") or broker_row.get("order_type") or ""
                 ).upper()
                 broker_price = broker_row.get("price")
-                if broker_order_type and broker_order_type != order_type:
+                # 2026-09-17 fix: Dhan always echoes a MARKET order back in
+                # its own order list as a "LIMIT" order carrying a computed
+                # protection price — this is normal NSE-equity broker
+                # behavior (a market order is implemented internally as a
+                # protected limit order), not evidence of a wrong order.
+                # Both checks below fired on every single market order
+                # before this fix, which is exactly the false alarm this
+                # service kept raising while the order filled fine.
+                _is_expected_market_to_limit_echo = (
+                    order_type == "MARKET" and broker_order_type == "LIMIT"
+                )
+                if (
+                    broker_order_type
+                    and broker_order_type != order_type
+                    and not _is_expected_market_to_limit_echo
+                ):
                     logger.critical(
                         "place_order: BROKER ORDER TYPE MISMATCH for order %s (%s %s x%s) — "
                         "sent order_type=%s but Dhan's own order list reports orderType=%s "
@@ -1171,14 +1186,6 @@ def place_order(
                         "a one-off.",
                         placed_order_id, transaction_type, security_id, quantity,
                         order_type, broker_order_type, broker_price,
-                    )
-                elif order_type == "MARKET" and broker_price not in (None, 0, 0.0):
-                    logger.critical(
-                        "place_order: BROKER PRICE MISMATCH for MARKET order %s (%s %s x%s) — "
-                        "sent price=0 but Dhan's own order list reports price=%s. A MARKET "
-                        "order should never carry a nonzero broker-side price — investigate "
-                        "immediately.",
-                        placed_order_id, transaction_type, security_id, quantity, broker_price,
                     )
         except Exception as e:  # noqa: BLE001 — verification must never break a real placement
             logger.warning(

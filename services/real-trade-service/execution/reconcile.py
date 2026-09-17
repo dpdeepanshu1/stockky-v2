@@ -411,7 +411,24 @@ async def reconcile_real_orders(db: Session) -> dict:
             _get(broker_row, "orderType", "order_type", default="")
         ).upper()
         broker_order_price = _get(broker_row, "price", default=None)
-        if broker_order_type and broker_order_type != (order.order_type or "").upper():
+        our_order_type = (order.order_type or "").upper()
+        # 2026-09-17 fix: Dhan echoes every MARKET order back in the order
+        # book as a "LIMIT" order carrying a computed protection price — this
+        # is standard NSE-equity broker behavior (a market order is
+        # implemented internally as a protected limit order), not a sign the
+        # order was placed differently than intended. It fires on every
+        # single market order, so treating it as a mismatch was a permanent
+        # false alarm that drowned out any real mismatch. Only alert when the
+        # broker's order type diverges in a way our own MARKET->LIMIT mapping
+        # doesn't already explain.
+        _is_expected_market_to_limit_echo = (
+            our_order_type == "MARKET" and broker_order_type == "LIMIT"
+        )
+        if (
+            broker_order_type
+            and broker_order_type != our_order_type
+            and not _is_expected_market_to_limit_echo
+        ):
             _mismatch_key = f"ordertype_mismatch_alerted_order_{order.id}"
             if not load_snapshot(db, _mismatch_key):
                 save_snapshot(db, _mismatch_key, {"alerted_at": str(datetime.now(timezone.utc))})

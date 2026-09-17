@@ -439,4 +439,17 @@ export const positionStocksApi = {
     psRequest<{ ok: boolean; status: string; id: number; symbol: string }>(
       `/positions/${id}/close`, { method: "POST" }, true
     ),
+
+  // 2026-09-17 addition: mirrors real-trade-service's holdings/sellHolding
+  // pair — this service had no holdings endpoint at all before that fix.
+  holdings: () => psRequest<{ ok: boolean; holdings: any[] }>("/dhan/holdings", {}, true),
+
+  sellHolding: (securityId: string, exchangeSegment: string, symbol: string, quantity: number) =>
+    psRequest<{ ok: boolean; symbol: string; qty: number; dhan_order_id?: string | null }>(
+      `/dhan/holdings/sell`,
+      { method: "POST", body: JSON.stringify({
+        security_id: securityId, exchange_segment: exchangeSegment, symbol, quantity,
+      }) },
+      true
+    ),
 };

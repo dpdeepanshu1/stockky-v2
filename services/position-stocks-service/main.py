@@ -1547,3 +1547,68 @@ def manual_close(
         raise HTTPException(status_code=409, detail=str(e))
 
     return {"ok": True, "status": "pending_broker_confirmation", **result}
+
+
+# ── Routes: Live Dhan demat holdings ─────────────────────────────────────
+# 2026-09-17 addition: this service previously had no holdings endpoint at
+# all — only real-trade-service exposed /dhan/holdings, which is why the
+# Position Stocks tab's Demat Holdings section (screenshots 2/5) showed
+# nothing. Both services trade the same Dhan account, so both need to be
+# able to read and manually sell a demat holding.
+
+@app.get("/dhan/holdings")
+def dhan_live_holdings(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """Live demat holdings from Dhan."""
+    try:
+        holdings = dhan_client.get_holdings(db)
+        return {"ok": True, "holdings": holdings}
+    except dhan_client.DhanNotConnectedError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        logger.warning("position-stocks: dhan get_holdings failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"Dhan API error: {e}")
+
+
+class SellHoldingRequest(BaseModel):
+    security_id: str
+    exchange_segment: str = "NSE_EQ"
+    symbol: str
+    quantity: int
+
+
+@app.post("/dhan/holdings/sell")
+async def sell_demat_holding(
+    body: SellHoldingRequest,
+    admin: str = Depends(require_admin), db: Session = Depends(get_db),
+):
+    """Manual sell for a raw Dhan demat holding — mirrors real-trade-
+    service's /dhan/holdings/sell (2026-09-17). Sells directly against
+    the security_id/qty the /dhan/holdings response reports; no
+    ScalpPosition row is required or created, since a demat holding may
+    not have originated from this service's own scalp cycle."""
+    if body.quantity <= 0:
+        raise HTTPException(status_code=400, detail="quantity must be positive")
+
+    import asyncio as _asyncio
+    try:
+        result = await _asyncio.to_thread(
+            dhan_client.place_order, db,
+            is_armed=True, security_id=body.security_id,
+            exchange_segment=body.exchange_segment, transaction_type="SELL",
+            quantity=body.quantity, order_type="MARKET", price=0.0,
+            product_type="CNC", tag="manual_holding_sell",
+        )
+    except dhan_client.DhanNotConnectedError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Dhan rejected the sell: {e}")
+
+    dhan_order_id = str(result.get("orderId") or result.get("order_id") or "") or None
+    logger.info(
+        "position-stocks: manual demat-holding sell by %s — %s qty=%s dhan_order_id=%s",
+        admin or "admin", body.symbol, body.quantity, dhan_order_id,
+    )
+    return {
+        "ok": True, "symbol": body.symbol, "qty": body.quantity,
+        "dhan_order_id": dhan_order_id,
+    }

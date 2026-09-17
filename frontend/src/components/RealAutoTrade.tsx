@@ -1287,6 +1287,29 @@ export default function RealAutoTrade() {
     finally { setActionBusy(null); }
   };
 
+  // 2026-09-17 addition: sells a raw demat holding directly (no
+  // TradePosition backing it) via the new /dhan/holdings/sell route —
+  // see realTradeApi.sellHolding. Mirrors doClosePosition's busy/message
+  // handling so it behaves identically to every other action button here.
+  const doSellHolding = async (h: any) => {
+    const sym = h.tradingSymbol || h.symbol || "—";
+    const securityId = String(h.securityId || h.security_id || "");
+    const exchangeSegment = h.exchangeSegment || h.exchange_segment || "NSE_EQ";
+    const qty = Number(h.totalQty || h.quantity || 0);
+    if (!securityId || qty <= 0) {
+      setActionMsg({ ok: false, text: `Can't sell ${sym} — missing security id or quantity from Dhan.` });
+      return;
+    }
+    const key = `sell-holding:${sym}`;
+    setActionBusy(key); setActionMsg(null);
+    try {
+      const res = await realTradeApi.sellHolding(securityId, exchangeSegment, sym, qty);
+      setActionMsg({ ok: true, text: `${sym} sell sent to Dhan (qty ${res.qty}).` });
+      await loadPositionsAndOrders(mode);
+    } catch (e: any) { setActionMsg({ ok: false, text: e?.message || `Failed to sell ${sym}` }); }
+    finally { setActionBusy(null); }
+  };
+
   const doCancelOrder = async (o: OrderRow) => {
     const key = `cancel:${o.id}`;
     setActionBusy(key); setActionMsg(null);
@@ -1948,7 +1971,8 @@ export default function RealAutoTrade() {
                               <th className="text-right pr-3">Qty</th>
                               <th className="text-right pr-3">Avg Cost</th>
                               <th className="text-right pr-3">LTP</th>
-                              <th className="text-right">P&L</th>
+                              <th className="text-right pr-3">P&L</th>
+                              <th className="text-right">Action</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -1992,6 +2016,17 @@ export default function RealAutoTrade() {
                                       <div className={`text-[9px] ${pnlColor(realizedPnl)}`}>
                                         {realizedPnl >= 0 ? "+" : ""}{fmtInr(realizedPnl, 0)} realized
                                       </div>
+                                    )}
+                                  </td>
+                                  <td className="text-right">
+                                    {remainingQty > 0 && (
+                                      <button
+                                        className="px-2 py-1 rounded-lg bg-signal-sell/20 text-signal-sell hover:bg-signal-sell/30 disabled:opacity-40 text-[10px] font-bold"
+                                        disabled={actionBusy === `sell-holding:${sym}`}
+                                        onClick={() => void doSellHolding(h)}
+                                      >
+                                        {actionBusy === `sell-holding:${sym}` ? "Selling…" : "Sell"}
+                                      </button>
                                     )}
                                   </td>
                                 </tr>

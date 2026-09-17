@@ -301,6 +301,27 @@ def get_positions(db: Session) -> list:
     return data if isinstance(data, list) else []
 
 
+def get_holdings(db: Session) -> list:
+    """Read-only — no arm check. Returns demat holdings.
+
+    2026-09-17 addition: this service never had a holdings endpoint at
+    all — the "Demat Holdings" tab only existed in real-trade-service.
+    Same benign-empty handling as real-trade-service's identically-named
+    function: Dhan's SDK reports zero holdings as {status: "failure",
+    remarks: "No holdings available"}, not an empty list, so that
+    specific message is swallowed into [] rather than raised as an
+    error; any other failure still raises."""
+    client = _get_sdk_client(db)
+    resp = client.get_holdings()
+    try:
+        data = _extract_data(resp)
+    except RuntimeError as e:
+        if "no holdings" in str(e).lower():
+            return []
+        raise
+    return data if isinstance(data, list) else []
+
+
 def get_order_list(db: Session) -> list:
     """Read-only — no arm check. Returns all PLAIN (non-super) orders for
     the day, i.e. the same order book place_order()'s own post-placement
@@ -413,21 +434,29 @@ def place_order(
                     broker_row.get("orderType") or broker_row.get("order_type") or ""
                 ).upper()
                 broker_price = broker_row.get("price")
-                if broker_order_type and broker_order_type != order_type:
+                # 2026-09-17 fix: Dhan always echoes a MARKET order back in
+                # the order book as a "LIMIT" order with a computed
+                # protection price — this is normal NSE-equity broker
+                # behavior (a market order is implemented internally as a
+                # protected limit order), not evidence the order was placed
+                # wrong. It fired on every single market order, so both
+                # checks below were permanent false alarms. Only alert when
+                # the broker's order type/price diverges in a way that this
+                # expected MARKET->LIMIT echo doesn't already explain.
+                _is_expected_market_to_limit_echo = (
+                    order_type == "MARKET" and broker_order_type == "LIMIT"
+                )
+                if (
+                    broker_order_type
+                    and broker_order_type != order_type
+                    and not _is_expected_market_to_limit_echo
+                ):
                     msg = (
                         f"place_order: BROKER ORDER TYPE MISMATCH for order "
                         f"{placed_order_id} ({transaction_type} {security_id} "
                         f"x{quantity}) — sent order_type={order_type} but Dhan "
                         f"reports orderType={broker_order_type} (price={broker_price}) "
                         f"— investigate immediately."
-                    )
-                    logger.critical("position-stocks: %s", msg)
-                    notifier.notify_critical(msg)
-                elif order_type == "MARKET" and broker_price not in (None, 0, 0.0):
-                    msg = (
-                        f"place_order: BROKER PRICE MISMATCH for MARKET order "
-                        f"{placed_order_id} ({transaction_type} {security_id} "
-                        f"x{quantity}) — sent price=0 but Dhan reports price={broker_price}."
                     )
                     logger.critical("position-stocks: %s", msg)
                     notifier.notify_critical(msg)

@@ -290,7 +290,15 @@ def start_feed_background(symbols: list) -> None:
                                 "tradeVolume":   row.get("tradeVolume") or row.get("volume"),
                             })
                     except Exception as e:
-                        logger.warning("AngelOne quote batch (%d-%d) failed: %s", i, i + len(batch), e)
+                        # BUG FIX (2026-09-17): httpx timeout exceptions
+                        # stringify to "" — bare `e` produced "quote batch
+                        # (X-Y) failed:" with no indication of timeout vs.
+                        # connection error vs. anything else. Fall back to
+                        # the exception's class name when str(e) is empty.
+                        logger.warning(
+                            "AngelOne quote batch (%d-%d) failed: %s",
+                            i, i + len(batch), str(e) or type(e).__name__,
+                        )
                     await asyncio.sleep(BATCH_GAP_S)
 
             async def _poll_forever():

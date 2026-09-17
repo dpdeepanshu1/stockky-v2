@@ -2202,7 +2202,7 @@ async def _refresh_fundamental_upstream(symbol: str, client: httpx.AsyncClient, 
                 return out, fallback_used
             return metrics, fallback_used
     except Exception as e:
-        logger.warning(f"Fundamental fetch failed for {symbol}: {e}")
+        logger.warning(f"Fundamental fetch failed for {symbol}: {str(e) or type(e).__name__}")
     return {}, True
 
 async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Optional[dict]:
@@ -2277,7 +2277,7 @@ async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Option
                     logger.debug("data feed write-through events: %s", e)
                 return data
     except Exception as e:
-        logger.warning(f"Events fetch failed for {symbol}: {e}")
+        logger.warning(f"Events fetch failed for {symbol}: {str(e) or type(e).__name__}")
     return None
 
 async def _fetch_news_cached(symbol: str, client: httpx.AsyncClient) -> Optional[dict]:
@@ -2296,7 +2296,7 @@ async def _fetch_news_cached(symbol: str, client: httpx.AsyncClient) -> Optional
                 _redis_set(cache_key, data, ttl=ttl)
                 return data
     except Exception as e:
-        logger.warning(f"News fetch failed for {symbol}: {e}")
+        logger.warning(f"News fetch failed for {symbol}: {str(e) or type(e).__name__}")
     return None
 
 async def _fetch_prediction_cached(symbol: str, client: httpx.AsyncClient) -> tuple[Optional[float], Optional[str]]:
@@ -2307,7 +2307,7 @@ async def _fetch_prediction_cached(symbol: str, client: httpx.AsyncClient) -> tu
             if data.get("model_loaded"):
                 return data.get("prediction_score"), data.get("note")
     except Exception as e:
-        logger.warning(f"Prediction lookup failed for {symbol}: {e}")
+        logger.warning(f"Prediction lookup failed for {symbol}: {str(e) or type(e).__name__}")
     return None, None
 
 # ── Hinglish & GenAI summary ──────────────────────────────────────────────
@@ -4802,7 +4802,7 @@ def _merge_fundamentals(normalized: dict, symbol: str):
             normalized["fundamental_metrics"] = metrics if metrics else {}
             normalized["fundamental_fallback"] = fallback_used
     except Exception as e:
-        logger.warning(f"Fundamental fetch failed for {symbol}: {e}")
+        logger.warning(f"Fundamental fetch failed for {symbol}: {str(e) or type(e).__name__}")
 
 def _fetch_news(symbol: str) -> Optional[dict]:
     cache_key = f"{NEWS_CACHE_PREFIX}{symbol}"
@@ -4818,7 +4818,7 @@ def _fetch_news(symbol: str) -> Optional[dict]:
                 _redis_set(cache_key, data, ttl=ttl)
                 return data
     except Exception as e:
-        logger.warning(f"News fetch failed for {symbol}: {e}")
+        logger.warning(f"News fetch failed for {symbol}: {str(e) or type(e).__name__}")
     return None
 
 def _fetch_events(symbol: str) -> Optional[dict]:
@@ -4834,7 +4834,7 @@ def _fetch_events(symbol: str) -> Optional[dict]:
                 _redis_set(cache_key, data, ttl=STATIC_PARAM_TTL)
                 return data
     except Exception as e:
-        logger.warning(f"Events fetch failed for {symbol}: {e}")
+        logger.warning(f"Events fetch failed for {symbol}: {str(e) or type(e).__name__}")
     return None
 
 # ── Legacy synchronous scan ──────────────────────────────────────────────────
@@ -5689,7 +5689,7 @@ def scan_watchlist():
                 try:
                     job_results[name] = fut.result()
                 except Exception as e:
-                    logger.warning(f"Watchlist scan enrichment '{name}' failed for {symbol}: {e}")
+                    logger.warning(f"Watchlist scan enrichment '{name}' failed for {symbol}: {str(e) or type(e).__name__}")
                     job_results[name] = None
 
         price = job_results.get("price")

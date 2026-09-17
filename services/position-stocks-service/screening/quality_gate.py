@@ -89,7 +89,12 @@ async def _fetch_fundamental(client: httpx.AsyncClient, symbol: str) -> tuple[Op
                 except (TypeError, ValueError):
                     market_cap_cr = None
     except Exception as e:
-        logger.info("quality_gate: fundamental fetch failed for %s (%s)", symbol, e)
+        # BUG FIX (2026-09-17): httpx timeout exceptions (ReadTimeout,
+        # ConnectTimeout, etc.) stringify to "" — logging bare `e` produced
+        # "fundamental fetch failed for X ()" with zero information about
+        # WHY it failed (timeout vs connection refused vs something else).
+        # Fall back to the exception's class name whenever str(e) is empty.
+        logger.info("quality_gate: fundamental fetch failed for %s (%s)", symbol, str(e) or type(e).__name__)
     return fund_score, market_cap_cr
 
 
@@ -100,7 +105,8 @@ async def _fetch_technical(client: httpx.AsyncClient, symbol: str) -> Optional[f
         if r.status_code == 200:
             tech_score = r.json().get("technical_score")
     except Exception as e:
-        logger.info("quality_gate: technical fetch failed for %s (%s)", symbol, e)
+        # See the matching BUG FIX comment in _fetch_fundamental above.
+        logger.info("quality_gate: technical fetch failed for %s (%s)", symbol, str(e) or type(e).__name__)
     return tech_score
 
 
@@ -134,7 +140,8 @@ async def _fetch_event_signal(client: httpx.AsyncClient, symbol: str) -> tuple[O
             event_score = ej.get("recent_event_score")
             bulk_flag = bool(ej.get("bulk_deals"))
     except Exception as e:
-        logger.info("quality_gate: event fetch failed for %s (%s)", symbol, e)
+        # See the matching BUG FIX comment in _fetch_fundamental above.
+        logger.info("quality_gate: event fetch failed for %s (%s)", symbol, str(e) or type(e).__name__)
     return has_catalyst, event_score, bulk_flag
 
 

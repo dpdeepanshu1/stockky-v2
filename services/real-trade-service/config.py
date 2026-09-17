@@ -395,6 +395,20 @@ AFTERHOURS_SCAN_MAX_NEXTDAY_CANDIDATES = int(
 AFTERHOURS_SCAN_MIN_INJECT_SCORE = float(
     os.getenv("AFTERHOURS_SCAN_MIN_INJECT_SCORE", "30.0")
 )
+# 2026-09-17 fix (session58, user request): both the RSS headlines and the
+# bulk/block-deal hits pulled into the after-hours scan need to actually be
+# RECENT news — an RSS feed occasionally re-serves an older item near the
+# top (feed re-publish, cache hiccup), and api-gateway's /stockky-hot bulk-
+# deal bucket carries whatever the most recent underlying deal/insider
+# filing was, which isn't always today's. Without an age check, a stale
+# item could get pre-seeded into tomorrow's watchlist as if it were fresh
+# after-hours news. Bounded to 3–7 days per user instruction; default 5
+# (mid-range) balances "not so tight it drops a Friday-evening story
+# scanned before a long weekend" against "not so loose it lets week-old
+# news back in".
+AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS = min(7, max(3, int(
+    os.getenv("AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS", "5")
+)))
 
 # ── US sector overnight signal (2026-09-11, session23 — user request) ──────
 # "We can take some idea from the US stock market sector-wise, or on some

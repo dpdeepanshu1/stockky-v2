@@ -1333,7 +1333,7 @@ def _is_afterhours_window_active() -> bool:
 
 async def _afterhours_scan_body(mode: str) -> None:
     """One after-hours scan tick for a mode. Called from worker thread."""
-    from tz_utils import ist_today_str, ist_now, parse_hhmm
+    from tz_utils import ist_today_str, ist_now, parse_hhmm, is_nse_holiday
     from watchlist_engine.afterhours_scan import run_afterhours_scan, finalize_nextday_watchlist
 
     Session = get_session_factory()
@@ -1354,14 +1354,32 @@ async def _afterhours_scan_body(mode: str) -> None:
         now_t = ist_now().time()
         start_t = parse_hhmm(config.AFTERHOURS_SCAN_START_IST, 15, 45)
         if now_t >= start_t:
-            # After today's close — target the next weekday
+            # After today's close — target the next actual trading date.
+            # 2026-09-17 fix (session57): this only ever skipped Sat (5) /
+            # Sun (6) via .weekday(), same "weekend-only" gap tz_utils.py's
+            # own AUDIT FIX note (2026-09-14, Ganesh Chaturthi incident)
+            # already fixed for is_market_open_ist() — but that fix was
+            # never applied here, so a scan run on e.g. the eve of Diwali
+            # Balipratipada (2026-11-10, a Tuesday) would have targeted the
+            # holiday itself as market_date, pre-seeding NextDayWatchlistEntry
+            # rows for a day the exchange never opens; they'd then sit
+            # unconsumed until the day after, one cycle stale. Now also
+            # skips tz_utils.is_nse_holiday() dates, using the same holiday
+            # list _prepick/_schedule_loop rely on elsewhere in this file.
             tomorrow = datetime.now(ZoneInfo("Asia/Kolkata")) + timedelta(days=1)
-            while tomorrow.weekday() >= 5:   # skip Sat (5) and Sun (6)
+            while tomorrow.weekday() >= 5 or is_nse_holiday(tomorrow):
                 tomorrow += timedelta(days=1)
             market_date = tomorrow.strftime("%Y-%m-%d")
         else:
-            # Before open — target today
-            market_date = ist_today_str()
+            # Before open — target today, unless today itself turns out to
+            # be a weekend/holiday (e.g. this tick is running during the
+            # early-morning hours of the holiday itself, not the evening
+            # before it) — same fix as above, applied to this branch too so
+            # both paths agree on what counts as a valid market_date.
+            candidate = datetime.now(ZoneInfo("Asia/Kolkata"))
+            while candidate.weekday() >= 5 or is_nse_holiday(candidate):
+                candidate += timedelta(days=1)
+            market_date = candidate.strftime("%Y-%m-%d")
 
         # ── Finalize pass (once per day, at/after AFTERHOURS_FINALIZE_TIME_IST) ──
         finalize_t = parse_hhmm(config.AFTERHOURS_FINALIZE_TIME_IST, 8, 45)

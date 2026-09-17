@@ -1,7 +1,8 @@
 """
-watchlist_engine/afterhours_scan.py — After-hours news scan (2026-09-17, session56)
+watchlist_engine/afterhours_scan.py — After-hours news scan (2026-09-17, session57)
 
-Polls Moneycontrol, LiveMint, and Economic Times RSS feeds once per
+Polls Moneycontrol, LiveMint, Economic Times, NDTV Profit, and Business
+Standard RSS/Atom feeds once per
 AFTERHOURS_SCAN_INTERVAL_SECONDS (default 3600s = hourly) between market
 close (~15:45 IST) and pre-market (~08:45 IST next day). Classifies headlines,
 scores and deduplicates by symbol, and upserts into NextDayWatchlistEntry so
@@ -84,13 +85,49 @@ Symbol validation (2026-09-17 fix, session56 audit follow-up):
   than block the whole scan (same non-fatal posture as everything else
   here) — bulk-deal-sourced symbols are pre-validated by api-gateway and
   skip this check.
+
+Feed sources (2026-09-17 fix, session57 — closes a design gap flagged in
+session56's own audit): NDTV Profit and Business Standard, both named in
+the original design doc, were never actually wired into _RSS_FEEDS —
+only Moneycontrol/LiveMint/ET/ET-companies were. Added both. NDTV Profit
+serves its feed as Atom (<feed>/<entry>/<published>), not RSS 2.0
+(<rss>/<item>/<pubDate>) like the other four — _fetch_rss_items below now
+detects and parses either format so this feed (and any future Atom feed)
+actually yields items instead of silently parsing to zero via root.iter
+("item") finding nothing.
+
+Sentiment veto — cost-context exception (2026-09-17 fix, session57 —
+closes the "double-negated headline" gap the session56 docstring flagged
+as still open, e.g. "Fall in input costs boosts profit margin"): a plain
+membership check for words like "fall"/"decline"/"drop" wrongly vetoed
+headlines where the negative word describes a COST going down (unambiguous
+good news for margins), not the company's own results going down. Before
+vetoing on a negative-outcome keyword, _score_headline now checks whether
+that keyword sits immediately next to a cost/expense noun (cost, costs,
+expense, expenditure, input, raw material, fuel, price of raw materials,
+etc.) within a short word window — if so, that particular match is treated
+as a cost-side move, not a results-side one, and does not veto by itself.
+This is still keyword/proximity-based, not real NLP or dependency parsing,
+so a sufficiently convoluted sentence can still fool it — but it closes
+the specific, common pattern named in the prior audit.
+
+Recency filter (2026-09-17 fix, session58 — user request): both RSS
+headlines and bulk/block-deal hits are now dropped if they're older than
+config.AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS (env-configurable, clamped to
+3–7 days, default 5). RSS items are checked against their own pubDate/
+published; bulk-deal hits are checked against the freshest date found in
+their nested bulk_deals[].published / insider_transactions[].date. An
+item with no parseable date degrades open (kept, not dropped) rather than
+being silently discarded — same non-fatal posture as the rest of this
+file's best-effort checks.
 """
 from __future__ import annotations
 
 import logging
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Optional
 
 import httpx
@@ -126,6 +163,20 @@ _RSS_FEEDS: list[dict] = [
         "source": "ET-companies",
         "url": "https://economictimes.indiatimes.com/industry/rss.cms",
         "source_bonus": 6,
+    },
+    {
+        # 2026-09-17 fix (session57): named in the original design doc but
+        # never actually wired in until now. Served as Atom, not RSS 2.0 —
+        # see _fetch_rss_items' format-detection below.
+        "source": "NDTVProfit",
+        "url": "https://prod-qt-images.s3.amazonaws.com/production/bloombergquint/feed.xml",
+        "source_bonus": 9,
+    },
+    {
+        # 2026-09-17 fix (session57): same gap as NDTVProfit above.
+        "source": "BusinessStandard",
+        "url": "https://www.business-standard.com/rss/markets-106.rss",
+        "source_bonus": 9,
     },
 ]
 
@@ -172,6 +223,25 @@ _NEGATIVE_KEYWORDS = {
     "bankruptcy", "insolvency", "default risk", "rating cut", "sell-off",
     "selloff", "crackdown", "scrutiny", "investigation",
 }
+
+# 2026-09-17 fix (session57): cost/expense nouns that, when a negative
+# keyword sits immediately next to one of these, flip the meaning from
+# "the company did badly" to "an input cost went down" — good news, not
+# bad. See _score_headline's cost-context check and the module docstring's
+# "Sentiment veto — cost-context exception" note for the reasoning and the
+# limits of this still-keyword-based approach.
+_COST_CONTEXT_WORDS = {
+    "cost", "costs", "expense", "expenses", "expenditure", "input",
+    "inputs", "raw material", "raw materials", "fuel", "fuel cost",
+    "commodity", "commodity prices", "interest cost", "interest costs",
+    "borrowing cost", "borrowing costs", "operating cost", "operating costs",
+    "material cost", "material costs",
+}
+# Small set of connector words that, placed between a negative keyword and
+# a cost noun (e.g. "fall in input costs"), still count as "next to" for
+# the proximity check — kept short and specific rather than a generic
+# stopword list, to avoid loosening the check too far.
+_COST_CONTEXT_CONNECTORS = {"in", "of", "on", "to"}
 
 # Catalyst-type base scores
 _CATALYST_BASE_SCORE: dict[str, float] = {
@@ -267,10 +337,55 @@ def _extract_symbol(headline: str, known_symbols: set[str]) -> Optional[str]:
     return None
 
 
+def _has_uncontextualized_negative(h: str) -> bool:
+    """True if `h` (already lowercased) contains a negative-outcome keyword
+    that is NOT immediately describing a cost/expense noun going down.
+
+    2026-09-17 fix (session57): a bare `any(k in h for k in
+    _NEGATIVE_KEYWORDS)` vetoed headlines like "Fall in input costs boosts
+    profit margin" — the negative word ("fall") describes a COST moving
+    down, which is good news, not the company's own results moving down.
+    This checks a small word-window around each negative-keyword match: if
+    a cost/expense noun (optionally through one connector word like "in"/
+    "of") appears right next to it, that match is treated as a cost-side
+    move and doesn't veto by itself. Still keyword/proximity-based, not
+    real parsing — see the module docstring for the acknowledged limits.
+    """
+    words = re.findall(r"[a-z']+", h)
+    for kw in _NEGATIVE_KEYWORDS:
+        start = 0
+        kw_words = kw.split()
+        while True:
+            idx = h.find(kw, start)
+            if idx == -1:
+                break
+            start = idx + 1
+            # Locate this occurrence in the tokenized word list.
+            # Build a rough token index by counting words before idx.
+            prefix_word_count = len(re.findall(r"[a-z']+", h[:idx]))
+            end_word_idx = prefix_word_count + len(kw_words) - 1
+            # Look at up to 3 words after the keyword for a cost noun,
+            # allowing one connector word in between.
+            window = words[end_word_idx + 1: end_word_idx + 4]
+            window_str = " ".join(window)
+            is_cost_context = False
+            if window and window[0] in _COST_CONTEXT_WORDS:
+                is_cost_context = True
+            elif (
+                len(window) >= 2
+                and window[0] in _COST_CONTEXT_CONNECTORS
+                and (window[1] in _COST_CONTEXT_WORDS or window_str[len(window[0]) + 1:] in _COST_CONTEXT_WORDS)
+            ):
+                is_cost_context = True
+            if not is_cost_context:
+                return True  # a genuine, non-cost-context negative hit
+    return False
+
+
 def _score_headline(headline: str, catalyst_types: list[str], source_bonus: float) -> float:
     """Compute a priority score 0–100 for a headline + its catalyst types."""
     h = headline.lower()
-    if any(k in h for k in _NEGATIVE_KEYWORDS):
+    if _has_uncontextualized_negative(h):
         return 0.0
     if not any(k in h for k in _POSITIVE_KEYWORDS):
         return 0.0
@@ -284,20 +399,110 @@ def _score_headline(headline: str, catalyst_types: list[str], source_bonus: floa
 
 # ── RSS fetch + parse ────────────────────────────────────────────────────────
 
-async def _fetch_rss_items(feed: dict) -> list[dict]:
-    """Fetch one RSS feed. Returns [] on any error — never crashes the scan."""
+_ATOM_NS = "{http://www.w3.org/2005/Atom}"
+
+
+def _parse_item_datetime(value: Optional[str]) -> Optional[datetime]:
+    """Best-effort parse of a timestamp string into an aware UTC datetime.
+
+    2026-09-17 fix (session58, user request): recency filtering needs a
+    single parser that copes with every date shape this file actually
+    sees — RSS 2.0's RFC-822 pubDate ("Wed, 16 Sep 2026 21:32:36 +0530"),
+    Atom's ISO-8601 published/updated ("2026-01-14T12:23:24.829Z"), and
+    the plain "YYYY-MM-DD" dates analysis-intelligence-service's
+    bulk_deals/insider_transactions carry. Returns None (not "now") on
+    anything unparseable, so callers can tell "confirmed old" apart from
+    "unknown" and choose to degrade open on the latter — same non-fatal
+    posture as the rest of this file.
+    """
+    if not value:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    # RFC-822 (RSS pubDate) — e.g. "Wed, 16 Sep 2026 21:32:36 +0530"
     try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True) as client:
-            resp = await client.get(feed["url"])
-            resp.raise_for_status()
-            root = ET.fromstring(resp.text)
-        items = []
-        for item in root.iter("item"):
+        dt = parsedate_to_datetime(value)
+        if dt is not None:
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        pass
+    # ISO-8601 (Atom published/updated) — normalize trailing "Z" first,
+    # since datetime.fromisoformat() only accepts +00:00-style offsets.
+    iso_value = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        dt = datetime.fromisoformat(iso_value)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        pass
+    # Plain "YYYY-MM-DD" (insider_transactions/bulk_deals date fields)
+    try:
+        dt = datetime.strptime(value[:10], "%Y-%m-%d")
+        return dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _is_within_max_age(dt: Optional[datetime], now: Optional[datetime] = None) -> bool:
+    """True if `dt` is within config.AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS of
+    `now` (default: current UTC time). An unparseable/missing `dt` (None)
+    is treated as "unknown, not confirmed stale" and passes — same
+    degrade-open posture the rest of this file uses for anything it can't
+    verify (see e.g. _validate_symbols)."""
+    if dt is None:
+        return True
+    now = now or datetime.now(timezone.utc)
+    max_age = timedelta(days=config.AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS)
+    return (now - dt) <= max_age
+
+
+def _parse_feed_items(root: ET.Element) -> list[dict]:
+    """Parse either RSS 2.0 (<rss><channel><item>...) or Atom
+    (<feed><entry>...) XML into a common [{title, link, pubDate}] shape.
+
+    2026-09-17 fix (session57): the original version only ever handled RSS
+    2.0's <item>/<title>/<link>/<pubDate> shape via root.iter("item"). NDTV
+    Profit's actual feed (added this session — see module docstring) is
+    Atom: <feed>/<entry>/<title>/<link href="...">/<published>, which has
+    no <item> elements at all, so the old code would have silently parsed
+    every NDTV Profit fetch to zero items forever without ever raising or
+    logging a warning. This checks for RSS <item>s first (unchanged
+    behavior for the four existing feeds) and falls back to Atom <entry>s.
+    """
+    items: list[dict] = []
+    rss_items = list(root.iter("item"))
+    if rss_items:
+        for item in rss_items:
             title = (item.findtext("title") or "").strip()
             link  = (item.findtext("link")  or "").strip()
             pub   = (item.findtext("pubDate") or "").strip()
             if title:
                 items.append({"title": title, "link": link, "pubDate": pub})
+        return items
+
+    for entry in root.iter(f"{_ATOM_NS}entry"):
+        title = (entry.findtext(f"{_ATOM_NS}title") or "").strip()
+        link = ""
+        for link_el in entry.iter(f"{_ATOM_NS}link"):
+            rel = link_el.get("rel")
+            href = link_el.get("href") or ""
+            if href and (rel is None or rel == "alternate"):
+                link = href
+                break
+        pub = (entry.findtext(f"{_ATOM_NS}published") or entry.findtext(f"{_ATOM_NS}updated") or "").strip()
+        if title:
+            items.append({"title": title, "link": link, "pubDate": pub})
+    return items
+
+
+async def _fetch_rss_items(feed: dict) -> list[dict]:
+    """Fetch one RSS/Atom feed. Returns [] on any error — never crashes the scan."""
+    try:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True) as client:
+            resp = await client.get(feed["url"])
+            resp.raise_for_status()
+            root = ET.fromstring(resp.text)
+        items = _parse_feed_items(root)
         logger.debug("afterhours-scan: %s → %d items", feed["source"], len(items))
         return items
     except Exception as e:
@@ -318,14 +523,48 @@ async def _fetch_bulk_deal_hits() -> dict[str, dict]:
             r.raise_for_status()
             return r.json()
 
-    payload = await api_gateway_breaker.call(_call, fallback=lambda: None)
+    # 2026-09-17 fix (this-session self-review): CircuitBreaker.call()
+    # awaits fallback() on both the open-breaker path and the exception
+    # path — it must be an async callable. `fallback=lambda: None` is a
+    # plain sync lambda; `await fallback()` on it raises TypeError (`await
+    # None`), which would have taken down the whole bulk-deal fetch (and,
+    # since nothing here catches it, potentially the whole scan tick) the
+    # first time api-gateway was slow/down/open-breaker — exactly the
+    # condition this fallback exists to handle gracefully.
+    async def _fallback():
+        return None
+
+    payload = await api_gateway_breaker.call(_call, fallback=_fallback)
     if not payload:
         return {}
 
     out: dict[str, dict] = {}
+    stale_dropped = 0
     for item in (payload.get("bulk_insider_driven") or []):
         sym = (item.get("symbol") or "").upper()
         if not sym:
+            continue
+        # 2026-09-17 fix (session58, user request): api-gateway's
+        # bulk_insider_driven items carry the freshest known dates one
+        # level down, in bulk_deals[].published and
+        # recent_insider_transactions[].date — the item itself has no
+        # top-level timestamp. Take the most recent parseable date across
+        # both nested lists and drop the hit if that's older than
+        # config.AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS. If neither list
+        # yields a parseable date, degrade open (see _is_within_max_age)
+        # rather than discarding a structurally-valid bulk/insider signal
+        # just because this pass couldn't date it.
+        candidate_dates = [
+            _parse_item_datetime(d.get("published"))
+            for d in (item.get("bulk_deals") or [])
+        ] + [
+            _parse_item_datetime(t.get("date"))
+            for t in (item.get("insider_transactions") or [])
+        ]
+        candidate_dates = [d for d in candidate_dates if d is not None]
+        most_recent = max(candidate_dates) if candidate_dates else None
+        if not _is_within_max_age(most_recent):
+            stale_dropped += 1
             continue
         # item["score"] is already a 0-100 conviction score from the same
         # pipeline watchlist_engine/sources.py's Tier 1 takes it from
@@ -344,6 +583,11 @@ async def _fetch_bulk_deal_hits() -> dict[str, dict]:
                 "catalyst_type": "bulk_block",
                 "source": "NSE-bulk-deals",
             }
+    if stale_dropped:
+        logger.debug(
+            "afterhours-scan: bulk-deal hits → dropped %d stale (>%dd) hit(s)",
+            stale_dropped, config.AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS,
+        )
     logger.debug("afterhours-scan: bulk-deal hits → %d symbol(s)", len(out))
     return out
 
@@ -397,8 +641,22 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
 
     for feed in _RSS_FEEDS:
         items = await _fetch_rss_items(feed)
+        stale_dropped = 0
         for item in items:
             headline = item["title"]
+            # 2026-09-17 fix (session58, user request): drop items whose
+            # own pubDate/published is older than
+            # config.AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS — an RSS feed can
+            # occasionally re-surface an older story near the top (feed
+            # re-publish, CDN cache hiccup) and this file has no other
+            # freshness signal once a headline clears the keyword filter.
+            # An unparseable/missing date degrades open (see
+            # _is_within_max_age) rather than silently dropping items on a
+            # feed whose date format this parser doesn't yet recognize.
+            item_dt = _parse_item_datetime(item.get("pubDate"))
+            if not _is_within_max_age(item_dt):
+                stale_dropped += 1
+                continue
             symbol = _extract_symbol(headline, known_symbols)
             if not symbol:
                 continue
@@ -415,6 +673,11 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
                     "catalyst_type": primary_catalyst,
                     "source": feed["source"],
                 }
+        if stale_dropped:
+            logger.debug(
+                "afterhours-scan: %s → dropped %d item(s) older than %dd",
+                feed["source"], stale_dropped, config.AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS,
+            )
 
     # RSS-derived symbols are extracted with a regex + small whitelist —
     # confirm each is a real, quotable NSE equity before it can reach

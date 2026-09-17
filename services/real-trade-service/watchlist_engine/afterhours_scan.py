@@ -37,11 +37,42 @@ Score formula (0–100):
     ET-companies   → +6
   keyword_bonus: +5 per positive catalyst keyword found in headline (capped +15)
   capped at 100.
+  A headline containing any negative-outcome keyword (falls, plunges, probe,
+  downgrade, etc.) is vetoed to 0 regardless of positive-keyword matches —
+  see _NEGATIVE_KEYWORDS below.
 
 Positive catalyst keywords (headline must contain at least one):
   profit, revenue, growth, results, beat, strong, buy, increase,
   dividend, bonus, buyback, deal, acquisition, fund, raise, order,
   contract, award, approved, launches, expands, q1, q2, q3, q4
+
+Bulk/block-deal candidates (2026-09-17 fix, session56 audit follow-up):
+  the original version only polled RSS feeds — bulk/block-deal data was
+  promised in the design but never actually wired in. Rather than scrape
+  NSE's bulk-deals board directly (api-gateway's _get_bulk_deal_symbols
+  already does this and is proven), this pulls the "bulk_insider_driven"
+  bucket from api-gateway's existing /stockky-hot endpoint — the same
+  endpoint watchlist_engine/sources.py's Tier 1 already calls, through the
+  same api_gateway_breaker circuit breaker so a gateway outage degrades to
+  "no bulk-deal hits this pass" rather than blocking the RSS side of the
+  scan. Bonus: these symbols come pre-resolved by api-gateway, so they
+  skip the regex/whitelist symbol-extraction path entirely (see
+  _extract_symbol's docstring for why that path is a lower-confidence
+  fallback).
+
+Symbol validation (2026-09-17 fix, session56 audit follow-up):
+  RSS-derived candidates only ever exist as a headline string — nothing
+  previously confirmed the extracted token was a real, currently-quotable
+  NSE equity before it reached NextDayWatchlistEntry (and from there,
+  _prepick would happily turn a bogus token into a TradeCandidate). Before
+  writing to the DB, every RSS-derived symbol is checked against
+  market_feed.feed.get_preview_quotes — a real ticker returns a quote, a
+  false-positive extracted word (e.g. "REPORTS", a company's generic
+  description word that slipped past the stoplists) does not. Best-effort:
+  if market-data-service itself is unavailable, we skip this filter rather
+  than block the whole scan (same non-fatal posture as everything else
+  here) — bulk-deal-sourced symbols are pre-validated by api-gateway and
+  skip this check.
 """
 from __future__ import annotations
 
@@ -56,6 +87,7 @@ import httpx
 import config
 import models
 from event_depth_local import classify_text
+from resilience.circuit_breaker import api_gateway_breaker
 
 logger = logging.getLogger("real-trade-afterhours-scan")
 
@@ -103,6 +135,30 @@ _BONUS_KEYWORDS = {
     "fund raise": 5, "order win": 5, "strong results": 5, "profit growth": 5,
     "revenue growth": 5, "q4 results": 5, "q3 results": 5, "q2 results": 5,
     "q1 results": 5,
+}
+
+# 2026-09-17 fix (session56 audit follow-up): the original scorer only ever
+# checked for POSITIVE keywords — "profit falls 20%" and "profit jumps 20%"
+# both contain "profit" and scored identically, since nothing checked for a
+# negative outcome word. Any of these appearing anywhere in the headline
+# vetoes the whole headline to a score of 0, regardless of how many positive
+# keywords also matched. This is still a plain keyword check, not real
+# sentiment analysis — a genuinely double-negated headline ("fall in costs
+# boosts profit") can still slip through — but it closes the large, common
+# gap where the base keyword itself (profit/results/strong) appears in both
+# good- and bad-news headlines equally.
+_NEGATIVE_KEYWORDS = {
+    "falls", "fall", "declines", "decline", "drops", "drop", "plunge",
+    "plunges", "tumbles", "tumble", "crashes", "crash", "loss", "losses",
+    "misses", "miss", "downgrade", "downgraded", "cut", "cuts", "slashed",
+    "slash", "probe", "raid", "fraud", "scam", "resigns", "resignation",
+    "default", "defaults", "lawsuit", "penalty", "fined", "fine", "ban",
+    "banned", "halt", "halted", "suspended", "suspends", "weak", "slump",
+    "slumps", "warns", "warning", "layoffs", "layoff", "scandal",
+    "negative", "worst", "lowest", "underperform", "downturn", "shrinks",
+    "shrink", "widens", "widening", "shutdown", "shuts", "closure",
+    "bankruptcy", "insolvency", "default risk", "rating cut", "sell-off",
+    "selloff", "crackdown", "scrutiny", "investigation",
 }
 
 # Catalyst-type base scores
@@ -190,6 +246,8 @@ def _extract_symbol(headline: str) -> Optional[str]:
 def _score_headline(headline: str, catalyst_types: list[str], source_bonus: float) -> float:
     """Compute a priority score 0–100 for a headline + its catalyst types."""
     h = headline.lower()
+    if any(k in h for k in _NEGATIVE_KEYWORDS):
+        return 0.0
     if not any(k in h for k in _POSITIVE_KEYWORDS):
         return 0.0
     base = max(
@@ -223,13 +281,79 @@ async def _fetch_rss_items(feed: dict) -> list[dict]:
         return []
 
 
+# ── Bulk/block-deal hits via api-gateway's existing /stockky-hot ───────────
+
+async def _fetch_bulk_deal_hits() -> dict[str, dict]:
+    """Pull the 'bulk_insider_driven' bucket from api-gateway's /stockky-hot
+    (same endpoint + circuit breaker watchlist_engine/sources.py's Tier 1
+    already uses). Returns {symbol: {score, headline, catalyst_type, source}}
+    — never raises; an open breaker or a bad response just yields {}."""
+    async def _call():
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            r = await client.get(f"{config.API_GATEWAY_URL}/stockky-hot")
+            r.raise_for_status()
+            return r.json()
+
+    payload = await api_gateway_breaker.call(_call, fallback=lambda: None)
+    if not payload:
+        return {}
+
+    out: dict[str, dict] = {}
+    for item in (payload.get("bulk_insider_driven") or []):
+        sym = (item.get("symbol") or "").upper()
+        if not sym:
+            continue
+        # item["score"] is already a 0-100 conviction score from the same
+        # pipeline watchlist_engine/sources.py's Tier 1 takes it from
+        # directly (see _normalize_tier1) — no need to re-derive it from
+        # keywords the way the RSS path does.
+        raw_score = item.get("score")
+        score = float(raw_score) if isinstance(raw_score, (int, float)) else _CATALYST_BASE_SCORE["bulk_block"]
+        score = max(0.0, min(100.0, score))
+        if score <= 0:
+            continue
+        existing = out.get(sym)
+        if existing is None or score > existing["score"]:
+            out[sym] = {
+                "score": score,
+                "headline": item.get("summary") or f"{sym}: bulk/block deal + insider activity flagged",
+                "catalyst_type": "bulk_block",
+                "source": "NSE-bulk-deals",
+            }
+    logger.debug("afterhours-scan: bulk-deal hits → %d symbol(s)", len(out))
+    return out
+
+
+# ── Symbol validation (RSS-derived symbols only; bulk-deal ones are already
+#    resolved server-side by api-gateway) ───────────────────────────────────
+
+async def _validate_symbols(symbols: list[str]) -> set[str]:
+    """Best-effort confirmation that each RSS-extracted token is a real,
+    currently-quotable NSE equity. Returns the subset that market-data-
+    service could produce a price for. On any failure, returns None-like
+    behavior handled by the caller (we return the input unchanged so a
+    market-data outage doesn't nuke the whole scan pass)."""
+    if not symbols:
+        return set()
+    try:
+        from market_feed.feed import get_preview_quotes
+        previews = await get_preview_quotes(symbols)
+        confirmed = {sym for sym, t in previews.items() if t and t.price and t.price > 0}
+        return confirmed
+    except Exception:
+        logger.exception("afterhours-scan: symbol validation failed (non-fatal — skipping filter this pass)")
+        return set(symbols)  # degrade open rather than drop everything
+
+
 # ── Main scan entry point ────────────────────────────────────────────────────
 
 async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
     """Run one after-hours scan pass for `mode`.
 
-    Fetches all RSS feeds, classifies headlines, scores them, and upserts into
-    NextDayWatchlistEntry for `market_date` (tomorrow's trading date).
+    Fetches all RSS feeds plus api-gateway's bulk/block-deal bucket,
+    classifies headlines, scores them, validates RSS-derived symbols against
+    a live quote source, and upserts into NextDayWatchlistEntry for
+    `market_date` (tomorrow's trading date).
 
     Returns the total number of new/updated rows written.
     """
@@ -256,6 +380,28 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
                     "catalyst_type": primary_catalyst,
                     "source": feed["source"],
                 }
+
+    # RSS-derived symbols are extracted with a regex + small whitelist —
+    # confirm each is a real, quotable NSE equity before it can reach
+    # NextDayWatchlistEntry (and from there, _prepick → TradeCandidate).
+    rss_symbols = list(best.keys())
+    confirmed = await _validate_symbols(rss_symbols)
+    dropped = [s for s in rss_symbols if s not in confirmed]
+    if dropped:
+        logger.info(
+            "afterhours-scan [%s %s]: dropped %d unconfirmed symbol(s): %s",
+            mode, market_date, len(dropped), dropped,
+        )
+        for s in dropped:
+            best.pop(s, None)
+
+    # Bulk/block-deal hits come pre-resolved by api-gateway — merge in,
+    # keeping the higher score if a symbol also had an RSS hit.
+    bulk_hits = await _fetch_bulk_deal_hits()
+    for symbol, hit in bulk_hits.items():
+        existing = best.get(symbol)
+        if existing is None or hit["score"] > existing["score"]:
+            best[symbol] = hit
 
     if not best:
         logger.info("afterhours-scan [%s %s]: no scored items found this pass", mode, market_date)

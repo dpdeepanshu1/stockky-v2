@@ -60,6 +60,17 @@ Bulk/block-deal candidates (2026-09-17 fix, session56 audit follow-up):
   _extract_symbol's docstring for why that path is a lower-confidence
   fallback).
 
+Symbol extraction (2026-09-17 fix, session56 audit follow-up — see
+symbol_master.py): candidate tokens from RSS headlines are now checked
+directly against the real ~2000-symbol NSE-EQ universe (AngelOne's public
+scrip master, cached locally) instead of a ~90-ticker hardcoded whitelist
+plus a blind length/stoplist heuristic for everything else. This both finds
+real short tickers the old 6-char minimum missed (TCS, ITC, SBIN, ONGC...)
+and stops non-tickers (generic capitalized English words) from ever being
+treated as a symbol in the first place. The old whitelist+heuristic path is
+kept only as a degrade-safe fallback for the rare case where the symbol
+master itself is completely unavailable (no live fetch, no cached snapshot).
+
 Symbol validation (2026-09-17 fix, session56 audit follow-up):
   RSS-derived candidates only ever exist as a headline string — nothing
   previously confirmed the extracted token was a real, currently-quotable
@@ -86,6 +97,7 @@ import httpx
 
 import config
 import models
+import symbol_master
 from event_depth_local import classify_text
 from resilience.circuit_breaker import api_gateway_breaker
 
@@ -218,25 +230,37 @@ _KNOWN_NSE_SYMBOLS = {
 }
 
 
-def _extract_symbol(headline: str) -> Optional[str]:
+def _extract_symbol(headline: str, known_symbols: set[str]) -> Optional[str]:
     """Extract a probable NSE symbol from a headline.
 
     The regex matches ALL-CAPS tokens, so we uppercase the headline first —
-    this turns title-case "Reliance" into "RELIANCE" and catches it via the
-    known-symbol whitelist. Without this, ~60% of real financial headlines
-    (which are title-case, not ALL-CAPS) would yield zero tokens.
+    this turns title-case "Reliance" into "RELIANCE" and lets it match
+    directly against the real symbol universe. Without this, ~60% of real
+    financial headlines (which are title-case, not ALL-CAPS) would yield
+    zero tokens.
+
+    When known_symbols (symbol_master.py's real NSE-EQ universe) is
+    available, a token is only ever treated as a symbol if it's actually
+    in that universe — no length restriction, no guessing. known_symbols
+    empty means the master itself is unavailable this pass (no live fetch,
+    no cached snapshot) — degrades to the old whitelist+heuristic path
+    rather than extracting nothing at all.
     """
     uheadline = headline.upper()
     tokens = _SYMBOL_RE.findall(uheadline)
-    # Prioritize known NSE symbols (highest confidence)
+
+    if known_symbols:
+        for t in tokens:
+            if t in known_symbols:
+                return t
+        return None
+
+    # Degraded fallback — symbol master unavailable this pass.
     for t in tokens:
         if t in _KNOWN_NSE_SYMBOLS:
             return t
-    # Fall back to any ALL-CAPS token not in combined stoplist, >= 6 chars.
     # Min-length 6 (not 3) avoids noisy partial tickers: HDFC (4), BAJAJ (5),
     # SUN (3) etc. that appear in title-case headlines when uppercased.
-    # Genuine non-whitelisted NSE tickers mentioned in news tend to be 6+ chars
-    # (TATASTEEL, PERSISTENT, COALINDIA, AUROPHARMA…).
     for t in tokens:
         if t not in _ALL_STOPS and 6 <= len(t) <= 12:
             return t
@@ -357,6 +381,17 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
 
     Returns the total number of new/updated rows written.
     """
+    # Load the real NSE-EQ symbol universe once for this pass (in-memory
+    # cached inside symbol_master.py, refreshed at most every 24h) — see
+    # _extract_symbol's docstring for why this replaced the old whitelist.
+    known_symbols = await symbol_master.get_all_symbols(db)
+    if not known_symbols:
+        logger.warning(
+            "afterhours-scan [%s %s]: symbol master unavailable (no live fetch, no "
+            "cached snapshot) — falling back to whitelist+heuristic extraction this pass",
+            mode, market_date,
+        )
+
     # Collect all scored hits: symbol → best {score, headline, catalyst_type, source}
     best: dict[str, dict] = {}
 
@@ -364,7 +399,7 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
         items = await _fetch_rss_items(feed)
         for item in items:
             headline = item["title"]
-            symbol = _extract_symbol(headline)
+            symbol = _extract_symbol(headline, known_symbols)
             if not symbol:
                 continue
             catalyst_types = classify_text(headline) or ["news"]

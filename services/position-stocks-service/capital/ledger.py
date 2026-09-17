@@ -19,6 +19,11 @@ Daily loss kill switch:
   6. If realized_pnl_today drops below -(total_allocated_capital *
      MAX_DAILY_LOSS_PCT_OF_POOL / 100), trip the kill switch and refuse
      new entries for the rest of the day.
+  This is now based SOLELY on this service's own realized_pnl_today —
+  real-trade-service's P&L is tracked separately (sync_peer_pnl(),
+  peer_realized_pnl_today) for display only and no longer affects this
+  trip decision (see reserve_capital()'s comment for why that cross-
+  service coupling was removed).
 """
 from __future__ import annotations
 
@@ -289,35 +294,26 @@ def reserve_capital(
         logger.warning("ledger.reserve_capital: daily loss kill switch tripped — refusing entry")
         return None
 
-    # BUG FIX (Issue #2): cross-service daily loss check. The kill switch in
-    # release_capital() only trips from THIS pool's own losses. But real-trade-
-    # service trades the same shared Dhan account, so its losses are real account
-    # drawdown too. Check combined pnl here (own + peer) against the threshold —
-    # if the combined loss already exceeds our limit, refuse the new entry and
-    # trip the switch. peer_realized_pnl_today is 0.0 (safe default) until the
-    # first successful sync_peer_pnl() call.
-    if row.total_allocated_capital > 0:
-        combined_pnl = row.realized_pnl_today + row.peer_realized_pnl_today
-        if combined_pnl < 0:
-            combined_loss_pct = abs(combined_pnl) / row.total_allocated_capital * 100
-            if combined_loss_pct >= config.MAX_DAILY_LOSS_PCT_OF_POOL:
-                logger.warning(
-                    "ledger.reserve_capital: combined daily loss kill switch tripped — "
-                    "own=₹%.2f peer=₹%.2f combined=₹%.2f (%.1f%% of pool ₹%.2f). "
-                    "Refusing entry.",
-                    row.realized_pnl_today, row.peer_realized_pnl_today,
-                    combined_pnl, combined_loss_pct, row.total_allocated_capital,
-                )
-                # Trip the local switch so subsequent calls skip the HTTP+math
-                row.daily_loss_kill_switch_tripped = True
-                row.daily_loss_kill_switch_tripped_date = ist_today_str()
-                gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
-                if gate is not None and not gate.daily_loss_kill_switch_tripped:
-                    gate.daily_loss_kill_switch_tripped = True
-                    gate.daily_loss_kill_switch_tripped_date = row.daily_loss_kill_switch_tripped_date
-                db.commit()
-                return None
-
+    # REMOVED (this session, user request): Issue #2's cross-service combined-
+    # pnl kill switch used to trip THIS service off real-trade-service's losses
+    # too (own + peer against OUR pool). Two things made that wrong in practice:
+    # (1) real-trade-service's realized_pnl_today was never actually reset
+    #     daily (fixed separately this session, in real-trade-service's own
+    #     portfolio.py) — so the "peer" number being compared here was really
+    #     an ALL-TIME cumulative figure, not today's, meaning this service
+    #     could get permanently frozen by stale historical losses that had
+    #     nothing to do with today.
+    # (2) even with a correct daily number, comparing the peer's rupee loss
+    #     against OUR (smaller) pool rather than the peer's own pool meant a
+    #     real-trade-service loss well within ITS OWN daily-loss tolerance
+    #     could still trip US.
+    # Per explicit user decision: each service now tracks and trips its own
+    # kill switch off its OWN realized_pnl_today only (see the plain
+    # loss_pct check in release_capital() below) — the two services are
+    # fully independent for this purpose. sync_peer_pnl() and
+    # peer_realized_pnl_today are KEPT (still synced, still surfaced in
+    # /ledger's response) purely as an informational "what is the peer
+    # doing" readout — they no longer feed into this trip decision.
     if row.total_allocated_capital <= 0:
         logger.warning("ledger.reserve_capital: total_allocated_capital=0 — run sync_from_broker first")
         return None

@@ -148,6 +148,22 @@ class TradeAccount(Base):
     broker_cash_available = Column(Float, nullable=False, default=0.0)
     realized_pnl_today = Column(Float, nullable=False, default=0.0)
     realized_pnl_total = Column(Float, nullable=False, default=0.0)
+    # ADDED (this session): realized_pnl_today was NEVER actually reset on a
+    # new trading day anywhere in this service — despite main.py's /status
+    # comment claiming it does, and despite risk_engine's daily_loss_limit
+    # check (engine.py) and every BUY-gating AccountState (entry_engine.py,
+    # manual_engine.py) treating it as "today's" P&L. In reality it only ever
+    # accumulated (see portfolio.py's close_position/record_real_exit_fill,
+    # which increment both realized_pnl_today and realized_pnl_total by the
+    # same amount, forever) — i.e. it silently became a second all-time
+    # total, identical in behavior to realized_pnl_total. This tracks the IST
+    # date realized_pnl_today is currently valid for; portfolio.get_account()
+    # lazily zeroes realized_pnl_today (only — realized_pnl_total is a true
+    # all-time figure and is untouched) whenever that date has passed, the
+    # same lazy-reset-on-read idiom position-stocks-service's capital/
+    # ledger.py already uses for the same reason (self-heals even if the
+    # service was down across midnight; no scheduler needed).
+    pnl_last_reset_date = Column(String(10), nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 

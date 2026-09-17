@@ -26,11 +26,19 @@ from auth.admin_auth import (
 from auth import dhan_credentials
 from audit.logger import log_action
 from db import get_db, init_schema
-from tz_utils import as_aware, iso_utc, is_market_open_ist
+from tz_utils import as_aware, iso_utc, is_market_open_ist, ist_today_str
 from portfolio.portfolio import (
     close_position as _pf_close_position,
     held_exposure_positions as _pf_held_exposure_positions,
+    _maybe_reset_daily_pnl as _pf_maybe_reset_daily_pnl,
 )
+# BUG FIX (this session, found while verifying — pre-existing, unrelated to
+# the day's actual ask): /risk-engine/check below uses AccountState,
+# OrderIntent and risk_evaluate but this file never imported them — every
+# call to that endpoint raised NameError. entry_engine.py/manual_engine.py
+# already import these same three names from the same place for the same
+# purpose; mirrored here.
+from risk_engine.engine import AccountState, OrderIntent, evaluate as risk_evaluate
 from execution import dhan_client, shared_symbol_lock
 
 logging.basicConfig(level=logging.INFO)
@@ -167,6 +175,7 @@ def _seed_defaults() -> None:
                 capital = config.DEFAULT_DEMO_CAPITAL if mode == "DEMO" else 0.0
                 db.add(models.TradeAccount(
                     mode=mode, starting_capital=capital, current_equity=capital, cash_available=capital,
+                    pnl_last_reset_date=ist_today_str(),
                 ))
         db.commit()
     finally:
@@ -278,6 +287,13 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
     gate = _check_and_expire_gates(db, mode)
     account = db.query(models.TradeAccount).filter_by(mode=mode).first()
+    # BUG FIX (this session): this route bypasses portfolio.get_account(),
+    # which is where the realized_pnl_today lazy daily-reset normally
+    # happens — apply it here too, since this is the exact field
+    # position-stocks-service's sync_peer_pnl() reads off this endpoint,
+    # and what the dashboard displays as "today's" P&L.
+    if account is not None:
+        _pf_maybe_reset_daily_pnl(db, account)
     risk = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
     return {
         "mode": mode,
@@ -761,6 +777,10 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
     risk_row = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
     if account_row is None or risk_row is None:
         raise HTTPException(status_code=404, detail=f"No account/risk-config for mode={mode}")
+    # BUG FIX (this session): same lazy daily-reset as get_account() — this
+    # dry-run route bypasses it, so without this it could preview against a
+    # stale (pre-reset) realized_pnl_today.
+    _pf_maybe_reset_daily_pnl(db, account_row)
 
     # 2026-09-12 fix (audit finding, minor): this used to call
     # _pf_open_positions() (excludes PENDING_EXIT), same gap

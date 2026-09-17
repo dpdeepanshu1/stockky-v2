@@ -35,8 +35,37 @@ import models
 from audit.logger import log_action
 from execution import shared_symbol_lock
 from market_feed.feed import Tick
+from tz_utils import ist_today_str
 
 logger = logging.getLogger("real-trade-portfolio")
+
+
+def _maybe_reset_daily_pnl(db: Session, account: models.TradeAccount) -> None:
+    """BUG FIX (this session): realized_pnl_today was never reset on a new
+    trading day anywhere in this service (see models.py's comment on
+    TradeAccount.pnl_last_reset_date for the full history) — it only ever
+    accumulated, making it functionally identical to realized_pnl_total
+    despite every daily-loss check (risk_engine.engine.py) and every
+    BUY-gating AccountState (entry_engine.py, manual_engine.py) treating it
+    as "today's" P&L. Same lazy-reset-on-read idiom as position-stocks-
+    service's capital/ledger.py: every read of the account row checks
+    whether IST's calendar date has moved on since the last reset and, if
+    so, zeroes realized_pnl_today (only — realized_pnl_total is untouched,
+    it's meant to accumulate forever) before the caller uses it. Self-heals
+    even if the service was down across midnight; no scheduler needed."""
+    today = ist_today_str()
+    if account.pnl_last_reset_date == today:
+        return
+    prev_reset_date = account.pnl_last_reset_date
+    prev_pnl = account.realized_pnl_today
+    account.realized_pnl_today = 0.0
+    account.pnl_last_reset_date = today
+    db.commit()
+    logger.info(
+        "portfolio: lazy daily P&L reset for mode=%s (last_reset=%s -> %s) — "
+        "cleared realized_pnl_today (was ₹%.2f)",
+        account.mode, prev_reset_date, today, prev_pnl,
+    )
 
 
 def get_account(db: Session, mode: str, for_update: bool = False) -> models.TradeAccount:
@@ -80,6 +109,7 @@ def get_account(db: Session, mode: str, for_update: bool = False) -> models.Trad
     row = query.first()
     if row is None:
         raise RuntimeError(f"No trade_accounts row for mode={mode} — schema not seeded.")
+    _maybe_reset_daily_pnl(db, row)
     return row
 
 

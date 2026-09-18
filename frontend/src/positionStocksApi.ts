@@ -155,7 +155,7 @@ export interface DhanAccountStatus {
 export interface ScalpPositionRow {
   id: number;
   symbol: string;
-  status: "OPEN" | "TARGET_HIT" | "STOP_HIT" | "EOD_SQUAREOFF" | "MANUAL_EXIT" | "EXIT_LEGS_REJECTED" | "ERROR";
+  status: "OPEN" | "TARGET_HIT" | "STOP_HIT" | "EOD_SQUAREOFF" | "MANUAL_EXIT" | "STAGNATION_EXIT" | "EXIT_LEGS_REJECTED" | "ERROR";
   window_source: "1m" | "5m" | "15m" | "60m" | "MANUAL";
   entry_price: number;
   exit_price: number | null;
@@ -404,7 +404,8 @@ export const positionStocksApi = {
   runCycle: () => psRequest<ScalpCycleResult>("/cycle/run", { method: "POST" }, true),
 
   positions: () => psRequest<ScalpPositionRow[]>("/positions"),
-  tradeHistory: (limit = 200) => psRequest<ScalpTradeHistory>(`/trades/history?limit=${limit}`),
+  tradeHistory: (limit = 200, range?: "today" | "3d") =>
+    psRequest<ScalpTradeHistory>(`/trades/history?limit=${limit}${range ? `&range=${range}` : ""}`),
   candidates: () => psRequest<ScalpCandidatesResponse>("/candidates"),
   // AUDIT FIX (session62, issue #5): reasonPrefix optionally isolates one
   // class of skip reason (e.g. "QUALITY_GATE") from the full mixed log —

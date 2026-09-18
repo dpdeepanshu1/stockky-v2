@@ -65,6 +65,11 @@ function statusColor(status: string): string {
   if (status === "TARGET_HIT") return "text-signal-buy";
   if (status === "STOP_HIT") return "text-signal-sell";
   if (status === "EOD_SQUAREOFF" || status === "MANUAL_EXIT") return "text-signal-hold";
+  // BUG FIX (this session): STAGNATION_EXIT is now a real status (was
+  // silently stored as "MANUAL_EXIT" before, see backend) — give it its
+  // own color so it's visually distinguishable from a true manual exit,
+  // not just a hold-orange lookalike.
+  if (status === "STAGNATION_EXIT") return "text-signal-prepare";
   return "text-signal-avoid";
 }
 
@@ -352,6 +357,11 @@ export default function PositionStocksTab() {
   const [candidates, setCandidates] = useState<ScalpCandidateRow[]>([]);
   const [ledger, setLedger] = useState<ScalpLedgerState | null>(null);
   const [tradeHistory, setTradeHistory] = useState<ScalpTradeHistory | null>(null);
+  // this session — Trade History Today/Last-3-days subtabs the user asked
+  // for. Defaults to "3d" since that's the full depth the backend retains
+  // anyway (orders/reconcile.py::run_retention_cleanup(),
+  // config.TRADE_HISTORY_RETENTION_DAYS).
+  const [tradeHistoryRange, setTradeHistoryRange] = useState<"today" | "3d">("3d");
   const [dhanLive, setDhanLive] = useState<DhanLiveOrders | null>(null);
   const [dhanLiveError, setDhanLiveError] = useState<string | null>(null);
   const [lastCycleResult, setLastCycleResult] = useState<ScalpCycleResult | null>(null);
@@ -426,7 +436,7 @@ export default function PositionStocksTab() {
         positionStocksApi.positions(),
         positionStocksApi.candidates().then(r => r.candidates),
         positionStocksApi.ledger().catch(() => null),   // don't let /ledger 500 kill the whole poll
-        positionStocksApi.tradeHistory(200),
+        positionStocksApi.tradeHistory(200, tradeHistoryRange),
       ]);
       setStatus(s); setPositions(p); setCandidates(c);
       if (l) setLedger(l);
@@ -436,7 +446,7 @@ export default function PositionStocksTab() {
     } catch (e: any) {
       setError(e?.message || "Failed to reach position-stocks-service");
     }
-  }, []);
+  }, [tradeHistoryRange]);
 
   // Candidate audit log (backend session 12: GET /candidates/log) — why a
   // candidate was entered or skipped, including quality-gate scores. Pure
@@ -614,8 +624,19 @@ export default function PositionStocksTab() {
     ? Math.max(0, Math.floor((new Date(dhanAccount.token_expires_at).getTime() - nowTick) / 1000))
     : null;
 
-  const openPositions = useMemo(() => positions.filter(p => p.status === "OPEN"), [positions]);
-  // AUDIT FIX (this session): this used to be `positions.filter(p => p.status
+  // BUG FIX (this session): was `p.status === "OPEN"` only, so an
+  // EXIT_LEGS_REJECTED position — real shares still held at the broker,
+  // no working target/stop leg — was excluded from Open Positions, the
+  // Positions tab count, and the open-slots-used metric, AND fell through
+  // into closedToday below as if it were a finished trade. Backend's own
+  // capacity gate (orders/entry.py::_count_open_positions) already treats
+  // OPEN + EXIT_LEGS_REJECTED as occupied slots; the frontend now matches
+  // that instead of showing live risk as if it were closed and free.
+  const openPositions = useMemo(
+    () => positions.filter(p => p.status === "OPEN" || p.status === "EXIT_LEGS_REJECTED"),
+    [positions]
+  );
+  // AUDIT FIX (prior session): this used to be `positions.filter(p => p.status
   // !== "OPEN")` with zero date filtering — GET /positions returns the last
   // 50 rows ordered by opened_at desc, so on a quiet day (or after a fresh
   // deploy with few trades since) this section's "Closed Today (N)" header
@@ -627,7 +648,9 @@ export default function PositionStocksTab() {
   const todayIst = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
   const closedToday = useMemo(
     () => positions.filter(p => {
-      if (p.status === "OPEN") return false;
+      // BUG FIX (this session): exclude EXIT_LEGS_REJECTED here too — it's
+      // still live exposure (see openPositions above), not a closed trade.
+      if (p.status === "OPEN" || p.status === "EXIT_LEGS_REJECTED") return false;
       const ts = p.closed_at ?? p.opened_at;
       if (!ts) return false;
       return new Date(ts).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }) === todayIst;
@@ -1510,7 +1533,28 @@ export default function PositionStocksTab() {
       <>
       {/* ── Trade history ── */}
       <div className="bg-graphite border border-slate rounded-2xl p-4">
-        <p className="dash-section-title mb-3">Trade History — Buy vs Sell, Win Rate</p>
+        <div className="flex items-center justify-between mb-3">
+          <p className="dash-section-title">Trade History — Buy vs Sell, Win Rate</p>
+          {/* this session: Today/Last-3-days subtabs the user asked for.
+              Backend also only retains 3 days (see config.
+              TRADE_HISTORY_RETENTION_DAYS + orders/reconcile.py::
+              run_retention_cleanup()), so "3d" is effectively "all". */}
+          <div className="flex gap-1">
+            {(["today", "3d"] as const).map(r => (
+              <button
+                key={r}
+                onClick={() => setTradeHistoryRange(r)}
+                className={`px-2.5 py-1 rounded-lg font-display tabular-nums text-[10px] uppercase border ${
+                  tradeHistoryRange === r
+                    ? "bg-signal-buy/20 border-signal-buy/40 text-signal-buy"
+                    : "border-slate text-mist"
+                }`}
+              >
+                {r === "today" ? "Today" : "Last 3 Days"}
+              </button>
+            ))}
+          </div>
+        </div>
         {tradeHistory ? (
           <>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
@@ -1932,7 +1976,11 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
           server-side while a position is open. "—" when this service's
           Angel One feed hasn't ticked the symbol yet (same fail-open
           convention as the rest of this dashboard). */}
-      {p.status === "OPEN" && (
+      {/* BUG FIX (this session): was `p.status === "OPEN"` only — now also
+          shown for EXIT_LEGS_REJECTED, which is real live exposure too
+          (see openPositions fix above) and now gets a live price from the
+          backend as well. */}
+      {(p.status === "OPEN" || p.status === "EXIT_LEGS_REJECTED") && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] mt-2 pt-2 border-t border-slate/50">
           <div><span className="text-mist">Current </span><span className="tabular-nums text-paper">{p.current_price != null ? `₹${p.current_price.toFixed(2)}` : "—"}</span></div>
           <div><span className="text-mist">Value </span><span className="tabular-nums text-paper">{p.current_amount != null ? fmtInr(p.current_amount) : "—"}</span></div>
@@ -1954,6 +2002,16 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
       {p.realized_pnl != null && (
         <p className={`font-display tabular-nums text-xs mt-2 font-bold ${p.realized_pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
           P&L {fmtInr(p.realized_pnl)} {pnlPct != null ? `(${pnlPct.toFixed(2)}%)` : ""}
+        </p>
+      )}
+      {/* AUDIT ADD (this session): an ERROR row renders Buy price/Total
+          identically to a real trade with no sell yet — but the entry
+          order was actually rejected/cancelled by Dhan and never filled,
+          so no money was ever at risk. Without this note it reads as an
+          open or lost trade. */}
+      {p.status === "ERROR" && (
+        <p className="font-display tabular-nums text-[10px] text-signal-avoid mt-1">
+          ⚠ Entry order was rejected/never filled — no shares bought, no capital was at risk. Buy price/Total above are the attempted order, not a real fill.
         </p>
       )}
       <p className="font-display tabular-nums text-[9px] text-mist mt-1">

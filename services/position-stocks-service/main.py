@@ -90,7 +90,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, time as dt_time
 from typing import Optional
 
 import config
@@ -126,8 +126,18 @@ from screening import intraday_eligibility, quality_gate
 from screening.engine import scan, on_tick_hook as _engine_tick_hook
 from tz_utils import (
     ist_today_str, ist_time_at_or_after, is_market_open_ist, parse_hhmm, iso_utc,
-    ist_now,
+    ist_now, as_aware, IST,
 )
+
+
+def _ist_midnight_today_utc() -> datetime:
+    """this session — start of the current IST calendar day, as a
+    tz-aware UTC datetime, for /trades/history?range=today. Mirrors the
+    IST-calendar-date convention the frontend's own closedToday filter and
+    ist_today_str() already use."""
+    today_ist = ist_now().date()
+    midnight_ist = datetime.combine(today_ist, dt_time.min, tzinfo=IST)
+    return midnight_ist.astimezone(timezone.utc)
 
 
 # ── Startup / shutdown ───────────────────────────────────────────────────────
@@ -283,6 +293,26 @@ async def _fast_reconcile_loop() -> None:
                         await asyncio.to_thread(eod_squareoff.run_eod_squareoff, db)
                 except Exception as e:
                     logger.error("position-stocks: fast-reconcile EOD check error: %s", e, exc_info=True)
+                try:
+                    # this session: trade-history retention cleanup, same
+                    # once-per-IST-day pattern as the EOD check just above.
+                    # Deliberately NOT gated on is_market_open_ist() the way
+                    # the rest of this loop's body is — the loop already
+                    # `continue`s before reaching here when the market is
+                    # closed, so this still only runs during market hours in
+                    # practice; that's fine since it only ever touches
+                    # already-closed positions, nothing time-sensitive.
+                    gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
+                    today = ist_today_str()
+                    cleanup_done_today = gate and gate.retention_cleanup_last_run_date == today
+                    if gate and not cleanup_done_today:
+                        n_deleted = await asyncio.to_thread(reconcile.run_retention_cleanup, db)
+                        gate.retention_cleanup_last_run_date = today
+                        db.commit()
+                        if n_deleted:
+                            logger.info("position-stocks: retention-cleanup deleted %d row(s)", n_deleted)
+                except Exception as e:
+                    logger.error("position-stocks: retention-cleanup error: %s", e, exc_info=True)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1130,7 +1160,13 @@ def positions(db: Session = Depends(get_db)):
     out = []
     for r in rows:
         ltp = None
-        if r.status == "OPEN":
+        # BUG FIX (this session): EXIT_LEGS_REJECTED is real, live exposure
+        # too (shares held, no working target/stop — see _count_open_
+        # positions in orders/entry.py, which already counts it as an open
+        # slot) — it was excluded from live-price lookup here, so the
+        # frontend's now-corrected "open positions" bucket had no current
+        # price/unrealized P&L for exactly the rows that most need it.
+        if r.status in ("OPEN", "EXIT_LEGS_REJECTED"):
             try:
                 ltp = ws_client.get_last_ltp(r.symbol)
             except Exception as e:
@@ -1190,15 +1226,34 @@ def trades_history(
     db: Session = Depends(get_db),
     limit: int = 200,
     status_filter: Optional[str] = None,
+    range: Optional[str] = None,
 ):
     """Full trade ledger — every closed (and currently open) scalp position,
     with buy price, sell price, and P&L per trade, plus summary stats
     (win rate, total P&L, best/worst trade) for a proper track-record view.
-    `status_filter` optionally narrows to one status (e.g. "TARGET_HIT")."""
+    `status_filter` optionally narrows to one status (e.g. "TARGET_HIT").
+
+    `range` (this session): "today" | "3d" | None(all — capped at whatever
+    orders/reconcile.py::run_retention_cleanup() has retained, currently
+    config.TRADE_HISTORY_RETENTION_DAYS days, so "all" is never more than
+    a few days deep anyway). Filters on each row's own closed_at (IST
+    calendar date for "today"), falling back to opened_at for OPEN rows /
+    the rare closed row with no closed_at — same fallback convention the
+    frontend's own closedToday filter already uses."""
     q = db.query(ScalpPosition).order_by(ScalpPosition.opened_at.desc())
     if status_filter:
         q = q.filter_by(status=status_filter.upper())
     rows = q.limit(max(1, min(limit, 1000))).all()
+
+    if range in ("today", "3d"):
+        cutoff = (
+            _ist_midnight_today_utc() if range == "today"
+            else datetime.now(timezone.utc) - timedelta(days=3)
+        )
+        rows = [
+            r for r in rows
+            if (ts := as_aware(r.closed_at or r.opened_at)) is not None and ts >= cutoff
+        ]
 
     closed = [r for r in rows if r.status != "OPEN" and r.realized_pnl is not None]
     wins = [r for r in closed if r.realized_pnl > 0]
@@ -1240,6 +1295,22 @@ def trades_history(
             for r in rows
         ],
     }
+
+
+@app.post("/trades/cleanup")
+def trades_cleanup(db: Session = Depends(get_db)):
+    """this session — on-demand trade-history retention cleanup (manual
+    trigger for orders/reconcile.py::run_retention_cleanup(), which
+    otherwise runs automatically at most once/day from the fast-reconcile
+    loop). Deletes CLOSED positions older than
+    config.TRADE_HISTORY_RETENTION_DAYS; never touches OPEN/
+    EXIT_LEGS_REJECTED (live exposure)."""
+    n_deleted = reconcile.run_retention_cleanup(db)
+    gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
+    if gate:
+        gate.retention_cleanup_last_run_date = ist_today_str()
+        db.commit()
+    return {"deleted": n_deleted, "retention_days": config.TRADE_HISTORY_RETENTION_DAYS}
 
 
 @app.get("/candidates")

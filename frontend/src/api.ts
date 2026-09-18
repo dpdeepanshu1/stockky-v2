@@ -591,10 +591,26 @@ export function stopSessionKeepAlive(): void {
 async function softWakeGateway(): Promise<void> {
   const base = getApiUrl();
   if (!base) return;
+  // 2026-09-18 fix: this fetch had NO timeout at all. On a real "sleeping
+  // dyno" PaaS that's fine — the connection gets refused/accepted quickly
+  // either way. But when the host is unreachable at the network layer
+  // (e.g. a security-list/firewall rule silently dropping the SYN packet,
+  // which is Oracle Cloud's default behaviour for any port you haven't
+  // explicitly opened, or a DNS name pointing at a dead IP), the browser
+  // gets no response to react to and this call hangs for its own default
+  // TCP timeout — and request() below calls this on every single retry,
+  // BEFORE its own backoff wait, so the hangs stacked on top of each
+  // other. That's what turned a supposedly ~90s ping into an effectively
+  // unbounded wait. Bounding it here means a dead connection now fails
+  // fast instead of silently eating the whole retry budget.
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 5000);
   try {
-    await fetch(`${base}/health?warm=true`, { method: "GET", mode: "cors" });
+    await fetch(`${base}/health?warm=true`, { method: "GET", mode: "cors", signal: controller.signal });
   } catch {
-    /* ignore — request still wakes dyno */
+    /* ignore — request still wakes dyno if it was actually just asleep */
+  } finally {
+    clearTimeout(t);
   }
 }
 
@@ -823,7 +839,17 @@ export async function streamSurpriseScan(
 // ───────────────────────────────────────────────
 
 export const api = {
-  ping: () => request<{ status: string; service: string }>("/health", undefined, 3, 45000),
+  // 2026-09-18 fix: /health does no DB work (confirmed in api-gateway/main.py —
+  // it's a static dict literal), so it has zero legitimate reason to need the
+  // old 45s-growing-to-180s budget. That budget made sense for a Render-style
+  // sleeping dyno; it does not make sense for an always-on Oracle Cloud VM,
+  // where a non-response means the service is actually unreachable (VM down,
+  // DuckDNS pointing at a stale IP, nginx down, or a firewall/security-list
+  // rule silently dropping the connection) — waiting longer never fixes that.
+  // Failing faster here means SystemCheck's stuck-hint UI (which now explains
+  // the self-hosted case specifically) shows up sooner instead of after
+  // minutes of silent, unresponsive retrying.
+  ping: () => request<{ status: string; service: string }>("/health", undefined, 2, 8000),
 
   wakeAll: () => request<any>("/wake-all", undefined, 1, 45000),
   systemHealth: () => request<SystemHealth>("/system/health", undefined, 3, 90000),

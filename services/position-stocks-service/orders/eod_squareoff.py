@@ -398,15 +398,18 @@ def close_position_now(db: Session, pos: ScalpPosition, exit_reason: str = "MANU
     Returns a small status dict on success (the real fill/P&L is not yet
     known — same placeholder-then-reconcile flow as EOD squareoff).
 
-    `exit_reason` (session68): cosmetic only — labels the error_message
-    placeholder and the Telegram notification (e.g. "STAGNATION_EXIT" from
-    run_stagnation_exit() below) so the two call paths are distinguishable
-    in the dashboard/logs. pos.status is ALWAYS set to the literal
-    "MANUAL_EXIT" regardless — reconcile.py's _FLAT_SELL_PENDING_STATUSES
-    state machine matches on that exact string in several places, and
-    introducing a third status value there is a real risk to the exit-
-    reconciliation pipeline for no real benefit; the reason is preserved
-    in error_message and the notification instead."""
+    `exit_reason` (session68, made a REAL status this session): labels the
+    error_message placeholder, the Telegram notification, AND pos.status
+    itself — e.g. run_stagnation_exit() below passes "STAGNATION_EXIT" and
+    the position is actually stored/shown as STAGNATION_EXIT, not
+    MANUAL_EXIT. reconcile.py's _FLAT_SELL_PENDING_STATUSES tuple now
+    includes "STAGNATION_EXIT" alongside "EOD_SQUAREOFF"/"MANUAL_EXIT" so
+    the same pending-fill resolution path covers it — see that module.
+    Previously this was cosmetic-only (error_message/notification said
+    STAGNATION_EXIT but pos.status was hardcoded to the literal
+    "MANUAL_EXIT"), which is exactly the mislabeling the user flagged:
+    every stagnation early-exit showed up in Positions/Trade History
+    indistinguishable from a real manual exit."""
     if pos.status not in ("OPEN", "EXIT_LEGS_REJECTED"):
         raise ManualCloseRejected(f"Position is {pos.status} — nothing to close.")
 
@@ -461,7 +464,7 @@ def close_position_now(db: Session, pos: ScalpPosition, exit_reason: str = "MANU
     ) or None
     shared_order_budget.record_order_unconditional(db)
 
-    pos.status = "MANUAL_EXIT"  # literal, always — see exit_reason note above
+    pos.status = exit_reason  # real status now, not a hardcoded literal — see exit_reason note above
     pos.closed_at = datetime.now(timezone.utc)
     pos.exit_price = pos.entry_price   # placeholder — reconcile() will update, same as EOD squareoff
     pos.realized_pnl = 0.0
@@ -505,11 +508,12 @@ def run_stagnation_exit(db: Session) -> int:
     (fund=49, tech=78 — a real candidate) repeatedly hit
     INSUFFICIENT_CAPITAL. Reusing close_position_now()'s proven cancel-
     wait-sell + PENDING_RECONCILE path rather than a second exit
-    mechanism; tagged exit_reason="STAGNATION_EXIT" so it's distinguishable
-    from a true manual exit in error_message/notifications (pos.status
-    stays the literal "MANUAL_EXIT" — see close_position_now's docstring
-    for why). Intentionally does NOT touch EXIT_LEGS_REJECTED positions —
-    those are eod_squareoff's job, not this one's.
+    mechanism; tagged exit_reason="STAGNATION_EXIT", which close_position_
+    now() now stores as the real pos.status (this session — it used to
+    fall back to the hardcoded "MANUAL_EXIT" literal), so it's
+    distinguishable from a true manual exit everywhere: dashboard, Trade
+    History, notifications. Intentionally does NOT touch EXIT_LEGS_REJECTED
+    positions — those are eod_squareoff's job, not this one's.
     """
     gate = _get_gate_state(db)
     if not gate.stagnation_exit_enabled:

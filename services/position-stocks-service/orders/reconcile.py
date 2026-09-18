@@ -36,10 +36,12 @@ booked P&L number for anything beyond a sanity check.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from sqlalchemy.orm import Session
+
+import config
 
 import notifier
 from capital import ledger, shared_symbol_lock
@@ -58,7 +60,14 @@ _DEAD_ENTRY_STATUSES = {"REJECTED", "CANCELLED"}
 # check in this file now checks membership in this tuple instead, so a
 # manually-exited position's real exit price/P&L gets resolved the same
 # way, rather than being stuck showing ₹0.0 P&L forever.
-_FLAT_SELL_PENDING_STATUSES = ("EOD_SQUAREOFF", "MANUAL_EXIT")
+#
+# BUG FIX (this session): "STAGNATION_EXIT" added. close_position_now()
+# now stores exit_reason as the real pos.status instead of hardcoding
+# "MANUAL_EXIT" (see its docstring), so a stagnation-closed position needs
+# to go through this exact same pending-fill resolution path or it would
+# be stuck at its entry_price/₹0.0 placeholder forever, same bug this
+# tuple already fixed once for MANUAL_EXIT.
+_FLAT_SELL_PENDING_STATUSES = ("EOD_SQUAREOFF", "MANUAL_EXIT", "STAGNATION_EXIT")
 
 
 def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 0.0) -> float:
@@ -752,3 +761,54 @@ def run_exit_reconciliation(db: Session) -> int:
         )
 
     return closed
+
+
+def run_retention_cleanup(db: Session) -> int:
+    """this session — user asked for Trade History to only keep "today" /
+    "last 3 days" and for the ledger to actually only STORE that much, not
+    just display a filtered view of an ever-growing table.
+
+    Deletes CLOSED scalp positions (any terminal status — TARGET_HIT,
+    STOP_HIT, EOD_SQUAREOFF, MANUAL_EXIT, STAGNATION_EXIT, ERROR) whose
+    closed_at (or opened_at, for the ERROR case where closed_at is often
+    never set — see models.py's ScalpPosition.closed_at usage) is older
+    than config.TRADE_HISTORY_RETENTION_DAYS.
+
+    Deliberately NEVER deletes OPEN or EXIT_LEGS_REJECTED rows regardless
+    of age — those are live broker exposure, not history; deleting one
+    would silently break the capacity gate (orders/entry.py::
+    _count_open_positions) and same-symbol re-entry cooldown
+    (_get_reentry_block_reason), both of which query ScalpPosition
+    directly. This function only ever touches genuinely finished trades.
+
+    Called at most once per IST calendar day from main.py's
+    _fast_reconcile_loop (see ScalpGateState.retention_cleanup_last_run_
+    date), and available on-demand via POST /trades/cleanup. Returns the
+    number of rows deleted."""
+    from sqlalchemy import or_, and_
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=config.TRADE_HISTORY_RETENTION_DAYS)
+    terminal_statuses = (
+        "TARGET_HIT", "STOP_HIT", "EOD_SQUAREOFF", "MANUAL_EXIT", "STAGNATION_EXIT", "ERROR",
+    )
+    rows = (
+        db.query(ScalpPosition)
+        .filter(ScalpPosition.status.in_(terminal_statuses))
+        .filter(
+            or_(
+                ScalpPosition.closed_at < cutoff,
+                and_(ScalpPosition.closed_at.is_(None), ScalpPosition.opened_at < cutoff),
+            )
+        )
+        .all()
+    )
+    n = len(rows)
+    if n:
+        for r in rows:
+            db.delete(r)
+        db.commit()
+        logger.info(
+            "retention-cleanup: deleted %d closed position(s) older than %.0f day(s)",
+            n, config.TRADE_HISTORY_RETENTION_DAYS,
+        )
+    return n

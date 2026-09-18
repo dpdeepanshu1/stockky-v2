@@ -105,7 +105,11 @@ class ScalpPosition(Base):
     status = Column(String(24), nullable=False, default="OPEN", index=True)
     # OPEN, TARGET_HIT, STOP_HIT, EOD_SQUAREOFF, MANUAL_EXIT, ERROR,
     # EXIT_LEGS_REJECTED (super-order exit legs were rejected by Dhan —
-    # circuit-limit / surveillance; awaiting EOD squareoff plain MARKET SELL)
+    # circuit-limit / surveillance; awaiting EOD squareoff plain MARKET SELL),
+    # STAGNATION_EXIT (this session: promoted from a MANUAL_EXIT-labeled
+    # cosmetic reason to its own real terminal status — see
+    # orders/eod_squareoff.py::close_position_now/run_stagnation_exit and
+    # orders/reconcile.py's _FLAT_SELL_PENDING_STATUSES)
 
     entry_price = Column(Float, nullable=False)
     quantity = Column(Integer, nullable=False)
@@ -226,6 +230,11 @@ class ScalpGateState(Base):
     # tuning knobs (not exposed as a toggle — same as MAX_ENTRY_RANGE_POSITION
     # etc.). Defaults False — unchanged behavior until explicitly turned on.
     stagnation_exit_enabled = Column(Boolean, nullable=False, default=False)
+    # this session: tracks the last IST calendar date the trade-history
+    # retention cleanup ran, same date-tracking pattern as
+    # eod_squareoff_fired_date above — lets the fast-reconcile loop run it
+    # at most once per day without a separate scheduler process.
+    retention_cleanup_last_run_date = Column(String(10), nullable=True)  # 'YYYY-MM-DD'
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 

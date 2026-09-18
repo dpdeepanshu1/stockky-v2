@@ -296,6 +296,16 @@ QUALITY_CACHE_MAX_AGE_HOURS = _get_float("QUALITY_CACHE_MAX_AGE_HOURS", 48.0)
 STAGNATION_EXIT_MINUTES = _get_float("STAGNATION_EXIT_MINUTES", 45.0)
 STAGNATION_EXIT_BAND_PCT = _get_float("STAGNATION_EXIT_BAND_PCT", 0.35)
 
+# this session: user asked for Trade History to only retain "today" /
+# "last 3 days" and for the ledger to actually only store that much —
+# orders/reconcile.py::run_retention_cleanup() deletes CLOSED positions
+# (never OPEN/EXIT_LEGS_REJECTED — those are live exposure, never auto-
+# deleted regardless of age) whose closed_at is older than this many days.
+# Runs at most once per IST calendar day (see main.py's fast-reconcile
+# loop + ScalpGateState.retention_cleanup_last_run_date). A manual
+# POST /trades/cleanup is also available for an on-demand run.
+TRADE_HISTORY_RETENTION_DAYS = _get_float("TRADE_HISTORY_RETENTION_DAYS", 3.0)
+
 # ── Entry range-position hard gate (this session — "buy/sell timing ... not
 # high low aware or price aware") ───────────────────────────────────────────
 # screening/engine.py already applies a SOFT range-position penalty to

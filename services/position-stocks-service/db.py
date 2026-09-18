@@ -168,6 +168,11 @@ _COLUMN_MIGRATIONS = [
     # it up on next boot — same idempotent ALTER TABLE pattern as every
     # other scalp_gate_state column above.
     ("scalp_gate_state", "stagnation_exit_enabled", "NUMBER(1)", "BOOLEAN", "0", "FALSE"),
+    # this session: retention_cleanup_last_run_date added to ScalpGateState
+    # (see models.py) — same idempotent ALTER TABLE pattern as every other
+    # scalp_gate_state column above, needed so an already-deployed table
+    # picks it up on next boot.
+    ("scalp_gate_state", "retention_cleanup_last_run_date", "VARCHAR2(10)", "VARCHAR(10)", None, None),
     ("scalp_candidate_log", "fundamental_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "technical_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "market_cap_cr", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),

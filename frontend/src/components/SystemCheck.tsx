@@ -35,6 +35,38 @@ const ESCAPE_HATCH_AFTER_ATTEMPTS = 3;
 // wait it out with no indication anything is happening.
 const STUCK_HINT_AFTER_MS = 8000;
 
+// 2026-09-18 follow-up fix: the copy below said "free-tier hosting... a
+// cold-start retry can take a couple of minutes" unconditionally. That's
+// true for a Render-style dyno that actually sleeps on idle — it is NOT
+// true for a self-hosted deployment (this user's setup: an always-on
+// Oracle Cloud VM running docker-compose + nginx behind a DuckDNS name).
+// Nothing in that stack ever "sleeps," so telling the user to just wait
+// was actively misleading: if it's not responding, the service is down or
+// unreachable, not waking up, and waiting longer will never fix it. This
+// checks the configured URL against known sleep-on-idle PaaS domains and
+// only shows the "wait it out" framing for those; everything else (custom
+// domains, duckdns.org, a bare IP, etc.) gets a self-hosted-specific
+// checklist instead.
+const SLEEPING_PAAS_HOSTS = [
+  "onrender.com",
+  "railway.app",
+  "herokuapp.com",
+  "fly.dev",
+  "pythonanywhere.com",
+  "replit.dev",
+  "replit.app",
+  "glitch.me",
+];
+
+function isKnownSleepingPaas(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return SLEEPING_PAAS_HOSTS.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+  } catch {
+    return false;
+  }
+}
+
 export default function SystemCheck({ onReady }: { onReady: () => void }) {
   const [stage, setStage] = useState<Stage>({ phase: "checking-gateway" });
   const [apiUrlInput, setApiUrlInput] = useState(getApiUrl());
@@ -189,13 +221,16 @@ export default function SystemCheck({ onReady }: { onReady: () => void }) {
   }
 
   if (stage.phase === "gateway-down") {
+    const selfHosted = !isKnownSleepingPaas(apiUrlInput);
     return (
       <GateShell>
         <p className="font-mono text-xs text-signal-sell uppercase tracking-widest mb-2">
           Can't reach the backend
         </p>
         <p className="text-mist text-sm mb-4 max-w-sm">
-          Set your API Gateway URL to continue.
+          {selfHosted
+            ? "The gateway isn't responding at all — check that docker compose, nginx, and DNS are actually up on the VM, then set the URL below to reconnect."
+            : "Set your API Gateway URL to continue."}
         </p>
         <div className="flex gap-2 max-w-md">
           <input
@@ -220,6 +255,7 @@ export default function SystemCheck({ onReady }: { onReady: () => void }) {
 
   if (stage.phase === "checking-gateway") {
     const stuck = checkingElapsedMs >= STUCK_HINT_AFTER_MS;
+    const selfHosted = !isKnownSleepingPaas(apiUrlInput);
     return (
       <GateShell>
         <p className="font-mono text-xs text-mist uppercase tracking-widest">
@@ -227,11 +263,38 @@ export default function SystemCheck({ onReady }: { onReady: () => void }) {
         </p>
         {stuck && (
           <>
-            <p className="text-mist/60 text-xs mt-2 mb-4 max-w-sm">
-              Still waiting on the API Gateway — a cold-start retry can take a
-              couple of minutes on free-tier hosting. You don't have to wait
-              it out.
-            </p>
+            {selfHosted ? (
+              <div className="text-mist/60 text-xs mt-2 mb-4 max-w-sm text-left">
+                <p className="mb-2">
+                  This isn't cold-start-and-wait hosting — it's a VM you run
+                  yourself, so a non-response means the service is actually
+                  down or unreachable, not waking up. Waiting longer won't
+                  fix it. Check, on the VM:
+                </p>
+                <ul className="list-disc list-inside space-y-0.5">
+                  <li><code>docker compose ps</code> — are all containers "Up"?</li>
+                  <li><code>sudo systemctl status nginx</code> — is it running?</li>
+                  <li>
+                    Does the domain's current IP match the VM's? Oracle Cloud
+                    Free Tier's public IP can change after a stop/start, and
+                    DuckDNS won't update itself if its updater/cron isn't
+                    running.
+                  </li>
+                  <li>
+                    Is the port open in the VCN's Security List/NSG? Oracle
+                    blocks everything but SSH (22) by default — this is the
+                    single most common cause, and it fails silently (the
+                    connection just hangs) rather than with a clear error.
+                  </li>
+                </ul>
+              </div>
+            ) : (
+              <p className="text-mist/60 text-xs mt-2 mb-4 max-w-sm">
+                Still waiting on the API Gateway — a cold-start retry can take a
+                couple of minutes on free-tier hosting. You don't have to wait
+                it out.
+              </p>
+            )}
             <div className="flex gap-2 max-w-md mb-2">
               <input
                 value={apiUrlInput}
@@ -282,8 +345,9 @@ export default function SystemCheck({ onReady }: { onReady: () => void }) {
         Waking up services
       </p>
       <p className="text-mist/60 text-xs mb-6 max-w-sm">
-        Everything runs on free-tier hosting, so a sleeping service can take up to a minute to
-        wake on its first request. Use the buttons below to wake individual services.
+        {isKnownSleepingPaas(apiUrlInput)
+          ? "Everything runs on free-tier hosting, so a sleeping service can take up to a minute to wake on its first request. Use the buttons below to wake individual services."
+          : "These are self-hosted services, not sleeping dynos — if one isn't responding, check that its container is actually up on the VM. The buttons below re-ping each one."}
       </p>
 
       {statusMessage && (

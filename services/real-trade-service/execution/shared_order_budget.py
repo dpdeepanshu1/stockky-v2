@@ -116,11 +116,23 @@ def check_and_reserve(db: Session) -> bool:
 
 def record_order_unconditional(db: Session) -> None:
     """Call after a successful SELL — tracked for visibility, never gates
-    an exit."""
+    an exit.
+
+    FIX (session70 audit): was read-then-increment (not atomic), inconsistent
+    with the sibling check_and_reserve() fixed to use a conditional UPDATE.
+    Now uses an atomic UPDATE so two near-simultaneous calls (this service +
+    position-stocks-service) can't both read the same row and both ORM-
+    increment, resulting in only +1 instead of +2 in the shared counter.
+    Low severity (visibility-only, fails open) but inconsistent with the
+    sibling. No WHERE guard — exits are unconditional, always increment."""
     try:
         today = ist_today_str()
-        row = _get_or_create_row(db, today)
-        row.orders_placed_today += 1
+        _ensure_row_exists(db, today)
+        db.execute(
+            update(SharedOrderBudget)
+            .where(SharedOrderBudget.trade_date == today)
+            .values(orders_placed_today=SharedOrderBudget.orders_placed_today + 1)
+        )
         db.commit()
     except Exception as e:
         logger.error("shared_order_budget.record_order_unconditional failed (non-blocking): %s", e, exc_info=True)

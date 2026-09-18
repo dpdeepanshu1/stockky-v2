@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 import config
+import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
@@ -308,6 +309,19 @@ def run_eod_squareoff(db: Session) -> int:
                     pos.symbol, pos.id, err_str,
                 )
                 pos.error_message = f"EOD_SQUAREOFF_INTRADAY_CUTOFF: {err_str}"
+                # FIX (session70 audit): all SELL-failure branches now alert via
+                # notify_critical — previously none of them did. A position that
+                # fails to flatten at 3 PM has real capital at risk overnight with
+                # its bracket already cancelled; silent log-only was the gap.
+                try:
+                    notifier.notify_critical(
+                        f"⚠️ <b>EOD SQUAREOFF FAILED — INTRADAY CUTOFF</b>\n"
+                        f"{pos.symbol} (id={pos.id}) x{pos.quantity} left OPEN overnight.\n"
+                        f"Exchange window closed. CNC sell possible tomorrow.\n"
+                        f"Error: {err_str[:300]}"
+                    )
+                except Exception as _ne:
+                    logger.warning("EOD squareoff: notify_critical failed for %s: %s", pos.symbol, _ne)
             elif dhan_client.is_security_intraday_restricted_error(err_str):
                 logger.error(
                     "EOD squareoff: %s (id=%d) — SECURITY_INTRADAY_RESTRICTED: "
@@ -327,6 +341,15 @@ def run_eod_squareoff(db: Session) -> int:
                         "EOD squareoff: could not record restriction for %s: %s",
                         pos.symbol, rec_e,
                     )
+                try:
+                    notifier.notify_critical(
+                        f"🚫 <b>EOD SQUAREOFF FAILED — SURVEILLANCE RESTRICTED</b>\n"
+                        f"{pos.symbol} (id={pos.id}) x{pos.quantity} left OPEN overnight.\n"
+                        f"T2T/ASM/GSM — cannot sell INTRA ever. Manual CNC sell required.\n"
+                        f"Error: {err_str[:300]}"
+                    )
+                except Exception as _ne:
+                    logger.warning("EOD squareoff: notify_critical failed for %s: %s", pos.symbol, _ne)
             elif dhan_client.is_insufficient_funds_error(err_str):
                 logger.error(
                     "EOD squareoff: %s (id=%d) — INSUFFICIENT_FUNDS: Dhan RMS "
@@ -336,6 +359,15 @@ def run_eod_squareoff(db: Session) -> int:
                     pos.symbol, pos.id, err_str,
                 )
                 pos.error_message = f"EOD_SQUAREOFF_INSUFFICIENT_FUNDS: {err_str}"
+                try:
+                    notifier.notify_critical(
+                        f"💸 <b>EOD SQUAREOFF FAILED — INSUFFICIENT FUNDS</b>\n"
+                        f"{pos.symbol} (id={pos.id}) x{pos.quantity} left OPEN overnight.\n"
+                        f"Dhan RMS margin shortfall on INTRA SELL (no matching MIS position?).\n"
+                        f"Error: {err_str[:300]}"
+                    )
+                except Exception as _ne:
+                    logger.warning("EOD squareoff: notify_critical failed for %s: %s", pos.symbol, _ne)
             elif dhan_client.is_circuit_limit_error(err_str):
                 # 2026-09-15 fix (session41b): stock is at lower circuit —
                 # the SELL price is outside the allowed band.  Cannot fill
@@ -347,12 +379,30 @@ def run_eod_squareoff(db: Session) -> int:
                     pos.symbol, pos.id, err_str,
                 )
                 pos.error_message = f"EOD_SQUAREOFF_CIRCUIT_LIMIT: {err_str}"
+                try:
+                    notifier.notify_critical(
+                        f"🔴 <b>EOD SQUAREOFF FAILED — CIRCUIT LIMIT</b>\n"
+                        f"{pos.symbol} (id={pos.id}) x{pos.quantity} left OPEN overnight.\n"
+                        f"Stock at lower circuit; SELL price outside band. Try CNC sell tomorrow.\n"
+                        f"Error: {err_str[:300]}"
+                    )
+                except Exception as _ne:
+                    logger.warning("EOD squareoff: notify_critical failed for %s: %s", pos.symbol, _ne)
             else:
                 logger.error(
                     "EOD squareoff: failed to close %s (id=%d): %s",
                     pos.symbol, pos.id, err_str,
                 )
                 pos.error_message = f"EOD_SQUAREOFF_FAILED: {err_str}"
+                try:
+                    notifier.notify_critical(
+                        f"❌ <b>EOD SQUAREOFF FAILED</b>\n"
+                        f"{pos.symbol} (id={pos.id}) x{pos.quantity} left OPEN overnight.\n"
+                        f"Unclassified error — check logs immediately.\n"
+                        f"Error: {err_str[:300]}"
+                    )
+                except Exception as _ne:
+                    logger.warning("EOD squareoff: notify_critical failed for %s: %s", pos.symbol, _ne)
             db.commit()
 
     gate.eod_squareoff_fired_date = today

@@ -125,7 +125,8 @@ from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSec
 from orders import breakeven, eod_squareoff, reconcile
 from orders import adaptive
 from orders.entry import (
-    attempt_entry, attempt_manual_entry, log_quality_reject, ManualEntryRejected,
+    attempt_entry, attempt_manual_entry, log_quality_reject,
+    ManualEntryRejected, InsufficientCapitalSkip,
 )
 from orders.eod_squareoff import close_position_now, ManualCloseRejected
 from resilience import circuit_breaker
@@ -666,7 +667,6 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
            checked=checked)
 
     if entered_candidate:
-        candidate, quality = entered_candidate
         _t = time.perf_counter()
         # AUDIT FIX (session 30): circuit_breaker.is_open() now gates right
         # here — the actual real-money Dhan call — instead of gating the
@@ -687,6 +687,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
         # breaker's real purpose — stop hammering a failing Dhan
         # connection with new entry orders — without silently pausing the
         # exits/EOD sweep that must always run.
+        candidate, quality = entered_candidate
         if circuit_breaker.is_open():
             cb = circuit_breaker.status()
             summary["skipped_reason"] = "CIRCUIT_BREAKER_OPEN"
@@ -696,7 +697,41 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                            f"~{cb['seconds_until_retry']:.0f}s until retry) — skipping entry, "
                            f"reconcile/EOD still ran this cycle"))
         else:
-            result = await asyncio.to_thread(attempt_entry, db, candidate, quality=quality)
+            # FIX (session70 audit): capital-starved candidates now fall
+            # through to the next quality-passing candidate in rank order.
+            # Previously, attempt_entry() returned None for ALL skip reasons
+            # and the loop always ended on the first quality-passer — so if
+            # the top candidate hit INSUFFICIENT_CAPITAL (a pool-sizing
+            # problem, not a quality problem), every cheaper already-vetted
+            # candidate in the pool sat unconsidered that cycle. Now
+            # attempt_entry() raises InsufficientCapitalSkip specifically for
+            # capital-sizing failures; we catch it here and try the next
+            # quality-passing candidate. All other skip reasons (MAX_POSITIONS,
+            # KILL_SWITCH, REENTRY_GUARD, SECURITY_NOT_FOUND) still end the
+            # cycle immediately — those are not capital-sizing problems and
+            # retrying the next candidate would not help.
+            result = None
+            capital_skipped: list[str] = []
+            quality_passers = [(c, q) for c, q in zip(top_n, quality_results) if q.passes()[0]]
+            for _c, _q in quality_passers:
+                try:
+                    result = await asyncio.to_thread(attempt_entry, db, _c, quality=_q)
+                    candidate = _c  # track which one actually attempted
+                    quality = _q
+                    break  # success or non-capital skip — stop here
+                except InsufficientCapitalSkip as _ics:
+                    capital_skipped.append(_c.symbol)
+                    logger.info(
+                        "position-stocks: %s — INSUFFICIENT_CAPITAL, trying next candidate (%s)",
+                        _c.symbol, _ics,
+                    )
+                    continue  # try the next quality-passing candidate
+            if capital_skipped and not result:
+                logger.info(
+                    "position-stocks: all %d quality-passing candidate(s) hit INSUFFICIENT_CAPITAL "
+                    "this cycle (%s) — no entry",
+                    len(capital_skipped), ", ".join(capital_skipped),
+                )
             if result:
                 circuit_breaker.record_success()
                 summary["entered_symbol"] = candidate.symbol
@@ -1378,13 +1413,21 @@ def trades_history(
 
 
 @app.post("/trades/cleanup")
-def trades_cleanup(db: Session = Depends(get_db)):
-    """this session — on-demand trade-history retention cleanup (manual
-    trigger for orders/reconcile.py::run_retention_cleanup(), which
-    otherwise runs automatically at most once/day from the fast-reconcile
-    loop). Deletes CLOSED positions older than
-    config.TRADE_HISTORY_RETENTION_DAYS; never touches OPEN/
-    EXIT_LEGS_REJECTED (live exposure)."""
+def trades_cleanup(
+    # FIX (session70 audit): was missing require_admin — every other
+    # mutating route in this file requires it; this unauthenticated
+    # destructive endpoint was a copy-paste omission. Low financial risk
+    # (run_retention_cleanup() only touches CLOSED rows, never OPEN/
+    # EXIT_LEGS_REJECTED live exposure) but still an unauthenticated
+    # write sitting next to a dozen properly-gated ones.
+    admin: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """On-demand trade-history retention cleanup (manual trigger for
+    orders/reconcile.py::run_retention_cleanup(), which otherwise runs
+    automatically at most once/day from the fast-reconcile loop). Deletes
+    CLOSED positions older than config.TRADE_HISTORY_RETENTION_DAYS;
+    never touches OPEN/EXIT_LEGS_REJECTED (live exposure)."""
     n_deleted = reconcile.run_retention_cleanup(db)
     gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
     if gate:

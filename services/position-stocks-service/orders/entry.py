@@ -286,7 +286,12 @@ def attempt_entry(
     position_value = ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct)
     if position_value is None:
         _log_candidate(db, candidate, "SKIPPED", "INSUFFICIENT_CAPITAL", quality=quality)
-        return None
+        # FIX (session70): raise instead of returning None so _run_cycle()
+        # can fall through to the next quality-passing candidate — the pool
+        # may afford a cheaper stock even when it can't afford this one.
+        raise InsufficientCapitalSkip(
+            f"{candidate.symbol}: INSUFFICIENT_CAPITAL — pool cannot size a position"
+        )
 
     # Resolve Dhan security_id
     try:
@@ -334,7 +339,11 @@ def attempt_entry(
                 f"INSUFFICIENT_CAPITAL_FOR_MIN_QTY:shortfall={shortfall:.2f}",
                 quality=quality,
             )
-            return None
+            # FIX (session70): same as INSUFFICIENT_CAPITAL above — raise so
+            # _run_cycle() falls through to a cheaper candidate.
+            raise InsufficientCapitalSkip(
+                f"{candidate.symbol}: INSUFFICIENT_CAPITAL_FOR_MIN_QTY shortfall=₹{shortfall:.2f}"
+            )
         position_value = actual_cost
 
     # Shared cross-service Dhan account-wide order-rate guard (tracking doc
@@ -542,6 +551,25 @@ def attempt_entry(
         f"| Super Order {dhan_super_order_id or 'N/A'}"
     )
     return pos
+
+
+class InsufficientCapitalSkip(Exception):
+    """Raised by attempt_entry() when the skip reason is purely a
+    capital-sizing problem (INSUFFICIENT_CAPITAL or
+    INSUFFICIENT_CAPITAL_FOR_MIN_QTY) — i.e. the candidate itself is
+    fine but the pool cannot currently afford it.
+
+    main.py's _run_cycle() catches this and continues to the next
+    quality-passing candidate in rank order instead of ending the cycle,
+    fixing the TREL/16x pattern where a cheaper already-vetted candidate
+    sat unconsidered every cycle while the pool kept re-trying the one
+    expensive stock it could not afford.
+
+    Distinguished from a plain None return (other skip reasons such as
+    MAX_POSITIONS, KILL_SWITCH, SECURITY_NOT_FOUND, REENTRY_GUARD) which
+    correctly end the cycle — those are not capital-sizing problems and
+    retrying the next candidate would not help.
+    FIX: session70 audit."""
 
 
 class ManualEntryRejected(Exception):

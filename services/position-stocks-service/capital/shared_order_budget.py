@@ -120,11 +120,24 @@ def record_order_unconditional(db: Session) -> None:
     closes, exits in general) — tracked for visibility into the shared
     budget's real usage, but NEVER gates the order. Matches this service's
     own tracking doc §3.7 "no exceptions" rule for exits, applied here too:
-    an exit must never be blocked by a rate-governor, shared or not."""
+    an exit must never be blocked by a rate-governor, shared or not.
+
+    FIX (session70 audit): was read-then-increment (not atomic), inconsistent
+    with the sibling check_and_reserve() fixed to use a conditional UPDATE.
+    Two near-simultaneous exit orders (this service + real-trade-service)
+    could both read the same row and both ORM-increment, resulting in only
+    +1 instead of +2 in the shared counter. Low severity (visibility-only,
+    fails open) but inconsistent. Now uses the same atomic UPDATE pattern as
+    check_and_reserve() — no WHERE guard needed here since exits are
+    unconditional, we just always increment."""
     try:
         today = ist_today_str()
-        row = _get_or_create_row(db, today)
-        row.orders_placed_today += 1
+        _ensure_row_exists(db, today)
+        db.execute(
+            update(SharedOrderBudget)
+            .where(SharedOrderBudget.trade_date == today)
+            .values(orders_placed_today=SharedOrderBudget.orders_placed_today + 1)
+        )
         db.commit()
     except Exception as e:
         logger.error("position-stocks: shared_order_budget.record_order_unconditional failed (non-blocking): %s", e, exc_info=True)

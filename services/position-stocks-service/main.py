@@ -889,6 +889,9 @@ def status(db: Session = Depends(get_db)):
         "armed_at": iso_utc(gate.armed_at),
         "service_enabled": gate.service_enabled,
         "auto_pilot_enabled": gate.auto_pilot_enabled,
+        # session69: DB-backed runtime toggle for orders/eod_squareoff.py::
+        # run_stagnation_exit — see POST /stagnation-exit/enable|disable.
+        "stagnation_exit_enabled": gate.stagnation_exit_enabled,
         "last_cycle_run_at": iso_utc(gate.last_cycle_run_at),
         "last_cycle_run_trigger": gate.last_cycle_run_trigger,
         "first_live_order_done": gate.first_live_order_done,
@@ -959,6 +962,11 @@ def status(db: Session = Depends(get_db)):
             "max_entry_range_position": config.MAX_ENTRY_RANGE_POSITION,
             "symbol_reentry_cooldown_minutes": config.SYMBOL_REENTRY_COOLDOWN_MINUTES,
             "symbol_reentry_min_pullback_pct": config.SYMBOL_REENTRY_MIN_PULLBACK_PCT,
+            # session69: tuning knobs for the stagnation-exit toggle above —
+            # the on/off switch is DB-backed (gate.stagnation_exit_enabled),
+            # these two stay config/env-only, same as the range-gate knobs.
+            "stagnation_exit_minutes": config.STAGNATION_EXIT_MINUTES,
+            "stagnation_exit_band_pct": config.STAGNATION_EXIT_BAND_PCT,
         },
     }
 
@@ -1032,6 +1040,35 @@ def autopilot_disable(admin: str = Depends(require_admin), db: Session = Depends
     db.commit()
     logger.warning("position-stocks-service: AUTO-PILOT DISABLED — screening still live")
     return {"status": "auto_pilot_disabled"}
+
+
+@app.post("/stagnation-exit/enable")
+def stagnation_exit_enable(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """session69: turn on orders/eod_squareoff.py::run_stagnation_exit —
+    a position that hasn't moved meaningfully (config.STAGNATION_EXIT_
+    BAND_PCT) after config.STAGNATION_EXIT_MINUTES gets closed early
+    instead of waiting for the 15:00 EOD sweep, freeing its capital/slot
+    for a better candidate the same session. DB-backed (gate row), so this
+    takes effect on the next fast-reconcile tick — no restart needed."""
+    gate = _get_gate(db)
+    gate.stagnation_exit_enabled = True
+    db.commit()
+    logger.warning(
+        "position-stocks-service: STAGNATION-EXIT ENABLED (%.0fm / ±%.2f%%)",
+        config.STAGNATION_EXIT_MINUTES, config.STAGNATION_EXIT_BAND_PCT,
+    )
+    return {"status": "stagnation_exit_enabled"}
+
+
+@app.post("/stagnation-exit/disable")
+def stagnation_exit_disable(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """session69: turn off the stagnation early-exit — flat positions go
+    back to waiting for target/stop or the 15:00 EOD sweep only."""
+    gate = _get_gate(db)
+    gate.stagnation_exit_enabled = False
+    db.commit()
+    logger.warning("position-stocks-service: STAGNATION-EXIT DISABLED")
+    return {"status": "stagnation_exit_disabled"}
 
 
 @app.post("/cycle/run")

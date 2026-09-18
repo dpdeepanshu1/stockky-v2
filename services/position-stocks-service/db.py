@@ -163,6 +163,11 @@ _COLUMN_MIGRATIONS = [
     ("scalp_gate_state", "orders_placed_today", "NUMBER(10)", "INTEGER", "0", "0"),
     ("scalp_gate_state", "orders_placed_today_date", "VARCHAR2(10)", "VARCHAR(10)", None, None),
     ("scalp_gate_state", "first_live_order_done", "NUMBER(1)", "BOOLEAN", "0", "FALSE"),
+    # session69: stagnation_exit_enabled added to ScalpGateState so the
+    # existing production table (created before this column existed) picks
+    # it up on next boot — same idempotent ALTER TABLE pattern as every
+    # other scalp_gate_state column above.
+    ("scalp_gate_state", "stagnation_exit_enabled", "NUMBER(1)", "BOOLEAN", "0", "FALSE"),
     ("scalp_candidate_log", "fundamental_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "technical_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "market_cap_cr", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),

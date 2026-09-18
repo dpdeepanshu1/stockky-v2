@@ -488,14 +488,16 @@ def close_position_now(db: Session, pos: ScalpPosition, exit_reason: str = "MANU
 
 
 def run_stagnation_exit(db: Session) -> int:
-    """session68, OFF by default (config.STAGNATION_EXIT_ENABLED).
-
-    Closes an OPEN position early if it has moved less than
-    STAGNATION_EXIT_BAND_PCT (either direction) from its entry price after
-    STAGNATION_EXIT_MINUTES — i.e. neither its target nor its stop is
-    anywhere close, and it isn't going to be. Frees that capital and its
-    MAX_CONCURRENT_SCALP_POSITIONS slot for a better candidate the SAME
-    session instead of parking it dead until the 15:00 EOD sweep.
+    """session68/69. Toggle is DB-backed (ScalpGateState.stagnation_exit_
+    enabled — POST /stagnation-exit/enable|disable, frontend button on the
+    Pipeline tab), not config/env — see config.py's tuning-knobs comment
+    for why. Closes an OPEN position early if it has moved less than
+    config.STAGNATION_EXIT_BAND_PCT (either direction) from its entry
+    price after config.STAGNATION_EXIT_MINUTES — i.e. neither its target
+    nor its stop is anywhere close, and it isn't going to be. Frees that
+    capital and its MAX_CONCURRENT_SCALP_POSITIONS slot for a better
+    candidate the SAME session instead of parking it dead until the 15:00
+    EOD sweep.
 
     Root cause this targets — 2026-09-17's trade history: MANGALAM,
     GEEKAYWIRE and JISLJALEQS all sat inside a near-zero P&L band the
@@ -509,7 +511,8 @@ def run_stagnation_exit(db: Session) -> int:
     for why). Intentionally does NOT touch EXIT_LEGS_REJECTED positions —
     those are eod_squareoff's job, not this one's.
     """
-    if not config.STAGNATION_EXIT_ENABLED:
+    gate = _get_gate_state(db)
+    if not gate.stagnation_exit_enabled:
         return 0
 
     now = datetime.now(timezone.utc)

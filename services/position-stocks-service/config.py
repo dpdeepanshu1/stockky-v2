@@ -275,7 +275,7 @@ MANUAL_EXIT_CANCEL_WAIT_S = _get_float("MANUAL_EXIT_CANCEL_WAIT_S", 0.5)
 # unchanged — this removes the blind spot for repeat offenders only.
 QUALITY_CACHE_MAX_AGE_HOURS = _get_float("QUALITY_CACHE_MAX_AGE_HOURS", 48.0)
 
-# ── Stagnation early-exit (session68, OFF by default) ───────────────────────
+# ── Stagnation early-exit tuning (session68/69) ─────────────────────────────
 # 2026-09-17: MANGALAM/GEEKAYWIRE/JISLJALEQS all sat within a tiny P&L band
 # the entire session (target/stop never triggered) and only closed at 15:00
 # EOD squareoff, while TREL (fund=49, tech=78 — a genuinely decent
@@ -283,13 +283,16 @@ QUALITY_CACHE_MAX_AGE_HOURS = _get_float("QUALITY_CACHE_MAX_AGE_HOURS", 48.0)
 # POSITIONS the whole day. A position that hasn't moved meaningfully in
 # STAGNATION_EXIT_MINUTES is dead capital with zero edge left — closing it
 # early frees that capital/slot for a better candidate the SAME session
-# instead of parking it until EOD for no reason. Opt-in: OFF by default
-# because it changes live trading behaviour (an early exit at breakeven
-# instead of letting a position run) — watch it manually before enabling.
+# instead of parking it until EOD for no reason.
 # STAGNATION_EXIT_BAND_PCT is the ± move (from entry) still considered
 # "flat"; a position that HAS moved past this band is left alone — target/
 # stop logic already owns that case.
-STAGNATION_EXIT_ENABLED = _get_bool("STAGNATION_EXIT_ENABLED", False)
+# The on/off switch itself (session69) moved OUT of config/env and onto
+# ScalpGateState.stagnation_exit_enabled — a DB-backed runtime toggle set
+# via POST /stagnation-exit/enable|disable (frontend button on the Pipeline
+# tab), same pattern as auto_pilot_enabled/service_enabled, so it can be
+# flipped without a redeploy. These two numbers stay config.py-only tuning
+# knobs, same as MAX_ENTRY_RANGE_POSITION etc.
 STAGNATION_EXIT_MINUTES = _get_float("STAGNATION_EXIT_MINUTES", 45.0)
 STAGNATION_EXIT_BAND_PCT = _get_float("STAGNATION_EXIT_BAND_PCT", 0.35)
 

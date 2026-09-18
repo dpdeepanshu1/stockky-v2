@@ -569,6 +569,8 @@ export default function PositionStocksTab() {
       else if (action === "service_disable") await positionStocksApi.serviceDisable();
       else if (action === "autopilot_enable") await positionStocksApi.autopilotEnable();
       else if (action === "autopilot_disable") await positionStocksApi.autopilotDisable();
+      else if (action === "stagnation_exit_enable") await positionStocksApi.stagnationExitEnable();
+      else if (action === "stagnation_exit_disable") await positionStocksApi.stagnationExitDisable();
       else if (action === "run_cycle") { const r = await positionStocksApi.runCycle(); setLastCycleResult(r); }
       await loadAll();
     } catch (e: any) {
@@ -887,6 +889,7 @@ export default function PositionStocksTab() {
           { label: "Kill Switch", value: killSwitchTripped ? "TRIPPED" : "clear", color: killSwitchTripped ? "text-signal-sell" : "text-signal-buy" },
           { label: "Module", value: status?.service_enabled ? "ENABLED" : "PAUSED", color: status?.service_enabled ? "text-signal-buy" : "text-signal-avoid" },
           { label: "Auto-Pilot", value: status?.auto_pilot_enabled ? "ON" : "OFF", color: status?.auto_pilot_enabled ? "text-signal-buy" : "text-signal-hold" },
+          { label: "Stagnation Exit", value: status?.stagnation_exit_enabled ? "ON" : "OFF", color: status?.stagnation_exit_enabled ? "text-signal-buy" : "text-signal-hold" },
         ].map(({ label, value, color }) => (
           <div key={label} className="bg-graphite border border-slate rounded-2xl p-3">
             <p className="text-[9px] text-mist uppercase tracking-widest mb-1">{label}</p>
@@ -1061,6 +1064,12 @@ export default function PositionStocksTab() {
           Auto-Pilot off — screener is scanning but won't act automatically. Use "Run Cycle Now" for a manual push.
         </div>
       )}
+      {status?.stagnation_exit_enabled && (
+        <div className="rounded-xl border border-signal-prepare/40 bg-signal-prepare/10 px-3 py-2 font-display tabular-nums text-[11px] text-signal-prepare">
+          Stagnation Exit ON — a position flat within ±{status.pipeline_config?.stagnation_exit_band_pct ?? "?"}% of entry
+          for {status.pipeline_config?.stagnation_exit_minutes ?? "?"}m closes early to free capital for a better candidate.
+        </div>
+      )}
 
       <LivePipelineStatus live={pipelineLive} />
 
@@ -1091,6 +1100,18 @@ export default function PositionStocksTab() {
         <button disabled={!loggedIn || busy !== null || !status?.auto_pilot_enabled} onClick={() => doAction("autopilot_disable")}
           className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-paper disabled:opacity-40">
           {busy === "autopilot_disable" ? "Disabling…" : "Disable Auto-Pilot"}
+        </button>
+        {/* session69: DB-backed toggle for the stagnation early-exit — see
+            orders/eod_squareoff.py::run_stagnation_exit's docstring. Off by
+            default; closes a flat position early (config.STAGNATION_EXIT_
+            MINUTES / _BAND_PCT) instead of waiting for the 15:00 EOD sweep. */}
+        <button disabled={!loggedIn || busy !== null || !!status?.stagnation_exit_enabled} onClick={() => doAction("stagnation_exit_enable")}
+          className="px-4 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 font-display tabular-nums text-xs text-signal-buy disabled:opacity-40">
+          {busy === "stagnation_exit_enable" ? "Enabling…" : "Enable Stagnation Exit"}
+        </button>
+        <button disabled={!loggedIn || busy !== null || !status?.stagnation_exit_enabled} onClick={() => doAction("stagnation_exit_disable")}
+          className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-paper disabled:opacity-40">
+          {busy === "stagnation_exit_disable" ? "Disabling…" : "Disable Stagnation Exit"}
         </button>
         <button disabled={!loggedIn || busy !== null || !status?.armed || !status?.service_enabled} onClick={() => doAction("run_cycle")}
           className="px-4 py-2 rounded-xl bg-signal-prepare/20 border border-signal-prepare/40 font-display tabular-nums text-xs text-signal-prepare disabled:opacity-40">

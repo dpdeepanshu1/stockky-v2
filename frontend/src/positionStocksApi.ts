@@ -87,6 +87,10 @@ export interface ScalpStatus {
   armed_at: string | null;
   service_enabled: boolean;
   auto_pilot_enabled: boolean;
+  // session69: DB-backed toggle for the stagnation early-exit — see
+  // positionStocksApi.stagnationExitEnable/Disable and PositionStocksTab's
+  // Pipeline-tab button.
+  stagnation_exit_enabled: boolean;
   last_cycle_run_at: string | null;
   last_cycle_run_trigger: "AUTO" | "MANUAL" | null;
   first_live_order_done: boolean;
@@ -123,6 +127,11 @@ export interface ScalpStatus {
     min_technical_score: number;
     min_market_cap_cr: number;
     scalp_product_type: string;
+    // session69: read-only display of the stagnation-exit tuning knobs —
+    // the on/off switch itself is the top-level stagnation_exit_enabled
+    // field above (DB-backed toggle), these two are config/env-only.
+    stagnation_exit_minutes?: number;
+    stagnation_exit_band_pct?: number;
   };
 }
 
@@ -387,6 +396,11 @@ export const positionStocksApi = {
 
   autopilotEnable: () => psRequest<{ status: string }>("/autopilot/enable", { method: "POST" }, true),
   autopilotDisable: () => psRequest<{ status: string }>("/autopilot/disable", { method: "POST" }, true),
+
+  // session69: DB-backed toggle (ScalpGateState.stagnation_exit_enabled)
+  // for orders/eod_squareoff.py::run_stagnation_exit — no restart needed.
+  stagnationExitEnable: () => psRequest<{ status: string }>("/stagnation-exit/enable", { method: "POST" }, true),
+  stagnationExitDisable: () => psRequest<{ status: string }>("/stagnation-exit/disable", { method: "POST" }, true),
   runCycle: () => psRequest<ScalpCycleResult>("/cycle/run", { method: "POST" }, true),
 
   positions: () => psRequest<ScalpPositionRow[]>("/positions"),

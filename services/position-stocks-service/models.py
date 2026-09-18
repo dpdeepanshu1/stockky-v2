@@ -218,6 +218,14 @@ class ScalpGateState(Base):
     orders_placed_today = Column(Integer, nullable=False, default=0)
     orders_placed_today_date = Column(String(10), nullable=True)
     first_live_order_done = Column(Boolean, nullable=False, default=False)
+    # session69: runtime (DB-backed, no restart needed) on/off switch for
+    # orders/eod_squareoff.py::run_stagnation_exit — same pattern as
+    # auto_pilot_enabled/service_enabled above, toggled from the frontend
+    # via POST /stagnation-exit/enable|disable instead of an env var that'd
+    # need a redeploy. STAGNATION_EXIT_MINUTES/_BAND_PCT stay config.py-only
+    # tuning knobs (not exposed as a toggle — same as MAX_ENTRY_RANGE_POSITION
+    # etc.). Defaults False — unchanged behavior until explicitly turned on.
+    stagnation_exit_enabled = Column(Boolean, nullable=False, default=False)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 

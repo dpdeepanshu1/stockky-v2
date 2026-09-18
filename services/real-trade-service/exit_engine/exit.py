@@ -997,6 +997,17 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
         _horizon         = _prof["horizon_class"]  # for audit trail
 
         # ── 0. Emergency gap-down exit ────────────────────────────────────────
+        # 2026-09-18 audit note (follow-on item #7 from the cost-model audit,
+        # user asked whether this covers positions _select_overnight_holds
+        # (execution/auto_pilot.py) kept open past EOD square-off): CONFIRMED
+        # generic. A held-overnight position stays status="OPEN" with no
+        # distinguishing flag exit_engine special-cases — this loop iterates
+        # every open position for `mode` every cycle (including the first
+        # cycle after next day's open), so an overnight-held position that
+        # gaps down gets caught by this exact check like any other open
+        # position. No code change needed; verified by reading both call
+        # paths together, not by running it live.
+        #
         # In a weak market (Aug-2026), gap-downs are common. If unrealized loss
         # exceeds EMERGENCY_LOSS_MULT × original stop distance, the stop has
         # been gapped through — exit immediately regardless of current_stop level.

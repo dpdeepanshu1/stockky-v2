@@ -198,6 +198,16 @@ class TradeRiskConfig(Base):
     stale_data_seconds = Column(Integer, nullable=False, default=30)
     max_tick_volatility_mult = Column(Float, nullable=False, default=2.0)
     allow_pyramiding = Column(Boolean, nullable=False, default=False)
+    # 2026-09-18 fix (follow-on item #5 from the cost-model audit): these two
+    # cost-gate knobs (Gate 5.6, cost_model.evaluate_entry_cost_gate) were
+    # env-var-only (config.MIN_TRADE_VALUE / MIN_EDGE_TO_COST_RATIO) while
+    # every other risk knob on this row is admin-editable per-mode with a
+    # confirm step. NULL means "use the config.py/env-var default for this
+    # mode" — entry.py's cost-gate call resolves DB override first, config.py
+    # fallback second, so an already-deployed row with these NULL changes
+    # nothing until an admin explicitly sets them.
+    min_trade_value = Column(Float, nullable=True)
+    min_edge_to_cost_ratio = Column(Float, nullable=True)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
     updated_by = Column(String(64), nullable=True)  # admin username, for audit
 
@@ -267,6 +277,12 @@ class TradeDecision(Base):
     proposed_target = Column(Float, nullable=True)
     risk_verdict = Column(String(24), nullable=True)     # "APPROVED" | "REJECTED" | "BLOCKED_GLOBAL"
     risk_verdict_reason = Column(Text, nullable=True)
+    # 2026-09-18 fix (follow-on item #6): entry_engine's Gate 5.6 (cost-model
+    # floor) writes "cost_model" here on every WAIT it produces, so the
+    # dashboard can badge/filter these distinctly from an ordinary risk-engine
+    # WAIT without brittle string-matching on `reasoning`. NULL for every
+    # other gate's decisions (unaffected, no behavior change).
+    gate_tag = Column(String(32), nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
 
 
@@ -480,6 +496,28 @@ class TradePosition(Base):
     # exactly as before).
     entry_decision_label = Column(String(32), nullable=True)
     entry_conviction_score = Column(Float, nullable=True)
+
+    # 2026-09-18 fix (follow-on item #2 from the cost-model audit): cost_model.py
+    # only ever gated ENTRIES — nothing recorded what a position's round-trip
+    # actually cost after the fact, so realized_pnl was a pre-cost (gross)
+    # number with no net-of-cost figure anywhere. portfolio.py's close_position
+    # (DEMO) / record_real_exit_fill (REAL) now accumulate both of these on
+    # every full or partial close, using the same estimate_round_trip_cost()
+    # Gate 5.6 already uses at entry. NULL/0 on pre-migration rows and any row
+    # that hasn't closed yet — best-effort estimate, never used to gate
+    # anything, so a failure here never blocks or corrupts the authoritative
+    # gross realized_pnl above.
+    net_realized_pnl = Column(Float, nullable=True)
+    realized_cost_estimate = Column(Float, nullable=True)
+
+    # 2026-09-18 fix (follow-on item #6 from the cost-model audit): the reason
+    # execution/auto_pilot.py._select_overnight_holds decided to keep this
+    # specific position open past EOD square-off used to only ever be logged
+    # (logger.info) — never persisted anywhere queryable, so the dashboard had
+    # no way to show *why* a position skipped square-off. Set once, the cycle
+    # it's decided; left NULL for every position that squared off normally or
+    # was never a hold candidate.
+    overnight_hold_reason = Column(Text, nullable=True)
 
     # 2026-09-15 fix (session40 — DATAMATICS position 81, 89 consecutive
     # REJECTED zero-fill exit-SELL attempts over ~4.5h with no backoff and

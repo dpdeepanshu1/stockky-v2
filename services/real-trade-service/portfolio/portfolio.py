@@ -40,6 +40,45 @@ from tz_utils import ist_today_str
 logger = logging.getLogger("real-trade-portfolio")
 
 
+def _accumulate_net_cost(position: "models.TradePosition", qty_closed: int,
+                          exit_price: float, pnl_leg: float, now: datetime) -> None:
+    """2026-09-18 fix (cost-model follow-on item #2): cost_model.py only ever
+    gated ENTRIES (Gate 5.6) — nothing recorded what a position's round-trip
+    actually cost after the fact, so realized_pnl has always been a pre-cost
+    (gross) number with no net-of-cost figure visible anywhere. Called from
+    both close_position() (DEMO) and record_real_exit_fill() (REAL), right
+    after each computes its own gross pnl_leg, so both modes report net P&L
+    identically.
+
+    is_delivery_sell mirrors exit_engine._send_real_sell's own same-day-vs-
+    delivery logic: only True when this leg is a genuine multi-day CNC
+    delivery sale (opened on an earlier calendar date than it's closing) —
+    a same-day round trip never sells real settled holdings, so it should
+    never be charged the flat DP charge.
+
+    Best-effort only: wrapped so a cost_model failure can never corrupt or
+    block the authoritative gross realized_pnl/cash bookkeeping the caller
+    already committed."""
+    try:
+        import cost_model
+        product_type = (getattr(position, "entry_product_type", None) or "CNC")
+        held_overnight = bool(
+            position.opened_at is not None and position.opened_at.date() != now.date()
+        )
+        is_delivery_sell = held_overnight and product_type.upper() == "CNC"
+        cost = cost_model.estimate_round_trip_cost(
+            position.avg_entry_price, qty_closed, exit_price=exit_price,
+            product_type=product_type, is_delivery_sell=is_delivery_sell,
+        )
+        position.realized_cost_estimate = round((position.realized_cost_estimate or 0.0) + cost.total, 2)
+        position.net_realized_pnl = round((position.net_realized_pnl or 0.0) + pnl_leg - cost.total, 2)
+    except Exception:
+        logger.exception(
+            "cost-model net-P&L accumulation failed for position %s — gross realized_pnl is still correct",
+            getattr(position, "id", None),
+        )
+
+
 def _maybe_reset_daily_pnl(db: Session, account: models.TradeAccount) -> None:
     """BUG FIX (this session): realized_pnl_today was never reset on a new
     trading day anywhere in this service (see models.py's comment on
@@ -1020,6 +1059,7 @@ def close_position(
 
     position.qty_open -= qty_to_close
     position.realized_pnl += pnl
+    _accumulate_net_cost(position, qty_to_close, exit_price, pnl, now)
     if position.qty_open <= 0:
         position.status = "CLOSED"
         position.closed_at = now
@@ -1205,6 +1245,7 @@ def record_real_exit_fill(db: Session, position: models.TradePosition, exit_pric
 
     position.qty_open -= qty_closed
     position.realized_pnl += pnl
+    _accumulate_net_cost(position, qty_closed, exit_price, pnl, now)
     if position.qty_open <= 0:
         position.status = "CLOSED"
         position.closed_at = now

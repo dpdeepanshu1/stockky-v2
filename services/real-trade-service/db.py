@@ -138,6 +138,7 @@ def init_schema() -> None:
     _ensure_position_columns(eng, dialect())
     _ensure_product_type_columns(eng, dialect())
     _ensure_overnight_hold_columns(eng, dialect())
+    _ensure_cost_model_columns(eng, dialect())
     _backfill_broker_imported_flag(eng)
     _ensure_watchlist_link_columns(eng, dialect())
     _fix_stale_dhan_token_expiry(eng)
@@ -632,6 +633,67 @@ def _ensure_overnight_hold_columns(engine, dialect_name: str) -> None:
              "ALTER TABLE trade_positions ADD COLUMN entry_decision_label VARCHAR(32)"),
             ("trade_positions", position_cols, "entry_conviction_score",
              "ALTER TABLE trade_positions ADD COLUMN entry_conviction_score FLOAT"),
+        ]
+
+    for table, existing, col_name, sql in adds:
+        if col_name in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added %s.%s", table, col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add %s.%s: %s", table, col_name, e)
+
+
+# 2026-09-18 fix (cost-model follow-on items #2, #5, #6 — see models.py
+# TradePosition.net_realized_pnl/realized_cost_estimate/overnight_hold_reason,
+# TradeDecision.gate_tag, and TradeRiskConfig.min_trade_value/
+# min_edge_to_cost_ratio docstrings). Same additive-migration idiom as every
+# _ensure_* fn above — all nullable, all NULL-safe on existing rows/callers.
+def _ensure_cost_model_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        position_cols = {c["name"] for c in inspect(engine).get_columns("trade_positions")}
+        decision_cols = {c["name"] for c in inspect(engine).get_columns("trade_decisions")}
+        risk_cols = {c["name"] for c in inspect(engine).get_columns("trade_risk_config")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect columns for cost-model migration: %s", e)
+        return
+
+    if dialect_name == "oracle":
+        adds = [
+            ("trade_positions", position_cols, "net_realized_pnl",
+             "ALTER TABLE trade_positions ADD (net_realized_pnl BINARY_DOUBLE)"),
+            ("trade_positions", position_cols, "realized_cost_estimate",
+             "ALTER TABLE trade_positions ADD (realized_cost_estimate BINARY_DOUBLE)"),
+            ("trade_positions", position_cols, "overnight_hold_reason",
+             "ALTER TABLE trade_positions ADD (overnight_hold_reason CLOB)"),
+            ("trade_decisions", decision_cols, "gate_tag",
+             "ALTER TABLE trade_decisions ADD (gate_tag VARCHAR2(32))"),
+            ("trade_risk_config", risk_cols, "min_trade_value",
+             "ALTER TABLE trade_risk_config ADD (min_trade_value BINARY_DOUBLE)"),
+            ("trade_risk_config", risk_cols, "min_edge_to_cost_ratio",
+             "ALTER TABLE trade_risk_config ADD (min_edge_to_cost_ratio BINARY_DOUBLE)"),
+        ]
+    else:
+        adds = [
+            ("trade_positions", position_cols, "net_realized_pnl",
+             "ALTER TABLE trade_positions ADD COLUMN net_realized_pnl FLOAT"),
+            ("trade_positions", position_cols, "realized_cost_estimate",
+             "ALTER TABLE trade_positions ADD COLUMN realized_cost_estimate FLOAT"),
+            ("trade_positions", position_cols, "overnight_hold_reason",
+             "ALTER TABLE trade_positions ADD COLUMN overnight_hold_reason TEXT"),
+            ("trade_decisions", decision_cols, "gate_tag",
+             "ALTER TABLE trade_decisions ADD COLUMN gate_tag VARCHAR(32)"),
+            ("trade_risk_config", risk_cols, "min_trade_value",
+             "ALTER TABLE trade_risk_config ADD COLUMN min_trade_value FLOAT"),
+            ("trade_risk_config", risk_cols, "min_edge_to_cost_ratio",
+             "ALTER TABLE trade_risk_config ADD COLUMN min_edge_to_cost_ratio FLOAT"),
         ]
 
     for table, existing, col_name, sql in adds:

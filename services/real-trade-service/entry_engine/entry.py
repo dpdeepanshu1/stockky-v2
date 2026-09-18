@@ -177,6 +177,30 @@ async def _get_market_regime(db: Session) -> tuple[bool, int, int, str]:
 
 # ── Stop / target helpers ─────────────────────────────────────────────────────
 
+def _resolve_cost_gate_knobs(db: Session, mode: str) -> tuple[float, float]:
+    """2026-09-18 fix (follow-on item #5 from the cost-model audit): Gate 5.6's
+    two knobs (min trade value, min edge-to-cost ratio) were env-var-only
+    (config.MIN_TRADE_VALUE / MIN_EDGE_TO_COST_RATIO) while every other risk
+    knob is admin-editable per-mode via TradeRiskConfig + POST /risk-config.
+    Reads that row's min_trade_value/min_edge_to_cost_ratio (models.py) when
+    an admin has set them; NULL (the row's default) falls back to the exact
+    same config.py/env-var value as before — zero behavior change until an
+    admin explicitly overrides one via the dashboard."""
+    try:
+        risk = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
+    except Exception:
+        risk = None
+    min_trade_value = (
+        risk.min_trade_value if risk is not None and risk.min_trade_value is not None
+        else config.MIN_TRADE_VALUE
+    )
+    min_edge_to_cost_ratio = (
+        risk.min_edge_to_cost_ratio if risk is not None and risk.min_edge_to_cost_ratio is not None
+        else config.MIN_EDGE_TO_COST_RATIO
+    )
+    return min_trade_value, min_edge_to_cost_ratio
+
+
 def _atr_stop_target_pct(atr_pct: Optional[float]) -> tuple[float, float]:
     if atr_pct is None or atr_pct <= 0:
         return FLAT_STOP_PCT, FLAT_TARGET_PCT
@@ -773,29 +797,33 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # See cost_model.py and config.py's "Transaction-cost model" section.
         if config.COST_MODEL_ENABLED:
             final_qty_for_cost = result.approved_qty or proposed_qty
+            min_trade_value, min_edge_to_cost_ratio = _resolve_cost_gate_knobs(db, mode)
             cost_check = cost_model.evaluate_entry_cost_gate(
                 entry_price, final_qty_for_cost, target_pct, product_type="CNC",
+                min_trade_value=min_trade_value, min_edge_to_cost_ratio=min_edge_to_cost_ratio,
             )
             if not cost_check.passes:
                 if not cost_check.passes_min_value:
                     cost_reason = (
                         f"Position value ₹{cost_check.trade_value:,.0f} < "
-                        f"₹{config.MIN_TRADE_VALUE:,.0f} minimum — too small for fixed/"
+                        f"₹{min_trade_value:,.0f} minimum — too small for fixed/"
                         "percentage transaction costs to make sense against."
                     )
                 else:
                     cost_reason = (
                         f"Expected edge ₹{cost_check.expected_edge:,.0f} is only "
                         f"{cost_check.ratio:.1f}x the estimated round-trip cost "
-                        f"₹{cost_check.estimated_cost:,.0f} (floor {config.MIN_EDGE_TO_COST_RATIO:.1f}x). "
+                        f"₹{cost_check.estimated_cost:,.0f} (floor {min_edge_to_cost_ratio:.1f}x). "
                         "Not enough real edge left after brokerage/STT/charges/slippage."
                     )
                 decision.action = "WAIT"
                 decision.reasoning = cost_reason
+                decision.gate_tag = "cost_model"
                 waited += 1
                 db.add(decision)
                 entry_details.append({"symbol": cand.symbol, "action": "WAIT",
-                                       "reasoning": cost_reason, "risk_verdict": decision.risk_verdict})
+                                       "reasoning": cost_reason, "risk_verdict": decision.risk_verdict,
+                                       "gate_tag": "cost_model"})
                 continue
 
         # ── Gate 5.5: same-symbol duplicate guard (within this cycle) ──────────

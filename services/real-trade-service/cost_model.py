@@ -101,12 +101,20 @@ def evaluate_entry_cost_gate(
     qty: int,
     target_pct: float,
     product_type: str = "CNC",
+    min_trade_value: Optional[float] = None,
+    min_edge_to_cost_ratio: Optional[float] = None,
 ) -> EdgeVsCostResult:
     """Gate 5.6 helper (entry_engine/entry.py): compares a candidate's own
     expected ₹ edge (position value * target_pct) against its estimated
     round-trip transaction cost. Same-day entries never trigger DP charges
     (is_delivery_sell=False) since a same-day exit is sold INTRADAY, never a
-    real delivery — see exit_engine._send_real_sell's product-type logic."""
+    real delivery — see exit_engine._send_real_sell's product-type logic.
+
+    min_trade_value/min_edge_to_cost_ratio: 2026-09-18 fix (follow-on item
+    #5) — optional per-mode overrides (entry_engine._resolve_cost_gate_knobs
+    reads them from TradeRiskConfig). Defaulting to None here (which falls
+    back to config.py's env-var values) keeps this function's own behavior
+    and every existing caller/test unchanged."""
     trade_value = entry_price * qty
     target_price = entry_price * (1 + target_pct / 100.0)
     expected_edge = (target_price - entry_price) * qty
@@ -115,11 +123,13 @@ def evaluate_entry_cost_gate(
         product_type=product_type, is_delivery_sell=False,
     )
     ratio = (expected_edge / cost.total) if cost.total > 0 else None
+    effective_min_trade_value = min_trade_value if min_trade_value is not None else config.MIN_TRADE_VALUE
+    effective_min_ratio = min_edge_to_cost_ratio if min_edge_to_cost_ratio is not None else config.MIN_EDGE_TO_COST_RATIO
     return EdgeVsCostResult(
         trade_value=round(trade_value, 2),
         expected_edge=round(expected_edge, 2),
         estimated_cost=cost.total,
         ratio=round(ratio, 2) if ratio is not None else None,
-        passes_min_value=trade_value >= config.MIN_TRADE_VALUE,
-        passes_min_ratio=(ratio is None) or (ratio >= config.MIN_EDGE_TO_COST_RATIO),
+        passes_min_value=trade_value >= effective_min_trade_value,
+        passes_min_ratio=(ratio is None) or (ratio >= effective_min_ratio),
     )

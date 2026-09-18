@@ -936,8 +936,22 @@ async def _eod_squareoff(db, mode: str) -> None:
 
     hold_ids, hold_reasons = await _select_overnight_holds(db, mode, positions)
     if hold_ids:
+        # 2026-09-18 fix (follow-on item #6): this reason used to only ever
+        # be logged (logger.info) — never persisted anywhere queryable, so
+        # the dashboard had no way to show *why* a position skipped
+        # square-off. Now stamped onto the row itself (models.py
+        # TradePosition.overnight_hold_reason, additive migration) so
+        # GET /positions/{mode} can surface it as a badge.
+        by_id = {p.id: p for p in positions}
         for pid, reason in hold_reasons.items():
             logger.info("[schedule] EOD square-off %s: HOLDING position %s overnight — %s", mode, pid, reason)
+            pos = by_id.get(pid)
+            if pos is not None:
+                pos.overnight_hold_reason = reason
+                db.add(models.TradePositionEvent(
+                    position_id=pos.id, event_type="OVERNIGHT_HOLD", detail=reason,
+                ))
+        db.commit()
     positions = [p for p in positions if p.id not in hold_ids]
 
     closed, sent, failed, skipped = 0, 0, 0, 0

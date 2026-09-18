@@ -22,11 +22,25 @@ const SERVICE_LABELS: Record<string, string> = {
 const MAX_AUTO_ATTEMPTS = 6;
 const ESCAPE_HATCH_AFTER_ATTEMPTS = 3;
 
+// 2026-09-18 fix (user-reported: app gets stuck on "Connecting to
+// backend..." on startup, and neither a refresh nor a hard refresh clears
+// it). Root cause: the "checking-gateway" phase rendered nothing but a
+// static string while api.ping() silently retried in the background for up
+// to ~4-5 minutes (growing per-retry timeouts, see api.ts's request()) with
+// zero visible feedback and zero escape hatch — a hard refresh just
+// restarts that same multi-minute blind wait, which reads as "permanently
+// stuck" even though it does eventually resolve. STUCK_HINT_AFTER_MS shows
+// a live elapsed-time readout plus an immediate way to enter/reset the
+// backend URL well before that chain finishes, instead of making the user
+// wait it out with no indication anything is happening.
+const STUCK_HINT_AFTER_MS = 8000;
+
 export default function SystemCheck({ onReady }: { onReady: () => void }) {
   const [stage, setStage] = useState<Stage>({ phase: "checking-gateway" });
   const [apiUrlInput, setApiUrlInput] = useState(getApiUrl());
   const cancelled = useRef(false);
   const currentAttempt = stage.phase === "waking" ? stage.attempt : 0;
+  const [checkingElapsedMs, setCheckingElapsedMs] = useState(0);
 
   const [wakingServices, setWakingServices] = useState<Record<string, boolean>>({});
   const [wakeMessages, setWakeMessages] = useState<Record<string, string>>({});
@@ -42,6 +56,21 @@ export default function SystemCheck({ onReady }: { onReady: () => void }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Live elapsed-time counter for the "checking-gateway" phase only — ticks
+  // every second so the stuck-hint below can appear without waiting on any
+  // network response, and resets automatically once we leave that phase.
+  useEffect(() => {
+    if (stage.phase !== "checking-gateway") {
+      setCheckingElapsedMs(0);
+      return;
+    }
+    const start = Date.now();
+    const id = setInterval(() => {
+      if (!cancelled.current) setCheckingElapsedMs(Date.now() - start);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [stage.phase]);
 
   async function runCheck(attempt: number) {
     try {
@@ -190,11 +219,44 @@ export default function SystemCheck({ onReady }: { onReady: () => void }) {
   }
 
   if (stage.phase === "checking-gateway") {
+    const stuck = checkingElapsedMs >= STUCK_HINT_AFTER_MS;
     return (
       <GateShell>
         <p className="font-mono text-xs text-mist uppercase tracking-widest">
-          Connecting to backend...
+          Connecting to backend{stuck ? ` (${Math.round(checkingElapsedMs / 1000)}s)` : "..."}
         </p>
+        {stuck && (
+          <>
+            <p className="text-mist/60 text-xs mt-2 mb-4 max-w-sm">
+              Still waiting on the API Gateway — a cold-start retry can take a
+              couple of minutes on free-tier hosting. You don't have to wait
+              it out.
+            </p>
+            <div className="flex gap-2 max-w-md mb-2">
+              <input
+                value={apiUrlInput}
+                onChange={(e) => setApiUrlInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && saveGatewayUrl()}
+                placeholder="https://your-api-gateway.onrender.com"
+                className="flex-1 bg-ink/60 border border-slate rounded-lg px-3 py-2 font-mono text-xs text-paper placeholder:text-mist/30 outline-none focus:border-signal-prepare/60 transition"
+                spellCheck={false}
+                autoComplete="off"
+              />
+              <button
+                onClick={saveGatewayUrl}
+                className="border border-slate rounded-lg px-4 py-2 font-mono text-xs text-mist hover:text-paper hover:border-signal-prepare/60 transition shrink-0"
+              >
+                Reconnect
+              </button>
+            </div>
+            <button
+              onClick={onReady}
+              className="font-mono text-xs text-mist/50 hover:text-paper underline"
+            >
+              Continue anyway
+            </button>
+          </>
+        )}
       </GateShell>
     );
   }

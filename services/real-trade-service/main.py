@@ -197,6 +197,11 @@ class RiskConfigUpdate(BaseModel):
     mode: str
     risk_per_trade_pct: Optional[float] = None
     max_daily_loss_pct: Optional[float] = None
+    # 2026-09-18 fix (follow-on item #5): None keeps whatever's already on
+    # the row (or the config.py/env-var default when never set) — same
+    # exclude_none semantics every other field on this model already has.
+    min_trade_value: Optional[float] = None
+    min_edge_to_cost_ratio: Optional[float] = None
     max_concurrent_positions: Optional[int] = None
     max_portfolio_risk_pct: Optional[float] = None
     stale_data_seconds: Optional[int] = None
@@ -396,6 +401,12 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
             "stale_data_seconds": risk.stale_data_seconds if risk else None,
             "max_tick_volatility_mult": risk.max_tick_volatility_mult if risk else None,
             "allow_pyramiding": risk.allow_pyramiding if risk else None,
+            # 2026-09-18 fix (follow-on item #5): same pattern as the three
+            # fields above — was configurable only via a raw API call.
+            "min_trade_value": risk.min_trade_value if risk else None,
+            "min_edge_to_cost_ratio": risk.min_edge_to_cost_ratio if risk else None,
+            "min_trade_value_default": config.MIN_TRADE_VALUE,
+            "min_edge_to_cost_ratio_default": config.MIN_EDGE_TO_COST_RATIO,
             "updated_at": iso_utc(risk.updated_at) if risk else None,
             "updated_by": risk.updated_by if risk else None,
         } if risk else None,
@@ -653,6 +664,14 @@ async def get_risk_config(mode: str, db: Session = Depends(get_db)):
         "stale_data_seconds": risk.stale_data_seconds,
         "max_tick_volatility_mult": risk.max_tick_volatility_mult,
         "allow_pyramiding": risk.allow_pyramiding,
+        # 2026-09-18 fix (follow-on item #5): cost-gate knobs, now
+        # admin-editable per-mode like everything else on this row. None
+        # means "using the config.py/env-var default" — the frontend should
+        # show the effective config.py value as a placeholder, not blank.
+        "min_trade_value": risk.min_trade_value,
+        "min_edge_to_cost_ratio": risk.min_edge_to_cost_ratio,
+        "min_trade_value_default": config.MIN_TRADE_VALUE,
+        "min_edge_to_cost_ratio_default": config.MIN_EDGE_TO_COST_RATIO,
         "updated_at": iso_utc(risk.updated_at) if risk.updated_at else None,
         "updated_by": risk.updated_by,
     }
@@ -675,7 +694,7 @@ async def update_risk_config(body: RiskConfigUpdate, authorization: str = Header
     for field in (
         "risk_per_trade_pct", "max_daily_loss_pct", "max_concurrent_positions",
         "max_portfolio_risk_pct", "stale_data_seconds", "max_tick_volatility_mult",
-        "allow_pyramiding",
+        "allow_pyramiding", "min_trade_value", "min_edge_to_cost_ratio",
     ):
         val = getattr(body, field)
         if val is not None:
@@ -1578,6 +1597,16 @@ async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin
             # position its own entry_engine actually bought. Lets the
             # Positions tab group/label these as their own sub-section.
             "broker_imported": bool(p.broker_imported),
+            # 2026-09-18 fix (follow-on items #2, #6 from the cost-model
+            # audit): net-of-cost realized P&L for any qty already closed on
+            # this position (0.0/None until a partial exit has happened —
+            # gross unrealized_pnl above is unaffected), the entry tier this
+            # position qualified under, and — when set — why it skipped
+            # today's EOD square-off.
+            "net_realized_pnl": p.net_realized_pnl,
+            "realized_cost_estimate": p.realized_cost_estimate,
+            "entry_decision_label": getattr(p, "entry_decision_label", None),
+            "overnight_hold_reason": getattr(p, "overnight_hold_reason", None),
         })
     return out
 
@@ -1608,9 +1637,20 @@ async def list_closed_positions(
         "avg_entry_price": p.avg_entry_price, "realized_pnl": p.realized_pnl,
         "opened_at": iso_utc(p.opened_at), "closed_at": iso_utc(p.closed_at),
         "source_tab": getattr(p, "source_tab", None),
+        # 2026-09-18 fix (follow-on item #2): net-of-cost figure for this
+        # closed trade — None on pre-migration rows, otherwise gross
+        # realized_pnl minus the estimated round-trip transaction cost.
+        "net_realized_pnl": getattr(p, "net_realized_pnl", None),
+        "realized_cost_estimate": getattr(p, "realized_cost_estimate", None),
+        "entry_decision_label": getattr(p, "entry_decision_label", None),
+        "overnight_hold_reason": getattr(p, "overnight_hold_reason", None),
     } for p in rows]
     total = len(positions)
     wins = sum(1 for p in rows if (p.realized_pnl or 0) > 0)
+    # 2026-09-18 fix (follow-on item #2): sum only rows that actually have a
+    # net_realized_pnl (pre-migration/never-closed-since-fix rows are
+    # skipped, not silently counted as 0) — None when nothing qualifies yet.
+    net_rows = [p.net_realized_pnl for p in rows if p.net_realized_pnl is not None]
     return {
         "positions": positions,
         "total": total,
@@ -1618,6 +1658,7 @@ async def list_closed_positions(
         # None (not 0.0) when there's nothing closed yet — a 0% win rate on
         # zero trades is a different, misleading claim from "no data".
         "win_rate": round(wins / total, 4) if total else None,
+        "net_realized_pnl_total": round(sum(net_rows), 2) if net_rows else None,
     }
 
 
@@ -1794,6 +1835,11 @@ async def list_candidates(
                 "proposed_qty": d.proposed_qty, "proposed_price": d.proposed_price,
                 "proposed_stop": d.proposed_stop, "proposed_target": d.proposed_target,
                 "risk_verdict": d.risk_verdict, "risk_verdict_reason": d.risk_verdict_reason,
+                # 2026-09-18 fix (follow-on item #6): "cost_model" when this
+                # WAIT came from Gate 5.6 specifically — lets the dashboard
+                # badge/filter cost-gate rejections instead of relying on
+                # string-matching `reasoning`. None for every other gate.
+                "gate_tag": getattr(d, "gate_tag", None),
                 "evaluated_at": iso_utc(d.created_at),
                 "limit_distance_pct": limit_distance_pct,
             } if d else None,

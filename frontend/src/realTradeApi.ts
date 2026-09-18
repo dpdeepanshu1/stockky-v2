@@ -139,6 +139,12 @@ export interface GateStatus {
     stale_data_seconds: number | null;
     max_tick_volatility_mult: number | null;
     allow_pyramiding: boolean | null;
+    // 2026-09-18 fix (follow-on item #5): cost-gate knobs, now
+    // admin-editable per-mode. null means "using the *_default value".
+    min_trade_value: number | null;
+    min_edge_to_cost_ratio: number | null;
+    min_trade_value_default: number;
+    min_edge_to_cost_ratio_default: number;
     updated_at: string | null;
     updated_by: string | null;
   } | null;
@@ -186,6 +192,33 @@ export interface Position {
   // bought itself — lets the Positions tab show these as their own
   // sub-section instead of mixing them in unlabeled with auto-pilot buys.
   broker_imported: boolean;
+  // 2026-09-18 fix (cost-model follow-on items #2, #6): net-of-cost P&L for
+  // any qty already closed on this position (null until a partial/full exit
+  // has happened since the fix shipped), the entry tier this position
+  // qualified under, and — when set — why it skipped today's EOD
+  // square-off (execution/auto_pilot.py._select_overnight_holds).
+  net_realized_pnl: number | null;
+  realized_cost_estimate: number | null;
+  entry_decision_label: string | null;
+  overnight_hold_reason: string | null;
+}
+
+export interface ClosedPosition {
+  id: number; symbol: string; qty_open: number; avg_entry_price: number;
+  realized_pnl: number; opened_at: string; closed_at: string | null;
+  source_tab: string | null;
+  net_realized_pnl: number | null;
+  realized_cost_estimate: number | null;
+  entry_decision_label: string | null;
+  overnight_hold_reason: string | null;
+}
+
+export interface ClosedPositionsResponse {
+  positions: ClosedPosition[];
+  total: number;
+  wins: number;
+  win_rate: number | null;
+  net_realized_pnl_total: number | null;
 }
 
 export interface OrderRow {
@@ -205,6 +238,11 @@ export interface CandidateDecision {
   proposed_target: number | null;
   risk_verdict: string | null;
   risk_verdict_reason: string | null;
+  // 2026-09-18 fix (follow-on item #6): "cost_model" when this WAIT came
+  // from Gate 5.6 (cost_model.evaluate_entry_cost_gate) specifically — lets
+  // the dashboard badge/filter cost-gate rejections distinctly from an
+  // ordinary risk-engine WAIT. null for every other gate.
+  gate_tag: string | null;
   evaluated_at: string;
   limit_distance_pct: number | null;
 }

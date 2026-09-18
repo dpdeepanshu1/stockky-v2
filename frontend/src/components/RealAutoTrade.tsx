@@ -180,6 +180,17 @@ function PositionCard({
                 DEMAT
               </span>
             )}
+            {/* 2026-09-18 fix (follow-on item #6): surfaces WHY this
+                position skipped today's EOD square-off — previously only
+                ever logged, never visible on the dashboard. */}
+            {p.overnight_hold_reason && (
+              <span
+                title={p.overnight_hold_reason}
+                className="font-display tabular-nums text-[9px] text-signal-hold ml-2 px-1.5 py-0.5 rounded border border-signal-hold/30 bg-signal-hold/10"
+              >
+                🌙 HELD OVERNIGHT
+              </span>
+            )}
           </div>
         </div>
         <div className="text-right">
@@ -190,6 +201,18 @@ function PositionCard({
             <span className={`font-display tabular-nums text-[10px] ml-1 ${pnlColor(p.pnl_pct)}`}>
               ({p.pnl_pct >= 0 ? "+" : ""}{p.pnl_pct}%)
             </span>
+          )}
+          {/* 2026-09-18 fix (follow-on item #2): net-of-cost figure for any
+              qty already closed on a PARTIALLY_CLOSED position — null on a
+              still-fully-OPEN position (nothing closed yet to have a cost
+              on), so this only appears once relevant. */}
+          {p.net_realized_pnl != null && (
+            <div className={`font-display tabular-nums text-[9px] ${pnlColor(p.net_realized_pnl)}`}>
+              net {p.net_realized_pnl >= 0 ? "+" : ""}{fmtInr(p.net_realized_pnl, 2)}
+              {p.realized_cost_estimate != null && (
+                <span className="text-mist"> (costs ₹{p.realized_cost_estimate.toFixed(0)})</span>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -919,7 +942,16 @@ export default function RealAutoTrade() {
     risk_per_trade_pct: string; max_daily_loss_pct: string; max_concurrent_positions: string;
     max_portfolio_risk_pct: string; stale_data_seconds: string; max_tick_volatility_mult: string;
     allow_pyramiding: boolean;
+    // 2026-09-18 fix (follow-on item #5): cost-gate knobs, now editable
+    // here alongside every other risk knob. Empty string = "use default".
+    min_trade_value: string; min_edge_to_cost_ratio: string;
   } | null>(null);
+  // Server-computed fallback values shown as input placeholders when the
+  // field above is blank (i.e. the DB row has no override yet) — lets the
+  // admin see what's actually in effect right now, not just an empty box.
+  const [riskDefaults, setRiskDefaults] = useState<{ min_trade_value: number; min_edge_to_cost_ratio: number }>({
+    min_trade_value: 3000, min_edge_to_cost_ratio: 3.0,
+  });
   const [riskSaving, setRiskSaving] = useState(false);
   const [riskMsg, setRiskMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
@@ -954,6 +986,12 @@ export default function RealAutoTrade() {
           stale_data_seconds: String(s.risk_config.stale_data_seconds ?? ""),
           max_tick_volatility_mult: String(s.risk_config.max_tick_volatility_mult ?? ""),
           allow_pyramiding: !!s.risk_config.allow_pyramiding,
+          min_trade_value: String(s.risk_config.min_trade_value ?? ""),
+          min_edge_to_cost_ratio: String(s.risk_config.min_edge_to_cost_ratio ?? ""),
+        });
+        setRiskDefaults({
+          min_trade_value: s.risk_config.min_trade_value_default ?? 3000,
+          min_edge_to_cost_ratio: s.risk_config.min_edge_to_cost_ratio_default ?? 3.0,
         });
       }
       if (m === "REAL" && getSessionToken()) {
@@ -1274,6 +1312,12 @@ export default function RealAutoTrade() {
         stale_data_seconds: Number(riskForm.stale_data_seconds),
         max_tick_volatility_mult: Number(riskForm.max_tick_volatility_mult),
         allow_pyramiding: riskForm.allow_pyramiding,
+        // 2026-09-18 fix (follow-on item #5): blank = "use the default",
+        // so only send these when the admin actually typed an override —
+        // sending Number("") (NaN) would otherwise wipe a previously-set
+        // override back to NaN instead of leaving it alone.
+        ...(riskForm.min_trade_value.trim() !== "" ? { min_trade_value: Number(riskForm.min_trade_value) } : {}),
+        ...(riskForm.min_edge_to_cost_ratio.trim() !== "" ? { min_edge_to_cost_ratio: Number(riskForm.min_edge_to_cost_ratio) } : {}),
       });
       setRiskMsg({ ok: true, text: "Risk configuration saved." });
       await loadStatus(mode);
@@ -1756,14 +1800,24 @@ export default function RealAutoTrade() {
                         ["max_portfolio_risk_pct", "Portfolio risk cap (%)"],
                         ["stale_data_seconds", "Stale data cutoff (s)"],
                         ["max_tick_volatility_mult", "Max tick volatility ×"],
+                        // 2026-09-18 fix (follow-on item #5): cost-gate
+                        // knobs (Gate 5.6), now editable here — empty shows
+                        // the effective config.py default as a placeholder.
+                        ["min_trade_value", `Min trade value ₹ (default ${riskDefaults.min_trade_value})`],
+                        ["min_edge_to_cost_ratio", `Min edge/cost ratio × (default ${riskDefaults.min_edge_to_cost_ratio})`],
                       ] as const).map(([key, label]) => (
                         <div key={key} className="bg-ink border border-slate rounded-xl p-2">
                           <p className="font-display tabular-nums text-[9px] uppercase tracking-widest text-mist">{label}</p>
                           <input
                             type="number" inputMode="decimal" disabled={armed}
                             value={riskForm[key]}
+                            placeholder={
+                              key === "min_trade_value" ? String(riskDefaults.min_trade_value)
+                              : key === "min_edge_to_cost_ratio" ? String(riskDefaults.min_edge_to_cost_ratio)
+                              : undefined
+                            }
                             onChange={e => setRiskForm(f => f && { ...f, [key]: e.target.value })}
-                            className="w-full bg-transparent font-display tabular-nums text-sm font-bold text-paper mt-0.5 focus:outline-none disabled:opacity-60"
+                            className="w-full bg-transparent font-display tabular-nums text-sm font-bold text-paper mt-0.5 focus:outline-none disabled:opacity-60 placeholder:text-mist/30"
                           />
                         </div>
                       ))}
@@ -2374,6 +2428,13 @@ export default function RealAutoTrade() {
                         {d?.reasoning && (
                           <p className="font-display tabular-nums text-[10px] text-mist border-t border-slate pt-2 mt-1">
                             {d.risk_verdict && <span className={`font-bold mr-1 ${d.risk_verdict === "APPROVED" ? "text-signal-buy" : "text-signal-sell"}`}>[{d.risk_verdict}]</span>}
+                            {/* 2026-09-18 fix (follow-on item #6): badges a
+                                Gate 5.6 (cost-model) WAIT distinctly from an
+                                ordinary risk-engine WAIT, instead of only
+                                being distinguishable by reading the prose. */}
+                            {d.gate_tag === "cost_model" && (
+                              <span className="font-bold mr-1 text-signal-hold">[COST GATE]</span>
+                            )}
                             {d.reasoning}
                           </p>
                         )}

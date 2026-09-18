@@ -223,6 +223,44 @@ MIN_FUNDAMENTAL_SCORE = _get_float("MIN_FUNDAMENTAL_SCORE", 40.0)
 MIN_TECHNICAL_SCORE = _get_float("MIN_TECHNICAL_SCORE", 40.0)
 MIN_MARKET_CAP_CR = _get_float("MIN_MARKET_CAP_CR", 500.0)  # ₹500 crore floor — excludes micro-caps
 
+# ── Minimum stock price gate (2026-09-18, session67) ────────────────────────
+# Penny stocks (₹0.19, ₹0.50, etc.) look great on a percentage-change scan
+# because a 1-paise tick is already a 5% move. They also have near-zero
+# absolute P&L even on a "win" (6481 shares × ₹0.43 move = ₹2,787), and
+# Dhan frequently rejects them outright (T2T, circuit-limit, or exchange
+# restriction). Checked in entry.py BEFORE quality gate — no network call
+# needed, just a price comparison. Default ₹20 keeps all real intraday
+# names; override via env to raise if you want only mid/large-cap territory.
+MIN_STOCK_PRICE = _get_float("MIN_STOCK_PRICE", 20.0)
+
+# ── EOD overnight carry (2026-09-18, session67) ──────────────────────────────
+# By default EOD squareoff closes ALL positions at 15:00 unconditionally.
+# When OVERNIGHT_HOLD_ENABLED=true, a position MAY be carried to the next
+# day instead of being force-closed, but ONLY when ALL four conditions hold:
+#   1. The position is currently in profit (unrealized P&L > 0).
+#   2. Its fundamental_score at entry time >= OVERNIGHT_MIN_FUNDAMENTAL_SCORE
+#      (stricter than the intraday floor of MIN_FUNDAMENTAL_SCORE).
+#   3. Its technical_score at entry time >= OVERNIGHT_MIN_TECHNICAL_SCORE.
+#   4. Its market_cap_cr >= OVERNIGHT_MIN_MARKET_CAP_CR (larger names only —
+#      a penny/micro-cap held overnight is a gap-down risk with thin liquidity).
+# If quality data was missing at entry (None fields on ScalpCandidateLog),
+# the position is squaredoff anyway — "unknown quality" is not good enough
+# for an overnight hold. When a position IS carried, it is re-evaluated at
+# next open (09:15 IST) — no new entry is placed, but the existing stop/
+# target levels stay live via the super order.
+OVERNIGHT_HOLD_ENABLED          = _get_bool("OVERNIGHT_HOLD_ENABLED", False)
+OVERNIGHT_MIN_FUNDAMENTAL_SCORE = _get_float("OVERNIGHT_MIN_FUNDAMENTAL_SCORE", 60.0)
+OVERNIGHT_MIN_TECHNICAL_SCORE   = _get_float("OVERNIGHT_MIN_TECHNICAL_SCORE", 60.0)
+OVERNIGHT_MIN_MARKET_CAP_CR     = _get_float("OVERNIGHT_MIN_MARKET_CAP_CR", 2000.0)
+
+# ── Manual exit: cancel-then-sell delay (2026-09-18, session67) ─────────────
+# close_position_now() cancels all super-order legs, then immediately fires
+# a plain MARKET SELL. If the cancel hasn't propagated on Dhan's side yet
+# the SELL can race against a still-live exit leg and get rejected or
+# partially double-fill. A small sleep between cancel and sell gives the
+# broker time to acknowledge the cancellation. 0 = no delay (original behaviour).
+MANUAL_EXIT_CANCEL_WAIT_S = _get_float("MANUAL_EXIT_CANCEL_WAIT_S", 0.5)
+
 # ── Entry range-position hard gate (this session — "buy/sell timing ... not
 # high low aware or price aware") ───────────────────────────────────────────
 # screening/engine.py already applies a SOFT range-position penalty to

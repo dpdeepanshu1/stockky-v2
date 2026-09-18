@@ -134,6 +134,68 @@ def run_eod_squareoff(db: Session) -> int:
         "EOD squareoff: closing %d open/exit-rejected scalp position(s) at market price",
         len(open_positions),
     )
+
+    # ── Overnight carry filter (2026-09-18, session67) ───────────────────────
+    # When OVERNIGHT_HOLD_ENABLED, skip force-close for positions that pass
+    # ALL four overnight quality conditions (in profit + stricter fund/tech/
+    # mcap scores). Uses the quality scores recorded on ScalpCandidateLog at
+    # entry time — no new network call at EOD. Only EXIT_LEGS_REJECTED
+    # positions are always squaredoff regardless (their bracket is dead and
+    # cannot protect them overnight).
+    carry_positions: list = []
+    if config.OVERNIGHT_HOLD_ENABLED:
+        from models import ScalpCandidateLog
+        from feed import ws_client as _ws
+        squareoff_only: list = []
+        for pos in open_positions:
+            if pos.status == "EXIT_LEGS_REJECTED":
+                squareoff_only.append(pos)
+                continue
+            # Get live price for unrealized P&L check
+            try:
+                buf = _ws.get_tick_buffer(pos.symbol)
+                ltp = buf[-1][1] if buf else None
+            except Exception:
+                ltp = None
+            if ltp is None or ltp <= pos.entry_price:
+                # Not in profit or no live price — squareoff
+                squareoff_only.append(pos)
+                continue
+            # Check quality scores from entry-time candidate log
+            log_row = (
+                db.query(ScalpCandidateLog)
+                .filter_by(symbol=pos.symbol, decision="ENTERED")
+                .order_by(ScalpCandidateLog.created_at.desc())
+                .first()
+            )
+            # Any None quality field = unknown = don't carry overnight
+            if (
+                log_row is None
+                or log_row.fundamental_score is None
+                or log_row.technical_score is None
+                or log_row.market_cap_cr is None
+                or log_row.fundamental_score < config.OVERNIGHT_MIN_FUNDAMENTAL_SCORE
+                or log_row.technical_score < config.OVERNIGHT_MIN_TECHNICAL_SCORE
+                or log_row.market_cap_cr < config.OVERNIGHT_MIN_MARKET_CAP_CR
+            ):
+                squareoff_only.append(pos)
+                continue
+            # All checks passed — carry overnight
+            carry_positions.append(pos)
+            logger.info(
+                "EOD overnight carry: %s (id=%d) qualifies — ltp=₹%.2f > entry=₹%.2f, "
+                "fund=%.0f tech=%.0f mcap=₹%.0fcr — skipping squareoff",
+                pos.symbol, pos.id, ltp, pos.entry_price,
+                log_row.fundamental_score, log_row.technical_score, log_row.market_cap_cr,
+            )
+        if carry_positions:
+            from notifier import notify_sync
+            carry_lines = [f"🌙 *EOD overnight carry — {len(carry_positions)} position(s) held:*"]
+            for p in carry_positions:
+                carry_lines.append(f"  • {p.symbol} entry=₹{p.entry_price:.2f}")
+            notify_sync("\n".join(carry_lines))
+        open_positions = squareoff_only
+
     closed = 0
     for pos in open_positions:
         try:
@@ -346,6 +408,18 @@ def close_position_now(db: Session, pos: ScalpPosition) -> dict:
                 )
             except Exception:
                 pass  # leg may already be filled/cancelled — not fatal
+        # 2026-09-18 fix (session67): give Dhan a moment to acknowledge the
+        # cancellations before firing the SELL. Without this pause, the plain
+        # MARKET SELL can race against a still-live TARGET_LEG or
+        # STOP_LOSS_LEG on Dhan's side, resulting in a rejected/double-fill
+        # or a position that appears closed in our DB but still has a live
+        # exit leg sitting at the broker. Even 0.3–0.5s is enough for the
+        # cancel to propagate over the RMS. Configurable via
+        # MANUAL_EXIT_CANCEL_WAIT_S; default 0.5s; set to 0 to restore the
+        # original no-wait behaviour.
+        wait_s = getattr(config, "MANUAL_EXIT_CANCEL_WAIT_S", 0.5)
+        if wait_s > 0:
+            time.sleep(wait_s)
 
     try:
         sell_result = _fire_flat_sell(db, pos)

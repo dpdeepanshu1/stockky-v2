@@ -239,6 +239,20 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", "SYMBOL_HELD_BY_OTHER_SERVICE", quality=quality)
         return None
 
+    # 2026-09-18 fix (session67): minimum stock price gate — reject penny
+    # stocks before any capital is reserved or network calls are made.
+    # Root cause of 5 FILATFASH ERROR rows: ₹0.19/share clears pct-change
+    # and volume thresholds easily (1 paise = 5% move), but Dhan rejects
+    # the order and the quality gate only runs afterward. Check price first.
+    if candidate.current_ltp < config.MIN_STOCK_PRICE:
+        _log_candidate(
+            db, candidate, "SKIPPED",
+            f"PENNY_STOCK:ltp=₹{candidate.current_ltp:.2f} < floor=₹{config.MIN_STOCK_PRICE:.2f}",
+            quality=quality,
+        )
+        shared_symbol_lock.release(db, candidate.symbol)
+        return None
+
     # AUDIT FIX (this session): hard high/low-awareness gate — reject a
     # candidate sitting right at today's high outright, before any capital
     # is committed. See _range_gate_reject()'s docstring.

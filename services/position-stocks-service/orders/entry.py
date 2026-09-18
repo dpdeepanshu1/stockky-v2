@@ -490,6 +490,13 @@ def attempt_entry(
         stop_price=levels.stop_price,
         adaptive_target_pct=levels.target_pct,
         adaptive_stop_pct=levels.stop_pct,
+        # AUDIT FIX (this session — "breakeven stop is dead code"):
+        # orders/adaptive.py::compute() has always computed
+        # breakeven_trigger_pct but nothing ever saved it — see models.py's
+        # comment on this column. Persisted here so
+        # orders/breakeven.py::run_breakeven_stop() has something to check
+        # unrealized gain against for this position.
+        breakeven_trigger_pct=levels.breakeven_trigger_pct,
         dhan_super_order_id=dhan_super_order_id,
         # AUDIT FIX (session22 cont'd): dhan_entry_order_id was declared on
         # the model but never written anywhere, so it was always NULL even
@@ -725,6 +732,9 @@ def attempt_manual_entry(
         stop_price=levels.stop_price,
         adaptive_target_pct=levels.target_pct,
         adaptive_stop_pct=levels.stop_pct,
+        # this session: same fix as attempt_entry() above — see that
+        # ScalpPosition() call's comment.
+        breakeven_trigger_pct=levels.breakeven_trigger_pct,
         dhan_super_order_id=dhan_super_order_id,
         dhan_entry_order_id=dhan_super_order_id,
         capital_risked=position_value,

@@ -122,6 +122,24 @@ class ScalpPosition(Base):
     dhan_entry_order_id = Column(String(64), nullable=True)
     dhan_exit_order_id = Column(String(64), nullable=True)
 
+    # this session ("breakeven stop is dead code — fix it"): orders/
+    # adaptive.py::compute() has ALWAYS computed breakeven_trigger_pct (the
+    # % of target at which the stop should move to entry) but nothing ever
+    # saved it or acted on it — it was calculated and thrown away every
+    # single entry. Persisted here at both entry-creation sites
+    # (orders/entry.py::attempt_entry/attempt_manual_entry) so
+    # orders/breakeven.py::run_breakeven_stop() has something to compare
+    # live unrealized gain against. Nullable: positions opened before this
+    # column existed have no trigger recorded and are simply never
+    # considered for breakeven (fail-open, same convention as every other
+    # best-effort field in this model).
+    breakeven_trigger_pct = Column(Float, nullable=True)
+    # Set True the moment run_breakeven_stop() successfully moves the
+    # STOP_LOSS_LEG to entry_price for this position, so it's only ever
+    # attempted once per position (Dhan's modify call is not re-sent on
+    # every fast-reconcile tick once it's already been done).
+    stop_moved_to_breakeven = Column(Boolean, nullable=False, default=False)
+
     exit_price = Column(Float, nullable=True)
     realized_pnl = Column(Float, nullable=True)
     realized_pnl_pct = Column(Float, nullable=True)
@@ -230,6 +248,14 @@ class ScalpGateState(Base):
     # tuning knobs (not exposed as a toggle — same as MAX_ENTRY_RANGE_POSITION
     # etc.). Defaults False — unchanged behavior until explicitly turned on.
     stagnation_exit_enabled = Column(Boolean, nullable=False, default=False)
+    # this session: runtime (DB-backed, no restart needed) on/off switch for
+    # orders/breakeven.py::run_breakeven_stop — exact same pattern as
+    # stagnation_exit_enabled above, toggled from the frontend via
+    # POST /breakeven-stop/enable|disable. Defaults False deliberately —
+    # this modifies a LIVE stop-loss order on a real position, so it should
+    # only start firing once explicitly turned on and tested, not silently
+    # activate on the next redeploy just because the dead-code fix landed.
+    breakeven_stop_enabled = Column(Boolean, nullable=False, default=False)
     # this session: tracks the last IST calendar date the trade-history
     # retention cleanup ran, same date-tracking pattern as
     # eod_squareoff_fired_date above — lets the fast-reconcile loop run it

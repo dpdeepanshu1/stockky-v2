@@ -91,6 +91,11 @@ export interface ScalpStatus {
   // positionStocksApi.stagnationExitEnable/Disable and PositionStocksTab's
   // Pipeline-tab button.
   stagnation_exit_enabled: boolean;
+  // this session ("breakeven stop is dead code — fix it"): DB-backed
+  // toggle for orders/breakeven.py::run_breakeven_stop — see
+  // positionStocksApi.breakevenStopEnable/Disable and
+  // PositionStocksTab's Pipeline-tab button. Off by default.
+  breakeven_stop_enabled: boolean;
   last_cycle_run_at: string | null;
   last_cycle_run_trigger: "AUTO" | "MANUAL" | null;
   first_live_order_done: boolean;
@@ -132,6 +137,10 @@ export interface ScalpStatus {
     // field above (DB-backed toggle), these two are config/env-only.
     stagnation_exit_minutes?: number;
     stagnation_exit_band_pct?: number;
+    // this session: read-only display of the breakeven-stop trigger
+    // fraction (orders/adaptive.py's BREAKEVEN_FRAC). The on/off switch
+    // is the top-level breakeven_stop_enabled field above.
+    breakeven_frac?: number;
   };
 }
 
@@ -164,6 +173,12 @@ export interface ScalpPositionRow {
   stop_price: number;
   adaptive_target_pct: number;
   adaptive_stop_pct: number;
+  // this session: breakeven-stop bookkeeping — null trigger means this
+  // position predates the feature (or breakeven never applies to it);
+  // stop_moved_to_breakeven flips true once orders/breakeven.py has
+  // actually moved the STOP_LOSS_LEG to entry for this position.
+  breakeven_trigger_pct: number | null;
+  stop_moved_to_breakeven: boolean;
   realized_pnl: number | null;
   realized_pnl_pct: number | null;
   // AUDIT FIX (session60): live fields, OPEN positions only — None/absent
@@ -401,6 +416,10 @@ export const positionStocksApi = {
   // for orders/eod_squareoff.py::run_stagnation_exit — no restart needed.
   stagnationExitEnable: () => psRequest<{ status: string }>("/stagnation-exit/enable", { method: "POST" }, true),
   stagnationExitDisable: () => psRequest<{ status: string }>("/stagnation-exit/disable", { method: "POST" }, true),
+  // this session: DB-backed toggle (ScalpGateState.breakeven_stop_enabled)
+  // for orders/breakeven.py::run_breakeven_stop — no restart needed.
+  breakevenStopEnable: () => psRequest<{ status: string }>("/breakeven-stop/enable", { method: "POST" }, true),
+  breakevenStopDisable: () => psRequest<{ status: string }>("/breakeven-stop/disable", { method: "POST" }, true),
   runCycle: () => psRequest<ScalpCycleResult>("/cycle/run", { method: "POST" }, true),
 
   positions: () => psRequest<ScalpPositionRow[]>("/positions"),

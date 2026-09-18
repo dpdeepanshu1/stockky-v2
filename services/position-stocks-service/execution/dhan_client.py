@@ -716,6 +716,65 @@ def cancel_super_order(db: Session, *, order_id: str, order_leg: str) -> dict:
     return _extract_data(resp) or {}
 
 
+def modify_super_order(
+    db: Session,
+    *,
+    order_id: str,
+    order_leg: str,
+    stop_loss_price: Optional[float] = None,
+    target_price: Optional[float] = None,
+    trailing_jump: float = 0.0,
+) -> dict:
+    """Modify a leg of an already-placed Super Order.
+
+    Added this session to back orders/breakeven.py::run_breakeven_stop() —
+    the first real caller. Only STOP_LOSS_LEG and TARGET_LEG are wired
+    here (ENTRY_LEG modification is not something this service has ever
+    needed — entries are MARKET orders that fill immediately or don't).
+
+    Deliberately no is_armed check, same policy as cancel_super_order()
+    just above: tightening/protecting an EXISTING position (moving a stop
+    up, trimming a target) must never be gated by the arm switch — only
+    PLACING new risk (place_super_order) should be. is_armed only guards
+    against opening new exposure while disarmed; it was never meant to
+    stop the service from managing risk it already took on.
+
+    Per dhanhq's own _super_order.py, the STOP_LOSS_LEG/TARGET_LEG payload
+    branches of modify_super_order don't actually use order_type — it's
+    only read for ENTRY_LEG, which this function doesn't support — so a
+    fixed placeholder is passed through and ignored by the SDK.
+    """
+    if order_leg not in ("STOP_LOSS_LEG", "TARGET_LEG"):
+        raise ValueError(
+            f"modify_super_order: unsupported order_leg={order_leg!r} — "
+            f"only STOP_LOSS_LEG/TARGET_LEG are wired here."
+        )
+    client = _get_sdk_client(db)
+
+    kwargs: dict = {}
+    if order_leg == "STOP_LOSS_LEG":
+        if stop_loss_price is None:
+            raise ValueError("modify_super_order: STOP_LOSS_LEG requires stop_loss_price.")
+        kwargs["stopLossPrice"] = round_to_tick(float(stop_loss_price))
+        kwargs["trailingJump"] = float(trailing_jump)
+    else:  # TARGET_LEG
+        if target_price is None:
+            raise ValueError("modify_super_order: TARGET_LEG requires target_price.")
+        kwargs["targetPrice"] = round_to_tick(float(target_price))
+
+    logger.info(
+        "position-stocks: Modifying REAL super order %s leg=%s -> %s",
+        order_id, order_leg, kwargs,
+    )
+    resp = client.modify_super_order(
+        order_id=order_id,
+        order_type="MARKET",  # ignored by the SDK for this leg_name — see docstring above
+        leg_name=order_leg,
+        **kwargs,
+    )
+    return _extract_data(resp) or {}
+
+
 # ── Rejection classifiers (mirrors real-trade-service/execution/dhan_client.py) ─
 # Added this session after screenshots confirmed all three rejection types fire
 # on SELL attempts from this service too — the classifiers already exist in

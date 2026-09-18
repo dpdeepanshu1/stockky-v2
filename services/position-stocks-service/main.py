@@ -82,6 +82,12 @@ API endpoints:
   GET  /dhan/account                  — Dhan connection/token status + live funds,
                                           same shared account real-trade-service owns
   POST /reconcile                    — force an exit-reconciliation pass now
+  POST /breakeven-stop/enable         — turn on breakeven stop management
+                                          (orders/breakeven.py) — moves an OPEN
+                                          position's stop to entry once
+                                          unrealized gain crosses its recorded
+                                          trigger %; off by default
+  POST /breakeven-stop/disable        — turn off breakeven stop management
 """
 from __future__ import annotations
 
@@ -116,7 +122,8 @@ from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition
-from orders import eod_squareoff, reconcile
+from orders import breakeven, eod_squareoff, reconcile
+from orders import adaptive
 from orders.entry import (
     attempt_entry, attempt_manual_entry, log_quality_reject, ManualEntryRejected,
 )
@@ -284,6 +291,19 @@ async def _fast_reconcile_loop() -> None:
                         logger.info("position-stocks: stagnation-exit closed %d position(s)", n_stagnant)
                 except Exception as e:
                     logger.error("position-stocks: stagnation-exit error: %s", e, exc_info=True)
+                try:
+                    # this session ("breakeven stop is dead code — fix it"),
+                    # OFF by default (ScalpGateState.breakeven_stop_enabled)
+                    # — see orders/breakeven.py::run_breakeven_stop's
+                    # docstring. Same fast-loop placement as stagnation-exit
+                    # just above so a position that's crossed its trigger
+                    # gets its stop moved promptly, not on the next 10s
+                    # screening cycle.
+                    n_breakeven = await asyncio.to_thread(breakeven.run_breakeven_stop, db)
+                    if n_breakeven:
+                        logger.info("position-stocks: breakeven-stop moved %d stop(s)", n_breakeven)
+                except Exception as e:
+                    logger.error("position-stocks: breakeven-stop error: %s", e, exc_info=True)
                 try:
                     gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
                     today = ist_today_str()
@@ -922,6 +942,9 @@ def status(db: Session = Depends(get_db)):
         # session69: DB-backed runtime toggle for orders/eod_squareoff.py::
         # run_stagnation_exit — see POST /stagnation-exit/enable|disable.
         "stagnation_exit_enabled": gate.stagnation_exit_enabled,
+        # this session: DB-backed runtime toggle for orders/breakeven.py::
+        # run_breakeven_stop — see POST /breakeven-stop/enable|disable.
+        "breakeven_stop_enabled": gate.breakeven_stop_enabled,
         "last_cycle_run_at": iso_utc(gate.last_cycle_run_at),
         "last_cycle_run_trigger": gate.last_cycle_run_trigger,
         "first_live_order_done": gate.first_live_order_done,
@@ -997,6 +1020,13 @@ def status(db: Session = Depends(get_db)):
             # these two stay config/env-only, same as the range-gate knobs.
             "stagnation_exit_minutes": config.STAGNATION_EXIT_MINUTES,
             "stagnation_exit_band_pct": config.STAGNATION_EXIT_BAND_PCT,
+            # this session: read-only display of the breakeven-stop
+            # trigger fraction (orders/adaptive.py's BREAKEVEN_FRAC — 40%
+            # of target by default). The on/off switch itself is the
+            # top-level breakeven_stop_enabled field above (DB-backed
+            # toggle); this one number stays a code constant, same as
+            # stagnation's two knobs just above.
+            "breakeven_frac": adaptive.BREAKEVEN_FRAC,
         },
     }
 
@@ -1101,6 +1131,41 @@ def stagnation_exit_disable(admin: str = Depends(require_admin), db: Session = D
     return {"status": "stagnation_exit_disabled"}
 
 
+@app.post("/breakeven-stop/enable")
+def breakeven_stop_enable(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """this session ("breakeven stop is dead code — fix it"): turn on
+    orders/breakeven.py::run_breakeven_stop — once an OPEN position's
+    unrealized gain crosses its recorded breakeven_trigger_pct (40% of
+    target by default, see orders/adaptive.py's BREAKEVEN_FRAC), its
+    STOP_LOSS_LEG is moved to entry_price so a subsequent reversal gives
+    back at most a wash instead of the full loss/gain swing. DB-backed
+    (gate row), so this takes effect on the next fast-reconcile tick — no
+    restart needed. Off by default — this modifies a live stop-loss order
+    on a real position, so it should only start firing once explicitly
+    turned on here."""
+    gate = _get_gate(db)
+    gate.breakeven_stop_enabled = True
+    db.commit()
+    logger.warning(
+        "position-stocks-service: BREAKEVEN-STOP ENABLED (trigger=%.0f%% of target)",
+        adaptive.BREAKEVEN_FRAC * 100,
+    )
+    return {"status": "breakeven_stop_enabled"}
+
+
+@app.post("/breakeven-stop/disable")
+def breakeven_stop_disable(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """Turn off the breakeven-stop management — stops stay exactly where
+    orders/entry.py originally placed them for the rest of each position's
+    life (target/stop/EOD/stagnation-exit logic is entirely unaffected
+    either way)."""
+    gate = _get_gate(db)
+    gate.breakeven_stop_enabled = False
+    db.commit()
+    logger.warning("position-stocks-service: BREAKEVEN-STOP DISABLED")
+    return {"status": "breakeven_stop_disabled"}
+
+
 @app.post("/cycle/run")
 async def cycle_run(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Force one scan+entry cycle right now, bypassing the 10s timer and
@@ -1201,6 +1266,11 @@ def positions(db: Session = Depends(get_db)):
             "stop_price": r.stop_price,
             "adaptive_target_pct": r.adaptive_target_pct,
             "adaptive_stop_pct": r.adaptive_stop_pct,
+            # this session: expose the breakeven-stop bookkeeping so the
+            # dashboard can show whether/where this position's stop will
+            # move (or already moved) — see orders/breakeven.py.
+            "breakeven_trigger_pct": r.breakeven_trigger_pct,
+            "stop_moved_to_breakeven": r.stop_moved_to_breakeven,
             "realized_pnl": r.realized_pnl,
             "realized_pnl_pct": r.realized_pnl_pct,
             # Live, OPEN-position-only fields (None for closed rows/rows

@@ -581,6 +581,8 @@ export default function PositionStocksTab() {
       else if (action === "autopilot_disable") await positionStocksApi.autopilotDisable();
       else if (action === "stagnation_exit_enable") await positionStocksApi.stagnationExitEnable();
       else if (action === "stagnation_exit_disable") await positionStocksApi.stagnationExitDisable();
+      else if (action === "breakeven_stop_enable") await positionStocksApi.breakevenStopEnable();
+      else if (action === "breakeven_stop_disable") await positionStocksApi.breakevenStopDisable();
       else if (action === "run_cycle") { const r = await positionStocksApi.runCycle(); setLastCycleResult(r); }
       await loadAll();
     } catch (e: any) {
@@ -913,6 +915,7 @@ export default function PositionStocksTab() {
           { label: "Module", value: status?.service_enabled ? "ENABLED" : "PAUSED", color: status?.service_enabled ? "text-signal-buy" : "text-signal-avoid" },
           { label: "Auto-Pilot", value: status?.auto_pilot_enabled ? "ON" : "OFF", color: status?.auto_pilot_enabled ? "text-signal-buy" : "text-signal-hold" },
           { label: "Stagnation Exit", value: status?.stagnation_exit_enabled ? "ON" : "OFF", color: status?.stagnation_exit_enabled ? "text-signal-buy" : "text-signal-hold" },
+          { label: "Breakeven Stop", value: status?.breakeven_stop_enabled ? "ON" : "OFF", color: status?.breakeven_stop_enabled ? "text-signal-buy" : "text-signal-hold" },
         ].map(({ label, value, color }) => (
           <div key={label} className="bg-graphite border border-slate rounded-2xl p-3">
             <p className="text-[9px] text-mist uppercase tracking-widest mb-1">{label}</p>
@@ -1093,6 +1096,12 @@ export default function PositionStocksTab() {
           for {status.pipeline_config?.stagnation_exit_minutes ?? "?"}m closes early to free capital for a better candidate.
         </div>
       )}
+      {status?.breakeven_stop_enabled && (
+        <div className="rounded-xl border border-signal-prepare/40 bg-signal-prepare/10 px-3 py-2 font-display tabular-nums text-[11px] text-signal-prepare">
+          Breakeven Stop ON — once an open position's unrealized gain reaches {((status.pipeline_config?.breakeven_frac ?? 0.4) * 100).toFixed(0)}%
+          of its target, its stop-loss is moved up to entry price to lock in a wash on any reversal.
+        </div>
+      )}
 
       <LivePipelineStatus live={pipelineLive} />
 
@@ -1135,6 +1144,20 @@ export default function PositionStocksTab() {
         <button disabled={!loggedIn || busy !== null || !status?.stagnation_exit_enabled} onClick={() => doAction("stagnation_exit_disable")}
           className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-paper disabled:opacity-40">
           {busy === "stagnation_exit_disable" ? "Disabling…" : "Disable Stagnation Exit"}
+        </button>
+        {/* this session ("breakeven stop is dead code — fix it"): DB-backed
+            toggle for the breakeven-stop management — see
+            orders/breakeven.py::run_breakeven_stop's docstring. Off by
+            default; once an OPEN position's unrealized gain crosses its
+            recorded trigger % (orders/adaptive.py's BREAKEVEN_FRAC, 40% of
+            target by default) its stop-loss leg is moved up to entry price. */}
+        <button disabled={!loggedIn || busy !== null || !!status?.breakeven_stop_enabled} onClick={() => doAction("breakeven_stop_enable")}
+          className="px-4 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 font-display tabular-nums text-xs text-signal-buy disabled:opacity-40">
+          {busy === "breakeven_stop_enable" ? "Enabling…" : "Enable Breakeven Stop"}
+        </button>
+        <button disabled={!loggedIn || busy !== null || !status?.breakeven_stop_enabled} onClick={() => doAction("breakeven_stop_disable")}
+          className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-paper disabled:opacity-40">
+          {busy === "breakeven_stop_disable" ? "Disabling…" : "Disable Breakeven Stop"}
         </button>
         <button disabled={!loggedIn || busy !== null || !status?.armed || !status?.service_enabled} onClick={() => doAction("run_cycle")}
           className="px-4 py-2 rounded-xl bg-signal-prepare/20 border border-signal-prepare/40 font-display tabular-nums text-xs text-signal-prepare disabled:opacity-40">
@@ -1967,7 +1990,18 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
           {fmtInr(p.entry_price * p.quantity)}{p.exit_price != null ? ` → ${fmtInr(p.exit_price * p.quantity)}` : ""}
         </span></div>
         <div><span className="text-mist">Target </span><span className="tabular-nums text-signal-buy">₹{p.target_price.toFixed(2)} <span className="text-[9px]">({p.adaptive_target_pct.toFixed(1)}%)</span></span></div>
-        <div><span className="text-mist">Stop </span><span className="tabular-nums text-signal-sell">₹{p.stop_price.toFixed(2)} <span className="text-[9px]">({p.adaptive_stop_pct.toFixed(1)}%)</span></span></div>
+        <div><span className="text-mist">Stop </span><span className="tabular-nums text-signal-sell">₹{p.stop_price.toFixed(2)} <span className="text-[9px]">({p.adaptive_stop_pct.toFixed(1)}%)</span></span>
+          {/* this session: shows whether/where breakeven-stop will move
+              (or already moved) this position's stop — see
+              orders/breakeven.py. Only rendered when a trigger was
+              actually recorded (positions predating the feature have
+              none — see models.py comment). */}
+          {p.breakeven_trigger_pct != null && (
+            <span className={`ml-1 text-[9px] ${p.stop_moved_to_breakeven ? "text-signal-buy" : "text-mist"}`}>
+              {p.stop_moved_to_breakeven ? "🔒 breakeven" : `BE@${p.breakeven_trigger_pct.toFixed(0)}%`}
+            </span>
+          )}
+        </div>
       </div>
       {/* AUDIT ADD (session60): live current price / unrealized P&L for an
           OPEN position — mirrors real-trade-service's Positions tab, which

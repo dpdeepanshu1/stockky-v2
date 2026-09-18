@@ -173,6 +173,19 @@ _COLUMN_MIGRATIONS = [
     # scalp_gate_state column above, needed so an already-deployed table
     # picks it up on next boot.
     ("scalp_gate_state", "retention_cleanup_last_run_date", "VARCHAR2(10)", "VARCHAR(10)", None, None),
+    # this session: breakeven_stop_enabled added to ScalpGateState (see
+    # models.py comment) — same idempotent ALTER TABLE pattern as
+    # stagnation_exit_enabled above.
+    ("scalp_gate_state", "breakeven_stop_enabled", "NUMBER(1)", "BOOLEAN", "0", "FALSE"),
+    # this session: breakeven_trigger_pct/stop_moved_to_breakeven added to
+    # ScalpPosition (see models.py comment). No prior scalp_positions
+    # migration tuples exist in this list because every earlier column
+    # added to that table happened to land before any production deploy of
+    # this table existed yet — these two are the first to need one on an
+    # already-deployed table, so they're added here rather than assumed to
+    # arrive via create_all() alone.
+    ("scalp_positions", "breakeven_trigger_pct", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    ("scalp_positions", "stop_moved_to_breakeven", "NUMBER(1)", "BOOLEAN", "0", "FALSE"),
     ("scalp_candidate_log", "fundamental_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "technical_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "market_cap_cr", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),

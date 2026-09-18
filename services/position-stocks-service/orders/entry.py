@@ -289,6 +289,10 @@ def attempt_entry(
         # FIX (session70): raise instead of returning None so _run_cycle()
         # can fall through to the next quality-passing candidate — the pool
         # may afford a cheaper stock even when it can't afford this one.
+        # Release the symbol lock first — same as every other early-return
+        # skip path above; leaving it held would block the next cycle from
+        # even considering this symbol as a candidate.
+        shared_symbol_lock.release(db, candidate.symbol)
         raise InsufficientCapitalSkip(
             f"{candidate.symbol}: INSUFFICIENT_CAPITAL — pool cannot size a position"
         )

@@ -479,18 +479,25 @@ def kv_set(key: str, value: Any, ttl: Optional[int] = None) -> None:
 
 
 def kv_get_stale(key: str) -> Any:
-    """Read a value from Neon even if its TTL has expired — for cold-start
-    stale-serve patterns where returning slightly stale data is far better
-    than triggering a full synchronous rebuild.  Memory cache is checked
-    first (fast path); if absent, Neon is queried WITHOUT the expiry check
-    so a recently-expired entry is still returned.  The caller is responsible
-    for scheduling a background refresh after serving the stale result.
-    Returns None only when the key is genuinely absent from both layers."""
+    """Read a value from the durable store even if its TTL has expired — for
+    cold-start stale-serve patterns where returning slightly stale data is far
+    better than triggering a full synchronous rebuild.
+
+    Works with both Oracle Autonomous DB (oracle+oracledb, CLOB v column) and
+    Neon/Postgres (TEXT v column).  The Oracle engine is built via
+    build_oracle_engine() which calls _configure_oracle_lobs() so CLOB columns
+    already come back as plain Python strings.  A defensive .read() guard is
+    kept for safety against edge cases in older oracledb builds.
+
+    Memory cache is checked first (fast path); if absent, the DB is queried
+    WITHOUT the expiry check so a recently-expired entry is still returned.
+    The caller is responsible for scheduling a background refresh after serving
+    the stale result.  Returns None only when the key is genuinely absent."""
     # 1. Memory fast path (still valid TTL)
     val = _mem.get(key)
     if val is not None:
         return val
-    # 2. Neon — ignore expires_at (stale-serve)
+    # 2. DB — ignore expires_at (stale-serve); works on Oracle + Postgres
     eng = _get_neon()
     if not eng:
         return None
@@ -503,15 +510,24 @@ def kv_get_stale(key: str) -> Any:
             ).fetchone()
             if not row:
                 return None
+            raw = row[0]
+            # Defensive LOB read for Oracle — fetch_lobs=False should already
+            # return a str, but guard against edge cases (older oracledb builds,
+            # thin-mode) by calling .read() if it is not a str/bytes.
+            if raw is not None and not isinstance(raw, (str, bytes, bytearray)):
+                try:
+                    raw = raw.read()
+                except Exception:
+                    raw = str(raw)
             try:
-                val = json.loads(row[0])
+                val = json.loads(raw)
             except Exception:
-                val = row[0]
-            # Warm memory briefly so concurrent callers don't all hit Neon
+                val = raw
+            # Warm memory briefly so concurrent callers don't all hit the DB
             _mem.set(key, val, ttl=120)
             return val
     except Exception as e:
-        logger.debug("neon get_stale %s: %s", key, e)
+        logger.debug("db get_stale %s: %s", key, e)
         return None
 
 

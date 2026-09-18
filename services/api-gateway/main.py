@@ -289,7 +289,13 @@ import time as _time_mod
 
 WATCHLIST_KEY       = "stockky:watchlist"
 SEARCHED_KEY        = "stockky:searched_symbols"
-SCAN_UNIVERSE_KEY   = "stockky:scan_universe"
+SCAN_UNIVERSE_KEY         = "stockky:scan_universe"
+# Separate long-lived stale-serve safety net — written with a 4h TTL every
+# time a fresh universe is built, never cleared by /scan/universe/cache,
+# so real-trade-service always has something to serve on a cold restart even
+# if the 30-min live key has expired.  Prefix "stockky:scan_universe" keeps
+# it in kv_cache's _DURABLE_PREFIXES so it persists in Neon across restarts.
+SCAN_UNIVERSE_STALE_KEY   = "stockky:scan_universe:stale_fallback"
 IPO_CACHE_KEY       = "stockky:ipos:recent"
 KNOWN_SYMBOLS_KEY   = "stockky:known_symbols"
 SCAN_TASK_PREFIX    = "stockky:scan_task:"
@@ -1674,6 +1680,25 @@ def _filter_symbols_under_max_price(symbols: List[str]) -> List[str]:
 
 # ── Build scan universe ──────────────────────────────────────────────────────
 def _build_scan_universe() -> List[str]:
+    # ── 2026-09-18 fix: stale-serve on cold-start ─────────────────────────
+    # Before this fix _build_scan_universe() had a 30-min in-market TTL on
+    # SCAN_UNIVERSE_KEY.  After a container restart the memory cache is wiped
+    # and Neon's copy may also be expired, so every first call of the day paid
+    # the full synchronous rebuild cost (~20-30s) — long enough to trip
+    # real-trade-service's 25s client timeout and lose the whole first cycle.
+    #
+    # Fix: if the normal (TTL-respecting) cache miss occurs, try a *stale* read
+    # from Neon (kv_cache.kv_get_stale — ignores expires_at). If we get
+    # anything back, serve it immediately AND set SCAN_UNIVERSE_STALE_SERVED so
+    # the background pre-warm in _warm_momentum_movers_cache() (startup hook)
+    # knows to kick off a real rebuild.  The stale result is always < 6h old
+    # (off-market TTL) so the data is perfectly usable for the first cycle.
+    # Real-trade-service gets a fast response; the rebuild runs concurrently.
+    #
+    # The stale copy is also written with a very long TTL (4h) every time a
+    # fresh universe is built (see the _redis_set call near the end of this
+    # function) under SCAN_UNIVERSE_STALE_KEY, kept separate from the short-TTL
+    # live key so a hard cache-clear never wipes the safety net.
 
     cached = _redis_get(SCAN_UNIVERSE_KEY)
     if cached and isinstance(cached, list) and len(cached) > 0:
@@ -1684,6 +1709,27 @@ def _build_scan_universe() -> List[str]:
         cached = _filter_equities(cached)
         # Always re-apply ≤₹5000 gate so a stale cache cannot reintroduce high-ticket names
         return _filter_symbols_under_max_price(cached)
+
+    # Live cache miss — try stale Neon read before paying full rebuild cost
+    if _kv_cache is not None:
+        try:
+            stale = _kv_cache.get_stale(SCAN_UNIVERSE_STALE_KEY)
+            if stale and isinstance(stale, list) and len(stale) > 0:
+                stale = _filter_equities(stale)
+                stale = _filter_symbols_under_max_price(stale)
+                if len(stale) >= 50:  # sanity: must be a real universe, not a stub
+                    logger.info(
+                        "scan_universe: live cache cold — serving %d-symbol stale copy "
+                        "from Neon (background rebuild will follow)",
+                        len(stale),
+                    )
+                    # Write it back into the live cache with a short TTL so the
+                    # next caller inside the same cycle doesn't also hit Neon,
+                    # AND so the background rebuild naturally overwrites it soon.
+                    _redis_set(SCAN_UNIVERSE_KEY, stale, ttl=300)
+                    return stale
+        except Exception as _stale_e:
+            logger.debug("scan_universe stale-read failed (non-fatal): %s", _stale_e)
 
     universe = set()
     try:
@@ -1862,6 +1908,16 @@ def _build_scan_universe() -> List[str]:
         ttl = 3600
     result = _filter_symbols_under_max_price(result)
     _redis_set(SCAN_UNIVERSE_KEY, result, ttl=ttl)
+    # 2026-09-18 fix: also write a long-lived stale-fallback copy so a restart
+    # that finds the 30-min live key expired can still serve something fast
+    # instead of doing a full synchronous rebuild.  4h TTL covers any realistic
+    # gap between a forced restart and the next scheduled background rebuild.
+    # This key is in kv_cache._DURABLE_PREFIXES ("stockky:scan_universe"
+    # prefix) so it lands in Neon and survives process restarts.
+    try:
+        _redis_set(SCAN_UNIVERSE_STALE_KEY, result, ttl=14400)  # 4h
+    except Exception as _se:
+        logger.debug("scan_universe stale-key write failed (non-fatal): %s", _se)
     logger.info(
         "Scan universe built: %s symbols (dynamic=%s, ttl=%ss, ≤₹%.0f gate)",
         len(result),
@@ -6163,8 +6219,68 @@ def get_market_indices(force_refresh: bool = False):
 
 # ── Universe preview + ≤ ₹5000 pre-filter ─────────────────────────────────
 @app.get("/scan/universe")
-def get_scan_universe():
-    universe = _build_scan_universe()  # already ≤₹5000 filtered
+async def get_scan_universe(cached: bool = False):
+    # 2026-09-18 fix: added `cached` query param (mirrors /surprise/scan).
+    # When cached=true, real-trade-service gets a sub-second response on any
+    # warm or stale hit — it only pays the full rebuild cost when both the
+    # live Neon key AND the stale-fallback key are completely absent (i.e. the
+    # very first ever build on a brand-new deployment, not a routine restart).
+    # Callers: candidate_engine/candidates.py already passes ?cached=true for
+    # its /surprise/scan call; same pattern applied here so the same client
+    # timeout (25s) is safe even right after a restart.
+    if cached:
+        # Try live cache first (may already be warm from pre-warm task)
+        live = _redis_get(SCAN_UNIVERSE_KEY)
+        if live and isinstance(live, list) and len(live) > 0:
+            live = _filter_equities(live)
+            live = _filter_symbols_under_max_price(live)
+            if len(live) >= 50:
+                searched = _load_searched()
+                movers = _get_momentum_movers()
+                return {
+                    "total": len(live),
+                    "symbols": live,
+                    "searched_symbols_included": [s for s in searched if s in live],
+                    "momentum_movers": movers,
+                    "max_price": MAX_UNIVERSE_PRICE,
+                    "cached": True,
+                }
+        # Live cache cold — try stale Neon fallback
+        if _kv_cache is not None:
+            try:
+                stale = _kv_cache.get_stale(SCAN_UNIVERSE_STALE_KEY)
+                if stale and isinstance(stale, list) and len(stale) >= 50:
+                    stale = _filter_equities(stale)
+                    stale = _filter_symbols_under_max_price(stale)
+                    if len(stale) >= 50:
+                        # Repopulate live key (short TTL) so next caller is fast
+                        _redis_set(SCAN_UNIVERSE_KEY, stale, ttl=300)
+                        # Kick off background rebuild so data freshens soon
+                        try:
+                            asyncio.create_task(asyncio.to_thread(_build_scan_universe))
+                        except Exception:
+                            pass
+                        searched = _load_searched()
+                        movers = _get_momentum_movers()
+                        logger.info(
+                            "scan/universe: served %d-symbol stale fallback (background rebuild scheduled)",
+                            len(stale),
+                        )
+                        return {
+                            "total": len(stale),
+                            "symbols": stale,
+                            "searched_symbols_included": [s for s in searched if s in stale],
+                            "momentum_movers": movers,
+                            "max_price": MAX_UNIVERSE_PRICE,
+                            "cached": True,
+                            "stale": True,
+                        }
+            except Exception as _se:
+                logger.debug("scan/universe cached stale-read failed: %s", _se)
+        # Both caches cold — fall through to full build (first-ever deployment)
+        logger.info("scan/universe: both caches cold, running full synchronous build")
+
+    universe = await asyncio.to_thread(_build_scan_universe)  # already ≤₹5000 filtered
     searched = _load_searched()
     movers = _get_momentum_movers()
     return {

@@ -478,6 +478,43 @@ def kv_set(key: str, value: Any, ttl: Optional[int] = None) -> None:
         _neon_set(key, value, ttl=ttl)
 
 
+def kv_get_stale(key: str) -> Any:
+    """Read a value from Neon even if its TTL has expired — for cold-start
+    stale-serve patterns where returning slightly stale data is far better
+    than triggering a full synchronous rebuild.  Memory cache is checked
+    first (fast path); if absent, Neon is queried WITHOUT the expiry check
+    so a recently-expired entry is still returned.  The caller is responsible
+    for scheduling a background refresh after serving the stale result.
+    Returns None only when the key is genuinely absent from both layers."""
+    # 1. Memory fast path (still valid TTL)
+    val = _mem.get(key)
+    if val is not None:
+        return val
+    # 2. Neon — ignore expires_at (stale-serve)
+    eng = _get_neon()
+    if not eng:
+        return None
+    try:
+        from sqlalchemy import text
+        with eng.connect() as conn:
+            row = conn.execute(
+                text("SELECT v FROM stockky_kv WHERE k = :k"),
+                {"k": key},
+            ).fetchone()
+            if not row:
+                return None
+            try:
+                val = json.loads(row[0])
+            except Exception:
+                val = row[0]
+            # Warm memory briefly so concurrent callers don't all hit Neon
+            _mem.set(key, val, ttl=120)
+            return val
+    except Exception as e:
+        logger.debug("neon get_stale %s: %s", key, e)
+        return None
+
+
 def kv_delete(key: str) -> None:
     _mem.delete(key)
     r = _get_redis()
@@ -702,6 +739,12 @@ def kv_get_many(keys: list) -> dict:
 # Module-level API expected by api-gateway: _kv_cache.get / _kv_cache.set
 def get(key: str) -> Any:
     return kv_get(key)
+
+
+def get_stale(key: str) -> Any:
+    """Stale-read variant — returns Neon value even when TTL has expired.
+    Use for cold-start fallback before scheduling a background refresh."""
+    return kv_get_stale(key)
 
 
 def set(key: str, value: Any, ttl: Optional[int] = None) -> None:  # noqa: A001

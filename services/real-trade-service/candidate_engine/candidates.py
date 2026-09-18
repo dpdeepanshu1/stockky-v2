@@ -201,7 +201,12 @@ _SOURCES = {
     # Raw candidate symbols only (no score/decision on this endpoint's
     # payload) — quality gating for this track happens entirely inside
     # _volume_shock_analysis() below, not via a source-provided score.
-    "volume_shock": "/scan/universe",
+    # 2026-09-18 fix: ?cached=true added — mirrors the /surprise/scan pattern.
+    # api-gateway now serves /scan/universe?cached=true from a durable Neon
+    # stale-fallback key (SCAN_UNIVERSE_STALE_KEY) that survives restarts, so
+    # this call returns in <1s even right after a container restart instead of
+    # triggering a full 20-30s synchronous rebuild that blows the 25s timeout.
+    "volume_shock": "/scan/universe?cached=true",
 }
 
 # ── Option A (Issue 1 fix) — momentum-breakout track thresholds ─────────────

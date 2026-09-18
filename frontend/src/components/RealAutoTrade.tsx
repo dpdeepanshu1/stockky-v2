@@ -741,7 +741,19 @@ function PortfolioSummary({
   const totalPnl = realized + unrealized;
   // P&L % is based on invested capital (open positions only), not equity
   const unrealizedPct = invested > 0 ? (unrealized / invested) * 100 : 0;
-  const totalPnlPct = invested > 0 ? (totalPnl / invested) * 100 : 0;
+  // AUDIT FIX (session67 — live case: showed -25.5% off a -₹1,429 all-time
+  // realized loss): this used to divide totalPnl (realized-all-time +
+  // unrealized-today) by `invested`, but `invested` is only the capital
+  // sitting in TODAY's open positions — realized P&L came from trades whose
+  // capital was already closed out and returned to cash long ago, so it has
+  // no relationship to today's invested amount. Concretely: -₹1,429 / ₹5,613
+  // (today's 3 open positions) read as a -25.5% loss, when the actual
+  // all-time return on the capital this engine has ever traded with is
+  // -₹1,429 / ₹12,305 (startingCapital) ≈ -11.6%. unrealizedPct above is
+  // correctly left on `invested` — unrealized P&L genuinely only concerns
+  // currently-open capital — only totalPnlPct (which mixes in all-time
+  // realized P&L) needed to move to startingCapital as its denominator.
+  const totalPnlPct = startingCapital && startingCapital > 0 ? (totalPnl / startingCapital) * 100 : 0;
 
   // Deposits made outside this engine = equity growth not from trading
   const depositsOutside =

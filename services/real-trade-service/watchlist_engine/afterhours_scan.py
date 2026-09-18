@@ -728,19 +728,43 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
                 feed["source"], stale_dropped, config.AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS,
             )
 
-    # RSS-derived symbols are extracted with a regex + small whitelist —
-    # confirm each is a real, quotable NSE equity before it can reach
-    # NextDayWatchlistEntry (and from there, _prepick → TradeCandidate).
+    # RSS-derived symbols: if known_symbols (NSE master, 2681 symbols) is
+    # available, every symbol in `best` already passed _extract_symbol's
+    # membership check — they're confirmed real NSE-EQ tickers.  A secondary
+    # live-quote check (_validate_symbols → get_preview_quotes → /quote/…)
+    # is WRONG here: NSE is closed during the 15:45–08:45 afterhours window,
+    # so yfinance returns null/stale prices for many mid/small-cap symbols
+    # (no pre-market NSE data), causing real, valid tickers to be dropped as
+    # "unconfirmed" on every overnight scan tick.
+    #
+    # 2026-09-18 fix (session67): when known_symbols is populated, skip the
+    # live-quote validation entirely — symbol-master membership is the correct
+    # gate here.  Fall back to the live-quote check only when the master itself
+    # is unavailable (known_symbols is empty), which means _extract_symbol
+    # already fell back to the old whitelist+heuristic path — in that case the
+    # live-quote check is still a useful second filter.
     rss_symbols = list(best.keys())
-    confirmed = await _validate_symbols(rss_symbols)
-    dropped = [s for s in rss_symbols if s not in confirmed]
-    if dropped:
-        logger.info(
-            "afterhours-scan [%s %s]: dropped %d unconfirmed symbol(s): %s",
-            mode, market_date, len(dropped), dropped,
+    if known_symbols:
+        # All symbols already confirmed against the real NSE-EQ universe above.
+        # No secondary quote-check needed — and it would be wrong afterhours.
+        logger.debug(
+            "afterhours-scan [%s %s]: %d RSS symbol(s) confirmed via symbol-master (live-quote check skipped — afterhours)",
+            mode, market_date, len(rss_symbols),
         )
-        for s in dropped:
-            best.pop(s, None)
+    else:
+        # Fallback path: symbol master was unavailable so _extract_symbol used
+        # the old whitelist+heuristic.  Live-quote check is the only secondary
+        # filter we have in that degraded state.
+        confirmed = await _validate_symbols(rss_symbols)
+        dropped = [s for s in rss_symbols if s not in confirmed]
+        if dropped:
+            logger.info(
+                "afterhours-scan [%s %s]: dropped %d unconfirmed symbol(s) "
+                "(fallback path — symbol-master was unavailable): %s",
+                mode, market_date, len(dropped), dropped,
+            )
+            for s in dropped:
+                best.pop(s, None)
 
     # Bulk/block-deal hits come pre-resolved by api-gateway — merge in,
     # keeping the higher score if a symbol also had an RSS hit.
@@ -806,6 +830,34 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
         "afterhours-scan [%s %s]: %d symbol(s) scored → %d rows upserted",
         mode, market_date, len(best), written,
     )
+
+    # ── Telegram notification (2026-09-18 fix, session67) ────────────────────
+    # Notify on every scan tick (auto or manual) with what was found/updated.
+    # Best-effort — a Telegram failure must never fail the scan.
+    try:
+        from notifier import notify_async
+        # Sort by score descending for the notification summary
+        sorted_hits = sorted(best.items(), key=lambda kv: kv[1]["score"], reverse=True)
+        lines = [f"📡 *After-hours scan — {mode}* ({market_date})"]
+        if written:
+            lines.append(f"{written} row(s) new/updated · {len(best)} total scored this pass\n")
+        else:
+            lines.append(f"No new rows — {len(best)} symbol(s) already at best score\n")
+        for sym, hit in sorted_hits[:8]:  # top 8 in notification
+            cat_icon = {"results": "📊", "bulk_block": "🏦", "board": "🗂️", "insider": "👤", "news": "📰"}.get(
+                hit["catalyst_type"], "📰"
+            )
+            lines.append(
+                f"{cat_icon} *{sym}* · score {hit['score']:.0f} · {hit['catalyst_type']} · {hit['source']}"
+            )
+            # Truncate headline to keep message readable
+            hl = hit.get("headline", "")
+            if hl:
+                lines.append(f"   _{hl[:80]}{'…' if len(hl) > 80 else ''}_")
+        await notify_async("\n".join(lines))
+    except Exception:
+        logger.debug("afterhours-scan: Telegram notification failed (non-fatal)", exc_info=True)
+
     return written
 
 
@@ -837,4 +889,30 @@ async def finalize_nextday_watchlist(db, mode: str, market_date: str) -> list[st
         "afterhours-scan finalize [%s %s]: keeping top %d → %s (discarded %d)",
         mode, market_date, len(keep), shortlist, len(discard),
     )
+
+    # ── Telegram finalize notification (2026-09-18 fix, session67) ───────────
+    # Sent once at 08:45 with the final shortlist and full details per symbol.
+    # This is the actionable pre-open summary — shows what _prepick will use.
+    try:
+        from notifier import notify_async
+        lines = [
+            f"🔔 *After-hours watchlist FINALIZED — {mode}*",
+            f"Market date: {market_date}",
+            f"Top {len(keep)} candidate(s) for today's open (discarded {len(discard)}):\n",
+        ]
+        for i, r in enumerate(keep, 1):
+            cat_icon = {"results": "📊", "bulk_block": "🏦", "board": "🗂️", "insider": "👤", "news": "📰"}.get(
+                r.catalyst_type, "📰"
+            )
+            lines.append(
+                f"{i}. {cat_icon} *{r.symbol}* — score {r.priority_score:.0f} "
+                f"[{r.catalyst_type}·{r.catalyst_source}]"
+            )
+            if r.headline:
+                lines.append(f"   _{r.headline[:90]}{'…' if len(r.headline) > 90 else ''}_")
+        lines.append("\n_These will be injected as overnight-priority candidates at 09:00 IST._")
+        await notify_async("\n".join(lines))
+    except Exception:
+        logger.debug("afterhours-scan finalize: Telegram notification failed (non-fatal)", exc_info=True)
+
     return shortlist

@@ -1217,6 +1217,9 @@ def positions(db: Session = Depends(get_db)):
             "dhan_super_order_id": r.dhan_super_order_id,
             "dhan_entry_order_id": r.dhan_entry_order_id,
             "dhan_exit_order_id": r.dhan_exit_order_id,
+            # this session: same reasoning as /trades/history's error_message
+            # field — "<STATUS>_PENDING_RECONCILE..." means not yet resolved.
+            "error_message": r.error_message,
         })
     return out
 
@@ -1291,6 +1294,13 @@ def trades_history(
                 "dhan_super_order_id": r.dhan_super_order_id,
                 "dhan_entry_order_id": r.dhan_entry_order_id,
                 "dhan_exit_order_id": r.dhan_exit_order_id,
+                # this session: exposed so a "_PENDING_RECONCILE" sentinel
+                # here is visible from the API — reconcile.py clears this to
+                # None once it successfully backfills the real fill price/
+                # P&L (see _reconcile_eod_pending); if it still reads
+                # "<STATUS>_PENDING_RECONCILE..." the row is stuck, not
+                # genuinely resolved, regardless of what exit_price shows.
+                "error_message": r.error_message,
             }
             for r in rows
         ],

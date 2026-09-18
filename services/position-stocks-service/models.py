@@ -318,3 +318,30 @@ class ScalpIntradayRestrictedSecurity(Base):
     last_detected_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
     hit_count = Column(Integer, nullable=False, default=1)
     last_detail = Column(String(255), nullable=True)
+
+
+class ScalpQualityCache(Base):
+    """Last-known-good quality-gate scores per symbol (session68).
+
+    WHY THIS EXISTS: screening/quality_gate.py is fail-open by design — a
+    timeout or non-200 from analysis-intelligence-service leaves a field
+    None, treated as "unknown = pass". Confirmed root cause of MANGALAM /
+    GEEKAYWIRE / JISLJALEQS (all ₹30-32, thin liquidity) getting entered
+    on 2026-09-17 despite the MIN_MARKET_CAP_CR=500cr floor: the fetch
+    for those symbols almost certainly timed out and the gate waved them
+    through blind. This table lets a live timeout fall back to the last
+    value this service actually fetched successfully for that symbol,
+    instead of blind None — see quality_gate.get_cache_batch/
+    upsert_cache_batch and check()'s `cached` param. A symbol with no
+    prior successful fetch still fails open the first time, same as
+    before — this only removes the blind spot for repeat offenders,
+    which MANGALAM/GEEKAYWIRE/JISLJALEQS-class names (scanned every
+    cycle, same low-liquidity names showing up repeatedly) are.
+    """
+    __tablename__ = "scalp_quality_cache"
+
+    symbol = Column(String(32), primary_key=True)
+    fundamental_score = Column(Float, nullable=True)
+    technical_score = Column(Float, nullable=True)
+    market_cap_cr = Column(Float, nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)

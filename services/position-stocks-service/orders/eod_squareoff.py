@@ -23,7 +23,7 @@ from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
 from screening import intraday_eligibility
-from tz_utils import ist_today_str
+from tz_utils import as_aware, ist_today_str
 
 logger = logging.getLogger("position-stocks-eod")
 
@@ -367,7 +367,7 @@ class ManualCloseRejected(Exception):
     as entry.py's ManualEntryRejected."""
 
 
-def close_position_now(db: Session, pos: ScalpPosition) -> dict:
+def close_position_now(db: Session, pos: ScalpPosition, exit_reason: str = "MANUAL_EXIT") -> dict:
     """Manual override — flatten ONE open scalp position immediately, any
     time of day, independent of whether its own bracket target/stop would
     currently trigger. This is the "manual exit if needed" feature (no
@@ -396,7 +396,17 @@ def close_position_now(db: Session, pos: ScalpPosition) -> dict:
     Raises ManualCloseRejected with a human-readable reason if the
     position isn't in a closeable state or Dhan rejects the flat SELL.
     Returns a small status dict on success (the real fill/P&L is not yet
-    known — same placeholder-then-reconcile flow as EOD squareoff)."""
+    known — same placeholder-then-reconcile flow as EOD squareoff).
+
+    `exit_reason` (session68): cosmetic only — labels the error_message
+    placeholder and the Telegram notification (e.g. "STAGNATION_EXIT" from
+    run_stagnation_exit() below) so the two call paths are distinguishable
+    in the dashboard/logs. pos.status is ALWAYS set to the literal
+    "MANUAL_EXIT" regardless — reconcile.py's _FLAT_SELL_PENDING_STATUSES
+    state machine matches on that exact string in several places, and
+    introducing a third status value there is a real risk to the exit-
+    reconciliation pipeline for no real benefit; the reason is preserved
+    in error_message and the notification instead."""
     if pos.status not in ("OPEN", "EXIT_LEGS_REJECTED"):
         raise ManualCloseRejected(f"Position is {pos.status} — nothing to close.")
 
@@ -451,12 +461,12 @@ def close_position_now(db: Session, pos: ScalpPosition) -> dict:
     ) or None
     shared_order_budget.record_order_unconditional(db)
 
-    pos.status = "MANUAL_EXIT"
+    pos.status = "MANUAL_EXIT"  # literal, always — see exit_reason note above
     pos.closed_at = datetime.now(timezone.utc)
     pos.exit_price = pos.entry_price   # placeholder — reconcile() will update, same as EOD squareoff
     pos.realized_pnl = 0.0
     pos.realized_pnl_pct = 0.0
-    pos.error_message = "MANUAL_EXIT_PENDING_RECONCILE: exit_price=entry_price placeholder until next reconcile pass fills in the real fill price."
+    pos.error_message = f"{exit_reason}_PENDING_RECONCILE: exit_price=entry_price placeholder until next reconcile pass fills in the real fill price."
     db.commit()
 
     ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=0.0)
@@ -464,13 +474,81 @@ def close_position_now(db: Session, pos: ScalpPosition) -> dict:
     # — reconcile.py's dead-status branch re-claims it if this SELL turns
     # out to have died with zero fill.
     shared_symbol_lock.release(db, pos.symbol)
-    logger.info("Manual exit: closed %s (id=%d) — awaiting broker fill confirmation", pos.symbol, pos.id)
+    logger.info("%s: closed %s (id=%d) — awaiting broker fill confirmation", exit_reason, pos.symbol, pos.id)
 
     from notifier import notify_sync
+    _label = "Manual EXIT sent" if exit_reason == "MANUAL_EXIT" else f"{exit_reason.replace('_', ' ').title()} sent"
     notify_sync(
-        f"📤 <b>Manual EXIT sent</b> — {pos.symbol} x{pos.quantity}\n"
+        f"📤 <b>{_label}</b> — {pos.symbol} x{pos.quantity}\n"
         f"Entry ₹{pos.entry_price:.2f} | Order {pos.dhan_exit_order_id or 'N/A'}\n"
         f"Awaiting broker fill confirmation."
     )
 
     return {"id": pos.id, "symbol": pos.symbol, "status": "pending_broker_confirmation"}
+
+
+def run_stagnation_exit(db: Session) -> int:
+    """session68, OFF by default (config.STAGNATION_EXIT_ENABLED).
+
+    Closes an OPEN position early if it has moved less than
+    STAGNATION_EXIT_BAND_PCT (either direction) from its entry price after
+    STAGNATION_EXIT_MINUTES — i.e. neither its target nor its stop is
+    anywhere close, and it isn't going to be. Frees that capital and its
+    MAX_CONCURRENT_SCALP_POSITIONS slot for a better candidate the SAME
+    session instead of parking it dead until the 15:00 EOD sweep.
+
+    Root cause this targets — 2026-09-17's trade history: MANGALAM,
+    GEEKAYWIRE and JISLJALEQS all sat inside a near-zero P&L band the
+    entire session and only ever closed via EOD_SQUAREOFF, while TREL
+    (fund=49, tech=78 — a real candidate) repeatedly hit
+    INSUFFICIENT_CAPITAL. Reusing close_position_now()'s proven cancel-
+    wait-sell + PENDING_RECONCILE path rather than a second exit
+    mechanism; tagged exit_reason="STAGNATION_EXIT" so it's distinguishable
+    from a true manual exit in error_message/notifications (pos.status
+    stays the literal "MANUAL_EXIT" — see close_position_now's docstring
+    for why). Intentionally does NOT touch EXIT_LEGS_REJECTED positions —
+    those are eod_squareoff's job, not this one's.
+    """
+    if not config.STAGNATION_EXIT_ENABLED:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    open_positions = db.query(ScalpPosition).filter(ScalpPosition.status == "OPEN").all()
+    closed = 0
+    for pos in open_positions:
+        try:
+            opened_at = as_aware(pos.opened_at)
+        except Exception:
+            continue
+        age_min = (now - opened_at).total_seconds() / 60.0
+        if age_min < config.STAGNATION_EXIT_MINUTES:
+            continue
+
+        try:
+            from feed import ws_client
+            buf = ws_client.get_tick_buffer(pos.symbol)
+            ltp = buf[-1][1] if buf else None
+        except Exception:
+            ltp = None
+        if ltp is None or ltp <= 0 or not pos.entry_price:
+            continue  # no live price to judge stagnation by — leave it to EOD/target/stop
+
+        pct_move = abs(ltp - pos.entry_price) / pos.entry_price * 100.0
+        if pct_move >= config.STAGNATION_EXIT_BAND_PCT:
+            continue  # moved meaningfully — target/stop logic already owns this case
+
+        try:
+            close_position_now(db, pos, exit_reason="STAGNATION_EXIT")
+            closed += 1
+            logger.info(
+                "STAGNATION_EXIT: %s (id=%d) closed after %.0fm flat within ±%.2f%% "
+                "(ltp=₹%.2f entry=₹%.2f) — freeing capital/slot",
+                pos.symbol, pos.id, age_min, config.STAGNATION_EXIT_BAND_PCT, ltp, pos.entry_price,
+            )
+        except ManualCloseRejected as e:
+            logger.info("STAGNATION_EXIT: %s (id=%d) skipped — %s", pos.symbol, pos.id, e)
+        except Exception as e:
+            logger.error(
+                "STAGNATION_EXIT: %s (id=%d) unexpected error: %s", pos.symbol, pos.id, e, exc_info=True,
+            )
+    return closed

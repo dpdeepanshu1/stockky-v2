@@ -264,6 +264,17 @@ async def _fast_reconcile_loop() -> None:
                     logger.error("position-stocks: fast-reconcile error: %s", e, exc_info=True)
                     continue
                 try:
+                    # session68, OFF by default (config.STAGNATION_EXIT_ENABLED)
+                    # — see orders/eod_squareoff.py::run_stagnation_exit's
+                    # docstring. Runs in the same fast loop as reconcile so a
+                    # stagnant position frees its capital/slot promptly
+                    # rather than waiting for the slower 10s screening cycle.
+                    n_stagnant = await asyncio.to_thread(eod_squareoff.run_stagnation_exit, db)
+                    if n_stagnant:
+                        logger.info("position-stocks: stagnation-exit closed %d position(s)", n_stagnant)
+                except Exception as e:
+                    logger.error("position-stocks: stagnation-exit error: %s", e, exc_info=True)
+                try:
                     gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
                     today = ist_today_str()
                     eod_fired = gate and gate.eod_squareoff_fired_date == today
@@ -574,7 +585,16 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     # couple-second-timeout best-effort GET (config.QUALITY_GATE_TIMEOUT_S),
     # so the extra network cost is small next to the latency win, and
     # matches this module's own "fail-open, always fast" design intent.
-    quality_results = await asyncio.gather(*(quality_gate.check(c.symbol) for c in top_n))
+    # session68: batch-read last-known-good scores BEFORE the async gather
+    # (synchronous DB read — never touched from inside check() itself), so
+    # a live timeout this cycle can fall back to real data instead of
+    # blind None. See screening/quality_gate.py's get_cache_batch/check.
+    _quality_cache = quality_gate.get_cache_batch(db, [c.symbol for c in top_n])
+    quality_results = await asyncio.gather(
+        *(quality_gate.check(c.symbol, cached=_quality_cache.get(c.symbol)) for c in top_n)
+    )
+    # Persist whatever WAS fetched live this cycle for next time's fallback.
+    quality_gate.upsert_cache_batch(db, quality_results)
     checked = []
     entered_candidate = None
     for candidate, quality in zip(top_n, quality_results):

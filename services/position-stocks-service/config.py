@@ -261,6 +261,38 @@ OVERNIGHT_MIN_MARKET_CAP_CR     = _get_float("OVERNIGHT_MIN_MARKET_CAP_CR", 2000
 # broker time to acknowledge the cancellation. 0 = no delay (original behaviour).
 MANUAL_EXIT_CANCEL_WAIT_S = _get_float("MANUAL_EXIT_CANCEL_WAIT_S", 0.5)
 
+# ── Quality-gate cache fallback (session68) ─────────────────────────────────
+# screening/quality_gate.py is fail-open, always — a timeout or non-200
+# leaves a field None, treated as "unknown = pass" (by design, so a slow
+# analysis-intelligence-service never blocks the scalp loop). Confirmed root
+# cause of MANGALAM/GEEKAYWIRE/JISLJALEQS (all ₹30-32, thin liquidity)
+# entering on 2026-09-17 despite the MIN_MARKET_CAP_CR floor. When a live
+# fetch is missing a field, the gate now falls back to the last value this
+# service successfully fetched for that symbol (models.ScalpQualityCache),
+# as long as it isn't older than QUALITY_CACHE_MAX_AGE_HOURS — live data
+# always wins when present; this only fills the gap on a timeout. A symbol
+# with no prior successful fetch (first time ever seen) still fails open,
+# unchanged — this removes the blind spot for repeat offenders only.
+QUALITY_CACHE_MAX_AGE_HOURS = _get_float("QUALITY_CACHE_MAX_AGE_HOURS", 48.0)
+
+# ── Stagnation early-exit (session68, OFF by default) ───────────────────────
+# 2026-09-17: MANGALAM/GEEKAYWIRE/JISLJALEQS all sat within a tiny P&L band
+# the entire session (target/stop never triggered) and only closed at 15:00
+# EOD squareoff, while TREL (fund=49, tech=78 — a genuinely decent
+# candidate) kept hitting INSUFFICIENT_CAPITAL / MAX_CONCURRENT_SCALP_
+# POSITIONS the whole day. A position that hasn't moved meaningfully in
+# STAGNATION_EXIT_MINUTES is dead capital with zero edge left — closing it
+# early frees that capital/slot for a better candidate the SAME session
+# instead of parking it until EOD for no reason. Opt-in: OFF by default
+# because it changes live trading behaviour (an early exit at breakeven
+# instead of letting a position run) — watch it manually before enabling.
+# STAGNATION_EXIT_BAND_PCT is the ± move (from entry) still considered
+# "flat"; a position that HAS moved past this band is left alone — target/
+# stop logic already owns that case.
+STAGNATION_EXIT_ENABLED = _get_bool("STAGNATION_EXIT_ENABLED", False)
+STAGNATION_EXIT_MINUTES = _get_float("STAGNATION_EXIT_MINUTES", 45.0)
+STAGNATION_EXIT_BAND_PCT = _get_float("STAGNATION_EXIT_BAND_PCT", 0.35)
+
 # ── Entry range-position hard gate (this session — "buy/sell timing ... not
 # high low aware or price aware") ───────────────────────────────────────────
 # screening/engine.py already applies a SOFT range-position penalty to

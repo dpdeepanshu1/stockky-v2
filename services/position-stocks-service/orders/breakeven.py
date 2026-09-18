@@ -114,14 +114,27 @@ def run_breakeven_stop(db: Session) -> int:
             if unrealized_gain_pct < pos.breakeven_trigger_pct:
                 continue  # not there yet
 
+            # 2026-09-18 audit fix: moving the stop to EXACTLY entry_price
+            # is not a true breakeven once brokerage/slippage on the exit
+            # SELL is accounted for — a position that round-trips back to
+            # entry after this stop moves still realizes a small net loss.
+            # Add a small buffer (config.BREAKEVEN_STOP_BUFFER_TICKS ticks,
+            # sized off entry_price's own NSE price band) above entry so a
+            # worst-case round-trip exit is closer to flat instead of a
+            # guaranteed small loss. Set BREAKEVEN_STOP_BUFFER_TICKS=0 to
+            # restore the original exact-entry behaviour.
+            entry_tick = dhan_client.tick_size_for_price(pos.entry_price)
+            buffered_entry = pos.entry_price + (entry_tick * config.BREAKEVEN_STOP_BUFFER_TICKS)
+            new_stop = dhan_client.round_to_tick(buffered_entry)
+
             # Same clamp orders/adaptive.py's compute() applies at entry
             # time (see that module's Step 6): Dhan rejects a BUY's
             # STOP_LOSS_LEG at or above the current market price. Since
             # unrealized_gain_pct >= breakeven_trigger_pct > 0 here,
-            # entry_price is already strictly below ltp before rounding —
-            # this only guards the rare case where tick-rounding collapses
-            # the two back together on a very low-priced stock.
-            new_stop = dhan_client.round_to_tick(pos.entry_price)
+            # entry_price (and thus the small buffer above it) is normally
+            # still strictly below ltp — this only guards the rare case
+            # where the buffer or tick-rounding pushes the two back
+            # together on a very low-priced / low-trigger stock.
             if new_stop >= ltp:
                 band = dhan_client.tick_size_for_price(ltp)
                 new_stop = dhan_client.round_to_tick(ltp - band)

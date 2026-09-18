@@ -639,12 +639,38 @@ def attempt_manual_entry(
     if current_ltp <= 0:
         raise ManualEntryRejected(f"No valid live price for {symbol}.")
 
+    symbol = symbol.strip().upper()
+
+    # AUDIT FIX (2026-09-18): shared_symbol_lock.try_claim() below returns
+    # True whenever the lock is already held by THIS service (an
+    # already-ours claim is treated as "not a conflict" — see its own
+    # docstring), so it never blocked a second manual BUY of a symbol this
+    # service already had an OPEN position in. This service has no
+    # pyramiding/averaging-in concept (unlike real-trade-service, which
+    # explicitly supports it) — MAX_CONCURRENT_SCALP_POSITIONS also counts
+    # positions, not distinct symbols, so two rows for the same symbol
+    # silently ate two slots of that cap instead of one. The automatic
+    # screener already excludes any symbol with an open position
+    # (screening/engine.py filters candidates against open ScalpPosition
+    # rows); this closes the same gap for the manual path.
+    existing_position = (
+        db.query(ScalpPosition)
+        .filter(ScalpPosition.symbol == symbol)
+        .filter(ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED")))
+        .first()
+    )
+    if existing_position is not None:
+        raise ManualEntryRejected(
+            f"{symbol} already has an open position here (id={existing_position.id}, "
+            f"status={existing_position.status}) — this service doesn't support "
+            "averaging in. Close the existing position first if you want to re-enter."
+        )
+
     # AUDIT FIX (session60): same cross-service symbol lock as attempt_entry()
     # — a manual BUY is exactly as capable of colliding with a
     # real-trade-service holding as an automatic one, and this is the
     # admin-facing path, so it gets an explicit rejection rather than a
     # silent skip.
-    symbol = symbol.strip().upper()
     if not shared_symbol_lock.try_claim(db, symbol):
         raise ManualEntryRejected(
             f"{symbol} is already held by real-trade-service on the shared Dhan "

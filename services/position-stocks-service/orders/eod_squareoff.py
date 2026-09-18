@@ -210,6 +210,23 @@ def run_eod_squareoff(db: Session) -> int:
                     except Exception:
                         pass  # leg may already be filled/cancelled — not fatal
 
+                # 2026-09-18 fix (this session): backport of session67's
+                # close_position_now() fix. Without this pause, the plain
+                # MARKET SELL fired below can race against a still-live
+                # TARGET_LEG or STOP_LOSS_LEG on Dhan's side, resulting in a
+                # rejected/double-fill or a position that appears closed in
+                # our DB but still has a live exit leg sitting at the
+                # broker. This is the highest-volume, least-supervised close
+                # path in the service (can flatten up to
+                # MAX_CONCURRENT_SCALP_POSITIONS positions unattended every
+                # trading day), so it needs the same protection that was
+                # already applied to manual/stagnation exits. Configurable
+                # via MANUAL_EXIT_CANCEL_WAIT_S; default 0.5s; set to 0 to
+                # restore the original no-wait behaviour.
+                wait_s = getattr(config, "MANUAL_EXIT_CANCEL_WAIT_S", 0.5)
+                if wait_s > 0:
+                    time.sleep(wait_s)
+
             # Always place a plain MARKET SELL to guarantee flat.
             #
             # AUDIT FIX (this session): this previously passed

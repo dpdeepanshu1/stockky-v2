@@ -296,6 +296,17 @@ QUALITY_CACHE_MAX_AGE_HOURS = _get_float("QUALITY_CACHE_MAX_AGE_HOURS", 48.0)
 STAGNATION_EXIT_MINUTES = _get_float("STAGNATION_EXIT_MINUTES", 45.0)
 STAGNATION_EXIT_BAND_PCT = _get_float("STAGNATION_EXIT_BAND_PCT", 0.35)
 
+# ── Breakeven stop buffer (2026-09-18 audit) ────────────────────────────────
+# orders/breakeven.py previously moved the STOP_LOSS_LEG to EXACTLY
+# entry_price when a position's unrealized gain crossed its trigger. A
+# position that then round-trips back to entry realizes a small NET LOSS
+# after brokerage/slippage on the exit SELL — not a true breakeven. Moving
+# the stop a couple of ticks above entry (still below the current price by
+# construction, same clamp orders/adaptive.py already applies) means a
+# worst-case round-trip exit realizes ~flat instead of a guaranteed small
+# loss. 0 = restore the original exact-entry behaviour.
+BREAKEVEN_STOP_BUFFER_TICKS = int(_get_float("BREAKEVEN_STOP_BUFFER_TICKS", 2))
+
 # this session: user asked for Trade History to only retain "today" /
 # "last 3 days" and for the ledger to actually only store that much —
 # orders/reconcile.py::run_retention_cleanup() deletes CLOSED positions

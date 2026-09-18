@@ -347,6 +347,17 @@ class TradeOrder(Base):
     # without an extra join back through TradeDecision -> TradeCandidate.
     # NULL for manual orders (manual_engine never sets this).
     source_tab = Column(String(32), nullable=True)
+
+    # 2026-09-18 fix (selective overnight hold — see execution/auto_pilot.py's
+    # _select_overnight_holds and config.py's OVERNIGHT_HOLD_* block): copied
+    # from the originating TradeCandidate.decision_label / conviction_score at
+    # order-creation time (same pattern as source_tab above), so portfolio.py's
+    # fill handlers can stamp the resulting TradePosition without a join back
+    # through TradeDecision -> TradeCandidate. NULL for manual orders (no
+    # originating candidate).
+    entry_decision_label = Column(String(32), nullable=True)
+    entry_conviction_score = Column(Float, nullable=True)
+
     created_at = Column(DateTime, nullable=False, default=_now)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
@@ -456,6 +467,19 @@ class TradePosition(Base):
     # trades, broker-imported holdings, and pre-migration rows — all of
     # which keep falling back to the existing global-default behavior.
     source_tab = Column(String(32), nullable=True)
+
+    # 2026-09-18 fix (selective overnight hold — see execution/auto_pilot.py's
+    # _select_overnight_holds and config.py's OVERNIGHT_HOLD_* block): copied
+    # from TradeOrder.entry_decision_label / entry_conviction_score at fill
+    # time (portfolio.py's try_fill_entry / record_real_fill, same spot
+    # source_tab is copied), so EOD square-off can decide whether this
+    # specific position is eligible to skip flattening without a join back
+    # through TradeOrder -> TradeDecision -> TradeCandidate. NULL for manual
+    # trades, broker-imported holdings, and pre-migration rows — all of which
+    # are simply never overnight-hold eligible (fail-safe: they square off
+    # exactly as before).
+    entry_decision_label = Column(String(32), nullable=True)
+    entry_conviction_score = Column(Float, nullable=True)
 
     # 2026-09-15 fix (session40 — DATAMATICS position 81, 89 consecutive
     # REJECTED zero-fill exit-SELL attempts over ~4.5h with no backoff and

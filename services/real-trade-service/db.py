@@ -137,6 +137,7 @@ def init_schema() -> None:
     _ensure_gate_state_columns(eng, dialect())
     _ensure_position_columns(eng, dialect())
     _ensure_product_type_columns(eng, dialect())
+    _ensure_overnight_hold_columns(eng, dialect())
     _backfill_broker_imported_flag(eng)
     _ensure_watchlist_link_columns(eng, dialect())
     _fix_stale_dhan_token_expiry(eng)
@@ -576,6 +577,61 @@ def _ensure_product_type_columns(engine, dialect_name: str) -> None:
              "ALTER TABLE trade_orders ADD COLUMN product_type VARCHAR(16)"),
             ("trade_positions", position_cols, "entry_product_type",
              "ALTER TABLE trade_positions ADD COLUMN entry_product_type VARCHAR(16)"),
+        ]
+
+    for table, existing, col_name, sql in adds:
+        if col_name in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added %s.%s", table, col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add %s.%s: %s", table, col_name, e)
+
+
+# 2026-09-18 fix (selective overnight hold — see models.py TradeOrder/
+# TradePosition entry_decision_label / entry_conviction_score docstrings and
+# config.py's OVERNIGHT_HOLD_* block for the full incident). Both columns are
+# nullable and left NULL on existing rows — auto_pilot._select_overnight_holds
+# simply never grants overnight-hold eligibility to a position with no
+# entry_decision_label, so this migration changes nothing for positions
+# already open when it ships (they keep squaring off exactly as before); it
+# only takes effect for BUYs placed after this deploy.
+def _ensure_overnight_hold_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        order_cols = {c["name"] for c in inspect(engine).get_columns("trade_orders")}
+        position_cols = {c["name"] for c in inspect(engine).get_columns("trade_positions")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect columns for overnight_hold migration: %s", e)
+        return
+
+    if dialect_name == "oracle":
+        adds = [
+            ("trade_orders", order_cols, "entry_decision_label",
+             "ALTER TABLE trade_orders ADD (entry_decision_label VARCHAR2(32))"),
+            ("trade_orders", order_cols, "entry_conviction_score",
+             "ALTER TABLE trade_orders ADD (entry_conviction_score BINARY_DOUBLE)"),
+            ("trade_positions", position_cols, "entry_decision_label",
+             "ALTER TABLE trade_positions ADD (entry_decision_label VARCHAR2(32))"),
+            ("trade_positions", position_cols, "entry_conviction_score",
+             "ALTER TABLE trade_positions ADD (entry_conviction_score BINARY_DOUBLE)"),
+        ]
+    else:
+        adds = [
+            ("trade_orders", order_cols, "entry_decision_label",
+             "ALTER TABLE trade_orders ADD COLUMN entry_decision_label VARCHAR(32)"),
+            ("trade_orders", order_cols, "entry_conviction_score",
+             "ALTER TABLE trade_orders ADD COLUMN entry_conviction_score FLOAT"),
+            ("trade_positions", position_cols, "entry_decision_label",
+             "ALTER TABLE trade_positions ADD COLUMN entry_decision_label VARCHAR(32)"),
+            ("trade_positions", position_cols, "entry_conviction_score",
+             "ALTER TABLE trade_positions ADD COLUMN entry_conviction_score FLOAT"),
         ]
 
     for table, existing, col_name, sql in adds:

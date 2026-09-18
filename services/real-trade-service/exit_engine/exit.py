@@ -1091,8 +1091,26 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                     db.commit()
                 partial_exits += 1
             else:
+                # 2026-09-18 fix (user audit finding): every automatic exit —
+                # including a profit-target hit — was sent as MARKET. That's
+                # the right call for stop-loss/emergency exits (must fill,
+                # capital protection), but it adds pure, avoidable slippage
+                # on winners, where there's no urgency. A LIMIT sell pinned
+                # just below the live LTP fills immediately on any liquid
+                # NSE name and still gets picked up + retried as normal by
+                # the next exit_engine cycle (EXIT_CHECK_INTERVAL_SECONDS,
+                # default 45s) if it doesn't — no dangling risk, since this
+                # position is re-evaluated every cycle regardless. Config-
+                # gated so it can be switched back to MARKET with no code
+                # change if live behavior ever shows a problem.
+                _target_order_type = "MARKET"
+                _target_limit_price = None
+                if config.EXIT_TARGET_USE_LIMIT:
+                    _target_order_type = "LIMIT"
+                    _target_limit_price = round(ltp * (1 - config.EXIT_TARGET_LIMIT_BUFFER_PCT / 100.0), 2)
                 if _send_real_sell(
-                    db, position, qty_to_close, "target_hit_partial", full=False
+                    db, position, qty_to_close, "target_hit_partial", full=False,
+                    order_type=_target_order_type, limit_price=_target_limit_price,
                 ):
                     partial_exits += 1
                     # FIX: nullify target + raise stop to breakeven for REAL too.

@@ -966,6 +966,13 @@ def try_fill_entry(db: Session, order: models.TradeOrder, tick: Tick, stop_price
             # exit_engine._load_profile can recognize a volume_shock-origin
             # position even with no watchlist_entry_id. NULL for manual orders.
             source_tab=getattr(order, "source_tab", None),
+            # 2026-09-18 fix (selective overnight hold): thread the
+            # candidate's decision_label/conviction_score through too, so
+            # auto_pilot._select_overnight_holds can decide eligibility
+            # without a join. NULL for manual orders. See models.py
+            # TradePosition.entry_decision_label's docstring.
+            entry_decision_label=getattr(order, "entry_decision_label", None),
+            entry_conviction_score=getattr(order, "entry_conviction_score", None),
         )
         db.add(position)
         db.flush()
@@ -1118,6 +1125,13 @@ def record_real_fill(db: Session, order: models.TradeOrder, fill_price: float, f
             # exit_engine._load_profile can recognize a volume_shock-origin
             # position even with no watchlist_entry_id. NULL for manual orders.
             source_tab=getattr(order, "source_tab", None),
+            # 2026-09-18 fix (selective overnight hold): thread the
+            # candidate's decision_label/conviction_score through too, so
+            # auto_pilot._select_overnight_holds can decide eligibility
+            # without a join. NULL for manual orders. See models.py
+            # TradePosition.entry_decision_label's docstring.
+            entry_decision_label=getattr(order, "entry_decision_label", None),
+            entry_conviction_score=getattr(order, "entry_conviction_score", None),
             # 2026-09-15 fix (session38): thread the BUY order's actual
             # product_type through to the position, same pattern as
             # watchlist_entry_id/source_tab above — see models.py

@@ -647,3 +647,116 @@ SHARED_DAILY_ORDER_BUDGET = int(os.getenv("SHARED_DAILY_ORDER_BUDGET", "5000"))
 # risk_engine/engine.py's new "capital_share_cap" check (caps this
 # service's TOTAL exposure — cash + open positions — not just new cash).
 CAPITAL_SHARE_PCT = float(os.getenv("REAL_TRADE_CAPITAL_SHARE_PCT", "50.0"))
+
+# ── Transaction-cost model (2026-09-18 — user audit finding) ─────────────────
+# Codebase audit found ZERO awareness of brokerage/STT/exchange charges/GST/
+# stamp duty anywhere in entry_engine or risk_engine — a candidate's
+# theoretical edge (target_pct * position_value) was never compared against
+# what it actually costs to round-trip the position. Combined with 1%-of-
+# equity risk sizing on ATR stops, this routinely produced 1-2 share
+# positions on ₹800-1500 stocks, where fixed/percentage transaction costs are
+# a much larger fraction of trade value than on a bigger position — very
+# plausibly the real reason for "breakeven or small loss" outcomes despite a
+# backtested edge. See cost_model.py for the actual estimate function.
+#
+# Rates below are standard NSE-equity levies as of 2026 for a discount
+# broker (Dhan): STT/exchange-txn/SEBI/GST rates are fixed by law/exchange,
+# not broker-specific, so these are accurate regardless of plan; BROKERAGE_*
+# defaults assume Dhan's ₹0 discount-brokerage plans (both CNC delivery and
+# intraday) — correct this env var if that ever changes. All estimates are
+# deliberately conservative/approximate — verify against a real Dhan
+# contract note periodically and adjust via env vars, no code change needed.
+COST_MODEL_ENABLED = os.getenv("COST_MODEL_ENABLED", "true").lower() == "true"
+
+# Brokerage: flat ₹ per executed leg (BUY and SELL each count as one leg).
+# Dhan's discount plans are ₹0 for both CNC and intraday as of 2026 — set
+# BROKERAGE_PER_ORDER if that ever changes for this account.
+BROKERAGE_PER_ORDER = float(os.getenv("BROKERAGE_PER_ORDER", "0.0"))
+
+# STT (Securities Transaction Tax) — statutory, not broker-specific.
+# Delivery (CNC): charged on BOTH legs. Intraday: SELL leg only.
+STT_DELIVERY_PCT_PER_LEG   = float(os.getenv("STT_DELIVERY_PCT_PER_LEG", "0.10"))
+STT_INTRADAY_SELL_PCT      = float(os.getenv("STT_INTRADAY_SELL_PCT", "0.025"))
+
+# Exchange transaction charges + SEBI turnover fee — both legs, both product types.
+EXCHANGE_TXN_PCT   = float(os.getenv("EXCHANGE_TXN_PCT", "0.00325"))
+SEBI_TURNOVER_PCT  = float(os.getenv("SEBI_TURNOVER_PCT", "0.0001"))
+
+# GST — applied on (brokerage + exchange txn charges + SEBI fee), both legs.
+GST_PCT = float(os.getenv("GST_PCT", "18.0"))
+
+# Stamp duty — BUY leg only. Delivery rate is higher than intraday.
+STAMP_DUTY_BUY_PCT_DELIVERY = float(os.getenv("STAMP_DUTY_BUY_PCT_DELIVERY", "0.015"))
+STAMP_DUTY_BUY_PCT_INTRADAY = float(os.getenv("STAMP_DUTY_BUY_PCT_INTRADAY", "0.003"))
+
+# DP (Depository Participant) charge — flat ₹ + GST, per scrip per day, ONLY
+# when actual T+1-settled demat holdings are sold (a genuine multi-day CNC
+# hold, not a same-day round trip — see exit_engine's same-day INTRADAY
+# product-type logic, which never touches real holdings). Applied by
+# cost_model.py only when the caller explicitly says the sell is a real
+# delivery sell of a previously-settled holding.
+DP_CHARGE_FLAT = float(os.getenv("DP_CHARGE_FLAT", "15.0"))
+
+# Entry-time cost gate (see entry_engine/entry.py's Gate 5.6):
+#   1. Position value must clear MIN_TRADE_VALUE — below this, fixed/
+#      percentage costs dominate any realistic edge.
+#   2. Expected edge in ₹ (qty * entry_price * target_pct) must clear the
+#      estimated round-trip cost by at least MIN_EDGE_TO_COST_RATIO — a
+#      trade whose entire theoretical profit is 1.2x its own transaction
+#      cost is not a real edge once execution slippage is added.
+MIN_TRADE_VALUE          = float(os.getenv("MIN_TRADE_VALUE", "3000.0"))
+MIN_EDGE_TO_COST_RATIO   = float(os.getenv("MIN_EDGE_TO_COST_RATIO", "3.0"))
+
+# ── Selective overnight hold (2026-09-18 — user audit finding) ───────────────
+# _eod_squareoff (execution/auto_pilot.py) used to flatten EVERY open
+# position at EOD_SQUAREOFF_TIME_IST, unconditionally — including positions
+# candidate_engine had already tagged high_conviction/upper_circuit with a
+# backtested Day+1 continuation edge (55.7%/69.7% win rate) and time_stop_
+# hint="EOD+1". That field was computed every cycle and never read anywhere
+# — the position got force-sold same-day regardless, before the edge it was
+# scored on ever had a chance to play out. This lets a NARROW, capped subset
+# of positions skip the square-off instead of the previous all-or-nothing
+# behavior. Everything else (base VOLUME_SHOCK tier, anything not currently
+# profitable, anything already extended near the day's high) still squares
+# off exactly as before — this does not change behavior for the bulk of
+# positions, only for the specific cases the pipeline already has strong
+# evidence for.
+OVERNIGHT_HOLD_ENABLED = os.getenv("OVERNIGHT_HOLD_ENABLED", "true").lower() == "true"
+
+# Only these entry decision labels are eligible — deliberately excludes the
+# base "VOLUME_SHOCK" tier (48.1% backtested win rate, +0.66% mean — too
+# thin an edge to justify overnight gap risk) and plain "BUY NOW"/"PREPARE
+# TO BUY" (no Day+1 continuation backtest attached at all).
+OVERNIGHT_HOLD_ELIGIBLE_LABELS = {
+    s.strip().upper() for s in os.getenv(
+        "OVERNIGHT_HOLD_ELIGIBLE_LABELS",
+        "VOLUME_SHOCK_UPPER_CIRCUIT,VOLUME_SHOCK_HIGH_CONVICTION",
+    ).split(",") if s.strip()
+}
+
+# Must be at/above breakeven right now — never hold a currently-losing
+# position overnight on the strength of a tier-level backtest statistic.
+OVERNIGHT_HOLD_REQUIRE_PROFITABLE = os.getenv("OVERNIGHT_HOLD_REQUIRE_PROFITABLE", "true").lower() == "true"
+
+# Skip the hold if price is already this far into today's range (near the
+# high) — mirrors entry_engine's own _range_adjusted_stop_target near_high
+# logic (rpos >= 0.80): a position that's already run to the top of its
+# day's range is more likely exhausted than mid-breakout.
+OVERNIGHT_HOLD_MAX_RANGE_POS = float(os.getenv("OVERNIGHT_HOLD_MAX_RANGE_POS", "0.80"))
+
+# Total value held overnight across ALL kept positions cannot exceed this %
+# of equity, regardless of how many individually qualify — caps aggregate
+# gap-risk exposure. When more positions qualify than the cap allows, the
+# highest-conviction ones are kept first and the rest are squared off as
+# usual (see execution/auto_pilot.py's _select_overnight_holds).
+OVERNIGHT_HOLD_MAX_EXPOSURE_PCT = float(os.getenv("OVERNIGHT_HOLD_MAX_EXPOSURE_PCT", "40.0"))
+
+# ── Limit orders for profit-target exits (2026-09-18 — user audit finding) ───
+# Every automatic exit (stop/emergency/time_stop/eod_squareoff/target) was
+# sent as a MARKET order. Correct for anything protecting capital, but a
+# needless slippage cost on a profit-target hit, where there's no urgency.
+# Only affects the target_hit_partial path in exit_engine/exit.py — stop_hit,
+# emergency_gap_down, time_stop, and eod_squareoff are all unchanged and
+# always MARKET, on purpose (must fill regardless of price).
+EXIT_TARGET_USE_LIMIT = os.getenv("EXIT_TARGET_USE_LIMIT", "true").lower() == "true"
+EXIT_TARGET_LIMIT_BUFFER_PCT = float(os.getenv("EXIT_TARGET_LIMIT_BUFFER_PCT", "0.1"))

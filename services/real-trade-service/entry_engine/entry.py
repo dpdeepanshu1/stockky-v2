@@ -29,6 +29,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 import config
+import cost_model
 import models
 from audit.logger import log_action
 from execution import dhan_client, shared_order_budget, shared_symbol_lock
@@ -86,6 +87,22 @@ _ACTIONABLE_DECISIONS = {
     "BUY NOW", "PREPARE TO BUY",
     "VOLUME_SHOCK", "VOLUME_SHOCK_HIGH_CONVICTION", "VOLUME_SHOCK_UPPER_CIRCUIT",
 }
+
+# 2026-09-18 fix (user audit finding): candidate_engine's own backtest note
+# (see candidate_engine/candidates.py, the "HIGH CONVICTION classification"
+# block) shows the base VOLUME_SHOCK tier at a 48.1% win rate with a mean
+# +0.66% next-day return — essentially a coin flip with an edge too thin to
+# survive round-trip transaction costs (see cost_model.py / Gate 5.6 below),
+# while VOLUME_SHOCK_HIGH_CONVICTION (55.7% win, +2.28%) and
+# VOLUME_SHOCK_UPPER_CIRCUIT (69.7% win, +5.22%) are real edges. Off by
+# default: base-tier candidates still get written (visible on the dashboard
+# as WAIT, same as any other gate) but never auto-entered until explicitly
+# turned back on — e.g. once account size makes the cost-to-edge ratio less
+# punishing, or a recalibration shows a better live win rate than the
+# original backtest.
+VOLUME_SHOCK_BASE_TIER_AUTO_ENTRY_ENABLED = os.getenv(
+    "VOLUME_SHOCK_BASE_TIER_AUTO_ENTRY_ENABLED", "false"
+).lower() == "true"
 
 # ── Adaptive regime cache (2-minute TTL to avoid DB hit every candidate) ─────
 _regime_cache: dict = {"score": None, "threshold": None, "source": None, "ts": 0.0}
@@ -490,8 +507,24 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             waited += 1
 
         # ── Gate 1: actionable decision label ─────────────────────────────────
-        if (cand.decision_label or "").upper() not in _ACTIONABLE_DECISIONS:
+        _label_upper = (cand.decision_label or "").upper()
+        if _label_upper not in _ACTIONABLE_DECISIONS:
             _wait(f"Source decision '{cand.decision_label}' is not actionable for entry.")
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT",
+                                   "reasoning": decision.reasoning, "risk_verdict": None})
+            continue
+
+        # ── Gate 1b: base VOLUME_SHOCK tier auto-entry off by default ───────────
+        # (2026-09-18 fix — see VOLUME_SHOCK_BASE_TIER_AUTO_ENTRY_ENABLED's
+        # docstring above.) HIGH_CONVICTION/UPPER_CIRCUIT are unaffected —
+        # only the plain base tier is held back.
+        if _label_upper == "VOLUME_SHOCK" and not VOLUME_SHOCK_BASE_TIER_AUTO_ENTRY_ENABLED:
+            _wait(
+                "Base VOLUME_SHOCK tier auto-entry is off (48.1% backtested win rate, "
+                "+0.66% mean — too thin an edge after transaction costs). Set "
+                "VOLUME_SHOCK_BASE_TIER_AUTO_ENTRY_ENABLED=true to re-enable."
+            )
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": decision.reasoning, "risk_verdict": None})
@@ -731,6 +764,40 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                    "reasoning": result.reason, "risk_verdict": result.verdict.value})
             continue
 
+        # ── Gate 5.6: transaction-cost / minimum-edge floor (2026-09-18) ────────
+        # Audit finding: nothing anywhere compared a candidate's expected ₹
+        # edge against what it actually costs to round-trip the position.
+        # Small per-trade risk sizing on ATR stops routinely produces 1-2
+        # share positions where brokerage/STT/exchange charges/GST/stamp
+        # duty are a large fraction of trade value — this closes that gap.
+        # See cost_model.py and config.py's "Transaction-cost model" section.
+        if config.COST_MODEL_ENABLED:
+            final_qty_for_cost = result.approved_qty or proposed_qty
+            cost_check = cost_model.evaluate_entry_cost_gate(
+                entry_price, final_qty_for_cost, target_pct, product_type="CNC",
+            )
+            if not cost_check.passes:
+                if not cost_check.passes_min_value:
+                    cost_reason = (
+                        f"Position value ₹{cost_check.trade_value:,.0f} < "
+                        f"₹{config.MIN_TRADE_VALUE:,.0f} minimum — too small for fixed/"
+                        "percentage transaction costs to make sense against."
+                    )
+                else:
+                    cost_reason = (
+                        f"Expected edge ₹{cost_check.expected_edge:,.0f} is only "
+                        f"{cost_check.ratio:.1f}x the estimated round-trip cost "
+                        f"₹{cost_check.estimated_cost:,.0f} (floor {config.MIN_EDGE_TO_COST_RATIO:.1f}x). "
+                        "Not enough real edge left after brokerage/STT/charges/slippage."
+                    )
+                decision.action = "WAIT"
+                decision.reasoning = cost_reason
+                waited += 1
+                db.add(decision)
+                entry_details.append({"symbol": cand.symbol, "action": "WAIT",
+                                       "reasoning": cost_reason, "risk_verdict": decision.risk_verdict})
+                continue
+
         # ── Gate 5.5: same-symbol duplicate guard (within this cycle) ──────────
         # See staged_symbols' declaration above the loop for the full incident
         # this closes. Checked here — after risk_evaluate has APPROVED this
@@ -946,6 +1013,13 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             # the watchlist engine — see candidate_engine's
             # _refresh_volume_shock_candidates).
             source_tab=getattr(cand, "source_tab", None),
+            # 2026-09-18 fix (selective overnight hold): carry the candidate's
+            # decision_label/conviction_score forward too, so portfolio.py can
+            # stamp the resulting TradePosition and EOD square-off can decide
+            # overnight-hold eligibility without a join. See models.py
+            # TradeOrder.entry_decision_label's docstring.
+            entry_decision_label=cand.decision_label,
+            entry_conviction_score=cand.conviction_score,
             # 2026-09-15 fix (session38): this automated entry path has
             # always bought CNC (dhan_client.place_order's default — never
             # passed explicitly a few lines below), but that fact was never

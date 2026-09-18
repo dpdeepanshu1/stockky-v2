@@ -823,18 +823,127 @@ async def _enter_at_open(db, mode: str, gate_armed: bool) -> None:
     )
 
 
+async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, dict]:
+    """2026-09-18 fix (user audit finding): _eod_squareoff used to flatten
+    EVERY open position unconditionally, discarding candidate_engine's own
+    backtested Day+1 continuation signal (high_conviction/upper_circuit
+    tiers, time_stop_hint="EOD+1") every single day before it ever had a
+    chance to play out. This picks a narrow, capped subset of CURRENTLY
+    OPEN positions that are allowed to skip today's square-off, using data
+    the pipeline already computed at entry time (never anything guessed
+    fresh here).
+
+    Eligibility (ALL must hold — fail-closed on missing data):
+      1. entry_decision_label in config.OVERNIGHT_HOLD_ELIGIBLE_LABELS
+         (default: only the two tiers with a real backtested win rate —
+         UPPER_CIRCUIT 69.7%, HIGH_CONVICTION 55.7% — explicitly excludes
+         the base VOLUME_SHOCK tier at 48.1%/+0.66%, too thin an edge to
+         justify overnight gap risk).
+      2. Currently at/above breakeven (config.OVERNIGHT_HOLD_REQUIRE_PROFITABLE).
+      3. Not already extended near today's high (range_pos below
+         config.OVERNIGHT_HOLD_MAX_RANGE_POS) — mirrors entry_engine's own
+         near-high exhaustion logic. Requires a live tick with day_high/
+         day_low; missing range data means NOT eligible (fail-closed).
+      4. Aggregate value of everything kept stays within
+         config.OVERNIGHT_HOLD_MAX_EXPOSURE_PCT of equity — ranked by
+         entry_conviction_score, highest first, until the cap is hit.
+
+    Returns (set of position ids to KEEP OPEN, dict[position.id -> reason
+    string] for logging/notification). Any position not returned in the
+    keep-set squares off exactly as before this fix.
+    """
+    if not config.OVERNIGHT_HOLD_ENABLED or not positions:
+        return set(), {}
+
+    eligible_labels = config.OVERNIGHT_HOLD_ELIGIBLE_LABELS
+    candidates = [
+        p for p in positions
+        if (getattr(p, "entry_decision_label", None) or "").upper() in eligible_labels
+    ]
+    if not candidates:
+        return set(), {}
+
+    from market_feed.feed import get_quotes
+    from portfolio.portfolio import get_account as _pf_get_account
+    syms = list({p.symbol for p in candidates})
+    ticks = await get_quotes(syms)
+
+    scored: list[tuple[float, object, float]] = []  # (conviction, position, position_value)
+    reasons: dict = {}
+    for p in candidates:
+        tick = ticks.get(p.symbol)
+        if tick is None or not tick.price:
+            continue  # fail-closed: no live price to verify against
+        ltp = float(tick.price)
+
+        if config.OVERNIGHT_HOLD_REQUIRE_PROFITABLE and ltp < (p.avg_entry_price or 0):
+            continue
+
+        dh = getattr(tick, "day_high", None)
+        dl = getattr(tick, "day_low", None)
+        if not dh or not dl or (dh - dl) <= 1e-6:
+            continue  # fail-closed: can't verify range position
+        range_pos = max(0.0, min(1.0, (ltp - dl) / (dh - dl)))
+        if range_pos >= config.OVERNIGHT_HOLD_MAX_RANGE_POS:
+            continue  # already extended near today's high — not the exhausted-breakout case
+
+        conviction = float(getattr(p, "entry_conviction_score", None) or 0.0)
+        position_value = ltp * p.qty_open
+        scored.append((conviction, p, position_value))
+        reasons[p.id] = (
+            f"overnight hold: {p.entry_decision_label} (conviction {conviction:.0f}), "
+            f"+{((ltp / p.avg_entry_price) - 1) * 100:.1f}% unrealized, "
+            f"range_pos {range_pos:.2f} < {config.OVERNIGHT_HOLD_MAX_RANGE_POS:.2f}"
+        )
+
+    if not scored:
+        return set(), {}
+
+    scored.sort(key=lambda t: t[0], reverse=True)
+
+    account = _pf_get_account(db, mode)
+    equity = float(account.current_equity or 0.0)
+    cap = equity * (config.OVERNIGHT_HOLD_MAX_EXPOSURE_PCT / 100.0)
+
+    # Only candidates that passed the profitability/range checks above ever
+    # compete for the cap — everything else squares off regardless, so it
+    # doesn't count against overnight exposure.
+    keep_ids: set = set()
+    running_value = 0.0
+    for conviction, p, position_value in scored:
+        if equity > 0 and (running_value + position_value) > cap:
+            reasons.pop(p.id, None)
+            continue
+        keep_ids.add(p.id)
+        running_value += position_value
+
+    return keep_ids, {k: v for k, v in reasons.items() if k in keep_ids}
+
+
 async def _eod_squareoff(db, mode: str) -> None:
     """~15:00 before the close (moved from 15:15 on 2026-09-10, session22 —
-    see config.EOD_SQUAREOFF_TIME_IST): flatten every open position for this mode so
-    nothing is carried overnight (intraday square-off). Reuses the exact manual-
-    close paths: DEMO closes at the live tick; REAL sends a MARKET sell to Dhan."""
+    see config.EOD_SQUAREOFF_TIME_IST): flatten every open position for this
+    mode so nothing is carried overnight (intraday square-off) — EXCEPT a
+    narrow, capped subset selected by _select_overnight_holds (2026-09-18
+    fix) for positions the pipeline already has real backtested evidence
+    for. Reuses the exact manual-close paths: DEMO closes at the live tick;
+    REAL sends a MARKET sell to Dhan."""
     from portfolio.portfolio import open_positions as _pf_open_positions, close_position as _pf_close_position
     positions = list(_pf_open_positions(db, mode))
     if not positions:
         logger.info("[schedule] EOD square-off %s: no open positions", mode)
         return
+
+    hold_ids, hold_reasons = await _select_overnight_holds(db, mode, positions)
+    if hold_ids:
+        for pid, reason in hold_reasons.items():
+            logger.info("[schedule] EOD square-off %s: HOLDING position %s overnight — %s", mode, pid, reason)
+    positions = [p for p in positions if p.id not in hold_ids]
+
     closed, sent, failed, skipped = 0, 0, 0, 0
-    if mode == "DEMO":
+    if not positions:
+        pass
+    elif mode == "DEMO":
         from market_feed.feed import get_quotes
         syms = list({p.symbol for p in positions})
         ticks = await get_quotes(syms)
@@ -896,15 +1005,17 @@ async def _eod_squareoff(db, mode: str) -> None:
             except Exception:
                 logger.exception("[schedule] EOD real-sell failed for %s %s", mode, p.symbol)
                 failed += 1
+    held = len(hold_ids)
     logger.info(
-        "[schedule] EOD square-off %s: closed=%s sent=%s failed=%s skipped=%s",
-        mode, closed, sent, failed, skipped,
+        "[schedule] EOD square-off %s: closed=%s sent=%s failed=%s skipped=%s held_overnight=%s",
+        mode, closed, sent, failed, skipped, held,
     )
     await notify_async(
         f"🌆 *EOD square-off — {mode}*\n"
         + (f"Closed {closed} position(s)." if mode == "DEMO" else f"Sent {sent} sell order(s) to Dhan.")
         + (f" {failed} could not be closed (no price / broker reject) — check manually." if failed else "")
         + (f" {skipped} skipped — SELL already pending broker confirmation (will settle on its own)." if skipped else "")
+        + (f" 🌙 {held} held overnight (high-conviction, in-profit, not near-high — see logs)." if held else "")
     )
 
 

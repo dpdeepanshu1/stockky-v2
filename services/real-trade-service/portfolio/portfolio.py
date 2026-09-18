@@ -429,14 +429,50 @@ async def import_broker_holdings(db: Session) -> int:
             models.TradePosition.status == "CLOSED",
             models.TradePosition.closed_at.isnot(None),
             models.TradePosition.closed_at >= recent_close_guard,
-        ).first()
+        ).order_by(models.TradePosition.closed_at.desc()).first()
         if recently_closed is not None:
+            # AUDIT FIX (session66 — live case: RIR/ANUHPHR): this guard only
+            # ever checked symbol + recency, never whether the broker's
+            # CURRENT holding is actually the same lingering lot the guard
+            # was built to protect against (see BUG FIX 2026-09-08 above).
+            # Live sequence that broke: this system bought+fully-sold RIR
+            # and ANUHPHR itself (closed_at recorded, qty_open=0) — then the
+            # user separately bought a brand-new lot of the same two symbols
+            # in the demat account. Dhan's holdings feed correctly reported
+            # the NEW lot's real qty/avg cost, but this guard blocked import
+            # purely because *a* CLOSED row for that symbol existed inside
+            # the 24h window — silently orphaning a genuine, currently-held
+            # position (no stop/target, no exit_engine coverage, invisible
+            # to /positions and every P&L total) for up to a full day, with
+            # nothing in the UI or logs surfacing it as a problem. Fix: only
+            # suppress import when the broker's current avg cost is
+            # plausibly the SAME lot still lingering in a lagged feed
+            # (within ~1% of what we closed it at) — a meaningfully
+            # different avg cost means it's an unrelated, newer purchase
+            # and must be imported regardless of how recently the old
+            # position closed. A missing/zero avg_entry_price on the old
+            # row (shouldn't happen, but fail safe) is treated as "not the
+            # same lot" — err toward importing, not toward silently hiding
+            # a real holding.
+            _old_avg = recently_closed.avg_entry_price
+            _same_lot = bool(_old_avg) and abs(avg_price - _old_avg) <= max(_old_avg * 0.01, 0.05)
+            if _same_lot:
+                logger.info(
+                    "import_broker_holdings: skipping re-import of %s — closed by this "
+                    "system at %s (avg cost %.2f matches current broker avg cost %.2f), "
+                    "within the %dh settlement-lag guard window.",
+                    symbol, recently_closed.closed_at, _old_avg, avg_price,
+                    _RECENT_CLOSE_REIMPORT_GUARD_HOURS,
+                )
+                continue
             logger.info(
-                "import_broker_holdings: skipping re-import of %s — closed by this "
-                "system at %s, within the %dh settlement-lag guard window.",
+                "import_broker_holdings: %s has a CLOSED row from %s within the %dh "
+                "guard window (avg cost %.2f) but the broker's current avg cost is "
+                "%.2f — treating as a genuinely new, separately-bought lot and "
+                "importing it.",
                 symbol, recently_closed.closed_at, _RECENT_CLOSE_REIMPORT_GUARD_HOURS,
+                _old_avg, avg_price,
             )
-            continue
 
         candidates.append((symbol, qty, avg_price, row))
 

@@ -62,6 +62,23 @@ QUOTE_TIMEOUT = float(os.getenv("SURPRISE_QUOTE_TIMEOUT", "3"))
 # (candidate_engine's own client-side timeout on that call is 25s). Widened
 # so one full-universe scan reliably covers a full pipeline cycle with margin.
 SURPRISE_CACHE_MAX_AGE_SEC = float(os.getenv("SURPRISE_CACHE_MAX_AGE_SEC", "220"))
+# 2026-09-18 fix: self._last_result/self._last_scan_ts (below) are plain
+# in-process attributes, wiped on every container restart. A live diagnostic
+# measured /surprise/scan?cached=true taking 320s right after a restart —
+# self._last_result was None, so the cached=true fast path above fell
+# through to a full live scan (the same ~1,023-symbol liquid-universe quote
+# sweep this class always does), which is what candidate_engine's own 25s
+# client timeout can never survive. The existing startup pre-warm
+# (_warm_surprise_scan_cache in main.py) tries to populate this before real
+# traffic arrives, but that pre-warm is itself a full scan and evidently
+# isn't always finishing before the first real cycle asks — worse, restarts
+# were observed happening in quick succession in that same diagnostic,
+# which resets this in-memory cache every time regardless. Mirroring the
+# durable (Neon-backed) caching already used elsewhere in this codebase
+# (see api-gateway/main.py's _redis_get/_redis_set) means a restart no
+# longer forces a full 320s scan before the fast path can work again — the
+# last real scan survives the restart.
+SURPRISE_LAST_RESULT_CACHE_KEY = "stockky:surprise_scan:last_result"
 MAX_STOCK_PRICE = float(os.getenv("MAX_STOCK_PRICE", "0") or 0)
 # Value-buy badge: ₹20–₹500 (same as buy_sniper — midcaps/smallcaps outperforming)
 VALUE_BUY_THRESHOLD = float(os.getenv("VALUE_BUY_THRESHOLD", "500") or 500)
@@ -265,6 +282,25 @@ class SurpriseStockEngine:
         self._last_rvol: Dict[str, float] = {}
         self._last_scan_ts: float = 0.0
         self._last_result: Optional[Dict[str, Any]] = None
+
+    def _load_last_result_from_durable_cache(self) -> None:
+        """Repopulate self._last_result/_last_scan_ts from the durable
+        (Neon-backed) cache after a restart — see SURPRISE_LAST_RESULT_CACHE_KEY
+        docstring above for why this exists. Best-effort/non-fatal: any
+        failure here just leaves self._last_result as None, and scan() falls
+        through to its normal full-scan path exactly as before this fix."""
+        try:
+            import kv_cache
+            payload = kv_cache.get(SURPRISE_LAST_RESULT_CACHE_KEY)
+        except Exception as e:
+            logger.debug("surprise last-result durable cache load failed (non-fatal): %s", e)
+            return
+        try:
+            if isinstance(payload, dict) and isinstance(payload.get("result"), dict) and payload.get("scan_ts"):
+                self._last_result = payload["result"]
+                self._last_scan_ts = float(payload["scan_ts"])
+        except Exception as e:
+            logger.debug("surprise last-result durable cache parse failed (non-fatal): %s", e)
 
     def load_static_cache(self, force: bool = False) -> int:
         if self.static_cache and not force and (time.time() - self._loaded_at) < 300:
@@ -746,13 +782,21 @@ class SurpriseStockEngine:
         # always does a live fetch — the cache only covers the default
         # full-universe scan, which is what candidate_engine actually asks
         # for.
-        if cached and not symbols and self._last_result is not None:
-            age = time.time() - self._last_scan_ts
-            if age <= cached_max_age_sec:
-                result = dict(self._last_result)
-                result["from_cache"] = True
-                result["cache_age_sec"] = round(age, 1)
-                return result
+        if cached and not symbols:
+            # 2026-09-18 fix: on a fresh process (post-restart), the
+            # in-memory cache is empty even though a durable copy of the
+            # last real scan may still be fresh — try that before falling
+            # through to a full live scan. See SURPRISE_LAST_RESULT_CACHE_KEY
+            # docstring above for the full root-cause writeup.
+            if self._last_result is None:
+                self._load_last_result_from_durable_cache()
+            if self._last_result is not None:
+                age = time.time() - self._last_scan_ts
+                if age <= cached_max_age_sec:
+                    result = dict(self._last_result)
+                    result["from_cache"] = True
+                    result["cache_age_sec"] = round(age, 1)
+                    return result
 
         n_static = self.load_static_cache(force=force_reload_static)
         if n_static == 0:
@@ -847,6 +891,20 @@ class SurpriseStockEngine:
         # the cached=true fast-path above is meant to serve.
         if not symbols:
             self._last_result = result
+            # 2026-09-18 fix: also persist durably so a restart doesn't force
+            # the next cached=true caller through another full ~320s scan —
+            # see SURPRISE_LAST_RESULT_CACHE_KEY docstring above. TTL gives
+            # some margin over cached_max_age_sec since the age check above
+            # (not this TTL) is what actually decides freshness at read time.
+            try:
+                import kv_cache
+                kv_cache.set(
+                    SURPRISE_LAST_RESULT_CACHE_KEY,
+                    {"result": result, "scan_ts": self._last_scan_ts},
+                    ttl=int(cached_max_age_sec) + 120,
+                )
+            except Exception as e:
+                logger.debug("surprise last-result durable cache set failed (non-fatal): %s", e)
         return result
 
 

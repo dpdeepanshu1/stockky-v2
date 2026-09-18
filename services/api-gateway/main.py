@@ -8784,11 +8784,23 @@ async def _warm_momentum_movers_cache():
             logger.info("Startup: momentum-movers cache pre-warmed (first /scan/universe call will be fast)")
         except Exception as e:
             logger.warning("Startup warning (momentum-movers warm, non-fatal): %s", e)
+            return
+        # _build_scan_universe() has its own durable cache (SCAN_UNIVERSE_KEY,
+        # 30m in market hours / 6h off-hours) that can independently be cold
+        # after a restart even once momentum movers is warm — it also pulls
+        # NSE securities/indices, bulk-deal symbols, 52w-extreme symbols, and
+        # news-mentioned symbols. Warm it right after so /scan/universe's
+        # OTHER dependency is ready too, not just the movers half.
+        try:
+            await asyncio.to_thread(_build_scan_universe)
+            logger.info("Startup: scan-universe cache pre-warmed (first /scan/universe call will be fast)")
+        except Exception as e:
+            logger.warning("Startup warning (scan-universe warm, non-fatal): %s", e)
 
     try:
         asyncio.create_task(_warm())
     except Exception as e:
-        logger.debug("momentum-movers warm task not scheduled: %s", e)
+        logger.debug("momentum-movers/scan-universe warm task not scheduled: %s", e)
 
 
 @app.post("/ops/circuit-reset")

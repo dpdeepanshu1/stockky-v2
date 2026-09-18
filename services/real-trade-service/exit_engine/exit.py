@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -219,6 +219,112 @@ def _has_pending_real_sell(db: Session, symbol: str) -> bool:
         .first()
         is not None
     )
+
+
+async def expire_stale_exit_orders(db: Session, mode: str) -> int:
+    """2026-09-18 audit fix #1 — the exit-side counterpart of entry_engine's
+    expire_stale_orders(). Only ever finds anything for mode=="REAL": DEMO
+    fills its LIMIT partial-target sell synchronously in close_position, so
+    it never has a resting order to expire.
+
+    A LIMIT SELL (currently only the target_hit_partial path when
+    config.EXIT_TARGET_USE_LIMIT is on) that hasn't filled within
+    config.EXIT_LIMIT_VALIDITY_MINUTES is cancelled at Dhan, marked EXPIRED
+    locally, and — unlike the entry side, which just re-evaluates next
+    cycle with no chase — the still-open remaining quantity is immediately
+    resent as a MARKET sell. This isn't optional the way an entry re-chase
+    is: by the time a partial-target SELL is placed, the position's stop has
+    already been raised to breakeven and current_target already nullified
+    (see evaluate_mode's target-hit branch), so nothing will re-trigger this
+    exit on its own if the LIMIT order dies unfilled — the shares must
+    actually be sold here or they're stranded with no way to be sold except
+    the next unrelated exit condition.
+
+    Same defensive pattern as expire_stale_orders(): if the Dhan cancel
+    itself fails, leave the order PLACED (don't guess whether it already
+    filled) and let reconcile_real_orders() resolve it against Dhan's own
+    order book next cycle instead.
+    """
+    if mode != "REAL":
+        return 0
+
+    now   = datetime.now(timezone.utc)
+    stale = (
+        db.query(models.TradeOrder)
+        .filter(
+            models.TradeOrder.mode        == "REAL",
+            models.TradeOrder.side        == "SELL",
+            models.TradeOrder.status.in_(("PLACED", "PARTIAL")),
+            models.TradeOrder.valid_until.isnot(None),
+            models.TradeOrder.valid_until  < now,
+        )
+        .all()
+    )
+    if not stale:
+        return 0
+
+    expired = 0
+    for order in stale:
+        if order.dhan_order_id:
+            try:
+                dhan_client.cancel_order(db, is_armed=True, dhan_order_id=order.dhan_order_id)
+            except Exception as e:
+                logger.warning(
+                    "expire_stale_exit_orders: Dhan cancel failed for %s (order %s) — "
+                    "leaving PLACED so reconcile can resolve it against Dhan: %s",
+                    order.symbol, order.dhan_order_id, e,
+                )
+                notify_sync(
+                    f"⚠️ *Exit LIMIT window closed but Dhan cancel failed* — {order.symbol}\n"
+                    f"{str(e)[:300]}\n"
+                    "Order left PLACED — reconcile will check next cycle in case it already filled. "
+                    "The stop-loss check for this position stays paused until then."
+                )
+                continue
+
+        remaining_qty = max(0, order.qty - (order.filled_qty_so_far or 0))
+        was_partial   = order.status == "PARTIAL"
+        order.status     = "EXPIRED"
+        order.updated_at = now
+        db.add(models.TradeOrderEvent(
+            order_id=order.id, event_type="EXPIRED",
+            detail=(
+                f"Exit LIMIT window ({config.EXIT_LIMIT_VALIDITY_MINUTES}m) closed "
+                f"{'partially filled' if was_partial else 'unfilled'} — cancelled at Dhan, "
+                f"resending remaining {remaining_qty} as MARKET."
+            ),
+        ))
+        db.commit()
+        expired += 1
+
+        if remaining_qty > 0:
+            position = (
+                db.query(models.TradePosition)
+                .filter(
+                    models.TradePosition.mode   == "REAL",
+                    models.TradePosition.symbol == order.symbol,
+                    models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")),
+                )
+                .first()
+            )
+            if position is None:
+                logger.warning(
+                    "expire_stale_exit_orders: no open %s position found to resend "
+                    "%d remaining shares for expired order %s — nothing to do (likely "
+                    "already closed out by another route).",
+                    order.symbol, remaining_qty, order.id,
+                )
+                continue
+            full_remainder = remaining_qty >= position.qty_open
+            _send_real_sell(
+                db, position, remaining_qty, order.exit_reason or "target_hit_partial",
+                full=full_remainder,
+            )
+
+    if expired:
+        log_action(db, actor="system", action="EXIT_ORDERS_EXPIRED", mode=mode,
+                   detail=f"count={expired}")
+    return expired
 
 
 def _send_real_sell(
@@ -447,6 +553,18 @@ def _send_real_sell(
             confirmed_by=confirmed_by,
             confirmed_at=datetime.now(timezone.utc) if confirmed_by else None,
             exit_reason=reason,
+            # 2026-09-18 audit fix #1: only a LIMIT sell can sit unfilled at
+            # Dhan for a meaningful stretch (MARKET exits fill in under a
+            # second) — give it its own short cancel-and-reassess window,
+            # mirroring entry_engine's ENTRY_VALIDITY_MINUTES pattern. See
+            # config.EXIT_LIMIT_VALIDITY_MINUTES and this module's
+            # expire_stale_exit_orders() for the matching expiry pass. NULL
+            # (never expires here) for every MARKET sell, exactly like a
+            # BUY's valid_until is NULL for order types that don't use it.
+            valid_until=(
+                datetime.now(timezone.utc) + timedelta(minutes=config.EXIT_LIMIT_VALIDITY_MINUTES)
+                if effective_order_type == "LIMIT" else None
+            ),
         )
         db.add(order)
         db.flush()
@@ -935,6 +1053,13 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
     Checks in order: emergency_gap, stop_hit, target_hit, time_stop,
     breakeven_stop, trail_stop, hold.
     Returns a tally dict for logs and dashboard."""
+    # 2026-09-18 audit fix #1: cancel/resend any exit-side LIMIT SELL whose
+    # EXIT_LIMIT_VALIDITY_MINUTES window has closed unfilled, BEFORE the
+    # per-position loop below — otherwise a position with a just-expired
+    # order would still see _has_pending_real_sell() return True for the
+    # rest of THIS cycle (its EXPIRED status hasn't been read yet) and get
+    # skipped with stop-loss checks still effectively paused one more cycle.
+    await expire_stale_exit_orders(db, mode)
     positions = open_positions(db, mode)
     if not positions:
         return {

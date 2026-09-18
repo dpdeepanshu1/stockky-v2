@@ -388,6 +388,19 @@ class TradeOrder(Base):
     entry_decision_label = Column(String(32), nullable=True)
     entry_conviction_score = Column(Float, nullable=True)
 
+    # 2026-09-18 audit fix #2 (regime-override win-rate tracking): True only
+    # for a BUY placed through the market-regime gate's ENTRY_REGIME_OVERRIDE_
+    # TOP_N bypass (config.py) — the single highest-conviction candidate let
+    # through at ENTRY_REGIME_OVERRIDE_RISK_SCALE sizing while the regime
+    # gate is otherwise blocking every entry. Set at order-creation time in
+    # entry_engine/entry.py from that same cycle's is_regime_override flag.
+    # False (default) for every normal entry and every pre-migration row.
+    # Threaded onto TradePosition.is_regime_override at fill time (see that
+    # column's docstring) so GET /stats/regime-override can report the
+    # win-rate of these deliberately-against-the-regime-read entries
+    # without a join back through TradeDecision.
+    is_regime_override = Column(Boolean, nullable=False, default=False)
+
     created_at = Column(DateTime, nullable=False, default=_now)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
@@ -547,6 +560,16 @@ class TradePosition(Base):
     # change for the normal case.
     consecutive_exit_failures = Column(Integer, nullable=False, default=0)
     last_exit_failure_at = Column(DateTime, nullable=True)
+
+    # 2026-09-18 audit fix #2 (regime-override win-rate tracking — see
+    # models.py TradeOrder.is_regime_override docstring for the full
+    # rationale). Copied from the opening BUY TradeOrder's is_regime_override
+    # at fill time (portfolio.py's try_fill_entry / record_real_fill, same
+    # spot entry_decision_label is copied). False (default) for every
+    # position not opened via the regime-override bypass and every
+    # pre-migration row — GET /stats/regime-override only ever counts rows
+    # where this is True.
+    is_regime_override = Column(Boolean, nullable=False, default=False)
 
     __table_args__ = (Index("ix_trade_positions_mode_symbol_status", "mode", "symbol", "status"),)
 

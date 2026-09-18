@@ -68,6 +68,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -134,6 +135,52 @@ _adaptive_extended_short_pct: float = 0.05
 _adaptive_trend_weight: float = 1.0
 _adaptive_meanrev_weight: float = 1.0
 _adaptive_params_source: str = "static (not yet refreshed this run)"
+
+# 2026-09-18 audit fix #3: rolling cross-cycle peer-score cache for
+# _quality_gate_fund_tech's sector-relative check — see config.py's
+# VOLUME_SHOCK_SECTOR_HISTORY_* docstring for the full rationale.
+# In-memory, process-local (same durability tier as the _adaptive_* globals
+# above — reset on restart, which is fine: this is noise-reduction over a
+# few hours, not a value anything needs to survive a redeploy). Keyed by
+# sector name; each value is a list of (unix_ts, quality_score) tuples,
+# capped by both age and count so it can never grow unbounded across a long
+# trading day.
+_sector_peer_history: dict = {}
+
+
+def _record_sector_peer_score(sector: str, quality_score: float) -> None:
+    """Append this cycle's (sector, quality_score) sample to the rolling
+    cross-cycle history, pruning anything past
+    VOLUME_SHOCK_SECTOR_HISTORY_MAX_AGE_MINUTES and capping the list at
+    VOLUME_SHOCK_SECTOR_HISTORY_MAX_SAMPLES (oldest dropped first). Called
+    once per scored symbol per cycle, AFTER that symbol's own gate decision
+    — so a symbol never gets to compare itself against its own just-added
+    sample within the same cycle, only against prior cycles' samples."""
+    if not sector or quality_score is None:
+        return
+    now = time.time()
+    cutoff = now - config.VOLUME_SHOCK_SECTOR_HISTORY_MAX_AGE_MINUTES * 60
+    bucket = [s for s in _sector_peer_history.get(sector, []) if s[0] >= cutoff]
+    bucket.append((now, quality_score))
+    if len(bucket) > config.VOLUME_SHOCK_SECTOR_HISTORY_MAX_SAMPLES:
+        bucket = bucket[-config.VOLUME_SHOCK_SECTOR_HISTORY_MAX_SAMPLES:]
+    _sector_peer_history[sector] = bucket
+
+
+def _get_cross_cycle_peer_scores(sector: str) -> list:
+    """Prune-then-return the rolling history for `sector` as a plain list
+    of quality_score floats, ready to merge alongside this cycle's own
+    sector_peers in _quality_gate_fund_tech. Empty list (not an error) for
+    a sector with no history yet — the gate falls back to cycle-only
+    behavior exactly as before this fix in that case."""
+    if not sector:
+        return []
+    now = time.time()
+    cutoff = now - config.VOLUME_SHOCK_SECTOR_HISTORY_MAX_AGE_MINUTES * 60
+    bucket = [s for s in _sector_peer_history.get(sector, []) if s[0] >= cutoff]
+    if len(bucket) != len(_sector_peer_history.get(sector, [])):
+        _sector_peer_history[sector] = bucket
+    return [s[1] for s in bucket]
 
 
 def _refresh_cycle_adaptive_params(db: Session) -> None:
@@ -496,7 +543,7 @@ async def _fetch_market_cap_cr(client: httpx.AsyncClient, symbol: str) -> float 
         return None
 
 
-def _quality_gate_fund_tech(scored: dict, sector_peers: list) -> tuple:
+def _quality_gate_fund_tech(scored: dict, sector_peers: list, cross_cycle_peer_scores: Optional[list] = None) -> tuple:
     """
     The actual "fundamental and technically ok, at least not bad" +
     "adaptive threshold, sector-wise not overall" gate. Three parts, ALL
@@ -536,6 +583,16 @@ def _quality_gate_fund_tech(scored: dict, sector_peers: list) -> tuple:
          sector is under-represented in a single cycle would empty the
          watchlist most days, not just guard against noise.
 
+         2026-09-18 audit fix #3: the comparison window above no longer
+         has to be JUST this cycle's batch. `cross_cycle_peer_scores` (see
+         _get_cross_cycle_peer_scores) carries recent-cycles' same-sector
+         quality scores, merged in alongside this cycle's own sector_peers
+         before the min-peers check and the percentile calculation. This
+         widens the sample without changing what's being measured — still
+         "how does this stock's quality score compare to its own sector's
+         recent candidates", just over a less noisy window than a single
+         cycle's often-1-3-name batch.
+
     Returns (passes: bool, note: str).
     """
     fs, ts = scored.get("fundamental_score"), scored.get("technical_score")
@@ -565,6 +622,9 @@ def _quality_gate_fund_tech(scored: dict, sector_peers: list) -> tuple:
         pq = [v for v in (pf, pt) if v is not None]
         if pq:
             peer_scores.append(sum(pq) / len(pq))
+    this_cycle_peer_count = len(peer_scores)
+    if cross_cycle_peer_scores:
+        peer_scores.extend(cross_cycle_peer_scores)
 
     if len(peer_scores) < config.VOLUME_SHOCK_SECTOR_MIN_PEERS:
         return True, f"fund/tech ok (sector sample too thin for relative check: {len(peer_scores)} peer(s))"
@@ -573,9 +633,13 @@ def _quality_gate_fund_tech(scored: dict, sector_peers: list) -> tuple:
     if pctl < config.VOLUME_SHOCK_SECTOR_PCTL_FLOOR:
         return False, (
             f"sector-relative pctl={pctl:.0f} < floor {config.VOLUME_SHOCK_SECTOR_PCTL_FLOOR:.0f} "
-            f"({len(peer_scores)} sector peers)"
+            f"({this_cycle_peer_count} this-cycle + {len(peer_scores) - this_cycle_peer_count} recent-cycle peers)"
         )
-    return True, f"fund/tech ok, sector pctl={pctl:.0f} ({len(peer_scores)} peers), mcap={amp.market_cap_tier(mcap)}"
+    return True, (
+        f"fund/tech ok, sector pctl={pctl:.0f} "
+        f"({this_cycle_peer_count} this-cycle + {len(peer_scores) - this_cycle_peer_count} recent-cycle peers), "
+        f"mcap={amp.market_cap_tier(mcap)}"
+    )
 
 
 # ── 2026-09-01 incident fix: bulk quote pre-warming ──────────────────────────
@@ -1666,8 +1730,19 @@ async def _refresh_volume_shock_candidates(
             continue
         qr = quality_scores.get(sym)
         if qr is not None:
-            sector_peers = [p for p in by_sector.get(qr.get("sector") or "UNKNOWN", []) if p.get("symbol") != sym]
-            gate_ok, gate_note = _quality_gate_fund_tech(qr, sector_peers)
+            sector_name = qr.get("sector") or "UNKNOWN"
+            sector_peers = [p for p in by_sector.get(sector_name, []) if p.get("symbol") != sym]
+            cross_cycle_scores = _get_cross_cycle_peer_scores(sector_name)
+            gate_ok, gate_note = _quality_gate_fund_tech(qr, sector_peers, cross_cycle_scores)
+            # 2026-09-18 audit fix #3: record this symbol's own quality
+            # score into the rolling cross-cycle history AFTER its gate
+            # decision above, so it never compares against itself within
+            # this same cycle — only available to OTHER symbols (this
+            # sector, later cycles) from here on.
+            _qfs, _qts = qr.get("fundamental_score"), qr.get("technical_score")
+            _qvals = [v for v in (_qfs, _qts) if v is not None]
+            if _qvals:
+                _record_sector_peer_score(sector_name, sum(_qvals) / len(_qvals))
             if not gate_ok:
                 logger.info(
                     "VOLUME_SHOCK CANDIDATE REJECTED %s (mode=%s) | quality gate: %s", sym, mode, gate_note

@@ -1012,6 +1012,12 @@ def try_fill_entry(db: Session, order: models.TradeOrder, tick: Tick, stop_price
             # TradePosition.entry_decision_label's docstring.
             entry_decision_label=getattr(order, "entry_decision_label", None),
             entry_conviction_score=getattr(order, "entry_conviction_score", None),
+            # 2026-09-18 audit fix #2 (regime-override win-rate tracking):
+            # thread the order's is_regime_override through too, so
+            # GET /stats/regime-override can report on these positions
+            # without a join. False for every non-override order. See
+            # models.py TradePosition.is_regime_override's docstring.
+            is_regime_override=getattr(order, "is_regime_override", False),
         )
         db.add(position)
         db.flush()
@@ -1180,6 +1186,10 @@ def record_real_fill(db: Session, order: models.TradeOrder, fill_price: float, f
             # exit_engine fall back to its previous same-day heuristic for
             # those, unchanged.
             entry_product_type=getattr(order, "product_type", None),
+            # 2026-09-18 audit fix #2 (regime-override win-rate tracking):
+            # same as the DEMO path above — see models.py TradePosition.
+            # is_regime_override's docstring.
+            is_regime_override=getattr(order, "is_regime_override", False),
         )
         db.add(position)
         db.flush()

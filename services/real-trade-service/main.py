@@ -1683,6 +1683,57 @@ async def list_closed_positions(
     }
 
 
+@app.get("/stats/regime-override")
+async def regime_override_stats(
+    mode: str = "REAL", admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """2026-09-18 audit fix #2 — count + win-rate among CLOSED positions that
+    were opened through the market-regime gate's ENTRY_REGIME_OVERRIDE_TOP_N
+    bypass (config.py). By definition these are entries the system's own
+    regime read said not to take, sized down to
+    ENTRY_REGIME_OVERRIDE_RISK_SCALE — this is the visibility the original
+    audit asked for so the bypass's actual live win-rate can be watched
+    over time instead of just trusted as "correctly wired". Still-open
+    override positions are counted separately (open_count) since they have
+    no realized_pnl to judge yet."""
+    mode = mode.upper()
+    closed = (
+        db.query(models.TradePosition)
+        .filter(
+            models.TradePosition.mode == mode,
+            models.TradePosition.status == "CLOSED",
+            models.TradePosition.is_regime_override == True,  # noqa: E712
+        )
+        .order_by(models.TradePosition.closed_at.desc())
+        .all()
+    )
+    open_count = (
+        db.query(models.TradePosition)
+        .filter(
+            models.TradePosition.mode == mode,
+            models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")),
+            models.TradePosition.is_regime_override == True,  # noqa: E712
+        )
+        .count()
+    )
+    total = len(closed)
+    wins = sum(1 for p in closed if (p.realized_pnl or 0) > 0)
+    net_rows = [p.net_realized_pnl for p in closed if p.net_realized_pnl is not None]
+    return {
+        "mode": mode,
+        "closed_count": total,
+        "open_count": open_count,
+        "wins": wins,
+        "win_rate": round(wins / total, 4) if total else None,
+        "realized_pnl_total": round(sum(p.realized_pnl or 0 for p in closed), 2) if total else None,
+        "net_realized_pnl_total": round(sum(net_rows), 2) if net_rows else None,
+        "recent": [{
+            "id": p.id, "symbol": p.symbol, "realized_pnl": p.realized_pnl,
+            "opened_at": iso_utc(p.opened_at), "closed_at": iso_utc(p.closed_at),
+        } for p in closed[:25]],
+    }
+
+
 @app.get("/orders/{mode}")
 async def list_orders(mode: str, days: int = 2, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     # AUDIT FIX (this session): this used to take `limit: int = 50` and

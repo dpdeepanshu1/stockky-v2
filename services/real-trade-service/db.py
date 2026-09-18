@@ -152,6 +152,7 @@ def init_schema() -> None:
     _ensure_afterhours_gate_column(eng, dialect())
     _ensure_nextday_watchlist_indexes(eng, dialect())
     _ensure_afterhours_last_run_columns(eng, dialect())
+    _ensure_regime_override_columns(eng, dialect())
 
 
 # 2026-08-27 data fixup: docker-compose.yml/.env.example/.env.oracle.example
@@ -1113,3 +1114,50 @@ def _ensure_nextday_watchlist_indexes(engine, dialect_name: str) -> None:
         sql = _oc.create_index_sql(dialect_name, index_name, table, cols)
         _oc.exec_ddl_safe(engine, sql, dialect_name)
         logger.info("real-trade-db: ensured index %s on %s", index_name, table)
+
+
+# 2026-09-18 audit fix #2 (regime-override win-rate tracking — see models.py
+# TradeOrder.is_regime_override / TradePosition.is_regime_override
+# docstrings). Same additive-migration idiom as every _ensure_* fn above:
+# both columns are nullable-safe booleans defaulting False, so every
+# pre-migration row (and every position opened by a non-override entry)
+# keeps its existing meaning with zero behavior change. Only entries that
+# actually went through the ENTRY_REGIME_OVERRIDE_TOP_N bypass (see
+# entry_engine/entry.py) ever get True, going forward from this deploy.
+def _ensure_regime_override_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        order_cols = {c["name"] for c in inspect(engine).get_columns("trade_orders")}
+        position_cols = {c["name"] for c in inspect(engine).get_columns("trade_positions")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect columns for regime_override migration: %s", e)
+        return
+
+    if dialect_name == "oracle":
+        adds = [
+            ("trade_orders", order_cols, "is_regime_override",
+             "ALTER TABLE trade_orders ADD (is_regime_override NUMBER(1) DEFAULT 0 NOT NULL)"),
+            ("trade_positions", position_cols, "is_regime_override",
+             "ALTER TABLE trade_positions ADD (is_regime_override NUMBER(1) DEFAULT 0 NOT NULL)"),
+        ]
+    else:
+        adds = [
+            ("trade_orders", order_cols, "is_regime_override",
+             "ALTER TABLE trade_orders ADD COLUMN is_regime_override BOOLEAN DEFAULT FALSE NOT NULL"),
+            ("trade_positions", position_cols, "is_regime_override",
+             "ALTER TABLE trade_positions ADD COLUMN is_regime_override BOOLEAN DEFAULT FALSE NOT NULL"),
+        ]
+
+    for table, existing, col_name, sql in adds:
+        if col_name in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added %s.%s", table, col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add %s.%s: %s", table, col_name, e)

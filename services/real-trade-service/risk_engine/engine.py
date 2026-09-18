@@ -73,6 +73,27 @@ CAPITAL_SHARE_PCT = float(os.getenv("REAL_TRADE_CAPITAL_SHARE_PCT", "50.0"))
 # and prevents the risk engine from wasting time sizing an impossible order.
 # Default ₹3000. Override via RISK_MAX_STOCK_PRICE env var as account grows.
 MAX_STOCK_PRICE = float(os.getenv("RISK_MAX_STOCK_PRICE", "3000.0"))
+
+# 2026-09-18 audit fix #4: the ₹3000 default above was a static number with
+# a comment telling the operator to raise it manually "as account equity
+# grows" — correct today, but nothing here actually scaled itself, so it
+# needed a periodic manual check rather than being something the system
+# self-corrects. When RISK_MAX_STOCK_PRICE was NOT explicitly set by the
+# operator, evaluate() now derives the effective ceiling each call from
+# account.equity/risk_per_trade_pct via _adaptive_max_stock_price() below,
+# instead of using this static default. An operator who DID explicitly set
+# RISK_MAX_STOCK_PRICE is never silently overridden — that always wins
+# outright, adaptive or not. RISK_MAX_STOCK_PRICE_ADAPTIVE is a kill switch
+# back to the pure static behavior with no code change if live behavior
+# ever shows a problem with the derived figure.
+MAX_STOCK_PRICE_EXPLICITLY_SET = os.getenv("RISK_MAX_STOCK_PRICE") is not None
+RISK_MAX_STOCK_PRICE_ADAPTIVE = os.getenv("RISK_MAX_STOCK_PRICE_ADAPTIVE", "true").lower() == "true"
+# Conservative representative stop distance for the "can at least 1 share
+# still be sized" math below — deliberately entry_engine's WIDEST possible
+# stop (entry_engine/entry.py's MAX_STOP_PCT, not its typical/flat one), so
+# the derived ceiling stays conservative: it should never let through a
+# stock that a wide-ATR stop would actually make unsizeable at 1 share.
+ADAPTIVE_MAX_PRICE_STOP_PCT = float(os.getenv("RISK_ADAPTIVE_MAX_PRICE_STOP_PCT", "6.0"))
 HARD_FLOOR_LIQUIDITY = float(os.getenv("HARD_FLOOR_LIQUIDITY", "5000000"))
 # 2026-09-01 cleanup: HARD_FLOOR_CONVICTION and the passes_hard_floor()
 # helper below it were removed here — both were dead code, never called
@@ -159,6 +180,28 @@ class RiskResult:
     approved_qty: Optional[int] = None  # risk engine may downsize, never upsize
 
 
+def _adaptive_max_stock_price(account: AccountState) -> float:
+    """2026-09-18 audit fix #4 — derive the max per-share price at which at
+    least 1 share can still be sized within this account's CURRENT
+    per-trade risk budget, using ADAPTIVE_MAX_PRICE_STOP_PCT as a
+    conservative (widest-case) stop distance. This is what lets
+    MAX_STOCK_PRICE effectively scale with equity automatically instead of
+    needing a manual RISK_MAX_STOCK_PRICE bump every time the account grows.
+    Falls back to the static MAX_STOCK_PRICE if equity or risk_per_trade_pct
+    isn't sane (never divides by zero, never produces a nonsensical
+    ceiling from a not-yet-populated AccountState)."""
+    if account.equity <= 0 or account.risk_per_trade_pct <= 0:
+        return MAX_STOCK_PRICE
+    max_trade_risk_amt = account.equity * account.risk_per_trade_pct / 100.0
+    derived = max_trade_risk_amt / (ADAPTIVE_MAX_PRICE_STOP_PCT / 100.0)
+    # Never let the derived ceiling fall below the min-price floor — a
+    # ceiling under the floor would reject every possible BUY outright,
+    # which was never this check's intent (a genuinely small account
+    # should still be able to trade SOME stock, not be shut out of the
+    # market entirely because its risk budget is thin).
+    return max(derived, MIN_STOCK_PRICE)
+
+
 def evaluate(
     intent:  OrderIntent,
     account: AccountState,
@@ -229,19 +272,30 @@ def evaluate(
         )
 
     # ── 4a-ii. Maximum price ceiling (BUY only) ───────────────────────────────
-    # Stocks priced above MAX_STOCK_PRICE (default ₹3000) require a position
-    # value larger than the per-trade risk budget allows at this account size.
+    # Stocks priced above the effective ceiling require a position value
+    # larger than the per-trade risk budget allows at this account size.
     # Rejecting early avoids the confusing "even 1 share exceeds risk cap"
-    # message and makes the real reason explicit. Override RISK_MAX_STOCK_PRICE
-    # env var as equity grows and the budget expands.
-    if intent.side == "BUY" and intent.entry_price > MAX_STOCK_PRICE:
+    # message and makes the real reason explicit.
+    # 2026-09-18 audit fix #4: the ceiling is now adaptive by default —
+    # derived fresh from THIS account's equity/risk_per_trade_pct each call
+    # (see _adaptive_max_stock_price) instead of the static ₹3000 default,
+    # unless the operator explicitly set RISK_MAX_STOCK_PRICE (that always
+    # wins) or disabled RISK_MAX_STOCK_PRICE_ADAPTIVE outright.
+    effective_max_stock_price = MAX_STOCK_PRICE
+    if RISK_MAX_STOCK_PRICE_ADAPTIVE and not MAX_STOCK_PRICE_EXPLICITLY_SET:
+        effective_max_stock_price = _adaptive_max_stock_price(account)
+    if intent.side == "BUY" and intent.entry_price > effective_max_stock_price:
         return RiskResult(
             RiskVerdict.REJECTED, "max_price_ceiling",
-            f"Entry price ₹{intent.entry_price:,.0f} exceeds the ₹{MAX_STOCK_PRICE:,.0f} "
+            f"Entry price ₹{intent.entry_price:,.0f} exceeds the ₹{effective_max_stock_price:,.0f} "
             f"per-share ceiling for this account size. Stock too expensive to size "
             f"within the {account.risk_per_trade_pct:.1f}% per-trade risk budget "
             f"(₹{account.equity * account.risk_per_trade_pct / 100:.0f}). "
-            f"Raise RISK_MAX_STOCK_PRICE env var when equity grows.",
+            + (
+                "Raise RISK_MAX_STOCK_PRICE env var when equity grows."
+                if not RISK_MAX_STOCK_PRICE_ADAPTIVE or MAX_STOCK_PRICE_EXPLICITLY_SET
+                else "Ceiling scales automatically with equity (RISK_MAX_STOCK_PRICE_ADAPTIVE)."
+            ),
         )
 
     # ── 4b. Liquidity hard floor §5 (BUY only, fail-open when data missing) ───

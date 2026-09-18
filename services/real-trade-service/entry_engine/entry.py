@@ -1048,6 +1048,12 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             # TradeOrder.entry_decision_label's docstring.
             entry_decision_label=cand.decision_label,
             entry_conviction_score=cand.conviction_score,
+            # 2026-09-18 audit fix #2 (regime-override win-rate tracking):
+            # carries this cycle's regime-override bypass flag onto the
+            # order so portfolio.py can stamp it onto the resulting
+            # TradePosition at fill time. See models.py TradeOrder.
+            # is_regime_override's docstring.
+            is_regime_override=is_regime_override,
             # 2026-09-15 fix (session38): this automated entry path has
             # always bought CNC (dhan_client.place_order's default — never
             # passed explicitly a few lines below), but that fact was never

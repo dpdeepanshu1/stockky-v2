@@ -552,6 +552,21 @@ VOLUME_SHOCK_FUND_ABS_FLOOR         = float(os.getenv("VOLUME_SHOCK_FUND_ABS_FLO
 VOLUME_SHOCK_TECH_ABS_FLOOR         = float(os.getenv("VOLUME_SHOCK_TECH_ABS_FLOOR", "35"))
 VOLUME_SHOCK_SECTOR_MIN_PEERS       = int(os.getenv("VOLUME_SHOCK_SECTOR_MIN_PEERS", "3"))
 VOLUME_SHOCK_SECTOR_PCTL_FLOOR      = float(os.getenv("VOLUME_SHOCK_SECTOR_PCTL_FLOOR", "30"))
+# 2026-09-18 audit fix #3: the sector-relative check above compares a
+# candidate only against THIS CYCLE's other same-sector candidates — often
+# just 1-3 names — so the same stock can pass or fail purely because of
+# which other names happened to be candidates that specific cycle, not
+# because anything about the stock itself changed. This does NOT replace
+# the cycle-scoped comparison (a historical-peer version was deliberately
+# rejected before as too strict for this "not bad" gate — see
+# _quality_gate_fund_tech's docstring); it widens the sample by also
+# remembering recent cycles' peer quality scores per sector (in-memory,
+# process-local — see candidate_engine/candidates.py's
+# _sector_peer_history) and merging them in alongside this cycle's peers
+# before the percentile check, so the comparison window is less sensitive
+# to which handful of names happened to show up this one cycle.
+VOLUME_SHOCK_SECTOR_HISTORY_MAX_AGE_MINUTES = int(os.getenv("VOLUME_SHOCK_SECTOR_HISTORY_MAX_AGE_MINUTES", "180"))
+VOLUME_SHOCK_SECTOR_HISTORY_MAX_SAMPLES     = int(os.getenv("VOLUME_SHOCK_SECTOR_HISTORY_MAX_SAMPLES", "40"))
 # Bound on how many symbols get fund/technical HTTP lookups per cycle —
 # analysis-intelligence-service calls are the most expensive step in this
 # gate; cap so a huge volume-shock universe day can't turn one cycle into
@@ -760,3 +775,23 @@ OVERNIGHT_HOLD_MAX_EXPOSURE_PCT = float(os.getenv("OVERNIGHT_HOLD_MAX_EXPOSURE_P
 # always MARKET, on purpose (must fill regardless of price).
 EXIT_TARGET_USE_LIMIT = os.getenv("EXIT_TARGET_USE_LIMIT", "true").lower() == "true"
 EXIT_TARGET_LIMIT_BUFFER_PCT = float(os.getenv("EXIT_TARGET_LIMIT_BUFFER_PCT", "0.1"))
+
+# ── Exit-side LIMIT sell expiry (2026-09-18 audit fix #1) ────────────────────
+# EXIT_TARGET_USE_LIMIT above fixed slippage on winners but opened a real gap:
+# exit.py's _has_pending_real_sell() blocks EVERY exit check (stop-hit,
+# target, time-stop, trail) for a position while any SELL for that symbol is
+# still PLACED/PARTIAL at Dhan — a guard written back when all exits were
+# MARKET orders that filled in under a second. A partial-target LIMIT sell
+# that doesn't fill quickly (illiquid name, circuit-limit halt, a fast gap
+# away from the 0.1%-buffered limit price) can now sit PLACED all day with
+# nothing to cancel/replace it — and for as long as it sits there, the
+# stop-loss for the remaining position is never checked. That's exactly the
+# scenario (a violent, fast move) where the stop matters most.
+# The entry side already has exactly this pattern (ENTRY_VALIDITY_MINUTES +
+# expire_stale_orders()) but valid_until was only ever set on BUY orders.
+# EXIT_LIMIT_VALIDITY_MINUTES gives exit-side LIMIT SELL orders their own
+# short window; exit_engine/exit.py's expire_stale_exit_orders() cancels an
+# unfilled one at that point and immediately resends the remaining qty as
+# MARKET, so the position is never left with a dark stop for longer than
+# this window.
+EXIT_LIMIT_VALIDITY_MINUTES = int(os.getenv("EXIT_LIMIT_VALIDITY_MINUTES", "3"))

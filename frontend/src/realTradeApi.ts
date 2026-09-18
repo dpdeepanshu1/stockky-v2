@@ -123,6 +123,15 @@ export interface GateStatus {
       last_run_at: string | null;
       last_run_ok: boolean | null;
     };
+    // 2026-09-18 fix (user report: "no new toggle shows"). Not a
+    // separately-scheduled time — modifies what eod_squareoff does at ITS
+    // scheduled time (hold a narrow, capped subset overnight instead of
+    // flattening everything — see execution/auto_pilot.py's
+    // _select_overnight_holds). Defaults true — see the TradeGateState
+    // model docstring for why this one is opt-out rather than opt-in.
+    overnight_hold?: {
+      enabled: boolean;
+    };
   };
   account: {
     starting_capital: number | null;
@@ -488,7 +497,7 @@ export const realTradeApi = {
   // added 2026-09-17 (session56) — see the afterhours_news_scan field above.
   setFeature: (
     mode: "DEMO" | "REAL",
-    feature: "prepick" | "enter_at_open" | "eod_squareoff" | "eod_signal_scan" | "afterhours_news_scan",
+    feature: "prepick" | "enter_at_open" | "eod_squareoff" | "eod_signal_scan" | "afterhours_news_scan" | "overnight_hold",
     enabled: boolean,
   ) =>
     rtRequest<{ ok: boolean; mode: string; feature: string; enabled: boolean }>(

@@ -92,6 +92,20 @@ class TradeGateState(Base):
     eod_signal_scan_enabled_at = Column(DateTime, nullable=True)
     eod_signal_scan_last_run = Column(String(10), nullable=True)
 
+    # 2026-09-18 fix (user report: "no new toggle shows" for selective
+    # overnight holding). execution/auto_pilot.py's _select_overnight_holds
+    # (2026-09-18) already ships live, gated only by config.py's
+    # OVERNIGHT_HOLD_ENABLED env var — no dashboard control existed, and
+    # "EOD square-off" above still described itself as flattening every
+    # position, which is no longer true whenever this is on. Unlike the
+    # four toggles above (all default OFF, opt-in), this one defaults ON
+    # to match the env var's existing default ("true") and the fact that
+    # this behavior is already live in REAL — flipping the dashboard
+    # switch off is what actually changes anything for an existing
+    # deployment. See execution/auto_pilot.py's _overnight_hold_enabled.
+    overnight_hold_enabled = Column(Boolean, nullable=False, default=True)
+    overnight_hold_enabled_at = Column(DateTime, nullable=True)
+
     # 2026-09-17 (session56, user request): fifth scheduled feature —
     # after-hours news scan. Polls Moneycontrol/LiveMint/ET RSS feeds hourly
     # between market close and next pre-open, classifies headlines, scores

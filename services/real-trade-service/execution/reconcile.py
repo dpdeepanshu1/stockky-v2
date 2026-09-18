@@ -554,6 +554,30 @@ async def reconcile_real_orders(db: Session) -> dict:
                     )
             dead_status = "REJECTED" if status == "REJECTED" else "CANCELLED"
             order.status = dead_status
+            # BUG FIX (2026-09-18, user-reported: a manually-placed BUY on a
+            # T2T/ASM-restricted symbol — e.g. product_type=INTRADAY — got
+            # rejected with Dhan's own "not allowed to be traded in
+            # Intraday" message, but the symbol was never learned into
+            # intraday_eligibility.py's restricted-symbol list, because
+            # record_restriction() was only ever called from exit_engine.py
+            # (the SELL side, which sees the live exception synchronously).
+            # A REJECTED BUY only surfaces here, via reconcile polling the
+            # broker order book, so this was the missing call site for
+            # buy-side rejections. Applies to any dead order regardless of
+            # side — a SELL rejected for this reason gets learned here too,
+            # as a harmless duplicate of exit_engine's own recording (same
+            # idempotent upsert, see record_restriction's docstring).
+            # Best-effort: must never block the dead-order bookkeeping below.
+            if dhan_client.is_security_intraday_restricted_error(rejection_reason or ""):
+                try:
+                    from intraday_eligibility import record_restriction
+                    record_restriction(db, order.symbol, rejection_reason)
+                except Exception as _rie:
+                    logger.warning(
+                        "reconcile: failed to record intraday restriction for %s (%s) — "
+                        "continuing with dead-order bookkeeping anyway.",
+                        order.symbol, _rie,
+                    )
             note = f" (after {order.filled_qty_so_far} of {order.qty} already filled)" if order.filled_qty_so_far else ""
             # DIAGNOSTIC (2026-09-16): append Dhan's own rejection reason/code
             # when present, additive only — see the capture point above.

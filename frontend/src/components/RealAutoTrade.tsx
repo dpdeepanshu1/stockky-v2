@@ -1414,7 +1414,7 @@ export default function RealAutoTrade() {
   };
 
   const doToggleFeature = async (
-    feature: "prepick" | "enter_at_open" | "eod_squareoff" | "eod_signal_scan" | "afterhours_news_scan",
+    feature: "prepick" | "enter_at_open" | "eod_squareoff" | "eod_signal_scan" | "afterhours_news_scan" | "overnight_hold",
     currentlyEnabled: boolean,
   ) => {
     setFeatureBusy(feature); setError(null);
@@ -2559,7 +2559,7 @@ export default function RealAutoTrade() {
                         { key: "enter_at_open" as const, icon: "🚀", title: "Enter at open",
                           desc: "Run one full entry cycle just after the open so pre-picked names get entered at the early price." },
                         { key: "eod_squareoff" as const, icon: "🌆", title: "EOD square-off",
-                          desc: "Close every open position before the close so nothing is carried overnight (intraday square-off)." },
+                          desc: "Close open positions before the close. When Selective overnight hold (below) is ON, a narrow, capped subset with a real backtested Day+1 edge is kept open instead of flattened." },
                         { key: "eod_signal_scan" as const, icon: "🌙", title: "EOD signal scan",
                           desc: "Right after square-off, re-scan for strong positive signals (news/results/events/momentum) and queue the best few as an overnight-priority pick — bought first thing at tomorrow's open, not today." },
                       ]).map(f => {
@@ -2595,6 +2595,47 @@ export default function RealAutoTrade() {
                           </div>
                         );
                       })}
+                      {/* 2026-09-18 fix (user report: "no new toggle shows"). Rendered
+                          separately from the .map() above (like afterhours_news_scan
+                          below) because it has no time_ist/last_run of its own — it's
+                          a modifier on what eod_squareoff does at ITS scheduled time,
+                          not a separately-scheduled feature. Defaults true — see
+                          TradeGateState.overnight_hold_enabled's docstring. */}
+                      {status.scheduled_automation!.overnight_hold && (() => {
+                        const oh = status.scheduled_automation!.overnight_hold!;
+                        const on = oh.enabled;
+                        const busy = featureBusy === "overnight_hold";
+                        return (
+                          <div className={`flex items-start justify-between gap-3 px-3 py-2.5 ${on ? "bg-signal-buy/[0.04]" : ""}`}>
+                            <div className="min-w-0">
+                              <p className="font-display tabular-nums text-[11px] text-paper">
+                                🌙 Selective overnight hold{" "}
+                                {on
+                                  ? <span className="text-signal-buy">ON</span>
+                                  : <span className="text-mist">OFF</span>}
+                              </p>
+                              <p className="font-display tabular-nums text-[9px] text-mist mt-0.5">
+                                Applies at EOD square-off time. When ON, a narrow, capped subset of open
+                                positions with a real backtested Day+1 edge (HIGH_CONVICTION / UPPER_CIRCUIT,
+                                at/above breakeven, not extended near today's high) skips square-off and is
+                                held overnight instead of flattened. When OFF, EOD square-off closes every
+                                open position exactly as it always did before this feature existed.
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => void doToggleFeature("overnight_hold", on)}
+                              disabled={!armed || busy}
+                              className={`shrink-0 px-3 py-1.5 rounded-xl font-display tabular-nums text-[11px] disabled:opacity-40 ${
+                                on
+                                  ? "bg-signal-sell/10 border border-signal-sell/30 text-signal-sell"
+                                  : "bg-signal-buy/10 border border-signal-buy/30 text-signal-buy"
+                              }`}
+                            >
+                              {busy ? "…" : on ? "Turn Off" : "Turn On"}
+                            </button>
+                          </div>
+                        );
+                      })()}
                       {/* 2026-09-17 (session56): after-hours RSS news scan. Rendered
                           separately from the .map() above because its status shape
                           (window_ist/interval_seconds/finalize_time_ist) differs from

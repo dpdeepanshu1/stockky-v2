@@ -823,6 +823,27 @@ async def _enter_at_open(db, mode: str, gate_armed: bool) -> None:
     )
 
 
+def _overnight_hold_enabled(db, mode: str) -> bool:
+    """2026-09-18 fix (user report: "no new toggle shows" for selective
+    overnight holding). Reads the new TradeGateState.overnight_hold_enabled
+    switch — same dashboard-toggle mechanism (POST /features/{mode}) as
+    prepick/enter_at_open/eod_squareoff/eod_signal_scan, wired via
+    main.py's _FEATURE_COLUMNS. Column defaults to True (see its model
+    docstring) so a gate row that predates this migration, or one no admin
+    has touched yet, behaves exactly as config.OVERNIGHT_HOLD_ENABLED
+    already did — zero behavior change until an admin explicitly flips the
+    new toggle off. Fails open to the config default if the gate row is
+    somehow missing (should not happen in practice — _eod_squareoff already
+    requires a gate row to run at all)."""
+    try:
+        gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
+    except Exception:
+        gate = None
+    if gate is not None:
+        return bool(getattr(gate, "overnight_hold_enabled", True))
+    return config.OVERNIGHT_HOLD_ENABLED
+
+
 async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, dict]:
     """2026-09-18 fix (user audit finding): _eod_squareoff used to flatten
     EVERY open position unconditionally, discarding candidate_engine's own
@@ -852,7 +873,7 @@ async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, 
     string] for logging/notification). Any position not returned in the
     keep-set squares off exactly as before this fix.
     """
-    if not config.OVERNIGHT_HOLD_ENABLED or not positions:
+    if not _overnight_hold_enabled(db, mode) or not positions:
         return set(), {}
 
     eligible_labels = config.OVERNIGHT_HOLD_ELIGIBLE_LABELS

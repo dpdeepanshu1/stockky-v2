@@ -139,6 +139,7 @@ def init_schema() -> None:
     _ensure_product_type_columns(eng, dialect())
     _ensure_overnight_hold_columns(eng, dialect())
     _ensure_cost_model_columns(eng, dialect())
+    _ensure_overnight_hold_toggle_column(eng, dialect())
     _backfill_broker_imported_flag(eng)
     _ensure_watchlist_link_columns(eng, dialect())
     _fix_stale_dhan_token_expiry(eng)
@@ -997,6 +998,58 @@ def _ensure_afterhours_gate_column(engine, dialect_name: str) -> None:
 # trade_gate_state existed before afterhours_scan_last_run_at /
 # afterhours_scan_last_run_ok were added to models.py — additive migration,
 # same idiom as _ensure_afterhours_gate_column above.
+def _ensure_overnight_hold_toggle_column(engine, dialect_name: str) -> None:
+    # Same pattern as _ensure_afterhours_gate_column just above. Unlike
+    # that one, this defaults to ON (DEFAULT 1 / TRUE) — see models.py
+    # TradeGateState.overnight_hold_enabled's docstring for why: the
+    # feature is already live via config.OVERNIGHT_HOLD_ENABLED's own
+    # "true" default, so an existing deployed row must come back enabled,
+    # not silently disable something already running in REAL.
+    from sqlalchemy import inspect, text
+
+    try:
+        existing = {c["name"] for c in inspect(engine).get_columns("trade_gate_state")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect trade_gate_state columns: %s", e)
+        return
+
+    if dialect_name == "oracle":
+        adds = [
+            (
+                "overnight_hold_enabled",
+                "ALTER TABLE trade_gate_state ADD (overnight_hold_enabled NUMBER(1) DEFAULT 1 NOT NULL)",
+            ),
+            (
+                "overnight_hold_enabled_at",
+                "ALTER TABLE trade_gate_state ADD (overnight_hold_enabled_at TIMESTAMP NULL)",
+            ),
+        ]
+    else:
+        adds = [
+            (
+                "overnight_hold_enabled",
+                "ALTER TABLE trade_gate_state ADD COLUMN overnight_hold_enabled BOOLEAN DEFAULT TRUE NOT NULL",
+            ),
+            (
+                "overnight_hold_enabled_at",
+                "ALTER TABLE trade_gate_state ADD COLUMN overnight_hold_enabled_at TIMESTAMP NULL",
+            ),
+        ]
+
+    for col_name, sql in adds:
+        if col_name in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added trade_gate_state.%s", col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add trade_gate_state.%s: %s", col_name, e)
+
+
 def _ensure_afterhours_last_run_columns(engine, dialect_name: str) -> None:
     from sqlalchemy import inspect, text
 

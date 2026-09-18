@@ -375,6 +375,18 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
                 ),
                 "last_run_ok": getattr(gate, "afterhours_scan_last_run_ok", None),
             },
+            # 2026-09-18 fix (user report: "no new toggle shows"). Not a
+            # separate scheduled time of its own — it modifies what
+            # eod_squareoff does at ITS scheduled time (hold a narrow,
+            # capped subset overnight instead of flattening everything —
+            # see execution/auto_pilot.py's _select_overnight_holds). No
+            # time_ist/last_run of its own for that reason; the frontend
+            # renders it as a plain on/off row instead of the time-stamped
+            # shape the others use. Defaults True — see this column's
+            # models.py docstring for why.
+            "overnight_hold": {
+                "enabled": bool(getattr(gate, "overnight_hold_enabled", True)),
+            },
         },
         "account": {
             "starting_capital": account.starting_capital if account else None,
@@ -1367,6 +1379,15 @@ _FEATURE_COLUMNS = {
     # tomorrow's _prepick. See execution/auto_pilot.py's _afterhours_scan_loop
     # and watchlist_engine/afterhours_scan.py.
     "afterhours_news_scan": ("afterhours_news_scan_enabled", "afterhours_news_scan_enabled_at"),
+    # 2026-09-18 fix (user report: "no new toggle shows" for selective
+    # overnight holding — see execution/auto_pilot.py's
+    # _select_overnight_holds / _overnight_hold_enabled and models.py's
+    # TradeGateState.overnight_hold_enabled docstrings). Unlike the five
+    # features above, this one defaults ON (column default=True) to match
+    # config.OVERNIGHT_HOLD_ENABLED's existing "true" default — it's
+    # already live in REAL, so this toggle is how an admin turns it OFF,
+    # not on.
+    "overnight_hold": ("overnight_hold_enabled", "overnight_hold_enabled_at"),
 }
 
 

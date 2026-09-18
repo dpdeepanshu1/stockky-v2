@@ -293,6 +293,17 @@ SCAN_UNIVERSE_KEY   = "stockky:scan_universe"
 IPO_CACHE_KEY       = "stockky:ipos:recent"
 KNOWN_SYMBOLS_KEY   = "stockky:known_symbols"
 SCAN_TASK_PREFIX    = "stockky:scan_task:"
+# 2026-09-18 fix — see the BUG FIX docstring at the top of
+# _get_momentum_movers() for the full root-cause writeup: that function had
+# no result cache of its own, so every caller (there are ~20 call sites)
+# paid for a full fresh recompute, including an uncached whole-market
+# AngelOne quote sweep. This is what was making /scan/universe (and other
+# movers-dependent endpoints) slow enough to trip real-trade-service's
+# candidate-fetch ReadTimeout, especially in the first few minutes after a
+# redeploy when several callers (the stockky-hot warm-up job, dashboard
+# polls, candidate_engine) all land in the same short window.
+MOMENTUM_MOVERS_CACHE_KEY = "stockky:momentum_movers"
+MOMENTUM_MOVERS_CACHE_TTL = 90  # seconds
 _SCAN_CANCEL_FLAGS: set = set()  # process-local instant cancel
 
 # ── Global activity gate (Power Off / force-stop) ───────────────────────────
@@ -1011,7 +1022,33 @@ def _next_general_pool_slice(general_pool: List[str], sample_size: int) -> List[
 
 
 def _get_momentum_movers() -> List[str]:
-    """Real-time movers: NSE gainers/losers/most-active + ≥5% day/week moves."""
+    """Real-time movers: NSE gainers/losers/most-active + ≥5% day/week moves.
+
+    BUG FIX (2026-09-18): this function had no result cache of its own —
+    every one of its ~20 call sites across this file (scan/universe,
+    stockky_hot_stocks' background warm-up loop, dashboard endpoints,
+    build_scan_universe, etc.) triggered a full fresh recompute each time:
+    4 NSE board fetches (each individually cached at ttl=900s inside
+    _fetch_from_nse_api, but still 4 round trips per call), one UNCACHED
+    AngelOne whole-market quote sweep (~2000-2700 symbols — several real
+    seconds even when it succeeds), and sometimes a bulk yfinance fallback.
+    Live logs taken right after a redeploy show this recomputing 5+ times
+    within a few minutes — once per caller that happened to land in that
+    window — each one re-paying the AngelOne sweep cost from scratch. That
+    redundant load is what was making /scan/universe (and anything else
+    that calls this) slow enough to trip real-trade-service's
+    candidate-fetch ReadTimeout, even though api-gateway's own /health
+    stayed instant throughout (a cheap route with none of this work).
+    Caching the whole result for MOMENTUM_MOVERS_CACHE_TTL seconds means a
+    burst of callers in the same window shares one computation instead of
+    each paying for their own — mirrors the per-endpoint NSE caching
+    already used inside this function, just applied to the function's
+    overall output too.
+    """
+    cached = _redis_get(MOMENTUM_MOVERS_CACHE_KEY)
+    if isinstance(cached, list) and cached:
+        return cached
+
     movers: set[str] = set()
 
     # 1) NSE live boards (best free real-time source when reachable — this
@@ -1266,6 +1303,10 @@ def _get_momentum_movers() -> List[str]:
 
     out = sorted(movers)
     logger.info("Momentum movers collected: %s symbols", len(out))
+    try:
+        _redis_set(MOMENTUM_MOVERS_CACHE_KEY, out, ttl=MOMENTUM_MOVERS_CACHE_TTL)
+    except Exception as e:
+        logger.debug("momentum movers cache set failed (non-fatal): %s", e)
     return out
 
 def _get_news_mentioned_symbols() -> List[str]:
@@ -8722,6 +8763,32 @@ async def _warm_surprise_scan_cache():
     except Exception as e:
         logger.debug("surprise-scan warm task not scheduled: %s", e)
 
+
+# ── Startup momentum-movers cache pre-warm ──────────────────────────────────
+# 2026-09-18 fix, same pattern/reason as _warm_surprise_scan_cache above:
+# _get_momentum_movers() now caches its result (MOMENTUM_MOVERS_CACHE_KEY,
+# see its own docstring), but right after a fresh deploy/restart that cache
+# is empty, so the first caller of the day — which in practice is usually
+# real-trade-service's candidate_engine hitting /scan/universe within
+# seconds of both services coming up together — still pays the full
+# uncached cost (NSE boards + an AngelOne whole-market quote sweep) and can
+# trip its own client-side ReadTimeout. Firing one computation here, as a
+# genuine background task (not awaited, never delays app readiness — same
+# reasoning as the surprise-scan warm above), means the cache is already
+# populated by the time the real pipeline's first cycle asks for it.
+@app.on_event("startup")
+async def _warm_momentum_movers_cache():
+    async def _warm():
+        try:
+            await asyncio.to_thread(_get_momentum_movers)
+            logger.info("Startup: momentum-movers cache pre-warmed (first /scan/universe call will be fast)")
+        except Exception as e:
+            logger.warning("Startup warning (momentum-movers warm, non-fatal): %s", e)
+
+    try:
+        asyncio.create_task(_warm())
+    except Exception as e:
+        logger.debug("momentum-movers warm task not scheduled: %s", e)
 
 
 @app.post("/ops/circuit-reset")

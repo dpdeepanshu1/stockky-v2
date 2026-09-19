@@ -333,7 +333,7 @@ async def get_market_sentiment(force_refresh: bool = False):
                 return MarketSentimentResponse(**cached_response)
 
         logger.info("Fetching fresh market sentiment data")
-        indices_data = fetch_indices_batch(INDEX_SYMBOLS)
+        indices_data = (await asyncio.to_thread(fetch_indices_batch, INDEX_SYMBOLS))
 
         if not indices_data:
             if _cache["data"] is not None:
@@ -360,7 +360,7 @@ async def get_market_sentiment(force_refresh: bool = False):
                 _cache["timestamp"] = now
                 return MarketSentimentResponse(**fallback)
 
-        score = compute_market_score(indices_data)
+        score = (await asyncio.to_thread(compute_market_score, indices_data))
         classification = classify_sentiment(score)
 
         trend = "Bullish" if score > 55 else "Bearish" if score < 45 else "Neutral"

@@ -557,6 +557,7 @@ export interface CategorizedEvents {
 /** Soft keep-alive while the UI is open — prevents free-tier sleep without hammering. */
 let _keepAliveTimer: ReturnType<typeof setInterval> | null = null;
 let _lastKeepAlive = 0;
+let _keepAliveVisHandler: (() => void) | null = null;
 const KEEP_ALIVE_MIN_GAP_MS = 4 * 60 * 1000; // never more often than every 4 min
 const KEEP_ALIVE_INTERVAL_MS = 4.5 * 60 * 1000; // ~4.5 min while tab visible
 
@@ -576,15 +577,22 @@ export function startSessionKeepAlive(): void {
   // Immediate soft wake when UI mounts
   tick();
   _keepAliveTimer = setInterval(tick, KEEP_ALIVE_INTERVAL_MS);
-  document.addEventListener("visibilitychange", () => {
+  // session72: keep a reference so stopSessionKeepAlive() can remove it — previously every stop/start
+  // cycle (StrictMode double-mount, view re-mounts) stacked one more anonymous listener that was never removed.
+  _keepAliveVisHandler = () => {
     if (document.visibilityState === "visible") tick();
-  });
+  };
+  document.addEventListener("visibilitychange", _keepAliveVisHandler);
 }
 
 export function stopSessionKeepAlive(): void {
   if (_keepAliveTimer) {
     clearInterval(_keepAliveTimer);
     _keepAliveTimer = null;
+  }
+  if (_keepAliveVisHandler) {
+    document.removeEventListener("visibilitychange", _keepAliveVisHandler);
+    _keepAliveVisHandler = null;
   }
 }
 

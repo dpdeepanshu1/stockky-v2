@@ -92,3 +92,35 @@ def require_admin(authorization: str = Header(default="")) -> str:
     if not username:
         raise HTTPException(status_code=401, detail="Invalid or expired admin session")
     return username
+
+
+
+def auth_config_diagnostics() -> dict:
+    """Session 72 (#9). Non-secret snapshot of this service's admin-auth config.
+    The fingerprint is the first 8 hex chars of SHA-256(SESSION_SECRET): if the
+    two services report DIFFERENT fingerprints, tokens issued by one are rejected
+    by the other (401 everywhere -> 'admin session broken')."""
+    import hashlib
+    secret = config.SESSION_SECRET or ""
+    h = config.ADMIN_PASSWORD_HASH or ""
+    return {
+        "session_secret_configured": bool(secret),
+        "session_secret_length": len(secret),
+        "session_secret_fingerprint": hashlib.sha256(secret.encode()).hexdigest()[:8] if secret else None,
+        "admin_username_configured": bool(config.ADMIN_USERNAME),
+        "admin_password_hash_configured": bool(h),
+        "admin_password_hash_looks_argon2": h.startswith("$argon2"),
+        "session_idle_timeout_minutes": config.SESSION_IDLE_TIMEOUT_MINUTES,
+    }
+
+
+def log_auth_config(service: str) -> None:
+    d = auth_config_diagnostics()
+    logger.info("AUTH CONFIG [%s]: %s", service, d)
+    if not d["session_secret_configured"]:
+        logger.error("AUTH CONFIG [%s]: SESSION_SECRET is empty — every admin route will 401.", service)
+    if not d["admin_password_hash_configured"]:
+        logger.error("AUTH CONFIG [%s]: no ADMIN_PASSWORD_HASH(_B64) — login is impossible.", service)
+    elif not d["admin_password_hash_looks_argon2"]:
+        logger.error("AUTH CONFIG [%s]: ADMIN_PASSWORD_HASH does not start with '$argon2' — docker compose most likely "
+                     "interpolated the '$' characters. Use ADMIN_PASSWORD_HASH_B64 instead.", service)

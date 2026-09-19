@@ -139,17 +139,22 @@ def test_missing_quote_fails_closed():
 
 
 def test_exposure_cap_keeps_highest_conviction_first():
+    # Session 72: rewritten. The original scenario (two positions worth 2,100 each on equity 10,000) predates
+    # OVERNIGHT_HOLD_MAX_SINGLE_SYMBOL_PCT (15% -> 1,500 per symbol), so BOTH were now (correctly) rejected by the
+    # single-symbol cap and the test failed on the untouched v7 zip. With single<=15% and total<=40% the total cap
+    # only binds with 3+ positions: three worth 1,365 each (4,095 > 4,000) -> the two highest-conviction fit.
     db = _fresh_db()
-    _make_account(db, equity=10_000.0)  # cap = 40% * 10,000 = 4,000
-    # Each position is worth 105 * 20 = 2,100 -> only one fits under the 4,000 cap
-    p_low = _make_position(db, "LOWCONV", 100.0, 20, "VOLUME_SHOCK_HIGH_CONVICTION", 40)
-    p_high = _make_position(db, "HIGHCONV", 100.0, 20, "VOLUME_SHOCK_HIGH_CONVICTION", 90)
+    _make_account(db, equity=10_000.0)  # total cap = 40% * 10,000 = 4,000; single-symbol cap = 1,500
+    p_low = _make_position(db, "LOWCONV", 100.0, 13, "VOLUME_SHOCK_HIGH_CONVICTION", 40)
+    p_mid = _make_position(db, "MIDCONV", 100.0, 13, "VOLUME_SHOCK_HIGH_CONVICTION", 65)
+    p_high = _make_position(db, "HIGHCONV", 100.0, 13, "VOLUME_SHOCK_HIGH_CONVICTION", 90)
     _patch_quotes({
         "LOWCONV": _tick("LOWCONV", 105.0, 108.0, 95.0),
+        "MIDCONV": _tick("MIDCONV", 105.0, 108.0, 95.0),
         "HIGHCONV": _tick("HIGHCONV", 105.0, 108.0, 95.0),
     })
-    keep_ids, reasons = _run(_select_overnight_holds(db, "REAL", [p_low, p_high]))
-    assert keep_ids == {p_high.id}
+    keep_ids, reasons = _run(_select_overnight_holds(db, "REAL", [p_low, p_mid, p_high]))
+    assert keep_ids == {p_high.id, p_mid.id}
     assert p_low.id not in reasons
 
 

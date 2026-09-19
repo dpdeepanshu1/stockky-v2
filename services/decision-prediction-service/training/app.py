@@ -3,6 +3,7 @@
 Training-service FastAPI application.
 Exposes REST API endpoints for training intelligence, prediction recording, and evaluation.
 """
+import asyncio
 import os
 import logging
 import json
@@ -1187,14 +1188,12 @@ async def stock_history(symbol: str, period: str = "1mo"):
         try:
             if attempt == 0:
                 try:
-                    httpx.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=8)
+                    (await asyncio.to_thread(httpx.get, f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=8))
                 except Exception:
                     pass
-            resp = httpx.get(
-                f"{MARKET_DATA_URL}/history/{symbol.upper()}",
+            resp = (await asyncio.to_thread(httpx.get, f"{MARKET_DATA_URL}/history/{symbol.upper()}",
                 params={"period": md_period, "interval": "1d"},
-                timeout=45,
-            )
+                timeout=45,))
             if resp.status_code in (502, 503, 504):
                 last_err = f"HTTP {resp.status_code}"
                 import time as _t
@@ -1216,7 +1215,7 @@ async def stock_history(symbol: str, period: str = "1mo"):
         try:
             import yfinance as yf
             yf_period, yf_interval = _CHART_PERIOD_MAP[period]
-            hist = yf.Ticker(symbol.upper() + ".NS").history(period=yf_period, interval=yf_interval)
+            hist = (await asyncio.to_thread(yf.Ticker, symbol.upper() + ".NS")).history(period=yf_period, interval=yf_interval)
             if hist is None or hist.empty:
                 raise HTTPException(status_code=503, detail=f"Chart temporarily unavailable (rate limit). Try again shortly. ({last_err})")
             points = []

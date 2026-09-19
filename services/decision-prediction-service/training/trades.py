@@ -411,8 +411,10 @@ def mark_to_market(trade_id: str):
         elif days_held >= (trade.max_holding_days or MAX_HOLDING_DAYS):
             exit_reason = "max_holding_period"
         else:
+            # session72 (#10): the weekly review used to also require days_held % 7 == 0 — the sweep had to run on EXACTLY day 7/14/21;
+            # one missed/late sweep skipped that week's profit-take entirely. current_week > weeks_held alone is the once-per-week trigger.
             current_week = days_held // WEEK_DAYS
-            if current_week > trade.weeks_held and days_held > 0 and days_held % WEEK_DAYS == 0:
+            if current_week > trade.weeks_held and days_held > 0:
                 trade.weeks_held = current_week
                 trade.last_weekly_review_at = ist_now()
                 if trade.pnl_pct >= WEEKLY_TAKE_PROFIT_PCT:

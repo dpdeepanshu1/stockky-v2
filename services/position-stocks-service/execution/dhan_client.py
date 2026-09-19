@@ -316,6 +316,36 @@ def get_order_list(db: Session) -> list:
     return data if isinstance(data, list) else []
 
 
+def get_trade_history(db: Session, from_date: str, to_date: str, max_pages: int = 10) -> list:
+    """Read-only. Dhan's trade history for [from_date, to_date] (YYYY-MM-DD),
+    unlike get_order_list() (today only). Used to recover fills of orders that
+    have aged out of the order book (overnight-stop partials, prior-day
+    *_PENDING_RECONCILE exits). SDK: dhanhq.get_trade_history(from, to, page).
+    Pages until an empty/repeated page; an empty account is not an error."""
+    client = _get_sdk_client(db)
+    out: list = []
+    first_key = None
+    for page in range(max_pages):
+        resp = client.get_trade_history(from_date, to_date, page)
+        try:
+            data = _extract_data(resp)
+        except RuntimeError as e:
+            if "no trade" in str(e).lower() or "no data" in str(e).lower():
+                break
+            raise
+        rows = data if isinstance(data, list) else (data.get("data") if isinstance(data, dict) else None)
+        rows = [r for r in (rows or []) if isinstance(r, dict)]
+        if not rows:
+            break
+        key = (str(rows[0].get("orderId")), str(rows[0].get("exchangeTradeId") or rows[0].get("createTime")))
+        if page > 0 and key == first_key:
+            break  # API ignored the page number and repeated page 0
+        if page == 0:
+            first_key = key
+        out.extend(rows)
+    return out
+
+
 # ── Order placement (plain — fallback if USE_SUPER_ORDER=false) ──────────
 def place_order(
     db: Session,

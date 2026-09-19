@@ -204,6 +204,13 @@ _COLUMN_MIGRATIONS = [
     # order is currently live (either not yet placed, already triggered, or
     # placement failed and the position was squared off instead).
     ("scalp_positions", "overnight_stop_order_id", "VARCHAR2(64)", "VARCHAR(64)", None, None),
+    # 2026-09-19 (audit fix — overnight-stop partial-fill handling): see
+    # the column's comment in models.py. NOT NULL default 0, same idempotent
+    # ALTER TABLE pattern as every other scalp_positions column above.
+    ("scalp_positions", "overnight_stop_filled_qty_so_far", "NUMBER(10)", "INTEGER", "0", "0"),
+    # 2026-09-19 (session 72): see models.py — per-order notional + lifetime prior qty.
+    ("scalp_positions", "overnight_stop_filled_notional_so_far", "BINARY_DOUBLE", "DOUBLE PRECISION", "0", "0"),
+    ("scalp_positions", "overnight_stop_prior_qty", "NUMBER(10)", "INTEGER", "0", "0"),
     ("scalp_candidate_log", "fundamental_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "technical_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "market_cap_cr", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),

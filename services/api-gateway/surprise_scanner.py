@@ -789,7 +789,16 @@ class SurpriseStockEngine:
             # through to a full live scan. See SURPRISE_LAST_RESULT_CACHE_KEY
             # docstring above for the full root-cause writeup.
             if self._last_result is None:
-                self._load_last_result_from_durable_cache()
+                # AUDIT FIX (2026-09-19): this is a Neon-backed durable
+                # read (see this file's prefix fix in kv_cache.py — this
+                # key wasn't even reaching Neon before that fix, so this
+                # blocking-call gap was previously masked by the read
+                # always being memory-only/instant; now that it's genuinely
+                # durable, a real DB round-trip can happen here and must
+                # not block the event loop). Same asyncio.to_thread idiom
+                # already used repeatedly in api-gateway/main.py's own
+                # event-loop-blocking-I/O audit (session55).
+                await asyncio.to_thread(self._load_last_result_from_durable_cache)
             if self._last_result is not None:
                 age = time.time() - self._last_scan_ts
                 if age <= cached_max_age_sec:
@@ -798,7 +807,14 @@ class SurpriseStockEngine:
                     result["cache_age_sec"] = round(age, 1)
                     return result
 
-        n_static = self.load_static_cache(force=force_reload_static)
+        # AUDIT FIX (2026-09-19): load_static_cache() does a blocking SQL
+        # query against the surprise-static-feed table (see its own body,
+        # sqlalchemy `engine.connect()`) whenever its 300s in-process cache
+        # is stale — previously called directly on the event loop from
+        # this async function, exactly the blocking-I/O-in-async pattern
+        # api-gateway's main.py was already audited and fixed for
+        # (session55) but this file (flagged unaudited) was not.
+        n_static = await asyncio.to_thread(self.load_static_cache, force_reload_static)
         if n_static == 0:
             return {
                 "count": 0, "stocks": [], "static_loaded": 0,
@@ -898,10 +914,14 @@ class SurpriseStockEngine:
             # (not this TTL) is what actually decides freshness at read time.
             try:
                 import kv_cache
-                kv_cache.set(
+                # AUDIT FIX (2026-09-19): blocking Neon write — see the
+                # to_thread wrap on the read side above for why this must
+                # not run directly on the event loop.
+                await asyncio.to_thread(
+                    kv_cache.set,
                     SURPRISE_LAST_RESULT_CACHE_KEY,
                     {"result": result, "scan_ts": self._last_scan_ts},
-                    ttl=int(cached_max_age_sec) + 120,
+                    int(cached_max_age_sec) + 120,
                 )
             except Exception as e:
                 logger.debug("surprise last-result durable cache set failed (non-fatal): %s", e)
@@ -967,7 +987,11 @@ async def run_market_aware_surprise_feed(
     import json as _json
     import httpx
 
-    cached = _read_surprise_feed_cache()
+    # AUDIT FIX (2026-09-19): blocking Neon read (system:surprise_feed is
+    # durable — see kv_cache._DURABLE_PREFIXES) run directly on the event
+    # loop; wrapped for the same reason as the durable-cache calls in
+    # scan() above.
+    cached = await asyncio.to_thread(_read_surprise_feed_cache)
     if cached:
         age = time.time() - float(cached.get("timestamp") or 0)
         open_now = is_market_open_ist()
@@ -993,7 +1017,9 @@ async def run_market_aware_surprise_feed(
             syms = list(surprise_engine.static_cache.keys())
         else:
             try:
-                surprise_engine.load_static_cache()
+                # AUDIT FIX (2026-09-19): blocking DB query, same fix as
+                # scan()'s load_static_cache() to_thread wrap above.
+                await asyncio.to_thread(surprise_engine.load_static_cache)
                 syms = list(surprise_engine.static_cache.keys())
             except Exception:
                 syms = []
@@ -1054,8 +1080,22 @@ async def run_market_aware_surprise_feed(
             chunk = syms[i: i + chunk_size]
             ticker_string = " ".join(f"{s}.NS" for s in chunk)
             try:
-                df = yf.download(ticker_string, period="2d", group_by="ticker",
-                                 threads=True, progress=False, auto_adjust=True)
+                # AUDIT FIX (2026-09-19, the significant find in this
+                # file's audit): yf.download() is a blocking network call
+                # (real Yahoo Finance HTTP round-trip for up to 50 tickers
+                # per chunk) that was being made directly on the event
+                # loop inside this async function's per-chunk loop — every
+                # other concurrent request to this service (including
+                # unrelated endpoints) stalled for the full duration of
+                # each chunk's download, for every chunk, every time this
+                # ran. Same asyncio.to_thread idiom as every other blocking
+                # call fixed in this file/session — yfinance itself has no
+                # async API, so a thread is the correct fix, not a
+                # different library.
+                df = await asyncio.to_thread(
+                    yf.download, ticker_string, period="2d", group_by="ticker",
+                    threads=True, progress=False, auto_adjust=True,
+                )
                 for s in chunk:
                     try:
                         sym_ns = f"{s}.NS"
@@ -1140,7 +1180,9 @@ async def run_market_aware_surprise_feed(
     payload = {"timestamp": time.time(), "data": results,
                "count": len(results), "errors": errors,
                "market_open": is_market_open_ist()}
-    _write_surprise_feed_cache(payload)
+    # AUDIT FIX (2026-09-19): blocking Neon write, same reason as the read
+    # at the top of this function.
+    await asyncio.to_thread(_write_surprise_feed_cache, payload)
     return {"status": "success", "source": "live", "market_open": is_market_open_ist(),
             "data": results, "count": len(results), "errors": errors,
             "message": f"Live surprise feed: {len(results)} quotes, {errors} errors"}

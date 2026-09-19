@@ -42,6 +42,13 @@ MARKET_DATA_URL = os.environ.get("MARKET_DATA_URL", "").rstrip("/")
 _yf_rate_limited_until = 0.0
 _YF_COOLDOWN_SEC = float(os.environ.get("YF_EVAL_COOLDOWN_SEC", "180"))
 
+# Session 72 (open-issue #10): history_backfill labels a prediction with the LAST TWO BARS OF HISTORY when
+# its own next session isn't available yet. Those bars are, by construction, at or BEFORE the prediction
+# day — so the "T+1 outcome" was a move that had already happened, i.e. a mislabelled (leaked) training
+# label (t1_success feeds pred_train / insights / scanner). Off by default; a prediction simply stays
+# pending until its real next session exists. Set EVAL_ALLOW_HISTORY_BACKFILL=true to restore the old behaviour.
+_ALLOW_HISTORY_BACKFILL = os.environ.get("EVAL_ALLOW_HISTORY_BACKFILL", "false").strip().lower() in ("1", "true", "yes")
+
 
 def _yf_is_rate_limited() -> bool:
     import time as _t
@@ -70,6 +77,11 @@ def _fetch_bars(symbol: str, start_date, end_date):
     seen = set()
 
     def _add(dt, o, h, l, c):
+        try:
+            if not c or float(c) <= 0:      # session72: a missing price became 0.0 -> fake -100% adverse excursion / false stop-loss
+                return
+        except (TypeError, ValueError):
+            return
         if dt in seen:
             return
         if start_date and dt < start_date:
@@ -79,9 +91,9 @@ def _fetch_bars(symbol: str, start_date, end_date):
         seen.add(dt)
         rows.append({
             "date": dt,
-            "open": float(o or 0),
-            "high": float(h or 0),
-            "low": float(l or 0),
+            "open": float(o or c),
+            "high": float(h or c),
+            "low": float(l or c),
             "close": float(c or 0),
         })
 
@@ -187,6 +199,7 @@ def _evaluate_t1_with_backfill(pred, bars, allow_backfill: bool = True) -> dict:
     Else history backfill: use last two complete sessions in bars (bhavcopy/upstream)
     so manual sweeps still produce labels when calendar 'due' is 0.
     """
+    allow_backfill = bool(allow_backfill and _ALLOW_HISTORY_BACKFILL)   # session72: see _ALLOW_HISTORY_BACKFILL
     if not bars or len(bars) < 2:
         return {"ok": False, "reason": "no_bars", "bars": len(bars) if bars else 0}
 
@@ -392,6 +405,19 @@ def evaluate_t1(prediction_id: str, allow_backfill: bool = True):
         db.close()
 
 
+def _score_t5(decision: str, target_reached: int, direction_correct: int, return_pct: float) -> int:
+    """T+5 success. Session 72 (#10): 'DO NOT BUY' (one of the five official decisions) was missing from the
+    avoid/sell tuple and fell through to the generic 'price went up = success' branch — i.e. avoiding a stock
+    that then rose was scored a WIN. T+1's _score_success already treats SELL/AVOID/DO NOT as 'success = did
+    not go up'; T+5 now agrees."""
+    d = (decision or "").upper()
+    if d in ("BUY NOW", "PREPARE TO BUY", "PREPARE", "BUY"):
+        return 1 if target_reached or (direction_correct and return_pct > 2.0) else 0
+    if any(k in d for k in ("SELL", "AVOID", "DO NOT", "WAIT")):
+        return 1 if return_pct <= 0.5 else 0
+    return 1 if return_pct > 0 else 0
+
+
 def evaluate_t5(prediction_id: str):
     """Evaluate a prediction on T+5 (5th session close vs entry)."""
     db = SessionLocal()
@@ -456,12 +482,7 @@ def evaluate_t5(prediction_id: str):
         stop_loss_reached = 1 if (pred.stop_loss and period_low <= pred.stop_loss) else 0
         direction_correct = 1 if return_pct > 0 else 0
         decision = (pred.decision or "").upper()
-        if decision in ("BUY NOW", "PREPARE TO BUY", "PREPARE", "BUY"):
-            success = 1 if (target_reached or (direction_correct and return_pct > 2.0)) else 0
-        elif decision in ("SELL", "AVOID", "AVOID / WAIT", "WAIT"):
-            success = 1 if return_pct <= 0.5 else 0
-        else:
-            success = 1 if return_pct > 0 else 0
+        success = _score_t5(decision, target_reached, direction_correct, return_pct)
 
         outcome = db_models.PredictionOutcome(
             prediction_id=prediction_id,
@@ -533,7 +554,7 @@ def evaluate_pending_predictions(period: str = 'T+1', max_batch: int = 50):
 
         # Manual / sync sweeps: process ALL pending (due first), with history backfill
         # so Training Intelligence is not stuck at "0 due / 19 waiting".
-        queue = list(due) + [p for p in pending if p not in due]
+        queue = list(due) + ([p for p in pending if p not in due] if _ALLOW_HISTORY_BACKFILL else [])   # session72: not-yet-due ones can't be scored without the leaky backfill
         queue = queue[:max_batch]
 
         logger.info(

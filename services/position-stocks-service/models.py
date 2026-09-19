@@ -154,6 +154,33 @@ class ScalpPosition(Base):
     # the order has already been triggered/cancelled before market open.
     overnight_stop_order_id = Column(String(64), nullable=True)
 
+    # 2026-09-19 (audit fix — overnight-stop partial-fill handling):
+    # cumulative quantity of overnight_stop_order_id that has ALREADY been
+    # booked into realized_pnl/quantity/capital_risked by
+    # orders/reconcile.py::_reconcile_overnight_stops. A plain
+    # STOP_LOSS_MARKET SELL (unlike a Super Order's bracket legs) can
+    # partial-fill on an illiquid name — Dhan reports a single cumulative
+    # filled-quantity figure on every poll, not a per-poll increment — so
+    # this tracks "how much of that cumulative figure this service has
+    # already accounted for", the same way real-trade-service's
+    # TradeOrder.filled_qty_so_far tracks it for plain orders. Always 0 for
+    # a position with no overnight stop in play (same default as every
+    # other best-effort field on this model); reset implicitly by simply
+    # never being read again once the position closes and
+    # overnight_stop_order_id is cleared.
+    overnight_stop_filled_qty_so_far = Column(Integer, nullable=False, default=0)
+
+    # 2026-09-19 (session 72, open-issue #1): cumulative NOTIONAL (price*qty)
+    # already booked for the CURRENT stop order, so each partial-fill delta can
+    # be priced at that chunk's own average instead of the order's cumulative
+    # average (orders/overnight_stop.py::delta_fill_price).
+    overnight_stop_filled_notional_so_far = Column(Float, nullable=False, default=0.0)
+    # Quantity already booked by PREVIOUS stop orders of this position (rolled
+    # in by overnight_stop.assign_stop_order on every re-arm). Per-order
+    # counters above reset on re-arm; this keeps the position's lifetime total
+    # so the final realized_pnl_pct uses the right cost basis.
+    overnight_stop_prior_qty = Column(Integer, nullable=False, default=0)
+
     exit_price = Column(Float, nullable=True)
     realized_pnl = Column(Float, nullable=True)
     realized_pnl_pct = Column(Float, nullable=True)

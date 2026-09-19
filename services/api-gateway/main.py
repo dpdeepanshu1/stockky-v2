@@ -154,6 +154,25 @@ def _get_http_client() -> httpx.AsyncClient:
 
 
 @app.on_event("startup")
+async def _boot_forensics_startup():
+    """Session 72 (#2): classify why the previous process ended (OOM SIGKILL vs clean restart vs recreate)."""
+    try:
+        import boot_forensics
+        boot_forensics.record_boot("api-gateway")
+    except Exception as _bf:
+        logger.debug("boot_forensics unavailable: %s", _bf)
+
+
+@app.on_event("shutdown")
+async def _boot_forensics_shutdown():
+    try:
+        import boot_forensics
+        boot_forensics.mark_clean_shutdown()
+    except Exception:
+        pass
+
+
+@app.on_event("startup")
 async def _start_shared_http():
     """Non-blocking startup — UI must never freeze on 'Connecting to Backend...'."""
     global _shared_http_client
@@ -2964,7 +2983,7 @@ async def _analyze_one_symbol_ultra(
                                         pass
                         if close_px is None:
                             try:
-                                close_px = _fetch_price_from_quote(symbol)
+                                close_px = (await asyncio.to_thread(_fetch_price_from_quote, symbol))
                             except Exception:
                                 close_px = None
 
@@ -3130,7 +3149,7 @@ async def _analyze_one_symbol_ultra(
                 if normalized.get("close") is None:
                     # Avoid hammering market-data during Yahoo 429 storms — soft try only
                     try:
-                        price = _fetch_price_from_quote(symbol)
+                        price = (await asyncio.to_thread(_fetch_price_from_quote, symbol))
                     except Exception:
                         price = None
                     if price is not None:
@@ -3248,7 +3267,7 @@ async def _analyze_one_symbol_ultra(
                 await asyncio.sleep(1.5)
                 price = None
                 try:
-                    price = _fetch_price_from_quote(symbol)
+                    price = (await asyncio.to_thread(_fetch_price_from_quote, symbol))
                 except Exception:
                     price = None
                 out = {
@@ -4042,7 +4061,7 @@ async def ops_refresh_static_params(limit: int = 60):
     Live quotes & decisions still refresh during market hours; this only warms
     slow-changing layers so daytime traffic hits cache and stays under rate limits.
     """
-    universe = _build_scan_universe()[: max(10, min(limit, 80))]
+    universe = (await asyncio.to_thread(_build_scan_universe))[: max(10, min(limit, 80))]
     refreshed = {"fundamental": 0, "event": 0, "news": 0, "errors": 0}
     client = _get_http_client()  # shared keepalive pool
     if True:
@@ -4296,7 +4315,7 @@ async def ops_idle_tick():
         did.append("neon_keepalive_error")
     try:
         # Indices: cheap, 5 min cache already
-        get_market_indices(force_refresh=False)
+        (await asyncio.to_thread(get_market_indices, force_refresh=False))
         did.append("indices")
     except Exception as e:
         logger.debug("idle-tick indices: %s", e)
@@ -4473,7 +4492,7 @@ async def system_health():
 
 # ── Wake all services ──────────────────────────────────────────────────
 @app.post("/wake/all")
-async def wake_all_services():
+async def wake_all_services_probe():   # session72: was a 2nd `wake_all_services` shadowing the /wake-all handler
     results = {}
     client = _get_http_client()  # shared keepalive pool
     if True:
@@ -4572,7 +4591,7 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
        re-fetches run concurrently via asyncio.gather (no serial waterfall).
     """
     original = symbol.strip()
-    resolved = _resolve_symbol(original)
+    resolved = (await asyncio.to_thread(_resolve_symbol, original))
     if resolved is None:
         symbol_to_use = original.upper()
         corrected_from = None
@@ -4818,7 +4837,7 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
 
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
-            suggestions = difflib.get_close_matches(symbol_to_use, _get_all_known_symbols(), n=3, cutoff=0.5)
+            suggestions = difflib.get_close_matches(symbol_to_use, (await asyncio.to_thread(_get_all_known_symbols)), n=3, cutoff=0.5)
             suggestion_text = (
                 f"Symbol '{symbol_to_use}' not found. Did you mean: {', '.join(suggestions)}?"
                 if suggestions
@@ -4948,7 +4967,7 @@ async def run_scan_post(
     # FastAPI injects BackgroundTasks when annotated; guard None for safety
     if background_tasks is None:
         background_tasks = BackgroundTasks()
-    return start_scan(force_refresh=force_refresh, lite=lite, background_tasks=background_tasks)
+    return (await asyncio.to_thread(start_scan, force_refresh=force_refresh, lite=lite, background_tasks=background_tasks))
 
 
 @app.get("/scan")
@@ -4987,7 +5006,7 @@ async def run_scan(force_refresh: bool = False, lite: bool = False):
             if not is_partial and total > 0 and processed >= int(total * 0.9):
                 return res
 
-    universe = _build_scan_universe()
+    universe = (await asyncio.to_thread(_build_scan_universe))
     if not universe:
         return {
             "scanned_at": datetime.now(IST).isoformat(),
@@ -5289,13 +5308,13 @@ async def stream_market_scan(
     else:
         use_lite = bool(lite)
 
-    universe = _build_scan_universe()
+    universe = (await asyncio.to_thread(_build_scan_universe))
     if force_refresh:
         try:
             _redis_set(SCAN_UNIVERSE_KEY, None, ttl=1)
         except Exception:
             pass
-        universe = _build_scan_universe()
+        universe = (await asyncio.to_thread(_build_scan_universe))
     universe = _prioritize_universe(universe)
     total = len(universe)
 
@@ -6218,6 +6237,34 @@ def get_market_indices(force_refresh: bool = False):
             )
 
 # ── Universe preview + ≤ ₹5000 pre-filter ─────────────────────────────────
+# Session 72 (open-issue #3): /scan/universe must never run past its callers'
+# 25s client timeout. _get_momentum_movers() is a SYNC helper that on a cold
+# cache does 4 NSE fetches + a blocking 25s httpx.get to market-data +
+# optionally yfinance — it was called straight from this async handler, i.e.
+# ON THE EVENT LOOP: a cold call froze the whole gateway (including /health)
+# for tens of seconds. It now runs in a worker thread under a deadline; on
+# timeout the thread keeps running (it warms MOMENTUM_MOVERS_CACHE_KEY for the
+# next caller) and this request returns without movers, flagged partial.
+SCAN_UNIVERSE_MOVERS_DEADLINE_S = float(os.getenv("SCAN_UNIVERSE_MOVERS_DEADLINE_S", "12"))
+SCAN_UNIVERSE_BUILD_DEADLINE_S = float(os.getenv("SCAN_UNIVERSE_BUILD_DEADLINE_S", "20"))
+
+
+async def _movers_with_deadline() -> tuple[List[str], bool]:
+    """(movers, partial). partial=True when the deadline hit before movers were ready."""
+    task = asyncio.ensure_future(asyncio.to_thread(_get_momentum_movers))
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=SCAN_UNIVERSE_MOVERS_DEADLINE_S), False
+    except asyncio.TimeoutError:
+        logger.warning("scan/universe: momentum movers not ready within %.0fs — returning without them "
+                       "(computation continues in the background and will warm the cache)",
+                       SCAN_UNIVERSE_MOVERS_DEADLINE_S)
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        return [], True
+    except Exception as _me:
+        logger.warning("scan/universe: momentum movers failed: %s", _me)
+        return [], True
+
+
 @app.get("/scan/universe")
 async def get_scan_universe(cached: bool = False):
     # 2026-09-18 fix: added `cached` query param (mirrors /surprise/scan).
@@ -6235,13 +6282,14 @@ async def get_scan_universe(cached: bool = False):
             live = _filter_equities(live)
             live = _filter_symbols_under_max_price(live)
             if len(live) >= 50:
-                searched = _load_searched()
-                movers = _get_momentum_movers()
+                searched = await asyncio.to_thread(_load_searched)
+                movers, _partial = await _movers_with_deadline()
                 return {
                     "total": len(live),
                     "symbols": live,
                     "searched_symbols_included": [s for s in searched if s in live],
                     "momentum_movers": movers,
+                    "momentum_movers_partial": _partial,
                     "max_price": MAX_UNIVERSE_PRICE,
                     "cached": True,
                 }
@@ -6260,8 +6308,8 @@ async def get_scan_universe(cached: bool = False):
                             asyncio.create_task(asyncio.to_thread(_build_scan_universe))
                         except Exception:
                             pass
-                        searched = _load_searched()
-                        movers = _get_momentum_movers()
+                        searched = await asyncio.to_thread(_load_searched)
+                        movers, _partial = await _movers_with_deadline()
                         logger.info(
                             "scan/universe: served %d-symbol stale fallback (background rebuild scheduled)",
                             len(stale),
@@ -6271,6 +6319,7 @@ async def get_scan_universe(cached: bool = False):
                             "symbols": stale,
                             "searched_symbols_included": [s for s in searched if s in stale],
                             "momentum_movers": movers,
+                            "momentum_movers_partial": _partial,
                             "max_price": MAX_UNIVERSE_PRICE,
                             "cached": True,
                             "stale": True,
@@ -6280,14 +6329,37 @@ async def get_scan_universe(cached: bool = False):
         # Both caches cold — fall through to full build (first-ever deployment)
         logger.info("scan/universe: both caches cold, running full synchronous build")
 
-    universe = await asyncio.to_thread(_build_scan_universe)  # already ≤₹5000 filtered
-    searched = _load_searched()
-    movers = _get_momentum_movers()
+    build_task = asyncio.ensure_future(asyncio.to_thread(_build_scan_universe))  # already ≤₹5000 filtered
+    try:
+        universe = await asyncio.wait_for(asyncio.shield(build_task), timeout=SCAN_UNIVERSE_BUILD_DEADLINE_S)
+    except asyncio.TimeoutError:
+        # Serve ANY cached universe rather than blow the caller's 25s timeout;
+        # the build keeps running in its thread and refreshes the caches itself.
+        fallback = None
+        try:
+            fallback = _redis_get(SCAN_UNIVERSE_KEY)
+            if not (isinstance(fallback, list) and len(fallback) >= 50) and _kv_cache is not None:
+                fallback = _kv_cache.get_stale(SCAN_UNIVERSE_STALE_KEY)
+        except Exception:
+            fallback = None
+        if isinstance(fallback, list) and len(fallback) >= 50:
+            logger.warning("scan/universe: full build exceeded %.0fs — served %d-symbol cached fallback, build continues in background",
+                           SCAN_UNIVERSE_BUILD_DEADLINE_S, len(fallback))
+            fb = _filter_symbols_under_max_price(_filter_equities(fallback))
+            movers, _partial = await _movers_with_deadline()
+            return {"total": len(fb), "symbols": fb, "searched_symbols_included": [], "momentum_movers": movers,
+                    "momentum_movers_partial": _partial, "max_price": MAX_UNIVERSE_PRICE,
+                    "cached": True, "stale": True, "deadline_exceeded": True}
+        logger.warning("scan/universe: full build exceeded %.0fs and no cached universe exists — waiting for the build", SCAN_UNIVERSE_BUILD_DEADLINE_S)
+        universe = await build_task
+    searched = await asyncio.to_thread(_load_searched)
+    movers, _partial = await _movers_with_deadline()
     return {
         "total": len(universe),
         "symbols": universe,
         "searched_symbols_included": [s for s in searched if s in universe],
         "momentum_movers": movers,
+        "momentum_movers_partial": _partial,
         "max_price": MAX_UNIVERSE_PRICE,
     }
 
@@ -6336,7 +6408,7 @@ async def get_universe():
     # 3) Dynamic scan universe last resort
     if not symbols:
         try:
-            symbols = _build_scan_universe()
+            symbols = (await asyncio.to_thread(_build_scan_universe))
         except Exception:
             symbols = []
 
@@ -6914,15 +6986,15 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
     news_syms = []
     event_syms = []
     try:
-        momentum = _get_momentum_movers() or []
+        momentum = (await asyncio.to_thread(_get_momentum_movers)) or []
     except Exception as e:
         logger.warning("hot momentum: %s", e)
     try:
-        news_syms = _get_news_mentioned_symbols() or []
+        news_syms = (await asyncio.to_thread(_get_news_mentioned_symbols)) or []
     except Exception as e:
         logger.warning("hot news: %s", e)
     try:
-        event_syms = _get_event_symbols() or []
+        event_syms = (await asyncio.to_thread(_get_event_symbols)) or []
     except Exception as e:
         logger.warning("hot events: %s", e)
 
@@ -7311,7 +7383,7 @@ async def api_run_premarket_feed(force: bool = False, request: Request = None):
         symbols = None
     if not symbols:
         try:
-            symbols = _build_scan_universe()[:200]
+            symbols = (await asyncio.to_thread(_build_scan_universe))[:200]
         except Exception:
             symbols = None
     try:
@@ -7372,6 +7444,9 @@ async def api_surprise_audit():
         }
 
 
+SURPRISE_SCAN_DEADLINE_S = float(os.getenv("SURPRISE_SCAN_DEADLINE_S", "20"))
+
+
 @app.get("/api/surprise/scan")
 @app.get("/surprise/scan")
 async def api_surprise_scan(
@@ -7409,13 +7484,33 @@ async def api_surprise_scan(
         sym_list = [x.strip() for x in symbols.replace(";", ",").split(",") if x.strip()]
 
     client = _get_http_client()
-    result = await surprise_engine.scan(
+    # Session 72 (#3): never run past the callers' 25s client timeout. The scan
+    # runs as a shielded task; if it exceeds SURPRISE_SCAN_DEADLINE_S we return
+    # the last computed result (flagged stale) while the scan finishes and
+    # refreshes the cache in the background. With no prior result at all we
+    # simply keep waiting (first-ever scan) — never worse than before.
+    _scan_task = asyncio.ensure_future(surprise_engine.scan(
         client=client,
         market_data_url=MARKET_DATA_URL,
         symbols=sym_list,
         force_reload_static=bool(force_reload),
         cached=bool(cached),
-    )
+    ))
+    try:
+        result = await asyncio.wait_for(asyncio.shield(_scan_task), timeout=SURPRISE_SCAN_DEADLINE_S)
+    except asyncio.TimeoutError:
+        _last = getattr(surprise_engine, "_last_result", None)
+        if _last is not None and not sym_list:
+            logger.warning("surprise/scan: exceeded %.0fs — served last computed result (age %.0fs); scan continues in background",
+                           SURPRISE_SCAN_DEADLINE_S, time.time() - getattr(surprise_engine, "_last_scan_ts", time.time()))
+            result = dict(_last)
+            result["from_cache"] = True
+            result["stale"] = True
+            result["deadline_exceeded"] = True
+            result["cache_age_sec"] = round(time.time() - getattr(surprise_engine, "_last_scan_ts", time.time()), 1)
+        else:
+            logger.warning("surprise/scan: exceeded %.0fs and no prior result to serve — waiting for the scan", SURPRISE_SCAN_DEADLINE_S)
+            result = await _scan_task
     if limit and isinstance(result.get("stocks"), list):
         result = dict(result)
         result["stocks"] = result["stocks"][: max(0, int(limit))]
@@ -8013,7 +8108,7 @@ async def api_surprise_premarket_proxy(request: Request):
     if not symbols and not background:
         # Synchronous path only: resolve the universe now, same as before.
         try:
-            uni = _build_scan_universe()
+            uni = (await asyncio.to_thread(_build_scan_universe))
             symbols = [
                 str(s).upper().replace(".NS", "").replace(".BO", "").strip()
                 for s in (uni or [])
@@ -9353,7 +9448,7 @@ async def start_bulk_feed(
     symbols: list = []
     if use_universe:
         try:
-            symbols = _build_scan_universe() or []
+            symbols = (await asyncio.to_thread(_build_scan_universe)) or []
         except Exception as e:
             logger.warning("bulk-feed universe: %s", e)
             symbols = []
@@ -9575,7 +9670,7 @@ async def data_feed_refill_additional(
             symbols = []
         if not symbols:
             try:
-                symbols = _build_scan_universe()
+                symbols = (await asyncio.to_thread(_build_scan_universe))
             except Exception:
                 symbols = []
         symbols = [str(s).upper().replace(".NS", "").replace(".BO", "") for s in (symbols or []) if s]
@@ -10683,7 +10778,6 @@ _REFILL_ALL_JOB: dict = {
 
 
 async def _run_refill_all_job(limit: int):
-    global _REFILL_ALL_JOB
     try:
         audit = await audit_missing_feed_data(limit=max(limit, 5000))
         targets = [item["symbol"] for item in (audit.get("incomplete_stocks") or [])]
@@ -10798,7 +10892,7 @@ async def data_feed_run(
     if job.get("status") == "running" and not force and not resume:
         return {"ok": True, "already_running": True, **job}
 
-    universe = _build_scan_universe()
+    universe = (await asyncio.to_thread(_build_scan_universe))
     if not universe:
         universe = list(_get_nifty_indices() or [])[:150]
     _df_max = int(os.getenv("DATA_FEED_MAX_SYMBOLS", "0") or 0)
@@ -11251,7 +11345,7 @@ async def stockky_hot_premarket(background_tasks: BackgroundTasks):
         return {"ok": True, "already_running": True, **job}
 
     try:
-        universe = _build_scan_universe()
+        universe = (await asyncio.to_thread(_build_scan_universe))
     except Exception as e:
         return {"ok": False, "error": f"could not build universe: {str(e)[:160]}"}
 

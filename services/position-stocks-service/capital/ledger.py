@@ -572,3 +572,18 @@ def get_state(db: Session) -> dict:
         "last_synced_from_broker_at": iso_utc(row.last_synced_from_broker_at),
         "daily_loss_kill_switch_tripped": row.daily_loss_kill_switch_tripped,
     }
+
+
+def book_late_realized_pnl(db: Session, realized_pnl: float) -> None:
+    """Session 72: books a P&L that was only learnable AFTER its trading day
+    (a prior-day *_PENDING_RECONCILE exit resolved via Dhan trade history).
+    The capital itself was already returned at placement time, so only the
+    P&L moves: available_capital and realized_pnl_total. It is deliberately
+    NOT added to realized_pnl_today — that would attribute yesterday's result
+    to today's daily-loss kill switch."""
+    row = _get_or_create(db)
+    row.available_capital += realized_pnl
+    row.realized_pnl_total += realized_pnl
+    db.commit()
+    logger.info("ledger.book_late_realized_pnl: booked ₹%.2f (total only), available=₹%.2f",
+                realized_pnl, row.available_capital)

@@ -36,7 +36,8 @@ booked P&L number for anything beyond a sanity check.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
+import time
+from datetime import date, datetime, timezone, timedelta
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -47,6 +48,8 @@ import notifier
 from capital import ledger, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpPosition
+from orders import overnight_stop
+from tz_utils import IST, as_aware, ist_today_str
 
 logger = logging.getLogger("position-stocks-reconcile")
 
@@ -345,40 +348,8 @@ def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int
                 )
                 continue
 
-            real_pnl = (real_exit_price - pos.entry_price) * pos.quantity
-            real_pnl_pct = (
-                (real_exit_price - pos.entry_price) / pos.entry_price * 100.0
-                if pos.entry_price else 0.0
-            )
-            pos.exit_price = real_exit_price
-            pos.realized_pnl = real_pnl
-            pos.realized_pnl_pct = real_pnl_pct
-            pos.error_message = None
-            db.commit()
-
-            # EOD's own (or close_position_now()'s, for a manual exit)
-            # placeholder release already returned capital_risked with
-            # realized_pnl=0.0 — book the real P&L now via the same
-            # release_capital() path with position_value=0.0 so it lands
-            # exactly once, in available_capital/realized_pnl_today/
-            # realized_pnl_total, and re-runs the same daily-loss-
-            # kill-switch check a normal exit would.
-            ledger.release_capital(db, position_value=0.0, realized_pnl=real_pnl)
+            _resolve_pending_with_price(db, pos, real_exit_price, late=False)
             resolved += 1
-            logger.info(
-                "reconcile: %s (id=%d) %s — real fill resolved @ ₹%.2f, "
-                "P&L ₹%.2f (%.2f%%) (was entry_price placeholder)",
-                pos.symbol, pos.id, pos.status, real_exit_price, real_pnl, real_pnl_pct,
-            )
-            # BUG FIX (this session — "no notification for position stocks
-            # order"): the actual booked P&L for an EOD-squared-off or
-            # manually-exited position was never notified anywhere — only
-            # a CRITICAL failure would page anyone. Notify on the normal,
-            # successful resolution too.
-            notifier.notify_sync(
-                f"✅ <b>{pos.status} — real fill resolved</b> — {pos.symbol} x{pos.quantity}\n"
-                f"Exit ₹{real_exit_price:.2f} | P&L ₹{real_pnl:,.2f} ({real_pnl_pct:.2f}%)"
-            )
         elif status in _DEAD_EXIT_STATUSES:
             # The flat SELL itself died with zero fill, even after
             # _fire_flat_sell's bounded retry — this position is still
@@ -425,42 +396,189 @@ def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int
     return resolved
 
 
+# Back-compat alias — the status vocabulary now lives in orders/overnight_stop.py.
+_OVERNIGHT_STOP_PARTIAL_STATUSES = overnight_stop.PARTIAL_STATUSES
+
+
+def _resolve_pending_with_price(db: Session, pos: ScalpPosition, real_exit_price: float, *, late: bool) -> None:
+    """Books the real exit of a *_PENDING_RECONCILE position (shared by the
+    same-day order-list path and the prior-day trade-history path).
+
+    session72: a position that had overnight-stop PARTIALS booked before its
+    flat SELL keeps that earlier realized P&L — the SELL's own P&L is added to
+    it instead of overwriting it, and the % uses the full quantity ever held.
+    The ledger only ever receives THIS sell's P&L (partials were released as
+    they happened). late=True (prior-day resolution) books to the ledger's
+    lifetime total only, never to today's daily-loss counter."""
+    booked_qty = int(pos.overnight_stop_prior_qty or 0) + int(pos.overnight_stop_filled_qty_so_far or 0)
+    prior_pnl = (pos.realized_pnl or 0.0) if booked_qty > 0 else 0.0
+    sell_pnl = (real_exit_price - pos.entry_price) * pos.quantity
+    total_pnl = prior_pnl + sell_pnl
+    basis = pos.entry_price * (pos.quantity + booked_qty)
+    total_pct = (total_pnl / basis * 100.0) if basis else 0.0
+
+    pos.exit_price = real_exit_price
+    pos.realized_pnl = total_pnl
+    pos.realized_pnl_pct = total_pct
+    pos.error_message = None
+    db.commit()
+
+    if late:
+        ledger.book_late_realized_pnl(db, sell_pnl)
+    else:
+        # The placeholder release already returned capital_risked with P&L 0.0;
+        # book the real P&L now (also re-runs the daily-loss kill-switch check).
+        ledger.release_capital(db, position_value=0.0, realized_pnl=sell_pnl)
+    logger.info("reconcile: %s (id=%d) %s — real fill resolved @ ₹%.2f, P&L ₹%.2f (%.2f%%)%s",
+                pos.symbol, pos.id, pos.status, real_exit_price, total_pnl, total_pct,
+                " [late, resolved from trade history]" if late else "")
+    notifier.notify_sync(
+        f"✅ <b>{pos.status} — real fill resolved</b> — {pos.symbol} x{pos.quantity}\n"
+        f"Exit ₹{real_exit_price:.2f} | P&L ₹{total_pnl:,.2f} ({total_pct:.2f}%)"
+        + (" (resolved late from Dhan trade history)" if late else "")
+    )
+
+
+_last_stuck_sweep_ts = 0.0
+_stuck_alerted: set[int] = set()
+
+
+def _ist_date_str(dt) -> str:
+    return as_aware(dt).astimezone(IST).strftime("%Y-%m-%d")
+
+
+def list_pending_reconcile(db: Session) -> list[dict]:
+    """Read-only diagnostic (GET /reconcile/pending): every row still carrying a
+    *_PENDING_RECONCILE sentinel, with its age and what it is waiting on."""
+    rows = (db.query(ScalpPosition)
+            .filter(ScalpPosition.error_message.like("%_PENDING_RECONCILE%"))
+            .order_by(ScalpPosition.id.desc()).all())
+    today = ist_today_str()
+    out = []
+    for p in rows:
+        closed_day = _ist_date_str(p.closed_at) if p.closed_at else None
+        age_days = (date.fromisoformat(today) - date.fromisoformat(closed_day)).days if closed_day else None
+        out.append({
+            "id": p.id, "symbol": p.symbol, "status": p.status, "closed_day_ist": closed_day,
+            "age_days": age_days, "dhan_exit_order_id": p.dhan_exit_order_id,
+            "entry_price": p.entry_price, "exit_price": p.exit_price, "realized_pnl": p.realized_pnl,
+            "resolvable_via": ("order_list (same day)" if age_days == 0 else "trade_history (prior day)"),
+            "error_message": p.error_message,
+        })
+    return out
+
+
+def resolve_stuck_pending(db: Session, *, force: bool = False) -> dict:
+    """Session 72, open-issue #5 (RML): resolves PRIOR-DAY *_PENDING_RECONCILE
+    rows the same-day order-list path can never see (Dhan's order book only
+    holds today). Uses Dhan's trade history (dhanhq.get_trade_history).
+
+    Per row: (1) self-heal an inconsistent row that already has a real exit
+    price + P&L but kept the sentinel; (2) resolve by dhan_exit_order_id from
+    trade history — only when the traded qty covers the position (never guess
+    on a partial); (3) with no order id, adopt one ONLY if exactly one SELL
+    order for this security that day matches the quantity; (4) after
+    PENDING_RECONCILE_MAX_AGE_DAYS still unresolved -> rewrite the sentinel to
+    *_UNRESOLVED and alert once, so nothing sits 'pending' forever. Throttled;
+    force=True (POST /reconcile/pending/resolve) bypasses the throttle."""
+    global _last_stuck_sweep_ts
+    summary = {"examined": 0, "resolved": 0, "self_healed": 0, "aged_out": 0, "still_pending": 0}
+    now_m = time.monotonic()
+    if not force and now_m - _last_stuck_sweep_ts < config.PENDING_RECONCILE_SWEEP_INTERVAL_S:
+        summary["skipped"] = "throttled"
+        return summary
+    _last_stuck_sweep_ts = now_m
+
+    today = ist_today_str()
+    rows = (db.query(ScalpPosition)
+            .filter(ScalpPosition.status.in_(_FLAT_SELL_PENDING_STATUSES),
+                    ScalpPosition.error_message.like("%_PENDING_RECONCILE%")).all())
+    stuck = [p for p in rows if p.closed_at is None or _ist_date_str(p.closed_at) < today]
+    if not stuck:
+        return summary
+
+    earliest = min((_ist_date_str(p.closed_at) if p.closed_at else today) for p in stuck)
+    from_d = (date.fromisoformat(earliest) - timedelta(days=1)).isoformat()
+    trades: list = []
+    trades_ok = True
+    try:
+        trades = dhan_client.get_trade_history(db, from_d, today)
+    except Exception as e:
+        trades_ok = False
+        logger.warning("reconcile: stuck-pending sweep — trade-history fetch failed (%s); will retry", e)
+
+    for pos in stuck:
+        summary["examined"] += 1
+        try:
+            if (pos.exit_price and pos.entry_price and abs(pos.exit_price - pos.entry_price) > 1e-9
+                    and abs(pos.realized_pnl or 0.0) > 1e-9):
+                pos.error_message = None
+                db.commit()
+                summary["self_healed"] += 1
+                continue
+            if not trades_ok:
+                summary["still_pending"] += 1
+                continue
+
+            oid = pos.dhan_exit_order_id
+            day = _ist_date_str(pos.closed_at) if pos.closed_at else None
+            if not oid:
+                per_order: dict[str, int] = {}
+                for t in trades:
+                    if str(t.get("transactionType") or "").upper() != "SELL":
+                        continue
+                    if str(t.get("securityId") or "") != str(pos.dhan_security_id):
+                        continue
+                    stamp = str(t.get("createTime") or t.get("exchangeTime") or t.get("updateTime") or "")[:10]
+                    if day and stamp and stamp != day:
+                        continue
+                    o = overnight_stop._trade_order_id(t)
+                    if o:
+                        per_order[o] = per_order.get(o, 0) + overnight_stop._trade_qty(t)
+                cands = [o for o, q in per_order.items() if q == pos.quantity]
+                if len(cands) == 1:
+                    oid = cands[0]
+                    pos.dhan_exit_order_id = oid
+                    db.commit()
+
+            qty, avg = overnight_stop.aggregate_trades(trades, oid) if oid else (0, None)
+            if avg and qty >= pos.quantity:
+                _resolve_pending_with_price(db, pos, avg, late=True)
+                summary["resolved"] += 1
+                continue
+
+            age_days = (date.fromisoformat(today) - date.fromisoformat(day)).days if day else config.PENDING_RECONCILE_MAX_AGE_DAYS
+            if age_days >= config.PENDING_RECONCILE_MAX_AGE_DAYS:
+                pos.error_message = (
+                    f"{pos.status}_UNRESOLVED: exit fill price could not be recovered from Dhan "
+                    f"(order id {oid or 'unknown'}, traded qty {qty}/{pos.quantity}); exit_price/"
+                    f"realized_pnl are the entry-price placeholder — check Dhan's contract note."
+                )
+                db.commit()
+                summary["aged_out"] += 1
+                if pos.id not in _stuck_alerted:
+                    _stuck_alerted.add(pos.id)
+                    notifier.notify_critical(
+                        f"⚠️ <b>{pos.status} exit price UNRESOLVED</b> — {pos.symbol} (id={pos.id}) closed "
+                        f"{day}: {age_days}d old, Dhan trade history has no matching SELL "
+                        f"(order {oid or 'unknown'}). P&L shown is a placeholder."
+                    )
+            else:
+                summary["still_pending"] += 1
+        except Exception as e:
+            db.rollback()
+            logger.error("reconcile: stuck-pending sweep failed for %s (id=%s): %s", pos.symbol, pos.id, e, exc_info=True)
+    if summary["resolved"] or summary["aged_out"] or summary["self_healed"]:
+        logger.info("reconcile: stuck-pending sweep %s", summary)
+    return summary
+
+
 def _reconcile_overnight_stops(db: Session) -> int:
-    """AUDIT FIX (2026-09-19, overnight-stop reconcile gap — the actual gap
-    flagged in this session's audit): closes out an overnight-carried
-    ScalpPosition once its protective STOP_LOSS_MARKET order (tracked in
-    ScalpPosition.overnight_stop_order_id, NOT dhan_super_order_id — the
-    bracket super order was cancelled and dhan_super_order_id nulled at
-    conversion time, see eod_squareoff.py) has actually filled at the
-    broker.
-
-    Before this fix, nothing in this module ever looked at
-    overnight_stop_order_id at all. main.py's morning recheck would notice
-    the stop order had gone TRADED and simply NULL the field with a comment
-    saying "reconcile will pick up the fill" — but reconcile had no code
-    path that did. The position stayed status="OPEN" in the DB forever
-    even though the shares were already sold at the broker: capital never
-    released back to the ledger, the cross-service symbol lock never
-    released, and /positions kept showing a live unrealized P&L for a
-    position that no longer existed. It would then resurface in the next
-    day's EOD sweep as a stale OPEN+overnight_converted_to_cnc row with
-    nothing left to sell.
-
-    Runs on the same fast-reconcile cadence as the super-order pass below
-    (not just once a day like the morning recheck), so a stop that
-    triggers mid-session on a volatile pre-market gap gets caught quickly,
-    not just at the next 6am check.
-
-    Mirrors the normal TARGET_HIT/STOP_HIT closing block further down in
-    run_exit_reconciliation() (same ledger.release_capital +
-    shared_symbol_lock.release + notify_sync shape) rather than the
-    EOD_SQUAREOFF placeholder-then-later-resolve pattern, because capital
-    for a carried position was never optimistically released at
-    conversion time the way an EOD flat-sell releases it at placement
-    time — it's still fully "at risk" until this closes it, so a single
-    real release here (not a placeholder followed by a correction) is
-    correct.
-    """
+    """Closes out overnight-carried positions once their protective
+    STOP_LOSS_MARKET fills, booking partials/expired-partials exactly once.
+    All accounting lives in orders/overnight_stop.py (session 72); this is
+    just the fast-loop driver. Runs BEFORE the super-order pass because a
+    carried position's dhan_super_order_id was nulled at CNC conversion."""
     positions = (
         db.query(ScalpPosition)
         .filter(
@@ -472,80 +590,27 @@ def _reconcile_overnight_stops(db: Session) -> int:
     )
     if not positions:
         return 0
-
     try:
         plain_orders = dhan_client.get_order_list(db)
     except Exception as e:
         logger.warning("reconcile: overnight-stop check — failed to fetch order list: %s", e)
         return 0
-
     by_id: dict[str, dict] = {}
     for row in plain_orders:
         oid = str(row.get("orderId") or row.get("order_id") or "")
         if oid:
             by_id[oid] = row
-
     closed = 0
     for pos in positions:
         row = by_id.get(str(pos.overnight_stop_order_id))
         if row is None:
-            # Not (yet) visible in today's order book, or the DAY-validity
-            # order has aged out — main.py's once-daily morning recheck is
-            # responsible for detecting a missing/dead stop and re-arming
-            # it; this pass only acts on a stop it can actually see.
-            continue
-
-        status = str(row.get("orderStatus") or row.get("order_status") or "").upper()
-        if status not in _FILLED_STATUSES:
-            # Still PENDING/TRANSIT/OPEN (live and un-triggered), or
-            # CANCELLED/REJECTED/EXPIRED — the latter are main.py's
-            # morning-recheck's job to re-arm, not this pass's.
-            continue
-
-        raw_fill = row.get("averageTradedPrice") or row.get("average_traded_price")
+            continue  # aged out of today's book — main.py's morning recheck uses trade history
         try:
-            exit_price = float(raw_fill) if raw_fill else None
-        except (TypeError, ValueError):
-            exit_price = None
-        if exit_price is None:
-            # Filled but no fill price yet visible — leave it for next
-            # pass rather than booking a wrong/placeholder P&L.
-            logger.warning(
-                "reconcile: %s (id=%d) overnight stop %s shows %s but no fill "
-                "price yet — leaving OPEN for next pass.",
-                pos.symbol, pos.id, pos.overnight_stop_order_id, status,
-            )
-            continue
-
-        realized_pnl = (exit_price - pos.entry_price) * pos.quantity
-        realized_pnl_pct = (
-            (exit_price - pos.entry_price) / pos.entry_price * 100.0
-            if pos.entry_price else 0.0
-        )
-
-        pos.status = "STOP_HIT"
-        pos.exit_price = exit_price
-        pos.realized_pnl = realized_pnl
-        pos.realized_pnl_pct = realized_pnl_pct
-        pos.dhan_exit_order_id = pos.overnight_stop_order_id
-        pos.overnight_stop_order_id = None
-        pos.closed_at = datetime.now(timezone.utc)
-        db.commit()
-
-        ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=realized_pnl)
-        shared_symbol_lock.release(db, pos.symbol)
-        closed += 1
-        logger.info(
-            "reconcile: %s (id=%d) overnight protective stop TRIGGERED @ ₹%.2f — "
-            "P&L ₹%.2f (%.2f%%)",
-            pos.symbol, pos.id, exit_price, realized_pnl, realized_pnl_pct,
-        )
-        notifier.notify_sync(
-            f"🔴 <b>STOP_HIT (overnight)</b> — {pos.symbol} x{pos.quantity}\n"
-            f"Entry ₹{pos.entry_price:.2f} → Exit ₹{exit_price:.2f}\n"
-            f"P&L ₹{realized_pnl:,.2f} ({realized_pnl_pct:.2f}%)\n"
-            f"Protective stop triggered pre-market/overnight."
-        )
+            if overnight_stop.settle_stop_row(db, pos, row)["closed"]:
+                closed += 1
+        except Exception as e:
+            db.rollback()
+            logger.error("reconcile: overnight-stop settle failed for %s (id=%s): %s", pos.symbol, pos.id, e, exc_info=True)
     return closed
 
 
@@ -564,6 +629,11 @@ def run_exit_reconciliation(db: Session) -> int:
     conversion time).
     """
     overnight_closed = _reconcile_overnight_stops(db)
+    try:
+        resolve_stuck_pending(db)
+    except Exception as e:
+        db.rollback()
+        logger.error("reconcile: stuck-pending sweep error: %s", e, exc_info=True)
 
     # AUDIT FIX: also pick up EOD_SQUAREOFF positions whose exit_price is
     # still the entry_price placeholder (recorded by eod_squareoff.py's
@@ -934,6 +1004,7 @@ def run_exit_reconciliation(db: Session) -> int:
         pos.realized_pnl = realized_pnl
         pos.realized_pnl_pct = realized_pnl_pct
         pos.dhan_exit_order_id = str(hit_leg.get("orderId") or pos.dhan_super_order_id)
+        pos.error_message = None  # session72: clear a stale earlier-EOD failure text on a real close
         pos.closed_at = datetime.now(timezone.utc)
         db.commit()
 

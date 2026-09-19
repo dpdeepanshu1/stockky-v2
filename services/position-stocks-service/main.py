@@ -123,7 +123,7 @@ from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition
-from orders import breakeven, eod_squareoff, reconcile
+from orders import breakeven, eod_squareoff, overnight_stop, reconcile
 from orders import adaptive
 from orders.entry import (
     attempt_entry, attempt_manual_entry, log_quality_reject,
@@ -152,6 +152,16 @@ def _ist_midnight_today_utc() -> datetime:
 # ── Startup / shutdown ───────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:  # session72 (#2): classify why the previous process ended; never fatal
+        import boot_forensics
+        boot_forensics.record_boot("position-stocks-service")
+    except Exception as _bf:
+        logger.debug("boot_forensics unavailable: %s", _bf)
+    try:
+        from auth.admin_auth import log_auth_config
+        log_auth_config("position-stocks-service")
+    except Exception as _ac:
+        logger.debug("auth config check failed: %s", _ac)
     # Init DB tables
     _db.init_tables()
 
@@ -213,6 +223,11 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     await ws_client.stop()
+    try:
+        import boot_forensics
+        boot_forensics.mark_clean_shutdown()
+    except Exception:
+        pass
     logger.info("position-stocks-service: shutdown complete")
 
 
@@ -341,6 +356,48 @@ async def _fast_reconcile_loop() -> None:
             raise
         except Exception:
             logger.exception("position-stocks: fast-reconcile loop error")
+
+
+# Session 72 (open-issue #8): symbols recently skipped for INSUFFICIENT_CAPITAL.
+# symbol -> (retry_after_monotonic, available_capital_at_skip). In-memory on
+# purpose: a restart just re-tries once, which is harmless.
+_capital_starved: dict = {}
+
+
+def _capital_cooldown_filter(db: Session, candidates: list) -> tuple[list, list]:
+    """Drop candidates still cooling down after a capital-sizing skip, unless
+    available capital has grown enough (a position closed) that a retry could
+    now succeed. Returns (kept, skipped_symbols)."""
+    if not _capital_starved or config.CAPITAL_STARVED_COOLDOWN_S <= 0:
+        return candidates, []
+    now = time.monotonic()
+    try:
+        avail = float(ledger.get_state(db).get("available_capital") or 0.0)
+    except Exception:
+        avail = None
+    kept, skipped = [], []
+    for c in candidates:
+        entry = _capital_starved.get(c.symbol)
+        if entry is None:
+            kept.append(c)
+            continue
+        until, avail_at_skip = entry
+        grew = (avail is not None and
+                (avail - avail_at_skip) >= max(abs(avail_at_skip) * config.CAPITAL_STARVED_RETRY_ON_GROWTH_PCT / 100.0, 50.0))
+        if now >= until or grew:
+            _capital_starved.pop(c.symbol, None)
+            kept.append(c)
+        else:
+            skipped.append(c.symbol)
+    return kept, skipped
+
+
+def _note_capital_starved(db: Session, symbol: str) -> None:
+    try:
+        avail = float(ledger.get_state(db).get("available_capital") or 0.0)
+    except Exception:
+        avail = 0.0
+    _capital_starved[symbol] = (time.monotonic() + config.CAPITAL_STARVED_COOLDOWN_S, avail)
 
 
 async def _run_cycle(db: Session, trigger: str) -> dict:
@@ -481,172 +538,20 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
             except Exception as e:
                 logger.error("position-stocks: eDIS morning check failed: %s", e, exc_info=True)
 
-    # ── Overnight protective stop recheck (2026-09-19, option 3 fix) ────────
-    # Runs alongside the eDIS morning check: for each overnight-carried
-    # position, verify that its STOP_LOSS_MARKET order is still PENDING/OPEN
-    # on Dhan's side.  Two reasons it might not be:
-    #   1. The stock gapped down hard pre-market and the stop triggered
-    #      overnight (status TRADED) — position was auto-closed, we just
-    #      need to reconcile the fill.
-    #   2. Dhan cancelled the order for some reason (margin, session rollover,
-    #      etc.) — in this case we attempt to re-arm a fresh stop before the
-    #      market opens, or alert loudly if that also fails.
-    # This check is best-effort and non-fatal: a failure here never blocks
-    # the rest of the main loop.  It runs every tick while there are open
-    # overnight-held positions AND the morning check hasn't been marked done
-    # for today.  Gate: reuses edis_check_last_run_date (set above) so this
-    # runs at most once pre-market per day, same schedule as the eDIS check.
+    # ── Overnight protective stop recheck (session 72 rewrite) ──────────────
+    # Runs once per day pre-market (same gate as the eDIS check above). All
+    # logic lives in orders/overnight_stop.py::morning_recheck: it books any
+    # fill first (order book, then Dhan trade history for orders that aged out
+    # of today's book), only then re-arms for the REMAINING quantity, and
+    # resets the per-order fill counters on re-arm. Best-effort, never fatal.
     if not edis_checked_today and ist_time_at_or_after(_EDIS_MORNING_CHECK_TIME):
-        # edis_checked_today was False at the top of this block; the gate
-        # was just set above, so this path runs exactly once per day.
-        cnc_positions = (
-            db.query(ScalpPosition)
-            .filter_by(status="OPEN", overnight_converted_to_cnc=True)
-            .all()
-        )
-        if cnc_positions:
-            try:
-                order_list = await asyncio.to_thread(dhan_client.get_order_list, db)
-                order_map = {
-                    str(r.get("orderId") or r.get("order_id") or ""): r
-                    for r in (order_list if isinstance(order_list, list) else [])
-                    if r.get("orderId") or r.get("order_id")
-                }
-                stop_pct = getattr(config, "OVERNIGHT_STOP_LOSS_PCT", 4.0)
-                for pos in cnc_positions:
-                    try:
-                        if not pos.overnight_stop_order_id:
-                            # No stop was ever placed (e.g. OVERNIGHT_STOP_LOSS_PCT=0
-                            # or this position predates the option 3 fix) — skip.
-                            continue
-                        broker_row = order_map.get(pos.overnight_stop_order_id)
-                        if broker_row is None:
-                            # Order not found in today's order list — it either
-                            # triggered pre-market (handled by reconcile), was
-                            # cancelled by Dhan, or today's order list doesn't
-                            # include yesterday's orders (DAY validity expires).
-                            # Attempt to re-arm if stop_pct > 0.
-                            logger.warning(
-                                "position-stocks: overnight stop %s for %s (id=%d) "
-                                "not found in order book — may have triggered or "
-                                "been cancelled; attempting re-arm.",
-                                pos.overnight_stop_order_id, pos.symbol, pos.id,
-                            )
-                            if stop_pct > 0:
-                                # AUDIT FIX (2026-09-19): capture the OLD
-                                # order id before it gets overwritten below —
-                                # this used to read pos.overnight_stop_order_id
-                                # inside the notify_critical f-string AFTER
-                                # already reassigning it to new_order_id a
-                                # few lines above, so the alert showed the
-                                # same (new) id twice instead of old->new.
-                                old_order_id = pos.overnight_stop_order_id
-                                from orders.eod_squareoff import _place_overnight_stop
-                                new_order_id = await asyncio.to_thread(
-                                    _place_overnight_stop, db, pos, stop_pct
-                                )
-                                if new_order_id:
-                                    pos.overnight_stop_order_id = new_order_id
-                                    db.commit()
-                                    notifier.notify_critical(
-                                        f"🔄 <b>Overnight stop RE-ARMED</b> — {pos.symbol} "
-                                        f"(id={pos.id}): old stop {old_order_id!r} "
-                                        f"was missing from Dhan order book; new stop placed "
-                                        f"(order {new_order_id}) at "
-                                        f"₹{round(pos.entry_price * (1 - stop_pct / 100.0), 2):.2f}."
-                                    )
-                                else:
-                                    notifier.notify_critical(
-                                        f"🚨 <b>OVERNIGHT STOP MISSING AND RE-ARM FAILED</b> — "
-                                        f"{pos.symbol} (id={pos.id}) x{pos.quantity}: "
-                                        f"protective stop order {pos.overnight_stop_order_id!r} "
-                                        f"not found in Dhan order book and re-arm attempt failed. "
-                                        f"Manage this position MANUALLY before market open."
-                                    )
-                            continue
-
-                        broker_status = str(
-                            broker_row.get("orderStatus") or broker_row.get("status") or ""
-                        ).upper()
-                        _LIVE_STATUSES = {"PENDING", "TRANSIT", "OPEN"}
-                        if broker_status in ("TRADED", "PARTIALLY_TRADED"):
-                            # Stop triggered pre-market — position was auto-closed
-                            # at the broker.
-                            #
-                            # AUDIT FIX (2026-09-19): this used to NULL
-                            # overnight_stop_order_id right here and commit,
-                            # on the assumption "reconcile.py will pick up
-                            # the fill" — but reconcile.py's
-                            # _reconcile_overnight_stops() detects a
-                            # triggered stop by looking up THIS SAME field,
-                            # so nulling it here first meant reconcile could
-                            # never find it, and the position stayed
-                            # status="OPEN" forever with the shares already
-                            # gone at the broker. Leave the field untouched
-                            # and just log — the fast reconcile loop (runs
-                            # far more often than this once-a-day morning
-                            # check) now does the actual close: sets
-                            # status="STOP_HIT", books the real exit price/
-                            # P&L, releases capital and the symbol lock, and
-                            # clears this field itself once done.
-                            logger.info(
-                                "position-stocks: overnight stop for %s (id=%d) "
-                                "already TRIGGERED (%s) — leaving overnight_stop_order_id "
-                                "set so the fast reconcile loop's overnight-stop check "
-                                "closes the position out with the real fill.",
-                                pos.symbol, pos.id, broker_status,
-                            )
-                        elif broker_status in ("CANCELLED", "REJECTED", "EXPIRED"):
-                            logger.warning(
-                                "position-stocks: overnight stop for %s (id=%d) "
-                                "is %s — attempting re-arm.",
-                                pos.symbol, pos.id, broker_status,
-                            )
-                            if stop_pct > 0:
-                                from orders.eod_squareoff import _place_overnight_stop
-                                new_order_id = await asyncio.to_thread(
-                                    _place_overnight_stop, db, pos, stop_pct
-                                )
-                                if new_order_id:
-                                    pos.overnight_stop_order_id = new_order_id
-                                    db.commit()
-                                    notifier.notify_critical(
-                                        f"🔄 <b>Overnight stop RE-ARMED</b> — {pos.symbol} "
-                                        f"(id={pos.id}): previous stop was {broker_status}; "
-                                        f"new stop placed (order {new_order_id}) at "
-                                        f"₹{round(pos.entry_price * (1 - stop_pct / 100.0), 2):.2f}."
-                                    )
-                                else:
-                                    notifier.notify_critical(
-                                        f"🚨 <b>OVERNIGHT STOP {broker_status} AND RE-ARM FAILED</b> — "
-                                        f"{pos.symbol} (id={pos.id}) x{pos.quantity}: "
-                                        f"protective stop {pos.overnight_stop_order_id!r} was "
-                                        f"{broker_status} and re-arm attempt failed. "
-                                        f"Manage this position MANUALLY before market open."
-                                    )
-                        elif broker_status in _LIVE_STATUSES:
-                            logger.info(
-                                "position-stocks: overnight stop for %s (id=%d) "
-                                "confirmed live: order=%s status=%s",
-                                pos.symbol, pos.id,
-                                pos.overnight_stop_order_id, broker_status,
-                            )
-                        else:
-                            logger.warning(
-                                "position-stocks: overnight stop for %s (id=%d) "
-                                "has unrecognized status=%r — not acting.",
-                                pos.symbol, pos.id, broker_status,
-                            )
-                    except Exception as pos_e:
-                        logger.error(
-                            "position-stocks: overnight stop recheck failed for "
-                            "%s (id=%d): %s", pos.symbol, pos.id, pos_e, exc_info=True,
-                        )
-            except Exception as e:
-                logger.error(
-                    "position-stocks: overnight stop recheck failed (get_order_list): %s",
-                    e, exc_info=True,
-                )
+        try:
+            _stop_pct = getattr(config, "OVERNIGHT_STOP_LOSS_PCT", 4.0)
+            _ons = await asyncio.to_thread(overnight_stop.morning_recheck, db, _stop_pct)
+            if _ons.get("checked"):
+                logger.info("position-stocks: overnight stop recheck %s", _ons)
+        except Exception as e:
+            logger.error("position-stocks: overnight stop recheck failed: %s", e, exc_info=True)
 
     # EOD squareoff gate — unconditional: runs regardless of
     # service_enabled/is_armed/auto_pilot_enabled, same reasoning as exit
@@ -827,6 +732,14 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     _effective_top_n = config.QUALITY_GATE_TOP_N + (
         config.MIN_PREFERRED_EXTRA_TOP_N if under_preferred else 0
     )
+    # session72 (#8): cooled-down capital-starved symbols are dropped BEFORE
+    # the top-N slice so other candidates take their place (and no quality-gate
+    # HTTP calls / candidate-log rows are spent on a symbol we know we can't fund).
+    candidates, _cooled = _capital_cooldown_filter(db, candidates)
+    summary["capital_cooldown_skipped"] = _cooled
+    if not candidates:
+        summary["skipped_reason"] = "ALL_CANDIDATES_CAPITAL_COOLDOWN"
+        return _finalize()
     top_n = candidates[: max(1, _effective_top_n)]
     # AUDIT FIX (session 30): quality_gate.check() was awaited one candidate
     # at a time inside a plain `for` loop. Each individual check is now
@@ -932,6 +845,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                     break  # success or non-capital skip — stop here
                 except InsufficientCapitalSkip as _ics:
                     capital_skipped.append(_c.symbol)
+                    _note_capital_starved(db, _c.symbol)
                     logger.info(
                         "position-stocks: %s — INSUFFICIENT_CAPITAL, trying next candidate (%s)",
                         _c.symbol, _ics,
@@ -1675,6 +1589,42 @@ def trades_cleanup(
         gate.retention_cleanup_last_run_date = ist_today_str()
         db.commit()
     return {"deleted": n_deleted, "retention_days": config.TRADE_HISTORY_RETENTION_DAYS}
+
+
+@app.get("/auth/config-check")
+def auth_config_check():
+    """Session 72 (#9): non-secret admin-auth config snapshot (fingerprint of SESSION_SECRET, hash format).
+    Compare the fingerprint across services — a mismatch means tokens don't cross services."""
+    from auth.admin_auth import auth_config_diagnostics
+    return auth_config_diagnostics()
+
+
+@app.get("/dhan/funds")
+def dhan_funds(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """Session 72 (#9): parity with real-trade-service's /dhan/funds (this service only had /dhan/account, so a
+    diagnostic `curl .../dhan/funds` 404'd). Admin-gated, read-only. Dhan-side failures map to 409/502 — never
+    401, because the dashboard clears the admin session on ANY 401 and a broker error must not log the operator out."""
+    try:
+        return dhan_client.get_funds(db)
+    except dhan_client.DhanNotConnectedError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Dhan funds fetch failed: {e}")
+
+
+@app.get("/reconcile/pending")
+def reconcile_pending(db: Session = Depends(get_db)):
+    """Read-only diagnostic (session 72, open-issue #5): every position still
+    carrying a *_PENDING_RECONCILE sentinel, its age, and how it can resolve.
+    An empty list means nothing is stuck."""
+    rows = reconcile.list_pending_reconcile(db)
+    return {"count": len(rows), "rows": rows}
+
+
+@app.post("/reconcile/pending/resolve")
+def reconcile_pending_resolve(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """Force the prior-day stuck-sentinel sweep now (bypasses its throttle)."""
+    return reconcile.resolve_stuck_pending(db, force=True)
 
 
 @app.get("/candidates")

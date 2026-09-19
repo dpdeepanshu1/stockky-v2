@@ -24,10 +24,16 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
+from orders import overnight_stop
 from screening import intraday_eligibility
 from tz_utils import as_aware, ist_today_str
 
 logger = logging.getLogger("position-stocks-eod")
+
+
+class PositionAlreadyFlat(Exception):
+    """Session 72: the overnight stop had already sold every remaining share
+    (booked just before/after cancelling it), so no flat SELL is needed."""
 
 
 def _place_overnight_stop(
@@ -142,6 +148,13 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
     no-op here, not an error.
     """
     if pos.overnight_converted_to_cnc and pos.overnight_stop_order_id:
+        # session72 (open-issue #1): book any fill of the resting stop BEFORE
+        # sizing the SELL — otherwise a partially-filled stop plus a full-size
+        # flat SELL oversells — and AGAIN after the cancel to catch a fill that
+        # landed in between. pos.quantity is then what is really left.
+        _pre = overnight_stop.settle_before_flat_sell(db, pos)
+        if _pre["closed"] or (pos.quantity or 0) <= 0:
+            raise PositionAlreadyFlat(f"{pos.symbol} (id={pos.id}) fully sold by its overnight stop")
         try:
             dhan_client.cancel_cnc_stop_loss_order(db, order_id=pos.overnight_stop_order_id)
             logger.info(
@@ -155,7 +168,10 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
                 "stop %s before flat SELL (may already be filled/cancelled elsewhere): %s",
                 pos.symbol, pos.id, pos.overnight_stop_order_id, e,
             )
-        pos.overnight_stop_order_id = None  # caller commits pos shortly after
+        _post = overnight_stop.settle_before_flat_sell(db, pos)
+        if _post["closed"] or (pos.quantity or 0) <= 0:
+            raise PositionAlreadyFlat(f"{pos.symbol} (id={pos.id}) fully sold by its overnight stop during cancel")
+        overnight_stop.assign_stop_order(pos, None)  # caller commits pos shortly after
 
     sell_product_type = "CNC" if pos.overnight_converted_to_cnc else config.SCALP_PRODUCT_TYPE
 
@@ -397,7 +413,7 @@ def run_eod_squareoff(db: Session) -> int:
                 if stop_pct > 0:
                     stop_order_id = _place_overnight_stop(db, pos, stop_pct)
                     if stop_order_id:
-                        pos.overnight_stop_order_id = stop_order_id
+                        overnight_stop.assign_stop_order(pos, stop_order_id)
                         converted_positions.append(pos)
                     else:
                         # _place_overnight_stop() returned None — it already
@@ -557,8 +573,11 @@ def run_eod_squareoff(db: Session) -> int:
             pos.status = "EOD_SQUAREOFF"
             pos.closed_at = datetime.now(timezone.utc)
             pos.exit_price = pos.entry_price   # placeholder — reconcile() will update
-            pos.realized_pnl = 0.0             # placeholder — reconcile() will update
-            pos.realized_pnl_pct = 0.0         # placeholder — reconcile() will update
+            # session72: keep P&L already booked from overnight-stop partials —
+            # reconcile.py::_resolve_pending_with_price ADDS this SELL's P&L to it.
+            _had_partials = ((pos.overnight_stop_filled_qty_so_far or 0) + (pos.overnight_stop_prior_qty or 0)) > 0
+            pos.realized_pnl = (pos.realized_pnl or 0.0) if _had_partials else 0.0   # placeholder — reconcile() will update
+            pos.realized_pnl_pct = (pos.realized_pnl_pct or 0.0) if _had_partials else 0.0
             # AUDIT FIX: record that this is a placeholder so operators
             # reading /positions or /trades/history before the next
             # reconcile() pass don't mistake 0.0 P&L for a real break-even
@@ -578,6 +597,10 @@ def run_eod_squareoff(db: Session) -> int:
             shared_symbol_lock.release(db, pos.symbol)
             closed += 1
             logger.info("EOD squareoff: closed %s (id=%d)", pos.symbol, pos.id)
+        except PositionAlreadyFlat as _paf:
+            logger.info("EOD squareoff: %s", _paf)
+            closed += 1
+            continue
         except Exception as e:
             err_str = str(e)
             # AUDIT FIX (2026-09-15): previously all SELL failures landed in
@@ -788,6 +811,8 @@ def close_position_now(db: Session, pos: ScalpPosition, exit_reason: str = "MANU
 
     try:
         sell_result = _fire_flat_sell(db, pos)
+    except PositionAlreadyFlat as _paf:
+        raise ManualCloseRejected(f"Already closed — {_paf}")
     except Exception as e:
         err_str = str(e)
         if dhan_client.is_intraday_cutoff_error(err_str):
@@ -819,8 +844,9 @@ def close_position_now(db: Session, pos: ScalpPosition, exit_reason: str = "MANU
     pos.status = exit_reason  # real status now, not a hardcoded literal — see exit_reason note above
     pos.closed_at = datetime.now(timezone.utc)
     pos.exit_price = pos.entry_price   # placeholder — reconcile() will update, same as EOD squareoff
-    pos.realized_pnl = 0.0
-    pos.realized_pnl_pct = 0.0
+    _had_partials = ((pos.overnight_stop_filled_qty_so_far or 0) + (pos.overnight_stop_prior_qty or 0)) > 0
+    pos.realized_pnl = (pos.realized_pnl or 0.0) if _had_partials else 0.0   # session72: keep booked stop partials
+    pos.realized_pnl_pct = (pos.realized_pnl_pct or 0.0) if _had_partials else 0.0
     pos.error_message = f"{exit_reason}_PENDING_RECONCILE: exit_price=entry_price placeholder until next reconcile pass fills in the real fill price."
     db.commit()
 
@@ -875,6 +901,23 @@ def run_stagnation_exit(db: Session) -> int:
     open_positions = db.query(ScalpPosition).filter(ScalpPosition.status == "OPEN").all()
     closed = 0
     for pos in open_positions:
+        # AUDIT FIX (2026-09-19, overnight-hold / stagnation-exit collision):
+        # a carried-overnight CNC position's opened_at is its ORIGINAL entry
+        # time (yesterday or earlier), so age_min below is trivially >=
+        # STAGNATION_EXIT_MINUTES the instant the market reopens — the only
+        # thing stopping it from being closed as "stagnant" is whether price
+        # has already moved STAGNATION_EXIT_BAND_PCT (default 0.35%) away
+        # from that old entry_price within the first tick or two of trading,
+        # which is easy to not clear right at the open. That would close out
+        # a position specifically chosen the night before for its quality
+        # and overnight profit, mislabel it STAGNATION_EXIT, and burn the
+        # whole point of the carry decision, seconds into the new session.
+        # This mechanism exists for same-day flat positions sitting dead
+        # inside their bracket, not for one already under its own dedicated
+        # overnight protective stop (reconcile.py's
+        # _reconcile_overnight_stops) — never eligible here.
+        if pos.overnight_converted_to_cnc:
+            continue
         try:
             opened_at = as_aware(pos.opened_at)
         except Exception:

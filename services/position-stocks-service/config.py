@@ -493,3 +493,17 @@ REAL_TRADE_SERVICE_URL = os.getenv(
     "REAL_TRADE_SERVICE_URL",
     "http://real-trade-service:8005",
 ).rstrip("/")
+
+# ── Session 72 (open-issues sweep) ─────────────────────────────────────────
+# #8: after a capital-sizing skip (INSUFFICIENT_CAPITAL / _FOR_MIN_QTY) a
+# symbol is not re-attempted for this many seconds, unless available capital
+# has since grown by CAPITAL_STARVED_RETRY_ON_GROWTH_PCT (a position closed).
+# Previously the same unaffordable symbol was retried every 10s cycle (TREL
+# 16x in 7 minutes), spamming candidate-log rows and quality-gate HTTP calls.
+CAPITAL_STARVED_COOLDOWN_S = _get_float("CAPITAL_STARVED_COOLDOWN_S", 120.0)
+CAPITAL_STARVED_RETRY_ON_GROWTH_PCT = _get_float("CAPITAL_STARVED_RETRY_ON_GROWTH_PCT", 25.0)
+# #5: a *_PENDING_RECONCILE sentinel that still cannot be resolved this many
+# days after the row closed is rewritten to *_UNRESOLVED (explicit, no longer
+# "pending forever") and alerted once. See orders/reconcile.py::resolve_stuck_pending.
+PENDING_RECONCILE_MAX_AGE_DAYS = _get_int("PENDING_RECONCILE_MAX_AGE_DAYS", 3)
+PENDING_RECONCILE_SWEEP_INTERVAL_S = _get_float("PENDING_RECONCILE_SWEEP_INTERVAL_S", 600.0)

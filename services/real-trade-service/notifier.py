@@ -16,6 +16,7 @@ Deliberately best-effort: a notification failure must NEVER block or
 fail an order path. Every function swallows its own exceptions.
 """
 from __future__ import annotations
+import asyncio
 
 import hashlib
 import logging
@@ -89,7 +90,7 @@ async def notify_async(text: str) -> bool:
         logger.debug("Notification service unreachable (%s) — trying direct Telegram fallback", e)
 
     # Fallback: direct Telegram using env vars
-    return _direct_telegram(text)
+    return (await asyncio.to_thread(_direct_telegram, text))
 
 
 def notify_sync(text: str) -> bool:

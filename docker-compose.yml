@@ -279,7 +279,7 @@ services:
     # Pure async I/O fan-out/proxy — CPU-light, but every request passes
     # through it, so it still gets a solid share.
     cpus: "0.45"
-    mem_limit: 500m
+    mem_limit: 900m  # session72 (#2): was 500m — see boot_forensics.py; a cgroup OOM-kill is a silent SIGKILL (the 'restart with no crash/SIGTERM in the logs' signature)
     mem_reservation: 200m
 
   real-trade-service:

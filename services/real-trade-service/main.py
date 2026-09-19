@@ -54,6 +54,27 @@ app.add_middleware(
 
 
 @app.on_event("startup")
+async def _boot_forensics_startup():
+    """Session 72 (#2): classify why the previous process ended (OOM SIGKILL vs clean restart vs recreate)."""
+    try:
+        import boot_forensics
+        boot_forensics.record_boot("real-trade-service")
+        from auth.admin_auth import log_auth_config
+        log_auth_config("real-trade-service")
+    except Exception as _bf:
+        logger.debug("boot_forensics unavailable: %s", _bf)
+
+
+@app.on_event("shutdown")
+async def _boot_forensics_shutdown():
+    try:
+        import boot_forensics
+        boot_forensics.mark_clean_shutdown()
+    except Exception:
+        pass
+
+
+@app.on_event("startup")
 async def startup() -> None:
     # Auto-Pilot (2026-08-27): a single asyncio background task IS started
     # here — execution/auto_pilot.py — but it is inert by default. It only
@@ -618,6 +639,13 @@ async def dhan_network_check(admin: str = Depends(require_admin)):
             "Could not determine the outbound IP right now (lookup service unreachable) — try again shortly."
         ),
     }
+
+
+@app.get("/auth/config-check")
+def auth_config_check():
+    """Session 72 (#9): non-secret admin-auth config snapshot — compare SESSION_SECRET fingerprints across services."""
+    from auth.admin_auth import auth_config_diagnostics
+    return auth_config_diagnostics()
 
 
 @app.get("/dhan/funds")

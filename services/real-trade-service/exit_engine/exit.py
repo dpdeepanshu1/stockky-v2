@@ -1045,6 +1045,34 @@ def _send_real_sell(
                 streak_state["last_alert_at"] = datetime.now(timezone.utc).isoformat()
             streak_state["count"] = streak
             save_snapshot(db, snap_key, streak_state)
+
+        # Session 72 (open-issue #4 — DATAMATICS retry storm / emergency_gap_down
+        # retry pattern). The backoff at the top of this function keys on
+        # consecutive_exit_failures, but ONLY reconcile.py's dead-order handler
+        # ever incremented it — a SELL that fails at PLACEMENT (SDK/API exception
+        # raised right here: CDSL, funds, IP, exchange-not-allowed, generic)
+        # never did, so those retried on EVERY exit cycle (45s) for as long as the
+        # condition lasted, alerts merely throttled. Placement failures now feed
+        # the same streak (so the existing 60s→900s doubling cooldown applies).
+        # Excluded: oversell (holdings sync above fixes qty and wants a fast retry)
+        # and intraday-cutoff (already suppressed by its own per-day flag). The
+        # generic branch only starts backing off after EXIT_REJECT_STREAK_ESCALATE_AT
+        # consecutive failures, so a one-off network blip still retries next cycle.
+        _err = str(e)
+        if not (dhan_client.is_oversell_error(_err) or dhan_client.is_intraday_cutoff_error(_err)):
+            _persistent = (dhan_client.is_invalid_ip_error(_err) or dhan_client.is_cdsl_edis_error(_err)
+                           or dhan_client.is_insufficient_funds_error(_err) or dhan_client.is_exchange_not_allowed_error(_err))
+            _bump = _persistent
+            if not _persistent:
+                _bump = int((load_snapshot(db, f"exit_reject_streak_{position.id}") or {}).get("count", 0)) >= EXIT_REJECT_STREAK_ESCALATE_AT
+            if _bump:
+                try:
+                    position.consecutive_exit_failures = (position.consecutive_exit_failures or 0) + 1
+                    position.last_exit_failure_at = datetime.now(timezone.utc)
+                    db.commit()
+                except Exception as _be:
+                    db.rollback()
+                    logger.warning("exit SELL %s: could not record placement-failure streak: %s", position.symbol, _be)
         return False
 
 

@@ -85,6 +85,19 @@ _DURABLE_PREFIXES = (
     "system:surprise_feed",     # SURPRISE_FEED_CACHE_KEY (surprise_scanner.py)
     "system:bulk_quote_cache",  # BULK_QUOTE_CACHE_KEY (data_feed.py)
     "stockky:hot_stocks",       # HOT_STOCKS_CACHE_KEY (main.py)
+    # AUDIT FIX (2026-09-19): SURPRISE_LAST_RESULT_CACHE_KEY
+    # ("stockky:surprise_scan:last_result", surprise_scanner.py) was added
+    # in an earlier session specifically so the cached=true fast-path's
+    # backing store survives a restart instead of forcing the next caller
+    # through another full ~320s scan (see that session's writeup — the
+    # incident this was meant to fix). But the key was never added to this
+    # prefix list, so _is_durable() returned False for it and every
+    # kv_cache.get/set call against it was silently memory-only — a
+    # restart wiped it exactly as before, and the "durable" fix never
+    # actually durabilized anything. Prefix (not an exact-match tuple
+    # entry) so any future sibling key under the same namespace is covered
+    # automatically, same convention as "stockky:hot_" above.
+    "stockky:surprise_scan:",
 )
 
 

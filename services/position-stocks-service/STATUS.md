@@ -6,6 +6,16 @@
 
 ---
 
+## Session 72 — open-issues sweep (2026-09-19)
+
+Full write-up: `archive/session-notes/SESSION72_OPEN_ISSUES_SWEEP_2026-09-19.md`. This service: new `orders/overnight_stop.py`
+(partial-fill accounting, re-arm counter reset, trade-history recovery), `GET /reconcile/pending` + `POST /reconcile/pending/resolve`,
+capital-starved cooldown, `GET /dhan/funds` + `GET /auth/config-check`, boot forensics. Two additive `scalp_positions` columns
+(auto-migrated). **Live-only next steps:** (1) next carried position that partially fills — check logs/Telegram;
+(2) `GET /reconcile/pending` (RML); (3) compare `/auth/config-check` fingerprints across services.
+
+---
+
 ## Session 53 (this session) — root-caused why the scalp pool NEVER updated all day, even after session 52's fixes
 
 Ran the diagnostic commands (`/status`, `/ledger`, `/cycle/run`, `/candidates/log`)

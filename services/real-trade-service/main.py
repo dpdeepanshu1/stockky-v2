@@ -1388,6 +1388,11 @@ _FEATURE_COLUMNS = {
     # already live in REAL, so this toggle is how an admin turns it OFF,
     # not on.
     "overnight_hold": ("overnight_hold_enabled", "overnight_hold_enabled_at"),
+    # 2026-09-19 (audit finding): sixth scheduled feature — pre-market CDSL
+    # eDIS verification check for overnight-held positions. Defaults ON,
+    # same reasoning as overnight_hold above. See execution/auto_pilot.py's
+    # _edis_morning_check.
+    "edis_morning_check": ("edis_morning_check_enabled", "edis_morning_check_enabled_at"),
 }
 
 

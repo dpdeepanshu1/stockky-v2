@@ -425,12 +425,146 @@ def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int
     return resolved
 
 
+def _reconcile_overnight_stops(db: Session) -> int:
+    """AUDIT FIX (2026-09-19, overnight-stop reconcile gap — the actual gap
+    flagged in this session's audit): closes out an overnight-carried
+    ScalpPosition once its protective STOP_LOSS_MARKET order (tracked in
+    ScalpPosition.overnight_stop_order_id, NOT dhan_super_order_id — the
+    bracket super order was cancelled and dhan_super_order_id nulled at
+    conversion time, see eod_squareoff.py) has actually filled at the
+    broker.
+
+    Before this fix, nothing in this module ever looked at
+    overnight_stop_order_id at all. main.py's morning recheck would notice
+    the stop order had gone TRADED and simply NULL the field with a comment
+    saying "reconcile will pick up the fill" — but reconcile had no code
+    path that did. The position stayed status="OPEN" in the DB forever
+    even though the shares were already sold at the broker: capital never
+    released back to the ledger, the cross-service symbol lock never
+    released, and /positions kept showing a live unrealized P&L for a
+    position that no longer existed. It would then resurface in the next
+    day's EOD sweep as a stale OPEN+overnight_converted_to_cnc row with
+    nothing left to sell.
+
+    Runs on the same fast-reconcile cadence as the super-order pass below
+    (not just once a day like the morning recheck), so a stop that
+    triggers mid-session on a volatile pre-market gap gets caught quickly,
+    not just at the next 6am check.
+
+    Mirrors the normal TARGET_HIT/STOP_HIT closing block further down in
+    run_exit_reconciliation() (same ledger.release_capital +
+    shared_symbol_lock.release + notify_sync shape) rather than the
+    EOD_SQUAREOFF placeholder-then-later-resolve pattern, because capital
+    for a carried position was never optimistically released at
+    conversion time the way an EOD flat-sell releases it at placement
+    time — it's still fully "at risk" until this closes it, so a single
+    real release here (not a placeholder followed by a correction) is
+    correct.
+    """
+    positions = (
+        db.query(ScalpPosition)
+        .filter(
+            ScalpPosition.status == "OPEN",
+            ScalpPosition.overnight_converted_to_cnc.is_(True),
+            ScalpPosition.overnight_stop_order_id.isnot(None),
+        )
+        .all()
+    )
+    if not positions:
+        return 0
+
+    try:
+        plain_orders = dhan_client.get_order_list(db)
+    except Exception as e:
+        logger.warning("reconcile: overnight-stop check — failed to fetch order list: %s", e)
+        return 0
+
+    by_id: dict[str, dict] = {}
+    for row in plain_orders:
+        oid = str(row.get("orderId") or row.get("order_id") or "")
+        if oid:
+            by_id[oid] = row
+
+    closed = 0
+    for pos in positions:
+        row = by_id.get(str(pos.overnight_stop_order_id))
+        if row is None:
+            # Not (yet) visible in today's order book, or the DAY-validity
+            # order has aged out — main.py's once-daily morning recheck is
+            # responsible for detecting a missing/dead stop and re-arming
+            # it; this pass only acts on a stop it can actually see.
+            continue
+
+        status = str(row.get("orderStatus") or row.get("order_status") or "").upper()
+        if status not in _FILLED_STATUSES:
+            # Still PENDING/TRANSIT/OPEN (live and un-triggered), or
+            # CANCELLED/REJECTED/EXPIRED — the latter are main.py's
+            # morning-recheck's job to re-arm, not this pass's.
+            continue
+
+        raw_fill = row.get("averageTradedPrice") or row.get("average_traded_price")
+        try:
+            exit_price = float(raw_fill) if raw_fill else None
+        except (TypeError, ValueError):
+            exit_price = None
+        if exit_price is None:
+            # Filled but no fill price yet visible — leave it for next
+            # pass rather than booking a wrong/placeholder P&L.
+            logger.warning(
+                "reconcile: %s (id=%d) overnight stop %s shows %s but no fill "
+                "price yet — leaving OPEN for next pass.",
+                pos.symbol, pos.id, pos.overnight_stop_order_id, status,
+            )
+            continue
+
+        realized_pnl = (exit_price - pos.entry_price) * pos.quantity
+        realized_pnl_pct = (
+            (exit_price - pos.entry_price) / pos.entry_price * 100.0
+            if pos.entry_price else 0.0
+        )
+
+        pos.status = "STOP_HIT"
+        pos.exit_price = exit_price
+        pos.realized_pnl = realized_pnl
+        pos.realized_pnl_pct = realized_pnl_pct
+        pos.dhan_exit_order_id = pos.overnight_stop_order_id
+        pos.overnight_stop_order_id = None
+        pos.closed_at = datetime.now(timezone.utc)
+        db.commit()
+
+        ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=realized_pnl)
+        shared_symbol_lock.release(db, pos.symbol)
+        closed += 1
+        logger.info(
+            "reconcile: %s (id=%d) overnight protective stop TRIGGERED @ ₹%.2f — "
+            "P&L ₹%.2f (%.2f%%)",
+            pos.symbol, pos.id, exit_price, realized_pnl, realized_pnl_pct,
+        )
+        notifier.notify_sync(
+            f"🔴 <b>STOP_HIT (overnight)</b> — {pos.symbol} x{pos.quantity}\n"
+            f"Entry ₹{pos.entry_price:.2f} → Exit ₹{exit_price:.2f}\n"
+            f"P&L ₹{realized_pnl:,.2f} ({realized_pnl_pct:.2f}%)\n"
+            f"Protective stop triggered pre-market/overnight."
+        )
+    return closed
+
+
 def run_exit_reconciliation(db: Session) -> int:
     """Check every locally-OPEN scalp position against Dhan's live super
     order book. Closes any position whose TARGET_LEG or STOP_LOSS_LEG has
     filled (or whose ENTRY_LEG was rejected/cancelled before ever filling),
     releases its reserved capital + realized P&L back into the ledger, and
-    returns the count of positions closed this pass."""
+    returns the count of positions closed this pass.
+
+    AUDIT FIX (2026-09-19): also runs _reconcile_overnight_stops() first —
+    see that function's docstring for why overnight-carried CNC positions
+    (protected by a plain STOP_LOSS_MARKET order, not a super order) need
+    their own detection path entirely separate from the super-order logic
+    below, which never sees them (dhan_super_order_id is nulled at CNC
+    conversion time).
+    """
+    overnight_closed = _reconcile_overnight_stops(db)
+
     # AUDIT FIX: also pick up EOD_SQUAREOFF positions whose exit_price is
     # still the entry_price placeholder (recorded by eod_squareoff.py's
     # `pos.error_message = "EOD_SQUAREOFF_PENDING_RECONCILE..."` comment).
@@ -459,11 +593,26 @@ def run_exit_reconciliation(db: Session) -> int:
     # position's real fill price/P&L gets resolved the same way an
     # EOD-squared-off one always has, instead of being stuck on the
     # ₹0.0-P&L placeholder forever.
+    # AUDIT FIX (2026-09-19, overnight-stop reconcile gap): this used to
+    # also require dhan_super_order_id.isnot(None). That's correct for a
+    # normal same-day position (always has one), but orders/eod_squareoff.py
+    # explicitly NULLs dhan_super_order_id the moment a position converts
+    # INTRADAY -> CNC for an overnight carry (the bracket legs are gone).
+    # So an overnight-carried position that gets flat-SOLD later — via the
+    # next day's EOD sweep, a manual exit, or the stop_failed_positions
+    # fallback — used to be silently excluded from this whole resolution
+    # path even though _reconcile_eod_pending() below only ever keys off
+    # dhan_exit_order_id and never needed dhan_super_order_id at all. Such
+    # a position stayed on its ₹0.0 entry_price-placeholder P&L forever.
+    # Dropping the dhan_super_order_id requirement here; the fallback pass
+    # further down (which DOES need dhan_super_order_id to read the
+    # original entry leg) simply won't apply to these rows, which is fine
+    # since their entry already filled long ago — that's how they qualified
+    # to carry overnight in the first place.
     eod_pending = (
         db.query(ScalpPosition)
         .filter(
             ScalpPosition.status.in_(_FLAT_SELL_PENDING_STATUSES),
-            ScalpPosition.dhan_super_order_id.isnot(None),
             ScalpPosition.error_message.like("%_PENDING_RECONCILE%"),
         )
         .all()
@@ -492,7 +641,12 @@ def run_exit_reconciliation(db: Session) -> int:
 
     all_positions = open_positions + eod_pending
     if not all_positions:
-        return 0
+        # AUDIT FIX: must still return overnight_closed here — previously
+        # this early-return path (which normal ticks hit most of the time,
+        # since super-order positions requiring this loop aren't always
+        # present) would silently drop a same-pass overnight-stop closure
+        # from the reported count, even though it was already committed.
+        return overnight_closed
     # Alias for the rest of the function (which iterates `open_positions`)
     open_positions = all_positions
 
@@ -500,7 +654,9 @@ def run_exit_reconciliation(db: Session) -> int:
         super_orders = dhan_client.get_super_order_list(db)
     except Exception as e:
         logger.error("reconcile: failed to fetch super order list: %s", e)
-        return 0
+        # AUDIT FIX: same as above — don't drop an already-committed
+        # overnight-stop closure just because this unrelated fetch failed.
+        return overnight_closed
 
     by_id: dict[str, dict] = {}
     for row in super_orders:
@@ -586,6 +742,52 @@ def run_exit_reconciliation(db: Session) -> int:
                         pos.symbol, pos.id, old_entry_price, real_entry_price,
                         old_capital_risked, real_capital_cost,
                     )
+
+                    # 2026-09-18 (user audit finding): the correction above
+                    # fixed the REPORTED entry_price/P&L, but the live
+                    # TARGET_LEG/STOP_LOSS_LEG prices already sent to Dhan
+                    # were computed off the pre-fill LTP and were never
+                    # re-submitted — so the actual R:R being executed on
+                    # the exchange could drift slightly from the intended
+                    # adaptive_target_pct/adaptive_stop_pct on the
+                    # noisiest names. Only meaningful for still-OPEN
+                    # positions (a FLAT_SELL_PENDING one already has its
+                    # legs cancelled or is on its way out — re-arming
+                    # them would be pointless and could race the close).
+                    if pos.status == "OPEN" and config.USE_SUPER_ORDER and pos.dhan_super_order_id:
+                        try:
+                            new_target = round(real_entry_price * (1 + pos.adaptive_target_pct / 100.0), 2)
+                            new_stop = round(real_entry_price * (1 - pos.adaptive_stop_pct / 100.0), 2)
+                            dhan_client.modify_super_order(
+                                db, order_id=pos.dhan_super_order_id,
+                                order_leg="TARGET_LEG", target_price=new_target,
+                            )
+                            dhan_client.modify_super_order(
+                                db, order_id=pos.dhan_super_order_id,
+                                order_leg="STOP_LOSS_LEG", stop_loss_price=new_stop,
+                            )
+                            old_target, old_stop = pos.target_price, pos.stop_price
+                            pos.target_price = new_target
+                            pos.stop_price = new_stop
+                            db.commit()
+                            logger.info(
+                                "reconcile: %s (id=%d) re-armed target/stop legs for the "
+                                "corrected fill price: target ₹%.2f -> ₹%.2f, stop ₹%.2f -> ₹%.2f",
+                                pos.symbol, pos.id, old_target, new_target, old_stop, new_stop,
+                            )
+                        except Exception as e:
+                            # Not fatal — the legs stay at their original
+                            # (slightly-off-fill) prices, which is exactly
+                            # today's pre-fix behavior, not a regression.
+                            # Common benign cause: the leg already filled
+                            # or was cancelled between the entry-price
+                            # correction above and this modify attempt.
+                            logger.warning(
+                                "reconcile: %s (id=%d) failed to re-arm target/stop legs "
+                                "after fill-price correction (%s) — legs remain at their "
+                                "original prices",
+                                pos.symbol, pos.id, e,
+                            )
 
         leg_details = row.get("legDetails") or []
         target_leg = next((l for l in leg_details if l.get("legName") == "TARGET_LEG"), None)
@@ -760,7 +962,7 @@ def run_exit_reconciliation(db: Session) -> int:
             f"P&L ₹{realized_pnl:,.2f} ({realized_pnl_pct:.2f}%)"
         )
 
-    return closed
+    return closed + overnight_closed
 
 
 def run_retention_cleanup(db: Session) -> int:

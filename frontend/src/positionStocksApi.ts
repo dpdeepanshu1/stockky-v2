@@ -195,6 +195,15 @@ export interface ScalpPositionRow {
   dhan_super_order_id: string | null;
   dhan_entry_order_id: string | null;
   dhan_exit_order_id: string | null;
+  // AUDIT ADD (2026-09-19): overnight-carry visibility — see main.py's
+  // /positions handler comment. overnight_stop_price is the live
+  // protective STOP_LOSS_MARKET trigger level (computed from
+  // OVERNIGHT_STOP_LOSS_PCT), distinct from stop_price above (which is
+  // the ORIGINAL, now-cancelled intraday bracket leg for a carried
+  // position).
+  overnight_converted_to_cnc: boolean;
+  overnight_stop_order_id: string | null;
+  overnight_stop_price: number | null;
 }
 
 export interface ScalpCandidateRow {

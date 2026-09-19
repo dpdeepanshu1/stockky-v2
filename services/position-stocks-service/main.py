@@ -92,6 +92,7 @@ API endpoints:
 from __future__ import annotations
 
 import asyncio
+import notifier
 import logging
 import os
 import time
@@ -224,6 +225,8 @@ app.add_middleware(
 )
 
 _EOD_SQUAREOFF_TIME = parse_hhmm(config.EOD_SQUAREOFF_TIME_IST, 15, 0)
+# 2026-09-19 (audit finding): pre-market CDSL eDIS check time.
+_EDIS_MORNING_CHECK_TIME = parse_hhmm(config.EDIS_MORNING_CHECK_TIME_IST, 9, 0)
 
 # session42 audit: two new time gates for entry quality.
 # Before 09:30: first 15 min of NSE session have extreme volatility, wide
@@ -435,11 +438,219 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
         _stage("reconcile_exits", "Reconcile Exits", _t, detail=f"Error: {e}")
 
     gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
+    today = ist_today_str()
+
+    # ── eDIS morning check (2026-09-19, audit finding) ──────────────────────
+    # Unconditional like reconciliation/EOD above — this only reads eDIS
+    # status and sends a notification, it places nothing, so it should run
+    # regardless of service_enabled/is_armed. Only meaningful once there's
+    # at least one converted-to-CNC OPEN position (see
+    # ScalpPosition.overnight_converted_to_cnc, set by orders/eod_squareoff.py's
+    # carry path) — nothing to verify otherwise, since every other position
+    # here sells INTRADAY and never touches CDSL.
+    edis_checked_today = gate and gate.edis_check_last_run_date == today
+    if not edis_checked_today and ist_time_at_or_after(_EDIS_MORNING_CHECK_TIME):
+        pending_cnc = (
+            db.query(ScalpPosition)
+            .filter_by(status="OPEN", overnight_converted_to_cnc=True)
+            .count()
+        )
+        if gate is not None:
+            gate.edis_check_last_run_date = today
+            db.commit()
+        if pending_cnc:
+            try:
+                summary_ = await asyncio.to_thread(dhan_client.edis_verification_summary, db)
+                if summary_.get("verified_today") is False:
+                    pending_syms = summary_.get("pending_symbols") or []
+                    notifier.notify_critical(
+                        f"⚠️ CDSL eDIS not yet verified — {pending_cnc} overnight-held "
+                        f"position(s) need CNC clearance today. Pending: "
+                        f"{', '.join(str(s) for s in pending_syms) or 'see Dhan app'}. "
+                        f"Verify holdings (TPIN) in the Dhan app before market open, "
+                        f"or today's stop-loss/exit on these can be rejected."
+                    )
+                elif summary_.get("verified_today") is None:
+                    notifier.notify_critical(
+                        f"⚠️ CDSL eDIS status unknown — {pending_cnc} overnight-held "
+                        f"position(s) need CNC clearance today. Could not confirm "
+                        f"verification status ({summary_.get('detail', 'no detail')}). "
+                        f"Check the Dhan app manually before market open."
+                    )
+                # verified_today True: silent, nothing to flag.
+            except Exception as e:
+                logger.error("position-stocks: eDIS morning check failed: %s", e, exc_info=True)
+
+    # ── Overnight protective stop recheck (2026-09-19, option 3 fix) ────────
+    # Runs alongside the eDIS morning check: for each overnight-carried
+    # position, verify that its STOP_LOSS_MARKET order is still PENDING/OPEN
+    # on Dhan's side.  Two reasons it might not be:
+    #   1. The stock gapped down hard pre-market and the stop triggered
+    #      overnight (status TRADED) — position was auto-closed, we just
+    #      need to reconcile the fill.
+    #   2. Dhan cancelled the order for some reason (margin, session rollover,
+    #      etc.) — in this case we attempt to re-arm a fresh stop before the
+    #      market opens, or alert loudly if that also fails.
+    # This check is best-effort and non-fatal: a failure here never blocks
+    # the rest of the main loop.  It runs every tick while there are open
+    # overnight-held positions AND the morning check hasn't been marked done
+    # for today.  Gate: reuses edis_check_last_run_date (set above) so this
+    # runs at most once pre-market per day, same schedule as the eDIS check.
+    if not edis_checked_today and ist_time_at_or_after(_EDIS_MORNING_CHECK_TIME):
+        # edis_checked_today was False at the top of this block; the gate
+        # was just set above, so this path runs exactly once per day.
+        cnc_positions = (
+            db.query(ScalpPosition)
+            .filter_by(status="OPEN", overnight_converted_to_cnc=True)
+            .all()
+        )
+        if cnc_positions:
+            try:
+                order_list = await asyncio.to_thread(dhan_client.get_order_list, db)
+                order_map = {
+                    str(r.get("orderId") or r.get("order_id") or ""): r
+                    for r in (order_list if isinstance(order_list, list) else [])
+                    if r.get("orderId") or r.get("order_id")
+                }
+                stop_pct = getattr(config, "OVERNIGHT_STOP_LOSS_PCT", 4.0)
+                for pos in cnc_positions:
+                    try:
+                        if not pos.overnight_stop_order_id:
+                            # No stop was ever placed (e.g. OVERNIGHT_STOP_LOSS_PCT=0
+                            # or this position predates the option 3 fix) — skip.
+                            continue
+                        broker_row = order_map.get(pos.overnight_stop_order_id)
+                        if broker_row is None:
+                            # Order not found in today's order list — it either
+                            # triggered pre-market (handled by reconcile), was
+                            # cancelled by Dhan, or today's order list doesn't
+                            # include yesterday's orders (DAY validity expires).
+                            # Attempt to re-arm if stop_pct > 0.
+                            logger.warning(
+                                "position-stocks: overnight stop %s for %s (id=%d) "
+                                "not found in order book — may have triggered or "
+                                "been cancelled; attempting re-arm.",
+                                pos.overnight_stop_order_id, pos.symbol, pos.id,
+                            )
+                            if stop_pct > 0:
+                                # AUDIT FIX (2026-09-19): capture the OLD
+                                # order id before it gets overwritten below —
+                                # this used to read pos.overnight_stop_order_id
+                                # inside the notify_critical f-string AFTER
+                                # already reassigning it to new_order_id a
+                                # few lines above, so the alert showed the
+                                # same (new) id twice instead of old->new.
+                                old_order_id = pos.overnight_stop_order_id
+                                from orders.eod_squareoff import _place_overnight_stop
+                                new_order_id = await asyncio.to_thread(
+                                    _place_overnight_stop, db, pos, stop_pct
+                                )
+                                if new_order_id:
+                                    pos.overnight_stop_order_id = new_order_id
+                                    db.commit()
+                                    notifier.notify_critical(
+                                        f"🔄 <b>Overnight stop RE-ARMED</b> — {pos.symbol} "
+                                        f"(id={pos.id}): old stop {old_order_id!r} "
+                                        f"was missing from Dhan order book; new stop placed "
+                                        f"(order {new_order_id}) at "
+                                        f"₹{round(pos.entry_price * (1 - stop_pct / 100.0), 2):.2f}."
+                                    )
+                                else:
+                                    notifier.notify_critical(
+                                        f"🚨 <b>OVERNIGHT STOP MISSING AND RE-ARM FAILED</b> — "
+                                        f"{pos.symbol} (id={pos.id}) x{pos.quantity}: "
+                                        f"protective stop order {pos.overnight_stop_order_id!r} "
+                                        f"not found in Dhan order book and re-arm attempt failed. "
+                                        f"Manage this position MANUALLY before market open."
+                                    )
+                            continue
+
+                        broker_status = str(
+                            broker_row.get("orderStatus") or broker_row.get("status") or ""
+                        ).upper()
+                        _LIVE_STATUSES = {"PENDING", "TRANSIT", "OPEN"}
+                        if broker_status in ("TRADED", "PARTIALLY_TRADED"):
+                            # Stop triggered pre-market — position was auto-closed
+                            # at the broker.
+                            #
+                            # AUDIT FIX (2026-09-19): this used to NULL
+                            # overnight_stop_order_id right here and commit,
+                            # on the assumption "reconcile.py will pick up
+                            # the fill" — but reconcile.py's
+                            # _reconcile_overnight_stops() detects a
+                            # triggered stop by looking up THIS SAME field,
+                            # so nulling it here first meant reconcile could
+                            # never find it, and the position stayed
+                            # status="OPEN" forever with the shares already
+                            # gone at the broker. Leave the field untouched
+                            # and just log — the fast reconcile loop (runs
+                            # far more often than this once-a-day morning
+                            # check) now does the actual close: sets
+                            # status="STOP_HIT", books the real exit price/
+                            # P&L, releases capital and the symbol lock, and
+                            # clears this field itself once done.
+                            logger.info(
+                                "position-stocks: overnight stop for %s (id=%d) "
+                                "already TRIGGERED (%s) — leaving overnight_stop_order_id "
+                                "set so the fast reconcile loop's overnight-stop check "
+                                "closes the position out with the real fill.",
+                                pos.symbol, pos.id, broker_status,
+                            )
+                        elif broker_status in ("CANCELLED", "REJECTED", "EXPIRED"):
+                            logger.warning(
+                                "position-stocks: overnight stop for %s (id=%d) "
+                                "is %s — attempting re-arm.",
+                                pos.symbol, pos.id, broker_status,
+                            )
+                            if stop_pct > 0:
+                                from orders.eod_squareoff import _place_overnight_stop
+                                new_order_id = await asyncio.to_thread(
+                                    _place_overnight_stop, db, pos, stop_pct
+                                )
+                                if new_order_id:
+                                    pos.overnight_stop_order_id = new_order_id
+                                    db.commit()
+                                    notifier.notify_critical(
+                                        f"🔄 <b>Overnight stop RE-ARMED</b> — {pos.symbol} "
+                                        f"(id={pos.id}): previous stop was {broker_status}; "
+                                        f"new stop placed (order {new_order_id}) at "
+                                        f"₹{round(pos.entry_price * (1 - stop_pct / 100.0), 2):.2f}."
+                                    )
+                                else:
+                                    notifier.notify_critical(
+                                        f"🚨 <b>OVERNIGHT STOP {broker_status} AND RE-ARM FAILED</b> — "
+                                        f"{pos.symbol} (id={pos.id}) x{pos.quantity}: "
+                                        f"protective stop {pos.overnight_stop_order_id!r} was "
+                                        f"{broker_status} and re-arm attempt failed. "
+                                        f"Manage this position MANUALLY before market open."
+                                    )
+                        elif broker_status in _LIVE_STATUSES:
+                            logger.info(
+                                "position-stocks: overnight stop for %s (id=%d) "
+                                "confirmed live: order=%s status=%s",
+                                pos.symbol, pos.id,
+                                pos.overnight_stop_order_id, broker_status,
+                            )
+                        else:
+                            logger.warning(
+                                "position-stocks: overnight stop for %s (id=%d) "
+                                "has unrecognized status=%r — not acting.",
+                                pos.symbol, pos.id, broker_status,
+                            )
+                    except Exception as pos_e:
+                        logger.error(
+                            "position-stocks: overnight stop recheck failed for "
+                            "%s (id=%d): %s", pos.symbol, pos.id, pos_e, exc_info=True,
+                        )
+            except Exception as e:
+                logger.error(
+                    "position-stocks: overnight stop recheck failed (get_order_list): %s",
+                    e, exc_info=True,
+                )
 
     # EOD squareoff gate — unconditional: runs regardless of
     # service_enabled/is_armed/auto_pilot_enabled, same reasoning as exit
     # reconciliation above (tracking doc §3.7: "no exceptions").
-    today = ist_today_str()
     eod_fired = gate and gate.eod_squareoff_fired_date == today
     _t = time.perf_counter()
     if ist_time_at_or_after(_EOD_SQUAREOFF_TIME) and not eod_fired:
@@ -1280,14 +1491,39 @@ def positions(db: Session = Depends(get_db)):
         current_amount = None
         target_distance_pct = None
         stop_distance_pct = None
+        # AUDIT FIX (2026-09-19, overnight-carry display gap): for a
+        # position carried overnight (overnight_converted_to_cnc=True),
+        # r.target_price/r.stop_price are the ORIGINAL intraday bracket
+        # legs, which were cancelled the moment the position converted to
+        # CNC (see eod_squareoff.py's carry path) — they no longer exist
+        # at the broker and no longer protect anything. The real
+        # protective level is a plain STOP_LOSS_MARKET order computed as
+        # entry_price * (1 - OVERNIGHT_STOP_LOSS_PCT/100). Without this,
+        # the dashboard silently showed a dead target/stop pair (and a
+        # target_distance_pct against a target leg that will never fill)
+        # for every carried position — exactly the numbers an operator
+        # would check before market open.
+        overnight_stop_price = None
+        if r.overnight_converted_to_cnc:
+            stop_pct = getattr(config, "OVERNIGHT_STOP_LOSS_PCT", 4.0)
+            if stop_pct > 0 and r.entry_price:
+                overnight_stop_price = round(r.entry_price * (1 - stop_pct / 100.0), 2)
         if ltp is not None and r.entry_price:
             unrealized_pnl = round((ltp - r.entry_price) * r.quantity, 2)
             unrealized_pnl_pct = round((ltp - r.entry_price) / r.entry_price * 100.0, 2)
             current_amount = round(ltp * r.quantity, 2)
-            if r.target_price:
-                target_distance_pct = round((r.target_price - ltp) / ltp * 100.0, 2)
-            if r.stop_price:
-                stop_distance_pct = round((ltp - r.stop_price) / ltp * 100.0, 2)
+            if r.overnight_converted_to_cnc:
+                # No live target leg anymore (bracket cancelled at
+                # conversion) — never show a distance-to-target that
+                # implies one still exists.
+                target_distance_pct = None
+                if overnight_stop_price:
+                    stop_distance_pct = round((ltp - overnight_stop_price) / ltp * 100.0, 2)
+            else:
+                if r.target_price:
+                    target_distance_pct = round((r.target_price - ltp) / ltp * 100.0, 2)
+                if r.stop_price:
+                    stop_distance_pct = round((ltp - r.stop_price) / ltp * 100.0, 2)
 
         out.append({
             "id": r.id,
@@ -1322,6 +1558,11 @@ def positions(db: Session = Depends(get_db)):
             "dhan_super_order_id": r.dhan_super_order_id,
             "dhan_entry_order_id": r.dhan_entry_order_id,
             "dhan_exit_order_id": r.dhan_exit_order_id,
+            # AUDIT ADD (2026-09-19): overnight-carry visibility — see the
+            # comment above where overnight_stop_price is computed.
+            "overnight_converted_to_cnc": r.overnight_converted_to_cnc,
+            "overnight_stop_order_id": r.overnight_stop_order_id,
+            "overnight_stop_price": overnight_stop_price,
             # this session: same reasoning as /trades/history's error_message
             # field — "<STATUS>_PENDING_RECONCILE..." means not yet resolved.
             "error_message": r.error_message,

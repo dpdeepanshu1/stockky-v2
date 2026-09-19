@@ -177,6 +177,9 @@ _COLUMN_MIGRATIONS = [
     # models.py comment) — same idempotent ALTER TABLE pattern as
     # stagnation_exit_enabled above.
     ("scalp_gate_state", "breakeven_stop_enabled", "NUMBER(1)", "BOOLEAN", "0", "FALSE"),
+    # 2026-09-19 (audit finding): edis_check_last_run_date added to
+    # ScalpGateState — see that column's comment in models.py.
+    ("scalp_gate_state", "edis_check_last_run_date", "VARCHAR2(10)", "VARCHAR(10)", None, None),
     # this session: breakeven_trigger_pct/stop_moved_to_breakeven added to
     # ScalpPosition (see models.py comment). No prior scalp_positions
     # migration tuples exist in this list because every earlier column
@@ -186,6 +189,21 @@ _COLUMN_MIGRATIONS = [
     # arrive via create_all() alone.
     ("scalp_positions", "breakeven_trigger_pct", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_positions", "stop_moved_to_breakeven", "NUMBER(1)", "BOOLEAN", "0", "FALSE"),
+    # 2026-09-18 (user audit finding): marks a carried-overnight position
+    # that was successfully converted INTRADAY -> CNC via
+    # execution/dhan_client.py::convert_position — see the
+    # OVERNIGHT_HOLD_ENABLED comment block in config.py for why this
+    # conversion is required at all. NULL/False for every normal
+    # same-day position; only ever set True by orders/eod_squareoff.py's
+    # carry path.
+    ("scalp_positions", "overnight_converted_to_cnc", "NUMBER(1)", "BOOLEAN", "0", "FALSE"),
+    # 2026-09-19 (option 3 fix): Dhan order_id of the STOP_LOSS_MARKET SELL
+    # placed immediately after INTRADAY -> CNC conversion (see models.py
+    # comment on overnight_stop_order_id and config.py's
+    # OVERNIGHT_STOP_LOSS_PCT).  Nullable — NULL means no protective stop
+    # order is currently live (either not yet placed, already triggered, or
+    # placement failed and the position was squared off instead).
+    ("scalp_positions", "overnight_stop_order_id", "VARCHAR2(64)", "VARCHAR(64)", None, None),
     ("scalp_candidate_log", "fundamental_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "technical_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "market_cap_cr", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),

@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy.orm import Session
 
@@ -27,6 +28,77 @@ from screening import intraday_eligibility
 from tz_utils import as_aware, ist_today_str
 
 logger = logging.getLogger("position-stocks-eod")
+
+
+def _place_overnight_stop(
+    db: Session,
+    pos: "ScalpPosition",
+    stop_pct: float,
+) -> Optional[str]:
+    """Place a STOP_LOSS_MARKET SELL (CNC) immediately after the position
+    has been converted from INTRADAY -> CNC.  Returns the confirmed Dhan
+    order_id string on success, or None if placement/verification failed
+    (caller then squares off the position rather than carrying it).
+
+    stop_pct: percentage below entry_price to set the trigger (e.g. 4.0 for
+    a 4% stop — trigger = entry_price * 0.96).
+
+    This function only raises on programming errors (bad arguments); all
+    Dhan-call failures are caught and returned as None so the caller can
+    decide between squaring off or notifying and proceeding.
+    """
+    try:
+        trigger = pos.entry_price * (1.0 - stop_pct / 100.0)
+        if trigger <= 0:
+            logger.error(
+                "_place_overnight_stop: %s (id=%d) — computed trigger=%.4f <= 0 "
+                "(entry=%.2f stop_pct=%.2f) — not placing stop.",
+                pos.symbol, pos.id, trigger, pos.entry_price, stop_pct,
+            )
+            return None
+
+        result = dhan_client.place_cnc_stop_loss_market(
+            db,
+            is_armed=True,
+            security_id=pos.dhan_security_id,
+            exchange_segment=config.SCALP_EXCHANGE_SEGMENT,
+            quantity=pos.quantity,
+            trigger_price=trigger,
+            tag=f"OVERNIGHT_STOP_{pos.id}",
+        )
+        order_id = str(result.get("orderId") or result.get("order_id") or "")
+        if not order_id:
+            logger.error(
+                "_place_overnight_stop: %s (id=%d) — place_cnc_stop_loss_market "
+                "returned no orderId (result=%r) — treating as failure.",
+                pos.symbol, pos.id, result,
+            )
+            return None
+
+        logger.warning(
+            "_place_overnight_stop: %s (id=%d) — protective STOP_LOSS_MARKET "
+            "placed and confirmed: order_id=%s trigger=₹%.2f (%.1f%% below "
+            "entry=₹%.2f)",
+            pos.symbol, pos.id, order_id,
+            dhan_client.round_to_tick(trigger), stop_pct, pos.entry_price,
+        )
+        return order_id
+
+    except Exception as e:
+        logger.error(
+            "_place_overnight_stop: %s (id=%d) — stop placement FAILED: %s",
+            pos.symbol, pos.id, e, exc_info=True,
+        )
+        try:
+            notifier.notify_critical(
+                f"❌ <b>OVERNIGHT STOP PLACEMENT FAILED</b>\n"
+                f"{pos.symbol} (id={pos.id}) converted to CNC but protective "
+                f"STOP_LOSS_MARKET could not be confirmed live — squaring off "
+                f"instead of leaving unprotected.\nError: {str(e)[:300]}"
+            )
+        except Exception:
+            pass
+        return None
 
 
 def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
@@ -44,7 +116,49 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
     Returns the raw place_order() result dict (has ``orderId``) on
     success. Raises the last exception once attempts are exhausted, same
     as an unretried call would have — callers keep their existing
-    try/except classification logic unchanged."""
+    try/except classification logic unchanged.
+
+    AUDIT FIX (2026-09-19, overnight-hold product-type gap): this
+    previously always sent product_type=config.SCALP_PRODUCT_TYPE
+    ("INTRADAY"), with no awareness that a position could already be a
+    real CNC holding. Once the overnight-carry feature existed, that
+    became reachable for real: the stop_failed_positions fallback in
+    run_eod_squareoff() (converted to CNC, but the protective stop failed
+    to place, so it falls through to here to square off) and any manual
+    exit of a still-open overnight-carried position both hit this exact
+    path. An INTRADAY SELL against an actual CNC holding has no matching
+    MIS position to net against and Dhan's RMS will very likely reject
+    it — leaving the position both unprotected AND unflattened, exactly
+    what the overnight-stop feature exists to prevent. Mirrors
+    real-trade-service/exit_engine/exit.py's existing pattern of picking
+    the SELL's product_type off the position's actual holding type rather
+    than a single global constant.
+
+    Also defensively cancels any still-live overnight_stop_order_id before
+    firing this SELL — without that, a resting protective stop order and
+    this independent flat SELL could both be live for the same quantity
+    at once, risking a broker rejection (insufficient holding qty) or a
+    double-sell. A missing/already-filled/already-cancelled stop is a
+    no-op here, not an error.
+    """
+    if pos.overnight_converted_to_cnc and pos.overnight_stop_order_id:
+        try:
+            dhan_client.cancel_cnc_stop_loss_order(db, order_id=pos.overnight_stop_order_id)
+            logger.info(
+                "_fire_flat_sell: %s (id=%d) — cancelled resting overnight stop "
+                "%s before flat SELL.",
+                pos.symbol, pos.id, pos.overnight_stop_order_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "_fire_flat_sell: %s (id=%d) — failed to cancel resting overnight "
+                "stop %s before flat SELL (may already be filled/cancelled elsewhere): %s",
+                pos.symbol, pos.id, pos.overnight_stop_order_id, e,
+            )
+        pos.overnight_stop_order_id = None  # caller commits pos shortly after
+
+    sell_product_type = "CNC" if pos.overnight_converted_to_cnc else config.SCALP_PRODUCT_TYPE
+
     last_exc: Exception | None = None
     attempts = max(1, config.EOD_SELL_RETRY_ATTEMPTS)
     for attempt in range(1, attempts + 1):
@@ -58,7 +172,7 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
                 quantity=pos.quantity,
                 order_type="MARKET",
                 price=0.0,
-                product_type=config.SCALP_PRODUCT_TYPE,
+                product_type=sell_product_type,
                 tag="EOD_SQUAREOFF",
             )
         except Exception as e:  # noqa: BLE001 — classified by the caller
@@ -136,20 +250,41 @@ def run_eod_squareoff(db: Session) -> int:
         len(open_positions),
     )
 
-    # ── Overnight carry filter (2026-09-18, session67) ───────────────────────
-    # When OVERNIGHT_HOLD_ENABLED, skip force-close for positions that pass
-    # ALL four overnight quality conditions (in profit + stricter fund/tech/
-    # mcap scores). Uses the quality scores recorded on ScalpCandidateLog at
-    # entry time — no new network call at EOD. Only EXIT_LEGS_REJECTED
-    # positions are always squaredoff regardless (their bracket is dead and
-    # cannot protect them overnight).
+    # ── Overnight carry filter (2026-09-18, session67; conversion + pool
+    # cap added 2026-09-18 user audit finding — see config.py's
+    # OVERNIGHT_HOLD_ENABLED comment block for the full "why") ──────────────
+    # When OVERNIGHT_HOLD_ENABLED, positions that pass ALL four overnight
+    # quality conditions (in profit + stricter fund/tech/mcap scores) are
+    # candidates to carry — but only actually carry if (a) an aggregate
+    # pool-exposure cap has room, ranked by quality score, and (b) this
+    # service can successfully convert them from INTRADAY to a real CNC
+    # holding via Dhan's own /positions/convert before Dhan's own RMS
+    # auto-squareoff cutoff. Anything that fails either check is squared
+    # off normally — never left in an ambiguous or unprotected state. Only
+    # EXIT_LEGS_REJECTED positions are always squaredoff regardless (their
+    # bracket is dead and cannot protect them overnight).
     carry_positions: list = []
     if config.OVERNIGHT_HOLD_ENABLED:
         from models import ScalpCandidateLog
         from feed import ws_client as _ws
         squareoff_only: list = []
+        carry_candidates: list = []  # (pos, quality_score) — before the pool cap
         for pos in open_positions:
             if pos.status == "EXIT_LEGS_REJECTED":
+                squareoff_only.append(pos)
+                continue
+            # AUDIT FIX (2026-09-19, overnight-hold re-conversion gap): a
+            # position can reach this loop already overnight_converted_to_cnc
+            # =True — normally reconcile.py's overnight-stop check closes
+            # these out once the stop triggers, but an OVERNIGHT_STOP_LOSS_PCT
+            # =0 opt-out carry (no stop at all) or a stop whose re-arm failed
+            # can still be sitting OPEN+CNC when this sweep runs again. Never
+            # re-run the "is this a fresh INTRADAY position worth carrying"
+            # evaluation on it (it's already carried, and convert_position()
+            # would be called INTRADAY->CNC on something that's already CNC,
+            # which Dhan would reject) — just square it off via the
+            # CNC-aware _fire_flat_sell() below.
+            if pos.overnight_converted_to_cnc:
                 squareoff_only.append(pos)
                 continue
             # Get live price for unrealized P&L check
@@ -181,20 +316,170 @@ def run_eod_squareoff(db: Session) -> int:
             ):
                 squareoff_only.append(pos)
                 continue
-            # All checks passed — carry overnight
-            carry_positions.append(pos)
-            logger.info(
-                "EOD overnight carry: %s (id=%d) qualifies — ltp=₹%.2f > entry=₹%.2f, "
-                "fund=%.0f tech=%.0f mcap=₹%.0fcr — skipping squareoff",
-                pos.symbol, pos.id, ltp, pos.entry_price,
-                log_row.fundamental_score, log_row.technical_score, log_row.market_cap_cr,
-            )
-        if carry_positions:
+            # Quality conditions passed — candidate for carry, subject to
+            # the aggregate pool cap below.
+            carry_candidates.append((pos, log_row.fundamental_score + log_row.technical_score))
+
+        # ── Aggregate pool-exposure cap (2026-09-18 — user audit finding) ──
+        # Individually-qualifying positions can still add up to an
+        # unbounded share of the pool sitting exposed to overnight gap
+        # risk. Rank by combined quality score (highest first) and keep
+        # only as many as fit under OVERNIGHT_HOLD_MAX_EXPOSURE_PCT_OF_POOL
+        # of total_allocated_capital — same pattern real-trade-service
+        # already uses for its own overnight-hold exposure cap.
+        capped_out: list = []
+        if carry_candidates:
+            from capital import ledger as _ledger
+            pool_state = _ledger.get_state(db)
+            total_pool = float(pool_state.get("total_allocated_capital") or 0.0)
+            cap_value = total_pool * (config.OVERNIGHT_HOLD_MAX_EXPOSURE_PCT_OF_POOL / 100.0)
+            carry_candidates.sort(key=lambda t: t[1], reverse=True)
+            running_value = 0.0
+            for pos, _score in carry_candidates:
+                position_value = pos.capital_risked or (pos.entry_price * pos.quantity)
+                if total_pool > 0 and (running_value + position_value) > cap_value:
+                    capped_out.append(pos)
+                    continue
+                running_value += position_value
+                carry_positions.append(pos)
+
+        # ── Convert each surviving carry candidate INTRADAY -> CNC ─────────
+        # This is what actually makes "carry" real — see config.py's
+        # OVERNIGHT_HOLD_ENABLED comment for why skipping squareoff alone
+        # (the old behavior) carried nothing at all.
+        #
+        # 2026-09-19 (option 3 fix): after each successful INTRADAY -> CNC
+        # conversion, immediately place a STOP_LOSS_MARKET SELL (CNC,
+        # product_type=CNC, trigger_price = entry_price * (1 -
+        # OVERNIGHT_STOP_LOSS_PCT / 100)) via _place_overnight_stop() below.
+        # That function verifies the order is live on Dhan's side (not just
+        # accepted at the REST layer) before returning the order_id.
+        # If placement or verification fails, the position is added to
+        # conversion_failed and squared off — we never leave a CNC holding
+        # overnight without a confirmed protective stop.
+        converted_positions: list = []
+        conversion_failed: list = []
+        stop_failed_positions: list = []  # converted OK, stop placement failed
+        for pos in carry_positions:
+            try:
+                if config.USE_SUPER_ORDER and pos.dhan_super_order_id:
+                    for leg in ("TARGET_LEG", "STOP_LOSS_LEG"):
+                        try:
+                            dhan_client.cancel_super_order(
+                                db, order_id=pos.dhan_super_order_id, order_leg=leg
+                            )
+                        except Exception:
+                            pass  # leg may already be filled/cancelled — not fatal
+                    wait_s = getattr(config, "MANUAL_EXIT_CANCEL_WAIT_S", 0.5)
+                    if wait_s > 0:
+                        time.sleep(wait_s)
+                dhan_client.convert_position(
+                    db,
+                    is_armed=True,  # protective/exposure-reducing action, same policy as cancel/modify_super_order
+                    security_id=pos.dhan_security_id,
+                    exchange_segment=config.SCALP_EXCHANGE_SEGMENT,
+                    position_type="LONG",  # this service is long-only (see orders/entry.py)
+                    convert_qty=pos.quantity,
+                    from_product_type=config.SCALP_PRODUCT_TYPE,
+                    to_product_type="CNC",
+                )
+                pos.overnight_converted_to_cnc = True
+                pos.dhan_super_order_id = None  # legs cancelled above; no longer applicable
+                logger.info(
+                    "EOD overnight carry: %s (id=%d) converted INTRADAY -> CNC, qty=%d",
+                    pos.symbol, pos.id, pos.quantity,
+                )
+
+                # ── Place protective STOP_LOSS_MARKET immediately ──────────
+                # If OVERNIGHT_STOP_LOSS_PCT is 0 or negative, skip stop
+                # placement (operator opted out explicitly).
+                stop_pct = getattr(config, "OVERNIGHT_STOP_LOSS_PCT", 4.0)
+                if stop_pct > 0:
+                    stop_order_id = _place_overnight_stop(db, pos, stop_pct)
+                    if stop_order_id:
+                        pos.overnight_stop_order_id = stop_order_id
+                        converted_positions.append(pos)
+                    else:
+                        # _place_overnight_stop() returned None — it already
+                        # logged the failure reason.  Square off instead of
+                        # leaving an unprotected CNC overnight.
+                        logger.error(
+                            "EOD overnight carry: %s (id=%d) — protective stop "
+                            "placement failed (see above) — squaring off instead of "
+                            "leaving an unprotected CNC holding overnight.",
+                            pos.symbol, pos.id,
+                        )
+                        stop_failed_positions.append(pos)
+                else:
+                    # Operator set OVERNIGHT_STOP_LOSS_PCT=0 — no stop.
+                    logger.warning(
+                        "EOD overnight carry: %s (id=%d) — OVERNIGHT_STOP_LOSS_PCT=0, "
+                        "carrying WITHOUT a protective stop (operator opt-out).",
+                        pos.symbol, pos.id,
+                    )
+                    converted_positions.append(pos)
+
+            except Exception as e:
+                # Conversion failed (e.g. insufficient margin for full CNC
+                # funding, or an API error) — fall back to squaring off.
+                # Never assume success and leave this ambiguous.
+                logger.warning(
+                    "EOD overnight carry: %s (id=%d) conversion FAILED (%s) — "
+                    "squaring off instead",
+                    pos.symbol, pos.id, e,
+                )
+                conversion_failed.append(pos)
+
+        squareoff_only.extend(capped_out)
+        squareoff_only.extend(conversion_failed)
+        squareoff_only.extend(stop_failed_positions)
+        carry_positions = converted_positions
+        db.commit()  # persist overnight_converted_to_cnc / overnight_stop_order_id /
+                     # cleared dhan_super_order_id for carried positions, which don't
+                     # pass through the squareoff loop below (that loop commits
+                     # per-position itself).
+
+        if carry_positions or capped_out or stop_failed_positions:
             from notifier import notify_sync
-            carry_lines = [f"🌙 *EOD overnight carry — {len(carry_positions)} position(s) held:*"]
-            for p in carry_positions:
-                carry_lines.append(f"  • {p.symbol} entry=₹{p.entry_price:.2f}")
-            notify_sync("\n".join(carry_lines))
+            lines = []
+            if carry_positions:
+                stop_pct = getattr(config, "OVERNIGHT_STOP_LOSS_PCT", 4.0)
+                lines.append(
+                    f"🌙 *EOD overnight carry — {len(carry_positions)} position(s) "
+                    f"converted to CNC and held:*"
+                )
+                for p in carry_positions:
+                    stop_level = round(p.entry_price * (1 - stop_pct / 100.0), 2) if stop_pct > 0 else None
+                    stop_note = f" | stop ₹{stop_level:.2f} (order {p.overnight_stop_order_id})" if stop_level and p.overnight_stop_order_id else " | ⚠️ NO STOP (OVERNIGHT_STOP_LOSS_PCT=0)"
+                    lines.append(f"  • {p.symbol} entry=₹{p.entry_price:.2f} qty={p.quantity}{stop_note}")
+                if stop_pct > 0:
+                    lines.append(
+                        f"✅ Protective STOP_LOSS_MARKET orders placed and confirmed "
+                        f"live on Dhan at {stop_pct:.1f}% below entry. "
+                        f"Verify holdings (CDSL TPIN) in the Dhan app before "
+                        f"market open so the stops can actually execute."
+                    )
+                else:
+                    lines.append(
+                        "⚠️ OVERNIGHT_STOP_LOSS_PCT=0 — NO protective stop placed. "
+                        "Verify holdings (CDSL TPIN) in the Dhan app *before market "
+                        "open* and be ready to manage these manually at the open."
+                    )
+            if stop_failed_positions:
+                lines.append(
+                    f"❌ {len(stop_failed_positions)} position(s) squared off because "
+                    f"protective stop placement failed after CNC conversion: "
+                    + ", ".join(p.symbol for p in stop_failed_positions)
+                    + " — check logs for the specific stop-placement error."
+                )
+            if capped_out:
+                lines.append(
+                    f"ℹ️ {len(capped_out)} other qualifying position(s) squared off "
+                    f"instead — pool-exposure cap "
+                    f"({config.OVERNIGHT_HOLD_MAX_EXPOSURE_PCT_OF_POOL:.0f}% of pool) reached: "
+                    + ", ".join(p.symbol for p in capped_out)
+                )
+            notify_sync("\n".join(lines))
         open_positions = squareoff_only
 
     closed = 0

@@ -109,6 +109,7 @@ from tz_utils import (
     parse_hhmm,
     ist_time_at_or_after,
     is_ist_weekday,
+    as_aware,
 )
 
 logger = logging.getLogger("real-trade-autopilot")
@@ -897,8 +898,24 @@ async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, 
             continue  # fail-closed: no live price to verify against
         ltp = float(tick.price)
 
-        if config.OVERNIGHT_HOLD_REQUIRE_PROFITABLE and ltp < (p.avg_entry_price or 0):
-            continue
+        if config.OVERNIGHT_HOLD_REQUIRE_PROFITABLE:
+            if config.OVERNIGHT_HOLD_PROFITABLE_NET_OF_COSTS:
+                # 2026-09-19 (audit finding, fixed): raw LTP >= avg_entry_price
+                # treats exact breakeven as "profitable", but a breakeven-on-
+                # price position is a net LOSER after brokerage/STT/GST/stamp
+                # duty. is_delivery_sell=True here because a carried position
+                # really will become a settled CNC holding by the time it's
+                # sold — see cost_model.py's own docstring on that flag.
+                import cost_model
+                cost_est = cost_model.estimate_round_trip_cost(
+                    entry_price=p.avg_entry_price, qty=p.qty_open, exit_price=ltp,
+                    product_type="CNC", is_delivery_sell=True,
+                )
+                gross_pnl = (ltp - (p.avg_entry_price or 0)) * p.qty_open
+                if gross_pnl < cost_est.total:
+                    continue
+            elif ltp < (p.avg_entry_price or 0):
+                continue
 
         dh = getattr(tick, "day_high", None)
         dl = getattr(tick, "day_low", None)
@@ -925,20 +942,130 @@ async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, 
     account = _pf_get_account(db, mode)
     equity = float(account.current_equity or 0.0)
     cap = equity * (config.OVERNIGHT_HOLD_MAX_EXPOSURE_PCT / 100.0)
+    max_single_value = (
+        equity * (config.OVERNIGHT_HOLD_MAX_SINGLE_SYMBOL_PCT / 100.0)
+        if equity > 0 else float("inf")
+    )
 
     # Only candidates that passed the profitability/range checks above ever
     # compete for the cap — everything else squares off regardless, so it
     # doesn't count against overnight exposure.
+    #
+    # 2026-09-19 (audit finding, fixed): the aggregate % cap alone let all
+    # of it concentrate into a handful of correlated names. Two extra caps
+    # now apply alongside it — see config.py's OVERNIGHT_HOLD_MAX_POSITIONS/
+    # OVERNIGHT_HOLD_MAX_SINGLE_SYMBOL_PCT comment for the full reasoning.
     keep_ids: set = set()
     running_value = 0.0
+    kept_count = 0
     for conviction, p, position_value in scored:
+        if kept_count >= config.OVERNIGHT_HOLD_MAX_POSITIONS:
+            reasons.pop(p.id, None)
+            continue
+        if equity > 0 and position_value > max_single_value:
+            reasons.pop(p.id, None)
+            continue
         if equity > 0 and (running_value + position_value) > cap:
             reasons.pop(p.id, None)
             continue
         keep_ids.add(p.id)
         running_value += position_value
+        kept_count += 1
 
     return keep_ids, {k: v for k, v in reasons.items() if k in keep_ids}
+
+
+def _edis_check_enabled(db, mode: str) -> bool:
+    """Same pattern as _overnight_hold_enabled above. Column defaults True
+    so an existing deployed row (or one no admin has touched) behaves as
+    config.EDIS_MORNING_CHECK_ENABLED already does."""
+    try:
+        gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
+    except Exception:
+        gate = None
+    if gate is not None:
+        return bool(getattr(gate, "edis_morning_check_enabled", True))
+    return config.EDIS_MORNING_CHECK_ENABLED
+
+
+def _needs_cnc_sell(position) -> bool:
+    """Would exit_engine/exit.py's _send_real_sell sell this position as
+    CNC (vs INTRADAY) right now? Duplicated in miniature from that
+    function's own product_type decision (see its docstring above the
+    `if position.broker_imported:` block) rather than refactoring it to
+    expose this directly — keep this in sync if that logic ever changes.
+    CNC == needs CDSL eDIS/TPIN clearance to sell; INTRADAY never does."""
+    if position.broker_imported:
+        return True
+    if position.entry_product_type in ("INTRADAY", "MIS"):
+        return False
+    if position.entry_product_type == "CNC":
+        return True
+    same_day_position = ist_today_str(as_aware(position.opened_at)) == ist_today_str()
+    return not same_day_position
+
+
+async def _edis_morning_check(db, mode: str) -> None:
+    """2026-09-19 (audit finding): every same-day exit sells INTRADAY,
+    which never touches CDSL — so this constraint was invisible until
+    OVERNIGHT_HOLD_ENABLED started deliberately carrying positions past
+    the close. A carried position becomes a real T+1 CNC holding; selling
+    it the next day (including a stop-loss/emergency-gap-down exit)
+    needs the account holder to have manually verified holdings (CDSL
+    TPIN) in the Dhan app that morning, or the SELL is rejected — see
+    execution/dhan_client.py's eDIS/TPIN documentation and
+    edis_verification_summary(), which already existed for a manual
+    dashboard check but was never called proactively before this fix.
+
+    Runs once per trading day, before market open (see
+    config.EDIS_MORNING_CHECK_TIME_IST), for REAL only (DEMO never
+    touches a real broker or CDSL). Only fires a notification when there
+    ARE positions that would need CNC clearance AND verification isn't
+    confirmed done — silent otherwise, same "quiet unless something
+    needs attention" convention the rest of this module follows."""
+    if mode != "REAL":
+        return
+    from portfolio.portfolio import open_positions as _pf_open_positions
+    from execution import dhan_client
+    positions = list(_pf_open_positions(db, mode))
+    needs_check = [p for p in positions if _needs_cnc_sell(p)]
+    if not needs_check:
+        logger.info("[schedule] eDIS morning check %s: no CNC-pending positions", mode)
+        return
+
+    try:
+        summary = dhan_client.edis_verification_summary(db)
+    except Exception:
+        logger.exception("[schedule] eDIS morning check failed for %s", mode)
+        return
+
+    verified_today = summary.get("verified_today")
+    if verified_today is True:
+        logger.info("[schedule] eDIS morning check %s: already verified today", mode)
+        return
+
+    symbols = ", ".join(sorted({p.symbol for p in needs_check}))
+    if verified_today is False:
+        pending = summary.get("pending_symbols") or []
+        pending_txt = ", ".join(str(s) for s in pending) if pending else symbols
+        await notify_async(
+            f"⚠️ *CDSL eDIS not yet verified — {mode}*\n"
+            f"{len(needs_check)} held position(s) need CNC clearance today: {symbols}\n"
+            f"Pending in Dhan's eDIS check: {pending_txt}\n"
+            f"Open the Dhan app and *Verify Holdings* (TPIN) before market open, "
+            f"or today's stop-loss/exit on these can be rejected."
+        )
+    else:
+        # verified_today is None — inquire call failed or came back in an
+        # unrecognized shape (see edis_verification_summary's own
+        # docstring). Can't confirm either way — say so rather than
+        # showing a false green or false red.
+        await notify_async(
+            f"⚠️ *CDSL eDIS status unknown — {mode}*\n"
+            f"{len(needs_check)} held position(s) need CNC clearance today: {symbols}\n"
+            f"Could not confirm verification status ({summary.get('detail', 'no detail')}). "
+            f"Check the Dhan app manually before market open."
+        )
 
 
 async def _eod_squareoff(db, mode: str) -> None:
@@ -1284,6 +1411,25 @@ async def _schedule_tick_body(mode: str) -> None:
             except Exception:
                 logger.exception("[schedule] pre-pick failed for %s", mode)
                 await notify_async(f"⚠️ *Pre-pick error — {mode}* — see server logs.")
+
+        # ── eDIS morning check (pre-open; market need not be open) ────────
+        # 2026-09-19 (audit finding): runs before pre-pick's default 09:00
+        # time is even reached in practice (default 09:00, same as
+        # pre-pick) so a pending verification is flagged with time to act
+        # before 09:15 open. Same "market need not be open" idiom as
+        # pre-pick above — this only reads eDIS status, it places nothing.
+        if (
+            _edis_check_enabled(db, mode)
+            and getattr(gate, "edis_check_last_run", None) != today
+            and ist_time_at_or_after(parse_hhmm(config.EDIS_MORNING_CHECK_TIME_IST, 9, 0))
+        ):
+            gate.edis_check_last_run = today
+            db.commit()
+            try:
+                await _edis_morning_check(db, mode)
+            except Exception:
+                logger.exception("[schedule] eDIS morning check failed for %s", mode)
+                await notify_async(f"⚠️ *eDIS morning check error — {mode}* — see server logs.")
 
         # ── Enter-at-open (market must be open) ───────────────────────────
         if (

@@ -99,7 +99,21 @@ MIN_PCT_CHANGE_5M = _get_float("MIN_PCT_CHANGE_5M", 1.0)
 MIN_PCT_CHANGE_15M = _get_float("MIN_PCT_CHANGE_15M", 1.5)
 MIN_PCT_CHANGE_60M = _get_float("MIN_PCT_CHANGE_60M", 2.5)
 MIN_AVG_VOLUME = _get_int("MIN_AVG_VOLUME", 50_000)
+# 2026-09-18 (user audit finding, fixed): this is now compared directly
+# against REAL cumulative day volume (shares) from the mode-3 WS feed —
+# see feed/ws_client.py's docstring. It used to be divided by 5000 and
+# compared against a tick-COUNT proxy, since mode-1 carried no real
+# volume field at all. If you were relying on the old env value, note
+# the units changed: 50_000 here now means "50,000 shares traded so far
+# today", not "10 ticks in the rolling window" — re-tune if needed.
 MAX_SPREAD_PCT = _get_float("MAX_SPREAD_PCT", 0.5)
+# 2026-09-18 (user audit finding, fixed): this was defined and documented
+# (see the MIN_PREFERRED_SCALP_POSITIONS comment below, STATUS.md) as a
+# hard risk gate that "stays exactly as strict regardless of position
+# count" — but it was never actually enforced anywhere; the mode-1 feed
+# had no bid/ask to check it against. Now enforced in screening/engine.py
+# via feed/ws_client.py's mode-3 depth data (fails OPEN, not closed, when
+# a symbol's depth genuinely hasn't arrived yet — see that gate's comment).
 
 # ── Adaptive target / stoploss bands (user-specified ranges) ────────────────
 MIN_TARGET_PCT = _get_float("MIN_TARGET_PCT", 3.0)
@@ -245,13 +259,84 @@ MIN_STOCK_PRICE = _get_float("MIN_STOCK_PRICE", 20.0)
 #      a penny/micro-cap held overnight is a gap-down risk with thin liquidity).
 # If quality data was missing at entry (None fields on ScalpCandidateLog),
 # the position is squaredoff anyway — "unknown quality" is not good enough
-# for an overnight hold. When a position IS carried, it is re-evaluated at
-# next open (09:15 IST) — no new entry is placed, but the existing stop/
-# target levels stay live via the super order.
+# for an overnight hold. When a position IS carried, it is converted to a
+# real CNC holding (see the 2026-09-18 fix note below) — its old
+# INTRADAY stop/target legs are cancelled as part of that conversion and
+# NOT re-armed (a fresh same-day protective order against an
+# unsettled/pending-eDIS CNC holding isn't something this codebase's
+# order-placement wrapper has been verified to support correctly — see
+# convert_position()'s docstring in execution/dhan_client.py). So a
+# carried position has NO live stop-loss/target from the moment of
+# conversion until whoever/whatever manages it the next day — this is a
+# known, deliberate gap, not an oversight; the carry notification says
+# so explicitly each time it fires.
 OVERNIGHT_HOLD_ENABLED          = _get_bool("OVERNIGHT_HOLD_ENABLED", False)
 OVERNIGHT_MIN_FUNDAMENTAL_SCORE = _get_float("OVERNIGHT_MIN_FUNDAMENTAL_SCORE", 60.0)
 OVERNIGHT_MIN_TECHNICAL_SCORE   = _get_float("OVERNIGHT_MIN_TECHNICAL_SCORE", 60.0)
 OVERNIGHT_MIN_MARKET_CAP_CR     = _get_float("OVERNIGHT_MIN_MARKET_CAP_CR", 2000.0)
+
+# 2026-09-18 (user audit finding, fixed): two problems found in the carry
+# path itself, both fixed in orders/eod_squareoff.py:
+#  1. Every entry here uses product_type=INTRADAY (see SCALP_PRODUCT_TYPE
+#     above, "NOT CNC" — for the same-day-eDIS reason explained there).
+#     An INTRADAY position is force-squared-off by DHAN'S OWN broker-side
+#     RMS before/at market close regardless of what this app decides —
+#     so simply skipping this app's own EOD squareoff call, as before,
+#     carried NOTHING: Dhan would flatten it anyway minutes later, at
+#     whatever price prevailed then, with no further stop/target control
+#     in between. Fixed by explicitly converting qualifying positions
+#     INTRADAY -> CNC via Dhan's own /positions/convert endpoint
+#     (execution/dhan_client.py::convert_position) before Dhan's RMS
+#     cutoff — only a real CNC holding can actually survive to the next
+#     day. This inherits real-trade-service's own well-documented CDSL
+#     eDIS constraint (selling it tomorrow needs manual TPIN verification
+#     in the Dhan app first) — the carry notification says this
+#     explicitly now.
+#  2. No aggregate cap: every position individually clearing the quality
+#     bar above would carry, with no limit on how much of the pool sits
+#     exposed to overnight gap risk at once. This caps total carried
+#     value (ranked by combined quality score, highest first) at this %
+#     of total_allocated_capital; positions beyond the cap are
+#     squared off instead of carried, same pattern real-trade-service
+#     already uses for its own OVERNIGHT_HOLD_MAX_EXPOSURE_PCT.
+OVERNIGHT_HOLD_MAX_EXPOSURE_PCT_OF_POOL = _get_float("OVERNIGHT_HOLD_MAX_EXPOSURE_PCT_OF_POOL", 30.0)
+
+# ── Overnight protective stop (2026-09-19, option 3 fix) ─────────────────────
+# After a position is converted INTRADAY -> CNC for overnight carry, the
+# old bracket's stop/target legs are cancelled (they were INTRADAY-product
+# orders and cannot protect a CNC holding). This config controls the
+# STOP_LOSS_MARKET order placed immediately after conversion as a genuine
+# protective stop — the trigger price is set at entry_price * (1 -
+# OVERNIGHT_STOP_LOSS_PCT / 100.0), rounded to the nearest valid tick.
+#
+# STOP_LOSS_MARKET mechanics (verified against dhanhq SDK 2.2.0, _order.py):
+#   order_type  = "STOP_LOSS_MARKET"
+#   price       = 0          (no limit price — fill at market once triggered)
+#   trigger_price = <level>  (exchange activates the order when LTP <= this)
+#   product_type  = "CNC"    (must match the converted holding)
+#   transaction_type = "SELL"
+# The SDK's place_order() accepts trigger_price as an explicit kwarg and
+# passes it as "triggerPrice" in the REST payload — confirmed in _order.py
+# line 83 / line 126. Dhan's server then holds this as a passive order in
+# the order book (status "PENDING" until triggered), NOT as an immediate
+# market sell. Post-placement, we read the order back via get_order_list()
+# and verify the broker echoes it as STOP_LOSS_MARKET / PENDING (or
+# TRANSIT) before committing overnight_stop_order_id — if that check fails
+# we do NOT carry the position and square it off instead.
+#
+# Default 4 % stop below entry — adjust to taste.  6 % is a common
+# overnight gap-risk budget for large-cap Indian equities; 4 % is tighter
+# (smaller loss if wrong, but also more vulnerable to a morning shake-out
+# before the real move).  Set to 0 to disable protective-stop placement
+# while keeping the conversion itself (NOT recommended — leaving a CNC
+# holding unprotected overnight is the original bug this fixes).
+OVERNIGHT_STOP_LOSS_PCT = _get_float("OVERNIGHT_STOP_LOSS_PCT", 4.0)
+
+# 2026-09-19 (audit finding): pre-market CDSL eDIS check — see
+# execution/dhan_client.py's edis_verification_summary and main.py's
+# scheduled call to it. Same reasoning as real-trade-service's own
+# EDIS_MORNING_CHECK_ENABLED.
+EDIS_MORNING_CHECK_TIME_IST = os.getenv("EDIS_MORNING_CHECK_TIME_IST", "09:00")
 
 # ── Manual exit: cancel-then-sell delay (2026-09-18, session67) ─────────────
 # close_position_now() cancels all super-order legs, then immediately fires

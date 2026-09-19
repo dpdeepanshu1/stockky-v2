@@ -153,6 +153,7 @@ def init_schema() -> None:
     _ensure_nextday_watchlist_indexes(eng, dialect())
     _ensure_afterhours_last_run_columns(eng, dialect())
     _ensure_regime_override_columns(eng, dialect())
+    _ensure_edis_check_columns(eng, dialect())
 
 
 # 2026-08-27 data fixup: docker-compose.yml/.env.example/.env.oracle.example
@@ -1161,3 +1162,62 @@ def _ensure_regime_override_columns(engine, dialect_name: str) -> None:
             if "already exists" in m.lower() or "ORA-01430" in m:
                 continue
             logger.warning("real-trade-db: could not add %s.%s: %s", table, col_name, e)
+
+
+# ── eDIS morning-check columns (2026-09-19, audit finding) ──────────────────
+# Same idiom as _ensure_overnight_hold_toggle_column above — defaults ON,
+# since this is a safety check for overnight-hold behavior that's already
+# live, not new exposure. See models.py's TradeGateState.edis_morning_check_enabled
+# and execution/auto_pilot.py's _edis_morning_check.
+def _ensure_edis_check_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        existing = {c["name"] for c in inspect(engine).get_columns("trade_gate_state")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect trade_gate_state columns: %s", e)
+        return
+
+    if dialect_name == "oracle":
+        adds = [
+            (
+                "edis_morning_check_enabled",
+                "ALTER TABLE trade_gate_state ADD (edis_morning_check_enabled NUMBER(1) DEFAULT 1 NOT NULL)",
+            ),
+            (
+                "edis_morning_check_enabled_at",
+                "ALTER TABLE trade_gate_state ADD (edis_morning_check_enabled_at TIMESTAMP NULL)",
+            ),
+            (
+                "edis_check_last_run",
+                "ALTER TABLE trade_gate_state ADD (edis_check_last_run VARCHAR2(10) NULL)",
+            ),
+        ]
+    else:
+        adds = [
+            (
+                "edis_morning_check_enabled",
+                "ALTER TABLE trade_gate_state ADD COLUMN edis_morning_check_enabled BOOLEAN DEFAULT TRUE NOT NULL",
+            ),
+            (
+                "edis_morning_check_enabled_at",
+                "ALTER TABLE trade_gate_state ADD COLUMN edis_morning_check_enabled_at TIMESTAMP NULL",
+            ),
+            (
+                "edis_check_last_run",
+                "ALTER TABLE trade_gate_state ADD COLUMN edis_check_last_run VARCHAR(10) NULL",
+            ),
+        ]
+
+    for col_name, sql in adds:
+        if col_name in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added trade_gate_state.%s", col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add trade_gate_state.%s: %s", col_name, e)

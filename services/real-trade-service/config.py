@@ -766,6 +766,50 @@ OVERNIGHT_HOLD_MAX_RANGE_POS = float(os.getenv("OVERNIGHT_HOLD_MAX_RANGE_POS", "
 # usual (see execution/auto_pilot.py's _select_overnight_holds).
 OVERNIGHT_HOLD_MAX_EXPOSURE_PCT = float(os.getenv("OVERNIGHT_HOLD_MAX_EXPOSURE_PCT", "40.0"))
 
+# 2026-09-19 (audit finding, fixed): the exposure cap above bounds TOTAL
+# overnight value but does nothing to stop that value concentrating into
+# a handful of correlated names — positions are ranked purely by
+# conviction, so 3-4 momentum names from the same sector could all be
+# held overnight together, which is exactly when gap risk is correlated
+# (a sector-wide open, not an idiosyncratic one, hits all of them at
+# once). No sector data is reliably available on TradePosition without
+# an extra live fundamental-service call at the worst possible time
+# (15:00 IST, latency-sensitive), so this uses two cheaper, robust
+# proxies instead: a hard cap on how many distinct symbols can be held
+# overnight, and a cap on how much of equity any ONE symbol can occupy
+# overnight — both enforced in execution/auto_pilot.py's
+# _select_overnight_holds alongside the aggregate % cap above.
+OVERNIGHT_HOLD_MAX_POSITIONS = int(os.getenv("OVERNIGHT_HOLD_MAX_POSITIONS", "3"))
+OVERNIGHT_HOLD_MAX_SINGLE_SYMBOL_PCT = float(os.getenv("OVERNIGHT_HOLD_MAX_SINGLE_SYMBOL_PCT", "15.0"))
+
+# 2026-09-19 (audit finding, fixed): OVERNIGHT_HOLD_REQUIRE_PROFITABLE
+# above only checked raw LTP >= avg_entry_price — a position sitting at
+# exact breakeven on price is still a NET LOSER once brokerage/STT/GST/
+# stamp duty are included, which is inconsistent with cost_model.py's
+# entry-time edge-vs-cost gate (entry_engine/entry.py Gate 5.6) elsewhere
+# in this same pipeline. When true, the overnight-hold profitability
+# check requires unrealized gross P&L to exceed the estimated round-trip
+# cost of exiting now, not just to be >= 0. Kept togglable in case the
+# stricter bar ever needs to be relaxed for testing.
+OVERNIGHT_HOLD_PROFITABLE_NET_OF_COSTS = os.getenv("OVERNIGHT_HOLD_PROFITABLE_NET_OF_COSTS", "true").lower() == "true"
+
+# ── Overnight-hold × CDSL eDIS morning check (2026-09-19, audit finding) ────
+# Every same-day exit in this service sells product_type=INTRADAY, which
+# never touches CDSL. A position carried overnight by OVERNIGHT_HOLD_ENABLED
+# becomes a real T+1 CNC holding — see execution/dhan_client.py's
+# eDIS/TPIN documentation — and selling it the next day (including a
+# stop-loss or emergency-gap-down exit) needs the account holder to
+# manually verify holdings in the Dhan app first, or the SELL is
+# rejected. dhan_client.edis_verification_summary() already existed for
+# a manual dashboard check but was never called proactively — so a
+# forgotten morning verification could silently leave an overnight
+# position's stop-loss unable to fire during exactly the highest-risk
+# window (the open gap). When enabled, a scheduled pre-market check
+# (execution/auto_pilot.py) calls it once per day and sends a loud
+# reminder notification if any held-overnight symbol isn't yet verified.
+EDIS_MORNING_CHECK_ENABLED = os.getenv("EDIS_MORNING_CHECK_ENABLED", "true").lower() == "true"
+EDIS_MORNING_CHECK_TIME_IST = os.getenv("EDIS_MORNING_CHECK_TIME_IST", "09:00")
+
 # ── Limit orders for profit-target exits (2026-09-18 — user audit finding) ───
 # Every automatic exit (stop/emergency/time_stop/eod_squareoff/target) was
 # sent as a MARKET order. Correct for anything protecting capital, but a

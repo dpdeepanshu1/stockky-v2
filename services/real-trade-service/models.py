@@ -139,6 +139,18 @@ class TradeGateState(Base):
     afterhours_scan_last_run_at = Column(DateTime, nullable=True)
     afterhours_scan_last_run_ok = Column(Boolean, nullable=True)
 
+    # 2026-09-19 (audit finding): sixth scheduled feature — pre-market CDSL
+    # eDIS verification check. Overnight-held positions (see
+    # overnight_hold_enabled above) become real CNC holdings that need
+    # manual TPIN verification in the Dhan app before they can be sold the
+    # next day — see execution/auto_pilot.py's _edis_morning_check and
+    # config.py's EDIS_MORNING_CHECK_ENABLED comment for the full "why".
+    # Defaults ON (same reasoning as overnight_hold_enabled above: this is
+    # a safety check for behavior that's already live, not new exposure).
+    edis_morning_check_enabled = Column(Boolean, nullable=False, default=True)
+    edis_morning_check_enabled_at = Column(DateTime, nullable=True)
+    edis_check_last_run = Column(String(10), nullable=True)  # "YYYY-MM-DD"
+
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 

@@ -7,43 +7,100 @@ Replaces the fake "ws" polling in market-data-service/angelone_ws_feed.py
 dressed up with a websocket filename — no actual WS frames).
 
 SmartWebSocketV2 binary frame format (from AngelOne SmartAPI docs):
-  Subscription mode 1 (LTP only) — 51-byte frames
-  Subscription mode 2 (quote)    — 195-byte frames
-  Subscription mode 3 (snap quote) — 501-byte frames
+  Subscription mode 1 (LTP)        —  51-byte frames
+  Subscription mode 2 (Quote)      — 123-byte frames (OHLC + cumulative
+                                      day volume — still NO bid/ask)
+  Subscription mode 3 (SnapQuote)  — 379-byte frames (adds 52w hi/lo,
+                                      circuit limits, and 5-level best
+                                      bid/ask depth)
 
-We use mode 1 (LTP) — we only need last traded price + volume for the
-rolling-window screener. That gives us the fastest parse path and lowest
-bandwidth.
+  BUG FIX (this session — root-caused the "connected forever, zero ticks
+  ever parsed, last_tick_at always null" symptom): the common-header
+  field offsets below were previously off by one byte (token sliced as
+  26 bytes, `data[2:28]`, instead of the correct 25, `data[2:27]`),
+  which cascaded into every field after it — LTP was read from offset
+  44 instead of 43. Fixed; every frame mode below shares this same
+  0-50 header layout, so the fix applies to all of them.
 
-Binary frame layout (mode 1, all little-endian, 51 bytes total):
-  Byte 0:      subscription_type (1=LTP, 2=Quote, 3=SnapQuote)
+  ── Mode upgrade (2026-09-18 — user audit finding) ──────────────────
+  Previously subscribed at mode 1 (LTP-only). Two consequences, both
+  now fixed by moving to mode 3 (SnapQuote):
+   1. config.MAX_SPREAD_PCT was defined and documented (STATUS.md,
+      config.py) as one of the hard risk gates, but was NEVER actually
+      enforced anywhere in the code — mode 1 carries no bid/ask, so
+      there was no spread to check. Every entry was a MARKET order
+      into a stock with zero liquidity/spread screening.
+   2. screening/engine.py's MIN_AVG_VOLUME floor was measured via
+      _volume_accum, which is literally `len(tick_timestamps_in_window)`
+      — a tick-COUNT proxy, not real traded volume. A thinly-traded
+      stock with an unstable, jumpy price generates lots of ticks and
+      would pass this "liquidity" floor despite being the opposite of
+      liquid.
+  Mode 3 gives real cumulative day volume AND best-5 bid/ask in every
+  tick, at the cost of a bigger frame (379 vs 51 bytes) — still trivial
+  bandwidth for ~2,000 NSE-EQ symbols. Mode 2 (Quote) was considered
+  first since it's cheaper, but per AngelOne's own official reference
+  parser (angel-one/smartapi-python, SmartApi/smartWebSocketV2.py,
+  `_parse_binary_data`), Quote mode does NOT carry depth — only
+  SnapQuote does — so mode 3 is the minimum mode that can feed a real
+  MAX_SPREAD_PCT gate.
+
+Binary frame layout (all little-endian). Common header, same for every
+mode (bytes 0-50, 51 bytes):
+  Byte 0:      subscription_mode (1=LTP, 2=Quote, 3=SnapQuote)
   Byte 1:      exchange_type     (1=NSE_CM, 2=NSE_FO, ...)
   Bytes 2-26:  token             (char[25], null-padded)
   Bytes 27-34: sequence_number   (int64)
   Bytes 35-42: exchange_feed_time (int64, unix seconds)
   Bytes 43-50: LTP               (int64, price * 100)
-  (additional fields in mode 2/3 not used here)
 
-  BUG FIX (this session — root-caused the "connected forever, zero ticks
-  ever parsed, last_tick_at always null" symptom): the field offsets
-  below were previously off by one byte (token sliced as 26 bytes,
-  `data[2:28]`, instead of the correct 25, `data[2:27]`), which cascaded
-  into every field after it — LTP was read from offset 44 instead of 43,
-  and the length guard required >=52 bytes. AngelOne's real mode-1 LTP
-  frame is exactly 51 bytes (confirmed against a synthetic frame built to
-  their documented layout), so every single incoming tick failed that
-  `len(data) < 52` guard and was discarded before parsing even began —
-  silently, with no exception and no log line, since the guard fires
-  before the try block. The WS connection itself was healthy the whole
-  time (connect/subscribe/idle-timeout-reconnect all worked correctly);
-  this was the only reason no tick ever reached the screening engine.
+Mode 2 (Quote) / Mode 3 (SnapQuote) add, bytes 51-122 (all int64 unless
+noted; prices are paise, i.e. price * 100):
+  51-58:   last_traded_quantity
+  59-66:   average_traded_price
+  67-74:   volume_trade_for_the_day   <- the REAL cumulative volume
+  75-82:   total_buy_quantity   (float64/"d", NOT int64 — per reference)
+  83-90:   total_sell_quantity  (float64/"d", NOT int64 — per reference)
+  91-98:   open_price_of_the_day
+  99-106:  high_price_of_the_day
+  107-114: low_price_of_the_day
+  115-122: closed_price
+
+Mode 3 (SnapQuote) additionally adds, bytes 123-378:
+  123-130: last_traded_timestamp
+  131-138: open_interest
+  139-146: open_interest_change_percentage
+  147-346: best-5 buy/sell depth — 10 packets of 20 bytes each:
+             bytes 0-1:   flag (H, uint16) — 0 or 1, see swap note below
+             bytes 2-9:   quantity (q, int64)
+             bytes 10-17: price    (q, int64, paise)
+             bytes 18-19: num_of_orders (H, uint16)
+  347-354: upper_circuit_limit
+  355-362: lower_circuit_limit
+  363-370: 52_week_high_price
+  371-378: 52_week_low_price
+
+  ⚠ DEPTH FLAG/LABEL SWAP: AngelOne's own official reference parser
+  (angel-one/smartapi-python's `_parse_binary_data`) collects flag==0
+  packets into a local `best_5_buy_data` bucket, flag!=0 into
+  `best_5_sell_data` — then, when building the final returned dict,
+  swaps the two: `parsed_data["best_5_buy_data"] = <the flag!=0
+  bucket>` and `parsed_data["best_5_sell_data"] = <the flag==0
+  bucket>`. This looks backwards on first read but it's AngelOne's own
+  documented behavior, not a transcription error here — replicated
+  exactly in `_parse_best5` below (flag==0 -> ASK side, flag!=0 -> BID
+  side, matching their final exposed labels) so this client's notion
+  of "best bid"/"best ask" matches what every other AngelOne SmartAPI
+  integration actually receives. If this is ever confirmed wrong
+  against a live captured frame, flip `_ASK_FLAG`/`_BID_FLAG` below —
+  don't reorder the parsing itself.
 
 Subscribe message (JSON):
   {
     "correlationID": "ps1",
     "action": 1,       # 1=subscribe, 0=unsubscribe
     "params": {
-      "mode": 1,       # 1=LTP
+      "mode": 3,       # 3=SnapQuote (real volume + best bid/ask depth)
       "tokenList": [{"exchangeType": 1, "tokens": ["3045", "1594", ...]}]
     }
   }
@@ -123,13 +180,39 @@ _last_volume:  Dict[str, int]   = {}   # latest volume per symbol from feed
 # during one.
 _buffer_locks: Dict[str, threading.Lock] = defaultdict(threading.Lock)
 
+# ── Best bid/ask storage (2026-09-18 mode-3 upgrade) ────────────────────────
+# Plain dict item assignment, same pattern _last_volume already used below —
+# a single dict[key]=value write is atomic under the GIL, so no lock needed
+# for this (unlike _tick_buffers, where the risk was a multi-step *read*
+# racing a writer mid-iteration — see the BUG FIX comment above
+# _buffer_locks). best_bid/best_ask are None until at least one mode-3 frame
+# with a non-empty depth book has been parsed for that symbol.
+_last_quote: Dict[str, tuple] = {}   # symbol -> (best_bid, best_ask, ts)
+
 # Registered on-tick callbacks — screening engine registers here
 _on_tick_callbacks: list[Callable] = []
 
 
 def register_on_tick(cb: Callable) -> None:
-    """Register a callback(symbol, ltp, volume, ts) called on every tick."""
+    """Register a callback(symbol, ltp, volume, ts) called on every tick.
+    `volume` is now the real cumulative day volume from the mode-3 feed
+    (see the 2026-09-18 mode-upgrade note in this module's docstring) —
+    previously always 0, since _last_volume was declared but never
+    actually written anywhere before that fix."""
     _on_tick_callbacks.append(cb)
+
+
+def get_best_bid_ask(symbol: str) -> Optional[tuple]:
+    """Returns (best_bid, best_ask) for symbol from the most recent mode-3
+    tick, or None if no depth has been seen yet for it (e.g. right after
+    (re)subscribe, or a symbol with a genuinely empty order book). Callers
+    (the MAX_SPREAD_PCT gate in screening/engine.py) must treat None as
+    "unknown", not "zero spread" — see that gate's fail-open comment."""
+    q = _last_quote.get(symbol)
+    if not q:
+        return None
+    bid, ask, _ts = q
+    return (bid, ask)
 
 
 def get_tick_buffer(symbol: str) -> list:
@@ -149,23 +232,76 @@ def get_last_ltp(symbol: str) -> Optional[float]:
     return buf[-1][1]
 
 
-# ── Binary frame parser (mode 1 LTP) ────────────────────────────────────────
-def _parse_ltp_frame(data: bytes) -> Optional[tuple]:
-    """Returns (token_str, ltp_float, ts_float) or None on parse error."""
+def get_last_volume(symbol: str) -> int:
+    """Real cumulative day volume (shares) from the mode-3 feed, 0 if no
+    tick has arrived for this symbol yet. See the mode-upgrade docstring
+    note at the top of this module — this used to always be 0."""
+    return _last_volume.get(symbol, 0)
+
+
+# ── Binary frame parser (mode 3 SnapQuote) ──────────────────────────────────
+# Per-depth-packet flag values — see the ⚠ DEPTH FLAG/LABEL SWAP note in this
+# module's docstring for why ASK is flag==0, not BID.
+_ASK_FLAG = 0
+_BID_FLAG = 1
+
+
+def _parse_best5(data: bytes) -> tuple:
+    """data is the 200-byte depth block (frame bytes 147:347) — 10 packets
+    of 20 bytes each. Returns (best_bid, best_ask) as floats, or (None,
+    None) if either side's top-of-book entry is missing/malformed. Only
+    reads the FIRST packet found on each side (index 0) — AngelOne returns
+    the 5 levels best-to-worst, so index 0 is top-of-book; we don't need
+    the other 4 levels for a spread check."""
+    best_bid = best_ask = None
+    for i in range(0, len(data) - 19, 20):
+        packet = data[i:i + 20]
+        try:
+            flag  = struct.unpack_from("<H", packet, 0)[0]
+            price = struct.unpack_from("<q", packet, 10)[0] / 100.0
+        except Exception:
+            continue
+        if price <= 0:
+            continue
+        if flag == _ASK_FLAG and best_ask is None:
+            best_ask = price
+        elif flag == _BID_FLAG and best_bid is None:
+            best_bid = price
+    return best_bid, best_ask
+
+
+def _parse_frame(data: bytes) -> Optional[tuple]:
+    """Returns (token_str, ltp, ts, volume, best_bid, best_ask) or None on
+    parse error / undersized frame. `volume` is real cumulative day
+    volume (0 if the frame is too short to carry it — e.g. a stray mode-1
+    frame). `best_bid`/`best_ask` are None unless this is a full mode-3
+    SnapQuote frame (>= 347 bytes, enough to include the depth block)."""
     if len(data) < 51:
         return None
     try:
-        # sub_type = data[0]    # feed mode — always 1 (LTP) since that's all we subscribe to
+        # sub_type = data[0]    # feed mode
         # exch_type = data[1]   # not needed for routing by symbol
-        token_raw  = data[2:27].rstrip(b"\x00").decode("ascii", errors="ignore").strip()
+        token_raw = data[2:27].rstrip(b"\x00").decode("ascii", errors="ignore").strip()
         # sequence  = struct.unpack_from("<q", data, 27)[0]  # not needed
         # feed_time = struct.unpack_from("<q", data, 35)[0]  # not needed
-        ltp_raw    = struct.unpack_from("<q", data, 43)[0]   # price * 100
-        ltp        = ltp_raw / 100.0
-        ts         = time.time()
+        ltp_raw = struct.unpack_from("<q", data, 43)[0]   # price * 100
+        ltp = ltp_raw / 100.0
+        ts = time.time()
         if ltp <= 0:
             return None
-        return token_raw, ltp, ts
+
+        volume = 0
+        if len(data) >= 75:
+            # bytes 67:75 — volume_trade_for_the_day (see docstring layout)
+            volume = struct.unpack_from("<q", data, 67)[0]
+            if volume < 0:
+                volume = 0
+
+        best_bid = best_ask = None
+        if len(data) >= 347:
+            best_bid, best_ask = _parse_best5(data[147:347])
+
+        return token_raw, ltp, ts, volume, best_bid, best_ask
     except Exception as e:
         logger.debug("frame parse error: %s (len=%d)", e, len(data))
         return None
@@ -182,12 +318,15 @@ def _build_reverse_map(symbol_token_map: Dict[str, str]) -> None:
 
 # ── Subscribe message builder ────────────────────────────────────────────────
 def _build_subscribe_msg(tokens: list[str], action: int = 1) -> str:
-    """action=1 subscribe, action=0 unsubscribe. NSE_CM exchange_type=1."""
+    """action=1 subscribe, action=0 unsubscribe. NSE_CM exchange_type=1.
+    mode=3 (SnapQuote) — see the mode-upgrade note in this module's
+    docstring for why LTP/Quote aren't enough (no real volume / no
+    bid-ask depth respectively)."""
     return json.dumps({
         "correlationID": "ps1",
         "action": action,
         "params": {
-            "mode": 1,  # LTP only
+            "mode": 3,  # SnapQuote: LTP + real day volume + best-5 depth
             "tokenList": [{"exchangeType": 1, "tokens": tokens}],
         },
     })
@@ -302,9 +441,9 @@ async def _ws_loop() -> None:
 
                     # Binary tick frame
                     if isinstance(message, bytes):
-                        parsed = _parse_ltp_frame(message)
+                        parsed = _parse_frame(message)
                         if parsed:
-                            token_str, ltp, ts = parsed
+                            token_str, ltp, ts, volume, best_bid, best_ask = parsed
                             _last_tick_at = ts
                             symbol = _token_to_symbol.get(token_str)
                             if symbol:
@@ -330,6 +469,13 @@ async def _ws_loop() -> None:
                                     cutoff = ts - _MAX_BUFFER_AGE_S
                                     while buf and buf[0][0] < cutoff:
                                         buf.popleft()
+                                # 2026-09-18: real cumulative day volume, not
+                                # the always-0 placeholder this used to be —
+                                # see the mode-upgrade docstring note.
+                                if volume:
+                                    _last_volume[symbol] = volume
+                                if best_bid is not None and best_ask is not None:
+                                    _last_quote[symbol] = (best_bid, best_ask, ts)
                                 for cb in _on_tick_callbacks:
                                     try:
                                         cb(symbol, ltp, _last_volume.get(symbol, 0), ts)

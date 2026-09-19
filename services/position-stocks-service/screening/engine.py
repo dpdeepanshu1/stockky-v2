@@ -12,17 +12,20 @@ surfaced it.
 
 Gates applied per candidate:
   1. Min pct-change per window (config.MIN_PCT_CHANGE_*M)
-  2. Min average volume floor (MIN_AVG_VOLUME — crude proxy, traded
-     volume from the WS feed accumulates in _volume_accum)
-  3. Not already in an open scalp position (open_symbols set, passed in)
-  4. Momentum consistency: require the move to be SUSTAINED across the
+  2. Min average volume floor (MIN_AVG_VOLUME — real cumulative day
+     volume from the mode-3 WS feed, see feed/ws_client.py's docstring;
+     2026-09-18: previously a tick-count proxy, not real volume)
+  3. Max bid-ask spread (MAX_SPREAD_PCT — 2026-09-18: previously defined
+     but never enforced, since the mode-1 feed carried no bid/ask)
+  4. Not already in an open scalp position (open_symbols set, passed in)
+  5. Momentum consistency: require the move to be SUSTAINED across the
      window, not a single-tick spike — see _momentum_consistency() below.
-  5. Range-position multiplier on composite_score: demotes candidates
+  6. Range-position multiplier on composite_score: demotes candidates
      already near their day-high (less upside room).
 
 Composite score formula:
   score = pct_change * volume_weight * range_mult * consistency_mult
-  volume_weight   = min(tick_count / floor, 3.0)   — cap at 3× floor
+  volume_weight   = min(real_day_volume / MIN_AVG_VOLUME, 3.0)  — cap at 3×
   range_mult      = 0.50 / 0.75 / 1.0 / 1.20       — day-range regime
   consistency_mult= 0.80 / 1.0 / 1.15               — momentum quality
 
@@ -76,8 +79,15 @@ _WINDOW_THRESHOLDS = {
     60: config.MIN_PCT_CHANGE_60M,
 }
 
-# Volume accumulator: tick count in last 5m as liquidity proxy
-# (WS mode-1 gives no real volume — tick frequency is the best proxy)
+# Volume accumulator: tick count in last 5m — kept as a supplementary
+# momentum-activity signal (feeds nothing else now), NOT the liquidity
+# floor. 2026-09-18 (user audit finding): this used to BE the liquidity
+# floor/weight, but tick frequency is a proxy for "price is jumping
+# around", not "the stock is liquid" — a thin order book can generate
+# lots of ticks on a jumpy price. Now that the WS feed runs in mode 3
+# (SnapQuote — see feed/ws_client.py's docstring), real cumulative day
+# volume is available per tick via ws_client.get_last_volume(), and the
+# floor/weight below use that instead.
 _volume_accum: Dict[str, int] = defaultdict(int)
 _volume_window_s = 300  # 5 minutes
 _tick_timestamps: Dict[str, list] = defaultdict(list)
@@ -105,13 +115,30 @@ _CONSISTENCY_WEAK_MULT   = 0.80
 
 
 def _update_volume(symbol: str, ts: float) -> None:
-    """Track tick count in the last _volume_window_s as activity proxy."""
+    """Track tick count in the last _volume_window_s — supplementary
+    activity signal only, see the module-level comment above
+    _volume_accum for why this is no longer the liquidity floor."""
     tl = _tick_timestamps[symbol]
     tl.append(ts)
     cutoff = ts - _volume_window_s
     while tl and tl[0] < cutoff:
         tl.pop(0)
     _volume_accum[symbol] = len(tl)
+
+
+def _spread_pct(symbol: str, ltp: float) -> Optional[float]:
+    """Bid-ask spread as a % of LTP, or None if depth hasn't arrived yet
+    for this symbol (right after (re)subscribe, or a genuinely empty
+    book). Callers must fail OPEN on None, not treat it as zero spread —
+    see the MAX_SPREAD_PCT gate in scan() below."""
+    quote = ws_client.get_best_bid_ask(symbol)
+    if not quote:
+        return None
+    bid, ask = quote
+    if not bid or not ask or ask <= bid or ltp <= 0:
+        return None
+    return (ask - bid) / ltp * 100.0
+
 
 
 def _rolling_pct_change(symbol: str, window_minutes: int) -> Optional[float]:
@@ -231,12 +258,27 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
         if current_ltp <= 0:
             continue
 
-        tick_count = _volume_accum.get(symbol, 0)
-        # BUG FIX (session48 followup): on_tick_hook is now properly registered at
-        # startup (main.py), so tick_count reflects real activity. Guard: if
-        # MIN_AVG_VOLUME is 0 (disabled), skip the activity floor check entirely.
-        _vol_floor_count = int(config.MIN_AVG_VOLUME / 5000)
-        if _vol_floor_count > 0 and tick_count < _vol_floor_count:
+        tick_count = _volume_accum.get(symbol, 0)  # supplementary signal only
+        real_volume = ws_client.get_last_volume(symbol)
+        # 2026-09-18 (user audit finding): floor now measured against real
+        # cumulative day volume (shares), not tick count — see the
+        # module-level comment above _volume_accum. MIN_AVG_VOLUME==0
+        # disables the check entirely, same as before.
+        if config.MIN_AVG_VOLUME > 0 and real_volume < config.MIN_AVG_VOLUME:
+            continue
+
+        # ── Bid-ask spread gate (2026-09-18 — user audit finding) ──────────
+        # MAX_SPREAD_PCT was defined and documented as a hard risk gate but
+        # was never actually enforced — the WS feed carried no bid/ask
+        # before this session's mode-1→mode-3 upgrade (see
+        # feed/ws_client.py's docstring). Fail OPEN (don't reject) when
+        # depth genuinely isn't available yet for this symbol, same
+        # philosophy the fundamental/technical quality gates already use
+        # elsewhere in this service for missing data — a hard reject on
+        # "no data yet" would block every candidate until every symbol's
+        # book had been seen at least once.
+        spread_pct = _spread_pct(symbol, current_ltp)
+        if config.MAX_SPREAD_PCT > 0 and spread_pct is not None and spread_pct > config.MAX_SPREAD_PCT:
             continue
 
         # ── Range-position multiplier (computed once, shared across windows) ──
@@ -278,9 +320,11 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
                 _cons_mult = 1.0
 
             # ── Volume weight (per-window cap for 1m noise control) ────────
-            vol_floor  = max(config.MIN_AVG_VOLUME / 5000, 1)
+            # 2026-09-18: weighted by real day volume vs MIN_AVG_VOLUME
+            # floor now, not tick count — see comment above _volume_accum.
+            vol_floor  = max(config.MIN_AVG_VOLUME, 1)
             vol_cap    = _VOLUME_WEIGHT_CAP.get(win_minutes, 3.0)
-            volume_weight = min(max(tick_count, 1) / vol_floor, vol_cap)
+            volume_weight = min(max(real_volume, 1) / vol_floor, vol_cap)
 
             # ── Window conviction bonus ────────────────────────────────────
             win_mult = _WINDOW_CONVICTION_MULT.get(win_minutes, 1.0)

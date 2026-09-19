@@ -775,6 +775,369 @@ def modify_super_order(
     return _extract_data(resp) or {}
 
 
+def convert_position(
+    db: Session,
+    *,
+    is_armed: bool,
+    security_id: str,
+    exchange_segment: str,
+    position_type: str,
+    convert_qty: int,
+    from_product_type: str = "INTRADAY",
+    to_product_type: str = "CNC",
+) -> dict:
+    """Convert an open position's product type via POST /positions/convert
+    (Dhan API v2 — https://dhanhq.co/docs/v2/portfolio/#convert-position).
+
+    Added 2026-09-18 (user audit finding): OVERNIGHT_HOLD_ENABLED's carry
+    path previously just skipped this app's own EOD squareoff call for a
+    "carried" position and left it as-is. That did NOTHING, because every
+    entry here uses product_type=INTRADAY (config.SCALP_PRODUCT_TYPE,
+    deliberately "NOT CNC" — see that config comment, which exists for a
+    good same-day reason: CNC would need CDSL eDIS/TPIN clearance to sell
+    the SAME day, which a scalp strategy can't tolerate). An INTRADAY
+    position is force-squared-off by Dhan's OWN broker-side RMS before/at
+    market close regardless of what this app decides — so "carrying" an
+    INTRADAY position past the close was never actually possible; the
+    feature was carrying nothing, or worse, could leave a position with
+    no live protective order in the gap between this app's own EOD skip
+    and Dhan's later forced RMS squareoff.
+
+    This function is the fix: explicitly convert INTRADAY -> CNC via
+    Dhan's own conversion endpoint BEFORE Dhan's RMS cutoff (this must be
+    called from the 15:00 EOD path — well before Dhan's ~15:20-15:30
+    intraday auto-squareoff — never later). A converted position becomes
+    a real T1/demat holding, same as real-trade-service's CNC entries,
+    which means it inherits that service's own well-documented CDSL eDIS
+    constraint: selling it the NEXT day requires the account holder to
+    manually verify holdings (TPIN) in the Dhan app first, or next-day
+    stop-loss/exit attempts will be rejected. See the carry-notification
+    message in orders/eod_squareoff.py, which now says this explicitly.
+
+    Deliberately no is_armed check on conversion itself for the same
+    reason cancel/modify_super_order have none: this MANAGES exposure
+    already taken on (converting it so it's actually protected/carryable
+    at all), it doesn't open new exposure. is_armed is still checked by
+    the caller before this whole carry path runs, same as before.
+
+    Returns the raw response dict. Callers MUST treat a non-2xx/failed
+    call as "conversion did not happen" and fall back to squaring off
+    the position instead (e.g. insufficient margin for full CNC funding
+    is a normal, expected rejection reason, not a bug) — never assume
+    success and skip squareoff based on this call alone without checking
+    its result.
+    """
+    if not is_armed:
+        raise DhanNotArmedError("position-stocks-service is not armed — refusing to convert position.")
+    client = _get_sdk_client(db)
+    dhan_http = getattr(client, "dhan_http", None)
+    if dhan_http is None:
+        raise RuntimeError(
+            "convert_position: requires client.dhan_http (direct HTTP access) — "
+            "this SDK build doesn't expose it. Same requirement as the MARKET "
+            "super-order path above; upgrade dhanhq (>=2.2.0)."
+        )
+    payload = {
+        "dhanClientId": getattr(client, "client_id", None) or getattr(client, "dhan_client_id", None),
+        "fromProductType": from_product_type.upper(),
+        "exchangeSegment": exchange_segment.upper(),
+        "positionType": position_type.upper(),
+        "securityId": security_id,
+        "tradingSymbol": "",
+        "convertQty": int(convert_qty),
+        "toProductType": to_product_type.upper(),
+    }
+    logger.warning(
+        "position-stocks: converting REAL position security_id=%s qty=%d %s -> %s "
+        "(overnight carry)",
+        security_id, convert_qty, from_product_type, to_product_type,
+    )
+    resp = dhan_http.post("/positions/convert", payload)
+    return _extract_data(resp) or {}
+
+
+# ── CDSL eDIS check (2026-09-19 — ported from real-trade-service, which
+# already had this because it's always used CNC entries; this service
+# never needed it until convert_position() above introduced the first
+# CNC exposure this service has ever had) ───────────────────────────────
+_EDIS_APPROVED_KEYS = ("aprvdQty", "approvedQty", "approved_qty", "aprvd_qty")
+_EDIS_TOTAL_KEYS = ("totalQty", "total_qty", "dpQty", "dp_qty")
+
+
+def _first_present(row: dict, keys: tuple) -> Optional[float]:
+    for k in keys:
+        if k in row and row[k] is not None:
+            try:
+                return float(row[k])
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def edis_inquire(db: Session, isin: str = "ALL") -> dict:
+    """GET /v2/edis/inquire/{isin} — check whether holdings are currently
+    eDIS-approved for sale. Pass "ALL" (default) for a whole-portfolio
+    check. Ported verbatim (credentials call swapped for this service's
+    read-only dhan_credentials_ro) from real-trade-service's own
+    edis_inquire, which has the same NOTE about unconfirmed live field
+    names as edis_verification_summary below."""
+    creds = dhan_credentials_ro.get_decrypted_credentials(db)
+    if creds is None:
+        raise DhanNotConnectedError("No Dhan credentials stored — connect Dhan first.")
+    _client_id, access_token = creds
+    resp = httpx.get(
+        f"https://api.dhan.co/v2/edis/inquire/{isin}",
+        headers={"Content-Type": "application/json", "access-token": access_token},
+        timeout=15.0,
+    )
+    resp.raise_for_status()
+    return resp.json() or {}
+
+
+def edis_verification_summary(db: Session) -> dict:
+    """Summarize edis_inquire("ALL") into "is today's CDSL authorization
+    already done for every current holding?" Three outcomes, kept
+    distinct rather than collapsed to a boolean — see
+    real-trade-service's identical function for the full reasoning
+    (verified_today True/False/None).
+
+    NOTE: same caveat as real-trade-service's copy — the exact field
+    names Dhan's v2 edis/inquire response uses for per-holding
+    approved/total qty haven't been confirmed against a live response
+    from THIS service's account either. If this returns
+    verified_today=None with detail="unrecognized shape" in practice,
+    capture one real response body and add its key names to
+    _EDIS_APPROVED_KEYS/_EDIS_TOTAL_KEYS above.
+    """
+    from datetime import datetime, timezone
+    checked_at = datetime.now(timezone.utc).isoformat()
+    try:
+        raw = edis_inquire(db, isin="ALL")
+    except DhanNotConnectedError as e:
+        return {"verified_today": None, "checked_at": checked_at, "detail": str(e),
+                "holdings_total": 0, "holdings_pending": 0, "pending_symbols": []}
+    except Exception as e:
+        return {"verified_today": None, "checked_at": checked_at,
+                "detail": f"eDIS inquire call failed: {e}",
+                "holdings_total": 0, "holdings_pending": 0, "pending_symbols": []}
+
+    rows = raw if isinstance(raw, list) else (
+        raw.get("data") or raw.get("holdings") or raw.get("result") or []
+        if isinstance(raw, dict) else []
+    )
+    if not rows:
+        return {"verified_today": None, "checked_at": checked_at,
+                "detail": "No holdings returned by eDIS inquire (nothing to authorize, or unrecognized response shape).",
+                "holdings_total": 0, "holdings_pending": 0, "pending_symbols": []}
+
+    pending = []
+    unrecognized = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            unrecognized += 1
+            continue
+        approved = _first_present(row, _EDIS_APPROVED_KEYS)
+        total = _first_present(row, _EDIS_TOTAL_KEYS)
+        if approved is None or total is None:
+            unrecognized += 1
+            continue
+        if approved < total:
+            label = row.get("isin") or row.get("tradingSymbol") or row.get("symbol") or "unknown"
+            pending.append(label)
+
+    if unrecognized == len(rows):
+        return {"verified_today": None, "checked_at": checked_at,
+                "detail": "eDIS inquire returned holdings but in an unrecognized shape "
+                          "(see _EDIS_APPROVED_KEYS/_EDIS_TOTAL_KEYS note above).",
+                "holdings_total": len(rows), "holdings_pending": 0, "pending_symbols": []}
+
+    return {
+        "verified_today": len(pending) == 0,
+        "checked_at": checked_at,
+        "detail": "all holdings approved" if not pending else f"{len(pending)} holding(s) pending eDIS approval",
+        "holdings_total": len(rows),
+        "holdings_pending": len(pending),
+        "pending_symbols": pending,
+    }
+
+
+# ── Overnight protective stop (2026-09-19, option 3 fix) ────────────────────
+def place_cnc_stop_loss_market(
+    db: Session,
+    *,
+    is_armed: bool,
+    security_id: str,
+    exchange_segment: str,
+    quantity: int,
+    trigger_price: float,
+    tag: Optional[str] = None,
+) -> dict:
+    """Place a STOP_LOSS_MARKET SELL order on an existing CNC holding to act
+    as a protective overnight stop-loss.
+
+    Mechanics (verified against dhanhq SDK 2.2.0, dhanhq/_order.py):
+      order_type    = "STOP_LOSS_MARKET"
+      price         = 0.0   (no limit peg — fill executes at market once triggered)
+      trigger_price = <level> (exchange activates the order when LTP drops to this)
+      product_type  = "CNC"  (must match the converted holding, not INTRADAY)
+      transaction_type = "SELL"
+
+    The SDK's place_order() accepts `trigger_price` as an explicit kwarg and
+    includes it as "triggerPrice" in the JSON payload (confirmed: _order.py
+    line 83 default signature, line 126 payload construction).  Dhan holds
+    this as a PASSIVE order in the order book (status "PENDING" or "TRANSIT")
+    until the trigger is hit — it does NOT execute immediately.
+
+    Post-placement verification (non-blocking):
+      After the REST call returns, we read the order back from get_order_list()
+      and assert:
+        a) the broker echoes order_type == STOP_LOSS_MARKET (not MARKET/LIMIT)
+        b) status is in {PENDING, TRANSIT, OPEN} — i.e. it's live, not already
+           rejected/cancelled
+      If either check fails we raise RuntimeError with a full description so
+      the caller (eod_squareoff.py's carry path) can treat this as a failed
+      placement and fall back to squaring off the position.
+
+    This function is NOT gated by is_armed for the same reason cancel_order/
+    cancel_super_order/modify_super_order/convert_position are exempt: it
+    manages exposure already taken on (adding a stop to a held CNC position),
+    not opening new exposure.  The is_armed parameter is still accepted and
+    checked here as a belt-and-suspenders guard, but the real caller
+    (eod_squareoff.py's carry path) already verified is_armed before entering
+    that branch.
+    """
+    if not is_armed:
+        raise DhanNotArmedError(
+            "position-stocks-service is not armed — refusing to place overnight "
+            "protective stop order."
+        )
+
+    trigger_price_rounded = round_to_tick(float(trigger_price))
+    if trigger_price_rounded <= 0:
+        raise ValueError(
+            f"place_cnc_stop_loss_market: trigger_price must be > 0 "
+            f"(got {trigger_price!r} -> rounded {trigger_price_rounded!r})."
+        )
+
+    client = _get_sdk_client(db)
+
+    outbound = {
+        "security_id": security_id,
+        "exchange_segment": exchange_segment,
+        "transaction_type": "SELL",
+        "quantity": quantity,
+        "order_type": "STOP_LOSS_MARKET",
+        "product_type": "CNC",
+        "price": 0.0,
+        "trigger_price": trigger_price_rounded,
+        "validity": "DAY",
+        "tag": tag,
+    }
+    logger.warning(
+        "position-stocks: placing REAL overnight protective stop: "
+        "STOP_LOSS_MARKET SELL %s x%d trigger=₹%.2f (CNC)",
+        security_id, quantity, trigger_price_rounded,
+    )
+
+    resp = client.place_order(
+        security_id=security_id,
+        exchange_segment=exchange_segment,
+        transaction_type="SELL",
+        quantity=int(quantity),
+        order_type="STOP_LOSS_MARKET",
+        product_type="CNC",
+        price=0.0,
+        trigger_price=trigger_price_rounded,
+        validity="DAY",
+        tag=tag,
+    )
+    result = _extract_data(resp) or {}
+
+    placed_order_id = str(result.get("orderId") or result.get("order_id") or "")
+    if not placed_order_id:
+        raise RuntimeError(
+            f"place_cnc_stop_loss_market: Dhan did not return an orderId in the "
+            f"placement response — treating as placement failure. "
+            f"Raw result: {result!r}"
+        )
+
+    # ── Post-placement verification (blocking, raises on failure) ──────────
+    # Unlike place_order()'s non-blocking best-effort check, this one MUST
+    # raise if the order isn't confirmed live — the caller uses the returned
+    # order_id as evidence the stop is protecting the position.  A silent
+    # failure here means a carried position with no real stop.
+    try:
+        list_resp = client.get_order_list()
+        broker_rows = _extract_data(list_resp)
+        broker_rows = broker_rows if isinstance(broker_rows, list) else []
+        broker_row = next(
+            (r for r in broker_rows
+             if str(r.get("orderId") or r.get("order_id") or "") == placed_order_id),
+            None,
+        )
+    except Exception as e:
+        raise RuntimeError(
+            f"place_cnc_stop_loss_market: placed order {placed_order_id} but "
+            f"get_order_list() failed during post-placement verification — "
+            f"cannot confirm stop is live: {e}"
+        ) from e
+
+    if broker_row is None:
+        raise RuntimeError(
+            f"place_cnc_stop_loss_market: placed order {placed_order_id} but it "
+            f"was NOT found in get_order_list() immediately after placement — "
+            f"treating as placement failure (order may have been rejected silently)."
+        )
+
+    broker_order_type = str(
+        broker_row.get("orderType") or broker_row.get("order_type") or ""
+    ).upper()
+    broker_status = str(
+        broker_row.get("orderStatus") or broker_row.get("status") or ""
+    ).upper()
+    _LIVE_STATUSES = {"PENDING", "TRANSIT", "OPEN"}
+
+    if broker_order_type not in ("STOP_LOSS_MARKET", "SL-M", "SLM"):
+        raise RuntimeError(
+            f"place_cnc_stop_loss_market: ORDER TYPE MISMATCH for {placed_order_id} "
+            f"— sent STOP_LOSS_MARKET but Dhan reports orderType={broker_order_type!r}. "
+            f"Full broker row: {broker_row!r}"
+        )
+    if broker_status and broker_status not in _LIVE_STATUSES:
+        raise RuntimeError(
+            f"place_cnc_stop_loss_market: order {placed_order_id} placed but broker "
+            f"status={broker_status!r} is not a live pending state "
+            f"({_LIVE_STATUSES}) — order may have been rejected immediately. "
+            f"Full broker row: {broker_row!r}"
+        )
+
+    logger.info(
+        "position-stocks: overnight protective stop CONFIRMED live — "
+        "order_id=%s type=%s status=%s trigger=₹%.2f",
+        placed_order_id, broker_order_type, broker_status, trigger_price_rounded,
+    )
+    result["orderId"] = placed_order_id
+    return result
+
+
+def cancel_cnc_stop_loss_order(
+    db: Session,
+    *,
+    order_id: str,
+) -> dict:
+    """Cancel a plain (non-super) order — used to cancel an overnight
+    protective stop that is no longer needed (e.g. position manually closed
+    before market open, or morning recheck finds the stop already triggered).
+
+    No is_armed check — cancelling a protective order is a risk-reducing or
+    cleanup action, same policy as cancel_order() above.
+    """
+    client = _get_sdk_client(db)
+    logger.info("position-stocks: cancelling overnight protective stop order %s", order_id)
+    resp = client.cancel_order(order_id)
+    return _extract_data(resp) or {}
+
+
 # ── Rejection classifiers (mirrors real-trade-service/execution/dhan_client.py) ─
 # Added this session after screenshots confirmed all three rejection types fire
 # on SELL attempts from this service too — the classifiers already exist in

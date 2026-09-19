@@ -140,6 +140,20 @@ class ScalpPosition(Base):
     # every fast-reconcile tick once it's already been done).
     stop_moved_to_breakeven = Column(Boolean, nullable=False, default=False)
 
+    # 2026-09-18 (user audit finding): see the migration entry in db.py and
+    # the OVERNIGHT_HOLD_ENABLED comment block in config.py.
+    overnight_converted_to_cnc = Column(Boolean, nullable=False, default=False)
+
+    # 2026-09-19 (option 3 fix): Dhan order_id of the STOP_LOSS_MARKET SELL
+    # placed immediately after INTRADAY -> CNC conversion to re-arm a
+    # protective stop for the overnight gap.  NULL until the order is
+    # confirmed live on Dhan's side (or if protective-stop placement fails,
+    # in which case the position is squared off instead of carried — see
+    # orders/eod_squareoff.py::_place_overnight_stop() and the call site in
+    # the carry path).  Set back to NULL by morning pre-market recheck if
+    # the order has already been triggered/cancelled before market open.
+    overnight_stop_order_id = Column(String(64), nullable=True)
+
     exit_price = Column(Float, nullable=True)
     realized_pnl = Column(Float, nullable=True)
     realized_pnl_pct = Column(Float, nullable=True)
@@ -261,6 +275,12 @@ class ScalpGateState(Base):
     # eod_squareoff_fired_date above — lets the fast-reconcile loop run it
     # at most once per day without a separate scheduler process.
     retention_cleanup_last_run_date = Column(String(10), nullable=True)  # 'YYYY-MM-DD'
+    # 2026-09-19 (audit finding): overnight-hold (see config.py's
+    # OVERNIGHT_HOLD_ENABLED comment) now converts qualifying positions to
+    # real CNC holdings, which introduces this service's first-ever CDSL
+    # eDIS/TPIN dependency. Same date-tracking pattern as
+    # eod_squareoff_fired_date above — runs at most once per day.
+    edis_check_last_run_date = Column(String(10), nullable=True)  # 'YYYY-MM-DD'
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 

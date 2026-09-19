@@ -1970,6 +1970,12 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
         <div className="flex items-center gap-2">
           <span className="font-display tabular-nums text-[10px] text-mist">{p.window_source}</span>
           <span className={`font-display tabular-nums text-[10px] uppercase font-bold ${statusColor(p.status)}`}>{p.status}</span>
+          {/* AUDIT ADD (2026-09-19): overnight-carry badge — nothing on
+              this card previously distinguished a CNC-carried position
+              from a normal same-day INTRADAY one. */}
+          {p.overnight_converted_to_cnc && (
+            <span className="font-display tabular-nums text-[10px] text-signal-prepare" title="Converted to CNC and carried overnight">🌙 CNC</span>
+          )}
           {canClose && (
             <button disabled={!loggedIn || busy !== null} onClick={() => onClose!(p.id, p.symbol)}
               className="px-2 py-1 rounded-lg bg-signal-sell/20 border border-signal-sell font-display tabular-nums text-[10px] text-signal-sell disabled:opacity-40">
@@ -1989,14 +1995,37 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
         <div><span className="text-mist">Total </span><span className="tabular-nums text-paper">
           {fmtInr(p.entry_price * p.quantity)}{p.exit_price != null ? ` → ${fmtInr(p.exit_price * p.quantity)}` : ""}
         </span></div>
-        <div><span className="text-mist">Target </span><span className="tabular-nums text-signal-buy">₹{p.target_price.toFixed(2)} <span className="text-[9px]">({p.adaptive_target_pct.toFixed(1)}%)</span></span></div>
-        <div><span className="text-mist">Stop </span><span className="tabular-nums text-signal-sell">₹{p.stop_price.toFixed(2)} <span className="text-[9px]">({p.adaptive_stop_pct.toFixed(1)}%)</span></span>
+        <div>
+          <span className="text-mist">Target </span>
+          {p.overnight_converted_to_cnc ? (
+            // AUDIT FIX (2026-09-19): the intraday bracket's TARGET_LEG was
+            // cancelled the moment this position converted to CNC for the
+            // overnight carry — showing p.target_price here would show a
+            // dead order that will never fill.
+            <span className="tabular-nums text-mist text-[10px]">— (bracket cancelled, carried overnight)</span>
+          ) : (
+            <span className="tabular-nums text-signal-buy">₹{p.target_price.toFixed(2)} <span className="text-[9px]">({p.adaptive_target_pct.toFixed(1)}%)</span></span>
+          )}
+        </div>
+        <div><span className="text-mist">Stop </span>
+          {p.overnight_converted_to_cnc ? (
+            // AUDIT FIX (2026-09-19): same as Target above — the real
+            // protection now is the plain STOP_LOSS_MARKET order at
+            // overnight_stop_price, not the cancelled p.stop_price.
+            <span className="tabular-nums text-signal-sell">
+              {p.overnight_stop_price != null ? `₹${p.overnight_stop_price.toFixed(2)}` : "NONE"}
+              <span className="text-[9px]"> {p.overnight_stop_order_id ? "🌙 overnight" : "⚠ opted out, no stop"}</span>
+            </span>
+          ) : (
+            <span className="tabular-nums text-signal-sell">₹{p.stop_price.toFixed(2)} <span className="text-[9px]">({p.adaptive_stop_pct.toFixed(1)}%)</span></span>
+          )}
           {/* this session: shows whether/where breakeven-stop will move
               (or already moved) this position's stop — see
               orders/breakeven.py. Only rendered when a trigger was
               actually recorded (positions predating the feature have
-              none — see models.py comment). */}
-          {p.breakeven_trigger_pct != null && (
+              none — see models.py comment). Breakeven doesn't apply once
+              a position is carried overnight (the bracket is gone). */}
+          {!p.overnight_converted_to_cnc && p.breakeven_trigger_pct != null && (
             <span className={`ml-1 text-[9px] ${p.stop_moved_to_breakeven ? "text-signal-buy" : "text-mist"}`}>
               {p.stop_moved_to_breakeven ? "🔒 breakeven" : `BE@${p.breakeven_trigger_pct.toFixed(0)}%`}
             </span>
@@ -2027,8 +2056,18 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
             ) : <span className="tabular-nums text-paper">—</span>}
           </div>
           <div><span className="text-mist">To target/stop </span><span className="tabular-nums text-paper">
+            {/* AUDIT FIX (2026-09-19): was requiring BOTH values non-null
+                — a carried CNC position never has a target_distance_pct
+                (no live target leg, see above) but does have a real
+                stop_distance_pct, so it always showed "—" here even
+                though the stop distance was known. Show whichever is
+                available instead of demanding both. */}
             {p.target_distance_pct != null && p.stop_distance_pct != null
               ? `${p.target_distance_pct.toFixed(1)}% / ${p.stop_distance_pct.toFixed(1)}%`
+              : p.stop_distance_pct != null
+              ? `— / ${p.stop_distance_pct.toFixed(1)}%`
+              : p.target_distance_pct != null
+              ? `${p.target_distance_pct.toFixed(1)}% / —`
               : "—"}
           </span></div>
         </div>

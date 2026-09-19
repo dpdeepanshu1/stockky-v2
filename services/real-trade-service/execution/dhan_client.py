@@ -2,10 +2,12 @@
 execution/dhan_client.py — THE ONLY module in this service allowed to hold
 a decrypted Dhan credential or make a request to Dhan's API.
 
-FIX (2026-08-27): dhanhq 2.0.2 constructor is dhanhq(client_id, access_token)
-— DhanContext does NOT exist in this version. All SDK responses follow the
-shape {status, remarks, data} — callers extract .get('data', {}) or
-.get('data', []).
+SDK version note (updated session72): requirements.txt now pins dhanhq>=2.2.0
+(aligned with position-stocks-service). _get_sdk_client() probes for
+DhanContext (≥2.1 style) and falls back to dhanhq(client_id, access_token)
+(2.0.x style) so both SDK generations are supported. All SDK responses
+follow the shape {status, remarks, data} — callers extract .get('data', {})
+or .get('data', []).
 
 Every other module (risk_engine, candidate_engine, entry/exit engines) must
 go through here. Two defense-in-depth layers on top of the 4-gate arming
@@ -197,9 +199,15 @@ class DhanNotArmedError(Exception):
 
 
 def _get_sdk_client(db: Session):
-    """Build a fresh dhanhq 2.0.2 SDK client from stored credentials.
-    dhanhq 2.0.2 constructor: dhanhq(client_id, access_token)
-    DhanContext was removed in 2.0 — do NOT use it."""
+    """Build a fresh dhanhq SDK client from stored credentials.
+
+    SDK version compatibility (session72 — aligned with position-stocks-service):
+      dhanhq <2.1  — constructor is dhanhq(client_id, access_token)
+      dhanhq ≥2.1  — constructor is dhanhq(DhanContext(client_id, access_token))
+    We probe for DhanContext first (≥2.1 style); if absent fall back to the
+    old two-arg form. Mirrors position-stocks-service's identical probe so
+    both services behave the same across any dhanhq build ≥2.0.
+    """
     creds = dhan_credentials.get_decrypted_credentials(db)
     if creds is None:
         raise DhanNotConnectedError("No Dhan credentials stored — connect Dhan first.")
@@ -208,8 +216,12 @@ def _get_sdk_client(db: Session):
         from dhanhq import dhanhq  # noqa: PLC0415
     except ImportError as e:
         raise RuntimeError("dhanhq SDK not installed — check requirements.txt") from e
-    # dhanhq 2.0.2: direct positional args, no DhanContext wrapper
-    return dhanhq(client_id, access_token)
+    try:
+        from dhanhq import DhanContext  # noqa: PLC0415 — dhanhq ≥2.1
+        return dhanhq(DhanContext(client_id, access_token))
+    except ImportError:
+        # dhanhq <2.1 (old two-arg positional form — fallback only)
+        return dhanhq(client_id, access_token)
 
 
 def _extract_data(response: dict, key: str = "data") -> any:

@@ -83,6 +83,22 @@ MAX_STOCK_PRICE = float(os.getenv("MAX_STOCK_PRICE", "0") or 0)
 # Value-buy badge: ₹20–₹500 (same as buy_sniper — midcaps/smallcaps outperforming)
 VALUE_BUY_THRESHOLD = float(os.getenv("VALUE_BUY_THRESHOLD", "500") or 500)
 
+# FIX (session72 — futures-symbol leak): F&O contract symbols (e.g.
+# "APLAPOLLO29SEP26FUT", "BANKNIFTY29SEP2648000CE") can reach this module via
+# two paths that did NOT have a derivative filter:
+#   1. _clean_sym() — called for per-symbol premarket baselines when explicit
+#      symbols are passed in; if the caller's list was built from a source
+#      that wasn't filtered (e.g. an old KV-cache snapshot), futures names
+#      could slip through and end up as rows in surprise_static_feed.
+#   2. _seed_from_data_feed_kv() — reads raw KV keys that may include
+#      contract-symbol entries written before the main.py filter existed.
+# Mirrors the identical _DERIVATIVE_CONTRACT_RE already in main.py
+# (_clean_equity_symbol), so the guard is consistent across all entry points.
+_DERIVATIVE_CONTRACT_RE = re.compile(
+    r"\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}"
+    r"(FUT|\d+(\.\d+)?(CE|PE))$"
+)
+
 # Building tier
 BUILDING_MIN_SCORE = int(os.getenv("SURPRISE_BUILDING_MIN_SCORE", "35"))
 BUILDING_MAX_SCORE = MIN_SCORE
@@ -424,6 +440,11 @@ class SurpriseStockEngine:
                             break
                     sym = sym.upper().replace(".NS", "").replace(".BO", "").strip()
                     if not sym or sym in cache:
+                        continue
+                    # FIX (session72): skip F&O contract keys that pre-date
+                    # the main.py derivative filter — same regex used in
+                    # _clean_sym() and main.py's _clean_equity_symbol().
+                    if _DERIVATIVE_CONTRACT_RE.search(sym):
                         continue
                     try:
                         data = raw if isinstance(raw, dict) else _json.loads(raw) if isinstance(raw, str) else {}
@@ -1046,6 +1067,11 @@ async def run_market_aware_surprise_feed(
             return _map[u]
         u = u.replace(" TECHNOLOGIES", "TECH").replace(" TECHNOLOGY", "TECH")
         u = u.replace(" LIMITED", "").replace(" LTD", "").replace(" ", "")
+        # FIX (session72): reject F&O futures/options contract symbols
+        # (e.g. "APLAPOLLO29SEP26FUT", "BANKNIFTY29SEP2648000CE") — same
+        # regex as main.py's _clean_equity_symbol / _DERIVATIVE_CONTRACT_RE.
+        if _DERIVATIVE_CONTRACT_RE.search(u):
+            return ""
         try:
             from symbol_aliases import resolve_base_symbol, is_known_delisted
             if is_known_delisted(u):

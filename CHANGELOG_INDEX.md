@@ -6,6 +6,11 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION74_DEEP_AUDIT_NO_NEW_BUGS_2026-09-20.md` — full (not pattern-swept)
+  read of decision-prediction-service's `training/models.py` and
+  `training/app.py`, plus a repo-wide sweep for mutable-default-args/bare-except/
+  unguarded-division; no new bugs found — remaining open items are config
+  decisions, infra, or awaiting live verification, not code
 - `SESSION73_CROSS_SERVICE_AUDIT_FIXES_2026-09-20.md` — capital_share_cap
   blind spot to the other service's holdings (new shared-exposure table),
   position-stocks-service exit-placement retry backoff (mirrors

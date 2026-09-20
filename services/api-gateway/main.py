@@ -4118,13 +4118,14 @@ async def market_history(symbol: str, period: str = "1mo"):
     md_period = {"1d": "1mo", "5d": "1mo", "1mo": "1mo", "1y": "1y", "5y": "5y", "3mo": "3mo", "6mo": "6mo"}.get(period, "1mo")
     last_err = None
     client = _get_http_client()  # shared keepalive pool
+    _hist_timeout = httpx.Timeout(10.0, connect=5.0)  # fast-fail; both sources 404 on current deploy
     if True:
         try:
             try:
-                await client.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"})
+                await client.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=_hist_timeout)
             except Exception:
                 pass
-            r = await client.get(f"{MARKET_DATA_URL}/history/{sym}", params={"period": md_period, "interval": "1d"})
+            r = await client.get(f"{MARKET_DATA_URL}/history/{sym}", params={"period": md_period, "interval": "1d"}, timeout=_hist_timeout)
             if r.status_code == 200:
                 data = r.json()
                 candles = data.get("candles") or []
@@ -4150,7 +4151,7 @@ async def market_history(symbol: str, period: str = "1mo"):
             last_err = str(e)
         # training service history
         try:
-            r2 = await client.get(f"{TRAINING_URL}/api/stock/history/{sym}", params={"period": period if period in ("1d","5d","1mo","1y","5y") else "1mo"})
+            r2 = await client.get(f"{TRAINING_URL}/api/stock/history/{sym}", params={"period": period if period in ("1d","5d","1mo","1y","5y") else "1mo"}, timeout=_hist_timeout)
             if r2.status_code == 200:
                 data = r2.json()
                 data["source"] = data.get("source") or "training"
@@ -6057,23 +6058,14 @@ def market_most_active():
     return {"data": sorted_data, "count": len(sorted_data)}
 
 @app.get("/market/trending")
-def market_trending():
-    import signal
+async def market_trending():
+    """Trending stocks — runs blocking work in a thread with a hard 20 s budget."""
 
-    def _handler(signum, frame):
-        raise TimeoutError("market/trending overall timeout")
-
-    # Hard 20 s wall-clock guard so the endpoint always returns before any
-    # reverse-proxy or test-sweep timeout (typically 25 s) fires on us.
-    old_handler = signal.signal(signal.SIGALRM, _handler)
-    signal.alarm(20)
-    try:
+    def _blocking():
         movers = _get_momentum_movers()
         news = _get_news_mentioned_symbols()
         trending = list(set(movers + news))
         trending_data = []
-        # Cap each individual quote fetch to 3 s (was 6 s) so 10 symbols
-        # can complete well within the 20 s budget.
         for sym in trending[:10]:
             try:
                 price = change = change_pct = None
@@ -6115,12 +6107,15 @@ def market_trending():
             except Exception as e:
                 logger.debug("trending-stocks: skipping %s after fetch failure: %s", sym, e)
         return {"data": trending_data, "count": len(trending_data)}
-    except TimeoutError:
-        logger.warning("market/trending hit 20 s wall-clock guard — returning partial results")
-        return {"data": trending_data if "trending_data" in dir() else [], "count": len(trending_data) if "trending_data" in dir() else 0}
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(None, _blocking),
+            timeout=20.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("market/trending hit 20 s budget — returning empty")
+        return {"data": [], "count": 0}
 
 # ── IMPROVED /market/indices with IST time ──────────────────────────────
 @app.get("/market/indices")

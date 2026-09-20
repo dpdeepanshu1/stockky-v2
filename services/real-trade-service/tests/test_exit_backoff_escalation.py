@@ -46,30 +46,42 @@ def db():
 
 
 def _make_position(db, *, symbol="TEST", mode="REAL", consecutive_exit_failures=0):
-    acct = models.TradeAccount(
-        mode=mode,
-        cash_available=50_000.0,
-        current_equity=50_000.0,
-        broker_cash_available=100_000.0,
-        starting_capital=50_000.0,
-        updated_at=datetime.now(timezone.utc),
-    )
-    db.add(acct)
-    gate = models.TradeGateState(
-        mode=mode,
-        armed=True,
-        auto_pilot_enabled=True,
-        risk_config_confirmed=True,
-    )
-    db.add(gate)
+    # Guard: TradeAccount and TradeGateState have a UNIQUE constraint on mode —
+    # skip inserting them if they already exist (e.g. second call in same test).
+    from sqlalchemy import text
+    existing_acct = db.execute(
+        text("SELECT id FROM trade_accounts WHERE mode = :m"), {"m": mode}
+    ).fetchone()
+    if not existing_acct:
+        acct = models.TradeAccount(
+            mode=mode,
+            cash_available=50_000.0,
+            current_equity=50_000.0,
+            broker_cash_available=100_000.0,
+            starting_capital=50_000.0,
+            updated_at=datetime.now(timezone.utc),
+        )
+        db.add(acct)
+
+    existing_gate = db.execute(
+        text("SELECT id FROM trade_gate_state WHERE mode = :m"), {"m": mode}
+    ).fetchone()
+    if not existing_gate:
+        gate = models.TradeGateState(
+            mode=mode,
+            armed=True,
+            auto_pilot_enabled=True,
+            risk_config_confirmed=True,
+        )
+        db.add(gate)
+
     pos = models.TradePosition(
         mode=mode,
         symbol=symbol,
         qty_open=10,
         avg_entry_price=100.0,
         current_stop=95.0,
-        target_price=110.0,
-        initial_stop_distance=5.0,
+        current_target=110.0,
         status="OPEN",
         opened_at=datetime.now(timezone.utc),
         consecutive_exit_failures=consecutive_exit_failures,

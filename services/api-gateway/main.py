@@ -4629,7 +4629,7 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
         return any(n in blob for n in needles)
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
             # ── 1) Live decide (already fans out in parallel downstream) ──
             resp = await client.get(
                 f"{DECISION_URL}/decide/{symbol_to_use}",
@@ -6058,56 +6058,69 @@ def market_most_active():
 
 @app.get("/market/trending")
 def market_trending():
-    movers = _get_momentum_movers()
-    news = _get_news_mentioned_symbols()
-    trending = list(set(movers + news))
-    trending_data = []
-    for sym in trending[:10]:
-        try:
-            # Round 4 of "AngelOne everywhere" (2026-09-05): try
-            # market-data-service's /quote first — already Angel ->
-            # yfinance -> NSE -> IndianAPI (rounds 1-2) — before the
-            # direct-yfinance path, which is kept below unchanged as the
-            # fallback if the market-data-service call fails outright.
-            price = change = change_pct = None
+    import signal
+
+    def _handler(signum, frame):
+        raise TimeoutError("market/trending overall timeout")
+
+    # Hard 20 s wall-clock guard so the endpoint always returns before any
+    # reverse-proxy or test-sweep timeout (typically 25 s) fires on us.
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(20)
+    try:
+        movers = _get_momentum_movers()
+        news = _get_news_mentioned_symbols()
+        trending = list(set(movers + news))
+        trending_data = []
+        # Cap each individual quote fetch to 3 s (was 6 s) so 10 symbols
+        # can complete well within the 20 s budget.
+        for sym in trending[:10]:
             try:
-                resp = httpx.get(f"{MARKET_DATA_URL}/quote/{sym}", timeout=6)
-                if resp.status_code == 200:
-                    data = resp.json() or {}
-                    p = data.get("price") or data.get("cmp")
-                    prev = data.get("previous_close")
-                    if p is not None and float(p) > 0:
-                        price = round(float(p), 2)
-                        if prev and float(prev) > 0:
-                            change = round(float(p) - float(prev), 2)
-                            change_pct = round((change / float(prev)) * 100, 2)
-                        elif data.get("day_change_pct") is not None:
-                            change_pct = data.get("day_change_pct")
-                            change = round(price * change_pct / 100, 2) if change_pct is not None else None
+                price = change = change_pct = None
+                try:
+                    resp = httpx.get(f"{MARKET_DATA_URL}/quote/{sym}", timeout=3)
+                    if resp.status_code == 200:
+                        data = resp.json() or {}
+                        p = data.get("price") or data.get("cmp")
+                        prev = data.get("previous_close")
+                        if p is not None and float(p) > 0:
+                            price = round(float(p), 2)
+                            if prev and float(prev) > 0:
+                                change = round(float(p) - float(prev), 2)
+                                change_pct = round((change / float(prev)) * 100, 2)
+                            elif data.get("day_change_pct") is not None:
+                                change_pct = data.get("day_change_pct")
+                                change = round(price * change_pct / 100, 2) if change_pct is not None else None
+                except Exception as e:
+                    logger.debug("trending market-data quote %s: %s", sym, e)
+
+                if price is None:
+                    yf_ticker = resolve_ns_ticker(sym)
+                    if not yf_ticker:
+                        continue
+                    ticker = yf.Ticker(yf_ticker)
+                    hist = ticker.history(period="1d")
+                    if hist.empty:
+                        continue
+                    price = round(hist["Close"].iloc[-1], 2)
+                    change = round(hist["Close"].iloc[-1] - hist["Open"].iloc[-1], 2)
+                    change_pct = round(change / hist["Open"].iloc[-1] * 100, 2)
+
+                trending_data.append({
+                    "symbol": sym,
+                    "price": price,
+                    "change": change,
+                    "change_pct": change_pct,
+                })
             except Exception as e:
-                logger.debug("trending market-data quote %s: %s", sym, e)
-
-            if price is None:
-                yf_ticker = resolve_ns_ticker(sym)
-                if not yf_ticker:
-                    continue
-                ticker = yf.Ticker(yf_ticker)
-                hist = ticker.history(period="1d")
-                if hist.empty:
-                    continue
-                price = round(hist["Close"].iloc[-1], 2)
-                change = round(hist["Close"].iloc[-1] - hist["Open"].iloc[-1], 2)
-                change_pct = round(change / hist["Open"].iloc[-1] * 100, 2)
-
-            trending_data.append({
-                "symbol": sym,
-                "price": price,
-                "change": change,
-                "change_pct": change_pct,
-            })
-        except Exception as e:
-            logger.debug("trending-stocks: skipping %s after fetch failure: %s", sym, e)
-    return {"data": trending_data, "count": len(trending_data)}
+                logger.debug("trending-stocks: skipping %s after fetch failure: %s", sym, e)
+        return {"data": trending_data, "count": len(trending_data)}
+    except TimeoutError:
+        logger.warning("market/trending hit 20 s wall-clock guard — returning partial results")
+        return {"data": trending_data if "trending_data" in dir() else [], "count": len(trending_data) if "trending_data" in dir() else 0}
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 # ── IMPROVED /market/indices with IST time ──────────────────────────────
 @app.get("/market/indices")

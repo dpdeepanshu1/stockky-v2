@@ -109,7 +109,7 @@ def test_verified_true_logs_info_no_alert(env, caplog):
     db, notifications = env
     pos = _make_pos(db, overnight=True)
 
-    with caplog.at_level(logging.INFO, logger="eod_squareoff"):
+    with caplog.at_level(logging.INFO, logger="position-stocks-eod"):
         sq._run_edis_precheck(
             db, [pos],
             _edis_override={"verified_today": True, "pending_symbols": []},

@@ -367,7 +367,7 @@ def _bump_exit_failure(
     """
     if excluded:
         return
-    _escalate_at = escalate_at if escalate_at is not None else config.EXIT_REJECT_STREAK_ESCALATE_AT
+    _escalate_at = escalate_at if escalate_at is not None else EXIT_REJECT_STREAK_ESCALATE_AT
     should_bump = is_persistent or (current_streak >= _escalate_at)
     if not should_bump:
         return

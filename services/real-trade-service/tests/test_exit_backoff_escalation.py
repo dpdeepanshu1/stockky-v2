@@ -59,8 +59,6 @@ def _make_position(db, *, symbol="TEST", mode="REAL", consecutive_exit_failures=
         mode=mode,
         armed=True,
         auto_pilot_enabled=True,
-        service_enabled=True,
-        daily_loss_kill_switch_tripped=False,
         risk_config_confirmed=True,
     )
     db.add(gate)
@@ -111,7 +109,8 @@ class TestStreakBumpLogic:
 
     def test_generic_error_below_threshold_does_not_bump(self, db, monkeypatch):
         """Generic (non-persistent) errors below ESCALATE_AT do NOT bump the streak."""
-        escalate_at = config.EXIT_REJECT_STREAK_ESCALATE_AT
+        import exit_engine.exit as ex
+        escalate_at = ex.EXIT_REJECT_STREAK_ESCALATE_AT
         pos = _make_position(db, consecutive_exit_failures=0)
 
         monkeypatch.setattr(dhan_client, "is_oversell_error", lambda e: False)
@@ -130,7 +129,8 @@ class TestStreakBumpLogic:
 
     def test_generic_error_at_threshold_bumps(self, db):
         """Generic error at or above ESCALATE_AT DOES bump (persistent retry storm path)."""
-        escalate_at = config.EXIT_REJECT_STREAK_ESCALATE_AT
+        import exit_engine.exit as ex
+        escalate_at = ex.EXIT_REJECT_STREAK_ESCALATE_AT
         pos = _make_position(db, consecutive_exit_failures=0)
 
         from exit_engine.exit import _bump_exit_failure

@@ -1689,18 +1689,25 @@ export default function RealAutoTrade() {
                           authorization per holding. Distinct from the token badge above on
                           purpose (green Dhan connection + red eDIS is a real, common state). */}
                       <div className={`rounded-xl px-3 py-2 border ${
-                        edisSummary?.verified_today === true ? "bg-signal-buy/5 border-signal-buy/20"
+                        edisSummary?.no_holdings ? "bg-ink border-slate"
+                        : edisSummary?.verified_today === true ? "bg-signal-buy/5 border-signal-buy/20"
                         : edisSummary?.verified_today === false ? "bg-signal-sell/5 border-signal-sell/20"
                         : "bg-ink border-slate"
                       }`}>
                         <div className="flex items-center justify-between">
                           <span className="font-display tabular-nums text-[10px] uppercase tracking-widest text-mist">Daily eDIS (CDSL)</span>
                           <span className={`font-display tabular-nums text-[10px] px-2 py-0.5 rounded-full border ${
-                            edisSummary?.verified_today === true ? "bg-signal-buy/10 border-signal-buy/30 text-signal-buy"
+                            edisSummary?.no_holdings ? "bg-slate/20 border-slate text-mist"
+                            : edisSummary?.verified_today === true ? "bg-signal-buy/10 border-signal-buy/30 text-signal-buy"
                             : edisSummary?.verified_today === false ? "bg-signal-sell/10 border-signal-sell/30 text-signal-sell"
                             : "bg-slate/20 border-slate text-mist"
                           }`}>
-                            {edisSummary?.verified_today === true ? "🟢 Verified today"
+                            {/* session73 fix: "no holdings, nothing to authorize" is a
+                                distinct, neutral state — it must not read as "✅ Verified
+                                today", which implies you actually completed CDSL's T-PIN/
+                                OTP flow. Check no_holdings before verified_today. */}
+                            {edisSummary?.no_holdings ? "— Nothing to authorize"
+                              : edisSummary?.verified_today === true ? "🟢 Verified today"
                               : edisSummary?.verified_today === false ? "🔴 Not verified"
                               : edisSummary ? "⚠ Unknown" : "— Checking…"}
                           </span>

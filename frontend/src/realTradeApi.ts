@@ -181,6 +181,7 @@ export interface DhanStatus {
 
 export interface DhanEdisSummary {
   verified_today: boolean | null;
+  no_holdings?: boolean;
   checked_at: string;
   detail: string;
   holdings_total: number;

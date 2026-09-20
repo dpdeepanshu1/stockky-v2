@@ -866,17 +866,25 @@ def edis_verification_summary(db: Session) -> dict:
     except Exception:
         holdings = None
     if holdings is not None and len(holdings) == 0:
-        return {"verified_today": True, "checked_at": checked_at,
+        # session73 follow-up: keep verified_today=True (literally correct —
+        # every one of zero holdings is "authorized") but add a distinct
+        # no_holdings flag so the frontend doesn't render this as a plain
+        # "✅ Verified today" — that phrasing implies the user actually
+        # completed CDSL's T-PIN/OTP flow today, which they didn't; there
+        # was simply nothing to verify. Collapsing these two genuinely
+        # different states into one green badge is what caused the
+        # confusion. See RealAutoTrade.tsx for the badge that reads this.
+        return {"verified_today": True, "no_holdings": True, "checked_at": checked_at,
                 "detail": "No demat holdings currently — nothing to authorize.",
                 "holdings_total": 0, "holdings_pending": 0, "pending_symbols": []}
 
     try:
         raw = edis_inquire(db, isin="ALL")
     except DhanNotConnectedError as e:
-        return {"verified_today": None, "checked_at": checked_at, "detail": str(e),
+        return {"verified_today": None, "no_holdings": False, "checked_at": checked_at, "detail": str(e),
                 "holdings_total": 0, "holdings_pending": 0, "pending_symbols": []}
     except Exception as e:
-        return {"verified_today": None, "checked_at": checked_at,
+        return {"verified_today": None, "no_holdings": False, "checked_at": checked_at,
                 "detail": f"eDIS inquire call failed: {e}",
                 "holdings_total": 0, "holdings_pending": 0, "pending_symbols": []}
 
@@ -887,7 +895,7 @@ def edis_verification_summary(db: Session) -> dict:
         if isinstance(raw, dict) else []
     )
     if not rows:
-        return {"verified_today": None, "checked_at": checked_at,
+        return {"verified_today": None, "no_holdings": False, "checked_at": checked_at,
                 "detail": "No holdings returned by eDIS inquire (nothing to authorize, or unrecognized response shape).",
                 "holdings_total": 0, "holdings_pending": 0, "pending_symbols": []}
 
@@ -907,7 +915,7 @@ def edis_verification_summary(db: Session) -> dict:
             pending.append(label)
 
     if unrecognized == len(rows):
-        return {"verified_today": None, "checked_at": checked_at,
+        return {"verified_today": None, "no_holdings": False, "checked_at": checked_at,
                 "detail": "eDIS inquire returned holdings but in an unrecognized shape — "
                           "field names didn't match any known variant. Check manually via "
                           "GET /dhan/edis/status?isin=ALL and update _EDIS_APPROVED_KEYS/"
@@ -916,6 +924,7 @@ def edis_verification_summary(db: Session) -> dict:
 
     return {
         "verified_today": len(pending) == 0,
+        "no_holdings": False,
         "checked_at": checked_at,
         "detail": "All holdings authorized for sale today." if not pending
                   else f"{len(pending)} holding(s) still need today's T-PIN authorization.",

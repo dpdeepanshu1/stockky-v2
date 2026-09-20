@@ -9,3 +9,4 @@ dist/
 venv/
 *.egg-info/
 real_data/
+stockky_test_report_*/

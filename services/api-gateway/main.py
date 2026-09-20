@@ -7422,7 +7422,14 @@ async def api_surprise_repair_batch(limit: int = Query(15, ge=1, le=100), symbol
     """
     try:
         from surprise_scanner import repair_surprise_batch
-        return repair_surprise_batch(
+        # AUDIT FIX: repair_surprise_batch() is a sync function that loops
+        # up to `limit` (100 max) symbols with a time.sleep() pace-out
+        # between each — called directly from this async route it ran
+        # straight on the event loop, stalling every other api-gateway
+        # request for the full repair duration. Offload to a worker
+        # thread, same fix pattern as circuit_breaker.py/rate_limit_monitor.py.
+        return await asyncio.to_thread(
+            repair_surprise_batch,
             limit=limit,
             market_data_url=MARKET_DATA_URL,
             symbol=symbol,
@@ -7920,7 +7927,12 @@ async def api_ipo_repair_batch(limit: int = Query(15, ge=1, le=100), symbol: Opt
         from ipo_scanner import ipo_repair_batch
     except Exception as e:
         return {"status": "error", "error": f"ipo_scanner unavailable: {str(e)[:160]}"}
-    return ipo_repair_batch(limit=limit, symbol=symbol)
+    # AUDIT FIX: same blocking-event-loop bug as /api/surprise/repair-batch
+    # above — ipo_repair_batch() is sync and loops up to `limit` (100 max)
+    # symbols with a time.sleep(0.3) pace-out between each; called directly
+    # from this async route it blocked every other api-gateway request for
+    # the full repair duration. Offload to a worker thread.
+    return await asyncio.to_thread(ipo_repair_batch, limit=limit, symbol=symbol)
 
 
 @app.post("/ipo/purge-non-equity")

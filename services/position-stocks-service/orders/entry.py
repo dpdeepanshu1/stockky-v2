@@ -616,8 +616,6 @@ def attempt_manual_entry(
     error, not a background scan skip. Returns the created ScalpPosition
     on success.
     """
-    from screening.engine import Candidate
-
     gate = _get_gate_state(db)
 
     if not gate.is_armed:

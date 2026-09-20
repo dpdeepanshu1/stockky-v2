@@ -284,7 +284,7 @@ def _get_neon():
             logger.info("KV: no CACHE_DATABASE_URL/DATABASE_URL — memory-only (Redis ignored)")
             return None
         try:
-            from sqlalchemy import create_engine, text
+            from sqlalchemy import create_engine
 
             if _oc is not None and _oc.oracle_is_configured(url):
                 # ── Oracle Autonomous DB (Oracle Cloud VM only) ──

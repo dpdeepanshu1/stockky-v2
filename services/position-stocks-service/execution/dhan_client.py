@@ -289,18 +289,6 @@ def get_funds(db: Session) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def get_positions(db: Session) -> list:
-    client = _get_sdk_client(db)
-    resp = client.get_positions()
-    try:
-        data = _extract_data(resp)
-    except RuntimeError as e:
-        if "no positions" in str(e).lower():
-            return []
-        raise
-    return data if isinstance(data, list) else []
-
-
 def get_order_list(db: Session) -> list:
     """Read-only — no arm check. Returns all PLAIN (non-super) orders for
     the day, i.e. the same order book place_order()'s own post-placement
@@ -1051,18 +1039,6 @@ def place_cnc_stop_loss_market(
 
     client = _get_sdk_client(db)
 
-    outbound = {
-        "security_id": security_id,
-        "exchange_segment": exchange_segment,
-        "transaction_type": "SELL",
-        "quantity": quantity,
-        "order_type": "STOP_LOSS_MARKET",
-        "product_type": "CNC",
-        "price": 0.0,
-        "trigger_price": trigger_price_rounded,
-        "validity": "DAY",
-        "tag": tag,
-    }
     logger.warning(
         "position-stocks: placing REAL overnight protective stop: "
         "STOP_LOSS_MARKET SELL %s x%d trigger=₹%.2f (CNC)",

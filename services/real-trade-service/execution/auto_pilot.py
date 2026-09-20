@@ -426,39 +426,62 @@ def _run_exit_tick_sync(mode: str) -> None:
 
 async def _exit_only_tick_body(mode: str) -> None:
     """The actual fast exit-only tick. Caller (_run_exit_tick_sync) already
-    holds the per-mode lock — this function does no locking itself."""
+    holds the per-mode lock — this function does no locking itself.
+
+    FIX (session72 — issue #26, MEDICAPQ root cause):
+    Exit evaluation (stop_hit, emergency_gap_down) now runs unconditionally
+    whenever the market is open and there are open positions, regardless of
+    gate.armed or auto_pilot_enabled.  This mirrors the existing pattern for
+    reconcile and EOD squareoff, which are both already decoupled from the
+    armed state.
+
+    Rationale: once a position is open, price-based protective exits
+    (stop-hit, emergency gap-down) must fire to protect capital.  Requiring
+    the operator to have the service "armed" AND "auto_pilot_enabled" just to
+    trigger a stop-loss is a safety gap — a disarmed or paused service silently
+    leaves open positions completely unprotected.  The armed gate remains
+    correct for ENTRY decisions (only place new trades when armed) but must
+    not gate EXIT decisions on already-open positions.
+
+    The full-cycle tick (_full_tick_body) retains its armed check because it
+    runs candidate scanning + new-entry logic, not just protective exits.
+    """
     Session = get_session_factory()
     db = Session()
     try:
         gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
-        if gate is None or not gate.armed or not getattr(gate, "auto_pilot_enabled", False):
-            # BUG FIX (2026-09-01): direct attribute read on a
-            # migration-added column (see main.py's /status/{mode} fix
-            # for the same class of bug) — getattr keeps this safe on
-            # first boot against an existing DB before the additive
-            # migration in init_schema() has run.
-            # 2026-09-12 fix (audit finding — MEDICAPQ stop never fired):
-            # this early-return used to be completely silent even when
-            # positions were open and needed evaluating. See
-            # _alert_if_open_positions_while_gate_off's docstring above.
-            await _alert_if_open_positions_while_gate_off(db, mode)
-            return
         if not is_market_open_ist():
             return
+
+        # ── Protective exits: always run during market hours ─────────────────
+        # Runs even when disarmed or auto_pilot_enabled=False.
+        # Stop-hit and emergency gap-down checks are purely price-based and
+        # must never be held hostage to the arming/auto-pilot state.
         from exit_engine.exit import evaluate_mode as exit_evaluate
         exit_result = await exit_evaluate(db, mode)
+
+        # Reconcile: only needed for REAL; also unconditional (same pre-fix
+        # pattern — reconcile already ran regardless of armed state).
         if mode == "REAL" and _reconcile_due(mode):
             from execution.reconcile import reconcile_real_orders
             await reconcile_real_orders(db)
             _mark_reconciled(mode)
-        # Notify only if something actually happened (no heartbeat on fast tick)
+
+        # Alert if gate is off while positions are open — keeps the operator
+        # informed without blocking the protective exit above.
+        armed = gate is not None and gate.armed and getattr(gate, "auto_pilot_enabled", False)
+        if not armed:
+            await _alert_if_open_positions_while_gate_off(db, mode)
+
+        # Notify only when something actually happened.
         exit_ = exit_result or {}
         if any([
             exit_.get("full_exits"), exit_.get("partial_exits"),
             exit_.get("time_stops"), exit_.get("emergency_exits"),
         ]):
+            gate_note = "" if armed else " *(gate off — protective exit only)*"
             await notify_async(
-                f"⚡ *Fast exit tick — {mode}*\n"
+                f"⚡ *Fast exit tick — {mode}*{gate_note}\n"
                 f"Full: {exit_.get('full_exits',0)} | Partial: {exit_.get('partial_exits',0)} | "
                 f"Time-stop: {exit_.get('time_stops',0)} | Emergency: {exit_.get('emergency_exits',0)}"
             )
@@ -1666,7 +1689,7 @@ async def _afterhours_scan_body(mode: str, manual: bool = False) -> dict:
     path fired it. Returns a small result dict for the manual caller to hand
     back to the HTTP response; the scheduled path (which doesn't read the
     return value) is unaffected by this change."""
-    from tz_utils import ist_today_str, ist_now, parse_hhmm, is_nse_holiday
+    from tz_utils import ist_today_str, ist_now, parse_hhmm
     from watchlist_engine.afterhours_scan import run_afterhours_scan, finalize_nextday_watchlist
 
     Session = get_session_factory()

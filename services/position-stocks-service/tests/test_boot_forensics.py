@@ -1,4 +1,4 @@
-import json, os, sys, time
+import json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import boot_forensics as bf
 
@@ -8,7 +8,6 @@ def test_classification(tmp_path, monkeypatch):
     monkeypatch.setattr(bf, "_STATE_PATH", str(p))
     monkeypatch.setattr(bf, "_install_signal_logging", lambda s: None)
     monkeypatch.setattr(bf.threading, "Thread", lambda *a, **k: type("T", (), {"start": lambda s: None})())
-    now = time.time()
     assert bf.record_boot("svc")["cause"] == "FRESH_CONTAINER"
     assert bf.record_boot("svc")["cause"] == "DIED_WITHOUT_CLEAN_SHUTDOWN"     # no clean flag -> SIGKILL/OOM signature
     bf.mark_clean_shutdown()

@@ -1005,7 +1005,6 @@ async def run_market_aware_surprise_feed(
     market_data_url: str = "",
     force: bool = False,
 ) -> dict:
-    import json as _json
     import httpx
 
     # AUDIT FIX (2026-09-19): blocking Neon read (system:surprise_feed is

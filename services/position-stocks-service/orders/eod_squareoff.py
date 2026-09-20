@@ -107,6 +107,66 @@ def _place_overnight_stop(
         return None
 
 
+def _run_edis_precheck(db: Session, positions: list, *, _edis_override: dict | None = None) -> None:
+    """Check CDSL eDIS/TPIN status before the EOD squareoff loop executes
+    CNC SELLs for overnight-converted positions (session72 fix — issue #17).
+
+    Extracted into its own function so tests/test_edis_precheck.py can call
+    it in isolation.  The _edis_override kwarg is for tests only — production
+    callers must never pass it.
+
+    Never raises: a failed eDIS check or a thrown exception only emits a log/
+    notification; the SELL attempt is always made regardless of the outcome.
+    """
+    cnc_positions = [p for p in positions if getattr(p, "overnight_converted_to_cnc", False)]
+    if not cnc_positions:
+        return
+
+    try:
+        edis_summary = _edis_override if _edis_override is not None \
+            else dhan_client.edis_verification_summary(db)
+
+        if edis_summary.get("verified_today") is False:
+            pending_symbols = edis_summary.get("pending_symbols") or []
+            logger.warning(
+                "EOD squareoff: %d position(s) are CNC-converted and require "
+                "CDSL eDIS/TPIN approval before the CNC SELL can execute — "
+                "pending holdings: %s. Open the Dhan app NOW to approve TPIN.",
+                len(cnc_positions),
+                pending_symbols,
+            )
+            try:
+                notifier.notify_critical(
+                    f"⚠️ <b>CDSL eDIS NOT APPROVED — CNC SELL MAY FAIL</b>\n"
+                    f"{len(cnc_positions)} position(s) converted to CNC need "
+                    f"eDIS/TPIN approval in the Dhan app before the flat SELL can execute.\n"
+                    f"Symbols: {', '.join(p.symbol for p in cnc_positions)}\n"
+                    f"Pending eDIS holdings: {pending_symbols}\n"
+                    f"Open the Dhan app → Portfolio → Verify Holdings (TPIN) IMMEDIATELY."
+                )
+            except Exception as _ne:
+                logger.warning("EOD squareoff: notify_critical for eDIS warning failed: %s", _ne)
+
+        elif edis_summary.get("verified_today") is None:
+            logger.warning(
+                "EOD squareoff: eDIS verification check inconclusive for %d CNC position(s) "
+                "(shape unrecognized or call failed — see edis_verification_summary note). "
+                "Proceeding with flat SELL attempt anyway. Detail: %s",
+                len(cnc_positions),
+                edis_summary.get("detail", ""),
+            )
+        else:
+            logger.info(
+                "EOD squareoff: eDIS verified for %d CNC position(s) — CNC SELL should succeed.",
+                len(cnc_positions),
+            )
+    except Exception as _edis_e:
+        logger.warning(
+            "EOD squareoff: eDIS pre-check failed (non-fatal, will attempt SELL anyway): %s",
+            _edis_e,
+        )
+
+
 def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
     """2026-09-15 fix (session40): places the flat-SELL for one position,
     retrying up to config.EOD_SELL_RETRY_ATTEMPTS times ONLY when the
@@ -497,6 +557,17 @@ def run_eod_squareoff(db: Session) -> int:
                 )
             notify_sync("\n".join(lines))
         open_positions = squareoff_only
+
+    # FIX (session72 — issue #17): CNC-converted positions that are being
+    # squared off (stop_failed_positions) require CDSL eDIS/TPIN authorization
+    # in the Dhan app before a CNC SELL can execute on the same day. Without
+    # this check, the flat SELL silently fails with an RMS rejection after the
+    # position is already marked EOD_SQUAREOFF in the DB, leaving it
+    # unflattened with no protective stop. We check once before the loop and
+    # emit a critical alert so the operator can approve TPIN in time. We still
+    # attempt the SELL either way — the broker may accept it if eDIS was
+    # already pre-approved (or if it's already past T+1 settlement on a re-run).
+    _run_edis_precheck(db, open_positions)
 
     closed = 0
     for pos in open_positions:

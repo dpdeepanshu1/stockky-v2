@@ -32,7 +32,6 @@ import config
 import models
 from market_feed.feed import Tick
 import market_feed.feed as feed_module
-import portfolio.portfolio as portfolio_module
 from execution.auto_pilot import _select_overnight_holds
 
 _engine = create_engine("sqlite:///:memory:")

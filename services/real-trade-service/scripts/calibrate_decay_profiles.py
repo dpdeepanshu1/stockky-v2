@@ -206,10 +206,10 @@ def main():
                   f"(entry_band_pct never rejected these — they timed out at "
                   f"expires_at without ever producing a trade)")
             if expired_rate > 0.5 and len(entries) >= MIN_SAMPLES:
-                print(f"  -> majority of entries here never convert even though price "
-                      f"stayed in-band. This is NOT a decay.py band/hold-time issue — "
-                      f"look downstream (risk_engine limits, daily entry caps, candidate "
-                      f"queue never consumed) for why band_ok rows aren't becoming trades.")
+                print("  -> majority of entries here never convert even though price "
+                      "stayed in-band. This is NOT a decay.py band/hold-time issue — "
+                      "look downstream (risk_engine limits, daily entry caps, candidate "
+                      "queue never consumed) for why band_ok rows aren't becoming trades.")
 
         if total_decided < MIN_SAMPLES:
             print(f"  -> not enough decided entries yet ({total_decided} < {MIN_SAMPLES}) to suggest a band change\n")

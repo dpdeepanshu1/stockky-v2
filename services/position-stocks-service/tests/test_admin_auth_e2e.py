@@ -3,7 +3,6 @@
 Proves: login works, /dhan/funds is admin-gated and maps Dhan errors to 409/502 (never 401),
 and a token minted by one service is accepted by the other (same SESSION_SECRET)."""
 import json, os, subprocess, sys
-import pytest
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVICES = os.path.dirname(HERE)

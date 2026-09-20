@@ -327,6 +327,62 @@ async def expire_stale_exit_orders(db: Session, mode: str) -> int:
     return expired
 
 
+def _should_skip_exit_this_cycle(position: models.TradePosition) -> bool:
+    """Return True if this position is still inside its exponential backoff
+    cooldown after consecutive broker rejections.  Extracted from
+    _send_real_sell for testability (session72 issue #32).
+
+    Cooldown formula: BASE * 2^(failures-1), capped at MAX.
+    reconcile.py is the sole writer of consecutive_exit_failures and
+    last_exit_failure_at — this function is read-only.
+    """
+    if not (position.consecutive_exit_failures and position.last_exit_failure_at):
+        return False
+    cooldown_seconds = min(
+        config.EXIT_RETRY_MAX_COOLDOWN_SECONDS,
+        config.EXIT_RETRY_BASE_COOLDOWN_SECONDS * (2 ** (position.consecutive_exit_failures - 1)),
+    )
+    elapsed_seconds = (
+        datetime.now(timezone.utc) - as_aware(position.last_exit_failure_at)
+    ).total_seconds()
+    return elapsed_seconds < cooldown_seconds
+
+
+def _bump_exit_failure(
+    db: Session,
+    position: models.TradePosition,
+    reason: str,
+    *,
+    is_persistent: bool,
+    excluded: bool = False,
+    current_streak: int = 0,
+    escalate_at: int | None = None,
+) -> None:
+    """Increment consecutive_exit_failures when a placement failure warrants
+    backoff.  Extracted from _send_real_sell for testability (session72 #32).
+
+    excluded=True (oversell / intraday-cutoff) → never bumps.
+    is_persistent=True (IP/CDSL/funds/exchange-not-allowed) → always bumps.
+    Generic errors → bump only if current_streak >= escalate_at.
+    """
+    if excluded:
+        return
+    _escalate_at = escalate_at if escalate_at is not None else config.EXIT_REJECT_STREAK_ESCALATE_AT
+    should_bump = is_persistent or (current_streak >= _escalate_at)
+    if not should_bump:
+        return
+    try:
+        position.consecutive_exit_failures = (position.consecutive_exit_failures or 0) + 1
+        position.last_exit_failure_at = datetime.now(timezone.utc)
+        db.commit()
+    except Exception as _be:
+        db.rollback()
+        logger.warning(
+            "exit SELL %s: could not record placement-failure streak (%s): %s",
+            position.symbol, reason, _be,
+        )
+
+
 def _send_real_sell(
     db: Session,
     position: models.TradePosition,
@@ -432,21 +488,20 @@ def _send_real_sell(
     # fires the operator alert once the streak crosses
     # EXIT_RETRY_ALERT_THRESHOLD) and what resets both back to 0/None the
     # moment a fill is actually booked.
-    if position.consecutive_exit_failures and position.last_exit_failure_at:
+    if _should_skip_exit_this_cycle(position):
         cooldown_seconds = min(
             config.EXIT_RETRY_MAX_COOLDOWN_SECONDS,
             config.EXIT_RETRY_BASE_COOLDOWN_SECONDS * (2 ** (position.consecutive_exit_failures - 1)),
         )
         elapsed_seconds = (datetime.now(timezone.utc) - as_aware(position.last_exit_failure_at)).total_seconds()
-        if elapsed_seconds < cooldown_seconds:
-            logger.info(
-                "Skipping SELL for %s (%s) — in backoff after %d consecutive broker "
-                "rejection(s) with zero fill (%.0fs remaining of a %.0fs cooldown); "
-                "will retry once the cooldown elapses.",
-                position.symbol, reason, position.consecutive_exit_failures,
-                cooldown_seconds - elapsed_seconds, cooldown_seconds,
-            )
-            return False
+        logger.info(
+            "Skipping SELL for %s (%s) — in backoff after %d consecutive broker "
+            "rejection(s) with zero fill (%.0fs remaining of a %.0fs cooldown); "
+            "will retry once the cooldown elapses.",
+            position.symbol, reason, position.consecutive_exit_failures,
+            cooldown_seconds - elapsed_seconds, cooldown_seconds,
+        )
+        return False
     # 2026-09-15 fix (session38 — DATAMATICS "insufficient funds" SELL
     # rejections, 20 consecutive over ~2h). Root cause: this used to decide
     # sell_product_type purely from "was this position opened today?" and
@@ -1053,26 +1108,22 @@ def _send_real_sell(
         # raised right here: CDSL, funds, IP, exchange-not-allowed, generic)
         # never did, so those retried on EVERY exit cycle (45s) for as long as the
         # condition lasted, alerts merely throttled. Placement failures now feed
-        # the same streak (so the existing 60s→900s doubling cooldown applies).
-        # Excluded: oversell (holdings sync above fixes qty and wants a fast retry)
-        # and intraday-cutoff (already suppressed by its own per-day flag). The
-        # generic branch only starts backing off after EXIT_REJECT_STREAK_ESCALATE_AT
-        # consecutive failures, so a one-off network blip still retries next cycle.
+        # the same streak via _bump_exit_failure() (so the existing 60s→900s
+        # doubling cooldown applies). Excluded: oversell (holdings sync above
+        # fixes qty and wants a fast retry) and intraday-cutoff (already
+        # suppressed by its own per-day flag).
         _err = str(e)
-        if not (dhan_client.is_oversell_error(_err) or dhan_client.is_intraday_cutoff_error(_err)):
-            _persistent = (dhan_client.is_invalid_ip_error(_err) or dhan_client.is_cdsl_edis_error(_err)
-                           or dhan_client.is_insufficient_funds_error(_err) or dhan_client.is_exchange_not_allowed_error(_err))
-            _bump = _persistent
-            if not _persistent:
-                _bump = int((load_snapshot(db, f"exit_reject_streak_{position.id}") or {}).get("count", 0)) >= EXIT_REJECT_STREAK_ESCALATE_AT
-            if _bump:
-                try:
-                    position.consecutive_exit_failures = (position.consecutive_exit_failures or 0) + 1
-                    position.last_exit_failure_at = datetime.now(timezone.utc)
-                    db.commit()
-                except Exception as _be:
-                    db.rollback()
-                    logger.warning("exit SELL %s: could not record placement-failure streak: %s", position.symbol, _be)
+        _excluded = dhan_client.is_oversell_error(_err) or dhan_client.is_intraday_cutoff_error(_err)
+        _persistent = (dhan_client.is_invalid_ip_error(_err) or dhan_client.is_cdsl_edis_error(_err)
+                       or dhan_client.is_insufficient_funds_error(_err) or dhan_client.is_exchange_not_allowed_error(_err))
+        _current_streak = int((load_snapshot(db, f"exit_reject_streak_{position.id}") or {}).get("count", 0))
+        _bump_exit_failure(
+            db, position, reason,
+            is_persistent=_persistent,
+            excluded=_excluded,
+            current_streak=_current_streak,
+            escalate_at=EXIT_REJECT_STREAK_ESCALATE_AT,
+        )
         return False
 
 

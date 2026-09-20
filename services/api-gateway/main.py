@@ -11819,7 +11819,6 @@ def stockky_hot_repair_batch(limit: int = Query(15, ge=1, le=100), symbol: Optio
 def _install_signal_handlers() -> None:
     """Ensure SIGTERM/SIGINT commit checkpoints even if uvicorn path is skipped."""
     import signal
-    import threading
 
     _once = getattr(_install_signal_handlers, "_installed", False)
     if _once:

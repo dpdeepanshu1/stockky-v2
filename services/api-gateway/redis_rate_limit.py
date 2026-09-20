@@ -32,7 +32,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict
 
 logger = logging.getLogger("rate-limiter")
 

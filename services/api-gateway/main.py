@@ -4148,7 +4148,15 @@ async def market_history(symbol: str, period: str = "1mo"):
                     return {"symbol": sym, "period": period, "points": points, "change_pct": chg, "source": "market-data"}
             last_err = f"market-data HTTP {r.status_code}"
         except Exception as e:
-            last_err = str(e)
+            # AUDIT FIX: httpx's own timeout exceptions (ConnectTimeout,
+            # ReadTimeout, PoolTimeout, etc.) stringify to "" when no
+            # message was attached, so str(e) alone silently swallowed the
+            # real failure — every timeout-caused 503 here rendered as a
+            # blank, undiagnosable "Chart unavailable for X: ; training "
+            # with no indication anything had even timed out. Always
+            # include the exception's class name so the cause survives
+            # into the response even when its message is empty.
+            last_err = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
         # training service history
         try:
             r2 = await client.get(f"{TRAINING_URL}/api/stock/history/{sym}", params={"period": period if period in ("1d","5d","1mo","1y","5y") else "1mo"}, timeout=_hist_timeout)
@@ -4158,7 +4166,7 @@ async def market_history(symbol: str, period: str = "1mo"):
                 return data
             last_err = f"{last_err}; training HTTP {r2.status_code}"
         except Exception as e:
-            last_err = f"{last_err}; training {e}"
+            last_err = f"{last_err}; training {type(e).__name__}: {e}" if str(e) else f"{last_err}; training {type(e).__name__}"
     raise HTTPException(status_code=503, detail=f"Chart unavailable for {sym}: {last_err}")
 
 

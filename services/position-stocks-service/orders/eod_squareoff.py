@@ -24,7 +24,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
-from orders import overnight_stop
+from orders import exit_retry, overnight_stop
 from screening import intraday_eligibility
 from tz_utils import as_aware, ist_today_str
 
@@ -206,7 +206,18 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
     at once, risking a broker rejection (insufficient holding qty) or a
     double-sell. A missing/already-filled/already-cancelled stop is a
     no-op here, not an error.
+
+    AUDIT FIX (2026-09-20, exit-placement retry storm): checks
+    orders/exit_retry.py's cooldown FIRST, before any broker call — raises
+    ExitInCooldown if this position's flat-SELL has failed at placement
+    (not just fill) repeatedly and is still backing off. See that module's
+    docstring for the incident this mirrors (real-trade-service's
+    session40 DATAMATICS storm). Applies to every caller uniformly (EOD
+    squareoff, manual exit, stagnation exit), same as real-trade-service
+    gates both automatic and manual exits through one shared check.
     """
+    exit_retry.check_cooldown(pos)
+
     if pos.overnight_converted_to_cnc and pos.overnight_stop_order_id:
         # session72 (open-issue #1): book any fill of the resting stop BEFORE
         # sizing the SELL — otherwise a partially-filled stop plus a full-size
@@ -239,7 +250,7 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
     attempts = max(1, config.EOD_SELL_RETRY_ATTEMPTS)
     for attempt in range(1, attempts + 1):
         try:
-            return dhan_client.place_order(
+            result = dhan_client.place_order(
                 db,
                 is_armed=True,
                 security_id=pos.dhan_security_id,
@@ -251,6 +262,17 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
                 product_type=sell_product_type,
                 tag="EOD_SQUAREOFF",
             )
+            # AUDIT FIX (2026-09-20): placement succeeded — clear any prior
+            # exit-placement failure streak now, not only once a fill is
+            # confirmed. A successful placement removes this position from
+            # this loop's retry surface entirely (status changes to
+            # *_PENDING_RECONCILE right after this returns); if the broker
+            # order itself later dies with zero fill, reconcile.py's
+            # dead-order path handles that separately (moves the position
+            # to ERROR, outside the OPEN pool this function's callers
+            # scan) — no cooldown needed for that case.
+            exit_retry.reset(pos)
+            return result
         except Exception as e:  # noqa: BLE001 — classified by the caller
             last_exc = e
             err_str = str(e)
@@ -263,6 +285,11 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
                 # Permanent for today (or permanent, period) — no point
                 # retrying, fail fast so the caller's classification/
                 # logging runs immediately instead of after a pointless wait.
+                # AUDIT FIX (2026-09-20): still record this as a
+                # placement failure before raising — this is exactly the
+                # kind of persistent, structural rejection the cooldown
+                # exists to throttle across cycles (see exit_retry.py).
+                exit_retry.record_failure(db, pos, reason=err_str)
                 raise
             if attempt < attempts:
                 logger.warning(
@@ -274,6 +301,11 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
                 )
                 time.sleep(config.EOD_SELL_RETRY_DELAY_SECONDS)
     assert last_exc is not None
+    # AUDIT FIX (2026-09-20): every bounded retry within this call is now
+    # exhausted with placement never succeeding — record the failure so
+    # the NEXT cycle's call to this same function backs off instead of
+    # immediately repeating the same doomed sequence of attempts.
+    exit_retry.record_failure(db, pos, reason=str(last_exc))
     raise last_exc
 
 
@@ -672,6 +704,16 @@ def run_eod_squareoff(db: Session) -> int:
             logger.info("EOD squareoff: %s", _paf)
             closed += 1
             continue
+        except exit_retry.ExitInCooldown as _eic:
+            # AUDIT FIX (2026-09-20): position left OPEN this pass — same
+            # "no exceptions but don't hammer a broken broker call" design
+            # already accepted for real-trade-service's own EOD sweep (see
+            # exit_retry.py). resolve_stuck_pending / the fast-reconcile
+            # loop will keep this visible; the next EOD sweep (or a manual
+            # exit, itself gated the same way) retries once the cooldown
+            # elapses.
+            logger.warning("EOD squareoff: %s — left OPEN this pass.", _eic)
+            continue
         except Exception as e:
             err_str = str(e)
             # AUDIT FIX (2026-09-15): previously all SELL failures landed in
@@ -884,6 +926,14 @@ def close_position_now(db: Session, pos: ScalpPosition, exit_reason: str = "MANU
         sell_result = _fire_flat_sell(db, pos)
     except PositionAlreadyFlat as _paf:
         raise ManualCloseRejected(f"Already closed — {_paf}")
+    except exit_retry.ExitInCooldown as _eic:
+        # AUDIT FIX (2026-09-20): applies uniformly to manual exits too —
+        # same precedent as real-trade-service's manual_engine.py routing
+        # through the same cooldown-gated _send_real_sell() as its
+        # automatic exits. Surfaced as a normal rejection (with the
+        # remaining wait time) rather than a generic error, same shape as
+        # every other classified rejection below.
+        raise ManualCloseRejected(str(_eic))
     except Exception as e:
         err_str = str(e)
         if dhan_client.is_intraday_cutoff_error(err_str):

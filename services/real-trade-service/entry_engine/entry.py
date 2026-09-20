@@ -32,7 +32,7 @@ import config
 import cost_model
 import models
 from audit.logger import log_action
-from execution import dhan_client, shared_order_budget, shared_symbol_lock
+from execution import dhan_client, shared_exposure, shared_order_budget, shared_symbol_lock
 from market_feed.feed import get_quotes, get_preview_quotes, MARKET_DATA_URL
 from notifier import notify_async
 from portfolio.portfolio import get_account, held_exposure_positions, record_real_order_sent
@@ -412,6 +412,14 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
         # avoiding a second DB round trip for the same data.
         broker_cash_available=account.broker_cash_available,
         open_positions_market_value=sum(p.avg_entry_price * p.qty_open for p in positions),
+        # AUDIT FIX (2026-09-20): completes the capital_share_cap total —
+        # see AccountState's field comment and execution/shared_exposure.py.
+        # REAL-only, same gating reasoning as broker_cash_available just
+        # above (DEMO shares no real Dhan account, so 0.0 correctly no-ops
+        # the check for DEMO).
+        other_service_open_positions_market_value=(
+            shared_exposure.get_other_service_exposure(db) if mode == "REAL" else 0.0
+        ),
     )
 
 

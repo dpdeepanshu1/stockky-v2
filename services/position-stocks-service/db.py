@@ -211,6 +211,11 @@ _COLUMN_MIGRATIONS = [
     # 2026-09-19 (session 72): see models.py — per-order notional + lifetime prior qty.
     ("scalp_positions", "overnight_stop_filled_notional_so_far", "BINARY_DOUBLE", "DOUBLE PRECISION", "0", "0"),
     ("scalp_positions", "overnight_stop_prior_qty", "NUMBER(10)", "INTEGER", "0", "0"),
+    # 2026-09-20 (audit fix — exit-placement retry storm, mirrors
+    # real-trade-service's consecutive_exit_failures/last_exit_failure_at).
+    # See models.py and orders/exit_retry.py.
+    ("scalp_positions", "consecutive_exit_failures", "NUMBER(10)", "INTEGER", "0", "0"),
+    ("scalp_positions", "last_exit_failure_at", "TIMESTAMP", "TIMESTAMP", None, None),
     ("scalp_candidate_log", "fundamental_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "technical_score", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_candidate_log", "market_cap_cr", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),

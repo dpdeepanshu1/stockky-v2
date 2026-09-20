@@ -35,6 +35,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import config
+from capital import shared_exposure
 from execution import dhan_client
 from models import ScalpCapitalLedger, ScalpGateState
 from tz_utils import ist_today_str, iso_utc
@@ -240,6 +241,12 @@ def sync_from_broker(db: Session) -> float:
     # BUG FIX (Issue #2): sync peer PnL at the same cadence as broker sync
     # so reserve_capital()'s combined kill-switch check stays current.
     sync_peer_pnl(db)
+    # AUDIT FIX (2026-09-20): publish this service's own open-position
+    # market value (own_committed_capital, already computed above) so
+    # real-trade-service's capital_share_cap check can see it — see
+    # shared_exposure.py for the full rationale. Same cadence as the peer
+    # PnL sync above; fail-open, never raises.
+    shared_exposure.publish_own_exposure(db, own_committed_capital)
     return scalp_alloc
 
 

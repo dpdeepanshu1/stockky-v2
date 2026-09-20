@@ -34,7 +34,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 import config
-from execution import dhan_client
+from execution import dhan_client, shared_exposure
 from portfolio.portfolio import _open_positions_market_value, get_account
 
 logger = logging.getLogger("real-trade-equity-sync")
@@ -157,4 +157,11 @@ def sync_real_equity(db: Session) -> Optional[float]:
         account.starting_capital = account.current_equity
     account.updated_at = datetime.now(timezone.utc)
     db.commit()
+    # AUDIT FIX (2026-09-20): publish this service's own open-position
+    # market value so position-stocks-service's copy of shared_exposure.py
+    # could read it back if it ever needs to (not required today — see
+    # that module's docstring); more importantly this keeps both sides of
+    # the shared table populated symmetrically. Same cadence as this sync;
+    # fail-open, never raises.
+    shared_exposure.publish_own_exposure(db, market_value)
     return account.current_equity

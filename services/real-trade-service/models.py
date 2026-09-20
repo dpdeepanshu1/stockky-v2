@@ -835,6 +835,32 @@ class SharedSymbolLock(Base):
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
+class SharedServiceExposure(Base):
+    """2026-09-20 audit fix — cross-service open-position market value,
+    shared with position-stocks-service (same Dhan account, same physical
+    DB — see that service's models.py::SharedServiceExposure and
+    capital/shared_exposure.py). Each service publishes ONLY ITS OWN
+    open-position market value here; risk_engine/engine.py's
+    "capital_share_cap" check reads the OTHER service's row to compute the
+    shared account's true total (broker_cash_available + this service's
+    own open positions + the other service's open positions), which it
+    previously omitted entirely — undercounting the true total whenever
+    position-stocks-service held stock, and over-restricting this
+    service's 50% cap as a result (the mirror-image of the session52
+    incident this whole split exists to prevent, just in the opposite,
+    non-money-unsafe direction). See execution/shared_exposure.py for how
+    this service reads/writes it. Mapped here to the SAME table name with
+    matching columns/types so both services' create_all() calls agree on
+    its shape regardless of which one boots first. Table name deliberately
+    NOT prefixed `trade_` (unlike every other table in this file) since
+    it's explicitly meant to be shared."""
+    __tablename__ = "stockky_shared_service_exposure"
+
+    service_name = Column(String(32), primary_key=True)  # "real-trade-service" | "position-stocks-service"
+    open_positions_market_value = Column(Float, nullable=False, default=0.0)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
 # ── After-hours news → next-day watchlist (2026-09-17, session56) ───────────
 # Separate from WatchlistEntry (intraday, same-day decay per watchlist_engine/
 # decay.py) — this table persists overnight and survives until market_date's

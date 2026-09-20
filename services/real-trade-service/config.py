@@ -781,6 +781,21 @@ OVERNIGHT_HOLD_MAX_EXPOSURE_PCT = float(os.getenv("OVERNIGHT_HOLD_MAX_EXPOSURE_P
 # _select_overnight_holds alongside the aggregate % cap above.
 OVERNIGHT_HOLD_MAX_POSITIONS = int(os.getenv("OVERNIGHT_HOLD_MAX_POSITIONS", "3"))
 OVERNIGHT_HOLD_MAX_SINGLE_SYMBOL_PCT = float(os.getenv("OVERNIGHT_HOLD_MAX_SINGLE_SYMBOL_PCT", "15.0"))
+# 2026-09-20 (audit fix — sector/correlation diversification): session72's
+# MAX_POSITIONS/MAX_SINGLE_SYMBOL_PCT caps bound how MANY names and how much
+# of ANY ONE name can be held overnight, but say nothing about whether those
+# names are actually diversified — three of session72's own 3-position cap
+# could still all be, say, IT names, concentrating gap risk in one overnight
+# catalyst (a US tech selloff, a sector-wide regulatory headline) instead of
+# spreading it. This caps how many overnight holds may share the same KNOWN
+# NSE sector (market_context/sector_signal.py's NSE_SECTOR_MAP — the same
+# map already used for the overnight US-sector signal, deliberately partial
+# per that module's own documented caveat). A symbol with NO recognized
+# sector is never compared against another for this specific check (there's
+# nothing to compare — see _select_overnight_holds for how this degrades
+# honestly rather than either blocking everything on missing data or
+# silently skipping the check).
+OVERNIGHT_HOLD_MAX_PER_SECTOR = int(os.getenv("OVERNIGHT_HOLD_MAX_PER_SECTOR", "1"))
 
 # 2026-09-19 (audit finding, fixed): OVERNIGHT_HOLD_REQUIRE_PROFITABLE
 # above only checked raw LTP >= avg_entry_price — a position sitting at

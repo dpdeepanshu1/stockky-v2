@@ -181,6 +181,22 @@ class ScalpPosition(Base):
     # so the final realized_pnl_pct uses the right cost basis.
     overnight_stop_prior_qty = Column(Integer, nullable=False, default=0)
 
+    # 2026-09-20 (audit fix — exit-placement retry storm): mirrors
+    # real-trade-service's TradePosition.consecutive_exit_failures /
+    # last_exit_failure_at (born from that service's session40 DATAMATICS
+    # incident — 89 consecutive REJECTED zero-fill exit-SELL attempts over
+    # ~4.5h with no backoff and no operator alert). This service's fast
+    # loop calls run_stagnation_exit() every cycle against every OPEN
+    # position meeting stagnation criteria; without this counter, a
+    # position whose flat-SELL keeps failing at PLACEMENT time (not just
+    # slow to fill — e.g. a persistent surveillance restriction or margin
+    # shortfall) would be retried on every single cycle forever, the same
+    # unthrottled-retry shape as the DATAMATICS incident. See
+    # orders/exit_retry.py for the read/write logic. Always 0/None for a
+    # position that has never had a flat-SELL placement fail.
+    consecutive_exit_failures = Column(Integer, nullable=False, default=0)
+    last_exit_failure_at = Column(DateTime, nullable=True)
+
     exit_price = Column(Float, nullable=True)
     realized_pnl = Column(Float, nullable=True)
     realized_pnl_pct = Column(Float, nullable=True)
@@ -382,6 +398,45 @@ class SharedSymbolLock(Base):
     held_by_service = Column(String(32), nullable=False)  # "position-stocks-service" | "real-trade-service"
     held_by_mode = Column(String(8), nullable=True)  # real-trade-service's REAL/DEMO; null for this service (REAL-only)
     claimed_at = Column(DateTime, nullable=False, default=_now)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class SharedServiceExposure(Base):
+    """2026-09-20 audit fix — cross-service open-position market value.
+
+    THE GAP THIS FIXES: real-trade-service's risk_engine "capital_share_cap"
+    check (session52) enforces the 50/50 Dhan-account split by comparing its
+    OWN open-position value + a proposed BUY against a computed "total
+    shared account value" — but that total only ever added its own raw
+    broker free cash to its own positions, never this service's. Whenever
+    this service (position-stocks-service) is holding a real book, that
+    made real-trade-service's computed total undercount the true account
+    value by exactly this service's exposure, over-restricting its 50%
+    cap (the mirror-image of the original session52 incident, just not
+    money-unsafe in this direction — it errs toward blocking, not
+    overspending).
+
+    This service publishes its OWN open-position market value here every
+    ledger.sync_from_broker() cycle (capital/shared_exposure.py); real-
+    trade-service reads it to complete its total. This service does not
+    currently need to read real-trade-service's row back (its own pool
+    sizing already self-corrects off Dhan's live free cash, which already
+    reflects whatever real-trade-service has spent) — the reader is kept
+    generic/symmetric anyway for whichever side needs it.
+
+    Mapped here to the SAME table name with matching columns/types as
+    real-trade-service's copy so both services' create_all() calls agree
+    on its shape regardless of which one boots first. FAIL-OPEN on any DB
+    error (own publish or the other side's read) — same as
+    SharedOrderBudget/SharedSymbolLock: a broken publish/read must never
+    itself block or corrupt a real entry or exit; worst case on failure is
+    a reversion to the old (undercounting) behavior on the reading side,
+    not a new way to get stuck. Table name deliberately NOT prefixed
+    `scalp_`, same reason as the other two shared tables above."""
+    __tablename__ = "stockky_shared_service_exposure"
+
+    service_name = Column(String(32), primary_key=True)  # "real-trade-service" | "position-stocks-service"
+    open_positions_market_value = Column(Float, nullable=False, default=0.0)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 

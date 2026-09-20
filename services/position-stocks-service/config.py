@@ -195,6 +195,17 @@ EOD_SQUAREOFF_TIME_IST = os.getenv("EOD_SQUAREOFF_TIME_IST", "15:00")
 EOD_SELL_RETRY_ATTEMPTS = _get_int("EOD_SELL_RETRY_ATTEMPTS", 3)
 EOD_SELL_RETRY_DELAY_SECONDS = float(os.getenv("EOD_SELL_RETRY_DELAY_SECONDS", "2.0"))
 
+# ── Exit-placement retry backoff (2026-09-20 audit fix) ───────────────────────
+# Mirrors real-trade-service's EXIT_RETRY_* knobs (same names, same defaults —
+# born from that service's session40 DATAMATICS incident). Gates repeated flat
+# -SELL PLACEMENT attempts across cycles (run_stagnation_exit runs every fast
+# loop tick against every OPEN position) — a placement that keeps failing
+# outright (not just slow to fill) now backs off exponentially instead of
+# being retried every single cycle. See orders/exit_retry.py.
+EXIT_RETRY_BASE_COOLDOWN_SECONDS = _get_float("EXIT_RETRY_BASE_COOLDOWN_SECONDS", 60.0)
+EXIT_RETRY_MAX_COOLDOWN_SECONDS = _get_float("EXIT_RETRY_MAX_COOLDOWN_SECONDS", 900.0)
+EXIT_RETRY_ALERT_THRESHOLD = _get_int("EXIT_RETRY_ALERT_THRESHOLD", 5)
+
 # ── Arming ──────────────────────────────────────────────────────────────────
 # Starts DISARMED — must be armed explicitly via POST /arm after startup.
 _STARTUP_ARMED_DEFAULT = False

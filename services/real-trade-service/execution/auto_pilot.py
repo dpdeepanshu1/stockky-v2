@@ -892,6 +892,14 @@ async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, 
       4. Aggregate value of everything kept stays within
          config.OVERNIGHT_HOLD_MAX_EXPOSURE_PCT of equity — ranked by
          entry_conviction_score, highest first, until the cap is hit.
+         Also bounded by config.OVERNIGHT_HOLD_MAX_POSITIONS (position
+         count), config.OVERNIGHT_HOLD_MAX_SINGLE_SYMBOL_PCT (any one
+         name), and config.OVERNIGHT_HOLD_MAX_PER_SECTOR (2026-09-20 audit
+         fix — how many kept names may share the same known NSE sector,
+         via market_context/sector_signal.py's NSE_SECTOR_MAP; a symbol
+         with no recognized sector is never compared against another for
+         this specific check, since the map is deliberately partial and
+         there is nothing real to compare).
 
     Returns (set of position ids to KEEP OPEN, dict[position.id -> reason
     string] for logging/notification). Any position not returned in the
@@ -978,9 +986,15 @@ async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, 
     # of it concentrate into a handful of correlated names. Two extra caps
     # now apply alongside it — see config.py's OVERNIGHT_HOLD_MAX_POSITIONS/
     # OVERNIGHT_HOLD_MAX_SINGLE_SYMBOL_PCT comment for the full reasoning.
+    #
+    # 2026-09-20 (audit fix): those two caps still don't stop the kept set
+    # from concentrating in one sector — added below. See config.py's
+    # OVERNIGHT_HOLD_MAX_PER_SECTOR comment for the full reasoning.
+    from market_context.sector_signal import NSE_SECTOR_MAP
     keep_ids: set = set()
     running_value = 0.0
     kept_count = 0
+    sector_counts: dict[str, int] = {}
     for conviction, p, position_value in scored:
         if kept_count >= config.OVERNIGHT_HOLD_MAX_POSITIONS:
             reasons.pop(p.id, None)
@@ -991,9 +1005,23 @@ async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, 
         if equity > 0 and (running_value + position_value) > cap:
             reasons.pop(p.id, None)
             continue
+        # A symbol with no recognized sector is never compared against
+        # another symbol for this check — there's genuinely nothing to
+        # compare (NSE_SECTOR_MAP is deliberately partial), so it can't be
+        # meaningfully said to concentrate WITH anything. It still only
+        # ever fills its own single "slot" (see sector_key below), so it
+        # never blocks a later recognized-sector candidate either.
+        sector = NSE_SECTOR_MAP.get(p.symbol)
+        sector_key = sector if sector else f"__UNMAPPED__:{p.symbol}"
+        if sector and sector_counts.get(sector_key, 0) >= config.OVERNIGHT_HOLD_MAX_PER_SECTOR:
+            reasons.pop(p.id, None)
+            continue
         keep_ids.add(p.id)
         running_value += position_value
         kept_count += 1
+        sector_counts[sector_key] = sector_counts.get(sector_key, 0) + 1
+        if sector:
+            reasons[p.id] = reasons.get(p.id, "") + f", sector={sector}"
 
     return keep_ids, {k: v for k, v in reasons.items() if k in keep_ids}
 

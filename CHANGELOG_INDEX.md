@@ -6,6 +6,10 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION73_CROSS_SERVICE_AUDIT_FIXES_2026-09-20.md` — capital_share_cap
+  blind spot to the other service's holdings (new shared-exposure table),
+  position-stocks-service exit-placement retry backoff (mirrors
+  real-trade-service's session40 fix), overnight-hold sector diversification cap
 - `SESSION24_ROOT_DEDUP_CLEANUP.md` — removed root-level duplicates left
   behind by a previous zip repackage (files were already archived but
   never deleted from root)

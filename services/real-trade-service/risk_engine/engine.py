@@ -170,6 +170,17 @@ class AccountState:
     # exactly the bug this whole fix exists to close.
     broker_cash_available:      float = 0.0  # RAW Dhan free cash (uncapped, whole shared account)
     open_positions_market_value: float = 0.0  # this service's OWN open-position value
+    # ADDED (2026-09-20 audit fix). Same "fail closed on missing data"
+    # reasoning as the two fields above: this service's own open-position
+    # value plus broker_cash_available previously stood in for the whole
+    # account's total, silently omitting position-stocks-service's own
+    # holdings whenever it had any — undercounting the true total and
+    # over-restricting this service's cap (never the reverse — see
+    # execution/shared_exposure.py). Defaults to 0.0, same as before this
+    # fix existed, so any call site that hasn't been updated to populate it
+    # reproduces the OLD (undercounting but never money-unsafe) behavior
+    # rather than a new failure mode.
+    other_service_open_positions_market_value: float = 0.0
 
 
 @dataclass
@@ -380,14 +391,29 @@ def evaluate(
     # service's own open-position value plus the proposed order must not
     # push its total exposure past CAPITAL_SHARE_PCT of the shared account's
     # true total (broker_cash_available, the RAW uncapped Dhan free cash,
-    # plus this service's own open-position value). Rejects outright rather
-    # than downsizing — unlike 5b, there is no partial fill that respects
-    # the split once the existing book alone already exceeds the cap; the
-    # correct fix in that state is "close positions", not "buy fewer shares
-    # of a new one on top of an already-over-cap book".
+    # plus this service's own open-position value, plus position-stocks-
+    # service's own open-position value — see 2026-09-20 audit fix note on
+    # AccountState.other_service_open_positions_market_value: earlier
+    # versions of this check omitted that last term, undercounting the true
+    # total whenever position-stocks-service held stock). Rejects outright
+    # rather than downsizing — unlike 5b, there is no partial fill that
+    # respects the split once the existing book alone already exceeds the
+    # cap; the correct fix in that state is "close positions", not "buy
+    # fewer shares of a new one on top of an already-over-cap book".
     if intent.side == "BUY":
         order_cost = intent.entry_price * final_qty
-        total_shared_account_value = account.broker_cash_available + account.open_positions_market_value
+        # AUDIT FIX (2026-09-20): total_shared_account_value previously
+        # omitted position-stocks-service's own open-position value
+        # entirely — see AccountState.other_service_open_positions_market_
+        # value's comment and execution/shared_exposure.py for the full
+        # rationale. Including it here is what makes this genuinely "the
+        # shared account's true total" rather than just "this service's
+        # cash-plus-positions".
+        total_shared_account_value = (
+            account.broker_cash_available
+            + account.open_positions_market_value
+            + account.other_service_open_positions_market_value
+        )
         share_cap = total_shared_account_value * (CAPITAL_SHARE_PCT / 100.0)
         projected_exposure = account.open_positions_market_value + order_cost
         if total_shared_account_value > 0 and projected_exposure > share_cap:

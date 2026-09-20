@@ -48,7 +48,7 @@ from sqlalchemy.orm import Session
 import config
 import models
 from audit.logger import log_action
-from execution import dhan_client, shared_order_budget, shared_symbol_lock
+from execution import dhan_client, shared_exposure, shared_order_budget, shared_symbol_lock
 from exit_engine.exit import _send_real_sell
 from intraday_eligibility import is_restricted as is_intraday_restricted
 from market_feed.feed import get_quotes
@@ -134,6 +134,13 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
         # as an automatic one.
         broker_cash_available=account.broker_cash_available,
         open_positions_market_value=sum(p.avg_entry_price * p.qty_open for p in positions),
+        # AUDIT FIX (2026-09-20): completes the capital_share_cap total for
+        # manual BUY tickets the same way entry_engine/entry.py's
+        # _account_state does for automatic ones — see AccountState's
+        # field comment and execution/shared_exposure.py.
+        other_service_open_positions_market_value=(
+            shared_exposure.get_other_service_exposure(db) if mode == "REAL" else 0.0
+        ),
     )
 
 

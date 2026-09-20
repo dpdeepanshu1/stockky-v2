@@ -39,7 +39,7 @@ from portfolio.portfolio import (
 # already import these same three names from the same place for the same
 # purpose; mirrored here.
 from risk_engine.engine import AccountState, OrderIntent, evaluate as risk_evaluate
-from execution import dhan_client, shared_symbol_lock
+from execution import dhan_client, shared_exposure, shared_symbol_lock
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("real-trade-service")
@@ -897,6 +897,12 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
         cash_available=account_row.cash_available,
         broker_cash_available=account_row.broker_cash_available,
         open_positions_market_value=sum(p.avg_entry_price * p.qty_open for p in open_positions),
+        # AUDIT FIX (2026-09-20): completes the capital_share_cap total for
+        # this dry-run preview too — see AccountState's field comment and
+        # execution/shared_exposure.py.
+        other_service_open_positions_market_value=(
+            shared_exposure.get_other_service_exposure(db) if mode == "REAL" else 0.0
+        ),
     )
     intent = OrderIntent(
         mode=mode, symbol=body.symbol.upper(), side=body.side.upper(),

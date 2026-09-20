@@ -9,3 +9,6 @@ dist/
 venv/
 *.egg-info/
 real_data/
+stockky_test_report_*/
+.coverage
+htmlcov/

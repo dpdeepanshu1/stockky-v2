@@ -6116,6 +6116,13 @@ async def market_trending():
     except asyncio.TimeoutError:
         logger.warning("market/trending hit 20 s budget — returning empty")
         return {"data": [], "count": 0}
+    except Exception as e:
+        # Anything other than the 20s budget (e.g. a bad response from
+        # _get_momentum_movers()/_get_news_mentioned_symbols()) used to
+        # propagate out of run_in_executor as an unhandled 500 — degrade
+        # to empty data instead, same shape as the timeout branch above.
+        logger.warning("market/trending failed: %s — returning empty", e)
+        return {"data": [], "count": 0}
 
 # ── IMPROVED /market/indices with IST time ──────────────────────────────
 @app.get("/market/indices")

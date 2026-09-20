@@ -1,7 +1,6 @@
 {
-  "buildCommand": "npm run build",
+  "installCommand": "cd frontend && npm install",
+  "buildCommand": "cd frontend && npm run build",
   "outputDirectory": "frontend/dist",
-  "installCommand": "npm install",
-  "framework": "vite",
-  "rootDirectory": "frontend"
+  "framework": "vite"
 }

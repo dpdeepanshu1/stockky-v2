@@ -286,10 +286,28 @@ async def _fast_reconcile_loop() -> None:
     while True:
         try:
             await asyncio.sleep(_FAST_RECONCILE_INTERVAL_S)
-            if not is_market_open_ist():
-                continue
             factory = _db.get_session_factory()
             if factory is None:
+                continue
+            # BUG FIX (session73, open-issue #2): resolve_stuck_pending()
+            # exists specifically to resolve PRIOR-DAY *_PENDING_RECONCILE
+            # rows via dhanhq.get_trade_history — it does not touch the live
+            # order book and does not need the market to be open. It was
+            # previously only reachable through run_exit_reconciliation()
+            # below, which is gated on is_market_open_ist(), so a position
+            # stuck after Friday's EOD squareoff could never be resolved
+            # until Monday's market open — it just sat on the entry-price
+            # placeholder all weekend (confirmed live: INDORAMA/NAHARINDUS
+            # still PENDING_RECONCILE at 2-3 days old on a Sunday). Run it
+            # unconditionally here; it already self-throttles to once per
+            # config.PENDING_RECONCILE_SWEEP_INTERVAL_S (default 600s)
+            # internally, so this adds no meaningful extra load off-hours.
+            with factory() as db:
+                try:
+                    await asyncio.to_thread(reconcile.resolve_stuck_pending, db)
+                except Exception as e:
+                    logger.error("position-stocks: off-hours stuck-pending sweep error: %s", e, exc_info=True)
+            if not is_market_open_ist():
                 continue
             with factory() as db:
                 try:

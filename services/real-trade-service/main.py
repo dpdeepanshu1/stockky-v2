@@ -585,7 +585,14 @@ async def dhan_edis_authorize_form(
     except dhan_client.DhanNotConnectedError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        # session73 fix: "no demat holdings" is a normal, common state (no
+        # overnight-carried CNC position today), not an upstream Dhan
+        # failure — 502 told the frontend/user this was broken when it
+        # isn't. 409 (nothing to do, not an error) lets the frontend show
+        # a calm message instead of the red error banner.
+        msg = str(e)
+        status = 409 if "No demat holdings found" in msg else 502
+        raise HTTPException(status_code=status, detail=msg)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Dhan eDIS form error: {e}")
     return Response(content=html, media_type="text/html")

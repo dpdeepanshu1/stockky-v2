@@ -1289,7 +1289,17 @@ export default function RealAutoTrade() {
       popup.document.close();
       setError(null);
     } catch (e: any) {
-      setError(e?.message || "Could not open CDSL authorization form");
+      const msg: string = e?.message || "Could not open CDSL authorization form";
+      // session73 fix: "no demat holdings" (backend now returns 409 for
+      // this specific case, see main.py) is a normal state — nothing was
+      // carried overnight, so there's nothing to authorize today. Showing
+      // it as a red error banner is misleading; a plain heads-up is enough.
+      if (msg.startsWith("409")) {
+        setError(null);
+        alert("Nothing to authorize on CDSL today — you currently have no demat holdings.");
+      } else {
+        setError(msg);
+      }
     } finally { setEdisBusy(false); }
   };
 

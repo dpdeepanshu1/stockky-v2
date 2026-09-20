@@ -468,7 +468,7 @@ export const realTradeApi = {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     const html = await resp.text();
-    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}: ${html.slice(0, 150)}`);
+    if (!resp.ok) throw new Error(`${resp.status}: ${html.slice(0, 150)}`);
     return html;
   },
 

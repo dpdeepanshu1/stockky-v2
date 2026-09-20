@@ -851,6 +851,25 @@ def edis_verification_summary(db: Session) -> dict:
     tuples.
     """
     checked_at = datetime.now(timezone.utc).isoformat()
+
+    # session73 fix: Dhan's /edis/inquire/ALL returns a plain 500 (not an
+    # empty list) when the demat account currently holds nothing — the
+    # dashboard was showing that as a scary "⚠ Unknown / Server error 500"
+    # instead of the calm, accurate answer "nothing held, so nothing needs
+    # authorizing". Check our own holdings first (the same call
+    # edis_get_form's bulk-anchor path already uses) and short-circuit
+    # before ever hitting the flaky inquire endpoint when there's genuinely
+    # nothing to check. Any error checking holdings just falls through to
+    # the original inquire-based logic below, unchanged.
+    try:
+        holdings = get_holdings(db)
+    except Exception:
+        holdings = None
+    if holdings is not None and len(holdings) == 0:
+        return {"verified_today": True, "checked_at": checked_at,
+                "detail": "No demat holdings currently — nothing to authorize.",
+                "holdings_total": 0, "holdings_pending": 0, "pending_symbols": []}
+
     try:
         raw = edis_inquire(db, isin="ALL")
     except DhanNotConnectedError as e:

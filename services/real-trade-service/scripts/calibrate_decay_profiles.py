@@ -47,10 +47,12 @@ What it computes, per catalyst_type:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import statistics
 import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import func
 
@@ -59,6 +61,61 @@ sys.path.insert(0, ".")  # run from services/real-trade-service/
 MIN_SAMPLES = 8  # below this, print "not enough data" rather than a number that's mostly noise
 
 _MISSED_REASON_RE = re.compile(r"price moved (-?\d+\.?\d*)%")
+
+
+def _autoload_env_if_missing() -> None:
+    """This script's usage note says 'run inside the real-trade-service
+    container or with its venv/DATABASE_URL/ORACLE_* env vars available' —
+    but running it directly on the host (python3 scripts/calibrate_decay_profiles.py,
+    the natural way to run a one-off script) leaves the host shell with none
+    of docker-compose's env_file/environment values loaded, so db.py's
+    get_session_factory() raises 'no database configured'. Rather than make
+    every operator manually export a dozen ORACLE_*/DATABASE_URL vars (and
+    likely get the Oracle wallet path wrong — the container mounts it at
+    /oracle_wallet, but the host copy lives at <repo_root>/oracle_wallet per
+    docker-compose.yml's volume mapping), load them here from the same
+    .env file docker-compose's `env_file: - .env` directive already uses,
+    and point ORACLE_WALLET_DIR/TNS_ADMIN at the host-relative wallet
+    folder when the container-only path isn't present. No-op inside the
+    container: DATABASE_URL/ORACLE_DSN are already set there, so nothing
+    here overrides them (existing env vars always take precedence)."""
+    if os.environ.get("DATABASE_URL") or os.environ.get("ORACLE_DSN"):
+        return  # already configured — inside the container, or exported manually
+
+    # scripts/ -> real-trade-service -> services -> repo root
+    repo_root = Path(__file__).resolve().parents[3]
+    env_path = repo_root / ".env"
+    if env_path.is_file():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                os.environ.setdefault(key, value)
+
+    if not (os.environ.get("DATABASE_URL") or os.environ.get("ORACLE_DSN")):
+        print(
+            f"NOTE: no DATABASE_URL/ORACLE_DSN found in the environment or in "
+            f"{env_path} — this will fail the same way it just did. Either "
+            f"create/populate {env_path} (same file docker-compose reads), "
+            f"export the vars yourself, or run this via "
+            f"'docker exec <real-trade-service container> python3 "
+            f"scripts/calibrate_decay_profiles.py ...' where they're already set.",
+            file=sys.stderr,
+        )
+        return
+
+    wallet_dir = os.environ.get("ORACLE_WALLET_DIR") or os.environ.get("TNS_ADMIN")
+    host_wallet = repo_root / "oracle_wallet"
+    if (not wallet_dir or not Path(wallet_dir).is_dir()) and host_wallet.is_dir():
+        os.environ["ORACLE_WALLET_DIR"] = str(host_wallet)
+        os.environ["TNS_ADMIN"] = str(host_wallet)
+
+
+_autoload_env_if_missing()
 
 
 def _percentile(sorted_vals: list[float], p: float) -> float:

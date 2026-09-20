@@ -6,6 +6,11 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION75_STUCK_RECONCILE_STATUS_FILTER_FIX_2026-09-20.md` — real bug found
+  from live `/reconcile/pending` data: `resolve_stuck_pending()`'s status
+  filter silently excluded STOP_HIT/TARGET_HIT rows from ever being
+  self-healed or aged-out, so a stale EOD_SQUAREOFF sentinel could sit
+  forever on an already-correctly-resolved position; fixed, 4 new tests
 - `SESSION74_DEEP_AUDIT_NO_NEW_BUGS_2026-09-20.md` — full (not pattern-swept)
   read of decision-prediction-service's `training/models.py` and
   `training/app.py`, plus a repo-wide sweep for mutable-default-args/bare-except/

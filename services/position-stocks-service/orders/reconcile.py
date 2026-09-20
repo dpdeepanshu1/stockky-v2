@@ -490,9 +490,25 @@ def resolve_stuck_pending(db: Session, *, force: bool = False) -> dict:
     _last_stuck_sweep_ts = now_m
 
     today = ist_today_str()
+    # BUG FIX (session 75, live evidence — INDORAMA/NAHARINDUS stuck 2-3 days):
+    # this used to also require status IN _FLAT_SELL_PENDING_STATUSES
+    # ("EOD_SQUAREOFF"/"MANUAL_EXIT"/"STAGNATION_EXIT"). But a row that
+    # started down that placeholder path (sentinel set, status EOD_SQUAREOFF)
+    # can later have its status overwritten to TARGET_HIT/STOP_HIT/CLOSED by
+    # an unrelated close path (e.g. a race between the EOD-flatten sweep and
+    # the overnight-stop/intraday-exit reconcile loop) without that path ever
+    # knowing to clear a sentinel it didn't set. list_pending_reconcile() (the
+    # GET /reconcile/pending diagnostic) has always filtered on the sentinel
+    # text alone, with no status restriction — this resolution sweep silently
+    # disagreed, so any row whose status drifted outside those 3 values was
+    # permanently invisible to self-heal/trade-history-resolve/age-out, and
+    # sat "pending" forever with no path to ever clear it. The self-heal case
+    # below (real exit_price/realized_pnl already present) and the
+    # trade-history match don't depend on status at all, so dropping the
+    # status filter here — matching list_pending_reconcile() exactly — is
+    # safe and closes the actual gap the diagnostic was built to catch.
     rows = (db.query(ScalpPosition)
-            .filter(ScalpPosition.status.in_(_FLAT_SELL_PENDING_STATUSES),
-                    ScalpPosition.error_message.like("%_PENDING_RECONCILE%")).all())
+            .filter(ScalpPosition.error_message.like("%_PENDING_RECONCILE%")).all())
     stuck = [p for p in rows if p.closed_at is None or _ist_date_str(p.closed_at) < today]
     if not stuck:
         return summary

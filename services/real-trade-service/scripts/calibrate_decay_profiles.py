@@ -51,8 +51,9 @@ import os
 import re
 import statistics
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 from sqlalchemy import func
 
@@ -108,11 +109,41 @@ def _autoload_env_if_missing() -> None:
         )
         return
 
+    # session73 fix (round 2): the container mounts the wallet at
+    # /oracle_wallet via docker-compose.yml's
+    # `${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro` line —
+    # so the REAL host path is whatever ORACLE_WALLET_HOST_DIR is set to in
+    # .env, and only defaults to <repo_root>/oracle_wallet when that var is
+    # unset, exactly mirroring docker-compose's own default. The previous
+    # version of this fix assumed <repo_root>/oracle_wallet unconditionally,
+    # which is wrong whenever ORACLE_WALLET_HOST_DIR points elsewhere — and
+    # dangerously easy to get wrong silently, since <repo_root>/oracle_wallet
+    # is normally an empty placeholder directory (wallet secrets aren't
+    # committed to the repo), so oracledb fails with a confusing "tnsnames.ora
+    # is missing" instead of a clear "wrong wallet dir" message. Validate by
+    # checking for tnsnames.ora, not just directory existence.
+    def _is_real_wallet(p: Optional[str]) -> bool:
+        return bool(p) and (Path(p) / "tnsnames.ora").is_file()
+
     wallet_dir = os.environ.get("ORACLE_WALLET_DIR") or os.environ.get("TNS_ADMIN")
-    host_wallet = repo_root / "oracle_wallet"
-    if (not wallet_dir or not Path(wallet_dir).is_dir()) and host_wallet.is_dir():
-        os.environ["ORACLE_WALLET_DIR"] = str(host_wallet)
-        os.environ["TNS_ADMIN"] = str(host_wallet)
+    if not _is_real_wallet(wallet_dir):
+        candidate = os.environ.get("ORACLE_WALLET_HOST_DIR") or str(repo_root / "oracle_wallet")
+        if _is_real_wallet(candidate):
+            os.environ["ORACLE_WALLET_DIR"] = candidate
+            os.environ["TNS_ADMIN"] = candidate
+        else:
+            print(
+                f"NOTE: no usable Oracle wallet (tnsnames.ora) found at "
+                f"{wallet_dir or '(unset)'} or {candidate} — the DB connection "
+                f"below will likely fail with a tnsnames.ora error. Set "
+                f"ORACLE_WALLET_HOST_DIR in {env_path} to wherever the wallet "
+                f"actually lives on this host (docker-compose.yml's volumes: "
+                f"line for real-trade-service uses the same variable), or run "
+                f"this via 'docker exec <real-trade-service container> python3 "
+                f"scripts/calibrate_decay_profiles.py ...' where the container's "
+                f"own /oracle_wallet mount already has it.",
+                file=sys.stderr,
+            )
 
 
 _autoload_env_if_missing()
@@ -139,7 +170,9 @@ def main():
     from watchlist_engine.decay import CATALYST_PROFILES, EXIT_PROFILES
 
     session = db.get_session_factory()()  # real db.py helper — creates a standalone Session outside FastAPI's request lifecycle
-    cutoff = datetime.utcnow() - timedelta(days=args.days)
+    # datetime.utcnow() is deprecated; .now(timezone.utc) + strip tzinfo gives
+    # the identical naive-UTC value this comparison against DB columns needs.
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=args.days)
 
     catalyst_types = sorted(CATALYST_PROFILES.keys())
     print(f"{'='*78}\nDecay profile calibration — last {args.days} days, mode={args.mode}\n{'='*78}\n")

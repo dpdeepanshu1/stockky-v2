@@ -6,6 +6,11 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION77_COVERAGE_PLAN_PHASE1_PART2_2026-09-21.md` — 100%-coverage plan,
+  Phase 1 continued: 21 new tests for `exit_engine/exit.py`'s
+  CDSL/insufficient-funds/oversell(×3)/exchange-not-allowed branches, both
+  `_cutoff_key` siblings (intraday-cutoff, security-intraday-restricted),
+  and the generic-rejection streak escalation state machine; no new bugs found
 - `SESSION77_COVERAGE_PLAN_PHASE1_PART1_2026-09-21.md` — 100%-coverage plan,
   Phase 1 continued: 12 new tests for `exit_engine/exit.py`'s
   `expire_stale_exit_orders()` and `_send_real_sell`'s success/invalid-IP/

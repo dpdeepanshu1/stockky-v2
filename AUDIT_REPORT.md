@@ -172,6 +172,68 @@ still queued: CDSL/insufficient-funds/oversell/exchange-not-allowed branches,
 the two `_cutoff_key` sibling branches, and the generic-rejection streak
 escalation, all still open per that plan).
 
+## Phase 1 progress (100%-coverage plan, session77 part 2) — `exit_engine/exit.py`'s error-classification branches
+
+Closed the remaining gap flagged at the end of part 1: `tests/test_exit_error_branches.py`
+(21 tests) covering every previously-untested branch in `_send_real_sell`'s
+except block —
+
+* CDSL/eDIS and insufficient-funds: single-alert-then-cooldown-suppress
+  behavior, confirmed both are `is_persistent` (bump the exponential-backoff
+  counter on first hit) and do NOT touch the separate generic-rejection
+  streak key.
+* Oversell, all 3 documented sub-cases: broker holds 0 → ghost-close via
+  `force_close_real_position`; broker holds a partial qty → `qty_open` is
+  capped to the broker's real figure; broker qty still covers ours → pure
+  no-op (timing issue, no mutation, no ghost-close) — plus the
+  holdings-sync-itself-failing path (alert-then-cooldown) and confirmed
+  oversell never bumps either streak counter (deliberately excluded, wants a
+  fast retry once qty is corrected).
+* Exchange-not-allowed (EXCH:16387): alert-then-cooldown, confirmed
+  persistent.
+* The two `_cutoff_key` siblings to session76's circuit-limit fix —
+  `is_intraday_cutoff_error` and `is_security_intraday_restricted_error` —
+  each got an explicit resend-suppression test (place_order called exactly
+  once even across 5 more evaluation cycles the same IST day), not assumed
+  symmetry with the circuit-limit test. Also confirmed the
+  security-intraday-restricted branch's `record_restriction()` call into
+  `intraday_eligibility.py` is correctly best-effort (a raised exception
+  there doesn't prevent the alert/skip handling that follows it).
+* Generic-rejection streak escalation, exercised end-to-end through
+  `_send_real_sell` (not just `_bump_exit_failure` directly, which
+  `test_exit_backoff_escalation.py` already unit-tested): confirmed the
+  alerting is cooldown-throttled rather than one-per-rejection (a rejection
+  arriving inside the cooldown window from the last alert stays silent even
+  below the escalation threshold), the escalation alert fires exactly once
+  when the streak first crosses `EXIT_REJECT_STREAK_ESCALATE_AT` (fires
+  regardless of cooldown — the escalation branch doesn't gate on `due`),
+  goes quiet again afterward, and re-fires (still the "STUCK" message, not
+  reverting to the plain one) once the cooldown window elapses again with
+  the streak still at/above threshold. Also confirmed a stream of
+  *different* unrecognized error strings still increments one shared
+  per-position counter rather than being tracked separately per message.
+
+No new bugs found — every branch matched its own docstring's documented
+behavior. `py_compile` clean. Same sandbox limitation as parts 1 and this
+session's earlier work: no network here, `pytest`/`sqlalchemy` aren't
+installed, so this file is written and hand-traced against the current code
+line-by-line (including working through the exact alert/cooldown/escalation
+state machine call-by-call) but not yet executed in this environment — run
+on the VM to confirm:
+
+```bash
+cd ~/stockky-v2/services/real-trade-service
+python3 -m pytest tests/test_exit_error_branches.py -q
+python3 -m pytest tests -q -p no:cacheprovider | tail -1
+python3 -m pytest tests -q --cov=exit_engine.exit --cov-report=term-missing
+```
+
+Per the coverage plan, still open in `exit_engine/exit.py` after this: lines
+67-69/131/165-166/176-182/378-380 (small helper/import guards — cheapest
+remaining), and re-confirming with `--cov-report=annotate` whether anything
+in the 1197-1530 range (evaluate_mode's trail/breakeven tail) is still
+genuinely uncovered now that expire_stale_exit_orders is fully tested.
+
 ## Other open decisions (unchanged from round 1)
 
 - **`adaptive.py` R:R floor:** docstring promises 2:1, but wide-ATR stocks get 1.6:1 because target cap wins.
@@ -185,7 +247,7 @@ escalation, all still open per that plan).
 | Priority | Module | Coverage | Why it matters |
 |---|---|---|---|
 | 1 | `entry_engine/entry.py::evaluate_mode` | 84% | every real BUY: gates, sizing, risk call, order placement — direct test coverage added round 3 |
-| 2 | `exit_engine/exit.py` | 55% | decides when real positions are sold — direct test coverage added round 3; round 4 fixed a real circuit-limit resend-storm bug in `_send_real_sell` and added targeted tests for it, but most of its other error-classification branches (CDSL, insufficient-funds, oversell holdings-sync, exchange-not-allowed) are still only exercised indirectly
+| 2 | `exit_engine/exit.py` | ~67%+ (unconfirmed, awaiting VM run) | decides when real positions are sold — direct test coverage added rounds 3-4; session77 parts 1-2 closed `expire_stale_exit_orders`, the success/invalid-IP path, and every error-classification branch (CDSL, insufficient-funds, oversell's 3 sub-cases, exchange-not-allowed, both `_cutoff_key` siblings, generic-streak escalation). Remaining: small helper/import guards and confirming the evaluate_mode trail/breakeven tail
 | 3 | `portfolio/portfolio.py` | 32% | cash, positions and P&L accounting |
 | 4 | `execution/auto_pilot.py` | 19% | runs the whole cycle and throttles |
 | 5 | `manual_engine.py` | 0% | manual BUY/SELL |

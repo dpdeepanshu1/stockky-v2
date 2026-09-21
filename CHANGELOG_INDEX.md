@@ -6,6 +6,10 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION77_COVERAGE_PLAN_PHASE1_PART1_2026-09-21.md` — 100%-coverage plan,
+  Phase 1 continued: 12 new tests for `exit_engine/exit.py`'s
+  `expire_stale_exit_orders()` and `_send_real_sell`'s success/invalid-IP/
+  pre-migration-fallback paths, all previously 0% direct; no new bugs found
 - `SESSION76_CIRCUIT_LIMIT_EXIT_RESEND_FIX_2026-09-21.md` — `_send_real_sell`'s
   circuit-limit rejection branch never set the `_cutoff_key` resend-suppression
   flag its sibling branches use, so a circuit-locked position's SELL was

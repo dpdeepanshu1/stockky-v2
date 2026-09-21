@@ -143,6 +143,35 @@ couldn't actually be executed here; traced its assertions by hand against
 the fixed code path instead, same fallback other sessions have used when
 offline).
 
+## Phase 1 progress (100%-coverage plan, session77) — `exit_engine/exit.py` continued
+
+Working through the coverage-plan checklist for `exit_engine/exit.py` (target
+90%+, was 57%). Added 3 new test files covering previously-0%-direct paths:
+
+* `tests/test_exit_expire_stale_exit_orders.py` (7 tests) — the LIMIT-exit
+  expiry/cancel/resend-as-MARKET function (`expire_stale_exit_orders`),
+  previously untested at all: no-stale-orders no-op, DEMO-mode no-op,
+  full-remainder resend, partial-fill resend of only the unfilled qty, Dhan
+  cancel failure leaves the order PLACED (not falsely EXPIRED), no-position-
+  found still expires the order without resending, and fully-filled-by-then
+  correctly sends nothing.
+* `tests/test_exit_send_real_sell_success_and_ip.py` (5 tests) — the
+  successful-placement path of `_send_real_sell` (order/event row creation,
+  rejection-streak reset, notification content), Dhan accepting a call but
+  returning no order id (treated as a failure, no phantom order row), the
+  invalid-IP branch's two notification variants (just-disarmed vs
+  already-disarmed), and the pre-session38-migration fallback where
+  `entry_product_type` is NULL (same-day-opened heuristic).
+
+No new bugs found in these paths — all behaved as documented. `py_compile` +
+`compileall` clean on the whole service. Same sandbox limitation as session76:
+no network here, so `pytest`/`sqlalchemy` aren't installed — these tests are
+written and compile-checked but not yet executed in this environment; run
+them on the VM to confirm (see the coverage-plan doc for the follow-on phases
+still queued: CDSL/insufficient-funds/oversell/exchange-not-allowed branches,
+the two `_cutoff_key` sibling branches, and the generic-rejection streak
+escalation, all still open per that plan).
+
 ## Other open decisions (unchanged from round 1)
 
 - **`adaptive.py` R:R floor:** docstring promises 2:1, but wide-ATR stocks get 1.6:1 because target cap wins.

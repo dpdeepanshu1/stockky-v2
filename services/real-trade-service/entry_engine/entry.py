@@ -1474,6 +1474,22 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
 
         price = tick.price
 
+        # BUG FIX (this session): a live tick with price <= 0 (bad/stale feed
+        # data — the same condition _entry_drift_ok elsewhere in this file
+        # already guards against) used to fall straight through into the
+        # catalyst_price==0.0 branch below, which would set catalyst_price to
+        # this same non-positive price and then divide by it two lines later
+        # (`pct_move = (price - row.catalyst_price) / row.catalyst_price`),
+        # raising ZeroDivisionError for price==0.0. That's uncaught inside
+        # this per-row loop, so it aborted evaluation of every OTHER active
+        # watchlist row for the rest of this cycle too, not just this one bad
+        # symbol — cycle_runner's outer try/except only stops it from
+        # crashing the whole trading cycle, it doesn't stop the collateral
+        # skip of unrelated rows. Skip just this row this cycle, same as the
+        # `tick is None` case above, and try again next cycle.
+        if price <= 0:
+            continue
+
         # catalyst_price == 0.0 means the price was not known at insert time.
         # Two distinct cases:
         #   Tier 3 (volume_shock): sources.py intentionally sets catalyst_price=None

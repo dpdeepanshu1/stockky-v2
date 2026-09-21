@@ -42,6 +42,41 @@ Both fixes have regression tests that fail on the original code and pass now.
   but exits write no `TradeFill` row, so a small schema change is required.
   Pinned: `TestKnownGaps.test_partial_fills_should_be_booked_at_the_increments_own_price`.
 
+## Round 3 (this session) — `entry_engine/entry.py::evaluate_watchlist_entries`
+
+Started on the two items flagged as highest-value next targets: `exit_engine/exit.py`
+(27% coverage) and `entry_engine/entry.py::evaluate_mode` (~830-line pipeline). A full
+line read of both found no new bugs beyond what round 1/2 and the session history
+already fixed — both are unusually heavily commented/self-documented at this point,
+with the majority of previously-found issues explained inline. Given the size of both
+(1543 and 1569 lines), a from-scratch line read of the two in one pass wasn't enough
+to responsibly claim either is now fully covered — see the untested-modules table
+below, unchanged for `exit.py` and `evaluate_mode` specifically.
+
+While reading `entry.py` end to end, found and fixed a real bug in its sibling
+Stage-2 function, **`evaluate_watchlist_entries`** (previously 0% tested, no test file
+existed for it at all):
+
+* **Division by zero crashes the whole watchlist pass, not just one symbol.**
+  A live tick with `price <= 0` (bad/stale feed data — the exact condition
+  `_entry_drift_ok` elsewhere in the same file already guards against) for a row
+  whose `catalyst_price` is still the `0.0` "unknown" sentinel fell straight into the
+  backfill branch, which set `catalyst_price` to that same non-positive price and then
+  divided by it two lines later — `ZeroDivisionError`. That's raised inside the
+  per-row `for row in active:` loop with no `try/except` around it, so it aborted
+  evaluation of every **other** active watchlist row for the rest of that cycle too —
+  `cycle_runner.py`'s outer try/except stops it from crashing the whole trading cycle,
+  but does nothing to stop the collateral skip of unrelated, healthy rows.
+  Fixed by skipping just the bad row this cycle (same treatment as the existing
+  `tick is None` case just above it) and retrying next cycle, instead of crashing.
+  13 new regression tests added in `tests/test_watchlist_trigger.py`, including one
+  that reverts the fix and confirms the tests actually catch the regression
+  (`TestZeroPriceGuard`), and one proving a bad row no longer blocks a healthy row in
+  the same cycle (`test_a_bad_zero_price_row_does_not_block_other_rows_same_cycle`).
+
+Test count: 376 passed → **389 passed**, 1 xfailed (unchanged). `entry_engine.entry`
+coverage: 40% → 48%.
+
 ## Other open decisions (unchanged from round 1)
 
 - **`adaptive.py` R:R floor:** docstring promises 2:1, but wide-ATR stocks get 1.6:1 because target cap wins.
@@ -54,8 +89,8 @@ Both fixes have regression tests that fail on the original code and pass now.
 
 | Priority | Module | Coverage | Why it matters |
 |---|---|---|---|
-| 1 | `entry_engine/entry.py::evaluate_mode` | ~38% of file | every real BUY: gates, sizing, risk call, order placement |
-| 2 | `exit_engine/exit.py` | 27% | decides when real positions are sold |
+| 1 | `entry_engine/entry.py::evaluate_mode` | ~38% of file | every real BUY: gates, sizing, risk call, order placement — full line read done round 3, no new bugs found, still needs direct test coverage |
+| 2 | `exit_engine/exit.py` | 27% | decides when real positions are sold — full line read done round 3, no new bugs found, still needs direct test coverage |
 | 3 | `portfolio/portfolio.py` | 32% | cash, positions and P&L accounting |
 | 4 | `execution/auto_pilot.py` | 19% | runs the whole cycle and throttles |
 | 5 | `manual_engine.py` | 0% | manual BUY/SELL |
@@ -81,7 +116,7 @@ Expected:
 === position-stocks-service
 1220 passed, 8 warnings in ~15s
 === real-trade-service
-376 passed, 1 xfailed in ~6s
+389 passed, 1 xfailed in ~8s
 ```
 
 **With coverage:**

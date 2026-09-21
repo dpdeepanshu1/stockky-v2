@@ -119,6 +119,27 @@ class TestStreakBumpLogic:
         assert pos.consecutive_exit_failures == 1
         assert pos.last_exit_failure_at is not None
 
+    def test_db_commit_failure_is_caught_and_rolled_back(self, db, monkeypatch):
+        """If db.commit() blows up mid-bump, the function must not propagate —
+        it logs and rolls back instead (session-under-test survives)."""
+        pos = _make_position(db, consecutive_exit_failures=0)
+
+        def _boom():
+            raise RuntimeError("db is on fire")
+        monkeypatch.setattr(db, "commit", _boom)
+        rolled_back = {"called": False}
+        real_rollback = db.rollback
+        def _rollback():
+            rolled_back["called"] = True
+            return real_rollback()
+        monkeypatch.setattr(db, "rollback", _rollback)
+
+        from exit_engine.exit import _bump_exit_failure
+        # Should not raise despite commit() failing.
+        _bump_exit_failure(db, pos, "INVALID_IP_ERROR", is_persistent=True)
+
+        assert rolled_back["called"] is True
+
     def test_generic_error_below_threshold_does_not_bump(self, db, monkeypatch):
         """Generic (non-persistent) errors below ESCALATE_AT do NOT bump the streak."""
         import exit_engine.exit as ex

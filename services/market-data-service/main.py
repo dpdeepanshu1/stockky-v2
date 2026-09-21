@@ -400,9 +400,21 @@ async def _refresh_feed_universe_loop():
     if not gw:
         logger.warning("feed universe refresh: API_GATEWAY_URL not set, skipping")
         return
+    # 2026-09-21 fix: this loop used to `sleep(UNIVERSE_REFRESH_INTERVAL_S)` (15 min)
+    # BEFORE its first fetch. After every redeploy both WS feeds therefore sat on
+    # the boot-time default universe (a handful of mega-caps) for a full 15
+    # minutes, so live_quotes had no fresh row for the actual watchlist/candidate
+    # symbols and real-trade-service's quote path fell through to the slow
+    # per-symbol /quote route for all of them ("live_quotes ... stale" → source 2).
+    # First refresh now happens shortly after boot (giving api-gateway time to
+    # come up), retries quickly until it succeeds once, then settles into the
+    # normal cadence.
+    _initial_delay = float(os.getenv("FEED_UNIVERSE_INITIAL_DELAY_S", "20"))
+    _retry_delay = min(UNIVERSE_REFRESH_INTERVAL_S, float(os.getenv("FEED_UNIVERSE_RETRY_DELAY_S", "60")))
+    delay = _initial_delay
     async with httpx.AsyncClient(timeout=15.0) as client:
         while True:
-            await asyncio.sleep(UNIVERSE_REFRESH_INTERVAL_S)
+            await asyncio.sleep(delay)
             try:
                 r = await client.get(f"{gw}/scan/universe")
                 r.raise_for_status()
@@ -415,7 +427,9 @@ async def _refresh_feed_universe_loop():
                 logger.warning(
                     "feed universe refresh: fetch failed, keeping existing feed: %s", e
                 )
+                delay = _retry_delay
                 continue
+            delay = UNIVERSE_REFRESH_INTERVAL_S
 
             if not symbols or set(symbols) == set(_current_feed_universe):
                 continue
@@ -2508,6 +2522,39 @@ def _nse_history_candles(sym: str, period: str, interval: str, days: Optional[in
         return None
 
 
+# ── /history single-flight (2026-09-21) ─────────────────────────────────────
+# The cache check at the top of the history implementation and the fetch that
+# fills it are not atomic, so N concurrent requests for the SAME
+# (symbol, period, interval, days) — real-trade-service's per-symbol ATR
+# refresh, api-gateway, candidate analysis and position-stocks all ask for the
+# same 1mo/1d series in the same cycle — each missed the cache together and
+# each went upstream (AngelOne candles → yfinance), multiplying load on the
+# 1.5 req/s candle bucket and the 8-worker yfinance pool. Now only the first
+# request for a given key goes upstream; identical concurrent requests wait
+# (bounded) for it and are then served from the cache it just filled.
+_HISTORY_FLIGHT_WAIT_S = float(os.getenv("HISTORY_SINGLE_FLIGHT_WAIT_S", "20"))
+_history_flights: dict = {}
+_history_flights_guard = threading.Lock()
+
+
+def _history_flight_enter(key: str):
+    with _history_flights_guard:
+        entry = _history_flights.get(key)
+        if entry is None:
+            entry = _history_flights[key] = [threading.Lock(), 0]
+        entry[1] += 1
+    return entry
+
+
+def _history_flight_exit(key: str, entry, held: bool) -> None:
+    if held:
+        entry[0].release()
+    with _history_flights_guard:
+        entry[1] -= 1
+        if entry[1] <= 0 and _history_flights.get(key) is entry:
+            del _history_flights[key]
+
+
 @app.get("/history/{symbol}")
 def get_history(
     symbol: str,
@@ -2529,6 +2576,22 @@ def get_history(
         ),
     ),
 ):
+    # force=True is an explicit cache bypass — never coalesce those.
+    if force:
+        return _get_history_impl(symbol, period, interval, force, days)
+    key = f"{(symbol or '').upper()}|{period}|{interval}|{days or ''}"
+    entry = _history_flight_enter(key)
+    # Followers block here until the leader finishes (then hit the cache inside
+    # the impl). Bounded so a wedged leader can never wedge its followers: on
+    # timeout we simply proceed on our own, exactly as before this change.
+    held = entry[0].acquire(timeout=_HISTORY_FLIGHT_WAIT_S)
+    try:
+        return _get_history_impl(symbol, period, interval, force, days)
+    finally:
+        _history_flight_exit(key, entry, held)
+
+
+def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days: Optional[int]):
     # Cap long periods on free-tier 512MB dynos
     _period_rank = {"1mo": 1, "3mo": 2, "6mo": 3, "1y": 4, "2y": 5, "5y": 6}
     if _period_rank.get(period, 4) > _period_rank.get(MAX_HISTORY_PERIOD, 4):

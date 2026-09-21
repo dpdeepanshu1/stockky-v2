@@ -32,6 +32,7 @@ import asyncio
 import logging
 import os
 import threading as _threading
+import time as _time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -81,6 +82,42 @@ _ATR_CACHE: dict[str, float] = {}
 _ATR_LOCK = _threading.Lock()
 ATR_WINDOW = 14
 _ATR_HISTORY_PERIOD = os.getenv("FEED_ATR_HISTORY_PERIOD", "1mo")  # 14+ daily candles
+
+# ── 2026-09-21 fan-out controls (post-redeploy incident) ─────────────────────
+# get_quotes() used to gather() EVERY symbol at once over one default
+# httpx.AsyncClient (max 100 connections, and client.get(..., timeout=3.0) also
+# sets the pool-wait to 3s). A full-watchlist evaluation therefore queued
+# hundreds of requests on the client's own pool — the wall of `PoolTimeout`
+# lines in the logs is THIS process failing before it ever reached
+# market-data-service — and whatever did get through landed on market-data-
+# service as one synchronized burst (`ReadTimeout`/`ConnectTimeout` while it
+# was also busy warming up after a redeploy). Cap in-flight lookups per batch
+# and bound the batch's wall-clock so a slow upstream degrades to "partial
+# results, on time" instead of a stalled cycle.
+FEED_QUOTE_CONCURRENCY = max(1, int(os.getenv("FEED_QUOTE_CONCURRENCY", "32")))
+FEED_BATCH_DEADLINE_S = float(os.getenv("FEED_BATCH_DEADLINE_S", "45"))
+FEED_HTTP_MAX_CONNECTIONS = max(8, int(os.getenv("FEED_HTTP_MAX_CONNECTIONS", "64")))
+
+# ATR background refresh policy. Before: Source 2 fired a /history fetch on
+# EVERY call for EVERY symbol (even with a warm ATR — the ATR cache has no
+# expiry and is also persisted to the DB), i.e. one extra history request per
+# quote per cycle across the whole watchlist; on AngelOne's ~3 req/s candle
+# endpoint that is the 403 storm. Now: only when the ATR is missing or older
+# than the TTL, never twice concurrently for one symbol, at most N in flight
+# process-wide, and a failed attempt backs off instead of retrying next cycle.
+_ATR_REFRESH_TTL_S = float(os.getenv("FEED_ATR_REFRESH_TTL_S", str(6 * 3600)))
+_ATR_RETRY_BACKOFF_S = float(os.getenv("FEED_ATR_RETRY_BACKOFF_S", "300"))
+_ATR_MAX_INFLIGHT = max(1, int(os.getenv("FEED_ATR_MAX_INFLIGHT", "8")))
+_ATR_INFLIGHT_MAX_AGE_S = 30.0   # a slot older than this is presumed leaked (e.g. its loop was torn down)
+_ATR_STATE_LOCK = _threading.Lock()          # plain threading lock: state is touched from >1 event loop/thread
+_ATR_INFLIGHT: dict[str, float] = {}         # clean symbol -> monotonic start
+_ATR_LAST_TRY: dict[str, float] = {}         # clean symbol -> monotonic time of last attempt
+_ATR_LAST_OK: dict[str, float] = {}          # clean symbol -> monotonic time of last successful compute
+_BG_TASKS: set = set()                       # strong refs so fire-and-forget tasks aren't GC'd mid-flight
+
+
+def _clean_sym(symbol: str) -> str:
+    return (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
 
 
 def _compute_atr_from_candles(candles: list) -> Optional[float]:
@@ -225,23 +262,73 @@ def flush_atr_cache_to_db(db) -> None:
         logger.warning("flush_atr_cache_to_db failed (non-fatal): %s", e)
 
 
-async def _bg_refresh_atr(client: httpx.AsyncClient, symbol: str) -> None:
+async def _bg_refresh_atr(client: Optional[httpx.AsyncClient], symbol: str) -> None:
     """Background task: fetch 1mo/1d history, compute ATR, store in cache.
-    Non-blocking and non-raising — called with asyncio.create_task()."""
+    Non-blocking and non-raising — called via _schedule_atr_refresh().
+
+    `client` is accepted for backward compatibility but deliberately NOT used:
+    the batch client passed in by get_quote() is closed the moment its
+    get_quotes() gather returns, so a history call still in flight at that
+    point died with "client has been closed". The refresh owns a short-lived
+    client of its own instead, so its outcome no longer depends on how fast
+    the surrounding batch happened to finish."""
+    clean = _clean_sym(symbol)
+    ok = False
     try:
-        r = await client.get(
-            f"{MARKET_DATA_URL}/history/{symbol}",
-            params={"period": _ATR_HISTORY_PERIOD, "interval": "1d"},
-            timeout=8.0,
-        )
+        async with httpx.AsyncClient(timeout=8.0) as own:
+            r = await own.get(
+                f"{MARKET_DATA_URL}/history/{symbol}",
+                params={"period": _ATR_HISTORY_PERIOD, "interval": "1d"},
+                timeout=8.0,
+            )
         if r.status_code == 200:
             candles = (r.json() or {}).get("candles") or []
             atr = _compute_atr_from_candles(candles)
             if atr:
                 _store_atr(symbol, atr)
+                ok = True
                 logger.debug("ATR cache updated: %s → %.4f", symbol, atr)
     except Exception as e:
         logger.debug("_bg_refresh_atr(%s) failed (non-fatal): %s", symbol, e)
+    finally:
+        with _ATR_STATE_LOCK:
+            _ATR_INFLIGHT.pop(clean, None)
+            if ok:
+                _ATR_LAST_OK[clean] = _time.monotonic()
+
+
+def _schedule_atr_refresh(client: Optional[httpx.AsyncClient], symbol: str) -> bool:
+    """Fire a background ATR refresh for `symbol` only if one is actually
+    warranted (see the policy comment at the top of this module). Returns True
+    if a task was scheduled. Never blocks, never raises. Must be called from
+    a running event loop."""
+    clean = _clean_sym(symbol)
+    if not clean:
+        return False
+    now = _time.monotonic()
+    have_atr = _cached_atr(clean) is not None
+    with _ATR_STATE_LOCK:
+        for k in [k for k, t0 in _ATR_INFLIGHT.items() if now - t0 > _ATR_INFLIGHT_MAX_AGE_S]:
+            _ATR_INFLIGHT.pop(k, None)             # reclaim leaked slots
+        if clean in _ATR_INFLIGHT or len(_ATR_INFLIGHT) >= _ATR_MAX_INFLIGHT:
+            return False
+        last_ok = _ATR_LAST_OK.get(clean)
+        if have_atr and last_ok is not None and (now - last_ok) < _ATR_REFRESH_TTL_S:
+            return False                           # warm and recent — nothing to do
+        last_try = _ATR_LAST_TRY.get(clean)
+        if last_try is not None and (now - last_try) < _ATR_RETRY_BACKOFF_S and (last_ok is None or last_try > last_ok):
+            return False                           # recent failed attempt — back off
+        _ATR_INFLIGHT[clean] = now
+        _ATR_LAST_TRY[clean] = now
+    try:
+        task = asyncio.create_task(_bg_refresh_atr(client, symbol))
+    except RuntimeError:                           # no running loop
+        with _ATR_STATE_LOCK:
+            _ATR_INFLIGHT.pop(clean, None)
+        return False
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return True
 
 
 class Tick:
@@ -299,9 +386,10 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
                     # ATR fix: serve from cache; if cold, schedule a background
                     # refresh so the next evaluation cycle has a warm value.
                     atr = _cached_atr(symbol)
-                    if atr is None:
-                        # Fire-and-forget — doesn't delay this return at all.
-                        asyncio.create_task(_bg_refresh_atr(client, symbol))
+                    # Fire-and-forget — doesn't delay this return at all. The
+                    # scheduler itself decides whether a refresh is warranted
+                    # (cold / past TTL / not already in flight / not backing off).
+                    if _schedule_atr_refresh(client, symbol) and atr is None:
                         logger.debug(
                             "ATR cache cold for %s (AngelOne hit) — background refresh scheduled",
                             symbol,
@@ -321,23 +409,36 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
                         symbol, age_s, LIVE_QUOTE_MAX_AGE_S,
                     )
     except Exception as e:
-        logger.debug("live_quotes read failed for %s (non-fatal): %s", symbol, e)
+        # 2026-09-21 visibility fix: same silent-debug problem as
+        # candidate_engine.py's _fetch_quote — a genuine dashboard "No
+        # current price available" WAIT for nearly the whole watchlist
+        # gave zero log signal to explain why. Loud enough for a normal
+        # `docker compose logs` grep.
+        logger.warning("live_quotes read failed for %s (falling through to source 2): %s: %s", symbol, type(e).__name__, e)
 
     # ── Source 2: market-data-service /quote (yfinance-backed) ────────────────
     # Also fires a background ATR refresh (non-blocking) so the cache warms
     # concurrently with returning the price to the caller.
     try:
-        # Fire both requests concurrently: quote (needed now) + history for ATR
-        # (background, result stored in cache for this and future calls).
-        quote_task   = asyncio.create_task(
-            client.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=8.0)
-        )
-        asyncio.create_task(_bg_refresh_atr(client, symbol))
+        # The quote is needed now; the ATR refresh (background, result stored
+        # in cache for this and future calls) is only scheduled when the
+        # scheduler says one is warranted — it used to fire unconditionally
+        # here, i.e. one /history request per quote per cycle for every symbol.
+        _schedule_atr_refresh(client, symbol)
 
-        r = await quote_task
+        r = await client.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=8.0)
         # the ATR refresh task runs in the background; we don't await it here.
 
         if r.status_code != 200:
+            # 2026-09-21 visibility fix: this branch used to return None with
+            # zero log line at all — worse than the except below, since a
+            # non-200 (e.g. market-data-service 500/timeout-ish response)
+            # never even hit the except block. This is the path directly
+            # behind the dashboard's "No current price available" WAIT text.
+            logger.warning(
+                "get_quote(%s): market-data-service /quote returned %d — %s",
+                symbol, r.status_code, r.text[:200],
+            )
             return None
         q = r.json()
         price = q.get("price") or q.get("cmp")
@@ -373,7 +474,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
             day_low=float(_day_low)  if _day_low  else None,
         )
     except Exception as e:
-        logger.debug("get_quote(%s) source-2 failed: %s", symbol, e)
+        logger.warning("get_quote(%s): source-2 (market-data-service /quote) failed: %s: %s", symbol, type(e).__name__, e)
         return None
 
 
@@ -386,12 +487,44 @@ async def get_quotes(symbols: list[str]) -> dict[str, Tick]:
     out: dict[str, Tick] = {}
     if not symbols:
         return out
-    async with httpx.AsyncClient() as client:
-        results = await asyncio.gather(*[get_quote(client, s) for s in symbols])
+    results = await _bounded_gather(symbols, get_quote, "get_quotes")
     for sym, tick in zip(symbols, results):
         if tick is not None:
             out[sym] = tick
     return out
+
+
+async def _bounded_gather(symbols: list[str], fn, label: str) -> list:
+    """Run `fn(client, symbol)` for every symbol over one shared client with
+    (a) at most FEED_QUOTE_CONCURRENCY lookups in flight and (b) a wall-clock
+    deadline after which not-yet-started lookups are skipped (returned as
+    None) instead of being attempted. Results are returned in input order."""
+    sem = asyncio.Semaphore(FEED_QUOTE_CONCURRENCY)
+    deadline = _time.monotonic() + FEED_BATCH_DEADLINE_S
+    skipped = 0
+
+    limits = httpx.Limits(
+        max_connections=FEED_HTTP_MAX_CONNECTIONS,
+        max_keepalive_connections=max(4, FEED_HTTP_MAX_CONNECTIONS // 2),
+    )
+
+    async def _one(client: httpx.AsyncClient, sym: str):
+        nonlocal skipped
+        async with sem:
+            if _time.monotonic() > deadline:
+                skipped += 1
+                return None
+            return await fn(client, sym)
+
+    async with httpx.AsyncClient(limits=limits) as client:
+        results = await asyncio.gather(*[_one(client, s) for s in symbols])
+    if skipped:
+        logger.warning(
+            "%s: batch deadline of %.0fs hit — %d/%d symbol(s) were not attempted "
+            "(market-data-service slow or overloaded?)",
+            label, FEED_BATCH_DEADLINE_S, skipped, len(symbols),
+        )
+    return list(results)
 
 
 async def _get_preview(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
@@ -434,8 +567,7 @@ async def get_preview_quotes(symbols: list[str]) -> dict[str, Tick]:
     out: dict[str, Tick] = {}
     if not symbols:
         return out
-    async with httpx.AsyncClient() as client:
-        results = await asyncio.gather(*[_get_preview(client, s) for s in symbols])
+    results = await _bounded_gather(symbols, _get_preview, "get_preview_quotes")
     for sym, tick in zip(symbols, results):
         if tick is not None:
             out[sym] = tick

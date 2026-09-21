@@ -1,0 +1,41 @@
+# Offline unit tests for the two trading services. No secrets, no network, no broker:
+# every test runs against in-memory SQLite and scripted fakes (see each service's tests/).
+# A failure here means real order-placement / reconciliation / risk logic changed behaviour.
+name: Service unit tests
+
+on:
+  push:
+    branches: [main, backup-production]
+    paths:
+      - "services/position-stocks-service/**"
+      - "services/real-trade-service/**"
+      - ".github/workflows/service-tests.yml"
+  pull_request:
+    paths:
+      - "services/position-stocks-service/**"
+      - "services/real-trade-service/**"
+      - ".github/workflows/service-tests.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [position-stocks-service, real-trade-service]
+        python-version: ["3.11", "3.12"]   # 3.11 = the Dockerfiles, 3.12 = the Ubuntu VM
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: services/${{ matrix.service }}/requirements.txt
+      - name: Install
+        run: pip install -r requirements.txt pytest pytest-cov
+      - name: Unit tests
+        run: python -m pytest tests -q --cov=. --cov-report=term

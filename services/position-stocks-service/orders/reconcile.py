@@ -1015,6 +1015,9 @@ def run_exit_reconciliation(db: Session) -> int:
             if pos.entry_price else 0.0
         )
 
+        # eod_squareoff.py / close_position_now() already returned this position's capital_risked to the
+        # ledger when they PLACED the flat SELL; only the P&L is new. (Mirrors _resolve_pending_with_price.)
+        _capital_already_released = pos.status in _FLAT_SELL_PENDING_STATUSES
         pos.status = hit_kind
         pos.exit_price = exit_price
         pos.realized_pnl = realized_pnl
@@ -1024,7 +1027,11 @@ def run_exit_reconciliation(db: Session) -> int:
         pos.closed_at = datetime.now(timezone.utc)
         db.commit()
 
-        ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=realized_pnl)
+        ledger.release_capital(
+            db,
+            position_value=0.0 if _capital_already_released else pos.capital_risked,
+            realized_pnl=realized_pnl,
+        )
         # AUDIT FIX (session60): position is now fully flat — release this
         # service's cross-service symbol lock claim so the symbol becomes
         # buyable again by either service. See capital/shared_symbol_lock.py.

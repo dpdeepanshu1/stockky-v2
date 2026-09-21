@@ -392,232 +392,245 @@ async def reconcile_real_orders(db: Session) -> dict:
 
     for order in pending_orders:
         tally["checked"] += 1
-        if not order.dhan_order_id:
-            continue
-        broker_row = by_id.get(str(order.dhan_order_id))
-        if broker_row is None:
-            continue  # not visible yet — check again next cycle, never assume
+        _oid_for_log = order.dhan_order_id
+        try:
+            if not order.dhan_order_id:
+                continue
+            broker_row = by_id.get(str(order.dhan_order_id))
+            if broker_row is None:
+                continue  # not visible yet — check again next cycle, never assume
 
-        # 2026-09-15 fix (session40 — see dhan_client.place_order's
-        # docstring for the full DATAMATICS incident this complements).
-        # dhan_client.place_order already checks this once, right after
-        # placement — this is the durable, every-cycle version: for as
-        # long as an order stays PLACED/PARTIAL, re-verify on every
-        # reconcile pass that Dhan's own order_type/price for it still
-        # matches what this service's own record says it sent. Alerted
-        # once per order (dedup via the snapshot cache — a mismatch that
-        # persists across cycles must not re-alert every single pass).
-        broker_order_type = str(
-            _get(broker_row, "orderType", "order_type", default="")
-        ).upper()
-        broker_order_price = _get(broker_row, "price", default=None)
-        our_order_type = (order.order_type or "").upper()
-        # 2026-09-17 fix: Dhan echoes every MARKET order back in the order
-        # book as a "LIMIT" order carrying a computed protection price — this
-        # is standard NSE-equity broker behavior (a market order is
-        # implemented internally as a protected limit order), not a sign the
-        # order was placed differently than intended. It fires on every
-        # single market order, so treating it as a mismatch was a permanent
-        # false alarm that drowned out any real mismatch. Only alert when the
-        # broker's order type diverges in a way our own MARKET->LIMIT mapping
-        # doesn't already explain.
-        _is_expected_market_to_limit_echo = (
-            our_order_type == "MARKET" and broker_order_type == "LIMIT"
-        )
-        if (
-            broker_order_type
-            and broker_order_type != our_order_type
-            and not _is_expected_market_to_limit_echo
-        ):
-            _mismatch_key = f"ordertype_mismatch_alerted_order_{order.id}"
-            if not load_snapshot(db, _mismatch_key):
-                save_snapshot(db, _mismatch_key, {"alerted_at": str(datetime.now(timezone.utc))})
-                logger.critical(
-                    "reconcile: BROKER ORDER TYPE MISMATCH — order %s (%s %s, our record "
-                    "says order_type=%s) but Dhan's order book reports orderType=%s "
-                    "(price=%s). This order was placed differently than this service "
-                    "believes — investigate immediately.",
-                    order.dhan_order_id, order.side, order.symbol, order.order_type,
-                    broker_order_type, broker_order_price,
-                )
-                await notify_async(
-                    f"🚨 *Broker order-type mismatch* — {order.symbol} {order.side}\n"
-                    f"order {order.dhan_order_id}: we sent order_type={order.order_type}, "
-                    f"but Dhan's own order book reports orderType={broker_order_type} "
-                    f"(price={broker_order_price}).\n"
-                    f"This means an order is being placed differently than this service "
-                    f"believes — please investigate."
-                )
+            # 2026-09-15 fix (session40 — see dhan_client.place_order's
+            # docstring for the full DATAMATICS incident this complements).
+            # dhan_client.place_order already checks this once, right after
+            # placement — this is the durable, every-cycle version: for as
+            # long as an order stays PLACED/PARTIAL, re-verify on every
+            # reconcile pass that Dhan's own order_type/price for it still
+            # matches what this service's own record says it sent. Alerted
+            # once per order (dedup via the snapshot cache — a mismatch that
+            # persists across cycles must not re-alert every single pass).
+            broker_order_type = str(
+                _get(broker_row, "orderType", "order_type", default="")
+            ).upper()
+            broker_order_price = _get(broker_row, "price", default=None)
+            our_order_type = (order.order_type or "").upper()
+            # 2026-09-17 fix: Dhan echoes every MARKET order back in the order
+            # book as a "LIMIT" order carrying a computed protection price — this
+            # is standard NSE-equity broker behavior (a market order is
+            # implemented internally as a protected limit order), not a sign the
+            # order was placed differently than intended. It fires on every
+            # single market order, so treating it as a mismatch was a permanent
+            # false alarm that drowned out any real mismatch. Only alert when the
+            # broker's order type diverges in a way our own MARKET->LIMIT mapping
+            # doesn't already explain.
+            _is_expected_market_to_limit_echo = (
+                our_order_type == "MARKET" and broker_order_type == "LIMIT"
+            )
+            if (
+                broker_order_type
+                and broker_order_type != our_order_type
+                and not _is_expected_market_to_limit_echo
+            ):
+                _mismatch_key = f"ordertype_mismatch_alerted_order_{order.id}"
+                if not load_snapshot(db, _mismatch_key):
+                    save_snapshot(db, _mismatch_key, {"alerted_at": str(datetime.now(timezone.utc))})
+                    logger.critical(
+                        "reconcile: BROKER ORDER TYPE MISMATCH — order %s (%s %s, our record "
+                        "says order_type=%s) but Dhan's order book reports orderType=%s "
+                        "(price=%s). This order was placed differently than this service "
+                        "believes — investigate immediately.",
+                        order.dhan_order_id, order.side, order.symbol, order.order_type,
+                        broker_order_type, broker_order_price,
+                    )
+                    await notify_async(
+                        f"🚨 *Broker order-type mismatch* — {order.symbol} {order.side}\n"
+                        f"order {order.dhan_order_id}: we sent order_type={order.order_type}, "
+                        f"but Dhan's own order book reports orderType={broker_order_type} "
+                        f"(price={broker_order_price}).\n"
+                        f"This means an order is being placed differently than this service "
+                        f"believes — please investigate."
+                    )
 
-        status = str(_get(broker_row, "orderStatus", "order_status", default="")).upper()
+            status = str(_get(broker_row, "orderStatus", "order_status", default="")).upper()
 
-        # DIAGNOSTIC (2026-09-16, additive, no behavior change): capture Dhan's
-        # own rejection-reason text when the broker's order-book response
-        # includes it, so a REJECTED/CANCELLED order stops being a bare status
-        # string with no "why". Field names per Dhan's documented Postback
-        # payload schema (https://dhanhq.co/docs/v2/postback/), which uses the
-        # same order-object shape as the orderbook GET this module already
-        # polls: `omsErrorCode` / `omsErrorDescription`. Not independently
-        # reconfirmed that GET /orders echoes these two fields identically to
-        # the Postback payload — if they're absent here, `_get` just returns
-        # None like it does for any other missing field, so this is purely
-        # additive: it can only ADD information to the alert/log/event detail
-        # below, never change what already gets logged. Exactly the kind of
-        # data point needed to confirm/refute the DATAMATICS SDK MARKET→LIMIT
-        # theory and the emergency_gap_down retry-cause question the next
-        # time either recurs live.
-        rejection_reason = _get(broker_row, "omsErrorDescription", "omsErrorMessage", default=None)
-        rejection_code = _get(broker_row, "omsErrorCode", default=None)
+            # DIAGNOSTIC (2026-09-16, additive, no behavior change): capture Dhan's
+            # own rejection-reason text when the broker's order-book response
+            # includes it, so a REJECTED/CANCELLED order stops being a bare status
+            # string with no "why". Field names per Dhan's documented Postback
+            # payload schema (https://dhanhq.co/docs/v2/postback/), which uses the
+            # same order-object shape as the orderbook GET this module already
+            # polls: `omsErrorCode` / `omsErrorDescription`. Not independently
+            # reconfirmed that GET /orders echoes these two fields identically to
+            # the Postback payload — if they're absent here, `_get` just returns
+            # None like it does for any other missing field, so this is purely
+            # additive: it can only ADD information to the alert/log/event detail
+            # below, never change what already gets logged. Exactly the kind of
+            # data point needed to confirm/refute the DATAMATICS SDK MARKET→LIMIT
+            # theory and the emergency_gap_down retry-cause question the next
+            # time either recurs live.
+            rejection_reason = _get(broker_row, "omsErrorDescription", "omsErrorMessage", default=None)
+            rejection_code = _get(broker_row, "omsErrorCode", default=None)
 
-        # filledQty is Dhan v2 GET /orders' actual field name (confirmed against
-        # DhanHQ v2 docs/release notes: "filledQty, remainingQuantity and
-        # averageTradedPrice is available as part of all GET Order APIs").
-        # tradedQuantity/traded_quantity — the ONLY keys previously checked here
-        # — belong to a different endpoint (v2/trades tradebook, and the old v1
-        # orders API), so they never appear on this orderbook response and
-        # fill_qty was always None. See this module's docstring update for the
-        # full filledQty incident writeup.
-        #
-        # NOTE on precision: fill_price below is the broker's CUMULATIVE
-        # average price for the whole order to date, not the average price
-        # of just this delta — Dhan's v2 orderbook doesn't expose a
-        # per-poll incremental price, only the tradebook (v2/trades) does,
-        # and pulling that in is a bigger change than this fix (flagged as
-        # out of scope in the filledQty incident entry). Using the
-        # cumulative average as a stand-in for the increment's price is a
-        # small, known approximation — it converges to the exact figure
-        # once the order finishes, and is materially closer than not
-        # booking the partial fill at all.
-        fill_price = _get(broker_row, "averageTradedPrice", "average_traded_price", "tradedPrice", default=None)
-        fill_qty_cumulative = _get(broker_row, "filledQty", "filled_qty", "tradedQuantity", "traded_quantity", default=None)
-        if fill_qty_cumulative is None:
-            # Cross-check: quantity - remainingQuantity gives the same number
-            # via a second, independent field pair, in case a future SDK/API
-            # version ever renames filledQty again.
-            qty_total = _get(broker_row, "quantity", "qty", default=None)
-            qty_remaining = _get(broker_row, "remainingQuantity", "remaining_quantity", default=None)
-            if qty_total is not None and qty_remaining is not None:
+            # filledQty is Dhan v2 GET /orders' actual field name (confirmed against
+            # DhanHQ v2 docs/release notes: "filledQty, remainingQuantity and
+            # averageTradedPrice is available as part of all GET Order APIs").
+            # tradedQuantity/traded_quantity — the ONLY keys previously checked here
+            # — belong to a different endpoint (v2/trades tradebook, and the old v1
+            # orders API), so they never appear on this orderbook response and
+            # fill_qty was always None. See this module's docstring update for the
+            # full filledQty incident writeup.
+            #
+            # NOTE on precision: fill_price below is the broker's CUMULATIVE
+            # average price for the whole order to date, not the average price
+            # of just this delta — Dhan's v2 orderbook doesn't expose a
+            # per-poll incremental price, only the tradebook (v2/trades) does,
+            # and pulling that in is a bigger change than this fix (flagged as
+            # out of scope in the filledQty incident entry). Using the
+            # cumulative average as a stand-in for the increment's price is a
+            # small, known approximation — it converges to the exact figure
+            # once the order finishes, and is materially closer than not
+            # booking the partial fill at all.
+            fill_price = _get(broker_row, "averageTradedPrice", "average_traded_price", "tradedPrice", default=None)
+            fill_qty_cumulative = _get(broker_row, "filledQty", "filled_qty", "tradedQuantity", "traded_quantity", default=None)
+            if fill_qty_cumulative is None:
+                # Cross-check: quantity - remainingQuantity gives the same number
+                # via a second, independent field pair, in case a future SDK/API
+                # version ever renames filledQty again.
+                qty_total = _get(broker_row, "quantity", "qty", default=None)
+                qty_remaining = _get(broker_row, "remainingQuantity", "remaining_quantity", default=None)
+                if qty_total is not None and qty_remaining is not None:
+                    try:
+                        fill_qty_cumulative = int(qty_total) - int(qty_remaining)
+                    except (TypeError, ValueError):
+                        fill_qty_cumulative = None
+
+            already_booked = order.filled_qty_so_far or 0
+            delta_qty = None
+            if fill_qty_cumulative is not None:
                 try:
-                    fill_qty_cumulative = int(qty_total) - int(qty_remaining)
+                    delta_qty = int(fill_qty_cumulative) - already_booked
                 except (TypeError, ValueError):
-                    fill_qty_cumulative = None
+                    delta_qty = None
 
-        already_booked = order.filled_qty_so_far or 0
-        delta_qty = None
-        if fill_qty_cumulative is not None:
-            try:
-                delta_qty = int(fill_qty_cumulative) - already_booked
-            except (TypeError, ValueError):
-                delta_qty = None
-
-        if status in _DEAD_STATUSES:
-            # A partial fill can be followed by the REMAINDER being
-            # rejected/cancelled (e.g. a day order Dhan auto-cancels at
-            # close after only some of it traded) — those already-executed
-            # shares are real fills that happened at the broker and must
-            # be booked before the order is marked dead, or they'd
-            # silently disappear from this system's own books while still
-            # sitting in the actual Dhan account/position.
-            if delta_qty and delta_qty > 0 and fill_price is not None:
-                await _book_fill_delta(db, order, float(fill_price), delta_qty, is_partial=True)
-                tally["partial_fills"] += 1
-            elif order.side == "SELL":
-                # BUG FIX (2026-09-04, see _repair_orphaned_pending_exits'
-                # docstring for the full incident): a SELL that dies with
-                # ZERO fill must not leave its position stuck at
-                # PENDING_EXIT — fix it the moment we learn the order is
-                # dead, in this same cycle, rather than waiting for the
-                # repair pass to catch it as an orphan next time.
-                dead_position = db.query(models.TradePosition).filter_by(
-                    mode="REAL", symbol=order.symbol, status="PENDING_EXIT"
-                ).first()
-                if dead_position is None:
-                    # Partial exits never set PENDING_EXIT — same
-                    # OPEN/PARTIALLY_CLOSED lookup as _book_fill_delta's
-                    # SELL branch above, so a dead zero-fill SELL against
-                    # the remainder of an already-partially-exited
-                    # position still gets its failure streak tracked below.
-                    dead_position = db.query(models.TradePosition).filter(
-                        models.TradePosition.mode == "REAL",
-                        models.TradePosition.symbol == order.symbol,
-                        models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")),
+            if status in _DEAD_STATUSES:
+                # A partial fill can be followed by the REMAINDER being
+                # rejected/cancelled (e.g. a day order Dhan auto-cancels at
+                # close after only some of it traded) — those already-executed
+                # shares are real fills that happened at the broker and must
+                # be booked before the order is marked dead, or they'd
+                # silently disappear from this system's own books while still
+                # sitting in the actual Dhan account/position.
+                if delta_qty and delta_qty > 0 and fill_price is not None:
+                    await _book_fill_delta(db, order, float(fill_price), delta_qty, is_partial=True)
+                    tally["partial_fills"] += 1
+                elif order.side == "SELL":
+                    # BUG FIX (2026-09-04, see _repair_orphaned_pending_exits'
+                    # docstring for the full incident): a SELL that dies with
+                    # ZERO fill must not leave its position stuck at
+                    # PENDING_EXIT — fix it the moment we learn the order is
+                    # dead, in this same cycle, rather than waiting for the
+                    # repair pass to catch it as an orphan next time.
+                    dead_position = db.query(models.TradePosition).filter_by(
+                        mode="REAL", symbol=order.symbol, status="PENDING_EXIT"
                     ).first()
-                if dead_position is not None:
-                    _restore_orphaned_position(
-                        db, dead_position,
-                        f"SELL order {order.dhan_order_id} came back {status.lower()} with zero fill",
-                    )
-                    tally["positions_unstuck"] += 1
-                    await _track_exit_failure_and_maybe_alert(
-                        db, dead_position, order, status,
-                        rejection_reason=rejection_reason, rejection_code=rejection_code,
-                    )
-            dead_status = "REJECTED" if status == "REJECTED" else "CANCELLED"
-            order.status = dead_status
-            # BUG FIX (2026-09-18, user-reported: a manually-placed BUY on a
-            # T2T/ASM-restricted symbol — e.g. product_type=INTRADAY — got
-            # rejected with Dhan's own "not allowed to be traded in
-            # Intraday" message, but the symbol was never learned into
-            # intraday_eligibility.py's restricted-symbol list, because
-            # record_restriction() was only ever called from exit_engine.py
-            # (the SELL side, which sees the live exception synchronously).
-            # A REJECTED BUY only surfaces here, via reconcile polling the
-            # broker order book, so this was the missing call site for
-            # buy-side rejections. Applies to any dead order regardless of
-            # side — a SELL rejected for this reason gets learned here too,
-            # as a harmless duplicate of exit_engine's own recording (same
-            # idempotent upsert, see record_restriction's docstring).
-            # Best-effort: must never block the dead-order bookkeeping below.
-            if dhan_client.is_security_intraday_restricted_error(rejection_reason or ""):
-                try:
-                    from intraday_eligibility import record_restriction
-                    record_restriction(db, order.symbol, rejection_reason)
-                except Exception as _rie:
-                    logger.warning(
-                        "reconcile: failed to record intraday restriction for %s (%s) — "
-                        "continuing with dead-order bookkeeping anyway.",
-                        order.symbol, _rie,
-                    )
-            note = f" (after {order.filled_qty_so_far} of {order.qty} already filled)" if order.filled_qty_so_far else ""
-            # DIAGNOSTIC (2026-09-16): append Dhan's own rejection reason/code
-            # when present, additive only — see the capture point above.
-            reason_note = f" — {rejection_reason}" if rejection_reason else ""
-            code_note = f" [{rejection_code}]" if rejection_code else ""
-            db.add(models.TradeOrderEvent(order_id=order.id, event_type=dead_status,
-                                           detail=f"Broker reported {status}{note}{reason_note}{code_note}"))
-            db.commit()
-            tally["dead_orders"] += 1
-            continue
-
-        is_partial_status = status in _PARTIAL_STATUSES
-        is_complete_status = status in _FILLED_STATUSES
-        if not (is_partial_status or is_complete_status):
-            continue  # still pending at the broker, nothing confirmed yet
-
-        if fill_price is None or fill_qty_cumulative is None:
-            logger.warning("reconcile: order %s reports %s but no fill price/qty — leaving as-is.",
-                            order.dhan_order_id, status)
-            continue
-
-        if delta_qty is None or delta_qty <= 0:
-            # Nothing NEW to book this pass (e.g. still PART_TRADED at the
-            # same cumulative qty as last cycle) — but if the broker has
-            # since moved it to a terminal filled status, finalize the
-            # order status even though there's no new qty to add. Also
-            # guards against a broker-side qty going backwards somehow
-            # (delta_qty < 0) being booked as a negative fill.
-            if is_complete_status and order.status != "FILLED":
-                order.status = "FILLED"
+                    if dead_position is None:
+                        # Partial exits never set PENDING_EXIT — same
+                        # OPEN/PARTIALLY_CLOSED lookup as _book_fill_delta's
+                        # SELL branch above, so a dead zero-fill SELL against
+                        # the remainder of an already-partially-exited
+                        # position still gets its failure streak tracked below.
+                        dead_position = db.query(models.TradePosition).filter(
+                            models.TradePosition.mode == "REAL",
+                            models.TradePosition.symbol == order.symbol,
+                            models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")),
+                        ).first()
+                    if dead_position is not None:
+                        _restore_orphaned_position(
+                            db, dead_position,
+                            f"SELL order {order.dhan_order_id} came back {status.lower()} with zero fill",
+                        )
+                        tally["positions_unstuck"] += 1
+                        await _track_exit_failure_and_maybe_alert(
+                            db, dead_position, order, status,
+                            rejection_reason=rejection_reason, rejection_code=rejection_code,
+                        )
+                dead_status = "REJECTED" if status == "REJECTED" else "CANCELLED"
+                order.status = dead_status
+                # BUG FIX (2026-09-18, user-reported: a manually-placed BUY on a
+                # T2T/ASM-restricted symbol — e.g. product_type=INTRADAY — got
+                # rejected with Dhan's own "not allowed to be traded in
+                # Intraday" message, but the symbol was never learned into
+                # intraday_eligibility.py's restricted-symbol list, because
+                # record_restriction() was only ever called from exit_engine.py
+                # (the SELL side, which sees the live exception synchronously).
+                # A REJECTED BUY only surfaces here, via reconcile polling the
+                # broker order book, so this was the missing call site for
+                # buy-side rejections. Applies to any dead order regardless of
+                # side — a SELL rejected for this reason gets learned here too,
+                # as a harmless duplicate of exit_engine's own recording (same
+                # idempotent upsert, see record_restriction's docstring).
+                # Best-effort: must never block the dead-order bookkeeping below.
+                if dhan_client.is_security_intraday_restricted_error(rejection_reason or ""):
+                    try:
+                        from intraday_eligibility import record_restriction
+                        record_restriction(db, order.symbol, rejection_reason)
+                    except Exception as _rie:
+                        logger.warning(
+                            "reconcile: failed to record intraday restriction for %s (%s) — "
+                            "continuing with dead-order bookkeeping anyway.",
+                            order.symbol, _rie,
+                        )
+                note = f" (after {order.filled_qty_so_far} of {order.qty} already filled)" if order.filled_qty_so_far else ""
+                # DIAGNOSTIC (2026-09-16): append Dhan's own rejection reason/code
+                # when present, additive only — see the capture point above.
+                reason_note = f" — {rejection_reason}" if rejection_reason else ""
+                code_note = f" [{rejection_code}]" if rejection_code else ""
+                db.add(models.TradeOrderEvent(order_id=order.id, event_type=dead_status,
+                                               detail=f"Broker reported {status}{note}{reason_note}{code_note}"))
                 db.commit()
-            continue
+                tally["dead_orders"] += 1
+                continue
 
-        await _book_fill_delta(db, order, float(fill_price), delta_qty, is_partial=is_partial_status)
-        if is_partial_status:
-            tally["partial_fills"] += 1
-        elif order.side == "BUY":
-            tally["entries_filled"] += 1
-        else:
-            tally["exits_confirmed"] += 1
+            is_partial_status = status in _PARTIAL_STATUSES
+            is_complete_status = status in _FILLED_STATUSES
+            if not (is_partial_status or is_complete_status):
+                continue  # still pending at the broker, nothing confirmed yet
+
+            if fill_price is None or fill_qty_cumulative is None:
+                logger.warning("reconcile: order %s reports %s but no fill price/qty — leaving as-is.",
+                                order.dhan_order_id, status)
+                continue
+
+            if delta_qty is None or delta_qty <= 0:
+                # Nothing NEW to book this pass (e.g. still PART_TRADED at the
+                # same cumulative qty as last cycle) — but if the broker has
+                # since moved it to a terminal filled status, finalize the
+                # order status even though there's no new qty to add. Also
+                # guards against a broker-side qty going backwards somehow
+                # (delta_qty < 0) being booked as a negative fill.
+                if is_complete_status and order.status != "FILLED":
+                    order.status = "FILLED"
+                    db.commit()
+                continue
+
+            await _book_fill_delta(db, order, float(fill_price), delta_qty, is_partial=is_partial_status)
+            if is_partial_status:
+                tally["partial_fills"] += 1
+            elif order.side == "BUY":
+                tally["entries_filled"] += 1
+            else:
+                tally["exits_confirmed"] += 1
+        except Exception as exc:  # noqa: BLE001 — one poisoned order must never block the rest of the queue
+            # AUDIT FIX: an exception here used to escape the whole pass — the caller only logged
+            # "self-heal failed", never marked the reconcile done, and the same order failed again at the
+            # same point every cycle, so every order queued behind it (incl. SELL confirmations) was
+            # never reconciled. Roll back this order's partial writes, count it, and keep going.
+            db.rollback()
+            tally["errors"] += 1
+            logger.error(
+                "reconcile: order %s (dhan id %s) failed — skipped this cycle, will retry next: %s",
+                getattr(order, "id", "?"), _oid_for_log, exc, exc_info=True,
+            )
 
     _log_duration("completed")
     return tally

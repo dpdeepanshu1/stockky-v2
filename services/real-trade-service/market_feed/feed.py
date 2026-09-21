@@ -321,7 +321,12 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
                         symbol, age_s, LIVE_QUOTE_MAX_AGE_S,
                     )
     except Exception as e:
-        logger.debug("live_quotes read failed for %s (non-fatal): %s", symbol, e)
+        # 2026-09-21 visibility fix: same silent-debug problem as
+        # candidate_engine.py's _fetch_quote — a genuine dashboard "No
+        # current price available" WAIT for nearly the whole watchlist
+        # gave zero log signal to explain why. Loud enough for a normal
+        # `docker compose logs` grep.
+        logger.warning("live_quotes read failed for %s (falling through to source 2): %s: %s", symbol, type(e).__name__, e)
 
     # ── Source 2: market-data-service /quote (yfinance-backed) ────────────────
     # Also fires a background ATR refresh (non-blocking) so the cache warms
@@ -338,6 +343,15 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
         # the ATR refresh task runs in the background; we don't await it here.
 
         if r.status_code != 200:
+            # 2026-09-21 visibility fix: this branch used to return None with
+            # zero log line at all — worse than the except below, since a
+            # non-200 (e.g. market-data-service 500/timeout-ish response)
+            # never even hit the except block. This is the path directly
+            # behind the dashboard's "No current price available" WAIT text.
+            logger.warning(
+                "get_quote(%s): market-data-service /quote returned %d — %s",
+                symbol, r.status_code, r.text[:200],
+            )
             return None
         q = r.json()
         price = q.get("price") or q.get("cmp")
@@ -373,7 +387,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
             day_low=float(_day_low)  if _day_low  else None,
         )
     except Exception as e:
-        logger.debug("get_quote(%s) source-2 failed: %s", symbol, e)
+        logger.warning("get_quote(%s): source-2 (market-data-service /quote) failed: %s: %s", symbol, type(e).__name__, e)
         return None
 
 

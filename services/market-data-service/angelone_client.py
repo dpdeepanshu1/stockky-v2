@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading as _threading
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -159,7 +160,34 @@ _CANDLE_MAX_WAIT_S = float(os.environ.get("ANGELONE_CANDLE_MAX_WAIT_S", "15"))
 
 
 class AngelOneSession:
-    """TOTP-authenticated AngelOne SmartAPI session. Thread-safe for async use."""
+    """TOTP-authenticated AngelOne SmartAPI session. Thread-safe for async use.
+
+    2026-09-21 fix ("is bound to a different event loop" crash, seen in
+    market-data-service logs as `ERROR:angelone-ws-feed:AngelOne feed
+    error: <asyncio.locks.Lock object ...> is bound to a different event
+    loop`): this session is a module-level singleton (see `_session`
+    below) that's called from TWO different event loops in the same
+    process — the main uvicorn loop (every FastAPI request handler that
+    calls ensure_session()/get_quote()/etc, e.g. main.py) AND
+    angelone_ws_feed.py's dedicated background thread, which spins up its
+    own `asyncio.new_event_loop()` and calls `session.ensure_session()`
+    on it. A single `asyncio.Lock()` instance lazily binds to whichever
+    loop first calls `.acquire()` on it (Python 3.10+ behavior) — every
+    subsequent `await` from the OTHER loop then raises exactly that
+    RuntimeError. This crashed the ws-feed thread's poll loop every time
+    a token refresh happened to be needed while a request was also being
+    served on the main loop (or vice versa).
+
+    Fix: keep one asyncio.Lock PER event loop instead of one shared lock.
+    `_get_lock()` looks up (or lazily creates) the lock for whichever
+    loop is currently running, keyed by the loop object itself. The
+    lookup dict is mutated from multiple threads, so that mutation is
+    guarded by a plain `threading.Lock` (cheap — held only for a
+    dict get/set, never across an `await`). This trades a theoretical,
+    harmless race (both loops independently decide a refresh is needed
+    at the exact same instant and both call `_login()`) for correctness
+    — far better than the guaranteed crash the shared-lock version had.
+    """
 
     def __init__(self) -> None:
         self.client_id   = os.environ.get("ANGELONE_CLIENT_ID", "")
@@ -169,14 +197,24 @@ class AngelOneSession:
         self.token:        Optional[str]      = None
         self.feed_token:   Optional[str]      = None
         self.token_expiry: Optional[datetime] = None
-        self._lock = asyncio.Lock()
+        self._locks: dict = {}                       # event loop -> asyncio.Lock
+        self._locks_guard = _threading.Lock()         # guards self._locks only
+
+    def _get_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        with self._locks_guard:
+            lock = self._locks.get(loop)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._locks[loop] = lock
+        return lock
 
     def is_configured(self) -> bool:
         return bool(self.client_id and self.mpin and self.api_key and self.totp_secret)
 
     async def ensure_session(self) -> None:
         """Refresh session if expired or missing. Thread-safe via lock."""
-        async with self._lock:
+        async with self._get_lock():
             if (
                 self.token
                 and self.token_expiry

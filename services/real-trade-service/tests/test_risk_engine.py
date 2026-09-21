@@ -25,10 +25,7 @@ Layout:
   - TestStaleData             check #8
   - TestAbnormalVolatility    check #9
   - TestSellSideBypass        exits must not be blocked by entry-only checks
-  - TestKnownGaps             strict xfails: things the engine SHOULD veto but
-                              currently approves. They flip to a hard failure
-                              (XPASS) the moment the engine is fixed, so remove
-                              the marker then.
+  - TestInvalidOrderGeometry  qty<=0 / stop>=entry BUYs — approved before the 2026-09-21 audit fix
 
 Run from services/real-trade-service:
     python3 -m pytest tests/test_risk_engine.py -q \
@@ -366,13 +363,12 @@ class TestPerTradeRisk:
         intent = make_intent(entry_price=25.0, stop_price=24.0, qty=10, adj_risk_pct=0.0)
         assert_rejected(run(intent), "per_trade_risk_cap")
 
-    def test_stop_equals_entry_branch_only_reachable_with_negative_equity(self):
-        # Documents the one way the "Stop price equals entry price" branch
-        # fires today: order_risk (0) > max_trade_risk requires a negative budget.
-        acct = make_account(equity=-1_000.0)
-        res = run(make_intent(entry_price=100.0, stop_price=100.0), acct)
-        assert_rejected(res, "per_trade_risk_cap")
-        assert "equals entry" in res.reason
+    def test_stop_equal_to_entry_is_rejected_before_sizing(self):
+        # Since the audit fix the geometry check (4c) runs first, so this is now "invalid_order".
+        # (The old "Stop price equals entry" branch inside check 5 is unreachable defence-in-depth.)
+        for equity in (100_000.0, -1_000.0):
+            res = run(make_intent(entry_price=100.0, stop_price=100.0), make_account(equity=equity))
+            assert_rejected(res, "invalid_order")
 
 
 # ── #5b cash cap ─────────────────────────────────────────────────────────────
@@ -620,34 +616,31 @@ def test_verdict_enum_values_are_stable():
 
 # ── Known gaps (strict xfail) ────────────────────────────────────────────────
 
-class TestKnownGaps:
-    """The engine calls itself the "absolute veto authority", but it takes
-    entry_price/stop_price/qty on trust: manual_engine.py validates them first
-    (qty > 0, stop < entry), and entry_engine derives the stop from a % so it
-    is always below entry — so live order flow is currently protected UPSTREAM.
-    Anything that calls evaluate() directly (the admin POST /risk-engine/check
-    endpoint, a future caller) gets no such protection.
+class TestInvalidOrderGeometry:
+    """Found by the 2026-09-21 audit: evaluate() used to APPROVE a BUY with qty <= 0 or a stop at/above
+    entry (abs() hid the sign). entry_engine and manual_engine validate upstream, but the admin
+    /risk-engine/check endpoint and any future caller had no such protection."""
 
-    Each test states the CORRECT behaviour and is xfail(strict=True): it passes
-    as an expected failure today, and turns red (XPASS) as soon as the engine
-    is fixed — at which point delete the marker."""
+    def test_buy_with_stop_above_entry_is_rejected(self):
+        assert_rejected(run(make_intent(entry_price=100.0, stop_price=105.0)), "invalid_order")
 
-    @pytest.mark.xfail(strict=True, reason="BUY with stop ABOVE entry is approved: risk uses abs()")
-    def test_buy_with_stop_above_entry_should_be_rejected(self):
-        res = run(make_intent(entry_price=100.0, stop_price=105.0))
-        assert res.verdict != RiskVerdict.APPROVED
+    def test_buy_with_stop_equal_to_entry_is_rejected(self):
+        assert_rejected(run(make_intent(entry_price=100.0, stop_price=100.0)), "invalid_order")
 
-    @pytest.mark.xfail(strict=True, reason="BUY with stop == entry is approved (zero risk distance)")
-    def test_buy_with_stop_equal_to_entry_should_be_rejected(self):
-        res = run(make_intent(entry_price=100.0, stop_price=100.0))
-        assert res.verdict != RiskVerdict.APPROVED
+    @pytest.mark.parametrize("qty", [0, -1, -10])
+    def test_buy_with_non_positive_qty_is_rejected(self, qty):
+        res = run(make_intent(qty=qty))
+        assert_rejected(res, "invalid_order")
+        assert "positive integer" in res.reason
 
-    @pytest.mark.xfail(strict=True, reason="qty=0 BUY is approved with approved_qty=0")
-    def test_zero_qty_buy_should_be_rejected(self):
-        res = run(make_intent(qty=0))
-        assert res.verdict != RiskVerdict.APPROVED
+    def test_quantity_is_reported_before_the_stop(self):
+        assert "positive integer" in run(make_intent(qty=0, stop_price=105.0)).reason
 
-    @pytest.mark.xfail(strict=True, reason="negative qty BUY is approved")
-    def test_negative_qty_buy_should_be_rejected(self):
-        res = run(make_intent(qty=-10))
-        assert res.verdict != RiskVerdict.APPROVED
+    def test_sell_is_never_blocked_by_the_geometry_check(self):
+        assert_approved(run(make_intent(side="SELL", stop_price=105.0, qty=5)), 5)
+
+    def test_price_floor_still_wins_over_the_geometry_check(self):
+        assert_rejected(run(make_intent(entry_price=0.0, stop_price=0.0, qty=1)), "min_price_floor")
+
+    def test_a_valid_buy_is_unaffected(self):
+        assert_approved(run(make_intent(entry_price=100.0, stop_price=99.99, qty=1)), 1)

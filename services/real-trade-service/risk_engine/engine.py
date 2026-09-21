@@ -319,6 +319,23 @@ def evaluate(
                 "Illiquid — exit may not fill at a reasonable price.",
             )
 
+    # ── 4c. Sane BUY geometry (audit fix) ─────────────────────────────────────
+    # evaluate() used to take qty / stop on trust: a BUY with qty <= 0, or a stop at/above the entry
+    # price, sailed through (abs() hid the sign) and was APPROVED. entry_engine and manual_engine
+    # already validate these upstream; this makes the "absolute veto authority" true for every
+    # caller, including the admin POST /risk-engine/check endpoint.
+    if intent.side == "BUY":
+        if intent.qty <= 0:
+            return RiskResult(
+                RiskVerdict.REJECTED, "invalid_order",
+                f"Quantity must be a positive integer (got {intent.qty}).",
+            )
+        if intent.stop_price >= intent.entry_price:
+            return RiskResult(
+                RiskVerdict.REJECTED, "invalid_order",
+                f"Stop ₹{intent.stop_price:.2f} must be below entry ₹{intent.entry_price:.2f} for a BUY.",
+            )
+
     # ── 5. Per-trade risk cap — downsize before reject ────────────────────────
     # 2026-09-01 fix: use intent.adj_risk_pct (entry_engine's conviction-
     # adjusted %) when the caller supplied one, instead of always falling

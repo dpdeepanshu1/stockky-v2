@@ -119,7 +119,7 @@ else
     scenario "stop_below_entry_sell" '{"mode":"DEMO","symbol":"RELIANCE","side":"SELL","qty":1,"entry_price":2900,"stop_price":2850}'
     scenario "zero_price"        '{"mode":"DEMO","symbol":"RELIANCE","side":"BUY","qty":1,"entry_price":0,"stop_price":0}'
     scenario "tight_stop"        '{"mode":"DEMO","symbol":"RELIANCE","side":"BUY","qty":1,"entry_price":2900,"stop_price":2898}'
-    echo "  -> Read each risk_*.json and check the 'allowed'/'rejection_reason' field"
+    echo "  -> Read each risk_*.json and check the verdict / check_name / reason fields (every scenario showing market_closed just means the market was shut - re-run Mon-Fri 09:15-15:30 IST)"
     echo "     matches what SHOULD happen for that scenario. This is the real test."
 
     curl -s -X POST -H "Content-Type: application/json" "${AUTH[@]}" \
@@ -163,6 +163,6 @@ echo
 echo "What to actually look at, in order of value:"
 echo "  1. $OUT/coverage/*.log — any pytest FAILED line = a real bug"
 echo "  2. $OUT/coverage/*-html/index.html — red lines = calculation code no test ever runs"
-echo "  3. $OUT/demo_scenarios/risk_*.json — does each 'allowed'/'rejection_reason' make sense?"
+echo "  3. $OUT/demo_scenarios/risk_*.json — does each verdict / check_name / reason make sense? (market_closed on a weekend = re-run in market hours)"
 echo "  4. $OUT/real_diagnostics/*.json — anything unexpected in a live number (ledger drift,"
 echo "     a candidate stuck in candidates/restricted that shouldn't be, reconcile/pending non-empty)"

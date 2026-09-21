@@ -305,6 +305,12 @@ def attempt_entry(
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", f"SECURITY_NOT_FOUND:{e}", quality=quality)
         return None
+    except Exception:
+        # Any other lookup failure (Dhan not connected, scrip-master download error, ...) must not
+        # leave the ledger reservation and the cross-service symbol lock held forever.
+        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+        shared_symbol_lock.release(db, candidate.symbol)
+        raise
 
     # Quantity
     raw_qty = int(position_value / candidate.current_ltp)
@@ -367,6 +373,7 @@ def attempt_entry(
 
     # Place the order
     dhan_super_order_id = None
+    plain_order_id = None
     error_msg = None
     try:
         if config.USE_SUPER_ORDER:
@@ -400,6 +407,7 @@ def attempt_entry(
                 product_type=config.SCALP_PRODUCT_TYPE,
                 tag="SCALP",
             )
+            plain_order_id = str((result or {}).get("orderId") or (result or {}).get("id") or "") or None
     except Exception as e:
         error_msg = str(e)
         # AUDIT FIX (2026-09-15): classify the BUY-side rejection too — if
@@ -455,7 +463,6 @@ def attempt_entry(
             )
             ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
             try:
-                from screening import intraday_eligibility
                 intraday_eligibility.record_restriction(db, candidate.symbol)
                 logger.info(
                     "position-stocks entry: %s added to intraday-restricted set (circuit limit)",
@@ -518,7 +525,7 @@ def attempt_entry(
         # orderId of a super order IS the ENTRY_LEG's order id — there is
         # no separate id Dhan issues for it — so it's set equal to
         # dhan_super_order_id here rather than left to default to NULL.
-        dhan_entry_order_id=dhan_super_order_id,
+        dhan_entry_order_id=dhan_super_order_id or plain_order_id,
         capital_risked=position_value,
         is_first_live_order=is_first,
         opened_at=datetime.now(timezone.utc),
@@ -687,6 +694,7 @@ def attempt_manual_entry(
 
     if quantity is not None:
         if quantity <= 0:
+            shared_symbol_lock.release(db, symbol)
             raise ManualEntryRejected("quantity must be a positive integer.")
         exact_cost = quantity * current_ltp
         if not ledger.reserve_additional(db, exact_cost):
@@ -719,6 +727,10 @@ def attempt_manual_entry(
         ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
         shared_symbol_lock.release(db, symbol)
         raise ManualEntryRejected(f"Could not resolve a Dhan security id for {symbol}: {e}")
+    except Exception:
+        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+        shared_symbol_lock.release(db, symbol)
+        raise
 
     if not shared_order_budget.check_and_reserve(db):
         ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
@@ -727,6 +739,7 @@ def attempt_manual_entry(
 
     is_first = not gate.first_live_order_done
     dhan_super_order_id = None
+    plain_order_id = None
     try:
         if config.USE_SUPER_ORDER:
             result = dhan_client.place_super_order(
@@ -758,6 +771,7 @@ def attempt_manual_entry(
                 product_type=config.SCALP_PRODUCT_TYPE,
                 tag="MANUAL",
             )
+            plain_order_id = str((result or {}).get("orderId") or (result or {}).get("id") or "") or None
     except Exception as e:
         ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
         shared_symbol_lock.release(db, symbol)
@@ -792,7 +806,7 @@ def attempt_manual_entry(
         # ScalpPosition() call's comment.
         breakeven_trigger_pct=levels.breakeven_trigger_pct,
         dhan_super_order_id=dhan_super_order_id,
-        dhan_entry_order_id=dhan_super_order_id,
+        dhan_entry_order_id=dhan_super_order_id or plain_order_id,
         capital_risked=position_value,
         is_first_live_order=is_first,
         opened_at=datetime.now(timezone.utc),

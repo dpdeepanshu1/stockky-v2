@@ -10,6 +10,7 @@ import logging
 import os
 import threading as _threading
 import time
+import weakref as _weakref
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -178,15 +179,20 @@ class AngelOneSession:
     a token refresh happened to be needed while a request was also being
     served on the main loop (or vice versa).
 
-    Fix: keep one asyncio.Lock PER event loop instead of one shared lock.
-    `_get_lock()` looks up (or lazily creates) the lock for whichever
-    loop is currently running, keyed by the loop object itself. The
-    lookup dict is mutated from multiple threads, so that mutation is
-    guarded by a plain `threading.Lock` (cheap — held only for a
-    dict get/set, never across an `await`). This trades a theoretical,
-    harmless race (both loops independently decide a refresh is needed
-    at the exact same instant and both call `_login()`) for correctness
-    — far better than the guaranteed crash the shared-lock version had.
+    2026-09-21 fix, part 2 (memory leak from part 1): `self._locks` was a
+    plain dict keyed by event-loop object. main.py has several sync route
+    handlers (`/angelone/movers`, per-request quote/candle lookups) that
+    call `asyncio.run(...)` — each `asyncio.run()` call creates a BRAND
+    NEW, one-shot event loop that's discarded the instant the call
+    returns. A plain dict holds a strong reference to its keys, so every
+    one of those throwaway loops (and everything reachable from it) was
+    being pinned in memory forever, one new dict entry per request,
+    forever — an unbounded leak. Switched to `weakref.WeakKeyDictionary`:
+    once nothing else references a given loop (i.e. right after
+    `asyncio.run()` returns and closes it), its entry — and that lock —
+    is dropped automatically. The long-lived loops (the main uvicorn loop,
+    the ws-feed thread's loop) behave exactly as before, since they stay
+    referenced for the life of the process.
     """
 
     def __init__(self) -> None:
@@ -197,7 +203,7 @@ class AngelOneSession:
         self.token:        Optional[str]      = None
         self.feed_token:   Optional[str]      = None
         self.token_expiry: Optional[datetime] = None
-        self._locks: dict = {}                       # event loop -> asyncio.Lock
+        self._locks: "_weakref.WeakKeyDictionary" = _weakref.WeakKeyDictionary()  # event loop -> asyncio.Lock
         self._locks_guard = _threading.Lock()         # guards self._locks only
 
     def _get_lock(self) -> asyncio.Lock:

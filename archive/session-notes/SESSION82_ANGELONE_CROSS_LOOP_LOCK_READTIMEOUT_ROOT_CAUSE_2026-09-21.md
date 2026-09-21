@@ -104,12 +104,62 @@ wraps `await session.ensure_session()` in its own try/except. A failed
 refresh logs a warning and skips just that one cycle instead of
 propagating up and killing the thread forever.
 
-**New regression test**:
+**New regression tests**:
 `market-data-service/tests/test_angelone_session_cross_loop_lock.py` —
-runs `ensure_session()` from two real, independent event loops (one via
-`asyncio.run()` on the main thread, one via `asyncio.new_event_loop()`
-on a background thread — the exact shape of the real bug) and asserts
-no exception and that two distinct per-loop locks were created.
+1. Runs `ensure_session()` from two real, independent event loops (the
+   exact shape of the original bug) and asserts no exception, with two
+   distinct per-loop locks momentarily coexisting.
+2. `test_locks_dict_does_not_leak_one_shot_asyncio_run_loops` — see
+   Session 82b below.
+
+## Session 82b — the per-loop-lock fix leaked memory; fixed same day
+
+**Found via the post-deploy verification commands**, specifically
+`docker compose logs ... | grep "angelone/movers failed"` turning up a
+403 shortly after deploy, which led to re-reading every call site that
+touches `AngelOneSession`. `main.py` has several **sync** route handlers
+that call `asyncio.run(...)` directly:
+
+- `/angelone/movers` (main.py:1964)
+- a per-request quote lookup (main.py:1507)
+- a per-request candle lookup (main.py:2436)
+
+Each `asyncio.run(...)` call creates a **brand-new, one-shot event
+loop** that's closed and discarded the instant the call returns. Since
+`self._locks` in the 82a fix was a plain `dict`, every one of those
+throwaway loops — one per request to any of these three routes — got a
+permanent entry keyed by that loop object. A plain dict holds a strong
+reference to its keys, so none of those loops (or anything reachable
+from them) could ever be garbage-collected: an unbounded memory leak,
+roughly one dict entry per request to these endpoints for the life of
+the process.
+
+**Fix**: `self._locks` is now a `weakref.WeakKeyDictionary` instead of
+a plain `dict`. Once nothing else references a given loop — which for a
+one-shot `asyncio.run()` loop is immediately after it returns — its
+entry (and that lock) is dropped automatically by the weak-ref
+machinery, no manual cleanup needed. The two long-lived loops (the main
+uvicorn loop, `angelone_ws_feed.py`'s dedicated thread loop) behave
+exactly as before, since something keeps them referenced for the life
+of the process.
+
+Verified directly (not just via the test): 10 sequential
+`asyncio.run(session.ensure_session())` calls followed by `gc.collect()`
+leave `0` entries in `self._locks`, vs `10` with the plain-dict version.
+
+The one 403 on `loginByPassword` seen in the post-deploy logs is not
+attributed to this bug — it lines up with the documented cold-cache
+outbound-IP-detection window right after a redeploy (see
+`_resolve_client_public_ip()`'s own comments, TTL 15 min) — but is worth
+a re-check after this deploy's had a few minutes to settle.
+
+## Verification (after both 82a and 82b)
+
+```
+services/market-data-service:       14 passed  (was 12 before this session)
+services/real-trade-service:        475 passed, 1 xfailed
+services/position-stocks-service:  1218 passed, 1 skipped
+```
 
 ## What this does NOT explain / other items from the sweep
 
@@ -136,10 +186,10 @@ no exception and that two distinct per-loop locks were created.
 ## Verification
 
 ```
-services/market-data-service:       13 passed  (was 12 — +1 new regression test)
+services/market-data-service:       14 passed  (was 12 — +2 new regression tests)
 services/real-trade-service:        475 passed, 1 xfailed
 services/position-stocks-service:  1218 passed, 1 skipped
 ```
 
-No `FAILED` lines. No application code besides the two files above
-touched.
+No `FAILED` lines. No application code besides `angelone_client.py` and
+`angelone_ws_feed.py` touched.

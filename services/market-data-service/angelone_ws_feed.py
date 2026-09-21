@@ -295,7 +295,33 @@ def start_feed_background(symbols: list) -> None:
             logger.info("AngelOne feed: polling %d resolved symbols every ~%.1fs", len(tokens), POLL_INTERVAL_S)
 
             async def _poll_cycle():
-                await session.ensure_session()
+                # 2026-09-21 fix (same class of bug as the scrip-master retry
+                # above, and the direct cause of that session's ReadTimeout
+                # storm): ensure_session() used to be called with no
+                # try/except here, OUTSIDE the get_quotes_batch try/except
+                # below. Any exception it raised — including the
+                # AngelOneSession cross-event-loop lock bug fixed in
+                # angelone_client.py this session — propagated all the way
+                # up through _poll_forever() to the outer handler at the
+                # bottom of _run(), which set _running = False and let this
+                # daemon thread die for good. Nothing ever restarted it:
+                # live_quotes went stale permanently, and every dependent
+                # service's quote lookups fell through to the slow per-symbol
+                # yfinance /quote path for the ENTIRE universe on every
+                # cycle — exactly the wall of "get_quote(...) failed:
+                # ReadTimeout" lines seen across real-trade-service and
+                # position-stocks-service. Skipping just this cycle on a
+                # session-refresh failure (and retrying next cycle) keeps
+                # one bad refresh from taking the whole feed down.
+                try:
+                    await session.ensure_session()
+                except Exception as e:
+                    logger.error(
+                        "AngelOne feed: ensure_session() failed (%s: %s) — "
+                        "skipping this poll cycle, will retry next cycle",
+                        type(e).__name__, e,
+                    )
+                    return
                 for i in range(0, len(tokens), BATCH_SIZE):
                     if not _running:
                         return

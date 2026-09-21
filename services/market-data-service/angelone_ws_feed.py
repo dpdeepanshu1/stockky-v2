@@ -247,15 +247,42 @@ def start_feed_background(symbols: list) -> None:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
-            token_map = scrip_master.get_tokens_bulk(symbols)   # {clean_symbol: token}
-            if not token_map:
+            # 2026-09-21 fix: this used to resolve tokens exactly ONCE and, if the
+            # scrip master hadn't loaded at that instant (routine right after a
+            # redeploy — the download competes with every other startup call),
+            # log an error and `return`, permanently killing the AngelOne feed
+            # thread. Nothing restarted it until the 15-min universe refresh, so
+            # every live_quotes row went stale and real-trade-service's quote
+            # path fell through to the slow per-symbol /quote route for
+            # everything. Retry with backoff while the scrip master itself is
+            # still not loaded; only give up when it IS loaded but genuinely
+            # resolves none of the requested symbols.
+            token_map: dict = {}
+            attempt = 0
+            while _running:
+                token_map = scrip_master.get_tokens_bulk(symbols, wait_s=5.0)   # {clean_symbol: token}
+                if token_map:
+                    break
+                if scrip_master.status().get("loaded_symbols", 0) > 0:
+                    logger.error(
+                        "AngelOne feed: scrip master resolved 0/%d requested symbols to tokens — "
+                        "feed will not produce any ticks. Check ANGELONE_SCRIP_MASTER_URL is "
+                        "reachable and its schema hasn't changed.",
+                        len(symbols),
+                    )
+                    return
+                attempt += 1
+                delay = min(60.0, 10.0 * attempt)
                 logger.error(
-                    "AngelOne feed: scrip master resolved 0/%d requested symbols to tokens — "
-                    "feed will not produce any ticks. Check ANGELONE_SCRIP_MASTER_URL is "
-                    "reachable and its schema hasn't changed.",
-                    len(symbols),
+                    "AngelOne feed: scrip master not loaded yet (attempt %d) — retrying in %.0fs",
+                    attempt, delay,
                 )
-                return
+                slept = 0.0
+                while _running and slept < delay:   # short slices so stop_feed_background() isn't held up
+                    time.sleep(1.0)
+                    slept += 1.0
+            if not token_map:
+                return   # stop requested before tokens ever resolved
             if len(token_map) < len(symbols):
                 logger.warning(
                     "AngelOne feed: resolved %d/%d requested symbols to tokens "

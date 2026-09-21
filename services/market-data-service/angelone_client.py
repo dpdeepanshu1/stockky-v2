@@ -17,9 +17,12 @@ import pyotp
 
 try:
     from rate_limiter import acquire as _rl_acquire, in_cooldown as _rl_in_cooldown, set_cooldown as _rl_set_cooldown
+    from rate_limiter import try_acquire as _rl_try_acquire
 except Exception:  # pragma: no cover — keep working even if rate_limiter.py is ever absent
     def _rl_acquire(provider, weight=1.0, max_wait=20.0):
         return 0.0
+    def _rl_try_acquire(provider, weight=1.0, max_wait=5.0):
+        return True
     def _rl_in_cooldown(provider):
         return False
     def _rl_set_cooldown(provider, seconds):
@@ -125,6 +128,34 @@ def _safe_json(r: httpx.Response) -> Optional[dict]:
         return r.json()
     except Exception:
         return None
+
+
+# 2026-09-21: the historical/quote endpoints were returning waves of 403s but
+# httpx's INFO line only shows the status code, never AngelOne's body — so
+# "rate limit" vs "IP not whitelisted / bad session" (completely different
+# fixes) could not be told apart from the logs. Log the body of any 403/429,
+# throttled per endpoint so a storm doesn't itself flood the log.
+_DENIED_LOG_EVERY_S = 60.0
+_denied_last_logged: dict[str, float] = {}
+
+
+def _log_denied(endpoint: str, r: httpx.Response) -> None:
+    if r.status_code not in (403, 429):
+        return
+    now = time.time()
+    if now - _denied_last_logged.get(endpoint, 0.0) < _DENIED_LOG_EVERY_S:
+        return
+    _denied_last_logged[endpoint] = now
+    logger.warning(
+        "AngelOne %s returned HTTP %d — body: %s (logged at most once per %.0fs per endpoint)",
+        endpoint, r.status_code, (r.text or "")[:300].replace("\n", " "), _DENIED_LOG_EVERY_S,
+    )
+
+
+# Candle calls that can't get a rate-limit token within this many seconds are
+# SKIPPED (caller falls back to yfinance) instead of being let through anyway —
+# see rate_limiter.try_acquire.
+_CANDLE_MAX_WAIT_S = float(os.environ.get("ANGELONE_CANDLE_MAX_WAIT_S", "15"))
 
 
 class AngelOneSession:
@@ -239,6 +270,7 @@ class AngelOneSession:
                     "exchangeTokens": {exchange: [symbol_token]},
                 },
             )
+            _log_denied("quote", r)
             if _is_rate_limit_response(r.status_code, _safe_json(r)):
                 _rl_set_cooldown("angelone_quote", _ANGELONE_COOLDOWN_SEC)
                 return {}
@@ -261,7 +293,16 @@ class AngelOneSession:
         if _rl_in_cooldown("angelone_candle"):
             return []
         await self.ensure_session()
-        _rl_acquire("angelone_candle", weight=1)
+        # Fail-CLOSED limiter (2026-09-21): get_candles is reached from 100+
+        # concurrent /history worker threads (asyncio.run per thread, so this
+        # blocking wait only ever parks that one thread). The old fail-open
+        # acquire() let EVERY waiter through at max_wait, so a burst became a
+        # synchronized spike far past AngelOne's ~3 req/s getCandleData
+        # ceiling → the 403 "exceeding access rate" wall. Now the excess is
+        # shed (returns [] → /history falls back to yfinance, same as when a
+        # cooldown is active) and only token-holders hit AngelOne.
+        if not _rl_try_acquire("angelone_candle", weight=1, max_wait=_CANDLE_MAX_WAIT_S):
+            return []
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.post(
                 f"{_BASE}/rest/secure/angelbroking/historical/v1/getCandleData",
@@ -274,6 +315,7 @@ class AngelOneSession:
                     "todate":      to_date,
                 },
             )
+            _log_denied("getCandleData", r)
             if _is_rate_limit_response(r.status_code, _safe_json(r)):
                 _rl_set_cooldown("angelone_candle", _ANGELONE_COOLDOWN_SEC)
                 return []
@@ -346,6 +388,7 @@ class AngelOneSession:
                 headers=self._headers(),
                 json={"mode": "FULL", "exchangeTokens": {exchange: symbol_tokens}},
             )
+            _log_denied("quote(batch)", r)
             if _is_rate_limit_response(r.status_code, _safe_json(r)):
                 _rl_set_cooldown("angelone_quote", _ANGELONE_COOLDOWN_SEC)
                 return []

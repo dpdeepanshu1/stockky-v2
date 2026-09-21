@@ -382,6 +382,23 @@ async def _ws_loop() -> None:
             # documents fixing for its own background loop ("EVENT-LOOP
             # ISOLATION"). Offloading to a worker thread instead.
             symbol_token_map = await asyncio.to_thread(get_all_nse_eq)
+            if not symbol_token_map:
+                # 2026-09-21: a failed scrip-master fetch used to fall straight
+                # through here, connect the WS and "subscribe" to ZERO tokens —
+                # connected: true, subscribed_symbols: 0, no ticks, and nothing
+                # retried until AngelOne's own idle-timeout dropped the socket.
+                # Treat it like any other not-ready precondition: back off and
+                # retry (scrip_master applies its own failure backoff, so this
+                # doesn't hammer the download).
+                logger.error(
+                    "position-stocks WS: scrip master map is empty (download failed?) — retrying in %ss",
+                    backoff,
+                )
+                _connected = False
+                _reconnect_attempts += 1
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+                continue
             _build_reverse_map(symbol_token_map)
             _subscribed_tokens = list(symbol_token_map.values())
             logger.info("position-stocks WS: subscribing to %d NSE-EQ tokens", len(_subscribed_tokens))

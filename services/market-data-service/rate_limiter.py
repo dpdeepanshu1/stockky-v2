@@ -98,10 +98,19 @@ class _Bucket:
     def __post_init__(self):
         self.tokens = self.capacity
 
-    def acquire(self, weight: float = 1.0, max_wait: float = 20.0) -> float:
+    def acquire(self, weight: float = 1.0, max_wait: float = 20.0, fail_open: bool = True) -> float:
         """Blocks until `weight` tokens are available (or max_wait elapses,
         to avoid an unbounded stall if a caller mis-sizes a batch). Returns
-        the actual wait time in seconds."""
+        the actual wait time in seconds.
+
+        fail_open=True  (default, historical behaviour): after max_wait the
+                        call is let through ANYWAY. Fine for a lone caller that
+                        mis-sized a batch — but under a burst of N concurrent
+                        callers, all N proceed at t=max_wait at once, which is
+                        exactly the spike the limiter exists to prevent.
+        fail_open=False: after max_wait NO token is consumed and -1.0 is
+                        returned, so the caller can skip/degrade instead of
+                        bursting through (see try_acquire)."""
         start = time.time()
         with self.lock:
             self.waiters += 1
@@ -121,7 +130,12 @@ class _Bucket:
                         return waited
                     deficit = weight - self.tokens
                     sleep_for = min(deficit / self.rps if self.rps > 0 else 0.5, 2.0)
+                    if not fail_open:
+                        # honour max_wait precisely instead of overshooting by up to one sleep slice
+                        sleep_for = min(sleep_for, max(0.0, max_wait - (now - start)))
                 if time.time() - start >= max_wait:
+                    if not fail_open:
+                        return -1.0
                     # Downgraded WARNING → DEBUG (2026-09-05): this path proceeds
                     # safely (the call goes ahead); WARNING-level here floods logs
                     # at ~1 line/s during premarket bulk feeds and buries real errors.
@@ -169,6 +183,22 @@ def acquire(provider: str, weight: float = 1.0, max_wait: float = 20.0) -> float
     except Exception as e:
         logger.debug("rate_limiter.acquire(%s) failed open: %s", provider, e)
         return 0.0
+
+
+def try_acquire(provider: str, weight: float = 1.0, max_wait: float = 5.0) -> bool:
+    """Fail-CLOSED variant of acquire(): waits up to `max_wait` for a token and
+    returns True if one was obtained, False if the wait timed out (nothing is
+    consumed on False). Use where the caller has a degradable alternative
+    (e.g. AngelOne candles → yfinance) so that a burst of concurrent callers
+    sheds load instead of all "proceeding anyway" at max_wait and tripping the
+    upstream's own 403 "exceeding access rate" (2026-09-21 incident: 150
+    concurrent /history threads x fail-open acquire = a synchronized spike
+    every 20s). Internal limiter errors fail open, same as acquire()."""
+    try:
+        return _get_bucket(provider).acquire(weight=weight, max_wait=max_wait, fail_open=False) >= 0.0
+    except Exception as e:
+        logger.debug("rate_limiter.try_acquire(%s) failed open: %s", provider, e)
+        return True
 
 
 def would_block(provider: str, weight: float = 1.0) -> bool:

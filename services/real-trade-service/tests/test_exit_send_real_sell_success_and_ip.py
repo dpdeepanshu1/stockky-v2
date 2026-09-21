@@ -142,3 +142,45 @@ def test_pre_migration_position_falls_back_to_same_day_heuristic(env, monkeypatc
     )
     assert _sell(db, pos_old) is True
     assert captured["product_type"] == "CNC"
+
+
+def test_entry_product_type_intraday_or_mis_mirrors_as_intraday(env, monkeypatch):
+    """session38 fix: a position actually bought as INTRADAY/MIS must be sold
+    as INTRADAY, mirroring what was bought rather than re-deriving from
+    opened_at -- regardless of when it was opened."""
+    db = env
+    captured = {}
+    monkeypatch.setattr(
+        dhan_client, "place_order",
+        lambda *a, **k: captured.update(product_type=k.get("product_type")) or {"orderId": "D1"},
+    )
+    monkeypatch.setattr(ex, "record_real_exit_sent", lambda *a, **k: None)
+
+    for entry_pt in ("INTRADAY", "MIS"):
+        captured.clear()
+        pos = _mkposition(
+            db, symbol=f"MIS-{entry_pt}", broker_imported=False,
+            entry_product_type=entry_pt,
+            opened_at=datetime(2020, 1, 1, tzinfo=timezone.utc),  # old, but must not matter
+        )
+        assert _sell(db, pos) is True
+        assert captured["product_type"] == "INTRADAY"
+
+
+def test_entry_product_type_cnc_mirrors_as_cnc_even_same_day(env, monkeypatch):
+    """The core session38 bug: a same-day CNC entry must still be sold as CNC
+    (not INTRADAY, which Dhan margin-rejects as a naked short)."""
+    db = env
+    captured = {}
+    monkeypatch.setattr(
+        dhan_client, "place_order",
+        lambda *a, **k: captured.update(product_type=k.get("product_type")) or {"orderId": "D1"},
+    )
+    monkeypatch.setattr(ex, "record_real_exit_sent", lambda *a, **k: None)
+
+    pos = _mkposition(
+        db, symbol="CNCTODAY", broker_imported=False, entry_product_type="CNC",
+        opened_at=datetime.now(timezone.utc),
+    )
+    assert _sell(db, pos) is True
+    assert captured["product_type"] == "CNC"

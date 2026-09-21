@@ -482,6 +482,53 @@ class TestConcentrationCap:
         assert_approved(res, 250, "sized_down")
 
 
+# ── #5c-ii max trade value cap ───────────────────────────────────────────────
+
+class TestMaxTradeValueCap:
+    def test_no_cap_when_unset(self):
+        # default AccountState.max_trade_value is None -> never enforced
+        res = run(account=make_account(max_trade_value=None))
+        assert_approved(res, 100)
+
+    def test_no_cap_when_zero_or_negative(self):
+        res = run(account=make_account(max_trade_value=0.0))
+        assert_approved(res, 100)
+
+    def test_under_cap_passes_unchanged(self):
+        # cost = 100 * 100 = 10,000 < 20,000 cap
+        res = run(account=make_account(max_trade_value=20_000.0))
+        assert_approved(res, 100)
+
+    def test_downsized_to_fit_cap(self):
+        # cost = 10,000 > 3,000 cap; entry 100 -> mtv_qty = 30
+        res = run(account=make_account(max_trade_value=3_000.0))
+        assert_approved(res, 30, check_name="sized_down")
+
+    def test_even_one_share_over_cap_rejected(self):
+        # entry price 100 > cap 50 -> mtv_qty = 0
+        res = run(account=make_account(max_trade_value=50.0))
+        assert_rejected(res, "max_trade_value_cap")
+
+    def test_cap_larger_than_concentration_qty_is_a_noop(self):
+        # concentration cap (25% of 100k = 25,000) already yields a qty whose
+        # value is under a roomy max_trade_value cap -> mtv_qty >= final_qty,
+        # so this check must not further downsize or override the reason.
+        res = run(
+            intent=make_intent(qty=1000, stop_price=99.5),  # cost 100,000
+            account=make_account(max_trade_value=1_000_000.0),
+        )
+        assert res.verdict == RiskVerdict.APPROVED
+        assert res.approved_qty < 1000  # downsized by an earlier cap
+        assert res.check_name == "sized_down"
+
+    def test_sell_side_never_checked(self):
+        res = run(
+            intent=make_intent(side="SELL", qty=100, entry_price=100.0, stop_price=98.0),
+            account=make_account(max_trade_value=1.0),
+        )
+        assert res.verdict == RiskVerdict.APPROVED
+
+
 # ── #6 portfolio risk ────────────────────────────────────────────────────────
 
 class TestPortfolioRisk:

@@ -48,3 +48,29 @@ is enough to catch obvious logic bugs (which is how the watchlist bug above was
 found) but not to responsibly claim either file is fully audited; recommend a
 dedicated session to build direct test coverage for both (currently 27%/40%) rather
 than relying on further manual reads alone.
+
+## Follow-up (same session, continued) — direct test coverage for both files
+
+Built the test coverage recommended above instead of stopping at the read:
+
+- `tests/test_exit_evaluate_mode.py` (25 tests) — `exit_engine.exit` coverage 27% → 55%.
+- `tests/test_entry_evaluate_mode.py` (20 tests) — `entry_engine.entry` coverage 40% → 84%.
+
+No further bugs found while writing these — every assertion passed against the
+existing (already-fixed) logic on the first correct attempt (one test's own
+assumption was wrong on the first pass — a breakeven-stop test that didn't account
+for the ATR-trail branch also firing on the same cycle — fixed the test, not the
+code, after confirming the actual behavior was correct). Both new files also
+reused the DATAMATICS-style Dhan-mocking pattern already established in
+`test_exit_placement_backoff.py` for the REAL-mode routing checks, rather than
+inventing a new pattern.
+
+Full suite: 376 → **434 passed**, 1 xfailed. `entry_engine.entry` still has real
+gaps (regime-cache TTL path, some of the Dhan-error-classification branches in the
+placement-failure handler, `check_pending_fills`/`expire_stale_orders`' less-common
+branches — see the coverage `Missing` column in AUDIT_REPORT.md for the exact line
+ranges); `exit_engine.exit`'s main remaining gap is `_send_real_sell`'s own internals
+(same-day CDSL/INTRADAY product-type branching, the DATAMATICS retry-storm cooldown
+math) — `_should_skip_exit_this_cycle`/`_bump_exit_failure` have their own dedicated
+tests already, but the body of `_send_real_sell` itself between them doesn't yet.
+

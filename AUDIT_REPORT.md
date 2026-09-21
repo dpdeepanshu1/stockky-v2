@@ -42,16 +42,13 @@ Both fixes have regression tests that fail on the original code and pass now.
   but exits write no `TradeFill` row, so a small schema change is required.
   Pinned: `TestKnownGaps.test_partial_fills_should_be_booked_at_the_increments_own_price`.
 
-## Round 3 (this session) — `entry_engine/entry.py::evaluate_watchlist_entries`
+## Round 3 (this session) — `entry_engine/entry.py::evaluate_watchlist_entries` + real test coverage for `evaluate_mode` in both files
 
 Started on the two items flagged as highest-value next targets: `exit_engine/exit.py`
 (27% coverage) and `entry_engine/entry.py::evaluate_mode` (~830-line pipeline). A full
 line read of both found no new bugs beyond what round 1/2 and the session history
 already fixed — both are unusually heavily commented/self-documented at this point,
-with the majority of previously-found issues explained inline. Given the size of both
-(1543 and 1569 lines), a from-scratch line read of the two in one pass wasn't enough
-to responsibly claim either is now fully covered — see the untested-modules table
-below, unchanged for `exit.py` and `evaluate_mode` specifically.
+with the majority of previously-found issues explained inline.
 
 While reading `entry.py` end to end, found and fixed a real bug in its sibling
 Stage-2 function, **`evaluate_watchlist_entries`** (previously 0% tested, no test file
@@ -74,8 +71,35 @@ existed for it at all):
   (`TestZeroPriceGuard`), and one proving a bad row no longer blocks a healthy row in
   the same cycle (`test_a_bad_zero_price_row_does_not_block_other_rows_same_cycle`).
 
-Test count: 376 passed → **389 passed**, 1 xfailed (unchanged). `entry_engine.entry`
-coverage: 40% → 48%.
+**Then built real direct test coverage for both flagged files** (no further code
+changes needed — writing the tests confirmed the logic is correct, it just wasn't
+exercised):
+
+* `tests/test_exit_evaluate_mode.py` — 25 tests covering `exit_engine.exit.evaluate_mode`'s
+  full decision tree end-to-end in DEMO mode (real `close_position`/`refresh_unrealized`
+  calls, not mocked) plus REAL-mode routing checks (mocking only the Dhan-facing edge,
+  `_send_real_sell`, which already has its own dedicated coverage elsewhere): empty/
+  missing-tick, stop-hit (incl. priority over target, exact-boundary, no-stop-set),
+  target-hit partial (60% lock, breakeven+nullify, no-retrigger), emergency gap-down
+  (incl. the boundary against ordinary stop-hit), time-stop (incl. the action-label
+  regression guard for the 2026-09-01 EMERGENCY_EXIT-mislabel bug fix), early warning,
+  breakeven stop (incl. never-lowers-an-already-higher-stop), ATR trail (incl.
+  ratchet-only and never-trails-a-loser), multi-position independence, and the REAL
+  pending-sell guard. `exit_engine.exit` coverage: 27% → **55%**.
+* `tests/test_entry_evaluate_mode.py` — 20 tests covering `entry_engine.entry.evaluate_mode`
+  in DEMO mode (risk_engine's own `evaluate()` is mocked at the boundary — it has its
+  own dedicated suite and a live-market-hours dependency that would make re-exercising
+  it indirectly from here both redundant and flaky): gate 1 (actionable-label + the
+  VOLUME_SHOCK base-tier off-by-default gate), gate 2 (no tick), gate 4 (drift/chasing),
+  gate 5 (R:R floor), the risk-engine rejection path, the same-cycle duplicate-symbol
+  guard, DEMO order placement (incl. confirming DEMO never touches the Dhan client),
+  Gate 6's composite-quality ranking (floor, UPPER_CIRCUIT bypass, max-per-cycle cap
+  picking the higher-conviction candidate), and REAL-mode routing to
+  `dhan_client.place_order` for both the success and placement-failure paths.
+  `entry_engine.entry` coverage: 40% → **84%**.
+
+Test count: 376 passed → **434 passed**, 1 xfailed (unchanged). `py_compile` +
+`pyflakes` clean on all new/changed files.
 
 ## Other open decisions (unchanged from round 1)
 
@@ -89,8 +113,8 @@ coverage: 40% → 48%.
 
 | Priority | Module | Coverage | Why it matters |
 |---|---|---|---|
-| 1 | `entry_engine/entry.py::evaluate_mode` | ~38% of file | every real BUY: gates, sizing, risk call, order placement — full line read done round 3, no new bugs found, still needs direct test coverage |
-| 2 | `exit_engine/exit.py` | 27% | decides when real positions are sold — full line read done round 3, no new bugs found, still needs direct test coverage |
+| 1 | `entry_engine/entry.py::evaluate_mode` | 84% | every real BUY: gates, sizing, risk call, order placement — direct test coverage added round 3 |
+| 2 | `exit_engine/exit.py` | 55% | decides when real positions are sold — direct test coverage added round 3, `_send_real_sell`'s internals (DATAMATICS-storm cooldown paths, error classification) still the main remaining gap
 | 3 | `portfolio/portfolio.py` | 32% | cash, positions and P&L accounting |
 | 4 | `execution/auto_pilot.py` | 19% | runs the whole cycle and throttles |
 | 5 | `manual_engine.py` | 0% | manual BUY/SELL |
@@ -116,7 +140,7 @@ Expected:
 === position-stocks-service
 1220 passed, 8 warnings in ~15s
 === real-trade-service
-389 passed, 1 xfailed in ~8s
+434 passed, 1 xfailed in ~10s
 ```
 
 **With coverage:**

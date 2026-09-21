@@ -283,6 +283,46 @@ app.add_middleware(
 
 
 @app.on_event("startup")
+async def _raise_sync_thread_pool_capacity():
+    """
+    2026-09-21 fix: 13 of this service's 17 routes (including /quote/{symbol}
+    and /quotes/bulk — the two hottest, called concurrently per-candidate by
+    real-trade-service's candidate_engine, per-stock by position-stocks-
+    service's screener, AND by the bulk-prefetch chunking) are plain sync
+    `def` functions doing blocking network I/O (yfinance, AngelOne REST).
+    Starlette runs every sync route in a background thread via AnyIO's
+    thread pool, which defaults to only 40 concurrent threads for the WHOLE
+    app — shared across every sync route, every caller, all at once. This
+    service also runs as a single uvicorn worker (see Dockerfile CMD, no
+    --workers flag), so that 40-thread budget is the entire app's ceiling.
+    A single /quote call can legitimately take up to ~38s worst-case (see
+    candidates.py's own timeout-math comment: 20s rate-limiter wait + 18s
+    yfinance hard timeout) — so any cycle where >40 sync calls are in
+    flight at once queues the excess, and callers with a tighter client
+    timeout (real-trade-service's 42s) can time out waiting for a free
+    thread even though market-data-service itself is healthy and each
+    individual request would have succeeded. Confirmed 2026-09-21: real
+    ReadTimeouts on EMMVEE/COLPAL (both liquid, actively-traded symbols,
+    not bad tickers) match this exactly.
+    Raising the limiter is a safe, additive capacity change — doesn't touch
+    any trading/quote logic, just lets more of this service's own sync
+    routes run concurrently instead of queuing behind each other.
+    """
+    try:
+        import anyio.to_thread
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        new_capacity = int(os.getenv("SYNC_THREAD_POOL_CAPACITY", "150"))
+        old_capacity = limiter.total_tokens
+        limiter.total_tokens = new_capacity
+        logger.info(
+            "sync thread pool capacity raised %d -> %d (override via "
+            "SYNC_THREAD_POOL_CAPACITY)", old_capacity, new_capacity,
+        )
+    except Exception as e:
+        logger.warning("could not raise sync thread pool capacity (non-fatal, keeping default): %s", e)
+
+
+@app.on_event("startup")
 async def _start_angelone_ws_feed():
     """
     §1 of the master prompt: AngelOne is meant to be the PRIMARY quote

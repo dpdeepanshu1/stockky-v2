@@ -846,9 +846,12 @@ class TestRunExitReconciliation:
         assert p.entry_price == 100.0
 
     # ── dead exit legs / dead entry ──
+    # 2026-09-21 fix (session80 — REFEX/LLOYDSENT sync gap): flagging now
+    # requires EVERY exit leg that exists on the order to be dead, not just
+    # one — see the detection comment in orders/reconcile.py. So both cases
+    # below use two dead legs.
     @pytest.mark.parametrize("target,stop", [
-        (("REJECTED", 102.0), ("PENDING", 99.0)),
-        (("PENDING", 102.0), ("CANCELLED", 99.0)),
+        (("REJECTED", 102.0), ("CANCELLED", 99.0)),
         (("EXPIRED", 102.0), ("REJECTED", 99.0)),
     ])
     def test_dead_exit_legs_flag_the_position_for_a_plain_sell(self, env, target, stop):
@@ -858,6 +861,22 @@ class TestRunExitReconciliation:
         assert reconcile.run_exit_reconciliation(db) == 0
         assert p.status == "EXIT_LEGS_REJECTED" and "plain MARKET SELL" in p.error_message
         assert lock_held(db, p.symbol) and available(db) == pytest.approx(LEDGER_AVAILABLE)
+
+    @pytest.mark.parametrize("target,stop", [
+        (("REJECTED", 102.0), ("PENDING", 99.0)),
+        (("PENDING", 102.0), ("CANCELLED", 99.0)),
+    ])
+    def test_single_dead_leg_does_not_flag_while_the_other_leg_is_still_live(self, env, target, stop):
+        """The exact REFEX/LLOYDSENT scenario the session80 fix addressed:
+        only one exit leg had been rejected while the other was still
+        resting normally at the broker. The position must stay OPEN (and
+        keep being polled) so the live leg's eventual real fill is still
+        caught by the normal hit_kind detection."""
+        db, b, _ = env
+        p = mkpos(db, super_id="SO1")
+        b.super_orders = [super_row("SO1", avg=100.0, target=target, stop=stop)]
+        assert reconcile.run_exit_reconciliation(db) == 0
+        assert p.status == "OPEN" and p.error_message is None
 
     @pytest.mark.parametrize("dead", ["REJECTED", "CANCELLED"])
     def test_dead_entry_releases_capital_and_lock_without_pnl(self, env, dead):

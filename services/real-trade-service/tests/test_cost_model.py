@@ -56,11 +56,19 @@ def test_gate_uses_config_defaults_when_no_override_given():
     """A tiny trade_value below config.MIN_TRADE_VALUE must fail the gate
     with no explicit min_trade_value/min_edge_to_cost_ratio passed in —
     this is the exact call signature entry_engine used before follow-on
-    item #5 added the per-mode override params."""
+    item #5 added the per-mode override params.
+
+    2026-09-21 fix (session79): MIN_TRADE_VALUE's default dropped from
+    3000.0 to 20.0 (see config.py's comment on that line) — a deliberate,
+    user-requested change to a sanity floor against near-zero,
+    cost-dominated orders rather than a sizing constraint. A ₹50
+    trade_value now clears that floor, so entry_price drops to ₹5 (qty=1)
+    to keep trade_value below whatever floor is configured, matching this
+    test's original intent."""
     result = cost_model.evaluate_entry_cost_gate(
-        entry_price=50.0, qty=1, target_pct=2.0, product_type="CNC",
+        entry_price=5.0, qty=1, target_pct=2.0, product_type="CNC",
     )
-    assert result.trade_value == 50.0
+    assert result.trade_value == 5.0
     assert result.trade_value < config.MIN_TRADE_VALUE
     assert result.passes_min_value is False
     assert result.passes is False

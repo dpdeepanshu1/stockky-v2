@@ -1218,346 +1218,382 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
             held += 1
             continue
 
-        held_days = (now - as_aware(position.opened_at)).days
+        # BUG FIX (session82c, 100%-coverage-plan audit finding — Phase 1
+        # #1's "check against current file" line for the per-position
+        # dispatch loop): everything from here through the final HOLD
+        # branch used to run completely unguarded. Any unexpected exception
+        # in one position's evaluation -- _load_profile hitting a bad
+        # watchlist_entry_id, a malformed tick, a DB hiccup mid-loop, an
+        # unforeseen None -- propagated straight out of evaluate_mode and
+        # aborted the ENTIRE cycle: every other open position in `mode`
+        # (this can be dozens on a real account) silently got NO stop/
+        # target/emergency-exit check that cycle, with no alert and no
+        # record of it happening. Same incident class as session65's
+        # portfolio.import_broker_holdings fix (one bad item must not drop
+        # every other item in the same batch), just never applied here.
+        # Mirrors that fix: isolate per-position, roll back any partial
+        # writes from the failed position, log a HOLD decision explaining
+        # the skip so it's visible in the audit trail, and let every other
+        # position in the cycle continue to be evaluated normally.
+        try:
+            held_days = (now - as_aware(position.opened_at)).days
 
-        # Short-Term Trading Upgrade (2026-09-02): load per-position exit
-        # profile. For watchlist-sourced positions this uses the catalyst's
-        # horizon_class; for manual/pre-upgrade positions it returns the
-        # existing global constants — zero behavior change for those.
-        _prof = _load_profile(db, position)
-        _trail_schedule  = _prof["trail_atr_schedule"]
-        _be_trigger      = _prof["breakeven_atr_trigger"]
-        _max_hold        = _prof["max_hold_days"]
-        _early_warn      = _prof["early_warn_days"]
-        _partial_frac    = _prof["partial_exit_fraction"]
-        _horizon         = _prof["horizon_class"]  # for audit trail
+            # Short-Term Trading Upgrade (2026-09-02): load per-position exit
+            # profile. For watchlist-sourced positions this uses the catalyst's
+            # horizon_class; for manual/pre-upgrade positions it returns the
+            # existing global constants — zero behavior change for those.
+            _prof = _load_profile(db, position)
+            _trail_schedule  = _prof["trail_atr_schedule"]
+            _be_trigger      = _prof["breakeven_atr_trigger"]
+            _max_hold        = _prof["max_hold_days"]
+            _early_warn      = _prof["early_warn_days"]
+            _partial_frac    = _prof["partial_exit_fraction"]
+            _horizon         = _prof["horizon_class"]  # for audit trail
 
-        # ── 0. Emergency gap-down exit ────────────────────────────────────────
-        # 2026-09-18 audit note (follow-on item #7 from the cost-model audit,
-        # user asked whether this covers positions _select_overnight_holds
-        # (execution/auto_pilot.py) kept open past EOD square-off): CONFIRMED
-        # generic. A held-overnight position stays status="OPEN" with no
-        # distinguishing flag exit_engine special-cases — this loop iterates
-        # every open position for `mode` every cycle (including the first
-        # cycle after next day's open), so an overnight-held position that
-        # gaps down gets caught by this exact check like any other open
-        # position. No code change needed; verified by reading both call
-        # paths together, not by running it live.
-        #
-        # In a weak market (Aug-2026), gap-downs are common. If unrealized loss
-        # exceeds EMERGENCY_LOSS_MULT × original stop distance, the stop has
-        # been gapped through — exit immediately regardless of current_stop level.
-        #
-        # 2026-09-01 fix: use position.initial_stop_distance (fixed once at
-        # OPEN time) instead of re-deriving from current_stop every cycle.
-        # current_stop moves via breakeven/ATR-trail, so the old approach
-        # drifted: once trail tightens near LTP the threshold shrinks toward
-        # zero (relabels an ordinary stop-hit as "EMERGENCY" — harmless but
-        # confusing in the audit log), and once breakeven pushes current_stop
-        # above entry the threshold GROWS (delays the emergency catch exactly
-        # when there's the most unrealized profit at stake — the opposite of
-        # the intent). Rows opened before this migration have no stored
-        # value, so they fall back to the previous approximation.
-        original_risk = position.initial_stop_distance
-        if original_risk is None:
-            original_risk = abs(
-                position.avg_entry_price - (position.current_stop or position.avg_entry_price)
-            )
-        unrealized_loss_per_share = position.avg_entry_price - ltp
-        if (
-            original_risk > 0
-            and unrealized_loss_per_share > EMERGENCY_LOSS_MULT * original_risk
-        ):
-            reasoning = (
-                f"EMERGENCY: price ₹{ltp:.2f} gapped {unrealized_loss_per_share:.2f} "
-                f"below entry ₹{position.avg_entry_price:.2f} "
-                f"({EMERGENCY_LOSS_MULT}× original stop distance ₹{original_risk:.2f}). "
-                "Gap-down scenario — closing immediately to prevent further damage."
-            )
-            _write_exit_decision(db, position, "EMERGENCY_EXIT", reasoning, ltp)
-            if mode == "DEMO":
-                close_position(db, position, tick, position.qty_open, "emergency_gap_down")
-                emergency_exits += 1
-            else:
-                if _send_real_sell(db, position, position.qty_open, "emergency_gap_down"):
+            # ── 0. Emergency gap-down exit ────────────────────────────────────────
+            # 2026-09-18 audit note (follow-on item #7 from the cost-model audit,
+            # user asked whether this covers positions _select_overnight_holds
+            # (execution/auto_pilot.py) kept open past EOD square-off): CONFIRMED
+            # generic. A held-overnight position stays status="OPEN" with no
+            # distinguishing flag exit_engine special-cases — this loop iterates
+            # every open position for `mode` every cycle (including the first
+            # cycle after next day's open), so an overnight-held position that
+            # gaps down gets caught by this exact check like any other open
+            # position. No code change needed; verified by reading both call
+            # paths together, not by running it live.
+            #
+            # In a weak market (Aug-2026), gap-downs are common. If unrealized loss
+            # exceeds EMERGENCY_LOSS_MULT × original stop distance, the stop has
+            # been gapped through — exit immediately regardless of current_stop level.
+            #
+            # 2026-09-01 fix: use position.initial_stop_distance (fixed once at
+            # OPEN time) instead of re-deriving from current_stop every cycle.
+            # current_stop moves via breakeven/ATR-trail, so the old approach
+            # drifted: once trail tightens near LTP the threshold shrinks toward
+            # zero (relabels an ordinary stop-hit as "EMERGENCY" — harmless but
+            # confusing in the audit log), and once breakeven pushes current_stop
+            # above entry the threshold GROWS (delays the emergency catch exactly
+            # when there's the most unrealized profit at stake — the opposite of
+            # the intent). Rows opened before this migration have no stored
+            # value, so they fall back to the previous approximation.
+            original_risk = position.initial_stop_distance
+            if original_risk is None:
+                original_risk = abs(
+                    position.avg_entry_price - (position.current_stop or position.avg_entry_price)
+                )
+            unrealized_loss_per_share = position.avg_entry_price - ltp
+            if (
+                original_risk > 0
+                and unrealized_loss_per_share > EMERGENCY_LOSS_MULT * original_risk
+            ):
+                reasoning = (
+                    f"EMERGENCY: price ₹{ltp:.2f} gapped {unrealized_loss_per_share:.2f} "
+                    f"below entry ₹{position.avg_entry_price:.2f} "
+                    f"({EMERGENCY_LOSS_MULT}× original stop distance ₹{original_risk:.2f}). "
+                    "Gap-down scenario — closing immediately to prevent further damage."
+                )
+                _write_exit_decision(db, position, "EMERGENCY_EXIT", reasoning, ltp)
+                if mode == "DEMO":
+                    close_position(db, position, tick, position.qty_open, "emergency_gap_down")
                     emergency_exits += 1
                 else:
-                    held += 1
-            continue
+                    if _send_real_sell(db, position, position.qty_open, "emergency_gap_down"):
+                        emergency_exits += 1
+                    else:
+                        held += 1
+                continue
 
-        # ── 1. Stop hit — capital protection always checked first ─────────────
-        if position.current_stop is not None and ltp <= position.current_stop:
-            reasoning = (
-                f"Stop ₹{position.current_stop:.2f} hit at LTP ₹{ltp:.2f}. "
-                f"Closing full position ({position.qty_open} shares)."
-            )
-            _write_exit_decision(db, position, "FULL_EXIT", reasoning, ltp)
-            if mode == "DEMO":
-                close_position(db, position, tick, position.qty_open, "stop_hit")
-                full_exits += 1
-            else:
-                if _send_real_sell(db, position, position.qty_open, "stop_hit"):
+            # ── 1. Stop hit — capital protection always checked first ─────────────
+            if position.current_stop is not None and ltp <= position.current_stop:
+                reasoning = (
+                    f"Stop ₹{position.current_stop:.2f} hit at LTP ₹{ltp:.2f}. "
+                    f"Closing full position ({position.qty_open} shares)."
+                )
+                _write_exit_decision(db, position, "FULL_EXIT", reasoning, ltp)
+                if mode == "DEMO":
+                    close_position(db, position, tick, position.qty_open, "stop_hit")
                     full_exits += 1
                 else:
-                    held += 1
-            continue
+                    if _send_real_sell(db, position, position.qty_open, "stop_hit"):
+                        full_exits += 1
+                    else:
+                        held += 1
+                continue
 
-        # ── 2. First target hit — partial exit (60%) ──────────────────────────
-        if (
-            position.current_target is not None
-            and ltp >= position.current_target
-            and position.status == "OPEN"
-        ):
-            qty_to_close = max(1, int(position.qty_open * _partial_frac))
-            pct_locked   = qty_to_close / position.qty_open * 100
-            reasoning = (
-                f"Target ₹{position.current_target:.2f} hit at LTP ₹{ltp:.2f}. "
-                f"Locking in {qty_to_close} shares ({pct_locked:.0f}% of position). "
-                f"Remainder trailed — stop moved to breakeven ₹{position.avg_entry_price:.2f}."
-            )
-            _write_exit_decision(db, position, "PARTIAL_EXIT", reasoning, ltp)
-            if mode == "DEMO":
-                close_position(db, position, tick, qty_to_close, "target_hit_partial")
-                if position.qty_open > 0:
-                    # Raise stop to breakeven on the remainder so the rest
-                    # is now a "free trade" — worst case exits at entry price.
-                    position.current_stop   = max(
-                        position.current_stop or 0, position.avg_entry_price
-                    )
-                    # Nullify target — remainder is now trailed, not held to a
-                    # stale fixed target that could be hit again for a second
-                    # unintended partial exit.
-                    position.current_target = None
-                    db.add(models.TradePositionEvent(
-                        position_id=position.id, event_type="PARTIAL_EXIT_TRAIL",
-                        detail=(
-                            f"Stop raised to breakeven ₹{position.avg_entry_price:.2f}, "
-                            "target nullified — remainder now on ATR trail."
-                        ),
-                    ))
-                    db.commit()
-                partial_exits += 1
-            else:
-                # 2026-09-18 fix (user audit finding): every automatic exit —
-                # including a profit-target hit — was sent as MARKET. That's
-                # the right call for stop-loss/emergency exits (must fill,
-                # capital protection), but it adds pure, avoidable slippage
-                # on winners, where there's no urgency. A LIMIT sell pinned
-                # just below the live LTP fills immediately on any liquid
-                # NSE name and still gets picked up + retried as normal by
-                # the next exit_engine cycle (EXIT_CHECK_INTERVAL_SECONDS,
-                # default 45s) if it doesn't — no dangling risk, since this
-                # position is re-evaluated every cycle regardless. Config-
-                # gated so it can be switched back to MARKET with no code
-                # change if live behavior ever shows a problem.
-                _target_order_type = "MARKET"
-                _target_limit_price = None
-                if config.EXIT_TARGET_USE_LIMIT:
-                    _target_order_type = "LIMIT"
-                    _target_limit_price = round(ltp * (1 - config.EXIT_TARGET_LIMIT_BUFFER_PCT / 100.0), 2)
-                if _send_real_sell(
-                    db, position, qty_to_close, "target_hit_partial", full=False,
-                    order_type=_target_order_type, limit_price=_target_limit_price,
-                ):
+            # ── 2. First target hit — partial exit (60%) ──────────────────────────
+            if (
+                position.current_target is not None
+                and ltp >= position.current_target
+                and position.status == "OPEN"
+            ):
+                qty_to_close = max(1, int(position.qty_open * _partial_frac))
+                pct_locked   = qty_to_close / position.qty_open * 100
+                reasoning = (
+                    f"Target ₹{position.current_target:.2f} hit at LTP ₹{ltp:.2f}. "
+                    f"Locking in {qty_to_close} shares ({pct_locked:.0f}% of position). "
+                    f"Remainder trailed — stop moved to breakeven ₹{position.avg_entry_price:.2f}."
+                )
+                _write_exit_decision(db, position, "PARTIAL_EXIT", reasoning, ltp)
+                if mode == "DEMO":
+                    close_position(db, position, tick, qty_to_close, "target_hit_partial")
+                    if position.qty_open > 0:
+                        # Raise stop to breakeven on the remainder so the rest
+                        # is now a "free trade" — worst case exits at entry price.
+                        position.current_stop   = max(
+                            position.current_stop or 0, position.avg_entry_price
+                        )
+                        # Nullify target — remainder is now trailed, not held to a
+                        # stale fixed target that could be hit again for a second
+                        # unintended partial exit.
+                        position.current_target = None
+                        db.add(models.TradePositionEvent(
+                            position_id=position.id, event_type="PARTIAL_EXIT_TRAIL",
+                            detail=(
+                                f"Stop raised to breakeven ₹{position.avg_entry_price:.2f}, "
+                                "target nullified — remainder now on ATR trail."
+                            ),
+                        ))
+                        db.commit()
                     partial_exits += 1
-                    # FIX: nullify target + raise stop to breakeven for REAL too.
-                    # Without this, the next cycle sees ltp >= target again and
-                    # fires another partial sell on the already-reduced position.
-                    position.current_stop   = max(
-                        position.current_stop or 0, position.avg_entry_price
-                    )
-                    position.current_target = None
-                    db.add(models.TradePositionEvent(
-                        position_id=position.id, event_type="PARTIAL_EXIT_TRAIL",
-                        detail=(
-                            f"REAL partial sent to Dhan. Stop raised to breakeven "
-                            f"₹{position.avg_entry_price:.2f}, target nullified — "
-                            "remainder now on ATR trail."
-                        ),
-                    ))
-                    db.commit()
                 else:
-                    held += 1
-            continue
+                    # 2026-09-18 fix (user audit finding): every automatic exit —
+                    # including a profit-target hit — was sent as MARKET. That's
+                    # the right call for stop-loss/emergency exits (must fill,
+                    # capital protection), but it adds pure, avoidable slippage
+                    # on winners, where there's no urgency. A LIMIT sell pinned
+                    # just below the live LTP fills immediately on any liquid
+                    # NSE name and still gets picked up + retried as normal by
+                    # the next exit_engine cycle (EXIT_CHECK_INTERVAL_SECONDS,
+                    # default 45s) if it doesn't — no dangling risk, since this
+                    # position is re-evaluated every cycle regardless. Config-
+                    # gated so it can be switched back to MARKET with no code
+                    # change if live behavior ever shows a problem.
+                    _target_order_type = "MARKET"
+                    _target_limit_price = None
+                    if config.EXIT_TARGET_USE_LIMIT:
+                        _target_order_type = "LIMIT"
+                        _target_limit_price = round(ltp * (1 - config.EXIT_TARGET_LIMIT_BUFFER_PCT / 100.0), 2)
+                    if _send_real_sell(
+                        db, position, qty_to_close, "target_hit_partial", full=False,
+                        order_type=_target_order_type, limit_price=_target_limit_price,
+                    ):
+                        partial_exits += 1
+                        # FIX: nullify target + raise stop to breakeven for REAL too.
+                        # Without this, the next cycle sees ltp >= target again and
+                        # fires another partial sell on the already-reduced position.
+                        position.current_stop   = max(
+                            position.current_stop or 0, position.avg_entry_price
+                        )
+                        position.current_target = None
+                        db.add(models.TradePositionEvent(
+                            position_id=position.id, event_type="PARTIAL_EXIT_TRAIL",
+                            detail=(
+                                f"REAL partial sent to Dhan. Stop raised to breakeven "
+                                f"₹{position.avg_entry_price:.2f}, target nullified — "
+                                "remainder now on ATR trail."
+                            ),
+                        ))
+                        db.commit()
+                    else:
+                        held += 1
+                continue
 
-        # ── 3. Time stop (with early warning at EARLY_WARN_DAYS) ─────────────
-        # In a choppy market, a non-performing position after MAX_HOLD_DAYS
-        # is tying up capital that could be in outperforming midcaps/PSU banks.
-        # Condition: held long enough AND price has not reached current_target
-        # (if target is None after partial exit, fire if below 1.01× entry).
-        # session42 audit: previous condition `ltp <= avg_entry_price * 1.01`
-        # let positions 1-5% above entry ride forever — a slow drifter that
-        # never hits its target still ties up capital. Use current_target as
-        # the benchmark: if we're below target after max_hold days, exit.
-        _time_stop_target = position.current_target if position.current_target else position.avg_entry_price * 1.005
-        if held_days >= _max_hold and ltp < _time_stop_target:
-            reasoning = (
-                f"Time-stop: held {held_days} days with no meaningful favorable move "
-                f"(LTP ₹{ltp:.2f} vs entry ₹{position.avg_entry_price:.2f}). "
-                f"Capital freed for better-performing setups."
-                f" [horizon={_horizon or 'manual'}]"
-            )
-            # BUG FIX (2026-09-01): this was logging action="EMERGENCY_EXIT" —
-            # copy-pasted from the gap-down branch above. A time-stop close is
-            # a full position exit, not the gap-through emergency case (that
-            # branch, and its own "emergency_exits" tally counter, are above
-            # and untouched). Using "EMERGENCY_EXIT" here mislabeled every
-            # time-stop close in the audit trail/dashboard decision history —
-            # reasoning correctly said "Time-stop:..." but the action field
-            # said EMERGENCY_EXIT, and the counters (time_stops vs
-            # emergency_exits) already disagreed with what got written to
-            # TradeExitDecision.action. "FULL_EXIT" matches models.py's
-            # documented action taxonomy and the stop-hit branch below, which
-            # uses the same label for the same kind of event (full close).
-            _write_exit_decision(db, position, "FULL_EXIT", reasoning, ltp)
-            if mode == "DEMO":
-                close_position(db, position, tick, position.qty_open, "time_stop")
-                time_stops += 1
-            else:
-                if _send_real_sell(db, position, position.qty_open, "time_stop"):
+            # ── 3. Time stop (with early warning at EARLY_WARN_DAYS) ─────────────
+            # In a choppy market, a non-performing position after MAX_HOLD_DAYS
+            # is tying up capital that could be in outperforming midcaps/PSU banks.
+            # Condition: held long enough AND price has not reached current_target
+            # (if target is None after partial exit, fire if below 1.01× entry).
+            # session42 audit: previous condition `ltp <= avg_entry_price * 1.01`
+            # let positions 1-5% above entry ride forever — a slow drifter that
+            # never hits its target still ties up capital. Use current_target as
+            # the benchmark: if we're below target after max_hold days, exit.
+            _time_stop_target = position.current_target if position.current_target else position.avg_entry_price * 1.005
+            if held_days >= _max_hold and ltp < _time_stop_target:
+                reasoning = (
+                    f"Time-stop: held {held_days} days with no meaningful favorable move "
+                    f"(LTP ₹{ltp:.2f} vs entry ₹{position.avg_entry_price:.2f}). "
+                    f"Capital freed for better-performing setups."
+                    f" [horizon={_horizon or 'manual'}]"
+                )
+                # BUG FIX (2026-09-01): this was logging action="EMERGENCY_EXIT" —
+                # copy-pasted from the gap-down branch above. A time-stop close is
+                # a full position exit, not the gap-through emergency case (that
+                # branch, and its own "emergency_exits" tally counter, are above
+                # and untouched). Using "EMERGENCY_EXIT" here mislabeled every
+                # time-stop close in the audit trail/dashboard decision history —
+                # reasoning correctly said "Time-stop:..." but the action field
+                # said EMERGENCY_EXIT, and the counters (time_stops vs
+                # emergency_exits) already disagreed with what got written to
+                # TradeExitDecision.action. "FULL_EXIT" matches models.py's
+                # documented action taxonomy and the stop-hit branch below, which
+                # uses the same label for the same kind of event (full close).
+                _write_exit_decision(db, position, "FULL_EXIT", reasoning, ltp)
+                if mode == "DEMO":
+                    close_position(db, position, tick, position.qty_open, "time_stop")
                     time_stops += 1
                 else:
+                    if _send_real_sell(db, position, position.qty_open, "time_stop"):
+                        time_stops += 1
+                    else:
+                        held += 1
+                continue
+
+            # Early warning (no exit — just visibility for the dashboard)
+            if held_days == _early_warn and ltp <= position.avg_entry_price:
+                _write_exit_decision(
+                    db, position, "HOLD",
+                    f"Day {held_days} review: LTP ₹{ltp:.2f} still at/below entry "
+                    f"₹{position.avg_entry_price:.2f}. "
+                    f"Time-stop fires in {_max_hold - held_days} more days if no move."
+                    f" [horizon={_horizon or 'manual'}]",
+                    ltp,
+                )
+                held += 1
+                continue
+
+            # ── 4. Breakeven stop (once gain ≥ _be_trigger × ATR) ────────────────
+            # Creates a free-ride floor: once the trade is meaningfully in profit
+            # (defined as 1×ATR gain), we protect that by moving stop to entry.
+            # Even if price reverses from here, we exit at breakeven, not a loss.
+            #
+            # 2026-09-15 (session41b): range-position breakeven acceleration.
+            # If the stock is near its DAY HIGH (range_pos ≥ 0.80), there is
+            # very little remaining upside room.  In that case trigger breakeven
+            # at 60% of the normal ATR threshold so we lock in profit sooner
+            # instead of watching it reverse back to entry (VGL/ZENSARTECH pattern).
+            if tick.atr and ltp > position.avg_entry_price:
+                gain_per_share = ltp - position.avg_entry_price
+
+                # Compute range_position from Tick.day_high/day_low (populated
+                # from /quote since session41b).  Fall back gracefully if absent.
+                _be_mult = 1.0
+                _range_note = ""
+                _dh = getattr(tick, "day_high", None)
+                _dl = getattr(tick, "day_low", None)
+                if _dh and _dl and (_dh - _dl) > 1e-6:
+                    _rpos = max(0.0, min(1.0, (ltp - _dl) / (_dh - _dl)))
+                    if _rpos >= 0.80:
+                        # Near day-high — trigger breakeven at 60% of normal threshold
+                        _be_mult   = 0.60
+                        _range_note = f" [range-pos={_rpos:.2f}≥0.80 — near-high: BE trigger accelerated to 60%]"
+                    elif _rpos >= 0.65:
+                        # Moderately extended — trigger at 80%
+                        _be_mult   = 0.80
+                        _range_note = f" [range-pos={_rpos:.2f}≥0.65 — extended: BE trigger at 80%]"
+
+                if gain_per_share >= (_be_trigger * _be_mult) * tick.atr:
+                    be_level = position.avg_entry_price
+                    if position.current_stop is None or position.current_stop < be_level:
+                        old_stop = position.current_stop
+                        position.current_stop = be_level
+                        db.add(models.TradePositionEvent(
+                            position_id=position.id, event_type="BREAKEVEN_STOP",
+                            detail=(
+                                f"Stop raised to breakeven ₹{be_level:.2f} "
+                                f"(was ₹{old_stop}) — gain ₹{gain_per_share:.2f} "
+                                f"≥ {_be_trigger * _be_mult:.2f}×ATR ₹{tick.atr:.2f}."
+                                f"Trade is now a free ride. [horizon={_horizon or 'manual'}]"
+                                f"{_range_note}"
+                            ),
+                        ))
+                        db.commit()
+                        _write_exit_decision(
+                            db, position, "TRAIL_STOP",
+                            f"Breakeven stop set at ₹{be_level:.2f} — "
+                            f"gain ₹{gain_per_share:.2f} ≥ {_be_trigger * _be_mult:.2f}×ATR. "
+                            f"Trade is now risk-free. [horizon={_horizon or 'manual'}]{_range_note}",
+                            ltp,
+                        )
+                        trailed += 1
+                        continue
+
+            # ── 5. Age-aware ATR trailing stop ────────────────────────────────────
+            # Only trail when price is above entry (never trail a losing position —
+            # that would loosen the stop, which is wrong).
+            # ATR multiplier tightens as trade ages to protect accumulated profit.
+            #
+            # 2026-09-15 (session41b): range-position trail tightening.
+            # Near the day-high the stop trails tighter (0.7× multiplier) so a
+            # reversal from the top is caught quickly rather than giving back all
+            # the gain (VGL/ZENSARTECH pattern).
+            if tick.atr and ltp > position.avg_entry_price:
+                trail_mult   = _trail_atr_mult(held_days, schedule=_trail_schedule)
+
+                # Apply range-position adjustment to trail_mult if day range available
+                _dh2 = getattr(tick, "day_high", None)
+                _dl2 = getattr(tick, "day_low", None)
+                _trail_range_note = ""
+                if _dh2 and _dl2 and (_dh2 - _dl2) > 1e-6:
+                    _rpos2 = max(0.0, min(1.0, (ltp - _dl2) / (_dh2 - _dl2)))
+                    if _rpos2 >= 0.80:
+                        trail_mult = round(trail_mult * 0.70, 3)   # tightest trail near peak
+                        _trail_range_note = f" [range-pos={_rpos2:.2f}≥0.80 — near-high: trail×0.70]"
+                    elif _rpos2 >= 0.65:
+                        trail_mult = round(trail_mult * 0.85, 3)
+                        _trail_range_note = f" [range-pos={_rpos2:.2f}≥0.65 — extended: trail×0.85]"
+
+                raw_atr_pct  = tick.atr / ltp * 100.0
+                # §6 — clamp: if today's ATR looks like a corporate-action jump, skip
+                # the trail update entirely this cycle rather than using a distorted ATR.
+                atr_pct = _clamp_for_atr(raw_atr_pct)
+                if atr_pct is None:
+                    # Corporate-action day — don't trail on bad data, just hold current stop
+                    _write_exit_decision(
+                        db, position, "HOLD",
+                        f"ATR clamped (corporate-action suspected, raw {raw_atr_pct:.1f}%) "
+                        "— trail skipped this cycle to avoid distorted stop.",
+                        ltp,
+                    )
                     held += 1
-            continue
+                    continue
+                trail_candidate = round(ltp * (1 - (atr_pct * trail_mult) / 100.0), 2)
 
-        # Early warning (no exit — just visibility for the dashboard)
-        if held_days == _early_warn and ltp <= position.avg_entry_price:
-            _write_exit_decision(
-                db, position, "HOLD",
-                f"Day {held_days} review: LTP ₹{ltp:.2f} still at/below entry "
-                f"₹{position.avg_entry_price:.2f}. "
-                f"Time-stop fires in {_max_hold - held_days} more days if no move."
-                f" [horizon={_horizon or 'manual'}]",
-                ltp,
-            )
-            held += 1
-            continue
-
-        # ── 4. Breakeven stop (once gain ≥ _be_trigger × ATR) ────────────────
-        # Creates a free-ride floor: once the trade is meaningfully in profit
-        # (defined as 1×ATR gain), we protect that by moving stop to entry.
-        # Even if price reverses from here, we exit at breakeven, not a loss.
-        #
-        # 2026-09-15 (session41b): range-position breakeven acceleration.
-        # If the stock is near its DAY HIGH (range_pos ≥ 0.80), there is
-        # very little remaining upside room.  In that case trigger breakeven
-        # at 60% of the normal ATR threshold so we lock in profit sooner
-        # instead of watching it reverse back to entry (VGL/ZENSARTECH pattern).
-        if tick.atr and ltp > position.avg_entry_price:
-            gain_per_share = ltp - position.avg_entry_price
-
-            # Compute range_position from Tick.day_high/day_low (populated
-            # from /quote since session41b).  Fall back gracefully if absent.
-            _be_mult = 1.0
-            _range_note = ""
-            _dh = getattr(tick, "day_high", None)
-            _dl = getattr(tick, "day_low", None)
-            if _dh and _dl and (_dh - _dl) > 1e-6:
-                _rpos = max(0.0, min(1.0, (ltp - _dl) / (_dh - _dl)))
-                if _rpos >= 0.80:
-                    # Near day-high — trigger breakeven at 60% of normal threshold
-                    _be_mult   = 0.60
-                    _range_note = f" [range-pos={_rpos:.2f}≥0.80 — near-high: BE trigger accelerated to 60%]"
-                elif _rpos >= 0.65:
-                    # Moderately extended — trigger at 80%
-                    _be_mult   = 0.80
-                    _range_note = f" [range-pos={_rpos:.2f}≥0.65 — extended: BE trigger at 80%]"
-
-            if gain_per_share >= (_be_trigger * _be_mult) * tick.atr:
-                be_level = position.avg_entry_price
-                if position.current_stop is None or position.current_stop < be_level:
+                # Only ever tighten (ratchet up), never loosen the stop.
+                if position.current_stop is None or trail_candidate > position.current_stop:
                     old_stop = position.current_stop
-                    position.current_stop = be_level
+                    position.current_stop = trail_candidate
                     db.add(models.TradePositionEvent(
-                        position_id=position.id, event_type="BREAKEVEN_STOP",
+                        position_id=position.id, event_type="STOP_TRAILED",
                         detail=(
-                            f"Stop raised to breakeven ₹{be_level:.2f} "
-                            f"(was ₹{old_stop}) — gain ₹{gain_per_share:.2f} "
-                            f"≥ {_be_trigger * _be_mult:.2f}×ATR ₹{tick.atr:.2f}."
-                            f"Trade is now a free ride. [horizon={_horizon or 'manual'}]"
-                            f"{_range_note}"
+                            f"₹{old_stop} → ₹{trail_candidate} "
+                            f"(LTP ₹{ltp}, day {held_days}, {trail_mult}×ATR "
+                            f"= {atr_pct * trail_mult:.2f}%){_trail_range_note}"
                         ),
                     ))
                     db.commit()
                     _write_exit_decision(
                         db, position, "TRAIL_STOP",
-                        f"Breakeven stop set at ₹{be_level:.2f} — "
-                        f"gain ₹{gain_per_share:.2f} ≥ {_be_trigger * _be_mult:.2f}×ATR. "
-                        f"Trade is now risk-free. [horizon={_horizon or 'manual'}]{_range_note}",
+                        f"Stop trailed to ₹{trail_candidate:.2f} "
+                        f"({trail_mult}×ATR, day {held_days} held).{_trail_range_note}",
                         ltp,
                     )
                     trailed += 1
                     continue
 
-        # ── 5. Age-aware ATR trailing stop ────────────────────────────────────
-        # Only trail when price is above entry (never trail a losing position —
-        # that would loosen the stop, which is wrong).
-        # ATR multiplier tightens as trade ages to protect accumulated profit.
-        #
-        # 2026-09-15 (session41b): range-position trail tightening.
-        # Near the day-high the stop trails tighter (0.7× multiplier) so a
-        # reversal from the top is caught quickly rather than giving back all
-        # the gain (VGL/ZENSARTECH pattern).
-        if tick.atr and ltp > position.avg_entry_price:
-            trail_mult   = _trail_atr_mult(held_days, schedule=_trail_schedule)
-
-            # Apply range-position adjustment to trail_mult if day range available
-            _dh2 = getattr(tick, "day_high", None)
-            _dl2 = getattr(tick, "day_low", None)
-            _trail_range_note = ""
-            if _dh2 and _dl2 and (_dh2 - _dl2) > 1e-6:
-                _rpos2 = max(0.0, min(1.0, (ltp - _dl2) / (_dh2 - _dl2)))
-                if _rpos2 >= 0.80:
-                    trail_mult = round(trail_mult * 0.70, 3)   # tightest trail near peak
-                    _trail_range_note = f" [range-pos={_rpos2:.2f}≥0.80 — near-high: trail×0.70]"
-                elif _rpos2 >= 0.65:
-                    trail_mult = round(trail_mult * 0.85, 3)
-                    _trail_range_note = f" [range-pos={_rpos2:.2f}≥0.65 — extended: trail×0.85]"
-
-            raw_atr_pct  = tick.atr / ltp * 100.0
-            # §6 — clamp: if today's ATR looks like a corporate-action jump, skip
-            # the trail update entirely this cycle rather than using a distorted ATR.
-            atr_pct = _clamp_for_atr(raw_atr_pct)
-            if atr_pct is None:
-                # Corporate-action day — don't trail on bad data, just hold current stop
+            # ── 6. Hold ───────────────────────────────────────────────────────────
+            _write_exit_decision(
+                db, position, "HOLD",
+                f"No exit condition met at LTP ₹{ltp:.2f}. Monitoring.", ltp,
+            )
+            held += 1
+        except Exception as _pos_exc:
+            db.rollback()
+            logger.error(
+                "evaluate_mode: unexpected error evaluating %s (%s) -- skipping this "
+                "position for this cycle only, other positions unaffected: %s",
+                position.symbol, mode, _pos_exc,
+            )
+            try:
                 _write_exit_decision(
                     db, position, "HOLD",
-                    f"ATR clamped (corporate-action suspected, raw {raw_atr_pct:.1f}%) "
-                    "— trail skipped this cycle to avoid distorted stop.",
-                    ltp,
+                    f"Evaluation error this cycle ({_pos_exc}) -- skipped, will retry "
+                    "next cycle. Other positions this cycle were not affected.",
+                    0.0,
                 )
-                held += 1
-                continue
-            trail_candidate = round(ltp * (1 - (atr_pct * trail_mult) / 100.0), 2)
-
-            # Only ever tighten (ratchet up), never loosen the stop.
-            if position.current_stop is None or trail_candidate > position.current_stop:
-                old_stop = position.current_stop
-                position.current_stop = trail_candidate
-                db.add(models.TradePositionEvent(
-                    position_id=position.id, event_type="STOP_TRAILED",
-                    detail=(
-                        f"₹{old_stop} → ₹{trail_candidate} "
-                        f"(LTP ₹{ltp}, day {held_days}, {trail_mult}×ATR "
-                        f"= {atr_pct * trail_mult:.2f}%){_trail_range_note}"
-                    ),
-                ))
                 db.commit()
-                _write_exit_decision(
-                    db, position, "TRAIL_STOP",
-                    f"Stop trailed to ₹{trail_candidate:.2f} "
-                    f"({trail_mult}×ATR, day {held_days} held).{_trail_range_note}",
-                    ltp,
-                )
-                trailed += 1
-                continue
-
-        # ── 6. Hold ───────────────────────────────────────────────────────────
-        _write_exit_decision(
-            db, position, "HOLD",
-            f"No exit condition met at LTP ₹{ltp:.2f}. Monitoring.", ltp,
-        )
-        held += 1
+            except Exception:
+                db.rollback()
+            held += 1
 
     db.commit()
     tally = {

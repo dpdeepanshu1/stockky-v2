@@ -86,15 +86,43 @@ rejection alerts" and would have failed against the real cooldown-throttled
 behavior — caught and fixed by hand-tracing the code before finalizing, not
 by running the test, since pytest still isn't available in this sandbox).
 
-## Verification
+## Fix round (user ran the tests on the VM)
 
-`python3 -m py_compile` clean on the new test file and the whole service.
-Same sandbox limitation as every session this week — no network here,
-`pytest`/`sqlalchemy` not installed — so these 21 tests are written and
-hand-traced call-by-call against the current code (including working through
-the exact snapshot-key read/write sequence and cooldown-elapsed math for the
-escalation test) but not yet executed in this environment. Run on the VM to
-confirm:
+`test_generic_rejection_escalates_at_threshold_then_suppresses` failed on
+the VM: `assert 3 == (3 + 1)` — a follow-up rejection right after the
+escalation call didn't bump the streak count at all. Root cause, confirmed
+by reading `_should_skip_exit_this_cycle` (called at the very top of
+`_send_real_sell`, line ~491): the SAME rejection that crosses
+`EXIT_REJECT_STREAK_ESCALATE_AT` also satisfies `_bump_exit_failure`'s
+`current_streak >= escalate_at` condition — which bumps
+`consecutive_exit_failures` even for a non-persistent generic error. That
+means the very next evaluation cycle is skipped by the exponential backoff
+(`BASE_COOLDOWN * 2^(failures-1)`, 60s on the first bump) *before*
+`_send_real_sell` ever reaches Dhan or the streak snapshot again — visible
+in the pasted log too (only 3 `ERROR ... REAL exit SELL failed` lines for 4
+`_sell()` calls, since the 4th call returned `False` from the backoff guard
+without ever entering the `try` block). Not a bug in the production code —
+this backoff is intentional and matches `test_exit_backoff_escalation.py`'s
+own cooldown tests — my test's assumption that every subsequent call would
+reach the generic-error branch was wrong. Fixed the test itself:
+1. Added a call counter around the mocked `place_order` so the
+   backoff-skip can be asserted directly (`calls["n"]` unchanged across the
+   skipped cycle).
+2. Added an explicit assertion that the immediate next call after crossing
+   the threshold is skipped by backoff (`consecutive_exit_failures == 1`,
+   no new alert, streak snapshot untouched) — this is now itself a useful
+   regression test for the backoff/streak interaction, not just a fix.
+3. Before every subsequent call that the test needs to actually reach Dhan
+   again, explicitly clears the backoff window by setting
+   `position.last_exit_failure_at` far enough into the past (using
+   `config.EXIT_RETRY_MAX_COOLDOWN_SECONDS` as a safe upper bound regardless
+   of how many times the exponential backoff has doubled by that point).
+
+Hand-traced the full corrected call sequence (7 `_sell()` calls total) against
+the production code line-by-line before finalizing — added `import config`
+to the test file for the cooldown constant. `py_compile` clean. Not
+re-executed here (still no `pytest`/`sqlalchemy` in this sandbox) — re-run
+on the VM to confirm:
 
 ```bash
 cd ~/stockky-v2/services/real-trade-service
@@ -103,12 +131,10 @@ python3 -m pytest tests -q -p no:cacheprovider | tail -1
 python3 -m pytest tests -q --cov=exit_engine.exit --cov-report=term-missing
 ```
 
-Diffed the extracted zip against the part-1 upload: only `AUDIT_REPORT.md`,
-`CHANGELOG_INDEX.md`, this note, and the 1 new test file changed —
-`exit_engine/exit.py` itself is untouched this session (no code changes
-needed, only tests, same as part 1).
-
-Delivered zip: `stockky-v2-main-2026-09-21-session77-phase1-part2.zip`.
+Delivered zip: `stockky-v2-main-2026-09-21-session77-phase1-part2.zip`
+(same file, now also includes this fix — diff against the original
+upload for this part: `AUDIT_REPORT.md`, `CHANGELOG_INDEX.md`, this note,
+and the 1 test file).
 
 ## Still open (Phase 1, exit_engine/exit.py) — per the coverage plan
 

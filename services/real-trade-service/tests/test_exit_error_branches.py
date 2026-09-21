@@ -22,6 +22,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import models
+import config
 from execution import dhan_client
 from resilience.local_cache import load_snapshot, save_snapshot
 from tz_utils import ist_today_str
@@ -340,10 +341,26 @@ def test_generic_rejection_escalates_at_threshold_then_suppresses(env, monkeypat
     fires again until the streak first crosses EXIT_REJECT_STREAK_ESCALATE_AT,
     which fires exactly one distinct 'STUCK' escalation -- after which it goes
     quiet again (escalated=True + still within cooldown) even though the
-    streak count keeps climbing underneath."""
+    streak count keeps climbing underneath.
+
+    Important wrinkle (found by running this test against the real code,
+    not assumed up front): the SAME rejection that crosses the escalation
+    threshold also crosses _bump_exit_failure's `current_streak >=
+    escalate_at` condition, which bumps consecutive_exit_failures even
+    though this is a non-persistent generic error -- so the very next
+    evaluation cycle is skipped by _should_skip_exit_this_cycle's
+    exponential backoff BEFORE _send_real_sell ever reaches Dhan again,
+    entirely independent of the alert-cooldown/streak mechanism above. The
+    test clears that backoff window explicitly wherever it needs the
+    rejection to actually go through again."""
     db = env
     pos = _mkposition(db)
-    monkeypatch.setattr(dhan_client, "place_order", _boom("RMS:9:Some unrecognized rejection reason"))
+    calls = {"n": 0}
+
+    def _boom_count(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("RMS:9:Some unrecognized rejection reason")
+    monkeypatch.setattr(dhan_client, "place_order", _boom_count)
     alerts = []
     monkeypatch.setattr(ex, "notify_sync", lambda *a, **k: alerts.append(a[0] if a else None))
     threshold = ex.EXIT_REJECT_STREAK_ESCALATE_AT
@@ -360,26 +377,45 @@ def test_generic_rejection_escalates_at_threshold_then_suppresses(env, monkeypat
     assert len(alerts) == 1, "an intermediate rejection alerted while within cooldown and below threshold"
 
     # the rejection that pushes streak to exactly `threshold` -> escalation fires
-    # regardless of cooldown (the escalation branch doesn't gate on `due`)
+    # regardless of the alert cooldown (the escalation branch doesn't gate on `due`)
     assert _sell(db, pos) is False
     assert len(alerts) == 2
     assert "STUCK" in alerts[-1]
     assert f"{threshold} consecutive" in alerts[-1]
+    calls_after_escalation = calls["n"]
 
     snap = load_snapshot(db, f"exit_reject_streak_{pos.id}")
     assert snap["escalated"] is True
     assert snap["count"] == threshold
 
-    # one more rejection, still within cooldown -> stays silent (streak keeps counting)
+    # this same rejection also crossed the exponential-backoff bump condition
+    # -> the immediate next evaluation cycle is skipped by backoff, before it
+    # ever reaches Dhan or touches the streak snapshot again
+    db.refresh(pos)
+    assert pos.consecutive_exit_failures == 1
     assert _sell(db, pos) is False
-    assert len(alerts) == 2, "escalation alert re-fired while still within cooldown"
+    assert calls["n"] == calls_after_escalation, "backoff cooldown did not suppress the immediate retry"
+    assert len(alerts) == 2, "no alert should fire on a cycle the backoff itself skipped"
+    snap_after_skip = load_snapshot(db, f"exit_reject_streak_{pos.id}")
+    assert snap_after_skip["count"] == threshold, "a backoff-skipped cycle must not touch the streak count"
+
+    # clear the backoff window (leave the alert-cooldown untouched) -> the
+    # rejection goes through again, streak keeps climbing, but stays SILENT
+    # (escalated=True, still within the alert cooldown)
+    pos.last_exit_failure_at = datetime.now(timezone.utc) - timedelta(seconds=config.EXIT_RETRY_MAX_COOLDOWN_SECONDS + 5)
+    db.commit()
+    assert _sell(db, pos) is False
+    assert len(alerts) == 2, "escalation alert re-fired while still within its own cooldown"
     snap2 = load_snapshot(db, f"exit_reject_streak_{pos.id}")
     assert snap2["count"] == threshold + 1
 
-    # advance the clock past cooldown -> the escalated state (streak still >=
-    # threshold) re-alerts rather than staying silent forever
+    # advance the clock past BOTH the alert cooldown and (again) the backoff
+    # window -> the escalated state (streak still >= threshold) re-alerts
+    # rather than staying silent forever
     snap2["last_alert_at"] = (datetime.now(timezone.utc) - timedelta(minutes=ex.CDSL_ALERT_COOLDOWN_MIN + 5)).isoformat()
     save_snapshot(db, f"exit_reject_streak_{pos.id}", snap2)
+    pos.last_exit_failure_at = datetime.now(timezone.utc) - timedelta(seconds=config.EXIT_RETRY_MAX_COOLDOWN_SECONDS + 5)
+    db.commit()
     assert _sell(db, pos) is False
     assert len(alerts) == 3, "escalation never re-fired after the cooldown window elapsed"
     assert "STUCK" in alerts[-1]

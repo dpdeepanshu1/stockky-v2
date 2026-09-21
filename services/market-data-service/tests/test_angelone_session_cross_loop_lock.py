@@ -55,29 +55,69 @@ def test_ensure_session_lock_survives_two_separate_event_loops():
 
     errors: list[BaseException] = []
 
-    def _run_ensure_session_in_new_loop():
-        loop = asyncio.new_event_loop()
+    # Keep both loops alive (referenced) for the duration of the test so
+    # the WeakKeyDictionary doesn't drop their entries before we can
+    # assert on them — in real usage that dropping is exactly the point
+    # (see test_locks_dict_does_not_leak_one_shot_asyncio_run_loops
+    # below), but here we want to see both entries present at once to
+    # prove two distinct per-loop locks were actually created.
+    loop1 = asyncio.new_event_loop()
+    loop2 = asyncio.new_event_loop()
+
+    def _run_ensure_session_in_new_loop(loop):
         try:
             loop.run_until_complete(session.ensure_session())
         except BaseException as e:  # capture for the main thread to assert on
             errors.append(e)
-        finally:
-            loop.close()
 
-    # First loop: the "main uvicorn loop" stand-in, right here.
-    asyncio.run(session.ensure_session())
+    # "Main uvicorn loop" stand-in.
+    _run_ensure_session_in_new_loop(loop1)
 
-    # Second loop: the "angelone_ws_feed.py background thread" stand-in —
-    # a genuinely different event loop, on a different thread, exactly
-    # like the real bug.
-    t = threading.Thread(target=_run_ensure_session_in_new_loop)
+    # "angelone_ws_feed.py background thread" stand-in — a genuinely
+    # different event loop, on a different thread, exactly like the
+    # real bug.
+    t = threading.Thread(target=_run_ensure_session_in_new_loop, args=(loop2,))
     t.start()
     t.join(timeout=10)
 
     assert not errors, f"ensure_session() raised on the second event loop: {errors!r}"
     # Confirm we actually created two distinct per-loop locks, not one
-    # shared lock silently working by luck.
+    # shared lock silently working by luck — checked before either loop
+    # is closed/dereferenced, since the WeakKeyDictionary is entitled to
+    # drop an entry the moment nothing references its loop anymore.
     assert len(session._locks) == 2
+
+    loop1.close()
+    loop2.close()
+
+
+def test_locks_dict_does_not_leak_one_shot_asyncio_run_loops():
+    """Regression for the memory leak the first fix introduced: main.py
+    has several sync route handlers (/angelone/movers, per-request
+    quote/candle lookups) that call asyncio.run(...) — each call spins
+    up a brand-new, one-shot event loop that's discarded the instant the
+    call returns. A plain dict for self._locks would pin every one of
+    those throwaway loops in memory forever, one entry per request.
+    self._locks must be a WeakKeyDictionary so an entry disappears once
+    its loop is no longer referenced anywhere else."""
+    import gc
+
+    session = angelone_client.AngelOneSession()
+    from datetime import datetime, timedelta
+    session.token = "fake-token"
+    session.token_expiry = datetime.utcnow() + timedelta(hours=1)
+
+    # Simulate 10 separate one-shot asyncio.run() calls, exactly like
+    # /angelone/movers or the per-request quote/candle routes in main.py.
+    for _ in range(10):
+        asyncio.run(session.ensure_session())
+
+    gc.collect()
+    assert len(session._locks) == 0, (
+        f"expected all one-shot event loops to be garbage-collected and "
+        f"their lock entries dropped, but {len(session._locks)} remain — "
+        f"self._locks is leaking memory again"
+    )
 
 
 if __name__ == "__main__":

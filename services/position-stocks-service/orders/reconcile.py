@@ -599,7 +599,7 @@ def _reconcile_overnight_stops(db: Session) -> int:
         db.query(ScalpPosition)
         .filter(
             ScalpPosition.status == "OPEN",
-            ScalpPosition.overnight_converted_to_cnc.is_(True),
+            ScalpPosition.overnight_converted_to_cnc == True,  # noqa: E712 - avoid .is_() on Oracle NUMBER(1) boolean (emits invalid "IS 1")
             ScalpPosition.overnight_stop_order_id.isnot(None),
         )
         .all()

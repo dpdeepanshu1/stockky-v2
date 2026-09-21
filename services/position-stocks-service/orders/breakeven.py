@@ -90,7 +90,7 @@ def run_breakeven_stop(db: Session) -> int:
     open_positions = (
         db.query(ScalpPosition)
         .filter(ScalpPosition.status == "OPEN")
-        .filter(ScalpPosition.stop_moved_to_breakeven.is_(False))
+        .filter(ScalpPosition.stop_moved_to_breakeven == False)  # noqa: E712 - avoid .is_() on Oracle NUMBER(1) boolean (emits invalid "IS 0")
         .filter(ScalpPosition.breakeven_trigger_pct.isnot(None))
         .filter(ScalpPosition.dhan_super_order_id.isnot(None))
         .all()

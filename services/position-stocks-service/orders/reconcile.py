@@ -660,10 +660,30 @@ def run_exit_reconciliation(db: Session) -> int:
     # We detect these by the status (EOD_SQUAREOFF) and the placeholder
     # sentinel in error_message rather than a separate column, so no schema
     # change is needed.
+    # 2026-09-21 fix (session80 — user-reported sync gap, REFEX/LLOYDSENT):
+    # this used to be `status == "OPEN"` only. That's the actual bug behind
+    # "Dhan already shows these closed, Stockky still shows them open with
+    # EXIT_LEGS_REJECTED" — see the dead-leg-detection fix a bit further
+    # down in this same function for the full incident. In short: a
+    # position gets marked EXIT_LEGS_REJECTED the moment EITHER exit leg
+    # (TARGET_LEG or STOP_LOSS_LEG) is REJECTED/CANCELLED/EXPIRED, even
+    # when the OTHER leg is still perfectly live and resting at the broker.
+    # Once marked, this query excluded it from every future pass — so the
+    # surviving leg could fill on Dhan's side (exactly what happened here:
+    # both stocks sold at ~their STOP_LOSS_LEG price) and this service
+    # would never find out: no P&L booked, no capital released, no
+    # notification, and the dashboard kept showing a real Dhan holding
+    # that had actually already been sold. Including EXIT_LEGS_REJECTED
+    # rows here (still gated on dhan_super_order_id.isnot(None) — no
+    # super order id means nothing to poll) lets the exact same fill-
+    # detection code below pick up a surviving leg's fill for these too,
+    # instead of waiting on EOD squareoff's blind plain-MARKET-SELL retry
+    # (which would now just get rejected by Dhan anyway, since the
+    # position is already flat there).
     open_positions = (
         db.query(ScalpPosition)
         .filter(
-            ScalpPosition.status == "OPEN",
+            ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED")),
             ScalpPosition.dhan_super_order_id.isnot(None),
         )
         .all()
@@ -894,35 +914,49 @@ def run_exit_reconciliation(db: Session) -> int:
         # fired 60+ identical MARKET SELL orders that also rejected (same
         # underlying cause) producing the spam we saw in the live order book.
         #
-        # Detection: if neither leg filled AND at least one exit leg exists
-        # AND its status is REJECTED/CANCELLED, mark the position as
-        # EXIT_LEGS_REJECTED so:
+        # Detection: if neither leg filled AND every exit leg that actually
+        # exists on this order is REJECTED/CANCELLED/EXPIRED, mark the
+        # position as EXIT_LEGS_REJECTED so:
         #   a) EOD squareoff knows to attempt a plain MARKET SELL once (not
         #      loop forever) and then give up gracefully.
         #   b) The dashboard shows the real state instead of "OPEN" forever.
+        #
+        # 2026-09-21 fix (session80 — user-reported sync gap, REFEX/
+        # LLOYDSENT): this used to fire on `target_dead or stop_dead` — ONE
+        # dead leg was enough to mark the whole position EXIT_LEGS_REJECTED,
+        # even when the OTHER leg was still perfectly live at the broker.
+        # For both REFEX and LLOYDSENT, only the TARGET_LEG had been
+        # rejected; the STOP_LOSS_LEG was still resting normally and later
+        # filled for real on Dhan (both closed at ~their stop price) — but
+        # because this code had already flipped them to EXIT_LEGS_REJECTED,
+        # the open_positions query above (pre-fix) stopped polling their
+        # super order entirely, so that real fill was never seen: no exit
+        # price, no P&L, no capital released, position still shown "open"
+        # with a stale EXIT_LEGS_REJECTED tag days after Dhan had already
+        # sold it. Now requires EVERY exit leg that exists on the order to
+        # be dead — a single-surviving-leg position is left as-is (still
+        # OPEN, still being polled) so its live leg's eventual fill is
+        # caught by the normal hit_kind detection just above, exactly like
+        # any other open position. Only a position with NO live exit leg
+        # left at all is genuinely unable to self-exit and gets tagged.
         #
         # We only do this for positions in status OPEN (not EOD_SQUAREOFF /
         # already-handled paths above) to avoid double-processing.
         if hit_kind is None and pos.status == "OPEN":
             _DEAD_LEG_STATUSES = ("REJECTED", "CANCELLED", "EXPIRED")
-            target_dead = (
-                target_leg is not None
-                and str(target_leg.get("orderStatus", "")).upper() in _DEAD_LEG_STATUSES
-            )
-            stop_dead = (
-                stop_leg is not None
-                and str(stop_leg.get("orderStatus", "")).upper() in _DEAD_LEG_STATUSES
-            )
-            if target_dead or stop_dead:
-                dead_status = (
-                    str(target_leg.get("orderStatus", "?")).upper() if target_dead
-                    else str(stop_leg.get("orderStatus", "?")).upper()
-                )
+            existing_legs = [l for l in (target_leg, stop_leg) if l is not None]
+            dead_legs = [
+                l for l in existing_legs
+                if str(l.get("orderStatus", "")).upper() in _DEAD_LEG_STATUSES
+            ]
+            all_legs_dead = bool(existing_legs) and len(dead_legs) == len(existing_legs)
+            if all_legs_dead:
+                dead_status = str(dead_legs[0].get("orderStatus", "?")).upper()
                 logger.warning(
-                    "reconcile: %s (id=%d) super-order exit leg(s) REJECTED/CANCELLED "
-                    "(%s) — position cannot self-exit via super order. "
-                    "Marking EXIT_LEGS_REJECTED so EOD squareoff fires a single "
-                    "plain MARKET SELL instead of looping.",
+                    "reconcile: %s (id=%d) ALL super-order exit leg(s) REJECTED/"
+                    "CANCELLED/EXPIRED (%s) — position cannot self-exit via super "
+                    "order. Marking EXIT_LEGS_REJECTED so EOD squareoff fires a "
+                    "single plain MARKET SELL instead of looping.",
                     pos.symbol, pos.id, dead_status,
                 )
                 pos.status = "EXIT_LEGS_REJECTED"

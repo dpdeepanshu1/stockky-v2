@@ -6,6 +6,10 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION76_CIRCUIT_LIMIT_EXIT_RESEND_FIX_2026-09-21.md` — `_send_real_sell`'s
+  circuit-limit rejection branch never set the `_cutoff_key` resend-suppression
+  flag its sibling branches use, so a circuit-locked position's SELL was
+  resent to Dhan every exit cycle all day instead of once; fixed, 2 new tests
 - `SESSION75_STUCK_RECONCILE_STATUS_FILTER_FIX_2026-09-20.md` — real bug found
   from live `/reconcile/pending` data: `resolve_stuck_pending()`'s status
   filter silently excluded STOP_HIT/TARGET_HIT rows from ever being

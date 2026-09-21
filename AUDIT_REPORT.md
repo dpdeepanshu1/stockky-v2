@@ -101,6 +101,48 @@ exercised):
 Test count: 376 passed → **434 passed**, 1 xfailed (unchanged). `py_compile` +
 `pyflakes` clean on all new/changed files.
 
+## Round 4 (this session) — fixed the `_send_real_sell` error-classification gap flagged as the top open item above
+
+Went after round 3's #2 remaining gap — `_send_real_sell`'s error-classification
+branches — and found one real bug, not just an untested-but-correct path:
+
+* **Bug: circuit-limit SELL rejections were resent to Dhan every exit cycle,
+  all day** (`exit_engine/exit.py`, `is_circuit_limit_error` branch). This
+  branch's own comment already says a circuit-band rejection is "permanent
+  for the session," matching how its two sibling branches
+  (`is_intraday_cutoff_error`, `is_security_intraday_restricted_error`)
+  behave — both of those set the per-position `_cutoff_key` snapshot flag so
+  `_send_real_sell`'s top-of-function check skips any further Dhan call for
+  the rest of the day. The circuit-limit branch never set that flag. Combined
+  with `is_persistent=False` (correct — a circuit hit isn't a broker/account
+  problem) never feeding the exponential-backoff counter either, nothing
+  stopped a circuit-locked position's SELL from being resent to Dhan every
+  `EXIT_CHECK_INTERVAL_SECONDS` (~45s) for as long as the stock stayed
+  circuit-locked — potentially hours. This is the exact DATAMATICS-style
+  retry-storm pattern sessions 40 and 72 already fixed for every other
+  placement-failure path; this one branch (added later, session41b) missed
+  it. Fixed by setting `_cutoff_key` in the branch, and made the generic
+  streak-exclusion list (`_excluded`) at the bottom of the function explicit
+  about all three self-suppressing branches (oversell,
+  intraday/security-restricted, circuit-limit) instead of relying on
+  `is_persistent` staying False for two of them by coincidence.
+* New test: `tests/test_exit_circuit_limit_resend.py` (2 tests) — asserts a
+  circuit-limit rejection stops resending after the first attempt, and that
+  `consecutive_exit_failures` correctly stays at 0 (confirms the fix didn't
+  accidentally start treating it as a persistent/broker-level failure).
+* Checked but found no bug: `entry_engine/entry.py`'s regime-cache TTL/lock
+  (correct), the entry-side `is_circuit_limit_error` BUY-rejection handling
+  (a rejected BUY just re-evaluates fresh next cycle from the candidate
+  engine — no resend-loop risk the way an open position's SELL has), and
+  `check_pending_fills`/`expire_stale_orders` (both already careful about
+  Dhan-vs-local state, matches their existing docstrings).
+
+`py_compile` + `compileall` clean on both services (no `pytest`/`sqlalchemy`
+available in this sandbox this session — no network — so the new test
+couldn't actually be executed here; traced its assertions by hand against
+the fixed code path instead, same fallback other sessions have used when
+offline).
+
 ## Other open decisions (unchanged from round 1)
 
 - **`adaptive.py` R:R floor:** docstring promises 2:1, but wide-ATR stocks get 1.6:1 because target cap wins.
@@ -114,7 +156,7 @@ Test count: 376 passed → **434 passed**, 1 xfailed (unchanged). `py_compile` +
 | Priority | Module | Coverage | Why it matters |
 |---|---|---|---|
 | 1 | `entry_engine/entry.py::evaluate_mode` | 84% | every real BUY: gates, sizing, risk call, order placement — direct test coverage added round 3 |
-| 2 | `exit_engine/exit.py` | 55% | decides when real positions are sold — direct test coverage added round 3, `_send_real_sell`'s internals (DATAMATICS-storm cooldown paths, error classification) still the main remaining gap
+| 2 | `exit_engine/exit.py` | 55% | decides when real positions are sold — direct test coverage added round 3; round 4 fixed a real circuit-limit resend-storm bug in `_send_real_sell` and added targeted tests for it, but most of its other error-classification branches (CDSL, insufficient-funds, oversell holdings-sync, exchange-not-allowed) are still only exercised indirectly
 | 3 | `portfolio/portfolio.py` | 32% | cash, positions and P&L accounting |
 | 4 | `execution/auto_pilot.py` | 19% | runs the whole cycle and throttles |
 | 5 | `manual_engine.py` | 0% | manual BUY/SELL |

@@ -1015,6 +1015,27 @@ def _send_real_sell(
             #   - DO NOT count toward the generic reject-streak escalation
             #     (the streak counter is for "we don't know why it's failing";
             #     circuit limit is fully understood and unrecoverable today).
+            # BUG FIX (session74, found during open-issue audit): unlike the
+            # intraday-cutoff and security-intraday-restricted branches above
+            # (both of which set _cutoff_key so _send_real_sell's top-of-
+            # function check short-circuits before ever calling Dhan again
+            # today), this branch never set it — despite its own comment
+            # right above saying the condition is "permanent for the
+            # session." Without _cutoff_key, a lower/upper-circuit-hit
+            # position was resent to Dhan every single exit cycle
+            # (EXIT_CHECK_INTERVAL_SECONDS, ~45s) for as long as the stock
+            # stayed circuit-locked — potentially hours — the exact
+            # DATAMATICS-style retry-storm pattern sessions 40/72 fixed for
+            # every other placement-failure path. is_persistent stays False
+            # here on purpose (a circuit hit isn't a broker/account problem,
+            # so it correctly doesn't feed the generic exponential backoff
+            # counter below), but that also meant nothing else was stopping
+            # the resend. Setting _cutoff_key here closes that gap the same
+            # way the sibling branches already do; the position stays open
+            # and simply isn't retried again until tomorrow, when it's no
+            # longer a same-day trade and _send_real_sell naturally re-
+            # evaluates from scratch.
+            save_snapshot(db, _cutoff_key, {"hit": True})
             snap_key  = f"circuit_limit_sell_alert_{position.id}"
             last_snap = load_snapshot(db, snap_key) or {}
             last_at_raw = last_snap.get("at")
@@ -1110,10 +1131,21 @@ def _send_real_sell(
         # condition lasted, alerts merely throttled. Placement failures now feed
         # the same streak via _bump_exit_failure() (so the existing 60s→900s
         # doubling cooldown applies). Excluded: oversell (holdings sync above
-        # fixes qty and wants a fast retry) and intraday-cutoff (already
-        # suppressed by its own per-day flag).
+        # fixes qty and wants a fast retry), intraday-cutoff, security-intraday-
+        # restricted, and circuit-limit (all three already suppress the resend
+        # via their own _cutoff_key flag, set in their branches above — see
+        # session74's fix to the circuit-limit branch, which used to be
+        # missing that flag; listing all three here too, rather than relying
+        # only on is_persistent staying False for them, keeps this explicit
+        # so a future generic-streak coincidence can't bump the counter for a
+        # failure mode that's already fully handled by a different mechanism).
         _err = str(e)
-        _excluded = dhan_client.is_oversell_error(_err) or dhan_client.is_intraday_cutoff_error(_err)
+        _excluded = (
+            dhan_client.is_oversell_error(_err)
+            or dhan_client.is_intraday_cutoff_error(_err)
+            or dhan_client.is_security_intraday_restricted_error(_err)
+            or dhan_client.is_circuit_limit_error(_err)
+        )
         _persistent = (dhan_client.is_invalid_ip_error(_err) or dhan_client.is_cdsl_edis_error(_err)
                        or dhan_client.is_insufficient_funds_error(_err) or dhan_client.is_exchange_not_allowed_error(_err))
         _current_streak = int((load_snapshot(db, f"exit_reject_streak_{position.id}") or {}).get("count", 0))

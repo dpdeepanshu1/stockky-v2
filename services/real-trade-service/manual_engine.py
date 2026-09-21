@@ -141,6 +141,13 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
         other_service_open_positions_market_value=(
             shared_exposure.get_other_service_exposure(db) if mode == "REAL" else 0.0
         ),
+        # 2026-09-21 (session79): same flat max-trade-value cap resolution
+        # as entry_engine/entry.py's _account_state — DB override first,
+        # config.py default second.
+        max_trade_value=(
+            risk.max_trade_value if risk.max_trade_value is not None
+            else config.MAX_TRADE_VALUE
+        ),
     )
 
 

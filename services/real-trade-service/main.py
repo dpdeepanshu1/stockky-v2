@@ -93,6 +93,7 @@ async def startup() -> None:
         raise RuntimeError(f"real-trade-service refusing to start: {'; '.join(errors)}")
     init_schema()
     _seed_defaults()
+    _migrate_risk_defaults()
     # 2026-09-02 Short-Term Trading Upgrade (resilience 3.1): compare the
     # last per-cycle open-positions snapshot (resilience/local_cache.py)
     # against live DB state. Never auto-corrects — just logs a
@@ -203,6 +204,51 @@ def _seed_defaults() -> None:
         db.close()
 
 
+# 2026-09-21 (session79 cold-start audit): _seed_defaults() above only ever
+# INSERTS a row when one doesn't exist yet — by design, so an admin's live
+# edits always survive a restart. That's correct for admin-made changes,
+# but it means a row seeded back when DEFAULT_RISK_PER_TRADE_PCT was still
+# 1.0 stays frozen at 1.0 forever, even after this file raises the default
+# to 5.0 — changing config.py's constant does nothing to an already-created
+# DB row. This is a ONE-TIME, narrowly-targeted correction: it only ever
+# touches a row that is STILL EXACTLY at the specific old default value
+# (1.0), and only sets it to the new default (config.DEFAULT_RISK_PER_TRADE_
+# PCT). It never fires again once a row has moved off 1.0 — whether because
+# this migration already changed it, or because an admin explicitly set it
+# to something else (including back to 1.0 on purpose) — so it can never
+# clobber a deliberate admin choice made after the first time this code
+# runs. Safe to leave in permanently; it becomes a no-op for both modes
+# after the first successful boot post-deploy.
+_OLD_DEFAULT_RISK_PER_TRADE_PCT = 1.0
+
+
+def _migrate_risk_defaults() -> None:
+    from db import get_session_factory
+    Session = get_session_factory()
+    db = Session()
+    try:
+        changed = False
+        for mode in ("DEMO", "REAL"):
+            risk = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
+            if risk is None:
+                continue
+            if risk.risk_per_trade_pct == _OLD_DEFAULT_RISK_PER_TRADE_PCT:
+                old = risk.risk_per_trade_pct
+                risk.risk_per_trade_pct = config.DEFAULT_RISK_PER_TRADE_PCT
+                risk.updated_at = datetime.now(timezone.utc)
+                risk.updated_by = "system-migration-session79"
+                changed = True
+                logger.info(
+                    "real-trade: migrated %s risk_per_trade_pct %.2f%% -> %.2f%% "
+                    "(session79 cold-start fix — old value was still the stale "
+                    "1.0%% seed default)", mode, old, risk.risk_per_trade_pct,
+                )
+        if changed:
+            db.commit()
+    finally:
+        db.close()
+
+
 # ── Request/response models ─────────────────────────────────────────────────
 class LoginRequest(BaseModel):
     username: str
@@ -223,6 +269,11 @@ class RiskConfigUpdate(BaseModel):
     # exclude_none semantics every other field on this model already has.
     min_trade_value: Optional[float] = None
     min_edge_to_cost_ratio: Optional[float] = None
+    # 2026-09-21 (session79): flat rupee ceiling on a single trade's
+    # position value — see config.MAX_TRADE_VALUE / risk_engine/engine.py
+    # §5c-ii. Same None-keeps-existing-value semantics as every other field
+    # on this model.
+    max_trade_value: Optional[float] = None
     max_concurrent_positions: Optional[int] = None
     max_portfolio_risk_pct: Optional[float] = None
     stale_data_seconds: Optional[int] = None
@@ -719,6 +770,11 @@ async def get_risk_config(mode: str, db: Session = Depends(get_db)):
         "min_edge_to_cost_ratio": risk.min_edge_to_cost_ratio,
         "min_trade_value_default": config.MIN_TRADE_VALUE,
         "min_edge_to_cost_ratio_default": config.MIN_EDGE_TO_COST_RATIO,
+        # 2026-09-21 (session79): flat max-trade-value cap, same
+        # None-means-"using the config.py default" pattern as the two
+        # min_trade_value fields above.
+        "max_trade_value": risk.max_trade_value,
+        "max_trade_value_default": config.MAX_TRADE_VALUE,
         "updated_at": iso_utc(risk.updated_at) if risk.updated_at else None,
         "updated_by": risk.updated_by,
     }
@@ -742,6 +798,7 @@ async def update_risk_config(body: RiskConfigUpdate, authorization: str = Header
         "risk_per_trade_pct", "max_daily_loss_pct", "max_concurrent_positions",
         "max_portfolio_risk_pct", "stale_data_seconds", "max_tick_volatility_mult",
         "allow_pyramiding", "min_trade_value", "min_edge_to_cost_ratio",
+        "max_trade_value",
     ):
         val = getattr(body, field)
         if val is not None:
@@ -902,6 +959,13 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
         # execution/shared_exposure.py.
         other_service_open_positions_market_value=(
             shared_exposure.get_other_service_exposure(db) if mode == "REAL" else 0.0
+        ),
+        # 2026-09-21 (session79): same flat max-trade-value cap resolution
+        # as the live entry/manual paths, so this dry run doesn't disagree
+        # with what a real order would actually do.
+        max_trade_value=(
+            risk_row.max_trade_value if risk_row.max_trade_value is not None
+            else config.MAX_TRADE_VALUE
         ),
     )
     intent = OrderIntent(

@@ -234,6 +234,11 @@ class TradeRiskConfig(Base):
     # nothing until an admin explicitly sets them.
     min_trade_value = Column(Float, nullable=True)
     min_edge_to_cost_ratio = Column(Float, nullable=True)
+    # 2026-09-21 fix (session79): flat rupee ceiling on a single trade's
+    # position value — see config.MAX_TRADE_VALUE and risk_engine/engine.py
+    # §5c-ii docstrings. Same NULL-means-"use config.py default" idiom as
+    # min_trade_value/min_edge_to_cost_ratio above.
+    max_trade_value = Column(Float, nullable=True)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
     updated_by = Column(String(64), nullable=True)  # admin username, for audit
 

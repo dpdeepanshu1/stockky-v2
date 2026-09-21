@@ -485,7 +485,11 @@ async def run(data_dir: Path):
         # yet today, since a real one isn't available from a data-only zip.
         return risk_mod.AccountState(
             equity=config.DEFAULT_DEMO_CAPITAL,
-            risk_per_trade_pct=1.0,
+            # 2026-09-21 (session79): kept in sync with config.py's
+            # DEFAULT_RISK_PER_TRADE_PCT (now 5.0, was 1.0) per this
+            # function's own comment above — every number here mirrors the
+            # real schema/config default.
+            risk_per_trade_pct=config.DEFAULT_RISK_PER_TRADE_PCT,
             max_daily_loss_pct=3.0,
             max_concurrent_positions=3,
             max_portfolio_risk_pct=5.0,

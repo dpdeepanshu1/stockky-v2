@@ -423,6 +423,13 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
         other_service_open_positions_market_value=(
             shared_exposure.get_other_service_exposure(db) if mode == "REAL" else 0.0
         ),
+        # 2026-09-21 (session79): flat max-trade-value cap — DB override
+        # first, config.py default second, same resolution order as every
+        # other admin-editable cost-gate knob on this row.
+        max_trade_value=(
+            risk.max_trade_value if risk.max_trade_value is not None
+            else config.MAX_TRADE_VALUE
+        ),
     )
 
 

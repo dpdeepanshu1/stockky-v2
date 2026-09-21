@@ -682,6 +682,9 @@ def _ensure_cost_model_columns(engine, dialect_name: str) -> None:
              "ALTER TABLE trade_risk_config ADD (min_trade_value BINARY_DOUBLE)"),
             ("trade_risk_config", risk_cols, "min_edge_to_cost_ratio",
              "ALTER TABLE trade_risk_config ADD (min_edge_to_cost_ratio BINARY_DOUBLE)"),
+            # 2026-09-21 (session79): new flat max-trade-value cap column.
+            ("trade_risk_config", risk_cols, "max_trade_value",
+             "ALTER TABLE trade_risk_config ADD (max_trade_value BINARY_DOUBLE)"),
         ]
     else:
         adds = [
@@ -697,6 +700,9 @@ def _ensure_cost_model_columns(engine, dialect_name: str) -> None:
              "ALTER TABLE trade_risk_config ADD COLUMN min_trade_value FLOAT"),
             ("trade_risk_config", risk_cols, "min_edge_to_cost_ratio",
              "ALTER TABLE trade_risk_config ADD COLUMN min_edge_to_cost_ratio FLOAT"),
+            # 2026-09-21 (session79): new flat max-trade-value cap column.
+            ("trade_risk_config", risk_cols, "max_trade_value",
+             "ALTER TABLE trade_risk_config ADD COLUMN max_trade_value FLOAT"),
         ]
 
     for table, existing, col_name, sql in adds:

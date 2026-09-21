@@ -29,9 +29,9 @@ Risk engine improvements from independent market analysis:
      triggered it and by how much, for dashboard audit.
 
 All 9 original checks are preserved. SELL side bypasses checks 1, 3, 4,
-4a, 4b, 4c, 5, 5b, 5c, 6, 7, 8. The only checks that still apply to a SELL
-are #2 (market hours — the exchange itself isn't open) and #9 (abnormal
-single-tick volatility — catch bad data even on exits).
+4a, 4b, 4c, 5, 5b, 5c, 5c-ii, 6, 7, 8. The only checks that still apply to
+a SELL are #2 (market hours — the exchange itself isn't open) and #9
+(abnormal single-tick volatility — catch bad data even on exits).
 """
 from __future__ import annotations
 
@@ -181,6 +181,15 @@ class AccountState:
     # reproduces the OLD (undercounting but never money-unsafe) behavior
     # rather than a new failure mode.
     other_service_open_positions_market_value: float = 0.0
+    # ADDED (2026-09-21, session79): flat rupee ceiling on a single trade's
+    # position value — see config.MAX_TRADE_VALUE / TradeRiskConfig.
+    # max_trade_value. None (the default) means "no cap" — matches the
+    # OLD behavior for any construction site that hasn't been updated to
+    # populate it, same "unpopulated = no-op, never a new rejection" safety
+    # rule the fields above already follow. The three live call sites
+    # (entry_engine/entry.py, manual_engine.py, main.py's dry-run endpoint)
+    # all resolve and populate this.
+    max_trade_value: Optional[float] = None
 
 
 @dataclass
@@ -465,6 +474,36 @@ def evaluate(
                     f"Qty {prev_qty} → {final_qty} "
                     f"(single-position cap {MAX_POSITION_CONCENTRATION_PCT:.0f}% "
                     f"of equity = ₹{max_position_val:.0f})."
+                )
+                order_risk = abs(intent.entry_price - intent.stop_price) * final_qty
+
+    # ── 5c-ii. Max trade value cap (BUY only) — NEW (2026-09-21, session79) ──
+    # Flat rupee ceiling on a single trade's position value, separate from
+    # 5c's %-of-equity concentration cap above — a small account's 25%
+    # concentration cap can still be a larger ₹ figure than the flat ceiling
+    # the user actually wants per trade (e.g. ₹3,000). Downsizes qty to fit,
+    # same non-rejecting pattern as 5c, rather than blocking the trade
+    # outright. None (unset on this AccountState) means no cap is enforced —
+    # see the field's own docstring on AccountState.
+    if intent.side == "BUY" and account.max_trade_value is not None and account.max_trade_value > 0:
+        position_value = intent.entry_price * final_qty
+        if position_value > account.max_trade_value:
+            mtv_qty = (
+                int(account.max_trade_value // intent.entry_price)
+                if intent.entry_price > 0 else 0
+            )
+            if mtv_qty <= 0:
+                return RiskResult(
+                    RiskVerdict.REJECTED, "max_trade_value_cap",
+                    f"Even 1 share at ₹{intent.entry_price:.2f} would exceed the "
+                    f"₹{account.max_trade_value:.0f} max-trade-value cap.",
+                )
+            if mtv_qty < final_qty:
+                prev_qty  = final_qty
+                final_qty = mtv_qty
+                downsize_reason = (
+                    f"Qty {prev_qty} → {final_qty} "
+                    f"(max trade value cap ₹{account.max_trade_value:.0f})."
                 )
                 order_risk = abs(intent.entry_price - intent.stop_price) * final_qty
 

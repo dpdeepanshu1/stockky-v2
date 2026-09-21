@@ -254,7 +254,15 @@ ENTRY_OVERNIGHT_PRIORITY_BONUS = float(os.getenv("ENTRY_OVERNIGHT_PRIORITY_BONUS
 # ── Decision 2: conservative risk defaults (seed values only — admin can
 #    edit via UI while disarmed; risk_engine always reads the live DB row,
 #    never these constants directly, once trade_risk_config exists) ────────
-DEFAULT_RISK_PER_TRADE_PCT = float(os.getenv("DEFAULT_RISK_PER_TRADE_PCT", "1.0"))
+# 2026-09-21 fix (session79 cold-start audit): was 1.0. At this account's
+# equity (~₹10,962 after the two other services' capital split), 1% capped
+# max_trade_risk at ₹109.62 — below the per-share risk of almost every
+# NSE stock above ~₹100, so gate 5 (per_trade_risk_cap) rejected "even 1
+# share" on nearly every candidate. Raised to 5.0 (max_trade_risk ≈ ₹548)
+# so a normal ATR-based stop distance can actually size a trade. Existing
+# DB rows already seeded at the old 1.0 default are corrected on startup —
+# see main.py's _migrate_risk_defaults().
+DEFAULT_RISK_PER_TRADE_PCT = float(os.getenv("DEFAULT_RISK_PER_TRADE_PCT", "5.0"))
 DEFAULT_MAX_DAILY_LOSS_PCT = float(os.getenv("DEFAULT_MAX_DAILY_LOSS_PCT", "3.0"))
 DEFAULT_MAX_CONCURRENT_POSITIONS = int(os.getenv("DEFAULT_MAX_CONCURRENT_POSITIONS", "3"))
 DEFAULT_MAX_PORTFOLIO_RISK_PCT = float(os.getenv("DEFAULT_MAX_PORTFOLIO_RISK_PCT", "5.0"))
@@ -719,8 +727,27 @@ DP_CHARGE_FLAT = float(os.getenv("DP_CHARGE_FLAT", "15.0"))
 #      estimated round-trip cost by at least MIN_EDGE_TO_COST_RATIO — a
 #      trade whose entire theoretical profit is 1.2x its own transaction
 #      cost is not a real edge once execution slippage is added.
-MIN_TRADE_VALUE          = float(os.getenv("MIN_TRADE_VALUE", "3000.0"))
+# 2026-09-21 fix (session79): was 3000.0. On a ~₹11K account that floor
+# forced every position to be 27%+ of equity, which then collided head-on
+# with the 25% position-concentration cap (risk_engine/engine.py) — the
+# two gates rejected almost everything between them. User explicitly asked
+# for "no min trade value... if needed set one like 10 or 20 rs", so this
+# is now just a sanity floor against near-zero, cost-dominated orders, not
+# a sizing constraint.
+MIN_TRADE_VALUE          = float(os.getenv("MIN_TRADE_VALUE", "20.0"))
 MIN_EDGE_TO_COST_RATIO   = float(os.getenv("MIN_EDGE_TO_COST_RATIO", "3.0"))
+
+# 2026-09-21 NEW (session79): flat rupee ceiling on a single trade's
+# position value (entry_price × final_qty), separate from and in addition
+# to risk_engine's existing MAX_POSITION_CONCENTRATION_PCT (a %-of-equity
+# cap). User explicitly asked for a flat ₹3,000 max per trade. Admin-
+# editable per-mode via TradeRiskConfig.max_trade_value (POST /risk-config,
+# field "max_trade_value") — None on that row falls back to this default,
+# same NULL-means-"use config default" pattern as MIN_TRADE_VALUE above.
+# Enforced in risk_engine/engine.py (§5c-ii), which downsizes qty to fit
+# under the cap the same way the concentration cap does, rather than
+# rejecting outright.
+MAX_TRADE_VALUE          = float(os.getenv("MAX_TRADE_VALUE", "3000.0"))
 
 # ── Selective overnight hold (2026-09-18 — user audit finding) ───────────────
 # _eod_squareoff (execution/auto_pilot.py) used to flatten EVERY open

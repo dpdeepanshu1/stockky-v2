@@ -158,7 +158,10 @@ async def _get_market_regime(db: Session) -> tuple[bool, int, int, str]:
             )
             if r.status_code == 200:
                 data  = r.json()
-                score = int(data.get("market_score") or 50)
+                # BUG FIX (item C.12): "or 50" treats a genuine 0 (worst possible market) as
+                # neutral 50. Use explicit None-check so a real score of 0 passes through.
+                _raw_score = data.get("market_score")
+                score = int(_raw_score) if _raw_score is not None else 50
     except Exception as e:
         logger.debug("regime fetch failed (fail-open): %s", e)
 
@@ -1343,6 +1346,46 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
                     "Order left PLACED — reconcile will check next cycle in case it already filled."
                 )
                 continue
+
+            # BUG FIX (item 10): shares that fill between the last reconcile pass and
+            # this cancel call are never seen by reconcile_real_orders — it only queries
+            # PLACED/PARTIAL orders, and cycle_runner runs expire_stale_orders BEFORE
+            # reconcile, so by the time reconcile runs the order is already EXPIRED and
+            # invisible to it. The fix: after a successful cancel, read Dhan's current
+            # book state for this order and book any fills that snuck in before the cancel
+            # landed. This is the same "reconcile once after cancel" path the function's
+            # own docstring describes as the missing piece.
+            try:
+                from execution.reconcile import _book_fill_delta  # lazy import avoids circular
+                broker_rows = dhan_client.get_order_list(db) or []
+                broker_row = next(
+                    (r for r in broker_rows
+                     if str(r.get("orderId") or r.get("order_id", "")) == str(order.dhan_order_id)),
+                    None,
+                )
+                if broker_row is not None:
+                    from execution.reconcile import _get  # same helper reconcile uses internally
+                    filled_at_broker = int(_get(broker_row, "filledQty", "filled_qty", default=0) or 0)
+                    fill_price_raw   = _get(broker_row, "averageTradedPrice", "average_traded_price", default=0.0)
+                    fill_price       = float(fill_price_raw or 0.0)
+                    already_booked   = int(order.filled_qty_so_far or 0)
+                    delta            = filled_at_broker - already_booked
+                    if delta > 0 and fill_price > 0:
+                        logger.info(
+                            "expire_stale_orders: %d shares of %s filled before cancel landed "                            "(total filled %d, previously booked %d) — booking now at ₹%.2f",
+                            delta, order.symbol, filled_at_broker, already_booked, fill_price,
+                        )
+                        await _book_fill_delta(db, order, fill_price, delta, is_partial=False)
+                        await notify_async(
+                            f"🟡 *Late fill on expired entry* — {order.symbol}\n"
+                            f"{delta} shares @ ₹{fill_price:.2f} filled before stale-order cancel landed.\n"
+                            "Position opened. Watching for exit signals."
+                        )
+            except Exception as _bfe:
+                logger.warning(
+                    "expire_stale_orders: post-cancel fill-check for %s failed (non-fatal, "                    "reconcile will retry next cycle): %s",
+                    order.symbol, _bfe,
+                )
 
         # A PARTIAL order still gets the SAME terminal "EXPIRED" order
         # status here — the order itself is done (no more shares coming,

@@ -393,11 +393,11 @@ class TestMarketRegime:
         now[0] += 121.0
         assert run(entry._get_market_regime(db))[1] == 10 and regime.http.calls == 2
 
-    def test_a_reported_score_of_zero_is_read_as_neutral__CURRENT_BEHAVIOUR(self, db, regime):
-        # `int(data.get("market_score") or 50)`: a genuine 0 (worst possible) is falsy, so it becomes 50 and
-        # the regime gate reads it as a healthy market. Pinned so a fix (use `is None`) is a conscious change.
+    def test_a_reported_score_of_zero_is_returned_as_zero__BUG_FIXED(self, db, regime):
+        # FIXED (item C.12): `int(data.get("market_score") or 50)` was treating a genuine 0 (worst possible
+        # market) as falsy and returning 50 (neutral). Now uses explicit is-None check so 0 passes through.
         regime.http.body = {"market_score": 0}
-        assert run(entry._get_market_regime(db))[1] == 50
+        assert run(entry._get_market_regime(db))[1] == 0
 
 
 # ── AccountState ─────────────────────────────────────────────────────────────
@@ -669,15 +669,11 @@ class TestExpireStaleOrders:
         assert db.query(models.TradeAuditLog).count() == 0
 
 
-# ── known gaps (strict xfail) ────────────────────────────────────────────────
+# ── item 10 fixed: shares filled before stale-order cancel are now booked ─────
 class TestKnownGaps:
-    @pytest.mark.xfail(strict=True, reason=(
-        "expire_stale_orders cancels the resting order at Dhan and marks it EXPIRED locally, but never looks at "
-        "what filled between the last reconcile pass and the cancel. cycle_runner runs expire_stale_orders BEFORE "
-        "reconcile_real_orders, and reconcile only ever queries PLACED/PARTIAL orders — so shares that filled in "
-        "that window are owned at Dhan yet never booked here (no position, no cash debit, no alert): the same "
-        "invisible-real-shares failure the function's own docstring describes for the un-cancelled case."))
     def test_shares_filled_just_before_the_cancel_should_still_be_booked(self, db, monkeypatch):
+        """FIXED (item 10): expire_stale_orders now reads Dhan's order state after a successful
+        cancel and books any fills that landed before the cancel reached the exchange."""
         import asyncio as _a
         from execution import reconcile as R
         db.add(models.TradeAccount(mode="REAL", starting_capital=100_000.0, current_equity=100_000.0,

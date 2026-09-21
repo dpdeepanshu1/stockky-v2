@@ -413,8 +413,19 @@ async def _fetch_quote(client: httpx.AsyncClient, symbol: str) -> Optional[dict]
         r = await client.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=42.0)
         if r.status_code == 200:
             return r.json()
+        # 2026-09-21 visibility fix: this used to be silent (no log line at
+        # all — only the except branch below logged, and only at DEBUG,
+        # which docker's default log level never surfaces). A per-symbol
+        # candidate rejection with reason "No live quote available" then
+        # gave no way to tell WHY market-data-service failed (bad symbol?
+        # 404? 500? rate limit?) without reading source. Log it once, loud
+        # enough to show up in a normal `docker compose logs` grep.
+        logger.warning(
+            "quote %s: market-data-service returned %d — %s",
+            symbol, r.status_code, r.text[:200],
+        )
     except Exception as e:
-        logger.debug("quote %s failed: %s", symbol, e)
+        logger.warning("quote %s: request failed — %s: %s", symbol, type(e).__name__, e)
     return None
 
 
@@ -704,15 +715,29 @@ async def _prefetch_quotes_bulk(client: httpx.AsyncClient, symbols: list[str]) -
     async def _post_chunk(chunk: list[str]) -> None:
         async with sem:
             try:
-                await client.post(
+                resp = await client.post(
                     f"{MARKET_DATA_URL}/quotes/bulk",
                     json={"symbols": chunk},
                     timeout=BULK_QUOTE_TIMEOUT_SECONDS,
                 )
+                # 2026-09-21 visibility fix: previously the response was
+                # never inspected at all — a non-2xx (e.g. market-data-
+                # service overloaded, 500) silently warmed nothing for this
+                # whole chunk and left every symbol in it to fail later,
+                # one at a time, in the per-symbol _fetch_quote fallback
+                # with no link back to "this was actually a chunk-level
+                # failure." Loud enough to show up in a normal log grep.
+                if resp.status_code >= 400:
+                    logger.warning(
+                        "bulk quote prefetch chunk of %d symbols (%s%s) got HTTP %d — %s",
+                        len(chunk), ", ".join(chunk[:5]), ", ..." if len(chunk) > 5 else "",
+                        resp.status_code, resp.text[:200],
+                    )
             except Exception as e:
-                logger.debug(
-                    "bulk quote prefetch chunk of %d symbols failed: %s: %s",
-                    len(chunk), type(e).__name__, e,
+                logger.warning(
+                    "bulk quote prefetch chunk of %d symbols (%s%s) failed: %s: %s",
+                    len(chunk), ", ".join(chunk[:5]), ", ..." if len(chunk) > 5 else "",
+                    type(e).__name__, e,
                 )
 
     await asyncio.gather(*(_post_chunk(c) for c in chunks))
@@ -1491,6 +1516,33 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
                 "in one cycle (mode=%s) — check market-data-service health/logs, "
                 "this almost never means that many quotes are genuinely unavailable.",
                 data_starved_count, len(tf_tasks), mode,
+            )
+
+        # 2026-09-21 visibility fix: distinct from data_starved above — these
+        # symbols DID get history/timeframe data back (so they don't trip the
+        # >50% data_starved check) but the quote itself resolved to a price
+        # <=0 (Check 0 in _multi_tf_analysis), so each one silently became an
+        # individual "CANDIDATE REJECTED ... No live quote available" info
+        # line with nothing tying them together. Several of these landing in
+        # one cycle for otherwise-liquid symbols (not just genuinely bad/
+        # delisted tickers) usually means a partial market-data-service
+        # blip (Yahoo/AngelOne rate limit on that specific chunk), not
+        # coincidence — surface it as one loud line, same pattern as the
+        # data_starved watchdog just above.
+        quote_only_failed = [
+            sym for sym, result in tf_map.items()
+            if not result.get("data_starved")
+            and (result.get("reject_reason") or "").startswith("No live quote available")
+        ]
+        if len(quote_only_failed) >= 3:
+            logger.warning(
+                "candidate_engine: %d symbols had history data but no resolvable "
+                "quote in one cycle (mode=%s): %s%s — check market-data-service's "
+                "/quote logs for these specific symbols (see the quote-fetch "
+                "warning lines this cycle for the actual failure reason).",
+                len(quote_only_failed), mode,
+                ", ".join(quote_only_failed[:10]),
+                ", ..." if len(quote_only_failed) > 10 else "",
             )
 
     inserted = 0

@@ -6,6 +6,20 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION85_AUTO_PILOT_HELPERS_COVERAGE_2026-09-23.md` — 100%-coverage plan
+  follow-up: first coverage round on `execution/auto_pilot.py`, the largest
+  remaining gap (750 stmts). New `tests/test_auto_pilot_helpers.py` (56
+  tests) covers the self-contained helpers — locks, reconcile-throttle,
+  `_summarize`, overnight-hold/edis gate toggles, `_needs_cnc_sell`,
+  gate-off alerting, the afterhours-window/market-date calcs, and the full
+  `_select_overnight_holds` eligibility/ranking/cap pipeline. Moves
+  `auto_pilot.py` 19%→31%. **Actually executed this session** (sandbox now
+  has working pytest + network, unlike prior sessions): full suite run —
+  869 passed, 1 xfailed, no regressions; confirms session84's two modules
+  and the three previously-100% modules are still 100%. Cycle orchestration
+  (`_full_tick_body`, `_prepick`, `_eod_squareoff`, background loops) left
+  for a follow-up round; `candidate_engine/candidates.py` (0%, 2077 lines)
+  still untouched. No production code changed, tests only.
 - `SESSION84_SHARED_ORDER_BUDGET_AND_SYMBOL_LOCK_COVERAGE_2026-09-23.md` —
   100%-coverage plan follow-up: `execution/shared_order_budget.py` (44%→100%)
   and `execution/shared_symbol_lock.py` (41%→100%) closed with 2 new test

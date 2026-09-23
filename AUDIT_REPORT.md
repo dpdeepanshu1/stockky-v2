@@ -249,7 +249,7 @@ genuinely uncovered now that expire_stale_exit_orders is fully tested.
 | 1 | `entry_engine/entry.py::evaluate_mode` | 84% | every real BUY: gates, sizing, risk call, order placement — direct test coverage added round 3 |
 | 2 | `exit_engine/exit.py` | 84% (confirmed by real pytest+coverage run, session83) | decides when real positions are sold — direct test coverage added rounds 3-4; session77 parts 1-2 closed `expire_stale_exit_orders`, the success/invalid-IP path, and every error-classification branch (CDSL, insufficient-funds, oversell's 3 sub-cases, exchange-not-allowed, both `_cutoff_key` siblings, generic-streak escalation); session82c added per-position exception isolation in `evaluate_mode` plus `_load_profile`/`_trail_atr_mult` coverage; session83 closed the last zero-coverage item, `_clamp_for_atr`'s ImportError fallback. Remaining 81 missed lines are scattered sub-branches inside `_send_real_sell`'s classification ladder and `evaluate_mode`'s trail/breakeven/partial-exit tail — needs `--cov-report=annotate` to identify exact conditions before writing more tests
 | 3 | `portfolio/portfolio.py` | 32% | cash, positions and P&L accounting |
-| 4 | `execution/auto_pilot.py` | 19% | runs the whole cycle and throttles |
+| 4 | `execution/auto_pilot.py` | ~~19%~~ 31% (session85 — see below) | runs the whole cycle and throttles |
 | 5 | `manual_engine.py` | 0% | manual BUY/SELL |
 | 6 | `execution/dhan_client.py` | 23% | broker calls and error classification |
 | 7 | `candidate_engine/candidates.py` | 0% | candidate selection |
@@ -301,6 +301,54 @@ lines — by far the largest gap, this service's live-trading orchestrator),
 `candidate_engine/candidates.py` (0%, 2077 lines, never touched by any
 test), then re-running the suite with the corrected
 `--cov=intraday_eligibility` flag to see its real number.
+
+## session85 (2026-09-23): execution/auto_pilot.py — first coverage round, 19% → 31%
+
+Unlike session84, this round's tests **were** actually executed (this
+sandbox now has working pytest + network access — the "no pytest here"
+limitation noted in prior sessions no longer applies). Ran
+`python3 -m pytest tests/ --cov=execution.auto_pilot --cov=execution.shared_order_budget
+--cov=execution.shared_symbol_lock --cov=exit_engine.exit --cov=portfolio.portfolio
+--cov=execution.dhan_client --cov-report=term-missing`: **869 passed, 1 xfailed, no
+failures, no regressions.** Confirms session84's `shared_order_budget.py` and
+`shared_symbol_lock.py` are genuinely 100%, and `exit_engine/exit.py`,
+`portfolio/portfolio.py`, `execution/dhan_client.py` remain 100%.
+
+`execution/auto_pilot.py` is 750 statements — far too large for one round, so this
+session targeted the self-contained helper functions that don't require standing
+up the full `_full_tick_body`/`_prepick`/`_eod_squareoff`/background-loop
+orchestration (left for a dedicated follow-up round). Added
+`tests/test_auto_pilot_helpers.py` (56 tests), covering: `_get_lock`/`_get_exit_lock`
+(per-mode `threading.Lock` lazy-init and independence from each other),
+`_reconcile_due`/`_mark_reconciled` (throttle-window bookkeeping), `_run_coro_in_new_loop`
+(the `asyncio.run` wrapper), `_summarize` (cycle-result → Telegram message text,
+including the market-regime line's presence/absence), `_overnight_hold_enabled` and
+`_edis_check_enabled` (gate-row read plus fail-safe config default on both a missing
+row and a DB-query exception), `_needs_cnc_sell` (CNC vs. INTRADAY product-type
+inference across broker-imported, explicit-product-type, and same-day-vs-carried
+fallback branches), `_alert_if_open_positions_while_gate_off` (throttled Telegram
+alert, REAL vs. DEMO hint wording, cooldown suppression, and the DB-error path that
+must never raise), `_is_afterhours_window_active` (the midnight-spanning window
+check), `_compute_afterhours_market_date` (next-trading-date calc — after-close vs.
+before-open branches, weekend skip, holiday skip, and the default-`now_t` branch),
+and `_select_overnight_holds` (the full eligibility/ranking/cap pipeline: eligible-label
+filter, no-live-tick exclusion, profitability requirement, missing-day-range exclusion,
+range-position cap, max-positions cap with conviction-ranked tie-breaking, single-symbol
+exposure cap, aggregate exposure cap, and the per-sector cap including the case where
+unmapped symbols must never compete against each other for the same sector slot).
+
+This moved `execution/auto_pilot.py` from 19% (611/750 missing) to 31% (516/750
+missing) — confirmed by the real run above, not hand-traced. No changes to the
+production module itself, tests only.
+
+Still open, in priority order: the rest of `execution/auto_pilot.py` (31%, 516/750
+lines still missing — the big remaining blocks are the cycle orchestration itself:
+`_full_tick_body`, entry/exit cycle wiring, `_prepick`, `_eod_squareoff`,
+`_eod_signal_scan`, and the background scheduler loops, none of which are
+self-contained the way this round's helpers were, so they'll need fixture-level
+mocking of the broker/feed/risk layers), then `candidate_engine/candidates.py`
+(0%, 2077 lines, never touched by any test), then re-running with the corrected
+`--cov=intraday_eligibility` flag.
 
 ## Commands to run all tests
 

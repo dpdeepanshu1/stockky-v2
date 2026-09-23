@@ -252,7 +252,7 @@ genuinely uncovered now that expire_stale_exit_orders is fully tested.
 | 4 | `execution/auto_pilot.py` | ~~19%~~ ~~31%~~ ~99% pending VM confirmation (session86 — see below) | runs the whole cycle and throttles |
 | 5 | `manual_engine.py` | 0% | manual BUY/SELL |
 | 6 | `execution/dhan_client.py` | 23% | broker calls and error classification |
-| 7 | `candidate_engine/candidates.py` | 0% | candidate selection |
+| 7 | `candidate_engine/candidates.py` | ~~0%~~ 65% (session87 — see below) | candidate selection |
 | 8 | `main.py` | 0% | API endpoints |
 | 9 | Locks: ~~`shared_symbol_lock.py`, `shared_order_budget.py`~~ (session84 — see below), `intraday_eligibility.py` (still 0%, wrong `--cov` module path — file lives at repo root `intraday_eligibility.py`, not `execution.intraday_eligibility`) | ~~24–60%~~ 100%/44%→100% | cross-service safety |
 | 10 | `watchlist_engine/*` | 0% | signal sourcing |
@@ -474,6 +474,115 @@ handful of lines (pending a real coverage run to see exactly which),
 test), then re-running with the corrected `--cov=intraday_eligibility`
 flag.
 
+## session87 (2026-09-23): candidate_engine/candidates.py — rounds 1+2, 0% → 65%
+
+Picked up where session86 left off mid-task (that session had drafted but
+not yet landed `tests/test_candidates_helpers.py`, round 1 of the
+`candidate_engine/candidates.py` plan). Unlike sessions 76/77/82c/86, this
+sandbox had working pytest **and** package-registry network access this
+time (`pip install pytest pytest-cov sqlalchemy httpx fastapi pydantic`
+all succeeded), so both rounds below were actually executed against the
+real code, not hand-traced/structurally-verified.
+
+**Round 1** (`tests/test_candidates_helpers.py`, 107 tests): landed
+session86's draft — the self-contained pieces: the sector-peer-history
+cache (`_record_sector_peer_score`/`_get_cross_cycle_peer_scores`,
+including staleness-pruning and max-samples-cap eviction),
+`_refresh_cycle_adaptive_params` (success path updates all seven module
+globals; an exception from any one `adaptive_market_params` call leaves
+every global at its prior value), the four HTTP fetch wrappers
+(`_fetch`/`_fetch_history`/`_fetch_quote`/`_fetch_delivery` — 200 vs.
+non-200 vs. exception for each), `_fetch_fund_tech_score` and
+`_fetch_market_cap_cr` (market_cap raw-dict fallback, either call's
+exception being non-fatal to the other, a non-numeric market_cap being
+swallowed), `_prefetch_quotes_bulk` (empty/all-falsy no-ops, dedup,
+chunking, and that a chunk's HTTP error or exception is logged, never
+raised), `_quality_gate_fund_tech` (absolute fund/tech/market-cap floors,
+the no-data skip note, thin-sector-sample bypass, sector-percentile
+reject/pass, and cross-cycle peer scores merging into the sample), the
+pure analysis helpers (`_compute_atr_from_candles`, `_pct_return`,
+`_weighted_bullish_score`/`_is_bullish`, `_volume_is_healthy`,
+`_near_resistance`), the four `_rows_from_*` source-normalizers (each
+source's actionable-decision + min-conviction filtering, per-source
+symbol/price/score field fallback chains), `_fetch_volume_shock_universe`,
+and `_recently_candidated_symbols` (cooldown window, other-mode exclusion,
+custom-hours override, and the Gate-6-skip requeue-window shrink vs. a
+non-Gate-6 WAIT reason keeping the full cooldown).
+
+Running it for real caught a bug in session86's own draft, before it ever
+reached the repo: `test_low_sector_percentile_rejects` fed a fundamental/
+technical_score of 20 without first lowering `_adaptive_fund_floor`/
+`_adaptive_tech_floor` from their real ~35 default, so the candidate was
+actually being rejected by the earlier **absolute-floor** check (line 613)
+and never reached the **sector-relative** check the test was written to
+exercise — the assertion on the note text (`"sector-relative pctl"`)
+caught it immediately once run. Fixed by monkeypatching both floors to
+`0.0` in that one test so execution actually reaches the branch under
+test. This is exactly the class of bug a structural-only check (import,
+`py_compile`, AST-verify every dotted target exists) cannot catch — it
+only catches naming/signature drift, not "this test's fixture doesn't
+reach the code path it claims to." Round 1 alone: **107 passed**, 50%
+line coverage on `candidate_engine/candidates.py`.
+
+**Round 2** (`tests/test_candidates_analysis.py`, 26 tests, new this
+session): the two multi-call analysis functions round 1 deliberately left
+out — `_multi_tf_analysis` (the standard track's 7-timeframe + quote gate:
+data-starved vs. plain no-quote, zero-price quote, sub-₹20 price floor,
+6-month downtrend block, weighted-bullish-score threshold, 52-week
+overextension, adaptive ATR cap, unhealthy volume, near-resistance, and
+the full-pass happy path) and `_volume_shock_analysis` (the momentum-
+breakout track's gate: no quote, insufficient daily history, unusable
+price, sub-₹20 floor, unresolvable return, below-threshold return, thin
+volume history, below-threshold volume multiple, adaptive ATR cap,
+base-tier delivery-quality gate reject/pass, missing-vs-neutral delivery
+data being treated as unknown rather than failing, high-conviction
+classification skipping the delivery fetch entirely, and upper-circuit
+classification). These needed a routing fake `httpx.AsyncClient`
+(`_RoutedAsyncClient`, dispatching on `(url, params)`) rather than round
+1's URL-substring router, because `_multi_tf_analysis` fires 7 concurrent
+GETs at the exact same `/history/{symbol}` URL, distinguished only by the
+`period` query param.
+
+Running this round for real caught two more bugs, both in this session's
+own first draft (same pattern as round 1's fix — caught immediately by
+the assertions, not by inspection): (1) the happy-path fixture's `1y`
+candle set was written to be flat/non-bullish (to isolate the 52-week
+range check from the weighted-bullish-score check) but its first-candle
+`open` value actually produced an 11%+ return, so it silently counted as
+a fifth bullish timeframe — `bullish_count` came back `5.0`, not the
+expected `4.0`; fixed by updating the assertion to match what the fixture
+actually produces (the check itself was correct, the test's expectation
+was wrong). (2) `test_overextended_52w_rejects`'s 52-week high/low pair
+gave a range position of 50%, nowhere near the >88% (top-12%) rejection
+threshold, so the function correctly did *not* reject and the test's own
+`"52w range" in result["reject_reason"]` assertion blew up with
+`TypeError: argument of type 'NoneType' is not iterable` — fixed the
+fixture's low/high values so the price genuinely sits in the top 12% of
+the range.
+
+Round 1 + round 2 together: **133 passed**, `candidate_engine/candidates.py`
+line coverage **0% → 65%** (243/689 statements still missing). Full
+`real-trade-service` suite re-run after landing both files: **1126 passed,
+1 xfailed, no regressions** (up from session86's 1100/1 baseline — the
+extra 26 are this round's own tests). No changes to the production module
+itself, tests only.
+
+Still open, largest first: the three top-level cycle-orchestrators this
+file builds on top of the now-tested pieces — `_refresh_standard_candidates`
+(lines 1383-1605), `_refresh_volume_shock_candidates` (1628-1878), and
+`refresh_candidates` (2012-2077) — none of which are self-contained the
+way rounds 1-2's targets were; each wraps DB writes, the
+`intraday_eligibility` restricted-symbol lookup, bulk-quote prefetch, and
+sector-peer-aware quality gating across a whole candidate batch, so
+they'll need fixture-level mocking of several chained calls plus a real
+in-memory-SQLite `db` fixture to exercise properly (same shape as
+session86's own deferred-then-closed orchestration round for
+`execution/auto_pilot.py`). A handful of small in-function branches
+(single lines 806, 819, 861, 1063, 1193) are also still open — likely
+narrow edge conditions inside the two functions just closed, worth a
+final short pass once the three orchestrators above are done. After that:
+re-running with the corrected `--cov=intraday_eligibility` flag.
+
 ## Commands to run all tests
 
 **On the VM (Ubuntu):**
@@ -490,7 +599,7 @@ Expected:
 === position-stocks-service
 1220 passed, 8 warnings in ~15s
 === real-trade-service
-434 passed, 1 xfailed in ~10s
+1126 passed, 1 xfailed in ~35s
 ```
 
 **With coverage:**

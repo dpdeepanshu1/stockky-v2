@@ -6,6 +6,24 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION87_CANDIDATES_COVERAGE_ROUNDS_1_2_2026-09-23.md` — 100%-coverage
+  plan follow-up: `candidate_engine/candidates.py`, 0%→65%, both rounds
+  actually run through live pytest+coverage (this sandbox had working
+  network/pip access). Landed session86's drafted-but-unlanded round 1
+  (`tests/test_candidates_helpers.py`, 107 tests — sector-peer-history
+  cache, adaptive-param refresh, HTTP fetch wrappers, quality gate, pure
+  analysis helpers, source row-normalizers, dedupe-cooldown lookup),
+  fixing one real bug the run caught in session86's own draft (a test
+  meant to exercise the sector-relative reject path was actually being
+  rejected earlier, by the absolute floor, because the floors were never
+  lowered from their ~35 default). Added round 2
+  (`tests/test_candidates_analysis.py`, 26 tests, new) covering
+  `_multi_tf_analysis` and `_volume_shock_analysis` via a routing fake
+  `httpx.AsyncClient`; the run caught two more bugs, both in this
+  session's own first-draft test fixtures/assertions, not the production
+  code. Full suite: 1126 passed, 1 xfailed, no regressions. Deferred to a
+  follow-up round: `_refresh_standard_candidates`, `_refresh_volume_shock_
+  candidates`, `refresh_candidates` — the DB-writing cycle orchestrators.
 - `SESSION86_AUTO_PILOT_ORCHESTRATION_COVERAGE_2026-09-23.md` — 100%-coverage
   plan follow-up: second (and final) coverage round on `execution/
   auto_pilot.py`, targeting the cycle-orchestration layer session85

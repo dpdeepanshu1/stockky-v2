@@ -6,6 +6,17 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION88_CANDIDATES_COVERAGE_100_PERCENT_2026-09-23.md` —
+  100%-coverage plan: `candidate_engine/candidates.py` finished, 65%→100%
+  (689/689 statements). New `tests/test_candidates_orchestration.py` (24
+  tests, round 3) covers the three DB-writing cycle orchestrators
+  session87 deferred (`_refresh_standard_candidates`,
+  `_refresh_volume_shock_candidates`, `refresh_candidates`) plus the 6
+  stray single-line gaps session87's note called out by number. No
+  production-code bugs found — pure coverage-closing pass. Full
+  `real-trade-service` suite: 1150 passed, 1 xfailed, no regressions;
+  overall repo coverage 78%→80%. `position-stocks-service` re-confirmed
+  unchanged (1221 passed).
 - `SESSION87_CANDIDATES_COVERAGE_ROUNDS_1_2_2026-09-23.md` — 100%-coverage
   plan follow-up: `candidate_engine/candidates.py`, 0%→65%, both rounds
   actually run through live pytest+coverage (this sandbox had working

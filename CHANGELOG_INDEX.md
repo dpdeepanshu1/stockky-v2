@@ -6,6 +6,24 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION86_AUTO_PILOT_ORCHESTRATION_COVERAGE_2026-09-23.md` — 100%-coverage
+  plan follow-up: second (and final) coverage round on `execution/
+  auto_pilot.py`, targeting the cycle-orchestration layer session85
+  deliberately left out. New `tests/test_auto_pilot_orchestration.py` (120
+  tests) covers the lock wrappers, `_exit_only_tick_body`, `_full_tick_body`,
+  `_select_overnight_holds`'s net-of-costs branch, `_requeue_overnight_
+  priority_candidates`, `_inject_nextday_watchlist_candidates`, `_prepick`,
+  `_enter_at_open`, `_edis_morning_check`, `_eod_squareoff`, `_eod_signal_
+  scan`, `_schedule_tick_body` and all five of its scheduled automations,
+  all five background loops, the remaining `_afterhours_scan_body` branches,
+  the after-hours lock + manual trigger, and `start()`. Moves `auto_pilot.py`
+  31%→~99% (pending VM confirmation). **Not run through live pytest this
+  session** (no network in this sandbox, unlike session85's) — verified
+  structurally instead: py_compile plus an AST sweep confirming every
+  referenced `ap.<name>`, every dotted monkeypatch target, and every model
+  kwarg/attribute actually exists in the target module. Same caveat as
+  sessions 76/77/82c — user should confirm with a real pytest+coverage run.
+  No production code changed, tests only.
 - `SESSION85_AUTO_PILOT_HELPERS_COVERAGE_2026-09-23.md` — 100%-coverage plan
   follow-up: first coverage round on `execution/auto_pilot.py`, the largest
   remaining gap (750 stmts). New `tests/test_auto_pilot_helpers.py` (56

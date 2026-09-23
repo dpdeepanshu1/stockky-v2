@@ -249,7 +249,7 @@ genuinely uncovered now that expire_stale_exit_orders is fully tested.
 | 1 | `entry_engine/entry.py::evaluate_mode` | 84% | every real BUY: gates, sizing, risk call, order placement — direct test coverage added round 3 |
 | 2 | `exit_engine/exit.py` | 84% (confirmed by real pytest+coverage run, session83) | decides when real positions are sold — direct test coverage added rounds 3-4; session77 parts 1-2 closed `expire_stale_exit_orders`, the success/invalid-IP path, and every error-classification branch (CDSL, insufficient-funds, oversell's 3 sub-cases, exchange-not-allowed, both `_cutoff_key` siblings, generic-streak escalation); session82c added per-position exception isolation in `evaluate_mode` plus `_load_profile`/`_trail_atr_mult` coverage; session83 closed the last zero-coverage item, `_clamp_for_atr`'s ImportError fallback. Remaining 81 missed lines are scattered sub-branches inside `_send_real_sell`'s classification ladder and `evaluate_mode`'s trail/breakeven/partial-exit tail — needs `--cov-report=annotate` to identify exact conditions before writing more tests
 | 3 | `portfolio/portfolio.py` | 32% | cash, positions and P&L accounting |
-| 4 | `execution/auto_pilot.py` | ~~19%~~ 31% (session85 — see below) | runs the whole cycle and throttles |
+| 4 | `execution/auto_pilot.py` | ~~19%~~ ~~31%~~ ~99% pending VM confirmation (session86 — see below) | runs the whole cycle and throttles |
 | 5 | `manual_engine.py` | 0% | manual BUY/SELL |
 | 6 | `execution/dhan_client.py` | 23% | broker calls and error classification |
 | 7 | `candidate_engine/candidates.py` | 0% | candidate selection |
@@ -349,6 +349,130 @@ self-contained the way this round's helpers were, so they'll need fixture-level
 mocking of the broker/feed/risk layers), then `candidate_engine/candidates.py`
 (0%, 2077 lines, never touched by any test), then re-running with the corrected
 `--cov=intraday_eligibility` flag.
+
+## session86 (2026-09-23): execution/auto_pilot.py — orchestration round, 31% → 99%
+
+Picked up session85's deferred item: the cycle-orchestration layer it
+deliberately left out (`_full_tick_body`, `_prepick`, `_eod_squareoff`,
+`_eod_signal_scan`, `_schedule_tick_body`, the five background loops, and
+`start()`). This sandbox has no network access (unlike session85's), so
+these tests were **not** run through a live pytest — same limitation as
+sessions 76, 77, and 82c. Verified structurally instead: `py_compile` on
+both the test file and `execution/auto_pilot.py`, then an AST sweep
+confirming every `ap.<name>` the tests reference (30 names) actually exists
+in the module, every dotted `monkeypatch.setattr("module.path.func", ...)`
+target (22 paths — `exit_engine.exit.evaluate_mode`, `cycle_runner.
+run_cycle_core`, `portfolio.portfolio.open_positions`, `market_feed.feed.
+get_quotes`, `entry_engine.entry.evaluate_mode`, `resilience.local_cache.
+{load,save}_snapshot`, `watchlist_engine.afterhours_scan.*`, `auth.
+dhan_credentials.*`, etc.) resolves to a real function in the target file,
+and every model kwarg/attribute used (`TradeGateState`, `TradePosition`,
+`TradeCandidate`, `NextDayWatchlistEntry`, `TradePositionEvent` — `armed`,
+`prepick_enabled`, `eod_squareoff_enabled`, `overnight_hold_reason`,
+`afterhours_scan_last_run_ok`, etc.) exists on the corresponding model in
+`models.py`. This catches signature/name drift but not runtime logic bugs —
+**user should run pytest+coverage on the VM to confirm**, same caveat as
+those three earlier sessions.
+
+Added `tests/test_auto_pilot_orchestration.py` (120 tests), covering:
+
+- **Lock wrappers**: `_run_exit_tick_sync`/`_run_full_tick_sync`/
+  `_run_schedule_tick_sync` — skip-when-already-held, run-and-release,
+  release-even-on-exception; top-level `_exit_only_tick`/`_full_tick`/
+  `_schedule_tick` async wrappers, including `_schedule_tick`'s
+  non-weekday skip.
+- **`_exit_only_tick_body`**: market-closed no-op, notify-on-activity vs.
+  no-notify-on-no-activity, DEMO skips reconcile, REAL reconciles only
+  when `_reconcile_due`, gate-off alert dispatch and its "protective exit
+  only" note appended to an activity notification, exception path (logs,
+  notifies, never raises).
+- **`_full_tick_body`**: not-armed / no-gate-row / auto-pilot-disabled all
+  short-circuit through the gate-off alert; market-closed no-op;
+  auto-disarmed notification; activity summary notify; heartbeat-vs-no-
+  heartbeat no-activity branches; exception path.
+- **`_select_overnight_holds`**, net-of-costs branch (session85 pinned
+  `OVERNIGHT_HOLD_PROFITABLE_NET_OF_COSTS=False` throughout; this session
+  added the `True` branch — excludes a position whose gross P&L doesn't
+  clear the round-trip cost model, keeps one whose gross move clears it
+  and every other cap).
+- **`_requeue_overnight_priority_candidates`**: snapshot-read exception,
+  no-snapshot, already-consumed, missing/stale trading-date, no-picks,
+  new-candidate insert + snapshot marked consumed, already-queued-symbol
+  skip, save-snapshot-failure swallowed.
+- **`_inject_nextday_watchlist_candidates`**: no-rows, above-threshold
+  insert with preview price, below-threshold marked-consumed-not-injected,
+  already-queued marked-consumed-not-reinjected, preview-price-lookup
+  failure is non-fatal, a flaky `db.commit()` rolling back and leaving the
+  row for retry, outer exception rolling back and returning 0.
+- **`_prepick`**: basic notify with counts, top-symbols list with the
+  🌙 overnight-tag, "carried over" line when requeue count is nonzero,
+  US-sector-signal bonus applied when enabled, sector-signal failure is
+  non-fatal, >10-candidates overflow line.
+- **`_enter_at_open`**: auto-disarmed notify-and-return, entry-summary
+  notify (entered/rejected/waited counts).
+- **`_edis_morning_check`**: DEMO no-op, no-CNC-pending no-op, summary-
+  lookup exception swallowed, already-verified-today no-op, not-verified
+  alert with pending symbols, ambiguous/unknown-status alert.
+- **`_eod_squareoff`**: no-open-positions no-op; DEMO closes at live tick
+  (success, close-failure, missing-tick — all three counted correctly);
+  REAL sends a sell per position, skips one with a pending sell,
+  send-sell-returns-False and send-sell-raises both count as failed;
+  overnight holds excluded from square-off, stamped with
+  `overnight_hold_reason`, logged as a `TradePositionEvent`, and called
+  out in the notification.
+- **`_eod_signal_scan`**: nothing-queued path (no candidates, below-
+  conviction, wrong-label all exercised), queue-only candidate saved to
+  the snapshot, high-conviction candidate entered same-day, not-filled
+  falls back to the queue, `entry_engine.evaluate_mode` exception falls
+  back to the queue, disarmed gate skips same-day entry entirely, and the
+  `EOD_SIGNAL_SCAN_MAX_CANDIDATES` cap keeping only the higher-conviction
+  pick.
+- **`_schedule_tick_body`**: no-gate-row / not-armed short-circuits; each
+  of the five scheduled automations (pre-pick, eDIS check, enter-at-open,
+  EOD square-off, EOD signal scan) — fires when enabled and due, skipped
+  when already run today or outside its time/market-open gate, and its
+  own exception is logged + notified without aborting the other four;
+  EOD square-off specifically confirmed to acquire and release the exit
+  lock even when its body raises; outer exception (e.g. a broken clock
+  call) logged and swallowed.
+- **Five background loops** (`_schedule_loop`, `_fast_exit_loop`,
+  `_full_cycle_loop`, `_totp_refresh_loop`, `_afterhours_scan_loop`) —
+  each broken out of its `while True` after N `asyncio.sleep` calls via a
+  sentinel exception, confirming DEMO-then-REAL ordering per tick and that
+  one mode's exception never stops the other mode's tick or the loop
+  itself; `_totp_refresh_loop` additionally covers the TOTP-disabled
+  no-op, refresh-needed vs. not-needed, refresh-returns-False, and an
+  exception inside the tick being swallowed.
+- **`_afterhours_scan_body`** remaining branches (session85's helper round
+  covered `_is_afterhours_window_active`/`_compute_afterhours_market_date`
+  in isolation; this session covers the body that calls them):
+  gate-not-found, feature-disabled, outside-window, manual bypassing both
+  the toggle and the window check, the finalize pass firing and notifying
+  on a non-empty shortlist vs. staying silent on an empty one, the regular
+  scan pass recording success, an exception recording failure and being
+  reported back with its reason, and that same exception's *recovery*
+  block failing too (a second, nested `db.query` blow-up) still not
+  propagating.
+- **After-hours lock + manual trigger**: `_get_afterhours_lock` reuse per
+  mode; `_run_afterhours_tick_sync` skip-when-held / run-and-release;
+  `run_afterhours_scan_manual_sync` returning `already_in_progress` when
+  locked vs. running the body and releasing the lock.
+- **`start()`**: creates all five background tasks when none exist, is a
+  no-op when all five are already running, and recreates any task found
+  `done()`.
+
+If this comes back clean on the VM, `execution/auto_pilot.py` should land
+at or near 99% (roughly 11 lines of the 750 likely still open — a couple
+of defensive branches worth a final short pass, e.g. any remaining
+recovery-path sub-cases in `_afterhours_scan_body`'s exception handling
+that a targeted run turns up). No changes to the production module itself,
+tests only.
+
+Still open, in priority order: closing `execution/auto_pilot.py`'s last
+handful of lines (pending a real coverage run to see exactly which),
+`candidate_engine/candidates.py` (0%, 2077 lines, never touched by any
+test), then re-running with the corrected `--cov=intraday_eligibility`
+flag.
 
 ## Commands to run all tests
 

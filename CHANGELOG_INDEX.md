@@ -6,6 +6,26 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION83_CLAMP_FOR_ATR_IMPORTERROR_COVERAGE_2026-09-21.md` — 100%-coverage
+  plan, Phase 1 #1 closed out: `_clamp_for_atr`'s `return_sanity` ImportError
+  fallback (the last zero-coverage item session82c flagged) now has 2 direct
+  tests; `exit_engine/exit.py` confirmed at 84% coverage via a real pytest run
+  (sandbox had pypi egress this session); no new bugs found
+- `2026-09-21-session82c-eval-mode-isolation.md` — real bug: `evaluate_mode`'s
+  per-position loop had no exception isolation, so one bad position could
+  abort stop/target evaluation for every other open position that cycle;
+  fixed with try/except + HOLD audit log per position; also added first-ever
+  direct tests for `_load_profile`/`_trail_atr_mult`
+- `SESSION82_ANGELONE_CROSS_LOOP_LOCK_READTIMEOUT_ROOT_CAUSE_2026-09-21.md` —
+  root cause of the ReadTimeout storm: `AngelOneSession`'s single shared
+  `asyncio.Lock` bound to whichever event loop touched it first, crashing the
+  ws-feed background thread for good on any cross-loop contention; fixed with
+  a per-event-loop lock (then a follow-up fix, 82b, to stop it leaking memory
+  via one-shot `asyncio.run()` loops using a `WeakKeyDictionary`)
+- `SESSION81_STALE_TEST_FIXES_AFTER_SESSION79_80_CHANGES_2026-09-21.md` — 3
+  tests updated to match two already-deliberate production changes (session79's
+  `MIN_TRADE_VALUE` default drop, session80's dead-exit-leg detection now
+  requiring every leg dead, not just one) — no application code changed
 - `SESSION77_COVERAGE_PLAN_PHASE1_PART2_2026-09-21.md` — 100%-coverage plan,
   Phase 1 continued: 21 new tests for `exit_engine/exit.py`'s
   CDSL/insufficient-funds/oversell(×3)/exchange-not-allowed branches, both

@@ -254,8 +254,53 @@ genuinely uncovered now that expire_stale_exit_orders is fully tested.
 | 6 | `execution/dhan_client.py` | 23% | broker calls and error classification |
 | 7 | `candidate_engine/candidates.py` | 0% | candidate selection |
 | 8 | `main.py` | 0% | API endpoints |
-| 9 | Locks: `shared_symbol_lock.py`, `shared_order_budget.py`, `intraday_eligibility.py` | 24–60% | cross-service safety |
+| 9 | Locks: ~~`shared_symbol_lock.py`, `shared_order_budget.py`~~ (session84 — see below), `intraday_eligibility.py` (still 0%, wrong `--cov` module path — file lives at repo root `intraday_eligibility.py`, not `execution.intraday_eligibility`) | ~~24–60%~~ 100%/44%→100% | cross-service safety |
 | 10 | `watchlist_engine/*` | 0% | signal sourcing |
+
+## session84 (2026-09-23): shared_order_budget.py + shared_symbol_lock.py closed to 100%
+
+Confirmed via a real `python3 -m pytest tests/ --cov=... --cov-report=term-missing`
+run on the user's VM: `exit_engine/exit.py`, `portfolio/portfolio.py`, and
+`execution/dhan_client.py` are all now genuinely 100% (matches this table's
+earlier entries). Same run flagged `execution/auto_pilot.py` at 19% (611/750
+lines missing — now priority 1, see below), `execution/shared_order_budget.py`
+at 44%, `execution/shared_symbol_lock.py` at 41%, and two coverage warnings:
+`candidate_engine.candidates` and `execution.intraday_eligibility` "never
+imported" — the latter is a wrong `--cov` flag, not a real gap (module is at
+repo root as `intraday_eligibility.py`); the former (`candidate_engine/
+candidates.py`, 2077 lines) has genuinely zero test coverage, not yet started.
+
+This session added `tests/test_shared_order_budget.py` and
+`tests/test_shared_symbol_lock.py`, closing both modules to 100%
+line coverage. `execution/shared_order_budget.py`: direct tests for
+`_get_or_create_row()` (both branches — also flagged as dead code, nothing
+in the codebase actually calls it, only its sibling `_ensure_row_exists()`
+is wired up; candidate for removal, not removed this session),
+`_ensure_row_exists()`'s IntegrityError race-swallow branch,
+`check_and_reserve()`'s budget-exhausted (False) branch and fail-open
+exception branch (including a rollback-also-fails sub-case), and
+`record_order_unconditional()`'s unconditional-increment-past-budget
+behavior and its own fail-open exception branch. `execution/
+shared_symbol_lock.py`: `try_claim()`'s already-ours no-op, blocked-by-
+other-service, both IntegrityError race sub-branches (lost to the other
+service vs. turned out to be our own retried request) plus the inner
+re-SELECT-also-fails sub-case, and the outer fail-open exception branch;
+`release()`'s non-blocking exception branch (existing tests only covered
+the happy delete-and-commit path); `status()` — previously exercised by
+NO test at all — both its normal snapshot shape and its fail-safe `[]`
+exception branch. IntegrityError races are simulated via a query-call-
+counting mock rather than genuine concurrent connections, since sqlite
+in-memory engines don't reliably share state across separate connections
+in this sandbox — deterministic and exercises the exact same code branches.
+No changes to the production modules themselves, tests only. Not executed
+in this sandbox (no pytest/network here, same limitation as prior sessions
+since ~session73) — hand-traced against the code; user runs on the VM.
+
+Still open, in priority order: `execution/auto_pilot.py` (19%, 611/750
+lines — by far the largest gap, this service's live-trading orchestrator),
+`candidate_engine/candidates.py` (0%, 2077 lines, never touched by any
+test), then re-running the suite with the corrected
+`--cov=intraday_eligibility` flag to see its real number.
 
 ## Commands to run all tests
 

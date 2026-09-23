@@ -6,6 +6,14 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION84_SHARED_ORDER_BUDGET_AND_SYMBOL_LOCK_COVERAGE_2026-09-23.md` —
+  100%-coverage plan follow-up: `execution/shared_order_budget.py` (44%→100%)
+  and `execution/shared_symbol_lock.py` (41%→100%) closed with 2 new test
+  files; confirmed via a real VM pytest run that `exit_engine/exit.py`,
+  `portfolio/portfolio.py`, `execution/dhan_client.py` are genuinely 100%;
+  flagged `execution/auto_pilot.py` (19%, 611 lines) as the next, largest
+  gap and `candidate_engine/candidates.py` (0%, never tested) after that;
+  no production code changed, tests only
 - `SESSION83_CLAMP_FOR_ATR_IMPORTERROR_COVERAGE_2026-09-21.md` — 100%-coverage
   plan, Phase 1 #1 closed out: `_clamp_for_atr`'s `return_sanity` ImportError
   fallback (the last zero-coverage item session82c flagged) now has 2 direct

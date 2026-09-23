@@ -1,9 +1,0 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-httpx==0.25.2
-python-dotenv==1.0.0
-pydantic==2.5.3
-upstash-redis>=1.0.0
-# Oracle Autonomous DB driver (thin mode) — used only when ORACLE_* env is set (Oracle Cloud VM).
-# Harmless on Render/Neon: pure-Python, imported lazily, never loaded on the Postgres path.
-oracledb==2.5.1

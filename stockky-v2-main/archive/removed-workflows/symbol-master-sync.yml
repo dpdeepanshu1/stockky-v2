@@ -1,0 +1,61 @@
+# Nightly symbol_master sync (Nifty 500 + sectoral index constituents →
+# sector/industry/status). ~05:00 IST, before the other premarket jobs.
+# GitHub cron is UTC: 05:00 IST ≈ 23:30 UTC (previous day).
+#
+# Bug L fix: this job (services/notification-scheduler-service/scheduler/
+# symbol_master_sync.py) previously had no route, no scheduler wiring, and
+# no workflow — it only ran if someone manually SSHed in and executed the
+# script. In production the symbol_master table was therefore never even
+# created, silently disabling the §4/§5 sector-relative-strength feature
+# (technical/main.py's /sector-strength/{symbol}, fundamental/main.py's
+# sector join). This workflow POSTs to the new /symbol-master/sync route
+# and polls /symbol-master/sync/status the same way weekend-hydrator.yml
+# polls /hydrate/weekend/status.
+#
+# Secrets: NOTIFICATION_SCHEDULER_URL (required)
+name: Symbol Master Nightly Sync
+
+on:
+  schedule:
+    - cron: "30 23 * * 0-4"
+  workflow_dispatch:
+
+jobs:
+  symbol-master-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Run symbol_master sync
+        env:
+          NOTIFICATION_URL: ${{ secrets.NOTIFICATION_SCHEDULER_URL }}
+        run: |
+          set +e
+          NS="${NOTIFICATION_URL%/}"
+          NS="${NS%/notification}"
+          if [ -z "$NS" ]; then
+            echo "NOTIFICATION_SCHEDULER_URL secret missing — skip"
+            exit 0
+          fi
+
+          URL="${NS}/scheduler/symbol-master/sync"
+          STATUS_URL="${NS}/scheduler/symbol-master/sync/status"
+
+          echo "POST $URL"
+          curl -sS -m 60 -X POST "$URL" || {
+            echo "Trigger failed — retrying once"
+            sleep 20
+            curl -sS -m 60 -X POST "$URL" || true
+          }
+
+          echo "Polling $STATUS_URL"
+          for i in $(seq 1 40); do
+            sleep 15
+            ST=$(curl -sS -m 20 "$STATUS_URL" || echo '{}')
+            echo "poll $i: $ST"
+            JOBSTATUS=$(echo "$ST" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || echo "")
+            if [ "$JOBSTATUS" = "done" ] || [ "$JOBSTATUS" = "error" ]; then
+              echo "Finished with status=$JOBSTATUS"
+              break
+            fi
+          done
+          exit 0

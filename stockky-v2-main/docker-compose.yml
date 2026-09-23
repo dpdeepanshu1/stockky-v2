@@ -1,0 +1,508 @@
+# Stockky v2 — local / Oracle Cloud VM
+# Requires a .env in this directory (see .env.example for Neon, .env.oracle.example for Oracle).
+#
+# CHANGES IN THIS VERSION (speed/stability tuning for a 2 vCPU / 12 GB Oracle
+# free-tier VM running all 6 services + Oracle wallet mTLS on one box):
+#   1. Added `cpus:` / `mem_limit:` / `mem_reservation:` to every service so
+#      one noisy container (e.g. sklearn training inside decision-prediction,
+#      or a big pandas scan inside analysis-intelligence) can never starve
+#      the others or push the host into swap/OOM. Numbers are sized to sum
+#      comfortably under 12 GB RAM with headroom for the OS, Docker itself,
+#      and the Oracle wallet's TLS session buffers.
+#   2. `logging` driver capped (json-file, max-size/max-file) on every
+#      service — uncapped container logs are a classic silent disk-fill/IO
+#      slowdown on a small VM over weeks of uptime; nothing here changes.
+#   3. frontend now builds to a tiny nginx:alpine image instead of running
+#      a Node `vite preview` process (see frontend/Dockerfile) — same
+#      static bundle, ~1/10th the RAM, faster first byte.
+#
+# TWO DATABASE MODES, SAME CODE — chosen purely by env, no code changes:
+#   • Neon / Postgres  → set DATABASE_URL / CACHE_DATABASE_URL (Render uses this).
+#   • Oracle Autonomous → set ORACLE_DSN + ORACLE_* (this compose mounts the wallet).
+#
+# CRITICAL: without env_file + DATABASE_* / ORACLE_* below, api-gateway runs
+# memory-only and loses data-feed / trades / training / surprise on every restart.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  market-data-service:
+    build: ./services/market-data-service
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
+      YFINANCE_MAX_CONCURRENT: ${YFINANCE_MAX_CONCURRENT:-6}
+      YFINANCE_MIN_INTERVAL_SEC: ${YFINANCE_MIN_INTERVAL_SEC:-0.08}
+      USE_REDIS: ${USE_REDIS:-0}
+      PORT: "8001"
+      API_GATEWAY_URL: http://api-gateway:8000
+      ORACLE_DSN: ${ORACLE_DSN:-}
+      ORACLE_USER: ${ORACLE_USER:-ADMIN}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-}
+      ORACLE_WALLET_PASSWORD: ${ORACLE_WALLET_PASSWORD:-}
+      ORACLE_WALLET_DIR: /oracle_wallet
+      TNS_ADMIN: /oracle_wallet
+    volumes:
+      - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8001/health', timeout=5) or sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
+    # Heaviest I/O fan-out service (AngelOne + yfinance + NSE waterfall) —
+    # give it the largest CPU share of the six.
+    cpus: "0.55"
+    mem_limit: 1200m
+    mem_reservation: 500m
+
+  analysis-intelligence-service:
+    build: ./services/analysis-intelligence-service
+    ports:
+      - "8002:8000"
+    env_file:
+      - .env
+    environment:
+      MARKET_DATA_URL: http://market-data-service:8001
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
+      USE_REDIS: ${USE_REDIS:-0}
+      PORT: "8000"
+      PEER_FUNDAMENTALS_CACHE_TTL_SECONDS: ${PEER_FUNDAMENTALS_CACHE_TTL_SECONDS:-60}
+      PEER_FUNDAMENTALS_FETCH_WORKERS: ${PEER_FUNDAMENTALS_FETCH_WORKERS:-6}
+      ORACLE_DSN: ${ORACLE_DSN:-}
+      ORACLE_USER: ${ORACLE_USER:-ADMIN}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-}
+      ORACLE_WALLET_PASSWORD: ${ORACLE_WALLET_PASSWORD:-}
+      ORACLE_WALLET_DIR: /oracle_wallet
+      TNS_ADMIN: /oracle_wallet
+    volumes:
+      - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
+    depends_on:
+      - market-data-service
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health', timeout=5) or sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
+    cpus: "0.45"
+    mem_limit: 900m
+    mem_reservation: 350m
+
+  decision-prediction-service:
+    build: ./services/decision-prediction-service
+    ports:
+      - "8004:8000"
+    env_file:
+      - .env
+    environment:
+      MARKET_DATA_URL: http://market-data-service:8001
+      TECHNICAL_URL: http://analysis-intelligence-service:8000/technical
+      FUNDAMENTAL_URL: http://analysis-intelligence-service:8000/fundamental
+      NEWS_URL: http://analysis-intelligence-service:8000/news
+      EVENT_URL: http://analysis-intelligence-service:8000/event
+      PREDICTION_URL: http://decision-prediction-service:8000/prediction
+      TRAINING_SERVICE_URL: http://decision-prediction-service:8000/training
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+      TRAINING_DATABASE_URL: ${TRAINING_DATABASE_URL:-${DATABASE_URL:-}}
+      CACHE_DATABASE_URL: ${CACHE_DATABASE_URL:-}
+      USE_REDIS: ${USE_REDIS:-0}
+      PORT: "8000"
+      ORACLE_DSN: ${ORACLE_DSN:-}
+      ORACLE_USER: ${ORACLE_USER:-ADMIN}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-}
+      ORACLE_WALLET_PASSWORD: ${ORACLE_WALLET_PASSWORD:-}
+      ORACLE_WALLET_DIR: /oracle_wallet
+      TNS_ADMIN: /oracle_wallet
+    volumes:
+      - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
+    depends_on:
+      - market-data-service
+      - analysis-intelligence-service
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health', timeout=5) or sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
+    # sklearn training bursts need more headroom than its steady-state CPU
+    # use — mem_limit stays large on purpose. cpus trimmed slightly
+    # (2026-09-03) to make room for real-trade-service's priority bump.
+    cpus: "0.40"
+    mem_limit: 1600m
+    mem_reservation: 400m
+
+  notification-scheduler-service:
+    build: ./services/notification-scheduler-service
+    ports:
+      - "8008:8000"
+    env_file:
+      - .env
+    environment:
+      API_GATEWAY_URL: http://api-gateway:8000
+      # 2026-09-17: overnight_orchestrator.py's premarket phase calls
+      # decision-prediction-service directly for the one-shot T+1/T+5
+      # evaluate-outcomes step (NOT via api-gateway, a different service).
+      DECISION_PREDICTION_URL: http://decision-prediction-service:8000
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+      CACHE_DATABASE_URL: ${CACHE_DATABASE_URL:-}
+      USE_REDIS: ${USE_REDIS:-0}
+      PORT: "8000"
+      ORACLE_DSN: ${ORACLE_DSN:-}
+      ORACLE_USER: ${ORACLE_USER:-ADMIN}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-}
+      ORACLE_WALLET_PASSWORD: ${ORACLE_WALLET_PASSWORD:-}
+      ORACLE_WALLET_DIR: /oracle_wallet
+      TNS_ADMIN: /oracle_wallet
+      # 2026-09-11: overnight orchestrator's enabled/schedule toggle
+      # persists here -- see overnight_orchestrator.py's module docstring.
+      SCHEDULER_STATE_DIR: /data
+    volumes:
+      - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
+      - ./data/scheduler-state:/data
+    depends_on:
+      - api-gateway
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health', timeout=5) or sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
+    # Mostly idle, timer-driven — smallest share.
+    cpus: "0.15"
+    mem_limit: 350m
+    mem_reservation: 128m
+
+  api-gateway:
+    build: ./services/api-gateway
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      MARKET_DATA_URL: http://market-data-service:8001
+      TECHNICAL_URL: http://analysis-intelligence-service:8000/technical
+      FUNDAMENTAL_URL: http://analysis-intelligence-service:8000/fundamental
+      NEWS_URL: http://analysis-intelligence-service:8000/news
+      EVENT_URL: http://analysis-intelligence-service:8000/event
+      MARKET_SENTIMENT_URL: http://analysis-intelligence-service:8000/sentiment
+      DECISION_URL: http://decision-prediction-service:8000/decision
+      PREDICTION_URL: http://decision-prediction-service:8000/prediction
+      TRAINING_URL: http://decision-prediction-service:8000/training
+      NOTIFICATION_URL: http://notification-scheduler-service:8000/notification
+      # 2026-09-11: overnight-orchestrator proxy routes (/ops/overnight/*)
+      # use a separate env var from NOTIFICATION_URL above (different
+      # sub-app mount — /scheduler, not /notification — see api-gateway/
+      # main.py's SCHEDULER_URL). Without this, it silently fell back to
+      # the old Render URL default and every Settings-page poll (every
+      # 20s) was hitting notification-scheduler-service-x8vc.onrender.com
+      # instead of the local Oracle container.
+      NOTIFICATION_SCHEDULER_URL: http://notification-scheduler-service:8000/notification
+      SCHEDULER_URL: http://notification-scheduler-service:8000/scheduler
+      # AUDIT FIX: position-stocks-service runs on port 8006 in the compose
+      # network but was never wired into api-gateway's environment block.
+      # Any gateway route proxying to it (or admin UI calling it via the
+      # gateway) would silently fall back to config.service_urls.py's
+      # localhost:8006 default — correct inside the compose network, but
+      # wrong on Render and fragile in general. Explicit here for the same
+      # reason every other internal service URL is explicit.
+      POSITION_STOCKS_SERVICE_URL: http://position-stocks-service:8006
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+      CACHE_DATABASE_URL: ${CACHE_DATABASE_URL:-}
+      TRAINING_DATABASE_URL: ${TRAINING_DATABASE_URL:-${DATABASE_URL:-}}
+      USE_REDIS: ${USE_REDIS:-0}
+      DISABLE_UPSTASH: ${DISABLE_UPSTASH:-1}
+      PORT: "8000"
+      WATCHLIST_SCAN_CONCURRENCY: ${WATCHLIST_SCAN_CONCURRENCY:-4}
+      WATCHLIST_SCAN_HTTP_CONCURRENCY: ${WATCHLIST_SCAN_HTTP_CONCURRENCY:-8}
+      WATCHLIST_SCAN_TIMEOUT_SECONDS: ${WATCHLIST_SCAN_TIMEOUT_SECONDS:-18}
+      WATCHLIST_SCAN_GRACE_SECONDS: ${WATCHLIST_SCAN_GRACE_SECONDS:-30}
+      ORACLE_DSN: ${ORACLE_DSN:-}
+      ORACLE_USER: ${ORACLE_USER:-ADMIN}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-}
+      ORACLE_WALLET_PASSWORD: ${ORACLE_WALLET_PASSWORD:-}
+      ORACLE_WALLET_DIR: /oracle_wallet
+      TNS_ADMIN: /oracle_wallet
+    volumes:
+      - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
+    depends_on:
+      - market-data-service
+      - analysis-intelligence-service
+      - decision-prediction-service
+    restart: unless-stopped
+    healthcheck:
+      # SESSION 33 fix: same false-unhealthy pattern already fixed below for
+      # real-trade-service. api-gateway's /health check shares this
+      # container's single asyncio event loop with synchronous, sometimes-
+      # slow outbound work run right on that loop — NSE cookie/index
+      # scraping (nseindia.com), yfinance market-movers fetches, and Oracle
+      # calls (see the boot logs: "Error fetching indices", "Fetching fresh
+      # market movers data from yfinance"). A legitimately busy stretch of
+      # that work can stall /health for longer than the old interval(30s) x
+      # retries(3) = 90s window, which is exactly what was observed:
+      # `docker compose ps` showed this container unhealthy while its own
+      # logs proved it was alive and successfully serving real requests
+      # (200s on /market/indices, /market/top-gainers, etc.) in the same
+      # window. Not a crash — widened to the same interval(20s) x
+      # retries(6) = 120s tolerance window real-trade-service uses, so a
+      # normal-length NSE/yfinance fetch doesn't false-trip it, while a
+      # genuinely dead process is still caught within ~2 minutes.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health', timeout=5) or sys.exit(0)"]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+      start_period: 60s
+    logging: *default-logging
+    # Pure async I/O fan-out/proxy — CPU-light, but every request passes
+    # through it, so it still gets a solid share.
+    cpus: "0.45"
+    mem_limit: 900m  # session72 (#2): was 500m — see boot_forensics.py; a cgroup OOM-kill is a silent SIGKILL (the 'restart with no crash/SIGTERM in the logs' signature)
+    mem_reservation: 200m
+
+  real-trade-service:
+    build: ./services/real-trade-service
+    ports:
+      - "8005:8005"
+    env_file:
+      - .env
+    environment:
+      API_GATEWAY_URL: http://api-gateway:8000
+      MARKET_DATA_URL: http://market-data-service:8001
+      EVENT_URL: http://analysis-intelligence-service:8000/event
+      # 2026-09-11 fix: needed for the volume-shock quality gate
+      # (candidate_engine/candidates.py's fundamental/technical checks) —
+      # previously undefined here, so it silently fell back to config.py's
+      # onrender.com default even inside the docker-compose network.
+      TECHNICAL_URL: http://analysis-intelligence-service:8000/technical
+      FUNDAMENTAL_URL: http://analysis-intelligence-service:8000/fundamental
+      NOTIFICATION_SERVICE_URL: http://notification-scheduler-service:8000/notification
+      PORT: "8005"
+      # SHARED_DAILY_ORDER_BUDGET: "5000"  # optional override — shared with
+      # position-stocks-service via the same Dhan account (session 7 audit
+      # finding, execution/shared_order_budget.py); 5000 is config.py's
+      # default so this line is informational unless you need to change it.
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
+      ADMIN_PASSWORD_HASH_B64: ${ADMIN_PASSWORD_HASH_B64:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      DHAN_CREDENTIAL_ENC_KEY: ${DHAN_CREDENTIAL_ENC_KEY:-}
+      DHAN_ENV: ${DHAN_ENV:-sandbox}
+      DHAN_TOTP_ENABLED: ${DHAN_TOTP_ENABLED:-false}
+      DHAN_TOKEN_LIFETIME_DAYS: ${DHAN_TOKEN_LIFETIME_DAYS:-1}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      AUTO_PILOT_INTERVAL_SECONDS: ${AUTO_PILOT_INTERVAL_SECONDS:-180}
+      AUTO_PILOT_NOTIFY_HEARTBEAT: ${AUTO_PILOT_NOTIFY_HEARTBEAT:-false}
+      DATABASE_URL: ${DATABASE_URL:-}
+      ORACLE_DSN: ${ORACLE_DSN:-}
+      ORACLE_USER: ${ORACLE_USER:-ADMIN}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-}
+      ORACLE_WALLET_PASSWORD: ${ORACLE_WALLET_PASSWORD:-}
+      ORACLE_WALLET_DIR: /oracle_wallet
+      TNS_ADMIN: /oracle_wallet
+    volumes:
+      - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
+    # depends_on intentionally removed (2026-09-03 durability upgrade):
+    # real-trade-service must start on VM reboot without waiting on the rest
+    # of the stack. It handles unreachable dependencies at runtime via
+    # circuit_breaker.py + the Tier 1/2/3 degradation ladder, not via
+    # startup ordering.
+    restart: unless-stopped
+    healthcheck:
+      # 2026-09-07 fix: real-trade-service's own trading cycles (_full_tick
+      # every AUTO_PILOT_INTERVAL_SECONDS=180s, _exit_only_tick every
+      # EXIT_CHECK_INTERVAL_SECONDS=45s — see execution/auto_pilot.py) run
+      # plain synchronous SQLAlchemy queries directly on the same asyncio
+      # event loop that serves this /health check, against a remote Oracle
+      # Autonomous DB. A legitimately busy cycle (many watchlist rows, each
+      # needing its own round-trip) can stall that loop — and therefore
+      # /health — for longer than interval(30s) x retries(3) = 90s, which is
+      # exactly what was observed: `docker compose ps` showed this container
+      # (unhealthy) while `docker stats` and its own logs proved it was
+      # alive and actively completing real work (successful calls to
+      # api-gateway) in the same window. Not a crash — a healthcheck window
+      # tighter than legitimate periodic processing time (the same class of
+      # false-timeout issue api-gateway's /stockky-hot endpoint already
+      # documents fixing for its own cold-scan case). Widened the tolerance
+      # window to interval(20s) x retries(6) = 120s so a normal-length cycle
+      # doesn't false-trip it, while still catching a genuinely dead
+      # process within ~2 minutes.
+      #
+      # This does NOT fix the underlying blocking — see the note above
+      # _full_tick/_exit_only_tick in execution/auto_pilot.py for why that
+      # part needs live testing before touching it (it shares locks that
+      # keep two trading cycles from overlapping on real capital).
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8005/health', timeout=5) or sys.exit(0)"]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+      start_period: 60s
+    logging: *default-logging
+    # Highest priority in the stack (2026-09-03 durability upgrade): this is
+    # the only service placing real orders, so it now gets the largest
+    # cpu/mem share on the box, trimmed from market-data-service and
+    # decision-prediction-service below.
+    cpus: "0.70"
+    mem_limit: 1000m
+    mem_reservation: 400m
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-/api}
+    ports:
+      - "5173:8080"
+    depends_on:
+      - api-gateway
+    restart: unless-stopped
+    logging: *default-logging
+    cpus: "0.10"
+    mem_limit: 96m
+    mem_reservation: 32m
+
+# Total caps: cpus sum ≈ 2.55 (soft ceilings, not reservations — fine to
+# slightly exceed 2 vCPU since these are mostly I/O-bound and never all
+# peak at once); mem_limit sum ≈ 5.1 GB, leaving ~7 GB free for the OS,
+# Docker, the Oracle wallet's TLS buffers, and a safety margin against OOM.
+
+  position-stocks-service:
+    build: ./services/position-stocks-service
+    ports:
+      - "8006:8006"
+    env_file:
+      - .env
+    environment:
+      - PORT=8006
+      # Inherits DATABASE_URL, ORACLE_DSN/USER/PASSWORD, DHAN_CREDENTIAL_ENC_KEY,
+      # ANGELONE_CLIENT_ID/MPIN/API_KEY/TOTP_SECRET/STATIC_IP from .env (same
+      # mechanism market-data-service already relies on for its own ANGELONE_*
+      # vars — env_file passes .env's raw keys straight through).
+      #
+      # Admin auth (session 8 — see auth/admin_auth.py): listed explicitly
+      # here, not left to env_file, for the SAME reason real-trade-service's
+      # block lists them explicitly below — makes it obvious at a glance
+      # that this service shares the ONE admin password with real-trade-
+      # service via the SAME .env keys, rather than needing a second set.
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH:-}
+      - ADMIN_PASSWORD_HASH_B64=${ADMIN_PASSWORD_HASH_B64:-}
+      - SESSION_SECRET=${SESSION_SECRET:-}
+      #
+      # 2026-09-12 fix: ORACLE_WALLET_DIR/TNS_ADMIN and the wallet volume mount
+      # below were missing entirely from this block. oracle_compat.py resolves
+      # the wallet dir from os.environ directly (not from config.py's Python
+      # default), so it was already reading "/oracle_wallet" correctly via
+      # whatever .env happened to contain — but nothing was ever mounted at
+      # that path in the container, so tnsnames.ora/ewallet.pem didn't exist
+      # there and every DB connection attempt failed with DPY-4026. Every
+      # other service in this file sets these two explicitly AND mounts the
+      # wallet — this block just never got either piece when the service was
+      # added. Explicit here now (not left to .env) for the same reason every
+      # other service does it explicitly: it's a container-internal path, not
+      # a host-specific value that belongs in .env.
+      - ORACLE_WALLET_DIR=/oracle_wallet
+      - TNS_ADMIN=/oracle_wallet
+      # Session41b fix (STATUS.md open item #7 — no notification channel):
+      # TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are already inherited raw from
+      # .env via env_file above (same mechanism as ADMIN_*/ANGELONE_* —
+      # nothing new needed there). NOTIFICATION_SERVICE_URL listed
+      # explicitly here too, matching real-trade-service's own block below,
+      # so both services' notifier.py route through the exact same
+      # notification-scheduler-service instance.
+      - NOTIFICATION_SERVICE_URL=http://notification-scheduler-service:8000/notification
+      # Confirmed by user (tracking doc §3.5/§5.9): 2% of the scalp pool
+      # risked per trade.
+      - RISK_PER_TRADE_PCT=2.0
+      - RISK_PER_TRADE_PCT_CONFIRMED=true
+      # Quality gate (session 6) — fast, fail-open fundamental/technical/news
+      # pre-check on the top few screened candidates before entry. Same
+      # shared analysis-intelligence-service endpoints every other Stockky
+      # service already points at (see TRACKING.md §3.13). If this service
+      # is down or these vars are wrong, the quality gate simply passes
+      # every candidate through unfiltered — never blocks the scalp loop.
+      - TECHNICAL_URL=http://analysis-intelligence-service:8000/technical
+      - FUNDAMENTAL_URL=http://analysis-intelligence-service:8000/fundamental
+      - EVENT_URL=http://analysis-intelligence-service:8000/event
+      # - QUALITY_GATE_ENABLED=true
+      # - QUALITY_GATE_TOP_N=3
+      # - QUALITY_GATE_TIMEOUT_S=2.5
+      # AUDIT FIX (session62, issue #5): these three floors existed in
+      # config.py (defaults 40/40/500) but were never listed here, so there
+      # was no discoverable way to tune them without editing source. Live
+      # case that prompted this: FILATFASH (fundamental_score 12) and LIBAS
+      # (22) were rejected by the 40 floor even though they were independent,
+      # real movers (not a capital-shortage rejection) — if the 40 default is
+      # too strict for the momentum-scalp universe this service targets
+      # (small/mid-caps move on volume, not always on a fundamentals score),
+      # lower these here. See the Screener tab's new "Quality Gate — recently
+      # dropped" panel to see exactly which candidates are being rejected and
+      # by how much before changing these.
+      # - MIN_FUNDAMENTAL_SCORE=40
+      # - MIN_TECHNICAL_SCORE=40
+      # - MIN_MARKET_CAP_CR=500
+      # - SHARED_DAILY_ORDER_BUDGET=5000
+      # - FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE=true
+      # - POSITION_STOCKS_DAILY_ORDER_BUDGET=300
+      # - MAX_DAILY_LOSS_PCT_OF_POOL=4.0
+      # - EOD_SQUAREOFF_TIME_IST=15:00
+      # AUDIT FIX: DHAN_CREDENTIAL_ENC_KEY was missing from this block.
+      # Without it, auth/dhan_credentials_ro.py raises "not configured" on
+      # every Dhan call (get_funds, place_order, get_super_order_list) —
+      # the service starts, passes /health, and logs no startup error, but
+      # is completely unable to check capital, place entries, or reconcile
+      # exits. It MUST match real-trade-service's key (same Dhan account).
+      - DHAN_CREDENTIAL_ENC_KEY=${DHAN_CREDENTIAL_ENC_KEY:-}
+      # AUDIT FIX: ANGELONE_* vars were also missing. feed/angelone_session.py
+      # checks is_configured() on startup and logs an error if any of the four
+      # required fields are empty — but the WS task still starts and returns
+      # "running: true" from /ws-status while never actually connecting, so
+      # the dashboard shows the feed as active when it isn't. Passing them
+      # through from .env explicitly (same pattern real-trade-service uses for
+      # DHAN_* above) makes the misconfiguration visible at the compose level.
+      - ANGELONE_CLIENT_ID=${ANGELONE_CLIENT_ID:-}
+      - ANGELONE_MPIN=${ANGELONE_MPIN:-}
+      - ANGELONE_API_KEY=${ANGELONE_API_KEY:-}
+      - ANGELONE_TOTP_SECRET=${ANGELONE_TOTP_SECRET:-}
+      - ANGELONE_STATIC_IP=${ANGELONE_STATIC_IP:-}
+    volumes:
+      - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
+    depends_on:
+      - real-trade-service
+      - analysis-intelligence-service
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8006/health', timeout=5) or sys.exit(0)"]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+      start_period: 60s
+    logging: *default-logging
+    # Separate from real-trade-service's CPU/mem budget — runs its own
+    # event loop and WS connection independently.
+    cpus: "0.30"
+    mem_limit: 400m
+    mem_reservation: 128m

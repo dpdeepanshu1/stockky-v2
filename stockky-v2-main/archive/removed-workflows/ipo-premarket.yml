@@ -1,0 +1,62 @@
+# Pre-market IPO scan → ipo_static_feed (Oracle/Neon), ~08:50 IST.
+# Runs BEFORE the session opens so the IPO Tracker's "Scan IPOs" button reads
+# an already-fresh table instead of doing full NSE discovery + yfinance
+# history pulls synchronously in front of the user (which is what made the
+# button feel like it "does nothing" — the work was happening, just too
+# slowly for a foreground click). This workflow does the same discovery +
+# scoring pass, just ahead of time, in the background, on a schedule.
+#
+# GitHub cron is UTC: 08:50 IST ≈ 03:20 UTC.
+# Secrets: API_GATEWAY_URL
+name: IPO Premarket Refresh
+
+on:
+  schedule:
+    - cron: "20 3 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  ipo-premarket:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Run IPO premarket scan
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+        run: |
+          set +e
+          GW="${API_GATEWAY_URL%/}"
+          [ -n "$GW" ] || { echo "API_GATEWAY_URL secret missing"; exit 0; }
+
+          DOW=$(TZ=Asia/Kolkata date +%u)
+          NOW=$(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M %Z')
+          echo "IST now: $NOW DOW=$DOW"
+          if [ "$DOW" -gt 5 ]; then
+            echo "Weekend — skip"
+            exit 0
+          fi
+
+          echo "Warm ping…"
+          curl -sS -m 30 "$GW/health?warm=true" >/dev/null 2>&1 || true
+          sleep 5
+
+          echo "POST $GW/surprise/ipo/scan?background=true&force=true"
+          code=$(curl -sS -o /tmp/ipo_pm.json -w "%{http_code}" \
+            -X POST "$GW/surprise/ipo/scan?background=true&force=true" \
+            --max-time 60 || echo "000")
+          echo "HTTP $code"
+          cat /tmp/ipo_pm.json 2>/dev/null || true
+
+          # background=true returns immediately once the scan is *started*;
+          # poll status until it finishes so this workflow's log shows the
+          # real result instead of just "started".
+          for i in $(seq 1 40); do
+            sleep 15
+            st=$(curl -sS -m 20 "$GW/surprise/ipo/status" || echo '{}')
+            echo "status: $st"
+            phase=$(echo "$st" | grep -o '"status"[^,}]*' | head -1)
+            case "$phase" in
+              *done*|*error*|*stopped*|*skipped_fresh*) break ;;
+            esac
+          done
+          echo "IPO premarket refresh finished (or timed out watching status — non-fatal)"

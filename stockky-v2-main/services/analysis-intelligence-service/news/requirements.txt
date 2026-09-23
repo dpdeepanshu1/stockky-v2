@@ -1,0 +1,5 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+feedparser==6.0.11
+vaderSentiment==3.3.2
+httpx==0.25.2

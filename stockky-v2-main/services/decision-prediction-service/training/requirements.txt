@@ -1,0 +1,17 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.5.1
+xgboost==2.1.1
+pydantic==2.11.5
+python-dotenv==1.0.0
+joblib==1.4.2
+sqlalchemy==2.0.31
+psycopg2-binary==2.9.9
+yfinance==1.5.2
+jinja2==3.1.4
+asyncpg==0.29.0
+# Oracle Autonomous DB driver (thin mode) — used only when ORACLE_* env is set (Oracle Cloud VM).
+# Harmless on Render/Neon: pure-Python, imported lazily, never loaded on the Postgres path.
+oracledb==2.5.1

@@ -1,0 +1,260 @@
+"""
+screening/quality_gate.py — fast, best-effort fundamental/technical/news
+pre-check applied to the top few price/volume candidates before entry.
+
+WHY THIS EXISTS: the 1m/5m/15m/60m screener (screening/engine.py) only looks
+at price and tick activity — it has no idea if a stock is moving because of
+a genuine positive catalyst (good results, a bulk deal, positive news) versus
+a fundamentally weak/illiquid name having a random spike. This module adds
+that check — but ONLY for the handful of symbols the price/volume screen
+already ranked highest (config.QUALITY_GATE_TOP_N), never the whole scan
+universe, so it stays fast.
+
+DESIGN — mirrors real-trade-service's candidate_engine/candidates.py
+quality-gate pattern exactly, reusing the SAME shared analysis-intelligence-
+service endpoints (a shared, read-only backend — not real-trade-service's
+own state, so calling it doesn't compromise this service's isolation from
+real-trade-service specifically):
+  - GET {FUNDAMENTAL_URL}/analyze/{symbol}  -> fundamental_score, market_cap
+  - GET {TECHNICAL_URL}/analyze/{symbol}    -> technical_score
+  - GET {EVENT_URL}/events/{symbol}/categorized -> has_positive_catalyst,
+    recent_event_score, bulk_deals (news/bulk-deal/earnings-surprise signal)
+
+FAIL-OPEN, ALWAYS: every call has a short timeout (config.QUALITY_GATE_
+TIMEOUT_S — a couple seconds, not real-trade-service's 12-60s, because this
+loop ticks every 10s and anything slower isn't "quick"). Any exception,
+timeout, or non-200 response leaves that field as None. A None field is
+"unknown", never treated as a reject — same leniency real-trade-service's
+own quality gate uses ("missing fresh fundamentals is common and shouldn't
+reject an otherwise fine breakout on its own"). Only a field that IS present
+and clearly below its floor causes a skip-this-one-try-next-candidate
+outcome. If analysis-intelligence-service is down entirely, every check
+comes back all-None and every candidate simply passes through unfiltered —
+the scalp loop is never blocked or slowed by this being unavailable.
+
+CACHE FALLBACK (session68): the paragraph above is still true for a symbol
+never seen before. For a symbol this service HAS successfully scored
+before, check()'s optional `cached` argument (see get_cache_batch/
+upsert_cache_batch, models.ScalpQualityCache) fills in a timed-out field
+with the last real value instead of leaving it None — closing the exact
+gap that let MANGALAM/GEEKAYWIRE/JISLJALEQS through on 2026-09-17. Live
+data always wins over cache when present; a symbol still gets one fully
+fail-open pass the first time it's ever scored.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+import httpx
+from sqlalchemy.orm import Session
+
+import config
+from models import ScalpQualityCache
+
+logger = logging.getLogger("position-stocks-quality-gate")
+
+
+@dataclass
+class QualitySignal:
+    symbol: str
+    fundamental_score: Optional[float] = None
+    technical_score: Optional[float] = None
+    market_cap_cr: Optional[float] = None
+    has_positive_catalyst: Optional[bool] = None
+    recent_event_score: Optional[float] = None
+    bulk_deal_flag: bool = False
+
+    def passes(self) -> tuple[bool, str]:
+        """Lenient pass/fail: only reject on data that IS present and below
+        floor. Missing data always passes through with a reason noting so."""
+        if self.fundamental_score is not None and self.fundamental_score < config.MIN_FUNDAMENTAL_SCORE:
+            return False, f"fundamental_score {self.fundamental_score:.0f} < floor {config.MIN_FUNDAMENTAL_SCORE:.0f}"
+        if self.technical_score is not None and self.technical_score < config.MIN_TECHNICAL_SCORE:
+            return False, f"technical_score {self.technical_score:.0f} < floor {config.MIN_TECHNICAL_SCORE:.0f}"
+        if self.market_cap_cr is not None and self.market_cap_cr < config.MIN_MARKET_CAP_CR:
+            return False, f"market_cap ₹{self.market_cap_cr:.0f}cr < floor ₹{config.MIN_MARKET_CAP_CR:.0f}cr"
+        reasons = []
+        if self.has_positive_catalyst:
+            reasons.append("positive catalyst")
+        if self.bulk_deal_flag:
+            reasons.append("bulk deal")
+        if self.fundamental_score is None and self.technical_score is None and self.market_cap_cr is None:
+            reasons.append("no fund/tech data available — floor check skipped")
+        return True, ", ".join(reasons) if reasons else "no red flags"
+
+
+def get_cache_batch(db: Session, symbols: list[str]) -> dict[str, QualitySignal]:
+    """session68: read last-known-good quality scores for these symbols,
+    skipping any row older than config.QUALITY_CACHE_MAX_AGE_HOURS. Called
+    ONCE, synchronously, from main.py BEFORE the async check() gather —
+    deliberately never called from inside a check() coroutine itself, so
+    no DB session is touched while multiple check() calls are interleaved
+    on the event loop."""
+    if not symbols:
+        return {}
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=config.QUALITY_CACHE_MAX_AGE_HOURS)
+    rows = (
+        db.query(ScalpQualityCache)
+        .filter(ScalpQualityCache.symbol.in_(symbols))
+        .filter(ScalpQualityCache.updated_at >= cutoff)
+        .all()
+    )
+    return {
+        r.symbol: QualitySignal(
+            symbol=r.symbol,
+            fundamental_score=r.fundamental_score,
+            technical_score=r.technical_score,
+            market_cap_cr=r.market_cap_cr,
+        )
+        for r in rows
+    }
+
+
+def upsert_cache_batch(db: Session, signals: list[QualitySignal]) -> None:
+    """session68: persist whichever fields were actually fetched live this
+    cycle (not None) so a future timeout for the same symbol has real data
+    to fall back to. Called ONCE, synchronously, AFTER the gather completes
+    — same reasoning as get_cache_batch above. Never overwrites an existing
+    cached field with None; a symbol with nothing live this cycle is
+    skipped entirely (stale cache stays as-is until it naturally ages out
+    via QUALITY_CACHE_MAX_AGE_HOURS)."""
+    for sig in signals:
+        if sig.fundamental_score is None and sig.technical_score is None and sig.market_cap_cr is None:
+            continue
+        row = db.query(ScalpQualityCache).filter_by(symbol=sig.symbol).one_or_none()
+        if row is None:
+            row = ScalpQualityCache(symbol=sig.symbol)
+            db.add(row)
+        if sig.fundamental_score is not None:
+            row.fundamental_score = sig.fundamental_score
+        if sig.technical_score is not None:
+            row.technical_score = sig.technical_score
+        if sig.market_cap_cr is not None:
+            row.market_cap_cr = sig.market_cap_cr
+        row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+
+async def _fetch_fundamental(client: httpx.AsyncClient, symbol: str) -> tuple[Optional[float], Optional[float]]:
+    fund_score = market_cap_cr = None
+    try:
+        r = await client.get(f"{config.FUNDAMENTAL_URL}/analyze/{symbol}", timeout=config.QUALITY_GATE_TIMEOUT_S)
+        if r.status_code == 200:
+            fj = r.json()
+            fund_score = fj.get("fundamental_score")
+            raw_mcap = fj.get("market_cap") or (fj.get("raw") or {}).get("market_cap")
+            if raw_mcap:
+                try:
+                    market_cap_cr = float(raw_mcap) / 1e7  # rupees -> crore
+                except (TypeError, ValueError):
+                    market_cap_cr = None
+    except Exception as e:
+        # BUG FIX (2026-09-17): httpx timeout exceptions (ReadTimeout,
+        # ConnectTimeout, etc.) stringify to "" — logging bare `e` produced
+        # "fundamental fetch failed for X ()" with zero information about
+        # WHY it failed (timeout vs connection refused vs something else).
+        # Fall back to the exception's class name whenever str(e) is empty.
+        logger.info("quality_gate: fundamental fetch failed for %s (%s)", symbol, str(e) or type(e).__name__)
+    return fund_score, market_cap_cr
+
+
+async def _fetch_technical(client: httpx.AsyncClient, symbol: str) -> Optional[float]:
+    tech_score = None
+    try:
+        r = await client.get(f"{config.TECHNICAL_URL}/analyze/{symbol}", timeout=config.QUALITY_GATE_TIMEOUT_S)
+        if r.status_code == 200:
+            tech_score = r.json().get("technical_score")
+    except Exception as e:
+        # See the matching BUG FIX comment in _fetch_fundamental above.
+        logger.info("quality_gate: technical fetch failed for %s (%s)", symbol, str(e) or type(e).__name__)
+    return tech_score
+
+
+async def _fetch_fund_tech(client: httpx.AsyncClient, symbol: str) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Runs the fundamental and technical calls concurrently, not sequentially.
+    FIXED session 29: these were two independent `await`s back to back inside
+    one function — real latency was fund_time + tech_time, not max(fund_time,
+    tech_time), even though the module docstring and `check()`'s docstring both
+    describe all three checks as running "concurrently". Combined with
+    `_fetch_event_signal()` running alongside via the outer `asyncio.gather()`
+    in `check()`, the true per-candidate wait was max(fund_time + tech_time,
+    event_time) — silently up to ~2x QUALITY_GATE_TIMEOUT_S longer than
+    intended on a timeout, directly compounding the scan-time-LTP entry-price
+    staleness already tracked from session 25/26 (more wall-clock time between
+    the screener's price snapshot and the real fill)."""
+    (fund_score, market_cap_cr), tech_score = await asyncio.gather(
+        _fetch_fundamental(client, symbol),
+        _fetch_technical(client, symbol),
+    )
+    return fund_score, tech_score, market_cap_cr
+
+
+async def _fetch_event_signal(client: httpx.AsyncClient, symbol: str) -> tuple[Optional[bool], Optional[float], bool]:
+    has_catalyst = event_score = None
+    bulk_flag = False
+    try:
+        r = await client.get(f"{config.EVENT_URL}/events/{symbol}/categorized", timeout=config.QUALITY_GATE_TIMEOUT_S)
+        if r.status_code == 200:
+            ej = r.json()
+            has_catalyst = ej.get("has_positive_catalyst")
+            event_score = ej.get("recent_event_score")
+            bulk_flag = bool(ej.get("bulk_deals"))
+    except Exception as e:
+        # See the matching BUG FIX comment in _fetch_fundamental above.
+        logger.info("quality_gate: event fetch failed for %s (%s)", symbol, str(e) or type(e).__name__)
+    return has_catalyst, event_score, bulk_flag
+
+
+def _apply_cache_fallback(signal: QualitySignal, cached: Optional[QualitySignal]) -> QualitySignal:
+    """session68: fill in whichever fields this live fetch didn't return
+    (still None) from the last-known-good cached signal. Live data always
+    wins when present — this never overwrites a value the fetch DID get."""
+    if cached is None:
+        return signal
+    if signal.fundamental_score is None:
+        signal.fundamental_score = cached.fundamental_score
+    if signal.technical_score is None:
+        signal.technical_score = cached.technical_score
+    if signal.market_cap_cr is None:
+        signal.market_cap_cr = cached.market_cap_cr
+    return signal
+
+
+async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualitySignal:
+    """Run all three best-effort checks concurrently for one symbol.
+    Never raises — worst case every field is None/False.
+
+    `cached` (session68): the symbol's last-known-good scores from
+    models.ScalpQualityCache, passed in by main.py via get_cache_batch()
+    (see that function — never fetched here, to keep this coroutine free
+    of DB access while several run concurrently). Any field this live
+    fetch didn't return falls back to `cached` instead of staying None."""
+    if not config.QUALITY_GATE_ENABLED:
+        return QualitySignal(symbol=symbol)
+
+    async with httpx.AsyncClient() as client:
+        try:
+            (fund_score, tech_score, market_cap_cr), (has_catalyst, event_score, bulk_flag) = await asyncio.gather(
+                _fetch_fund_tech(client, symbol),
+                _fetch_event_signal(client, symbol),
+            )
+        except Exception as e:
+            # Belt-and-suspenders — asyncio.gather itself shouldn't raise given
+            # the inner functions already swallow their own exceptions, but a
+            # quality signal must never be able to crash the trading loop.
+            logger.error("quality_gate: unexpected error for %s: %s", symbol, e, exc_info=True)
+            return _apply_cache_fallback(QualitySignal(symbol=symbol), cached)
+
+    return _apply_cache_fallback(QualitySignal(
+        symbol=symbol,
+        fundamental_score=fund_score,
+        technical_score=tech_score,
+        market_cap_cr=market_cap_cr,
+        has_positive_catalyst=has_catalyst,
+        recent_event_score=event_score,
+        bulk_deal_flag=bulk_flag,
+    ), cached)

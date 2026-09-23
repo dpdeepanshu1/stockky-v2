@@ -315,12 +315,20 @@ class TestRefreshDynamicUniverseSync:
         assert result["kept"] == 0
 
     def test_stale_symbols_are_unsubscribed(self):
+        # NOTE: desired=[] hits the early "nothing active" return before the
+        # diff/unsubscribe logic ever runs (see refresh_dynamic_universe:
+        # `if not desired: return None`), so it can never exercise the
+        # removal path. Keep one symbol in `desired` (and in `current`, so
+        # it doesn't also get "added") purely to get past that early return;
+        # the real thing under test is that OLD1/OLD2 — present in
+        # `current` but absent from `desired` — get unsubscribed.
         result = self._run_with_desired_and_current(
-            desired=[],
-            current=["OLD1", "OLD2"],
+            desired=["KEEP"],
+            current=["KEEP", "OLD1", "OLD2"],
         )
         assert result["added"] == []
         assert sorted(result["removed"]) == ["OLD1", "OLD2"]
+        assert result["kept"] == 1
 
     def test_overlap_counted_as_kept(self):
         result = self._run_with_desired_and_current(
@@ -361,9 +369,13 @@ class TestRefreshDynamicUniverseSync:
         assert result["added"] == []
 
     def test_unsubscribe_failure_logs_but_does_not_raise(self):
+        # Same reasoning as test_stale_symbols_are_unsubscribed above:
+        # desired must be non-empty or refresh_dynamic_universe returns
+        # None before ever reaching the to_remove/except branch (lines
+        # 116-117) this test exists to cover.
         result = self._run_with_desired_and_current(
-            desired=[],
-            current=["GONE"],
+            desired=["KEEP"],
+            current=["KEEP", "GONE"],
             unsubscribe_ok=False,
         )
         assert isinstance(result, dict)

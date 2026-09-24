@@ -308,6 +308,40 @@ _KNOWN_NSE_SYMBOLS = {
 }
 
 
+# 2026-09-24 fix (user report: real movers with genuine news — Man
+# Industries, Everest Kanto Cylinder, OLA Electric, Raymond Realty,
+# Fujiyama Power Systems — never appearing in the after-hours scan even
+# on days with obvious coverage). Root cause: _extract_symbol only ever
+# matched a headline's ALL-CAPS *tokens* against the ticker string itself
+# ("RELIANCE" in "Reliance surges" works because the company's common
+# name and its ticker are the same word). That silently fails for any
+# stock whose ticker is an abbreviation/rename that never appears as a
+# literal word in ordinary prose — headlines say "Man Industries", never
+# "MANINDS"; "Everest Kanto Cylinder", never "EKC"; "OLA Electric", never
+# "OLAELEC"; "Raymond Realty", never "RAYMONDREL"; and Fujiyama Power
+# Systems still trades under its pre-rename ticker UTLSOLAR, which shares
+# no word with either name at all. None of this is a feed-coverage or
+# bot-blocking problem (the ET-feed-retirement class of bug this file has
+# hit before) — the news exists and is being fetched, it's the
+# name→symbol mapping step that's blind to it. A regex over ALL-CAPS
+# tokens can never solve this in general (real financial headlines are
+# title-case prose, not ticker soup), so this adds a small, explicit
+# alias table of name-fragments for symbols known to have this gap,
+# checked as a second pass (substring match) after the direct
+# ticker-token match fails. Every value here is intentionally the
+# *company name*, not a ticker guess, so a false match can only ever
+# resolve to the correct real symbol (still gated by known_symbols, same
+# as the primary path) — extend this table whenever a new "genuine news
+# exists but never got picked up" report names another mismatched ticker.
+_NAME_ALIASES: dict[str, tuple[str, ...]] = {
+    "MANINDS":     ("MAN INDUSTRIES",),
+    "EKC":         ("EVEREST KANTO",),
+    "OLAELEC":     ("OLA ELECTRIC",),
+    "RAYMONDREL":  ("RAYMOND REALTY",),
+    "UTLSOLAR":    ("FUJIYAMA", "UTL SOLAR"),
+}
+
+
 def _extract_symbol(headline: str, known_symbols: set[str]) -> Optional[str]:
     """Extract a probable NSE symbol from a headline.
 
@@ -323,6 +357,11 @@ def _extract_symbol(headline: str, known_symbols: set[str]) -> Optional[str]:
     empty means the master itself is unavailable this pass (no live fetch,
     no cached snapshot) — degrades to the old whitelist+heuristic path
     rather than extracting nothing at all.
+
+    After the direct token match fails, also checks _NAME_ALIASES — see
+    its docstring above for why a ticker-token-only match structurally
+    misses real news for any stock whose ticker isn't a word in its own
+    company name.
     """
     uheadline = headline.upper()
     tokens = _SYMBOL_RE.findall(uheadline)
@@ -331,12 +370,18 @@ def _extract_symbol(headline: str, known_symbols: set[str]) -> Optional[str]:
         for t in tokens:
             if t in known_symbols:
                 return t
+        for sym, aliases in _NAME_ALIASES.items():
+            if sym in known_symbols and any(a in uheadline for a in aliases):
+                return sym
         return None
 
     # Degraded fallback — symbol master unavailable this pass.
     for t in tokens:
         if t in _KNOWN_NSE_SYMBOLS:
             return t
+    for sym, aliases in _NAME_ALIASES.items():
+        if any(a in uheadline for a in aliases):
+            return sym
     # Min-length 6 (not 3) avoids noisy partial tickers: HDFC (4), BAJAJ (5),
     # SUN (3) etc. that appear in title-case headlines when uppercased.
     for t in tokens:

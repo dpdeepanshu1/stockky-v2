@@ -6,6 +6,23 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION99_SECRET_IN_URL_LOG_LEAK_FIX_ROUND2_2026-09-24.md` — session98's
+  "still open" secret-in-URL leak, closed in the two services it named, plus
+  one more found along the way. **`market-data-service/main.py`:** TwelveData,
+  Polygon and AlphaVantage API keys were in query strings, logged in full at
+  INFO via `httpx` (same mechanism as session98). **`analysis-intelligence-
+  service/news/main.py`:** same for the NewsAPI key (this service's first
+  tests). Both fixed with an `httpx`-logger redaction filter, same shape as
+  session98. **Also found:** `position-stocks-service/feed/ws_client.py` puts
+  the AngelOne feed token and API key in the WS URL; the `websockets` library
+  logs the full request line at DEBUG via its own `"websockets.client"`
+  logger — lower severity (this service's `LOG_LEVEL` defaults to INFO, so it
+  doesn't leak today) but fixed the same way since `LOG_LEVEL=DEBUG` is a real
+  supported knob. All three reproduced live (real httpx `MockTransport` /
+  real local `websockets` server-client round-trip) both leaking pre-fix and
+  clean post-fix; regression tests fail on the old files. market-data-service
+  24 passed (14+10 new); analysis-intelligence-service 8 passed (new);
+  position-stocks-service 1232 passed (1225+7 new).
 - `SESSION98_NOTIFIER_COVERAGE_AND_SECRET_IN_URL_LOG_LEAK_FIX_2026-09-24.md` —
   `notifier.py` 23%(unstable)→100%; new `tests/test_notifier.py` (64 tests, real
   httpx via MockTransport). **Security fix in 4 files / 3 services:** httpx logs

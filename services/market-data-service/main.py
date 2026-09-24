@@ -273,6 +273,53 @@ ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY") or os.getenv("TWELVEDATA_API_KEY")
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
 
+# ── API-key-in-URL hygiene (session99) ────────────────────────────────────────
+# The waterfall fallbacks below all put the provider's API key IN THE URL:
+#   TwelveData    https://api.twelvedata.com/price?symbol=...&apikey=<key>
+#   Polygon       https://api.polygon.io/v2/aggs/ticker/.../prev?...&apiKey=<key>
+#   AlphaVantage  https://www.alphavantage.co/query?...&apikey=<key>
+# httpx logs every request at INFO as "HTTP Request: GET <full url> ..." and this
+# service runs logging.basicConfig(level=logging.INFO) with nothing muting the
+# "httpx" logger — so every waterfall call wrote the key to the log. Same class
+# of leak as session98's Telegram-bot-token fix; same fix shape.
+_SECRET_SUBS = (
+    (re.compile(r"(?i)([?&]apikey=)[^&\s'\"]+"), r"\1***"),
+    (re.compile(r"(?i)([?&]apiKey=)[^&\s'\"]+"), r"\1***"),
+)
+
+
+def _redact_secrets(text) -> str:
+    """str(text) with every provider API key above replaced by ``***``. Never raises."""
+    try:
+        out = str(text)
+        for pattern, repl in _SECRET_SUBS:
+            out = pattern.sub(repl, out)
+        return out
+    except Exception:
+        return "<text withheld: redaction failed>"
+
+
+class _SecretRedactingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+            redacted = _redact_secrets(msg)
+            if redacted != msg:
+                record.msg, record.args = redacted, ()
+        except Exception:
+            pass   # a logging filter must never break logging
+        return True
+
+
+def _install_httpx_secret_filter() -> None:
+    """Idempotent — safe on module reload."""
+    httpx_logger = logging.getLogger("httpx")
+    if not any(isinstance(f, _SecretRedactingFilter) for f in httpx_logger.filters):
+        httpx_logger.addFilter(_SecretRedactingFilter())
+
+
+_install_httpx_secret_filter()
+
 app = FastAPI(title="Stockky Market Data Service", version="2.2.0")
 app.add_middleware(
     CORSMiddleware,
@@ -1286,7 +1333,7 @@ def _waterfall_twelvedata_price(symbol: str) -> Optional[float]:
                         logger.info("TwelveData waterfall hit %s → ₹%.2f", sym, px)
                         return float(px)
         except Exception as e:
-            logger.debug("TwelveData %s: %s", sym, e)
+            logger.debug("TwelveData %s: %s", sym, _redact_secrets(e))
     return None
 
 
@@ -1316,7 +1363,7 @@ def _waterfall_polygon_price(symbol: str) -> Optional[float]:
                     logger.info("Polygon waterfall hit %s → ₹%.2f", sym, px)
                     return float(px)
     except Exception as e:
-        logger.debug("Polygon %s: %s", sym, e)
+        logger.debug("Polygon %s: %s", sym, _redact_secrets(e))
     return None
 
 
@@ -1570,7 +1617,7 @@ def _waterfall_alphavantage_price(symbol: str) -> Optional[float]:
             if "rate" in note.lower() or "call frequency" in note.lower():
                 _set_cooldown("alphavantage", 300)
     except Exception as e:
-        logger.debug("AlphaVantage %s: %s", base, e)
+        logger.debug("AlphaVantage %s: %s", base, _redact_secrets(e))
     return None
 
 

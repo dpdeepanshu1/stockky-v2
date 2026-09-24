@@ -11,6 +11,7 @@ try:
 except Exception:
     build_news_response = None  # type: ignore
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 from urllib.parse import quote
@@ -31,6 +32,51 @@ HF_API_KEY = os.getenv("HF_API_KEY")
 
 # Optional NewsAPI key (free tier)
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
+
+# ── API-key-in-URL hygiene (session99) ────────────────────────────────────────
+# _fetch_newsapi() calls https://newsapi.org/v2/everything?...&apiKey=<key> with
+# httpx — the key is part of the URL. httpx logs every request at INFO as
+# "HTTP Request: GET <full url> ..." and this service runs
+# logging.basicConfig(level=logging.INFO) with nothing muting the "httpx"
+# logger, so every news fetch wrote the key to the log. Same class of leak as
+# session98's Telegram-bot-token fix (and session99's market-data-service fix);
+# same fix shape.
+_SECRET_SUBS = (
+    (re.compile(r"(?i)([?&]apiKey=)[^&\s'\"]+"), r"\1***"),
+)
+
+
+def _redact_secrets(text) -> str:
+    """str(text) with the NewsAPI key above replaced by ``***``. Never raises."""
+    try:
+        out = str(text)
+        for pattern, repl in _SECRET_SUBS:
+            out = pattern.sub(repl, out)
+        return out
+    except Exception:
+        return "<text withheld: redaction failed>"
+
+
+class _SecretRedactingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+            redacted = _redact_secrets(msg)
+            if redacted != msg:
+                record.msg, record.args = redacted, ()
+        except Exception:
+            pass   # a logging filter must never break logging
+        return True
+
+
+def _install_httpx_secret_filter() -> None:
+    """Idempotent — safe on module reload."""
+    httpx_logger = logging.getLogger("httpx")
+    if not any(isinstance(f, _SecretRedactingFilter) for f in httpx_logger.filters):
+        httpx_logger.addFilter(_SecretRedactingFilter())
+
+
+_install_httpx_secret_filter()
 
 # Primary display name + common aliases for keyword matching
 NAME_HINTS = {
@@ -400,7 +446,7 @@ def _fetch_newsapi(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
                 })
             return items
     except Exception as e:
-        logger.warning("NewsAPI fetch failed: %s", e)
+        logger.warning("NewsAPI fetch failed: %s", _redact_secrets(e))
         return []
 
 

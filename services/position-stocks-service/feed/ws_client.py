@@ -112,6 +112,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import struct
 import threading
 import time
@@ -127,6 +128,59 @@ from feed.angelone_session import get_session
 from feed.scrip_master import get_all_nse_eq
 
 logger = logging.getLogger("position-stocks-ws-client")
+
+# ── Feed-secret-in-URL hygiene (session99) ────────────────────────────────────
+# ws_url below carries clientCode / feedToken / apiKey as query params (AngelOne
+# requires them in the URL — no header-auth alternative for this feed). Nothing
+# in this module logs ws_url directly, but the `websockets` library itself logs
+# the full request line (path + query string) via its "websockets.client"
+# logger at DEBUG — see websockets/client.py's `self.logger.debug("> GET %s
+# HTTP/1.1", request.path)`. This service's LOG_LEVEL defaults to INFO (so the
+# line is normally suppressed), but LOG_LEVEL=DEBUG is a supported, real
+# config knob (config.py), and turning it on for any other reason would leak
+# the feed token and API key to the log. Same class of leak as session98's
+# Telegram-bot-token fix and session99's provider-API-key fixes; closing it the
+# same way rather than leaving it conditional on nobody ever setting LOG_LEVEL.
+_SECRET_SUBS = (
+    (re.compile(r"(?i)([?&]feedToken=)[^&\s'\"]+"), r"\1***"),
+    (re.compile(r"(?i)([?&]apiKey=)[^&\s'\"]+"), r"\1***"),
+)
+
+
+def _redact_secrets(text) -> str:
+    """str(text) with the AngelOne feed token / API key above replaced by
+    ``***``. Never raises."""
+    try:
+        out = str(text)
+        for pattern, repl in _SECRET_SUBS:
+            out = pattern.sub(repl, out)
+        return out
+    except Exception:
+        return "<text withheld: redaction failed>"
+
+
+class _SecretRedactingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+            redacted = _redact_secrets(msg)
+            if redacted != msg:
+                record.msg, record.args = redacted, ()
+        except Exception:
+            pass   # a logging filter must never break logging
+        return True
+
+
+def _install_ws_secret_filter() -> None:
+    """Idempotent — safe on module reload. Covers "websockets.client" (the
+    library's own request-line DEBUG log) and this module's own logger."""
+    for name in ("websockets.client", "position-stocks-ws-client"):
+        target = logging.getLogger(name)
+        if not any(isinstance(f, _SecretRedactingFilter) for f in target.filters):
+            target.addFilter(_SecretRedactingFilter())
+
+
+_install_ws_secret_filter()
 
 # ── Tick storage ────────────────────────────────────────────────────────────
 # AUDIT FIX (this session — "check for any other remaining issue,

@@ -6,6 +6,16 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION108_POSITION_STOCKS_ORACLE_COMPAT_COVERAGE_2026-09-24.md` —
+  `position-stocks-service/oracle_compat.py` 15%→100% (110 stmts, 30/30
+  branches; still 100% with the `# pragma: no cover` lines counted). Finishes a
+  half-done draft (88%, 5 failing). New `tests/test_oracle_compat.py` (104
+  tests): exact-string SQL for both dialects, the Postgres upsert executed for
+  real on SQLite, real `exec_ddl_safe` DDL, the `connect` call-timeout listener
+  fired from the pool's dispatch, lazy real Oracle engine build when `oracledb`
+  is installed. position-stocks 1233→1337 passed, 78%→80%. 53 mutations, 0
+  survivors. No production code changed. Next: `pipeline_status.py`,
+  `capital/shared_symbol_lock.py`, `capital/shared_exposure.py`.
 - `SESSION99_SECRET_IN_URL_LOG_LEAK_FIX_ROUND2_2026-09-24.md` — session98's
   "still open" secret-in-URL leak, closed in the two services it named, plus
   one more found along the way. **`market-data-service/main.py`:** TwelveData,

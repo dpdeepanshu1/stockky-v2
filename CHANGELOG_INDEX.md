@@ -6,6 +6,17 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION91_AFTERHOURS_FETCHERS_COVERAGE_ROUND2_2026-09-24.md` — round 2:
+  new `tests/test_afterhours_scan_fetchers.py` (20 tests) covers
+  `_fetch_rss_items`, `_fetch_bulk_deal_hits`, and `_validate_symbols` —
+  the three network/circuit-breaker-dependent functions in
+  `watchlist_engine/afterhours_scan.py` — using the same
+  `httpx.AsyncClient` + breaker-`.call()` mocking pattern already
+  established in `tests/test_watchlist_sources.py`. **Not run through live
+  pytest — no network in this sandbox**; hand-traced against the real
+  source. Deferred to round 3: `run_afterhours_scan` and
+  `finalize_nextday_watchlist`, the two DB-writing orchestrators. No
+  production code changed.
 - `SESSION91_AFTERHOURS_PURE_HELPERS_COVERAGE_ROUND1_2026-09-24.md` — new
   `tests/test_afterhours_scan_pure_helpers.py` (31 tests) covers
   `watchlist_engine/afterhours_scan.py`'s five self-contained helpers

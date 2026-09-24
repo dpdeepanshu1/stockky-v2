@@ -36,6 +36,7 @@ a SELL are #2 (market hours — the exchange itself isn't open) and #9
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -200,6 +201,24 @@ class RiskResult:
     approved_qty: Optional[int] = None  # risk engine may downsize, never upsize
 
 
+def _qty_within_risk_cap(per_share_risk: float, max_trade_risk: float) -> int:
+    """Largest whole-share qty whose stop-loss risk fits inside `max_trade_risk`.
+
+    Returns 0 (=> the caller REJECTS) whenever a valid size cannot be derived:
+    a non-positive or non-finite per-share risk, or a budget too small for even
+    one share. Fails closed by construction — it can never divide by zero.
+
+    Extracted from evaluate() in session109: check 4c already guarantees a BUY
+    reaches check 5 with a finite stop strictly below a finite entry, so the
+    `per_share_risk <= 0` guard was unreachable *through* evaluate() and sat
+    uncovered as inline code. As a helper it is directly testable, and it stays
+    as defence-in-depth if the check order is ever rearranged.
+    """
+    if not (per_share_risk > 0 and math.isfinite(per_share_risk) and math.isfinite(max_trade_risk)):
+        return 0
+    return int(max_trade_risk // per_share_risk)
+
+
 def _adaptive_max_stock_price(account: AccountState) -> float:
     """2026-09-18 audit fix #4 — derive the max per-share price at which at
     least 1 share can still be sized within this account's CURRENT
@@ -334,6 +353,23 @@ def evaluate(
     # already validate these upstream; this makes the "absolute veto authority" true for every
     # caller, including the admin POST /risk-engine/check endpoint.
     if intent.side == "BUY":
+        # session109 fix: NaN / +-inf slipped straight through this check AND the
+        # per-trade / cash / concentration caps below — every comparison against
+        # NaN is False, so `order_risk > max_trade_risk` never fired and a BUY
+        # with a NaN stop, NaN entry, NaN qty or NaN adj_risk_pct came back
+        # APPROVED at full size. (Reproduced: stop=NaN -> approved 100 shares.)
+        # Sources are realistic — an ATR of NaN feeding a computed stop, or a
+        # JSON `NaN` through POST /risk-engine/check or a manual ticket, which
+        # pydantic accepts by default. Fail closed instead.
+        _numeric_inputs = [intent.qty, intent.entry_price, intent.stop_price]
+        if intent.adj_risk_pct is not None:
+            _numeric_inputs.append(intent.adj_risk_pct)
+        if not all(math.isfinite(_v) for _v in _numeric_inputs):
+            return RiskResult(
+                RiskVerdict.REJECTED, "invalid_order",
+                f"Non-finite value in order intent (qty={intent.qty}, entry={intent.entry_price}, "
+                f"stop={intent.stop_price}, adj_risk_pct={intent.adj_risk_pct}) — refusing to size it.",
+            )
         if intent.qty <= 0:
             return RiskResult(
                 RiskVerdict.REJECTED, "invalid_order",
@@ -364,12 +400,7 @@ def evaluate(
 
     if intent.side == "BUY" and order_risk > max_trade_risk:
         per_share_risk = abs(intent.entry_price - intent.stop_price)
-        if per_share_risk <= 0:
-            return RiskResult(
-                RiskVerdict.REJECTED, "per_trade_risk_cap",
-                "Stop price equals entry price — cannot size a valid risk amount.",
-            )
-        final_qty = int(max_trade_risk // per_share_risk)
+        final_qty = _qty_within_risk_cap(per_share_risk, max_trade_risk)
         if final_qty <= 0:
             return RiskResult(
                 RiskVerdict.REJECTED, "per_trade_risk_cap",

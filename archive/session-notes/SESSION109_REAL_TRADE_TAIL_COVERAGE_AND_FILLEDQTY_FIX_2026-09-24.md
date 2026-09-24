@@ -1,4 +1,4 @@
-# Session 109 (2026-09-24): real-trade-service — last uncovered production lines closed, one silent-ghost-fill bug fixed, coverage config
+# Session 109 (2026-09-24): real-trade-service — production code at 100%, two silent-approval/ghost-fill bugs fixed, coverage config
 
 ## Where this picked up
 
@@ -48,6 +48,43 @@ existing "DB exception falls back" test injected its failure by patching
 testing nothing, so it now patches `db.get` and asserts the call. The two other
 `Query.get()` warnings were in test files and were switched to `Session.get`.
 
+## Production fix 4 (round 2) — `risk_engine/engine.py`: NaN slipped past the "absolute veto authority"
+
+The VM run after the first zip (2638 passed, 8218 stmts, **1 missed: `engine.py`
+368**) left only the "unreachable" guard `per_share_risk <= 0` ("Stop price equals
+entry price"). Working out why it was unreachable exposed a real hole: check 4c
+rejects `stop >= entry`, but every comparison against NaN is False, so **NaN
+passes 4c and then silently skips every downstream cap** (`order_risk >
+max_trade_risk` is False for NaN, so no per-trade downsize). Reproduced on the
+old code before changing anything:
+
+    stop_price=NaN      -> APPROVED, 100 shares, all_checks_passed
+    entry_price=NaN     -> APPROVED, 100 shares, all_checks_passed
+    qty=NaN             -> APPROVED, approved_qty=nan
+    adj_risk_pct=NaN    -> APPROVED, 100 shares (per-trade cap bypassed)
+
+Realistic sources: a NaN ATR feeding a computed stop, or a JSON `NaN` through
+`POST /risk-engine/check` / a manual ticket (pydantic accepts NaN by default).
+Fix: 4c now rejects a BUY (`invalid_order`, "Non-finite value in order intent
+(qty=…, entry=…, stop=…, adj_risk_pct=…)") if qty, entry, stop or a supplied
+`adj_risk_pct` is not finite. SELLs are deliberately untouched — exits must never
+be blocked by an entry-only check (test pins this). Finite-but-odd values (stop 0
+or negative) are unchanged: they only *increase* per-share risk, so sizing shrinks
+the order (conservative), pinned by a test rather than changed.
+
+Then line 368: with 4c now guaranteeing a finite stop strictly below a finite
+entry, the inline guard is provably dead *through* `evaluate()`. Rather than
+delete a divide-by-zero guard or hide it behind `# pragma: no cover`, the sizing
+step is extracted as `_qty_within_risk_cap(per_share_risk, max_trade_risk)`, which
+returns 0 (→ the caller's existing "Even 1 share risks …" rejection) for a
+non-positive / non-finite per-share risk or budget, and is tested **directly**
+(including that `1000.0 // 0.0` really raises, i.e. the guard matters). Same
+fail-closed behaviour if the check order is ever rearranged; the only wording
+change is on the unreachable path. 30 new tests in `tests/test_risk_engine.py`
+(`TestNonFiniteInputs`, `TestQtyWithinRiskCap`), 10 mutations, 0 survivors
+(guard removed, each of the four fields dropped from the check, each of the three
+helper conditions dropped, floor→round, guard applied to SELL too).
+
 ## A test that never tested what it claimed — `test_exception_also_failing_to_record_is_swallowed`
 
 Its docstring/comment said it forces the recovery block's own query to fail, but it
@@ -87,21 +124,16 @@ Same command as always from `services/real-trade-service`:
 
 ## Result
 
-real-trade-service: **2637 passed, 2 skipped, 1 xfailed** (was 2596 + 2 + 1 in the
-same sandbox; +41 tests). Every production module 100% except `risk_engine/engine.py`
-line 368. The 2 skips are optional (`pgserver`, `psycopg2` not installed here — on
-the VM `psycopg2` is present so expect 1 skip). position-stocks-service untouched:
-1337 passed. Mutation-checked: 9 deliberate regressions (both boundary operators,
-zero-dropping in both filters, lowercase, any→all, a keyword drifted from the
-source service, the reconcile fix reverted, the `db.get` call removed) — all
-caught.
+real-trade-service: **2667 passed, 2 skipped, 1 xfailed; 8226 statements, 0
+missed — 100%** (production code; `.coveragerc` omits the dev harness and
+`tests/`). The 2 skips are optional here (`pgserver`, `psycopg2` not installed in
+the sandbox — on the VM `psycopg2` is present, expect 1 skip). Before this
+session's second round the VM showed 2638 passed / 8218 stmts / 1 missed.
+position-stocks-service untouched: 1337 passed. Mutation-checked: 19 deliberate
+regressions across both rounds, all caught.
 
 ## Not changed / open
 
-- `risk_engine/engine.py` 368 (`per_share_risk <= 0` inside the per-trade-risk cap)
-  is unreachable: check 4c rejects `stop >= entry` for every BUY first. Kept as a
-  divide-by-zero guard rather than deleted or `pragma`'d — decide if you want it
-  removed.
 - `main.py` still uses `@app.on_event("startup"/"shutdown")` (FastAPI deprecation
   warning). Migrating to `lifespan` changes boot ordering for a service that
   places real orders; left for a change that can be watched on the VM.

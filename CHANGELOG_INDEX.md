@@ -6,6 +6,22 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION112_ROUND6_SHARED_ORDER_BUDGET_COVERAGE_2026-09-25.md` —
+  position-stocks-service `capital/shared_order_budget.py` (cross-service Dhan
+  order-rate guard) 55% → 100%, tests only. New
+  `tests/test_shared_order_budget.py` (38 tests) incl. a stale-identity-map
+  regression proving the cap is enforced by the atomic UPDATE, exits never
+  gated, fail-open, `status()`. Suite 1539 → 1577 passed. 29 mutations, 0
+  survivors. Flags `_get_or_create_row` as dead code (unchanged). Next:
+  `capital/shared_exposure.py` (36%).
+- `SESSION112_ROUND5_SHARED_SYMBOL_LOCK_COVERAGE_2026-09-25.md` —
+  position-stocks-service `capital/shared_symbol_lock.py` (cross-service
+  same-symbol guard) 30% → 100%, tests only. New
+  `tests/test_shared_symbol_lock.py` (54 tests) incl. a REAL unique-constraint
+  IntegrityError race (lost / won-by-self) and fail-open on every error path.
+  Suite 1485 → 1539 passed, 84% → 86%. 36 mutations, 0 survivors. Flags one
+  cosmetic `cleanup_stale` startup-log inaccuracy (not changed). Next:
+  `capital/shared_order_budget.py` (55%).
 - `SESSION112_ROUND4_LEDGER_COVERAGE_2026-09-25.md` — position-stocks-service
   `capital/ledger.py` (the money engine) 53% → 100%, tests only, no production
   change. New `tests/test_ledger_coverage.py` (82 tests) incl. the REAL

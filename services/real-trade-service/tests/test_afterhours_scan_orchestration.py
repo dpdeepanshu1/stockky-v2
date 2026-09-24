@@ -123,7 +123,11 @@ class _Patches:
 
 class TestRunAfterhoursScan:
     def test_new_scored_item_is_inserted(self, db):
-        headline = "record profit growth beat estimates"  # score 65 w/ +10 bonus, see round 1
+        # Headline must contain "Reliance" so _extract_symbol uppercases it
+        # to "RELIANCE" and matches against known_symbols={"RELIANCE"}.
+        # Score: base=40 (results) + source_bonus=10 (MC) + kw_bonus=15
+        #        ("beat"+5, "record"+5, "profit growth"+5) = 65.
+        headline = "Reliance record profit growth beat estimates"
         with _Patches(_patched(
             known_symbols={"RELIANCE"},
             rss_items={"Moneycontrol": [_item(headline)]},
@@ -139,7 +143,7 @@ class TestRunAfterhoursScan:
         assert row.consumed is False
 
     def test_stale_item_is_dropped(self, db):
-        headline = "record profit growth beat estimates"
+        headline = "Reliance record profit growth beat estimates"
         with _Patches(_patched(
             known_symbols={"RELIANCE"},
             rss_items={"Moneycontrol": [_item(headline, pub_date="2020-01-01")]},
@@ -170,7 +174,7 @@ class TestRunAfterhoursScan:
         assert written == 0
 
     def test_known_symbols_available_skips_validate_symbols(self, db):
-        headline = "record profit growth beat estimates"
+        headline = "Reliance record profit growth beat estimates"
         validate_spy = AsyncMock(return_value=set())
         with _Patches(_patched(
             known_symbols={"RELIANCE"},
@@ -203,7 +207,7 @@ class TestRunAfterhoursScan:
         assert written == 0
 
     def test_bulk_hit_with_higher_score_overrides_rss_hit(self, db):
-        headline = "record profit growth beat estimates"  # RSS score 65
+        headline = "Reliance record profit growth beat estimates"  # RSS score 65
         bulk = AsyncMock(return_value={
             "RELIANCE": {"score": 90.0, "headline": "Bulk deal flagged", "catalyst_type": "bulk_block", "source": "NSE-bulk-deals"},
         })
@@ -218,7 +222,7 @@ class TestRunAfterhoursScan:
         assert row.catalyst_type == "bulk_block"
 
     def test_bulk_hit_with_lower_score_does_not_override_rss_hit(self, db):
-        headline = "record profit growth beat estimates"  # RSS score 65
+        headline = "Reliance record profit growth beat estimates"  # RSS score 65
         bulk = AsyncMock(return_value={
             "RELIANCE": {"score": 20.0, "headline": "Minor bulk note", "catalyst_type": "bulk_block", "source": "NSE-bulk-deals"},
         })
@@ -248,7 +252,7 @@ class TestRunAfterhoursScan:
             collected_at=datetime.now(timezone.utc), consumed=False,
         ))
         db.commit()
-        headline = "record profit growth beat estimates"  # score 65
+        headline = "Reliance record profit growth beat estimates"  # score 65
         with _Patches(_patched(known_symbols={"RELIANCE"}, rss_items={"Moneycontrol": [_item(headline)]})):
             written = run(ahs.run_afterhours_scan(db, "DEMO", "2026-09-25"))
         assert written == 1
@@ -263,7 +267,7 @@ class TestRunAfterhoursScan:
             collected_at=datetime.now(timezone.utc), consumed=False,
         ))
         db.commit()
-        headline = "record profit growth beat estimates"  # score 65 < 99
+        headline = "Reliance record profit growth beat estimates"  # score 65 < 99
         with _Patches(_patched(known_symbols={"RELIANCE"}, rss_items={"Moneycontrol": [_item(headline)]})):
             written = run(ahs.run_afterhours_scan(db, "DEMO", "2026-09-25"))
         assert written == 0
@@ -278,7 +282,7 @@ class TestRunAfterhoursScan:
             collected_at=datetime.now(timezone.utc), consumed=True,
         ))
         db.commit()
-        headline = "record profit growth beat estimates"
+        headline = "Reliance record profit growth beat estimates"
         with _Patches(_patched(known_symbols={"RELIANCE"}, rss_items={"Moneycontrol": [_item(headline)]})):
             written = run(ahs.run_afterhours_scan(db, "DEMO", "2026-09-25"))
         # upsert lookup only matches consumed=False, so this is a fresh insert,
@@ -294,7 +298,7 @@ class TestRunAfterhoursScan:
         assert db.query(models.NextDayWatchlistEntry).count() == 0
 
     def test_notify_failure_does_not_crash_or_change_written_count(self, db):
-        headline = "record profit growth beat estimates"
+        headline = "Reliance record profit growth beat estimates"
         with _Patches(_patched(
             known_symbols={"RELIANCE"},
             rss_items={"Moneycontrol": [_item(headline)]},

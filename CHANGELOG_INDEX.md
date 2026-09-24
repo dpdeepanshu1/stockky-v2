@@ -6,6 +6,18 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION110_PARTIAL_FILL_INCREMENT_PRICING_AND_STAGE_TIMINGS_2026-09-24.md` —
+  the last xfail is gone. **`execution/reconcile.py`** booked every partial-fill
+  increment at Dhan's *cumulative* average price (5 @ 100 then 5 @ 102 booked as
+  100 + 101: position average, cash and SELL P&L all drifted); each increment is
+  now booked at its own price, derived from the previous poll's cumulative value
+  (new nullable `trade_orders.broker_fill_notional`, additive migration), with
+  fallbacks to the old behaviour whenever paise-rounding noise or inconsistent
+  broker data makes the derivation untrustworthy; also wired into the
+  `expire_stale_orders` late-fill path. **`pipeline_status`/`cycle_runner`:** stage
+  timings for the three concurrent stages were misattributed since session48b —
+  now exact. real-trade-service 2716 passed, 0 xfailed, 100% (8304 stmts).
+  30 mutations, 0 real survivors.
 - `SESSION109_REAL_TRADE_TAIL_COVERAGE_AND_FILLEDQTY_FIX_2026-09-24.md` —
   **real-trade-service production code 100%** (8226 stmts, 0 missed; 2667
   passed). Two silent-failure bugs fixed. (1) `execution/reconcile.py` stamped a

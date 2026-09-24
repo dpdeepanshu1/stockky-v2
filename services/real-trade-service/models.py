@@ -382,6 +382,21 @@ class TradeOrder(Base):
     # db.py's _ensure_manual_order_columns for the additive migration
     # that adds this column to an already-deployed table.
     filled_qty_so_far = Column(Integer, nullable=False, default=0)
+    # session110 fix (partial fills booked at the cumulative average price):
+    # Dhan's averageTradedPrice on a PART_TRADED/TRADED order is the CUMULATIVE
+    # average of the whole order, but reconcile books each NEW increment
+    # (delta_qty). Booking every increment at that cumulative average drifts
+    # the position's average entry price, the cash debit and (for SELLs) the
+    # realized P&L. This column holds the broker's cumulative filled VALUE
+    # (filledQty x averageTradedPrice) as of the last poll reconcile booked, so
+    # the next poll can derive the increment's own price:
+    #     (notional_now - broker_fill_notional) / delta_qty
+    # NULL on every order booked before this column existed and on orders with
+    # no fill yet — reconcile then books that one increment at the cumulative
+    # average exactly as before and starts tracking from there. See
+    # execution/reconcile.py::_increment_price and db.py::
+    # _ensure_fill_notional_column.
+    broker_fill_notional = Column(Float, nullable=True)
     # 2026-09-02 Short-Term Trading Upgrade: copied from the originating
     # TradeCandidate.watchlist_entry_id at order-creation time (entry_engine),
     # so portfolio.py's fill handlers can stamp the resulting TradePosition

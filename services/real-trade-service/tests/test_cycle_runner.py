@@ -340,7 +340,83 @@ class TestModeNormalisation:
         assert "reconcile" in rig.calls
 
 
+class TestOverlappingStageTimings:
+    """session110: dynamic_universe -> watchlist and candidates run concurrently
+    (session48b) but pipeline_status only has one current-stage slot, so their
+    reported timings overwrote each other (candidates 300 ms real -> ~50 ms
+    reported). Uses the REAL pipeline_status with real asyncio sleeps; only
+    LOWER bounds are asserted, so a slow CI box can't make it flaky."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_pstat(self):
+        pstat._STATE.pop("DEMO", None)
+        pstat._HISTORY["DEMO"].clear()
+        yield
+        pstat._STATE.pop("DEMO", None)
+        pstat._HISTORY["DEMO"].clear()
+
+    def test_each_overlapping_stage_reports_its_own_real_duration(self, monkeypatch):
+        async def slow_universe(db):
+            await asyncio.sleep(0.02)
+
+        async def slow_watchlist(db, mode):
+            await asyncio.sleep(0.05)
+
+        async def slow_candidates(db, mode):
+            await asyncio.sleep(0.50)
+            return 3
+
+        _stub_stages(monkeypatch, refresh_candidates=slow_candidates)
+        monkeypatch.setattr(du_mod, "refresh_dynamic_universe", slow_universe)
+        monkeypatch.setattr(wl_mod, "refresh_watchlist", slow_watchlist)
+
+        run(cycle_runner.run_cycle_core(_DB, "DEMO", True, trigger="autopilot"))
+
+        t = pstat.get_status("DEMO")["last_cycle"]["stage_timings_ms"]
+        # Lower bounds are each stage's own sleep (a slow box can only make a
+        # sleep LONGER). The generous upper bounds on the two short stages are
+        # what catch the old bug: the single current-stage slot charged the
+        # watchlist for the whole wait on candidates (~480 ms) and gave
+        # dynamic_universe ~0.
+        assert t["candidates"] >= 490
+        assert 48 <= t["watchlist"] < 300
+        assert 19 <= t["dynamic_universe"] < 300
+        # sequential stages are unaffected and still present
+        for stage in ("entry", "fills", "expire", "exit"):
+            assert stage in t
+
+    def test_timers_are_closed_even_when_a_stage_fails(self, monkeypatch):
+        async def boom(db, mode):
+            raise RuntimeError("candidates 500")
+
+        _stub_stages(monkeypatch, refresh_candidates=boom)
+        with pytest.raises(RuntimeError, match="candidates 500"):
+            run(cycle_runner.run_cycle_core(_DB, "DEMO", True, trigger="manual"))
+        assert "candidates" in pstat.get_status("DEMO")["last_cycle"]["stage_timings_ms"]
+
+    def test_a_failing_watchlist_stage_still_records_its_time(self, monkeypatch):
+        async def boom(db, mode):
+            raise RuntimeError("catalyst source down")
+
+        _stub_stages(monkeypatch)
+        monkeypatch.setattr(wl_mod, "refresh_watchlist", boom)
+        run(cycle_runner.run_cycle_core(_DB, "DEMO", True, trigger="manual"))   # non-fatal by design
+        assert "watchlist" in pstat.get_status("DEMO")["last_cycle"]["stage_timings_ms"]
+
+
 class TestStatusTrackingIsBestEffort:
+    def test_stage_timer_failure_never_blocks_the_cycle(self, rig, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("pstat broken")
+
+        monkeypatch.setattr(pstat, "stage_started", boom)
+        monkeypatch.setattr(pstat, "stage_finished", boom)
+        result = _cycle("REAL")
+        assert result["new_candidates"] == 3
+        for step in ("du", "wl_eval", "candidates", "entry", "exit", "reconcile"):
+            assert step in rig.calls
+
+
     def test_start_cycle_failure_never_blocks_the_cycle(self, rig, monkeypatch):
         def boom(*a, **k):
             raise RuntimeError("pstat broken")

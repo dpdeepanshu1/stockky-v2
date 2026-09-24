@@ -79,7 +79,10 @@ def set_stage(mode: str, stage: str) -> None:
             return
         now = _now()
         prev_stage = st.get("stage")
-        if prev_stage and prev_stage != "starting":
+        # session110: a stage timed explicitly via stage_started()/stage_finished()
+        # keeps its exact duration — the single current-stage slot can't time
+        # stages that overlap (see stage_started's docstring).
+        if prev_stage and prev_stage != "starting" and prev_stage not in st.get("_exact", ()):
             elapsed_ms = round((now - st["stage_started_at"]) * 1000, 1)
             st["stage_timings_ms"][prev_stage] = elapsed_ms
         st["stage"] = stage
@@ -88,6 +91,39 @@ def set_stage(mode: str, stage: str) -> None:
         st["current_source"] = None
         st["symbols_done"] = 0
         st["symbols_total"] = 0
+
+
+def stage_started(mode: str, stage: str) -> None:
+    """Start an EXACT timer for `stage`, independent of the single current-stage
+    slot that set_stage() drives.
+
+    Since session48b `dynamic_universe`, `watchlist` and `candidates` run
+    concurrently, and set_stage() only remembers ONE current stage, so the
+    stages overwrote each other's start time: a probe with real durations of
+    50 / 100 / 300 ms reported candidates=50.7 ms and watchlist=249.5 ms
+    (session94 finding). Each overlapping stage calls stage_started() when it
+    begins and stage_finished() when it ends (in a `finally`), and that value is
+    the one reported. set_stage() is still what drives the live "current stage"
+    label. No-op when no cycle is running for `mode`."""
+    with _LOCK:
+        st = _STATE.get(mode)
+        if st is None:
+            return
+        st.setdefault("_t0", {})[stage] = _now()
+
+
+def stage_finished(mode: str, stage: str) -> None:
+    """Stop the timer started by stage_started() and record the exact duration.
+    Ignored if there is no running cycle or `stage` was never started."""
+    with _LOCK:
+        st = _STATE.get(mode)
+        if st is None:
+            return
+        t0 = st.get("_t0", {}).pop(stage, None)
+        if t0 is None:
+            return
+        st["stage_timings_ms"][stage] = round((_now() - t0) * 1000, 1)
+        st.setdefault("_exact", set()).add(stage)
 
 
 def set_source(mode: str, source: str) -> None:

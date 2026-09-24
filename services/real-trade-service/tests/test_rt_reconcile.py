@@ -775,21 +775,166 @@ class TestAuditRegressions:
         assert o.filled_qty_so_far in (0, None) and cash(db) == START_CASH and positions(db) == []
 
 
-# ── known gaps (strict xfail) ────────────────────────────────────────────────
-class TestKnownGaps:
-    @pytest.mark.xfail(strict=True, reason=(
-        "Dhan's averageTradedPrice is the CUMULATIVE average of the whole order, but reconcile books each "
-        "increment (delta_qty) at that cumulative average instead of at the increment's own price. "
-        "5 @ ₹100 then 5 @ ₹102 (cumulative avg ₹101) is booked as 5 @ 100 + 5 @ 101 => position avg "
-        "₹100.50 and cash debited ₹1,005 instead of ₹101.00 / ₹1,010. Exits have the same shape "
-        "(realized P&L drifts). A fix needs each increment's own price — for BUYs derivable from TradeFill "
-        "rows, for SELLs record_real_exit_fill writes no TradeFill row, so it needs a small schema/record change."))
-    def test_partial_fills_should_be_booked_at_the_increments_own_price(self, env):
+# ── partial fills at the increment's own price (was the strict-xfail known gap) ──
+class TestIncrementPricing:
+    """Dhan's averageTradedPrice is the CUMULATIVE average of the whole order.
+    reconcile used to book every increment at it (5 @ 100 then 5 @ 102 => 5 @ 100
+    + 5 @ 101 => position avg 100.50, cash -1,005 instead of 101.00 / -1,010).
+    session110: each increment is booked at its own price, derived from the
+    broker's cumulative value at the previous poll (TradeOrder.broker_fill_notional)."""
+
+    def poll(self, db, rig, **kw):
+        rig.book = [row(**kw)]
+        return run(R.reconcile_real_orders(db))
+
+    # -- BUY -----------------------------------------------------------------
+    def test_the_original_known_gap_scenario_is_now_exact(self, env):
         db, rig = env
         mk_order(db)
-        rig.book = [row(status="PART_TRADED", avg=100.0, filled=5)]
-        run(R.reconcile_real_orders(db))
-        rig.book = [row(status="TRADED", avg=101.0, filled=10)]     # 5 @100 then 5 @102 => cumulative avg 101
-        run(R.reconcile_real_orders(db))
+        self.poll(db, rig, status="PART_TRADED", avg=100.0, filled=5)
+        self.poll(db, rig, status="TRADED", avg=101.0, filled=10)     # 5 @100 then 5 @102 => cum avg 101
         assert positions(db)[0].avg_entry_price == pytest.approx(101.0)
         assert cash(db) == pytest.approx(START_CASH - 1_010.0)
+
+    def test_three_polls_position_average_equals_the_brokers_final_average(self, env):
+        db, rig = env
+        o = mk_order(db, qty=12)
+        self.poll(db, rig, status="PART_TRADED", avg=100.0, filled=4)
+        self.poll(db, rig, status="PART_TRADED", avg=101.0, filled=10)   # increment: 6 @ 101.6667
+        self.poll(db, rig, status="TRADED", avg=101.5, filled=12)        # increment: 2 @ 104
+        pos = positions(db)[0]
+        assert pos.qty_open == 12
+        assert pos.avg_entry_price == pytest.approx(101.5)               # == broker's final cumulative average
+        assert cash(db) == pytest.approx(START_CASH - 12 * 101.5)
+        assert o.filled_qty_so_far == 12 and o.broker_fill_notional == pytest.approx(12 * 101.5)
+
+    def test_partial_notification_reports_the_increments_own_price(self, env):
+        db, rig = env
+        mk_order(db)
+        self.poll(db, rig, status="PART_TRADED", avg=100.0, filled=5)
+        self.poll(db, rig, status="PART_TRADED", avg=101.0, filled=10)
+        assert "5 shares @ ₹102.00" in rig.sent[-1]
+
+    def test_repeated_poll_with_no_new_shares_books_nothing_and_keeps_the_baseline(self, env):
+        db, rig = env
+        o = mk_order(db)
+        self.poll(db, rig, status="PART_TRADED", avg=100.0, filled=5)
+        before = (o.broker_fill_notional, cash(db), positions(db)[0].qty_open)
+        self.poll(db, rig, status="PART_TRADED", avg=100.0, filled=5)
+        assert (o.broker_fill_notional, cash(db), positions(db)[0].qty_open) == before
+
+    def test_partial_fill_then_cancelled_remainder_books_the_last_increment_at_its_own_price(self, env):
+        db, rig = env
+        o = mk_order(db)
+        self.poll(db, rig, status="PART_TRADED", avg=100.0, filled=5)
+        self.poll(db, rig, status="CANCELLED", avg=101.0, filled=8)      # 3 more @ 102.6667, then the rest dies
+        assert o.status == "CANCELLED"
+        assert positions(db)[0].qty_open == 8
+        assert positions(db)[0].avg_entry_price == pytest.approx(101.0)  # broker's cumulative average
+        assert cash(db) == pytest.approx(START_CASH - 808.0)
+
+    # -- SELL ----------------------------------------------------------------
+    def test_partial_sell_realized_pnl_matches_the_brokers_cumulative_average(self, env):
+        db, rig = env
+        pos = mk_pos(db, status="OPEN", qty=10, avg=100.0)
+        mk_order(db, side="SELL", dhan_id="S1", qty=10)
+        self.poll(db, rig, oid="S1", status="PART_TRADED", avg=110.0, filled=4)
+        self.poll(db, rig, oid="S1", status="TRADED", avg=112.0, filled=10)   # 6 more @ 113.3333
+        assert pos.status == "CLOSED"
+        assert pos.realized_pnl == pytest.approx(10 * (112.0 - 100.0))        # gross P&L on the broker's own figures
+        assert cash(db) == pytest.approx(START_CASH + 10 * 112.0)
+
+    # -- orders booked before the column existed -----------------------------
+    def test_legacy_order_without_a_baseline_is_booked_at_the_cumulative_average_then_tracked(self, env):
+        db, rig = env
+        o = mk_order(db, status="PARTIAL", filled_so_far=5)
+        assert o.broker_fill_notional is None
+        self.poll(db, rig, status="PART_TRADED", avg=101.0, filled=8)         # no baseline -> old behaviour for this one increment
+        assert o.broker_fill_notional == pytest.approx(808.0)
+        assert positions(db)[0].avg_entry_price == pytest.approx(101.0)       # 3 @ 101.00 (cumulative avg)
+        self.poll(db, rig, status="TRADED", avg=102.0, filled=10)             # baseline now known: 2 @ (1020-808)/2 = 106
+        assert positions(db)[0].avg_entry_price == pytest.approx((3 * 101.0 + 2 * 106.0) / 5)
+
+    def test_direct_book_fill_delta_without_a_cumulative_qty_is_unchanged(self, env):
+        db, _ = env
+        o = mk_order(db)
+        run(R._book_fill_delta(db, o, 100.0, 4, is_partial=True))
+        run(R._book_fill_delta(db, o, 105.0, 6, is_partial=False))
+        assert o.broker_fill_notional is None
+        assert positions(db)[0].avg_entry_price == pytest.approx((4 * 100.0 + 6 * 105.0) / 10)
+
+
+class TestIncrementPriceFunction:
+    """_increment_price: derive the increment's price, or fall back to the
+    cumulative average (the old behaviour) whenever the derivation is unsafe."""
+
+    @staticmethod
+    def order(notional):
+        return models.TradeOrder(mode="REAL", symbol="ABC", side="BUY", qty=10, order_type="MARKET",
+                                 status="PARTIAL", broker_fill_notional=notional)
+
+    def test_derives_the_increments_own_price(self):
+        assert R._increment_price(self.order(500.0), 101.0, 10, 5) == pytest.approx(102.0)
+
+    def test_result_is_rounded_to_four_places(self):
+        assert R._increment_price(self.order(400.0), 101.0, 10, 6) == 101.6667
+
+    def test_first_fill_is_the_cumulative_average(self):
+        assert R._increment_price(self.order(None), 100.0, 5, 5) == 100.0
+        assert R._increment_price(self.order(0.0), 100.0, 5, 5) == 100.0      # cum_qty == delta: nothing before it
+
+    def test_no_baseline_falls_back(self):
+        assert R._increment_price(self.order(None), 101.0, 10, 5) == 101.0
+
+    @pytest.mark.parametrize("delta", [0, -3])
+    def test_non_positive_delta_falls_back(self, delta):
+        assert R._increment_price(self.order(500.0), 101.0, 10, delta) == 101.0
+
+    def test_stale_baseline_is_ignored_when_nothing_was_booked_before_this_increment(self):
+        # cum_qty == delta_qty means there was no previous quantity, so any stored
+        # baseline is meaningless; (500 - 20) / 5 = 96 would otherwise pass the
+        # noise and plausibility checks and be booked instead of the exact 100.
+        assert R._increment_price(self.order(20.0), 100.0, 5, 5) == 100.0
+
+    def test_cumulative_not_above_delta_falls_back(self):
+        assert R._increment_price(self.order(500.0), 101.0, 5, 8) == 101.0
+
+    @pytest.mark.parametrize("avg", [0.0, -1.0])
+    def test_non_positive_cumulative_average_falls_back(self, avg):
+        assert R._increment_price(self.order(500.0), avg, 10, 5) == avg
+
+    @pytest.mark.parametrize("prev", [float("nan"), float("inf"), -float("inf")])
+    def test_non_finite_baseline_falls_back(self, prev):
+        assert R._increment_price(self.order(prev), 101.0, 10, 5) == 101.0
+
+    def test_baseline_above_current_value_gives_negative_increment_and_falls_back(self):
+        assert R._increment_price(self.order(2_000.0), 101.0, 10, 5) == 101.0
+
+    def test_correction_smaller_than_paise_rounding_noise_falls_back(self):
+        # 1,000 shares @ 100.00, then +10 and the broker's cumulative average
+        # reads 100.01. Derived increment = (1010*100.01 - 100000)/10 = ₹101.01,
+        # a ₹1.00 "correction" — but two 2-dp averages can hide up to
+        # 0.005 * (1010 + 1000) / 10 = ₹1.005 of rounding noise, so it is
+        # indistinguishable from noise and the cumulative average is kept.
+        prev = 1_000 * 100.00
+        derived = (100.01 * 1010 - prev) / 10
+        assert derived == pytest.approx(101.01)
+        assert abs(derived - 100.01) <= 0.005 * (1010 + 1000) / 10
+        assert R._increment_price(self.order(prev), 100.01, 1010, 10) == 100.01
+
+    def test_correction_larger_than_the_noise_is_used(self):
+        # 5 then +5: noise bound = 0.005 * (10 + 5) / 5 = ₹0.015; the ₹1 correction clears it
+        assert R._increment_price(self.order(500.0), 101.0, 10, 5) == pytest.approx(102.0)
+
+    def test_implausibly_far_result_falls_back(self):
+        # derived = (10*101 - 100)/5 = 182 -> +80% from the cumulative average
+        assert R._increment_price(self.order(100.0), 101.0, 10, 5) == 101.0
+
+    def test_result_just_inside_the_plausibility_band_is_used(self):
+        # cumulative avg 100 over 10 shares; baseline 380 => increment (1000-380)/5 = 124 (+24%)
+        prev = 10 * 100.0 - 5 * 124.0
+        assert R._increment_price(self.order(prev), 100.0, 10, 5) == pytest.approx(124.0)
+
+    def test_result_just_outside_the_plausibility_band_falls_back(self):
+        prev = 10 * 100.0 - 5 * 126.0               # increment = 126 (+26%) -> outside the 25% band
+        assert R._increment_price(self.order(prev), 100.0, 10, 5) == 100.0

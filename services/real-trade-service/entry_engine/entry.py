@@ -1382,7 +1382,11 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
                             "expire_stale_orders: %d shares of %s filled before cancel landed "                            "(total filled %d, previously booked %d) — booking now at ₹%.2f",
                             delta, order.symbol, filled_at_broker, already_booked, fill_price,
                         )
-                        await _book_fill_delta(db, order, fill_price, delta, is_partial=False)
+                        # session110: pass the cumulative qty so a late fill that follows an
+                        # earlier partial is booked at the increment's own price, not at the
+                        # order's cumulative average (see reconcile._increment_price).
+                        await _book_fill_delta(db, order, fill_price, delta, is_partial=False,
+                                               cumulative_qty=filled_at_broker)
                         await notify_async(
                             f"🟡 *Late fill on expired entry* — {order.symbol}\n"
                             f"{delta} shares @ ₹{fill_price:.2f} filled before stale-order cancel landed.\n"

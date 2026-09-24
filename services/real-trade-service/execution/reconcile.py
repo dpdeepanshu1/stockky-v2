@@ -19,8 +19,10 @@ as "leave it PLACED/PENDING_EXIT for next cycle", never as a fill.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy.orm import Session
 
@@ -57,8 +59,53 @@ def _get(row: dict, *keys, default=None):
     return default
 
 
+# session110: Dhan reports averageTradedPrice to paise (2 dp), so each cumulative
+# average carries up to +-0.005 of rounding. Deriving an increment's price from
+# two such averages multiplies that noise by (cumulative qty / delta qty), which
+# for a tiny increment on a big order can swamp the real correction.
+_AVG_PRICE_ROUNDING = 0.005
+# Circuit limits cap a single-day move at 20%; an increment price further than
+# this from the cumulative average means the broker's cumulative figures are
+# inconsistent, so the derived value is discarded.
+_MAX_INCREMENT_DEVIATION = 0.25
+
+
+def _increment_price(order: models.TradeOrder, cum_avg: float, cum_qty: int, delta_qty: int) -> float:
+    """Price to book `delta_qty` NEWLY-confirmed shares at.
+
+    Dhan's `averageTradedPrice` is the average of the WHOLE order to date, not
+    of the new shares, so booking each increment at it drifts the position's
+    average, the cash debit and SELL P&L (5 @ 100 then 5 @ 102 reports a
+    cumulative 101 -> the second half used to be booked at 101, not 102).
+
+    The increment's own price is recoverable from two consecutive polls:
+        (cum_qty * cum_avg  -  previous cumulative value) / delta_qty
+    where the previous cumulative value is `order.broker_fill_notional`.
+
+    Falls back to `cum_avg` — the old behaviour, never worse — whenever the
+    derivation isn't trustworthy: first fill (increment == cumulative, exact),
+    no stored baseline (order booked before the column existed), a non-finite
+    or non-positive result, a correction that is smaller than the paise-rounding
+    noise in the two averages, or a result implausibly far from `cum_avg`.
+    """
+    prev_notional = order.broker_fill_notional
+    if prev_notional is None or delta_qty <= 0 or cum_qty <= delta_qty or cum_avg <= 0:
+        return cum_avg
+    inc = (cum_avg * cum_qty - prev_notional) / delta_qty
+    if not math.isfinite(inc) or inc <= 0:
+        return cum_avg
+    prev_qty = cum_qty - delta_qty
+    noise = _AVG_PRICE_ROUNDING * (cum_qty + prev_qty) / delta_qty
+    if abs(inc - cum_avg) <= noise:
+        return cum_avg
+    if abs(inc / cum_avg - 1.0) > _MAX_INCREMENT_DEVIATION:
+        return cum_avg
+    return round(inc, 4)
+
+
 async def _book_fill_delta(
     db: Session, order: models.TradeOrder, fill_price: float, delta_qty: int, is_partial: bool,
+    cumulative_qty: Optional[int] = None,
 ) -> None:
     """Book delta_qty NEWLY-confirmed shares for this order into the
     position/account and notify. `delta_qty` must already be the
@@ -70,6 +117,15 @@ async def _book_fill_delta(
     partial/complete path AND the dead-status-after-partial-fill path)
     gets this bookkeeping for free instead of repeating it."""
     order.filled_qty_so_far = (order.filled_qty_so_far or 0) + delta_qty
+
+    # session110: `fill_price` is the broker's CUMULATIVE average. When the
+    # caller supplies the cumulative quantity too, book this increment at its own
+    # price and remember the broker's cumulative value for the next poll (set
+    # before any commit below so it persists in the same transaction as the fill).
+    if cumulative_qty is not None:
+        cum_avg = fill_price
+        fill_price = _increment_price(order, cum_avg, cumulative_qty, delta_qty)
+        order.broker_fill_notional = cum_avg * cumulative_qty
 
     if order.side == "BUY":
         decision = db.query(models.TradeDecision).filter_by(id=order.decision_id).first()
@@ -521,7 +577,8 @@ async def reconcile_real_orders(db: Session) -> dict:
                 # silently disappear from this system's own books while still
                 # sitting in the actual Dhan account/position.
                 if delta_qty and delta_qty > 0 and fill_price is not None:
-                    await _book_fill_delta(db, order, float(fill_price), delta_qty, is_partial=True)
+                    await _book_fill_delta(db, order, float(fill_price), delta_qty, is_partial=True,
+                                           cumulative_qty=int(fill_qty_cumulative))
                     tally["partial_fills"] += 1
                 elif order.side == "SELL":
                     # BUG FIX (2026-09-04, see _repair_orphaned_pending_exits'
@@ -628,7 +685,8 @@ async def reconcile_real_orders(db: Session) -> dict:
                     db.commit()
                 continue
 
-            await _book_fill_delta(db, order, float(fill_price), delta_qty, is_partial=is_partial_status)
+            await _book_fill_delta(db, order, float(fill_price), delta_qty, is_partial=is_partial_status,
+                                   cumulative_qty=int(fill_qty_cumulative))
             if is_partial_status:
                 tally["partial_fills"] += 1
             elif order.side == "BUY":

@@ -704,3 +704,45 @@ class TestKnownGaps:
         run(R.reconcile_real_orders(db))                                  # ...then reconcile
         pos = db.query(models.TradePosition).filter_by(symbol="ABC").first()
         assert pos is not None and pos.qty_open == 3
+
+
+class TestLateFillAfterEarlierPartial:
+    """session110: the post-cancel late-fill booking in expire_stale_orders is a
+    second caller of reconcile._book_fill_delta. When the order had ALREADY been
+    partially booked, the late shares must be booked at their own price, not at
+    the broker's cumulative average of the whole order."""
+
+    def test_late_fill_after_a_partial_is_booked_at_its_own_price(self, db, monkeypatch):
+        import asyncio as _a
+        from execution import reconcile as R
+        db.add(models.TradeAccount(mode="REAL", starting_capital=100_000.0, current_equity=100_000.0,
+                                   cash_available=100_000.0, broker_cash_available=100_000.0,
+                                   realized_pnl_today=0.0, realized_pnl_total=0.0))
+        dec = models.TradeDecision(mode="REAL", symbol="ABC", decision_type="ENTRY", action="BUY",
+                                   proposed_stop=97.0, proposed_target=106.0)
+        db.add(dec)
+        db.commit()
+        # 5 shares already booked at the broker's cumulative 100.00 (baseline = 500)
+        o = models.TradeOrder(mode="REAL", decision_id=dec.id, symbol="ABC", side="BUY", qty=10, order_type="LIMIT",
+                              status="PARTIAL", dhan_order_id="D1", filled_qty_so_far=5,
+                              broker_fill_notional=500.0,
+                              valid_until=datetime.now(timezone.utc) - timedelta(minutes=1))
+        db.add(o)
+        db.commit()
+        monkeypatch.setattr(dhan_client, "cancel_order", lambda *a, **k: {})
+        # 5 more filled before the cancel landed -> cumulative 10 @ 101.00, i.e. the late 5 were @ 102.00
+        monkeypatch.setattr(dhan_client, "get_order_list", lambda d: [
+            {"orderId": "D1", "orderStatus": "CANCELLED", "orderType": "LIMIT",
+             "averageTradedPrice": 101.0, "filledQty": 10}])
+
+        async def _noop(*a, **k):
+            return 0
+        monkeypatch.setattr(R, "notify_async", _noop)
+        monkeypatch.setattr(entry, "notify_async", _noop)
+
+        run(entry.expire_stale_orders(db, "REAL"))
+        pos = db.query(models.TradePosition).filter_by(symbol="ABC").first()
+        assert pos is not None and pos.qty_open == 5
+        assert pos.avg_entry_price == pytest.approx(102.0)
+        assert o.broker_fill_notional == pytest.approx(1010.0)
+

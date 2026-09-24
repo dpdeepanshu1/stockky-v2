@@ -144,3 +144,6 @@ regressions across both rounds, all caught.
   `portfolio/portfolio.py,cover`, `execution/dhan_client.py,cover` are still in the
   repo (they show old line numbers and are now out of date). Safe to delete; left
   alone since nothing asked for it.
+- "100%" here is **line** coverage of production code (as `--cov` has always
+  reported it here), not branch coverage — `pytest --cov-branch` would be the
+  next, stricter step.

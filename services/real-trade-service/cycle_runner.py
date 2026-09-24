@@ -140,6 +140,20 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
         except Exception:
             pass
 
+    # session110: exact timers for the three stages that overlap (see
+    # pipeline_status.stage_started) — best-effort like _stage above.
+    def _timer_start(name: str) -> None:
+        try:
+            pstat.stage_started(mode, name)
+        except Exception:
+            pass
+
+    def _timer_stop(name: str) -> None:
+        try:
+            pstat.stage_finished(mode, name)
+        except Exception:
+            pass
+
     # PERF (2026-09-16): the dynamic_universe→watchlist chain and the
     # candidates refresh used to run fully sequentially, but neither depends
     # on the other's output — refresh_candidates() never reads anything
@@ -171,6 +185,7 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
         # activity BEFORE the watchlist stage below, so Tier 2 sees the
         # widened universe the same cycle it changes, not one cycle late.
         _stage("dynamic_universe")
+        _timer_start("dynamic_universe")
         try:
             du_result = await refresh_dynamic_universe(db)
             if du_result is not None:
@@ -182,6 +197,8 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
                 })
         except Exception as exc:
             logger.warning("run_cycle_core: dynamic universe refresh failed (non-fatal): %s", exc)
+        finally:
+            _timer_stop("dynamic_universe")
 
         # ── Short-Term Trading Upgrade (2026-09-02) ─────────────────────────
         # Stage 1 (watchlist ingestion) + Stage 2 (band-check trigger pass).
@@ -189,6 +206,7 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
         # block the existing candidate/entry/exit flow that already works
         # today.
         _stage("watchlist")
+        _timer_start("watchlist")
         try:
             await refresh_watchlist(db, mode)
             expire_stale_entries(db, mode)
@@ -196,10 +214,16 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
         except Exception as exc:
             logger.warning("run_cycle_core: watchlist stage failed (non-fatal): %s", exc)
             return {"error": str(exc)}
+        finally:
+            _timer_stop("watchlist")
 
     async def _candidates() -> int:
         _stage("candidates")
-        return await refresh_candidates(db, mode)
+        _timer_start("candidates")
+        try:
+            return await refresh_candidates(db, mode)
+        finally:
+            _timer_stop("candidates")
 
     watchlist_result, new_candidates = await asyncio.gather(
         _dynamic_universe_and_watchlist(), _candidates()

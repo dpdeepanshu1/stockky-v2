@@ -98,6 +98,7 @@ COLUMN_FUNCS = [
     "_ensure_afterhours_last_run_columns",
     "_ensure_regime_override_columns",
     "_ensure_edis_check_columns",
+    "_ensure_fill_notional_column",
 ]
 INDEX_FUNCS = ["_ensure_hot_path_indexes", "_ensure_nextday_watchlist_indexes"]
 OTHER_FUNCS = ["_fix_stale_dhan_token_expiry", "_backfill_broker_imported_flag", "_ensure_oracle_autoincrement"]

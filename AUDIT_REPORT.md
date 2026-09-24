@@ -33,7 +33,7 @@ Both fixes have regression tests that fail on the original code and pass now.
 | 6 | `real-trade-service/risk_engine/engine.py` | BUY with qty ≤ 0 or stop ≥ entry was APPROVED |
 | 7 | `real-trade-service/execution/reconcile.py` | No per-order error isolation; one bad order blocked all SELL confirmations |
 
-## Remaining xfail (1) — needs design decision
+## ~~Remaining xfail (1) — needs design decision~~ — RESOLVED in session110 (see archive/session-notes/SESSION110_*.md)
 
 * **Partial fills booked at cumulative average price** (`execution/reconcile.py`): Dhan's
   `averageTradedPrice` is the whole-order average, but each increment is booked at it.

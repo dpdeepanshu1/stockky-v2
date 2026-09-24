@@ -158,6 +158,7 @@ def init_schema() -> None:
     _ensure_nextday_watchlist_indexes(eng, dialect())
     _ensure_afterhours_last_run_columns(eng, dialect())
     _ensure_regime_override_columns(eng, dialect())
+    _ensure_fill_notional_column(eng, dialect())
     _ensure_edis_check_columns(eng, dialect())
 
 
@@ -600,6 +601,38 @@ def _ensure_product_type_columns(engine, dialect_name: str) -> None:
             if "already exists" in m.lower() or "ORA-01430" in m:
                 continue
             logger.warning("real-trade-db: could not add %s.%s: %s", table, col_name, e)
+
+
+# session110 fix (partial fills booked at the cumulative average price). See
+# models.py TradeOrder.broker_fill_notional. Nullable, left NULL on existing
+# rows — reconcile books the first increment it sees for such an order at the
+# broker's cumulative average exactly as before, then tracks from there, so
+# this migration changes nothing for orders already in flight when it ships.
+def _ensure_fill_notional_column(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        order_cols = {c["name"] for c in inspect(engine).get_columns("trade_orders")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect columns for fill-notional migration: %s", e)
+        return
+
+    if dialect_name == "oracle":
+        sql = "ALTER TABLE trade_orders ADD (broker_fill_notional BINARY_DOUBLE)"
+    else:
+        sql = "ALTER TABLE trade_orders ADD COLUMN broker_fill_notional FLOAT"
+
+    if "broker_fill_notional" in order_cols:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+        logger.info("real-trade-db: added trade_orders.broker_fill_notional")
+    except Exception as e:
+        m = str(e)
+        if "already exists" in m.lower() or "ORA-01430" in m:
+            return
+        logger.warning("real-trade-db: could not add trade_orders.broker_fill_notional: %s", e)
 
 
 # 2026-09-18 fix (selective overnight hold — see models.py TradeOrder/

@@ -163,7 +163,14 @@ def record_boot(service: str) -> dict:
         prev = None
     except Exception as e:
         prev = {"corrupt": str(e)}
-    cause, detail = _classify(prev, now)
+    try:
+        cause, detail = _classify(prev, now)
+    except Exception as e:
+        # Valid JSON but the wrong shape/types (list, str, non-numeric timestamps...).
+        # Without this the exception escapes BEFORE _write() below, so the bad file is
+        # never replaced and every later boot raises too: forensics stays dead for good
+        # and the heartbeat thread never starts. Contract: never raise into the caller.
+        cause, detail = "UNKNOWN", f"previous boot state unusable ({type(e).__name__}: {e})"
     mem = memory_snapshot()
     with _lock:
         _state.clear()

@@ -613,6 +613,34 @@ Still open, largest first: `resilience/local_cache.py` (45%),
 small modules listed in the session note. `offline_test_harness.py` (0%) is
 a dev harness — recommend excluding from coverage.
 
+## session95 (2026-09-24): resilience/local_cache.py — 45% → 100%
+
+VM transcript confirmed session94 (1784 passed, 1 xfailed, 93%). Next item by
+risk × gap: `resilience/local_cache.py`, the store behind every exit-alert
+cooldown / resend-suppression / reject-streak flag and the per-cycle
+open-position snapshot that `reconcile_on_startup` checks after a restart
+(home of the 2026-09-16 frozen-snapshot bug).
+
+New `tests/test_local_cache.py` (32 tests, executed) on a real in-memory
+SQLite DB — no mocking of the code under test. Covers the two-writer
+IntegrityError race (reproduced for real), both failure paths, the
+2026-09-16 and 2026-09-12 regressions, exact mismatch audit detail, and a
+`String(64)` key-length audit (longest key written: 42 chars, no bug).
+`local_cache.py` **100%**. Mutation-checked: 14 regressions, 0 survivors.
+Full suite **1816 passed, 1 xfailed**, overall 93%. No production code
+changed.
+
+Observations, not changed: `json.dumps` is outside `save_snapshot`'s `try`
+(unserialisable payload raises); startup reconcile can report a
+false-positive mismatch after an active session because the snapshot is taken
+before exit evaluation — persistent mismatches across cycles are the real
+signal. See `archive/session-notes/SESSION95_LOCAL_CACHE_COVERAGE_2026-09-24.md`.
+
+Still open, largest first: `auth/dhan_credentials.py` (18%), `db.py`
+migrations (7%), `market_feed/feed.py` (66%), `entry_engine/entry.py`
+tails (84%), small modules per the session note; session94's open
+`pipeline_status` stage-timing finding.
+
 ## Commands to run all tests
 
 **On the VM (Ubuntu):**
@@ -629,7 +657,7 @@ Expected:
 === position-stocks-service
 1220 passed, 8 warnings in ~15s
 === real-trade-service
-1784 passed, 1 xfailed in ~60s
+1816 passed, 1 xfailed in ~65s
 ```
 
 **With coverage:**

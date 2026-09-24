@@ -6,6 +6,18 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION95_LOCAL_CACHE_COVERAGE_2026-09-24.md` — `resilience/local_cache.py`
+  45%→100% (62/62). New `tests/test_local_cache.py` (32 tests) against a real
+  in-memory SQLite DB: the 2026-09-12 two-writer `IntegrityError` race
+  reproduced for real (loser's write lands via the UPDATE fallback), the
+  2026-09-16 empty-positions snapshot regression, the 2026-09-12
+  PARTIALLY_CLOSED reconcile fix, exact `RECONCILE_MISMATCH` audit detail,
+  and a `String(64)` key-length audit of every key the service writes
+  (longest 42 — no bug). Mutation-checked (14 regressions, 0 survivors).
+  Full suite: 1816 passed, 1 xfailed; overall 93%. No production code
+  changed. Observations: `json.dumps` sits outside `save_snapshot`'s `try`;
+  startup reconcile is false-positive-prone by design (snapshot precedes
+  exits).
 - `SESSION94_CYCLE_RUNNER_COVERAGE_2026-09-24.md` — `cycle_runner.py`
   7%→100% (122/122). New `tests/test_cycle_runner.py` (64 tests) covers the
   function every REAL/DEMO cycle funnels through: manual market-hours

@@ -193,6 +193,19 @@ class TestPublishOwnExposure:
         mock_db.commit.assert_called_once()
         mock_db.rollback.assert_not_called()
 
+    def test_failing_rollback_inside_the_handler_does_not_escape(self, caplog):
+        # Contract: "Fail-open — never raises". A dead connection can make the
+        # cleanup rollback() fail too; that must not propagate into
+        # equity_sync.py (and from there whatever triggered the sync cycle).
+        # Session112 round 8: mirrors position-stocks-service's round 7 test
+        # for the identical bug in this service's copy of the module.
+        mock_db = MagicMock()
+        mock_db.query.side_effect = RuntimeError("db down")
+        mock_db.rollback.side_effect = RuntimeError("rollback failed too")
+        with caplog.at_level(logging.DEBUG, logger=LOGGER):
+            se.publish_own_exposure(mock_db, 1.0)  # must not raise
+        assert any("failed to publish own exposure" in w for w in _warnings(caplog))
+
 
 # ─────────────────────────── get_other_service_exposure ───────────────────────────
 

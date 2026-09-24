@@ -365,7 +365,8 @@ class TestPerTradeRisk:
 
     def test_stop_equal_to_entry_is_rejected_before_sizing(self):
         # Since the audit fix the geometry check (4c) runs first, so this is now "invalid_order".
-        # (The old "Stop price equals entry" branch inside check 5 is unreachable defence-in-depth.)
+        # (The old inline "Stop price equals entry" branch inside check 5 was unreachable; session109
+        # moved that fail-closed guard into _qty_within_risk_cap(), tested directly below.)
         for equity in (100_000.0, -1_000.0):
             res = run(make_intent(entry_price=100.0, stop_price=100.0), make_account(equity=equity))
             assert_rejected(res, "invalid_order")
@@ -691,3 +692,102 @@ class TestInvalidOrderGeometry:
 
     def test_a_valid_buy_is_unaffected(self):
         assert_approved(run(make_intent(entry_price=100.0, stop_price=99.99, qty=1)), 1)
+
+
+# ── session109: non-finite inputs + the extracted risk-cap helper ─────────────
+
+NAN = float("nan")
+INF = float("inf")
+
+
+class TestNonFiniteInputs:
+    """Found while closing the last uncovered line in this module: every
+    comparison against NaN is False, so a BUY carrying a NaN stop / entry / qty /
+    adj_risk_pct skipped the per-trade risk cap, the cash cap and the geometry
+    check and came back APPROVED at full size (reproduced: stop=NaN -> approved,
+    100 shares, 'all_checks_passed'). Realistic sources: a NaN ATR feeding a
+    computed stop, or a JSON NaN via POST /risk-engine/check / a manual ticket
+    (pydantic accepts it by default). The veto authority must fail closed."""
+
+    @pytest.mark.parametrize("field,value", [
+        ("stop_price", NAN), ("stop_price", -INF), ("stop_price", INF),
+        ("entry_price", NAN),
+        ("qty", NAN),
+        ("adj_risk_pct", NAN), ("adj_risk_pct", INF), ("adj_risk_pct", -INF),
+    ])
+    def test_buy_with_non_finite_value_is_rejected(self, field, value):
+        res = run(make_intent(**{field: value}))
+        assert_rejected(res, "invalid_order")
+        assert "Non-finite" in res.reason
+
+    def test_reason_names_the_offending_values(self):
+        res = run(make_intent(stop_price=NAN))
+        assert "stop=nan" in res.reason and "entry=100.0" in res.reason and "qty=100" in res.reason
+
+    def test_adj_risk_pct_unset_is_not_treated_as_non_finite(self):
+        # None means "use the account's base %" — must still approve normally.
+        assert_approved(run(make_intent(adj_risk_pct=None)), 100, "all_checks_passed")
+
+    def test_adj_risk_pct_zero_is_still_finite_and_handled_by_sizing(self):
+        # 0.0 is a legitimate zero budget (existing behaviour), not "non-finite".
+        res = run(make_intent(entry_price=25.0, stop_price=24.0, qty=10, adj_risk_pct=0.0))
+        assert_rejected(res, "per_trade_risk_cap")
+
+    def test_finite_negative_stop_is_left_to_the_existing_checks(self):
+        # Not part of this fix: a negative stop only makes per-share risk larger,
+        # so sizing shrinks the order — conservative, so unchanged.
+        assert_approved(run(make_intent(stop_price=-5.0)), 9, "sized_down")
+
+    @pytest.mark.parametrize("field,value", [
+        ("stop_price", NAN), ("entry_price", NAN), ("qty", NAN),
+    ])
+    def test_sell_is_never_blocked_by_the_non_finite_check(self, field, value):
+        # exits must never be blocked by an entry-only check
+        res = run(make_intent(side="SELL", **{field: value}))
+        assert res.verdict == RiskVerdict.APPROVED
+
+    def test_non_finite_check_runs_before_sizing_so_no_partial_qty_leaks(self):
+        res = run(make_intent(stop_price=NAN, qty=10_000))
+        assert res.approved_qty is None
+
+
+class TestQtyWithinRiskCap:
+    """`_qty_within_risk_cap` — the per-trade-risk sizing step, extracted from
+    evaluate() so its fail-closed guard (previously unreachable inline dead code
+    at engine.py:368, the last uncovered production line) is directly testable."""
+
+    def test_floor_division_of_budget_by_per_share_risk(self):
+        assert engine._qty_within_risk_cap(2.0, 1_000.0) == 500
+        assert engine._qty_within_risk_cap(3.0, 1_000.0) == 333      # floors, never rounds up
+        assert engine._qty_within_risk_cap(1_000.0, 1_000.0) == 1
+
+    def test_budget_smaller_than_one_share_gives_zero(self):
+        assert engine._qty_within_risk_cap(50.0, 49.99) == 0
+
+    @pytest.mark.parametrize("per_share", [0.0, -1.0, -0.0001, NAN, INF, -INF])
+    def test_unusable_per_share_risk_gives_zero_not_an_exception(self, per_share):
+        assert engine._qty_within_risk_cap(per_share, 1_000.0) == 0
+
+    @pytest.mark.parametrize("budget", [NAN, INF, -INF])
+    def test_non_finite_budget_gives_zero(self, budget):
+        assert engine._qty_within_risk_cap(2.0, budget) == 0
+
+    def test_zero_or_negative_budget_gives_zero_or_less_never_positive(self):
+        assert engine._qty_within_risk_cap(2.0, 0.0) == 0
+        assert engine._qty_within_risk_cap(2.0, -10.0) <= 0
+
+    def test_zero_per_share_risk_does_not_divide_by_zero(self):
+        # the whole point of the guard: 1000.0 // 0.0 raises ZeroDivisionError
+        with pytest.raises(ZeroDivisionError):
+            _ = 1000.0 // 0.0
+        assert engine._qty_within_risk_cap(0.0, 1000.0) == 0
+
+    def test_evaluate_still_downsizes_and_rejects_through_the_helper(self):
+        # ₹1,000 budget, ₹1/share risk -> 1,000 cap; qty 2,000 is downsized
+        # (₹25 entry keeps the 25% concentration cap out of the way)
+        acct = make_account()
+        assert_approved(run(make_intent(entry_price=25.0, stop_price=24.0, qty=2_000), acct), 1_000, "sized_down")
+        # ₹1,000 budget, ₹2,000/share risk (entry 3,000) -> not even 1 share fits
+        res = run(make_intent(entry_price=3_000.0, stop_price=1_000.0, qty=1), acct)
+        assert_rejected(res, "per_trade_risk_cap")
+        assert "Even 1 share" in res.reason

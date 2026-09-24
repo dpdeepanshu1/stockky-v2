@@ -67,6 +67,7 @@ def env(monkeypatch):
         return [(0, r.ticks[sym])] if sym in r.ticks else []
 
     monkeypatch.setattr(notifier, "notify_sync", _info)
+    monkeypatch.setattr(notifier, "notify_fire_and_forget", lambda m, *a, **k: _info(m))
     monkeypatch.setattr(dhan_client, "modify_super_order", _modify)
     monkeypatch.setattr(ws_client, "get_tick_buffer", _ticks)
     monkeypatch.setattr(config, "USE_SUPER_ORDER", True)

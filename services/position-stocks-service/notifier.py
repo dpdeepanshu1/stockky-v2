@@ -30,12 +30,33 @@ The dedup cache keeps a hash of the last N unique messages and their
 send-time. Any message identical to one sent within DEDUP_WINDOW_S is
 dropped silently (the original alert already reached the operator).
 Different messages (different symbol, different error text) always send.
+
+session112 fix (port of real-trade-service's session111 fix — see
+archive/session-notes/SESSION111_NOTIFY_FIRE_AND_FORGET_EXIT_PATH_FIX_2026-09-25.md):
+notify_sync is fully synchronous end to end — httpx.post to
+notification-scheduler-service (12s timeout), on failure a direct
+Telegram call (15s timeout), on a non-200/HTML-parse failure a second
+direct Telegram attempt as plain text (another 15s timeout). Worst case
+~42s. Every order-path caller in this service (orders/entry.py,
+orders/breakeven.py, orders/eod_squareoff.py, orders/overnight_stop.py,
+orders/reconcile.py) ran this inline inside a to_thread-wrapped stage of
+either _run_cycle() (under _cycle_lock, shared with screening/entry for
+every OTHER candidate that cycle) or _fast_reconcile_loop() (no lock, but
+a single sequential while-loop, so a slow call here delays that loop's
+own next 5-10s tick the same way) — see main.py. notify_critical()'s two
+callers in main.py's eDIS morning check are worse still: called directly
+on the event loop with no to_thread wrapper at all, so a blocking
+notify_sync there could stall every request this service was handling.
+notify_fire_and_forget() (below) fixes this without touching the shape of
+any call site's message text — every one of them was already a
+fire-and-forget statement with no caller using the return value.
 """
 from __future__ import annotations
 
 import hashlib
 import logging
 import re as _re
+import threading
 import time
 from collections import OrderedDict
 
@@ -107,10 +128,79 @@ def notify_sync(text: str) -> bool:
     a direct Telegram call using env vars. Never raises.
 
     Deduplicates: identical messages within DEDUP_WINDOW_S (5 min) are
-    dropped silently — the original alert already reached the operator."""
+    dropped silently — the original alert already reached the operator.
+
+    BLOCKS the calling thread for the full delivery attempt — worst case
+    the 12s service timeout PLUS the 15s direct-Telegram timeout PLUS a
+    second 15s HTML-retry-as-plain-text attempt inside _direct_telegram,
+    ~42s. Prefer notify_fire_and_forget() (or notify_critical(), which now
+    uses it) from order/execution code — see notify_fire_and_forget's
+    docstring for why. notify_sync remains the right choice only for a
+    caller with nothing else waiting on it."""
     if not _should_send(text):
         logger.debug("notifier: duplicate message suppressed within dedup window")
         return True   # treat as "delivered" — operator was already notified
+    return _deliver_sync(text)
+
+
+def notify_fire_and_forget(text: str) -> None:
+    """Non-blocking variant of notify_sync, for call sites that cannot
+    afford to block on network I/O while holding a shared resource.
+
+    session112 fix (ported from real-trade-service's session111 fix):
+    every order-path caller of notify_sync in this service — entry.py's
+    BUY-placed alerts, breakeven.py's stop-moved alert,
+    eod_squareoff.py's EOD-sent/capped-out alerts, overnight_stop.py's
+    overnight STOP_HIT/partial-fill alerts, reconcile.py's fill-resolved/
+    target-hit/stop-hit alerts — runs inside a to_thread-wrapped stage of
+    either _run_cycle() (under _cycle_lock, shared with screening/entry for
+    every OTHER candidate that cycle) or _fast_reconcile_loop() (no lock,
+    but a single sequential while-loop, so a slow call here delays that
+    loop's own next 5-10s tick the same way). Two of main.py's own
+    notify_critical() calls (the eDIS morning check) are worse still —
+    called directly on the event loop with no to_thread wrapper at all, so
+    a blocking notify_sync there stalls EVERY request this service is
+    handling, not just its own background loop. notify_critical() is
+    redefined below to use this function instead, which fixes those two
+    call sites with no code change at their end.
+
+    The dedup check (_should_send) stays on the calling thread — cheap,
+    in-memory, and keeping it here (not in the background thread) keeps
+    the "identical message within 5 minutes is suppressed" guarantee
+    exact, with no race between two near-simultaneous fire-and-forget
+    calls for the same text. Only the actual network I/O moves to a
+    daemon thread. No return value: by the time delivery finishes, the
+    caller has moved on and there is no one left to hand a result to —
+    the same "never block or fail an order path" contract this module's
+    docstring states, taken to its conclusion for a caller that can't
+    wait at all."""
+    if not _should_send(text):
+        logger.debug("notifier: duplicate message suppressed within dedup window")
+        return
+    try:
+        threading.Thread(target=_deliver_background, args=(text,), daemon=True, name="notify-bg").start()
+    except Exception:
+        # Starting the thread itself failed (e.g. resource limits) — this
+        # is still just a notification, never let it surface to the caller.
+        logger.debug("notify_fire_and_forget: failed to start background delivery thread", exc_info=True)
+
+
+def _deliver_background(text: str) -> None:
+    """Runs _deliver_sync on the background thread notify_fire_and_forget
+    starts. Swallows everything — _deliver_sync already catches its own
+    network exceptions, this is just a last-resort guard so a bug in the
+    delivery path can never crash the (silent, unjoined) thread loudly."""
+    try:
+        _deliver_sync(text)
+    except Exception:
+        logger.debug("notify_fire_and_forget: background delivery failed", exc_info=True)
+
+
+def _deliver_sync(text: str) -> bool:
+    """The actual synchronous delivery attempt (service, then direct
+    Telegram fallback) — shared by notify_sync (blocking) and
+    notify_fire_and_forget (via a background thread). Assumes the dedup
+    check has already been done by the caller."""
     try:
         resp = httpx.post(
             f"{_NOTIFICATION_SERVICE_URL}/notify",
@@ -164,8 +254,18 @@ def _direct_telegram(text: str) -> bool:
 def notify_critical(text: str) -> None:
     """Fire-and-forget wrapper for CRITICAL-log call sites — never raises,
     never blocks an order path on notification latency/failure. Prefer
-    this over calling notify_sync directly from execution/order code."""
+    this over calling notify_sync directly from execution/order code.
+
+    session112 fix: this was ALREADY documented as fire-and-forget and
+    non-blocking, but its implementation called the blocking notify_sync
+    directly — a try/except around a synchronous call is not fire-and-
+    forget, it just makes a blocking call that also can't raise. Two of
+    this function's own callers (main.py's eDIS morning check) run
+    directly on the event loop with no to_thread wrapper at all, so this
+    was the single worst call-site instance of the notify_sync blocking
+    bug: every request this service was handling could stall for up to
+    ~42s. Now genuinely non-blocking, via notify_fire_and_forget."""
     try:
-        notify_sync(f"\U0001F6A8 <b>CRITICAL</b>\n{text}")
+        notify_fire_and_forget(f"\U0001F6A8 <b>CRITICAL</b>\n{text}")
     except Exception as e:  # noqa: BLE001 — notification must never break the caller
         logger.debug("notify_critical: swallowed notification error: %s", e)

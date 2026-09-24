@@ -432,7 +432,7 @@ def _resolve_pending_with_price(db: Session, pos: ScalpPosition, real_exit_price
     logger.info("reconcile: %s (id=%d) %s — real fill resolved @ ₹%.2f, P&L ₹%.2f (%.2f%%)%s",
                 pos.symbol, pos.id, pos.status, real_exit_price, total_pnl, total_pct,
                 " [late, resolved from trade history]" if late else "")
-    notifier.notify_sync(
+    notifier.notify_fire_and_forget(
         f"✅ <b>{pos.status} — real fill resolved</b> — {pos.symbol} x{pos.quantity}\n"
         f"Exit ₹{real_exit_price:.2f} | P&L ₹{total_pnl:,.2f} ({total_pct:.2f}%)"
         + (" (resolved late from Dhan trade history)" if late else "")
@@ -1084,7 +1084,7 @@ def run_exit_reconciliation(db: Session) -> int:
         # it sends. Added here so a closed scalp position is always
         # reported, good or bad.
         emoji = "🟢" if hit_kind == "TARGET_HIT" else "🔴"
-        notifier.notify_sync(
+        notifier.notify_fire_and_forget(
             f"{emoji} <b>{hit_kind}</b> — {pos.symbol} x{pos.quantity}\n"
             f"Entry ₹{pos.entry_price:.2f} → Exit ₹{exit_price:.2f}\n"
             f"P&L ₹{realized_pnl:,.2f} ({realized_pnl_pct:.2f}%)"

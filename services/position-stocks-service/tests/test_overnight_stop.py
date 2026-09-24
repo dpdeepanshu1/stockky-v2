@@ -36,6 +36,7 @@ def env(monkeypatch):
     b = Broker()
     sent = {"info": [], "critical": []}
     monkeypatch.setattr(notifier, "notify_sync", lambda m, *a, **k: sent["info"].append(m))
+    monkeypatch.setattr(notifier, "notify_fire_and_forget", lambda m, *a, **k: sent["info"].append(m))
     monkeypatch.setattr(notifier, "notify_critical", lambda m, *a, **k: sent["critical"].append(m))
     monkeypatch.setattr(dhan_client, "get_order_list", lambda db_: list(b.orders))
     monkeypatch.setattr(dhan_client, "get_trade_history", lambda db_, f, t: list(b.trades))

@@ -554,7 +554,7 @@ def attempt_entry(
     # BUY it sends. Mirrors that message shape (see entry_engine.py's
     # "📤 BUY sent (auto)" notify_async call), best-effort/non-blocking
     # same as every other notifier.py call in this codebase.
-    notifier.notify_sync(
+    notifier.notify_fire_and_forget(
         f"📤 <b>BUY placed</b> — {candidate.symbol} x{quantity}\n"
         f"Entry ₹{candidate.current_ltp:.2f} | Target ₹{levels.target_price:.2f} "
         f"({levels.target_pct:.2f}%) | Stop ₹{levels.stop_price:.2f} ({levels.stop_pct:.2f}%)\n"
@@ -827,7 +827,7 @@ def attempt_manual_entry(
         symbol, quantity, current_ltp, levels.target_price, levels.stop_price,
         dhan_super_order_id or "N/A",
     )
-    notifier.notify_sync(
+    notifier.notify_fire_and_forget(
         f"📤 <b>Manual BUY placed</b> — {symbol} x{quantity}\n"
         f"Entry ₹{current_ltp:.2f} | Target ₹{levels.target_price:.2f} "
         f"({levels.target_pct:.2f}%) | Stop ₹{levels.stop_price:.2f} ({levels.stop_pct:.2f}%)\n"

@@ -16,6 +16,7 @@ auto-refresh path for later.
 from __future__ import annotations
 
 import os
+import re
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -39,6 +40,58 @@ DHAN_TOKEN_LIFETIME_HOURS = config.DHAN_TOKEN_LIFETIME_DAYS * 24  # see config.p
 # CHANGES_2026-08-27_REVIEW.md #2) or a future misconfiguration can never
 # show/enforce a countdown longer than Dhan itself will actually honor.
 DHAN_HARD_CAP_HOURS = 24.0
+
+
+# 2026-09-24 (session96): Dhan's /app/generateAccessToken takes the client id,
+# PIN and one-time TOTP code as URL *query parameters*, and httpx's
+# HTTPStatusError message embeds the full request URL. So any 4xx/5xx from
+# that endpoint (the single most likely failure: a wrong/expired TOTP or a
+# changed PIN) produced an exception whose str() contained
+# "...generateAccessToken?dhanClientId=<id>&pin=<PIN>&totp=<code>" — and
+# refresh_if_totp_enabled() wrote that string to the service log AND sent the
+# first 300 chars of it to Telegram. Verified against the pinned
+# httpx==0.25.2 (see tests/test_dhan_credentials.py). Everything that leaves
+# this module as an error string goes through _redact_secrets() first.
+_SECRET_QUERY_PARAM_RE = re.compile(
+    r"(?i)\b(dhanClientId|pin|totp|access[_-]?token)=[^&\s'\"]*"
+)
+_MIN_LITERAL_REDACT_LEN = 4  # don't blank out 1-3 char values everywhere in a message
+
+
+def _redact_secrets(text, *secrets) -> str:
+    """str(text) with (a) the value of any pin/totp/dhanClientId/access_token
+    query parameter replaced by ``***`` and (b) every literal in ``secrets``
+    (>= 4 chars) replaced by ``***`` as defence in depth for exception types
+    that echo an input without a ``key=`` prefix. Never raises."""
+    try:
+        out = _SECRET_QUERY_PARAM_RE.sub(lambda m: f"{m.group(1)}=***", str(text))
+        for secret in secrets:
+            if secret and len(secret) >= _MIN_LITERAL_REDACT_LEN:
+                out = out.replace(secret, "***")
+        return out
+    except Exception:  # an exotic object whose __str__ raises must never break the alert path
+        return "<error text withheld: redaction failed>"
+
+
+def _heal_session(db: Session) -> None:
+    """Roll the session back ONLY if a failed flush/commit left it in the
+    'partial rollback' state (Session.is_active is False), where every later
+    use raises PendingRollbackError until rollback() is called.
+
+    refresh_if_totp_enabled() is documented non-fatal and is called on the
+    caller's own Session (cycle_runner reuses that Session immediately
+    afterwards for enforce_live_token()). Without this, a DB failure while
+    saving the refreshed token — or while restoring gate.dhan_connected —
+    was swallowed here but poisoned the caller's Session, so the very next
+    query in the cycle blew up with PendingRollbackError. A healthy session
+    (e.g. the HTTP call failed before touching the DB) is left untouched so
+    the caller's pending state is never discarded.
+    """
+    try:
+        if not db.is_active:
+            db.rollback()
+    except Exception:  # rollback failing means the connection itself is gone — nothing more to do
+        logger.exception("Session rollback after failed Dhan credential write also failed (non-fatal).")
 
 
 def _effective_expiry(row: "models.TradeCredential"):
@@ -412,6 +465,7 @@ def refresh_if_totp_enabled(db: Session) -> bool:
                 logger.info("REAL gate.dhan_connected restored after TOTP refresh.")
         except Exception:
             logger.exception("Failed to restore gate.dhan_connected after TOTP refresh (non-fatal).")
+            _heal_session(db)
 
         try:
             from notifier import notify_sync
@@ -420,10 +474,14 @@ def refresh_if_totp_enabled(db: Session) -> bool:
             pass
         return True
     except Exception as e:
-        logger.error("refresh_if_totp_enabled failed: %s", e)
+        # Redact BEFORE truncating (a [:300] cut through "pin=98765" would
+        # otherwise leave a partial secret the regex can no longer match).
+        safe_err = _redact_secrets(e, totp_secret, client_id, dhan_pin)
+        logger.error("refresh_if_totp_enabled failed: %s", safe_err)
+        _heal_session(db)
         try:
             from notifier import notify_sync
-            notify_sync(f"🚨 *Dhan TOTP refresh FAILED*\n{str(e)[:300]}")
+            notify_sync(f"🚨 *Dhan TOTP refresh FAILED*\n{safe_err[:300]}")
         except Exception:
             pass
         return False

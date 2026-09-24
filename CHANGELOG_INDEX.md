@@ -6,6 +6,19 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION96_DHAN_CREDENTIALS_COVERAGE_AND_PIN_LEAK_FIX_2026-09-24.md` —
+  `auth/dhan_credentials.py` 18%→100% (215/215). New
+  `tests/test_dhan_credentials.py` (156 tests, real SQLite + real Fernet + real
+  pyotp). **Two production fixes:** (1) `refresh_if_totp_enabled()` logged AND
+  Telegrammed `str(HTTPStatusError)`, which contains the full request URL —
+  `...generateAccessToken?dhanClientId=..&pin=<PIN>&totp=..` — so any 4xx/5xx
+  leaked the Dhan PIN; now redacted via `_redact_secrets()` before log/notify
+  (check your log/Telegram history — see note). (2) a swallowed DB failure in
+  that function left the caller's Session in `PendingRollbackError` for the
+  next query in `cycle_runner`; now healed via `_heal_session()` (rolls back
+  only a poisoned session). Regression tests fail on the pre-fix code (24
+  failures); mutation-checked (38 regressions, 0 survivors). Full suite: 1972
+  passed, 1 xfailed; overall 93%→94%.
 - `SESSION95_LOCAL_CACHE_COVERAGE_2026-09-24.md` — `resilience/local_cache.py`
   45%→100% (62/62). New `tests/test_local_cache.py` (32 tests) against a real
   in-memory SQLite DB: the 2026-09-12 two-writer `IntegrityError` race

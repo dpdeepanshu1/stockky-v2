@@ -548,7 +548,7 @@ def run_eod_squareoff(db: Session) -> int:
                      # per-position itself).
 
         if carry_positions or capped_out or stop_failed_positions:
-            from notifier import notify_sync
+            from notifier import notify_fire_and_forget as notify_sync  # session112: fire-and-forget, see notifier.py docstring
             lines = []
             if carry_positions:
                 stop_pct = getattr(config, "OVERNIGHT_STOP_LOSS_PCT", 4.0)
@@ -978,7 +978,7 @@ def close_position_now(db: Session, pos: ScalpPosition, exit_reason: str = "MANU
     shared_symbol_lock.release(db, pos.symbol)
     logger.info("%s: closed %s (id=%d) — awaiting broker fill confirmation", exit_reason, pos.symbol, pos.id)
 
-    from notifier import notify_sync
+    from notifier import notify_fire_and_forget as notify_sync  # session112: fire-and-forget, see notifier.py docstring
     _label = "Manual EXIT sent" if exit_reason == "MANUAL_EXIT" else f"{exit_reason.replace('_', ' ').title()} sent"
     notify_sync(
         f"📤 <b>{_label}</b> — {pos.symbol} x{pos.quantity}\n"

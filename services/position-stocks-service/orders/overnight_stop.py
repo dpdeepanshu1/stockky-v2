@@ -156,7 +156,7 @@ def _close_out(db: Session, pos: ScalpPosition, last_price: float, staged: bool)
     shared_symbol_lock.release(db, pos.symbol)
     logger.info("overnight stop: %s (id=%d) TRIGGERED (final) @ ~₹%.2f — total P&L ₹%.2f (%.2f%%)",
                 pos.symbol, pos.id, last_price, pos.realized_pnl or 0.0, pct)
-    notifier.notify_sync(
+    notifier.notify_fire_and_forget(
         f"🔴 <b>STOP_HIT (overnight)</b> — {pos.symbol} (final exit price ~₹{last_price:.2f})\n"
         f"Entry ₹{pos.entry_price:.2f}\n"
         f"Total P&L ₹{pos.realized_pnl or 0.0:,.2f} ({pct:.2f}%)\n"
@@ -191,7 +191,7 @@ def _settle(db: Session, pos: ScalpPosition, *, kind: str, status: str,
         if pos.quantity > 0:
             logger.info("overnight stop: %s (id=%d) PARTIAL fill %d @ ₹%.2f (cum %d) [%s], %d sh remain.",
                         pos.symbol, pos.id, delta, dprice, cum_qty, status, pos.quantity)
-            notifier.notify_sync(
+            notifier.notify_fire_and_forget(
                 f"🟠 <b>STOP partial fill (overnight)</b> — {pos.symbol}: {delta} sh @ ₹{dprice:.2f} "
                 f"(P&L ₹{pnl_delta:,.2f}). {pos.quantity} sh still open."
             )

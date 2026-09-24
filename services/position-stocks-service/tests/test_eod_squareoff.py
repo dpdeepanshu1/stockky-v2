@@ -116,6 +116,7 @@ def env(monkeypatch):
         sent["critical"].append(m)
 
     monkeypatch.setattr(notifier, "notify_sync", _info)
+    monkeypatch.setattr(notifier, "notify_fire_and_forget", lambda m, *a, **k: _info(m))
     monkeypatch.setattr(notifier, "notify_critical", _critical)
 
     # ── broker surface ──

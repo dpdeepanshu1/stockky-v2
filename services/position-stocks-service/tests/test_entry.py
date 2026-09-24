@@ -93,6 +93,7 @@ def env(monkeypatch):
     b = Broker()
     sent = {"info": []}
     monkeypatch.setattr(notifier, "notify_sync", lambda m, *a, **k: sent["info"].append(m) or True)
+    monkeypatch.setattr(notifier, "notify_fire_and_forget", lambda m, *a, **k: sent["info"].append(m))
 
     def _sec(db_, symbol):
         b.calls.append(("get_security_id", {"symbol": symbol}))

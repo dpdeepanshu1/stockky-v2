@@ -73,6 +73,7 @@ def env(monkeypatch):
     b = Broker()
     sent = {"info": [], "critical": []}
     monkeypatch.setattr(notifier, "notify_sync", lambda m, *a, **k: sent["info"].append(m) or True)
+    monkeypatch.setattr(notifier, "notify_fire_and_forget", lambda m, *a, **k: sent["info"].append(m))
     monkeypatch.setattr(notifier, "notify_critical", lambda m, *a, **k: sent["critical"].append(m))
 
     def _plain(db_):

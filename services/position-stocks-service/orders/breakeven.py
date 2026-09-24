@@ -160,7 +160,7 @@ def run_breakeven_stop(db: Session) -> int:
             )
             try:
                 import notifier
-                notifier.notify_sync(
+                notifier.notify_fire_and_forget(
                     f"🔒 <b>Breakeven stop</b> — {pos.symbol} x{pos.quantity}\n"
                     f"Stop moved ₹{old_stop:.2f} → ₹{new_stop:.2f} (entry ₹{pos.entry_price:.2f})\n"
                     f"Unrealized gain {unrealized_gain_pct:.2f}% at trigger {pos.breakeven_trigger_pct:.2f}%"

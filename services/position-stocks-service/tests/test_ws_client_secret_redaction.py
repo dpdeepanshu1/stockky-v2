@@ -46,25 +46,35 @@ async def _echo(websocket):
         pass
 
 
-@pytest.mark.asyncio
-async def test_feed_token_and_api_key_never_reach_the_client_log(caplog):
+@pytest.fixture()
+def _client_logger_captured(caplog):
+    """Attach caplog to 'websockets.client' and restore propagate afterward."""
     client_logger = logging.getLogger("websockets.client")
     prev_propagate = client_logger.propagate
     client_logger.propagate = True  # so caplog (attached to the root handler) sees it
     try:
         with caplog.at_level(logging.DEBUG, logger="websockets.client"):
-            server = await websockets.serve(_echo, "localhost", 0)
-            port = server.sockets[0].getsockname()[1]
-            url = (
-                f"ws://localhost:{port}/smart-stream"
-                f"?clientCode=C1&feedToken={FEED_TOKEN}&apiKey={API_KEY}"
-            )
-            async with websockets.connect(url):
-                pass
-            server.close()
-            await server.wait_closed()
+            yield caplog
     finally:
         client_logger.propagate = prev_propagate
+
+
+def test_feed_token_and_api_key_never_reach_the_client_log(_client_logger_captured):
+    caplog = _client_logger_captured
+
+    async def _round_trip():
+        server = await websockets.serve(_echo, "localhost", 0)
+        port = server.sockets[0].getsockname()[1]
+        url = (
+            f"ws://localhost:{port}/smart-stream"
+            f"?clientCode=C1&feedToken={FEED_TOKEN}&apiKey={API_KEY}"
+        )
+        async with websockets.connect(url):
+            pass
+        server.close()
+        await server.wait_closed()
+
+    asyncio.run(_round_trip())
 
     assert FEED_TOKEN not in caplog.text
     assert API_KEY not in caplog.text

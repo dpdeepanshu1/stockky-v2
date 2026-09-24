@@ -111,6 +111,30 @@ and not new tests that would pass regardless.
   `websockets` server/client round-trip for the feed-token case — each shown
   leaking pre-fix and clean post-fix.
 
+## Post-delivery fix (VM run)
+
+Running the full suites on the actual VM surfaced one real issue in this
+session's own work: `tests/test_ws_client_secret_redaction.py` used
+`@pytest.mark.asyncio`, but `pytest-asyncio` isn't in
+`position-stocks-service/requirements.txt` and isn't installed on the VM, so
+the marker was unrecognized and the test errored (`async def functions are
+not natively supported`) instead of running. Every other async test in this
+codebase avoids that dependency by wrapping `asyncio.run()` in a plain sync
+test (see `tests/test_screening_support.py`); this test now does the same —
+no new dependency needed. Verified passing with `pytest-asyncio` explicitly
+uninstalled. Full suite: 1232 passed (unchanged count, now green on the VM
+too).
+
+Separately, the VM run showed one failure in
+`real-trade-service/tests/test_feed_fanout_controls.py::
+test_preview_quotes_use_same_bounded_path` (`assert 7 <= 6` on a real-socket
+concurrency-bound check). Confirmed unrelated to this session: `feed.py` and
+that test file are byte-identical to the pre-session99 zip, the
+`asyncio.Semaphore(FEED_QUOTE_CONCURRENCY)` bound in `feed.py` is correctly
+implemented, and the test passed 5/5 in isolated reruns — consistent with a
+timing-sensitive real-thread/socket test flaking under load during a
+127-second, 2200+ test run rather than a real regression. Left as-is.
+
 ## Left open
 
 1. **`market_feed/feed.py`** (67% in real-trade-service) and

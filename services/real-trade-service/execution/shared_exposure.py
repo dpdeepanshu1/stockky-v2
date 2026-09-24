@@ -72,7 +72,18 @@ def publish_own_exposure(db: Session, market_value: float) -> None:
         row.open_positions_market_value = max(0.0, float(market_value or 0.0))
         db.commit()
     except Exception as e:
-        db.rollback()
+        # BUG FIX (session112 round 8): this handler's own rollback() was
+        # unguarded, so a dead connection (commit fails, then the cleanup
+        # rollback fails too) would raise straight out of a function that
+        # documents "never raises" — into equity_sync.py and from there
+        # whatever triggered the sync cycle. Every sibling shared-table
+        # module (shared_order_budget / shared_symbol_lock) already guards
+        # this. Mirrors the identical fix in position-stocks-service's copy
+        # of this module (session112 round 7).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         logger.warning("shared-exposure: failed to publish own exposure: %s", e)
 
 

@@ -65,22 +65,6 @@ def spy_thread(monkeypatch):
     return created
 
 
-@pytest.fixture()
-def net(monkeypatch):
-    """Real httpx.Client over a MockTransport, so a background-thread
-    delivery exercises genuine request/response handling — only the
-    transport is faked."""
-    calls = []
-
-    def handler(request):
-        calls.append(request)
-        return httpx.Response(200, json={"delivered": True})
-
-    transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(httpx, "post", lambda url, **kw: httpx.Client(transport=transport).post(url, **kw))
-    return calls
-
-
 # ══════════════════════════════════════════════════════════════════════════
 # notify_fire_and_forget
 # ══════════════════════════════════════════════════════════════════════════
@@ -135,7 +119,7 @@ class TestNotifyFireAndForget:
         assert result is None
         assert len(spy_thread) == 1   # no second thread started for the duplicate
 
-    def test_falls_back_to_direct_telegram_in_the_background_same_as_blocking_variant(self, net, monkeypatch, spy_thread):
+    def test_falls_back_to_direct_telegram_in_the_background_same_as_blocking_variant(self, monkeypatch, spy_thread):
         monkeypatch.setattr(notifier, "_NOTIFICATION_SERVICE_URL", "http://notification-scheduler-service:8000/notification")
         monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123456789:AAHtoken")
         monkeypatch.setattr(config, "TELEGRAM_CHAT_ID", "42")

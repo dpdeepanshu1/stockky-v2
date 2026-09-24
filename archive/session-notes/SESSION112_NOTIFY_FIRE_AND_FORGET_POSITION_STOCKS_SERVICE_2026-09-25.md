@@ -128,3 +128,52 @@ environment.
   restriction — see "Verification notes" above.
 * Nothing else from either session's open-issues list was picked up this
   round — this was a single focused port.
+
+## Round 2 (same day): closing the coverage gap after a real pytest run
+
+The user ran the round-1 zip for real: **1353 passed, 0 failed** — the fix and
+all nine call-site migrations were correct on the first try. Coverage,
+however, showed `notifier.py` at only 77% (99 stmts, 23 missed:
+85-86, 118, 121, 140-143, 211-216, 225-226, 241-247), because:
+
+* Every order-file test fixture monkeypatches `notify_sync` /
+  `notify_fire_and_forget` wholesale, so the real `notify_sync` body (140-143)
+  never runs in the suite at all.
+* `_deliver_sync`'s success / not-delivered / service-unreachable branches
+  (211-216) were never exercised with a real (mocked-transport) httpx call —
+  only `_direct_telegram` had that kind of test, and only for one shape.
+* `_direct_telegram`'s no-token-configured branch (225-226) and its non-200
+  HTML-reject → plain-text-retry branch (241-247) were untested.
+* `_should_send`'s refresh-on-resend-after-expiry branch (118) and its LRU
+  eviction branch (121) were untested — the existing dedup tests only ever
+  sent up to a couple of distinct messages within the window.
+* `_TelegramTokenRedactingFilter.filter`'s malformed-record guard (85-86) was
+  untested.
+* Also found: `test_notifier_fire_and_forget.py`'s own `net` fixture (lines
+  76-77) was dead code — the one test that took it as a parameter shadowed
+  it with a second, local `httpx.post` monkeypatch, so the fixture's handler
+  body never actually ran. Removed the unused fixture rather than wiring it
+  up, since the test already had its own working mock.
+
+New `tests/test_notifier_core.py` (12 tests) closes the remaining gaps by
+calling the real functions directly rather than through a fixture's
+monkeypatch: `_should_send` refresh + eviction, `notify_sync` (duplicate
+short-circuit, real-delivery True, real-delivery False), `_deliver_sync`
+(service delivers / service 200-but-not-delivered-falls-back / service
+unreachable-falls-back, each via a real `httpx.Client` over a
+`httpx.MockTransport`), `_direct_telegram` (no token/chat-id configured;
+HTML-mode-rejected retries as plain text and succeeds; the plain-text retry
+itself raising returns False), and the token filter's malformed-record path.
+
+Every new assertion in both this file and the resulting diff was verified
+by hand first, the same way as round 1: real notifier.py functions called
+directly against a stubbed `httpx` module and a controllable clock, no
+pytest available in this sandbox (still no outbound network here — see
+round 1's "Verification notes"). All checks passed. As before, please run
+
+    python3 -m pytest -q --cov=. --cov-report=term-missing
+
+from `services/position-stocks-service` to get the real numbers — expected
+result is `notifier.py` at or very close to 100%, with the previous 1353
+passed count now a little higher (23 new test functions across the two
+files) and no failures.

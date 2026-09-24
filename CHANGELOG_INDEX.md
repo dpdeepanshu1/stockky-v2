@@ -6,6 +6,17 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION112_ROUND7_SHARED_EXPOSURE_COVERAGE_AND_ROLLBACK_GUARD_2026-09-25.md`
+  — position-stocks-service `capital/shared_exposure.py` 36% → 100% (whole
+  `capital/` package now 100%). **One real fix:** `publish_own_exposure`'s
+  except-handler called `db.rollback()` unguarded, so a dead connection made
+  it raise despite its documented "never raises" contract, out of
+  `ledger.sync_from_broker` and `POST /ledger/sync`; now guarded like its
+  siblings (red test first, then fix). New `tests/test_shared_exposure.py`
+  (36 tests) incl. unstubbed ledger→publish wiring and a cross-service drift
+  guard. Suite 1577 → 1613 passed, 87%. 22 mutations, 0 survivors. Same
+  unguarded rollback flagged (not changed) in real-trade-service's copy.
+  Next: `tz_utils.py` (71%).
 - `SESSION112_ROUND6_SHARED_ORDER_BUDGET_COVERAGE_2026-09-25.md` —
   position-stocks-service `capital/shared_order_budget.py` (cross-service Dhan
   order-rate guard) 55% → 100%, tests only. New

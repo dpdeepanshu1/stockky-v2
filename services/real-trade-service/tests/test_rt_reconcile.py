@@ -566,6 +566,44 @@ class TestReconcileFlow:
         self.go(db)
         assert positions(db) == []
 
+    @pytest.mark.parametrize("bad_qty", ["n/a", "", "12abc", [3]])
+    def test_unparseable_filled_qty_leaves_order_pending_instead_of_finalizing_it(self, env, bad_qty):
+        """A TRADED row whose filledQty is present but not a number must behave
+        like the other unusable-fill cases (no price / no qty / unusable
+        remainingQuantity): log and leave the order PLACED so the next cycle
+        retries. It used to fall into the 'nothing new to book' branch and be
+        stamped FILLED with NO position and NO cash movement — reconcile only
+        polls PLACED/PARTIAL orders, so the real broker fill was then never
+        looked at again (silent ghost fill)."""
+        db, rig = env
+        o = mk_order(db)
+        rig.book = [row(filled=bad_qty)]
+        t = self.go(db)
+        assert o.status == "PLACED"
+        assert positions(db) == []
+        assert cash(db) == START_CASH
+        assert t["entries_filled"] == 0 and t["errors"] == 0
+
+    def test_unparseable_filled_qty_recovers_once_broker_reports_a_number(self, env):
+        db, rig = env
+        o = mk_order(db)
+        rig.book = [row(filled="n/a")]
+        self.go(db)
+        assert o.status == "PLACED" and positions(db) == []
+        rig.book = [row(filled=10)]                     # next cycle the row is sane
+        t = self.go(db)
+        assert t["entries_filled"] == 1
+        assert o.status == "FILLED" and positions(db)[0].qty_open == 10
+
+    def test_fully_booked_partial_then_terminal_status_still_finalizes(self, env):
+        """The branch the fix must NOT disturb: delta == 0 (everything already
+        booked) + broker now says TRADED → just flip the order to FILLED."""
+        db, rig = env
+        o = mk_order(db, status="PARTIAL", filled_so_far=10)
+        rig.book = [row(status="TRADED", filled=10)]
+        t = self.go(db)
+        assert o.status == "FILLED" and positions(db) == [] and t["entries_filled"] == 0
+
     @pytest.mark.parametrize("kw", [{"avg": None}, {"filled": None}])
     def test_filled_status_without_price_or_quantity_is_left_as_is(self, env, kw):
         db, rig = env

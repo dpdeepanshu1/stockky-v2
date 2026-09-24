@@ -601,7 +601,22 @@ async def reconcile_real_orders(db: Session) -> dict:
                                 order.dhan_order_id, status)
                 continue
 
-            if delta_qty is None or delta_qty <= 0:
+            if delta_qty is None:
+                # session109 FIX: filledQty was present but not a number (the
+                # int() above raised) — the fill size is UNKNOWN, not zero.
+                # This used to fall into the 'nothing new to book' branch
+                # below and stamp a TRADED order FILLED with no position and no
+                # cash movement; reconcile only polls PLACED/PARTIAL orders, so
+                # that real broker fill was then never looked at again. Treat
+                # it exactly like the other unusable-fill cases above (no
+                # price / no qty): leave the order as-is and retry next cycle.
+                logger.warning(
+                    "reconcile: order %s reports %s but filled qty %r is not a number — leaving as-is.",
+                    order.dhan_order_id, status, fill_qty_cumulative,
+                )
+                continue
+
+            if delta_qty <= 0:
                 # Nothing NEW to book this pass (e.g. still PART_TRADED at the
                 # same cumulative qty as last cycle) — but if the broker has
                 # since moved it to a terminal filled status, finalize the

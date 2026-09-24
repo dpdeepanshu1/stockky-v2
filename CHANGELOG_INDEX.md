@@ -6,6 +6,20 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION109_REAL_TRADE_TAIL_COVERAGE_AND_FILLEDQTY_FIX_2026-09-24.md` —
+  real-trade-service's last uncovered production lines closed
+  (`event_depth_local.py` 40%→100%, `return_sanity.py` 82%→100%,
+  `reconcile.py`, `auto_pilot.py`); 41 new tests. **Bug fixed:**
+  `execution/reconcile.py` stamped a `TRADED` order `FILLED` with no position and
+  no cash booked when Dhan's `filledQty` was present but non-numeric (reconcile
+  never re-polls FILLED, so the fill vanished from the books) — now left pending
+  and retried like every other unusable-fill case. Also: never-awaited coroutine
+  in `feed._schedule_atr_refresh`, legacy `Query.get()` in `exit._load_profile`,
+  one vacuous test rewritten (it patched a session the code under test never
+  used), keyword-table drift guard vs analysis-intelligence-service, new
+  `.coveragerc` (omits the dev harness + `tests/`; production-only 8218 stmts,
+  1 missed — not comparable with the old 98%). 2637 passed, 2 skipped,
+  1 xfailed. 9 mutations, 0 survivors.
 - `SESSION108_POSITION_STOCKS_ORACLE_COMPAT_COVERAGE_2026-09-24.md` —
   `position-stocks-service/oracle_compat.py` 15%→100% (110 stmts, 30/30
   branches; still 100% with the `# pragma: no cover` lines counted). Finishes a

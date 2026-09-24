@@ -696,7 +696,7 @@ class TestTryFillEntryNewPosition:
             position_id=pos.id, event_type="OPENED").first()
         assert event is not None
 
-        order_after = db.query(models.TradeOrder).get(order.id)
+        order_after = db.get(models.TradeOrder, order.id)
         assert order_after.status == "FILLED"
 
         account = pf.get_account(db, "DEMO")

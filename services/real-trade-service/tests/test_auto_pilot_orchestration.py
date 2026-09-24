@@ -1645,19 +1645,40 @@ class TestAfterhoursScanBody:
         monkeypatch.setattr(ap, "notify_async", _async_recorder(notes))
 
         # Force the recovery block's own db.query to blow up too.
-        orig_query = db.query
+        #
+        # session109 fix: this test used to monkeypatch `db.query` on the
+        # *fixture's* session — but the body opens its OWN session via
+        # get_session_factory(), so the patch never reached it, the recovery
+        # block succeeded normally, and the inner `except` (lines 1801-1802)
+        # stayed uncovered while the test still passed. Patch the factory so
+        # the session the body actually uses is the flaky one.
+        real_factory = sessionmaker(bind=_engine)
         state = {"n": 0}
 
-        def _flaky_query(*a, **kw):
-            state["n"] += 1
-            if state["n"] >= 2:
-                raise RuntimeError("recovery query also broken")
-            return orig_query(*a, **kw)
+        def _flaky_factory():
+            s = real_factory()
+            orig_query = s.query
 
-        monkeypatch.setattr(db, "query", _flaky_query)
+            def _flaky_query(*a, **kw):
+                state["n"] += 1
+                if state["n"] >= 2:
+                    raise RuntimeError("recovery query also broken")
+                return orig_query(*a, **kw)
+
+            s.query = _flaky_query
+            return s
+
+        monkeypatch.setattr(ap, "get_session_factory", lambda: _flaky_factory)
         with caplog.at_level(logging.ERROR, logger="real-trade-autopilot"):
             result = run(ap._afterhours_scan_body("REAL"))  # must not raise
         assert "date calc boom" in result["reason"]
+        assert state["n"] == 2                       # gate lookup + the failed recovery lookup
+        assert len(notes) == 1                       # operator alert still went out
+        assert any("also failed to record last_run failure" in r.getMessage() for r in caplog.records)
+        # the failure could not be recorded, so the gate row is untouched
+        db.expire_all()
+        gate = db.query(models.TradeGateState).filter_by(mode="REAL").first()
+        assert gate.afterhours_scan_last_run_at is None
 
 
 # ---------------------------------------------------------------------------

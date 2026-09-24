@@ -174,7 +174,7 @@ def _load_profile(db: Session, position) -> dict:
             "horizon_class":         None,
         }
     try:
-        row = db.query(models.WatchlistEntry).get(position.watchlist_entry_id)
+        row = db.get(models.WatchlistEntry, position.watchlist_entry_id)   # Session.get (Query.get is legacy in SQLAlchemy 2.0)
         horizon_class = row.horizon_class if row else None
     except Exception:
         horizon_class = None

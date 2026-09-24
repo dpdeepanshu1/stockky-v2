@@ -320,9 +320,14 @@ def _schedule_atr_refresh(client: Optional[httpx.AsyncClient], symbol: str) -> b
             return False                           # recent failed attempt — back off
         _ATR_INFLIGHT[clean] = now
         _ATR_LAST_TRY[clean] = now
+    coro = _bg_refresh_atr(client, symbol)
     try:
-        task = asyncio.create_task(_bg_refresh_atr(client, symbol))
+        task = asyncio.create_task(coro)
     except RuntimeError:                           # no running loop
+        # session109 fix: the coroutine object already exists at this point;
+        # without close() Python emits "coroutine '_bg_refresh_atr' was never
+        # awaited" (RuntimeWarning) every time this path is taken.
+        coro.close()
         with _ATR_STATE_LOCK:
             _ATR_INFLIGHT.pop(clean, None)
         return False

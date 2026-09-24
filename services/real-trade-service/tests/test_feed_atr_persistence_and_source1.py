@@ -515,6 +515,34 @@ def test_schedule_atr_refresh_without_running_loop_returns_false_and_clears_slot
     assert "NOLOOP" not in f._ATR_INFLIGHT
 
 
+def test_schedule_atr_refresh_without_running_loop_closes_the_unscheduled_coroutine(monkeypatch):
+    # session109: the coroutine object is created BEFORE create_task() raises,
+    # so it must be closed explicitly — otherwise every call on this path
+    # emitted "RuntimeWarning: coroutine '_bg_refresh_atr' was never awaited".
+    import inspect
+    import warnings
+    made = []
+
+    async def _fake_bg_refresh(client, symbol):
+        pass
+
+    def _factory(client, symbol):
+        c = _fake_bg_refresh(client, symbol)
+        made.append(c)
+        return c
+
+    monkeypatch.setattr(f, "_bg_refresh_atr", _factory)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert f._schedule_atr_refresh(None, "NOLOOP2") is False
+        import gc
+        gc.collect()
+    assert len(made) == 1
+    assert inspect.getcoroutinestate(made[0]) == "CORO_CLOSED"
+    assert not [w for w in caught if "never awaited" in str(w.message)]
+    assert "NOLOOP2" not in f._ATR_INFLIGHT
+
+
 def test_get_quote_source1_naive_updated_at_is_treated_as_utc():
     # updated_at with no tzinfo (no offset suffix) exercises the
     # `.replace(tzinfo=timezone.utc)` branch instead of erroring on the

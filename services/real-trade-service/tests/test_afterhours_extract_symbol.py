@@ -85,6 +85,15 @@ class TestDegradedHeuristicUnaffectedByAliasFix(object):
         headline = "SOMENEWCORP shares list at a premium on debut"
         assert _extract_symbol(headline, set()) == "SOMENEWCORP"
 
+    def test_degraded_path_with_no_viable_token_returns_none(self):
+        # Every ALL-CAPS token this headline produces is either a stopword
+        # (MARKET, REPORTS, STRONG, GROWTH — all in _STOPWORDS/_ENGLISH_STOPS)
+        # or too short for the length heuristic (TODAY, 5 chars) — so the
+        # degraded fallback path must fall all the way through to the final
+        # `return None`, not just the alias-lookup step above it.
+        headline = "Market reports strong growth today"
+        assert _extract_symbol(headline, set()) is None
+
 
 if __name__ == "__main__":
     import sys as _sys

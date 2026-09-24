@@ -307,6 +307,41 @@ class TestRunAfterhoursScan:
             written = run(ahs.run_afterhours_scan(db, "DEMO", "2026-09-25"))
         assert written == 1
 
+    def test_one_symbols_upsert_failure_is_isolated_and_others_still_write(self, db):
+        """Same incident class as session65's import_broker_holdings fix and
+        session82c's evaluate_mode isolation fix: a per-symbol commit
+        failure (constraint error, etc.) inside the upsert loop must only
+        roll back that symbol's own row via the try/except/continue, not
+        abort the whole batch. RELIANCE (from RSS) is forced to fail on its
+        commit; TCS (from a bulk-deal hit, no RSS involved) must still be
+        written in the same pass.
+        """
+        headline = "Reliance record profit growth beat estimates"  # score 65
+        bulk = AsyncMock(return_value={
+            "TCS": {"score": 55.0, "headline": "TCS bulk deal", "catalyst_type": "bulk_block", "source": "NSE-bulk-deals"},
+        })
+        real_commit = db.commit
+        state = {"n": 0}
+
+        def flaky_commit():
+            state["n"] += 1
+            if state["n"] == 1:
+                raise RuntimeError("simulated constraint violation")
+            return real_commit()
+
+        db.commit = flaky_commit
+        with _Patches(_patched(
+            known_symbols={"RELIANCE"},
+            rss_items={"Moneycontrol": [_item(headline)]},
+            bulk_hits=bulk,
+        )):
+            written = run(ahs.run_afterhours_scan(db, "DEMO", "2026-09-25"))
+        # RELIANCE is inserted first (RSS hit precedes the bulk-only merge)
+        # and its commit is the one forced to fail, so only TCS is written.
+        assert written == 1
+        assert db.query(models.NextDayWatchlistEntry).filter_by(symbol="TCS").first() is not None
+        assert db.query(models.NextDayWatchlistEntry).filter_by(symbol="RELIANCE").first() is None
+
 
 # ── finalize_nextday_watchlist ───────────────────────────────────────────────
 

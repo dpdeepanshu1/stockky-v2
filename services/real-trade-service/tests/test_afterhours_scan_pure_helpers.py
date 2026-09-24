@@ -174,6 +174,20 @@ class TestParseItemDatetime:
         dt = _parse_item_datetime("2026-09-16")
         assert dt.utcoffset() is not None
 
+    def test_plain_date_with_trailing_text_reaches_strptime_branch(self):
+        # A bare "2026-09-16" is itself valid ISO-8601 (date-only), so it
+        # returns from the fromisoformat() branch above and never actually
+        # exercises the plain-"YYYY-MM-DD" strptime fallback this docstring
+        # advertises for insider_transactions/bulk_deals date fields. Those
+        # real-world values sometimes carry trailing text after the date
+        # (e.g. a bulk-deal remark) that fromisoformat() rejects outright
+        # but strptime(value[:10], ...) still parses — that's the case this
+        # test targets.
+        dt = _parse_item_datetime("2026-09-16 (bulk deal)")
+        assert dt is not None
+        assert (dt.year, dt.month, dt.day) == (2026, 9, 16)
+        assert dt.tzinfo is not None
+
 
 # ── _is_within_max_age ───────────────────────────────────────────────────────
 

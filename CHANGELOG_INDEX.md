@@ -6,6 +6,13 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION112_ROUND4_LEDGER_COVERAGE_2026-09-25.md` — position-stocks-service
+  `capital/ledger.py` (the money engine) 53% → 100%, tests only, no production
+  change. New `tests/test_ledger_coverage.py` (82 tests) incl. the REAL
+  `sync_peer_pnl` (shared fixture stubs it), capital-erosion add-back,
+  kill-switch trip boundary + gate mirror, `EXIT_LEGS_REJECTED` handling.
+  Suite 1403 → 1485 passed, 82% → 84%. 41 mutations, 0 real survivors (2
+  provably equivalent). Next: `capital/shared_symbol_lock.py` (30%).
 - `SESSION111_NOTIFY_FIRE_AND_FORGET_EXIT_PATH_FIX_2026-09-25.md` — `notify_sync`
   could block its caller for a ~42s worst case (service timeout + direct-Telegram
   timeout + its own HTML-retry timeout), and `exit_engine/exit.py` called it 14

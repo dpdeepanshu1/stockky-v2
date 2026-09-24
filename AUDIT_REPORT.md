@@ -583,6 +583,36 @@ narrow edge conditions inside the two functions just closed, worth a
 final short pass once the three orchestrators above are done. After that:
 re-running with the corrected `--cov=intraday_eligibility` flag.
 
+## session94 (2026-09-24): cycle_runner.py — 7% → 100%
+
+Picked from the session93 VM transcript's coverage table as the highest
+(module risk × gap size) item: `cycle_runner.py` was at 7% (114/122
+statements missed) even though every REAL/DEMO cycle — manual Run Cycle,
+Auto-Pilot, enter-at-open — funnels through `run_cycle_core`; every existing
+test mocks it out at its own boundary. It also holds session48b's untested
+`asyncio.gather` concurrency change.
+
+New `tests/test_cycle_runner.py` (64 tests, executed): wrapper/market-hours
+warning, REAL token pre-flight and early auto-disarm, concurrency proven with
+`asyncio.Event`s, stage order + error isolation, position snapshot, exit
+lock (incl. a real `threading.Lock`), and the real `pipeline_status`
+contract. `cycle_runner.py` **100%**. Mutation-checked: 16 deliberate
+regressions, all caught. Full suite **1784 passed, 1 xfailed**, overall
+92%→93%. No production code changed.
+
+**Open finding (not fixed):** since session48b the `dynamic_universe`,
+`watchlist` and `candidates` stages run concurrently but `pipeline_status`
+has a single current-stage slot, so `stage_timings_ms` is misattributed
+(probe: candidates 300 ms real → 50.7 ms reported; watchlist ~100 ms real →
+249.5 ms). Observability-only; total `duration_ms` is correct. See
+`archive/session-notes/SESSION94_CYCLE_RUNNER_COVERAGE_2026-09-24.md`.
+
+Still open, largest first: `resilience/local_cache.py` (45%),
+`auth/dhan_credentials.py` (18%), `db.py` migrations (7%),
+`market_feed/feed.py` (67%), `entry_engine/entry.py` tails (84%), then the
+small modules listed in the session note. `offline_test_harness.py` (0%) is
+a dev harness — recommend excluding from coverage.
+
 ## Commands to run all tests
 
 **On the VM (Ubuntu):**
@@ -599,7 +629,7 @@ Expected:
 === position-stocks-service
 1220 passed, 8 warnings in ~15s
 === real-trade-service
-1126 passed, 1 xfailed in ~35s
+1784 passed, 1 xfailed in ~60s
 ```
 
 **With coverage:**

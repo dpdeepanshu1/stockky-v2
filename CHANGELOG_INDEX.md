@@ -6,6 +6,27 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION94_CYCLE_RUNNER_COVERAGE_2026-09-24.md` — `cycle_runner.py`
+  7%→100% (122/122). New `tests/test_cycle_runner.py` (64 tests) covers the
+  function every REAL/DEMO cycle funnels through: manual market-hours
+  warning, REAL token pre-flight (TOTP gating, early auto-disarm with nothing
+  downstream executed), the session48b concurrent
+  dynamic_universe→watchlist ‖ candidates stage (proven with events, not
+  just call order), exit-lock acquire/release incl. a real `threading.Lock`,
+  position snapshot, and the real `pipeline_status` contract.
+  Mutation-checked (16 deliberate regressions, all caught). Full
+  `real-trade-service` suite: 1784 passed, 1 xfailed; overall 92%→93%.
+  No production code changed. **Finding, not fixed:** `pipeline_status`'s
+  single "current stage" slot is overwritten by the three concurrent stages,
+  so per-stage `stage_timings_ms` are misattributed since session48b
+  (observability only) — see the note for numbers and options.
+- `SESSION93_INTRADAY_ELIGIBILITY_COVERAGE_2026-09-24.md` —
+  `intraday_eligibility.py` first direct coverage (every other test
+  monkeypatched its public functions away, so its cross-service
+  `scalp_intraday_restricted` mirroring had never run under test).
+- `SESSION92_AFTERHOURS_SCAN_FINAL_COVERAGE_GAPS_2026-09-24.md` —
+  `watchlist_engine/afterhours_scan.py` final 3 gaps closed (now 100%);
+  VM run confirmed session91's rounds 1-3 (1694 passed, 1 xfailed).
 - `SESSION91_AFTERHOURS_FETCHERS_COVERAGE_ROUND2_2026-09-24.md` — round 2:
   new `tests/test_afterhours_scan_fetchers.py` (20 tests) covers
   `_fetch_rss_items`, `_fetch_bulk_deal_hits`, and `_validate_symbols` —

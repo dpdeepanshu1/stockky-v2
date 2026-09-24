@@ -21,6 +21,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import time
 from collections import OrderedDict
 
@@ -29,6 +30,55 @@ import httpx
 import config
 
 logger = logging.getLogger("real-trade-notifier")
+
+
+# ── Bot-token hygiene (session98) ─────────────────────────────────────────────
+# _direct_telegram() calls https://api.telegram.org/bot<TOKEN>/sendMessage — the
+# bot token is part of the URL. httpx logs every request at INFO as
+#   HTTP Request: POST https://api.telegram.org/bot<TOKEN>/sendMessage "HTTP/1.1 200 OK"
+# and main.py runs logging.basicConfig(level=logging.INFO) with nothing muting
+# the "httpx" logger, so on every fallback send the token went into the service
+# log (and anything that ships it). Fix: a filter on the "httpx" logger that
+# rewrites the token out of the record before any handler sees it, plus the same
+# scrubbing on the error text this module logs itself.
+_TOKEN_IN_URL_RE = re.compile(r"/bot\d+:[\w-]+/")
+_MIN_LITERAL_TOKEN_LEN = 8
+
+
+def _redact_token(text) -> str:
+    """str(text) with any '/bot<id>:<secret>/' URL segment -> '/bot***/' and the
+    configured TELEGRAM_BOT_TOKEN (if long enough to be real) -> '***'.
+    Never raises."""
+    try:
+        out = _TOKEN_IN_URL_RE.sub("/bot***/", str(text))
+        token = getattr(config, "TELEGRAM_BOT_TOKEN", "") or ""
+        if len(token) >= _MIN_LITERAL_TOKEN_LEN:
+            out = out.replace(token, "***")
+        return out
+    except Exception:
+        return "<text withheld: redaction failed>"
+
+
+class _TelegramTokenRedactingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+            redacted = _redact_token(msg)
+            if redacted != msg:
+                record.msg, record.args = redacted, ()
+        except Exception:
+            pass   # a logging filter must never break logging
+        return True
+
+
+def _install_httpx_token_filter() -> None:
+    """Idempotent — safe on module reload."""
+    httpx_logger = logging.getLogger("httpx")
+    if not any(isinstance(f, _TelegramTokenRedactingFilter) for f in httpx_logger.filters):
+        httpx_logger.addFilter(_TelegramTokenRedactingFilter())
+
+
+_install_httpx_token_filter()
 
 # Internal URL to notification-scheduler-service (docker-compose service name)
 # Injected via NOTIFICATION_SERVICE_URL env var (added to docker-compose.yml)
@@ -153,5 +203,5 @@ def _direct_telegram(text: str) -> bool:
                 return False
         return True
     except Exception as e:
-        logger.warning("Direct Telegram notify error: %s", e)
+        logger.warning("Direct Telegram notify error: %s", _redact_token(e))
         return False

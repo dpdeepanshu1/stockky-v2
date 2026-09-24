@@ -6,6 +6,36 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION98_NOTIFIER_COVERAGE_AND_SECRET_IN_URL_LOG_LEAK_FIX_2026-09-24.md` —
+  `notifier.py` 23%(unstable)→100%; new `tests/test_notifier.py` (64 tests, real
+  httpx via MockTransport). **Security fix in 4 files / 3 services:** httpx logs
+  every request URL at INFO and services run `basicConfig(INFO)`, so the
+  Telegram **bot token** was in the logs on every send — and in
+  `notification-scheduler-service` (the platform's *primary* alert path) also the
+  **Discord/Slack webhook URLs** and **CallMeBot apikey**; a revoked webhook even
+  returned its URL in the `/notify` response (`HTTPStatusError` embeds the URL).
+  Fixed with an `httpx`-logger redaction filter (+ scrubbed error strings) in
+  `real-trade-service/notifier.py`, `position-stocks-service/notifier.py`,
+  `notification-scheduler-service/notification/main.py` and
+  `scheduler/governance_check.py`; regression tests fail on the old code. **Check
+  your logs and rotate secrets — see the note.** Same class still open in
+  `market-data-service` / `analysis-intelligence-service` (API keys in query
+  strings). real-trade-service 2253 passed/1 skipped/1 xfailed, 96%;
+  position-stocks 1225 passed; notification-scheduler 21 passed (first tests
+  there). 52 mutations, 0 survivors.
+- `SESSION97_DB_MIGRATIONS_COVERAGE_AND_DRIFT_GUARD_2026-09-24.md` —
+  `db.py` 7%→100% (521/521). New `tests/test_db.py` (217 tests): every one of
+  the 22 boot-time migrations executed on a real *legacy* SQLite schema (Oracle
+  branch captured via recorded SQL and checked for parity/type/length/default
+  against `models.py`); legacy rows read back with the same defaults as new
+  rows. **Drift guard:** adding a column to an existing model without an
+  `_ensure_*` migration now fails a test (the session-11 bug class). Optional
+  `tests/test_db_postgres_live.py` (5 tests, skipped without `pgserver`) runs
+  the Postgres SQL on a real PostgreSQL. **One production fix:**
+  `_normalize_pg_url` left `&&` when `channel_binding` sat mid-query, which
+  libpq rejects. VM-equivalent run: 2189 passed, 1 skipped, 1 xfailed; 94%→96%.
+  60 mutations, 0 survivors. Note: `notifier.py` coverage (52→48→23%) is
+  incidental, not a regression — it has no direct tests; next candidate.
 - `SESSION96_DHAN_CREDENTIALS_COVERAGE_AND_PIN_LEAK_FIX_2026-09-24.md` —
   `auth/dhan_credentials.py` 18%→100% (215/215). New
   `tests/test_dhan_credentials.py` (156 tests, real SQLite + real Fernet + real

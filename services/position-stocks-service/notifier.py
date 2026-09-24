@@ -45,6 +45,36 @@ import config
 
 logger = logging.getLogger("position-stocks-notifier")
 
+# ── Bot-token hygiene (session98) ─────────────────────────────────────────────
+# Telegram's bot token is part of the URL (https://api.telegram.org/bot<TOKEN>/
+# sendMessage) and httpx logs every request at INFO as
+#   HTTP Request: POST https://api.telegram.org/bot<TOKEN>/sendMessage "HTTP/1.1 200 OK"
+# while this service runs logging.basicConfig(level=logging.INFO) — so the token
+# was written to the log on every send. This filter rewrites it out of the
+# record before any handler sees it. (Same fix as real-trade-service/notifier.py.)
+class _TelegramTokenRedactingFilter(logging.Filter):
+    _TOKEN_IN_URL = _re.compile(r"/bot\d+:[\w-]+/")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+            redacted = self._TOKEN_IN_URL.sub("/bot***/", msg)
+            if redacted != msg:
+                record.msg, record.args = redacted, ()
+        except Exception:
+            pass   # a logging filter must never break logging
+        return True
+
+
+def _install_httpx_token_filter() -> None:
+    """Idempotent — safe on module reload."""
+    httpx_logger = logging.getLogger("httpx")
+    if not any(isinstance(f, _TelegramTokenRedactingFilter) for f in httpx_logger.filters):
+        httpx_logger.addFilter(_TelegramTokenRedactingFilter())
+
+
+_install_httpx_token_filter()
+
 _NOTIFICATION_SERVICE_URL = f"{config.NOTIFICATION_SERVICE_URL}"
 
 # ── Message deduplication ─────────────────────────────────────────────────────
@@ -127,7 +157,7 @@ def _direct_telegram(text: str) -> bool:
                 return False
         return True
     except Exception as e:
-        logger.warning("Direct Telegram notify error: %s", e)
+        logger.warning("Direct Telegram notify error: %s", _TelegramTokenRedactingFilter._TOKEN_IN_URL.sub("/bot***/", str(e)))
         return False
 
 

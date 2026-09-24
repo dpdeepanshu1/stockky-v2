@@ -30,6 +30,11 @@ def _normalize_pg_url(url: str) -> str:
         url = "postgresql://" + url[len("postgres://"):]
     if "channel_binding=" in url:
         url = re.sub(r"([&?])channel_binding=[^&]*", r"\1", url)
+        # 2026-09-24 (session97): a channel_binding param in the MIDDLE of the
+        # query ("?a=1&channel_binding=require&b=2") used to leave "a=1&&b=2";
+        # libpq's URI parser rejects the empty key. Collapse the doubled '&'
+        # before the leading/trailing cleanup below.
+        url = re.sub(r"&{2,}", "&", url)
         url = url.replace("?&", "?").rstrip("?&")
     if "sslmode=" not in url.lower():
         url = url + ("&" if "?" in url else "?") + "sslmode=require"

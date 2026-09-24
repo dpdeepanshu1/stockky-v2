@@ -28,6 +28,7 @@ reliable delivery pipe — same design principle as Market Data Service.
 v0.5.0 – respects the 'channel' parameter: "telegram", "discord", "slack", or "all".
 """
 import os
+import re as _re_top
 import json
 import logging
 import threading
@@ -51,6 +52,60 @@ except Exception:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("notification-service")
+
+# ── Secret-in-URL hygiene (session98) ─────────────────────────────────────────
+# Every channel this service delivers to carries its secret IN THE URL:
+#   Telegram   https://api.telegram.org/bot<TOKEN>/sendMessage
+#   Discord    https://discord.com/api/webhooks/<id>/<token>
+#   Slack      https://hooks.slack.com/services/T…/B…/<secret>
+#   CallMeBot  https://api.callmebot.com/text.php?user=…&text=…&apikey=<key>
+# and httpx logs every request at INFO as  "HTTP Request: POST <full url> …"
+# while this service runs logging.basicConfig(level=logging.INFO) — so each
+# secret was written to the log on every send. Separately, Discord/Slack call
+# resp.raise_for_status(), and httpx's HTTPStatusError message embeds the full
+# URL; that text was both logged AND returned to the API caller as
+# "failed: <exc>" (a revoked webhook -> 404 -> webhook URL in the /notify
+# response). _redact_secrets() is applied to the httpx logger via a filter and
+# to those error strings. (Same class of fix as real-trade-service/notifier.py.)
+_SECRET_SUBS = (
+    (_re_top.compile(r"/bot\d+:[\w-]+/"), "/bot***/"),
+    (_re_top.compile(r"(?i)(/api/webhooks/)\d+/[\w-]+"), r"\1***"),
+    (_re_top.compile(r"(?i)(hooks\.slack\.com/services/)[\w/-]+"), r"\1***"),
+    (_re_top.compile(r"(?i)([?&]apikey=)[^&\s'\"]+"), r"\1***"),
+)
+
+
+def _redact_secrets(text) -> str:
+    """str(text) with every channel secret above replaced by ``***``. Never raises."""
+    try:
+        out = str(text)
+        for pattern, repl in _SECRET_SUBS:
+            out = pattern.sub(repl, out)
+        return out
+    except Exception:
+        return "<text withheld: redaction failed>"
+
+
+class _SecretRedactingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+            redacted = _redact_secrets(msg)
+            if redacted != msg:
+                record.msg, record.args = redacted, ()
+        except Exception:
+            pass   # a logging filter must never break logging
+        return True
+
+
+def _install_httpx_secret_filter() -> None:
+    """Idempotent — safe on module reload."""
+    httpx_logger = logging.getLogger("httpx")
+    if not any(isinstance(f, _SecretRedactingFilter) for f in httpx_logger.filters):
+        httpx_logger.addFilter(_SecretRedactingFilter())
+
+
+_install_httpx_secret_filter()
 
 app = FastAPI(title="Stockky Notification Service", version="0.5.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -351,8 +406,8 @@ def _send_discord(cfg: dict, title: str, message: str):
         resp.raise_for_status()
         return "sent"
     except httpx.HTTPError as e:
-        logger.error("Discord notification failed: %s", e)
-        return f"failed: {e}"
+        logger.error("Discord notification failed: %s", _redact_secrets(e))
+        return f"failed: {_redact_secrets(e)}"
 
 
 def _send_slack(cfg: dict, title: str, message: str):
@@ -365,8 +420,8 @@ def _send_slack(cfg: dict, title: str, message: str):
         resp.raise_for_status()
         return "sent"
     except httpx.HTTPError as e:
-        logger.error("Slack notification failed: %s", e)
-        return f"failed: {e}"
+        logger.error("Slack notification failed: %s", _redact_secrets(e))
+        return f"failed: {_redact_secrets(e)}"
 
 
 def _send_telegram(cfg: dict, title: str, message: str):
@@ -419,8 +474,8 @@ def _send_telegram(cfg: dict, title: str, message: str):
                 pass
             return f"failed: HTTP {resp.status_code}"
     except httpx.HTTPError as e:
-        logger.error("Telegram notification failed: %s", e)
-        return f"failed: {e}"
+        logger.error("Telegram notification failed: %s", _redact_secrets(e))
+        return f"failed: {_redact_secrets(e)}"
 
 
 def _callmebot_recipients(cfg: dict):
@@ -550,7 +605,7 @@ def _send_callmebot(cfg: dict, title: str, message: str, voice_first: bool = Tru
         try:
             results.append(_one_with_retry(u, k))
         except Exception as e:
-            results.append(f"{u}:error:{e}")
+            results.append(f"{u}:error:{_redact_secrets(e)}")
         if i < len(users) - 1:
             _t.sleep(0.8)
 

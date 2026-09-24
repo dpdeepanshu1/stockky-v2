@@ -158,7 +158,7 @@ class TestLoadProfile:
         assert profile["trail_atr_schedule"] == ex.TRAIL_ATR_SCHEDULE
 
     def test_watchlist_entry_id_found_returns_horizon_class(self):
-        # line 176: db.query(WatchlistEntry).get(...)
+        # line 177: db.get(WatchlistEntry, id)
         db = _fresh_db()
         entry = models.WatchlistEntry(
             mode="REAL", symbol="TESTCO",
@@ -182,15 +182,12 @@ class TestLoadProfile:
         # lines 179-180: exception in the try block → horizon_class stays None
         db = _fresh_db()
         pos = _mkpos(db, watchlist_entry_id=1)
-        orig_query = db.query
 
-        def _boom(model):
-            if model is models.WatchlistEntry:
-                raise RuntimeError("DB exploded")
-            return orig_query(model)
-
-        with mock.patch.object(db, "query", side_effect=_boom):
+        # session109: _load_profile now uses Session.get (Query.get is legacy
+        # in SQLAlchemy 2.0), so the failure has to be injected there.
+        with mock.patch.object(db, "get", side_effect=RuntimeError("DB exploded")) as g:
             profile = ex._load_profile(db, pos)
+        g.assert_called_once_with(models.WatchlistEntry, 1)
         assert profile["horizon_class"] is None
 
 

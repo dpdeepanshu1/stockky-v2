@@ -1,0 +1,15 @@
+# Coverage config for real-trade-service (session109).
+#
+# Run from this directory exactly as before:
+#     python3 -m pytest -q --cov=. --cov-report=term-missing
+#
+# offline_test_harness.py is a developer script (run by hand against a folder
+# of downloaded NSE data — see its docstring), not service code; it can never
+# be exercised by the unit suite and only added 288 permanently-missed lines.
+#
+# tests/ is omitted so TOTAL measures production code only — with it included,
+# the (~100% covered) test files themselves inflated the headline number.
+[run]
+omit =
+    offline_test_harness.py
+    tests/*

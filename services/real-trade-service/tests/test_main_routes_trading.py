@@ -949,7 +949,7 @@ class TestManualCancelOrder:
         cancel_fn.assert_not_called()
         assert result == {"ok": True, "mode": "DEMO", "order_id": o.id, "status": "CANCELLED"}
         db.expire_all()
-        assert db.query(models.TradeOrder).get(o.id).status == "CANCELLED"
+        assert db.get(models.TradeOrder, o.id).status == "CANCELLED"
         assert db.query(models.TradeAuditLog).filter_by(action="MANUAL_CANCEL").count() == 1
         assert db.query(models.TradeOrderEvent).filter_by(order_id=o.id, event_type="CANCELLED").count() == 1
 

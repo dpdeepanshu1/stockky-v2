@@ -6,6 +6,18 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION91_AFTERHOURS_PURE_HELPERS_COVERAGE_ROUND1_2026-09-24.md` — new
+  `tests/test_afterhours_scan_pure_helpers.py` (31 tests) covers
+  `watchlist_engine/afterhours_scan.py`'s five self-contained helpers
+  (`_has_uncontextualized_negative`, `_score_headline`,
+  `_parse_item_datetime`, `_is_within_max_age`, `_parse_feed_items`) —
+  only `_extract_symbol` (the MANINDS/EKC/OLAELEC/RAYMONDREL/UTLSOLAR
+  name-alias fix, already present coming into this round) had direct tests
+  before. **Not run through live pytest — no network in this sandbox**;
+  written and hand-traced against the real source instead, same caveat as
+  sessions 76/77/82c/86. Deferred: the two DB-writing orchestrators
+  (`run_afterhours_scan`, `finalize_nextday_watchlist`) and the three
+  httpx-calling fetchers. No production code changed.
 - `SESSION88_CANDIDATES_COVERAGE_100_PERCENT_2026-09-23.md` —
   100%-coverage plan: `candidate_engine/candidates.py` finished, 65%→100%
   (689/689 statements). New `tests/test_candidates_orchestration.py` (24

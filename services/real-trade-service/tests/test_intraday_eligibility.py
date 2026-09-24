@@ -56,6 +56,18 @@ def db():
     models.Base.metadata.drop_all(_engine)
     models.Base.metadata.create_all(_engine)
     s = sessionmaker(bind=_engine)()
+    # The sister table lives outside models.Base (it belongs to
+    # position-stocks-service's own schema — see module docstring), so
+    # Base.metadata.drop_all() above never touches it. Since all tests in
+    # this file share one in-memory-SQLite engine/connection (same
+    # convention as test_afterhours_scan_orchestration.py's `db` fixture),
+    # a table any earlier test created via raw CREATE TABLE would otherwise
+    # persist — and its rows with it — into every later test, including
+    # ones that specifically need the sister table ABSENT. Drop it here on
+    # every test's setup so each test starts from a truly clean slate
+    # regardless of what ran before it.
+    s.execute(text("DROP TABLE IF EXISTS scalp_intraday_restricted"))
+    s.commit()
     yield s
     s.close()
 

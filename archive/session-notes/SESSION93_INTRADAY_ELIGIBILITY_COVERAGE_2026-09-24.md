@@ -61,8 +61,33 @@ TABLE`, same as how the module itself only ever touches it via `text()`).
 not even a local import-check was possible this time, let alone a live
 `pytest` run) — written and hand-traced against the real source, including
 manually re-deriving the raw-SQL UPDATE statement's conditional
-`last_detail` clause to get the "leaves it unchanged" test right. Run for
-real before trusting the result:
+`last_detail` clause to get the "leaves it unchanged" test right.
+
+## Round 2 (same day): fixed a real bug the live run caught
+
+The user ran this for real and it correctly caught a bug in the test file
+itself: 19 setup errors (`table scalp_intraday_restricted already exists`)
+plus 1 assertion failure. Root cause — all `TestSisterRestrictedSymbols` /
+etc. tests share one module-level in-memory-SQLite `_engine` (same
+convention as `test_afterhours_scan_orchestration.py`'s `db` fixture), but
+the sister table lives outside `models.Base` (it's position-stocks-
+service's own schema — no ORM model for it in this codebase), so
+`models.Base.metadata.drop_all()` in the `db` fixture never touched it.
+Once one test created it via raw `CREATE TABLE`, it silently persisted —
+rows and all — into every later test in the file: tests using
+`db_with_sister` got "table already exists" on their own `CREATE TABLE`,
+and `test_missing_sister_table_degrades_to_empty_set` (which needs the
+sister table genuinely ABSENT) instead saw a prior test's leftover
+`{TCS, INFY}` rows and failed its own assertion.
+
+Fix: the `db` fixture now runs `DROP TABLE IF EXISTS
+scalp_intraday_restricted` on every test's setup, before `db_with_sister`
+(if used) recreates it fresh. Every test now starts from a genuinely clean
+slate regardless of execution order. No changes to `intraday_eligibility.py`
+itself or to any test's actual assertions/logic — this was purely a test-
+fixture isolation bug in the new file, not a bug in the code under test.
+
+Run for real before trusting the result:
 
 ```bash
 cd services/real-trade-service
@@ -70,7 +95,7 @@ python -m pytest tests/test_intraday_eligibility.py -v
 python3 -m pytest -q --cov=. --cov-report=term-missing
 ```
 
-Expected: `intraday_eligibility.py` at or near 100% (a couple of logger-only
-lines inside except blocks may still show as covered once the exception
-paths above actually execute — no line in this file was structurally
-unreachable). No production code was changed this session — tests only.
+Expected: `intraday_eligibility.py` at or near 100% (the live run's
+first attempt, despite the fixture bug, already got it to 72% on the 1700
+tests that did pass — the fix above should close the rest). No production
+code was changed this session — tests only.

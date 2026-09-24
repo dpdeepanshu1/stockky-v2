@@ -14,6 +14,12 @@ env vars (original behaviour) — so .env config still works as backup.
 
 Deliberately best-effort: a notification failure must NEVER block or
 fail an order path. Every function swallows its own exceptions.
+
+notify_sync() itself can still block the CALLING thread for its full
+delivery attempt (worst case ~42s — see its docstring). For a call site
+that cannot afford that (anything running inside a shared lock or a
+tight loop), use notify_fire_and_forget() instead, which does the exact
+same dedup + delivery but off-thread and with no return value.
 """
 from __future__ import annotations
 import asyncio
@@ -22,6 +28,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 import time
 from collections import OrderedDict
 
@@ -144,12 +151,77 @@ async def notify_async(text: str) -> bool:
 
 
 def notify_sync(text: str) -> bool:
-    """Synchronous variant for call sites that aren't in an async function
-    (e.g. exit_engine). Same routing logic as notify_async.
-    Deduplicates identical messages within 5 minutes."""
+    """Synchronous variant for call sites that aren't in an async function.
+    Same routing logic as notify_async. Deduplicates identical messages
+    within 5 minutes.
+
+    BLOCKS the calling thread for the full delivery attempt — worst case
+    the 12s service timeout PLUS the 15s direct-Telegram timeout PLUS a
+    second 15s HTML-retry-as-plain-text attempt inside _direct_telegram,
+    ~42s. Fine for one-off callers (adaptive_thresholds.py's startup
+    notice, dhan_credentials.py's TOTP alerts) that have nothing else
+    waiting on them. NOT fine for a call site sitting inside a shared lock
+    or a tight polling loop — use notify_fire_and_forget() there instead
+    (see its docstring for why exit_engine specifically needs it)."""
     if not _should_send(text):
         logger.debug("notifier: duplicate message suppressed within dedup window")
         return True
+    return _deliver_sync(text)
+
+
+def notify_fire_and_forget(text: str) -> None:
+    """Non-blocking variant of notify_sync, for call sites that cannot
+    afford to block on network I/O while holding a shared resource.
+
+    session111 fix: exit_engine/exit.py's per-position exit loop runs
+    inside _run_exit_tick_sync's per-mode exit lock (see auto_pilot.py's
+    _run_exit_tick_sync docstring) and calls notify_sync after every
+    SELL-sent / blocked-exit / fill-confirmation event — up to 14 call
+    sites per evaluate_mode() pass. Each of those calls could block the
+    thread (and therefore the lock) for up to notify_sync's ~42s worst
+    case. Since the exit tick is skip-if-busy and fires every 5-10s, one
+    slow Telegram delivery for position A could delay protective
+    stop-loss evaluation for every OTHER open position in the same tick,
+    and skip the next 5-10s tick outright while still holding the lock.
+
+    The dedup check (_should_send) stays on the calling thread — it's a
+    cheap in-memory lookup, and doing it here (not in the background
+    thread) keeps the "identical message within 5 minutes is suppressed"
+    guarantee exact, with no race between two near-simultaneous fire-and-
+    forget calls for the same text. Only the actual network I/O (the part
+    that can take seconds) moves to a daemon thread. There is deliberately
+    no return value: by the time delivery finishes, the exit loop that
+    triggered it has moved on and there is no one left to hand a result
+    to — this is the same "never block or fail an order path" contract
+    notify_sync documents, taken to its logical conclusion for a caller
+    that can't wait at all."""
+    if not _should_send(text):
+        logger.debug("notifier: duplicate message suppressed within dedup window")
+        return
+    try:
+        threading.Thread(target=_deliver_background, args=(text,), daemon=True, name="notify-bg").start()
+    except Exception:
+        # Starting the thread itself failed (e.g. resource limits) — this is
+        # still just a notification, never let it surface to the caller.
+        logger.debug("notify_fire_and_forget: failed to start background delivery thread", exc_info=True)
+
+
+def _deliver_background(text: str) -> None:
+    """Runs _deliver_sync on the background thread notify_fire_and_forget
+    starts. Swallows everything — _deliver_sync already catches its own
+    network exceptions, this is just a last-resort guard so a bug in the
+    delivery path can never crash the (silent, unjoined) thread loudly."""
+    try:
+        _deliver_sync(text)
+    except Exception:
+        logger.debug("notify_fire_and_forget: background delivery failed", exc_info=True)
+
+
+def _deliver_sync(text: str) -> bool:
+    """The actual synchronous delivery attempt (service, then direct
+    Telegram fallback) — shared by notify_sync (blocking) and
+    notify_fire_and_forget (via a background thread). Assumes the dedup
+    check has already been done by the caller."""
     # Primary: notification service
     try:
         resp = httpx.post(

@@ -371,6 +371,26 @@ def test_get_quote_source2_zero_price_returns_none():
     assert _run(go()) is None
 
 
+def test_get_quote_source2_non_200_status_returns_none_and_logs(caplog):
+    import logging
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if "/live-quote/" in str(request.url):
+            return httpx.Response(404, json={})
+        # market-data-service reachable but returning a real error status
+        # (not an exception) — the branch at line 432 in feed.py, distinct
+        # from the except-block path exercised below.
+        return httpx.Response(500, text="upstream data provider error")
+
+    async def go():
+        async with _client(handler) as client:
+            return await f.get_quote(client, "RELIANCE")
+
+    with caplog.at_level(logging.WARNING):
+        assert _run(go()) is None
+    assert "market-data-service /quote returned 500" in caplog.text
+
+
 def test_get_quote_source2_exception_returns_none_and_logs(caplog):
     import logging
 

@@ -287,6 +287,129 @@ class TestNotifySync:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# notify_fire_and_forget (session111 — #2, exit-path blocking fix)
+# ══════════════════════════════════════════════════════════════════════════
+class TestNotifyFireAndForget:
+    def test_returns_none_immediately_while_delivery_is_still_in_flight(self, net):
+        import threading
+        import time as _t
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_service(req):
+            entered.set()
+            assert release.wait(timeout=2), "test deadlocked waiting for release"
+            return httpx.Response(200, json={"delivered": True})
+
+        net.service = slow_service
+        start = _t.monotonic()
+        result = notifier.notify_fire_and_forget("BUY *AAA* filled")
+        elapsed = _t.monotonic() - start
+
+        assert result is None
+        assert elapsed < 0.5, f"notify_fire_and_forget blocked the caller for {elapsed:.2f}s"
+        assert entered.wait(timeout=2), "background thread never reached the network"
+        release.set()
+
+    def test_background_thread_is_a_daemon(self, net, monkeypatch):
+        # A non-daemon thread would keep the process alive waiting on a
+        # notification delivery on shutdown — must not happen.
+        captured = {}
+        real_thread = notifier.threading.Thread
+
+        def spying_thread(*a, **k):
+            t = real_thread(*a, **k)
+            captured["thread"] = t
+            return t
+
+        monkeypatch.setattr(notifier.threading, "Thread", spying_thread)
+        notifier.notify_fire_and_forget("hello")
+        assert captured["thread"].daemon is True
+
+    def test_delivers_on_a_background_thread_not_the_caller(self, net):
+        import threading
+        import time as _t
+
+        seen = {}
+
+        def handler(req):
+            seen["thread"] = threading.current_thread()
+            return httpx.Response(200, json={"delivered": True})
+
+        net.service = handler
+        caller = threading.current_thread()
+        assert notifier.notify_fire_and_forget("hello") is None
+        for _ in range(200):
+            if "thread" in seen:
+                break
+            _t.sleep(0.01)
+        assert "thread" in seen
+        assert seen["thread"] is not caller
+
+    def test_duplicate_is_suppressed_without_starting_a_background_thread(self, net, monkeypatch, caplog):
+        import time as _t
+
+        notifier.notify_fire_and_forget("dup")
+        _t.sleep(0.05)  # let the first (real) background delivery land
+        net.requests.clear()
+
+        real_thread = notifier.threading.Thread
+        started = {"count": 0}
+
+        def counting_thread(*a, **k):
+            started["count"] += 1
+            return real_thread(*a, **k)
+
+        monkeypatch.setattr(notifier.threading, "Thread", counting_thread)
+        with caplog.at_level(logging.DEBUG, logger=LOGGER):
+            assert notifier.notify_fire_and_forget("dup") is None
+        assert started["count"] == 0
+        assert net.requests == []
+        assert "duplicate message suppressed within dedup window" in caplog.text
+
+    def test_falls_back_to_direct_telegram_in_the_background(self, net, telegram_configured):
+        import time as _t
+
+        net.service = lambda req: httpx.Response(200, json={"delivered": False, "note": "disabled"})
+        assert notifier.notify_fire_and_forget("hello") is None
+        for _ in range(200):
+            if net.telegram_requests:
+                break
+            _t.sleep(0.01)
+        assert len(net.telegram_requests) == 1
+
+    def test_failure_to_start_the_thread_is_swallowed(self, monkeypatch, caplog):
+        def boom(*a, **k):
+            raise RuntimeError("can't allocate thread")
+
+        monkeypatch.setattr(notifier.threading, "Thread", boom)
+        with caplog.at_level(logging.DEBUG, logger=LOGGER):
+            assert notifier.notify_fire_and_forget("hello") is None
+        assert "failed to start background delivery thread" in caplog.text
+
+    def test_a_delivery_exception_on_the_background_thread_is_swallowed(self, monkeypatch, caplog):
+        import threading
+        import time as _t
+
+        raised = threading.Event()
+
+        def boom(text):
+            raised.set()
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(notifier, "_deliver_sync", boom)
+        with caplog.at_level(logging.DEBUG, logger=LOGGER):
+            notifier.notify_fire_and_forget("hello")
+            assert raised.wait(timeout=2), "background thread never ran"
+            for _ in range(200):
+                if "background delivery failed" in caplog.text:
+                    break
+                _t.sleep(0.01)
+        assert "background delivery failed" in caplog.text
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # notify_async
 # ══════════════════════════════════════════════════════════════════════════
 class TestNotifyAsync:
@@ -539,3 +662,15 @@ class TestModuleWiring:
 
     def test_env_override_has_trailing_slashes_stripped(self):
         assert _service_url_in_fresh_interpreter("http://10.0.0.5:9000/notification///") == "http://10.0.0.5:9000/notification"
+
+    def test_exit_engine_is_wired_to_the_non_blocking_variant(self):
+        # session111 fix (#2): exit_engine/exit.py's per-position loop runs
+        # inside the shared exit lock (auto_pilot.py's _run_exit_tick_sync)
+        # and must never call the blocking notify_sync there — pin the
+        # import so a future edit can't silently swap it back to the ~42s-
+        # worst-case blocking variant (every exit test mocks the attribute
+        # wholesale, so none of them would otherwise notice a regression).
+        import exit_engine.exit as ex
+
+        assert ex.notify_sync is notifier.notify_fire_and_forget
+        assert ex.notify_sync is not notifier.notify_sync

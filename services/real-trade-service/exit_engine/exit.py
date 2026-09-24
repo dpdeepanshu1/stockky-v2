@@ -54,7 +54,18 @@ import models
 from audit.logger import log_action
 from execution import dhan_client, shared_order_budget
 from market_feed.feed import get_quotes
-from notifier import notify_sync
+# session111 fix (#2 — notify_sync blocking up to ~42s inline in exit paths):
+# this module's evaluate_mode() runs inside _run_exit_tick_sync's per-mode
+# exit lock (auto_pilot.py) and fires a notification after almost every
+# branch below. notify_sync() itself can block its caller for a ~42s worst
+# case (service timeout + direct-Telegram timeout + its own HTML-retry
+# timeout) — held here, that stalls protective stop-loss evaluation for
+# every OTHER open position in the same tick, and skips the next 5-10s
+# tick outright while the lock is still held. notify_fire_and_forget()
+# does the identical dedup + delivery but off-thread, so it returns
+# immediately; aliased to the old name so every call site below (and
+# every test that monkeypatches `notify_sync` on this module) is unchanged.
+from notifier import notify_fire_and_forget as notify_sync
 from portfolio.portfolio import (
     close_position, force_close_real_position, open_positions, refresh_unrealized, record_real_exit_sent,
 )

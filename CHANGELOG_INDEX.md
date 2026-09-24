@@ -6,6 +6,18 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION111_NOTIFY_FIRE_AND_FORGET_EXIT_PATH_FIX_2026-09-25.md` — `notify_sync`
+  could block its caller for a ~42s worst case (service timeout + direct-Telegram
+  timeout + its own HTML-retry timeout), and `exit_engine/exit.py` called it 14
+  times inline while holding the per-mode exit lock — one slow Telegram delivery
+  for one position's exit stalled protective stop-loss checks for every other
+  open position in the same tick, and skipped the next 5-10s tick outright.
+  Fixed with a new `notifier.notify_fire_and_forget` (same dedup + delivery,
+  off a daemon thread, no return value) and a one-line import-alias change in
+  `exit_engine/exit.py` — no call sites touched. real-trade-service 2725 passed,
+  0 xfailed, 100% (8320 stmts). 30 mutations, 0 real survivors.
+  `position-stocks-service`'s equivalent call sites not ported this round
+  (flagged as open).
 - `SESSION110_PARTIAL_FILL_INCREMENT_PRICING_AND_STAGE_TIMINGS_2026-09-24.md` —
   the last xfail is gone. **`execution/reconcile.py`** booked every partial-fill
   increment at Dhan's *cumulative* average price (5 @ 100 then 5 @ 102 booked as

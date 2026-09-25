@@ -513,3 +513,181 @@ class TestLoadSync:
         _seed_map({"OLD": "0"})
         sm._load_sync()
         assert sm._token_map.get("SYNC") == "777"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# _fetch_map (session112 round 21) — the real network path, never exercised
+# before: every other test monkeypatches _fetch_map itself away entirely.
+# httpx.stream is faked with a minimal context manager + a response stub
+# exposing raise_for_status()/iter_text(), matching how _fetch_map actually
+# uses it (`with httpx.stream(...) as resp: resp.raise_for_status(); ...
+# resp.iter_text()`) — no real socket involved.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _FakeHttpxResponse:
+    def __init__(self, text_chunks, status_error=None):
+        self._chunks = text_chunks
+        self._status_error = status_error
+
+    def raise_for_status(self):
+        if self._status_error is not None:
+            raise self._status_error
+
+    def iter_text(self):
+        return iter(self._chunks)
+
+
+class _FakeHttpxStream:
+    """Stands in for what httpx.stream(...) returns, used only as
+    `with httpx.stream(...) as resp:`."""
+    def __init__(self, resp):
+        self._resp = resp
+
+    def __enter__(self):
+        return self._resp
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestFetchMap:
+    def test_happy_path_parses_and_returns_nse_eq_map(self, monkeypatch):
+        chunks = [
+            "[",
+            '{"symbol":"SBIN-EQ","exch_seg":"NSE","token":"3045"},',
+            '{"symbol":"BOGUS","exch_seg":"BSE","token":"1"}',
+            "]",
+        ]
+        resp = _FakeHttpxResponse(chunks)
+        monkeypatch.setattr(
+            sm.httpx, "stream",
+            lambda method, url, timeout=None: _FakeHttpxStream(resp),
+        )
+        result = sm._fetch_map()
+        assert result == {"SBIN": "3045"}  # the BSE row is filtered out by _rows_to_map
+
+    def test_http_status_error_propagates(self, monkeypatch):
+        err = sm.httpx.HTTPStatusError("500 error", request=None, response=None)
+        resp = _FakeHttpxResponse([], status_error=err)
+        monkeypatch.setattr(
+            sm.httpx, "stream",
+            lambda method, url, timeout=None: _FakeHttpxStream(resp),
+        )
+        with pytest.raises(sm.httpx.HTTPStatusError):
+            sm._fetch_map()
+
+    def test_wall_clock_cap_raises_timeout_error(self, monkeypatch):
+        """The per-chunk deadline check inside _fetch_map's own _text_chunks
+        closure — deterministic via a scripted time.monotonic() sequence
+        rather than an actual sleep: the first call computes `deadline`,
+        the second (inside the generator, checking the first chunk) is
+        made to read as already past it."""
+        # deadline = first_call + _MAX_DOWNLOAD_S (default 180s) — the
+        # follow-up calls need to clear THAT, not just the first value.
+        calls = iter([100.0] + [10_000.0] * 10)
+        monkeypatch.setattr(sm.time, "monotonic", lambda: next(calls))
+        resp = _FakeHttpxResponse(["[", "{}"])
+        monkeypatch.setattr(
+            sm.httpx, "stream",
+            lambda method, url, timeout=None: _FakeHttpxStream(resp),
+        )
+        with pytest.raises(TimeoutError, match="wall-clock cap"):
+            sm._fetch_map()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# _save_disk — the write-failure cleanup path (session112 round 21)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestSaveDiskWriteFailure:
+    def test_replace_failure_cleans_up_tmp_and_logs(self, tmp_path, monkeypatch):
+        """os.replace fails after mkstemp already created the tmp file —
+        exercises the inner except's os.unlink(tmp) AND the outer
+        except-as-e logger.warning, both otherwise unreached by
+        test_save_disk_bad_path_does_not_raise (which fails earlier, at
+        makedirs/mkstemp, before any tmp file exists to clean up)."""
+        cache = str(tmp_path / "cache.json")
+        monkeypatch.setattr(sm, "_CACHE_PATH", cache)
+        _reset()
+
+        def _boom_replace(src, dst):
+            raise OSError("simulated replace failure")
+        monkeypatch.setattr(sm.os, "replace", _boom_replace)
+
+        sm._save_disk({"A": "1"})  # must not raise
+        # the tmp file created by mkstemp should have been cleaned up, and
+        # the real cache path was never written to.
+        assert not os.path.exists(cache)
+        assert not any(p.name.startswith(".scrip_master_") for p in tmp_path.iterdir())
+
+    def test_replace_and_unlink_both_fail_still_logs_and_does_not_raise(self, tmp_path, monkeypatch):
+        """Both os.replace AND the cleanup os.unlink fail — the nested
+        `except OSError: pass` inside the cleanup try, then the outer
+        except-as-e logger.warning."""
+        cache = str(tmp_path / "cache.json")
+        monkeypatch.setattr(sm, "_CACHE_PATH", cache)
+        _reset()
+
+        monkeypatch.setattr(sm.os, "replace", lambda src, dst: (_ for _ in ()).throw(OSError("replace boom")))
+        monkeypatch.setattr(sm.os, "unlink", lambda path: (_ for _ in ()).throw(OSError("unlink boom too")))
+
+        sm._save_disk({"A": "1"})  # must not raise despite both failing
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ensure_loaded — remaining branches (session112 round 21)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestEnsureLoadedRemainingBranches:
+    def test_cold_start_returns_immediately_during_backoff_window(self, monkeypatch, tmp_path):
+        """Empty map, but a recent failure's backoff hasn't elapsed yet —
+        returns without ever touching _fetch_map. Points _CACHE_PATH at a
+        file that doesn't exist so _warm_from_disk() can't quietly
+        populate the map first and take a different branch."""
+        monkeypatch.setattr(sm, "_CACHE_PATH", str(tmp_path / "does-not-exist.json"))
+        called = []
+        monkeypatch.setattr(sm, "_fetch_map", lambda: called.append(1) or {"X": "1"})
+        _reset()
+        sm._next_retry_at = time.time() + 9999
+        sm.ensure_loaded()
+        assert called == []
+        assert sm._token_map == {}
+
+    def test_stale_background_refresh_thread_start_failure_releases_lock(self, monkeypatch, tmp_path):
+        """threading.Thread(...).start() itself raising — the acquired
+        _load_lock must still be released rather than left stuck held
+        forever (which would wedge every future stale-while-revalidate
+        attempt)."""
+        monkeypatch.setattr(sm, "_CACHE_PATH", str(tmp_path / "does-not-exist.json"))
+        _reset()
+        _seed_map({"OLD": "1"})
+        sm._loaded_at = time.time() - sm.REFRESH_INTERVAL_S - 10  # stale
+
+        class _BoomThread:
+            def __init__(self, *a, **kw):
+                pass
+
+            def start(self):
+                raise RuntimeError("thread start boom")
+        monkeypatch.setattr(sm.threading, "Thread", _BoomThread)
+
+        sm.ensure_loaded()  # must not raise
+        assert not sm._load_lock.locked()
+
+    def test_cold_start_gives_up_if_lock_already_held_elsewhere(self, monkeypatch, tmp_path):
+        """Simulates another thread already mid-fetch: _load_lock is held
+        before ensure_loaded() is even called, so the cold-start
+        single-flight acquire (bounded by wait_s) times out and returns
+        with the map still empty, exactly as a real caller falling back
+        to its non-AngelOne path would see."""
+        monkeypatch.setattr(sm, "_CACHE_PATH", str(tmp_path / "does-not-exist.json"))
+        called = []
+        monkeypatch.setattr(sm, "_fetch_map", lambda: called.append(1) or {"X": "1"})
+        _reset()
+        sm._load_lock.acquire()
+        try:
+            sm.ensure_loaded(wait_s=0.05)
+            assert called == []
+            assert sm._token_map == {}
+        finally:
+            sm._load_lock.release()

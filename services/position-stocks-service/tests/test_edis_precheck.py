@@ -187,6 +187,26 @@ def test_multiple_cnc_positions_symbols_appear_in_alert(env):
     assert "ALPHA" in alert and "BETA" in alert
 
 
+def test_notify_critical_exception_is_swallowed(env, monkeypatch, caplog):
+    """If notify_critical() itself raises, _run_edis_precheck must not propagate —
+    only a warning is logged (lines 147-148)."""
+    db, notifications = env
+    pos = _make_pos(db, overnight=True)
+
+    def _boom(msg):
+        raise RuntimeError("telegram down")
+    monkeypatch.setattr(notifier, "notify_critical", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="eod_squareoff"):
+        sq._run_edis_precheck(
+            db, [pos],
+            _edis_override={"verified_today": False, "pending_symbols": ["TESTCNC"]},
+        )
+
+    assert not notifications  # the lambda never appended — it raised instead
+    assert any("notify_critical" in r.message.lower() for r in caplog.records)
+
+
 def test_mixed_positions_only_cnc_ones_counted(env, monkeypatch):
     """A non-CNC position alongside a CNC one must not change the CNC count in the alert."""
     db, notifications = env

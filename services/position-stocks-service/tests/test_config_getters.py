@@ -11,7 +11,25 @@ Both helpers are pure and read `os.getenv` directly, so these are plain
 monkeypatch.setenv tests against the already-imported `config` module —
 no reimport/reload needed, unlike the ADMIN_PASSWORD_HASH_B64 module-level
 block later in the file.
+
+That module-level block (lines 471-475) only runs ONCE, at import, off
+whatever ADMIN_PASSWORD_HASH_B64/ADMIN_PASSWORD_HASH env vars were set at
+that moment — no function wraps it. The only way to exercise both branches
+(decode succeeds / decode raises) is to set the env vars and
+importlib.reload(config) so the module body runs again — same approach
+already used in real-trade-service's tests/test_config.py for the
+byte-for-byte identical block there. Every test that reloads restores the
+original env and reloads config back to its normal state in a
+finally-equivalent fixture teardown, so config's attributes are exactly as
+every other test file in this suite left them by the time this file's
+tests are done — no cross-test pollution.
 """
+import base64
+import importlib
+import os
+
+import pytest
+
 import config
 
 
@@ -54,3 +72,64 @@ class TestGetInt:
         # int("3.5") also raises ValueError (int() doesn't parse decimals).
         monkeypatch.setenv("SOME_INT", "3.5")
         assert config._get_int("SOME_INT", 11) == 11
+
+
+# ── ADMIN_PASSWORD_HASH_B64 decode at import time (lines 471-475) ──────────
+
+@pytest.fixture()
+def _restore_config_env():
+    """Snapshot the two relevant env vars, yield, then put both back exactly
+    as they were and reload config so later test files see the same config
+    module state they always have."""
+    saved_env = {
+        "ADMIN_PASSWORD_HASH_B64": os.environ.get("ADMIN_PASSWORD_HASH_B64"),
+        "ADMIN_PASSWORD_HASH": os.environ.get("ADMIN_PASSWORD_HASH"),
+    }
+    yield
+    for key, val in saved_env.items():
+        if val is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = val
+    importlib.reload(config)
+
+
+class TestAdminHashB64Decode:
+    def test_b64_hash_is_decoded_when_set_and_plain_hash_is_not(self, _restore_config_env):
+        raw_hash = "$argon2id$v=19$m=65536,t=3,p=4$saltsalt$hashhash"
+        os.environ["ADMIN_PASSWORD_HASH_B64"] = base64.b64encode(raw_hash.encode("utf-8")).decode("ascii")
+        os.environ.pop("ADMIN_PASSWORD_HASH", None)
+
+        importlib.reload(config)
+
+        assert config.ADMIN_PASSWORD_HASH == raw_hash
+
+    def test_invalid_b64_hash_falls_back_to_empty_string(self, _restore_config_env):
+        """Garbage that base64/utf-8 decoding can't handle must not crash the
+        whole service at import — it degrades to an empty hash, not an
+        unhandled exception on boot."""
+        os.environ["ADMIN_PASSWORD_HASH_B64"] = "not-valid-base64-!!!"
+        os.environ.pop("ADMIN_PASSWORD_HASH", None)
+
+        importlib.reload(config)
+
+        assert config.ADMIN_PASSWORD_HASH == ""
+
+    def test_plain_hash_env_var_takes_priority_over_b64(self, _restore_config_env):
+        """Per the module comment: either input is accepted, but
+        ADMIN_PASSWORD_HASH wins if both are set."""
+        plain_hash = "$argon2id$plain$hash"
+        os.environ["ADMIN_PASSWORD_HASH"] = plain_hash
+        os.environ["ADMIN_PASSWORD_HASH_B64"] = base64.b64encode(b"should-be-ignored").decode("ascii")
+
+        importlib.reload(config)
+
+        assert config.ADMIN_PASSWORD_HASH == plain_hash
+
+    def test_neither_env_var_set_gives_empty_hash(self, _restore_config_env):
+        os.environ.pop("ADMIN_PASSWORD_HASH_B64", None)
+        os.environ.pop("ADMIN_PASSWORD_HASH", None)
+
+        importlib.reload(config)
+
+        assert config.ADMIN_PASSWORD_HASH == ""

@@ -268,9 +268,20 @@ def _ensure_columns(engine) -> None:
     from sqlalchemy import inspect, text
 
     is_oracle = dialect() == "oracle"
-    inspector = inspect(engine)
     for table, column, oracle_type, pg_type, oracle_default, pg_default in _COLUMN_MIGRATIONS:
         try:
+            # BUG FIX (session112 round 15): inspect(engine) used to be
+            # built ONCE, outside this per-entry try/except. If it raised
+            # for any reason (a bad/half-initialized engine, a transient
+            # connection error while SQLAlchemy introspects the dialect),
+            # the exception propagated straight out of _ensure_columns()
+            # and crashed init_tables() — defeating the whole point of this
+            # function's "never let a migration failure abort startup"
+            # contract. Building it fresh inside the per-entry try means a
+            # failure here is caught and logged exactly like a failed
+            # ALTER, and a transient failure on one entry doesn't prevent
+            # the next entry's inspector from being tried again.
+            inspector = inspect(engine)
             if not inspector.has_table(table):
                 # Table doesn't exist yet at all — create_all() will make it
                 # with the column already present next time it's called on a

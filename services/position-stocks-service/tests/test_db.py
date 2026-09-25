@@ -73,6 +73,7 @@ Run from services/position-stocks-service:
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sys
@@ -389,7 +390,18 @@ class TestEnsureColumns:
         assert alters(eng) == []
 
     def test_existing_column_is_a_no_op(self, monkeypatch):
-        eng = self._engine_with_table("scalp_gate_state", ["service_enabled"])
+        # BUG FIX (session112 round 15): this used to pre-create the table
+        # with only "service_enabled" present, then assert zero ALTERs —
+        # which could only pass if _ensure_columns silently skipped every
+        # OTHER scalp_gate_state column too. It was accidentally testing
+        # "one column already exists" while claiming to test "no-op",
+        # masking the fact that the assertion was really exercising a much
+        # weaker (and wrong) invariant. Pre-create every scalp_gate_state
+        # column from _COLUMN_MIGRATIONS so this genuinely tests the no-op
+        # path: nothing missing anywhere -> zero ALTERs.
+        eng = self._engine_with_table("scalp_gate_state", [
+            c for (t, c, *_rest) in db._COLUMN_MIGRATIONS if t == "scalp_gate_state"
+        ])
         db._ensure_columns(eng)
         assert alters(eng) == []
 
@@ -420,19 +432,25 @@ class TestEnsureColumns:
         real_begin = eng.begin
         state = {"failed_once": False}
 
+        # BUG FIX (session112 round 15): the original version of this fixture
+        # monkeypatched `ctx.__enter__` as an INSTANCE attribute on the
+        # context manager returned by `eng.begin()`. The `with` statement
+        # looks up dunder methods on the TYPE, not the instance, so that
+        # override was silently never invoked — `_ensure_columns` never
+        # actually saw a failure, nothing was logged, and the test only
+        # "passed" by accident (or, once _ensure_columns changed, failed
+        # for a reason that had nothing to do with what it was written to
+        # check). `@contextlib.contextmanager` builds a real class whose
+        # `__enter__`/`__exit__` live on the type, so this genuinely raises
+        # on the first `with engine.begin() as conn:` and behaves normally
+        # after that.
+        @contextlib.contextmanager
         def flaky_begin():
-            ctx = real_begin()
-            orig_enter = ctx.__enter__
-
-            def enter():
-                conn = orig_enter()
-                if not state["failed_once"]:
-                    state["failed_once"] = True
-                    raise OperationalError("ALTER", {}, Exception("simulated failure"))
-                return conn
-
-            ctx.__enter__ = enter
-            return ctx
+            if not state["failed_once"]:
+                state["failed_once"] = True
+                raise OperationalError("ALTER", {}, Exception("simulated failure"))
+            with real_begin() as conn:
+                yield conn
 
         monkeypatch.setattr(eng, "begin", flaky_begin)
         with caplog.at_level(logging.ERROR, logger=LOGGER):

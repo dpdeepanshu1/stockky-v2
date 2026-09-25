@@ -1071,3 +1071,21 @@ rationale. Both travel together in every zip from now on.
     Recommend as a live/staging smoke check before relying on this branch
     under a real breaker trip.
 
+## session112 round 30 (2026-09-25) — closed `tests/test_config_getters.py`'s last coverage gap
+- Every test in this file started with `ADMIN_PASSWORD_HASH_B64`/`ADMIN_PASSWORD_HASH`
+  genuinely unset, so `_restore_config_env`'s teardown (`if val is None: pop / else:
+  os.environ[key] = val`) only ever took the `pop` branch — the `else` restore-a-real-value
+  branch (line 93) was permanently unreachable by every existing test.
+- Added a new fixture, `_preexisting_admin_hash_env`, that sets `ADMIN_PASSWORD_HASH_B64` to
+  a real value *before* `_restore_config_env` snapshots it (ordered ahead of it in the new
+  test's parameter list, so its setup runs first and its own teardown runs last/LIFO) and
+  reloads `config` again in its own teardown so the module's final state still matches the
+  truly-empty environment every other test in the suite expects — no isolation regression.
+  New test: `TestAdminHashB64Decode::test_teardown_restores_a_preexisting_b64_env_value`.
+  `tests/test_config_getters.py` now 100% (was 98%, missing line 93).
+- Full suite re-run: 2280 passed (was 2279), still 99% total — the handful of remaining
+  gaps (`test_db.py`, `test_dhan_client.py`, `test_edis_precheck.py`, `test_eod_squareoff.py`,
+  `test_main.py`, `test_oracle_compat.py`, `test_screening_support.py`, `test_scrip_master.py`,
+  `test_tz_utils.py`, `test_ws_client.py`, `test_ws_client_loop.py`,
+  `test_ws_client_secret_redaction.py`) are next in line for a future round.
+  Delivered: stockky-v2-main-2026-09-25-session112-round31-config-getters-coverage.zip.

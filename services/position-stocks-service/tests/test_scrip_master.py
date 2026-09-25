@@ -691,3 +691,16 @@ class TestEnsureLoadedRemainingBranches:
             assert sm._token_map == {}
         finally:
             sm._load_lock.release()
+
+
+# ── _reset() with lock held (round-30) ───────────────────────────────────────
+class TestResetWithLockHeld:
+    """Lines 52-55 in _reset() — the `if sm._load_lock.locked(): sm._load_lock.release()`
+    branch — are never exercised because every call to _reset() happens when
+    the lock is free.  Acquire the lock before calling _reset() to hit the branch."""
+
+    def test_reset_releases_a_held_lock(self):
+        sm._load_lock.acquire()
+        assert sm._load_lock.locked()
+        _reset()                          # must not raise; must release the lock
+        assert not sm._load_lock.locked()

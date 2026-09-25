@@ -388,3 +388,20 @@ class TestQueries:
     def test_single_lookup_fails_open_on_a_dead_table(self, db, monkeypatch):
         monkeypatch.setattr(db, "query", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db down")))
         assert ie.is_restricted(db, "ABC") is False
+
+
+# ── FakeClient async context-manager protocol (round-30) ─────────────────────
+class TestFakeClientContextManager:
+    """FakeClient.__aenter__ and __aexit__ are defined but no existing test
+    exercises the `async with FakeClient(...) as c:` path — all callers pass
+    the client directly as an argument.  This class covers both dunder methods
+    so test_screening_support.py line 183 (`return False`) is reached."""
+
+    def test_async_context_manager_enters_and_exits_cleanly(self):
+        async def _use():
+            routes = {"http://fund": Resp(200, {"fundamental_score": 80, "market_cap": 1e10})}
+            async with FakeClient(routes) as c:
+                resp = await c.get("http://fund/analyze/TEST")
+                assert resp.json()["fundamental_score"] == 80
+
+        run(_use())

@@ -669,3 +669,17 @@ class TestEnsureOracleAutoincrement:
         eng = _FakeOracleEngine(conn)
         monkeypatch.setattr(_oc, "exec_ddl_safe", lambda *a, **k: None)
         db._ensure_oracle_autoincrement(eng, base)  # must not raise
+
+
+# ── _FakeOracleConn.execute fallthrough path (round-30) ──────────────────────
+class TestFakeOracleConnFallthrough:
+    """The execute() fallthrough `return _Scalar(None)` on line 563 fires when
+    the SQL matches neither `user_tab_identity_cols` nor `MAX(ID)`.  No
+    existing test triggers it because every call goes through
+    _ensure_oracle_autoincrement, which only issues those two query shapes.
+    Call execute() directly with an unrecognised statement to hit the branch."""
+
+    def test_execute_with_unknown_sql_returns_scalar_none(self):
+        conn = _FakeOracleConn()
+        result = conn.execute("SELECT 1 FROM dual")
+        assert result.scalar() is None

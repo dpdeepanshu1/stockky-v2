@@ -913,3 +913,15 @@ class TestAuditRegressions:
         monkeypatch.setattr(config, "USE_SUPER_ORDER", False)
         pos = entry.attempt_entry(db, cand())
         assert pos.dhan_entry_order_id == "PO1"
+
+
+# ── mkpos claim_lock branch (round-30) ───────────────────────────────────────
+class TestMkposClaimLock:
+    """mkpos()'s `if claim_lock: shared_symbol_lock.try_claim(db, symbol)` branch
+    (test_entry.py line 181) is never True in any existing test.  Call it with
+    claim_lock=True and verify the lock is held afterwards."""
+
+    def test_claim_lock_true_acquires_the_symbol_lock(self, env):
+        db, _, _ = env
+        p = mkpos(db, "LOCKME", claim_lock=True)
+        assert lock_held(db, p.symbol)

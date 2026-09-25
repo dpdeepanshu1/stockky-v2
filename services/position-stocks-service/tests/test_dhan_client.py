@@ -260,6 +260,17 @@ class TestClassifiers:
         assert dc.is_circuit_limit_error("RMS:1:Rate Not Within Ckt Limit 395.25 To 592.85")
         assert not dc.is_circuit_limit_error("Insufficient funds. Add Rs.500 to trade.")
 
+    def test_circuit_limit_freeze_wording(self):
+        """session112 round 22 — real, live Dhan RMS rejection (Allied
+        Digital Services, PB FinTech/POLICYBZR incident): "circuit freeze"
+        is a distinct phrasing from "Ckt Limit"/"circuit limit" that the
+        original marker list didn't catch."""
+        assert dc.is_circuit_limit_error(
+            "RMS:351260925312407:Order rejected, Stock in circuit freeze. "
+            "Place order within 78.95 to 113.60."
+        )
+        assert dc.is_circuit_limit_error("Order rejected, stock is in circuit freeze.")
+
     def test_none_message_never_raises(self):
         assert dc.is_intraday_cutoff_error(None) is False
         assert dc.is_circuit_limit_error(None) is False

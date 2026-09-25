@@ -1177,9 +1177,30 @@ _INSUFFICIENT_FUNDS_MARKERS = (
 # band only widens at the start of the next session), so we must NOT hammer
 # Dhan with repeated identical orders.  The screener should also avoid
 # picking circuit-hit stocks because there is no room to exit intraday.
+#
+# BUG FIX (session112 round 22 — PB FinTech/POLICYBZR stuck-OPEN incident,
+# user-reported): Dhan's RMS uses at least two DIFFERENT phrasings for the
+# same underlying rejection depending on the trigger path — the super-order
+# STOP_LOSS_LEG's own rejection (and Allied Digital Services' plain-order
+# rejection observed live) came back as:
+#     "RMS:...:Order rejected, Stock in circuit freeze. Place order
+#      within 78.95 to 113.60."
+# — "circuit FREEZE", not "circuit LIMIT"/"ckt limit" — which none of the
+# markers above match (confirmed: is_circuit_limit_error() returned False
+# for this exact live message). The practical effect: _fire_flat_sell()'s
+# EOD-squareoff/manual-exit retry loop (orders/eod_squareoff.py) treated a
+# permanent, session-long circuit-freeze rejection as an "unclassified
+# (possibly transient)" error — wasting retry attempts against a rejection
+# that can never succeed at any price until the freeze lifts, instead of
+# failing fast with the correct circuit-limit classification/notification/
+# cooldown path the "Ckt limit" wording already gets. Adding the "circuit
+# freeze"/"in circuit freeze" markers closes that gap; every existing
+# marker is left as-is since "Rate Not Within Ckt Limit" is a real,
+# separately-observed phrasing too.
 _CIRCUIT_LIMIT_MARKERS = (
     "rate not within ckt limit", "not within circuit limit",
     "ckt limit", "circuit limit", "within ckt",
+    "circuit freeze", "in circuit freeze",
 )
 
 

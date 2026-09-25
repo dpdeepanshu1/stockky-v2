@@ -111,6 +111,10 @@ _CASES = [
         [
             "RMS:789:Rate Not Within Ckt Limit 395.25 To 592.85",
             "Order price not within circuit limit",
+            # session112 round 22 — real, live Dhan RMS wording distinct
+            # from "Ckt Limit"/"circuit limit" (see execution/dhan_client.py).
+            "RMS:351260925312407:Order rejected, Stock in circuit freeze. "
+            "Place order within 78.95 to 113.60.",
         ],
         ["EXCH:16387:Security is not allowed to trade in this market."],
     ),

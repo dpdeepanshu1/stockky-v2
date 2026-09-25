@@ -232,3 +232,17 @@ def test_output_invariants_hold_for_any_input(monkeypatch, ltp, pct, atr, rng):
     assert lv.target_pct <= config.MAX_TARGET_PCT + 1e-9
     assert lv.breakeven_trigger_pct == pytest.approx(lv.target_pct * 0.4, abs=1e-3)
     assert lv.range_regime in ("neutral", "near_high", "near_low")
+
+
+# ── defensive branch: len(sample) < 2 (round-30) ────────────────────────────
+class TestAtrProxyShortWindowBranch:
+    """ATR_LOOKBACK=20 makes the `if len(sample) < 2` guard unreachable under
+    normal conditions (prices >= 4 → sample >= 4).  Patching ATR_LOOKBACK=1
+    means sample = prices[-1:] = 1 item, which is < 2, so the early-return
+    fires.  This is the only way to cover adaptive.py line 113 without
+    touching source code."""
+
+    def test_sample_shorter_than_two_ticks_returns_none(self, feed, monkeypatch):
+        monkeypatch.setattr(adaptive, "ATR_LOOKBACK", 1)
+        feed["XYZ"] = [100.0, 101.0, 100.0, 101.0]   # 4 valid prices → sample[-1:] = [101.0]
+        assert adaptive._atr_proxy_pct("XYZ", 100.0) is None

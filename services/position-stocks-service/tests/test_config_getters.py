@@ -77,6 +77,43 @@ class TestGetInt:
 # ── ADMIN_PASSWORD_HASH_B64 decode at import time (lines 471-475) ──────────
 
 @pytest.fixture()
+def _preexisting_admin_hash_env():
+    """session112 round 30: `_restore_config_env`'s own teardown (below) has
+    a branch nothing was hitting — `os.environ[key] = val` for a `val` that
+    ISN'T None (line 93). Every test in this file starts from a clean
+    environment (neither ADMIN_PASSWORD_HASH_B64 nor ADMIN_PASSWORD_HASH set
+    before the fixture snapshots them), so `saved_env`'s values were always
+    None and teardown always took the `pop` branch instead.
+
+    This fixture sets ADMIN_PASSWORD_HASH_B64 to a real value *before*
+    `_restore_config_env` runs and snapshots it, so that fixture's teardown
+    has a genuine non-None value to restore. Requested ahead of
+    `_restore_config_env` in the test's parameter list so its setup runs
+    first (pytest instantiates same-scope, non-dependent fixtures in
+    left-to-right parameter order) and its own teardown runs last (LIFO) —
+    after `_restore_config_env` has already put the pre-existing value back
+    and reloaded `config` once. Reloads `config` again here so the module's
+    final state matches the truly-original environment this fixture itself
+    restores, not the intermediate "pre-existing" value `_restore_config_env`
+    leaves it at — keeping this file's isolation promise intact for whatever
+    test runs next.
+
+    Deliberately doesn't mirror `_restore_config_env`'s own
+    save-whatever-was-there-first/restore-it pattern: every test in this
+    suite (this one included) starts with ADMIN_PASSWORD_HASH_B64 genuinely
+    unset, so an "if it had a prior value, restore it" branch here would
+    just be a second, permanently-unreachable copy of the exact coverage
+    gap this fixture exists to close on the fixture below it. A plain
+    unconditional pop is both correct for this file's actual starting state
+    and free of that problem.
+    """
+    os.environ["ADMIN_PASSWORD_HASH_B64"] = base64.b64encode(b"pre-existing").decode("ascii")
+    yield
+    os.environ.pop("ADMIN_PASSWORD_HASH_B64", None)
+    importlib.reload(config)
+
+
+@pytest.fixture()
 def _restore_config_env():
     """Snapshot the two relevant env vars, yield, then put both back exactly
     as they were and reload config so later test files see the same config
@@ -133,3 +170,17 @@ class TestAdminHashB64Decode:
         importlib.reload(config)
 
         assert config.ADMIN_PASSWORD_HASH == ""
+
+    def test_teardown_restores_a_preexisting_b64_env_value(
+        self, _preexisting_admin_hash_env, _restore_config_env
+    ):
+        """Covers _restore_config_env's own teardown restore branch (line 93:
+        `os.environ[key] = val` for a non-None val) — see
+        `_preexisting_admin_hash_env`'s docstring above for why every other
+        test in this class could never reach it."""
+        os.environ["ADMIN_PASSWORD_HASH_B64"] = base64.b64encode(b"temporary-value").decode("ascii")
+        os.environ.pop("ADMIN_PASSWORD_HASH", None)
+
+        importlib.reload(config)
+
+        assert config.ADMIN_PASSWORD_HASH == "temporary-value"

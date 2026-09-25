@@ -6,6 +6,20 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION112_ROUND16_DHAN_CLIENT_COVERAGE_2026-09-25.md` —
+  position-stocks-service `execution/dhan_client.py` (the only module
+  allowed to hold a decrypted Dhan credential / call Dhan's API) 21% → 
+  target ~95%+, tests only, no production change. New
+  `tests/test_dhan_client.py`: pure tick-rounding/classifier logic tested
+  directly; every SDK-facing function (`place_order`, `place_super_order`
+  incl. the MARKET direct-HTTP bump/clamp path, `get_trade_history`
+  pagination, `place_cnc_stop_loss_market`'s 4 raise conditions, eDIS,
+  `convert_position`, etc.) tested against a `SimpleNamespace` fake SDK
+  client. No `sqlalchemy`/`httpx`/`dhanhq` in this sandbox — pure-logic
+  math/classifiers re-verified standalone (all passed); SDK-facing tests
+  traced by hand against the source, not executed — re-run pytest to
+  confirm. No new production bug found this round. Next:
+  `feed/scrip_master.py` (22%).
 - `SESSION112_ROUND15_DB_TEST_FAILURES_FIX_2026-09-25.md` — first real
   pytest run of round 14's new `tests/test_db.py` (position-stocks-service)
   found 3 failures, all in `TestEnsureColumns`. **One real fix:**

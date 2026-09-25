@@ -196,6 +196,3 @@ def test_iso_utc_preserves_already_aware_datetime():
     aware = datetime(2026, 8, 28, 4, 7, 0, tzinfo=timezone.utc)
     assert tz_utils.iso_utc(aware) == aware.isoformat()
 
-
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))

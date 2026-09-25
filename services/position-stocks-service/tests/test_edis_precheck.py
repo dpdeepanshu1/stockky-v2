@@ -103,6 +103,11 @@ def test_no_cnc_positions_skips_check(env, monkeypatch):
     assert called["n"] == 0
     assert not notifications
 
+    # Sanity-check the spy itself actually works, so a silently-broken spy
+    # can't make the "never called" assertion above pass trivially.
+    _boom(db)
+    assert called["n"] == 1
+
 
 def test_verified_true_logs_info_no_alert(env, caplog):
     """verified_today=True → INFO log, no notify_critical call."""

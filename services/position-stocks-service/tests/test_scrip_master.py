@@ -704,3 +704,24 @@ class TestResetWithLockHeld:
         assert sm._load_lock.locked()
         _reset()                          # must not raise; must release the lock
         assert not sm._load_lock.locked()
+
+    def test_reset_swallows_runtime_error_from_release(self):
+        """The `except RuntimeError: pass` guard — reached when release() is
+        called on a lock that looks locked() but actually isn't ours to
+        release (e.g. released concurrently between the check and the call).
+        Simulate with a fake lock object so the branch is exercised
+        deterministically."""
+
+        class _FakeLock:
+            def locked(self_inner):
+                return True
+
+            def release(self_inner):
+                raise RuntimeError("release unlocked lock")
+
+        real_lock = sm._load_lock
+        sm._load_lock = _FakeLock()
+        try:
+            _reset()  # must not raise — the RuntimeError is swallowed
+        finally:
+            sm._load_lock = real_lock

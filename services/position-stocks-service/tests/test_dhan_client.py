@@ -286,16 +286,16 @@ class TestGetSdkClient:
         with pytest.raises(dc.DhanNotConnectedError):
             dc._get_sdk_client(DB)
 
-    def test_valid_creds_returns_client_or_exercises_sdk_probe(self, monkeypatch):
-        # dhanhq may or may not be installed in this environment -- either
-        # way, the no-creds guard above and the import/probe below it both
-        # ran; only the "got a real client back" assertion is conditional.
+    def test_valid_creds_returns_client(self, monkeypatch):
+        # dhanhq IS installed in this environment (a real requirements.txt
+        # pin, not an optional extra), so the no-creds guard and the
+        # import/probe below it both ran deterministically and produced a
+        # real client -- no ambiguity/try-except needed here. The "SDK not
+        # installed" and "old pre-2.1 SDK" branches are covered separately
+        # below by deterministically forcing those conditions.
         _wire_creds(monkeypatch)
-        try:
-            client = dc._get_sdk_client(DB)
-            assert client is not None
-        except (ImportError, RuntimeError):
-            pass
+        client = dc._get_sdk_client(DB)
+        assert client is not None
 
     def test_dhanhq_not_installed_raises_runtime_error(self, monkeypatch):
         # Covers lines 156-157: `from dhanhq import dhanhq` raising
@@ -613,6 +613,15 @@ def _order_client(place_result=None, order_list=None, place_error=None):
 
 
 class TestPlaceOrder:
+    def test_broker_call_error_propagates(self, monkeypatch):
+        client, _ = _order_client(place_error=RuntimeError("connection reset"))
+        _wire_client(monkeypatch, client)
+        with pytest.raises(RuntimeError, match="connection reset"):
+            dc.place_order(
+                DB, is_armed=True, security_id="1", exchange_segment=dc.NSE_EQ_SEGMENT,
+                transaction_type="BUY", quantity=1, order_type="MARKET", price=0,
+            )
+
     def test_not_armed_raises(self, monkeypatch):
         client, _ = _order_client()
         _wire_client(monkeypatch, client)

@@ -444,6 +444,7 @@ class TestStartStop:
 
         async def _run():
             await wsc.start()
+            await asyncio.sleep(0)  # let the task actually start running
             assert wsc._running is True
             assert wsc._ws_task is not None
             assert not wsc._ws_task.done()

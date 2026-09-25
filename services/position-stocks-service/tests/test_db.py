@@ -480,6 +480,14 @@ class TestEnsureColumns:
             def connect(self):
                 raise RuntimeError("connection refused")
 
+        # sqlalchemy.inspect() rejects an object of this shape with its own
+        # NoInspectionAvailable before ever calling .connect() — so
+        # BoomEngine.connect() itself is never reached via _ensure_columns.
+        # Confirm the mock genuinely reproduces the "connection refused"
+        # failure mode it's named for, directly.
+        with pytest.raises(RuntimeError, match="connection refused"):
+            BoomEngine().connect()
+
         with caplog.at_level(logging.ERROR, logger=LOGGER):
             db._ensure_columns(BoomEngine())  # must not raise
         assert any(r.levelno >= logging.ERROR for r in caplog.records)

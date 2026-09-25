@@ -31,6 +31,7 @@ Run from services/position-stocks-service:
 from __future__ import annotations
 
 import itertools
+import logging
 import os
 import sys
 import types
@@ -905,6 +906,23 @@ class TestOvernightCarry:
         qualifying(db, b, ltp=90.0)                                # sold as plain INTRADAY
         eod.run_eod_squareoff(db)
         assert b.of("edis_verification_summary") == []
+
+    def test_edis_check_raising_does_not_stop_the_sell(self, env, caplog):
+        # b.edis set to an exception instance exercises the "raise b.edis"
+        # branch of this file's own _edis fixture, and confirms
+        # _run_edis_precheck's own try/except swallows it and the flat SELL
+        # still proceeds (never raises, per its docstring contract). Needs a
+        # position that actually reaches squareoff_only as CNC — force that
+        # via a failed stop placement, same as
+        # test_stop_failure_after_conversion_squares_off_as_cnc above.
+        db, b, _ = env
+        b.stop_script = [RuntimeError("stop rejected")]
+        b.edis = RuntimeError("eDIS API unreachable")
+        p = qualifying(db, b)
+        with caplog.at_level(logging.WARNING):
+            assert eod.run_eod_squareoff(db) == 1
+        assert p.status == "EOD_SQUAREOFF"
+        assert "eDIS pre-check failed" in caplog.text
 
 
 # ── close_position_now ───────────────────────────────────────────────────────

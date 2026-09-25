@@ -42,8 +42,8 @@ API_KEY = "SECRETapiKEYsecretAPIkey456"
 
 
 async def _echo(websocket):
-    async for _ in websocket:
-        pass
+    async for message in websocket:
+        await websocket.send(message)
 
 
 @pytest.fixture()
@@ -69,8 +69,10 @@ def test_feed_token_and_api_key_never_reach_the_client_log(_client_logger_captur
             f"ws://localhost:{port}/smart-stream"
             f"?clientCode=C1&feedToken={FEED_TOKEN}&apiKey={API_KEY}"
         )
-        async with websockets.connect(url):
-            pass
+        async with websockets.connect(url) as client:
+            await client.send("ping")
+            reply = await client.recv()
+            assert reply == "ping"
         server.close()
         await server.wait_closed()
 

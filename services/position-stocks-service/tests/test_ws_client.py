@@ -411,6 +411,10 @@ class TestWsStatus:
         loop = asyncio.new_event_loop()
         try:
             task = loop.create_task(_dummy())
+            # Let the loop actually step the task once so its body (the
+            # sleep(999) call) really starts running, rather than staying
+            # merely scheduled-but-never-executed before we check/cancel it.
+            loop.run_until_complete(asyncio.sleep(0))
             wsc._ws_task = task
             assert wsc.ws_status()["task_done"] is False
             task.cancel()

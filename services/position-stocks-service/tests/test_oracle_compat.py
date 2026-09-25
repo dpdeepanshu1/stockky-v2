@@ -509,14 +509,15 @@ class TestAttachCallTimeout:
         eng = _sqlite()
         m._attach_call_timeout(eng)
 
-        class _NoTimeout:
-            @property
-            def call_timeout(self):
-                return 0
-
-            @call_timeout.setter
-            def call_timeout(self, v):
+        class _RaisingSetterDescriptor:
+            """Only the setter path is ever exercised (the listener writes
+            conn.call_timeout, never reads it) -- a plain data descriptor
+            with just __set__ avoids needing a dead getter."""
+            def __set__(self, obj, value):
                 raise AttributeError("not supported")
+
+        class _NoTimeout:
+            call_timeout = _RaisingSetterDescriptor()
 
         with caplog.at_level(logging.DEBUG, logger="oracle-compat"):
             self._fire_connect(eng, _NoTimeout())  # must not raise

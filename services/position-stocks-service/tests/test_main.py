@@ -1306,7 +1306,13 @@ class TestLifespan:
 
         async def _run():
             async with m.lifespan(m.app):
-                pass
+                # Yield control at least once so the background tasks
+                # created by lifespan (_trading_loop/_fast_reconcile_loop,
+                # patched to _never_ending here) actually get scheduled and
+                # start running before the context exits and cancels them —
+                # otherwise asyncio may cancel them before their first line
+                # ever executes.
+                await asyncio.sleep(0)
         asyncio.run(_run())
         assert started["n"] == 1
         assert stopped["n"] == 1
@@ -1468,13 +1474,13 @@ def test_fast_reconcile_loop_retention_cleanup_exception_is_caught(db, monkeypat
     assert any("retention-cleanup error" in r.message for r in caplog.records)
 
 
-def test_fast_reconcile_loop_outer_exception_is_caught(monkeypatch, caplog):
+def test_fast_reconcile_loop_outer_exception_is_caught(db, monkeypatch, caplog):
     """is_market_open_ist() raising here happens OUTSIDE every inner try
     block (it's called between the two `with factory() as db:` blocks) —
     the only way to reach the loop's own outer `except Exception:` handler
     rather than one of the per-stage inner ones."""
     monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
-    monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: object()))
+    monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
 
     def _boom():

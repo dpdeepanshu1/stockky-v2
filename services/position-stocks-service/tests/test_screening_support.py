@@ -193,6 +193,15 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def test_fake_client_raises_on_unrouted_url():
+    """Sanity-check FakeClient's own safety net: a URL with no matching
+    prefix in `routes` is a test-authoring bug, not a code path under test —
+    confirm it actually raises rather than silently misrouting."""
+    c = FakeClient({"http://fund": Resp(200, {})})
+    with pytest.raises(AssertionError, match="unrouted"):
+        run(c.get("http://nowhere/analyze/ABC"))
+
+
 class TestFetchers:
     def test_fundamental_score_and_market_cap_converted_to_crore(self):
         c = FakeClient({"http://fund": Resp(200, {"fundamental_score": 66.5, "market_cap": 5e10})})

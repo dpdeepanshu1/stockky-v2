@@ -421,6 +421,22 @@ class TestEnsureColumns:
         assert len(matching) == 1
         assert "NOT NULL" not in matching[0].upper()
 
+    def test_oracle_dialect_builds_add_column_ddl_without_column_keyword(self, monkeypatch):
+        # Covers the `is_oracle` DDL branch (lines 296-298) — every other
+        # _ensure_columns test above runs with dialect() -> postgresql, so
+        # the Oracle-specific "ADD {col} {type}" (no COLUMN keyword,
+        # oracle_type/oracle_default) string was never built or exercised.
+        monkeypatch.setattr(config, "DATABASE_URL", "oracle+oracledb://u:p@h/svc")
+        eng = self._engine_with_table("scalp_gate_state", [])  # service_enabled missing
+        db._ensure_columns(eng)
+        stmts = alters(eng)
+        matching = [s for s in stmts if "service_enabled" in s]
+        assert len(matching) == 1
+        stmt = matching[0]
+        assert "ADD COLUMN" not in stmt.upper()  # Oracle syntax omits COLUMN
+        assert "NUMBER(1)" in stmt  # oracle_type, not pg_type (BOOLEAN)
+        assert "DEFAULT 1 NOT NULL" in stmt.upper()  # oracle_default, not pg_default (TRUE)
+
     def test_a_failed_alter_is_logged_and_does_not_abort_the_rest(self, monkeypatch, caplog):
         eng = new_engine()
         md = MetaData()

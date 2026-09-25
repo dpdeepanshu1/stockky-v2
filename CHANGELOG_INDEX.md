@@ -6,6 +6,42 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION112_ROUND27_EOD_SQUAREOFF_STAGNATION_EXIT_COVERAGE_2026-09-25.md` —
+  position-stocks-service `orders/eod_squareoff.py` 1044-1045 closed:
+  `run_stagnation_exit`'s `except Exception: continue` guarding a
+  malformed `opened_at`, via monkeypatched `as_aware` (same isolation
+  convention as the class's other skip-and-continue tests). Tests only.
+  Still open from round-24: `eod_squareoff.py`'s other 2 lines (needs a
+  fresh coverage run to confirm), and the four 1-line gaps in
+  `adaptive.py` / `entry.py` / `reconcile.py` / `screening/engine.py`.
+- `SESSION112_ROUND26_WS_CLIENT_LOOP_COVERAGE_CLOSEOUT_2026-09-25.md` —
+  position-stocks-service `feed/ws_client.py` last 4 missing lines closed
+  (510-511, 542, 549): `_ws_loop`'s heartbeat-send exception guard, the
+  stale-tick buffer-prune eviction, and the `_last_quote` write (needed a
+  full ≥347-byte depth frame, ported from `test_ws_client.py`'s builder).
+  Tests only. Next per the round-24 coverage run: `orders/
+  eod_squareoff.py` (4), or the four 1-line gaps in `adaptive.py` /
+  `entry.py` / `reconcile.py` / `screening/engine.py`.
+- `SESSION112_ROUND25_DHAN_CLIENT_COVERAGE_CLOSEOUT_2026-09-25.md` —
+  position-stocks-service `execution/dhan_client.py` all 10 remaining
+  missing lines closed (156-157, 161-163, 244, 246, 252-253, 960-961):
+  `_get_sdk_client`'s two SDK-version ImportError branches (forced via
+  `sys.modules["dhanhq"]` patching), the CSV-fallback loop's exchange/
+  instrument filters + per-row exception guard, and
+  `edis_verification_summary`'s non-dict-row branch. Tests only. Next per
+  the round-24 coverage run: `feed/ws_client.py` (4), `orders/
+  eod_squareoff.py` (4), or the four 1-line gaps in `adaptive.py` /
+  `entry.py` / `reconcile.py` / `screening/engine.py`.
+- `SESSION112_ROUND24_DB_ORACLE_DDL_COVERAGE_2026-09-25.md` —
+  position-stocks-service `db.py` `_ensure_columns`'s Oracle-dialect DDL
+  branch (lines 296-298), tests only. New test in `tests/test_db.py`
+  monkeypatches `DATABASE_URL` to an Oracle DSN to exercise the
+  `is_oracle` ALTER-TABLE string. Picked off a real `pytest --cov` run
+  (2257 passed) that confirmed round 23's fix and superseded the earlier
+  unverified table. Next per that run: `execution/dhan_client.py` (10),
+  `feed/ws_client.py` (4), `orders/eod_squareoff.py` (4), or the four
+  1-line gaps in `orders/adaptive.py` / `entry.py` / `reconcile.py` /
+  `screening/engine.py`.
 - `SESSION112_ROUND23_CONFIG_GETTERS_COVERAGE_2026-09-25.md` —
   position-stocks-service `config.py` `_get_float`/`_get_int` malformed-env-var
   fallback branches (lines 31-32, 38-39), tests only. New

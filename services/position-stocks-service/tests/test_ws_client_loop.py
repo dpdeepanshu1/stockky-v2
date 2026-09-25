@@ -85,9 +85,13 @@ def _reset_state():
     wsc._ws_task = None
 
 
-def _build_mode3_frame(token: str, ltp_paise: int, volume: int = 0) -> bytes:
+def _build_mode3_frame(token: str, ltp_paise: int, volume: int = 0,
+                        depth_packets: bytes = b"") -> bytes:
     """Same layout as test_ws_client.py's own builder — kept local so this
-    file has no import-order dependency on that one."""
+    file has no import-order dependency on that one. `depth_packets`
+    (added for round 26's `_last_quote` coverage) extends the frame past
+    the 347-byte SnapQuote threshold so `_parse_frame` returns real
+    best_bid/best_ask instead of None."""
     token_bytes = token.encode("ascii").ljust(25, b"\x00")[:25]
     header = (
         bytes([3, 1]) + token_bytes +
@@ -101,8 +105,21 @@ def _build_mode3_frame(token: str, ltp_paise: int, volume: int = 0) -> bytes:
         struct.pack("<d", 0.0) + struct.pack("<d", 0.0) +
         struct.pack("<q", 0) * 4
     )
-    snap_ext = struct.pack("<q", 0) * 3 + b"\x00" * 200 + struct.pack("<q", 0) * 4
+    snap_ext = struct.pack("<q", 0) * 3
+    if depth_packets:
+        depth = depth_packets[:200].ljust(200, b"\x00")
+    else:
+        depth = b"\x00" * 200
+    snap_ext += depth + struct.pack("<q", 0) * 4
     return header + quote_ext + snap_ext
+
+
+def _build_depth_packet(flag: int, price_paise: int, qty: int = 100) -> bytes:
+    """One 20-byte depth packet — same layout as test_ws_client.py's."""
+    return (
+        struct.pack("<H", flag) + struct.pack("<q", qty) +
+        struct.pack("<q", price_paise) + struct.pack("<H", 1)
+    )
 
 
 def _one_shot_sleep_stops_running():
@@ -300,6 +317,60 @@ class TestWsLoopHappyPath:
         wsc._running = True
         asyncio.run(wsc._ws_loop())
         assert "ping" in ws.sent
+
+    def test_heartbeat_send_failure_is_swallowed(self, monkeypatch):
+        # Covers lines 510-511: `except Exception: pass` around the
+        # heartbeat `ws.send("ping")` — the happy-path heartbeat test above
+        # never lets that send fail, so the guard itself was never hit.
+        monkeypatch.setattr(config, "ANGELONE_WS_HEARTBEAT_INTERVAL_S", 0.0)
+        frame = _build_mode3_frame("3045", ltp_paise=10000)
+        ws = _FakeWS([frame])
+
+        async def _boom_send(msg):
+            if msg == "ping":
+                raise RuntimeError("send failed")
+            ws.sent.append(msg)
+        ws.send = _boom_send
+        session = _FakeSession(ready=True)
+        _patch_common(monkeypatch, session, {"SBIN": "3045"}, _FakeConnect(ws))
+        wsc._running = True
+        asyncio.run(wsc._ws_loop())  # must not raise
+        # the tick after the failed heartbeat still gets processed normally
+        assert len(wsc.get_tick_buffer("SBIN")) == 1
+
+    def test_stale_ticks_are_pruned_from_the_buffer(self, monkeypatch):
+        # Covers line 542: `buf.popleft()` inside the time-bounded prune
+        # loop. Pre-seed the buffer with an ancient (epoch) tick — any new
+        # tick's real `ts` (time.time()) is always far more than
+        # _MAX_BUFFER_AGE_S (65 min) past it, so the prune loop evicts it.
+        wsc._tick_buffers["SBIN"].append((0.0, 999.0))
+        frame = _build_mode3_frame("3045", ltp_paise=10000)
+        ws = _FakeWS([frame])
+        session = _FakeSession(ready=True)
+        _patch_common(monkeypatch, session, {"SBIN": "3045"}, _FakeConnect(ws))
+        wsc._running = True
+        asyncio.run(wsc._ws_loop())
+        buf = wsc.get_tick_buffer("SBIN")
+        assert len(buf) == 1  # ancient entry evicted, only the new tick remains
+        assert buf[0][1] == pytest.approx(100.00)
+
+    def test_best_bid_ask_stored_from_full_depth_frame(self, monkeypatch):
+        # Covers line 549: `_last_quote[symbol] = (best_bid, best_ask, ts)`.
+        # Every other happy-path test uses a bare (non-depth) frame, whose
+        # `_parse_frame` always returns best_bid=best_ask=None, so this
+        # branch was never reached.
+        ask_pkt = _build_depth_packet(flag=0, price_paise=100100)
+        bid_pkt = _build_depth_packet(flag=1, price_paise=100000)
+        depth = ask_pkt + bid_pkt + b"\x00" * (8 * 20)
+        frame = _build_mode3_frame("3045", ltp_paise=100050, depth_packets=depth)
+        ws = _FakeWS([frame])
+        session = _FakeSession(ready=True)
+        _patch_common(monkeypatch, session, {"SBIN": "3045"}, _FakeConnect(ws))
+        wsc._running = True
+        asyncio.run(wsc._ws_loop())
+        best_bid, best_ask = wsc.get_best_bid_ask("SBIN")
+        assert best_bid == pytest.approx(1000.00)
+        assert best_ask == pytest.approx(1001.00)
 
     def test_idle_timeout_close_logged_as_expected(self, monkeypatch, caplog):
         ws = _FakeWS([], close_code=1001, close_reason="Connection Idle Timeout")

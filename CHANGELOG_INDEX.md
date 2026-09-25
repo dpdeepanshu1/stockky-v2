@@ -6,6 +6,19 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION112_ROUND15_DB_TEST_FAILURES_FIX_2026-09-25.md` — first real
+  pytest run of round 14's new `tests/test_db.py` (position-stocks-service)
+  found 3 failures, all in `TestEnsureColumns`. **One real fix:**
+  `_ensure_columns` built its `inspect(engine)` once, outside the
+  per-entry `try/except`, so a failure there crashed `init_tables()`
+  instead of being logged and skipped like every other migration failure
+  — moved inside the loop. Two test-file bugs also fixed: a no-op test
+  that only pre-created 1 of 12 columns, and a "failed ALTER" test whose
+  `ctx.__enter__` override was an instance attribute the `with` statement
+  never actually looked up (rewritten with `@contextlib.contextmanager`).
+  `sqlalchemy`/`pytest` still unavailable in this sandbox (no network) —
+  fixes are statically verified (`py_compile`) only; re-run pytest to
+  confirm. Next: `execution/dhan_client.py` (21%).
 - `SESSION112_ROUND7_SHARED_EXPOSURE_COVERAGE_AND_ROLLBACK_GUARD_2026-09-25.md`
   — position-stocks-service `capital/shared_exposure.py` 36% → 100% (whole
   `capital/` package now 100%). **One real fix:** `publish_own_exposure`'s

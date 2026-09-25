@@ -38,6 +38,7 @@ Run from services/position-stocks-service:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -186,6 +187,48 @@ class TestCapitalCooldownFilter:
         kept, skipped = m._capital_cooldown_filter(db, [_candidate("TREL")])
         assert skipped == ["TREL"]
         m._capital_starved.clear()
+
+    def test_candidate_not_in_starved_map_passes_through(self, db):
+        """Some OTHER symbol is starved, but the candidate being filtered
+        here isn't — it should be kept without even consulting the
+        cooldown/growth math."""
+        m._capital_starved.clear()
+        m._capital_starved["SOME_OTHER_SYMBOL"] = (m.time.monotonic() + 999, 100.0)
+        try:
+            kept, skipped = m._capital_cooldown_filter(db, [_candidate("FRESH")])
+            assert skipped == []
+            assert kept[0].symbol == "FRESH"
+        finally:
+            m._capital_starved.clear()
+
+    def test_starved_symbol_retried_once_cooldown_elapses(self, db, monkeypatch):
+        """Cooldown window already passed (`until` in the past) — the
+        symbol comes off the starved map and is kept."""
+        m._capital_starved.clear()
+        monkeypatch.setattr(m.ledger, "get_state", lambda _db: {"available_capital": 100.0})
+        m._capital_starved["TREL"] = (m.time.monotonic() - 1, 100.0)  # already expired
+        try:
+            kept, skipped = m._capital_cooldown_filter(db, [_candidate("TREL")])
+            assert skipped == []
+            assert kept[0].symbol == "TREL"
+            assert "TREL" not in m._capital_starved
+        finally:
+            m._capital_starved.clear()
+
+    def test_starved_symbol_retried_when_capital_has_grown_enough(self, db, monkeypatch):
+        """Cooldown window still open, but available capital has grown
+        enough since the skip to justify an early retry."""
+        m._capital_starved.clear()
+        monkeypatch.setattr(m.ledger, "get_state", lambda _db: {"available_capital": 10_000.0})
+        # avail_at_skip=100.0 — a jump to 10,000 easily clears the growth floor.
+        m._capital_starved["TREL"] = (m.time.monotonic() + 999, 100.0)
+        try:
+            kept, skipped = m._capital_cooldown_filter(db, [_candidate("TREL")])
+            assert skipped == []
+            assert kept[0].symbol == "TREL"
+            assert "TREL" not in m._capital_starved
+        finally:
+            m._capital_starved.clear()
 
 
 def test_ist_midnight_today_utc_is_before_now(db):
@@ -1212,3 +1255,288 @@ class TestManualClose:
         assert r.status_code == 200
         assert r.json()["order_id"] == "X1"
         assert r.json()["status"] == "pending_broker_confirmation"
+
+
+# ─── lifespan() (session112 round 20) ───────────────────────────────────────
+# Completely untested until now — round 18's test_main.py explicitly scoped
+# out startup/shutdown. Driven as a real async context manager: `async with
+# m.lifespan(m.app):` runs everything up to and including `yield`, then the
+# `__aexit__` runs the shutdown half. `_trading_loop`/`_fast_reconcile_loop`
+# are replaced with a coroutine that waits on an Event that's never set, so
+# the `asyncio.create_task(...)` calls produce real, cancellable tasks
+# without ever looping for real — lifespan's own cancel-and-await-
+# CancelledError shutdown code then exercises normally.
+
+import boot_forensics as _boot_forensics_mod
+import auth.admin_auth as _admin_auth_mod
+
+
+class TestLifespan:
+    def _base_patches(self, monkeypatch, db):
+        monkeypatch.setattr(_boot_forensics_mod, "record_boot", lambda service: {})
+        monkeypatch.setattr(_boot_forensics_mod, "mark_clean_shutdown", lambda reason="shutdown-event": None)
+        monkeypatch.setattr(_admin_auth_mod, "log_auth_config", lambda service: None)
+        monkeypatch.setattr(m._db, "init_tables", lambda: None)
+        monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
+        monkeypatch.setattr(m.shared_symbol_lock, "cleanup_stale", lambda db_: [])
+        monkeypatch.setattr(m.config, "RISK_PER_TRADE_PCT_CONFIRMED", True)
+        monkeypatch.setattr(m.config, "ADMIN_PASSWORD_HASH", "somehash")
+        monkeypatch.setattr(m.config, "SESSION_SECRET", "somesecret")
+
+        started = {"n": 0}
+        stopped = {"n": 0}
+        registered = []
+
+        async def _fake_start():
+            started["n"] += 1
+        async def _fake_stop():
+            stopped["n"] += 1
+        monkeypatch.setattr(m.ws_client, "start", _fake_start)
+        monkeypatch.setattr(m.ws_client, "stop", _fake_stop)
+        monkeypatch.setattr(m.ws_client, "register_on_tick", lambda cb: registered.append(cb))
+
+        async def _never_ending():
+            await asyncio.Event().wait()
+        monkeypatch.setattr(m, "_trading_loop", _never_ending)
+        monkeypatch.setattr(m, "_fast_reconcile_loop", _never_ending)
+        return started, stopped, registered
+
+    def test_happy_path_starts_and_stops_everything(self, db, monkeypatch):
+        started, stopped, registered = self._base_patches(monkeypatch, db)
+
+        async def _run():
+            async with m.lifespan(m.app):
+                pass
+        asyncio.run(_run())
+        assert started["n"] == 1
+        assert stopped["n"] == 1
+        assert registered == [m._engine_tick_hook]
+
+    def test_boot_forensics_exception_is_swallowed(self, db, monkeypatch):
+        started, stopped, _ = self._base_patches(monkeypatch, db)
+
+        def _boom(service):
+            raise RuntimeError("no forensics file")
+        monkeypatch.setattr(_boot_forensics_mod, "record_boot", _boom)
+
+        async def _run():
+            async with m.lifespan(m.app):
+                pass
+        asyncio.run(_run())  # must not raise
+        assert started["n"] == 1
+
+    def test_auth_config_check_exception_is_swallowed(self, db, monkeypatch):
+        started, stopped, _ = self._base_patches(monkeypatch, db)
+
+        def _boom(service):
+            raise RuntimeError("bad auth config")
+        monkeypatch.setattr(_admin_auth_mod, "log_auth_config", _boom)
+
+        async def _run():
+            async with m.lifespan(m.app):
+                pass
+        asyncio.run(_run())  # must not raise
+        assert started["n"] == 1
+
+    def test_warns_when_risk_pct_not_confirmed(self, db, monkeypatch, caplog):
+        self._base_patches(monkeypatch, db)
+        monkeypatch.setattr(m.config, "RISK_PER_TRADE_PCT_CONFIRMED", False)
+
+        async def _run():
+            async with m.lifespan(m.app):
+                pass
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(_run())
+        assert any("RISK_PER_TRADE_PCT_CONFIRMED" in r.message for r in caplog.records)
+
+    def test_warns_when_admin_auth_not_configured(self, db, monkeypatch, caplog):
+        self._base_patches(monkeypatch, db)
+        monkeypatch.setattr(m.config, "ADMIN_PASSWORD_HASH", "")
+        monkeypatch.setattr(m.config, "SESSION_SECRET", "")
+
+        async def _run():
+            async with m.lifespan(m.app):
+                pass
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(_run())
+        assert any("ADMIN_PASSWORD_HASH" in r.message for r in caplog.records)
+
+    def test_warns_when_stale_locks_released(self, db, monkeypatch, caplog):
+        self._base_patches(monkeypatch, db)
+        monkeypatch.setattr(m.shared_symbol_lock, "cleanup_stale", lambda db_: ["SBIN", "TCS"])
+
+        async def _run():
+            async with m.lifespan(m.app):
+                pass
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(_run())
+        assert any("stale symbol lock" in r.message for r in caplog.records)
+
+    def test_mark_clean_shutdown_exception_is_swallowed(self, db, monkeypatch):
+        started, stopped, _ = self._base_patches(monkeypatch, db)
+
+        def _boom(reason="shutdown-event"):
+            raise RuntimeError("can't write forensics file")
+        monkeypatch.setattr(_boot_forensics_mod, "mark_clean_shutdown", _boom)
+
+        async def _run():
+            async with m.lifespan(m.app):
+                pass
+        asyncio.run(_run())  # must not raise
+        assert stopped["n"] == 1
+
+
+# ─── _fast_reconcile_loop — remaining branches (session112 round 20) ───────
+
+def test_fast_reconcile_loop_stagnation_success_is_logged(db, monkeypatch, caplog):
+    monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
+    monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
+    monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
+    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
+    monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit", lambda db: 2)  # truthy
+    monkeypatch.setattr(m.breakeven, "run_breakeven_stop", lambda db: 0)
+    monkeypatch.setattr(m, "ist_time_at_or_after", lambda t: False)
+    _gate(db)
+    with caplog.at_level(logging.INFO):
+        _run_one_fast_reconcile_pass()
+    assert any("stagnation-exit closed" in r.message for r in caplog.records)
+
+
+def test_fast_reconcile_loop_breakeven_success_is_logged(db, monkeypatch, caplog):
+    monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
+    monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
+    monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
+    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
+    monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit", lambda db: 0)
+    monkeypatch.setattr(m.breakeven, "run_breakeven_stop", lambda db: 3)  # truthy
+    monkeypatch.setattr(m, "ist_time_at_or_after", lambda t: False)
+    _gate(db)
+    with caplog.at_level(logging.INFO):
+        _run_one_fast_reconcile_pass()
+    assert any("breakeven-stop moved" in r.message for r in caplog.records)
+
+
+def test_fast_reconcile_loop_breakeven_exception_is_caught(db, monkeypatch, caplog):
+    monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
+    monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
+    monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
+    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
+    monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit", lambda db: 0)
+    monkeypatch.setattr(m.breakeven, "run_breakeven_stop",
+                         lambda db: (_ for _ in ()).throw(RuntimeError("breakeven boom")))
+    monkeypatch.setattr(m, "ist_time_at_or_after", lambda t: False)
+    _gate(db)
+    with caplog.at_level(logging.ERROR):
+        _run_one_fast_reconcile_pass()  # must not raise
+    assert any("breakeven-stop error" in r.message for r in caplog.records)
+
+
+def test_fast_reconcile_loop_eod_squareoff_exception_is_caught(db, monkeypatch, caplog):
+    monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
+    monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
+    monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
+    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
+    monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit", lambda db: 0)
+    monkeypatch.setattr(m.breakeven, "run_breakeven_stop", lambda db: 0)
+    monkeypatch.setattr(m, "ist_time_at_or_after", lambda t: t == m._EOD_SQUAREOFF_TIME)
+    monkeypatch.setattr(m.eod_squareoff, "run_eod_squareoff",
+                         lambda db: (_ for _ in ()).throw(RuntimeError("eod boom")))
+    _gate(db)
+    with caplog.at_level(logging.ERROR):
+        _run_one_fast_reconcile_pass()  # must not raise
+    assert any("fast-reconcile EOD check error" in r.message for r in caplog.records)
+
+
+def test_fast_reconcile_loop_retention_cleanup_exception_is_caught(db, monkeypatch, caplog):
+    monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
+    monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
+    monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
+    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
+    monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit", lambda db: 0)
+    monkeypatch.setattr(m.breakeven, "run_breakeven_stop", lambda db: 0)
+    monkeypatch.setattr(m, "ist_time_at_or_after", lambda t: False)
+    monkeypatch.setattr(m.reconcile, "run_retention_cleanup",
+                         lambda db: (_ for _ in ()).throw(RuntimeError("retention boom")))
+    _gate(db)
+    with caplog.at_level(logging.ERROR):
+        _run_one_fast_reconcile_pass()  # must not raise
+    assert any("retention-cleanup error" in r.message for r in caplog.records)
+
+
+def test_fast_reconcile_loop_outer_exception_is_caught(monkeypatch, caplog):
+    """is_market_open_ist() raising here happens OUTSIDE every inner try
+    block (it's called between the two `with factory() as db:` blocks) —
+    the only way to reach the loop's own outer `except Exception:` handler
+    rather than one of the per-stage inner ones."""
+    monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
+    monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: object()))
+    monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
+
+    def _boom():
+        raise RuntimeError("market-open check exploded")
+    monkeypatch.setattr(m, "is_market_open_ist", _boom)
+    with caplog.at_level(logging.ERROR):
+        _run_one_fast_reconcile_pass()  # must not raise
+    assert any("fast-reconcile loop error" in r.message for r in caplog.records)
+
+
+# ─── _run_cycle — no candidate clears the Quality Gate (session112 round 20) ─
+
+def test_run_cycle_no_candidate_passes_quality_gate(db, monkeypatch):
+    _patch_no_op_prechecks(monkeypatch)
+    monkeypatch.setattr(m, "ist_now", lambda: datetime(2026, 9, 25, 11, 0, tzinfo=m.IST))
+    monkeypatch.setattr(m.ledger, "sync_from_broker", lambda db: 100000.0)
+    monkeypatch.setattr(m.intraday_eligibility, "get_restricted_symbols", lambda db: set())
+    monkeypatch.setattr(m, "scan", lambda **kw: [_candidate("BAD")])
+    monkeypatch.setattr(m.quality_gate, "get_cache_batch", lambda db, syms: {})
+    monkeypatch.setattr(m.quality_gate, "upsert_cache_batch", lambda db, res: None)
+
+    async def _fake_check(symbol, cached=None):
+        return _quality(symbol, fund=10.0, tech=10.0, cap=1.0)  # fails floors
+    monkeypatch.setattr(m.quality_gate, "check", _fake_check)
+    monkeypatch.setattr(m, "log_quality_reject", lambda db, c, q, r: None)
+    _gate(db, service_enabled=True, is_armed=True, auto_pilot_enabled=True)
+
+    summary = asyncio.run(m._run_cycle(db, trigger="AUTO"))
+    stage = next(s for s in summary["stages"] if s["name"] == "entry_attempt")
+    assert "No candidate cleared the Quality Gate" in stage["detail"]
+    assert summary["entered_symbol"] is None
+
+
+# ─── get_db() — actually executing the yield (session112 round 20) ─────────
+
+def test_get_db_dependency_yields_the_underlying_session():
+    sentinel = object()
+
+    def _fake_gen():
+        yield sentinel
+    m_gen = m.get_db()
+    import db as _db_mod
+    # patch AFTER creating the generator object — get_db() itself is a thin
+    # `yield from`, nothing runs until the first next(), so this is safe.
+    orig = _db_mod.get_db
+    _db_mod.get_db = _fake_gen
+    try:
+        val = next(m_gen)
+        assert val is sentinel
+    finally:
+        _db_mod.get_db = orig
+        m_gen.close()
+
+
+# ─── /dhan/live-orders — non-dict entries (session112 round 20) ────────────
+
+def test_live_orders_skips_non_dict_entries(client, db, monkeypatch):
+    monkeypatch.setattr(m.dhan_client, "get_super_order_list", lambda db: [
+        "not-a-dict-entry",
+        {"orderId": "SOZ", "tag": "SCALP"},
+    ])
+    r = client.get("/dhan/live-orders")
+    body = r.json()
+    assert body["count"] == 1
+    assert body["orders"][0]["orderId"] == "SOZ"

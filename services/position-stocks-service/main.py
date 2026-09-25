@@ -179,10 +179,22 @@ async def lifespan(app: FastAPI):
             )
 
     if not config.RISK_PER_TRADE_PCT_CONFIRMED:
+        # BUG FIX (session112 round 20 — found while adding lifespan()
+        # coverage): the old message had a bare, unescaped `%` in
+        # "<your chosen %>" — with %-style logging that's an invalid format
+        # spec once `config.RISK_PER_TRADE_PCT` is substituted in for the
+        # first `%.1f%%`, so `logger.warning(...)` raised inside stdlib
+        # logging's own formatter every time this branch actually fired
+        # (RISK_PER_TRADE_PCT_CONFIRMED unset/false at startup). Python's
+        # default StreamHandler.emit() swallows that via handleError() —
+        # so it never crashed the process — but the intended warning was
+        # silently replaced by a bare "Logging error" traceback on stderr,
+        # every single startup, for exactly the misconfiguration this
+        # warning exists to flag. Escaped the stray `%` as `%%`.
         logger.warning(
             "⚠️  RISK_PER_TRADE_PCT_CONFIRMED is not set — using placeholder "
             "RISK_PER_TRADE_PCT=%.1f%%. Set RISK_PER_TRADE_PCT_CONFIRMED=true and "
-            "RISK_PER_TRADE_PCT=<your chosen %> in env before going live.",
+            "RISK_PER_TRADE_PCT=<your chosen %%> in env before going live.",
             config.RISK_PER_TRADE_PCT,
         )
 

@@ -1136,6 +1136,25 @@ class TestStagnationExit:
         b.ticks[p.symbol] = p.entry_price
         assert eod.run_stagnation_exit(db) == 1
 
+    def test_malformed_opened_at_skips_that_position_and_continues(self, env, monkeypatch):
+        """Covers the `except Exception: continue` guarding as_aware(pos.opened_at) —
+        a corrupt/non-datetime opened_at value must not abort the whole sweep, same
+        isolation contract as the broker-rejection and unexpected-error cases above."""
+        db, b, _ = env
+        bad = mkpos(db, opened_min_ago=60)
+        good = mkpos(db, opened_min_ago=60)
+        for p in (bad, good):
+            b.ticks[p.symbol] = p.entry_price
+        real_as_aware = eod.as_aware
+
+        def flaky(dt):
+            if dt == bad.opened_at:
+                raise TypeError("garbage timestamp")
+            return real_as_aware(dt)
+        monkeypatch.setattr(eod, "as_aware", flaky)
+        assert eod.run_stagnation_exit(db) == 1
+        assert bad.status == "OPEN" and good.status == "STAGNATION_EXIT"
+
 
 # ── exit_retry ───────────────────────────────────────────────────────────────
 class TestExitRetry:

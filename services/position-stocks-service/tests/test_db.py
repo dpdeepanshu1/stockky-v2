@@ -421,6 +421,22 @@ class TestEnsureColumns:
         assert len(matching) == 1
         assert "NOT NULL" not in matching[0].upper()
 
+    def test_oracle_dialect_builds_add_column_ddl_without_column_keyword(self, monkeypatch):
+        # Covers the `is_oracle` DDL branch (lines 296-298) — every other
+        # _ensure_columns test above runs with dialect() -> postgresql, so
+        # the Oracle-specific "ADD {col} {type}" (no COLUMN keyword,
+        # oracle_type/oracle_default) string was never built or exercised.
+        monkeypatch.setattr(config, "DATABASE_URL", "oracle+oracledb://u:p@h/svc")
+        eng = self._engine_with_table("scalp_gate_state", [])  # service_enabled missing
+        db._ensure_columns(eng)
+        stmts = alters(eng)
+        matching = [s for s in stmts if "service_enabled" in s]
+        assert len(matching) == 1
+        stmt = matching[0]
+        assert "ADD COLUMN" not in stmt.upper()  # Oracle syntax omits COLUMN
+        assert "NUMBER(1)" in stmt  # oracle_type, not pg_type (BOOLEAN)
+        assert "DEFAULT 1 NOT NULL" in stmt.upper()  # oracle_default, not pg_default (TRUE)
+
     def test_a_failed_alter_is_logged_and_does_not_abort_the_rest(self, monkeypatch, caplog):
         eng = new_engine()
         md = MetaData()
@@ -653,3 +669,17 @@ class TestEnsureOracleAutoincrement:
         eng = _FakeOracleEngine(conn)
         monkeypatch.setattr(_oc, "exec_ddl_safe", lambda *a, **k: None)
         db._ensure_oracle_autoincrement(eng, base)  # must not raise
+
+
+# ── _FakeOracleConn.execute fallthrough path (round-30) ──────────────────────
+class TestFakeOracleConnFallthrough:
+    """The execute() fallthrough `return _Scalar(None)` on line 563 fires when
+    the SQL matches neither `user_tab_identity_cols` nor `MAX(ID)`.  No
+    existing test triggers it because every call goes through
+    _ensure_oracle_autoincrement, which only issues those two query shapes.
+    Call execute() directly with an unrecognised statement to hit the branch."""
+
+    def test_execute_with_unknown_sql_returns_scalar_none(self):
+        conn = _FakeOracleConn()
+        result = conn.execute("SELECT 1 FROM dual")
+        assert result.scalar() is None

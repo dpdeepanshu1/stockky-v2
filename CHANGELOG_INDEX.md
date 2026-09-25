@@ -6,6 +6,15 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION112_ROUND23_CONFIG_GETTERS_COVERAGE_2026-09-25.md` —
+  position-stocks-service `config.py` `_get_float`/`_get_int` malformed-env-var
+  fallback branches (lines 31-32, 38-39), tests only. New
+  `tests/test_config_getters.py` (8 tests). Picked up in a fresh
+  conversation with no memory of the session that produced the prior
+  coverage table — not re-verified against a real coverage run (no
+  pytest/coverage in this sandbox, no network). See the note at the top
+  of the session file. Next: re-run coverage for real before continuing
+  down that table, since its line numbers may be stale.
 - `SESSION112_ROUND16_DHAN_CLIENT_COVERAGE_2026-09-25.md` —
   position-stocks-service `execution/dhan_client.py` (the only module
   allowed to hold a decrypted Dhan credential / call Dhan's API) 21% → 

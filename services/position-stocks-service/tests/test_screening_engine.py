@@ -341,6 +341,17 @@ class TestScoreMultipliers:
         c = score_of(feed, monkeypatch, five_min(105.0, mid=110.0), volume=0)
         assert c.composite_score == pytest.approx(5.0 * 1.0)
 
+    def test_non_positive_composite_score_is_excluded(self, feed, monkeypatch):
+        """`if score <= 0: continue` (line 342) — under real config this branch
+        can never fire naturally (every passing pct and every multiplier is
+        positive), so force it directly via a monkeypatched window-conviction
+        multiplier gone negative, and confirm the candidate is dropped rather
+        than appended with a non-positive score."""
+        neutral(monkeypatch)
+        monkeypatch.setattr(engine, "_WINDOW_CONVICTION_MULT", {1: 0.90, 5: -1.0, 15: 1.05, 60: 1.10})
+        feed.add("ABC", five_min(101.0))       # rpos 1.0 -> 0.5x, pct exactly at the 5m threshold
+        assert only(engine.scan(), 5) == []
+
 
 class TestWindows:
     def ladder(self, feed):

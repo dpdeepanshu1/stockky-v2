@@ -329,6 +329,15 @@ class TestBackfillLegacy:
         assert reconcile._backfill_legacy_eod_exit_order_ids(db, [p]) == 1
         assert p.dhan_exit_order_id == "S9"
 
+    def test_match_with_blank_order_id_is_skipped(self, env):
+        """A matched row with no usable orderId/order_id (line 232's `if not
+        oid: continue`) must not be adopted — nothing to store, nothing to claim."""
+        db, b, _ = env
+        p = pending(db, qty=10)
+        b.plain_orders = [sell("", p.dhan_security_id, 10)]
+        assert reconcile._backfill_legacy_eod_exit_order_ids(db, [p]) == 0
+        assert p.dhan_exit_order_id is None
+
     def test_one_order_is_never_claimed_by_two_positions(self, env):
         db, b, _ = env
         a = pending(db, qty=10)

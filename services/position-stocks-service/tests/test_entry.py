@@ -306,6 +306,14 @@ class TestHelpers:
         mkpos(db, "ABC", status="ERROR", exit_price=None, closed_min_ago=1)
         assert entry._reentry_guard_reject(db, "ABC", 500.0) is None
 
+    def test_reentry_treats_unresolvable_closed_at_as_no_guard(self, env, monkeypatch):
+        """as_aware(last.closed_at) coming back None (line 109) — a corrupt/
+        unparseable closed_at must fail open (allow), not raise."""
+        db, _, _ = env
+        mkpos(db, "ABC", status="TARGET_HIT", exit_price=500.0, closed_min_ago=5)
+        monkeypatch.setattr(entry, "as_aware", lambda dt: None)
+        assert entry._reentry_guard_reject(db, "ABC", 500.0) is None
+
     # gate / counters / logging
     def test_gate_row_created_and_kill_switch_lazily_reset(self, env):
         db, _, _ = env

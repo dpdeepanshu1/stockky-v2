@@ -6,6 +6,24 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION112_ROUND29_CONFIG_ADMIN_HASH_B64_COVERAGE_2026-09-25.md` —
+  position-stocks-service `config.py` 471-475 closed: the
+  ADMIN_PASSWORD_HASH_B64 decode block, ported from real-trade-service's
+  identical block + its `importlib.reload` fixture pattern. Pure stdlib —
+  all 4 tests actually run for real in-sandbox (no stub needed), not just
+  hand-traced. This clears the entire round-24 source-file list; only
+  tests/*.py files' own coverage gaps remain, flagged round 28, still out
+  of scope pending an explicit go-ahead.
+- `SESSION112_ROUND28_REMAINING_ONE_LINE_GAPS_2026-09-25.md` — position-
+  stocks-service: closed all five remaining 1-2 line source gaps from the
+  round-24 list — `eod_squareoff.py` 147-148 (notify_critical exception
+  swallow), `adaptive.py` 113 (ATR sample<2 guard, forced via monkeypatched
+  `ATR_LOOKBACK`), `entry.py` 109 (reentry guard's unresolvable `closed_at`
+  fail-open), `reconcile.py` 232 (legacy-backfill blank orderId skip),
+  `screening/engine.py` 342 (non-positive composite score, forced via
+  monkeypatched `_WINDOW_CONVICTION_MULT`). Tests only. `config.py`
+  471-475 still open (importlib.reload risk); several `tests/*.py` files'
+  own coverage gaps flagged but not yet in scope.
 - `SESSION112_ROUND27_EOD_SQUAREOFF_STAGNATION_EXIT_COVERAGE_2026-09-25.md` —
   position-stocks-service `orders/eod_squareoff.py` 1044-1045 closed:
   `run_stagnation_exit`'s `except Exception: continue` guarding a

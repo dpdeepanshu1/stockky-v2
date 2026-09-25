@@ -576,9 +576,22 @@ def is_security_intraday_restricted_error(message: str) -> bool:
 # PERMANENT rejection for the current session: no retry at the same price
 # can succeed.  On BUY side: skip entry, the stock has no intraday upside.
 # On SELL side: nothing to do except wait; log once, do not retry.
+#
+# BUG FIX (session112 round 22, ported from position-stocks-service — same
+# user-reported incident: PB FinTech/POLICYBZR stuck OPEN past its stop,
+# Allied Digital Services rejected live): Dhan's RMS uses at least two
+# different phrasings for this rejection — the one observed live was
+#     "RMS:...:Order rejected, Stock in circuit freeze. Place order
+#      within 78.95 to 113.60."
+# — "circuit FREEZE", not "circuit LIMIT"/"ckt limit" — which none of the
+# markers below matched (confirmed against the exact live message). Kept
+# in sync with position-stocks-service/execution/dhan_client.py's copy of
+# this same list/function — see that file's own comment for the full
+# incident write-up.
 _CIRCUIT_LIMIT_MARKERS = (
     "rate not within ckt limit", "not within circuit limit",
     "ckt limit", "circuit limit", "within ckt",
+    "circuit freeze", "in circuit freeze",
 )
 
 

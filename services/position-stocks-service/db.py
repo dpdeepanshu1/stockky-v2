@@ -35,6 +35,16 @@ def _normalize_pg_url(url: str) -> str:
         url = "postgresql://" + url[len("postgres://"):]
     if "channel_binding=" in url:
         url = re.sub(r"([&?])channel_binding=[^&]*", r"\1", url)
+        # BUG FIX (session112 round 14): a channel_binding param in the
+        # MIDDLE of the query string (e.g. Neon's own
+        # "?a=1&channel_binding=require&b=2") used to leave "a=1&&b=2" after
+        # the substitution above — libpq's URI parser rejects the resulting
+        # empty key ("missing key/value separator '=' in URI query
+        # parameter"). Collapse the doubled '&' before the leading/trailing
+        # cleanup below. Same regression already fixed in real-trade-service's
+        # copy of this function (2026-09-24, session97) — never ported here
+        # until now, found while writing this module's coverage tests.
+        url = re.sub(r"&{2,}", "&", url)
         url = url.replace("?&", "?").rstrip("?&")
     if "sslmode=" not in url.lower():
         url = url + ("&" if "?" in url else "?") + "sslmode=require"

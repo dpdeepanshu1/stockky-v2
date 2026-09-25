@@ -4355,8 +4355,11 @@ async def ops_qstash_tick(request: Request):
     try:
         sig = request.headers.get("Upstash-Signature") or request.headers.get("upstash-signature") or ""
         body = await request.body()
-        if qstash_client is not None and not qstash_client.verify_signature(sig, body):
-            raise HTTPException(status_code=401, detail="Invalid QStash signature")
+        if qstash_client is not None:
+            _gw_base = (os.environ.get("API_GATEWAY_URL") or "").rstrip("/")
+            _expected_url = f"{_gw_base}{request.url.path}" if _gw_base else None
+            if not qstash_client.verify_signature(sig, body, expected_url=_expected_url):
+                raise HTTPException(status_code=401, detail="Invalid QStash signature")
     except HTTPException:
         raise
     except Exception:

@@ -6,6 +6,8 @@ Env:
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import os
 from typing import Any, Dict, Optional
@@ -74,7 +76,20 @@ def schedule_gateway_tick(
     return publish(f"{base}{path}", body or {"source": "qstash"}, delay_seconds=delay_seconds)
 
 
-def verify_signature(signature_header: str, body: bytes) -> bool:
+def verify_signature(
+    signature_header: str,
+    body: bytes,
+    expected_url: Optional[str] = None,
+) -> bool:
+    """Verify an Upstash-Signature JWT per QStash's own spec:
+    https://upstash.com/docs/qstash/howto/signature — iss must be "Upstash",
+    sub must match the destination URL the callback was sent to, exp must
+    not have passed, and the body claim must match a SHA-256 hash of the
+    raw request body. `expected_url` is optional (older/self-hosted
+    deployments may not have API_GATEWAY_URL configured); when omitted, the
+    sub claim is still required to be present (via `require`) but its value
+    is not pinned.
+    """
     if not SIGN_CURRENT and not SIGN_NEXT:
         logger.debug("QStash signature keys not set — accepting callback")
         return True
@@ -84,20 +99,41 @@ def verify_signature(signature_header: str, body: bytes) -> bool:
         return False
     try:
         import jwt  # type: ignore
-        keys = [k for k in (SIGN_CURRENT, SIGN_NEXT) if k]
-        last_err = None
-        for key in keys:
-            try:
-                jwt.decode(
-                    signature_header,
-                    key,
-                    algorithms=["HS256"],
-                    options={"require": ["iss", "sub", "exp"]},
-                )
-                return True
-            except Exception as e:
-                last_err = e
-        logger.warning("QStash JWT verify failed: %s", last_err)
-        return False
     except ImportError:
+        # Fail-open, same as every other degraded-dependency path in this
+        # codebase (see shared_exposure.py) — but always log it, since a
+        # missing PyJWT here means EVERY QStash callback is accepted
+        # unverified until the dependency is installed.
+        logger.warning(
+            "PyJWT not installed — cannot verify QStash signatures; "
+            "accepting callback unverified (fail-open). Install PyJWT to "
+            "enable signature verification."
+        )
         return True
+
+    body_hash = base64.urlsafe_b64encode(hashlib.sha256(body).digest()).decode("ascii").rstrip("=")
+    keys = [k for k in (SIGN_CURRENT, SIGN_NEXT) if k]
+    last_err: Any = None
+    for key in keys:
+        try:
+            claims = jwt.decode(
+                signature_header,
+                key,
+                algorithms=["HS256"],
+                options={"require": ["iss", "sub", "exp"]},
+            )
+            if claims.get("iss") != "Upstash":
+                last_err = f"unexpected iss claim: {claims.get('iss')!r}"
+                continue
+            if expected_url is not None and claims.get("sub") != expected_url:
+                last_err = f"unexpected sub claim: {claims.get('sub')!r} (expected {expected_url!r})"
+                continue
+            claim_body_hash = (claims.get("body") or "").rstrip("=")
+            if claim_body_hash and claim_body_hash != body_hash:
+                last_err = "body hash mismatch"
+                continue
+            return True
+        except Exception as e:
+            last_err = e
+    logger.warning("QStash JWT verify failed: %s", last_err)
+    return False

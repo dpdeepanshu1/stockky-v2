@@ -297,6 +297,37 @@ class TestGetSdkClient:
         except (ImportError, RuntimeError):
             pass
 
+    def test_dhanhq_not_installed_raises_runtime_error(self, monkeypatch):
+        # Covers lines 156-157: `from dhanhq import dhanhq` raising
+        # ImportError -> re-raised as RuntimeError. A `None` entry in
+        # sys.modules is the standard way to force an import to fail
+        # without needing the package to actually be absent.
+        _wire_creds(monkeypatch)
+        monkeypatch.setitem(sys.modules, "dhanhq", None)
+        with pytest.raises(RuntimeError, match="dhanhq SDK not installed"):
+            dc._get_sdk_client(DB)
+
+    def test_pre_2_1_sdk_without_dhancontext_falls_back_to_two_arg_form(self, monkeypatch):
+        # Covers lines 161-163: `from dhanhq import DhanContext` raising
+        # ImportError (old SDK, e.g. pinned 2.0.2) -> falls back to the
+        # legacy two-positional-arg constructor. Fakes the `dhanhq` module
+        # with a `dhanhq` class but no `DhanContext` attribute, since the
+        # real installed SDK version on any given box may already be >=2.1.
+        _wire_creds(monkeypatch)
+        calls = []
+
+        class _FakeDhanhqClass:
+            def __init__(self, *args):
+                calls.append(args)
+
+        fake_module = SimpleNamespace(dhanhq=_FakeDhanhqClass)
+        # No DhanContext attribute at all -> `from dhanhq import DhanContext`
+        # raises ImportError, exactly like a pre-2.1 SDK install.
+        monkeypatch.setitem(sys.modules, "dhanhq", fake_module)
+        client = dc._get_sdk_client(DB)
+        assert isinstance(client, _FakeDhanhqClass)
+        assert calls == [("C1", "T1")]  # old two-arg positional form, not DhanContext-wrapped
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # _load_security_cache / get_security_id
@@ -370,6 +401,43 @@ class TestLoadSecurityCache:
             lambda url, headers, timeout: httpx.Response(200, text=csv_text, request=httpx.Request("GET", url)),
         )
         dc._load_security_cache(DB)
+        assert dc._security_cache == {"TCS": "11536"}
+
+    def test_csv_fallback_skips_non_nse_non_equity_and_row_exceptions(self, monkeypatch):
+        # Covers the CSV-fallback per-row filter/exception lines (244, 246,
+        # 252-253) — the existing `test_sdk_fails_falls_back_to_csv_download`
+        # only exercises the SEM_SERIES filter (line 248) via its "BE" row;
+        # the exchange filter, instrument filter, and per-row except/continue
+        # in this loop were never hit.
+        self._reset_cache(monkeypatch)
+
+        def boom(mode):
+            raise RuntimeError("SDK down")
+
+        _wire_client(monkeypatch, SimpleNamespace(fetch_security_list=boom))
+        _wire_creds(monkeypatch)
+        csv_text = (
+            "SEM_EXM_EXCH_ID,SEM_INSTRUMENT_NAME,SEM_SERIES,SEM_TRADING_SYMBOL,SEM_SMST_SECURITY_ID\r\n"
+            "BSE,EQUITY,EQ,WRONGEXCH,1\r\n"
+            "NSE,FUTURE,EQ,WRONGINSTR,2\r\n"
+            "NSE,EQUITY,EQ,BOOM,3\r\n"
+            "NSE,EQUITY,EQ,TCS,11536.0\r\n"
+        )
+        monkeypatch.setattr(
+            dc.httpx, "get",
+            lambda url, headers, timeout: httpx.Response(200, text=csv_text, request=httpx.Request("GET", url)),
+        )
+        real_add_security = dc._add_security
+
+        def flaky_add_security(fresh, sym, sec_id_raw):
+            if sym == "BOOM":
+                raise RuntimeError("bad row")
+            real_add_security(fresh, sym, sec_id_raw)
+
+        monkeypatch.setattr(dc, "_add_security", flaky_add_security)
+        dc._load_security_cache(DB)
+        # Only the well-formed NSE/EQUITY row survives all three filters
+        # plus the per-row exception guard.
         assert dc._security_cache == {"TCS": "11536"}
 
     def test_csv_fallback_with_no_creds_raises(self, monkeypatch):
@@ -931,6 +999,18 @@ class TestEdisVerificationSummary:
         ])
         result = dc.edis_verification_summary(DB)
         assert result["verified_today"] is True
+
+    def test_non_dict_row_is_counted_unrecognized_not_fatal(self, monkeypatch):
+        # Covers lines 960-961 (`if not isinstance(row, dict): unrecognized
+        # += 1; continue`) — every other test's rows are always dicts, well-
+        # or ill-shaped, so a row that isn't a dict at all (a malformed/
+        # unexpected API shape) was never hit.
+        monkeypatch.setattr(dc, "edis_inquire", lambda db, isin="ALL": {
+            "data": ["not-a-dict-row", {"isin": "X", "aprvdQty": 5, "totalQty": 5}]
+        })
+        result = dc.edis_verification_summary(DB)
+        assert result["verified_today"] is True  # the one real row is fully approved
+        assert result["holdings_total"] == 2  # non-dict row still counted in the total
 
 
 # ══════════════════════════════════════════════════════════════════════════

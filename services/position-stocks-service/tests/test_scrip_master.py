@@ -321,7 +321,11 @@ class TestRefreshLocked:
         def fake_fetch():
             if raises:
                 raise raises
-            return result or {"SBIN": "3045"}
+            # NOTE (session112 round18 fix): `result or {...}` was wrong here
+            # — an explicitly-passed empty dict `{}` is falsy in Python, so it
+            # silently fell through to the non-empty default instead of
+            # exercising the empty-result branch. Use an explicit None check.
+            return {"SBIN": "3045"} if result is None else result
         monkeypatch.setattr(sm, "_fetch_map", fake_fetch)
 
     def test_success_updates_map(self, monkeypatch, tmp_path):

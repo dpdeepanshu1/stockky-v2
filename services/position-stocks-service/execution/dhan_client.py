@@ -767,8 +767,11 @@ def modify_super_order(
             f"modify_super_order: unsupported order_leg={order_leg!r} — "
             f"only STOP_LOSS_LEG/TARGET_LEG are wired here."
         )
-    client = _get_sdk_client(db)
-
+    # Validate leg-specific price args BEFORE touching credentials/SDK client —
+    # a missing price is a caller bug, not something that should cost a DB
+    # round trip + decryption first (found session112 round18 while adding
+    # coverage: the old order made these ValueErrors untestable without also
+    # mocking the credentials DB call, which was the tell).
     kwargs: dict = {}
     if order_leg == "STOP_LOSS_LEG":
         if stop_loss_price is None:
@@ -779,6 +782,8 @@ def modify_super_order(
         if target_price is None:
             raise ValueError("modify_super_order: TARGET_LEG requires target_price.")
         kwargs["targetPrice"] = round_to_tick(float(target_price))
+
+    client = _get_sdk_client(db)
 
     logger.info(
         "position-stocks: Modifying REAL super order %s leg=%s -> %s",

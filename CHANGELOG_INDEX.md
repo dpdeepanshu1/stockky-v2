@@ -6,6 +6,17 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION124_ANALYSIS_INTEL_RATE_LIMIT_REPORT_COVERAGE_2026-09-29.md` —
+  analysis-intelligence-service `rate_limit_report.py`: 35 test functions appended to
+  `tests/test_rate_limit_report.py` covering the `_kv_get`/`_kv_set` sys.path fallback,
+  stats/event edge cases, gateway POST and status extraction. Tests only; not run
+  in-sandbox (no pytest) — confirm with the coverage command in the note.
+- `SESSION123_ANALYSIS_INTEL_SERVICE_MAIN_COVERAGE_2026-09-29.md` —
+  analysis-intelligence-service root `main.py`: new `tests/test_service_main.py`
+  (fake sub-app trees + one real-mount smoke test; temp trees under `__pycache__` so
+  they stay out of coverage). Fixed a wrong `''`-on-sys.path assertion. Tests only; not
+  re-run in-sandbox (no pytest) — run `./run_tests.sh` to confirm. Session-122 roadmap
+  is now complete.
 - `SESSION112_ROUND29_CONFIG_ADMIN_HASH_B64_COVERAGE_2026-09-25.md` —
   position-stocks-service `config.py` 471-475 closed: the
   ADMIN_PASSWORD_HASH_B64 decode block, ported from real-trade-service's

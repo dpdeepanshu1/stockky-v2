@@ -1,0 +1,20 @@
+# Run from services/analysis-intelligence-service.
+# The sub-app folders (event/, fundamental/, ...) have no __init__.py, so `source = .` alone
+# skips any file in them that no test imports. Listing each folder as its own source root makes
+# coverage walk it, so untested files (event/main.py, ...) show up as 0% instead of being hidden.
+[run]
+source =
+    .
+    event
+    fundamental
+    news
+    sentiment
+    technical
+omit =
+    tests/*
+    */__pycache__/*
+    .venv/*
+
+[report]
+show_missing = True
+skip_empty = True

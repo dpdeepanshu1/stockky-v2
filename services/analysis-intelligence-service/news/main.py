@@ -12,7 +12,7 @@ except Exception:
     build_news_response = None  # type: ignore
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 from urllib.parse import quote
 
@@ -23,6 +23,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("news-intelligence-service")
+
+
+def _utcnow() -> datetime:
+    """Naive-UTC 'now' (drop-in for the deprecated datetime.utcnow()).
+    Naive on purpose: compared against naive datetimes built from feed timestamps."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 app = FastAPI(title="Stockky News Intelligence Service", version="0.5.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -239,7 +245,7 @@ def _is_relevant(title: str, description: str, keywords: List[str]) -> bool:
 
 def _parse_feed_items(parsed, publisher: str, keywords: List[str], max_items: int, days: int = 10) -> List[Dict[str, Any]]:
     items = []
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = _utcnow() - timedelta(days=days)
     for entry in getattr(parsed, "entries", [])[:50]:
         title = getattr(entry, "title", "") or ""
         desc = getattr(entry, "description", "") or getattr(entry, "summary", "") or ""
@@ -423,7 +429,7 @@ def _fetch_newsapi(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
                 return []
             data = resp.json()
             items = []
-            cutoff = datetime.utcnow() - timedelta(days=10)
+            cutoff = _utcnow() - timedelta(days=10)
             for article in data.get("articles", []):
                 title = article.get("title") or ""
                 desc = article.get("description") or ""

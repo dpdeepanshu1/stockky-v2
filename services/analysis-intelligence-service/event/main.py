@@ -19,7 +19,7 @@ import time
 import random
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 from urllib.parse import quote
 from functools import wraps
@@ -35,6 +35,14 @@ from upstash_redis import Redis
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("event-tracker-service")
+
+
+def _utcnow() -> datetime:
+    """Naive-UTC 'now' (drop-in for the deprecated datetime.utcnow()).
+    Kept naive on purpose: it is compared against naive datetimes parsed from
+    yfinance/RSS/ISO strings elsewhere in this module."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 app = FastAPI(title="Stockky Event Tracker Service", version="0.4.4")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -474,7 +482,7 @@ def _fetch_google_news(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]
             logger.warning("Google News RSS feed returned empty for %s", symbol)
             return []
         items = []
-        cutoff = datetime.utcnow() - timedelta(days=30)
+        cutoff = _utcnow() - timedelta(days=30)
         for entry in parsed.entries[:max_items]:
             published = None
             if getattr(entry, "published_parsed", None):
@@ -500,7 +508,7 @@ def _fetch_moneycontrol_news(symbol: str, max_items: int = 5) -> List[Dict[str, 
         parsed = feedparser.parse(feed_url)
         logger.info(f"Moneycontrol feed entries for {symbol}: {len(parsed.entries)}")
         items = []
-        cutoff = datetime.utcnow() - timedelta(days=30)
+        cutoff = _utcnow() - timedelta(days=30)
         for entry in parsed.entries[:50]:
             title = entry.title.lower()
             desc = entry.description.lower() if hasattr(entry, "description") else ""
@@ -532,7 +540,7 @@ def _fetch_economic_times(symbol: str, max_items: int = 5) -> List[Dict[str, Any
         parsed = feedparser.parse(feed_url)
         logger.info(f"Economic Times feed entries for {symbol}: {len(parsed.entries)}")
         items = []
-        cutoff = datetime.utcnow() - timedelta(days=30)
+        cutoff = _utcnow() - timedelta(days=30)
         for entry in parsed.entries[:50]:
             title = entry.title.lower()
             desc = entry.description.lower() if hasattr(entry, "description") else ""
@@ -564,7 +572,7 @@ def _fetch_cnbc_tv18(symbol: str, max_items: int = 5) -> List[Dict[str, Any]]:
         parsed = feedparser.parse(feed_url)
         logger.info(f"CNBC TV18 feed entries for {symbol}: {len(parsed.entries)}")
         items = []
-        cutoff = datetime.utcnow() - timedelta(days=30)
+        cutoff = _utcnow() - timedelta(days=30)
         for entry in parsed.entries[:50]:
             title = entry.title.lower()
             desc = entry.description.lower() if hasattr(entry, "description") else ""
@@ -798,7 +806,7 @@ def _fetch_events(symbol: str, force: bool = False) -> dict:
         "earnings_surprise": earnings_surprise,
         "bulk_deals": bulk_deals,
         "fii_dii_net_flow": fii_dii_net_flow,
-        "checked_at": datetime.utcnow().isoformat(),
+        "checked_at": _utcnow().isoformat(),
         "cached": False,
     }
     result["summary"] = _summarize_events(result)
@@ -963,7 +971,7 @@ def get_events_categorized(symbol: str, force: bool = False):
     next_earnings = current.get("next_earnings_date")
     if next_earnings:
         try:
-            is_future = datetime.fromisoformat(next_earnings.replace("Z", "")) >= datetime.utcnow()
+            is_future = datetime.fromisoformat(next_earnings.replace("Z", "")) >= _utcnow()
         except (ValueError, TypeError):
             is_future = True  # unparseable date — don't silently drop it, default to showing it
         (upcoming if is_future else recent).append({
@@ -1035,7 +1043,7 @@ def get_events_categorized(symbol: str, force: bool = False):
 def subscribe(req: SubscribeRequest):
     state = _load_state()
     existing = set(state["subscriptions"])
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = _utcnow().isoformat()
     for s in req.symbols:
         sym = _normalize(s)
         existing.add(sym)
@@ -1111,7 +1119,7 @@ def raw_feed(hours: int = 24):
     """
     state = _load_state()
     subscriptions = state.get("subscriptions", [])
-    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    cutoff = _utcnow() - timedelta(hours=hours)
 
     items: list[dict] = []
     for symbol in subscriptions:
@@ -1141,7 +1149,7 @@ def raw_feed(hours: int = 24):
                 "publisher": n.get("publisher"),
             })
 
-    return {"items": items, "hours": hours, "checked_at": datetime.utcnow().isoformat()}
+    return {"items": items, "hours": hours, "checked_at": _utcnow().isoformat()}
 
 
 @app.get("/check")
@@ -1170,7 +1178,7 @@ def check_for_changes():
     return {
         "checked": len(state["subscriptions"]),
         "changes": changes,
-        "checked_at": datetime.utcnow().isoformat(),
+        "checked_at": _utcnow().isoformat(),
     }
 
 
@@ -1190,7 +1198,7 @@ def symbols_with_events(days_ahead: int = 7):
         _redis_set(EVENTS_LIST_CACHE_KEY, [], ttl=EVENTS_LIST_CACHE_TTL)
         return {"symbols": []}
 
-    now = datetime.utcnow()
+    now = _utcnow()
     cutoff = now + timedelta(days=days_ahead)
     result_symbols = []
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -18,6 +18,12 @@ import feedparser
 import httpx
 
 logger = logging.getLogger("news_quality")
+
+
+def _utcnow() -> datetime:
+    """Naive-UTC 'now' (drop-in for the deprecated datetime.utcnow()).
+    Naive on purpose: compared against naive datetimes built from feed timestamps."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 # Expanded aliases — especially for IPO / edtech / odd ticker names
 EXTRA_ALIASES: Dict[str, List[str]] = {
@@ -97,7 +103,7 @@ def _is_relevant(title: str, desc: str, keywords: List[str]) -> bool:
 
 def _parse_entries(parsed, publisher: str, keywords: List[str], max_items: int = 8, days: int = 14) -> List[Dict[str, Any]]:
     items = []
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = _utcnow() - timedelta(days=days)
     for entry in getattr(parsed, "entries", []) or []:
         title = getattr(entry, "title", "") or ""
         desc = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""

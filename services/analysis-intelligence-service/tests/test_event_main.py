@@ -103,11 +103,11 @@ class _Boom:
 
 def _pp(days_ago):
     """feedparser-style published_parsed struct_time."""
-    return (datetime.utcnow() - timedelta(days=days_ago)).timetuple()
+    return (em._utcnow() - timedelta(days=days_ago)).timetuple()
 
 
 def _iso(days_from_now):
-    return (datetime.utcnow() + timedelta(days=days_from_now)).date().isoformat()
+    return (em._utcnow() + timedelta(days=days_from_now)).date().isoformat()
 
 
 _UNSET = object()
@@ -720,6 +720,21 @@ class TestSummarize:
     def test_bulk_with_transaction_key(self):
         s = em._summarize_events({"symbol": "A.NS", "bulk_deals": [{"transaction": "SELL"}]})
         assert s == "📦 Bulk/block deal(s): 1 — SELL"
+
+    def test_bulk_unindexable_truthy_value_is_tolerated(self):
+        # bulk_deals arriving as a dict (truthy, has len, but bulk[0] raises KeyError)
+        # must not crash the summary: the sample lookup is best-effort (lines 430-431).
+        s = em._summarize_events({"symbol": "A.NS", "bulk_deals": {"x": 1}})
+        assert s == "📦 Bulk/block deal(s): 1"
+
+    def test_utcnow_helper_is_naive_and_current(self):
+        import warnings
+        from datetime import timezone
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            t = em._utcnow()
+        assert t.tzinfo is None
+        assert abs((datetime.now(timezone.utc).replace(tzinfo=None) - t).total_seconds()) < 5
 
     def test_bulk_without_side_or_non_dict(self):
         assert em._summarize_events({"symbol": "A.NS", "bulk_deals": [{}]}) == "📦 Bulk/block deal(s): 1"
@@ -1617,8 +1632,8 @@ class TestRawFeed:
         assert em.raw_feed()["items"] == []
 
     def test_recent_items_included_old_excluded(self):
-        recent = (datetime.utcnow() - timedelta(hours=2)).isoformat()
-        old = (datetime.utcnow() - timedelta(hours=60)).isoformat()
+        recent = (em._utcnow() - timedelta(hours=2)).isoformat()
+        old = (em._utcnow() - timedelta(hours=60)).isoformat()
         self._seed(["A.NS"], {"A.NS": [
             {"title": "fresh", "published": recent, "publisher": "P"},
             {"title": "stale", "published": old, "publisher": "P"},
@@ -1627,13 +1642,13 @@ class TestRawFeed:
         assert items == [{"symbol": "A.NS", "headline": "fresh", "price": None, "ts": recent, "publisher": "P"}]
 
     def test_hours_widens_window(self):
-        old = (datetime.utcnow() - timedelta(hours=60)).isoformat()
+        old = (em._utcnow() - timedelta(hours=60)).isoformat()
         self._seed(["A.NS"], {"A.NS": [{"title": "stale", "published": old}]})
         out = em.raw_feed(hours=72)
         assert out["hours"] == 72 and len(out["items"]) == 1
 
     def test_z_suffix_parsed(self):
-        old = (datetime.utcnow() - timedelta(hours=60)).isoformat() + "Z"
+        old = (em._utcnow() - timedelta(hours=60)).isoformat() + "Z"
         self._seed(["A.NS"], {"A.NS": [{"title": "stale", "published": old}]})
         assert em.raw_feed(hours=24)["items"] == []
 
@@ -1650,7 +1665,7 @@ class TestRawFeed:
         assert em.raw_feed()["items"] == []
 
     def test_items_from_multiple_symbols(self):
-        ts = datetime.utcnow().isoformat()
+        ts = em._utcnow().isoformat()
         self._seed(["A.NS", "B.NS"], {"A.NS": [{"title": "a", "published": ts}], "B.NS": [{"title": "b", "published": ts}]})
         assert [i["symbol"] for i in em.raw_feed()["items"]] == ["A.NS", "B.NS"]
 

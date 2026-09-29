@@ -104,7 +104,7 @@ class TestParseEntries:
 
     def test_old_entry_excluded(self):
         from datetime import timedelta
-        old = datetime.utcnow() - timedelta(days=20)
+        old = nq._utcnow() - timedelta(days=20)
         entry = _entry("Reliance old news", "",
                        published_parsed=old.timetuple()[:6])
         result = nq._parse_entries(_parsed(entry), "TestSource", ["reliance"], days=14)
@@ -112,7 +112,7 @@ class TestParseEntries:
 
     def test_recent_entry_included(self):
         from datetime import timedelta
-        recent = datetime.utcnow() - timedelta(days=2)
+        recent = nq._utcnow() - timedelta(days=2)
         entry = _entry("Reliance strong", "",
                        published_parsed=recent.timetuple()[:6])
         result = nq._parse_entries(_parsed(entry), "TestSource", ["reliance"])
@@ -145,7 +145,7 @@ class TestParseEntries:
 class TestFetchMultiSource:
     def test_returns_list(self, monkeypatch):
         from datetime import timedelta
-        recent = datetime.utcnow() - timedelta(days=1)
+        recent = nq._utcnow() - timedelta(days=1)
         entry = _entry("Reliance surges", "Strong result",
                        published_parsed=recent.timetuple()[:6], link="http://x.com")
         import feedparser
@@ -156,7 +156,7 @@ class TestFetchMultiSource:
 
     def test_deduplicates_by_title(self, monkeypatch):
         from datetime import timedelta
-        recent = datetime.utcnow() - timedelta(days=1)
+        recent = nq._utcnow() - timedelta(days=1)
         entry = _entry("Reliance Q3 profit", "",
                        published_parsed=recent.timetuple()[:6])
         import feedparser
@@ -167,7 +167,7 @@ class TestFetchMultiSource:
 
     def test_max_25_returned(self, monkeypatch):
         from datetime import timedelta
-        recent = datetime.utcnow() - timedelta(days=1)
+        recent = nq._utcnow() - timedelta(days=1)
         entries = [_entry(f"Reliance news unique {i}", "",
                           published_parsed=recent.timetuple()[:6])
                    for i in range(50)]
@@ -184,8 +184,8 @@ class TestFetchMultiSource:
 
     def test_sorted_newest_first(self, monkeypatch):
         from datetime import timedelta
-        older = (datetime.utcnow() - timedelta(days=5)).timetuple()[:6]
-        newer = (datetime.utcnow() - timedelta(days=1)).timetuple()[:6]
+        older = (nq._utcnow() - timedelta(days=5)).timetuple()[:6]
+        newer = (nq._utcnow() - timedelta(days=1)).timetuple()[:6]
         entries = [
             _entry("Reliance old", "", published_parsed=older),
             _entry("Reliance new", "", published_parsed=newer),
@@ -195,6 +195,35 @@ class TestFetchMultiSource:
         result = nq.fetch_multi_source("RELIANCE")
         if len(result) >= 2:
             assert result[0]["published_at"] >= result[1]["published_at"]
+
+
+    def test_sort_key_failure_is_tolerated(self, monkeypatch):
+        # An item whose .get("published_at") raises must sort as "" instead of
+        # crashing the whole fetch (lines 158-159).
+        class _Item(dict):
+            def get(self, key, default=None):
+                if key == "published_at":
+                    raise RuntimeError("boom")
+                return super().get(key, default)
+
+        monkeypatch.setattr(nq, "_parse_entries",
+                            lambda parsed, publisher, kw, n=8, days=14:
+                            [_Item(title=f"Reliance {publisher} story")])
+        import feedparser
+        monkeypatch.setattr(feedparser, "parse", lambda url: _parsed())
+        result = nq.fetch_multi_source("RELIANCE")
+        assert len(result) >= 1
+
+
+class TestUtcNow:
+    def test_naive_current_and_no_deprecation(self):
+        import warnings
+        from datetime import timezone
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            t = nq._utcnow()
+        assert t.tzinfo is None
+        assert abs((datetime.now(timezone.utc).replace(tzinfo=None) - t).total_seconds()) < 5
 
 
 # ── summarize_headlines ───────────────────────────────────────────────────────

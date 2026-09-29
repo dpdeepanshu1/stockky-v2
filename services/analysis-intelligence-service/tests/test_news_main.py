@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import runpy
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -871,3 +872,42 @@ class TestAnalyze:
         monkeypatch.setattr(nm, "_fetch_headlines", lambda s, max_items=15: hs)
         monkeypatch.setattr(nm, "_score_headline", lambda t: 0.0)
         assert nm.analyze("INFY")["data_quality"]["sources_used"] == ["unknown"]
+
+
+# ── import fallback, __main__ block, _utcnow ──────────────────────────────────
+
+_NEWS_MAIN = os.path.join(os.path.dirname(_HERE), "news", "main.py")
+
+
+class TestModuleLevel:
+    def test_news_quality_missing_disables_build_news_response(self, monkeypatch):
+        # `from news_quality import ...` failing must leave build_news_response = None
+        # instead of breaking service start-up (lines 11-12).
+        monkeypatch.setitem(sys.modules, "news_quality", None)
+        ns = runpy.run_path(_NEWS_MAIN, run_name="news_main_no_quality")
+        assert ns["build_news_response"] is None
+
+    def _run_main(self, monkeypatch):
+        started = []
+        fake = types.ModuleType("uvicorn")
+        fake.run = lambda *a, **k: started.append((a, k))
+        monkeypatch.setitem(sys.modules, "uvicorn", fake)
+        runpy.run_path(_NEWS_MAIN, run_name="__main__")
+        return started
+
+    def test_main_block_port_from_env(self, monkeypatch):
+        monkeypatch.setenv("PORT", "9124")
+        assert self._run_main(monkeypatch) == [
+            (("main:app",), {"host": "0.0.0.0", "port": 9124, "reload": True})]
+
+    def test_main_block_port_default(self, monkeypatch):
+        monkeypatch.delenv("PORT", raising=False)
+        assert self._run_main(monkeypatch)[0][1]["port"] == 8005
+
+    def test_utcnow_naive_current_no_deprecation(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            t = nm._utcnow()
+        assert t.tzinfo is None
+        assert abs((_now() - t).total_seconds()) < 5

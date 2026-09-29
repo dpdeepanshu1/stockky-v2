@@ -5,7 +5,7 @@ Pure stdlib + math. No network, no DB.
 from __future__ import annotations
 import math, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "event"))
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytest
 import event_depth as ed
 
@@ -140,6 +140,56 @@ class TestDecay:
     def test_ceiling_at_one(self):
         assert ed._decay(0.001) == pytest.approx(1.0, abs=0.01)
 
+
+# ── _utcnow / _naive_utc (deprecation fix; must stay naive) ───────────────────
+
+class TestUtcHelpers:
+    def test_utcnow_is_naive_and_current(self):
+        t = ed._utcnow()
+        assert t.tzinfo is None
+        assert abs((datetime.now(timezone.utc).replace(tzinfo=None) - t).total_seconds()) < 5
+
+    def test_naive_utc_none_uses_now(self):
+        assert ed._naive_utc(None).tzinfo is None
+
+    def test_naive_utc_passes_naive_through(self):
+        assert ed._naive_utc(_NOW) is _NOW
+
+    def test_naive_utc_converts_aware_to_naive_utc(self):
+        ist = timezone(timedelta(hours=5, minutes=30))
+        out = ed._naive_utc(datetime(2026, 9, 28, 15, 30, tzinfo=ist))
+        assert out == datetime(2026, 9, 28, 10, 0) and out.tzinfo is None
+
+    def test_age_days_accepts_aware_now(self):
+        aware = datetime(2026, 9, 28, 10, 0, tzinfo=timezone.utc)
+        assert ed._age_days("2026-09-18", aware) == 10
+
+    def test_compute_event_score_accepts_aware_now(self):
+        aware = datetime(2026, 9, 28, 10, 0, tzinfo=timezone.utc)
+        out = ed.compute_event_score({"next_earnings_date": "2026-10-01"}, now=aware)
+        assert any(b["type"] == "earnings_imminent_risk" for b in out["event_score_breakdown"])
+
+    def test_default_now_does_not_warn(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            ed._age_days("2026-01-01")
+            ed.compute_event_score({})
+
+
+class TestDecayAndScoreFallbackBranches:
+    def test_decay_bad_half_life_falls_back_to_full_weight(self):
+        # max(0.5, None) raises TypeError -> caught, returns 1.0 (lines 118-119)
+        assert ed._decay(5, half_life=None) == 1.0
+
+    def test_unparseable_next_earnings_date_is_ignored(self):
+        out = ed.compute_event_score({"next_earnings_date": "not-a-date"}, now=_NOW)
+        assert out["event_score_breakdown"] == []
+
+    def test_non_numeric_surprise_pct_is_ignored(self):
+        out = ed.compute_event_score(
+            {"earnings_surprise": {"surprise_pct": "abc", "date": "2026-09-27"}}, now=_NOW)
+        assert not any("earnings" in b["type"] for b in out["event_score_breakdown"])
 
 # ── compute_event_score ───────────────────────────────────────────────────────
 

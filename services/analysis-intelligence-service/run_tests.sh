@@ -6,7 +6,7 @@ set -u
 cd "$(dirname "$0")"
 
 if [ "${1:-}" = "--single" ]; then
-  python3 -m pytest tests/ -q --cov --cov-report=term-missing
+  python3 -m pytest tests/ -q --cov --cov-report=term-missing --cov-fail-under="${COV_MIN:-95}"
   exit $?
 fi
 
@@ -15,6 +15,7 @@ fail=0
 for f in tests/test_*.py; do
   python3 -m pytest "$f" -q -p no:cacheprovider --cov --cov-append --cov-report= || { echo "FAILED: $f"; fail=1; }
 done
-python3 -m coverage report
+# Regression gate: fail if total coverage drops below COV_MIN (default 95; override: COV_MIN=98 ./run_tests.sh)
+python3 -m coverage report --fail-under="${COV_MIN:-95}" || fail=1
 echo "exit=$fail"
 exit $fail

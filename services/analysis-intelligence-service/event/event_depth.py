@@ -13,10 +13,29 @@ from __future__ import annotations
 import logging
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("event_depth")
+
+
+def _utcnow() -> datetime:
+    """Current UTC time as a *naive* datetime.
+
+    Replaces the deprecated datetime.utcnow(). Kept naive on purpose: every date
+    parsed in this module comes from datetime.fromisoformat(str(x)[:10]), which is
+    naive, and subtracting naive from aware raises TypeError (swallowed by the
+    surrounding try/except, which would silently disable scoring)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _naive_utc(now: Optional[datetime]) -> datetime:
+    """Normalise a caller-supplied `now` to naive UTC (aware values are converted)."""
+    if now is None:
+        return _utcnow()
+    if now.tzinfo is not None:
+        return now.astimezone(timezone.utc).replace(tzinfo=None)
+    return now
 
 EVENT_KEYWORDS = {
     "results": [
@@ -100,7 +119,7 @@ def _age_days(date_str: Any, now: Optional[datetime] = None) -> Optional[float]:
     if not date_str:
         return None
     try:
-        now = now or datetime.utcnow()
+        now = _naive_utc(now)
         d = datetime.fromisoformat(str(date_str)[:10])
         return (now - d).days
     except Exception:
@@ -132,7 +151,7 @@ def compute_event_score(events: Dict[str, Any], now: Optional[datetime] = None) 
     directly in horizon scoring instead of only ever being an ad-hoc bonus.
     """
     events = events or {}
-    now = now or datetime.utcnow()
+    now = _naive_utc(now)
     breakdown: List[Dict[str, Any]] = []
     raw = 0.0
 

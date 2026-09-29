@@ -6,6 +6,17 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- `SESSION126_ANALYSIS_INTEL_INDIANAPI_FALLBACK_COVERAGE_2026-09-29.md` —
+  analysis-intelligence-service `fundamental/indianapi_fallback.py` 93% -> expected 100%: kv_cache
+  import fallback, in-process pacing sleep, suggested_timeout failure, redis-client guard. Tests only.
+  35/35 passed via a hand-rolled pytest stand-in with line tracing (all 8 target lines hit); NOT run
+  under real pytest/coverage — re-run on the VM. Next: `event/event_depth.py` (97%).
+- `SESSION125_ANALYSIS_INTEL_MAIN_SENTIMENT_COVERAGE_2026-09-29.md` —
+  analysis-intelligence-service: root `main.py` (real source executed against a temp fake-sub-app
+  tree so failure branches count for the real file) and `sentiment/main.py` (batch/individual
+  fallbacks, adjustment failures, double-checked cache, `__main__` block). Tests only. Passed in
+  an earlier sandbox (1741 passed, both files 100%); re-applied here and compile-checked only —
+  re-run on the VM. Next: `fundamental/indianapi_fallback.py` (93%).
 - `SESSION124_ANALYSIS_INTEL_RATE_LIMIT_REPORT_COVERAGE_2026-09-29.md` —
   analysis-intelligence-service `rate_limit_report.py`: 35 test functions appended to
   `tests/test_rate_limit_report.py` covering the `_kv_get`/`_kv_set` sys.path fallback,

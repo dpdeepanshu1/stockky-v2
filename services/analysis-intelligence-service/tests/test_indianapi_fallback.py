@@ -234,3 +234,117 @@ class TestGetFundamentalsWithFallback:
         def _yahoo_fail(sym): raise RuntimeError("yf down")
         result = iaf.get_fundamentals_with_fallback("SBIN", _yahoo_fail)
         assert result["pe"] == 20
+
+
+# ══ session 126: import fallback / in-memory pacing / timeout fallback / redis guard ══════════
+#
+# Closes the last uncovered lines of fundamental/indianapi_fallback.py:
+#   44-45    `import kv_cache` fails at import time -> `_kv = None`
+#   146      in-process pacing fallback actually sleeps
+#   159-160  rate_limiter.suggested_timeout() raises -> default REQUEST_TIMEOUT_SECONDS is kept
+#   199-201  _get_redis_client() raises RuntimeError -> log + return None (no fetch attempted)
+
+import logging
+
+
+class TestKvCacheImportFallback:
+    def test_kv_is_none_when_kv_cache_cannot_be_imported(self, monkeypatch):
+        # Re-execute the REAL source (compiled under its real filename so coverage attributes the
+        # lines to it) with `import kv_cache` forced to fail. sys.modules[name] = None makes the
+        # import statement raise ImportError, which the module's `except Exception` swallows.
+        monkeypatch.setitem(sys.modules, "kv_cache", None)
+        with open(iaf.__file__, encoding="utf-8") as f:
+            src = f.read()
+        ns = {"__name__": "_iaf_no_kv", "__file__": iaf.__file__}
+        exec(compile(src, iaf.__file__, "exec"), ns)
+        assert ns["_kv"] is None
+        # ...and the cache helpers degrade to no-ops on that fresh copy instead of raising.
+        assert ns["_cache_get"](None, "X") is None
+        ns["_cache_set"](None, "X", {"data": {}})
+
+
+class TestEnforceRateLimitInProcessFallback:
+    def test_sleeps_for_the_remaining_interval_and_stamps_the_time(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "rate_limiter", None)   # force the fallback path
+        slept = []
+        monkeypatch.setattr(iaf.time, "sleep", lambda s: slept.append(s))
+        iaf._MEM_LAST_TS = time.time()          # a request "just" happened
+        before = iaf._MEM_LAST_TS
+        iaf._enforce_rate_limit(None)
+        assert len(slept) == 1
+        assert 0 < slept[0] <= iaf.MIN_REQUEST_INTERVAL_SECONDS
+        assert iaf._MEM_LAST_TS >= before       # stamped after the (mocked) wait
+
+    def test_does_not_sleep_when_interval_already_elapsed(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "rate_limiter", None)
+        slept = []
+        monkeypatch.setattr(iaf.time, "sleep", lambda s: slept.append(s))
+        iaf._MEM_LAST_TS = 0.0                  # long ago
+        iaf._enforce_rate_limit(None)
+        assert slept == []
+        assert iaf._MEM_LAST_TS > 0.0
+
+
+class TestFetchTimeoutFallback:
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"ok": True}
+
+    def _rate_limiter(self, monkeypatch, suggested):
+        fake = types.ModuleType("rate_limiter")
+        fake.acquire = lambda p, weight=1: None
+        fake.suggested_timeout = suggested
+        monkeypatch.setitem(sys.modules, "rate_limiter", fake)
+
+    def _capture_get(self, monkeypatch):
+        import requests
+        seen = {}
+        def _get(url, **kw):
+            seen.update(kw)
+            return self._Resp()
+        monkeypatch.setattr(requests, "get", _get)
+        return seen
+
+    def test_default_timeout_kept_when_suggested_timeout_raises(self, monkeypatch):
+        iaf.INDIANAPI_KEY = "k"
+        def _boom(default, name): raise RuntimeError("limiter down")
+        self._rate_limiter(monkeypatch, _boom)
+        seen = self._capture_get(monkeypatch)
+        assert iaf._fetch_from_indianapi("RELIANCE") == {"ok": True}
+        assert seen["timeout"] == iaf.REQUEST_TIMEOUT_SECONDS
+
+    def test_suggested_timeout_is_used_when_available(self, monkeypatch):
+        iaf.INDIANAPI_KEY = "k"
+        calls = []
+        def _suggest(default, name):
+            calls.append((default, name))
+            return 3.5
+        self._rate_limiter(monkeypatch, _suggest)
+        seen = self._capture_get(monkeypatch)
+        iaf._fetch_from_indianapi("RELIANCE")
+        assert calls == [(iaf.REQUEST_TIMEOUT_SECONDS, "indianapi")]
+        assert seen["timeout"] == 3.5
+        assert seen["params"] == {"name": "RELIANCE"}
+        assert seen["headers"] == {"x-api-key": "k"}
+
+
+class TestRedisClientGuard:
+    def test_runtime_error_from_redis_client_returns_none_and_skips_fetch(self, monkeypatch, caplog):
+        def _no_redis(): raise RuntimeError("redis unavailable")
+        monkeypatch.setattr(iaf, "_get_redis_client", _no_redis)
+        fetched = []
+        monkeypatch.setattr(iaf, "_fetch_from_indianapi", lambda s: fetched.append(s) or {"pe": 1})
+        with caplog.at_level(logging.ERROR, logger="fundamental-analysis-service.indianapi_fallback"):
+            result = iaf.get_fundamentals_with_fallback("TCS", lambda sym: None)
+        assert result is None
+        assert fetched == []
+        assert any("redis unavailable" in r.getMessage() for r in caplog.records)
+
+    def test_yahoo_success_never_reaches_the_redis_client(self, monkeypatch):
+        def _no_redis(): raise AssertionError("must not be called")
+        monkeypatch.setattr(iaf, "_get_redis_client", _no_redis)
+        assert iaf.get_fundamentals_with_fallback("TCS", lambda sym: {"pe": 5}) == {"pe": 5}
+
+    def test_get_redis_client_is_a_noop_returning_none(self):
+        assert iaf._get_redis_client() is None
+

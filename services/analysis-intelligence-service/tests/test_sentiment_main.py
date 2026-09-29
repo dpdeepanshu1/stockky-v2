@@ -426,3 +426,243 @@ class TestRoutes:
         assert body["breadth"] in ("Positive", "Negative", "Mixed")
         assert body["momentum"] in ("Strong", "Weak", "Moderate")
         assert body["volatility"] in ("Normal", "High")
+
+
+# ══ session 125: fallback / exception / double-check / __main__ branches ═════════════════
+
+import logging
+import runpy
+
+
+def _two_row_hist():
+    return _pd.DataFrame({
+        "Close": [100.0, 102.0], "High": [103.0, 104.0],
+        "Low": [99.0, 101.0], "Volume": [1_000_000, 1_100_000],
+    })
+
+
+def _ticker_class(hist=None, exc=None):
+    """yf.Ticker stand-in: history() returns `hist` (or raises `exc`)."""
+    class _T:
+        def __init__(self, sym): pass
+        def history(self, **kw):
+            if exc is not None:
+                raise exc
+            return hist if hist is not None else _pd.DataFrame()
+    return _T
+
+
+def _batch_df(sym, n=3, start=200.0, cols=("Close", "High", "Low", "Volume")):
+    base = {
+        "Close": [start + i for i in range(n)],
+        "High": [start + 4 + i for i in range(n)],
+        "Low": [start - 1 + i for i in range(n)],
+        "Volume": [1_000_000 + i for i in range(n)],
+    }
+    return _pd.DataFrame({(sym, c): base[c] for c in cols})
+
+
+@pytest.fixture
+def _no_sleep(monkeypatch):
+    monkeypatch.setattr(sm.time, "sleep", lambda s: None)
+
+
+class TestFetchIndividualTickerZeroRetries:
+    def test_zero_retries_never_calls_yahoo_and_returns_none(self, monkeypatch):
+        import yfinance as yf
+        calls = []
+        class _T:
+            def __init__(self, sym): calls.append(sym)
+        monkeypatch.setattr(yf, "Ticker", _T)
+        assert sm.fetch_individual_ticker("^NSEI", "NIFTY 50", max_retries=0) is None
+        assert calls == []
+
+
+class TestBatchFallbackWhenIndividualAlsoFails:
+    def test_download_exception_and_individual_fail_logs_and_returns_empty(self, monkeypatch, caplog, _no_sleep):
+        import yfinance as yf
+        def _boom(**kw): raise RuntimeError("download error")
+        monkeypatch.setattr(yf, "download", _boom)
+        monkeypatch.setattr(yf, "Ticker", _ticker_class(hist=_pd.DataFrame()))
+        with caplog.at_level(logging.WARNING, logger="market-sentiment-service"):
+            result = sm.fetch_indices_batch({"NIFTY 50": "^NSEI"})
+        assert result == {}
+        assert any("Individual fetch also failed for NIFTY 50" in r.getMessage() for r in caplog.records)
+
+    def test_empty_batch_and_individual_fail_logs_and_returns_empty(self, monkeypatch, caplog, _no_sleep):
+        import yfinance as yf
+        monkeypatch.setattr(yf, "download", lambda **kw: _pd.DataFrame())
+        monkeypatch.setattr(yf, "Ticker", _ticker_class(hist=_pd.DataFrame()))
+        with caplog.at_level(logging.WARNING, logger="market-sentiment-service"):
+            result = sm.fetch_indices_batch({"NIFTY 50": "^NSEI"})
+        assert result == {}
+        assert any("Individual fetch failed for NIFTY 50" in r.getMessage() for r in caplog.records)
+
+    def test_empty_batch_partial_individual_success_keeps_the_good_one(self, monkeypatch, _no_sleep):
+        import yfinance as yf
+        monkeypatch.setattr(yf, "download", lambda **kw: None)
+        class _T:
+            def __init__(self, sym): self.sym = sym
+            def history(self, **kw):
+                return _two_row_hist() if self.sym == "^NSEI" else _pd.DataFrame()
+        monkeypatch.setattr(yf, "Ticker", _T)
+        result = sm.fetch_indices_batch({"NIFTY 50": "^NSEI", "SENSEX": "^BSESN"})
+        assert list(result) == ["NIFTY 50"]
+
+
+class TestBatchPerSymbolFallbacks:
+    SYMS = {"NIFTY 50": "^NSEI"}
+
+    def _patch(self, monkeypatch, df, hist):
+        import yfinance as yf
+        monkeypatch.setattr(yf, "download", lambda **kw: df)
+        monkeypatch.setattr(yf, "Ticker", _ticker_class(hist=hist))
+
+    # symbol absent from the batch frame (206-210)
+    def test_symbol_missing_from_batch_uses_individual_fetch(self, monkeypatch, caplog):
+        self._patch(monkeypatch, _batch_df("^OTHER"), _two_row_hist())
+        with caplog.at_level(logging.WARNING, logger="market-sentiment-service"):
+            result = sm.fetch_indices_batch(self.SYMS)
+        assert result["NIFTY 50"].current == 102.0
+        assert any("No data for NIFTY 50 (^NSEI)" in r.getMessage() for r in caplog.records)
+
+    def test_symbol_missing_from_batch_and_individual_fails_is_dropped(self, monkeypatch):
+        self._patch(monkeypatch, _batch_df("^OTHER"), _pd.DataFrame())
+        assert sm.fetch_indices_batch(self.SYMS) == {}
+
+    # only one row of batch data (233-236)
+    def test_single_row_in_batch_uses_individual_fetch(self, monkeypatch, caplog):
+        self._patch(monkeypatch, _batch_df("^NSEI", n=1), _two_row_hist())
+        with caplog.at_level(logging.WARNING, logger="market-sentiment-service"):
+            result = sm.fetch_indices_batch(self.SYMS)
+        assert result["NIFTY 50"].current == 102.0
+        assert any("Insufficient data for NIFTY 50 (^NSEI)" in r.getMessage() for r in caplog.records)
+
+    def test_single_row_in_batch_and_individual_fails_is_dropped(self, monkeypatch):
+        self._patch(monkeypatch, _batch_df("^NSEI", n=1), _pd.DataFrame())
+        assert sm.fetch_indices_batch(self.SYMS) == {}
+
+    # processing blows up (237-241): 'Close' column absent -> KeyError
+    def test_processing_error_falls_back_to_individual(self, monkeypatch, caplog):
+        df = _batch_df("^NSEI", cols=("High", "Low", "Volume"))
+        self._patch(monkeypatch, df, _two_row_hist())
+        with caplog.at_level(logging.ERROR, logger="market-sentiment-service"):
+            result = sm.fetch_indices_batch(self.SYMS)
+        assert result["NIFTY 50"].current == 102.0
+        assert any("Error processing NIFTY 50 (^NSEI)" in r.getMessage() for r in caplog.records)
+
+    def test_processing_error_and_individual_fails_is_dropped(self, monkeypatch):
+        df = _batch_df("^NSEI", cols=("High", "Low", "Volume"))
+        self._patch(monkeypatch, df, _pd.DataFrame())
+        assert sm.fetch_indices_batch(self.SYMS) == {}
+
+    def test_one_bad_symbol_does_not_affect_a_good_one(self, monkeypatch):
+        # batch has only ^NSEI (start=200) -> SENSEX must come from the individual path (102.0)
+        self._patch(monkeypatch, _batch_df("^NSEI"), _two_row_hist())
+        result = sm.fetch_indices_batch({"NIFTY 50": "^NSEI", "SENSEX": "^BSESN"})
+        assert result["NIFTY 50"].current == 202.0
+        assert result["SENSEX"].current == 102.0
+
+
+class TestComputeMarketScoreAdjustmentFailures:
+    DATA = staticmethod(lambda: {"NIFTY 50": _make_index("NIFTY 50", 0.2)})
+
+    def _baseline(self, monkeypatch):
+        import yfinance as yf
+        monkeypatch.setattr(yf, "Ticker", _ticker_class(hist=_pd.DataFrame(
+            {"Close": [], "High": [], "Low": [], "Volume": []})))
+        return sm.compute_market_score(self.DATA())
+
+    @pytest.mark.parametrize("period,message", [
+        ("6d", "Could not compute 5-day momentum"),
+        ("1mo", "Could not compute volatility adjustment"),
+    ])
+    def test_yahoo_failure_skips_that_adjustment_only(self, monkeypatch, caplog, period, message):
+        import yfinance as yf
+        baseline = self._baseline(monkeypatch)
+        empty = _pd.DataFrame({"Close": [], "High": [], "Low": [], "Volume": []})
+        class _T:
+            def __init__(self, sym): pass
+            def history(self, **kw):
+                if kw.get("period") == period:
+                    raise RuntimeError("yahoo down")
+                return empty
+        monkeypatch.setattr(yf, "Ticker", _T)
+        with caplog.at_level(logging.DEBUG, logger="market-sentiment-service"):
+            score = sm.compute_market_score(self.DATA())
+        assert score == baseline
+        assert any(message in r.getMessage() and "yahoo down" in r.getMessage() for r in caplog.records)
+
+    def test_ticker_constructor_failure_is_swallowed_for_both_adjustments(self, monkeypatch, caplog):
+        import yfinance as yf
+        baseline = self._baseline(monkeypatch)
+        def _bad(sym): raise RuntimeError("no ticker")
+        monkeypatch.setattr(yf, "Ticker", _bad)
+        with caplog.at_level(logging.DEBUG, logger="market-sentiment-service"):
+            assert sm.compute_market_score(self.DATA()) == baseline
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("5-day momentum" in m for m in msgs)
+        assert any("volatility adjustment" in m for m in msgs)
+
+
+class _PopulatingLock:
+    """Async-lock stand-in: while the request 'waits' for it, another request fills the cache."""
+    def __init__(self, timestamp_set=True):
+        self.timestamp_set = timestamp_set
+
+    async def __aenter__(self):
+        sm._cache["data"] = {
+            "timestamp": sm.datetime.now(), "indices": {}, "market_score": 61,
+            "classification": "BULLISH", "trend": "Bullish", "momentum": "Moderate",
+            "breadth": "Mixed", "volatility": "Normal", "cached": False, "stale": False,
+        }
+        if self.timestamp_set:
+            sm._cache["timestamp"] = sm.datetime.now()
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class TestDoubleCheckedCacheInsideLock:
+    def test_cache_filled_while_waiting_for_lock_is_served_without_refetch(self, monkeypatch):
+        def _must_not_fetch(syms): raise AssertionError("should have been served from cache")
+        monkeypatch.setattr(sm, "fetch_indices_batch", _must_not_fetch)
+        monkeypatch.setitem(sm._cache, "lock", _PopulatingLock())
+        body = client.get("/sentiment").json()
+        assert body["market_score"] == 61
+        assert body["cached"] is True
+        assert body["stale"] is False
+
+    def test_cache_without_timestamp_inside_lock_counts_as_expired(self, monkeypatch):
+        # data present but timestamp None -> age treated as 9999 -> refetch; fetch fails -> stale copy
+        monkeypatch.setattr(sm, "fetch_indices_batch", lambda syms: {})
+        monkeypatch.setitem(sm._cache, "lock", _PopulatingLock(timestamp_set=False))
+        body = client.get("/sentiment").json()
+        assert body["market_score"] == 61
+        assert body["cached"] is True and body["stale"] is True
+
+
+class TestMainEntrypoint:
+    def _run(self, monkeypatch, port_env):
+        calls = []
+        fake = types.ModuleType("uvicorn")
+        fake.run = lambda app, **kw: calls.append((app, kw))
+        monkeypatch.setitem(sys.modules, "uvicorn", fake)
+        if port_env is None:
+            monkeypatch.delenv("PORT", raising=False)
+        else:
+            monkeypatch.setenv("PORT", port_env)
+        runpy.run_path(sm.__file__, run_name="__main__")
+        return calls
+
+    def test_default_port_8009(self, monkeypatch):
+        from fastapi import FastAPI
+        calls = self._run(monkeypatch, None)
+        assert len(calls) == 1
+        assert isinstance(calls[0][0], FastAPI)
+        assert calls[0][1] == {"host": "0.0.0.0", "port": 8009, "reload": True}
+
+    def test_port_from_environment(self, monkeypatch):
+        calls = self._run(monkeypatch, "9123")
+        assert calls[0][1]["port"] == 9123
+

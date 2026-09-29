@@ -26,6 +26,7 @@ import itertools
 import os
 import shutil
 import sys
+import types
 
 import pytest
 from fastapi.testclient import TestClient
@@ -395,3 +396,91 @@ class TestRealServiceSmoke:
         assert h["status"] == "ok"
         assert h["mounted"] == ["/technical", "/fundamental", "/news", "/event", "/sentiment"]
         assert client.get("/").json()["status"] == "running"
+
+
+# ── the REAL main.py source, measured ─────────────────────────────────────────
+#
+# `build` above executes a *copy* of main.py, which .coveragerc omits (it lives under
+# `__pycache__`), and the smoke test only ever takes the all-mounts-OK path. So the failure
+# branches of the real file (BASE sys.path insert, missing folder, no `app`, the mount-failure
+# handler, health "error"/"degraded") were never attributed to it. Here the real source is
+# compiled with its REAL filename (so coverage measures the real file) but executed with
+# `__file__` pointing into a temp tree of fake sub-apps, so BASE resolves there.
+
+def _exec_real_source(root):
+    with open(_REAL_MAIN, encoding="utf-8") as f:
+        src = f.read()
+    code = compile(src, _REAL_MAIN, "exec")
+    mod = types.ModuleType(f"_svc_real_src_{next(_counter)}")
+    mod.__file__ = os.path.join(root, "main.py")
+    exec(code, mod.__dict__)
+    return mod
+
+
+@pytest.fixture
+def real_src(tree_root):
+    """real_src({folder: kind, ...}) -> real main.py source executed against a fake tree."""
+
+    def _make(kinds=None):
+        kinds = dict(kinds or {})
+        root = os.path.join(tree_root, f"real{next(_counter)}")
+        os.makedirs(root)
+        for folder in _FOLDERS:
+            _write_subapp(root, folder, kinds.get(folder, "ok"))
+        assert root not in sys.path
+        mod = _exec_real_source(root)
+        mod.ROOT = root
+        return mod
+
+    return _make
+
+
+class TestRealSourceBranches:
+    def test_base_is_inserted_at_front_of_sys_path_when_absent(self, real_src):
+        m = real_src()
+        assert sys.path[0] == m.ROOT
+        assert m.BASE == m.ROOT
+
+    def test_all_fake_subapps_mount_and_health_is_ok(self, real_src):
+        m = real_src()
+        assert all(s["ok"] for s in m.MOUNT_STATUS.values())
+        assert m.health()["status"] == "ok"
+        assert TestClient(m.app).get("/technical/ping").json() == {"who": "technical"}
+
+    def test_missing_folder_hits_file_not_found_and_is_recorded(self, real_src):
+        m = real_src({"news": "missing_folder"})
+        st = m.MOUNT_STATUS["/news"]
+        assert st["ok"] is False
+        assert st["error"].endswith(os.path.join("news", "main.py"))
+        assert st["folder"] == "news" and st["label"] == "news intelligence"
+        assert m.MOUNT_STATUS["/event"]["ok"] is True
+
+    def test_module_without_app_attribute_is_recorded(self, real_src):
+        m = real_src({"event": "no_app"})
+        assert m.MOUNT_STATUS["/event"] == {
+            "ok": False,
+            "label": "event tracker",
+            "folder": "event",
+            "error": "event/main.py has no 'app' attribute",
+        }
+
+    def test_import_crash_is_recorded_truncated_and_logged(self, real_src, caplog):
+        with caplog.at_level("ERROR", logger="analysis-intelligence-service"):
+            m = real_src({"technical": "crash"})
+        assert len(m.MOUNT_STATUS["/technical"]["error"]) == 300
+        assert any("Failed to mount /technical" in r.getMessage() for r in caplog.records)
+
+    def test_health_is_degraded_when_only_some_mounts_fail(self, real_src):
+        m = real_src({"news": "crash_short", "sentiment": "no_app"})
+        h = m.health()
+        assert h["status"] == "degraded"
+        assert h["failed"] == ["/news", "/sentiment"]
+        assert h["all_ok"] is False
+
+    def test_health_is_error_when_nothing_mounts(self, real_src):
+        m = real_src({f: "crash_short" for f in _FOLDERS})
+        h = m.health()
+        assert h["status"] == "error"
+        assert h["mounted"] == []
+        assert m.root()["status"] == "degraded"
+

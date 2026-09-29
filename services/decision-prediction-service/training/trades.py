@@ -568,9 +568,7 @@ def get_weekly_trade_report(weeks: int = 12):
     return out
 
 # ── Clear All + Backup (paper trades / tracking) ──────────────────────────
-import json, os
-from datetime import datetime, timezone
-
+# (json, os, datetime/timezone already imported at module top)
 BACKUP_DIR = os.getenv("TRADE_BACKUP_DIR", "/app/data/trade_backups")
 BACKUP_RETENTION_DAYS = int(os.getenv("TRADE_BACKUP_RETENTION_DAYS", "14"))
 

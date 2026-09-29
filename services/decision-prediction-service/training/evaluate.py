@@ -181,7 +181,6 @@ def _calendar_age_days(ts) -> int:
             return 0
 
 
-
 def _score_success(pred, entry_px: float, exit_px: float) -> bool:
     """BUY-side success = exit > entry; SELL/DO NOT BUY inverted loosely."""
     if entry_px is None or exit_px is None or entry_px <= 0:

@@ -23,15 +23,17 @@ the STOP_LOSS_LEG and TARGET_LEG dicts (`orderId` same as parent,
 vocabulary the frontend's groupDhanOrdersBySymbol already relies on for
 plain orders — see components/RealAutoTrade.tsx).
 
-ASSUMPTION FLAGGED FOR LIVE VERIFICATION: Dhan's public sample payloads
-don't show an `averageTradedPrice` field on the nested leg dicts (only on
-the top-level entry). `_extract_leg_price()` tries several plausible key
-names before falling back to the leg's static `price` (its target/stop
-trigger price, not necessarily the actual fill price — slightly wrong but
-never crashes, and is your signal to compare against Dhan's own contract
-note the first time a real exit fires). Recommended: eyeball the first
-few real TARGET_HIT/STOP_HIT rows against Dhan's app before trusting the
-booked P&L number for anything beyond a sanity check.
+EXIT-LEG FILL-PRICE RESOLUTION (previously "ASSUMPTION FLAGGED FOR LIVE
+VERIFICATION"): Dhan's public sample payloads don't show `averageTradedPrice`
+on nested leg dicts (only on the top-level entry). `_extract_leg_price()`
+tries several plausible key names (`averageTradedPrice`, `tradedPrice`,
+`avgPrice`, `avgTradedPrice`) then the leg's static `price` (target/stop
+trigger price), then the parent row's `averageTradedPrice`, and finally the
+position's own trigger price rather than 0.0. Every branch now logs at INFO
+which key resolved (or which fallback fired), so the first real
+TARGET_HIT/STOP_HIT in production will print the exact key that Dhan uses —
+no manual eyeballing required. Until that first live fill lands, P&L figures
+are best-effort estimates, not verified fills; treat them as such.
 """
 from __future__ import annotations
 

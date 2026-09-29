@@ -194,6 +194,19 @@ class TestFetchFundamentalsBatch:
         assert result["BAD.NS"] == {}
 
 
+    def test_worker_exception_maps_to_empty_and_others_survive(self, monkeypatch):
+        # fetch_fundamentals normally swallows its own errors, but a raise escaping the
+        # worker (e.g. a bug / BaseException-free error path) must be logged and mapped
+        # to {} without losing the other symbols (lines 173-175).
+        def _fake(url, sym, timeout):
+            if sym == "BAD.NS":
+                raise RuntimeError("worker blew up")
+            return {"pe": 12}
+        monkeypatch.setattr(pmq, "fetch_fundamentals", _fake)
+        result = pmq.fetch_fundamentals_batch("http://mds/", ["BAD.NS", "OK.NS"])
+        assert result == {"BAD.NS": {}, "OK.NS": {"pe": 12}}
+
+
 # ── compute_peer_relative ─────────────────────────────────────────────────────
 
 class TestComputePeerRelative:

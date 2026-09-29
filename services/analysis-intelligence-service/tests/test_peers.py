@@ -10,6 +10,19 @@ import pytest
 import peers as p
 
 
+class TestSafeFloat:
+    """_f(): tolerant float coercion used when averaging peer metrics."""
+
+    @pytest.mark.parametrize("raw,expected", [(None, None), ("12.5", 12.5), (3, 3.0), (0, 0.0)])
+    def test_valid_and_none(self, raw, expected):
+        assert p._f(raw) == expected
+
+    @pytest.mark.parametrize("bad", ["abc", "", object(), [], {}])
+    def test_unconvertible_returns_none(self, bad):
+        # ValueError ("abc", "") and TypeError (object/list/dict) -> None (lines 74-75)
+        assert p._f(bad) is None
+
+
 class TestNormalizeSector:
     def test_symbol_lookup_wins(self):
         assert p.normalize_sector(None, "TCS") == "IT"

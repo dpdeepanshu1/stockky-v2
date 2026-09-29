@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import runpy
 import sys
 import types
 from types import SimpleNamespace
@@ -838,3 +839,37 @@ class TestAnalyzeResult:
             out = env.analyze({"roe": 25}, symbol="INFY")
         assert out["fundamental_score"] == 60 and "unified" not in out
         assert "apply_to_analyze_response failed" in caplog.text
+
+
+# ── import fallback + __main__ block ──────────────────────────────────────────
+
+_FUND_MAIN = os.path.join(os.path.dirname(_HERE), "fundamental", "main.py")
+
+
+class TestModuleLevel:
+    def test_wire_peer_multi_quarter_missing_disables_hook(self, monkeypatch):
+        # `from wire_peer_multi_quarter import ...` failing must leave the hook as None
+        # instead of breaking service start-up (lines 8-9).
+        monkeypatch.setitem(sys.modules, "wire_peer_multi_quarter", None)
+        ns = runpy.run_path(_FUND_MAIN, run_name="fund_main_no_wire")
+        assert ns["apply_to_analyze_response"] is None
+
+    def test_wire_peer_multi_quarter_present_by_default(self):
+        assert callable(fm.apply_to_analyze_response)
+
+    def _run_main(self, monkeypatch):
+        started = []
+        fake = types.ModuleType("uvicorn")
+        fake.run = lambda *a, **k: started.append((a, k))
+        monkeypatch.setitem(sys.modules, "uvicorn", fake)
+        runpy.run_path(_FUND_MAIN, run_name="__main__")
+        return started
+
+    def test_main_block_port_from_env(self, monkeypatch):
+        monkeypatch.setenv("PORT", "9125")
+        assert self._run_main(monkeypatch) == [
+            (("main:app",), {"host": "0.0.0.0", "port": 9125, "reload": True})]
+
+    def test_main_block_port_default(self, monkeypatch):
+        monkeypatch.delenv("PORT", raising=False)
+        assert self._run_main(monkeypatch)[0][1]["port"] == 8003

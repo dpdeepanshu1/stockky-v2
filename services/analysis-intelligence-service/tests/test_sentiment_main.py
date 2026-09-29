@@ -666,3 +666,29 @@ class TestMainEntrypoint:
         calls = self._run(monkeypatch, "9123")
         assert calls[0][1]["port"] == 9123
 
+
+
+# ── yfinance session wiring fallbacks ─────────────────────────────────────────
+
+class TestYfinanceSessionFallback:
+    """Module import must survive yfinance builds that lack set_session and/or shared."""
+
+    _SENT_MAIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "sentiment", "main.py")
+
+    def _run(self, monkeypatch, yf_stub):
+        import runpy
+        monkeypatch.setitem(sys.modules, "yfinance", yf_stub)
+        return runpy.run_path(self._SENT_MAIN, run_name="sent_main_yf_variant")
+
+    def test_no_set_session_uses_shared_session(self, monkeypatch):
+        stub = types.ModuleType("yfinance")
+        stub.shared = types.SimpleNamespace(_session=None)
+        ns = self._run(monkeypatch, stub)
+        assert stub.shared._session is ns["session"]
+
+    def test_neither_set_session_nor_shared_is_tolerated(self, monkeypatch):
+        # both AttributeError paths swallowed -> import still completes (lines 37-38)
+        stub = types.ModuleType("yfinance")
+        ns = self._run(monkeypatch, stub)
+        assert "app" in ns

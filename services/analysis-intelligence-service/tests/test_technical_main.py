@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import datetime as _dt
 import os
+import runpy
 import sys
 import types
 from types import SimpleNamespace
@@ -1450,6 +1451,19 @@ class TestAnalyzeSupportResistanceVolume:
         assert "below resistance" not in _reasons(r)
         assert "Near resistance (4.0%)" in _reasons(r)
 
+    def test_regime_penalty_failure_is_swallowed(self, env, monkeypatch):
+        # A resistance value whose comparison raises must not break analyze(); the regime
+        # penalty is simply skipped (lines 692-693).
+        class _CmpBoom(float):
+            def __gt__(self, other):
+                raise TypeError("cmp boom")
+
+        env.df = _flat_df(60, close=100.0)
+        _Ind(monkeypatch, 60, sr=(50.0, _CmpBoom(101.0)))
+        r = tm.analyze("TCS")
+        assert "regime penalty applied" not in _reasons(r)
+        assert "technical_score" in r
+
     def test_far_from_resistance_no_penalty(self, env, monkeypatch):
         env.df = _flat_df(60, close=100.0)
         _Ind(monkeypatch, 60, sr=(50.0, 110.0))
@@ -1993,3 +2007,26 @@ class TestSectorStrength:
         fake_rs.drive = drive
         run(tm.sector_relative_strength("TCS", sector="IT"))
         assert out["peers"] == [] and seen["urls"] == [""]
+
+
+class TestMainBlock:
+    """`if __name__ == "__main__"` starts uvicorn on $PORT (default 8002) — lines 765-767."""
+
+    _TECH_MAIN = os.path.join(os.path.dirname(_HERE), "technical", "main.py")
+
+    def _run(self, monkeypatch):
+        started = []
+        fake = types.ModuleType("uvicorn")
+        fake.run = lambda *a, **k: started.append((a, k))
+        monkeypatch.setitem(sys.modules, "uvicorn", fake)
+        runpy.run_path(self._TECH_MAIN, run_name="__main__")
+        return started
+
+    def test_port_from_env(self, monkeypatch):
+        monkeypatch.setenv("PORT", "9126")
+        assert self._run(monkeypatch) == [
+            (("main:app",), {"host": "0.0.0.0", "port": 9126, "reload": True})]
+
+    def test_port_default(self, monkeypatch):
+        monkeypatch.delenv("PORT", raising=False)
+        assert self._run(monkeypatch)[0][1]["port"] == 8002

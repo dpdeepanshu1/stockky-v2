@@ -1,0 +1,13 @@
+# Run from services/api-gateway. The gateway is flat (all modules at the top level), so
+# `source = .` walks every .py file — untested modules show up as 0% instead of being hidden.
+# tests/ is omitted so TOTAL measures production code only.
+[run]
+source = .
+omit =
+    tests/*
+    */__pycache__/*
+    .venv/*
+
+[report]
+show_missing = True
+skip_empty = True

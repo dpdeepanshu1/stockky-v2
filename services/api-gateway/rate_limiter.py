@@ -652,7 +652,7 @@ def patch_yfinance() -> bool:
             result = _yf_call_with_hard_timeout(_orig_download, *args, **kwargs)
             # Only attribute success/failure per-symbol for single-ticker calls;
             # in a batch an empty frame does not say WHICH ticker was missing.
-            if _n == 1:
+            if _n == 1 and symbols:
                 if _looks_empty(result):
                     note_symbol_failure(symbols[0])
                 else:

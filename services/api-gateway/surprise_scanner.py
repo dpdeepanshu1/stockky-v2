@@ -985,7 +985,10 @@ def _read_surprise_feed_cache() -> Optional[dict]:
             return raw
         if isinstance(raw, str):
             import json as _json
-            return _json.loads(raw)
+            parsed = _json.loads(raw)
+            # A corrupt/foreign value (list, number, null) must not reach callers that do
+            # `cached.get(...)` — audit_surprise_feed / repair_surprise_batch would crash.
+            return parsed if isinstance(parsed, dict) else None
     except Exception as e:
         logger.debug("surprise feed cache read: %s", e)
     return None

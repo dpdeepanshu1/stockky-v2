@@ -47,6 +47,17 @@ _ENV_KEYS = (
 NOW = datetime.now(timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_now():
+    """Re-anchor NOW to the real clock at the start of every test.
+
+    The module under test reads the real clock (datetime.now) while NOW used to be frozen at import time,
+    so tight age assertions (abs=0.05h = 3 min) flaked whenever a long full-suite run executed a test
+    more than ~3 minutes after collection."""
+    globals()["NOW"] = datetime.now(timezone.utc)
+    yield
+
+
 # ── fakes ─────────────────────────────────────────────────────────────────────
 
 class FakeText:

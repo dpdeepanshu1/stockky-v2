@@ -4369,11 +4369,8 @@ async def ops_qstash_tick(request: Request):
     try:
         client = _get_http_client()
         for path in ["/health", "/ops/keepalive"]:
-            try:
-                # local self
-                results["warm"].append(path)
-            except Exception as e:
-                results["warm"].append(f"{path}: {e}")
+            # local self (list.append cannot raise, so no per-path try/except)
+            results["warm"].append(path)
         # Fan-out wake is expensive — only if body asks
         try:
             import json as _json
@@ -11761,9 +11758,9 @@ async def api_hotpicks_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
     )
     order = {"BUY NOW": 0, "PREPARE TO BUY": 1, "DO NOT BUY": 2, "SELL": 3}
     merged.sort(key=lambda x: (order.get((x.get("decision") or "").upper(), 9), -(x.get("score") or 0)))
+    # `merged` is never empty here: _has_picks() above already returned early
+    # when all three lists were empty, so `top` always has at least one item.
     top = merged[: max(1, min(int(top_n), 20))]
-    if not top:
-        return {"ok": False, "sent": False, "count": 0, "message": "No Hot Picks available right now."}
 
     lines = [f"🔥 *Stockky Hot Picks — Top {len(top)}*"]
     for i, s in enumerate(top, 1):
@@ -11880,10 +11877,10 @@ def _install_signal_handlers() -> None:
 
 try:
     _install_signal_handlers()
-except Exception as _sig_err:
+except Exception as _sig_err:  # pragma: no cover - defensive, handler install already swallows its own errors
     logger.debug("signal handlers: %s", _sig_err)
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - uvicorn entrypoint, never imported by tests
     import uvicorn
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)

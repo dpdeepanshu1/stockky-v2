@@ -2433,8 +2433,8 @@ class TestRepairMessages:
 
     def test_unscored_rows_are_reported_as_not_tradeable_not_lost(self, rep):
         # Every non-repaired, non-waiting symbol lands in exactly one of `failed` / `not_yet_tradeable`,
-        # so the "N no longer found upstream" fallback in the summary can never fire from a real run
-        # (dead branch — left uncovered on purpose, see the pass-58 notes).
+        # so the old "N no longer found upstream" fallback in the summary could never fire from a real
+        # run — that dead branch has been removed from ipo_repair_batch (pass 81).
         rep.miss("A")
         rep.known("A")
         rep.analysis["A"] = {"symbol": "A", "ipo_score": None, "decision": None}

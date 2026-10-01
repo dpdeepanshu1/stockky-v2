@@ -2090,8 +2090,6 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
         if skipped > 0 and failed:
             names = ", ".join(f"{f['symbol']} ({f['reason']})" for f in failed[:5])
             parts.append(f"{skipped} failed — {names}{'…' if len(failed) > 5 else ''}")
-        elif skipped > 0:
-            parts.append(f"{skipped} no longer found upstream")
         if not_yet_tradeable:
             parts.append(
                 f"{len(not_yet_tradeable)} found but not tradeable yet "

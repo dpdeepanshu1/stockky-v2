@@ -595,20 +595,20 @@ class TestRsiTier:
         go(env, "A", dict(NO_RSI))
         assert env.client.urls() == ["http://tconst.t/analyze/A?lite=1"]
 
-    def test_technical_success_wrongly_flags_the_real_rsi_as_a_seed(self, env):
-        """NOT FIXED: the technical-service branch never does `missing.discard("rsi")`, so the baseline-seed block
-        right after still fires — the real RSI survives (setdefault) but the row is stamped `rsi_seed=True`."""
+    def test_technical_success_does_not_flag_the_real_rsi_as_a_seed(self, env):
+        """FIXED: the technical-service branch now does `missing.discard("rsi")`, so the baseline-seed block
+        no longer fires and the real RSI is not stamped `rsi_seed=True`."""
         env.client.routes["/analyze/"] = FakeResp(200, {"rsi": 44})
         out = go(env, "A", dict(NO_RSI))
-        assert stored(env)["rsi"] == 44.0 and stored(env)["rsi_seed"] is True
+        assert stored(env)["rsi"] == 44.0 and "rsi_seed" not in stored(env)
         assert out["patched_fields"] == ["rsi"]                 # de-duplicated in the response
 
-    def test_stored_zero_rsi_is_never_seeded(self, env):
-        """NOT FIXED: the seed uses setdefault, so a stored rsi of 0 stays 0 and the row stays incomplete."""
+    def test_stored_zero_rsi_is_seeded(self, env):
+        """FIXED: a stored 0 / None RSI is "unusable", so the seed now replaces it."""
         env.client.routes["/analyze/"] = FakeResp(404)
         out = go(env, "A", {**NO_RSI, "rsi": 0})
-        assert stored(env)["rsi"] == 0 and stored(env)["rsi_seed"] is True
-        assert out["still_missing"] == ["rsi"] and out["complete"] is False
+        assert stored(env)["rsi"] == 50.0 and stored(env)["rsi_seed"] is True
+        assert out["still_missing"] == [] and out["complete"] is True
 
 
 # ══ fundamental tier ═════════════════════════════════════════════════════════
@@ -630,16 +630,15 @@ class TestFundamentalTier:
                                      "http://fund.t/fundamental/A?skip_peers=1"]
         assert env.client.calls[1][1] == 35.0
 
-    def test_real_pe_and_roce_are_overwritten_by_the_baseline_seeds(self, env):
-        """NOT FIXED (data-quality bug): after a successful fundamental fetch the PE / ROCE branches append to
-        `patched` but never `missing.discard(...)`, so the seed block below runs anyway and replaces the real
-        values with the flat defaults (PE 22.5, ROCE 15.0). The real numbers survive only inside `metrics`."""
+    def test_real_pe_and_roce_are_kept_out_of_the_baseline_seeds(self, env):
+        """FIXED (data-quality bug): the PE / ROCE branches now `missing.discard(...)`, so the seed block no
+        longer replaces the real values with the flat defaults (PE 22.5, ROCE 15.0)."""
         env.client.routes["/analyze/A"] = FakeResp(200, {"pe_ratio": 18.2, "roce": 31.4,
                                                          "metrics": {"pe_ratio": 18.2, "roce": 31.4}})
         out = go(env, "A", dict(NO_PE_ROCE))
         row = stored(env)
-        assert row["pe_ratio"] == 22.5 and row["pe_seed"] is True
-        assert row["roce"] == 15.0 and row["roce_seed"] is True
+        assert row["pe_ratio"] == 18.2 and "pe_seed" not in row
+        assert row["roce"] == 31.4 and "roce_seed" not in row
         assert row["metrics"] == {"pe_ratio": 18.2, "roce": 31.4}
         assert out["patched_fields"] == ["pe_ratio", "roce"] and out["complete"] is True
 
@@ -651,8 +650,8 @@ class TestFundamentalTier:
     def test_every_key_shape_counts_as_a_patch(self, env, body, field):
         env.client.routes["/analyze/"] = FakeResp(200, body)
         go(env, "A", dict(NO_PE_ROCE))
-        # the seed block always re-adds the field, so a REAL patch shows up as a duplicate in the stored list
-        assert stored(env)["repair_patched"].count(field) == 2
+        # FIXED: a real patch no longer re-enters the seed block, so it is listed exactly once
+        assert stored(env)["repair_patched"].count(field) == 1
 
     @pytest.mark.parametrize("val", [None, 0, "0", "NA"])
     def test_zero_or_missing_values_are_not_patched_but_still_seeded(self, env, val):
@@ -666,7 +665,7 @@ class TestFundamentalTier:
         go(env, "A", {**NO_PE_ROCE, "pe_ratio": 20})                  # roce missing only
         row = stored(env)
         assert row["pe_ratio"] == 20 and "pe_seed" not in row
-        assert row["roce_seed"] is True
+        assert row["roce"] == 77 and "roce_seed" not in row
 
     def test_present_roce_is_not_overwritten_when_only_pe_is_missing(self, env):
         env.client.routes["/analyze/"] = FakeResp(200, {"pe_ratio": 3, "roce": 77})
@@ -851,12 +850,11 @@ class TestSeedsAndEnvelope:
         _run(gw._patch_single_stock_feed("A", env.client))
         assert original == NO_RSI
 
-    def test_stored_repair_patched_keeps_duplicates_while_the_response_is_deduped(self, env):
-        """NOT FIXED: `current["repair_patched"] = patched` is assigned before the de-dupe rebinds `patched`, so
-        the persisted list keeps duplicates (here `rsi` from the technical service AND from the seed block)."""
+    def test_stored_repair_patched_is_deduped_like_the_response(self, env):
+        """FIXED: the persisted list is assigned AFTER the de-dupe, so it matches the response."""
         env.client.routes["/analyze/"] = FakeResp(200, {"rsi": 44})
         out = go(env, "A", dict(NO_RSI))
-        assert stored(env)["repair_patched"] == ["rsi", "rsi"]
+        assert stored(env)["repair_patched"] == ["rsi"]
         assert out["patched_fields"] == ["rsi"]
 
     def test_full_cold_repair_walks_every_tier_in_order(self, env):

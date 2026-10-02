@@ -6,6 +6,7 @@ v2.5.16 – uses IST for fetched_at timestamp (hh:mm:ss AM/PM).
 """
 import os
 import re
+import math
 import json
 import time
 import asyncio
@@ -632,6 +633,17 @@ def _save_watchlist(symbols: List[str]):
 
 def _load_searched() -> List[str]:
     return _redis_get(SEARCHED_KEY) or []
+
+
+async def _load_searched_safe() -> List[str]:
+    """``_load_searched`` in a worker thread; a failure degrades to [] so a
+    side lookup can't fail a /scan/universe call whose universe built fine."""
+    try:
+        got = await asyncio.to_thread(_load_searched)
+    except Exception as e:
+        logger.warning("scan/universe: searched-list lookup failed: %s", e)
+        return []
+    return got if isinstance(got, list) else []
 
 def _add_searched(symbol: str):
     searched = _load_searched()
@@ -5606,8 +5618,10 @@ async def find_actionable_buys(request: Request):
         if not isinstance(out, dict):
             return {"ok": True, "count": 0, "suggestions": []}
         out.setdefault("ok", True)
-        out.setdefault("count", len(out.get("suggestions") or []))
-        out.setdefault("suggestions", [])
+        # An explicit None used to survive setdefault (suggestions: null, count: 0).
+        if not isinstance(out.get("suggestions"), list):
+            out["suggestions"] = []
+        out.setdefault("count", len(out["suggestions"]))
         return out
     except Exception as e:
         logger.exception("find-buys failed")
@@ -5652,6 +5666,7 @@ def scan_stop_all():
     """Force-stop every running scan task (commit partial)."""
     _SCAN_CANCEL_FLAGS.add("__ALL__")
     n = 0
+    failed = 0
     try:
         for k in list(_mem_kv.keys()):
             if str(k).startswith(SCAN_TASK_PREFIX) and not str(k).endswith(":cancel"):
@@ -5662,12 +5677,22 @@ def scan_stop_all():
                     data["status"] = "cancelled"
                     data["partial"] = True
                     _mem_kv[k] = data
-                    _redis_set(k, data, ttl=3600)
-                    _redis_set(str(k) + ":cancel", True, ttl=3600)
+                    # One failing durable write must not end the sweep: the
+                    # remaining running tasks still need to be stopped.
+                    try:
+                        _redis_set(k, data, ttl=3600)
+                        _redis_set(str(k) + ":cancel", True, ttl=3600)
+                    except Exception as _we:
+                        failed += 1
+                        logger.warning("scan/stop-all durable write failed for %s: %s", k, _we)
+                        continue
                     n += 1
     except Exception:
         pass
-    return {"ok": True, "stopped": n, "message": "All scans stop-signalled"}
+    out = {"ok": True, "stopped": n, "message": "All scans stop-signalled"}
+    if failed:
+        out["durable_write_failures"] = failed
+    return out
 
 
 # ── Watchlist-only scan ──────────────────────────────────────────────────
@@ -5888,13 +5913,13 @@ def scan_watchlist():
         for fut in not_done:
             symbol = futures[fut]
             logger.warning(
-                "Watchlist scan deadline (%.0fs) hit before %s completed — "
+                "Watchlist scan deadline (%gs) hit before %s completed — "
                 "returning partial results instead of blocking the response.",
                 _SCAN_DEADLINE_SECONDS, symbol,
             )
             errors.append({
                 "symbol": symbol,
-                "error": f"scan deadline ({_SCAN_DEADLINE_SECONDS:.0f}s) exceeded, skipped this run",
+                "error": f"scan deadline ({_SCAN_DEADLINE_SECONDS:g}s) exceeded, skipped this run",
             })
     finally:
         # Fix (30 Aug 2026, round 3): round 2's `pool.shutdown(wait=False,
@@ -6039,7 +6064,12 @@ def market_session():
     return {
         "phase": phase,
         "is_open": phase == "open",
-        "is_market_day": phase not in ("closed", "holiday") or (now.weekday() < 5 and not is_nse_holiday(now.date())),
+        # The phase helper is authoritative for "holiday": the two sources used to be
+        # unreconciled, so a holiday phase on a calendar-clean weekday reported both
+        # is_holiday and is_market_day as True.
+        "is_market_day": phase != "holiday" and (
+            phase not in ("closed",) or (now.weekday() < 5 and not is_nse_holiday(now.date()))
+        ),
         "is_holiday": phase == "holiday",
         "now_ist": now.isoformat(),
         "session_window": "09:15–15:30 IST Mon–Fri (ex holidays)",
@@ -6047,22 +6077,60 @@ def market_session():
     }
 
 
+def _safe_pct(change, base) -> float:
+    """change / base * 100, or 0.0 when the base is missing, non-positive or the
+    result is not finite (a zero previous close used to give inf, which then
+    poisoned the caches and made FastAPI fail to JSON-encode the response)."""
+    try:
+        c = float(change)
+        b = float(base)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(c) or not math.isfinite(b) or b <= 0:
+        return 0.0
+    out = c / b * 100
+    return out if math.isfinite(out) else 0.0
+
+
+def _json_finite(obj) -> bool:
+    """True when every float inside obj is finite (i.e. it is JSON-encodable)."""
+    if isinstance(obj, float):
+        return math.isfinite(obj)
+    if isinstance(obj, dict):
+        return all(_json_finite(v) for v in obj.values())
+    if isinstance(obj, (list, tuple)):
+        return all(_json_finite(v) for v in obj)
+    return True
+
+
+def _rank_market_rows(rows, key: str, reverse: bool, n: int = 10) -> list:
+    """Top-n rows by a numeric key. A malformed row (not a dict, or a missing /
+    non-numeric / non-finite key) is skipped instead of failing the endpoint."""
+    scored = []
+    for r in (rows or []):
+        if not isinstance(r, dict):
+            continue
+        v = _hot_float(r.get(key))
+        if v is None:
+            continue
+        scored.append((v, r))
+    scored.sort(key=lambda t: t[0], reverse=reverse)
+    return [r for _, r in scored[:n]]
+
+
 @app.get("/market/top-gainers")
 def market_top_gainers():
-    data = _get_nifty50_data()
-    sorted_data = sorted(data, key=lambda x: x["change_pct"], reverse=True)[:10]
+    sorted_data = _rank_market_rows(_get_nifty50_data(), "change_pct", True)
     return {"data": sorted_data, "count": len(sorted_data)}
 
 @app.get("/market/top-losers")
 def market_top_losers():
-    data = _get_nifty50_data()
-    sorted_data = sorted(data, key=lambda x: x["change_pct"])[:10]
+    sorted_data = _rank_market_rows(_get_nifty50_data(), "change_pct", False)
     return {"data": sorted_data, "count": len(sorted_data)}
 
 @app.get("/market/most-active")
 def market_most_active():
-    data = _get_nifty50_data()
-    sorted_data = sorted(data, key=lambda x: x["volume"], reverse=True)[:10]
+    sorted_data = _rank_market_rows(_get_nifty50_data(), "volume", True)
     return {"data": sorted_data, "count": len(sorted_data)}
 
 @app.get("/market/trending")
@@ -6104,7 +6172,10 @@ async def market_trending():
                         continue
                     price = round(hist["Close"].iloc[-1], 2)
                     change = round(hist["Close"].iloc[-1] - hist["Open"].iloc[-1], 2)
-                    change_pct = round(change / hist["Open"].iloc[-1] * 100, 2)
+                    _open = float(hist["Open"].iloc[-1])
+                    # A zero/invalid Open used to give inf, which FastAPI cannot
+                    # JSON-encode: one bad bar turned the whole route into a 500.
+                    change_pct = round(change / _open * 100, 2) if (math.isfinite(_open) and _open > 0) else None
 
                 trending_data.append({
                     "symbol": sym,
@@ -6146,7 +6217,9 @@ def get_market_indices(force_refresh: bool = False):
 
     if not force_refresh:
         cached = _redis_get(INDICES_CACHE_KEY)
-        if cached and isinstance(cached, dict):
+        # A cache entry holding inf/NaN (written by an older build) is ignored
+        # and rebuilt rather than served: it cannot be JSON-encoded.
+        if cached and isinstance(cached, dict) and _json_finite(cached):
             cached["fetched_at"] = fetched_at_str
             return JSONResponse(
                 content=cached,
@@ -6163,19 +6236,20 @@ def get_market_indices(force_refresh: bool = False):
         nifty_hist = nifty.history(period="1d")
         sensex_hist = sensex.history(period="1d")
         if nifty_hist.empty or sensex_hist.empty:
-            raise HTTPException(status_code=503, detail="Index data temporarily unavailable")
+            # Handled by the degrade path below (last-known copy / zero fallback, HTTP 200).
+            raise ValueError("Index data temporarily unavailable")
 
         nifty_close = nifty_hist['Close'].iloc[-1]
         nifty_open = nifty_hist['Open'].iloc[0]
         nifty_prev_close = nifty_hist['Close'].iloc[0] if len(nifty_hist) > 1 else nifty_open
         nifty_change = nifty_close - nifty_prev_close
-        nifty_change_pct = (nifty_change / nifty_prev_close) * 100
+        nifty_change_pct = _safe_pct(nifty_change, nifty_prev_close)
 
         sensex_close = sensex_hist['Close'].iloc[-1]
         sensex_open = sensex_hist['Open'].iloc[0]
         sensex_prev_close = sensex_hist['Close'].iloc[0] if len(sensex_hist) > 1 else sensex_open
         sensex_change = sensex_close - sensex_prev_close
-        sensex_change_pct = (sensex_change / sensex_prev_close) * 100
+        sensex_change_pct = _safe_pct(sensex_change, sensex_prev_close)
 
         avg_change = (nifty_change_pct + sensex_change_pct) / 2
         # 2026-09-03 fix: sensitivity raised 0.3 → 1.5.
@@ -6212,6 +6286,8 @@ def get_market_indices(force_refresh: bool = False):
             "market_score": round(market_score),
             "fetched_at": fetched_at_str,
         }
+        if not _json_finite(result):
+            raise ValueError("non-finite index values")
         _redis_set(INDICES_CACHE_KEY, result, ttl=300)
         _redis_set(INDICES_LAST_KNOWN, result, ttl=86400)
         return JSONResponse(
@@ -6226,7 +6302,8 @@ def get_market_indices(force_refresh: bool = False):
     except Exception as e:
         logger.error(f"Error fetching indices: {e}")
         last_known = _redis_get(INDICES_LAST_KNOWN)
-        if last_known and isinstance(last_known, dict):
+        if last_known and isinstance(last_known, dict) and _json_finite(last_known):
+            last_known = dict(last_known)   # never mutate the stored copy in place
             last_known["fetched_at"] = fetched_at_str
             last_known["stale"] = True
             _redis_set(INDICES_CACHE_KEY, last_known, ttl=60)
@@ -6248,8 +6325,9 @@ def get_market_indices(force_refresh: bool = False):
                 "stale": True,
                 "fallback": True
             }
+            # Short-lived only: writing the zero fallback to the 24 h last-known
+            # key meant the NEXT outage served zeros as if they were a real copy.
             _redis_set(INDICES_CACHE_KEY, fallback, ttl=60)
-            _redis_set(INDICES_LAST_KNOWN, fallback, ttl=86400)
             return JSONResponse(
                 content=fallback,
                 headers={
@@ -6305,7 +6383,7 @@ async def get_scan_universe(cached: bool = False):
             live = _filter_equities(live)
             live = _filter_symbols_under_max_price(live)
             if len(live) >= 50:
-                searched = await asyncio.to_thread(_load_searched)
+                searched = await _load_searched_safe()
                 movers, _partial = await _movers_with_deadline()
                 return {
                     "total": len(live),
@@ -6331,7 +6409,7 @@ async def get_scan_universe(cached: bool = False):
                             asyncio.create_task(asyncio.to_thread(_build_scan_universe))
                         except Exception:
                             pass
-                        searched = await asyncio.to_thread(_load_searched)
+                        searched = await _load_searched_safe()
                         movers, _partial = await _movers_with_deadline()
                         logger.info(
                             "scan/universe: served %d-symbol stale fallback (background rebuild scheduled)",
@@ -6365,17 +6443,25 @@ async def get_scan_universe(cached: bool = False):
                 fallback = _kv_cache.get_stale(SCAN_UNIVERSE_STALE_KEY)
         except Exception:
             fallback = None
+        # The >=50 check must hold AFTER the equity/price filters, otherwise a
+        # fallback that shrinks to a handful of symbols would be served.
+        fb = []
         if isinstance(fallback, list) and len(fallback) >= 50:
+            try:
+                fb = _filter_symbols_under_max_price(_filter_equities(fallback))
+            except Exception as _fe:
+                logger.warning("scan/universe: fallback filter failed: %s", _fe)
+                fb = []
+        if len(fb) >= 50:
             logger.warning("scan/universe: full build exceeded %.0fs — served %d-symbol cached fallback, build continues in background",
-                           SCAN_UNIVERSE_BUILD_DEADLINE_S, len(fallback))
-            fb = _filter_symbols_under_max_price(_filter_equities(fallback))
+                           SCAN_UNIVERSE_BUILD_DEADLINE_S, len(fb))
             movers, _partial = await _movers_with_deadline()
             return {"total": len(fb), "symbols": fb, "searched_symbols_included": [], "momentum_movers": movers,
                     "momentum_movers_partial": _partial, "max_price": MAX_UNIVERSE_PRICE,
                     "cached": True, "stale": True, "deadline_exceeded": True}
         logger.warning("scan/universe: full build exceeded %.0fs and no cached universe exists — waiting for the build", SCAN_UNIVERSE_BUILD_DEADLINE_S)
         universe = await build_task
-    searched = await asyncio.to_thread(_load_searched)
+    searched = await _load_searched_safe()
     movers, _partial = await _movers_with_deadline()
     return {
         "total": len(universe),
@@ -6440,12 +6526,43 @@ async def get_universe():
 
 @app.delete("/scan/universe/cache")
 def clear_universe_cache():
+    """Clear every cache layer holding the scan universe.
+
+    Used to do nothing (yet report success) unless the legacy Redis client
+    was configured; the real stores are the Neon/kv layer and the in-process
+    fallback, so those are cleared too and the response says what happened.
+    """
+    cleared = []
+    errors = []
+    if _kv_cache is not None:
+        try:
+            _kv_cache.delete(SCAN_UNIVERSE_KEY)
+            cleared.append("kv")
+        except Exception as e:
+            errors.append(f"kv: {e}")
+    try:
+        _mem_kv.pop(SCAN_UNIVERSE_KEY, None)
+        _mem_kv_exp.pop(SCAN_UNIVERSE_KEY, None)
+        cleared.append("memory")
+    except Exception as e:
+        errors.append(f"memory: {e}")
     if _redis:
         try:
             _redis.delete(SCAN_UNIVERSE_KEY)
-        except Exception:
-            pass
-    return {"message": "Scan universe cache cleared — will rebuild on next scan"}
+            cleared.append("redis")
+        except Exception as e:
+            errors.append(f"redis: {e}")
+    if not cleared:
+        return {
+            "ok": False,
+            "cleared": [],
+            "errors": errors,
+            "message": "Scan universe cache could not be cleared",
+        }
+    out = {"message": "Scan universe cache cleared — will rebuild on next scan", "cleared": cleared}
+    if errors:
+        out["errors"] = errors
+    return out
 
 # ── Notification endpoints ──────────────────────────────────────────────────
 @app.get("/notifications/health")
@@ -6456,6 +6573,9 @@ def notifications_health():
         return resp.json()
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
+    except ValueError as e:
+        # 200 with a non-JSON body: same upstream-failure class as the rest.
+        raise HTTPException(status_code=502, detail=f"Notification service returned a non-JSON health body: {e}")
 
 @app.get("/notifications/config")
 def get_notification_config():
@@ -6557,6 +6677,9 @@ def send_picks_to_telegram(payload: dict):
     recs = payload.get("recommendations", [])
     if not recs:
         raise HTTPException(status_code=400, detail="No recommendations provided")
+    if not isinstance(recs, list):
+        # A string used to be sliced per character into "(invalid pick)" lines.
+        raise HTTPException(status_code=400, detail="recommendations must be a list")
 
     _wake_notification_service()
 
@@ -6574,6 +6697,20 @@ def send_picks_to_telegram(payload: dict):
         except (TypeError, ValueError):
             return None
 
+    def _fmt_holding(h):
+        # scan_watchlist attaches holding_period_estimate as a dict; print it
+        # as a readable range rather than a Python repr.
+        if isinstance(h, dict):
+            lo, hi = h.get("min_days"), h.get("max_days")
+            if lo is not None and hi is not None:
+                return f"{lo}–{hi} days" if lo != hi else f"{lo} days"
+            if hi is not None:
+                return f"up to {hi} days"
+            if lo is not None:
+                return f"{lo}+ days"
+            return "N/A"
+        return h
+
     def format_pick(r, index):
         if not isinstance(r, dict):
             return f"{index}. *(invalid pick)*"
@@ -6590,7 +6727,7 @@ def send_picks_to_telegram(payload: dict):
             entry = {}
         entry_low = _num(entry.get("low"))
         entry_high = _num(entry.get("high"))
-        holding = r.get("holding_period") or r.get("holding_period_estimate") or "N/A"
+        holding = _fmt_holding(r.get("holding_period") or r.get("holding_period_estimate") or "N/A")
         lines = [f"{index}. *{symbol}* – {decision} (Score: {score})"]
         if close is not None:
             lines.append(f"   Current: ₹{close:.2f}")
@@ -6598,12 +6735,26 @@ def send_picks_to_telegram(payload: dict):
             lines.append(f"   Entry: ₹{entry_low:.2f} – ₹{entry_high:.2f}")
         if target is not None:
             upside = ((target - close) / close * 100) if close else 0
-            lines.append(f"   Target: ₹{target:.2f} (+{upside:.1f}%)")
+            # ``:+`` keeps the sign right for a target below the close.
+            lines.append(f"   Target: ₹{target:.2f} ({upside:+.1f}%)")
         if stop is not None:
             lines.append(f"   Stop: ₹{stop:.2f}")
         if holding and holding != "N/A":
             lines.append(f"   Hold: {holding}")
         return "\n".join(lines)
+
+    def _delivered(resp, what: str) -> bool:
+        """Parse the notify reply; any malformed reply is a 502, not a 500."""
+        try:
+            data = resp.json()
+        except ValueError as e:
+            raise HTTPException(status_code=502, detail=f"{what}: notification service returned a non-JSON reply: {e}")
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=502, detail=f"{what}: notification service returned an unexpected reply")
+        if data.get("delivered"):
+            return True
+        error_note = data.get("note", "Delivery failed")
+        raise HTTPException(status_code=502, detail=f"{what}: {error_note}")
 
     if msg_type == "top5":
         lines = [title, ""]
@@ -6618,12 +6769,8 @@ def send_picks_to_telegram(payload: dict):
                 timeout=15,
             )
             resp.raise_for_status()
-            data = resp.json()
-            if data.get("delivered"):
-                return {"success": True, "sent": len(picks), "message": "Notification sent"}
-            else:
-                error_note = data.get("note", "Delivery failed")
-                raise HTTPException(status_code=502, detail=f"Notification service failed to deliver: {error_note}")
+            _delivered(resp, "Notification service failed to deliver")
+            return {"success": True, "sent": len(picks), "message": "Notification sent"}
         except httpx.HTTPError as e:
             raise HTTPException(status_code=502, detail=f"Notification service failed: {e}")
 
@@ -6633,12 +6780,18 @@ def send_picks_to_telegram(payload: dict):
 
     base_header = title + "\n\n"
     MAX_CHARS = 4000
+    # Room for the longest header ("(Part NN/NN)") plus the trailing newline;
+    # a single oversized pick is truncated to fit instead of being sent
+    # after an empty header-only part.
+    _max_pick = max(100, MAX_CHARS - len(base_header) - 40)
     chunks = []
     current_chunk = []
     current_len = len(base_header)
     for pick_str in pick_strings:
+        if len(pick_str) > _max_pick:
+            pick_str = pick_str[: _max_pick - 1] + "…"
         pick_len = len(pick_str) + 1
-        if current_len + pick_len + 10 > MAX_CHARS:
+        if current_chunk and current_len + pick_len + 10 > MAX_CHARS:
             chunks.append(current_chunk)
             current_chunk = []
             current_len = len(base_header)
@@ -6649,6 +6802,13 @@ def send_picks_to_telegram(payload: dict):
 
     total_chunks = len(chunks)
     sent_count = 0
+
+    def _partial_note() -> str:
+        # Telegram has no rollback: tell the caller what was already delivered.
+        if sent_count:
+            return f" ({sent_count} of {total_chunks} part(s) were already delivered and cannot be recalled)"
+        return ""
+
     for idx, chunk in enumerate(chunks, 1):
         if total_chunks > 1:
             header = f"{title} (Part {idx}/{total_chunks})\n\n"
@@ -6662,14 +6822,14 @@ def send_picks_to_telegram(payload: dict):
                 timeout=15,
             )
             resp.raise_for_status()
-            data = resp.json()
-            if data.get("delivered"):
-                sent_count += 1
-            else:
-                error_note = data.get("note", "Delivery failed")
-                raise HTTPException(status_code=502, detail=f"Part {idx} failed: {error_note}")
+            _delivered(resp, f"Part {idx} failed")
+            sent_count += 1
+        except HTTPException as he:
+            if sent_count:
+                raise HTTPException(status_code=502, detail=f"{he.detail}{_partial_note()}")
+            raise
         except httpx.HTTPError as e:
-            raise HTTPException(status_code=502, detail=f"Notification service failed for part {idx}: {e}")
+            raise HTTPException(status_code=502, detail=f"Notification service failed for part {idx}: {e}{_partial_note()}")
 
     return {"success": True, "sent": len(picks), "parts": total_chunks, "message": f"Notification sent in {total_chunks} parts"}
 
@@ -6688,6 +6848,8 @@ async def training_status():
                 resp = await client.get(f"{TRAINING_URL.rstrip('/')}/api/status")
             resp.raise_for_status()
             return resp.json()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Training service unreachable: {str(e)}")
 
@@ -6718,7 +6880,7 @@ async def get_training_score(symbol: str):
     try:
         client = _get_http_client()  # shared keepalive pool
         if True:
-            resp = await client.get(f"{TRAINING_URL}/training-score/{symbol}")
+            resp = await client.get(f"{TRAINING_URL.rstrip('/')}/training-score/{symbol}")
             if resp.status_code == 404:
                 return {
                     "symbol": symbol.upper(),
@@ -6940,6 +7102,60 @@ def _build_hot_conviction_extra(decide_full, last_decision):
     return out
 
 
+def _env_int(name: str, default: int, fallback_name: str = None) -> int:
+    """int(os.environ[name]) with a safe default for unset/blank/non-numeric."""
+    raw = os.getenv(name)
+    if (raw is None or str(raw).strip() == "") and fallback_name:
+        raw = os.getenv(fallback_name)
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _hot_base(sym) -> str:
+    """Canonical bare symbol: upper-case FIRST, then drop a .NS/.BO suffix.
+
+    (Stripping before upper-casing left ``aaa.ns`` as ``AAA.NS``, which was
+    then treated as a different symbol from ``AAA``.)
+    """
+    t = str(sym or "").strip().upper()
+    for suf in (".NS", ".BO"):
+        if t.endswith(suf):
+            t = t[: -len(suf)]
+    return t
+
+
+def _hot_float(v):
+    """float(v) or None when v is missing / non-numeric / non-finite."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+# Positive catalyst wording — whole words/phrases only, so "bulk of staff"
+# or "record loss" can't promote a name on a substring accident.
+_CATALYST_POS_RE = re.compile(
+    r"\b(?:surg(?:e|es|ed|ing)|jump(?:s|ed|ing)?|rall(?:y|ies|ied|ying)|beats?"
+    r"|order wins?|wins?|bulk deals?|stake|upgrad(?:e|es|ed)"
+    r"|record (?:profits?|highs?|revenues?|sales|earnings|orders?|growth|quarter))\b"
+)
+# Negative wording vetoes the promotion (e.g. "falls as it wins no orders").
+_CATALYST_NEG_RE = re.compile(
+    r"\b(?:loss(?:es)?|fall(?:s|ing)?|fell|drop(?:s|ped)?|plunge[sd]?|slump(?:s|ed)?"
+    r"|layoffs?|laid off|downgrad(?:e|es|ed)|no orders?|wins? no|fraud|probe|penalty|default)\b"
+)
+
+
+def _has_catalyst_language(summary) -> bool:
+    text = str(summary or "").lower()
+    if not text:
+        return False
+    return bool(_CATALYST_POS_RE.search(text)) and not _CATALYST_NEG_RE.search(text)
+
+
 async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = None, progress_cb=None):
     """Curated list for Stockky 🔥 Stocks (internal; HTTP via /stockky-hot).
 
@@ -6968,7 +7184,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                     if not isinstance(r, dict):
                         continue
                     dec = (r.get("decision") or "").upper()
-                    s = (r.get("symbol") or "").replace(".NS", "").replace(".BO", "").upper()
+                    s = _hot_base(r.get("symbol"))
                     if not s:
                         continue
                     if dec in ("BUY NOW", "PREPARE TO BUY"):
@@ -7022,7 +7238,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
         logger.warning("hot events: %s", e)
 
     # Catalyst sources first so they are never crowded out by scan seed
-    universe = list(dict.fromkeys(
+    _raw_universe = (
         list(momentum)[:80]
         + list(news_syms)[:60]
         + list(event_syms)[:80]
@@ -7030,7 +7246,15 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
         + list(watch)
         + list(_load_searched() or [])[:40]
         + list(_get_recent_ipos() or [])[:20]
-    ))
+    )
+    # De-duplicate on the NORMALISED symbol ("AAA" == "AAA.NS" == "aaa.ns"),
+    # keeping the first spelling seen, so one name is never fetched twice.
+    _seen_u: dict = {}
+    for _u in _raw_universe:
+        _k = _hot_base(_u)
+        if _k and _k not in _seen_u:
+            _seen_u[_k] = _u
+    universe = list(_seen_u.values())
     if not universe:
         universe = list(_get_nifty_indices() or [])[:80]
     # Full catalyst universe by default. Optional max_symbols only if caller caps.
@@ -7040,7 +7264,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
         universe = universe[:lim]
     else:
         lim = len(universe)
-    batch_size = max(5, int(os.getenv("HOT_BATCH_SIZE", os.getenv("CATALYST_BATCH_SIZE", "25"))))
+    batch_size = max(5, _env_int("HOT_BATCH_SIZE", 25, fallback_name="CATALYST_BATCH_SIZE"))
     logger.info(
         "stockky-hot universe=%s (mom=%s news=%s evt=%s scan=%s lim=%s batch=%s)",
         len(universe), len(momentum), len(news_syms), len(event_syms), len(scan_syms), lim, batch_size,
@@ -7091,7 +7315,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                     pass
             processed_symbols = i_sym + 1
             try:
-                base = sym.replace(".NS", "").replace(".BO", "").upper()
+                base = _hot_base(sym)
                 news_data = None
                 event_data = None
                 decision_data = None
@@ -7131,7 +7355,11 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                     reasons = flat
 
                 hc = int((news_data or {}).get("headline_count") or 0)
-                nscore = (news_data or {}).get("news_score")
+                _nscore_raw = (news_data or {}).get("news_score")
+                # A non-numeric news score is treated as "no score" instead of
+                # dropping the symbol from every section (results rows too).
+                _nscore_f = _hot_float(_nscore_raw)
+                nscore = _nscore_raw if _nscore_f is not None else None
                 news_summary = (news_data or {}).get("summary") or ""
                 headlines = (news_data or {}).get("headlines") or []
 
@@ -7170,21 +7398,24 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                 # Catalyst promotion: strong news / bulk buy / results beat
                 # can surface PREPARE TO BUY even without a prior full decide.
                 catalyst_bits = []
-                if nscore is not None and int(nscore) >= 62 and hc >= 2:
+                if _nscore_f is not None and int(_nscore_f) >= 62 and hc >= 2:
                     catalyst_bits.append(f"Positive news flow (score {nscore}, {hc} headlines)")
-                if news_summary and any(
-                    k in str(news_summary).lower()
-                    for k in ("surge", "jump", "rally", "beat", "order win", "wins", "bulk", "stake", "upgrade", "record")
-                ):
+                if news_summary and _has_catalyst_language(news_summary):
                     catalyst_bits.append("Catalyst language in news summary")
                 if has_bulk_insider and bulk:
                     catalyst_bits.append("Bulk/block deal activity")
                 if has_results and event_data and event_data.get("earnings_surprise"):
-                    try:
-                        sp = float((event_data.get("earnings_surprise") or {}).get("surprise_pct") or 0)
-                        if sp > 0:
-                            catalyst_bits.append(f"Positive earnings surprise {sp}%")
-                    except (TypeError, ValueError):
+                    _es = event_data.get("earnings_surprise")
+                    if isinstance(_es, dict):
+                        try:
+                            sp = float(_es.get("surprise_pct") or 0)
+                            if sp > 0:
+                                catalyst_bits.append(f"Positive earnings surprise {sp}%")
+                        except (TypeError, ValueError):
+                            catalyst_bits.append("Earnings/results event")
+                    else:
+                        # truthy non-dict (e.g. "beat"): a results event, but
+                        # no parsable surprise — don't drop the whole symbol.
                         catalyst_bits.append("Earnings/results event")
                 if event_data and event_data.get("has_positive_catalyst"):
                     catalyst_bits.append("Positive classified catalyst")
@@ -7207,7 +7438,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
 
                 # NEWS section: stricter — need real headlines + score; drop weak noise
                 # Prefer names that also have scan actionability or event signal
-                news_ok = hc >= 2 and nscore is not None and float(nscore) >= 55
+                news_ok = hc >= 2 and _nscore_f is not None and _nscore_f >= 55
                 if news_ok and (actionable or has_results or has_bulk_insider or from_scan or hc >= 4):
                     news_driven.append({
                         **conviction_extra,
@@ -7289,7 +7520,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
         _item
         for _bucket in (news_driven, results_driven, bulk_insider_driven)
         for _item in _bucket
-        if not (float(_item.get("price") or 0) > 0 or float(_item.get("close") or 0) > 0)
+        if not ((_hot_float(_item.get("price")) or 0) > 0 or (_hot_float(_item.get("close")) or 0) > 0)
     ]
     if _still_missing:
         _miss_syms = list({_item.get("symbol") or "" for _item in _still_missing if _item.get("symbol")})
@@ -7299,9 +7530,12 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                 for _item in _still_missing:
                     _sym = _item.get("symbol") or ""
                     _lpx = _live_prices.get(_sym) or _live_prices.get(_sym.replace(".NS", "").replace(".BO", ""))
-                    if _lpx and float(_lpx) > 0:
-                        _item["price"] = float(_lpx)
-                        _item["close"] = float(_lpx)
+                    # One unparsable live price must not stop the pass for every
+                    # later item: parse per item and skip just the bad one.
+                    _lpx_f = _hot_float(_lpx)
+                    if _lpx_f is not None and _lpx_f > 0:
+                        _item["price"] = _lpx_f
+                        _item["close"] = _lpx_f
                 logger.info(
                     "stockky-hot price pass-2 (AngelOne/yf waterfall): %s/%s symbols resolved",
                     sum(1 for s in _miss_syms if _live_prices.get(s)),
@@ -7383,6 +7617,38 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
 
 # ── Surprise momentum scanner (static Neon baselines + live ticks) ──────────
 
+SYMBOL_LIST_CAP = 200
+
+
+def _clean_symbol_list(raw, cap: int = SYMBOL_LIST_CAP) -> Optional[List[str]]:
+    """Validate a caller-supplied symbol list.
+
+    Accepts a list/tuple/set of strings or a comma/semicolon-separated string;
+    drops non-strings and blanks, upper-cases, de-duplicates (keeping order)
+    and caps the size. Returns None when nothing usable remains, so the caller
+    falls back to its default universe.
+    """
+    if isinstance(raw, str):
+        items = [x for x in raw.replace(";", ",").split(",")]
+    elif isinstance(raw, (list, tuple, set)):
+        items = list(raw)
+    else:
+        return None
+    out: List[str] = []
+    seen = set()
+    for it in items:
+        if not isinstance(it, str):
+            continue
+        t = it.strip().upper()
+        if not t or len(t) > 32 or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= cap:
+            break
+    return out or None
+
+
 @app.post("/api/surprise/run-premarket-feed")
 @app.post("/surprise/run-premarket-feed")
 @app.get("/api/surprise/run-premarket-feed")
@@ -7401,7 +7667,7 @@ async def api_run_premarket_feed(force: bool = False, request: Request = None):
                 import json as _json
                 payload = _json.loads(body.decode("utf-8") or "{}")
                 if isinstance(payload, dict) and payload.get("symbols"):
-                    symbols = payload["symbols"]
+                    symbols = _clean_symbol_list(payload["symbols"])
     except Exception:
         symbols = None
     if not symbols:
@@ -7540,8 +7806,19 @@ async def api_surprise_scan(
             result["cache_age_sec"] = round(time.time() - getattr(surprise_engine, "_last_scan_ts", time.time()), 1)
         else:
             logger.warning("surprise/scan: exceeded %.0fs and no prior result to serve — waiting for the scan", SURPRISE_SCAN_DEADLINE_S)
-            result = await _scan_task
-    if limit and isinstance(result.get("stocks"), list):
+            try:
+                result = await _scan_task
+            except Exception as e:
+                logger.exception("surprise/scan failed: %s", e)
+                raise HTTPException(status_code=500, detail=f"surprise scan failed: {str(e)[:240]}")
+    except Exception as e:
+        # Same mapping as the sibling surprise routes (a clear 500 detail
+        # instead of an unhandled error).
+        logger.exception("surprise/scan failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"surprise scan failed: {str(e)[:240]}")
+    # ``limit`` is applied whenever it is given: 0 (like a negative value)
+    # means "no rows", it no longer silently means "unlimited".
+    if limit is not None and isinstance(result.get("stocks"), list):
         result = dict(result)
         result["stocks"] = result["stocks"][: max(0, int(limit))]
     return result
@@ -7600,6 +7877,7 @@ async def api_surprise_scan_stream(
         total = len(keys)
         hits = 0
         quotes_ok = 0
+        quotes_failed = 0
         chunk = 20
         yield json.dumps({
             "_meta": True,
@@ -7621,10 +7899,12 @@ async def api_surprise_scan_stream(
 
             for sym, tick in zip(batch, ticks):
                 if isinstance(tick, Exception) or not tick:
-                    scored = surprise_engine.score_stock(sym, {})
-                else:
-                    quotes_ok += 1
-                    scored = surprise_engine.score_stock(sym, tick)
+                    # No quote: nothing real to score. Scoring an empty tick
+                    # could still return a "hit" built from the baseline alone.
+                    quotes_failed += 1
+                    continue
+                quotes_ok += 1
+                scored = surprise_engine.score_stock(sym, tick)
                 if scored:
                     hits += 1
                     scored["_progress"] = {
@@ -7659,6 +7939,7 @@ async def api_surprise_scan_stream(
             "hits": hits,
             "universe": total,
             "quotes_ok": quotes_ok,
+            "quotes_failed": quotes_failed,
             "elapsed": round(time.time() - t0, 1),
         }) + "\n"
 
@@ -7704,12 +7985,19 @@ async def api_surprise_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
         raise HTTPException(status_code=500, detail=f"surprise_scanner import failed: {e}")
 
     client = _get_http_client()
-    result = await surprise_engine.scan(
-        client=client,
-        market_data_url=MARKET_DATA_URL,
-        symbols=None,
-        force_reload_static=False,
-    )
+    try:
+        result = await surprise_engine.scan(
+            client=client,
+            market_data_url=MARKET_DATA_URL,
+            symbols=None,
+            force_reload_static=False,
+        )
+    except Exception as e:
+        # Mapped like the sibling surprise routes instead of a bare 500.
+        logger.exception("surprise notify-top-picks scan failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"surprise scan failed: {str(e)[:240]}")
+    if not isinstance(result, dict):
+        result = {}
     stocks = result.get("stocks") or []
     if not stocks:
         return {
@@ -7734,9 +8022,16 @@ async def api_surprise_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
             chg_str = f"{float(chg):+.2f}%"
         except (TypeError, ValueError):
             chg_str = "—"
+
+        def _val(v, money=False):
+            # A missing field prints a dash, never "None" / "₹None".
+            if v is None or v == "":
+                return "—"
+            return f"₹{v}" if money else str(v)
+
         lines.append(
-            f"{i}. {sym} — {tier} (score {score}/100)\n"
-            f"   ₹{price} ({chg_str}) · Target ₹{target} · Stop ₹{stop}\n"
+            f"{i}. {_val(sym)} — {tier or '—'} (score {_val(score)}/100)\n"
+            f"   {_val(price, True)} ({chg_str}) · Target {_val(target, True)} · Stop {_val(stop, True)}\n"
             f"   {trig}"
         )
     message = "\n".join(lines)
@@ -7759,14 +8054,21 @@ async def api_surprise_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
             detail = resp.json()
         except Exception:
             detail = {"status_code": resp.status_code}
-        delivered = bool(isinstance(detail, dict) and detail.get("delivered"))
-        return {
-            "ok": True,
+        _status = getattr(resp, "status_code", 200)
+        http_ok = not (isinstance(_status, int) and _status >= 400)
+        delivered = bool(http_ok and isinstance(detail, dict) and detail.get("delivered"))
+        out = {
+            # A 4xx/5xx reply from the notification service is a failure the
+            # caller should see in `ok`, not only inside notification_result.
+            "ok": http_ok,
             "sent": delivered,
             "count": len(top),
             "symbols": [s.get("symbol") for s in top],
             "notification_result": detail,
         }
+        if not http_ok:
+            out["error"] = f"notification service returned HTTP {_status}"
+        return out
     except Exception as e:
         return {"ok": False, "sent": False, "count": len(top), "error": str(e)[:300]}
 
@@ -7812,7 +8114,11 @@ async def api_ipo_scan(
     ipo_scanner.analyze_ipo(). Runs in the background like the premarket
     job; poll /surprise/ipo/status, then GET /surprise/ipo/list.
     """
-    from ipo_scanner import run_ipo_scan, get_ipo_scan_progress
+    try:
+        from ipo_scanner import run_ipo_scan, get_ipo_scan_progress
+    except Exception as e:
+        # Same shape as the sibling IPO routes when ipo_scanner can't load.
+        return {"accepted": False, "status": "error", "error": f"ipo_scanner unavailable: {str(e)[:160]}"}
 
     current = get_ipo_scan_progress()
     if current.get("status") == "running":
@@ -7821,8 +8127,16 @@ async def api_ipo_scan(
     if background and background_tasks is not None:
         background_tasks.add_task(run_ipo_scan, force=force, wipe=wipe)
         return {"accepted": True, "background": True, "force": force, "wipe": wipe, "message": "IPO scan started"}
-    result = run_ipo_scan(force=force, wipe=wipe)
-    return {"accepted": True, "background": False, **result}
+    try:
+        result = run_ipo_scan(force=force, wipe=wipe)
+    except Exception as e:
+        logger.exception("ipo/scan failed: %s", e)
+        return {"accepted": False, "background": False, "status": "error", "error": str(e)[:200]}
+    if not isinstance(result, dict):
+        result = {}
+    # The envelope keys are spread LAST so a scan result carrying its own
+    # ``accepted`` / ``background`` can no longer override them.
+    return {**result, "accepted": True, "background": False}
 
 
 @app.get("/ipo/status")
@@ -7912,8 +8226,14 @@ async def api_ipo_add(body: IpoAddRequest):
     or type those themselves. A resolved entry is persisted as a manual
     IPO and included in every subsequent scan/list the same way any other
     manual entry is."""
-    from ipo_scanner import add_manual_ipo_by_name
-    result = add_manual_ipo_by_name(body.company_name)
+    try:
+        from ipo_scanner import add_manual_ipo_by_name
+        result = add_manual_ipo_by_name(body.company_name)
+    except Exception as e:
+        logger.exception("ipo/add failed: %s", e)
+        return {"accepted": False, "message": f"IPO lookup failed: {str(e)[:160]}", "suggestions": []}
+    if not isinstance(result, dict):
+        result = {}
     if not result.get("resolved"):
         return {
             "accepted": False,
@@ -7940,7 +8260,11 @@ async def api_ipo_repair_batch(limit: int = Query(15, ge=1, le=100), symbol: Opt
     # symbols with a time.sleep(0.3) pace-out between each; called directly
     # from this async route it blocked every other api-gateway request for
     # the full repair duration. Offload to a worker thread.
-    return await asyncio.to_thread(ipo_repair_batch, limit=limit, symbol=symbol)
+    try:
+        return await asyncio.to_thread(ipo_repair_batch, limit=limit, symbol=symbol)
+    except Exception as e:
+        logger.exception("ipo/repair-batch failed: %s", e)
+        return {"status": "error", "error": str(e)[:160]}
 
 
 @app.post("/ipo/purge-non-equity")
@@ -7955,7 +8279,11 @@ async def api_ipo_purge_non_equity():
         from ipo_scanner import purge_non_equity_ipos
     except Exception as e:
         return {"status": "error", "error": f"ipo_scanner unavailable: {str(e)[:160]}"}
-    return purge_non_equity_ipos()
+    try:
+        return purge_non_equity_ipos()
+    except Exception as e:
+        logger.exception("ipo/purge-non-equity failed: %s", e)
+        return {"status": "error", "error": str(e)[:160]}
 
 
 @app.post("/ipo/notify-top-picks")
@@ -7983,7 +8311,11 @@ async def api_ipo_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
     for i, r in enumerate(top, 1):
         sym = r.get("symbol")
         decision = r.get("decision") or "—"
-        score = r.get("ipo_score") or r.get("pre_listing_advisory_score")
+        # A real IPO score of 0 is a score, not "missing": only fall back to
+        # the advisory score when ipo_score is actually absent.
+        score = r.get("ipo_score")
+        if score is None:
+            score = r.get("pre_listing_advisory_score")
         stage = str(r.get("stage") or "").replace("_", " ")
         issue_px = r.get("issue_price")
         cur_px = r.get("current_price")
@@ -7994,7 +8326,8 @@ async def api_ipo_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
             chg_str = "—"
         lines.append(
             f"{i}. {sym} — {decision} (score {score if score is not None else '—'}/100, {stage})\n"
-            f"   Issue ₹{issue_px} → Current ₹{cur_px if cur_px is not None else '—'} ({chg_str})"
+            f"   Issue ₹{issue_px if issue_px is not None else '—'} → "
+            f"Current ₹{cur_px if cur_px is not None else '—'} ({chg_str})"
         )
     message = "\n".join(lines)
 
@@ -8133,28 +8466,33 @@ async def api_surprise_premarket_proxy(request: Request):
     )
     force = str(request.query_params.get("force", "false")).lower() in ("1", "true", "yes")
 
-    from surprise_premarket import (
-        precalculate_surprise_baselines,
-        get_premarket_progress,
-        default_universe_from_env,
-    )
+    try:
+        from surprise_premarket import (
+            precalculate_surprise_baselines,
+            get_premarket_progress,
+            default_universe_from_env,
+        )
+    except Exception as e:
+        logger.warning("surprise_premarket import failed: %s", e)
+        return {
+            "ok": False,
+            "accepted": False,
+            "error": f"surprise_premarket unavailable: {str(e)[:160]}",
+            "schema": schema,
+        }
 
-    explicit_symbols = bool(symbols)
-    if not symbols and not background:
-        # Synchronous path only: resolve the universe now, same as before.
-        try:
-            uni = (await asyncio.to_thread(_build_scan_universe))
-            symbols = [
-                str(s).upper().replace(".NS", "").replace(".BO", "").strip()
-                for s in (uni or [])
-                if s
-            ]
-        except Exception as e:
-            logger.warning("universe inject failed: %s", e)
-            symbols = []
-        if not symbols:
-            symbols = default_universe_from_env()
+    def _normalise_universe(uni) -> list:
+        # Normalise FIRST, then drop empties: filtering the raw entries first
+        # let a bare ".NS" through, turning into "" and defeating the
+        # default-universe fallback.
+        out = []
+        for _s in (uni or []):
+            _b = _hot_base(_s)
+            if _b:
+                out.append(_b)
+        return out
 
+    # Already-running check BEFORE any (slow, NSE-backed) universe build.
     prog = get_premarket_progress()
     if prog.get("is_running"):
         return {
@@ -8166,6 +8504,18 @@ async def api_surprise_premarket_proxy(request: Request):
             "schema": schema,
         }
 
+    explicit_symbols = bool(symbols)
+    if not symbols and not background:
+        # Synchronous path only: resolve the universe now, same as before.
+        try:
+            uni = (await asyncio.to_thread(_build_scan_universe))
+            symbols = _normalise_universe(uni)
+        except Exception as e:
+            logger.warning("universe inject failed: %s", e)
+            symbols = []
+        if not symbols:
+            symbols = default_universe_from_env()
+
     if background:
         def _job(explicit_syms=(list(symbols) if explicit_symbols else None), force=force):
             try:
@@ -8176,11 +8526,7 @@ async def api_surprise_premarket_proxy(request: Request):
                     # it no longer holds the HTTP response open.
                     try:
                         uni = _build_scan_universe()
-                        syms = [
-                            str(s).upper().replace(".NS", "").replace(".BO", "").strip()
-                            for s in (uni or [])
-                            if s
-                        ]
+                        syms = _normalise_universe(uni)
                     except Exception as e:
                         logger.warning("gateway premarket job: universe inject failed: %s", e)
                         syms = []
@@ -8207,7 +8553,16 @@ async def api_surprise_premarket_proxy(request: Request):
             "schema": schema,
         }
 
-    result = precalculate_surprise_baselines(symbols, force=force)
+    try:
+        result = precalculate_surprise_baselines(symbols, force=force)
+    except Exception as e:
+        # The background job logs and swallows a baseline error; the
+        # synchronous path now reports it as a structured error instead of an
+        # unhandled 500.
+        logger.exception("gateway premarket (sync): %s", e)
+        return {"ok": False, "error": str(e)[:200], "runner": "api-gateway", "schema": schema}
+    if not isinstance(result, dict):
+        result = {"ok": True, "result": result}
     result["runner"] = "api-gateway"
     result["schema"] = schema
     return result
@@ -8301,7 +8656,13 @@ def catalyst_alert_status():
                     "message": f"Auto-failed: no progress for {age}s — re-run will continue batches",
                     "updated_at": datetime.now(IST).isoformat(),
                 }
-                _redis_set(job_key, st, ttl=86400)
+                try:
+                    _redis_set(job_key, st, ttl=86400)
+                except Exception as _we:
+                    # Reported as error, but the stored job still says
+                    # "running" — say so instead of implying it was healed.
+                    logger.warning("catalyst status heal write failed: %s", _we)
+                    st = {**st, "heal_persisted": False}
     except Exception as e:
         logger.debug("catalyst status heal: %s", e)
     return {"ok": True, **st}
@@ -8315,6 +8676,7 @@ async def catalyst_alert_scan(
     notify: bool = True,
     sync: bool = False,
     batch_size: int = 0,
+    restart: bool = False,
 ):
     """Pre-market / intraday catalyst sweep — FULL universe in batches.
 
@@ -8323,7 +8685,8 @@ async def catalyst_alert_scan(
     every candidate is scored. Poll GET /catalysts/alert/status.
     """
     job_key = "stockky:catalyst_job"
-    batch_size = int(batch_size or os.getenv("CATALYST_BATCH_SIZE", "25"))
+    # A non-numeric CATALYST_BATCH_SIZE falls back to 25 instead of a 500.
+    batch_size = int(batch_size or _env_int("CATALYST_BATCH_SIZE", 25))
     batch_size = max(8, min(batch_size, 40))
 
     def _set_job(**kw):
@@ -8336,7 +8699,10 @@ async def catalyst_alert_scan(
         return cur
 
     existing = _redis_get(job_key) or {}
-    if isinstance(existing, dict) and existing.get("status") == "running" and not force:
+    # ``force`` only bypasses the hot-stocks cache. It used to also bypass this
+    # already-running guard, and it defaults to True, so a plain call always
+    # started a second sweep. Only an explicit ``restart=true`` overrides it.
+    if isinstance(existing, dict) and existing.get("status") == "running" and not restart:
         try:
             upd = existing.get("updated_at") or existing.get("started_at")
             ts = datetime.fromisoformat(str(upd).replace("Z", "+00:00"))
@@ -8362,8 +8728,9 @@ async def catalyst_alert_scan(
     )
 
     async def _work():
+        ka_task = None
+        stop_evt = asyncio.Event()
         try:
-            stop_evt = asyncio.Event()
 
             async def _keepalive_loop():
                 while not stop_evt.is_set():
@@ -8403,7 +8770,10 @@ async def catalyst_alert_scan(
             for section in ("bulk_insider_driven", "results_driven", "news_driven"):
                 for item in (hot or {}).get(section) or []:
                     dec = (item.get("decision") or "").upper()
-                    if dec in ("BUY NOW", "PREPARE TO BUY") or item.get("signal_strength") == "high":
+                    # A "high" signal must not list a DO NOT BUY / SELL row.
+                    if dec in ("BUY NOW", "PREPARE TO BUY") or (
+                        item.get("signal_strength") == "high" and dec not in ("DO NOT BUY", "SELL")
+                    ):
                         picks.append({**item, "section": section})
 
             rank_sec = {"bulk_insider_driven": 0, "results_driven": 1, "news_driven": 2}
@@ -8417,10 +8787,12 @@ async def catalyst_alert_scan(
                 seen.add(s)
                 unique.append(p)
 
+            _universe_n = (hot or {}).get("universe_size")
+            _universe_n = _universe_n if _universe_n is not None else 0
             lines = [
                 "🔥 *Stockky Catalyst Alert*",
                 f"IST {datetime.now(IST).strftime('%Y-%m-%d %H:%M')}",
-                f"Universe screened: {(hot or {}).get('universe_size')} · Actionable: {len(unique)}",
+                f"Universe screened: {_universe_n} · Actionable: {len(unique)}",
                 "",
             ]
             if not unique:
@@ -8447,10 +8819,15 @@ async def catalyst_alert_scan(
                 try:
                     client = _get_http_client()  # shared keepalive pool
                     if True:
-                        await client.post(
+                        _nresp = await client.post(
                             f"{NOTIFICATION_URL.rstrip('/')}/notify",
                             json={"title": "Catalyst Alert", "message": message, "channel": "telegram"},
                         )
+                    # A non-2xx reply is a failed delivery: take the fallback
+                    # path below instead of reporting notified=True.
+                    _nstatus = getattr(_nresp, "status_code", 200)
+                    if isinstance(_nstatus, int) and not (200 <= _nstatus < 300):
+                        raise RuntimeError(f"notify returned HTTP {_nstatus}")
                     notified = True
                 except Exception as e:
                     logger.warning("catalyst telegram failed: %s", e)
@@ -8483,16 +8860,21 @@ async def catalyst_alert_scan(
                 "batch_size": batch_size,
             }
             _set_job(**result)
-            stop_evt.set()
-            try:
-                await asyncio.wait_for(ka_task, timeout=2)
-            except Exception:
-                ka_task.cancel()
             return result
         except Exception as e:
             logger.exception("catalyst alert failed")
             _set_job(status="error", error=str(e)[:300], message=f"Error: {e}")
             return {"ok": False, "status": "error", "error": str(e)[:300]}
+        finally:
+            # Stop the keep-alive loop on EVERY exit path (it used to leak
+            # when the scan failed — only the success path stopped it).
+            stop_evt.set()
+            if ka_task is not None:
+                # wait_for itself cancels ka_task if this coroutine is cancelled.
+                try:
+                    await asyncio.wait_for(ka_task, timeout=2)
+                except Exception:
+                    ka_task.cancel()
 
     if sync:
         return await _work()
@@ -8565,7 +8947,7 @@ class ConnectionManager:
 
     async def broadcast(self, channel: str, payload: dict):
         dead = []
-        msg = json.dumps({"channel": channel, **payload}, default=str)
+        msg = json.dumps({**payload, "channel": channel}, default=str)
         for ws in list(self.active):
             chans = self.subs.get(id(ws), set())
             if channel in chans or "all" in chans:
@@ -8624,56 +9006,62 @@ def _resolve_quote_price(sym: str):
 
 
 async def _quote_broadcast_loop():
-    """Push quotes for WS-watched symbols.
-    During market hours: slower cadence, only when clients watch symbols.
-    Power-off / activity pause: sleep only — zero upstream quote calls.
-    Off-hours / weekend / holiday: idle sleep (no upstream quote spam).
+    """Push quotes for WS-watched symbols and evaluate price alerts.
+
+    Quote pushes only happen while clients are connected AND watching symbols
+    AND the session is live. Price alerts are server-side rules that don't
+    depend on any browser being connected, so the alert pass now runs every
+    live-session tick regardless of clients/watched symbols (it used to be
+    skipped by every idle ``continue``).
+    Power-off / activity pause: sleep only — zero upstream calls.
+    Off-hours / weekend / holiday: idle sleep (no upstream spam, no alerts).
     """
     while True:
         try:
             if activity_paused() or scan_in_progress() or not _QUOTE_LOOP_ENABLED:
                 await asyncio.sleep(30)
                 continue
-            # No connected clients → do not hit market-data at all
-            if not getattr(ws_manager, "active", None):
-                await asyncio.sleep(20)
-                continue
             phase = _market_session_phase_ist()
-            # Only fetch while session is live (preopen/open/post)
+            # Only work while session is live (preopen/open/post)
             if phase not in ("preopen", "open", "post"):
                 await asyncio.sleep(90)
                 continue
+        except Exception as e:
+            logger.debug("quote loop gate: %s", e)
+            await asyncio.sleep(20)
+            continue
 
-            symbols = ws_manager.all_watched_symbols()
-            if not symbols:
-                await asyncio.sleep(20)
-                continue
-
+        # ── quote push: only with connected clients that watch symbols ──
+        symbols = []
+        try:
+            # No connected clients → do not hit market-data for quotes at all
+            symbols = ws_manager.all_watched_symbols() if getattr(ws_manager, "active", None) else []
             # Cap concurrent watched symbols to protect Yahoo/NSE / free-tier
             for sym in list(symbols)[:12]:
-                q = await asyncio.to_thread(_resolve_quote_price, sym)
-                if q:
-                    await ws_manager.broadcast(f"quote:{sym}", {
-                        "type": "quote",
-                        **q,
-                    })
-                    try:
-                        metrics.inc("stockky_ws_quote_push_total")
-                    except Exception:
-                        pass
+                # One failing symbol/broadcast must not abort the rest of the tick.
+                try:
+                    q = await asyncio.to_thread(_resolve_quote_price, sym)
+                    if q:
+                        await ws_manager.broadcast(f"quote:{sym}", {
+                            **q,
+                            "type": "quote",
+                        })
+                        try:
+                            metrics.inc("stockky_ws_quote_push_total")
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.debug("quote loop %s: %s", sym, e)
+                    continue
                 await asyncio.sleep(0.2)
         except Exception as e:
             logger.debug("quote loop: %s", e)
         # Real-time price alerts (15-min cooldown per rule)
         # BUG FIX (session 55, event-loop-blocking-I/O audit): evaluate_price_alerts()
         # does a blocking kv_get() (and, on any trigger, a blocking kv_set() to
-        # persist the cooldown) — same blocking-I/O-on-event-loop class as
-        # circuit_breaker.py/rate_limit_monitor.py/batch_worker.py, but here it
-        # ran unconditionally every 8-20s of this permanent background loop's
-        # lifetime. The httpx.post() notification call below was also
-        # synchronous/blocking (up to its 8s timeout) right on the event loop.
-        # Both moved to asyncio.to_thread so a slow DB or slow notification
-        # service can't stall every other request this process is serving.
+        # persist the cooldown); the httpx.post() notification call below was
+        # also synchronous. Both run via asyncio.to_thread so a slow DB or slow
+        # notification service can't stall every other request.
         try:
             from data_feed import evaluate_price_alerts
             triggered = await asyncio.to_thread(evaluate_price_alerts)
@@ -8698,9 +9086,10 @@ async def _quote_broadcast_loop():
                     pass
         except Exception as e:
             logger.debug("quote loop alerts: %s", e)
-        # Open: 8s; preopen/post: slower
+        # Open with quotes to push: 8s; preopen/post — or nothing to push (no
+        # clients / no watched symbols): slower, so an idle loop stays cheap.
         phase = _market_session_phase_ist()
-        await asyncio.sleep(8 if phase == "open" else 20)
+        await asyncio.sleep(8 if (phase == "open" and symbols) else 20)
 
 
 def _ensure_quote_loop():
@@ -8711,6 +9100,19 @@ def _ensure_quote_loop():
             _quote_loop_task = loop.create_task(_quote_broadcast_loop())
     except Exception as e:
         logger.debug("quote loop start: %s", e)
+
+
+def _ws_symbol_list(raw) -> List[str]:
+    """Coerce a client-supplied ``symbols`` value to a list of strings.
+
+    A bare string becomes a one-item list; non-iterables and non-string items
+    are dropped instead of raising inside the socket loop.
+    """
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, (list, tuple, set)):
+        return [x for x in raw if isinstance(x, str)]
+    return []
 
 
 @app.websocket("/ws")
@@ -8745,17 +9147,26 @@ async def websocket_endpoint(websocket: WebSocket):
                 msg = json.loads(raw) if raw else {}
             except Exception:
                 msg = {}
-            action = (msg.get("action") or "").lower()
-            channel = (msg.get("channel") or "").strip()
+            # A frame that isn't a JSON object, or has a non-string action /
+            # channel, is ignored — it used to raise and drop the connection.
+            if not isinstance(msg, dict):
+                msg = {}
+            _act = msg.get("action")
+            action = _act.lower() if isinstance(_act, str) else ""
+            _chan = msg.get("channel")
+            channel = _chan.strip() if isinstance(_chan, str) else ""
+            # Quote channels are canonicalised ("quote:tcs.ns" -> "quote:TCS")
+            # so the subscription, the watch set and the snapshot all agree.
+            if channel.lower().startswith("quote:"):
+                _qsym = _hot_base(channel.split(":", 1)[1])
+                channel = f"quote:{_qsym}" if _qsym else ""
 
             if action == "ping":
                 await websocket.send_text(json.dumps({"channel": "system", "type": "pong"}))
 
             elif action == "subscribe_quotes":
-                syms = msg.get("symbols") or []
-                if isinstance(syms, str):
-                    syms = [syms]
-                ws_manager.watch_quotes(websocket, list(syms))
+                syms = _ws_symbol_list(msg.get("symbols"))
+                ws_manager.watch_quotes(websocket, syms)
                 await websocket.send_text(json.dumps({
                     "channel": "system",
                     "type": "quotes_subscribed",
@@ -8776,9 +9187,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if syms is None:
                     ws_manager.unwatch_quotes(websocket, None)
                 else:
-                    if isinstance(syms, str):
-                        syms = [syms]
-                    ws_manager.unwatch_quotes(websocket, list(syms))
+                    ws_manager.unwatch_quotes(websocket, _ws_symbol_list(syms))
                 await websocket.send_text(json.dumps({
                     "channel": "system",
                     "type": "quotes_unsubscribed",
@@ -8818,7 +9227,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if channel.startswith("quote:"):
                     ws_manager.unwatch_quotes(websocket, [channel.split(":", 1)[1]])
 
-            elif action == "poll_scan" and msg.get("task_id"):
+            elif action == "poll_scan" and isinstance(msg.get("task_id"), str) and msg.get("task_id"):
                 task_id = msg["task_id"]
                 data = _redis_get(SCAN_TASK_PREFIX + task_id) or {}
                 await websocket.send_text(json.dumps({
@@ -8914,8 +9323,12 @@ def _collect_job_snapshots() -> dict:
 
 def _job_is_active(snap: dict) -> bool:
     for key in ("data_feed", "refill_additional", "surprise_premarket", "ipo_scan"):
-        st = (snap.get(key) or {}).get("status")
-        if st in ("running", "computing", "started"):
+        entry = snap.get(key)
+        if not isinstance(entry, dict):
+            continue
+        # The premarket progress reports ``is_running`` (no ``status``), so
+        # honour that flag too or it never speeds up the push interval.
+        if entry.get("status") in ("running", "computing", "started") or entry.get("is_running") is True:
             return True
     return False
 
@@ -8930,9 +9343,11 @@ async def _jobs_broadcast_loop():
                 continue
             snap = await asyncio.to_thread(_collect_job_snapshots)
             await ws_manager.broadcast("jobs", {
+                **snap,
+                # Own keys last: a job source returning ``type`` / ``ts``
+                # must not override the broadcast's envelope.
                 "type": "jobs_snapshot",
                 "ts": datetime.now(IST).isoformat(),
-                **snap,
             })
             await asyncio.sleep(active_interval if _job_is_active(snap) else idle_interval)
         except Exception as e:
@@ -10593,6 +11008,9 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                 if rsi is not None and _safe_float(rsi) != 0:
                     current["rsi"] = _safe_float(rsi)
                     patched.append("rsi")
+                    # Without this the baseline-seed block below still fired and
+                    # stamped rsi_seed=True on a real technical-service value.
+                    missing.discard("rsi")
                 if t.get("ema20") is not None:
                     current["ema20"] = t.get("ema20")
                 if t.get("technical_score") is not None and current.get("technical_score") is None:
@@ -10626,9 +11044,11 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                 if "pe_ratio" in missing and pe is not None and _safe_float(pe) != 0:
                     current["pe_ratio"] = _safe_float(pe)
                     patched.append("pe_ratio")
+                    missing.discard("pe_ratio")   # keep the real PE out of the seed block
                 if "roce" in missing and roce is not None and _safe_float(roce) != 0:
                     current["roce"] = _safe_float(roce)
                     patched.append("roce")
+                    missing.discard("roce")       # keep the real ROCE out of the seed block
                 if f.get("fundamental_score") is not None and current.get("fundamental_score") is None:
                     current["fundamental_score"] = f.get("fundamental_score")
                 if f.get("sector") and not current.get("sector"):
@@ -10664,7 +11084,10 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
     # Matches bulk feed defaults so Health Score recovers without 429 storms.
     if "rsi" in missing:
         # Neutral RSI seed if Yahoo/technical both failed
-        current.setdefault("rsi", 50.0)
+        # A stored 0 / None RSI is "unusable", not a value: seed over it too
+        # (setdefault used to keep the stored zero and leave the row incomplete).
+        if not current.get("rsi"):
+            current["rsi"] = 50.0
         current["rsi_seed"] = True
         patched.append("rsi")
         missing.discard("rsi")
@@ -10703,7 +11126,6 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
             logger.warning("repair %s: price still missing after quote attempt", base)
 
     current["symbol"] = base
-    current["repair_patched"] = patched
     current["repair_updated_at"] = datetime.now(IST).isoformat()
     # Deduplicate patched list while preserving order
     seen_p = set()
@@ -10713,6 +11135,9 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
             seen_p.add(f)
             patched_unique.append(f)
     patched = patched_unique
+    # Persist the DE-DUPLICATED list (it used to be assigned before the
+    # de-dupe, so the stored copy kept duplicates the API response didn't).
+    current["repair_patched"] = patched
 
     store.put_symbol(base, current, ttl=DATA_FEED_TTL)
     still_missing = _feed_missing_fields(current)
@@ -11254,59 +11679,80 @@ async def data_feed_stop(force: bool = True):
 
     Free-tier workers often die after sleep, so cooperative stop alone leaves
     status=running forever. We always force-commit from the last checkpoint.
+
+    The job is read BEFORE anything is written: the "stopping" marker used to
+    be written first, so the "not running" guard always saw "stopping"
+    (force=false could never stop anything, and a no-op call flipped an idle
+    job to stopping with stop_requested=True and nothing undid it).
     """
+    store = _feed_store()
+    job = store.job()
+    status = job.get("status")
+    if status not in ("running", "stopping", "stopped") and not force:
+        return {"ok": True, "stopped": False, "detail": f"Not running (status={status})", **job}
+
     # Hard stop first — worker sees this on next symbol (no Neon round-trip)
     try:
         request_data_feed_stop()
     except Exception:
         pass
-    store = _feed_store()
     # Mark stopping so in-flight loop exits even if Event was cleared
     try:
         store.set_job(stop_requested=True, status="stopping", message="Stop requested — finishing current symbol…")
     except Exception:
         pass
-    job = store.job()
-    status = job.get("status")
-    if status not in ("running", "stopped") and not force:
-        return {"ok": True, "stopped": False, "detail": f"Not running (status={status})", **job}
+    # Re-read: the stopping write may have merged fields we want to keep.
+    try:
+        job = store.job() or job
+    except Exception:
+        pass
 
-    cp = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
-    cursor = int(cp.get("cursor") or job.get("processed") or 0)
-    total = int(job.get("total") or 0)
-    ok_n = int(job.get("ok_count") or 0)
-    err_n = int(job.get("error_count") or job.get("errors") or 0)
-    # Prefer counting done list if present
-    done = list(cp.get("done") or [])
-    if done:
-        ok_n = max(ok_n, len(done))
-    ts = datetime.now(IST).isoformat()
-    msg = f"Stopped at {cursor}/{total} — committed {ok_n} fed stocks at {ts}"
-    store.set_meta(
-        last_success_at=ts,
-        last_count=ok_n,
-        last_errors=err_n,
-        last_message=msg,
-        source="stop",
-        universe_size=total,
-        partial=bool(total and cursor < total),
-    )
-    job = store.set_job(
-        status="stopped",
-        processed=cursor,
-        total=total,
-        message=msg,
-        errors=err_n,
-        ok_count=ok_n,
-        error_count=err_n,
-        finished_at=ts,
-        stop_requested=False,
-        checkpoint={
-            "cursor": cursor,
-            "done": done,
-            "universe": cp.get("universe") or [],
-        },
-    )
+    try:
+        cp = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
+        cursor = int(cp.get("cursor") or job.get("processed") or 0)
+        total = int(job.get("total") or 0)
+        ok_n = int(job.get("ok_count") or 0)
+        err_n = int(job.get("error_count") or job.get("errors") or 0)
+        # Prefer counting done list if present
+        done = list(cp.get("done") or [])
+        if done:
+            ok_n = max(ok_n, len(done))
+        ts = datetime.now(IST).isoformat()
+        msg = f"Stopped at {cursor}/{total} — committed {ok_n} fed stocks at {ts}"
+        store.set_meta(
+            last_success_at=ts,
+            last_count=ok_n,
+            last_errors=err_n,
+            last_message=msg,
+            source="stop",
+            universe_size=total,
+            partial=bool(total and cursor < total),
+        )
+        job = store.set_job(
+            status="stopped",
+            processed=cursor,
+            total=total,
+            message=msg,
+            errors=err_n,
+            ok_count=ok_n,
+            error_count=err_n,
+            finished_at=ts,
+            stop_requested=False,
+            checkpoint={
+                "cursor": cursor,
+                "done": done,
+                "universe": cp.get("universe") or [],
+            },
+        )
+    except Exception as e:
+        # The stop signal is already out; only the checkpoint commit failed.
+        logger.exception("data-feed/stop commit failed: %s", e)
+        return {
+            "ok": False,
+            "stopped": False,
+            "stop_signalled": True,
+            "error": f"stop signalled but checkpoint commit failed: {str(e)[:200]}",
+        }
     return {"ok": True, "stopped": True, "message": msg, **job}
 
 

@@ -523,21 +523,21 @@ class TestDataFeedStop:
         out = _run(gw.data_feed_stop())
         assert out["stopped"] is True and [c["status"] for c in calls] == ["stopping", "stopped"]
 
-    def test_force_false_always_reports_not_running(self, stopenv):
-        """NOT FIXED: the route writes status="stopping" BEFORE it reads the job back, so the `status not in
-        ("running","stopped")` guard sees "stopping" and `force=False` can never stop anything — even a genuinely
+    def test_force_false_stops_a_genuinely_running_job(self, stopenv):
+        """FIXED: the job is read BEFORE the "stopping" marker is written, so `force=False` can stop a
         running job."""
         stopenv.store.job_val = {"status": "running", "processed": 3, "total": 9}
         out = _run(gw.data_feed_stop(force=False))
-        assert out["stopped"] is False and out["detail"] == "Not running (status=stopping)"
-        assert [m for m in stopenv.store.metas] == []
+        assert out["stopped"] is True
+        assert stopenv.store.metas[0]["source"] == "stop"
 
-    def test_force_false_on_an_idle_job_leaves_it_stuck_in_stopping(self, stopenv):
-        """NOT FIXED: the same pre-write means a "not running" no-op still flips the job to stopping with
-        stop_requested=True and never undoes it."""
+    def test_force_false_on_an_idle_job_is_a_pure_no_op(self, stopenv):
+        """FIXED: a "not running" call no longer flips the job to stopping / stop_requested=True."""
         stopenv.store.job_val = {"status": "done"}
-        _run(gw.data_feed_stop(force=False))
-        assert stopenv.store.job_val["status"] == "stopping" and stopenv.store.job_val["stop_requested"] is True
+        out = _run(gw.data_feed_stop(force=False))
+        assert out["stopped"] is False and out["detail"] == "Not running (status=done)"
+        assert stopenv.store.job_val["status"] == "done" and not stopenv.store.job_val.get("stop_requested")
+        assert stopenv.store.metas == []
 
     def test_force_false_with_a_failed_marker_reads_the_real_status(self, stopenv):
         stopenv.store.set_job_raises = True
@@ -548,22 +548,24 @@ class TestDataFeedStop:
     def test_force_false_with_a_failed_marker_and_a_running_job_does_stop(self, stopenv):
         stopenv.store.job_val = {"status": "running"}
         stopenv.store.set_job_raises = True
-        with pytest.raises(RuntimeError):                      # the commit's own set_job then raises
-            _run(gw.data_feed_stop(force=False))
+        out = _run(gw.data_feed_stop(force=False))             # the commit's own set_job then raises
+        assert out["ok"] is False and out["stop_signalled"] is True and "checkpoint commit failed" in out["error"]
         assert stopenv.store.metas[0]["source"] == "stop"
 
-    def test_commit_failure_propagates(self, stopenv):
-        """NOT FIXED: only the stop flag and the stopping marker are guarded; a failing commit is a 500."""
+    def test_commit_failure_is_reported_as_a_structured_error(self, stopenv):
+        """FIXED: a failing commit is reported (the stop signal is already out) instead of a 500."""
         stopenv.store.job_val = {"status": "running"}
         stopenv.store.set_meta = lambda **kw: (_ for _ in ()).throw(RuntimeError("meta down"))
-        with pytest.raises(RuntimeError):
-            _run(gw.data_feed_stop())
+        out = _run(gw.data_feed_stop())
+        assert out["ok"] is False and out["stopped"] is False and out["stop_signalled"] is True
+        assert "meta down" in out["error"]
 
     def test_routed_on_both_paths(self, stopenv, tc):
         stopenv.store.job_val = {"status": "running"}
         for path in ("/data-feed/stop", "/api/data-feed/stop"):
             r = tc.post(path)
             assert r.status_code == 200 and r.json()["stopped"] is True
+        stopenv.store.job_val = {"status": "done"}
         assert tc.post("/data-feed/stop?force=false").json()["stopped"] is False
 
 
@@ -610,3 +612,20 @@ class TestDataFeedResume:
         for path in ("/data-feed/resume", "/api/data-feed/resume"):
             assert tc.post(path).json() == {"ok": True, "status": "started"}
         assert len(resume.run_calls) == 2
+
+
+class TestPass82FeedStop:
+    def test_reread_failure_after_the_marker_keeps_the_original_job(self, stopenv):
+        stopenv.store.job_val = {"status": "running", "processed": 4, "total": 8}
+        calls = {"n": 0}
+        orig = stopenv.store.job
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise RuntimeError("read down")
+            return orig()
+
+        stopenv.store.job = flaky
+        out = _run(gw.data_feed_stop())
+        assert out["stopped"] is True and stopenv.store.metas[0]["universe_size"] == 8

@@ -225,12 +225,11 @@ class TestRunPremarketFeed:
         client.get("/api/surprise/run-premarket-feed")
         assert senv.feed_calls[0]["symbols"] is None
 
-    def test_body_symbols_are_not_validated_or_capped(self, senv, client):
-        # NOT FIXED: only the fallback universe is cut to 200; a caller-supplied value is passed to the
-        # feed as-is, even when it is a bare string or longer than 200 items.
+    def test_body_symbols_are_validated_and_capped(self, senv, client):
+        # FIXED: a caller-supplied value is cleaned (string -> list, upper-cased, de-duplicated) and capped at 200.
         client.post("/surprise/run-premarket-feed", json={"symbols": "AAA"})
         client.post("/surprise/run-premarket-feed", json={"symbols": [f"S{i}" for i in range(300)]})
-        assert senv.feed_calls[0]["symbols"] == "AAA" and len(senv.feed_calls[1]["symbols"]) == 300
+        assert senv.feed_calls[0]["symbols"] == ["AAA"] and len(senv.feed_calls[1]["symbols"]) == 200
 
     def test_feed_failure_is_a_500_with_a_truncated_detail(self, senv, client):
         senv.feed_raises = RuntimeError("x" * 500)
@@ -356,11 +355,12 @@ class TestSurpriseScan:
         assert out["stocks"] == _stocks(2) and out["total"] == 5
         assert len(senv.engine.scan_result["stocks"]) == 5
 
-    def test_limit_zero_is_ignored_and_negative_limit_empties_the_list(self, senv, client):
-        # NOT FIXED: `if limit` treats 0 as "no limit" (full list) while -1 gives an empty list.
+    def test_limit_zero_and_negative_limit_both_empty_the_list(self, senv, client):
+        # FIXED: `limit` is applied whenever given; 0 no longer means "unlimited".
         senv.engine.scan_result = {"stocks": _stocks(3)}
-        assert len(client.get("/surprise/scan?limit=0").json()["stocks"]) == 3
+        assert client.get("/surprise/scan?limit=0").json()["stocks"] == []
         assert client.get("/surprise/scan?limit=-1").json()["stocks"] == []
+        assert len(client.get("/surprise/scan").json()["stocks"]) == 3
 
     def test_limit_with_a_non_list_stocks_value_changes_nothing(self, senv, client):
         senv.engine.scan_result = {"stocks": None, "error": "empty"}
@@ -370,10 +370,11 @@ class TestSurpriseScan:
         r = client.get("/surprise/scan")
         assert r.status_code == 500 and r.json()["detail"].startswith("surprise_scanner import failed")
 
-    def test_engine_failure_is_an_unhandled_500(self, senv, client):
-        # NOT FIXED: unlike the sibling routes, scan() errors are not mapped to an HTTPException.
+    def test_engine_failure_is_a_mapped_500(self, senv, client):
+        # FIXED: scan() errors are mapped to an HTTPException with a clear detail, like the sibling routes.
         senv.engine.scan_raises = RuntimeError("scan down")
-        assert client.get("/surprise/scan").status_code == 500
+        r = client.get("/surprise/scan")
+        assert r.status_code == 500 and r.json()["detail"] == "surprise scan failed: scan down"
 
 
 class TestSurpriseScanDeadline:
@@ -423,6 +424,15 @@ class TestSurpriseScanDeadline:
         out = _run(self._call(symbols="aaa,bbb"))
         assert out == {"stocks": _stocks(2), "fresh": True}
         assert eng.scan_calls[0]["symbols"] == ["aaa", "bbb"]
+
+    def test_slow_scan_that_then_fails_is_a_mapped_500(self, senv):
+        eng = senv.engine
+        eng.scan_delay = 0.2
+        eng.scan_raises = RuntimeError("late failure")
+        eng._last_result = None
+        with pytest.raises(gw.HTTPException) as ei:
+            _run(self._call())
+        assert ei.value.status_code == 500 and ei.value.detail == "surprise scan failed: late failure"
 
     def test_slow_first_ever_scan_waits_for_the_result(self, senv):
         eng = senv.engine
@@ -529,17 +539,17 @@ class TestSurpriseScanStream:
         _stream(symbols=" ; ")
         assert senv.engine.quote_calls == ["AAA", "BBB"]
 
-    def test_quote_failures_are_scored_with_an_empty_tick(self, senv):
+    def test_quote_failures_are_skipped_not_scored(self, senv):
         eng = senv.engine
         eng.static_cache = {"S00": {}, "S01": {}, "S02": {}}
         eng.quotes = {"S00": RuntimeError("quote down"), "S01": None, "S02": {"price": 5}}
         eng.scores = {"S01": None}
         _, lines = _stream()
-        assert eng.score_calls == [("S00", {}), ("S01", {}), ("S02", {"price": 5})]
+        # FIXED: a failed quote is counted and skipped; an empty tick is no longer scored into a "hit"
+        assert eng.score_calls == [("S02", {"price": 5})]
         done = _events(lines, "done")[0]
-        # a failed quote can still be a "hit" when score_stock returns something for the empty tick
-        assert done["quotes_ok"] == 1 and done["hits"] == 2 and done["universe"] == 3
-        assert [h["symbol"] for h in _hits(lines)] == ["S00", "S02"]
+        assert done["quotes_ok"] == 1 and done["quotes_failed"] == 2 and done["hits"] == 1 and done["universe"] == 3
+        assert [h["symbol"] for h in _hits(lines)] == ["S02"]
 
     def test_scored_rows_carry_running_progress(self, senv):
         senv.engine.static_cache = {f"S{i:02d}": {} for i in range(3)}
@@ -554,14 +564,15 @@ class TestSurpriseScanStream:
         _, lines = _stream()
         assert _hits(lines)[0]["when"] == "2026-10-01 09:15:00"
 
-    def test_quote_factory_failure_scores_the_whole_chunk_with_empty_ticks(self, senv):
+    def test_quote_factory_failure_skips_the_whole_chunk(self, senv):
         eng = senv.engine
         eng.static_cache = {"S00": {}, "S01": {}}
         eng.quote_sync_raises = True
         _, lines = _stream()
         assert eng.quote_calls == ["S00"]                        # the factory failed on the first call
-        assert eng.score_calls == [("S00", {}), ("S01", {})]
-        assert _events(lines, "done")[0]["quotes_ok"] == 0
+        assert eng.score_calls == []
+        done = _events(lines, "done")[0]
+        assert done["quotes_ok"] == 0 and done["quotes_failed"] == 2
 
     def test_universe_is_processed_in_chunks_of_20(self, senv):
         senv.engine.static_cache = {f"S{i:02d}": {} for i in range(45)}
@@ -702,13 +713,12 @@ class TestNotifyTopPicks:
         client.post("/surprise/notify-top-picks")
         assert "₹100.5 (—) ·" in posts.calls[0][1]["json"]["message"]
 
-    def test_missing_fields_are_printed_as_none(self, senv, client, posts):
-        # NOT FIXED: absent score / price / target / stop are interpolated raw, so Telegram shows
-        # "score None/100", "₹None" and an empty tier after the dash.
+    def test_missing_fields_are_printed_as_dashes(self, senv, client, posts):
+        # FIXED: absent score / price / target / stop print a dash, never "None" / "₹None".
         senv.engine.scan_result = {"stocks": [{"symbol": "AAA"}]}
         client.post("/surprise/notify-top-picks")
         assert posts.calls[0][1]["json"]["message"].endswith(
-            "1. AAA —  (score None/100)\n   ₹None (—) · Target ₹None · Stop ₹None\n   ")
+            "1. AAA — — (score —/100)\n   — (—) · Target — · Stop —\n   ")
 
     def test_top_n_defaults_to_five(self, senv, client, posts):
         senv.engine.scan_result = {"stocks": [_pick(f"S{i}") for i in range(8)]}
@@ -741,7 +751,8 @@ class TestNotifyTopPicks:
         senv.engine.scan_result = {"stocks": [_pick("AAA")]}
         posts.state["out"] = Resp(502, json_raises=True)
         out = client.post("/surprise/notify-top-picks").json()
-        assert out["ok"] is True and out["sent"] is False and out["notification_result"] == {"status_code": 502}
+        # FIXED: a non-2xx reply is a failure the caller sees in `ok`.
+        assert out["ok"] is False and out["sent"] is False and out["notification_result"] == {"status_code": 502}
 
     def test_non_dict_reply_is_not_delivered(self, senv, client, posts):
         senv.engine.scan_result = {"stocks": [_pick("AAA")]}
@@ -749,13 +760,12 @@ class TestNotifyTopPicks:
         out = client.post("/surprise/notify-top-picks").json()
         assert out["sent"] is False and out["notification_result"] == ["delivered"]
 
-    def test_http_error_reply_is_still_reported_as_ok(self, senv, client, posts):
-        # NOT FIXED: a 4xx/5xx JSON reply from the notification service is never checked, so the route
-        # answers ok=True with sent=False and the caller has to read notification_result to notice.
+    def test_http_error_reply_is_reported_as_not_ok(self, senv, client, posts):
+        # FIXED: a 4xx/5xx JSON reply from the notification service now sets ok=False with an error.
         senv.engine.scan_result = {"stocks": [_pick("AAA")]}
         posts.state["out"] = Resp(500, {"detail": "boom"})
         out = client.post("/surprise/notify-top-picks").json()
-        assert out["ok"] is True and out["sent"] is False
+        assert out["ok"] is False and out["sent"] is False and "HTTP 500" in out["error"]
 
     def test_post_failure_is_a_200_error_envelope(self, senv, client, posts):
         senv.engine.scan_result = {"stocks": [_pick("AAA"), _pick("BBB")]}
@@ -770,9 +780,28 @@ class TestNotifyTopPicks:
         r = client.post("/surprise/notify-top-picks")
         assert r.status_code == 500 and r.json()["detail"].startswith("surprise_scanner import failed")
 
-    def test_scan_failure_is_an_unhandled_500(self, senv, client, posts):
-        # NOT FIXED: surprise_engine.scan() sits outside the try block, so a scan error escapes as a
-        # generic 500 instead of the {"ok": False, ...} envelope the delivery step uses.
+    def test_scan_failure_is_a_mapped_500(self, senv, client, posts):
+        # FIXED: a scan error is mapped to an HTTPException with a clear detail (like the sibling routes).
         senv.engine.scan_raises = RuntimeError("scan down")
-        assert client.post("/surprise/notify-top-picks").status_code == 500
+        r = client.post("/surprise/notify-top-picks")
+        assert r.status_code == 500 and r.json()["detail"] == "surprise scan failed: scan down"
         assert posts.calls == []
+
+    def test_a_non_dict_scan_result_is_treated_as_empty(self, senv, client, posts):
+        senv.engine.scan_result = ["junk"]
+        assert client.post("/surprise/notify-top-picks").status_code == 200
+        assert posts.calls == []
+
+
+class TestPass82CleanSymbolList:
+    def test_accepts_strings_and_iterables_and_cleans_them(self):
+        assert gw._clean_symbol_list("aaa; bbb,aaa , ") == ["AAA", "BBB"]
+        assert gw._clean_symbol_list([" tcs ", "TCS", 5, None, "", "x" * 40, "infy"]) == ["TCS", "INFY"]
+        assert gw._clean_symbol_list(("a", "b")) == ["A", "B"]
+        assert sorted(gw._clean_symbol_list({"a", "b"})) == ["A", "B"]
+
+    def test_caps_the_size_and_falls_back_to_none(self):
+        assert len(gw._clean_symbol_list([f"S{i}" for i in range(500)])) == gw.SYMBOL_LIST_CAP
+        assert len(gw._clean_symbol_list([f"S{i}" for i in range(10)], cap=3)) == 3
+        for bad in (None, 5, {}, [], [None, 1], "  ,; "):
+            assert gw._clean_symbol_list(bad) is None

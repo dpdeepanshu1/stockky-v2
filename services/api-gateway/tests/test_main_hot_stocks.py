@@ -536,17 +536,15 @@ class TestHotScanSeed:
                 in kv.sets)
         assert "stockky:last_decision:CCC" not in kv.store
 
-    def test_lowercase_exchange_suffix_is_not_stripped_from_scan_seeds(self, henv, kv):
-        # NOT FIXED: the seed normaliser does .replace(".NS", "") BEFORE .upper(), so a lowercase
-        # ".ns" suffix survives ("aaa.ns" -> "AAA.NS") and the symbol is seeded as a different name
-        # from the plain "AAA" in the same scan.
+    def test_lowercase_exchange_suffix_is_stripped_from_scan_seeds(self, henv, kv):
+        # FIXED: upper-case first, then strip the suffix, so "aaa.ns" and "AAA" are one name.
         kv.store[gw.LAST_FULL_SCAN_KEY] = {
             "recommendations": [{"symbol": "aaa.ns", "decision": "BUY NOW"}],
             "all_results": [{"symbol": "AAA", "decision": "BUY NOW"}],
         }
         out = _hot()
-        assert out["universe_size"] == 2 and out["scan_seed_count"] == 2
-        assert "stockky:last_decision:AAA.NS" in kv.store and "stockky:last_decision:AAA" in kv.store
+        assert out["universe_size"] == 1
+        assert "stockky:last_decision:AAA.NS" not in kv.store and "stockky:last_decision:AAA" in kv.store
 
     def test_all_four_result_keys_are_read(self, henv, kv):
         kv.store[gw.LAST_FULL_SCAN_KEY] = {
@@ -635,13 +633,12 @@ class TestHotUniverse:
         henv.watch = [f"S{i:02d}" for i in range(30)]
         assert _hot(max_symbols=cap)["universe_size"] == expected
 
-    def test_dotted_variants_of_one_symbol_are_not_deduplicated(self, henv):
-        # NOT FIXED: the universe is de-duplicated on the raw string, but each entry is normalised
-        # later, so "AAA" and "AAA.NS" are fetched twice and produce two identical rows.
+    def test_dotted_variants_of_one_symbol_are_deduplicated(self, henv):
+        # FIXED: the universe is de-duplicated on the normalised symbol.
         henv.watch = ["AAA", "AAA.NS"]
         henv.events = {"AAA": _results()}
         out = _hot()
-        assert out["universe_size"] == 2 and _syms(out["results_driven"]) == ["AAA", "AAA"]
+        assert out["universe_size"] == 1 and _syms(out["results_driven"]) == ["AAA"]
 
 
 # ── batching, progress, stop ────────────────────────────────────────────────
@@ -773,11 +770,11 @@ class TestHotSymbolBasics:
         _hot()
         assert henv.news_calls == ["AAA", "BBB"]
 
-    def test_lowercase_ns_suffix_survives_normalisation(self, henv):
-        # NOT FIXED: ".replace('.NS', '')" runs before ".upper()", so "aaa.ns" -> "AAA.NS".
+    def test_lowercase_ns_suffix_is_normalised(self, henv):
+        # FIXED: upper-case first, then strip the suffix.
         henv.watch = ["aaa.ns"]
         _hot()
-        assert henv.news_calls == ["AAA.NS"]
+        assert henv.news_calls == ["AAA"]
 
     def test_failing_news_and_event_fetches_are_ignored(self, henv):
         henv.watch = ["AAA"]
@@ -995,38 +992,43 @@ class TestHotCatalystPromotion:
         _hot()
         assert self._promoted(kv)["reasons"] == ["Earnings/results event"]
 
-    def test_non_dict_earnings_surprise_drops_the_symbol(self, henv, caplog):
-        # NOT FIXED: only (TypeError, ValueError) are handled around the surprise parse, so a truthy
-        # non-dict `earnings_surprise` raises AttributeError and the whole symbol is skipped (but the
-        # scan carries on with the next one).
+    def test_non_dict_earnings_surprise_keeps_the_symbol(self, henv, caplog):
+        # FIXED: a truthy non-dict `earnings_surprise` is a results event with no parsable surprise;
+        # the symbol is no longer skipped.
         henv.watch = ["AAA", "BBB"]
         henv.events = {"AAA": {"earnings_surprise": "beat"}, "BBB": _results()}
         with caplog.at_level(logging.WARNING, logger=gw.logger.name):
             out = _hot()
-        assert _syms(out["results_driven"]) == ["BBB"]
-        assert "stockky-hot skip AAA" in caplog.text
+        assert _syms(out["results_driven"]) == ["AAA", "BBB"]
+        assert "stockky-hot skip AAA" not in caplog.text
 
-    def test_malformed_news_score_drops_the_symbol(self, henv, caplog):
-        # NOT FIXED: `int(nscore)` / `float(nscore)` are unguarded, so one non-numeric news score
-        # costs the symbol every section, including a perfectly good results row.
+    def test_malformed_news_score_is_treated_as_no_score(self, henv, caplog):
+        # FIXED: a non-numeric news score no longer drops the symbol from every section.
         henv.watch = ["AAA"]
         henv.news = {"AAA": _news(3, "n/a")}
         henv.events = {"AAA": _results()}
         with caplog.at_level(logging.WARNING, logger=gw.logger.name):
             out = _hot()
-        assert out["results_driven"] == [] and "stockky-hot skip AAA" in caplog.text
+        assert _syms(out["results_driven"]) == ["AAA"] and "stockky-hot skip AAA" not in caplog.text
 
     @pytest.mark.parametrize("summary", ["Company posts record loss", "Shares fall as it wins no orders",
                                          "Bulk of staff laid off"])
-    def test_catalyst_language_is_a_plain_substring_match(self, henv, kv, summary):
-        # NOT FIXED: no word boundaries or sentiment check — negative headlines that merely contain
-        # "record" / "wins" / "bulk" are promoted to PREPARE TO BUY.
+    def test_negative_headlines_are_not_promoted_on_a_substring_accident(self, henv, kv, summary):
+        # FIXED: whole-word matching plus a negative-wording veto.
+        henv.watch = ["AAA"]
+        henv.news = {"AAA": _news(1, 40, summary)}
+        henv.events = {"AAA": _results()}
+        out = _hot()
+        assert out["results_driven"][0]["decision"] != "PREPARE TO BUY"
+        assert "Catalyst language in news summary" not in (kv.store.get("stockky:last_decision:AAA") or {}).get("reasons", "")
+
+    @pytest.mark.parametrize("summary", ["Stock surges on order win", "Company beats estimates", "Analyst upgrade lifts shares"])
+    def test_genuine_catalyst_wording_still_promotes(self, henv, kv, summary):
         henv.watch = ["AAA"]
         henv.news = {"AAA": _news(1, 40, summary)}
         henv.events = {"AAA": _results()}
         out = _hot()
         assert out["results_driven"][0]["decision"] == "PREPARE TO BUY"
-        assert "Catalyst language in news summary" in kv.store["stockky:last_decision:AAA"]["reasons"]
 
 
 # ── price enrichment ────────────────────────────────────────────────────────
@@ -1099,12 +1101,15 @@ class TestHotPrices:
         out = _hot()
         assert len(out["results_driven"]) == 2 and all("price" not in r for r in out["results_driven"])
 
-    def test_one_unparsable_live_price_abandons_the_rest_of_the_batch(self, henv):
-        # NOT FIXED: the per-item `float(...)` sits inside the single try, so one bad value stops the
-        # loop and every item after it stays unpriced.
+    def test_one_unparsable_live_price_only_skips_that_item(self, henv):
+        # FIXED: the price is parsed per item, so a bad value no longer stops the pass.
         henv.bulk_prices = {"AAA": "n/a", "BBB": 20.0}
         out = _hot()
-        assert all("price" not in r for r in out["results_driven"])
+        by = {r["symbol"]: r for r in out["results_driven"]}
+        if "BBB" in by:
+            assert by["BBB"].get("price") == 20.0
+        if "AAA" in by:
+            assert by["AAA"].get("price") != "n/a"
 
     def test_no_missing_prices_means_no_waterfall_call(self, henv):
         henv.watch = []
@@ -1184,3 +1189,18 @@ class TestHotPayload:
         henv.watch = ["AAA"]
         out = _hot()
         assert out["processed_symbols"] == 1
+
+
+class TestPass82Helpers:
+    def test_catalyst_language_helper_handles_empty_and_negative_text(self):
+        assert gw._has_catalyst_language("") is False and gw._has_catalyst_language(None) is False
+        assert gw._has_catalyst_language("Stock surges on order win") is True
+        assert gw._has_catalyst_language("Stock surges but company posts a loss") is False
+
+    def test_a_malformed_insider_row_skips_only_that_symbol(self, henv, caplog):
+        henv.watch = ["AAA", "BBB"]
+        henv.events = {"AAA": {"bulk_deals": [{"d": 1}], "recent_insider_transactions": [1], "summary": "x"},
+                       "BBB": _results()}
+        with caplog.at_level(logging.WARNING, logger=gw.logger.name):
+            out = _hot()
+        assert "stockky-hot skip AAA" in caplog.text and "BBB" in _syms(out["results_driven"])

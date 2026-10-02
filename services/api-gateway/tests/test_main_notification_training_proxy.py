@@ -113,11 +113,10 @@ class TestNotificationHealthAndConfig:
         assert r.status_code == 502
         assert r.json()["detail"].startswith("Notification service unreachable: ")
 
-    def test_health_non_json_body_is_an_unhandled_500(self, nenv, client):
-        # NOT FIXED: only httpx.HTTPError is caught, so a 200 with a non-JSON body (a proxy error page)
-        # escapes as a generic 500 instead of the 502 used for every other upstream failure.
+    def test_health_non_json_body_is_a_502(self, nenv, client):
+        # FIXED: a 200 with a non-JSON body (a proxy error page) is a 502 like every other upstream failure.
         nenv.on("GET", "/health", Resp(200, json_raises=True))
-        assert client.get("/notifications/health").status_code == 500
+        assert client.get("/notifications/health").status_code == 502
 
     def test_get_config_passes_the_body_through(self, nenv, client):
         nenv.on("GET", "/config", Resp(200, {"telegram": True}))
@@ -289,19 +288,17 @@ class TestSendPicksTop5:
         r = client.post("/notifications/send-picks", json={"recommendations": [_pick()]})
         assert r.status_code == 502 and r.json()["detail"].startswith("Notification service failed: ")
 
-    def test_non_dict_notify_body_is_an_unhandled_500(self, nenv, client):
-        # NOT FIXED: `data.get(...)` assumes a JSON object; a list body raises AttributeError, which the
-        # `except httpx.HTTPError` does not catch.
+    def test_non_dict_notify_body_is_a_502(self, nenv, client):
+        # FIXED: a non-object reply from the notification service is a 502, not a 500.
         nenv.on("POST", "/notify", Resp(200, ["unexpected"]))
-        assert client.post("/notifications/send-picks", json={"recommendations": [_pick()]}).status_code == 500
+        assert client.post("/notifications/send-picks", json={"recommendations": [_pick()]}).status_code == 502
 
-    def test_non_list_recommendations_are_sliced_per_character(self, nenv, client):
-        # NOT FIXED: no type check on `recommendations`; a string is sliced and every character
-        # becomes an "(invalid pick)" line instead of being rejected with a 400/422.
+    def test_non_list_recommendations_are_rejected(self, nenv, client):
+        # FIXED: a non-list `recommendations` is a 400 instead of being sliced per character.
         nenv.on("POST", "/notify", Resp(200, {"delivered": True}))
         r = client.post("/notifications/send-picks", json={"recommendations": "abcdefg"})
-        assert r.status_code == 200 and r.json()["sent"] == 5
-        assert _messages(nenv)[0].count("*(invalid pick)*") == 5
+        assert r.status_code == 400 and "list" in r.json()["detail"]
+        assert nenv.sent() == []
 
 
 class TestSendPicksFormatter:
@@ -357,10 +354,10 @@ class TestSendPicksFormatter:
         block = self._line_block(client, {"symbol": "A", "close": 0, "target": 50})
         assert "Current: ₹0.00" in block and "(+0.0%)" in block
 
-    def test_target_below_close_prints_a_plus_minus_sign(self, client):
-        # NOT FIXED: the sign is hard-coded, so a negative upside renders as "(+-10.0%)".
+    def test_target_below_close_prints_a_single_minus_sign(self, client):
+        # FIXED: the sign is formatted with `:+`, so a negative upside renders as "(-10.0%)".
         block = self._line_block(client, {"symbol": "A", "close": 100, "target": 90})
-        assert "Target: ₹90.00 (+-10.0%)" in block
+        assert "Target: ₹90.00 (-10.0%)" in block and "+-" not in block
 
     def test_holding_period_estimate_is_used_when_holding_period_is_missing(self, client):
         assert "Hold: 3 weeks" in self._line_block(client, {"symbol": "A", "holding_period_estimate": "3 weeks"})
@@ -368,11 +365,10 @@ class TestSendPicksFormatter:
     def test_na_holding_is_hidden(self, client):
         assert "Hold" not in self._line_block(client, {"symbol": "A", "holding_period": "N/A"})
 
-    def test_dict_holding_estimate_is_printed_as_a_python_repr(self, client):
-        # NOT FIXED: scan_watchlist attaches `holding_period_estimate` as a dict
-        # ({"min_days": .., "max_days": ..}); the formatter just interpolates it.
+    def test_dict_holding_estimate_is_printed_as_a_range(self, client):
+        # FIXED: the dict from scan_watchlist is rendered as a readable range.
         est = {"min_days": 3, "max_days": 9}
-        assert "Hold: {'min_days': 3, 'max_days': 9}" in self._line_block(
+        assert "Hold: 3–9 days" in self._line_block(
             client, {"symbol": "A", "holding_period_estimate": est})
 
 
@@ -414,14 +410,15 @@ class TestSendPicksAll:
         assert sum(m.count(" – BUY NOW") for m in msgs) == 60
         assert all(f"*S{i:03d}*" in "".join(msgs) for i in range(60))
 
-    def test_part_failure_after_a_delivered_part_is_a_502_without_rollback(self, client):
-        # NOT FIXED: part 1 is already in Telegram when part 2 fails, and the 502 does not say so.
+    def test_part_failure_after_a_delivered_part_is_a_502_that_reports_the_partial_delivery(self, client):
+        # FIXED: part 1 is already in Telegram when part 2 fails, and the 502 now says so.
         replies = iter([Resp(200, {"delivered": True}), Resp(200, {"delivered": False, "note": "flood"})])
         self.nenv.on("POST", "/notify", lambda kw: next(replies))
         recs = [_pick(f"S{i:03d}", close=100, target=120, stop_loss=90, holding_period="2 weeks",
                       entry_range={"low": 99, "high": 101}) for i in range(60)]
         r = client.post("/notifications/send-picks", json={"type": "all", "recommendations": recs})
-        assert r.status_code == 502 and r.json()["detail"] == "Part 2 failed: flood"
+        assert r.status_code == 502 and r.json()["detail"].startswith("Part 2 failed: flood")
+        assert "already delivered" in r.json()["detail"]
         assert len(self.nenv.sent()) == 2
 
     def test_part_failure_without_a_note_uses_the_default(self, client):
@@ -435,21 +432,19 @@ class TestSendPicksAll:
         assert r.status_code == 502
         assert r.json()["detail"].startswith("Notification service failed for part 1: ")
 
-    def test_non_dict_notify_body_is_an_unhandled_500(self, client):
-        # NOT FIXED: same `data.get` assumption as the top-5 path.
+    def test_non_dict_notify_body_is_a_502(self, client):
+        # FIXED: same 502 mapping as the top-5 path.
         self.nenv.on("POST", "/notify", Resp(200, ["unexpected"]))
         r = client.post("/notifications/send-picks", json={"type": "all", "recommendations": [_pick()]})
-        assert r.status_code == 500
+        assert r.status_code == 502
 
-    def test_a_single_oversized_pick_sends_a_header_only_part_first(self, client):
-        # NOT FIXED: when one pick alone exceeds the limit the chunker closes the (still empty) current
-        # chunk, so an empty part goes out before the oversized one.
+    def test_a_single_oversized_pick_is_truncated_into_one_part(self, client):
+        # FIXED: an oversized pick is truncated to fit instead of going out after an empty header-only part.
         big = _pick("X" * 4100)
         r = client.post("/notifications/send-picks", json={"type": "all", "recommendations": [big]})
-        assert r.status_code == 200 and r.json()["parts"] == 2
-        first, second = _messages(self.nenv)
-        assert first == "📊 *All Actionable Stocks (BUY NOW / PREPARE TO BUY)* (Part 1/2)\n\n\n"
-        assert "X" * 4100 in second
+        assert r.status_code == 200 and r.json()["parts"] == 1
+        (only,) = _messages(self.nenv)
+        assert len(only) <= 4000 and "…" in only and "X" * 4100 not in only
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -579,11 +574,11 @@ class TestTrainingScore:
         r = client.get("/training/score/AAA")
         assert r.status_code == 502 and r.json()["detail"].startswith("Training service unreachable: ")
 
-    def test_trailing_slash_base_url_produces_a_double_slash(self, tenv, client, monkeypatch):
-        # NOT FIXED: unlike its siblings this route never `rstrip`s TRAINING_URL.
+    def test_trailing_slash_base_url_is_stripped(self, tenv, client, monkeypatch):
+        # FIXED: like its siblings this route now `rstrip`s TRAINING_URL.
         monkeypatch.setattr(gw, "TRAINING_URL", TRAIN + "/")
         client.get("/training/score/AAA")
-        assert tenv.calls[0][1] == f"{TRAIN}//training-score/AAA"
+        assert tenv.calls[0][1] == f"{TRAIN}/training-score/AAA"
 
     def test_an_http_exception_from_the_client_factory_is_passed_through(self, tenv, client, monkeypatch):
         def boom():
@@ -592,9 +587,9 @@ class TestTrainingScore:
         monkeypatch.setattr(gw, "_get_http_client", boom)
         r = client.get("/training/score/AAA")
         assert r.status_code == 503 and r.json()["detail"] == "pool closed"
-        # NOT FIXED: /training/status has no such guard, so the same failure is rewritten to a 502.
+        # FIXED: /training/status now passes the HTTPException through as well.
         r2 = client.get("/training/status")
-        assert r2.status_code == 502 and "pool closed" in r2.json()["detail"]
+        assert r2.status_code == 503 and "pool closed" in r2.json()["detail"]
 
     def test_specific_routes_win_over_the_catch_all(self, tenv, client):
         # /training/score/AAA must not be proxied as /score/AAA through the catch-all
@@ -702,3 +697,26 @@ class TestTrainingCatchAll:
             r = client.get("/training/portfolio/summary")
         assert r.status_code == 502 and r.json()["detail"] == "Training proxy error: kaboom"
         assert "training proxy error for path=portfolio/summary" in caplog.text
+
+
+class TestPass82SendPicks:
+    @pytest.mark.parametrize("est,text", [
+        ({"max_days": 9}, "Hold: up to 9 days"),
+        ({"min_days": 3}, "Hold: 3+ days"),
+        ({"min_days": 5, "max_days": 5}, "Hold: 5 days"),
+    ])
+    def test_partial_holding_estimates(self, nenv, client, est, text):
+        nenv.on("POST", "/notify", Resp(200, {"delivered": True}))
+        client.post("/notifications/send-picks", json={"recommendations": [{"symbol": "A", "holding_period_estimate": est}]})
+        assert text in _messages(nenv)[-1]
+
+    def test_a_holding_dict_without_day_bounds_prints_no_hold_line(self, nenv, client):
+        nenv.on("POST", "/notify", Resp(200, {"delivered": True}))
+        client.post("/notifications/send-picks", json={"recommendations": [{"symbol": "A", "holding_period_estimate": {"note": "n/a"}}]})
+        assert "Hold:" not in _messages(nenv)[-1]
+
+    def test_non_json_notify_reply_is_a_502_on_both_paths(self, nenv, client):
+        nenv.on("POST", "/notify", Resp(200, json_raises=True))
+        for body in ({"recommendations": [_pick()]}, {"type": "all", "recommendations": [_pick()]}):
+            r = client.post("/notifications/send-picks", json=body)
+            assert r.status_code == 502 and "non-JSON" in r.json()["detail"]

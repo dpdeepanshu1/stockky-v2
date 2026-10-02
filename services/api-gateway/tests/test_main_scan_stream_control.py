@@ -807,12 +807,12 @@ class TestFindBuys:
         body = client.post("/scan/find-buys", json={}).json()
         assert body == {"ok": False, "count": 9, "suggestions": [{"symbol": "A"}]}
 
-    def test_none_suggestions_are_returned_as_none_with_zero_count(self, client, monkeypatch):
-        # NOT FIXED: `setdefault("suggestions", [])` does not replace an explicit None.
+    def test_none_suggestions_are_normalised_to_an_empty_list(self, client, monkeypatch):
+        # FIXED: an explicit None is replaced by [] (setdefault alone did not).
         import buy_sniper
         monkeypatch.setattr(buy_sniper, "suggestions_from_scan_payload", lambda p: {"suggestions": None})
         body = client.post("/scan/find-buys", json={}).json()
-        assert body["count"] == 0 and body["suggestions"] is None
+        assert body["count"] == 0 and body["suggestions"] == []
 
     def test_sniper_crash_returns_ok_false_with_a_truncated_error(self, client, monkeypatch):
         import buy_sniper
@@ -961,18 +961,18 @@ class TestScanStopAll:
         assert original == {"status": "running"}
         assert mem[p + "a"] is not original
 
-    def test_kv_failure_aborts_the_sweep_but_still_reports_ok(self, cancel_flags, mem, kv):
-        # NOT FIXED: one failing durable write ends the whole loop, so later running tasks are
-        # left untouched (only the process-local `__ALL__` flag will stop them).
+    def test_kv_failure_does_not_abort_the_sweep(self, cancel_flags, mem, kv):
+        # FIXED: one failing durable write no longer ends the loop; every running task is still
+        # marked cancelled in memory and the failures are counted.
         p = gw.SCAN_TASK_PREFIX
         mem[p + "a"] = {"status": "running"}
         mem[p + "b"] = {"status": "running"}
         kv.raise_on = lambda key: True
         out = gw.scan_stop_all()
-        assert out["ok"] is True and out["stopped"] == 0
+        assert out["ok"] is True and out["stopped"] == 0 and out["durable_write_failures"] == 2
         assert "__ALL__" in cancel_flags
-        assert mem[p + "a"]["status"] == "cancelled"      # memory was updated before the write raised
-        assert mem[p + "b"]["status"] == "running"
+        assert mem[p + "a"]["status"] == "cancelled"
+        assert mem[p + "b"]["status"] == "cancelled"
 
     def test_route_is_registered(self, cancel_flags, mem, kv, client):
         r = client.post("/scan/stop-all")
@@ -1242,7 +1242,7 @@ class TestWatchlistDeadline:
         out = gw.scan_watchlist()
         assert wl.notified_evt.wait(2) and wl.cleanup_evt.wait(2)
         assert [r["symbol"] for r in out["all_results"]] == ["FAST"]
-        assert out["errors"] == [{"symbol": "SLOW", "error": "scan deadline (0s) exceeded, skipped this run"}]
+        assert out["errors"] == [{"symbol": "SLOW", "error": "scan deadline (0.3s) exceeded, skipped this run"}]
         assert out["partial"] is True
         pool, client, not_done, deadline = wl.cleanup_calls[0]
         assert len(not_done) == 1 and deadline == 0.3
@@ -1250,8 +1250,8 @@ class TestWatchlistDeadline:
         wl.release.set()
         pool.shutdown(wait=True)
 
-    def test_deadline_message_formats_whole_seconds(self, wl, monkeypatch):
-        # NOT FIXED: `%.0f` / `:.0f` round a sub-second budget to "0s" in the message.
+    def test_deadline_message_keeps_a_sub_second_budget(self, wl, monkeypatch):
+        # FIXED: `%g` / `:g` no longer round a sub-second budget to "0s" in the message.
         monkeypatch.setenv("WATCHLIST_SCAN_TIMEOUT_SECONDS", "0.2")
         wl.watchlist = ["SLOW"]
 
@@ -1262,7 +1262,7 @@ class TestWatchlistDeadline:
         wl.decide["SLOW"] = slow
         out = gw.scan_watchlist()
         assert wl.notified_evt.wait(2)
-        assert "(0s)" in out["errors"][0]["error"]
+        assert "(0.2s)" in out["errors"][0]["error"]
         wl.release.set()
         wl.cleanup_calls[0][0].shutdown(wait=True)
 
@@ -1549,3 +1549,16 @@ class TestWatchlistPicksAndMood:
         })
         assert [r["symbol"] for r in out["recommendations_short"]] == ["BBB", "AAA"]
         assert out["recommendations"] == out["recommendations_short"]
+
+
+class TestPass82StopAllOuterGuard:
+    def test_an_unreadable_task_table_still_reports_ok(self, monkeypatch, kv):
+        class BadMem(dict):
+            def keys(self):
+                raise RuntimeError("table gone")
+
+        flags = set()
+        monkeypatch.setattr(gw, "_SCAN_CANCEL_FLAGS", flags)
+        monkeypatch.setattr(gw, "_mem_kv", BadMem())
+        out = gw.scan_stop_all()
+        assert out["ok"] is True and out["stopped"] == 0 and "__ALL__" in flags

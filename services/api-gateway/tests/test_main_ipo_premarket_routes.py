@@ -270,16 +270,17 @@ class TestIpoScan:
         ienv.ipo_progress = progress
         assert client.post("/ipo/scan").json()["message"] == "IPO scan started"
 
-    def test_inline_result_can_override_the_envelope_keys(self, ienv):
-        # NOT FIXED: `**result` is spread last, so a result carrying "accepted" / "background" wins.
+    def test_inline_result_cannot_override_the_envelope_keys(self, ienv):
+        # FIXED: the envelope keys are spread LAST.
         ienv.scan_result = {"accepted": False, "background": "maybe"}
         out = _run(gw.api_ipo_scan(background=False, force=False, wipe=False, background_tasks=None))
-        assert out == {"accepted": False, "background": "maybe"}
+        assert out == {"accepted": True, "background": False}
 
-    def test_missing_module_is_an_unhandled_500(self, client, monkeypatch):
-        # NOT FIXED: unlike the sibling IPO routes, the import / progress read are not guarded.
+    def test_missing_module_is_a_structured_error(self, client, monkeypatch):
+        # FIXED: same envelope as the sibling IPO routes when ipo_scanner can't load.
         _missing(monkeypatch, "ipo_scanner")
-        assert client.post("/ipo/scan").status_code == 500
+        r = client.post("/ipo/scan")
+        assert r.status_code == 200 and r.json()["accepted"] is False and r.json()["status"] == "error"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -358,11 +359,11 @@ class TestIpoAdd:
     def test_missing_company_name_is_a_422(self, ienv, client):
         assert client.post("/ipo/add", json={}).status_code == 422 and ienv.add_calls == []
 
-    def test_resolver_failure_is_an_unhandled_500(self, ienv, client):
-        # NOT FIXED: add_manual_ipo_by_name() (which hits NSE / ipoalerts) is not wrapped, so any upstream
-        # error escapes as a generic 500 instead of the accepted=False envelope.
+    def test_resolver_failure_is_an_accepted_false_envelope(self, ienv, client):
+        # FIXED: an upstream error is returned as the accepted=False envelope.
         ienv.add_raises = RuntimeError("nse blocked")
-        assert client.post("/ipo/add", json={"company_name": "X"}).status_code == 500
+        r = client.post("/ipo/add", json={"company_name": "X"})
+        assert r.status_code == 200 and r.json()["accepted"] is False and "nse blocked" in r.json()["message"]
 
 
 class TestIpoRepairAndPurge:
@@ -383,10 +384,11 @@ class TestIpoRepairAndPurge:
         out = client.post("/ipo/repair-batch").json()
         assert out["status"] == "error" and out["error"].startswith("ipo_scanner unavailable: ")
 
-    def test_repair_failure_is_an_unhandled_500(self, ienv, client):
-        # NOT FIXED: only the import is guarded; an error inside ipo_repair_batch() is a generic 500.
+    def test_repair_failure_is_a_structured_error(self, ienv, client):
+        # FIXED: an error inside ipo_repair_batch() is reported, not a generic 500.
         ienv.repair_raises = RuntimeError("repair down")
-        assert client.post("/ipo/repair-batch").status_code == 500
+        r = client.post("/ipo/repair-batch")
+        assert r.status_code == 200 and r.json()["status"] == "error" and "repair down" in r.json()["error"]
 
     def test_purge_passes_the_result_through_on_both_paths(self, ienv, client):
         assert client.post("/ipo/purge-non-equity").json() == {"deleted": 4}
@@ -397,10 +399,11 @@ class TestIpoRepairAndPurge:
         out = client.post("/ipo/purge-non-equity").json()
         assert out["status"] == "error" and out["error"].startswith("ipo_scanner unavailable: ")
 
-    def test_purge_failure_is_an_unhandled_500(self, ienv, client):
-        # NOT FIXED: same as repair — the purge call itself is outside the try.
+    def test_purge_failure_is_a_structured_error(self, ienv, client):
+        # FIXED: same as repair — the purge call itself is guarded.
         ienv.purge_raises = RuntimeError("db down")
-        assert client.post("/ipo/purge-non-equity").status_code == 500
+        r = client.post("/ipo/purge-non-equity")
+        assert r.status_code == 200 and r.json()["status"] == "error" and "db down" in r.json()["error"]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -463,13 +466,17 @@ class TestIpoNotifyTopPicks:
         client.post("/ipo/notify-top-picks")
         assert _msg(posts).endswith("1. AAA — — (score —/100, )\n   Issue ₹10 → Current ₹— (—)")
 
-    def test_a_zero_ipo_score_falls_through_to_the_advisory_score(self, ienv, client, posts):
-        # NOT FIXED: `ipo_score or pre_listing_advisory_score` treats a real 0 as missing, so a scored-0
-        # IPO shows the advisory score (or a dash) instead.
+    def test_a_zero_ipo_score_is_kept_as_a_score(self, ienv, client, posts):
+        # FIXED: a real 0 is a score; only an absent ipo_score falls back to the advisory score.
         ienv.listing = {"results": [_ipo("AAA", ipo_score=0, pre_listing_advisory_score=55),
                                     _ipo("BBB", ipo_score=0)]}
         client.post("/ipo/notify-top-picks")
-        assert "AAA — BUY NOW (score 55/100" in _msg(posts) and "BBB — BUY NOW (score —/100" in _msg(posts)
+        assert "AAA — BUY NOW (score 0/100" in _msg(posts) and "BBB — BUY NOW (score 0/100" in _msg(posts)
+
+    def test_an_absent_ipo_score_falls_back_to_the_advisory_score(self, ienv, client, posts):
+        ienv.listing = {"results": [_ipo("AAA", ipo_score=None, pre_listing_advisory_score=55)]}
+        client.post("/ipo/notify-top-picks")
+        assert "AAA — BUY NOW (score 55/100" in _msg(posts)
 
     @pytest.mark.parametrize("chg,shown", [(None, "—"), ("abc", "—"), (3.5, "+3.50%"), (-2, "-2.00%"), (0, "+0.00%")])
     def test_change_formatting(self, ienv, client, posts, chg, shown):
@@ -477,11 +484,11 @@ class TestIpoNotifyTopPicks:
         client.post("/ipo/notify-top-picks")
         assert f"Current ₹112.5 ({shown})" in _msg(posts)
 
-    def test_missing_issue_price_is_printed_as_none(self, ienv, client, posts):
-        # NOT FIXED: only the current price gets a dash fallback; a missing issue price shows "₹None".
+    def test_missing_issue_price_is_printed_as_a_dash(self, ienv, client, posts):
+        # FIXED: a missing issue price shows a dash, never "₹None".
         ienv.listing = {"results": [_ipo("AAA", issue_price=None)]}
         client.post("/ipo/notify-top-picks")
-        assert "Issue ₹None → Current" in _msg(posts)
+        assert "Issue ₹— → Current" in _msg(posts) and "₹None" not in _msg(posts)
 
     def test_top_n_defaults_to_five_and_is_clamped(self, ienv, client, posts):
         ienv.listing = {"results": [_ipo(f"S{i}") for i in range(8)]}
@@ -637,11 +644,11 @@ class TestPremarketSchemaGate:
         _premarket()
         assert ienv.schema_calls == 2
 
-    def test_missing_premarket_module_escapes_as_an_import_error(self, ienv, monkeypatch):
-        # NOT FIXED: the surprise_premarket import comes after the guarded schema step and is unguarded.
+    def test_missing_premarket_module_is_a_structured_error(self, ienv, monkeypatch):
+        # FIXED: the surprise_premarket import is guarded.
         _missing(monkeypatch, "surprise_premarket")
-        with pytest.raises(ImportError):
-            _premarket(_jbody(["A"]))
+        out = _premarket(_jbody(["A"]))
+        assert out["ok"] is False and out["accepted"] is False and "surprise_premarket unavailable" in out["error"]
 
 
 class TestPremarketSymbolParsing:
@@ -686,11 +693,11 @@ class TestPremarketAlreadyRunning:
                        "schema": {"ok": True, "backend": "postgres"}}
         assert threads == [] and ienv.base_calls == []
 
-    def test_synchronous_call_resolves_the_universe_before_noticing_the_running_job(self, ienv):
-        # NOT FIXED: the already-running check comes after the (slow, NSE-backed) universe injection.
+    def test_synchronous_call_notices_the_running_job_before_building_the_universe(self, ienv):
+        # FIXED: the already-running check now precedes the (slow, NSE-backed) universe build.
         ienv.prem_progress = {"is_running": True}
         _premarket(b"", background="false")
-        assert ienv.universe_calls == 1 and ienv.base_calls == []
+        assert ienv.universe_calls == 0 and ienv.base_calls == []
 
 
 class TestPremarketBackground:
@@ -736,14 +743,12 @@ class TestPremarketBackground:
         threads[0].target()
         assert ienv.base_calls[0]["symbols"] == ["DEF1", "DEF2"]
 
-    def test_a_universe_of_bare_suffixes_becomes_a_list_with_one_empty_symbol(self, ienv, threads):
-        # NOT FIXED: entries are filtered before they are normalised, so ".NS" survives the filter and
-        # normalises to "" — the list is non-empty, the default-universe fallback never fires, and the
-        # baseline job is handed [""].
+    def test_a_universe_of_bare_suffixes_falls_back_to_the_default_universe(self, ienv, threads):
+        # FIXED: entries are normalised first, then empties dropped, so the default fallback fires.
         ienv.universe = [".NS"]
         _premarket()
         threads[0].target()
-        assert ienv.base_calls[0]["symbols"] == [""]
+        assert "" not in ienv.base_calls[0]["symbols"] and ienv.base_calls[0]["symbols"]
 
     def test_a_failing_baseline_run_is_swallowed_by_the_job(self, ienv, threads):
         ienv.base_raises = RuntimeError("yfinance down")
@@ -772,14 +777,40 @@ class TestPremarketSynchronous:
         _premarket(b"", background="false")
         assert ienv.base_calls[0]["symbols"] == ["DEF1", "DEF2"]
 
-    def test_a_universe_of_bare_suffixes_skips_the_default_fallback(self, ienv):
-        # NOT FIXED: same filter-before-normalise gap as the background job — [".NS"] becomes [""].
+    def test_a_universe_of_bare_suffixes_uses_the_default_fallback(self, ienv):
+        # FIXED: same normalise-then-filter as the background job.
         ienv.universe = [".NS"]
         _premarket(b"", background="false")
-        assert ienv.base_calls[0]["symbols"] == [""]
+        assert ienv.base_calls[0]["symbols"] == ["DEF1", "DEF2"]
 
-    def test_baseline_failure_propagates_on_the_synchronous_path(self, ienv):
-        # NOT FIXED: only the background job swallows baseline errors; the inline call raises (a 500).
+    def test_baseline_failure_is_reported_on_the_synchronous_path(self, ienv):
+        # FIXED: the inline call returns a structured error instead of raising.
         ienv.base_raises = RuntimeError("yfinance down")
-        with pytest.raises(RuntimeError):
-            _premarket(_jbody(["A"]), background="false")
+        out = _premarket(_jbody(["A"]), background="false")
+        assert out["ok"] is False and "yfinance down" in out["error"] and out["runner"] == "api-gateway"
+
+
+class TestPass82IpoAndPremarketGuards:
+    def test_inline_scan_failure_is_a_structured_error(self, ienv, monkeypatch):
+        def boom(force=False, wipe=False):
+            raise RuntimeError("scan blew up")
+
+        monkeypatch.setattr(sys.modules["ipo_scanner"], "run_ipo_scan", boom)
+        out = _run(gw.api_ipo_scan(background=False, force=False, wipe=False, background_tasks=None))
+        assert out["accepted"] is False and out["status"] == "error" and "scan blew up" in out["error"]
+
+    def test_inline_scan_non_dict_result_still_returns_the_envelope(self, ienv, monkeypatch):
+        monkeypatch.setattr(sys.modules["ipo_scanner"], "run_ipo_scan", lambda force=False, wipe=False: ["junk"])
+        out = _run(gw.api_ipo_scan(background=False, force=False, wipe=False, background_tasks=None))
+        assert out == {"accepted": True, "background": False}
+
+    def test_add_with_a_non_dict_resolver_result_is_not_resolved(self, ienv, client):
+        ienv.add_result = ["junk"]
+        r = client.post("/ipo/add", json={"company_name": "X"})
+        assert r.status_code == 200 and r.json()["accepted"] is False
+
+    def test_synchronous_baseline_non_dict_result_is_wrapped(self, ienv, monkeypatch):
+        monkeypatch.setattr(sys.modules["surprise_premarket"], "precalculate_surprise_baselines",
+                            lambda symbols, force=False: ["junk"])
+        out = _premarket(_jbody(["A"]), background="false")
+        assert out["ok"] is True and out["result"] == ["junk"] and out["runner"] == "api-gateway"

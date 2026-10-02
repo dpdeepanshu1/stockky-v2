@@ -163,12 +163,11 @@ class TestMarketSession:
         assert out["is_holiday"] is True and out["is_market_day"] is False
         assert out["is_open"] is False and out["quote_polling"] is False
 
-    def test_holiday_phase_contradicting_the_calendar_reports_a_market_day(self, session_env):
-        # NOT FIXED: when the phase helper says "holiday" but `is_nse_holiday` disagrees on a weekday,
-        # `is_market_day` and `is_holiday` are both True. The two sources are never reconciled.
+    def test_holiday_phase_contradicting_the_calendar_is_not_a_market_day(self, session_env):
+        # FIXED: the phase helper is authoritative for "holiday", so the flags agree.
         session_env.setup(2026, 9, 30, "holiday", holidays=[])
         out = gw.market_session()
-        assert out["is_holiday"] is True and out["is_market_day"] is True
+        assert out["is_holiday"] is True and out["is_market_day"] is False
 
     def test_route_is_registered(self, session_env, client):
         session_env.setup(2026, 9, 30, "open")
@@ -223,13 +222,13 @@ class TestNiftyMovers:
         assert client.get("/market/top-losers").json()["count"] == 10
         assert client.get("/market/most-active").json()["count"] == 10
 
-    def test_a_row_missing_the_sort_key_is_a_500(self, client):
-        # NOT FIXED: these three routes index the sort key directly, so one malformed row takes the
-        # whole endpoint down instead of being skipped.
+    def test_a_row_missing_the_sort_key_is_skipped(self, client):
+        # FIXED: a malformed row is skipped instead of taking the endpoint down.
         self.rows.append({"symbol": "BAD"})
-        assert client.get("/market/top-gainers").status_code == 500
-        assert client.get("/market/top-losers").status_code == 500
-        assert client.get("/market/most-active").status_code == 500
+        for path in ("/market/top-gainers", "/market/top-losers", "/market/most-active"):
+            r = client.get(path)
+            assert r.status_code == 200
+            assert "BAD" not in [x["symbol"] for x in r.json()["data"]]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -375,15 +374,13 @@ class TestMarketTrendingYfinanceFallback:
         out = _run(gw.market_trending())
         assert [r["symbol"] for r in out["data"]] == ["BBB"]
 
-    def test_zero_open_price_makes_the_route_a_500(self, tenv, client):
-        # NOT FIXED: a zero Open from yfinance gives change_pct = inf (numpy division), `round`
-        # accepts it, the row is returned by the handler, and FastAPI then fails to JSON-encode it,
-        # so one bad bar turns the whole /market/trending response into a 500.
+    def test_zero_open_price_gives_a_null_change_pct(self, tenv, client):
+        # FIXED: a zero Open no longer produces inf (which FastAPI cannot JSON-encode).
         tenv.movers = ["AAA"]
         tenv.tickers["AAA.NS"] = _ohlc(0.0, 5.0)
         out = _run(gw.market_trending())
-        assert out["count"] == 1 and out["data"][0]["change_pct"] == float("inf")
-        assert client.get("/market/trending").status_code == 500
+        assert out["count"] == 1 and out["data"][0]["change_pct"] is None
+        assert client.get("/market/trending").status_code == 200
 
 
 class TestMarketTrendingSelection:
@@ -594,34 +591,37 @@ class TestIndicesDegrade:
         assert body["market_mood"] == "NEUTRAL" and body["market_score"] == 50
         assert body["stale"] is True and body["fallback"] is True
         assert (gw.INDICES_CACHE_KEY, body, 60) in kv.sets
-        assert (gw.INDICES_LAST_KNOWN, body, 86400) in kv.sets
+        # FIXED: the zero fallback is short-lived only; it never reaches the 24 h last-known key.
+        assert all(k != gw.INDICES_LAST_KNOWN for k, _, _ in kv.sets)
 
     def test_second_index_failure_also_degrades(self, ienv, kv):
         ienv.frames["^NSEI"] = _frame([1.0], [1.0])
         ienv.frames["^BSESN"] = RuntimeError("sensex down")
         assert json.loads(gw.get_market_indices().body)["fallback"] is True
 
-    def test_fallback_overwrites_a_good_last_known_with_zeros(self, ienv, kv):
-        # NOT FIXED: with no usable last-known copy the zero fallback is written to the 24 h key, so
-        # the next outage serves zeros (marked stale) rather than nothing — pinned, not asserted good.
+    def test_fallback_does_not_write_the_last_known_key(self, ienv, kv):
+        # FIXED: the zero fallback used to be written to the 24 h key, so the next outage served zeros.
         ienv.frames["^NSEI"] = RuntimeError("down")
         gw.get_market_indices()
-        assert kv.store[gw.INDICES_LAST_KNOWN]["fallback"] is True
+        assert gw.INDICES_LAST_KNOWN not in kv.store
 
-    def test_zero_previous_close_poisons_both_caches_and_returns_500(self, ienv, kv, client):
-        # NOT FIXED (real bug, edge case): a zero previous close from Yahoo makes change_pct = inf.
-        # The result is written to the 300 s cache and the 24 h last-known key BEFORE the JSON response
-        # is built; building it raises, the handler's own recovery path re-reads the poisoned
-        # last-known copy and fails the same way -> HTTP 500, and every later call that hits either
-        # cache key repeats it until the TTLs expire.
+    def test_zero_previous_close_yields_a_zero_pct_and_clean_caches(self, ienv, kv, client):
+        # FIXED: a zero previous close gives change_pct 0.0 (via _safe_pct) instead of inf, so nothing
+        # poisoned is cached and the route answers 200.
         ienv.frames["^NSEI"] = _frame([0.0, 0.0], [0.0, 5.0])
         ienv.frames["^BSESN"] = _frame([0.0, 0.0], [0.0, 5.0])
         r = client.get("/market/indices", params={"force_refresh": "true"})
-        assert r.status_code == 500
-        assert kv.store[gw.INDICES_LAST_KNOWN]["nifty"]["change_pct"] == float("inf")
-        assert kv.store[gw.INDICES_CACHE_KEY]["nifty"]["change_pct"] == float("inf")
-        # the next plain call is served straight from the poisoned cache: still a 500
-        assert client.get("/market/indices").status_code == 500
+        assert r.status_code == 200
+        assert r.json()["nifty"]["change_pct"] == 0.0
+        assert kv.store[gw.INDICES_LAST_KNOWN]["nifty"]["change_pct"] == 0.0
+        assert kv.store[gw.INDICES_CACHE_KEY]["nifty"]["change_pct"] == 0.0
+        assert client.get("/market/indices").status_code == 200
+
+    def test_a_non_finite_cache_entry_is_ignored_and_rebuilt(self, ienv, kv, client):
+        kv.store[gw.INDICES_CACHE_KEY] = {"nifty": {"change_pct": float("inf")}, "sensex": {}}
+        ienv.frames["^NSEI"] = _frame([100.0, 110.0], [100.0, 110.0])
+        ienv.frames["^BSESN"] = _frame([100.0, 110.0], [100.0, 110.0])
+        assert client.get("/market/indices").status_code == 200
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -786,12 +786,10 @@ class TestScanUniverseColdBuild:
         out = _universe(cached=False)
         assert out["symbols"] == uenv.build_result and "cached" not in out
 
-    def test_searched_lookup_failure_propagates(self, uenv):
-        # NOT FIXED: `_load_searched` is awaited without a guard, so a failing searched-list read
-        # fails the whole endpoint even though the universe itself was built fine.
+    def test_searched_lookup_failure_is_degraded_to_empty(self, uenv):
+        # FIXED: a failing searched-list read no longer fails an endpoint whose universe built fine.
         uenv.searched_raises = True
-        with pytest.raises(RuntimeError, match="searched down"):
-            _universe()
+        _universe()
 
     def test_route_is_registered(self, uenv, client):
         r = client.get("/scan/universe")
@@ -953,13 +951,23 @@ class TestScanUniverseDeadline:
         out = _run(gw.get_scan_universe())
         assert "deadline_exceeded" not in out and out["symbols"] == uenv.build_result
 
-    def test_fallback_below_50_after_filtering_is_still_served(self, uenv, kv):
-        # NOT FIXED: the >= 50 gate runs on the raw cached list, but the price/equity filters run
-        # afterwards — so a deadline fallback can be served with far fewer than 50 symbols.
+    def test_fallback_below_50_after_filtering_is_not_served(self, uenv, kv):
+        # FIXED: the >= 50 gate now holds AFTER the price/equity filters, so a shrunken fallback
+        # is not served as a deadline response.
         kv.store[gw.SCAN_UNIVERSE_KEY] = _syms(60, "R")
         uenv.filter_price = lambda s: list(s)[:5]
         out = _run(gw.get_scan_universe())
-        assert out["deadline_exceeded"] is True and out["total"] == 5
+        assert not out.get("deadline_exceeded")
+
+    def test_fallback_filter_failure_is_not_served(self, uenv, kv):
+        kv.store[gw.SCAN_UNIVERSE_KEY] = _syms(60, "R")
+
+        def boom(s):
+            raise RuntimeError("filter down")
+
+        uenv.filter_price = boom
+        out = _run(gw.get_scan_universe())
+        assert not out.get("deadline_exceeded")
 
     def test_build_failure_after_the_deadline_propagates(self, uenv, kv):
         uenv.build_raises = RuntimeError("build blew up")
@@ -1151,29 +1159,83 @@ class FakeRedis:
 
 
 class TestClearUniverseCache:
-    MESSAGE = {"message": "Scan universe cache cleared — will rebuild on next scan"}
+    MESSAGE = "Scan universe cache cleared — will rebuild on next scan"
 
     def test_redis_key_is_deleted(self, monkeypatch):
         r = FakeRedis()
         monkeypatch.setattr(gw, "_redis", r)
-        assert gw.clear_universe_cache() == self.MESSAGE
+        out = gw.clear_universe_cache()
+        assert out["message"] == self.MESSAGE and "redis" in out["cleared"]
         assert r.deleted == [gw.SCAN_UNIVERSE_KEY]
 
     def test_redis_failure_is_swallowed(self, monkeypatch):
         monkeypatch.setattr(gw, "_redis", FakeRedis(raises=True))
-        assert gw.clear_universe_cache() == self.MESSAGE
+        out = gw.clear_universe_cache()
+        assert out["message"] == self.MESSAGE and "redis" not in out["cleared"]
+        assert out["errors"] == ["redis: redis down"]
 
-    def test_without_redis_nothing_is_cleared_but_the_message_still_claims_success(self, monkeypatch, kv):
-        # NOT FIXED: with Redis off (the default) only the `_redis` handle is touched, so the cached
-        # universe in the kv layer is left alone while the response says it was cleared.
+    def test_without_redis_the_kv_and_memory_layers_are_still_cleared(self, monkeypatch, kv):
+        # FIXED: with Redis off (the default) the kv / in-process layers are cleared and reported.
         monkeypatch.setattr(gw, "_redis", None)
         kv.store[gw.SCAN_UNIVERSE_KEY] = _syms(60, "C")
-        assert gw.clear_universe_cache() == self.MESSAGE
-        assert gw.SCAN_UNIVERSE_KEY in kv.store
+        out = gw.clear_universe_cache()
+        assert out["message"] == self.MESSAGE and "memory" in out["cleared"]
 
     def test_route_is_registered(self, monkeypatch, client):
         r = FakeRedis()
         monkeypatch.setattr(gw, "_redis", r)
         resp = client.delete("/scan/universe/cache")
-        assert resp.status_code == 200 and resp.json() == self.MESSAGE
+        assert resp.status_code == 200 and resp.json()["message"] == self.MESSAGE
         assert r.deleted == [gw.SCAN_UNIVERSE_KEY]
+
+
+class TestPass82MarketHelpers:
+    def test_safe_pct_guards(self):
+        assert gw._safe_pct(5, 100) == 5.0
+        assert gw._safe_pct("x", 100) == 0.0 and gw._safe_pct(5, None) == 0.0
+        assert gw._safe_pct(5, 0) == 0.0 and gw._safe_pct(5, -3) == 0.0
+        assert gw._safe_pct(float("inf"), 100) == 0.0 and gw._safe_pct(5, float("nan")) == 0.0
+        assert gw._safe_pct(1e308, 1e-300) == 0.0          # finite inputs, overflowing result
+
+    def test_json_finite_walks_nested_containers(self):
+        assert gw._json_finite({"a": [1.0, (2.0, {"b": 3.0})], "c": "x"}) is True
+        assert gw._json_finite({"a": [1.0, {"b": float("nan")}]}) is False
+        assert gw._json_finite([float("inf")]) is False and gw._json_finite(1.5) is True
+
+    def test_rank_market_rows_skips_malformed_rows(self):
+        rows = [{"v": 1}, {"v": 3}, "junk", None, {"v": "x"}, {"v": float("inf")}, {"w": 9}, {"v": 2}]
+        assert [r["v"] for r in gw._rank_market_rows(rows, "v", True)] == [3, 2, 1]
+        assert [r["v"] for r in gw._rank_market_rows(rows, "v", False, n=2)] == [1, 2]
+        assert gw._rank_market_rows(None, "v", True) == []
+
+
+class TestPass82IndicesAndUniverse:
+    def test_non_finite_index_values_take_the_degrade_path(self, ienv, kv, client):
+        ienv.frames["^NSEI"] = _frame([100.0, 100.0], [100.0, float("inf")])
+        ienv.frames["^BSESN"] = _frame([100.0, 100.0], [100.0, 105.0])
+        r = client.get("/market/indices", params={"force_refresh": "true"})
+        assert r.status_code == 200 and r.json().get("fallback") is True
+        assert all(k != gw.INDICES_LAST_KNOWN for k, _, _ in kv.sets)
+
+
+class TestPass82ClearCacheFailures:
+    def test_kv_delete_failure_is_reported_but_other_layers_clear(self, monkeypatch):
+        class BadKV:
+            def delete(self, key):
+                raise RuntimeError("kv down")
+
+        monkeypatch.setattr(gw, "_kv_cache", BadKV())
+        monkeypatch.setattr(gw, "_redis", None)
+        out = gw.clear_universe_cache()
+        assert out["cleared"] == ["memory"] and out["errors"] == ["kv: kv down"]
+
+    def test_nothing_clearable_reports_failure(self, monkeypatch):
+        class BadMem(dict):
+            def pop(self, *a, **k):
+                raise RuntimeError("mem down")
+
+        monkeypatch.setattr(gw, "_kv_cache", None)
+        monkeypatch.setattr(gw, "_redis", None)
+        monkeypatch.setattr(gw, "_mem_kv", BadMem())
+        out = gw.clear_universe_cache()
+        assert out["ok"] is False and out["cleared"] == [] and out["errors"] == ["memory: mem down"]

@@ -245,7 +245,8 @@ class TestQuoteLoopGates:
         qenv.hub.active = []
         qenv.hub.symbols = ["TCS"]
         assert _drive(gw._quote_broadcast_loop, lenv, 1) == [20]
-        assert qenv.resolve_calls == [] and qenv.alert_calls == 0
+        # no quote upstream call; server-side price alerts are still evaluated (they need no client)
+        assert qenv.resolve_calls == [] and qenv.alert_calls == 1
 
     def test_a_hub_without_an_active_list_counts_as_no_clients(self, lenv, qenv):
         qenv.hub.active = None
@@ -262,19 +263,20 @@ class TestQuoteLoopGates:
         assert _drive(gw._quote_broadcast_loop, lenv, 1) == [20]
         assert qenv.resolve_calls == []
 
-    def test_price_alerts_are_not_evaluated_on_any_idle_iteration(self, lenv, qenv, monkeypatch):
-        # NOT FIXED: every idle gate uses `continue`, which skips the price-alert pass below the try block.
-        # Alerts are only evaluated on an iteration that has clients, a live session AND watched symbols,
-        # so with the market closed or nobody watching a quote, a triggered rule is never noticed here.
+    def test_price_alerts_are_evaluated_on_live_session_ticks_without_clients_or_symbols(self, lenv, qenv, monkeypatch):
+        # FIXED: alerts are server-side rules, so the pass runs every live-session tick regardless of
+        # connected clients / watched symbols. A closed session still skips everything.
         qenv.alerts = [_alert()]
         qenv.phase = "closed"
         _drive(gw._quote_broadcast_loop, lenv, 3)
-        qenv.hub.active = []
-        _drive(gw._quote_broadcast_loop, lenv, 3)
-        qenv.hub.active = [object()]
-        qenv.phase = "open"
-        _drive(gw._quote_broadcast_loop, lenv, 3)           # no symbols
         assert qenv.alert_calls == 0 and qenv.posts == []
+        qenv.hub.active = []
+        qenv.phase = "open"
+        _drive(gw._quote_broadcast_loop, lenv, 3)           # live session, nobody connected
+        assert qenv.alert_calls == 3
+        qenv.hub.active = [object()]
+        _drive(gw._quote_broadcast_loop, lenv, 3)           # clients, but no symbols
+        assert qenv.alert_calls == 6
 
 
 class TestQuoteLoopBroadcast:
@@ -314,14 +316,13 @@ class TestQuoteLoopBroadcast:
         assert _drive(gw._quote_broadcast_loop, lenv, 1) == [8]
         assert qenv.alert_calls == 1 and len(qenv.posts) == 1
 
-    def test_a_failing_broadcast_aborts_the_rest_of_the_symbols_for_that_tick(self, lenv, qenv):
-        # NOT FIXED: the per-symbol loop sits inside one try, so one failing broadcast skips the remaining
-        # symbols until the next tick.
+    def test_a_failing_broadcast_does_not_abort_the_rest_of_the_symbols_for_that_tick(self, lenv, qenv):
+        # FIXED: each symbol is guarded, so one failing broadcast no longer skips the remaining symbols.
         qenv.hub.symbols = ["TCS", "INFY"]
         qenv.quotes = {"TCS": {"price": 1.0}, "INFY": {"price": 2.0}}
         qenv.hub.broadcast_raises = RuntimeError("hub down")
         _drive(gw._quote_broadcast_loop, lenv, 1)
-        assert qenv.resolve_calls == ["TCS"]
+        assert qenv.resolve_calls == ["TCS", "INFY"]
 
     @pytest.mark.parametrize("phase,expected", [("open", 8), ("preopen", 20), ("post", 20)])
     def test_cadence_is_8s_when_open_and_20s_in_preopen_or_post(self, lenv, qenv, phase, expected):
@@ -514,14 +515,15 @@ class TestWebsocketBasics:
 
     @pytest.mark.parametrize("frame", ["[1, 2]", "5", '"ping"', "null", '{"action": 123}',
                                        '{"action": "subscribe_quotes", "symbols": 5}'])
-    def test_a_non_object_or_badly_typed_frame_closes_the_connection(self, wenv, frame, caplog):
-        # NOT FIXED: only `json.loads` is guarded. A frame that parses to a non-dict, a non-string `action`
-        # or a non-iterable `symbols` raises outside that try, lands in the catch-all and the socket is
-        # dropped (and later frames are never read).
+    def test_a_non_object_or_badly_typed_frame_is_ignored(self, wenv, frame, caplog):
+        # FIXED: a frame that parses to a non-dict, a non-string `action` or a non-iterable `symbols` is
+        # ignored; the socket stays open and later frames are still read.
         with caplog.at_level("WARNING"):
             ws = _serve(_ws([frame, {"action": "ping"}]))
-        assert [m["type"] for m in ws.sent] == ["connected"]
-        assert "websocket closed" in caplog.text and wenv.hub.active == []
+        types = [m["type"] for m in ws.sent]
+        # a bad `symbols` value still gets its (empty) subscribe ack; the later ping is answered either way
+        assert types[0] == "connected" and types[-1] == "pong"
+        assert "websocket closed" not in caplog.text
 
     def test_a_receive_error_is_logged_and_the_socket_removed(self, wenv, caplog):
         with caplog.at_level("WARNING"):
@@ -630,10 +632,9 @@ class TestWebsocketChannels:
         ws = _serve(_ws([{"action": "subscribe", "channel": "quote:ZZZ"}]))
         assert ws.by_type("quote") == [] and len(ws.by_type("subscribed")) == 1
 
-    def test_lowercase_quote_channel_keeps_a_second_raw_subscription_and_raw_snapshot_symbol(self, wenv):
-        # NOT FIXED: `subscribe(channel)` stores the channel as typed, `watch_quotes` normalises and
-        # subscribes "quote:TCS" as well, and the snapshot resolves/answers with the raw text.
-        wenv.quotes = {"tcs.ns": {"symbol": "tcs.ns", "price": 1.0}}
+    def test_lowercase_quote_channel_is_canonicalised_to_one_subscription_and_symbol(self, wenv):
+        # FIXED: "quote:tcs.ns" is canonicalised to "quote:TCS" before subscribe / watch / snapshot.
+        wenv.quotes = {"TCS": {"symbol": "TCS", "price": 1.0}}
         seen = {}
         orig = wenv.hub.watch_quotes
 
@@ -643,8 +644,8 @@ class TestWebsocketChannels:
 
         wenv.hub.watch_quotes = spy
         ws = _serve(_ws([{"action": "subscribe", "channel": "quote:tcs.ns"}]))
-        assert seen["subs"] == {"quote:tcs.ns", "quote:TCS"}
-        assert wenv.resolve_calls == ["tcs.ns"] and ws.by_type("quote")[0]["channel"] == "quote:tcs.ns"
+        assert seen["subs"] == {"quote:TCS"}
+        assert wenv.resolve_calls == ["TCS"] and ws.by_type("quote")[0]["channel"] == "quote:TCS"
 
     @pytest.mark.parametrize("data,expected", [
         ({"status": "done", "processed": 5, "total": 5, "elapsed": 3.2, "result": {"n": 1}},
@@ -811,12 +812,14 @@ class TestJobIsActive:
     @pytest.mark.parametrize("snap", [
         {}, {"data_feed": None}, {"data_feed": {"status": "idle"}}, {"data_feed": {"status": "done"}},
         {"data_feed": {}}, {"rate_limits": {"status": "running"}}, {"yahoo_ws_feed": {"status": "running"}},
-        {"surprise_premarket": {"is_running": True}},
+        {"surprise_premarket": {"is_running": False}}, {"surprise_premarket": "running"},
     ])
     def test_inactive_snapshots(self, snap):
-        # NOT FIXED (last case): the premarket progress dict exposes `is_running`, not `status` — a
-        # running premarket scan reporting only that flag never speeds the push interval up.
         assert gw._job_is_active(snap) is False
+
+    def test_premarket_is_running_flag_counts_as_active(self):
+        # FIXED: the premarket progress dict exposes `is_running`, not `status`; the flag is now honoured.
+        assert gw._job_is_active({"surprise_premarket": {"is_running": True}}) is True
 
 
 class TestJobsBroadcastLoop:
@@ -860,11 +863,11 @@ class TestJobsBroadcastLoop:
         assert "jobs broadcast loop" in caplog.text and hub.broadcasts == []
 
     def test_a_snapshot_cannot_override_type_or_ts(self, loop_env, lenv):
-        # NOT FIXED: `**snap` is spread last, so a job source returning a "type"/"ts" key overrides them.
+        # FIXED: the envelope's own keys are spread last.
         hub, snaps = loop_env
         snaps["value"] = {"type": "x", "ts": "y"}
         _drive(gw._jobs_broadcast_loop, lenv, 1)
-        assert hub.broadcasts[0][1]["type"] == "x" and hub.broadcasts[0][1]["ts"] == "y"
+        assert hub.broadcasts[0][1]["type"] == "jobs_snapshot" and hub.broadcasts[0][1]["ts"] != "y"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1059,3 +1062,22 @@ class TestWarmMomentumMoversCache:
         with caplog.at_level("DEBUG"):
             _run(gw._warm_momentum_movers_cache())
         assert env.calls == [] and "warm task not scheduled" in caplog.text
+
+
+class TestPass82QuoteLoopGuards:
+    def test_a_failing_gate_check_sleeps_20s_and_retries(self, lenv, qenv, monkeypatch):
+        def boom():
+            raise RuntimeError("gate down")
+
+        monkeypatch.setattr(gw, "activity_paused", boom)
+        assert _drive(gw._quote_broadcast_loop, lenv, 2) == [20, 20]
+        assert qenv.resolve_calls == [] and qenv.alert_calls == 0
+
+    def test_a_failing_watch_set_lookup_does_not_stop_the_alert_pass(self, lenv, qenv):
+        def boom():
+            raise RuntimeError("hub down")
+
+        qenv.hub.all_watched_symbols = boom
+        qenv.alerts = [_alert()]
+        _drive(gw._quote_broadcast_loop, lenv, 1)
+        assert qenv.alert_calls == 1 and qenv.resolve_calls == []

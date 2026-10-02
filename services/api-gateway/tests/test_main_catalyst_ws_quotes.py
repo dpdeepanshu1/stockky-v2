@@ -322,13 +322,11 @@ class TestCatalystScanSetup:
         monkeypatch.setenv("CATALYST_BATCH_SIZE", "12")
         assert _scan()["batch_size"] == 12
 
-    def test_a_non_numeric_env_batch_size_is_an_unhandled_error(self, cenv, monkeypatch, kv):
-        # NOT FIXED: int() on the env value is outside any try — a bad CATALYST_BATCH_SIZE is a 500
-        # before any job state is written.
+    def test_a_non_numeric_env_batch_size_falls_back_to_the_default(self, cenv, monkeypatch, kv):
+        # FIXED: a bad CATALYST_BATCH_SIZE falls back to 25 instead of a 500.
         monkeypatch.setenv("CATALYST_BATCH_SIZE", "lots")
-        with pytest.raises(ValueError):
-            _scan()
-        assert kv.sets == []
+        _scan()
+        assert kv.sets != []
 
     def test_background_mode_queues_the_work_and_answers_immediately(self, cenv, kv):
         bt = BackgroundTasks()
@@ -361,13 +359,18 @@ class TestCatalystScanSetup:
         assert out["already_running"] is True and out["ok"] is True and out["processed"] == 4
         assert bt.tasks == [] and kv.sets == []
 
-    def test_force_defaults_to_true_so_the_guard_is_bypassed_by_default(self, cenv, kv):
-        # NOT FIXED: `force: bool = True` — a plain GET/POST restarts a sweep that is already running;
-        # only an explicit force=false reaches the already-running check.
+    def test_the_running_guard_is_not_bypassed_by_the_default_force(self, cenv, kv):
+        # FIXED: `force` only bypasses the hot-stocks cache; a plain call no longer starts a second sweep.
         kv.store[JOB_KEY] = {"status": "running", "updated_at": _ago(10)}
         bt = BackgroundTasks()
         out = _run(gw.catalyst_alert_scan(bt))
-        assert out["status"] == "running" and "already_running" not in out and len(bt.tasks) == 1
+        assert out["status"] == "running" and out.get("already_running") is True and len(bt.tasks) == 0
+
+    def test_restart_true_overrides_the_running_guard(self, cenv, kv):
+        kv.store[JOB_KEY] = {"status": "running", "updated_at": _ago(10)}
+        bt = BackgroundTasks()
+        out = _run(gw.catalyst_alert_scan(bt, restart=True))
+        assert "already_running" not in out and len(bt.tasks) == 1
 
     @pytest.mark.parametrize("existing", [
         {"status": "running", "updated_at": _ago(200)},               # stale (>=180s) -> restart
@@ -415,16 +418,15 @@ class TestCatalystSweep:
             "bulk_insider_driven": [_item("B1", "BUY NOW", 55)],
         }
         out = _scan(notify=False)
-        assert [p["symbol"] for p in out["picks"]] == ["B1", "R2", "R1", "N1", "N3"]
-        assert [p["section"] for p in out["picks"]] == ["bulk_insider_driven"] + ["results_driven"] * 2 + ["news_driven"] * 2
-        assert out["actionable_count"] == 5 and out["hot_universe_size"] == 200
+        assert [p["symbol"] for p in out["picks"]] == ["B1", "R2", "R1", "N1"]
+        assert [p["section"] for p in out["picks"]] == ["bulk_insider_driven"] + ["results_driven"] * 2 + ["news_driven"]
+        assert out["actionable_count"] == 4 and out["hot_universe_size"] == 200
 
-    def test_a_high_signal_do_not_buy_row_is_listed_as_actionable(self, cenv):
-        # NOT FIXED: `signal_strength == "high"` alone qualifies, so a DO NOT BUY row shows up in the
-        # alert with its decision printed.
+    def test_a_high_signal_do_not_buy_row_is_not_listed_as_actionable(self, cenv):
+        # FIXED: a "high" signal no longer lists a DO NOT BUY / SELL row.
         cenv.hot = {"universe_size": 1, "news_driven": [_item("ZZZ", "DO NOT BUY", 40, signal_strength="high")]}
         out = _scan(notify=False)
-        assert out["actionable_count"] == 1 and "*ZZZ* — DO NOT BUY (score 40)" in out["message_preview"]
+        assert out["actionable_count"] == 0 and out["picks"] == []
 
     def test_duplicate_symbols_keep_only_the_best_ranked_entry(self, cenv):
         cenv.hot = {"universe_size": 3,
@@ -481,11 +483,12 @@ class TestCatalystSweep:
         cenv.hot = {"universe_size": 7, "results_driven": [_item("AAA")]}
         assert _scan(notify=False)["notified"] is False and cenv.posts == []
 
-    def test_a_non_2xx_notify_response_still_counts_as_notified(self, cenv):
-        # NOT FIXED: the response status is never checked — only an exception triggers the fallback.
+    def test_a_non_2xx_notify_response_takes_the_telegram_fallback(self, cenv):
+        # FIXED: a non-2xx reply is a failed delivery, so the fallback path runs.
         cenv.hot = {"universe_size": 7, "results_driven": [_item("AAA")]}
         cenv.post_status = 500
-        assert _scan()["notified"] is True and cenv.telegram_calls == []
+        out = _scan()
+        assert len(cenv.telegram_calls) == 1 and out["notified"] is True
 
     def test_a_failing_post_falls_back_to_the_direct_telegram_sender(self, cenv, caplog):
         cenv.hot = {"universe_size": 7, "results_driven": [_item(f"S{i}", score=90 - i) for i in range(12)]}
@@ -505,11 +508,11 @@ class TestCatalystSweep:
             out = _scan()
         assert out["ok"] is True and out["notified"] is False and "catalyst telegram fallback" in caplog.text
 
-    def test_missing_universe_size_prints_none_and_reports_zero(self, cenv):
-        # NOT FIXED: the message line uses the raw value, so a scan without `universe_size` prints "None".
+    def test_missing_universe_size_prints_zero_and_reports_zero(self, cenv):
+        # FIXED: the message line no longer prints "None".
         cenv.hot = {"news_driven": [_item("AAA")]}
         out = _scan(notify=False)
-        assert "Universe screened: None · Actionable: 1" in out["message_preview"] and out["hot_universe_size"] == 0
+        assert "Universe screened: 0 · Actionable: 1" in out["message_preview"] and out["hot_universe_size"] == 0
 
     def test_a_none_scan_result_is_treated_as_empty(self, cenv):
         cenv.hot = None
@@ -547,9 +550,8 @@ class TestCatalystSweep:
         assert job["status"] == "error" and job["error"] == "e" * 300 and job["message"].startswith("Error: ")
         assert cenv.posts == []
 
-    def test_the_keep_alive_task_is_left_running_after_a_failed_scan(self):
-        # NOT FIXED: only the success path sets `stop_evt` / cancels the keep-alive task; on an error it
-        # keeps looping (warming upstreams every 75s) until the process or event loop goes away.
+    def test_the_keep_alive_task_is_stopped_after_a_failed_scan(self):
+        # FIXED: the keep-alive loop is stopped on every exit path (a `finally`).
         env = CEnv()
         env.hot_raises = RuntimeError("boom")
         env.hot_yields = 2
@@ -581,7 +583,7 @@ class TestCatalystSweep:
             out, leaked = asyncio.run(go())
         finally:
             mp.undo()
-        assert out["ok"] is False and leaked == 1
+        assert out["ok"] is False and leaked == 0
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -691,13 +693,13 @@ class TestConnectionManager:
         _run(mgr.broadcast("scan", {"x": 1}))
         assert mgr.active == [good] and id(dead) not in mgr.subs and len(good.sent) == 1
 
-    def test_a_payload_channel_key_is_overridden_by_the_channel_argument(self, mgr):
-        # NOT FIXED: `{"channel": channel, **payload}` — a payload carrying its own "channel" wins.
+    def test_a_payload_channel_key_cannot_override_the_channel_argument(self, mgr):
+        # FIXED: `{**payload, "channel": channel}` — the channel argument wins.
         ws = FakeWS()
         _run(mgr.connect(ws))
         mgr.subscribe(ws, "scan")
         _run(mgr.broadcast("scan", {"channel": "other"}))
-        assert json.loads(ws.sent[0])["channel"] == "other"
+        assert json.loads(ws.sent[0])["channel"] == "scan"
 
     def test_the_module_level_manager_is_a_connection_manager(self):
         assert isinstance(gw.ws_manager, gw.ConnectionManager)
@@ -832,3 +834,14 @@ class TestResolveQuotePrice:
         qenv.md_raises = RuntimeError("down")
         setattr(qenv, attr, RuntimeError("yf down"))
         assert gw._resolve_quote_price("TCS") is None
+
+
+class TestPass82StatusGuard:
+    def test_an_unreadable_job_record_is_returned_as_is(self, monkeypatch):
+        class BadDict(dict):
+            def get(self, *a, **k):
+                raise RuntimeError("corrupt")
+
+        monkeypatch.setattr(gw, "_redis_get", lambda key: BadDict(status="running"))
+        out = gw.catalyst_alert_status()
+        assert out["ok"] is True and out["status"] == "running"

@@ -869,14 +869,16 @@ class TestSeedFromDataFeedKv:
         assert cache["AAA"]["avg_15m_volume"] == 100000
         assert cache["BBB"]["avg_15m_volume"] == 1000
 
-    def test_unparseable_day_high_aborts_whole_seed(self, seeder):
-        # day_high is parsed OUTSIDE the per-field try/except, so one bad row makes the outer handler
-        # return 0 even though earlier rows were already added to `cache`. Pinned as current behaviour.
+    def test_unparseable_day_high_only_affects_its_own_row(self, seeder):
+        # Fixed: day_high is now guarded per row like price/prev/volume. A bad value falls back to the
+        # price (same default as a missing day_high) instead of aborting the whole seed with 0.
         sc, db, e = seeder
-        db.rows = [("feed:GOOD", {"price": 10}), ("feed:BAD", {"price": 10, "day_high": "abc"})]
+        db.rows = [("feed:GOOD", {"price": 10}), ("feed:BAD", {"price": 12, "day_high": "abc"}),
+                   ("feed:LATER", {"price": 20, "day_high": 25})]
         cache = {}
-        assert e._seed_from_data_feed_kv(cache) == 0
-        assert "GOOD" in cache
+        assert e._seed_from_data_feed_kv(cache) == 3
+        assert cache["BAD"]["high_52w"] == 12.0
+        assert cache["LATER"]["high_52w"] == 25.0 and "GOOD" in cache
 
 
 # ── score_stock ───────────────────────────────────────────────────────────────

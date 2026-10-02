@@ -154,10 +154,19 @@ class TestSymbolHelpers:
     def test_base_symbol_strips_ns_suffix(self):
         assert nm._base_symbol("TCS.NS") == "TCS"
 
-    def test_base_symbol_lowercase_suffix_not_stripped(self):
-        # Pins current behaviour: suffix is removed BEFORE upper-casing, so a
-        # lowercase ".ns" survives (as ".NS"). Callers pass upper-case symbols.
-        assert nm._base_symbol("tcs.ns") == "TCS.NS"
+    def test_base_symbol_lowercase_suffix_is_stripped(self):
+        # The suffix is matched after upper-casing, so ".ns" / ".bo" are stripped
+        # exactly like ".NS" / ".BO".
+        assert nm._base_symbol("tcs.ns") == "TCS"
+        assert nm._base_symbol("infy.bo") == "INFY"
+        assert nm._base_symbol("  Tcs.Ns ") == "TCS"
+
+    def test_base_symbol_only_strips_a_trailing_suffix(self):
+        assert nm._base_symbol("A.NSB") == "A.NSB"
+        assert nm._base_symbol("TCS") == "TCS"
+
+    def test_company_query_lowercase_suffix_finds_hint(self):
+        assert nm._company_query("tcs.ns") == "Tata Consultancy Services"
 
     def test_base_symbol_bo(self):
         assert nm._base_symbol("INFY.BO") == "INFY"

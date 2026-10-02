@@ -467,12 +467,20 @@ class SurpriseStockEngine:
                         vol = int(payload.get("volume") or 10000)
                     except Exception:
                         vol = 10000
+                    # FIX: an unparseable day_high used to raise out of the whole
+                    # loop, so the outer handler returned 0 even though earlier rows
+                    # were already in `cache`. Guard it per row like price/prev/vol
+                    # and fall back to price (the same default as a missing value).
+                    try:
+                        high_52w = float(payload.get("day_high") or price)
+                    except Exception:
+                        high_52w = price
                     cache[sym] = {
                         "symbol": sym,
                         "prev_close": prev,
                         "avg_15m_volume": max(1000, vol // 20),
                         "daily_atr": abs(price - prev) or (price * 0.015),
-                        "high_52w": float(payload.get("day_high") or price),
+                        "high_52w": high_52w,
                         "dist_52w_pct": 5.0,
                         "sector": payload.get("sector") or "",
                         "is_liquid": True,

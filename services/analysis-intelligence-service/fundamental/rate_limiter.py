@@ -51,9 +51,14 @@ def _cfg(provider: str) -> tuple:
     rps_env = os.getenv(f"RL_{provider.upper()}_RPS")
     burst_env = os.getenv(f"RL_{provider.upper()}_BURST")
     rps, burst = _DEFAULTS.get(provider, (2.0, 5))
+    # Parse each override independently: a typo in one must not discard a
+    # valid value for the other.
     try:
         if rps_env:
             rps = float(rps_env)
+    except (TypeError, ValueError):
+        pass
+    try:
         if burst_env:
             burst = int(burst_env)
     except (TypeError, ValueError):

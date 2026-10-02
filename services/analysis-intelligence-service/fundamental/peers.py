@@ -38,6 +38,13 @@ def normalize_sector(raw: Optional[str], symbol: Optional[str] = None) -> Option
     if not raw:
         return None
     r = raw.lower()
+    # Idempotent: an already-canonical sector name ("IT", "Finance", "Infra",
+    # "Capital Goods", ...) maps to itself. Callers feed a normalised sector back
+    # in (analyze() -> peers_for()), and substring matching alone returned None
+    # for those four.
+    for canonical in SECTOR_PEERS:
+        if r.strip() == canonical.lower():
+            return canonical
     mapping = [
         ("software", "IT"), ("information technology", "IT"), ("technology", "IT"),
         ("bank", "Banks"),

@@ -405,10 +405,13 @@ class TestEnrichEvents:
         assert out["has_positive_catalyst"] is True
 
     def test_earnings_days_out_propagated(self):
-        future = (_NOW + timedelta(days=7)).strftime("%Y-%m-%d")
+        # enrich_events reads the REAL clock, so the date must be built from it too;
+        # anchoring to the module's fixed _NOW made this fail once the wall clock
+        # moved more than a few days past it.
+        future = (ed._utcnow() + timedelta(days=7)).strftime("%Y-%m-%d")
         out = ed.enrich_events({"next_earnings_date": future})
-        # enrich_events calls datetime.utcnow() internally so days_out varies slightly
-        assert out.get("earnings_days_out") in range(4, 9)
+        # date-only string parses to midnight, so days_out is 6 or 7 depending on time of day
+        assert out.get("earnings_days_out") in range(5, 9)
 
     def test_event_score_raw_delta_present(self):
         out = ed.enrich_events({"earnings_surprise": {"surprise_pct": 5.0}}, "Y")

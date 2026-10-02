@@ -16,7 +16,7 @@ Everything downstream is faked: `_cb_get` / `_cb_post`, the KV helpers, the Data
 four `_fetch_*_cached` helpers, `_generate_ai_summary`, `_fetch_price_from_quote` and metrics.
 `asyncio.sleep` is faked so the retry / circuit pauses cost nothing. The "Max retries exceeded"
 tail is unreachable with the real ``range(MAX_RETRIES + 1)``; the test shadows ``range`` inside
-the module to reach it and says so. Findings are pinned as current behaviour, ``NOT FIXED``.
+the module to reach it and says so. Findings are fixed in main.py and pinned as fixed behaviour.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_analyze_symbol.py -v
@@ -355,13 +355,21 @@ def test_lite_quote_error_is_treated_as_no_price(env):
 
 
 @pytest.mark.parametrize("row,score", [
-    ({"combined_score": 0, "fundamental_score": 0, "technical_score": 33, "close": 1}, 33.0),
-    ({"combined_score": 0, "fundamental_score": 0, "technical_score": 0, "close": 1}, 50.0),
+    ({"combined_score": 0, "fundamental_score": 0, "technical_score": 33, "close": 1}, 0.0),   # a real 0 is kept
+    ({"combined_score": 0, "fundamental_score": 0, "technical_score": 0, "close": 1}, 0.0),
+    ({"combined_score": None, "fundamental_score": 0, "technical_score": 33, "close": 1}, 0.0),
+    ({"combined_score": None, "fundamental_score": None, "technical_score": 33, "close": 1}, 33.0),
+    ({"combined_score": "", "fundamental_score": 44, "close": 1}, 44.0),
+    ({"combined_score": "abc", "fundamental_score": 61, "close": 1}, 61.0),
+    ({"combined_score": float("nan"), "technical_score": 40, "close": 1}, 40.0),
+    ({"combined_score": float("inf"), "technical_score": 40, "close": 1}, 40.0),
     ({"combined_score": "abc", "close": 1}, 50.0),
+    ({"close": 1, "decision": "SELL"}, 50.0),
     ({"combined_score": 72.5, "close": 1}, 72.5),
+    ({"combined_score": "64", "close": 1}, 64.0),
 ])
-def test_lite_score_ladder_treats_zero_as_missing(env, row, score):
-    assert analyze("TCS", lite=True, feed_row=row)["combined_score"] == score   # NOT FIXED: a real 0 score becomes the next rung
+def test_lite_score_ladder_keeps_a_real_zero_and_skips_unusable_rungs(env, row, score):
+    assert analyze("TCS", lite=True, feed_row=row)["combined_score"] == score
 
 
 def test_lite_feed_with_only_a_decision_string_still_takes_the_fast_path(env):
@@ -718,12 +726,26 @@ def test_news_result_without_reasons_only_sets_the_score(env):
     assert out["news_score"] == 10 and "news" not in out["reasons"]
 
 
-def test_news_result_without_a_score_overwrites_with_none(env):
-    """NOT FIXED: `normalized["news_score"] = news_data.get("news_score")` assigns None when the
-    news payload has no score, discarding whatever the feed / engine had (here: nothing to lose)."""
+def test_news_is_not_fetched_when_a_score_is_already_supplied(env):
+    """A score the feed / decision engine already supplied is final: the news service is not called,
+    so neither a payload score nor its reasons can overwrite it."""
+    env.get_result = DResp(dict(ALL_SUPPLIED, news_score=55))
+    env.news = {"news_score": 0, "reasons": ["r"]}
+    out = analyze("TCS")
+    assert out["news_score"] == 55
+    assert "news" not in env.fetch_calls and "news" not in out["reasons"]
+
+
+def test_news_result_without_a_score_leaves_an_unset_score_unset(env):
     env.get_result = DResp(dict(ALL_SUPPLIED, news_score=None))
     env.news = {"reasons": ["r"]}
     assert analyze("TCS")["news_score"] is None
+
+
+def test_news_result_with_a_zero_score_is_applied(env):
+    env.get_result = DResp(dict(ALL_SUPPLIED, news_score=None))
+    env.news = {"news_score": 0}
+    assert analyze("TCS")["news_score"] == 0
 
 
 @pytest.mark.parametrize("exc", [None, RuntimeError("x")])
@@ -809,8 +831,10 @@ def test_template_failure_leaves_the_summary_none(env, monkeypatch):
     assert analyze("TCS", skip_gemini=True)["natural_language_summary"] is None
 
 
-def test_engine_row_that_is_not_a_dict_is_replaced_by_the_default_row(env):
-    env.get_result = DResp("garbage")
+@pytest.mark.parametrize("body", ["garbage", {}, None, ["x"]])
+def test_engine_row_that_is_not_a_usable_dict_is_replaced_by_the_default_row_and_not_cached(env, body):
+    """Fixed: the placeholder default row is returned but never cached for the TTL."""
+    env.get_result = DResp(body)
     out = analyze("TCS", skip_gemini=True)
     assert out["decision"] == "DO NOT BUY" and out["symbol"] == "TCS"
-    assert env.kv_sets[0][0] == DKEY                                    # NOT FIXED: the placeholder default is cached for the TTL
+    assert env.kv_sets == [] and DKEY not in env.kv

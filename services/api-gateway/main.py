@@ -3135,16 +3135,22 @@ async def _analyze_one_symbol_ultra(
                         if has_feed or close_px is not None:
                             # Always take lite fast-path (skip decision HTTP)
                             fr = feed_row if isinstance(feed_row, dict) else {}
-                            score = (
-                                fr.get("combined_score")
-                                or fr.get("fundamental_score")
-                                or fr.get("technical_score")
-                                or 50
-                            )
-                            try:
-                                score = float(score)
-                            except Exception:
-                                score = 50.0
+                            # First rung holding a usable number wins. A real 0 is a
+                            # valid score; only None / blank / non-numeric / non-finite
+                            # values fall through to the next rung.
+                            score = 50.0
+                            for _rung in ("combined_score", "fundamental_score", "technical_score"):
+                                _v = fr.get(_rung)
+                                if _v is None or isinstance(_v, bool):
+                                    continue
+                                try:
+                                    _f = float(_v)
+                                except (TypeError, ValueError):
+                                    continue
+                                if _f != _f or _f in (float("inf"), float("-inf")):
+                                    continue
+                                score = _f
+                                break
                             fast = _normalize_decision_response({
                                 "symbol": base_sym,
                                 "decision": fr.get("decision") or "HOLD",
@@ -3252,7 +3258,11 @@ async def _analyze_one_symbol_ultra(
                     decision_resp.raise_for_status()
                     raw = decision_resp.json()
                     normalized = _normalize_decision_response(raw, symbol)
-                    _redis_set(cache_key, normalized, ttl=_decide_cache_ttl())
+                    # Only cache a real engine answer. A non-dict / empty body is
+                    # replaced by the placeholder default row, which must not be
+                    # served from cache for the whole TTL.
+                    if isinstance(raw, dict) and raw:
+                        _redis_set(cache_key, normalized, ttl=_decide_cache_ttl())
 
                 # Overlay durable Neon feed onto decision (do not call fund/news upstream if present)
                 if isinstance(feed_row, dict) and feed_row:
@@ -3357,7 +3367,10 @@ async def _analyze_one_symbol_ultra(
                         except Exception:
                             news_data = None
                         if news_data:
-                            normalized["news_score"] = news_data.get("news_score")
+                            # A news payload with no score must not wipe a score the
+                            # feed / decision engine already supplied.
+                            if news_data.get("news_score") is not None:
+                                normalized["news_score"] = news_data.get("news_score")
                             reasons = normalized.get("reasons", {})
                             if news_data.get("reasons"):
                                 reasons["news"] = news_data["reasons"]
@@ -4156,14 +4169,17 @@ def proxy_quote(symbol: str):
         if resp.status_code == 200:
             data = resp.json()
             price = data.get("price") or data.get("regularMarketPrice") or data.get("close") or data.get("last")
-            return {
-                "symbol": sym,
-                "price": price,
-                "close": data.get("close") or price,
-                "as_of": data.get("as_of") or datetime.now(IST).isoformat(),
-                "source": data.get("source") or "market-data",
-                "raw": {k: data.get(k) for k in ("volume", "delivery_pct", "change_pct") if k in data},
-            }
+            if price:
+                return {
+                    "symbol": sym,
+                    "price": price,
+                    "close": data.get("close") or price,
+                    "as_of": data.get("as_of") or datetime.now(IST).isoformat(),
+                    "source": data.get("source") or "market-data",
+                    "raw": {k: data.get(k) for k in ("volume", "delivery_pct", "change_pct") if k in data},
+                }
+            # A 200 with no usable price used to be returned as price=None; fall through to yfinance instead.
+            logger.warning("quote proxy %s: market-data returned no price, trying yfinance", sym)
     except Exception as e:
         logger.warning("quote proxy %s: %s", sym, e)
     # fallback yfinance light
@@ -4370,6 +4386,11 @@ async def market_history(symbol: str, period: str = "1mo"):
                         "volume": c.get("volume") or 0,
                     })
                 if points:
+                    # Daily candles only: trim the 1-month window to the span asked for so change_pct
+                    # covers the day / week requested (1d = last two sessions, 5d = last five).
+                    _keep = {"1d": 2, "5d": 5}.get(period)
+                    if _keep:
+                        points = points[-_keep:]
                     first = points[0]["close"] or 0
                     last = points[-1]["close"] or 0
                     chg = round((last - first) / first * 100, 2) if first else None
@@ -4454,6 +4475,13 @@ def _neon_keepalive_ping() -> dict:
             out["ok"] = bool(st.get("neon_connected"))
             if st.get("neon_error"):
                 out["error"] = st.get("neon_error")
+            if out["ok"] and hasattr(_kv_cache, "get"):
+                # status() only reports a cached flag; do a real read so Neon compute is actually touched.
+                try:
+                    _kv_cache.get("__neon_keepalive__")
+                except Exception as e:
+                    out["ok"] = False
+                    out["error"] = str(e)[:200]
             return out
         _kv_cache.get("__neon_keepalive__")
         out["ok"] = True
@@ -10739,11 +10767,16 @@ async def purge_over_cap_feed_symbols():
     except Exception:
         symbols = []
     purged = []
+    skipped = []
     for sym in symbols:
         try:
             row = store.get_symbol(sym) or {}
-        except Exception:
-            row = {}
+        except Exception as e:
+            # A failed read is not evidence the row is over cap (it used to be judged as an empty row,
+            # so the by-name denylist could delete a row we never managed to read). Leave it alone.
+            logger.warning("purge_over_cap: could not read %s, skipping: %s", sym, e)
+            skipped.append(sym)
+            continue
         if isinstance(row, dict) and _row_price_over_cap(row, symbol=sym):
             try:
                 store.delete_symbol(sym)
@@ -10754,7 +10787,12 @@ async def purge_over_cap_feed_symbols():
         "ok": True,
         "purged_count": len(purged),
         "purged_symbols": purged,
-        "message": f"Removed {len(purged)} symbol(s) above ₹{MAX_UNIVERSE_PRICE:.0f} from the feed.",
+        "skipped_count": len(skipped),
+        "skipped_symbols": skipped,
+        "message": (
+            f"Removed {len(purged)} symbol(s) above ₹{MAX_UNIVERSE_PRICE:.0f} from the feed."
+            + (f" Skipped {len(skipped)} symbol(s) that could not be read; run Purge again." if skipped else "")
+        ),
     }
 
 
@@ -11713,6 +11751,11 @@ async def data_feed_run(
     universe = [u.upper().replace(".NS", "").replace(".BO", "") for u in universe]
     # Full universe by default. Only DATA_FEED_MAX_SYMBOLS>0 truncates (explicit opt-in).
 
+    if not universe:
+        # Same guard as /data-feed/start-bulk-feed. Without it an empty universe reported `started: true`,
+        # wrote a "running" job with total 0 and queued a worker that had nothing to do.
+        raise HTTPException(status_code=400, detail="No symbols available for data feed")
+
     if only_new:
         store = _feed_store()
         fresh = []
@@ -11794,6 +11837,7 @@ async def data_feed_run(
         err_n = err0
         done_set = set(done0)
         client = _get_http_client()  # shared keepalive pool
+        bulk_ran = False  # True only when THIS run did the bulk seed (a resume that skips it did not)
 
         # ── PHASE 0: Chunked Yahoo bulk quotes (50/chunk, threads=True) ──
         # Replaces sequential /quote calls that took ~15 min with ~20s total.
@@ -11811,6 +11855,7 @@ async def data_feed_run(
                 bulk_result = await asyncio.to_thread(
                     run_bulk_yahoo_price_feed, universe, True
                 )
+                bulk_ran = True
                 saved = int((bulk_result or {}).get("tracked_stocks") or 0)
                 for sym in (bulk_result or {}).get("symbols") or []:
                     done_set.add(str(sym).upper().replace(".NS", "").replace(".BO", ""))
@@ -11869,7 +11914,10 @@ async def data_feed_run(
         _skip_seq = os.getenv("DATA_FEED_SKIP_SEQUENTIAL_FUND", "1").strip().lower() in (
             "1", "true", "yes", "on",
         )
-        if _skip_seq and ok_n > 0:
+        # Only when this run actually did the bulk seed. A resumed run carries `ok_count` from the earlier
+        # run but skipped the bulk phase, and used to hit this branch immediately and declare the job done
+        # with the remaining symbols never fed; it now continues into the sequential fill below.
+        if _skip_seq and ok_n > 0 and bulk_ran:
             ts = datetime.now(IST).isoformat()
             msg = f"Data feed stopped after bulk seed ({ok_n} rows) — sequential fund skipped"
             store.set_job(status="done", processed=len(universe), total=len(universe),

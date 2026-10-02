@@ -13,7 +13,7 @@ Pass 74. The data-feed control + health-audit block that follows the ops/hard-re
 
 Everything downstream is faked: the feed store, `data_feed` / `refill_additional` helpers, the market-data
 httpx client, `asyncio.sleep`, the kv index and the clock. Nothing touches the network or a database.
-Findings are pinned as current behaviour and marked ``NOT FIXED``.
+Findings are pinned as current behaviour and marked ``NOT FIXED``; fixed ones say ``Fixed``.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_feed_control_audit.py -v
@@ -1058,14 +1058,30 @@ class TestPurgeOverCap:
         out = _run(gw.purge_over_cap_feed_symbols())
         assert out["purged_count"] == 0 and out["purged_symbols"] == []
 
-    def test_row_fetch_failure_still_reaches_the_cap_check_with_an_empty_row(self, purge):
-        """NOT FIXED: a failed `get_symbol` is swallowed as `{}` and the symbol is still judged by the cap
-        gate, so a transient read error can delete a row that the by-name denylist flags."""
+    def test_row_fetch_failure_skips_the_symbol_instead_of_judging_an_empty_row(self, purge):
+        """Fixed: a failed `get_symbol` used to be swallowed as `{}`, so a transient read error could delete
+        a row the by-name denylist flags. The symbol is now skipped and reported."""
         purge.symbols = ["MRF", "SMALL"]
         purge.rows = {"MRF": {"price": 1}, "SMALL": {"price": 1}}
         purge.row_raises.update({"MRF", "SMALL"})
         out = _run(gw.purge_over_cap_feed_symbols())
-        assert out["purged_symbols"] == ["MRF"]
+        assert out["purged_symbols"] == [] and out["purged_count"] == 0 and purge.deleted == []
+        assert out["skipped_symbols"] == ["MRF", "SMALL"] and out["skipped_count"] == 2
+        assert out["message"].endswith("Skipped 2 symbol(s) that could not be read; run Purge again.")
+
+    def test_a_read_failure_does_not_stop_the_other_symbols(self, purge):
+        purge.symbols = ["BIG", "FLAKY", "SMALL"]
+        purge.rows = {"BIG": {"price": 9000}, "FLAKY": {"price": 9000}, "SMALL": {"price": 1}}
+        purge.row_raises.add("FLAKY")
+        out = _run(gw.purge_over_cap_feed_symbols())
+        assert out["purged_symbols"] == ["BIG"] and out["skipped_symbols"] == ["FLAKY"]
+
+    def test_clean_run_reports_no_skips_and_keeps_the_plain_message(self, purge):
+        purge.symbols = ["SMALL"]
+        purge.rows = {"SMALL": {"price": 1}}
+        out = _run(gw.purge_over_cap_feed_symbols())
+        assert out["skipped_count"] == 0 and out["skipped_symbols"] == []
+        assert out["message"] == "Removed 0 symbol(s) above ₹5000 from the feed."
 
     def test_missing_rows_become_empty_dicts(self, purge):
         purge.symbols = ["GHOST", "MRF"]

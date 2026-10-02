@@ -1895,12 +1895,15 @@ class TestAnalyzePostListing:
         r = ipo.analyze_ipo(_entry("2026-09-28"), NOW)
         assert r["stage"] == "listed" and r["gmp"] == 5.0 and r["gmp_pct_of_issue"] == 5.0
 
-    def test_zero_issue_price_raises(self, stubs):
-        """Pins current behaviour: issue_price=0 (reachable via add_manual_ipo + repair) raises
-        ZeroDivisionError instead of returning an error row. NOT FIXED."""
+    @pytest.mark.parametrize("bad", [0, 0.0, -5, float("nan"), float("inf")])
+    def test_non_positive_or_non_finite_issue_price_returns_error_row(self, stubs, bad):
+        """issue_price=0 (reachable via add_manual_ipo + repair), negatives, NaN and inf return an
+        error row (same shape as an unparseable listing_date) instead of raising ZeroDivisionError,
+        and no GMP / history lookup is attempted."""
         stubs["hist"] = _hist([120, 125])
-        with pytest.raises(ZeroDivisionError):
-            ipo.analyze_ipo(_entry("2026-09-25", issue_price=0), NOW)
+        r = ipo.analyze_ipo(_entry("2026-09-25", issue_price=bad), NOW)
+        assert r["stage"] == "unknown" and r["error"] == "issue_price must be a positive number"
+        assert "ipo_score" not in r and "decision" not in r and "buy_suggestion" not in r
 
 
 # ── result cache merge ────────────────────────────────────────────────────────
@@ -1926,12 +1929,18 @@ class TestMergeResults:
         kv.store[ipo.IPO_LIST_KEY] = {"results": None}
         assert ipo._merge_ipo_results([{"symbol": "A"}]) == [{"symbol": "A"}]
 
-    def test_duplicate_symbol_in_cache_only_first_is_replaced(self, kv):
-        """Pins current behaviour: if the cached list already holds the same symbol twice, only the
-        first copy is refreshed and the second stays stale. NOT FIXED."""
-        kv.store[ipo.IPO_LIST_KEY] = {"results": [{"symbol": "A", "v": 1}, {"symbol": "A", "v": 2}]}
+    def test_duplicate_symbol_in_cache_is_collapsed_to_the_fresh_row(self, kv):
+        """A symbol held twice in the cached list is refreshed in place once and the stale second
+        copy is dropped."""
+        kv.store[ipo.IPO_LIST_KEY] = {"results": [{"symbol": "A", "v": 1}, {"symbol": "B", "v": "keep"},
+                                                  {"symbol": "A", "v": 2}]}
         out = ipo._merge_ipo_results([{"symbol": "A", "v": 9}])
-        assert out == [{"symbol": "A", "v": 9}, {"symbol": "A", "v": 2}]
+        assert out == [{"symbol": "A", "v": 9}, {"symbol": "B", "v": "keep"}]
+
+    def test_duplicate_cached_symbol_without_fresh_row_is_left_alone(self, kv):
+        kv.store[ipo.IPO_LIST_KEY] = {"results": [{"symbol": "A", "v": 1}, {"symbol": "A", "v": 2}]}
+        out = ipo._merge_ipo_results([{"symbol": "B", "v": 9}])
+        assert out == [{"symbol": "A", "v": 1}, {"symbol": "A", "v": 2}, {"symbol": "B", "v": 9}]
 
 
 # ── scan orchestration ────────────────────────────────────────────────────────
@@ -2355,6 +2364,18 @@ class TestRepairAnalysis:
         assert "PRE analyzed but still unscored (stage=pre_listing)" in caplog.text
         assert rep.sleeps == [0.3] * 4                # paced after every analyzed symbol, even failures
 
+    def test_error_row_is_reported_as_failed_not_pending(self, rep):
+        rep.miss("BADPX", "PRE")
+        rep.known("BADPX", "PRE")
+        rep.analysis = {
+            "BADPX": {"symbol": "BADPX", "stage": "unknown", "error": "issue_price must be a positive number"},
+            "PRE": {"symbol": "PRE", "stage": "pre_listing"},
+        }
+        out = ipo.ipo_repair_batch()
+        assert out["repaired"] == [] and out["not_yet_tradeable"] == ["PRE"]
+        assert out["failed"] == [{"symbol": "BADPX", "reason": "issue_price must be a positive number"}]
+        assert "BADPX (issue_price must be a positive number)" in out["message"]
+
     def test_zero_score_counts_as_scored(self, rep):
         rep.miss("Z")
         rep.known("Z")
@@ -2397,8 +2418,9 @@ class TestRepairAnalysis:
 
 class TestRepairMessages:
     def test_all_repaired_has_no_message(self, rep):
-        """Pins current behaviour: when everything is repaired and nothing is waiting on Yahoo, neither
-        message branch fires, so the response carries no 'message' key at all. NOT FIXED."""
+        """By design: when everything is repaired and nothing is waiting on Yahoo, neither message
+        branch fires and the response carries no 'message' key — the frontend (IpoFeedHealth) then
+        builds its own "Repaired N symbol(s): ..." text from `repaired`."""
         rep.miss("A", "B")
         rep.known("A", "B")
         out = ipo.ipo_repair_batch()

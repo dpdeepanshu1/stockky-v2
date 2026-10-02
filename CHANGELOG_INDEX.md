@@ -6,6 +6,25 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-02 (group 25) — analysis-intelligence-service `fundamental/peers.py`: `normalize_sector`
+  is now idempotent (canonical names like "IT", "Finance", "Infra", "Capital Goods" map to
+  themselves). `analyze()` feeds the normalised sector back into `peers_for()`, which returned no
+  peers for those four sectors for any symbol outside the curated list. Pin in
+  `test_fundamental_main.py` rewritten to assert peers are returned; idempotency tests added in
+  `test_peers.py`. The other fundamental pin (debt-to-equity <= 50 not rescaled) left as is: the
+  percent-vs-multiple heuristic is ambiguous, needs your call. `./run_tests.sh` in a clean venv:
+  exit 0, 100% coverage.
+- 2026-10-02 (group 24) — analysis-intelligence-service `news/main.py`: `_base_symbol` now
+  upper-cases/strips before removing the `.NS`/`.BO` suffix (and only strips a trailing one), so
+  `tcs.ns` resolves to `TCS` and finds its company-name hint instead of searching news for
+  `TCS.NS`. Pin in `test_news_main.py` rewritten to assert the fix. `./run_tests.sh` in a clean
+  venv: exit 0, 100% coverage.
+- 2026-10-02 (group 23) — analysis-intelligence-service `fundamental/rate_limiter.py`:
+  `_cfg` now parses `RL_<PROVIDER>_RPS` and `RL_<PROVIDER>_BURST` independently, so a typo in
+  one no longer discards a valid value for the other (pin in `test_rate_limiter.py` rewritten to
+  assert the fix). Also fixed `test_event_depth.py::test_earnings_days_out_propagated`, which
+  built its date from a hardcoded `_NOW` while the code reads the real clock (failed on the
+  group 22 zip too). `./run_tests.sh` in a clean venv: exit 0, 100% coverage.
 - `SESSION126_ANALYSIS_INTEL_INDIANAPI_FALLBACK_COVERAGE_2026-09-29.md` —
   analysis-intelligence-service `fundamental/indianapi_fallback.py` 93% -> expected 100%: kv_cache
   import fallback, in-process pacing sleep, suggested_timeout failure, redis-client guard. Tests only.

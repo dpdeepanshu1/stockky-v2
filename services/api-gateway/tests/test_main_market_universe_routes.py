@@ -12,7 +12,7 @@ Pass 66. The market-overview routes and the scan-universe routes:
 Everything downstream is faked: the session-phase / holiday helpers, the nifty-50 and momentum helpers,
 the sync `httpx.get`, `httpx.AsyncClient`, `yf.Ticker` (tiny DataFrames), the kv cache, the stale-fallback
 cache, the universe builder and the price/equity filters. Nothing touches the network or a database.
-Findings are pinned as current behaviour and marked ``NOT FIXED``.
+Findings are pinned as current behaviour and marked ``NOT FIXED``; fixed or by-design ones are labelled as such.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_market_universe_routes.py -v
@@ -556,8 +556,9 @@ class TestIndicesLive:
 class TestIndicesDegrade:
     @pytest.mark.parametrize("empty", ["^NSEI", "^BSESN"])
     def test_empty_history_degrades_instead_of_returning_503(self, ienv, kv, empty):
-        # NOT FIXED: the 503 raised for empty index data is swallowed by the function's own broad
-        # `except Exception`, so callers never see it — they get the fallback payload with HTTP 200.
+        # By design (relabelled from NOT FIXED): the 503 raised for empty index data is caught by the
+        # function's own `except Exception`, so callers get the fallback payload with HTTP 200 and the
+        # `fallback`/`stale` flags say it is degraded. A banner keeps working instead of erroring.
         _set_move(ienv, 0.0, 0.0)
         ienv.frames[empty] = pd.DataFrame({"Open": [], "Close": []})
         resp = gw.get_market_indices()

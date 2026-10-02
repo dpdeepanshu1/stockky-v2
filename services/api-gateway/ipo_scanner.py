@@ -1345,6 +1345,15 @@ def analyze_ipo(entry: Dict[str, Any], now: Optional[datetime] = None) -> Dict[s
         "gmp": entry.get("gmp"),
     }
 
+    # A zero, negative or non-finite issue price (reachable via add_manual_ipo or
+    # a repaired cache row) would hit ZeroDivisionError in the listing-pop maths
+    # below, or yield nonsense percentages. Return an error row instead — same
+    # shape as the unparseable listing_date row — before any network call.
+    if not (issue_price > 0 and math.isfinite(issue_price)):
+        result["stage"] = "unknown"
+        result["error"] = "issue_price must be a positive number"
+        return result
+
     # ── Auto-fetch GMP when not provided by the discovery source ─────────
     # ipoalerts only provides GMP on paid plans; NSE never does. For pre-
     # listing and recently-listed stocks where GMP matters most, attempt a
@@ -1666,8 +1675,20 @@ def _merge_ipo_results(new_results: List[Dict[str, Any]]) -> List[Dict[str, Any]
         cached = None
     existing = list(cached.get("results") or []) if isinstance(cached, dict) else []
     by_sym_new = {r.get("symbol"): r for r in new_results if r.get("symbol")}
-    merged = [by_sym_new.pop(e.get("symbol"), e) for e in existing]
-    merged.extend(by_sym_new.values())  # any new symbol not already cached
+    merged: List[Dict[str, Any]] = []
+    replaced: set = set()
+    for e in existing:
+        sym = e.get("symbol")
+        if sym in by_sym_new:
+            # Refresh the first cached copy in place; drop any further stale
+            # copies of the same symbol so the cache can't keep a duplicate.
+            if sym not in replaced:
+                replaced.add(sym)
+                merged.append(by_sym_new[sym])
+        else:
+            merged.append(e)
+    # any new symbol not already cached
+    merged.extend(r for sym, r in by_sym_new.items() if sym not in replaced)
     return merged
 
 
@@ -2025,6 +2046,11 @@ def ipo_repair_batch(limit: int = 15, symbol: Optional[str] = None) -> Dict[str,
             # never moved but the button kept lying about it.
             if r.get("ipo_score") is not None and r.get("decision"):
                 repaired.append(sym)
+            elif r.get("error"):
+                # analyze_ipo returned an error row (bad issue_price or an
+                # unparseable listing_date): that is a failure to name, not a
+                # "found but not tradeable yet" row.
+                failed.append({"symbol": sym, "reason": str(r["error"])})
             else:
                 # Bug 8 fix (2026-09-05): this used to be logged and then
                 # dropped on the floor — not repaired, not failed, not

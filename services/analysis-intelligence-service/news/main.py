@@ -189,7 +189,13 @@ ALIASES: Dict[str, List[str]] = {
 
 
 def _base_symbol(symbol: str) -> str:
-    return symbol.replace(".NS", "").replace(".BO", "").upper().strip()
+    # Normalise case/whitespace FIRST so a lowercase ".ns" / ".bo" suffix is
+    # recognised and stripped like its upper-case form.
+    base = symbol.upper().strip()
+    for suffix in (".NS", ".BO"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+    return base
 
 
 def _company_query(symbol: str) -> str:

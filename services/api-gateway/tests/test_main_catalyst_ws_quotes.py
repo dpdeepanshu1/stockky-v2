@@ -16,7 +16,7 @@ resolver:
 The routes are called directly (no TestClient). Faked: the kv layer, `stockky_hot_stocks`, `stockky_hot_run`,
 `_warm_upstream_services`, `_get_http_client`, `send_picks_to_telegram`, `httpx.get`, `yf.Ticker`,
 `resolve_ns_ticker`, and (for the keep-alive loop) `asyncio.wait_for`. Nothing touches the network, a database
-or a real WebSocket. Findings are pinned as current behaviour and marked ``NOT FIXED``.
+or a real WebSocket. Findings are pinned as current behaviour and marked ``NOT FIXED``; fixed ones say ``Fixed``.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_catalyst_ws_quotes.py -v
@@ -299,13 +299,19 @@ class TestCatalystStatus:
         assert kv.sets == []
 
     def test_a_failing_heal_write_is_swallowed_but_the_healed_state_is_still_returned(self, kv):
-        # NOT FIXED: `st` is reassigned before `_redis_set`, so when the write fails the caller is told
-        # "error" while the stored job still says "running".
+        # Fixed (the code already did this; the pin was stale): the caller is still told "error", but the
+        # response now carries heal_persisted=False so it is clear the stored job still says "running".
         kv.store[JOB_KEY] = {"status": "running", "updated_at": _ago(500)}
         kv.set_raises = True
         out = gw.catalyst_alert_status()
-        assert out["status"] == "error"
+        assert out["status"] == "error" and out["heal_persisted"] is False
         assert kv.store[JOB_KEY]["status"] == "running"
+
+    def test_a_successful_heal_carries_no_heal_persisted_flag(self, kv):
+        kv.store[JOB_KEY] = {"status": "running", "updated_at": _ago(500)}
+        out = gw.catalyst_alert_status()
+        assert out["status"] == "error" and "heal_persisted" not in out
+        assert kv.store[JOB_KEY]["status"] == "error"
 
 
 # ═════════════════════════════════════════════════════════════════════════════

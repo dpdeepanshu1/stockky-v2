@@ -15,7 +15,8 @@ Handlers that take a `Request` (or need route wiring) are driven through Starlet
 WITHOUT the context manager, so the app's start-up hooks never run. Everything downstream is
 faked: the shared async httpx client (one scripted `FakeClient`), the sync `httpx.get`, Redis,
 the kv cache, metrics, circuit snapshots, the rate-limit monitor, qstash, and `asyncio.sleep`.
-Nothing touches the network. Findings are pinned as current behaviour and marked ``NOT FIXED``.
+Nothing touches the network. Findings are pinned as current behaviour and marked ``NOT FIXED``;
+ones that have since been fixed say ``Fixed`` in their comment.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_ops_routes.py -v
@@ -280,13 +281,17 @@ class TestQuote:
         fm.raise_on_inc = True
         assert gw.proxy_quote("X")["price"] == 101.5
 
-    def test_market_data_200_without_a_price_returns_null_price_no_fallback(self, md, fm, monkeypatch):
-        # NOT FIXED (low): a 200 with no price field is returned as price=None; yfinance is never tried.
+    def test_market_data_200_without_a_price_falls_back_to_yfinance(self, md, fm, monkeypatch):
+        # Fixed: a 200 with no usable price used to come back as price=None with yfinance never tried.
         md.resp = FakeResp(200, {"note": "empty"})
-        called = []
-        monkeypatch.setattr(gw.yf, "Ticker", lambda t: called.append(t))
+        self._yf(monkeypatch, {"last_price": 55.5})
         out = gw.proxy_quote("X")
-        assert out["price"] is None and called == []
+        assert out["price"] == 55.5 and out["source"] == "yfinance_fast"
+
+    def test_market_data_200_with_zero_price_also_falls_back(self, md, fm, monkeypatch):
+        md.resp = FakeResp(200, {"price": 0})
+        self._yf(monkeypatch, {"last_price": 12.0})
+        assert gw.proxy_quote("X")["price"] == 12.0
 
     def _yf(self, monkeypatch, fast_info, ticker="X.NS"):
         monkeypatch.setattr(gw, "resolve_ns_ticker", lambda s: ticker)
@@ -624,12 +629,27 @@ class TestMarketHistory:
         _run(gw.market_history("X", period))
         assert client.calls[-1][2]["params"]["period"] == mapped
 
-    def test_intraday_periods_return_a_month_of_daily_candles(self, client):
-        # NOT FIXED (low): asking for "1d"/"5d" still yields the whole 1-month window and the
-        # change_pct spans that month, not the day/week requested.
+    def test_1d_trims_to_the_last_two_sessions(self, client):
+        # Fixed: "1d" used to return the whole 1-month window with change_pct spanning the month.
         client.routes[_MD_HIST()] = FakeResp(200, {"candles": _candles(*range(10, 40))})
         out = _run(gw.market_history("X", "1d"))
-        assert len(out["points"]) == 30 and out["period"] == "1d"
+        assert [p["close"] for p in out["points"]] == [38, 39]
+        assert out["period"] == "1d" and out["change_pct"] == 2.63
+
+    def test_5d_trims_to_the_last_five_sessions(self, client):
+        client.routes[_MD_HIST()] = FakeResp(200, {"candles": _candles(*range(10, 40))})
+        out = _run(gw.market_history("X", "5d"))
+        assert [p["close"] for p in out["points"]] == [35, 36, 37, 38, 39]
+        assert out["change_pct"] == 11.43
+
+    def test_1d_with_a_single_candle_is_left_alone(self, client):
+        client.routes[_MD_HIST()] = FakeResp(200, {"candles": _candles(50)})
+        out = _run(gw.market_history("X", "1d"))
+        assert len(out["points"]) == 1 and out["change_pct"] == 0.0
+
+    def test_1mo_is_not_trimmed(self, client):
+        client.routes[_MD_HIST()] = FakeResp(200, {"candles": _candles(*range(10, 40))})
+        assert len(_run(gw.market_history("X", "1mo"))["points"]) == 30
 
     def test_none_close_candles_skipped_and_volume_defaults_to_zero(self, client):
         cs = _candles(100, 105)
@@ -771,14 +791,27 @@ class TestNeonKeepalive:
         out = gw._neon_keepalive_ping()
         assert out["ok"] is False and len(out["error"]) == 200
 
-    def test_status_never_touches_the_database_in_the_stub_path(self, monkeypatch):
-        # NOT FIXED (low): when kv_cache.status() exists the "ping" only reads its cached flag —
-        # it does not issue SELECT 1, so it cannot by itself keep Neon compute awake.
+    def test_connected_status_also_issues_a_real_read(self, monkeypatch):
+        # Fixed: status() only reports a cached flag, so the ping now also reads a key to touch Neon.
         called = []
         monkeypatch.setattr(gw, "_kv_cache", SimpleNamespace(status=lambda: {"neon_connected": True},
                                                             get=lambda k: called.append(k)))
-        gw._neon_keepalive_ping()
-        assert called == []
+        out = gw._neon_keepalive_ping()
+        assert called == ["__neon_keepalive__"] and out["ok"] is True
+
+    def test_disconnected_status_skips_the_read(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(gw, "_kv_cache", SimpleNamespace(status=lambda: {"neon_connected": False},
+                                                            get=lambda k: called.append(k)))
+        assert gw._neon_keepalive_ping()["ok"] is False and called == []
+
+    def test_a_failing_read_marks_the_ping_not_ok(self, monkeypatch):
+        def boom(k):
+            raise RuntimeError("y" * 500)
+
+        monkeypatch.setattr(gw, "_kv_cache", SimpleNamespace(status=lambda: {"neon_connected": True}, get=boom))
+        out = gw._neon_keepalive_ping()
+        assert out["ok"] is False and out["neon_connected"] is True and len(out["error"]) == 200
 
     def test_route_serves_get_and_post_with_hint(self, monkeypatch, tc):
         monkeypatch.setattr(gw, "_kv_cache", SimpleNamespace(status=lambda: {"neon_connected": True}))

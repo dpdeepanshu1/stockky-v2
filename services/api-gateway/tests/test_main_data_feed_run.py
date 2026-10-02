@@ -13,7 +13,8 @@ Pass 78. `POST /data-feed/run` (+ alias) — the full-universe feed launcher and
 
 Everything downstream is faked: the feed store, the scan-universe builders, the bulk Yahoo feed, the shared httpx
 client, `extract_feed_payload`, `_warm_upstream_services`, the stop flag and `asyncio.sleep`. Nothing touches the
-network or a database. Findings are pinned as current behaviour and marked ``NOT FIXED``.
+network or a database. Findings are pinned as current behaviour and marked ``NOT FIXED``; the ones fixed afterwards (empty-universe 400,
+resume skipping the remaining symbols) now pin the fixed behaviour.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_data_feed_run.py -v
@@ -36,7 +37,7 @@ finally:
     os.environ.update(_saved_env)
 
 import data_feed
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, HTTPException
 from fastapi.testclient import TestClient
 
 _ENV_KEYS = ("DATA_FEED_MAX_SYMBOLS", "DATA_FEED_SKIP_FUNDAMENTALS_AFTER_BULK", "DATA_FEED_SKIP_SEQUENTIAL_FUND",
@@ -252,17 +253,28 @@ class TestUniverse:
         assert out["total"] == 150
         assert fr.store.set_jobs[0]["checkpoint"]["universe"][-1] == "S149"
 
-    def test_nifty_none_is_an_empty_universe(self, fr):
-        fr.universe, fr.nifty = [], None
-        assert start(fr)[0]["total"] == 0
+    @pytest.mark.parametrize("nifty", [None, []])
+    def test_empty_everywhere_is_a_400_and_starts_nothing(self, fr, nifty):
+        """FIXED: there was no "no symbols" guard (unlike start-bulk-feed's 400), so an empty universe reported
+        `started: True`, wrote a running job with total 0 and queued a worker. It is now a 400 before any
+        job is written or task queued (a nifty fallback of None counts as empty too)."""
+        fr.universe, fr.nifty = [], nifty
+        bt = BackgroundTasks()
+        with pytest.raises(HTTPException) as ei:
+            _run(gw.data_feed_run(bt))
+        assert ei.value.status_code == 400 and ei.value.detail == "No symbols available for data feed"
+        assert bt.tasks == [] and fr.store.set_jobs == []
 
-    def test_empty_everywhere_still_starts_a_zero_symbol_run(self, fr):
-        """NOT FIXED: no "no symbols" guard here (unlike start-bulk-feed's 400) — an empty universe still reports
-        `started: True`, writes a running job with total 0 and queues a worker."""
+    @pytest.mark.parametrize("kw", [{"force": True}, {"resume": True}, {"only_new": True}])
+    def test_the_empty_guard_applies_to_every_mode(self, fr, kw):
         fr.universe, fr.nifty = [], []
-        out, bt = start(fr)
-        assert out["started"] is True and out["total"] == 0 and len(bt.tasks) == 1
-        assert fr.store.set_jobs[0]["status"] == "running"
+        with pytest.raises(HTTPException) as ei:
+            _run(gw.data_feed_run(BackgroundTasks(), **kw))
+        assert ei.value.status_code == 400 and fr.store.set_jobs == []
+
+    def test_a_universe_that_only_normalises_to_something_still_starts(self, fr):
+        fr.universe = ["tcs.ns"]
+        assert start(fr)[0]["total"] == 1
 
     def test_max_symbols_env_truncates(self, fr):
         fr.mp.setenv("DATA_FEED_MAX_SYMBOLS", "2")
@@ -561,14 +573,40 @@ class TestSkipSequential:
         go(fr)
         assert len(fr.store.puts) == 8
 
-    def test_resuming_with_progress_is_marked_done_without_feeding_anything(self, fr):
-        """NOT FIXED: with the default env, a resumed run whose carried `ok_count` is > 0 hits the skip-sequential
-        branch immediately and declares the job done — the remaining symbols are never fed."""
+    def test_resuming_with_progress_feeds_the_remaining_symbols(self, fr):
+        """FIXED: with the default env, a resumed run whose carried `ok_count` was > 0 hit the skip-sequential
+        branch immediately and declared the job done, so the remaining symbols were never fed. The early
+        finish now applies only to a run that did the bulk seed itself; a resume continues the sequential
+        fill from its cursor."""
         fr.store.job_val = {"status": "stopped", "ok_count": 2,
                             "checkpoint": {"cursor": 2, "done": ["AAA", "BBB"]}}
+        ok_routes(fr, "CCC")
         out = go(fr, resume=True)
         assert out["resume_from"] == 2
-        assert fr.store.job_val["status"] == "done" and fr.store.puts == [] and fr.client.calls == []
+        assert [p[0] for p in fr.store.puts] == ["CCC"]
+        job = fr.store.job_val
+        assert job["status"] == "done" and job["ok_count"] == 3 and job["checkpoint"]["cursor"] == 3
+        assert sorted(job["checkpoint"]["done"]) == ["AAA", "BBB", "CCC"]
+        assert job["message"].startswith("Data feed successfully for 3 stocks at ")
+        assert fr.store.metas[-1]["partial"] is False
+
+    def test_resuming_never_reruns_the_bulk_seed_or_the_early_finish_message(self, fr):
+        fr.store.job_val = {"status": "stopped", "ok_count": 1,
+                            "checkpoint": {"cursor": 1, "done": ["AAA"]}}
+        ok_routes(fr, "BBB", "CCC")
+        go(fr, resume=True)
+        assert fr.bulk_calls == []                          # the bulk phase is skipped on a mid-run resume
+        assert [p[0] for p in fr.store.puts] == ["BBB", "CCC"]
+        assert "sequential fund skipped" not in fr.store.job_val["message"]
+
+    def test_a_resume_that_restarts_from_zero_still_does_the_bulk_seed_and_early_finish(self, fr):
+        # a finished job (cursor at the end) resumed again resets to 0 -> the bulk seed runs again and the
+        # early finish applies exactly as for a fresh run
+        fr.universe = [f"S{i}" for i in range(10)]
+        fr.bulk_result = {"tracked_stocks": 2, "symbols": ["S0", "S1"]}
+        fr.store.job_val = {"status": "done", "ok_count": 5,
+                            "checkpoint": {"cursor": 10, "done": ["S0"]}}
+        go(fr, resume=True)
         assert fr.store.job_val["message"] == "Data feed stopped after bulk seed (2 rows) — sequential fund skipped"
 
 

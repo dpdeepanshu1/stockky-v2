@@ -157,11 +157,16 @@ class TestCfg:
         monkeypatch.setenv("RL_NSE_BURST", "")
         assert rl._cfg("nse") == (1.0, 3)
 
-    def test_bad_rps_is_swallowed_and_skips_the_burst_override_too(self, rl, monkeypatch):
-        # rps is parsed first; the ValueError aborts the whole try-block, so a VALID
-        # burst env var is not applied either. Pinned as current behaviour.
+    def test_bad_rps_is_swallowed_and_valid_burst_override_still_applies(self, rl, monkeypatch):
+        # Each override is parsed on its own: a bad rps falls back to the default
+        # rps, but a VALID burst env var is still honoured.
         monkeypatch.setenv("RL_NSE_RPS", "fast")
         monkeypatch.setenv("RL_NSE_BURST", "9")
+        assert rl._cfg("nse") == (1.0, 9)
+
+    def test_both_bad_overrides_fall_back_to_defaults(self, rl, monkeypatch):
+        monkeypatch.setenv("RL_NSE_RPS", "fast")
+        monkeypatch.setenv("RL_NSE_BURST", "lots")
         assert rl._cfg("nse") == (1.0, 3)
 
     def test_bad_burst_keeps_valid_rps_override(self, rl, monkeypatch):

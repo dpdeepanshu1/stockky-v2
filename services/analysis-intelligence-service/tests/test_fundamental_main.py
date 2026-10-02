@@ -765,15 +765,24 @@ class TestAnalyzePeers:
         assert out["sector_normalized"] == "Pharma"
         assert out["peer_list"] == fm.peers_for("ZZZCO", "Pharma") != []
 
-    def test_it_sector_gives_no_peers_for_unknown_symbol_quirk(self, env):
-        # Pins current behaviour: analyze() feeds the *normalised* sector back
-        # into peers_for(), and peers.normalize_sector("IT") returns None (it
-        # is not idempotent for "IT", "Finance", "Infra", "Capital Goods"), so
-        # symbols outside SYMBOL_SECTOR with a Yahoo "Technology" sector get no
-        # peers. If normalize_sector is made idempotent, update this test.
+    def test_it_sector_gives_peers_for_unknown_symbol(self, env):
+        # analyze() feeds the *normalised* sector back into peers_for(), so
+        # normalize_sector must be idempotent: "IT" -> "IT". A symbol outside
+        # SYMBOL_SECTOR with a Yahoo "Software" sector still gets IT peers.
         out = env.analyze({"roe": 10, "sector": "Software - Application"}, symbol="ZZZCO")
         assert out["sector_normalized"] == "IT"
-        assert out["peer_list"] == []
+        assert out["peer_list"] == fm.peers_for("ZZZCO", "IT") != []
+
+    @pytest.mark.parametrize("yahoo_sector, canonical", [
+        ("Software - Application", "IT"),
+        ("Credit Services", "Finance"),
+        ("Engineering & Construction", "Infra"),
+        ("Electrical Equipment", "Capital Goods"),
+    ])
+    def test_every_normalised_sector_gets_peers_for_unknown_symbol(self, env, yahoo_sector, canonical):
+        out = env.analyze({"roe": 10, "sector": yahoo_sector}, symbol="ZZZCO")
+        assert out["sector_normalized"] == canonical
+        assert out["peer_list"] == fm.peers_for("ZZZCO", canonical) != []
 
     def test_batch_failure_leaves_default_note(self, env, caplog):
         env.peer_exc = RuntimeError("market data down")

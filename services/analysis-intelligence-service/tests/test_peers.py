@@ -48,6 +48,12 @@ class TestNormalizeSector:
     def test_unknown_returns_none(self):
         assert p.normalize_sector("completely unknown industry") is None
 
+    def test_normalize_sector_is_idempotent_for_every_canonical_name(self):
+        for canonical in p.SECTOR_PEERS:
+            assert p.normalize_sector(canonical) == canonical
+            assert p.normalize_sector(canonical.upper()) == canonical
+            assert p.normalize_sector(f"  {canonical.lower()} ") == canonical
+
     def test_none_raw_and_no_symbol(self):
         assert p.normalize_sector(None) is None
 

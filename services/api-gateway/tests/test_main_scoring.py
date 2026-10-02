@@ -24,7 +24,7 @@ the tests that would otherwise really wait. Wall-clock is pinned by swapping `gw
 
 Two lines of `_cb_get` / `_cb_post` (the trailing ``if last_err: raise last_err``) are unreachable
 with the real ``range(2)`` — they are exercised by shadowing ``range`` inside the module and the
-test docstrings say so. Findings are pinned as current behaviour and marked ``NOT FIXED``.
+test docstrings say so. The three findings that were pinned here are now FIXED and pinned as fixed behaviour.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_scoring.py -v
@@ -486,8 +486,12 @@ def test_bulk_prices_empty_and_none_symbols():
     c = FakeAsyncClient()
     c.default = Resp(200, {"price": 1})
     assert run(gw._fetch_prices_bulk_async([], c)) == {}
-    out = run(gw._fetch_prices_bulk_async([None], c))
-    assert out == {"": 1.0}          # NOT FIXED: a None symbol is requested as ".../quote/None" and stored under ""
+    # FIXED: None / blank / non-string symbols are skipped (used to be requested as ".../quote/None"
+    # and stored under "")
+    assert run(gw._fetch_prices_bulk_async([None, "", "   ", 5], c)) == {}
+    assert c.calls == []
+    out = run(gw._fetch_prices_bulk_async([None, "A"], c))
+    assert out == {"A": 1.0} and len(c.calls) == 1
 
 
 def test_bulk_prices_strips_trailing_slash_on_the_base_url(monkeypatch):
@@ -540,7 +544,12 @@ def test_fundamental_feed_row_defaults(feed, kv, locks):
     assert fb is True                                        # missing fallback_used → True
     assert data["metrics"] == {} and data["reasons"] == ["From Data Feed cache"]
     feed.rows["TCS"] = {"sector": "IT", "fallback_used": None}
-    assert run(gw._fetch_fundamental_cached("TCS", None))[1] is False   # NOT FIXED: explicit None → False, absent → True
+    # FIXED: an explicit None is treated like an absent key (unknown -> fallback True)
+    assert run(gw._fetch_fundamental_cached("TCS", None))[1] is True
+    feed.rows["TCS"] = {"sector": "IT", "fallback_used": False}
+    assert run(gw._fetch_fundamental_cached("TCS", None))[1] is False   # an explicit False still wins
+    feed.rows["TCS"] = {"sector": "IT", "fallback_used": True}
+    assert run(gw._fetch_fundamental_cached("TCS", None))[1] is True
 
 
 @pytest.mark.parametrize("row", [
@@ -1171,14 +1180,30 @@ def test_notification_outer_failures_are_swallowed(notify, log):
     assert log.any("warning", "Failed to send scan notification: net")
 
 
-def test_notification_non_numeric_close_raises_outside_the_try(notify):
-    """NOT FIXED: the message body is built before the try/except, so a string `close`
-    (or a non-dict entry_range) escapes and would break the whole scan-complete path."""
-    with pytest.raises(ValueError):
-        gw._send_scan_notification([{"symbol": "A", "decision": "HOLD", "close": "n/a"}], "v", 1, 1)
-    with pytest.raises(AttributeError):
-        gw._send_scan_notification([{"symbol": "A", "decision": "HOLD", "entry_range": "x"}], "v", 1, 1)
-    assert _posts(notify) == []
+def test_notification_bad_numeric_fields_are_omitted_and_the_message_still_sends(notify):
+    """FIXED: the message body is built before the try/except, so a string `close` or a non-dict
+    entry_range used to escape and break the whole scan-complete path. Bad fields are now omitted."""
+    gw._send_scan_notification([
+        {"symbol": "A", "decision": "HOLD", "close": "n/a", "target": "x", "stop_loss": float("nan")},
+        {"symbol": "B", "decision": "HOLD", "entry_range": "x"},
+        {"symbol": "C", "decision": "HOLD", "entry_range": {"low": "a", "high": float("inf")}},
+        "not-a-dict",
+    ], "v", 3, 3)
+    posts = _posts(notify)
+    assert len(posts) == 1
+    msg = posts[0][1]["message"]
+    assert "1. *A* – HOLD" in msg and "2. *B* – HOLD" in msg and "3. *C* – HOLD" in msg
+    for field in ("Current", "Entry", "Target", "Stop"):
+        assert field not in msg
+
+
+def test_notification_numeric_strings_are_still_formatted(notify):
+    gw._send_scan_notification([{"symbol": "A", "decision": "BUY NOW", "close": "100",
+                                 "target": "110", "stop_loss": "95",
+                                 "entry_range": {"low": "99", "high": "101"}}], "v", 1, 1)
+    msg = _posts(notify)[0][1]["message"]
+    assert "   Current: ₹100.00" in msg and "   Entry: ₹99.00 – ₹101.00" in msg
+    assert "   Target: ₹110.00 (+10.0%)" in msg and "   Stop: ₹95.00" in msg
 
 
 # ── _cleanup_scan_resources / _wake_notification_service ─────────────────────

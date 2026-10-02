@@ -389,7 +389,8 @@ class TestAttemptEntryHappy:
         assert db.query(models.SharedOrderBudget).one().orders_placed_today == 1
 
         log = last_log(db)
-        assert log.decision == "ENTERED" and log.reason == "SUPER_ORDER=SO1"
+        assert log.decision == "ENTERED" and log.reason.startswith("SUPER_ORDER=SO1 nifty_pct=")
+        assert "stop_pct=2.00 target_pct=1.00" in log.reason   # 2026-10-02: market/level context for loss analysis
         assert (log.fundamental_score, log.technical_score, log.market_cap_cr) == (70.0, 65.0, 8000.0)
         assert log.has_positive_catalyst is True
         assert any("BUY placed" in m and "ABC" in m and "x40" in m for m in sent["info"])
@@ -406,7 +407,7 @@ class TestAttemptEntryHappy:
         b.super_script = [{}]
         pos = entry.attempt_entry(db, cand())
         assert pos is not None and pos.dhan_super_order_id == ""
-        assert last_log(db).reason == "SUPER_ORDER=plain_order"
+        assert last_log(db).reason.startswith("SUPER_ORDER=plain_order nifty_pct=")
 
     def test_plain_order_fallback_when_super_orders_disabled(self, env, monkeypatch):
         db, b, _ = env
@@ -418,7 +419,7 @@ class TestAttemptEntryHappy:
         assert kw["transaction_type"] == "BUY" and kw["quantity"] == 40
         assert pos.dhan_super_order_id is None
         assert pos.dhan_entry_order_id == "PO1"                       # the BUY id is kept for tracing
-        assert last_log(db).reason == "SUPER_ORDER=plain_order"
+        assert last_log(db).reason.startswith("SUPER_ORDER=plain_order nifty_pct=")
 
     def test_second_entry_same_day_increments_counters(self, env):
         db, b, _ = env

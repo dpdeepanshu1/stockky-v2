@@ -199,6 +199,9 @@ _COLUMN_MIGRATIONS = [
     # arrive via create_all() alone.
     ("scalp_positions", "breakeven_trigger_pct", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_positions", "stop_moved_to_breakeven", "NUMBER(1)", "BOOLEAN", "0", "FALSE"),
+    # 2026-10-02: see models.py (max/min tick price seen while OPEN).
+    ("scalp_positions", "max_price_seen", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    ("scalp_positions", "min_price_seen", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     # 2026-09-18 (user audit finding): marks a carried-overnight position
     # that was successfully converted INTRADAY -> CNC via
     # execution/dhan_client.py::convert_position — see the

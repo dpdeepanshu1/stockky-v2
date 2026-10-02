@@ -313,7 +313,18 @@ def merge_feed_payload(existing: dict, incoming: dict) -> dict:
     }
     _ZERO_PROTECTED = ("volume", "pe_ratio", "market_cap", "day_change_pct", "roce", "rsi")
 
+    # When a seed is rejected because a real value is already stored, its seed FLAG must be
+    # dropped too (otherwise the real value is mislabelled as a seed and the next seed run
+    # may overwrite it). Computed up front: the flag key can come before its value key.
+    _rejected_seed_flags = set()
+    for _vk, _fk in _SEED_PROTECTED.items():
+        if _vk in inc and inc.get(_fk) is True:
+            if base.get(_vk) is not None and not bool(base.get(_fk)):
+                _rejected_seed_flags.add(_fk)
+
     for k, v in inc.items():
+        if k in _rejected_seed_flags:
+            continue
         # 1) Sparse zero protection
         if k in _ZERO_PROTECTED:
             try:
@@ -546,6 +557,7 @@ class DataFeedStore:
             for drop_k in (
                 "price", "close", "cmp", "ltp", "last_price", "current_price",
                 "day_high", "day_low", "day_change_pct", "previous_close", "volume",
+                "prev_close",   # normalize_feed_payload renames price/close/cmp to this
             ):
                 payload.pop(drop_k, None)
             payload["price_over_cap"] = True
@@ -712,9 +724,12 @@ class DataFeedStore:
         except Exception as e:
             logger.warning("delete_symbol: kv_cache unavailable for %s: %s", base, e)
         try:
-            self._persist_index()
+            # exclude=base: list_symbols() re-unions the (still stale) durable index, which
+            # used to put the symbol straight back into both the local and durable index.
+            self._persist_index(exclude=base)
         except Exception as e:
             logger.debug("delete_symbol index persist: %s", e)
+        _LOCAL_INDEX.discard(base)
         return found
 
     def list_symbols(self) -> List[str]:
@@ -738,9 +753,9 @@ class DataFeedStore:
     def count_symbols(self) -> int:
         return len(self.list_symbols())
 
-    def _persist_index(self, ttl: int = DATA_FEED_TTL) -> None:
+    def _persist_index(self, ttl: int = DATA_FEED_TTL, exclude: Optional[str] = None) -> None:
         # Always set-dedupe + sorted for stable index (prevents "1208 duplicates" growth)
-        symbols = sorted(set(self.list_symbols()))
+        symbols = sorted(set(self.list_symbols()) - ({exclude} if exclude else set()))
         payload = {
             "symbols": symbols,
             "count": len(symbols),
@@ -1321,7 +1336,7 @@ def _yf_close_volume(frame, sym_ns: str):
             if len(vs) > 0:
                 try:
                     volume = int(float(vs.iloc[-1]))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     volume = None
         if close is not None and (math.isnan(close) or close <= 0):
             close = None
@@ -1985,6 +2000,7 @@ def set_bulk_quote_cache(quotes: dict, source: str = "yahoo_bulk") -> dict:
     Persist bulk quotes with market-aware TTL.
     Open: short TTL so UI stays fresh; Closed: long TTL (no Yahoo storm).
     """
+    quotes = quotes if isinstance(quotes, dict) else {}
     open_now = _is_nse_session_open()
     ttl = BULK_QUOTE_OPEN_TTL if open_now else BULK_QUOTE_CLOSED_TTL
     payload = {

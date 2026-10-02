@@ -38,6 +38,7 @@ from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility
 from screening.engine import Candidate
 from screening.quality_gate import QualitySignal
+from screening import trade_gates
 from tz_utils import as_aware, ist_today_str
 
 logger = logging.getLogger("position-stocks-entry")
@@ -93,6 +94,17 @@ def _reentry_guard_reject(db: Session, symbol: str, current_ltp: float) -> Optio
     ₹139.50, then stop out). No prior closed trade, or cooldown already
     elapsed, or a real pullback present → allowed (returns None).
     """
+    # 2026-10-02: a symbol that already closed at a LOSS today is blocked for
+    # the rest of the day — the 30-minute cooldown below let the system buy
+    # back into the same fading move (GANDHAR, SUPREMEINF re-entered 2-3x).
+    if config.SYMBOL_BLOCK_AFTER_LOSS_TODAY:
+        lost = trade_gates.symbol_lost_today(db, symbol)
+        if lost is not None:
+            return (
+                f"REENTRY_BLOCKED_AFTER_LOSS:{symbol} already closed at a loss today "
+                f"({lost.status}, ₹{(lost.realized_pnl or 0.0):.2f}) — no re-entry until tomorrow"
+            )
+
     last = (
         db.query(ScalpPosition)
         .filter(ScalpPosition.symbol == symbol)
@@ -534,8 +546,11 @@ def attempt_entry(
     db.commit()
     db.refresh(pos)
 
+    _nifty = trade_gates.last_nifty_change_pct()
     _log_candidate(db, candidate, "ENTERED",
-                   f"SUPER_ORDER={dhan_super_order_id or 'plain_order'}",
+                   f"SUPER_ORDER={dhan_super_order_id or 'plain_order'}"
+                   f" nifty_pct={'n/a' if _nifty is None else f'{_nifty:+.2f}'}"
+                   f" stop_pct={levels.stop_pct:.2f} target_pct={levels.target_pct:.2f}",
                    composite_score=candidate.composite_score,
                    quality=quality)
     logger.info(

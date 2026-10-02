@@ -15,7 +15,7 @@ Pass 77. The thin route layer around `_patch_single_stock_feed`, plus the feed s
 
 Everything downstream is faked: `_patch_single_stock_feed`, `audit_missing_feed_data`, the feed store,
 `request_data_feed_stop`, `data_feed_run` (covered in its own pass), `asyncio.sleep`. Nothing touches the
-network or a database. Findings are pinned as current behaviour and marked ``NOT FIXED``.
+network or a database. The three findings that were pinned here are now FIXED and pinned as fixed behaviour.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_repair_routes_stop_resume.py -v
@@ -222,11 +222,18 @@ class TestRepairBatch:
                                "D": {"symbol": "D", "purged": True, "complete": False}})
         assert _run(gw.repair_batch_missing())["successish_count"] == 2
 
-    def test_audit_failure_propagates(self, patch1, audit, sleeps):
-        """NOT FIXED: unlike repair-single, the batch route has no error envelope around the audit call."""
+    def test_audit_failure_returns_an_error_envelope(self, patch1, audit, sleeps):
+        """FIXED: like repair-single, an audit failure is reported as an envelope, not an unhandled 500."""
+        audit.raises = RuntimeError("E" * 300)
+        out = _run(gw.repair_batch_missing())
+        assert out == {"status": "error", "ok": False, "repaired_count": 0, "successish_count": 0,
+                       "repaired": [], "repaired_symbols": [], "message": "E" * 200}
+        assert patch1.calls == [] and sleeps == []
+
+    def test_audit_failure_over_http_is_a_200_envelope(self, patch1, audit, sleeps, tc):
         audit.raises = RuntimeError("audit down")
-        with pytest.raises(RuntimeError):
-            _run(gw.repair_batch_missing())
+        r = tc.post("/data-feed/repair-batch")
+        assert r.status_code == 200 and r.json()["ok"] is False and r.json()["message"] == "audit down"
 
     def test_missing_incomplete_key_is_empty(self, patch1, monkeypatch, sleeps):
         async def fake(limit=500, cache=True):
@@ -324,9 +331,37 @@ class TestRefillAllJob:
 
         monkeypatch.setattr(gw, "audit_missing_feed_data", audit_then_cancel)
         _run(gw._run_refill_all_job(100))
-        # NOT FIXED: the start-of-run update resets cancel_requested to False, so a stop that lands during the
-        # audit is silently lost and the whole run proceeds.
-        assert job["status"] == "done" and job["processed"] == 2
+        # FIXED: the job is marked running and the cancel flag reset BEFORE the audit, so a stop that
+        # lands during the audit is honoured at the first batch check instead of being wiped.
+        assert job["status"] == "stopped" and job["processed"] == 0 and patch1.calls == []
+        assert job["message"] == "Stopped by user after 0/2."
+
+    def test_job_is_running_and_not_cancelled_while_the_audit_is_in_flight(self, patch1, audit, job, sleeps,
+                                                                             monkeypatch):
+        job["cancel_requested"] = True                        # stale flag from a previous run
+        seen = []
+        orig = gw.audit_missing_feed_data
+
+        async def spy(limit=500, cache=True):
+            seen.append((job["status"], job["cancel_requested"], job["message"], job["total"]))
+            return await orig(limit=limit)
+
+        monkeypatch.setattr(gw, "audit_missing_feed_data", spy)
+        _run(gw._run_refill_all_job(100))
+        assert seen == [("running", False, "Auditing incomplete feed records…", 0)]
+
+    def test_a_second_start_during_the_audit_reports_already_running(self, patch1, audit, job, sleeps, monkeypatch):
+        from fastapi import BackgroundTasks
+        out = {}
+        orig = gw.audit_missing_feed_data
+
+        async def spy(limit=500, cache=True):
+            out["resp"] = await gw.repair_all_missing(BackgroundTasks())
+            return await orig(limit=limit)
+
+        monkeypatch.setattr(gw, "audit_missing_feed_data", spy)
+        _run(gw._run_refill_all_job(100))
+        assert out["resp"]["already_running"] is True
 
     def test_cancel_between_batches_stops_after_the_current_batch(self, patch1, audit, job, sleeps, monkeypatch):
         audit.incomplete = [f"S{i}" for i in range(12)]
@@ -402,14 +437,18 @@ class TestRefillAllRoutes:
         assert job["processed"] == 3
 
     def test_stop_sets_the_cancel_flag(self, job):
+        job["status"] = "running"
         out = _run(gw.repair_all_stop())
         assert out == {"ok": True, "message": "Stop requested — will halt after the current batch."}
         assert job["cancel_requested"] is True
 
-    def test_stop_on_an_idle_job_leaves_a_stale_flag(self, job):
-        """NOT FIXED: stop is unconditional, so on an idle job the flag stays True until the next run resets it."""
-        _run(gw.repair_all_stop())
-        assert job["status"] == "idle" and job["cancel_requested"] is True
+    @pytest.mark.parametrize("status", ["idle", "done", "stopped", "error"])
+    def test_stop_on_a_job_that_is_not_running_leaves_no_stale_flag(self, job, status):
+        """FIXED: stop used to be unconditional, so on an idle job the flag stayed True until the next run."""
+        job["status"] = status
+        out = _run(gw.repair_all_stop())
+        assert out == {"ok": True, "stopped": False, "message": "No Refill All job is running."}
+        assert job["cancel_requested"] is False
 
     def test_routed(self, job, patch1, audit, sleeps, tc):
         for path in ("/api/feed/repair-all", "/data-feed/repair-all"):

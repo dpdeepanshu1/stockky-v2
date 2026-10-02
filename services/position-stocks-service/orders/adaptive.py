@@ -121,6 +121,39 @@ def _atr_proxy_pct(symbol: str, current_ltp: float) -> Optional[float]:
         return None
 
 
+def _bar_atr_pct(symbol: str, current_ltp: float) -> Optional[float]:
+    """Phase 2 volatility: mean (high-low)/close over the last
+    ADAPTIVE_BAR_LOOKBACK completed-or-forming ADAPTIVE_BAR_MINUTES bars built
+    from the tick buffer. Returns % of current_ltp, or None when fewer than
+    ADAPTIVE_BAR_MIN_BARS bars exist (caller falls back to the legacy path)."""
+    try:
+        from feed import ws_client
+        buf = ws_client.get_tick_buffer(symbol)
+        width = max(1, config.ADAPTIVE_BAR_MINUTES) * 60
+        bars: dict = {}
+        for ts, px in buf:
+            if px <= 0:
+                continue
+            k = int(ts // width)
+            b = bars.get(k)
+            if b is None:
+                bars[k] = [px, px]
+            else:
+                if px > b[0]:
+                    b[0] = px
+                if px < b[1]:
+                    b[1] = px
+        if len(bars) < config.ADAPTIVE_BAR_MIN_BARS or current_ltp <= 0:
+            return None
+        keys = sorted(bars)[-max(1, config.ADAPTIVE_BAR_LOOKBACK):]
+        ranges = [(bars[k][0] - bars[k][1]) / current_ltp * 100.0 for k in keys]
+        avg = sum(ranges) / len(ranges)
+        return avg if avg > 0 else None
+    except Exception as e:
+        logger.debug("adaptive: bar ATR failed for %s: %s", symbol, e)
+        return None
+
+
 def _intraday_range_position(symbol: str, current_ltp: float) -> Optional[float]:
     """Return range_position in [0, 1]: where LTP sits within today's
     intraday high/low derived from the tick buffer. None if unavailable."""
@@ -141,6 +174,44 @@ def _intraday_range_position(symbol: str, current_ltp: float) -> Optional[float]
         return None
 
 
+def _compute_bar_levels(bar_atr_pct: float, current_ltp: float, symbol: str) -> AdaptiveLevels:
+    """Phase 2 levels. stop = clamp(bar_atr x STOP_MULT, STOP_MIN, STOP_MAX);
+    target = stop x TARGET_RR capped at TARGET_MAX; near-day-high trades get a
+    20% smaller target (less room up). Breakeven trigger stays at 40% of target."""
+    stop_pct = max(config.ADAPTIVE_BAR_STOP_MIN_PCT,
+                   min(bar_atr_pct * config.ADAPTIVE_BAR_STOP_MULT, config.ADAPTIVE_BAR_STOP_MAX_PCT))
+    target_pct = min(stop_pct * config.ADAPTIVE_BAR_TARGET_RR, config.ADAPTIVE_BAR_TARGET_MAX_PCT)
+
+    range_regime = "neutral"
+    range_pos_val = _intraday_range_position(symbol, current_ltp)
+    if range_pos_val is not None and range_pos_val >= _NEAR_HIGH_THRESHOLD:
+        range_regime = "near_high"
+        target_pct *= 0.8
+    elif range_pos_val is not None and range_pos_val <= _NEAR_LOW_THRESHOLD:
+        range_regime = "near_low"
+    # never let tightening drop reward:risk below 1.2 (a coin-flip needs >1)
+    target_pct = max(target_pct, stop_pct * 1.2)
+
+    from execution.dhan_client import tick_size_for_price as _tsz
+    target_price = round_to_tick(current_ltp * (1 + target_pct / 100))
+    stop_price = round_to_tick(current_ltp * (1 - stop_pct / 100))
+    band = _tsz(current_ltp)
+    if target_price <= current_ltp:
+        target_price = round_to_tick(current_ltp + band)
+    if stop_price >= current_ltp:
+        stop_price = round_to_tick(current_ltp - band)
+    return AdaptiveLevels(
+        target_pct=round(target_pct, 4),
+        stop_pct=round(stop_pct, 4),
+        target_price=target_price,
+        stop_price=stop_price,
+        breakeven_trigger_pct=round(target_pct * BREAKEVEN_FRAC, 4),
+        range_regime=range_regime,
+        range_position=range_pos_val,
+        atr_proxy_pct=round(bar_atr_pct, 4),
+    )
+
+
 def compute(
     pct_change: float,
     current_ltp: float,
@@ -153,6 +224,12 @@ def compute(
     symbol:      if given, reads tick buffer for ATR proxy and range position.
                  Falls back gracefully if buffer unavailable.
     """
+    # ── Phase 2 (flag-gated, default OFF): candle-range stop/target ─────────
+    if config.ADAPTIVE_BAR_ATR_ENABLED and symbol:
+        bar_atr = _bar_atr_pct(symbol, current_ltp)
+        if bar_atr is not None:
+            return _compute_bar_levels(bar_atr, current_ltp, symbol)
+
     # ── Step 1: ATR-proxy based stop and target ────────────────────────────
     atr_pct = _atr_proxy_pct(symbol, current_ltp) if symbol else None
 

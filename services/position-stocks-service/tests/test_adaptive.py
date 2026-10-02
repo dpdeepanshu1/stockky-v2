@@ -246,3 +246,73 @@ class TestAtrProxyShortWindowBranch:
         monkeypatch.setattr(adaptive, "ATR_LOOKBACK", 1)
         feed["XYZ"] = [100.0, 101.0, 100.0, 101.0]   # 4 valid prices → sample[-1:] = [101.0]
         assert adaptive._atr_proxy_pct("XYZ", 100.0) is None
+
+
+# ── Phase 2: candle-range volatility (2026-10-02), flag-gated ────────────────
+class TestBarAtrPhase2:
+    @pytest.fixture(autouse=True)
+    def _bar_cfg(self, monkeypatch):
+        for k, v in dict(ADAPTIVE_BAR_ATR_ENABLED=True, ADAPTIVE_BAR_MINUTES=5, ADAPTIVE_BAR_LOOKBACK=6,
+                         ADAPTIVE_BAR_MIN_BARS=3, ADAPTIVE_BAR_STOP_MULT=1.3, ADAPTIVE_BAR_STOP_MIN_PCT=0.8,
+                         ADAPTIVE_BAR_STOP_MAX_PCT=2.0, ADAPTIVE_BAR_TARGET_RR=1.8,
+                         ADAPTIVE_BAR_TARGET_MAX_PCT=3.5).items():
+            monkeypatch.setattr(config, k, v)
+
+    @staticmethod
+    def _bars(monkeypatch, ranges_pct, base=100.0):
+        """one 5-minute bar per entry with the given high-low % range; last tick = base."""
+        ticks = []
+        for i, r in enumerate(ranges_pct):
+            t0 = i * 300
+            ticks += [(t0 + 1, base), (t0 + 100, base * (1 + r / 100.0)), (t0 + 200, base)]
+        monkeypatch.setattr(ws_client, "get_tick_buffer", lambda sym: ticks)
+
+    def test_off_by_default_flag_uses_legacy_path(self, monkeypatch):
+        monkeypatch.setattr(config, "ADAPTIVE_BAR_ATR_ENABLED", False)
+        self._bars(monkeypatch, [0.5] * 6)
+        assert adaptive.compute(1.2, 100.0, symbol="X").stop_pct == 2.0     # legacy floor
+
+    def test_calm_stock_gets_tighter_stop_than_legacy_floor(self, monkeypatch):
+        self._bars(monkeypatch, [0.5] * 6)
+        lv = adaptive.compute(1.2, 100.0, symbol="X")
+        assert lv.stop_pct == pytest.approx(0.8)            # 0.5*1.3=0.65 -> floor 0.8
+        assert lv.target_pct == pytest.approx(0.8 * 1.8, abs=0.01) or lv.range_regime == "near_high"
+        assert lv.atr_proxy_pct == pytest.approx(0.5, abs=0.01)
+
+    def test_jumpy_stock_gets_wider_stop(self, monkeypatch):
+        self._bars(monkeypatch, [1.2] * 6)
+        lv = adaptive.compute(1.2, 100.0, symbol="X")
+        assert lv.stop_pct == pytest.approx(1.56, abs=0.01)
+
+    def test_stop_capped_at_max(self, monkeypatch):
+        self._bars(monkeypatch, [3.0] * 6)
+        assert adaptive.compute(1.2, 100.0, symbol="X").stop_pct == pytest.approx(2.0)
+
+    def test_target_capped_and_prices_consistent(self, monkeypatch):
+        self._bars(monkeypatch, [3.0] * 6)
+        lv = adaptive.compute(1.2, 100.0, symbol="X")
+        assert lv.target_pct <= 3.5 and lv.target_price > 100.0 > lv.stop_price
+        assert lv.breakeven_trigger_pct == pytest.approx(lv.target_pct * 0.4, abs=1e-3)
+
+    def test_too_few_bars_falls_back_to_legacy(self, monkeypatch):
+        self._bars(monkeypatch, [0.5, 0.5])
+        assert adaptive.compute(1.2, 100.0, symbol="X").stop_pct == 2.0
+
+    def test_no_symbol_falls_back_to_legacy(self, monkeypatch):
+        assert adaptive.compute(1.2, 100.0).stop_pct == 2.0
+
+    def test_feed_error_falls_back_to_legacy(self, monkeypatch):
+        def boom(sym):
+            raise RuntimeError("ws down")
+        monkeypatch.setattr(ws_client, "get_tick_buffer", boom)
+        assert adaptive.compute(1.2, 100.0, symbol="X").stop_pct == 2.0
+
+    def test_only_last_lookback_bars_count(self, monkeypatch):
+        self._bars(monkeypatch, [3.0] * 10 + [0.5] * 6)
+        assert adaptive.compute(1.2, 100.0, symbol="X").atr_proxy_pct == pytest.approx(0.5, abs=0.01)
+
+    def test_reward_risk_never_below_1_2(self, monkeypatch):
+        self._bars(monkeypatch, [3.0] * 6)
+        monkeypatch.setattr(config, "ADAPTIVE_BAR_TARGET_MAX_PCT", 1.0)   # cap would give target<stop
+        lv = adaptive.compute(1.2, 100.0, symbol="X")
+        assert lv.target_pct / lv.stop_pct >= 1.19

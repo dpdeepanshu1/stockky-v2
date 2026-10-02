@@ -251,6 +251,12 @@ def test_get_db_dependency_yields_from_db_module():
 def _patch_no_op_prechecks(monkeypatch):
     """Common baseline: reconcile/edis/overnight-stop all no-op, EOD not
     due, so tests can focus on whichever later stage they're targeting."""
+    # 2026-10-02: the market filter would otherwise make a real HTTP call to
+    # the API gateway from every AUTO cycle test. Neutralize it here; the
+    # TestTradeGatesInCycle tests below patch it explicitly.
+    async def _no_market_block():
+        return None
+    monkeypatch.setattr(m.trade_gates, "market_gate_reject", _no_market_block)
     monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
     monkeypatch.setattr(m, "ist_time_at_or_after", lambda t: False)
     monkeypatch.setattr(m, "ist_now", lambda: datetime(2026, 9, 25, 10, 0, tzinfo=m.IST))
@@ -398,6 +404,64 @@ class TestRunCycleScanOnward:
         self._armed_gate(db, auto_pilot_enabled=False)
         summary = asyncio.run(m._run_cycle(db, trigger="MANUAL"))
         assert summary["skipped_reason"] != "AUTO_PILOT_OFF"
+
+    # ── 2026-10-02 loss-day gates wired into _run_cycle (AUTO only) ──────────
+    def _gates_setup(self, db, monkeypatch):
+        m._capital_starved.clear()   # module-level cooldown dict leaks SBIN from earlier tests
+        self._base_patches(monkeypatch)
+        monkeypatch.setattr(m, "scan", lambda **kw: [_candidate("SBIN")])
+        called = {"n": 0}
+        monkeypatch.setattr(m.quality_gate, "get_cache_batch",
+                            lambda db_, syms: called.__setitem__("n", called["n"] + 1) or {})
+        monkeypatch.setattr(m.quality_gate, "upsert_cache_batch", lambda db_, res: None)
+
+        async def _fake_check(symbol, cached=None):
+            return _quality(symbol, fund=None, tech=None, cap=None)
+        monkeypatch.setattr(m.quality_gate, "check", _fake_check)
+        self._armed_gate(db)
+        return called
+
+    def test_gates_market_weak_blocks_auto_before_quality_gate(self, db, monkeypatch):
+        called = self._gates_setup(db, monkeypatch)
+
+        async def _weak():
+            return "MARKET_WEAK:nifty -0.40% vs day open <= -0.10%"
+        monkeypatch.setattr(m.trade_gates, "market_gate_reject", _weak)
+        monkeypatch.setattr(m.trade_gates, "loss_brake_reject", lambda db_, now=None: None)
+        summary = asyncio.run(m._run_cycle(db, trigger="AUTO"))
+        assert summary["skipped_reason"] == "MARKET_WEAK"
+        assert called["n"] == 0
+        assert any(st["name"] == "trade_gates" for st in summary["stages"])
+
+    def test_gates_loss_brake_blocks_auto_and_skips_market_fetch(self, db, monkeypatch):
+        called = self._gates_setup(db, monkeypatch)
+        fetched = {"n": 0}
+
+        async def _mkt():
+            fetched["n"] += 1
+            return None
+        monkeypatch.setattr(m.trade_gates, "market_gate_reject", _mkt)
+        monkeypatch.setattr(m.trade_gates, "loss_brake_reject",
+                            lambda db_, now=None: "LOSS_BRAKE_STREAK:3 consecutive losses, paused 40m more")
+        summary = asyncio.run(m._run_cycle(db, trigger="AUTO"))
+        assert summary["skipped_reason"] == "LOSS_BRAKE_STREAK"
+        assert called["n"] == 0 and fetched["n"] == 0
+
+    def test_gates_manual_trigger_bypasses_both_gates(self, db, monkeypatch):
+        self._gates_setup(db, monkeypatch)
+
+        async def _weak():
+            return "MARKET_WEAK:x"
+        monkeypatch.setattr(m.trade_gates, "market_gate_reject", _weak)
+        monkeypatch.setattr(m.trade_gates, "loss_brake_reject", lambda db_, now=None: "LOSS_BRAKE_DAILY:x")
+        summary = asyncio.run(m._run_cycle(db, trigger="MANUAL"))
+        assert summary["skipped_reason"] not in ("MARKET_WEAK", "LOSS_BRAKE_DAILY")
+
+    def test_gates_both_gates_pass_reaches_quality_gate(self, db, monkeypatch):
+        called = self._gates_setup(db, monkeypatch)
+        monkeypatch.setattr(m.trade_gates, "loss_brake_reject", lambda db_, now=None: None)
+        asyncio.run(m._run_cycle(db, trigger="AUTO"))
+        assert called["n"] == 1
 
     def test_all_candidates_capital_cooldown_skips_cycle(self, db, monkeypatch):
         self._base_patches(monkeypatch)
@@ -1546,3 +1610,25 @@ def test_live_orders_skips_non_dict_entries(client, db, monkeypatch):
     body = r.json()
     assert body["count"] == 1
     assert body["orders"][0]["orderId"] == "SOZ"
+
+
+def test_fast_reconcile_loop_runs_excursion_tracking_and_survives_its_failure(db, monkeypatch):
+    """2026-10-02: the high/low tracker runs every fast pass; an error in it must not
+    stop the rest of the pass (breakeven still runs)."""
+    monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
+    monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
+    monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
+    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
+    monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit", lambda db: 0)
+    ran = {"exc": 0, "be": 0}
+
+    def _boom(db_):
+        ran["exc"] += 1
+        raise RuntimeError("tracker down")
+    monkeypatch.setattr(m.excursion, "run_excursion_tracking", _boom)
+    monkeypatch.setattr(m.breakeven, "run_breakeven_stop", lambda db_: ran.__setitem__("be", 1) or 0)
+    monkeypatch.setattr(m, "ist_time_at_or_after", lambda t: False)
+    _gate(db)
+    _run_one_fast_reconcile_pass()
+    assert ran == {"exc": 1, "be": 1}

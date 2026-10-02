@@ -16,7 +16,9 @@ Pass 73. The operator-facing tail that follows the startup hooks:
 Everything downstream is faked: the shared async httpx client, `httpx.AsyncClient` / `httpx.post` inside main,
 the breaker registry, data_feed's alert + bulk-cache helpers, `kv_cache.hard_reset_stockky_kv`, the Redis /
 kv handles and the feed store. Nothing touches the network or a database. Findings are pinned as current
-behaviour and marked ``NOT FIXED``.
+behaviour and marked ``NOT FIXED``; the five found here that were safe to fix (upstream error status on the
+overnight proxy, non-object / NaN / Infinity price-alert bodies, the unguarded evaluate route, a status-less wipe
+result) are fixed in main.py and their tests pin the fixed behaviour.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_ops_alerts_hardreset.py -v
@@ -259,10 +261,23 @@ class TestOvernightProxy:
         proxy.script = FakeResp(200, json_raises=True)
         assert _run(gw.ops_overnight_status()) == {"ok": False, "error": "bad json"}
 
-    def test_status_passes_upstream_error_status_body_through(self, proxy):
-        """NOT FIXED: upstream status code is ignored; a 500 body is relayed as a plain 200."""
+    def test_status_surfaces_an_upstream_error_status(self, proxy):
+        """FIXED: the upstream status code was ignored, so a 500 body was relayed as a plain 200."""
         proxy.script = FakeResp(500, {"detail": "scheduler down"})
-        assert _run(gw.ops_overnight_status()) == {"detail": "scheduler down"}
+        assert _run(gw.ops_overnight_status()) == {
+            "ok": False, "error": "scheduler returned HTTP 500", "detail": {"detail": "scheduler down"}}
+
+    def test_every_overnight_route_surfaces_an_upstream_error_status(self, proxy):
+        proxy.script = FakeResp(503, {"x": 1})
+        for call in (gw.ops_overnight_status, gw.ops_overnight_get_config,
+                     gw.ops_overnight_set_config, gw.ops_overnight_run):
+            out = _run(call())
+            assert out == {"ok": False, "error": "scheduler returned HTTP 503", "detail": {"x": 1}}
+
+    def test_a_2xx_and_3xx_body_is_still_relayed_unchanged(self, proxy):
+        for code in (200, 204, 302):
+            proxy.script = FakeResp(code, {"enabled": True})
+            assert _run(gw.ops_overnight_status()) == {"enabled": True}
 
     def test_get_config_proxies(self, proxy):
         proxy.script = FakeResp(200, {"enabled": True})
@@ -624,21 +639,28 @@ class TestAddAlert:
             assert r.status_code == 400
         assert added == []
 
-    def test_non_empty_list_body_crashes_with_500(self, added, tc):
-        """NOT FIXED: only falsy bodies are coerced to {}; a truthy non-object has no `.get` -> 500."""
-        r = tc.post("/api/price-alerts", content=b"[1]", headers={"content-type": "application/json"})
-        assert r.status_code == 500 and added == []
+    @pytest.mark.parametrize("body", [b"[1]", b'"text"', b"42", b"true"])
+    def test_non_object_body_is_a_400(self, added, tc, body):
+        """FIXED: only falsy bodies were coerced to {}; a truthy non-object had no `.get` -> bare 500."""
+        r = tc.post("/api/price-alerts", content=body, headers={"content-type": "application/json"})
+        assert r.status_code == 400 and "JSON object" in r.json()["detail"] and added == []
 
-    def test_nan_target_is_accepted(self, added, tc):
-        """NOT FIXED: `float('nan') <= 0` is False, so a NaN/Infinity target (json.loads accepts both)
-        passes validation and reaches add_price_alert."""
-        r = tc.post("/api/price-alerts", content=b'{"symbol": "TCS", "target_price": NaN}',
+    @pytest.mark.parametrize("raw", [b"NaN", b"Infinity", b"-Infinity"])
+    def test_non_finite_target_is_a_400(self, added, tc, raw):
+        """FIXED: `float('nan') <= 0` is False, so a NaN/Infinity target (json.loads accepts both) passed
+        validation and reached add_price_alert."""
+        r = tc.post("/api/price-alerts", content=b'{"symbol": "TCS", "target_price": ' + raw + b"}",
                     headers={"content-type": "application/json"})
-        assert r.status_code == 200
-        assert added[0]["target"] != added[0]["target"]       # NaN
-        r = tc.post("/api/price-alerts", content=b'{"symbol": "TCS", "target_price": Infinity}',
+        assert r.status_code == 400 and "target_price" in r.json()["detail"] and added == []
+
+    def test_non_finite_value_in_the_target_alias_is_also_a_400(self, added, tc):
+        r = tc.post("/api/price-alerts", content=b'{"symbol": "TCS", "target": NaN}',
                     headers={"content-type": "application/json"})
-        assert r.status_code == 200 and added[1]["target"] == float("inf")
+        assert r.status_code == 400 and added == []
+
+    def test_a_normal_finite_target_still_goes_through(self, added, tc):
+        r = tc.post("/api/price-alerts", json={"symbol": "TCS", "target_price": 4100.5})
+        assert r.status_code == 200 and added[0]["target"] == 4100.5
 
     def test_non_string_symbol_and_note_are_stringified(self, added, tc):
         tc.post("/api/price-alerts", json={"symbol": 500325, "target_price": 1, "note": 42})
@@ -722,15 +744,24 @@ class TestEvaluateAlerts:
         assert out["notified"] == 0 and env.posts == [] and env.wakes == 2
         assert out["triggered_count"] == 2
 
-    def test_evaluation_failure_propagates(self, monkeypatch, tc):
-        """NOT FIXED: unlike its siblings this route has no try/except around evaluate_price_alerts."""
+    def test_evaluation_failure_is_an_error_envelope(self, monkeypatch, tc):
+        """FIXED: unlike its siblings this route had no try/except around evaluate_price_alerts, so a kv
+        failure was a bare 500 / an exception out of the handler."""
         def boom():
             raise RuntimeError("kv down")
 
         monkeypatch.setattr(data_feed, "evaluate_price_alerts", boom)
-        assert tc.post("/api/price-alerts/evaluate").status_code == 500
-        with pytest.raises(RuntimeError):
-            _run(gw.api_evaluate_price_alerts())
+        expected = {"ok": False, "error": "kv down", "triggered": [], "triggered_count": 0, "notified": 0}
+        r = tc.post("/api/price-alerts/evaluate")
+        assert r.status_code == 200 and r.json() == expected
+        assert _run(gw.api_evaluate_price_alerts()) == expected
+
+    def test_evaluation_failure_error_text_is_truncated_to_200(self, monkeypatch):
+        def boom():
+            raise RuntimeError("k" * 500)
+
+        monkeypatch.setattr(data_feed, "evaluate_price_alerts", boom)
+        assert _run(gw.api_evaluate_price_alerts())["error"] == "k" * 200
 
     def test_both_paths_are_routed(self, env, tc):
         env.triggered = [{"symbol": "A"}]
@@ -874,12 +905,15 @@ class TestHardReset:
         assert hr.kv_deleted == []                    # nothing after the wipe ran
         assert "clear_local" not in hr.events
 
-    def test_non_dict_result_becomes_500(self, hr):
-        """NOT FIXED: a None result from the wipe (no status contract) is an AttributeError -> 500."""
-        hr.result = None
-        with pytest.raises(HTTPException) as ei:
-            _run(gw.hard_reset_database())
-        assert ei.value.status_code == 500 and "get" in ei.value.detail
+    @pytest.mark.parametrize("result", [None, "done", ["x"], 0])
+    def test_non_dict_result_is_a_success_with_the_default_message(self, hr, result):
+        """FIXED: a None result from the wipe (no status contract) was an AttributeError -> 500, reported
+        AFTER the wipe, job reset and ghost purge had already run."""
+        hr.result = result
+        out = _run(gw.hard_reset_database())
+        assert out["message"] == "Database wiped, locked, and memory cleared. Ready for feed."
+        assert out["ghosts_cleared"] == GHOSTS
+        assert "wipe" in hr.events and hr.events[-2:] == ["set_job", "set_meta"]
 
     @pytest.mark.parametrize("failing", ["stop", "clear_local", "clear_stop"])
     def test_each_best_effort_step_fails_independently(self, hr, failing):

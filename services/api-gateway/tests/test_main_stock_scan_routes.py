@@ -13,7 +13,9 @@ Everything downstream is faked: the per-request `httpx.AsyncClient` the handler 
 (one scripted `FakeClient`), the shared async client, the sync `httpx.get`, the kv cache
 (`_redis_get` / `_redis_set` -> a dict), Redis, `run_scan_parallel`, `_analyze_one_symbol_ultra`,
 and the data-feed write-back. Nothing touches the network or a database. Findings are pinned as
-current behaviour and marked ``NOT FIXED``.
+current behaviour and marked ``NOT FIXED``. The ones fixed afterwards (non-JSON decide reply, blank symbols
+and the cap, bare-string / null /scan/batch bodies, /scan/last partial rule, negative ETA) now pin the fixed
+behaviour; the universe-cache pin turned out to be a stale test artefact (see TestStockRedisClear).
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_stock_scan_routes.py -v
@@ -340,19 +342,30 @@ class TestStockRedisClear:
         env.decide("TCS")
         assert stock("TCS")["symbol"] == "TCS"
 
-    def test_redis_off_means_the_kv_cached_universe_is_never_cleared(self, env, kv, monkeypatch):
-        # NOT FIXED (low-medium): with Upstash off (the default) `_redis` is None, so every
-        # `_redis.delete(SCAN_UNIVERSE_KEY)` in this slice is dead code. The universe lives in the
-        # kv cache (`_redis_set`), so neither searching a stock, `force_refresh=true`, nor
-        # DELETE /scan/universe/cache actually invalidates it. `/scan/stop-all` does it right
-        # (`_redis_set(KEY, None, ttl=1)`).
+    def test_redis_off_still_clears_the_universe_from_the_real_cache_layers(self, env, monkeypatch):
+        """RESOLVED (the old pin was a stale test artefact): main.py already clears the kv / in-process /
+        Redis layers through `_drop_cache_keys`, and DELETE /scan/universe/cache does the same. The old test
+        used a fake kv dict that those code paths can never touch, so it only looked broken. This one uses the
+        real `_redis_set` / `_redis_get` with Upstash and Neon off (the default)."""
         monkeypatch.setattr(gw, "_redis", None)
-        kv.store[gw.SCAN_UNIVERSE_KEY] = ["AAA", "BBB"]
+        monkeypatch.setattr(gw, "_kv_cache", None)
+        monkeypatch.setattr(gw, "_mem_kv", {})
+        monkeypatch.setattr(gw, "_mem_kv_exp", {})
+        gw._redis_set(gw.SCAN_UNIVERSE_KEY, ["AAA", "BBB"], ttl=300)
+        assert gw._redis_get(gw.SCAN_UNIVERSE_KEY) == ["AAA", "BBB"]
         env.decide("TCS")
         stock("TCS")
-        assert kv.store[gw.SCAN_UNIVERSE_KEY] == ["AAA", "BBB"]
-        assert gw.clear_universe_cache()["message"].startswith("Scan universe cache cleared")
-        assert kv.store[gw.SCAN_UNIVERSE_KEY] == ["AAA", "BBB"]
+        assert gw._redis_get(gw.SCAN_UNIVERSE_KEY) is None
+
+    def test_delete_universe_cache_route_clears_the_real_cache_layers(self, monkeypatch):
+        monkeypatch.setattr(gw, "_redis", None)
+        monkeypatch.setattr(gw, "_kv_cache", None)
+        monkeypatch.setattr(gw, "_mem_kv", {})
+        monkeypatch.setattr(gw, "_mem_kv_exp", {})
+        gw._redis_set(gw.SCAN_UNIVERSE_KEY, ["AAA", "BBB"], ttl=300)
+        out = gw.clear_universe_cache()
+        assert out["message"].startswith("Scan universe cache cleared") and out["cleared"] == ["memory"]
+        assert gw._redis_get(gw.SCAN_UNIVERSE_KEY) is None
 
 
 class TestStockPriceFill:
@@ -717,13 +730,15 @@ class TestStockUpstreamFailures:
         assert out["data_quality"]["flags"] == ["Decision engine unreachable"]
         assert any("decision engine unreachable for TCS" in m for m in logs["warning"])
 
-    def test_a_non_json_200_from_decide_escapes_as_an_unhandled_error(self, env, tc):
-        # NOT FIXED (low): only httpx errors are caught; a 200 whose body is not JSON raises
-        # ValueError straight out of the handler (a bare 500 at the HTTP layer).
+    def test_a_non_json_200_from_decide_degrades_to_hold(self, env, tc, logs):
+        # FIXED: only httpx errors were caught, so a 200 whose body is not JSON escaped as a bare 500.
         env.client.routes[D("TCS")] = FakeResp(200, json_raises=True)
-        with pytest.raises(ValueError):
-            stock("TCS")
-        assert tc.get("/stock/tcs").status_code == 500
+        out = stock("TCS")
+        assert out["decision"] == "HOLD" and out["data_insufficient"] is True
+        assert out["error"] == "decision engine returned a non-JSON response"
+        assert out["data_quality"]["flags"] == ["Decision engine error"]
+        assert any("returned non-JSON for TCS" in m for m in logs["warning"])
+        assert tc.get("/stock/tcs").status_code == 200
 
 
 # ── legacy sync fallback helpers ─────────────────────────────────────────────
@@ -883,10 +898,9 @@ class TestScanPost:
         _run(gw.run_scan_post())
         assert isinstance(seen["bt"], BackgroundTasks) and len(seen["bt"].tasks) == 1
 
-    def test_post_scan_never_auto_selects_lite(self, tc, monkeypatch, kv):
-        # NOT FIXED (low-medium): POST /scan forwards lite=False, which start_scan treats as
-        # "explicitly full" — so the open-circuit / SCAN_LITE_DEFAULT protection that GET /scan and
-        # POST /scan/start both apply is bypassed on the overnight-cron path.
+    def test_post_scan_auto_selects_lite(self, tc, monkeypatch, kv):
+        # FIXED: POST /scan no longer forces lite=False, so the open-circuit / SCAN_LITE_DEFAULT
+        # protection applies on the overnight-cron path like GET /scan and POST /scan/start.
         monkeypatch.setattr(gw, "_should_force_lite_scan", lambda: True)
         monkeypatch.setattr(gw, "SCAN_LITE_DEFAULT", True)
         monkeypatch.setattr(gw, "_build_scan_universe", lambda: ["AAA", "BBB"])
@@ -897,8 +911,8 @@ class TestScanPost:
 
         monkeypatch.setattr(gw, "run_scan_parallel", fake_parallel)
         r = tc.post("/scan")
-        assert r.status_code == 200 and r.json()["lite"] is False and r.json()["universe_size"] == 2
-        assert ran == [False]
+        assert r.status_code == 200 and r.json()["lite"] is True and r.json()["universe_size"] == 2
+        assert ran == [True]
         r2 = tc.post("/scan/start?force_refresh=true")
         assert r2.json()["lite"] is True          # the sibling route does auto-select lite
 
@@ -1104,11 +1118,12 @@ class TestScanBatch:
             self.batch([f"S{i}" for i in range(16)])
         assert e.value.status_code == 400 and "Maximum 15" in e.value.detail
 
-    def test_blank_entries_count_toward_the_cap(self):
-        # NOT FIXED (very low): the 15-symbol cap is checked on the raw list, so 15 real symbols
-        # plus one blank is refused even though only 15 would be analysed.
+    def test_blank_entries_do_not_count_toward_the_cap(self):
+        # FIXED: the cap was checked on the raw list, so 15 real symbols plus a blank was refused.
+        out = self.batch([f"S{i}" for i in range(15)] + ["", "  "])
+        assert len(out["results"]) == 15
         with pytest.raises(HTTPException):
-            self.batch([f"S{i}" for i in range(15)] + [""])
+            self.batch([f"S{i}" for i in range(16)] + [""])
 
     def test_bulk_prefetch_failure_is_not_fatal(self):
         self.feed_exc = RuntimeError("neon down")
@@ -1134,17 +1149,28 @@ class TestScanBatch:
     def test_no_symbols_key_returns_empty_results(self):
         assert _run(gw.scan_batch(_Req({})))["results"] == []
 
-    def test_a_bare_string_is_split_into_characters(self):
-        # NOT FIXED (low): {"symbols": "TCS"} is iterated char-by-char -> T, C, S.
+    def test_a_bare_string_is_one_symbol_not_characters(self):
+        # FIXED: {"symbols": "TCS"} was iterated char-by-char -> T, C, S.
         out = _run(gw.scan_batch(_Req({"symbols": "TCS"})))
-        assert [r["symbol"] for r in out["results"]] == ["T", "C", "S"]
+        assert [r["symbol"] for r in out["results"]] == ["TCS"]
 
-    def test_malformed_bodies_are_bare_500s(self, tc):
-        # NOT FIXED (low): no body validation — null body / null symbols raise out of the handler.
-        r = tc.post("/scan/batch", content="null", headers={"content-type": "application/json"})
-        assert r.status_code == 500
+    def test_a_comma_separated_string_is_split_into_symbols(self):
+        out = _run(gw.scan_batch(_Req({"symbols": "tcs.ns, infy ;reliance,"})))
+        assert [r["symbol"] for r in out["results"]] == ["TCS", "INFY", "RELIANCE"]
+
+    def test_malformed_bodies_are_400s(self, tc):
+        # FIXED: no body validation — null body / null symbols / bad JSON were bare 500s.
+        hdr = {"content-type": "application/json"}
+        r = tc.post("/scan/batch", content="null", headers=hdr)
+        assert r.status_code == 400 and "JSON object" in r.json()["detail"]
+        r = tc.post("/scan/batch", content="[1]", headers=hdr)
+        assert r.status_code == 400
+        r = tc.post("/scan/batch", content="{not json", headers=hdr)
+        assert r.status_code == 400 and "must be JSON" in r.json()["detail"]
         r = tc.post("/scan/batch", json={"symbols": None})
-        assert r.status_code == 500
+        assert r.status_code == 400 and "list" in r.json()["detail"]
+        r = tc.post("/scan/batch", json={"symbols": {"a": 1}})
+        assert r.status_code == 400
 
     def test_served_over_http(self, tc):
         r = tc.post("/scan/batch", json={"symbols": ["tcs.ns"]})
@@ -1297,17 +1323,35 @@ class TestScanLast:
         kv.store[gw.LAST_FULL_SCAN_KEY] = _cached_scan(processed=120, total=300)
         out = gw.get_last_scan()
         assert out == {"ok": True, "task_id": "T-CACHED", "scanned_at": "2026-09-30T10:00:00+05:30",
-                       "partial": False, "processed": 120, "total": 300,
+                       "partial": True, "processed": 120, "total": 300,
                        "result": kv.store[gw.LAST_FULL_SCAN_KEY]["result"]}
 
-    def test_partial_flag_reflects_partial_or_cancelled_only(self, kv):
+    def test_partial_flag_follows_the_same_rule_as_scan_and_scan_start(self, kv):
         kv.store[gw.LAST_FULL_SCAN_KEY] = _cached_scan(partial=True)
         assert gw.get_last_scan()["partial"] is True
         kv.store[gw.LAST_FULL_SCAN_KEY] = _cached_scan(cancelled=True)
         assert gw.get_last_scan()["partial"] is True
-        # NOT FIXED (very low): unlike /scan and /scan/start, the result block's own
-        # partial/stopped_early flags and the 90% rule are not consulted here.
+        # FIXED: the result block's own flags and the 90% rule are now consulted too.
+        for flag in ("partial", "stopped_early", "cancelled"):
+            res = {"scanned": 300, "universe_size": 300, flag: True}
+            kv.store[gw.LAST_FULL_SCAN_KEY] = _cached_scan(result=res)
+            assert gw.get_last_scan()["partial"] is True, flag
         kv.store[gw.LAST_FULL_SCAN_KEY] = _cached_scan(processed=10, total=300)
+        assert gw.get_last_scan()["partial"] is True
+        kv.store[gw.LAST_FULL_SCAN_KEY] = _cached_scan(processed=269, total=300)
+        assert gw.get_last_scan()["partial"] is True
+        kv.store[gw.LAST_FULL_SCAN_KEY] = _cached_scan(processed=270, total=300)
+        assert gw.get_last_scan()["partial"] is False
+        kv.store[gw.LAST_FULL_SCAN_KEY] = _cached_scan(processed=300, total=300)
+        assert gw.get_last_scan()["partial"] is False
+
+    def test_unparseable_counts_do_not_break_the_partial_check(self, kv):
+        kv.store[gw.LAST_FULL_SCAN_KEY] = _cached_scan(processed="n/a", total="n/a")
+        out = gw.get_last_scan()
+        assert out["ok"] is True and out["partial"] is False
+
+    def test_non_dict_result_block_is_tolerated(self, kv):
+        kv.store[gw.LAST_FULL_SCAN_KEY] = _cached_scan(result="junk", processed=300, total=300)
         assert gw.get_last_scan()["partial"] is False
 
     def test_total_falls_back_to_universe_size(self, kv):
@@ -1352,11 +1396,11 @@ class TestScanStatus:
         kv.store[gw.SCAN_TASK_PREFIX + "t1"] = {"status": "done", "processed": 9, "total": 9}
         assert gw.get_scan_status("t1") == {"status": "done", "processed": 9, "total": 9}
 
-    def test_eta_goes_negative_when_processed_exceeds_total(self, kv):
-        # NOT FIXED (very low): no clamp on remaining = total - processed.
+    def test_eta_is_clamped_to_zero_when_processed_exceeds_total(self, kv):
+        # FIXED: no clamp on remaining = total - processed, so the ETA went negative (-2.0).
         kv.store[gw.SCAN_TASK_PREFIX + "t1"] = {"status": "running", "processed": 12, "total": 10,
                                                 "elapsed": 12}
-        assert gw.get_scan_status("t1")["estimated_remaining"] == -2.0
+        assert gw.get_scan_status("t1")["estimated_remaining"] == 0.0
 
 
 # ── _lite_evaluate_from_feed ─────────────────────────────────────────────────

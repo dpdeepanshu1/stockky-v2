@@ -1501,11 +1501,12 @@ class TestWatchlistPicksAndMood:
         assert [r["symbol"] for r in out["recommendations_mid"]] == ["AAA"]
         assert [r["symbol"] for r in out["recommendations_long"]] == ["AAA"]
 
-    def test_do_not_buy_above_the_floor_is_promoted_to_prepare_to_buy(self, wl):
+    def test_do_not_buy_above_the_floor_is_not_promoted(self, wl):
         out = _scan(wl, ["AAA"], {"AAA": _decision("AAA", "DO NOT BUY", 70)})
         row = out["recommendations_short"][0]
-        assert row["decision"] == "PREPARE TO BUY" and row["promoted_from_score"] is True
-        # the underlying result row is untouched
+        # fallback row: true decision, not relabelled, not a horizon pick
+        assert row["decision"] == "DO NOT BUY" and "promoted_from_score" not in row
+        assert "horizon_focus" not in row
         assert out["all_results"][0]["decision"] == "DO NOT BUY"
 
     def test_error_rows_are_kept_out_of_the_boards(self, wl):

@@ -220,11 +220,11 @@ class TestRoot:
                 seen[key] = seen.get(key, 0) + 1
         assert [k for k, v in seen.items() if v > 1] == []
 
-    def test_index_omits_the_ops_routes_it_sits_beside(self):
-        # NOT FIXED (very low): /quote, /circuits, /metrics and /ops/* are live but undocumented.
+    def test_index_documents_the_ops_routes_it_sits_beside(self):
+        # FIXED: /quote, /circuits, /metrics and /ops/check-alert are listed.
         doc = gw.root()["endpoints"]
         for p in ("/quote/{symbol}", "/circuits", "/metrics", "/ops/check-alert"):
-            assert p not in doc
+            assert p in doc
 
     def test_served_over_http(self, tc):
         r = tc.get("/")
@@ -392,13 +392,13 @@ class TestCircuitsAndMetrics:
         r = _run(gw.ops_rate_limits_event({"source": "y"}))
         assert r.status_code == 400 and b"bad record" in r.body
 
-    def test_event_metrics_failure_reports_400_although_it_recorded(self, monkeypatch, fm):
-        # NOT FIXED (very low): a metrics error AFTER the event was stored still answers 400.
+    def test_event_metrics_failure_still_reports_ok_because_it_recorded(self, monkeypatch, fm):
+        # FIXED: a metrics error AFTER the event was stored no longer answers 400.
         mon = FakeMonitor()
         monkeypatch.setattr(gw, "rate_limit_monitor", mon)
         fm.raise_on_inc = True
         r = _run(gw.ops_rate_limits_event({"source": "y", "status": 429}))
-        assert r.status_code == 400 and len(mon.recorded) == 1
+        assert r == {"ok": True} and len(mon.recorded) == 1
 
     def test_event_over_http_rejects_non_object(self, tc):
         assert tc.post("/ops/rate-limits/event", json=[1, 2]).status_code == 422
@@ -732,10 +732,12 @@ class TestDbStatus:
         assert out["ok"] is False and out["db_backend"] == "unknown" and out["db_durable"] is False
         assert out["db_message"].startswith("Cannot reach training service") and len(out["db_error"]) == 200
 
-    def test_a_200_with_bad_json_lands_in_the_unreachable_branch(self, client):
-        # NOT FIXED (very low): the message then says "Cannot reach" although the service answered.
+    def test_a_200_with_bad_json_is_reported_as_such_not_as_unreachable(self, client):
+        # FIXED: the service answered, so the message no longer says "Cannot reach".
         client.routes["/health"] = FakeResp(200, json_raises=True)
-        assert "Cannot reach training service" in _run(gw.ops_db_status())["db_message"]
+        out = _run(gw.ops_db_status())
+        assert out["ok"] is False and out["db_connected"] is False
+        assert "Cannot reach" not in out["db_message"] and "not with JSON" in out["db_message"]
 
 
 class TestNeonKeepalive:
@@ -819,11 +821,12 @@ class TestWakeDbAll:
         out = _run(gw.ops_wake_db_all())
         assert out["targets"]["training_db"] == {"ok": True, "db_connected": None, "db_backend": None}
 
-    def test_training_reports_db_down_but_still_counts_as_ok(self, env):
-        # NOT FIXED (low): ok is just "HTTP 200" — db_connected=False does not turn the summary red.
+    def test_training_reporting_db_down_turns_the_summary_red(self, env):
+        # FIXED: HTTP 200 with db_connected=False is no longer "ok".
         env.routes["/health"] = FakeResp(200, {"db_connected": False, "db_backend": "none"})
         out = _run(gw.ops_wake_db_all())
-        assert out["ok"] is True and out["targets"]["training_db"]["db_connected"] is False
+        assert out["ok"] is False and out["targets"]["training_db"]["ok"] is False
+        assert out["targets"]["training_db"]["db_connected"] is False
 
     def test_training_url_not_configured(self, env, monkeypatch):
         monkeypatch.setattr(gw, "TRAINING_URL", "")
@@ -1060,9 +1063,10 @@ class TestQstashPublish:
         tc.post("/ops/qstash/publish", content=b"not json")
         assert env.scheduled == [(0, {})]
 
-    def test_non_numeric_delay_is_an_unhandled_500(self, env, tc):
-        # NOT FIXED (very low): int() on a bad delay is outside any try — bare 500, no message.
-        assert tc.post("/ops/qstash/publish", json={"delay_seconds": "soon"}).status_code == 500
+    def test_non_numeric_delay_is_a_400_with_a_message(self, env, tc):
+        # FIXED: a bad delay no longer escapes as a bare 500.
+        r = tc.post("/ops/qstash/publish", json={"delay_seconds": "soon"})
+        assert r.status_code == 400 and r.json()["ok"] is False and "delay_seconds" in r.json()["error"]
 
 
 # ── wake-all, momentum, health, system health ────────────────────────────────
@@ -1115,14 +1119,14 @@ class TestWakeAndHealth:
         monkeypatch.setattr(gw, "_redis", object())
         assert gw.health(warm=True)["redis"] is True
 
-    def test_ready_is_false_without_redis_but_still_http_200(self, monkeypatch, tc):
-        # NOT FIXED (low): "not ready" is a 200 body flag, so an orchestrator probing status codes
-        # would never see a failure.
+    def test_ready_is_503_without_redis_and_200_with_it(self, monkeypatch, tc):
+        # FIXED: "not ready" is now an HTTP 503, so an orchestrator probing status codes sees it.
         monkeypatch.setattr(gw, "_redis", None)
         r = tc.get("/ready")
-        assert r.status_code == 200 and r.json() == {"ready": False}
+        assert r.status_code == 503 and r.json() == {"ready": False}
         monkeypatch.setattr(gw, "_redis", object())
-        assert tc.get("/ready").json() == {"ready": True}
+        r = tc.get("/ready")
+        assert r.status_code == 200 and r.json() == {"ready": True}
 
 
 class TestSystemHealth:
@@ -1188,11 +1192,13 @@ class TestSystemHealth:
         env.routes["http://nw"] = FakeResp(200, [1])
         assert _run(gw.system_health())["services"]["news"]["status"] == "unreachable"
 
-    def test_per_service_timeout_is_computed_but_never_used(self, env):
-        # NOT FIXED (low): `timeout = 15 if market-data else 10` is dead — the probe uses the
-        # shared client's default (90s read), so one hung service delays the whole health page.
+    def test_per_service_timeout_is_passed_to_each_probe(self, env):
+        # FIXED: 15s for market-data, 10s for the rest — one hung service no longer holds the
+        # whole health page for the shared client's 90s default.
         _run(gw.system_health())
-        assert all("timeout" not in kw for _, _, kw in env.calls)
+        by_url = {url: kw.get("timeout") for _, url, kw in env.calls}
+        assert by_url["http://md/health"] == 15 and by_url["http://dc/health"] == 10
+        assert by_url["http://nw/health"] == 10
 
     def test_probes_are_concurrent_and_all_answer(self, env):
         _run(gw.system_health())
@@ -1213,12 +1219,12 @@ class TestWakeProbe:
         assert out["c"] == {"ok": False, "status": 500}
         assert out["d"]["ok"] is False and "gone" in out["d"]["error"]
 
-    def test_does_not_trim_trailing_slash_unlike_the_other_probes(self, monkeypatch, client):
-        # NOT FIXED (very low): f"{url}/health" — a configured URL ending in "/" probes "//health".
+    def test_trims_trailing_slash_like_the_other_probes(self, monkeypatch, client):
+        # FIXED: a configured URL ending in "/" now probes "/health", not "//health".
         monkeypatch.setattr(gw, "SYSTEM_SERVICES", {"a": {"url": "http://a/", "required": True}})
         client.routes["http://a"] = FakeResp(200)
         _run(gw.wake_all_services_probe())
-        assert client.urls() == ["http://a//health"]
+        assert client.urls() == ["http://a/health"]
 
 
 # ── watchlist / events / searched ────────────────────────────────────────────
@@ -1245,12 +1251,11 @@ class TestWatchlist:
         assert out == {"symbols": ["TCS", "INFY"]} and env.saved == [["TCS", "INFY"]]
         assert env.redis.deleted == [gw.SCAN_UNIVERSE_KEY]
 
-    def test_set_response_can_differ_from_what_is_stored(self, env):
-        # NOT FIXED (low): the response echoes the raw list ("tcs.ns", "") while _save_watchlist
-        # strips suffixes and drops blanks — the UI can show a row that was never persisted.
-        out = gw.set_watchlist(gw.WatchlistUpdate(symbols=["tcs.ns", ""]))
-        assert out["symbols"] == ["TCS.NS", ""]
-        assert env.saved == [["TCS.NS", ""]]                   # (save is stubbed; real one cleans — see below)
+    def test_set_response_matches_what_is_stored(self, env):
+        # FIXED: the route strips suffixes and drops blanks itself, so the response is what is persisted.
+        out = gw.set_watchlist(gw.WatchlistUpdate(symbols=["tcs.ns", "", "infy.bo"]))
+        assert out["symbols"] == ["TCS", "INFY"]
+        assert env.saved == [["TCS", "INFY"]]
 
     def test_real_save_cleans_what_the_route_echoes(self, monkeypatch):
         seen = {}
@@ -1289,12 +1294,12 @@ class TestWatchlist:
     def test_remove(self, env):
         assert gw.remove_from_watchlist("bbb") == {"symbols": ["AAA"]}
 
-    def test_remove_does_not_strip_exchange_suffix_and_leaves_universe_cache(self, env):
-        # NOT FIXED (low): add/set accept ".NS", remove does not; and remove never clears the
-        # cached scan universe, so a removed symbol keeps being scanned until the cache expires.
-        assert gw.remove_from_watchlist("aaa.ns") == {"symbols": ["AAA", "BBB"]}
-        gw.remove_from_watchlist("bbb")
-        assert env.redis.deleted == []
+    def test_remove_strips_exchange_suffix_and_clears_the_universe_cache(self, env):
+        # FIXED: remove accepts ".NS"/".BO" like add/set, and drops the cached scan universe so a
+        # removed symbol stops being scanned immediately.
+        assert gw.remove_from_watchlist("aaa.ns") == {"symbols": ["BBB"]}
+        assert env.redis.deleted == [gw.SCAN_UNIVERSE_KEY]
+        assert gw.remove_from_watchlist(" bbb.bo ") == {"symbols": []}
 
     def test_remove_missing_still_writes(self, env):
         gw.remove_from_watchlist("nope")
@@ -1330,12 +1335,12 @@ class TestEventsAndSearched:
             gw.get_symbol_events("x")
         assert e.value.status_code == 502 and "refused" in e.value.detail
 
-    def test_events_does_not_strip_exchange_suffix(self, monkeypatch):
-        # NOT FIXED (very low): /events/TCS.NS is forwarded as-is, unlike /quote and /market/history.
+    def test_events_strips_exchange_suffix(self, monkeypatch):
+        # FIXED: /events/TCS.NS is forwarded as TCS, like /quote and /market/history.
         seen = []
         monkeypatch.setattr(gw.httpx, "get", lambda url, **kw: (seen.append(url), FakeResp(200, {}))[1])
         gw.get_symbol_events("tcs.ns")
-        assert seen[0].endswith("/events/TCS.NS/categorized")
+        assert seen[0].endswith("/events/TCS/categorized")
 
     def test_searched(self, monkeypatch):
         monkeypatch.setattr(gw, "_load_searched", lambda: ["A", "B"])

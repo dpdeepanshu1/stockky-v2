@@ -19,8 +19,8 @@ end to end; everything the scan talks to is faked: Redis/KV helpers (one in-memo
 per-symbol worker, the Data Feed bulk read, the wake / warm helpers, the WebSocket push, the
 notification sender, metrics, yfinance. `asyncio.sleep` is faked so nothing waits. One unreachable
 branch (an ERROR row inside `results`, which the classifier always diverts to `errors`) is reached
-by stubbing `run_in_batches` and the test says so. Findings are pinned as current behaviour and
-marked ``NOT FIXED``.
+by stubbing `run_in_batches` and the test says so. Four findings that were pinned here are now FIXED
+and pinned as the fixed behaviour.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_scan_runner.py -v
@@ -31,7 +31,7 @@ import asyncio
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -449,34 +449,66 @@ class TestSeedFromLastScan:
         assert payload["status"] == "done"
         assert env.log.any("debug", "seed batch cache")
 
-    def test_finding_lite_rows_from_the_last_scan_are_seeded_into_the_full_cache(self, env):
-        """NOT FIXED (low-medium): seeding uses the CURRENT scan's `lite` for the cache key and never
-        looks at the last scan's own ``lite`` flag, so a lite scan's score-ladder rows (no
-        fundamentals / news) are served by the next FULL scan as if they were full results."""
+    def test_lite_rows_from_the_last_scan_are_not_seeded_into_the_full_cache(self, env):
+        """FIXED: a lite row (score ladder, no fundamentals / news) is skipped when seeding a FULL scan."""
         env.store[gw.LAST_FULL_SCAN_KEY] = self._last(
             [{"symbol": "AAA", "decision": "BUY NOW", "combined_score": 61, "lite": True}], lite=True)
         result = env.result(["AAA"], lite=False)
-        assert env.worker_calls == []                            # the full scan never analysed AAA
-        assert result["all_results"][0]["_from_batch_cache"] is True
-        assert result["all_results"][0]["lite"] is True
+        assert env.worker_calls != []                            # the full scan analysed AAA itself
+        assert not result["all_results"][0].get("_from_batch_cache")
 
-    def test_finding_last_scan_age_is_ignored_and_the_row_gets_a_fresh_ttl(self, env):
-        """NOT FIXED (low): a row from a scan that finished a day ago is re-cached with a new TTL
-        and served as fresh (last-scan record lives 24h)."""
+    def test_a_last_scan_older_than_the_cache_ttl_is_not_seeded(self, env, monkeypatch):
+        """FIXED: seeding re-caches rows with a fresh TTL, so a row from a scan older than that TTL
+        used to be served as fresh. Now it is skipped and the symbol is re-scored."""
+        monkeypatch.setattr(gw, "_decide_cache_ttl", lambda: 600)
+        old = (datetime.now(gw.IST) - timedelta(hours=3)).isoformat()
         env.store[gw.LAST_FULL_SCAN_KEY] = self._last(
-            [{"symbol": "AAA", "decision": "BUY NOW", "combined_score": 61}],
-            scanned_at="2026-09-28T09:00:00+05:30")
+            [{"symbol": "AAA", "decision": "BUY NOW", "combined_score": 61}], scanned_at=old)
+        env.run(["AAA"])
+        assert env.worker_syms() == ["AAA"]
+        assert not env.log.any("info", "Seeded batch_result cache")
+
+    def test_a_last_scan_inside_the_cache_ttl_is_still_seeded(self, env, monkeypatch):
+        monkeypatch.setattr(gw, "_decide_cache_ttl", lambda: 600)
+        recent = (datetime.now(gw.IST) - timedelta(minutes=1)).isoformat()
+        env.store[gw.LAST_FULL_SCAN_KEY] = self._last(
+            [{"symbol": "AAA", "decision": "BUY NOW", "combined_score": 61}], scanned_at=recent)
         env.run(["AAA"])
         assert env.worker_calls == []
-        assert any(k == env.cache_key("AAA") and t == gw._decide_cache_ttl() for k, _v, t in env.sets)
 
-    def test_finding_seeded_count_is_logged_even_when_the_batch_cache_is_disabled(self, env, monkeypatch):
-        """NOT FIXED (very low): with BATCH_RESULT_CACHE off the set is a no-op but `seeded` still
-        counts, so the log claims rows were seeded that were never stored."""
+    def test_the_top_level_scanned_at_is_used_when_the_result_has_none(self, env, monkeypatch):
+        monkeypatch.setattr(gw, "_decide_cache_ttl", lambda: 600)
+        old = (datetime.now(gw.IST) - timedelta(hours=3)).isoformat()
+        last = self._last([{"symbol": "AAA", "decision": "BUY NOW", "combined_score": 61}])
+        last["scanned_at"] = old                      # shape written by run_scan_parallel itself
+        env.store[gw.LAST_FULL_SCAN_KEY] = last
+        env.run(["AAA"])
+        assert env.worker_syms() == ["AAA"]
+
+    @pytest.mark.parametrize("scanned_at", [None, "", "not-a-date"])
+    def test_a_missing_or_unparseable_scanned_at_keeps_seeding(self, env, monkeypatch, scanned_at):
+        monkeypatch.setattr(gw, "_decide_cache_ttl", lambda: 600)
+        last = self._last([{"symbol": "AAA", "decision": "BUY NOW", "combined_score": 61}])
+        last["scanned_at"] = scanned_at
+        env.store[gw.LAST_FULL_SCAN_KEY] = last
+        env.run(["AAA"])
+        assert env.worker_calls == []
+
+    def test_a_naive_scanned_at_is_read_as_ist(self, env, monkeypatch):
+        monkeypatch.setattr(gw, "_decide_cache_ttl", lambda: 600)
+        naive_old = (datetime.now(gw.IST) - timedelta(hours=3)).replace(tzinfo=None).isoformat()
+        env.store[gw.LAST_FULL_SCAN_KEY] = self._last(
+            [{"symbol": "AAA", "decision": "BUY NOW", "combined_score": 61}], scanned_at=naive_old)
+        env.run(["AAA"])
+        assert env.worker_syms() == ["AAA"]
+
+    def test_nothing_is_seeded_or_logged_when_the_batch_cache_is_disabled(self, env, monkeypatch):
+        """FIXED: with BATCH_RESULT_CACHE off the set is a no-op, but the log used to claim rows
+        were seeded. Now the seeding block is skipped entirely."""
         monkeypatch.setattr(gw, "BATCH_RESULT_CACHE_ENABLED", False)
         env.store[gw.LAST_FULL_SCAN_KEY] = self._last([{"symbol": "AAA", "decision": "BUY NOW"}])
         env.run(["AAA"])
-        assert env.log.any("info", "Seeded batch_result cache with 1 symbols")
+        assert not env.log.any("info", "Seeded batch_result cache")
         assert env.cache_key("AAA") not in env.store
         assert env.worker_syms() == ["AAA"]
 
@@ -623,15 +655,15 @@ class TestMidScanWarm:
         env.run(syms(20))
         assert len(env.warm_calls) == 1
 
-    def test_finding_default_batch_of_eight_only_lines_up_with_twenty_every_forty_symbols(self, env):
-        """NOT FIXED (low): the rule is `processed % 20 == 0`, but processed only takes values that
-        are multiples of the batch size. With the default 8, the warm fires at 40 / 80 / 120... and
-        never at 20, 60, 100 — so a 39-symbol scan never warms at all."""
+    def test_default_batch_of_eight_warms_each_time_processed_crosses_a_multiple_of_twenty(self, env):
+        """FIXED: the rule was `processed % 20 == 0`, which with batch 8 only matched at 40 / 80 / ...
+        so a 39-symbol scan never warmed. It now warms once per multiple of 20 crossed."""
         env.run(syms(39))
-        assert env.warm_calls == []
-        env.store.clear()                       # else the 39 cached rows make run two "mostly cached"
+        assert len(env.warm_calls) == 1                 # processed 8,16,24(crosses 20),32,39
+        env.store.clear()                               # else the 39 cached rows make run two "mostly cached"
+        env.warm_calls.clear()
         env.run(syms(40))
-        assert len(env.warm_calls) == 1
+        assert len(env.warm_calls) == 2                 # crosses 20 at 24, 40 at 40
 
 
 # ── batch-result cache ───────────────────────────────────────────────────────
@@ -741,32 +773,46 @@ class TestResultsAndBoards:
         assert [t for k, _v, t in env.sets if k == env.task_key][-1] == 3600
         assert env.ws_calls[-1][1] is env.store[env.task_key]
 
-    def test_finding_value_adjusted_ranking_never_reaches_the_recommendations(self, env):
-        """NOT FIXED (medium): `_select_top_picks` (value-adjusted, BUY-only) only feeds the verdict
-        count, the fallback and `watchlist_candidates`. `recommendations` — what the UI shows and
-        what the notification sends — is the horizon-short board, ranked by RAW score. The cheap
-        fundamentally-sound name never gets its bonus in the list people actually see."""
+    def test_value_adjusted_ranking_reaches_the_recommendations(self, env):
+        """FIXED: the boards are ranked with the same cheap-stock value bonus the verdict's
+        `_select_top_picks` uses, so the list people see matches the verdict's ranking.
+        `_hz_score` stays the raw score."""
         env.rows["AAA"] = buy("AAA", 66, close=1900, fund=80)       # adjusted 66.4
         env.rows["BBB"] = buy("BBB", 60, close=200, fund=80)        # adjusted 67.2
         result = env.result(["AAA", "BBB"])
         assert [r["symbol"] for r in gw._select_top_picks(result["all_results"])] == ["BBB", "AAA"]
-        assert [r["symbol"] for r in result["recommendations"]] == ["AAA", "BBB"]
+        assert [r["symbol"] for r in result["recommendations"]] == ["BBB", "AAA"]
+        assert [r["_hz_score"] for r in result["recommendations"]] == [60, 66]      # raw, not adjusted
         assert result["recommendations"] == result["recommendations_short"]
-        assert env.notify_calls[0][0] == result["recommendations"]
+        assert [r["symbol"] for r in env.notify_calls[0][0]] == ["BBB", "AAA"]
 
-    def test_finding_high_score_do_not_buy_rows_are_promoted_while_the_verdict_says_do_not_buy(self, env):
-        """NOT FIXED (low-medium): with zero BUY signals the verdict reads "DO NOT BUY ANY STOCK
-        TODAY", yet the recommendations hold DO NOT BUY rows relabelled PREPARE TO BUY, and the
-        notification goes out as "Top N Picks" with that same contradictory verdict."""
+    def test_board_rank_key_handles_junk(self):
+        assert gw._board_rank_key({"_hz_score": 70, "combined_score": 70, "close": 100}) == 70
+        assert gw._board_rank_key({"_hz_score": None}) == 0
+        assert gw._board_rank_key({"_hz_score": "x"}) == 0
+        # junk combined score: no bonus, raw horizon score only
+        assert gw._board_rank_key({"_hz_score": 55, "combined_score": "n/a", "close": 100}) == 55
+
+    def test_high_score_do_not_buy_rows_are_not_promoted_under_a_do_not_buy_verdict(self, env):
+        """FIXED: DO NOT BUY rows are no longer relabelled PREPARE TO BUY. The boards fall back
+        to the overall ranking (true decisions, no `horizon_focus`), and the notification only
+        announces actionable rows, so a DO NOT BUY verdict sends "No strong BUY signals"."""
         env.rows["A"] = row("A", "DO NOT BUY", 60)
         env.rows["B"] = row("B", "DO NOT BUY", 55)
         result = env.result(["A", "B"])
         assert result["verdict"].startswith("DO NOT BUY ANY STOCK TODAY")
         assert result["market_stats"]["buy_signals"] == 0 and result["market_mood"] == "Cautious"
         recs = result["recommendations_short"]
-        assert [r["decision"] for r in recs] == ["PREPARE TO BUY", "PREPARE TO BUY"]
-        assert all(r["promoted_from_score"] is True for r in recs)
-        assert env.notify_calls[0][0] == recs and env.notify_calls[0][1] == result["verdict"]
+        assert [r["decision"] for r in recs] == ["DO NOT BUY", "DO NOT BUY"]
+        assert all("promoted_from_score" not in r and "horizon_focus" not in r for r in recs)
+        assert env.notify_calls[0][0] == [] and env.notify_calls[0][1] == result["verdict"]
+
+    def test_notification_only_announces_actionable_rows(self, env):
+        env.rows["A"] = buy("A", 80)
+        env.rows["H"] = row("H", "HOLD", 70)           # above the short bar: on the board, not announced
+        res = env.result(["A", "H"])
+        assert [r["symbol"] for r in res["recommendations"]] == ["A", "H"]
+        assert [r["symbol"] for r in env.notify_calls[0][0]] == ["A"]
 
     def test_final_verdict_block_counts_and_names_the_best_short_pick(self, env):
         env.rows["A"] = buy("A", 80)
@@ -802,14 +848,14 @@ class TestHorizonBoards:
         assert res["recommendations_short"][0]["horizon_focus"] == "short"
 
     def test_missing_horizon_scores_fall_back_to_the_combined_score_with_a_mid_and_long_discount(self, env):
-        env.rows["A"] = row("A", "DO NOT BUY", 60, fund=70)
+        env.rows["A"] = row("A", "HOLD", 60, fund=70)
         res = env.result(["A"])
         assert res["recommendations_short"][0]["_hz_score"] == pytest.approx(60)
         assert res["recommendations_mid"][0]["_hz_score"] == pytest.approx(57.0)
         assert res["recommendations_long"][0]["_hz_score"] == pytest.approx(70 * 0.9 + 60 * 0.1)
 
     def test_long_board_without_a_fundamental_score_uses_the_combined_score(self, env):
-        env.rows["A"] = row("A", "DO NOT BUY", 60)
+        env.rows["A"] = row("A", "HOLD", 60)
         assert env.result(["A"])["recommendations_long"][0]["_hz_score"] == pytest.approx(60)
 
     @pytest.mark.parametrize("board, key, below, at", [
@@ -817,14 +863,24 @@ class TestHorizonBoards:
         ("mid", "recommendations_mid", 55.9, 56),
         ("long", "recommendations_long", 57.9, 58),
     ])
-    def test_score_bars_for_promoting_a_do_not_buy_row(self, env, board, key, below, at):
-        env.rows["A"] = row("A", "DO NOT BUY", 10, horizons={board: {"score": below}})
+    def test_score_bars_for_a_non_actionable_row_to_reach_a_board(self, env, board, key, below, at):
+        env.rows["A"] = row("A", "HOLD", 10, horizons={board: {"score": below}})
         assert "horizon_focus" not in env.result(["A"])[key][0]         # fallback only
         env.store.clear()
-        env.rows["A"] = row("A", "DO NOT BUY", 10, horizons={board: {"score": at}})
+        env.rows["A"] = row("A", "HOLD", 10, horizons={board: {"score": at}})
         picked = env.result(["A"])[key][0]
-        assert picked["horizon_focus"] == board and picked["decision"] == "PREPARE TO BUY"
-        assert picked["promoted_from_score"] is True
+        assert picked["horizon_focus"] == board and picked["decision"] == "HOLD"
+        assert "promoted_from_score" not in picked
+
+    @pytest.mark.parametrize("board, key, at", [
+        ("short", "recommendations_short", 54), ("mid", "recommendations_mid", 56),
+        ("long", "recommendations_long", 58), ("short", "recommendations_short", 99),
+    ])
+    def test_do_not_buy_is_never_promoted_however_high_the_score(self, env, board, key, at):
+        env.rows["A"] = row("A", "DO NOT BUY", 10, horizons={board: {"score": at}})
+        out = env.result(["A"])[key][0]
+        assert out["decision"] == "DO NOT BUY" and "horizon_focus" not in out
+        assert "promoted_from_score" not in out
 
     def test_actionable_rows_are_kept_regardless_of_score_and_not_relabelled(self, env):
         env.rows["A"] = buy("A", 5)
@@ -832,13 +888,15 @@ class TestHorizonBoards:
         assert pick["horizon_focus"] == "short" and pick["decision"] == "BUY NOW"
         assert "promoted_from_score" not in pick
 
-    def test_finding_sell_and_hold_rows_above_the_bar_land_on_the_boards_unchanged(self, env):
-        """NOT FIXED (low): only DO NOT BUY is promoted; any other decision with a score at or above
-        the bar (SELL, HOLD) is added as-is, so a SELL can sit in a "Top picks" list."""
+    def test_sell_rows_never_land_on_the_boards_but_hold_rows_above_the_bar_still_do(self, env):
+        """FIXED: a SELL scoring at or above the bar used to be added to "Top picks". SELL is now
+        skipped like DO NOT BUY. HOLD above the bar is unchanged."""
         env.rows["A"] = row("A", "SELL", 80)
         env.rows["B"] = row("B", "HOLD", 70)
-        recs = env.result(["A", "B"])["recommendations_short"]
-        assert [(r["symbol"], r["decision"]) for r in recs] == [("A", "SELL"), ("B", "HOLD")]
+        res = env.result(["A", "B"])
+        for key in ("recommendations_short", "recommendations_mid", "recommendations_long"):
+            assert "A" not in [r["symbol"] for r in res[key] if r.get("horizon_focus")]
+        assert [(r["symbol"], r["decision"]) for r in res["recommendations_short"]] == [("B", "HOLD")]
 
     def test_each_board_holds_at_most_five(self, env):
         for i in range(7):
@@ -936,29 +994,47 @@ class TestFinish:
         assert env.run(syms(3))["status"] == "done"
         assert len(env.notify_calls) == 2                        # still got as far as the notification
 
-    def test_finding_a_failing_notification_escapes_the_scan_after_the_result_is_saved(self, env):
-        """NOT FIXED (low): `_send_scan_notification` is awaited without a guard, so any error in it
-        (pass 61 pinned that a non-numeric `close` raises) propagates out of the background task.
-        The done record and last-scan cache are already written, so the damage is a logged traceback."""
+    def test_a_failing_notification_does_not_escape_the_scan_after_the_result_is_saved(self, env):
+        """FIXED: the crash wrapper contains it; the done record is NOT overwritten and the flag is reset."""
         env.notify_raises = ValueError("Unknown format code 'f' for object of type 'str'")
-        with pytest.raises(ValueError):
-            env.run(syms(2))
+        env.run(syms(2))
         assert env.store[env.task_key]["status"] == "done"
         assert gw.LAST_FULL_SCAN_KEY in env.store and gw._SCAN_IN_PROGRESS is False
 
-    def test_finding_a_null_combined_score_crashes_the_sort_and_leaves_the_scan_flag_stuck_on(self, env):
-        """NOT FIXED (medium): `results.sort(key=lambda r: r.get("combined_score", 0))` only
-        defaults an ABSENT key; an explicit null (decision-engine JSON null merged over the default
-        row) compares None with a number and raises TypeError. There is no try/finally, so
-        `_SCAN_IN_PROGRESS` stays True (WS quote upstream stays paused) and the task record stays
-        "running" forever — the background task swallows the traceback."""
+    def test_a_null_combined_score_sorts_as_zero_and_the_scan_finishes(self, env):
+        """FIXED: an explicit-null score no longer crashes the sort, and the crash wrapper guarantees
+        the scan flag / task record can never stay stuck."""
         env.rows["A"] = row("A", "BUY NOW", None)
         env.rows["B"] = row("B", "HOLD", 40)
-        with pytest.raises(TypeError):
-            env.run(["A", "B"])
-        assert gw._SCAN_IN_PROGRESS is True and gw.scan_in_progress() is True
-        assert env.store[env.task_key]["status"] == "running"
-        assert env.notify_calls == [] and gw.LAST_FULL_SCAN_KEY not in env.store
+        env.run(["A", "B"])
+        assert gw._SCAN_IN_PROGRESS is False and gw.scan_in_progress() is False
+        assert env.store[env.task_key]["status"] != "running"
+
+    def test_score_sort_key_handles_junk(self):
+        assert gw._score_sort_key({"combined_score": 7}) == 7.0
+        assert gw._score_sort_key({"combined_score": None}) == 0.0
+        assert gw._score_sort_key({"combined_score": "x"}) == 0.0
+        assert gw._score_sort_key("junk") == 0.0
+
+    def test_an_unexpected_crash_resets_the_flag_and_marks_the_task_error(self, env, monkeypatch):
+        async def boom(*a, **k):
+            raise RuntimeError("impl exploded")
+
+        monkeypatch.setattr(gw, "_run_scan_parallel_impl", boom)
+        gw._SCAN_IN_PROGRESS = True
+        asyncio.run(gw.run_scan_parallel("tid", ["A"], False))
+        assert gw._SCAN_IN_PROGRESS is False
+        assert env.store[gw.SCAN_TASK_PREFIX + "tid"]["status"] == "error"
+
+    def test_a_crash_after_a_finished_record_does_not_overwrite_it(self, env, monkeypatch):
+        env.store[gw.SCAN_TASK_PREFIX + "tid"] = {"status": "done"}
+
+        async def boom(*a, **k):
+            raise RuntimeError("late")
+
+        monkeypatch.setattr(gw, "_run_scan_parallel_impl", boom)
+        asyncio.run(gw.run_scan_parallel("tid", ["A"], False))
+        assert env.store[gw.SCAN_TASK_PREFIX + "tid"] == {"status": "done"}
 
 
 # ── _get_nifty50_data ────────────────────────────────────────────────────────
@@ -1080,22 +1156,44 @@ class TestNifty50Data:
                                highs=[101, 102.111, 104.999], lows=[99, 100.5, 102.005])
         assert gw._get_nifty50_data() == [{
             "symbol": "ABC", "price": 103.46, "change": 3.46, "change_pct": 3.46,
-            "volume": 200, "high": 105.0, "low": 102.0,
+            "volume": 1600, "high": 105.0, "low": 99.0,
         }]
 
-    def test_finding_volume_high_low_are_the_last_one_minute_bar_and_change_is_since_the_first_bar(self, mv):
-        """NOT FIXED (medium): `interval="1m"` history is used as if it were a daily bar. `volume`,
-        `high` and `low` are the LAST MINUTE's values, and `change_pct` is measured from the first
-        1-minute bar's CLOSE, not the previous session's close. /market/most-active therefore ranks
-        by one minute of volume, and the gainers/losers boards by move since ~09:15."""
+    def test_volume_high_low_are_day_aggregates_over_the_minute_bars(self, mv):
+        """FIXED: volume is the day's SUM, high/low the day's max/min over the 1-minute bars (they
+        used to be the last minute only, so most-active ranked one minute of volume). The change
+        base is the previous session close when yfinance exposes it, else the first bar."""
         mv.indices = ["BIGDAY", "QUIETNOW"]
         mv.hists["BIGDAY"] = hist([100, 101, 102], volumes=[900_000, 800_000, 10])
         mv.hists["QUIETNOW"] = hist([100, 100, 100], volumes=[5, 5, 50])
         by = {d["symbol"]: d for d in gw._get_nifty50_data()}
-        assert by["BIGDAY"]["volume"] == 10 and by["QUIETNOW"]["volume"] == 50
-        assert by["BIGDAY"]["high"] == 103 and by["BIGDAY"]["low"] == 101     # last bar only
-        assert by["BIGDAY"]["change"] == 2      # vs first bar close (100), not yesterday's close
-        assert sorted(by, key=lambda s: by[s]["volume"], reverse=True)[0] == "QUIETNOW"
+        assert by["BIGDAY"]["volume"] == 1_700_010 and by["QUIETNOW"]["volume"] == 60
+        assert by["BIGDAY"]["high"] == 103 and by["BIGDAY"]["low"] == 99
+        assert by["BIGDAY"]["change"] == 2      # vs the first bar (no previous close available here)
+        assert sorted(by, key=lambda s: by[s]["volume"], reverse=True)[0] == "BIGDAY"
+
+    def test_previous_session_close_is_used_when_available(self, mv, monkeypatch):
+        mv.indices = ["PC"]
+        mv.hists["PC"] = hist([100, 101, 102])
+        orig = mv._ticker
+
+        def with_fast_info(sym):
+            tk = orig(sym)
+            tk.fast_info = {"previous_close": 50.0}
+            return tk
+
+        monkeypatch.setattr(gw.yf, "Ticker", with_fast_info)
+        row = gw._get_nifty50_data()[0]
+        assert row["change"] == 52.0 and row["change_pct"] == 104.0
+
+    def test_first_bar_open_is_the_base_and_an_unusable_base_drops_the_row(self, mv):
+        mv.indices = ["OPEN", "ZERO"]
+        h = hist([100, 110]); h["Open"] = [90.0, 95.0]
+        mv.hists["OPEN"] = h
+        z = hist([0.0, 5.0]); z["Open"] = [0.0, 0.0]
+        mv.hists["ZERO"] = z
+        by = {d["symbol"]: d for d in gw._get_nifty50_data()}
+        assert by["OPEN"]["change"] == 20.0 and "ZERO" not in by
 
     def test_symbols_that_fail_in_any_way_are_dropped_and_the_rest_kept_in_order(self, mv):
         mv.indices = ["A", "B", "C", "D", "E"]
@@ -1169,3 +1267,50 @@ class TestNifty50Data:
         assert not t1.is_alive() and not t2.is_alive()
         assert mv.indices_calls == 1
         assert out["one"] == out["two"] and [d["symbol"] for d in out["one"]] == ["A", "B"]
+
+
+class TestPass83DropCacheKeys:
+    def test_clears_every_layer_even_with_redis_off(self, monkeypatch):
+        deleted = []
+
+        class KV:
+            def delete(self, key):
+                deleted.append(key)
+
+        monkeypatch.setattr(gw, "_kv_cache", KV())
+        monkeypatch.setattr(gw, "_redis", None)
+        gw._mem_kv["k1"] = 1
+        gw._mem_kv_exp["k1"] = 2
+        gw._drop_cache_keys("k1")
+        assert deleted == ["k1"] and "k1" not in gw._mem_kv and "k1" not in gw._mem_kv_exp
+
+    def test_each_layer_failure_is_swallowed(self, monkeypatch):
+        class BadKV:
+            def delete(self, key):
+                raise RuntimeError("kv down")
+
+        class BadRedis:
+            def delete(self, key):
+                raise RuntimeError("redis down")
+
+        class BadMem(dict):
+            def pop(self, *a, **k):
+                raise RuntimeError("mem down")
+
+        monkeypatch.setattr(gw, "_kv_cache", BadKV())
+        monkeypatch.setattr(gw, "_redis", BadRedis())
+        monkeypatch.setattr(gw, "_mem_kv", BadMem())
+        gw._drop_cache_keys("k2")          # must not raise
+
+    def test_the_crash_record_write_failing_is_swallowed(self, env, monkeypatch):
+        async def boom(*a, **k):
+            raise RuntimeError("impl exploded")
+
+        def bad_set(*a, **k):
+            raise RuntimeError("store down")
+
+        monkeypatch.setattr(gw, "_run_scan_parallel_impl", boom)
+        monkeypatch.setattr(gw, "_redis_set", bad_set)
+        gw._SCAN_IN_PROGRESS = True
+        asyncio.run(gw.run_scan_parallel("tid2", ["A"], False))
+        assert gw._SCAN_IN_PROGRESS is False

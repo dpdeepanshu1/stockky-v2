@@ -16,7 +16,10 @@ hooks, and the one leftover line pair in `get_stock_decision`:
 
 Everything downstream is faked: the `hotpicks_store` module (via sys.modules), the redis get/set shims, the hot job
 helpers, `stockky_hot_stocks`, `httpx.post`, `signal.signal`, the module clock. Nothing touches the network or a
-database. Findings are pinned as current behaviour and marked ``NOT FIXED``.
+database. Findings that are still open are pinned as current behaviour and marked ``NOT FIXED``; the nine
+low-severity ones found in this slice (force flag, stopped-message total, non-dict scan result, bad interval env,
+stop-message clobbering, table `ok`, empty-cache fallback, notify HTTP status, price-pass isolation) are fixed in
+main.py and their tests pin the fixed behaviour.
 
 Deliberately NOT covered (unreachable, left as dead code): main.py 4375-4376 (`except` around `list.append` in
 `ops_qstash_tick`) and the `if not top:` guard in `api_hotpicks_notify_top_picks` (merged is never empty once
@@ -239,12 +242,22 @@ class TestHotRunRoute:
         out, bt = start(hh)
         assert out["started"] is True and len(bt.tasks) == 1
 
-    def test_force_flag_is_accepted_but_ignored(self, hh):
-        """NOT FIXED: `force` is never read — the worker always scans with force=True."""
+    def test_force_false_is_passed_to_the_scan_and_keeps_the_cache(self, hh, monkeypatch):
+        """FIXED: the worker used to scan with force=True and drop the cache whatever `force` was."""
+        fake = FakeRedisClient()
+        monkeypatch.setattr(gw, "_redis", fake)
         out, bt = start(hh, force=False)
         t = bt.tasks[0]
         _run(t.func(*t.args, **t.kwargs))
-        assert hh.stocks_calls == [(True, True)]
+        assert hh.stocks_calls == [(False, True)] and fake.deleted == []
+
+    def test_force_true_is_passed_to_the_scan_and_drops_the_cache(self, hh, monkeypatch):
+        fake = FakeRedisClient()
+        monkeypatch.setattr(gw, "_redis", fake)
+        out, bt = start(hh, force=True)
+        t = bt.tasks[0]
+        _run(t.func(*t.args, **t.kwargs))
+        assert hh.stocks_calls == [(True, True)] and fake.deleted == [gw.HOT_STOCKS_CACHE_KEY]
 
 
 # ══ _run_hot worker: outcomes ════════════════════════════════════════════════
@@ -299,10 +312,10 @@ class TestHotRunWorkerOutcomes:
         assert job["message"] == "Stopped after 4/10 symbols — 3 pick(s) kept"
         assert job["processed"] == 4 and job["total"] == 10 and len(hh.redis_sets) == 1
 
-    def test_stopped_message_shows_zero_total_when_the_universe_size_is_missing(self, hh):
-        """NOT FIXED: the stopped message uses the raw `total` (0) while the job row uses `total or done`."""
+    def test_stopped_message_falls_back_to_the_processed_count_when_the_universe_size_is_missing(self, hh):
+        """FIXED: the message used the raw `total` (0) while the job row used `total or done`."""
         run_hot(hh, stocks_result={"stopped_early": True, "processed_symbols": 4})
-        assert final(hh)["message"] == "Stopped after 4/0 symbols — 0 pick(s) kept"
+        assert final(hh)["message"] == "Stopped after 4/4 symbols — 0 pick(s) kept"
         assert final(hh)["total"] == 4
 
     def test_scan_failure_lands_in_an_error_row_truncated_to_200(self, hh):
@@ -312,10 +325,12 @@ class TestHotRunWorkerOutcomes:
         assert job["current_symbol"] is None and job["estimated_remaining_sec"] is None
         assert hh.redis_sets == []
 
-    def test_non_dict_result_lands_in_the_error_row(self, hh):
-        """NOT FIXED: a truthy non-dict scan result hits `(result or {}).get` and becomes an AttributeError."""
+    def test_non_dict_result_lands_in_a_clear_error_row(self, hh):
+        """FIXED: it used to surface as an opaque AttributeError from `(result or {}).get`."""
         run_hot(hh, stocks_result=["x"])
-        assert final(hh)["status"] == "error" and "get" in final(hh)["message"]
+        assert final(hh)["status"] == "error"
+        assert final(hh)["message"] == "unexpected scan result type: list"
+        assert hh.redis_sets == []
 
     def test_stop_flag_is_cleared_after_success(self, hh):
         run_hot(hh)
@@ -393,16 +408,17 @@ class TestHotRunProgress:
         run_hot(hh, events=[lambda cb: cb(0, 10, "A"), lambda cb: cb(9, 10, "Z")])
         assert final(hh)["status"] == "done"
 
-    def test_bad_interval_env_kills_the_worker_and_leaves_the_job_running(self, hh, monkeypatch):
-        """NOT FIXED: `float(os.getenv(...))` sits outside the try, so a bad value raises out of the background
-        task — the job stays "running" forever and the stop flag is never cleared."""
+    def test_bad_interval_env_falls_back_to_the_default_and_the_job_finishes(self, hh, monkeypatch):
+        """FIXED: `float(os.getenv(...))` sat outside the try, so a bad value killed the background task — the
+        job stayed "running" forever and the stop flag was never cleared."""
         monkeypatch.setenv("HOT_PROGRESS_MIN_INTERVAL_SEC", "abc")
-        out, bt = start(hh)
-        hh.store_calls.clear()
-        t = bt.tasks[0]
-        with pytest.raises(ValueError):
-            _run(t.func(*t.args, **t.kwargs))
-        assert hh.job["status"] == "running" and hh.store_calls == []
+        # Default 1.0s: with a 0.1s step per event only the first and last symbol are written.
+        run_hot(hh, events=[lambda cb: (tick(hh, 0.1)(cb), cb(0, 10, "A")),
+                            lambda cb: (tick(hh, 0.1)(cb), cb(1, 10, "B")),
+                            lambda cb: (tick(hh, 0.1)(cb), cb(9, 10, "Z"))])
+        assert final(hh)["status"] == "done"
+        assert [s["current_symbol"] for s in scans(hh)] == ["A", "Z"]
+        assert hh.store_calls == ["clear_hotpicks_stop"]
 
 
 # ══ POST /stockky-hot/stop ═══════════════════════════════════════════════════
@@ -436,11 +452,12 @@ class TestHotStop:
         gw.stockky_hot_stop()
         assert hh.store_calls == ["request_hotpicks_stop"]
 
-    def test_last_job_message_clobbers_the_nothing_running_message(self, hh):
-        """NOT FIXED: `**job` is spread after `message`, so any finished job's own message replaces
-        "No Hot Picks scan is running"."""
+    def test_last_job_message_does_not_replace_the_nothing_running_message(self, hh):
+        """FIXED: `**job` was spread after `message`, so a finished job's own message replaced it."""
         hh.job = {"status": "done", "message": "Hot Picks ready at T — 3 pick(s)"}
-        assert gw.stockky_hot_stop()["message"] == "Hot Picks ready at T — 3 pick(s)"
+        out = gw.stockky_hot_stop()
+        assert out["message"] == "No Hot Picks scan is running"
+        assert out["ok"] is True and out["stopping"] is False and out["status"] == "done"
 
 
 # ══ GET /stockky-hot/table ═══════════════════════════════════════════════════
@@ -482,10 +499,11 @@ class TestHotTable:
         hh.payload = {"news_driven": None, "results_driven": [{"s": "R"}], "fresh": True}
         assert gw.stockky_hot_table(hours=24)["rows"] == [{"s": "R"}]
 
-    def test_payload_keys_can_override_ok(self, hh):
-        """NOT FIXED: the payload is spread after `ok=True`."""
-        hh.payload = {"ok": False, "news_driven": []}
-        assert gw.stockky_hot_table(hours=24)["ok"] is False
+    def test_payload_keys_cannot_override_ok_or_rows(self, hh):
+        """FIXED: the payload was spread after `ok=True`, so a stray `ok` key in it won."""
+        hh.payload = {"ok": False, "news_driven": [{"s": "N"}]}
+        out = gw.stockky_hot_table(hours=24)
+        assert out["ok"] is True and out["rows"] == [{"s": "N"}]
 
 
 # ══ POST /stockky-hot/notify-top-picks ═══════════════════════════════════════
@@ -553,12 +571,17 @@ class TestNotifyTopPicks:
         hh.redis[gw.HOT_STOCKS_CACHE_KEY] = {"news_driven": [], "results_driven": None}
         assert notify() == NO_PICKS
 
-    def test_an_empty_but_truthy_cache_blocks_the_durable_fallback(self, hh, post):
-        """NOT FIXED: only a falsy cache falls through to hotpicks_static_feed, so a stale empty cache dict hides
-        picks that are sitting in the durable table."""
+    def test_an_empty_but_truthy_cache_still_falls_back_to_the_durable_table(self, hh, post):
+        """FIXED: only a falsy cache used to fall through, so a stale empty cache dict hid durable picks."""
         hh.redis[gw.HOT_STOCKS_CACHE_KEY] = {"news_driven": []}
         hh.payload = {"news_driven": [pick("D1")]}
-        assert notify() == NO_PICKS and hh.payload_calls == []
+        out = notify()
+        assert out["symbols"] == ["D1"] and hh.payload_calls == [None]
+
+    def test_an_empty_cache_and_an_empty_durable_table_is_still_no_picks(self, hh, post):
+        hh.redis[gw.HOT_STOCKS_CACHE_KEY] = {"news_driven": []}
+        hh.payload = {"news_driven": []}
+        assert notify() == NO_PICKS and hh.payload_calls == [None]
 
     def test_sorted_by_decision_rank_then_score_desc(self, hh, post):
         hh.redis[gw.HOT_STOCKS_CACHE_KEY] = MIXED
@@ -609,13 +632,21 @@ class TestNotifyTopPicks:
         out = notify()
         assert out["sent"] is False and out["notification_result"] == {"status_code": 502}
 
-    def test_error_status_is_still_ok_true(self, hh, post):
-        """NOT FIXED: the notification service's HTTP status is never checked — a 500 with a JSON body comes back
-        as ok=True, sent=False."""
+    def test_error_status_is_ok_false_with_an_error_message(self, hh, post):
+        """FIXED: the HTTP status was never checked — a 500 with a JSON body came back as ok=True. Same
+        contract as /surprise/notify-top-picks."""
         hh.redis[gw.HOT_STOCKS_CACHE_KEY] = {"news_driven": [pick("A")]}
         post.resp = HttpResp(500, {"detail": "boom"})
         out = notify()
-        assert out["ok"] is True and out["sent"] is False
+        assert out["ok"] is False and out["sent"] is False
+        assert out["error"] == "notification service returned HTTP 500"
+        assert out["notification_result"] == {"detail": "boom"}
+
+    def test_error_status_never_counts_as_delivered_even_if_the_body_says_so(self, hh, post):
+        hh.redis[gw.HOT_STOCKS_CACHE_KEY] = {"news_driven": [pick("A")]}
+        post.resp = HttpResp(503, {"delivered": True})
+        out = notify()
+        assert out["ok"] is False and out["sent"] is False
 
     def test_post_failure_is_a_soft_error_truncated_to_300(self, hh, post):
         hh.redis[gw.HOT_STOCKS_CACHE_KEY] = {"news_driven": [pick("A"), pick("B")]}
@@ -716,13 +747,21 @@ class TestHotRepairBatch:
         hh.store_raises["hotpicks_repair_scores"] = RuntimeError("x")
         assert repair()["status"] == "error"
 
-    def test_price_pass_failure_propagates_and_skips_the_score_pass(self, hh):
-        """NOT FIXED: only the score pass is wrapped in try/except; an exception in the price pass is an
-        unhandled 500 and the score repair never runs."""
-        hh.store_raises["hotpicks_repair_batch"] = RuntimeError("price boom")
-        with pytest.raises(RuntimeError):
-            repair()
-        assert hh.score_calls == []
+    def test_price_pass_failure_is_isolated_and_the_score_pass_still_runs(self, hh):
+        """FIXED: only the score pass was wrapped in try/except; a price-pass exception was an unhandled 500
+        and the score repair never ran."""
+        hh.score_res = {"status": "ok", "repaired": ["S1"], "attempted": 1}
+        hh.store_raises["hotpicks_repair_batch"] = RuntimeError("P" * 300)
+        out = repair()
+        assert out["price_detail"] == {"status": "error", "error": "P" * 160}
+        assert len(hh.score_calls) == 1
+        assert out["status"] == "completed" and out["repaired"] == ["S1"]
+
+    def test_price_and_score_pass_both_failing_is_an_overall_error(self, hh):
+        hh.store_raises["hotpicks_repair_batch"] = RuntimeError("p")
+        hh.store_raises["hotpicks_repair_scores"] = RuntimeError("s")
+        out = repair()
+        assert out["status"] == "error" and out["repaired"] == []
 
 
 # ══ _install_signal_handlers ═════════════════════════════════════════════════

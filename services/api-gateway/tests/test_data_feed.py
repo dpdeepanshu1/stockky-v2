@@ -347,15 +347,23 @@ class TestMergeFeedPayload:
         out = df.merge_feed_payload({"pe_ratio": 30.0}, {"pe_ratio": 22.5, "pe_ratio_seed": True})
         assert out["pe_ratio"] == 30.0
 
-    def test_seed_flag_leaks_onto_real_value_current_behaviour(self):
-        # NOT FIXED — pinned as current behaviour. The comment in merge_feed_payload says the
-        # seed flag is not written either when the real value is kept, but the flag key itself
-        # is not in _SEED_PROTECTED, so it falls through to `base[k] = v`. The real 30.0 is then
-        # mislabelled as a seed, and the NEXT seed run is allowed to overwrite it.
+    def test_rejected_seed_does_not_leak_its_flag_onto_the_real_value(self):
+        # FIXED: the seed flag used to fall through to `base[k] = v` when the real value was
+        # kept, mislabelling the real 30.0 as a seed so the NEXT seed run could overwrite it.
         first = df.merge_feed_payload({"pe_ratio": 30.0}, {"pe_ratio": 22.5, "pe_ratio_seed": True})
-        assert first["pe_ratio_seed"] is True
+        assert first == {"pe_ratio": 30.0}
         second = df.merge_feed_payload(first, {"pe_ratio": 22.5, "pe_ratio_seed": True})
-        assert second["pe_ratio"] == 22.5
+        assert second == {"pe_ratio": 30.0}
+
+    def test_rejected_seed_flag_is_dropped_whichever_key_comes_first(self):
+        out = df.merge_feed_payload({"pe_ratio": 30.0}, {"pe_ratio_seed": True, "pe_ratio": 22.5})
+        assert out == {"pe_ratio": 30.0}
+
+    def test_rejected_seed_only_drops_the_flags_of_the_rejected_fields(self):
+        out = df.merge_feed_payload(
+            {"pe_ratio": 30.0},
+            {"pe_ratio": 22.5, "pe_ratio_seed": True, "roce": 12.0, "roce_seed": True})
+        assert out == {"pe_ratio": 30.0, "roce": 12.0, "roce_seed": True}
 
     def test_seed_refreshes_seed(self):
         out = df.merge_feed_payload(
@@ -577,16 +585,16 @@ class TestPrepareSymbolPayload:
             assert k not in out
         assert out["pe_ratio"] == 20.0
 
-    def test_over_cap_price_survives_as_prev_close_current_behaviour(self, store, monkeypatch):
-        # NOT FIXED — pinned as current behaviour. normalize_feed_payload renames price/close/cmp
-        # to prev_close BEFORE the over-cap strip runs, and "prev_close" is not in the strip list
-        # (only "previous_close" is), so the over-cap price is still persisted and still readable
-        # through _payload_price — the thing the strip is meant to prevent.
+    @pytest.mark.parametrize("key", ["price", "close", "cmp", "prev_close", "prevclose"])
+    def test_over_cap_price_is_not_left_behind_as_prev_close(self, store, monkeypatch, key):
+        # FIXED: normalize_feed_payload renames price/close/cmp to prev_close BEFORE the over-cap
+        # strip runs, and prev_close was not in the strip list, so the over-cap price was still
+        # persisted and readable through _payload_price. It is now stripped too.
         monkeypatch.setattr(df, "MAX_STOCK_PRICE", 500.0)
-        out = store._prepare_symbol_payload("TCS", {"price": 900, "sector": "IT"}, None)
+        out = store._prepare_symbol_payload("TCS", {key: 900, "sector": "IT"}, None)
         assert out["price_over_cap"] is True
-        assert out["prev_close"] == 900.0
-        assert df._payload_price(out) == 900.0
+        assert "prev_close" not in out
+        assert df._payload_price(out) == 0.0
 
     def test_over_cap_without_durable_fields_returns_none(self, store, monkeypatch):
         monkeypatch.setattr(df, "MAX_STOCK_PRICE", 500.0)
@@ -716,18 +724,30 @@ class TestDeleteSymbol:
         assert not any(k.endswith("TCS") for k in df._LOCAL_SYMBOLS)
         assert not any(k.endswith("TCS") for k in kv.store if k != df.DATA_FEED_INDEX_KEY)
 
-    def test_deleted_symbol_stays_in_index_current_behaviour(self, kv, store):
-        # NOT FIXED — pinned as current behaviour. delete_symbol discards the symbol from
-        # _LOCAL_INDEX and then calls _persist_index(), but that goes through list_symbols(),
-        # which re-unions the (still stale) durable index — so the symbol is added straight back
-        # locally and re-written to the durable index. The payload rows are gone, the index
-        # entry is not: count_symbols() stays inflated and callers see a symbol with no data.
+    def test_deleted_symbol_leaves_the_local_and_durable_index(self, kv, store):
+        # FIXED: _persist_index() went through list_symbols(), which re-unioned the stale durable
+        # index and put the symbol straight back (count_symbols() stayed inflated). delete_symbol
+        # now excludes it from the rewritten index and from the local index.
         store.put_symbol("TCS", rich())
-        store.delete_symbol("TCS")
-        assert "TCS" in df._LOCAL_INDEX
-        assert kv.store[df.DATA_FEED_INDEX_KEY]["symbols"] == ["TCS"]
-        assert store.list_symbols() == ["TCS"]
+        assert store.delete_symbol("TCS") is True
+        assert "TCS" not in df._LOCAL_INDEX
+        assert kv.store[df.DATA_FEED_INDEX_KEY]["symbols"] == []
+        assert store.list_symbols() == []
+        assert store.count_symbols() == 0
         assert store.get_symbol("TCS") is None
+
+    def test_deleting_one_symbol_keeps_the_others_in_the_index(self, kv, store):
+        store.put_symbol("TCS", rich())
+        store.put_symbol("INFY", rich(symbol="INFY"))
+        store.delete_symbol("TCS")
+        assert kv.store[df.DATA_FEED_INDEX_KEY]["symbols"] == ["INFY"]
+        assert store.list_symbols() == ["INFY"]
+
+    def test_persist_index_exclude_drops_only_that_symbol(self, kv, store):
+        df._LOCAL_INDEX.update({"A", "B", "C"})
+        store._persist_index(ttl=5, exclude="B")
+        assert kv.store[df.DATA_FEED_INDEX_KEY]["symbols"] == ["A", "C"]
+        assert kv.store[df.DATA_FEED_INDEX_KEY]["count"] == 2
 
     def test_unknown_symbol_returns_false(self, kv, store):
         assert store.delete_symbol("NOPE") is False
@@ -1386,11 +1406,12 @@ class TestYfCloseVolume:
         assert df._yf_close_volume(frame, "X") == (None, 5)          # non-positive close discarded
         frame = pd.DataFrame({"Close": [5.0], "Volume": ["abc"]})
         assert df._yf_close_volume(frame, "X") == (5.0, None)        # unparseable volume -> None
-        # NOT FIXED — pinned as current behaviour. int(float(inf)) raises OverflowError, which
-        # the (TypeError, ValueError) guard around the volume cast does not catch, so the outer
-        # handler returns (None, None) and a perfectly good close is thrown away with it.
+        # FIXED: int(float(inf)) raises OverflowError, which the volume cast did not catch, so the
+        # outer handler used to throw away a perfectly good close with it. Volume -> None only.
         frame = pd.DataFrame({"Close": [5.0], "Volume": [float("inf")]})
-        assert df._yf_close_volume(frame, "X") == (None, None)
+        assert df._yf_close_volume(frame, "X") == (5.0, None)
+        frame = pd.DataFrame({"Close": [5.0], "Volume": [float("-inf")]})
+        assert df._yf_close_volume(frame, "X") == (5.0, None)
 
     def test_all_nan_columns(self):
         pd = self._pd()
@@ -2090,12 +2111,14 @@ class TestBulkQuoteCache:
         kv.set_raises = RuntimeError("x")
         assert df.set_bulk_quote_cache({"A": {"price": 1}})["_meta"]["count"] == 1
 
-    def test_set_none_quotes_raises_current_behaviour(self, kv, monkeypatch):
-        # NOT FIXED — pinned as current behaviour: the `quotes or {}` guard on the quotes map
-        # comes after `quotes.keys()` is already evaluated for the count, so None blows up.
+    @pytest.mark.parametrize("bad", [None, [], "x", 5])
+    def test_set_non_dict_quotes_is_an_empty_cache_write(self, kv, monkeypatch, bad):
+        # FIXED: `quotes.keys()` was evaluated before the `quotes or {}` guard, so None raised
+        # AttributeError. Non-dict input is now treated as no quotes.
         monkeypatch.setattr(df, "_is_nse_session_open", lambda: False)
-        with pytest.raises(AttributeError):
-            df.set_bulk_quote_cache(None)
+        payload = df.set_bulk_quote_cache(bad)
+        assert payload["quotes"] == {} and payload["_meta"]["count"] == 0
+        assert kv.store[df.BULK_QUOTE_CACHE_KEY]["quotes"] == {}
 
     def test_get_cached_quote(self, kv):
         kv.store[df.BULK_QUOTE_CACHE_KEY] = {"quotes": {"TCS": {"price": 5}, "NOPX": {"price": 0}, "BAD": "x"}}

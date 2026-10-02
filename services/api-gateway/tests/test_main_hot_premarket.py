@@ -12,7 +12,7 @@ Pass 79. The Hot Picks read routes and the Premarket bulk pre-feed:
 
 Everything downstream is faked: the redis get/set shims, the hot job helpers, `_build_scan_universe`,
 `data_feed.run_bulk_yahoo_price_feed`, `httpx.post`, the feed store, the session-phase clock and `time.sleep`.
-Nothing touches the network or a database. Findings are pinned as current behaviour and marked ``NOT FIXED``.
+Nothing touches the network or a database. The four findings that were pinned here are now FIXED and pinned as fixed behaviour.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_hot_premarket.py -v
@@ -178,9 +178,11 @@ class TestHotStatus:
         hp.redis[gw.HOT_RESULT_KEY] = {"picks": []}
         assert gw.stockky_hot_status()["result_generated_at"] is None
 
-    def test_job_keys_can_override_ok(self, hp):
-        hp.hot_job = {"ok": False}
-        assert gw.stockky_hot_status()["ok"] is False                # NOT FIXED: the job dict is spread after ok=True
+    def test_a_stray_ok_key_in_the_job_cannot_override_the_route_ok(self, hp):
+        """FIXED: `ok` is set after the job spread, so job state can't flip it. Job state is `status`."""
+        hp.hot_job = {"ok": False, "status": "error"}
+        out = gw.stockky_hot_status()
+        assert out["ok"] is True and out["status"] == "error"
 
 
 class TestHotResult:
@@ -206,16 +208,20 @@ class TestHotResult:
         assert gw.stockky_hot_result()["v"] == "old"
 
     def test_non_dict_cache_crashes_the_route(self, hp):
-        """NOT FIXED: `{**cached, ...}` assumes a dict; a truthy non-dict value in redis is an unhandled TypeError."""
+        """FIXED: a truthy non-dict value in redis is treated as no result (soft failure), not a TypeError."""
         hp.redis[gw.HOT_RESULT_KEY] = ["x"]
-        with pytest.raises(TypeError):
-            gw.stockky_hot_result()
+        assert gw.stockky_hot_result() == {
+            "ok": False, "detail": "No Hot Picks result yet — run Search Hot Picks Stocks"}
 
 
 class TestPremarketStatus:
     def test_merges_the_job(self, hp):
         hp.pm_job = {"status": "done", "processed": 5}
         assert gw.stockky_hot_premarket_status() == {"ok": True, "status": "done", "processed": 5}
+
+    def test_a_stray_ok_key_in_the_job_cannot_override_the_route_ok(self, hp):
+        hp.pm_job = {"ok": False, "status": "done"}
+        assert gw.stockky_hot_premarket_status()["ok"] is True
 
 
 # ══ POST /stockky-hot/premarket ══════════════════════════════════════════════
@@ -399,21 +405,33 @@ class TestPremarketWorkerLive:
         run_worker(hp, phase="open")
         assert hp.store.puts == []
 
-    def test_write_failure_is_swallowed_but_the_hit_is_still_counted(self, hp):
-        """NOT FIXED: `angelone_hits` is incremented before the store write, so a failed write is reported as a
-        live price "written over the baseline"."""
+    def test_write_failure_is_swallowed_and_not_counted_as_an_overlaid_price(self, hp):
+        """FIXED: `angelone_hits` is incremented only after the store write succeeds, so a failed
+        write is no longer reported as a live price written over the baseline."""
         hp.store.put_raises.add("AAA")
         hp.post_handler = lambda u, j, t: FakeResp(200, {"quotes": [quote("AAA"), quote("BBB")]})
         run_worker(hp, phase="open")
         assert [p[0] for p in hp.store.puts] == ["BBB"]
-        assert final(hp)["message"] == "bulk ok · 2 live LTPs overlaid from AngelOne"
+        assert final(hp)["message"] == "bulk ok · 1 live LTPs overlaid from AngelOne"
 
-    def test_symbols_are_written_under_the_raw_quote_key(self, hp):
-        """NOT FIXED: the overlay never strips `.NS` / upper-cases, so a quote keyed "tcs.ns" creates a second feed
-        row instead of updating "TCS"."""
-        hp.post_handler = lambda u, j, t: FakeResp(200, {"quotes": [quote("tcs.ns")]})
+    def test_every_write_failing_reports_no_overlay_at_all(self, hp):
+        hp.store.put_raises.update({"AAA", "BBB"})
+        hp.post_handler = lambda u, j, t: FakeResp(200, {"quotes": [quote("AAA"), quote("BBB")]})
         run_worker(hp, phase="open")
-        assert hp.store.puts[0][0] == "tcs.ns"
+        assert hp.store.puts == [] and final(hp)["message"] == "bulk ok"
+
+    @pytest.mark.parametrize("raw", ["tcs.ns", "TCS.NS", "tcs.bo", " tcs ", "tcs"])
+    def test_symbols_are_normalised_before_the_write(self, hp, raw):
+        """FIXED: the overlay strips .NS/.BO and upper-cases, so a quote keyed "tcs.ns" updates the
+        "TCS" feed row instead of creating a second one."""
+        hp.post_handler = lambda u, j, t: FakeResp(200, {"quotes": [quote(raw)]})
+        run_worker(hp, phase="open")
+        assert hp.store.puts[0][0] == "TCS" and hp.store.puts[0][1]["symbol"] == "TCS"
+
+    def test_a_quote_that_normalises_to_nothing_is_skipped(self, hp):
+        hp.post_handler = lambda u, j, t: FakeResp(200, {"quotes": [quote(".NS")]})
+        run_worker(hp, phase="open")
+        assert hp.store.puts == []
 
     def test_sweep_setup_failure_is_swallowed_and_the_job_still_finishes(self, hp):
         hp.store_raises = True

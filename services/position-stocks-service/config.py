@@ -216,6 +216,55 @@ DAILY_ORDER_BUDGET = _get_int("POSITION_STOCKS_DAILY_ORDER_BUDGET", 300)
 # ── Daily loss kill switch (tighter than real-trade-service's, by design) ──
 MAX_DAILY_LOSS_PCT_OF_POOL = _get_float("MAX_DAILY_LOSS_PCT_OF_POOL", 4.0)
 
+# ── Trade gates (2026-10-02 loss-day fix) ───────────────────────────────────
+# Added after a day where ~19 scalp trades netted about -₹370 (avg loss -1.3%,
+# avg win +0.3%). Three cheap, fail-open gates; each can be switched off with
+# its env var. They apply to AUTO entries only — a manual /cycle/run is an
+# explicit human action and bypasses them, same as it bypasses auto-pilot.
+#
+# 1. Market filter: no new entries while Nifty is trading below its day open
+#    by more than MARKET_GATE_MIN_NIFTY_CHANGE_PCT. Source is the API
+#    gateway's /market/indices (same endpoint real-trade-service uses).
+#    Fetch failure => ALLOW (a broken data feed must never freeze trading).
+MARKET_GATE_ENABLED = _get_bool("MARKET_GATE_ENABLED", True)
+MARKET_GATE_MIN_NIFTY_CHANGE_PCT = _get_float("MARKET_GATE_MIN_NIFTY_CHANGE_PCT", -0.10)
+MARKET_GATE_CACHE_TTL_S = _get_float("MARKET_GATE_CACHE_TTL_S", 120.0)
+MARKET_GATE_TIMEOUT_S = _get_float("MARKET_GATE_TIMEOUT_S", 3.0)
+_API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "https://api-gateway-puwd.onrender.com").rstrip("/")
+MARKET_INDICES_URL = os.getenv("MARKET_INDICES_URL", f"{_API_GATEWAY_URL}/market/indices")
+
+# 2. Loss brake (softer and earlier than MAX_DAILY_LOSS_PCT_OF_POOL's 4% kill
+#    switch): pause new entries after N consecutive losing closes today (for
+#    LOSS_BRAKE_COOLDOWN_MINUTES after the last one), and stop for the rest of
+#    the day once today's realized loss reaches LOSS_BRAKE_DAILY_PCT_OF_POOL.
+LOSS_BRAKE_ENABLED = _get_bool("LOSS_BRAKE_ENABLED", True)
+LOSS_BRAKE_MAX_CONSECUTIVE_LOSSES = _get_int("LOSS_BRAKE_MAX_CONSECUTIVE_LOSSES", 3)
+LOSS_BRAKE_COOLDOWN_MINUTES = _get_int("LOSS_BRAKE_COOLDOWN_MINUTES", 60)
+LOSS_BRAKE_DAILY_PCT_OF_POOL = _get_float("LOSS_BRAKE_DAILY_PCT_OF_POOL", 1.5)
+
+# 3. No same-symbol re-entry for the rest of the day after it closed at a loss
+#    (the 30-minute SYMBOL_REENTRY_COOLDOWN_MINUTES guard still applies to
+#    symbols that closed at a profit).
+SYMBOL_BLOCK_AFTER_LOSS_TODAY = _get_bool("SYMBOL_BLOCK_AFTER_LOSS_TODAY", True)
+
+# ── Phase 2: candle-range volatility stop/target (2026-10-02) ───────────────
+# OFF by default. The legacy "ATR proxy" in orders/adaptive.py averages the
+# change between consecutive ticks (~0.02-0.1%), so stop*1.5 always fell under
+# MIN_STOP_PCT and every trade got the same 2% stop / ~4% target. When enabled,
+# volatility is measured from real candle ranges: ticks are bucketed into
+# ADAPTIVE_BAR_MINUTES-minute bars, and the mean (high-low)/close of the last
+# ADAPTIVE_BAR_LOOKBACK bars sets the stop. Needs ADAPTIVE_BAR_MIN_BARS bars
+# of history; otherwise the legacy logic runs unchanged (fail-safe).
+ADAPTIVE_BAR_ATR_ENABLED = _get_bool("ADAPTIVE_BAR_ATR_ENABLED", False)
+ADAPTIVE_BAR_MINUTES = _get_int("ADAPTIVE_BAR_MINUTES", 5)
+ADAPTIVE_BAR_LOOKBACK = _get_int("ADAPTIVE_BAR_LOOKBACK", 6)
+ADAPTIVE_BAR_MIN_BARS = _get_int("ADAPTIVE_BAR_MIN_BARS", 3)
+ADAPTIVE_BAR_STOP_MULT = _get_float("ADAPTIVE_BAR_STOP_MULT", 1.3)
+ADAPTIVE_BAR_STOP_MIN_PCT = _get_float("ADAPTIVE_BAR_STOP_MIN_PCT", 0.8)
+ADAPTIVE_BAR_STOP_MAX_PCT = _get_float("ADAPTIVE_BAR_STOP_MAX_PCT", 2.0)
+ADAPTIVE_BAR_TARGET_RR = _get_float("ADAPTIVE_BAR_TARGET_RR", 1.8)
+ADAPTIVE_BAR_TARGET_MAX_PCT = _get_float("ADAPTIVE_BAR_TARGET_MAX_PCT", 3.5)
+
 # ── Quality gate — fundamental/technical/news pre-check (session 6) ────────
 # Applied ONLY to the top few candidates the fast price/volume screen already
 # ranked highest — never the whole scan universe — so it stays "quick" as

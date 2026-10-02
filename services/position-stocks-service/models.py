@@ -140,6 +140,14 @@ class ScalpPosition(Base):
     # every fast-reconcile tick once it's already been done).
     stop_moved_to_breakeven = Column(Boolean, nullable=False, default=False)
 
+    # 2026-10-02: highest / lowest tick price seen while the position was OPEN
+    # (orders/excursion.py, updated from the fast-reconcile loop, independent of
+    # the breakeven toggle). Nullable: older rows have none. Lets us measure how
+    # far each trade ran before it reversed (max favourable / adverse excursion)
+    # before tuning targets, breakeven trigger or trailing/partial exits.
+    max_price_seen = Column(Float, nullable=True)
+    min_price_seen = Column(Float, nullable=True)
+
     # 2026-09-18 (user audit finding): see the migration entry in db.py and
     # the OVERNIGHT_HOLD_ENABLED comment block in config.py.
     overnight_converted_to_cnc = Column(Boolean, nullable=False, default=False)

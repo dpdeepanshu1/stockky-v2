@@ -125,13 +125,14 @@ from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition
 from orders import breakeven, eod_squareoff, overnight_stop, reconcile
 from orders import adaptive
+from orders import excursion
 from orders.entry import (
     attempt_entry, attempt_manual_entry, log_quality_reject,
     ManualEntryRejected, InsufficientCapitalSkip,
 )
 from orders.eod_squareoff import close_position_now, ManualCloseRejected
 from resilience import circuit_breaker
-from screening import intraday_eligibility, quality_gate
+from screening import intraday_eligibility, quality_gate, trade_gates
 from screening.engine import scan, on_tick_hook as _engine_tick_hook
 from tz_utils import (
     ist_today_str, ist_time_at_or_after, is_market_open_ist, parse_hhmm, iso_utc,
@@ -340,6 +341,12 @@ async def _fast_reconcile_loop() -> None:
                         logger.info("position-stocks: stagnation-exit closed %d position(s)", n_stagnant)
                 except Exception as e:
                     logger.error("position-stocks: stagnation-exit error: %s", e, exc_info=True)
+                try:
+                    # 2026-10-02: record each open trade's high/low (read-only,
+                    # not gated by the breakeven toggle) — orders/excursion.py.
+                    await asyncio.to_thread(excursion.run_excursion_tracking, db)
+                except Exception as e:
+                    logger.error("position-stocks: excursion-tracking error: %s", e, exc_info=True)
                 try:
                     # this session ("breakeven stop is dead code — fix it"),
                     # OFF by default (ScalpGateState.breakeven_stop_enabled)
@@ -751,6 +758,23 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     if trigger == "AUTO" and not gate.auto_pilot_enabled:
         summary["skipped_reason"] = "AUTO_PILOT_OFF"
         return _finalize()
+
+    # 2026-10-02 loss-day fix: market filter + loss brake (AUTO entries only;
+    # a manual /cycle/run bypasses them like it bypasses auto-pilot). Both
+    # fail open — see screening/trade_gates.py.
+    if trigger == "AUTO":
+        _t = time.perf_counter()
+        _brake = await asyncio.to_thread(trade_gates.loss_brake_reject, db)
+        if _brake:
+            summary["skipped_reason"] = _brake.split(":", 1)[0]
+            _stage("trade_gates", "Loss Brake", _t, detail=_brake)
+            return _finalize()
+        _mkt = await trade_gates.market_gate_reject()
+        if _mkt:
+            summary["skipped_reason"] = "MARKET_WEAK"
+            _stage("trade_gates", "Market Filter", _t, detail=_mkt)
+            return _finalize()
+        _stage("trade_gates", "Market Filter + Loss Brake", _t, detail="passed")
 
     # Quality-gate the top few ranked candidates (fast, best-effort, fail-
     # open — see screening/quality_gate.py) and enter the first that passes.
@@ -1205,6 +1229,17 @@ def status(db: Session = Depends(get_db)):
             "max_entry_range_position": config.MAX_ENTRY_RANGE_POSITION,
             "symbol_reentry_cooldown_minutes": config.SYMBOL_REENTRY_COOLDOWN_MINUTES,
             "symbol_reentry_min_pullback_pct": config.SYMBOL_REENTRY_MIN_PULLBACK_PCT,
+            # 2026-10-02 loss-day fix gates (see screening/trade_gates.py)
+            "market_gate_enabled": config.MARKET_GATE_ENABLED,
+            "market_gate_min_nifty_change_pct": config.MARKET_GATE_MIN_NIFTY_CHANGE_PCT,
+            "loss_brake_enabled": config.LOSS_BRAKE_ENABLED,
+            "loss_brake_max_consecutive_losses": config.LOSS_BRAKE_MAX_CONSECUTIVE_LOSSES,
+            "loss_brake_cooldown_minutes": config.LOSS_BRAKE_COOLDOWN_MINUTES,
+            "loss_brake_daily_pct_of_pool": config.LOSS_BRAKE_DAILY_PCT_OF_POOL,
+            "symbol_block_after_loss_today": config.SYMBOL_BLOCK_AFTER_LOSS_TODAY,
+            "adaptive_bar_atr_enabled": config.ADAPTIVE_BAR_ATR_ENABLED,
+            "adaptive_bar_stop_range_pct": [config.ADAPTIVE_BAR_STOP_MIN_PCT, config.ADAPTIVE_BAR_STOP_MAX_PCT],
+            "adaptive_bar_target_rr": config.ADAPTIVE_BAR_TARGET_RR,
             # session69: tuning knobs for the stagnation-exit toggle above —
             # the on/off switch is DB-backed (gate.stagnation_exit_enabled),
             # these two stay config/env-only, same as the range-gate knobs.
@@ -1486,6 +1521,9 @@ def positions(db: Session = Depends(get_db)):
             # move (or already moved) — see orders/breakeven.py.
             "breakeven_trigger_pct": r.breakeven_trigger_pct,
             "stop_moved_to_breakeven": r.stop_moved_to_breakeven,
+            "max_price_seen": r.max_price_seen,
+            "min_price_seen": r.min_price_seen,
+            **excursion.excursion_pcts(r),
             "realized_pnl": r.realized_pnl,
             "realized_pnl_pct": r.realized_pnl_pct,
             # Live, OPEN-position-only fields (None for closed rows/rows
@@ -1579,6 +1617,9 @@ def trades_history(
                 "quantity": r.quantity,
                 "realized_pnl": r.realized_pnl,
                 "realized_pnl_pct": r.realized_pnl_pct,
+                "max_price_seen": r.max_price_seen,
+                "min_price_seen": r.min_price_seen,
+                **excursion.excursion_pcts(r),
                 "opened_at": iso_utc(r.opened_at),
                 "closed_at": iso_utc(r.closed_at),
                 "dhan_super_order_id": r.dhan_super_order_id,

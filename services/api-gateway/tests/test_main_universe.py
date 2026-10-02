@@ -16,7 +16,10 @@ scanner routes, `data_feed`, `price_resolver`, `symbol_aliases` and the KV helpe
 with small fakes. `random.shuffle` is made deterministic where order matters, and tests never
 depend on the iteration order of a `set` (string hashing is randomised per process).
 
-Findings are pinned as current behaviour and marked ``NOT FIXED``.
+Findings that are still open are pinned as current behaviour and marked ``NOT FIXED``; the seven low-severity ones
+found in this slice (IPO equity filter, pool-change key, flat-mover pChange, news substring matches, price-cap
+parsing, non-dict price rows, unguarded known-symbol sources) are fixed in main.py and their tests pin the fixed
+behaviour.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_universe.py -v
@@ -401,13 +404,23 @@ def test_recent_ipos_ipoalerts_error_falls_to_static_list(ipo_env, log):
     assert log.any("warning", "ipoalerts fallback for recent-ipos failed")
 
 
-def test_recent_ipos_symbols_are_not_run_through_the_equity_filter(ipo_env):
-    """NOT FIXED (low severity): unlike every other universe source, `_get_recent_ipos` returns raw
-    upper-cased symbols without `_clean_equity_symbol`. A renamed/delisted/derivative name from NSE
-    passes through here and is only dropped later, in `_build_scan_universe`'s final clean pass.
-    Callers that use this list directly (e.g. `_get_all_known_symbols`) keep such names."""
-    ipo_env.nse.responses[PAST_EP] = {"data": [{"symbol": "nifty 50"}, {"symbol": "MOTHERSUMI"}]}
-    assert gw._get_recent_ipos() == ["NIFTY 50", "MOTHERSUMI"]
+def test_recent_ipos_symbols_are_run_through_the_equity_filter(ipo_env, monkeypatch):
+    """FIXED: unlike every other universe source, `_get_recent_ipos` returned raw upper-cased symbols, so
+    index / derivative / renamed names only died later in `_build_scan_universe`'s final clean pass, and
+    callers using this list directly (e.g. `_get_all_known_symbols`) kept them."""
+    monkeypatch.setattr(gw, "_clean_equity_symbol",
+                        lambda x: None if " " in str(x) else ({"OLDNAME": "NEWNAME"}.get(str(x).upper(), str(x).upper())))
+    ipo_env.nse.responses[PAST_EP] = {"data": [{"symbol": "nifty 50"}, {"symbol": "OLDNAME"},
+                                               {"symbol": "newname"}, {"symbol": "KEEP"}]}
+    assert gw._get_recent_ipos() == ["NEWNAME", "KEEP"]          # index dropped, rename mapped, de-duplicated
+
+
+def test_recent_ipos_when_every_live_name_is_filtered_falls_through_to_the_fallbacks(ipo_env, monkeypatch):
+    monkeypatch.setattr(gw, "_clean_equity_symbol", lambda x: None if str(x).startswith("X") else str(x).upper())
+    ipo_env.nse.responses[PAST_EP] = {"data": [{"symbol": "XJUNK"}]}
+    ipo_env.alerts = [{"symbol": "alt1"}, {"symbol": "XALT"}]       # the fallback source is filtered too
+    assert gw._get_recent_ipos() == ["ALT1"]
+    assert ipo_env.alerts_calls
 
 
 # ── _next_general_pool_slice ─────────────────────────────────────────────────
@@ -469,14 +482,21 @@ def test_slice_reshuffles_and_restarts_when_pool_changes(cursor):
     assert len(cursor) == 3
 
 
-def test_slice_key_only_looks_at_length_and_endpoints(cursor):
-    """NOT FIXED (low severity): the pool-change key is (len, first, last). A pool that keeps the
-    same size and the same first/last symbol but swaps interior symbols is NOT detected, so the
-    cursor keeps serving the OLD interior symbols until a lap boundary or endpoint changes."""
+def test_slice_key_detects_swapped_interior_symbols(cursor):
+    """FIXED: the pool-change key was (len, first, last), so a pool with the same size and endpoints but
+    swapped interior symbols was not detected and the cursor kept serving the OLD interior symbols."""
     a = ["A0", "A1", "A2", "A3", "A4", "A5"]
     b = ["A0", "B1", "B2", "B3", "B4", "A5"]
     gw._next_general_pool_slice(a, 3)
-    assert gw._next_general_pool_slice(b, 3) == ["A3", "A4", "A5"]    # stale interior from `a`
+    out = gw._next_general_pool_slice(b, 3)
+    assert out == ["A0", "B1", "B2"]                                   # restarted on the NEW pool
+    assert len(cursor) == 2 and cursor[1] == b
+
+
+def test_slice_key_is_stable_for_an_unchanged_pool(cursor):
+    a = ["A0", "A1", "A2", "A3", "A4", "A5"]
+    gw._next_general_pool_slice(a, 3)
+    assert gw._next_general_pool_slice(list(a), 3) == ["A3", "A4", "A5"]   # same content -> cursor continues
     assert len(cursor) == 1
 
 
@@ -581,15 +601,23 @@ def test_movers_nse_move_threshold_is_two_percent_inclusive(mm):
     assert "BELOW" not in out
 
 
-def test_movers_zero_pchange_is_treated_as_missing_and_included(mm):
-    """NOT FIXED (low severity): `item.get("pChange") or item.get("perChange") or ...` treats a
-    numeric 0 / 0.0 like a missing field, so a flat stock (pChange == 0) is added as a "mover",
-    whereas the string "0" is truthy and correctly excluded. Pinned as current behaviour."""
+def test_movers_zero_pchange_is_a_real_flat_value_and_excluded(mm):
+    """FIXED: `item.get("pChange") or item.get("perChange") or ...` treated a numeric 0 / 0.0 like a missing
+    field, so a flat stock was added as a "mover" while the string "0" was correctly excluded."""
     mm.nse.responses[GAINERS] = {"data": [
         {"symbol": "FLATNUM", "pChange": 0}, {"symbol": "FLATFLOAT", "pChange": 0.0},
-        {"symbol": "FLATSTR", "pChange": "0"}]}
+        {"symbol": "FLATSTR", "pChange": "0"}, {"symbol": "FLATALT", "pChange": 0, "perChange": 9}]}
     out = set(gw._get_momentum_movers())
-    assert "FLATNUM" in out and "FLATFLOAT" in out and "FLATSTR" not in out
+    assert not ({"FLATNUM", "FLATFLOAT", "FLATSTR", "FLATALT"} & out)
+
+
+def test_movers_missing_or_blank_pchange_falls_through_to_the_next_field_or_is_included(mm):
+    mm.nse.responses[GAINERS] = {"data": [
+        {"symbol": "ALTFIELD", "pChange": None, "perChange": 5},
+        {"symbol": "BLANKFIELD", "pChange": "", "change_pct": -4},
+        {"symbol": "NOFIELD"}, {"symbol": "SMALL", "pChange": 0.5}]}
+    out = set(gw._get_momentum_movers())
+    assert {"ALTFIELD", "BLANKFIELD", "NOFIELD"} <= out and "SMALL" not in out
 
 
 def test_movers_nse_row_shapes(mm, log):
@@ -833,21 +861,31 @@ def test_news_matches_whole_words_at_start_middle_and_end(news):
     assert set(out) == {"TCS", "INFY", "WIPRO"}
 
 
-def test_news_short_symbols_need_a_word_boundary_but_long_ones_match_inside_words(news):
+def test_news_symbols_of_every_length_need_a_word_boundary(news):
     news.securities = ["TCS", "ITC", "IDEA", "TITAN"]
     news.feeds["results+earnings"] = [Entry("ITCHY TCSX IDEAS TITANIUM stocks")]
     out = set(gw._get_news_mentioned_symbols())
-    assert "TCS" not in out and "ITC" not in out              # 3 chars: substring alone is not enough
-    assert {"IDEA", "TITAN"} <= out                           # >= 4 chars: substring is enough
+    assert not ({"TCS", "ITC", "IDEA", "TITAN"} & out)        # substrings of longer words never match
 
 
-def test_news_substring_match_for_four_plus_chars_gives_false_positives(news):
-    """NOT FIXED: any symbol of 4+ characters matches as a bare substring of the upper-cased news
-    text, so "IDEA" (Vodafone Idea) matches the ordinary word "ideas" and "TITAN" matches
-    "titanium". Only 2-3 character symbols are protected by the word-boundary rule."""
-    news.securities = ["IDEA"]
-    news.feeds["results+earnings"] = [Entry("Five ideas for the week ahead")]
-    assert gw._get_news_mentioned_symbols() == ["IDEA"]
+def test_news_four_plus_char_symbols_no_longer_match_inside_ordinary_words(news):
+    """FIXED: any symbol of 4+ characters matched as a bare substring, so "IDEA" (Vodafone Idea) matched the
+    ordinary word "ideas" and "TITAN" matched "titanium"."""
+    news.securities = ["IDEA", "TITAN"]
+    news.feeds["results+earnings"] = [Entry("Five ideas for the week ahead, titanium prices rise")]
+    assert gw._get_news_mentioned_symbols() == []
+
+
+def test_news_whole_word_mentions_still_match_including_next_to_punctuation(news):
+    news.securities = ["IDEA", "TITAN", "ITC", "M&M", "BAJAJ-AUTO"]
+    news.feeds["results+earnings"] = [Entry("Vodafone IDEA, TITAN: up. (ITC) and M&M; BAJAJ-AUTO!")]
+    assert set(gw._get_news_mentioned_symbols()) == {"IDEA", "TITAN", "ITC", "M&M", "BAJAJ-AUTO"}
+
+
+def test_news_symbol_glued_to_ampersand_or_digits_is_not_a_match(news):
+    news.securities = ["TCS", "SAIL"]
+    news.feeds["results+earnings"] = [Entry("TCS2 AT&TCS SAIL9")]
+    assert gw._get_news_mentioned_symbols() == []
 
 
 def test_news_single_character_symbols_are_ignored(news):
@@ -1102,20 +1140,20 @@ def test_price_cap_row_metrics_must_be_a_dict(cap):
     assert gw._row_price_over_cap({"metrics": "text", "price": None}) is False
 
 
-def test_price_cap_unparseable_value_aborts_the_remaining_keys(cap):
-    """NOT FIXED (low severity): the try/except sits OUTSIDE the key loop, so one unparseable
-    value ("abc") ends the scan and the function returns False — a valid, over-cap `close`
-    listed after it is never consulted, and the row is let through."""
-    assert gw._row_price_over_cap({"price": "abc", "close": 9000}) is False
-    assert gw._row_price_over_cap({"price": [1], "close": 9000}) is False
+def test_price_cap_unparseable_value_skips_that_key_and_reads_the_next(cap):
+    """FIXED: the try/except sat OUTSIDE the key loop, so one unparseable value ("abc") ended the scan and
+    a valid, over-cap `close` listed after it was never consulted — the row was let through."""
+    assert gw._row_price_over_cap({"price": "abc", "close": 9000}) is True
+    assert gw._row_price_over_cap({"price": [1], "close": 9000}) is True
+    assert gw._row_price_over_cap({"price": "abc", "close": 100}) is False
+    assert gw._row_price_over_cap({"price": "abc", "close": "xyz"}) is False      # nothing parseable -> allowed
 
 
-def test_price_cap_non_dict_row_raises_attribute_error(cap):
-    """NOT FIXED (low severity): `isinstance(row, dict)` is only checked for the symbol lookup;
-    the price loop then calls `row.get` unguarded, so a non-dict row raises AttributeError
-    (only TypeError/ValueError are caught). All current callers pass dicts."""
-    with pytest.raises(AttributeError):
-        gw._row_price_over_cap(None)
+def test_price_cap_non_dict_row_is_allowed_through(cap):
+    """FIXED: `isinstance(row, dict)` was only checked for the symbol lookup; the price loop then called
+    `row.get` unguarded, so a non-dict row raised AttributeError."""
+    assert gw._row_price_over_cap(None) is False
+    assert gw._row_price_over_cap("junk") is False
 
 
 # ── _filter_symbols_under_max_price ──────────────────────────────────────────
@@ -1408,17 +1446,13 @@ def test_build_securities_failure_is_logged_and_indices_still_used(ub, monkeypat
     assert log.any("warning", "Failed to fetch securities")
 
 
-def test_build_pad_step_securities_lookup_is_unguarded(ub):
-    """NOT FIXED (low-medium severity): the base fetch of `_get_all_nse_securities()` is wrapped in
-    try/except, but the padding step further down (taken whenever the universe is thinner than the
-    floor) calls it again OUTSIDE any try/except. If the securities source fails persistently
-    (the fake here raises on every call) `_build_scan_universe` raises instead of returning the
-    thin universe. In production `_get_all_nse_securities` has its own static fallback, so this
-    is only reachable through an unexpected exception."""
+def test_build_pad_step_securities_lookup_is_guarded(ub):
+    """FIXED: the padding step's securities lookup is now guarded, so a persistently failing source
+    returns the thin universe instead of raising."""
     ub.indices = ["IDX1", "IDX2"]
     ub.raises["_get_all_nse_securities"] = RuntimeError("nse + bhavcopy down")
-    with pytest.raises(RuntimeError):
-        gw._build_scan_universe()
+    out = gw._build_scan_universe()
+    assert isinstance(out, list) and "IDX1" in out
 
 
 def test_build_indices_failure_is_logged_not_raised(ub, log):
@@ -1686,14 +1720,16 @@ def test_known_symbols_securities_slice_is_at_least_300_deep(known, monkeypatch)
     assert "Q349" in out and "Q350" not in out
 
 
-def test_known_symbols_only_securities_lookup_is_guarded(known):
-    """NOT FIXED (low severity): a failure in any other source (indices, watchlist, searched,
-    IPOs, movers) propagates out of `_get_all_known_symbols` — only `_get_all_nse_securities`
-    is wrapped — so `_resolve_symbol` (and every route that calls it) raises instead of
-    degrading. Pinned as current behaviour."""
-    known.raises["_get_recent_ipos"] = RuntimeError("ipo source down")
-    with pytest.raises(RuntimeError):
-        gw._get_all_known_symbols()
+@pytest.mark.parametrize("source", ["_get_nifty_indices", "_load_watchlist", "_load_searched",
+                                    "_get_recent_ipos", "_get_momentum_movers"])
+def test_known_symbols_every_source_is_guarded(known, source):
+    """FIXED: a failure in any source other than `_get_all_nse_securities` propagated out of
+    `_get_all_known_symbols`, so `_resolve_symbol` (and every route that calls it) raised instead of
+    degrading."""
+    known.securities = ["SEC1"]
+    known.raises[source] = RuntimeError("source down")
+    out = gw._get_all_known_symbols()
+    assert "SEC1" in out
 
 
 # ── _resolve_symbol ──────────────────────────────────────────────────────────

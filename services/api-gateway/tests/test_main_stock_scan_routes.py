@@ -14,8 +14,8 @@ Everything downstream is faked: the per-request `httpx.AsyncClient` the handler 
 (`_redis_get` / `_redis_set` -> a dict), Redis, `run_scan_parallel`, `_analyze_one_symbol_ultra`,
 and the data-feed write-back. Nothing touches the network or a database. Findings are pinned as
 current behaviour and marked ``NOT FIXED``. The ones fixed afterwards (non-JSON decide reply, blank symbols
-and the cap, bare-string / null /scan/batch bodies, /scan/last partial rule, negative ETA) now pin the fixed
-behaviour; the universe-cache pin turned out to be a stale test artefact (see TestStockRedisClear).
+and the cap, bare-string / null /scan/batch bodies, /scan/last partial rule, negative ETA, the degraded-HOLD scores and the
+`background_tasks=None` scan fallbacks) now pin the fixed behaviour; the universe-cache pin turned out to be a stale test artefact (see TestStockRedisClear).
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_stock_scan_routes.py -v
@@ -714,12 +714,27 @@ class TestStockUpstreamFailures:
         assert out["data_quality"]["flags"] == ["Decision engine error"]
         assert any("decision engine HTTP 500 for TCS" in m for m in logs["warning"])
 
-    def test_the_degraded_hold_has_no_scores_or_price(self, env):
-        # NOT FIXED (low): unlike the normal path the degraded payload omits close/scores
-        # entirely, so a UI that reads `technical_score` etc. sees undefined, not a neutral 50.
-        env.client.routes[D("TCS")] = FakeResp(502)
+    @pytest.mark.parametrize("failure", [
+        FakeResp(502), FakeResp(200, json_raises=True), httpx.ConnectError("refused"),
+    ])
+    def test_the_degraded_hold_carries_neutral_scores_and_price(self, env, failure):
+        # FIXED: the degraded payload used to omit close/scores entirely, so a UI reading
+        # `technical_score` etc. saw undefined. All three degraded paths (HTTP error, non-JSON 200,
+        # unreachable) now carry the same neutral fields as the normal path, still flagged
+        # data_insufficient / low quality so it is never mistaken for a real analysis.
+        env.client.routes[D("TCS")] = failure
         out = stock("TCS")
-        assert "close" not in out and "technical_score" not in out and "combined_score" not in out
+        assert out["decision"] == "HOLD" and out["data_insufficient"] is True
+        assert out["data_quality"]["level"] == "low"
+        assert out["technical_score"] == 50 and out["fundamental_score"] == 50
+        assert out["market_score"] == 50 and out["training_score"] == 50 and out["combined_score"] == 0
+        assert out["news_score"] is None and out["prediction_score"] is None
+        assert out["close"] is None and out["entry_range"] is None
+        assert out["target"] is None and out["stop_loss"] is None
+        assert out["confidence"] == "Low" and out["holding_period"] == "N/A"
+        assert out["reasons"] == {"technical": ["Data unavailable"], "fundamental": ["Data unavailable"]}
+        # same key set on every degraded path (one shared builder)
+        assert set(out) == set(gw._degraded_hold("X", "e", "s", "f", "n"))
 
     @pytest.mark.parametrize("exc", [httpx.ConnectError("refused"), httpx.ReadTimeout("slow")])
     def test_unreachable_decision_service_degrades_to_hold(self, env, exc, logs):
@@ -883,20 +898,19 @@ class TestScanPost:
         assert out == {"task_id": "X"}
         assert seen == {"force_refresh": False, "lite": True, "background_tasks": bt}
 
-    def test_missing_background_tasks_gets_a_throwaway_that_never_runs(self, monkeypatch):
-        # NOT FIXED (low): the substitute BackgroundTasks is never handed to Starlette, so a scan
-        # "started" this way would be scheduled but never executed. Only reachable by calling the
-        # function directly; FastAPI always injects a real one.
+    def test_missing_background_tasks_is_passed_through_not_swapped_for_a_dead_throwaway(self, monkeypatch):
+        # FIXED: a direct call without BackgroundTasks used to hand start_scan a throwaway one that
+        # nothing ever executed, so the scan was "started" but never ran. It now passes None through and
+        # start_scan() runs the scan on a daemon thread (see TestStartScan).
         seen = {}
 
         def fake_start(**kw):
-            seen["bt"] = kw["background_tasks"]
-            kw["background_tasks"].add_task(lambda: None)
+            seen.update(kw)
             return {}
 
         monkeypatch.setattr(gw, "start_scan", fake_start)
         _run(gw.run_scan_post())
-        assert isinstance(seen["bt"], BackgroundTasks) and len(seen["bt"].tasks) == 1
+        assert seen["background_tasks"] is None
 
     def test_post_scan_auto_selects_lite(self, tc, monkeypatch, kv):
         # FIXED: POST /scan no longer forces lite=False, so the open-circuit / SCAN_LITE_DEFAULT
@@ -1290,12 +1304,51 @@ class TestStartScan:
         assert e.value.status_code == 500 and e.value.detail == "Scan failed: nse down"
         assert any("Scan start failed" in m for m in logs["error"])
 
-    def test_calling_without_background_tasks_is_a_500(self):
-        # NOT FIXED (very low): the `background_tasks=None` default is unusable — it fails with
-        # AttributeError (caught and reported as a 500). Via HTTP FastAPI always injects one.
-        with pytest.raises(HTTPException) as e:
-            gw.start_scan()
-        assert e.value.status_code == 500 and "add_task" in e.value.detail
+    def test_calling_without_background_tasks_runs_the_scan_on_a_daemon_thread(self, monkeypatch):
+        # FIXED: the `background_tasks=None` default used to fail with AttributeError (reported as a
+        # 500). It now runs run_scan_parallel on a daemon thread with its own event loop.
+        import threading
+        ran, done = [], threading.Event()
+
+        async def fake_parallel(task_id, universe, lite=False):
+            ran.append((task_id, universe, lite, threading.current_thread().daemon))
+            done.set()
+
+        monkeypatch.setattr(gw, "run_scan_parallel", fake_parallel)
+        out = gw.start_scan(lite=True)
+        assert out["from_cache"] is False and out["lite"] is True and out["universe_size"] == 2
+        assert done.wait(5)
+        assert ran == [(out["task_id"], self.universe, True, True)]
+
+    def test_a_crashing_fallback_scan_thread_is_logged_not_raised(self, monkeypatch, logs):
+        import threading
+        done = threading.Event()
+
+        async def boom(task_id, universe, lite=False):
+            done.set()
+            raise RuntimeError("scan blew up")
+
+        monkeypatch.setattr(gw, "run_scan_parallel", boom)
+        out = gw.start_scan()
+        assert out["from_cache"] is False
+        assert done.wait(5)
+        for _ in range(100):                      # the logger call lands just after the event
+            if any("crashed: scan blew up" in m for m in logs["error"]):
+                break
+            threading.Event().wait(0.05)
+        assert any("crashed: scan blew up" in m for m in logs["error"])
+
+    def test_post_scan_without_background_tasks_really_runs_end_to_end(self, monkeypatch):
+        import threading
+        done, ran = threading.Event(), []
+
+        async def fake_parallel(task_id, universe, lite=False):
+            ran.append(task_id)
+            done.set()
+
+        monkeypatch.setattr(gw, "run_scan_parallel", fake_parallel)
+        out = _run(gw.run_scan_post(force_refresh=False, lite=False))
+        assert done.wait(5) and ran == [out["task_id"]]
 
     def test_served_over_http_and_the_queued_run_executes(self, tc, monkeypatch):
         ran = []

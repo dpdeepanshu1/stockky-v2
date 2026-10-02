@@ -14,7 +14,8 @@ Pass 76. `_patch_single_stock_feed(symbol, client)`, the surgical repair worker 
 
 Everything downstream is faked: the feed store, the shared async httpx client, `symbol_aliases` predicates,
 `yfinance.Ticker`, `data_feed.compute_rsi_from_closes`, `asyncio.sleep`. Nothing touches the network or a
-database. Findings are pinned as current behaviour and marked ``NOT FIXED``.
+database. Findings are pinned as current behaviour and marked ``NOT FIXED``; the ones fixed afterwards (unusable price
+aliases, a stored `news_score: None`) now pin the fixed behaviour.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_patch_single_stock_feed.py -v
@@ -304,12 +305,30 @@ class TestPriceTier:
         assert out["message"] == "Repaired TCS: price — complete"
         assert env.sleeps == [0.5]
 
-    def test_existing_aliases_are_kept_by_setdefault(self, env):
+    def test_unusable_aliases_are_replaced_by_the_repaired_price(self, env):
         env.client.routes["/quote/"] = FakeResp(200, {"price": 50})
         go(env, "TCS", {**NO_PRICE, "close": 0, "cmp": "", "ltp": None})
         row = stored(env)
-        # NOT FIXED: setdefault keeps a stored 0 / "" / None, so the aliases stay unusable next to price=50.
-        assert row["price"] == 50.0 and row["close"] == 0 and row["cmp"] == "" and row["ltp"] is None
+        # FIXED: setdefault used to keep a stored 0 / "" / None, so the aliases stayed unusable next to
+        # price=50. A stored alias that is not a positive number is now overwritten with the repaired price.
+        assert row["price"] == 50.0 and row["close"] == 50.0 and row["cmp"] == 50.0 and row["ltp"] == 50.0
+
+    @pytest.mark.parametrize("bad", ["-", "abc", -3, "nan", "0"])
+    def test_other_unusable_alias_values_are_replaced_too(self, env, bad):
+        env.client.routes["/quote/"] = FakeResp(200, {"price": 50})
+        go(env, "TCS", {**NO_PRICE, "close": bad, "cmp": bad, "ltp": bad})
+        row = stored(env)
+        assert row["close"] == 50.0 and row["cmp"] == 50.0 and row["ltp"] == 50.0
+
+    def test_valid_existing_aliases_are_still_kept(self, env, monkeypatch):
+        # A usable alias normally means the price is not "missing" at all (the resolver reads the same
+        # keys), so force the price tier to run to prove the keep-if-valid branch directly.
+        monkeypatch.setattr(gw, "_feed_missing_fields", lambda d: ["price"])
+        env.client.routes["/quote/"] = FakeResp(200, {"price": 50})
+        go(env, "TCS", {**NO_PRICE, "close": 48.5, "cmp": "49", "ltp": 0})
+        row = stored(env)
+        # never wipes a valid existing value; only the unusable `ltp` is repaired
+        assert row["price"] == 50.0 and row["close"] == 48.5 and row["cmp"] == "49" and row["ltp"] == 50.0
 
     def test_key_priority_skips_none_and_zero(self, env):
         env.client.routes["/quote/"] = FakeResp(200, {"price": None, "cmp": 0, "ltp": "1,234.5", "close": 9})
@@ -754,11 +773,28 @@ class TestSentimentTier:
         go(env, "A", dict(NO_SENT))
         assert stored(env)["sentiment_score"] == 0 and "sentiment_seed" not in stored(env)
 
-    def test_existing_news_score_alias_is_kept(self, env):
+    def test_none_news_score_alias_is_filled(self, env):
         env.client.routes["/analyze/"] = FakeResp(200, {"news_score": 0.8})
         go(env, "A", {**NO_SENT, "news_score": None})
-        # NOT FIXED: `news_score: None` is a "present" key for setdefault, so the alias stays None.
-        assert stored(env)["news_score"] is None and stored(env)["sentiment_score"] == 0.8
+        # FIXED: `news_score: None` was a "present" key for setdefault, so the alias stayed None.
+        assert stored(env)["news_score"] == 0.8 and stored(env)["sentiment_score"] == 0.8
+
+    def test_a_stored_real_news_score_alias_is_kept(self, env):
+        env.client.routes["/analyze/"] = FakeResp(200, {"news_score": 0.8})
+        # `sentiment_score: None` makes the tier run; a stored news_score of 0 is a real score, not "absent"
+        go(env, "A", {**NO_SENT, "sentiment_score": None, "news_score": 0})
+        assert stored(env)["news_score"] == 0 and stored(env)["sentiment_score"] == 0.8
+
+    def test_a_stored_nonzero_news_score_alias_is_kept(self, env):
+        env.client.routes["/analyze/"] = FakeResp(200, {"news_score": 0.8})
+        go(env, "A", {**NO_SENT, "sentiment_score": None, "news_score": 0.3})
+        assert stored(env)["news_score"] == 0.3 and stored(env)["sentiment_score"] == 0.8
+
+    def test_none_news_score_alias_is_filled_by_the_seed_too(self, env):
+        env.client.routes["/analyze/"] = FakeResp(200, {"news_score": None})
+        go(env, "A", {**NO_SENT, "news_score": None})
+        row = stored(env)
+        assert row["sentiment_seed"] is True and row["news_score"] == 0.65 and row["sentiment_score"] == 0.65
 
     def test_none_score_falls_to_the_seed(self, env):
         env.client.routes["/analyze/"] = FakeResp(200, {"news_score": None})

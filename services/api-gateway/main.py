@@ -100,7 +100,7 @@ _AI = os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-serv
 _NS = os.getenv("NOTIFICATION_SCHEDULER_URL", "https://notification-scheduler-service-x8vc.onrender.com/notification")
 
 DECISION_URL = os.getenv("DECISION_URL", f"{_DP.rstrip('/')}/decision")
-NOTIFICATION_URL = os.getenv("NOTIFICATION_URL", _NS if _NS.rstrip('/').endswith('notification') else f"{_NS.rstrip('/')}/notification")
+NOTIFICATION_URL = os.getenv("NOTIFICATION_URL", _NS.rstrip('/') if _NS.rstrip('/').endswith('notification') else f"{_NS.rstrip('/')}/notification")
 NEWS_URL = os.getenv("NEWS_URL", f"{_AI.rstrip('/')}/news")
 MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
 TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_AI.rstrip('/')}/technical")
@@ -572,11 +572,42 @@ def _redis_soft_ttl_refresh(key: str, soft_window: int = 10) -> bool:
     except Exception:
         return False
 
+def _sync_scan_task_mirror(key: str, value, ttl: int = None) -> None:
+    """Keep ONLY currently-running scan-task statuses mirrored in `_mem_kv`.
+
+    `_redis_set` returns right after a successful `kv_cache.set`, so with kv_cache importable (the normal
+    production state) scan statuses never reached `_mem_kv` -- but `_graceful_shutdown_commit` and
+    `/scan/stop-all` find running scans by walking `_mem_kv`, so they saw none and the persisted status
+    stayed "running" until its TTL. This mirrors a scan-task key while its status is "running" and drops it
+    on any other status, so `_mem_kv` stays bounded to live scans. Entries past their TTL are pruned here
+    too, so a scan that died without writing a final status is not re-cancelled forever. Never raises."""
+    try:
+        if not isinstance(key, str) or not key.startswith(SCAN_TASK_PREFIX) or key.endswith(":cancel"):
+            return
+        now = _time_mod.time()
+        for k in [k for k in list(_mem_kv) if str(k).startswith(SCAN_TASK_PREFIX)
+                  and (_mem_kv_exp.get(k) or now + 1) < now]:
+            _mem_kv.pop(k, None)
+            _mem_kv_exp.pop(k, None)
+        if isinstance(value, dict) and value.get("status") == "running":
+            _mem_kv[key] = dict(value)
+            if ttl:
+                _mem_kv_exp[key] = now + int(ttl)
+            else:
+                _mem_kv_exp.pop(key, None)
+        else:
+            _mem_kv.pop(key, None)
+            _mem_kv_exp.pop(key, None)
+    except Exception:
+        pass
+
+
 def _redis_set(key: str, value, ttl: int = None):
     """Memory always; Neon for durable prefixes; Redis only if USE_REDIS=1."""
     if _kv_cache is not None:
         try:
             _kv_cache.set(key, value, ttl=ttl)
+            _sync_scan_task_mirror(key, value, ttl)
             return
         except Exception as e:
             logger.debug("kv set %s: %s", key, e)
@@ -647,8 +678,8 @@ async def _load_searched_safe() -> List[str]:
 
 def _add_searched(symbol: str):
     searched = _load_searched()
-    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
-    if sym not in searched:
+    sym = (symbol or "").strip().upper().replace(".NS", "").replace(".BO", "").strip()
+    if sym and sym not in searched:
         searched.append(sym)
         _redis_set(SEARCHED_KEY, searched[-200:])
 
@@ -2032,6 +2063,43 @@ def _resolve_symbol(misspelled: str) -> Optional[str]:
     if matches:
         return matches[0]
     return None
+
+# ── Degraded (decision engine down) payload ──────────────────────────────
+def _degraded_hold(symbol: str, error: str, summary: str, flag: str, note: str) -> dict:
+    """Neutral HOLD returned by /stock/{symbol} when the decision engine errors or is unreachable.
+
+    Carries the same neutral score / price fields the normal path always has (50 for the sub-scores,
+    0 combined, None for close/entry/target/stop) so a UI reading `technical_score` or `close` gets a
+    neutral value instead of `undefined`. `data_insufficient: True` + the low-quality flag still mark it
+    as not a real analysis."""
+    return {
+        "ok": True,
+        "symbol": symbol,
+        "decision": "HOLD",
+        "confidence": "Low",
+        "combined_score": 0,
+        "technical_score": 50,
+        "fundamental_score": 50,
+        "news_score": None,
+        "prediction_score": None,
+        "prediction_note": None,
+        "market_score": 50,
+        "training_score": 50,
+        "event_risk": False,
+        "entry_range": None,
+        "target": None,
+        "stop_loss": None,
+        "holding_period": "N/A",
+        "close": None,
+        "support": None,
+        "resistance": None,
+        "reasons": {"technical": ["Data unavailable"], "fundamental": ["Data unavailable"]},
+        "data_insufficient": True,
+        "error": error,
+        "natural_language_summary": summary,
+        "data_quality": {"level": "low", "flags": [flag], "note": note},
+    }
+
 
 # ── Safe response normalization ──────────────────────────────────────────
 def _normalize_decision_response(raw, symbol: str) -> dict:
@@ -4838,22 +4906,14 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
             except ValueError as e:
                 # A 200 whose body is not JSON used to escape as a bare 500.
                 logger.warning("decision engine returned non-JSON for %s: %s", symbol_to_use, e)
-                return {
-                    "ok": True,
-                    "symbol": symbol_to_use,
-                    "decision": "HOLD",
-                    "data_insufficient": True,
-                    "error": "decision engine returned a non-JSON response",
-                    "natural_language_summary": (
-                        f"{symbol_to_use}: decision engine returned an unreadable response — "
-                        f"showing a neutral HOLD until it recovers."
-                    ),
-                    "data_quality": {
-                        "level": "low",
-                        "flags": ["Decision engine error"],
-                        "note": "Upstream decision-prediction-service returned a non-JSON body — scores unavailable.",
-                    },
-                }
+                return _degraded_hold(
+                    symbol_to_use,
+                    "decision engine returned a non-JSON response",
+                    f"{symbol_to_use}: decision engine returned an unreadable response — "
+                    f"showing a neutral HOLD until it recovers.",
+                    "Decision engine error",
+                    "Upstream decision-prediction-service returned a non-JSON body — scores unavailable.",
+                )
             result = _normalize_decision_response(raw, symbol_to_use)
 
             reasons = result.get("reasons") if isinstance(result.get("reasons"), dict) else {}
@@ -5074,43 +5134,27 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
                 "decision engine HTTP %s for %s: %s",
                 e.response.status_code, symbol_to_use, str(e.response.text)[:200],
             )
-            return {
-                "ok": True,
-                "symbol": symbol_to_use,
-                "decision": "HOLD",
-                "data_insufficient": True,
-                "error": f"decision engine returned HTTP {e.response.status_code}",
-                "natural_language_summary": (
-                    f"{symbol_to_use}: decision engine is temporarily unavailable "
-                    f"(HTTP {e.response.status_code}) — showing a neutral HOLD until it recovers."
-                ),
-                "data_quality": {
-                    "level": "low",
-                    "flags": ["Decision engine error"],
-                    "note": "Upstream decision-prediction-service returned an error — scores unavailable.",
-                },
-            }
+            return _degraded_hold(
+                symbol_to_use,
+                f"decision engine returned HTTP {e.response.status_code}",
+                f"{symbol_to_use}: decision engine is temporarily unavailable "
+                f"(HTTP {e.response.status_code}) — showing a neutral HOLD until it recovers.",
+                "Decision engine error",
+                "Upstream decision-prediction-service returned an error — scores unavailable.",
+            )
     except httpx.HTTPError as e:
         # Connection refused / timeout / DNS failure — service is down or
         # asleep (Render free-tier cold start), not a client error. Same
         # graceful-degrade as above instead of bubbling a raw 502.
         logger.warning("decision engine unreachable for %s: %s", symbol_to_use, e)
-        return {
-            "ok": True,
-            "symbol": symbol_to_use,
-            "decision": "HOLD",
-            "data_insufficient": True,
-            "error": f"decision engine unreachable: {e}",
-            "natural_language_summary": (
-                f"{symbol_to_use}: decision engine is unreachable right now "
-                f"(cold start or outage) — showing a neutral HOLD until it recovers."
-            ),
-            "data_quality": {
-                "level": "low",
-                "flags": ["Decision engine unreachable"],
-                "note": "Could not reach decision-prediction-service — scores unavailable.",
-            },
-        }
+        return _degraded_hold(
+            symbol_to_use,
+            f"decision engine unreachable: {e}",
+            f"{symbol_to_use}: decision engine is unreachable right now "
+            f"(cold start or outage) — showing a neutral HOLD until it recovers.",
+            "Decision engine unreachable",
+            "Could not reach decision-prediction-service — scores unavailable.",
+        )
 
 
 # ── Legacy sync fallback helpers ──────────────────────────────────────────
@@ -5181,9 +5225,9 @@ async def run_scan_post(
     Compatibility alias: overnight cron and external tools used POST /scan and got 405
     because only GET /scan existed. Delegate to the async parallel scan starter.
     """
-    # FastAPI injects BackgroundTasks when annotated; guard None for safety
-    if background_tasks is None:
-        background_tasks = BackgroundTasks()
+    # FastAPI injects BackgroundTasks when annotated. When called directly without one, pass None
+    # through: start_scan() then runs the scan on a daemon thread instead of queueing it on a
+    # throwaway BackgroundTasks that nothing would ever execute.
     return (await asyncio.to_thread(start_scan, force_refresh=force_refresh, lite=lite, background_tasks=background_tasks))
 
 
@@ -5410,7 +5454,21 @@ def start_scan(
 
         universe = _build_scan_universe()
         task_id = str(uuid.uuid4())
-        background_tasks.add_task(run_scan_parallel, task_id, universe, use_lite)
+        if background_tasks is not None:
+            background_tasks.add_task(run_scan_parallel, task_id, universe, use_lite)
+        else:
+            # Called directly (FastAPI always injects one over HTTP): run the scan on a daemon thread
+            # with its own event loop, same fallback idiom as /data-feed/start-bulk-feed. Previously
+            # this was an AttributeError reported as a 500.
+            import threading
+
+            def _scan_thread():
+                try:
+                    asyncio.run(run_scan_parallel(task_id, universe, use_lite))
+                except Exception as _e:  # run_scan_parallel records its own failures; this is a last resort
+                    logger.error("Scan thread %s crashed: %s", task_id, _e)
+
+            threading.Thread(target=_scan_thread, name=f"scan-{task_id[:8]}", daemon=True).start()
         return {
             "task_id": task_id,
             "from_cache": False,
@@ -10700,10 +10758,24 @@ async def purge_over_cap_feed_symbols():
     }
 
 
+# Single-segment data-feed ACTION names that are registered POST-only above. A GET on one of them
+# used to fall into the `/data-feed/{symbol}` catch-all below and come back as a 200
+# `{"ok": False, "detail": "No data feed entry"}` for a bogus "symbol" (harmless, but misleading: a
+# browser/curl GET looked like it had "worked"). They now get the 405 the method deserves. The match
+# is exact and lowercase, so real (uppercase) NSE symbols can never collide with it.
+_FEED_POST_ONLY_ACTIONS = frozenset({
+    "hard-reset", "start-bulk-feed", "refresh-prepare-to-buy", "refill-additional",
+    "purge-over-cap", "update", "batch", "update-batch", "repair-batch", "repair-all",
+    "run", "stop", "resume",
+})
+
+
 @app.get("/data-feed/{symbol}")
 @app.get("/api/data-feed/{symbol}")
 @app.get("/api/feed/{symbol}")
 def data_feed_symbol(symbol: str):
+    if symbol in _FEED_POST_ONLY_ACTIONS:
+        raise HTTPException(status_code=405, detail="Method Not Allowed", headers={"Allow": "POST"})
     fed = _feed_store().get_symbol(symbol)
     if not fed:
         return {"ok": False, "symbol": symbol.upper(), "detail": "No data feed entry"}
@@ -10890,6 +10962,9 @@ async def data_feed_update_batch_refresh(request: Request):
                 if _row_price_over_cap(row):
                     err_n += 1
                     results.append({"symbol": base, "ok": False, "error": "price above cap"})
+                    # Same pacing as every other outcome: this branch used to `continue` straight past the
+                    # sleep, so a run of over-cap symbols hammered the upstream at full speed.
+                    await asyncio.sleep(0.15)
                     continue
                 store.put_symbol(base, row, ttl=DATA_FEED_TTL)
                 ok_n += 1
@@ -10918,19 +10993,20 @@ REPAIR_COOLDOWN_SEC = float(os.getenv("REPAIR_COOLDOWN_SEC", "0.5"))
 
 
 def _safe_float(val, default: float = 0.0) -> float:
-    """Parse floats safely including NSE comma formats; never raises."""
+    """Parse floats safely including NSE comma formats; never raises.
+    NaN and +/-infinity (including the strings "nan" / "inf") are not usable numbers and return `default`."""
     if val is None or val == "":
         return default
     try:
         if isinstance(val, (int, float)):
             f = float(val)
-            return f if f == f else default  # NaN guard
+            return f if math.isfinite(f) else default  # NaN / inf guard
         s = str(val).replace(",", "").replace(" ", "").strip()
         if not s or s.upper() in ("-", "NA", "N/A", "NONE", "NULL"):
             return default
         f = float(s)
-        return f if f == f else default
-    except (TypeError, ValueError):
+        return f if math.isfinite(f) else default
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -10977,16 +11053,18 @@ def _feed_resolved_price(payload: dict) -> float:
         pass
     m = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
     for k in ("price", "close", "ltp", "cmp", "last_price", "prev_close"):
-        raw = data.get(k) if data.get(k) not in (None, "") else m.get(k)
-        try:
-            s = str(raw or "").replace(",", "").replace(" ", "").strip()
-            if not s or s.upper() in ("-", "NA", "N/A"):
-                continue
-            v = float(s)
-            if v > 0:
-                return v
-        except (TypeError, ValueError):
-            pass
+        # Flat value first, then the nested metrics value for the SAME key. A flat 0 / "-" / junk used to
+        # win (`0 not in (None, "")`), so a usable metrics value for that key was never consulted.
+        for raw in (data.get(k), m.get(k)):
+            try:
+                s = str(raw or "").replace(",", "").replace(" ", "").strip()
+                if not s or s.upper() in ("-", "NA", "N/A"):
+                    continue
+                v = float(s)
+                if v > 0 and math.isfinite(v):
+                    return v
+            except (TypeError, ValueError):
+                pass
     return 0.0
 
 
@@ -11199,9 +11277,12 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                                 "message": f"{base} is above ₹{MAX_UNIVERSE_PRICE:.0f} cap — removed from feed.",
                             }
                         current["price"] = px
-                        current.setdefault("close", px)
-                        current.setdefault("cmp", px)
-                        current.setdefault("ltp", px)
+                        # Price aliases: keep a stored value only if it is a usable (positive) number.
+                        # setdefault kept a stored 0 / "" / None, leaving the aliases unusable next to the
+                        # freshly repaired price.
+                        for _alias in ("close", "cmp", "ltp"):
+                            if _safe_float(current.get(_alias)) <= 0:
+                                current[_alias] = px
                         # Real OHLCV from Yahoo 2d when present
                         for ok in ("previous_close", "day_high", "day_low", "day_change_pct"):
                             if cleaned.get(ok) is not None:
@@ -11316,7 +11397,8 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                 ns = n.get("news_score", n.get("sentiment_score"))
                 if ns is not None:
                     current["sentiment_score"] = ns
-                    current.setdefault("news_score", ns)
+                    if current.get("news_score") is None:   # a stored None is "absent"; a stored 0 is a real score
+                        current["news_score"] = ns
                     patched.append("sentiment_score")
                     missing.discard("sentiment_score")
             elif r.status_code in (401, 429):
@@ -11355,7 +11437,8 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
     if "sentiment_score" in missing:
         current["sentiment_score"] = 0.65
         current["sentiment_seed"] = True
-        current.setdefault("news_score", 0.65)
+        if current.get("news_score") is None:
+            current["news_score"] = 0.65
         patched.append("sentiment_score")
         missing.discard("sentiment_score")
         logger.info("repair %s: seeded baseline sentiment=0.65", base)

@@ -340,11 +340,12 @@ class TestStartBulkFeed:
         r = tc.post("/data-feed/start-bulk-feed?force=false&use_universe=false")
         assert r.status_code == 200 and r.json()["total"] == 1
 
-    def test_get_is_not_a_405(self, store, bulk, uni, tc):
+    def test_get_is_a_405(self, store, bulk, uni, tc):
         n = len(bulk.bulk_calls)
-        # NOT FIXED: GET is not a 405 — `/data-feed/{symbol}` captures it. Nothing is started.
-        assert tc.get("/data-feed/start-bulk-feed").status_code != 405
-        assert len(bulk.bulk_calls) == n
+        # FIXED: the `/data-feed/{symbol}` catch-all no longer swallows a GET on this POST-only action.
+        r = tc.get("/data-feed/start-bulk-feed")
+        assert r.status_code == 405 and r.headers["allow"] == "POST"
+        assert len(bulk.bulk_calls) == n                   # nothing is started
 
 
 # ══ refresh_prepare_to_buy ═══════════════════════════════════════════════════
@@ -629,8 +630,9 @@ class TestRefillTrigger:
             r = tc.post(path)
             assert r.status_code == 200 and r.json()["total"] == 1
         assert len(refill.run_calls) == 2
-        # NOT FIXED: GET is not a 405 — `/data-feed/{symbol}` captures it. Nothing is started.
-        assert tc.get("/data-feed/refill-additional").status_code != 405
+        # FIXED: GET is a real 405 (not swallowed by `/data-feed/{symbol}`). Nothing is started.
+        r = tc.get("/data-feed/refill-additional")
+        assert r.status_code == 405 and r.headers["allow"] == "POST"
         assert len(refill.run_calls) == 2
 
 
@@ -1088,6 +1090,46 @@ class TestPurgeOverCap:
         for path in ("/api/feed/purge-over-cap", "/data-feed/purge-over-cap"):
             assert tc.post(path).status_code == 200
         purge.deleted.clear()
-        # NOT FIXED: GET is not a 405 — `/data-feed/{symbol}` captures it. Nothing is purged.
-        assert tc.get("/data-feed/purge-over-cap").status_code != 405
+        # FIXED: GET is a real 405 (not swallowed by `/data-feed/{symbol}`). Nothing is purged.
+        r = tc.get("/data-feed/purge-over-cap")
+        assert r.status_code == 405 and r.headers["allow"] == "POST"
         assert purge.deleted == []
+
+
+# ══ GET on a POST-only action name (the `/data-feed/{symbol}` catch-all guard) ═══════════════════════
+
+class TestPostOnlyActionGetGuard:
+    """A GET on any POST-only single-segment action used to land in `data_feed_symbol` as a bogus symbol
+    and answer 200 `{"ok": False, "detail": "No data feed entry"}`. It is now a 405 with `Allow: POST`
+    on all three prefixes, while real symbols (uppercase) keep resolving."""
+
+    PREFIXES = ("/data-feed/", "/api/data-feed/", "/api/feed/")
+
+    def test_guard_set_matches_every_post_only_single_segment_action(self):
+        """Drift guard: every single-segment POST-only data-feed route in the app must be in the set."""
+        post_only, get_ok = set(), set()
+        for r in gw.app.routes:
+            path = getattr(r, "path", "")
+            for prefix in self.PREFIXES:
+                if path.startswith(prefix):
+                    seg = path[len(prefix):]
+                    if seg and "/" not in seg and not seg.startswith("{"):
+                        (get_ok if "GET" in r.methods else post_only).add(seg)
+        post_only -= get_ok                                  # status/meta/bulk-cache/audit-missing are real GETs
+        assert post_only, "expected POST-only actions to be discovered"
+        assert post_only <= gw._FEED_POST_ONLY_ACTIONS, sorted(post_only - gw._FEED_POST_ONLY_ACTIONS)
+
+    @pytest.mark.parametrize("action", sorted(gw._FEED_POST_ONLY_ACTIONS))
+    def test_get_is_405_on_every_prefix(self, store, tc, action):
+        for prefix in self.PREFIXES:
+            r = tc.get(prefix + action)
+            assert r.status_code == 405 and r.headers["allow"] == "POST"
+
+    def test_real_gets_and_symbols_are_untouched(self, store, tc):
+        store.rows = {"TCS": {"price": 4000}, "RUN": {"price": 1}}
+        for prefix in self.PREFIXES:
+            assert tc.get(prefix + "TCS").json() == {"ok": True, "data": {"price": 4000}}
+            # exact, lowercase-only match: an uppercase symbol that happens to spell an action still resolves
+            assert tc.get(prefix + "RUN").json() == {"ok": True, "data": {"price": 1}}
+            assert tc.get(prefix + "NOPE").json() == {"ok": False, "symbol": "NOPE", "detail": "No data feed entry"}
+        assert tc.get("/data-feed/meta").status_code == 200

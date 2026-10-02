@@ -14,7 +14,8 @@ Pass 75. The feed read/write routes and the two price helpers that follow the au
 
 Everything downstream is faked: the feed store, `data_feed.save_stock_feed` / `extract_feed_payload`, the
 shared async httpx client, `rate_limit_monitor.record`, `asyncio.sleep`. Nothing touches the network or a
-database. Findings are pinned as current behaviour and marked ``NOT FIXED``.
+database. Findings are pinned as current behaviour and marked ``NOT FIXED``; the ones fixed afterwards
+(over-cap pacing sleep, infinity in `_safe_float`, flat-zero vs metrics price) now pin the fixed behaviour.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_feed_write_routes.py -v
@@ -473,16 +474,23 @@ class TestUpdateBatchRefresh:
         out = _run(gw.data_feed_update_batch_refresh(FakeRequest({"symbols": ["TCS"]})))
         assert out["error_count"] == 1 and out["results"][0]["error"] == "no fund/events"
 
-    def test_over_cap_row_is_an_error_row_and_skips_the_sleep(self, ub, store, cap):
-        """NOT FIXED: the over-cap `continue` skips the 0.15s pacing sleep, so a run of over-cap symbols
-        hammers the upstream at full speed (only that branch; every other outcome sleeps)."""
+    def test_over_cap_row_is_an_error_row_and_still_paces(self, ub, store, cap):
+        """FIXED: the over-cap `continue` used to skip the 0.15s pacing sleep, so a run of over-cap symbols
+        hammered the upstream at full speed. Every outcome (incl. over-cap) now sleeps once per symbol."""
         ub.client.routes["/analyze/BIG"] = FakeResp(200, {"price": 9000})
         ub.client.routes["/analyze/OK"] = FakeResp(200, {"price": 10})
         out = _run(gw.data_feed_update_batch_refresh(FakeRequest({"symbols": ["BIG", "OK"]})))
         assert out["results"] == [{"symbol": "BIG", "ok": False, "error": "price above cap"},
                                   {"symbol": "OK", "ok": True}]
         assert out["ok_count"] == 1 and out["error_count"] == 1 and [p[0] for p in store.puts] == ["OK"]
-        assert ub.sleeps == [0.15]
+        assert ub.sleeps == [0.15, 0.15]                   # one pacing sleep per symbol, over-cap included
+
+    def test_a_run_of_over_cap_symbols_is_paced(self, ub, store, cap):
+        for sym in ("B1", "B2", "B3"):
+            ub.client.routes["/analyze/" + sym] = FakeResp(200, {"price": 9000})
+        out = _run(gw.data_feed_update_batch_refresh(FakeRequest({"symbols": ["B1", "B2", "B3"]})))
+        assert out["ok_count"] == 0 and out["error_count"] == 3 and store.puts == []
+        assert ub.sleeps == [0.15, 0.15, 0.15]
 
     def test_store_write_failure_is_isolated_to_that_symbol(self, ub, store):
         store.put_raises.add("AAA")
@@ -542,9 +550,15 @@ class TestSafeFloat:
     def test_nan_string_returns_default(self):
         assert gw._safe_float("nan", default=7.0) == 7.0
 
-    def test_infinity_is_passed_through(self):
-        # NOT FIXED: only NaN is guarded; "inf" parses to a real float('inf').
-        assert gw._safe_float("inf") == float("inf") and gw._safe_float(float("inf")) == float("inf")
+    @pytest.mark.parametrize("val", ["inf", "-inf", "Infinity", "-Infinity", "1e999", float("inf"), float("-inf")])
+    def test_infinity_returns_default(self, val):
+        # FIXED: only NaN used to be guarded, so "inf" / float('inf') leaked through as a real infinity
+        # (and then poisoned any comparison / sum downstream). Infinities now fall back to the default too.
+        assert gw._safe_float(val, default=7.0) == 7.0
+        assert gw._safe_float(val) == 0.0
+
+    def test_huge_int_that_overflows_float_returns_default(self):
+        assert gw._safe_float(10 ** 400, default=4.0) == 4.0
 
     @pytest.mark.parametrize("val,exp", [("1,234.5", 1234.5), (" 1 2 ", 12.0), ("  7  ", 7.0), ("-4", -4.0),
                                          ("1,20,000", 120000.0)])
@@ -640,10 +654,24 @@ class TestFeedResolvedPrice:
         assert gw._feed_resolved_price({"price": "", "metrics": {"price": 3, "close": 8}}) == 3.0
         assert gw._feed_resolved_price({"price": None, "metrics": {"close": 8}}) == 8.0
 
-    def test_flat_zero_is_not_replaced_by_metrics(self, local_only):
-        # NOT FIXED: `0 not in (None, "")` -> the flat 0 is used and metrics is never consulted for that key.
-        d = {"price": 0, "metrics": {"price": 55}}
-        assert gw._feed_resolved_price(d) == 0.0
+    def test_flat_zero_falls_back_to_metrics_for_the_same_key(self, local_only):
+        # FIXED: `0 not in (None, "")` used to make the flat 0 win, so metrics was never consulted for that
+        # key. A flat value that is zero / negative / junk now falls through to the metrics value.
+        assert gw._feed_resolved_price({"price": 0, "metrics": {"price": 55}}) == 55.0
+        assert gw._feed_resolved_price({"price": "-", "metrics": {"price": "1,200"}}) == 1200.0
+        assert gw._feed_resolved_price({"price": "abc", "metrics": {"price": 7}}) == 7.0
+        assert gw._feed_resolved_price({"price": -4, "metrics": {"price": 9}}) == 9.0
+
+    def test_a_positive_flat_value_still_beats_metrics(self, local_only):
+        assert gw._feed_resolved_price({"price": 3, "metrics": {"price": 55}}) == 3.0
+
+    def test_flat_key_order_still_beats_a_later_metrics_key(self, local_only):
+        # key order is price, close, ...: metrics.price is consulted before the flat `close`
+        assert gw._feed_resolved_price({"price": 0, "close": 8, "metrics": {"price": 55}}) == 55.0
+        assert gw._feed_resolved_price({"price": 0, "close": 8, "metrics": {"close": 99}}) == 8.0
+
+    def test_infinite_price_is_never_returned(self, local_only):
+        assert gw._feed_resolved_price({"price": "inf", "close": 6}) == 6.0
 
     def test_non_dict_metrics_is_ignored(self, local_only):
         assert gw._feed_resolved_price({"metrics": "x"}) == 0.0

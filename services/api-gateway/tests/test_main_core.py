@@ -18,7 +18,9 @@ imports, URL derivation) execute a *fresh copy* of the file under another module
 (`_load_probe`) so the canonical `main` module and its globals are never disturbed.
 Nothing sleeps; no test starts a server.
 
-Findings are pinned as current behaviour and marked ``NOT FIXED``.
+Findings are pinned as current behaviour and marked ``NOT FIXED``; the ones fixed afterwards (notification
+URL trailing slash, scan statuses invisible to shutdown / stop-all under kv_cache, `_add_searched` whitespace)
+now pin the fixed behaviour.
 
 Run from services/api-gateway:
     python3 -m pytest tests/test_main_core.py -v
@@ -256,16 +258,17 @@ def test_notification_url_kept_when_base_already_ends_in_notification(monkeypatc
     assert m.SCHEDULER_URL == "https://ns.example/scheduler"
 
 
-def test_notification_url_keeps_trailing_slash_of_the_base(monkeypatch, tmp_path):
-    """NOT FIXED (low severity): when NOTIFICATION_SCHEDULER_URL already ends in "/notification/"
-    the value is used verbatim, trailing slash included, while every other derived URL (and
-    SCHEDULER_URL) is rstrip('/')-ed. A caller doing f"{NOTIFICATION_URL}/x" would send "//x".
-    Pinned as current behaviour."""
+def test_notification_url_trailing_slash_of_the_base_is_stripped(monkeypatch, tmp_path):
+    """FIXED: when NOTIFICATION_SCHEDULER_URL already ended in "/notification/" the value used to be taken
+    verbatim, trailing slash included, so f"{NOTIFICATION_URL}/notify" sent "//notify". It is now
+    rstrip('/')-ed like every other derived URL."""
     monkeypatch.delenv("NOTIFICATION_URL", raising=False)
     monkeypatch.delenv("SCHEDULER_URL", raising=False)
     m = _load_probe(monkeypatch, tmp_path, env={"NOTIFICATION_SCHEDULER_URL": "https://ns.example/notification/"})
-    assert m.NOTIFICATION_URL == "https://ns.example/notification/"
+    assert m.NOTIFICATION_URL == "https://ns.example/notification"
     assert m.SCHEDULER_URL == "https://ns.example/scheduler"
+    m = _load_probe(monkeypatch, tmp_path, env={"NOTIFICATION_SCHEDULER_URL": "https://ns.example/notification///"})
+    assert m.NOTIFICATION_URL == "https://ns.example/notification"
 
 
 def test_explicit_url_env_overrides_win(monkeypatch, tmp_path):
@@ -1175,13 +1178,12 @@ def test_commit_quote_loop_failure_is_reported(commit_env, monkeypatch):
     assert ph["ok"] is False and "done exploded" in ph["detail"]
 
 
-def test_commit_only_sees_scans_held_in_mem_kv_not_in_kv_cache(commit_env, monkeypatch):
-    """NOT FIXED: scan-task status is written through `_redis_set`, which returns right after a
-    successful `kv_cache.set` and therefore never populates `_mem_kv` when kv_cache is importable
-    (the normal production state). `_graceful_shutdown_commit` (and `/scan/stop-all`) only walk
-    `_mem_kv`, so they find 0 running scans there. The `__ALL__` cancel flag is still set, which is
-    what actually stops the workers; only the persisted status stays "running" until its TTL.
-    Pinned as current behaviour."""
+def test_commit_sees_running_scans_written_through_kv_cache(commit_env, monkeypatch):
+    """FIXED: scan-task status is written through `_redis_set`, which returns right after a successful
+    `kv_cache.set` and used to never populate `_mem_kv` when kv_cache is importable (the normal production
+    state). `_graceful_shutdown_commit` (and `/scan/stop-all`) only walk `_mem_kv`, so they found 0 running
+    scans and the persisted status stayed "running" until its TTL. `_redis_set` now mirrors a scan-task key
+    into `_mem_kv` while its status is "running", so the sweep finds it and commits the partial."""
     kv = FakeKVCache()
     # commit_env swapped `_redis_set` for a recorder; put the real one back for this test
     monkeypatch.setattr(gw, "_redis_set", _REAL_REDIS_SET)
@@ -1189,13 +1191,64 @@ def test_commit_only_sees_scans_held_in_mem_kv_not_in_kv_cache(commit_env, monke
     mem = {}
     monkeypatch.setattr(gw, "_mem_kv", mem)
     monkeypatch.setattr(gw, "_mem_kv_exp", {})
-    gw._redis_set(gw.SCAN_TASK_PREFIX + "abc", {"status": "running"}, ttl=3600)
-    assert kv.store[gw.SCAN_TASK_PREFIX + "abc"] == {"status": "running"}
-    assert mem == {}                                              # never mirrored to memory
+    key = gw.SCAN_TASK_PREFIX + "abc"
+    gw._redis_set(key, {"status": "running"}, ttl=3600)
+    assert kv.store[key] == {"status": "running"}
+    assert mem[key] == {"status": "running"}                      # mirrored while running
     phases = gw._graceful_shutdown_commit()
-    assert _by_phase(phases)["scan"]["detail"] == "cancel committed partial=0"
-    assert kv.store[gw.SCAN_TASK_PREFIX + "abc"]["status"] == "running"   # still "running"
+    assert _by_phase(phases)["scan"]["detail"] == "cancel committed partial=1"
+    done = kv.store[key]
+    assert done["status"] == "cancelled" and done["partial"] is True and done["cancel_requested"] is True
+    assert kv.store[key + ":cancel"] is True
     assert "__ALL__" in gw._SCAN_CANCEL_FLAGS
+    assert key not in mem                                         # the cancelled write drops the mirror
+
+
+def test_scan_stop_all_sees_running_scans_written_through_kv_cache(monkeypatch):
+    kv = FakeKVCache()
+    monkeypatch.setattr(gw, "_kv_cache", kv)
+    monkeypatch.setattr(gw, "_mem_kv", {})
+    monkeypatch.setattr(gw, "_mem_kv_exp", {})
+    monkeypatch.setattr(gw, "_SCAN_CANCEL_FLAGS", set())
+    k1, k2 = gw.SCAN_TASK_PREFIX + "a", gw.SCAN_TASK_PREFIX + "b"
+    gw._redis_set(k1, {"status": "running", "processed": 3}, ttl=3600)
+    gw._redis_set(k2, {"status": "done"}, ttl=3600)
+    out = gw.scan_stop_all()
+    assert out["stopped"] == 1 and "durable_write_failures" not in out
+    assert kv.store[k1]["status"] == "cancelled" and kv.store[k1]["partial"] is True
+    assert kv.store[k2]["status"] == "done"                        # finished scans are left alone
+
+
+def test_scan_task_mirror_is_bounded_to_running_scans(monkeypatch):
+    kv = FakeKVCache()
+    monkeypatch.setattr(gw, "_kv_cache", kv)
+    mem, exp = {}, {}
+    monkeypatch.setattr(gw, "_mem_kv", mem)
+    monkeypatch.setattr(gw, "_mem_kv_exp", exp)
+    k1, k2 = gw.SCAN_TASK_PREFIX + "t1", gw.SCAN_TASK_PREFIX + "t2"
+    gw._redis_set(k1, {"status": "running", "processed": 1}, ttl=60)
+    gw._redis_set(k2, {"status": "running"})                      # no ttl -> no expiry entry
+    assert set(mem) == {k1, k2} and k1 in exp and k2 not in exp
+    gw._redis_set(k1, {"status": "done"}, ttl=60)                 # finished -> dropped
+    assert set(mem) == {k2} and k1 not in exp
+    gw._redis_set(k2 + ":cancel", True, ttl=60)                   # cancel flag is never mirrored
+    gw._redis_set("stockky:other", {"status": "running"}, ttl=60) # non-scan keys never mirrored
+    assert set(mem) == {k2}
+    mem[k1] = {"status": "running"}; exp[k1] = 1.0                # a stale, long-expired mirror entry
+    gw._redis_set(k2, {"status": "running", "processed": 2})      # ...is pruned on the next scan write
+    assert set(mem) == {k2} and k1 not in exp
+    # the mirror is a copy: mutating the caller's dict later does not change it
+    payload = {"status": "running"}
+    gw._redis_set(k2, payload)
+    payload["status"] = "done"
+    assert mem[k2]["status"] == "running"
+
+
+def test_scan_task_mirror_never_raises(monkeypatch):
+    monkeypatch.setattr(gw, "_kv_cache", FakeKVCache())
+    monkeypatch.setattr(gw, "_mem_kv", None)                      # makes the helper's own bookkeeping blow up
+    gw._redis_set(gw.SCAN_TASK_PREFIX + "x", {"status": "running"}, ttl=60)   # must not raise
+    gw._sync_scan_task_mirror(123, {"status": "running"})         # non-str key: ignored
 
 
 _REAL_REDIS_SET = gw._redis_set
@@ -1595,14 +1648,22 @@ def test_add_searched_keeps_only_the_newest_200(monkeypatch):
     assert len(saved) == 200 and saved[-1] == "NEW" and saved[0] == "S6"
 
 
-def test_add_searched_does_not_strip_whitespace(monkeypatch):
-    """NOT FIXED: unlike the watchlist helpers, `_add_searched` never `.strip()`s, so " tcs.ns "
-    is stored as " TCS " and would not de-duplicate against "TCS". Pinned as current behaviour."""
+def test_add_searched_strips_whitespace_and_dedupes(monkeypatch):
+    """FIXED: `_add_searched` never `.strip()`-ed, so " tcs.ns " was stored as " TCS " and did not
+    de-duplicate against "TCS". It now strips (before and after the suffix removal) and ignores blanks."""
     writes = []
     monkeypatch.setattr(gw, "_redis_get", lambda k: ["TCS"])
     monkeypatch.setattr(gw, "_redis_set", lambda k, v, ttl=None: writes.append(list(v)))
-    gw._add_searched(" tcs.ns ")
-    assert writes == [["TCS", " TCS "]]
+    gw._add_searched(" tcs.ns ")                                   # same symbol as stored -> no write
+    assert writes == []
+    gw._add_searched(" infy.ns ")
+    assert writes == [["TCS", "INFY"]]
+    gw._add_searched("   ")                                        # blank -> ignored, not stored as ""
+    gw._add_searched("")
+    gw._add_searched(None)
+    assert writes == [["TCS", "INFY"]]
+    gw._add_searched("reliance .bo")                               # whitespace left after the suffix is gone
+    assert writes[-1] == ["TCS", "RELIANCE"]
 
 
 # ── NSE client / API ─────────────────────────────────────────────────────────

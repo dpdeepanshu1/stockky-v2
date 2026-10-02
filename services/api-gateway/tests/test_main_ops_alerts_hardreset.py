@@ -964,9 +964,10 @@ class TestHardReset:
         r = tc.post("/data-feed/hard-reset")
         assert r.status_code == 500 and r.json()["detail"] == "locked"
 
-    def test_get_never_wipes_and_falls_into_the_symbol_route(self, hr, tc):
-        """NOT FIXED: GET is not a 405 — `/data-feed/{symbol}` captures it as symbol="hard-reset".
-        The important property is that nothing is wiped."""
-        r = tc.get("/data-feed/hard-reset")
-        assert r.status_code != 405
+    def test_get_is_a_405_and_never_wipes(self, hr, tc):
+        """FIXED: GET used to fall into the `/data-feed/{symbol}` catch-all (symbol="hard-reset") and
+        answer 200. It is now a real 405 on every prefix, and nothing is wiped."""
+        for path in ("/data-feed/hard-reset", "/api/data-feed/hard-reset", "/api/feed/hard-reset"):
+            r = tc.get(path)
+            assert r.status_code == 405 and r.headers["allow"] == "POST"
         assert hr.events == [] and hr.kv_deleted == []

@@ -21,8 +21,23 @@ from __future__ import annotations
 import os
 
 
+def _get_str(name: str, default: str) -> str:
+    """Trimmed env string; a missing, blank or whitespace-only variable gives `default`.
+
+    docker-compose / .env files routinely carry `NAME=` (an empty string), and
+    `os.getenv(NAME, default)` returns that empty string instead of the default."""
+    return (os.getenv(name) or "").strip() or default
+
+
 def _get_bool(name: str, default: bool) -> bool:
-    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+    # A blank / whitespace-only value is "unset", NOT "false": with the old
+    # `os.getenv(name, str(default))` a stray `LOSS_BRAKE_ENABLED=` (or
+    # MARKET_GATE_ENABLED / QUALITY_GATE_ENABLED ...) silently switched a
+    # default-True safety gate OFF.
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    return raw.lower() in ("1", "true", "yes", "on")
 
 
 def _get_float(name: str, default: float) -> float:
@@ -42,12 +57,16 @@ def _get_int(name: str, default: int) -> int:
 PORT = _get_int("PORT", 8006)
 
 # ── Database (same instance as every other Stockky service) ────────────────
-DATABASE_URL = os.getenv("DATABASE_URL", "")
-ORACLE_DSN = os.getenv("ORACLE_DSN", "")
-ORACLE_USER = os.getenv("ORACLE_USER", "ADMIN")
-ORACLE_PASSWORD = os.getenv("ORACLE_PASSWORD", "")
-ORACLE_WALLET_PASSWORD = os.getenv("ORACLE_WALLET_PASSWORD", "")
-ORACLE_WALLET_DIR = os.getenv("ORACLE_WALLET_DIR", "/oracle_wallet")
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
+ORACLE_DSN = (os.getenv("ORACLE_DSN") or "").strip()
+ORACLE_USER = (os.getenv("ORACLE_USER") or "").strip() or "ADMIN"
+ORACLE_PASSWORD = os.getenv("ORACLE_PASSWORD") or ""
+if not ORACLE_PASSWORD.strip():  # passwords are kept verbatim; whitespace-only = unset
+    ORACLE_PASSWORD = ""
+ORACLE_WALLET_PASSWORD = os.getenv("ORACLE_WALLET_PASSWORD") or ""
+if not ORACLE_WALLET_PASSWORD.strip():
+    ORACLE_WALLET_PASSWORD = ""
+ORACLE_WALLET_DIR = (os.getenv("ORACLE_WALLET_DIR") or "").strip() or "/oracle_wallet"
 
 DB_POOL_SIZE = _get_int("DB_POOL_SIZE", 3)
 DB_MAX_OVERFLOW = _get_int("DB_MAX_OVERFLOW", 3)
@@ -58,17 +77,15 @@ DB_POOL_TIMEOUT = _get_int("DB_POOL_TIMEOUT", 30)
 # This service only READS the trade_credentials row real-trade-service
 # already owns and refreshes. It never writes/refreshes the token itself —
 # see auth/dhan_credentials_ro.py.
-DHAN_CREDENTIAL_ENC_KEY = os.getenv("DHAN_CREDENTIAL_ENC_KEY", "")
+DHAN_CREDENTIAL_ENC_KEY = (os.getenv("DHAN_CREDENTIAL_ENC_KEY") or "").strip()
 
 # ── Angel One (FREE market data feed — separate account from Dhan) ─────────
-ANGELONE_CLIENT_ID = os.getenv("ANGELONE_CLIENT_ID", "")
-ANGELONE_MPIN = os.getenv("ANGELONE_MPIN", "")
-ANGELONE_API_KEY = os.getenv("ANGELONE_API_KEY", "")
-ANGELONE_TOTP_SECRET = os.getenv("ANGELONE_TOTP_SECRET", "")
-ANGELONE_STATIC_IP = os.getenv("ANGELONE_STATIC_IP", "")
-ANGELONE_WS_URL = os.getenv(
-    "ANGELONE_WS_URL", "wss://smartapisocket.angelone.in/smart-stream"
-)
+ANGELONE_CLIENT_ID = (os.getenv("ANGELONE_CLIENT_ID") or "").strip()
+ANGELONE_MPIN = (os.getenv("ANGELONE_MPIN") or "").strip()
+ANGELONE_API_KEY = (os.getenv("ANGELONE_API_KEY") or "").strip()
+ANGELONE_TOTP_SECRET = (os.getenv("ANGELONE_TOTP_SECRET") or "").strip()
+ANGELONE_STATIC_IP = _get_str("ANGELONE_STATIC_IP", "")
+ANGELONE_WS_URL = _get_str("ANGELONE_WS_URL", "wss://smartapisocket.angelone.in/smart-stream")
 # SmartAPI: up to 3 concurrent WS connections per client code. We only need 1.
 ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION = _get_int(
     "ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION", 1000
@@ -87,7 +104,7 @@ ANGELONE_WS_RECONNECT_BACKOFF_MAX_S = _get_float(
 )
 
 # ── Scan universe ────────────────────────────────────────────────────────────
-SCAN_UNIVERSE_SOURCE = os.getenv("SCAN_UNIVERSE_SOURCE", "all_nse_eq")
+SCAN_UNIVERSE_SOURCE = _get_str("SCAN_UNIVERSE_SOURCE", "all_nse_eq")
 
 # ── Screening windows ────────────────────────────────────────────────────────
 SCAN_WINDOWS_MINUTES = [1, 5, 15, 60]
@@ -154,7 +171,7 @@ RISK_PER_TRADE_PCT_CONFIRMED = _get_bool("RISK_PER_TRADE_PCT_CONFIRMED", True)
 SCALP_POOL_CAPITAL_SHARE_PCT = _get_float("SCALP_POOL_CAPITAL_SHARE_PCT", 50.0)
 
 # ── Order execution ──────────────────────────────────────────────────────────
-SCALP_PRODUCT_TYPE = os.getenv("SCALP_PRODUCT_TYPE", "INTRADAY")  # NOT "CNC"
+SCALP_PRODUCT_TYPE = _get_str("SCALP_PRODUCT_TYPE", "INTRADAY")  # NOT "CNC"
 # BUG FIX (session38): this previously defaulted to "INTRA", which is not
 # a value Dhan's actual REST API accepts for productType — the real enum
 # (per Dhan's official API docs and confirmed by real-trade-service's own
@@ -170,7 +187,7 @@ SCALP_PRODUCT_TYPE = os.getenv("SCALP_PRODUCT_TYPE", "INTRADAY")  # NOT "CNC"
 # `first_live_order_done` never once flipping true. Not overridden by any
 # env var in docker-compose.yml/.env.example, so this default is what was
 # actually running.
-SCALP_EXCHANGE_SEGMENT = os.getenv("SCALP_EXCHANGE_SEGMENT", "NSE_EQ")
+SCALP_EXCHANGE_SEGMENT = _get_str("SCALP_EXCHANGE_SEGMENT", "NSE_EQ")
 USE_SUPER_ORDER = _get_bool("USE_SUPER_ORDER", True)
 # First-live-trade safety valve (recommended, not enforced): forces qty=1
 # on the very first REAL order this process ever places after startup,
@@ -180,7 +197,7 @@ USE_SUPER_ORDER = _get_bool("USE_SUPER_ORDER", True)
 FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE = _get_bool("FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE", True)
 
 # ── EOD square-off ───────────────────────────────────────────────────────────
-EOD_SQUAREOFF_TIME_IST = os.getenv("EOD_SQUAREOFF_TIME_IST", "15:00")
+EOD_SQUAREOFF_TIME_IST = _get_str("EOD_SQUAREOFF_TIME_IST", "15:00")
 
 # 2026-09-15 fix (session40 — mirrors real-trade-service's DATAMATICS-storm
 # hardening, applied here even though this service's EOD sweep runs at most
@@ -193,7 +210,7 @@ EOD_SQUAREOFF_TIME_IST = os.getenv("EOD_SQUAREOFF_TIME_IST", "15:00")
 # with zero further attempts until tomorrow's sweep. These settings bound a
 # small in-call retry for genuinely transient failures only.
 EOD_SELL_RETRY_ATTEMPTS = _get_int("EOD_SELL_RETRY_ATTEMPTS", 3)
-EOD_SELL_RETRY_DELAY_SECONDS = float(os.getenv("EOD_SELL_RETRY_DELAY_SECONDS", "2.0"))
+EOD_SELL_RETRY_DELAY_SECONDS = _get_float("EOD_SELL_RETRY_DELAY_SECONDS", 2.0)
 
 # ── Exit-placement retry backoff (2026-09-20 audit fix) ───────────────────────
 # Mirrors real-trade-service's EXIT_RETRY_* knobs (same names, same defaults —
@@ -408,7 +425,7 @@ OVERNIGHT_STOP_LOSS_PCT = _get_float("OVERNIGHT_STOP_LOSS_PCT", 4.0)
 # execution/dhan_client.py's edis_verification_summary and main.py's
 # scheduled call to it. Same reasoning as real-trade-service's own
 # EDIS_MORNING_CHECK_ENABLED.
-EDIS_MORNING_CHECK_TIME_IST = os.getenv("EDIS_MORNING_CHECK_TIME_IST", "09:00")
+EDIS_MORNING_CHECK_TIME_IST = _get_str("EDIS_MORNING_CHECK_TIME_IST", "09:00")
 
 # ── Manual exit: cancel-then-sell delay (2026-09-18, session67) ─────────────
 # close_position_now() cancels all super-order legs, then immediately fires
@@ -514,7 +531,7 @@ SYMBOL_REENTRY_MIN_PULLBACK_PCT = _get_float("SYMBOL_REENTRY_MIN_PULLBACK_PCT", 
 # SharedOrderBudget for the full rationale.
 SHARED_DAILY_ORDER_BUDGET = _get_int("SHARED_DAILY_ORDER_BUDGET", 5000)
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOG_LEVEL = _get_str("LOG_LEVEL", "INFO")
 
 # ── Admin auth (Layer 1) — SAME mechanism, SAME env vars as real-trade-
 # service's config.py (auth/admin_auth.py docstring there has the full
@@ -527,18 +544,18 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 #   python -c "from argon2 import PasswordHasher; print(PasswordHasher().hash('yourpassword'))"
 # See real-trade-service/config.py's comment for why ADMIN_PASSWORD_HASH_B64
 # exists (docker-compose .env $ interpolation) — same applies here.
-_ADMIN_HASH_B64 = os.getenv("ADMIN_PASSWORD_HASH_B64", "")
-if _ADMIN_HASH_B64 and not os.getenv("ADMIN_PASSWORD_HASH"):
+_ADMIN_HASH_B64 = (os.getenv("ADMIN_PASSWORD_HASH_B64") or "").strip()
+if _ADMIN_HASH_B64 and not (os.getenv("ADMIN_PASSWORD_HASH") or "").strip():
     try:
         import base64 as _b64
         ADMIN_PASSWORD_HASH = _b64.b64decode(_ADMIN_HASH_B64).decode("utf-8").strip()
     except Exception:
         ADMIN_PASSWORD_HASH = ""
 else:
-    ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+    ADMIN_PASSWORD_HASH = (os.getenv("ADMIN_PASSWORD_HASH") or "").strip()
+ADMIN_USERNAME = _get_str("ADMIN_USERNAME", "admin")
 
-SESSION_SECRET = os.getenv("SESSION_SECRET", "")
+SESSION_SECRET = (os.getenv("SESSION_SECRET") or "").strip()
 SESSION_IDLE_TIMEOUT_MINUTES = _get_int("SESSION_IDLE_TIMEOUT_MINUTES", 30)
 
 # ── Notifications (session41 fix — STATUS.md open item #7) ─────────────
@@ -549,8 +566,8 @@ SESSION_IDLE_TIMEOUT_MINUTES = _get_int("SESSION_IDLE_TIMEOUT_MINUTES", 30)
 # execution/dhan_client.py and orders/reconcile.py (order-type mismatches,
 # dead EOD SELLs, unresolvable legacy exit-order backfills) actually reach
 # a human instead of sitting log-only.
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 NOTIFICATION_SERVICE_URL = _env_url("NOTIFICATION_SERVICE_URL", "http://notification-scheduler-service:8000/notification",)
 
 # ── Cross-service PnL sync (Issue #2 fix) ──────────────────────────────

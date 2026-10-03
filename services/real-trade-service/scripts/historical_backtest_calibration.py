@@ -42,7 +42,7 @@ sys.path.insert(0, ".")
 
 import httpx
 
-MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "http://market-data-service:8001").rstrip("/")
+MARKET_DATA_URL = (os.getenv("MARKET_DATA_URL") or "").strip().rstrip("/") or "http://market-data-service:8001"
 MIN_SAMPLES = 8
 
 

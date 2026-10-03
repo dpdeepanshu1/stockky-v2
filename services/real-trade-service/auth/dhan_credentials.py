@@ -405,9 +405,9 @@ def refresh_if_totp_enabled(db: Session) -> bool:
     if not config.DHAN_TOTP_ENABLED:
         return False
 
-    totp_secret = os.environ.get("DHAN_TOTP_SECRET", "")
-    client_id   = os.environ.get("DHAN_CLIENT_ID", "")
-    dhan_pin    = os.environ.get("DHAN_PIN", "")
+    totp_secret = (os.environ.get("DHAN_TOTP_SECRET") or "").strip()
+    client_id   = (os.environ.get("DHAN_CLIENT_ID") or "").strip()
+    dhan_pin    = (os.environ.get("DHAN_PIN") or "").strip()
 
     # All three are required by generateAccessToken. An unset DHAN_PIN used to be
     # sent as pin="" and burn a TOTP attempt on a request Dhan can only reject.

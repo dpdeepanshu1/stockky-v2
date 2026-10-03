@@ -1924,3 +1924,34 @@ class TestCappedMemTtl:
 
     def test_custom_default(self, kv):
         assert kv._capped_mem_ttl(None, 120) == 120 and kv._capped_mem_ttl(500, 120) == 120
+
+
+# ── group 67: whitespace-only / padded env values ─────────────────────────────
+
+class TestBlankAndPaddedEnv:
+    def test_blank_cache_url_does_not_beat_a_valid_database_url(self, kv, monkeypatch):
+        monkeypatch.setenv("CACHE_DATABASE_URL", "   ")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://main/db")
+        assert kv._neon_url() == "postgresql://main/db?sslmode=require"
+
+    def test_whitespace_in_every_variable_means_not_configured(self, kv, monkeypatch):
+        for k in ("CACHE_DATABASE_URL", "KV_DATABASE_URL", "DATABASE_URL", "TRAINING_DATABASE_URL"):
+            monkeypatch.setenv(k, " \t\n ")
+        assert kv._neon_url() is None
+
+    def test_padded_url_is_trimmed(self, kv, monkeypatch):
+        monkeypatch.setenv("KV_DATABASE_URL", "  postgresql://kv/db \n")
+        assert kv._neon_url() == "postgresql://kv/db?sslmode=require"
+
+    def test_whitespace_redis_url_means_no_redis(self, load):
+        m = load(USE_REDIS="1", UPSTASH_REDIS_REST_URL="   ", UPSTASH_REDIS_REST_TOKEN="tok")
+        assert m._get_redis() is None
+
+    def test_whitespace_redis_token_means_no_redis(self, load):
+        m = load(USE_REDIS="1", UPSTASH_REDIS_REST_URL="https://r", UPSTASH_REDIS_REST_TOKEN=" \t")
+        assert m._get_redis() is None
+
+    def test_padded_redis_credentials_are_trimmed(self, load, monkeypatch):
+        made = _fake_upstash(monkeypatch)
+        m = load(USE_REDIS="1", UPSTASH_REDIS_REST_URL="  https://r\n", UPSTASH_REDIS_REST_TOKEN=" tok ")
+        assert m._get_redis() is not None and made == [("https://r", "tok")]

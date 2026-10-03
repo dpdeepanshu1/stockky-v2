@@ -32,7 +32,7 @@ try:
 except ImportError:
     peers_for = normalize_sector = peer_relative_score = average_metrics = None
 
-MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "").rstrip("/")
+MARKET_DATA_URL = (os.getenv("MARKET_DATA_URL") or "").strip().rstrip("/")
 
 
 def _first_score(*candidates: Any, default: float = 50.0) -> float:

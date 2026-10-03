@@ -55,8 +55,8 @@ def _env_url(name: str, default: str, rstrip: bool = True) -> str:
 
 
 MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
-UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL")
-UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+UPSTASH_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip() or None
+UPSTASH_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip() or None
 
 
 def _rs_vs_nifty(close_series, nifty_close_series=None):
@@ -465,7 +465,7 @@ async def sector_relative_strength(symbol: str, sector: str = ""):
     if not sec:
         # Try to read sector from symbol_master
         try:
-            db_url = os.getenv("DATABASE_URL") or os.getenv("CACHE_DATABASE_URL") or ""
+            db_url = (os.getenv("DATABASE_URL") or "").strip() or (os.getenv("CACHE_DATABASE_URL") or "").strip()
             if db_url.startswith("postgres://"):
                 db_url = "postgresql://" + db_url[len("postgres://"):]
             from sqlalchemy import create_engine, text as _text
@@ -499,7 +499,7 @@ async def sector_relative_strength(symbol: str, sector: str = ""):
 
         async def _get_peers(s):
             try:
-                db_url = os.getenv("DATABASE_URL") or os.getenv("CACHE_DATABASE_URL") or ""
+                db_url = (os.getenv("DATABASE_URL") or "").strip() or (os.getenv("CACHE_DATABASE_URL") or "").strip()
                 if db_url.startswith("postgres://"):
                     db_url = "postgresql://" + db_url[len("postgres://"):]
                 from sqlalchemy import create_engine, text as _text

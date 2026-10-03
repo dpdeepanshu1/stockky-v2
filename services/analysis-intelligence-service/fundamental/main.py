@@ -95,8 +95,8 @@ def sector_typical_pe_from_db(sector: str) -> float:
         return float(SECTOR_TYPICAL_PE.get(sector, DEFAULT_TYPICAL_PE))
     try:
         db_url = (
-            os.getenv("CACHE_DATABASE_URL")
-            or os.getenv("DATABASE_URL")
+            (os.getenv("CACHE_DATABASE_URL") or "").strip()
+            or (os.getenv("DATABASE_URL") or "").strip()
             or ""
         )
         if not db_url:
@@ -245,7 +245,7 @@ def health():
     return {
         "status": "ok",
         "service": "fundamental-analysis-service",
-        "indianapi_configured": bool(_os.environ.get("INDIANAPI_KEY")),
+        "indianapi_configured": bool((_os.environ.get("INDIANAPI_KEY") or "").strip()),
         "indianapi_module": get_fundamentals_with_fallback is not None,
     }
 

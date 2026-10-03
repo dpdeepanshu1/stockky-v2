@@ -55,8 +55,11 @@ def archive_dataframe_to_parquet(df, symbol: str, year: int, month: int) -> Opti
 
 def upload_to_supabase_storage(local_path: Path, bucket: str = "bhavcopy-archive") -> bool:
     """Optional upload to private Supabase Storage (1 GB free)."""
-    base = os.environ.get("SUPABASE_URL", "").rstrip("/")
-    key = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    base = (os.environ.get("SUPABASE_URL") or "").strip().rstrip("/")
+    key = (
+        (os.environ.get("SUPABASE_SERVICE_KEY") or "").strip()
+        or (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+    )
     if not base or not key or not local_path.exists():
         return False
     try:

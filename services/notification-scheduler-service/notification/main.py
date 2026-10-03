@@ -112,29 +112,46 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 CONFIG_KEY = "stockky:notification_config"
 
+# A blank or padded env value (e.g. DISCORD_WEBHOOK_URL=" " in a .env file) must
+# count as "not set" — a whitespace-only string is truthy, so it was reported as
+# configured/enabled and then POSTed to as a URL.
+def _env_text(name: str) -> str:
+    """Trimmed env value; "" when unset, empty or whitespace-only."""
+    return (os.getenv(name) or "").strip()
+
+
+_DISCORD_WEBHOOK_ENV = _env_text("DISCORD_WEBHOOK_URL")
+_SLACK_WEBHOOK_ENV = _env_text("SLACK_WEBHOOK_URL")
+_TELEGRAM_TOKEN_ENV = _env_text("TELEGRAM_BOT_TOKEN")
+_TELEGRAM_CHAT_ENV = _env_text("TELEGRAM_CHAT_ID")
+_CALLMEBOT_PHONE_ENV = _env_text("CALLMEBOT_PHONE")
+# CALLMEBOT_USER falls back to CALLMEBOT_PHONE when blank, not only when unset.
+_CALLMEBOT_USER_ENV = _env_text("CALLMEBOT_USER") or _CALLMEBOT_PHONE_ENV
+_CALLMEBOT_APIKEY_ENV = _env_text("CALLMEBOT_APIKEY")
+_CALLMEBOT_USERS_ENV = _env_text("CALLMEBOT_USERS")
+
 # Env vars are only the *initial* defaults — the webpage config overrides them.
 ENV_DEFAULTS = {
-    "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),
-    "slack_webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
-    "telegram_bot_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),
-    "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
+    "discord_webhook_url": _DISCORD_WEBHOOK_ENV,
+    "slack_webhook_url": _SLACK_WEBHOOK_ENV,
+    "telegram_bot_token": _TELEGRAM_TOKEN_ENV,
+    "telegram_chat_id": _TELEGRAM_CHAT_ENV,
     # CallMeBot Telegram API — user is @username (or phone). Optional apikey if required by account.
     # Primary user:
-    "callmebot_user": os.getenv("CALLMEBOT_USER", os.getenv("CALLMEBOT_PHONE", "")),
-    "callmebot_apikey": os.getenv("CALLMEBOT_APIKEY", ""),
+    "callmebot_user": _CALLMEBOT_USER_ENV,
+    "callmebot_apikey": _CALLMEBOT_APIKEY_ENV,
     # Up to 5 users total — CSV of @user or @user:apikey
     # e.g. "@dpdeep29,@friend2,@user3:optionalkey"
-    "callmebot_users": os.getenv("CALLMEBOT_USERS", ""),
+    "callmebot_users": _CALLMEBOT_USERS_ENV,
     # Legacy aliases kept for older configs
-    "callmebot_phone": os.getenv("CALLMEBOT_PHONE", ""),
+    "callmebot_phone": _CALLMEBOT_PHONE_ENV,
     "enabled": {
-        "discord": bool(os.getenv("DISCORD_WEBHOOK_URL")),
-        "slack": bool(os.getenv("SLACK_WEBHOOK_URL")),
-        "telegram": bool(os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID")),
+        "discord": bool(_DISCORD_WEBHOOK_ENV),
+        "slack": bool(_SLACK_WEBHOOK_ENV),
+        "telegram": bool(_TELEGRAM_TOKEN_ENV and _TELEGRAM_CHAT_ENV),
         "callmebot": bool(
-            os.getenv("CALLMEBOT_USER")
-            or os.getenv("CALLMEBOT_PHONE")
-            or os.getenv("CALLMEBOT_USERS")
+            _CALLMEBOT_USER_ENV
+            or _CALLMEBOT_USERS_ENV
         ),
     },
 }
@@ -145,8 +162,8 @@ if os.getenv("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
     _USE_REDIS = False
 if _USE_REDIS and Redis is not None:
     try:
-        url = os.getenv("UPSTASH_REDIS_REST_URL")
-        token = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+        url = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
+        token = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
         if url and token:
             _redis = Redis(url=url, token=token)
             _redis.ping()
@@ -230,6 +247,21 @@ def _save_config(cfg: dict):
             logger.warning("Failed to persist notification config to Redis: %s", e)
 
 
+def _cfg_text(cfg: dict, key: str) -> str:
+    """Trimmed string from a config dict ("" if missing, None or blank).
+
+    The stored config can hold a padded or whitespace-only value (older saves,
+    hand-edited rows, a padded env default merged in by _load_config), so every
+    reader goes through here instead of truth-testing cfg.get(key) directly.
+    """
+    return str(cfg.get(key) or "").strip()
+
+
+def _webhook_url(cfg: dict, key: str) -> str:
+    """Trimmed Discord/Slack webhook URL from a config dict."""
+    return _cfg_text(cfg, key)
+
+
 def _mask(secret: str) -> str:
     if not secret:
         return ""
@@ -261,32 +293,32 @@ def _public_config(cfg: dict) -> dict:
     enabled = cfg.get("enabled", {})
     return {
         "discord": {
-            "configured": bool(cfg.get("discord_webhook_url")),
+            "configured": bool(_webhook_url(cfg, "discord_webhook_url")),
             "enabled": bool(enabled.get("discord")),
-            "masked": _mask(cfg.get("discord_webhook_url", "")),
+            "masked": _mask(_webhook_url(cfg, "discord_webhook_url")),
         },
         "slack": {
-            "configured": bool(cfg.get("slack_webhook_url")),
+            "configured": bool(_webhook_url(cfg, "slack_webhook_url")),
             "enabled": bool(enabled.get("slack")),
-            "masked": _mask(cfg.get("slack_webhook_url", "")),
+            "masked": _mask(_webhook_url(cfg, "slack_webhook_url")),
         },
         "telegram": {
-            "configured": bool(cfg.get("telegram_bot_token") and cfg.get("telegram_chat_id")),
+            "configured": bool(_cfg_text(cfg, "telegram_bot_token") and _cfg_text(cfg, "telegram_chat_id")),
             "enabled": bool(enabled.get("telegram")),
-            "masked": _mask(cfg.get("telegram_bot_token", "")),
-            "chat_id": cfg.get("telegram_chat_id", ""),
+            "masked": _mask(_cfg_text(cfg, "telegram_bot_token")),
+            "chat_id": _cfg_text(cfg, "telegram_chat_id"),
         },
         "callmebot": {
             "configured": bool(
-                (cfg.get("callmebot_user") or cfg.get("callmebot_phone") or "").strip()
-                or (cfg.get("callmebot_users") or "").strip()
+                _cfg_text(cfg, "callmebot_user") or _cfg_text(cfg, "callmebot_phone")
+                or _cfg_text(cfg, "callmebot_users")
             ),
             "enabled": bool(enabled.get("callmebot")),
-            "masked": _mask(cfg.get("callmebot_apikey", "") or "none"),
-            "user": cfg.get("callmebot_user") or cfg.get("callmebot_phone") or "",
-            "phone": cfg.get("callmebot_phone") or cfg.get("callmebot_user") or "",
-            "users_preview": (cfg.get("callmebot_users") or ""),
-            "users": (cfg.get("callmebot_users") or ""),
+            "masked": _mask(_cfg_text(cfg, "callmebot_apikey") or "none"),
+            "user": _cfg_text(cfg, "callmebot_user") or _cfg_text(cfg, "callmebot_phone"),
+            "phone": _cfg_text(cfg, "callmebot_phone") or _cfg_text(cfg, "callmebot_user"),
+            "users_preview": _cfg_text(cfg, "callmebot_users"),
+            "users": _cfg_text(cfg, "callmebot_users"),
             "recipients_count": len(_callmebot_recipients(cfg)),
         },
         "persisted": bool(_kv is not None or _redis),
@@ -397,7 +429,7 @@ def clear_channel(channel: str):
 
 
 def _send_discord(cfg: dict, title: str, message: str):
-    url = cfg.get("discord_webhook_url")
+    url = _webhook_url(cfg, "discord_webhook_url")
     if not (url and cfg.get("enabled", {}).get("discord")):
         return None
     payload = {"content": f"**{title}**\n{message}"}
@@ -411,7 +443,7 @@ def _send_discord(cfg: dict, title: str, message: str):
 
 
 def _send_slack(cfg: dict, title: str, message: str):
-    url = cfg.get("slack_webhook_url")
+    url = _webhook_url(cfg, "slack_webhook_url")
     if not (url and cfg.get("enabled", {}).get("slack")):
         return None
     payload = {"text": f"*{title}*\n{message}"}
@@ -425,8 +457,8 @@ def _send_slack(cfg: dict, title: str, message: str):
 
 
 def _send_telegram(cfg: dict, title: str, message: str):
-    token = cfg.get("telegram_bot_token")
-    chat_id = cfg.get("telegram_chat_id")
+    token = _cfg_text(cfg, "telegram_bot_token")
+    chat_id = _cfg_text(cfg, "telegram_chat_id")
     enabled = cfg.get("enabled", {}).get("telegram")
 
     if not token or not chat_id:
@@ -507,8 +539,8 @@ def _callmebot_recipients(cfg: dict):
         seen.add(u.lower())
         users.append((u, (key or "").strip()))
 
-    primary = (cfg.get("callmebot_user") or cfg.get("callmebot_phone") or "").strip()
-    primary_key = (cfg.get("callmebot_apikey") or "").strip()
+    primary = _cfg_text(cfg, "callmebot_user") or _cfg_text(cfg, "callmebot_phone")
+    primary_key = _cfg_text(cfg, "callmebot_apikey")
     if primary:
         if ":" in primary and not primary.startswith("@"):
             a, b = primary.split(":", 1)
@@ -516,7 +548,7 @@ def _callmebot_recipients(cfg: dict):
         else:
             _add(primary, primary_key)
 
-    raw = (cfg.get("callmebot_users") or "").strip()
+    raw = _cfg_text(cfg, "callmebot_users")
     for part in raw.split(","):
         part = part.strip()
         if not part:
@@ -862,7 +894,7 @@ def _neon_select_1() -> dict:
         # Neon free-tier keep-alive only. On the Oracle Cloud side there is no
         # auto-suspend to prevent, so skip cleanly (a bare "SELECT 1" would also
         # need "FROM dual" on Oracle). Guard is False on Render/Neon.
-        if os.environ.get("ORACLE_DSN"):
+        if (os.environ.get("ORACLE_DSN") or "").strip():
             return {"ok": True, "source": "oracle-skip"}
         if _kv is not None:
             eng = None
@@ -876,9 +908,9 @@ def _neon_select_1() -> dict:
                 return {"ok": True, "source": "kv_cache"}
         # Fallback: direct DATABASE_URL
         url = (
-            os.getenv("CACHE_DATABASE_URL")
-            or os.getenv("DATABASE_URL")
-            or os.getenv("TRAINING_DATABASE_URL")
+            (os.getenv("CACHE_DATABASE_URL") or "").strip()
+            or (os.getenv("DATABASE_URL") or "").strip()
+            or (os.getenv("TRAINING_DATABASE_URL") or "").strip()
         )
         if not url:
             return {"ok": False, "error": "no_database_url"}
@@ -945,11 +977,11 @@ import urllib.parse
 
 def _callmebot_users():
     users = []
-    single_phone = os.getenv("CALLMEBOT_PHONE")
-    single_key = os.getenv("CALLMEBOT_APIKEY")
+    single_phone = _env_text("CALLMEBOT_PHONE")
+    single_key = _env_text("CALLMEBOT_APIKEY")
     if single_phone and single_key:
         users.append((single_phone, single_key))
-    raw = os.getenv("CALLMEBOT_USERS", "")
+    raw = _env_text("CALLMEBOT_USERS")
     for part in raw.split(","):
         part = part.strip()
         if ":" in part:

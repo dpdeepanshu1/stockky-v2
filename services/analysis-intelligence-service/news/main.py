@@ -34,10 +34,10 @@ app = FastAPI(title="Stockky News Intelligence Service", version="0.5.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
-HF_API_KEY = os.getenv("HF_API_KEY")
+HF_API_KEY = (os.getenv("HF_API_KEY") or "").strip() or None
 
 # Optional NewsAPI key (free tier)
-NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
+NEWSAPI_KEY = (os.getenv("NEWSAPI_KEY") or "").strip() or None
 
 # ── API-key-in-URL hygiene (session99) ────────────────────────────────────────
 # _fetch_newsapi() calls https://newsapi.org/v2/everything?...&apiKey=<key> with

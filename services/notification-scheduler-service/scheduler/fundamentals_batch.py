@@ -40,8 +40,8 @@ def _env_url(name: str, default: str, rstrip: bool = True) -> str:
 FUNDAMENTAL_URL = _env_url("FUNDAMENTAL_URL", "https://analysis-intelligence-service.onrender.com/fundamental",)
 API_GATEWAY_URL = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/") or "https://api-gateway.onrender.com"
 DB_URL = (
-    os.getenv("CACHE_DATABASE_URL")
-    or os.getenv("DATABASE_URL")
+    (os.getenv("CACHE_DATABASE_URL") or "").strip()
+    or (os.getenv("DATABASE_URL") or "").strip()
     or ""
 )
 

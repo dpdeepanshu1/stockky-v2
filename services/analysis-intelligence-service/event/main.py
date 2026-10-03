@@ -91,10 +91,12 @@ _mem: dict = {}
 _mem_exp: dict = {}
 
 try:
-    if _USE_REDIS and os.getenv("UPSTASH_REDIS_REST_URL") and os.getenv("UPSTASH_REDIS_REST_TOKEN"):
+    _up_url = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
+    _up_tok = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
+    if _USE_REDIS and _up_url and _up_tok:
         _redis = Redis(
-            url=os.getenv("UPSTASH_REDIS_REST_URL"),
-            token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
+            url=_up_url,
+            token=_up_tok,
         )
         _redis.ping()
         logger.info("Event tracker: Upstash Redis ON (USE_REDIS=1)")

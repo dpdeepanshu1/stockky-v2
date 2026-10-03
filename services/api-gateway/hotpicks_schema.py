@@ -178,9 +178,9 @@ def _normalize_db_url(url: str) -> str:
 
 def _raw_url() -> str:
     return (
-        os.getenv("CACHE_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
-        or os.getenv("TRAINING_DATABASE_URL")
+        (os.getenv("CACHE_DATABASE_URL") or "").strip()
+        or (os.getenv("DATABASE_URL") or "").strip()
+        or (os.getenv("TRAINING_DATABASE_URL") or "").strip()
         or ""
     )
 
@@ -192,7 +192,7 @@ def is_oracle() -> bool:
             return _oc.oracle_is_configured(_raw_url() or "")
         except Exception:
             pass
-    return bool(os.environ.get("ORACLE_DSN"))
+    return bool((os.environ.get("ORACLE_DSN") or "").strip())
 
 
 def dialect() -> str:

@@ -370,6 +370,19 @@ def compute_instant_scores(
     if price <= 0 and not has_feed:
         return _avoid_payload(base, 0.0, "NO DATA / MISSING FROM FEED")
 
+    # A feed row that only carries price / prev_close / close proves the symbol quotes — it says
+    # nothing about quality, so every sub-score below would be made-up defaults. Only these keys
+    # count as real fundamental / technical evidence for a bullish label.
+    has_signal = bool(feed) and (
+        feed.get("fundamental_score") is not None
+        or feed.get("technical_score") is not None
+        or feed.get("combined_score") is not None
+        or bool(feed.get("metrics"))
+        or feed.get("rsi") is not None
+        or feed.get("pe_ratio") is not None
+        or feed.get("roce") is not None
+    )
+
     change_pct = 0.0
     if price > 0 and prev_close > 0:
         change_pct = round(((price - prev_close) / prev_close) * 100.0, 2)
@@ -385,6 +398,16 @@ def compute_instant_scores(
     combined = max(12, min(95, combined))
 
     decision, confidence = derive_decision(combined, change_pct, tech, fund)
+
+    # Never let default scores alone produce a bullish call (price-only rows used to reach
+    # BUY NOW at +1%). Bearish labels (AVOID) are kept: a price drop is real evidence by itself.
+    decision_cap_reason = None
+    if not has_signal and decision in ("BUY NOW", "PREPARE TO BUY"):
+        decision, confidence = "HOLD", "Low"
+        decision_cap_reason = (
+            "No fundamental/technical data in the feed — scores are defaults, "
+            "bullish label withheld until real data arrives"
+        )
 
     target = round(price * 1.065, 2) if price > 0 else None
     stop = round(price * 0.968, 2) if price > 0 else None
@@ -433,6 +456,8 @@ def compute_instant_scores(
         "from_data_feed": has_feed,
         "data_insufficient": (price <= 0),
         "provisional_defaults": (not has_feed and price > 0),
+        "decision_capped": decision_cap_reason is not None,
+        "decision_cap_reason": decision_cap_reason,
         # Display-only tag — never used to exclude a stock, just lets the UI
         # badge/sort "value buys" (price under VALUE_BUY_THRESHOLD, default ₹2000).
         "value_buy": bool(0 < price <= VALUE_BUY_THRESHOLD),
@@ -456,6 +481,9 @@ def compute_instant_scores(
             f"{decision} · tech {tech} · fund {fund} · combined {combined} · Δ {change_pct:+.2f}%"
         ),
     }
+
+    if decision_cap_reason:
+        out["reasons"]["lite"].append(decision_cap_reason)
 
     try:
         from price_resolver import apply_price_aliases

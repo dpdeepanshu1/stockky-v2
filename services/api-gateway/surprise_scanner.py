@@ -166,7 +166,7 @@ def _dialect() -> str:
             return _ss.dialect()
         except Exception:
             pass
-    return "oracle" if os.environ.get("ORACLE_DSN") else "postgresql"
+    return "oracle" if (os.environ.get("ORACLE_DSN") or "").strip() else "postgresql"
 
 
 def _conn_dialect(conn) -> str:
@@ -183,9 +183,9 @@ def _db_url() -> Optional[str]:
         except Exception as e:
             logger.debug("surprise_schema.database_url: %s", e)
     url = (
-        os.getenv("CACHE_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
-        or os.getenv("TRAINING_DATABASE_URL")
+        (os.getenv("CACHE_DATABASE_URL") or "").strip()
+        or (os.getenv("DATABASE_URL") or "").strip()
+        or (os.getenv("TRAINING_DATABASE_URL") or "").strip()
     )
     if url and url.lower().startswith("oracle"):
         return None
@@ -1296,7 +1296,7 @@ def repair_surprise_batch(limit: int = 15, market_data_url: str = "", symbol: st
     if not targets:
         return {"status": "completed", "repaired": [], "message": "Nothing missing"}
 
-    md = (market_data_url or os.getenv("MARKET_DATA_URL") or "").rstrip("/")
+    md = ((market_data_url or "").strip() or (os.getenv("MARKET_DATA_URL") or "").strip()).rstrip("/")
     repaired = []
     try:
         with httpx.Client(timeout=8.0, follow_redirects=True) as client:

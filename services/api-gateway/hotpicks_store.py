@@ -652,7 +652,7 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
             out["message"] = "Nothing missing a price."
             return out
 
-        md = (market_data_url or os.getenv("MARKET_DATA_URL") or "").rstrip("/")
+        md = ((market_data_url or "").strip() or (os.getenv("MARKET_DATA_URL") or "").strip()).rstrip("/")
         repaired = []
         with httpx.Client(timeout=8.0, follow_redirects=True) as client, eng.begin() as conn:
             for sym, section, blob in targets:
@@ -743,7 +743,7 @@ def hotpicks_repair_scores(
     import httpx
 
     out: Dict[str, Any] = {"status": "no_data", "repaired": [], "attempted": 0}
-    dec_base = (decision_url or os.getenv("DECISION_URL") or "").rstrip("/")
+    dec_base = ((decision_url or "").strip() or (os.getenv("DECISION_URL") or "").strip()).rstrip("/")
     if not dec_base:
         out["status"] = "not_configured"
         out["error"] = "DECISION_URL not set"

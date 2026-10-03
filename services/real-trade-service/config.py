@@ -93,27 +93,27 @@ FUNDAMENTAL_URL = _env_url("FUNDAMENTAL_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/fun
 #      no $ characters, so no interpolation problem, on either platform:
 #        python -c "import base64; print(base64.b64encode(b'<hash>').decode())"
 # Either input is accepted; ADMIN_PASSWORD_HASH takes priority if both are set.
-_ADMIN_HASH_B64 = os.getenv("ADMIN_PASSWORD_HASH_B64", "")
-if _ADMIN_HASH_B64 and not os.getenv("ADMIN_PASSWORD_HASH"):
+_ADMIN_HASH_B64 = (os.getenv("ADMIN_PASSWORD_HASH_B64") or "").strip()
+if _ADMIN_HASH_B64 and not (os.getenv("ADMIN_PASSWORD_HASH") or "").strip():
     try:
         import base64 as _b64
         ADMIN_PASSWORD_HASH = _b64.b64decode(_ADMIN_HASH_B64).decode("utf-8").strip()
     except Exception:
         ADMIN_PASSWORD_HASH = ""
 else:
-    ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
+    ADMIN_PASSWORD_HASH = (os.getenv("ADMIN_PASSWORD_HASH") or "").strip()
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 
 # Session token signing secret + lifetime. Idle timeout is intentionally
 # short (real-money surface) — every mutating call re-validates the session,
 # not just page load (see auth/admin_auth.py).
-SESSION_SECRET = os.getenv("SESSION_SECRET", "")
+SESSION_SECRET = (os.getenv("SESSION_SECRET") or "").strip()
 SESSION_IDLE_TIMEOUT_MINUTES = int(os.getenv("SESSION_IDLE_TIMEOUT_MINUTES", "30"))
 
 # ── Dhan credential encryption (Layer 2) ─────────────────────────────────────
 # Fernet key encrypting the stored Dhan client-id/access-token at rest.
 # Generate once with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-DHAN_CREDENTIAL_ENC_KEY = os.getenv("DHAN_CREDENTIAL_ENC_KEY", "")
+DHAN_CREDENTIAL_ENC_KEY = (os.getenv("DHAN_CREDENTIAL_ENC_KEY") or "").strip()
 
 # Decision 4: manual token paste by default. Dhan access tokens are
 # generated from the Dhan developer console (web.dhan.co → DhanHQ Trading
@@ -130,7 +130,7 @@ DHAN_CREDENTIAL_ENC_KEY = os.getenv("DHAN_CREDENTIAL_ENC_KEY", "")
 # self-heals the token instead.
 DHAN_TOKEN_LIFETIME_DAYS = float(os.getenv("DHAN_TOKEN_LIFETIME_DAYS", "1") or 1)
 DHAN_TOTP_ENABLED = os.getenv("DHAN_TOTP_ENABLED", "false").lower() == "true"
-DHAN_TOTP_SECRET = os.getenv("DHAN_TOTP_SECRET", "")  # only read when the above is true
+DHAN_TOTP_SECRET = (os.getenv("DHAN_TOTP_SECRET") or "").strip()  # only read when the above is true
 
 # §2 proactive TOTP refresh loop (execution/auto_pilot.py:_totp_refresh_loop,
 # auth/dhan_credentials.py:token_needs_refresh). Added alongside the
@@ -151,13 +151,36 @@ DHAN_TOTP_REFRESH_MARGIN_HOURS = float(
 )
 
 # Dhan sandbox vs live base URL — sandbox is the default until Phase 2's
-# validation runs are done; execution/dhan_client.py reads this, never
-# hardcodes a host.
-DHAN_ENV = os.getenv("DHAN_ENV", "sandbox")  # "sandbox" | "live"
+# validation runs are done. NOTE: nothing imports DHAN_BASE_URL yet (the order path goes through
+# the Dhan SDK and execution/dhan_client.py's eDIS calls hardcode https://api.dhan.co/v2), so this
+# value is only a resolved, validated setting for now.
+_DHAN_DEFAULT_BASE = "https://api.dhan.co/v2"
+
+
+def _dhan_base_url(name: str) -> str:
+    """Dhan REST base from the environment, never blank and never a non-https host.
+
+    os.getenv(name, default) only falls back when the variable is UNSET, so a blank
+    DHAN_LIVE_URL (`DHAN_LIVE_URL=` in an env_file) became "" and every order call went to
+    "/orders". Blank / whitespace-only / slash-only values use the official base. A value
+    that is not https:// is refused (the access token travels on this URL), so it also falls
+    back to the official base instead of sending the token over plain http or to a typo host.
+    """
+    raw = (os.getenv(name) or "").strip().rstrip("/")
+    if raw.lower().startswith("https://") and len(raw) > len("https://"):
+        return raw
+    return _DHAN_DEFAULT_BASE
+
+
+# A blank DHAN_ENV used to raise KeyError at import; blank now means the safe default (sandbox).
+# A non-blank value that is neither "sandbox" nor "live" still fails fast, with a clear message.
+DHAN_ENV = (os.getenv("DHAN_ENV") or "").strip().lower() or "sandbox"  # "sandbox" | "live"
+if DHAN_ENV not in ("sandbox", "live"):
+    raise ValueError(f"DHAN_ENV must be 'sandbox' or 'live', got {DHAN_ENV!r}")
 DHAN_BASE_URL = {
-    "sandbox": os.getenv("DHAN_SANDBOX_URL", "https://api.dhan.co/v2"),  # Dhan uses one
-    "live": os.getenv("DHAN_LIVE_URL", "https://api.dhan.co/v2"),        # base URL for both;
-}[DHAN_ENV]                                                              # sandbox = separate app/token
+    "sandbox": _dhan_base_url("DHAN_SANDBOX_URL"),  # Dhan uses one base URL for both;
+    "live": _dhan_base_url("DHAN_LIVE_URL"),        # sandbox = separate app/token
+}[DHAN_ENV]
 
 # ── Decision 1: entry style — bounded limit order, time-boxed ──────────────
 ENTRY_ORDER_TYPE = "LIMIT"
@@ -288,7 +311,7 @@ DEFAULT_MAX_TICK_VOLATILITY_MULT = float(os.getenv("DEFAULT_MAX_TICK_VOLATILITY_
 #    pointed at the SAME instance as the rest of Stockky via the same
 #    ORACLE_DSN / ORACLE_WALLET_DIR / ORACLE_WALLET_PASSWORD env vars, or
 #    (on Render/Neon for local dev) the same DATABASE_URL. ─────────────────
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 
 # ── Paper-mode default capital (DEMO account seed, admin-editable) ─────────
 DEFAULT_DEMO_CAPITAL = float(os.getenv("DEFAULT_DEMO_CAPITAL", "100000"))
@@ -460,8 +483,8 @@ US_SECTOR_BONUS_FULL_SCALE_PCT = float(os.getenv("US_SECTOR_BONUS_FULL_SCALE_PCT
 #    events, so a token/chat can be shared or split independently.
 #    Create a bot via @BotFather, then message it once and open
 #    https://api.telegram.org/bot<token>/getUpdates to read your chat_id.
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 
 
 def startup_config_errors() -> list[str]:

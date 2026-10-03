@@ -50,8 +50,8 @@ def _get_redis():
         _redis = None
         return None
 
-    url = os.environ.get("UPSTASH_REDIS_REST_URL")
-    token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+    url = (os.environ.get("UPSTASH_REDIS_REST_URL") or "").strip()
+    token = (os.environ.get("UPSTASH_REDIS_REST_TOKEN") or "").strip()
     if not url or not token:
         return None
     try:

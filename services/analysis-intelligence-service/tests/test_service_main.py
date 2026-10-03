@@ -530,3 +530,37 @@ class TestRealSourceBranches:
         assert h["mounted"] == []
         assert m.root()["status"] == "degraded"
 
+
+
+class TestRealHiddenWhileLoading:
+    """`_hidden_while_loading` on the REAL main.py source (not a temp copy).
+
+    The loader tests above drive it through copies of main.py under `__pycache__`, which
+    .coveragerc omits, so in run_tests.sh the real file showed two uncovered lines (the
+    non-string and the '' early returns). These pin the same contract directly."""
+
+    def test_non_string_entries_are_never_hidden_and_never_raise(self, real_src):
+        m = real_src()
+        for entry in (None, 0, 3.5, b"bytes", object(), ("a",), os.path.join):
+            assert m._hidden_while_loading(entry) is False
+
+    def test_empty_string_is_hidden(self, real_src):
+        assert real_src()._hidden_while_loading("") is True
+
+    def test_sibling_subapp_folders_are_hidden_in_every_spelling(self, real_src, monkeypatch):
+        m = real_src()
+        for folder in _FOLDERS:
+            absolute = os.path.join(m.ROOT, folder)
+            assert m._hidden_while_loading(absolute) is True
+            assert m._hidden_while_loading(absolute + os.sep) is True
+            assert m._hidden_while_loading(os.path.join(m.ROOT, ".", folder)) is True
+        monkeypatch.chdir(m.ROOT)
+        assert m._hidden_while_loading("news") is True   # relative spelling resolves against cwd
+
+    def test_unrelated_paths_are_kept(self, real_src, monkeypatch):
+        m = real_src()
+        assert m._hidden_while_loading(m.ROOT) is False                       # the service root itself
+        assert m._hidden_while_loading(os.path.join(m.ROOT, "not_a_subapp")) is False
+        assert m._hidden_while_loading("/usr/lib/python3/dist-packages") is False
+        monkeypatch.chdir(m.ROOT)
+        assert m._hidden_while_loading("not_a_subapp") is False

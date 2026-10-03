@@ -101,8 +101,8 @@ if USE_REDIS:
     try:
         from upstash_redis import Redis as _UR
         _redis = _UR(
-            url=os.environ.get("UPSTASH_REDIS_REST_URL", ""),
-            token=os.environ.get("UPSTASH_REDIS_REST_TOKEN", ""),
+            url=(os.environ.get("UPSTASH_REDIS_REST_URL") or "").strip(),
+            token=(os.environ.get("UPSTASH_REDIS_REST_TOKEN") or "").strip(),
         )
         _redis.ping()
         logger.info("Scheduler Redis ON (USE_REDIS=1)")

@@ -48,8 +48,8 @@ def _get_redis():
         return None
     if os.getenv("CB_REDIS_SYNC", "0").lower() not in ("1", "true", "yes"):
         return None
-    url = os.environ.get("UPSTASH_REDIS_REST_URL")
-    token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+    url = (os.environ.get("UPSTASH_REDIS_REST_URL") or "").strip()
+    token = (os.environ.get("UPSTASH_REDIS_REST_TOKEN") or "").strip()
     if not url or not token:
         return None
     try:

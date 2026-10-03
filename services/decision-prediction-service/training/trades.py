@@ -61,7 +61,11 @@ MAX_HOLDING_DAYS = 21
 WEEKLY_TAKE_PROFIT_PCT = 5.0
 
 # ---------- Database engine and session factory ----------
-DATABASE_URL = os.environ.get('TRAINING_DATABASE_URL') or os.environ.get('DATABASE_URL', 'sqlite:///./training.db')
+try:
+    from models import get_engine, resolve_database_url
+    DATABASE_URL = resolve_database_url()
+except Exception:
+    DATABASE_URL = (os.environ.get('TRAINING_DATABASE_URL') or '').strip() or (os.environ.get('DATABASE_URL') or '').strip() or 'sqlite:///./training.db'
 try:
     from models import get_engine
     engine = get_engine(DATABASE_URL)

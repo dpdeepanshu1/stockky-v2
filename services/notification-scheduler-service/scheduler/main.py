@@ -26,12 +26,12 @@ def _select_1() -> dict:
     try:
         # Neon free-tier keep-alive only; Oracle has no auto-suspend to prevent
         # and needs "FROM dual", so skip cleanly. Guard is False on Render/Neon.
-        if os.environ.get("ORACLE_DSN"):
+        if (os.environ.get("ORACLE_DSN") or "").strip():
             return {"ok": True, "source": "oracle-skip"}
         url = (
-            os.getenv("CACHE_DATABASE_URL")
-            or os.getenv("DATABASE_URL")
-            or os.getenv("TRAINING_DATABASE_URL")
+            (os.getenv("CACHE_DATABASE_URL") or "").strip()
+            or (os.getenv("DATABASE_URL") or "").strip()
+            or (os.getenv("TRAINING_DATABASE_URL") or "").strip()
         )
         if not url:
             return {"ok": False, "error": "no_database_url"}

@@ -162,10 +162,10 @@ def _neon_url() -> Optional[str]:
     Prevents data bleeding into the Training Database.
     """
     url = (
-        os.getenv("CACHE_DATABASE_URL")
-        or os.getenv("KV_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
-        or os.getenv("TRAINING_DATABASE_URL")
+        (os.getenv("CACHE_DATABASE_URL") or "").strip()
+        or (os.getenv("KV_DATABASE_URL") or "").strip()
+        or (os.getenv("DATABASE_URL") or "").strip()
+        or (os.getenv("TRAINING_DATABASE_URL") or "").strip()
     )
     # Oracle Autonomous DB (Oracle VM): when ORACLE_DSN is set — or the resolved
     # URL is an oracle+oracledb:// URL — return it untouched (a scheme-only
@@ -430,8 +430,8 @@ def _get_redis():
     if not USE_REDIS:
         logger.info("KV: USE_REDIS=0 — Upstash disconnected (memory + optional Neon)")
         return None
-    url = os.getenv("UPSTASH_REDIS_REST_URL")
-    tok = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+    url = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
+    tok = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
     if not url or not tok:
         return None
     try:

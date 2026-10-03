@@ -1,0 +1,33 @@
+# .dockerignore — repo-root build context (the root Dockerfile; docker-compose builds each
+# service from its own folder and does not use this one).
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+**/.DS_Store
+
+# Secrets / machine-local config
+.env
+.env.*
+oracle_wallet
+
+# Dependencies and build output
+**/node_modules
+**/dist
+
+# Python caches / virtualenvs
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.venv
+venv
+**/*.egg-info
+
+# Tests + coverage output
+**/tests
+**/.pytest_cache
+.coverage
+.coverage.*
+htmlcov
+**/*,cover

@@ -79,7 +79,7 @@ def _dialect() -> str:
             return _ss.dialect()
         except Exception:
             pass
-    return "oracle" if os.environ.get("ORACLE_DSN") else "postgresql"
+    return "oracle" if (os.environ.get("ORACLE_DSN") or "").strip() else "postgresql"
 
 
 def _conn_dialect(conn) -> str:
@@ -100,9 +100,9 @@ def _db_url() -> Optional[str]:
         except Exception as e:
             logger.debug("surprise_schema.database_url: %s", e)
     url = (
-        os.getenv("CACHE_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
-        or os.getenv("TRAINING_DATABASE_URL")
+        (os.getenv("CACHE_DATABASE_URL") or "").strip()
+        or (os.getenv("DATABASE_URL") or "").strip()
+        or (os.getenv("TRAINING_DATABASE_URL") or "").strip()
     )
     if url and url.lower().startswith("oracle"):
         return None

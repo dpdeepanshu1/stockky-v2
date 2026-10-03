@@ -104,10 +104,15 @@ SERVICE_URL = _env_url(
     ),
     rstrip=False,
 )
-DATABASE_URL = os.environ.get('TRAINING_DATABASE_URL') or os.environ.get('DATABASE_URL', 'sqlite:///./training.db')
-_db_backend = 'postgres' if DATABASE_URL.startswith(('postgres://', 'postgresql://')) else 'sqlite'
-_training_db_env_set = bool(os.environ.get('TRAINING_DATABASE_URL') or os.environ.get('DATABASE_URL'))
-logging.getLogger('training-service').info('DB backend=%s (set DATABASE_URL for durable win-rate/T+1/T+5)', _db_backend)
+try:
+    from models import resolve_database_url, db_backend_name
+    DATABASE_URL = resolve_database_url()
+    _db_backend = db_backend_name(DATABASE_URL)
+except Exception:
+    DATABASE_URL = (os.environ.get('TRAINING_DATABASE_URL') or '').strip() or (os.environ.get('DATABASE_URL') or '').strip() or 'sqlite:///./training.db'
+    _db_backend = 'postgres' if DATABASE_URL.startswith(('postgres://', 'postgresql://')) else 'sqlite'
+_training_db_env_set = bool((os.environ.get('TRAINING_DATABASE_URL') or '').strip() or (os.environ.get('DATABASE_URL') or '').strip())
+logging.getLogger('training-service').info('DB backend=%s (set DATABASE_URL, or ORACLE_DSN on the Oracle VM, for durable win-rate/T+1/T+5)', _db_backend)
 MODEL_STORE_PATH = os.environ.get('MODEL_STORE_PATH', './model-store')
 # Neon/Supabase-friendly engine (pool_pre_ping, ssl, postgres:// fix)
 try:
@@ -306,7 +311,7 @@ def _db_connection_info():
     """Probe DB connectivity for UI (no secrets)."""
     info = {
         "db_backend": _db_backend,
-        "db_durable": _db_backend == "postgres",
+        "db_durable": _db_backend in ("postgres", "oracle"),
         "db_connected": False,
         "db_provider": None,
         "db_message": "",
@@ -318,6 +323,8 @@ def _db_connection_info():
         info["db_provider"] = "supabase"
     elif "neon.tech" in low or "neon" in low:
         info["db_provider"] = "neon"
+    elif _db_backend == "oracle":
+        info["db_provider"] = "oracle"
     elif _db_backend == "postgres":
         info["db_provider"] = "postgres"
     else:
@@ -327,7 +334,9 @@ def _db_connection_info():
         try:
             db.execute(text("SELECT 1"))
             info["db_connected"] = True
-            if info["db_durable"]:
+            if _db_backend == "oracle":
+                info["db_message"] = "Connected to Oracle Autonomous DB — trades, training, and backups persist."
+            elif info["db_durable"]:
                 prov = (info["db_provider"] or "postgres").title()
                 info["db_message"] = f"Connected to {prov} Postgres — trades, training, and backups persist."
             else:

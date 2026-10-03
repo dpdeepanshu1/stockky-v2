@@ -1,0 +1,18 @@
+# .dockerignore — frontend build context.
+# The Dockerfile runs `npm install` and `vite build` inside the image, so host-side
+# node_modules / dist must not be copied in (wrong-platform native modules, stale bundles,
+# and a `COPY . .` layer that changes on every local build).
+#
+# .env* files are deliberately NOT ignored here: vite reads .env.production at build time.
+
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+**/.DS_Store
+node_modules
+**/node_modules
+dist
+npm-debug.log*
+.vite

@@ -23,9 +23,9 @@ import httpx
 logger = logging.getLogger("symbol-master-sync")
 
 DB_URL = (
-    os.getenv("CACHE_DATABASE_URL")
-    or os.getenv("DATABASE_URL")
-    or os.getenv("TRAINING_DATABASE_URL")
+    (os.getenv("CACHE_DATABASE_URL") or "").strip()
+    or (os.getenv("DATABASE_URL") or "").strip()
+    or (os.getenv("TRAINING_DATABASE_URL") or "").strip()
     or ""
 )
 

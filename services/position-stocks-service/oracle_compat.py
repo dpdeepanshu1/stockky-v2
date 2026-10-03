@@ -21,6 +21,10 @@ services/decision-prediction-service/training/models.py:
     ORACLE_WALLET_PASSWORD  wallet password (mTLS Instance Wallet)
     DB_POOL_SIZE / DB_MAX_OVERFLOW / DB_POOL_RECYCLE / DB_POOL_TIMEOUT
 
+Blank handling (group 71): ORACLE_DSN / ORACLE_USER / ORACLE_WALLET_DIR / TNS_ADMIN are trimmed and a
+whitespace-only value counts as unset (a padded ORACLE_DSN used to flip the process into Oracle mode with an
+empty DSN). The two passwords are kept verbatim -- never stripped -- but a whitespace-only value counts as unset.
+
 Nothing here imports oracledb unless an Oracle engine is actually built, so
 services that only ever talk to Neon pay no import cost.
 """
@@ -34,6 +38,26 @@ _log = logging.getLogger("oracle-compat")
 _ORACLE_LOB_CONFIGURED = False
 
 
+def _secret_env(*names: str) -> str:
+    """First non-blank value among the named env vars, returned VERBATIM.
+
+    Passwords are deliberately not .strip()'d (a password may legitimately start
+    or end with whitespace), but a whitespace-only value is a paste/typo, not a
+    password: it counts as unset, so an `ORACLE_PASSWORD="  "` no longer shadows
+    the `ORACLE_ADMIN_PASSWORD` fallback or gets sent to Oracle as the password."""
+    for name in names:
+        value = os.environ.get(name) or ""
+        if value.strip():
+            return value
+    return ""
+
+
+def _wallet_dir() -> str:
+    """Wallet directory: ORACLE_WALLET_DIR, else TNS_ADMIN (both trimmed; a
+    whitespace-only value is unset, not a directory called ' ')."""
+    return (os.environ.get("ORACLE_WALLET_DIR") or "").strip() or (os.environ.get("TNS_ADMIN") or "").strip()
+
+
 def oracle_is_configured(url: str = "") -> bool:
     """True when we should talk to Oracle Autonomous DB instead of Postgres.
 
@@ -41,7 +65,7 @@ def oracle_is_configured(url: str = "") -> bool:
     exactly what lets the SAME code run on Render (Neon/Postgres) and on the
     Oracle VM (Oracle ADB) with only environment differences."""
     try:
-        return (url or "").lower().startswith("oracle") or bool(os.environ.get("ORACLE_DSN"))
+        return (url or "").lower().startswith("oracle") or bool((os.environ.get("ORACLE_DSN") or "").strip())
     except Exception:
         return False
 
@@ -90,14 +114,14 @@ def oracle_engine_kwargs(full_url_provided: bool, **pool_overrides) -> dict:
     if not full_url_provided:
         # Empty URL ("oracle+oracledb://") + connect_args — cleanest for wallet
         # auth and avoids URL-encoding the ADMIN password.
-        ca["user"] = os.environ.get("ORACLE_USER", "ADMIN")
-        pw = os.environ.get("ORACLE_PASSWORD") or os.environ.get("ORACLE_ADMIN_PASSWORD")
+        ca["user"] = (os.environ.get("ORACLE_USER") or "").strip() or "ADMIN"
+        pw = _secret_env("ORACLE_PASSWORD", "ORACLE_ADMIN_PASSWORD")
         if pw:
             ca["password"] = pw
-        ca["dsn"] = os.environ.get("ORACLE_DSN", "")  # TNS alias e.g. stockkydb_high
+        ca["dsn"] = (os.environ.get("ORACLE_DSN") or "").strip()  # TNS alias e.g. stockkydb_high
     # Wallet location applies to both URL and discrete-var forms.
-    wallet_dir = os.environ.get("ORACLE_WALLET_DIR") or os.environ.get("TNS_ADMIN")
-    wallet_pw = os.environ.get("ORACLE_WALLET_PASSWORD")
+    wallet_dir = _wallet_dir()
+    wallet_pw = _secret_env("ORACLE_WALLET_PASSWORD")
     if wallet_dir:
         ca["config_dir"] = wallet_dir
         ca["wallet_location"] = wallet_dir
@@ -137,8 +161,8 @@ def build_oracle_engine(url: str = "", **pool_overrides):
         url = "oracle+oracledb://"
     _log.info(
         "Oracle Autonomous DB engine (dsn=%s, wallet=%s)",
-        os.environ.get("ORACLE_DSN", "from-url"),
-        os.environ.get("ORACLE_WALLET_DIR") or os.environ.get("TNS_ADMIN") or "none",
+        (os.environ.get("ORACLE_DSN") or "").strip() or "from-url",
+        _wallet_dir() or "none",
     )
     eng = create_engine(url, **kwargs)
     _attach_call_timeout(eng)

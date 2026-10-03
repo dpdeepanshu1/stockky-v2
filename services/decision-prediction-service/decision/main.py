@@ -99,8 +99,8 @@ except Exception:
 if _USE_REDIS:
     try:
         from upstash_redis import Redis
-        _url = os.getenv("UPSTASH_REDIS_REST_URL")
-        _tok = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+        _url = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
+        _tok = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
         if _url and _tok:
             _redis = Redis(url=_url, token=_tok)
             _redis.ping()

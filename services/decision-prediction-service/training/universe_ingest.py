@@ -29,7 +29,7 @@ logger = logging.getLogger("universe_ingest")
 
 IST = ZoneInfo("Asia/Kolkata")
 RETENTION_HOURS = int(os.getenv("TRAINING_SAMPLE_RETENTION_HOURS", "48"))  # 24–48h
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("TRAINING_DATABASE_URL") or "sqlite:///./training.db"
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip() or (os.getenv("TRAINING_DATABASE_URL") or "").strip() or "sqlite:///./training.db"
 
 Base = declarative_base()
 
@@ -51,7 +51,7 @@ class UniverseTrainingSample(Base):
 
 
 def _get_engine():
-    url = os.getenv("TRAINING_DATABASE_URL") or os.getenv("DATABASE_URL") or DATABASE_URL
+    url = (os.getenv("TRAINING_DATABASE_URL") or "").strip() or (os.getenv("DATABASE_URL") or "").strip() or DATABASE_URL
     # Oracle Autonomous DB (Oracle Cloud side): build via oracle_compat and skip
     # ALL the Postgres/Neon URL surgery below (it assumes psycopg2). The ORM
     # (Base.metadata.create_all + Session) is dialect-portable, so the same code

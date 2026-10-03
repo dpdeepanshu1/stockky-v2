@@ -22,7 +22,11 @@ from metrics import calculate_sharpe, calculate_sortino, max_drawdown, cumulativ
 logger = logging.getLogger("training-service.evaluate")
 
 # ---------- Database engine and session factory ----------
-DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///./training.db')
+try:
+    from models import get_engine, resolve_database_url
+    DATABASE_URL = resolve_database_url('DATABASE_URL')
+except Exception:
+    DATABASE_URL = (os.environ.get('DATABASE_URL') or '').strip() or 'sqlite:///./training.db'
 try:
     from models import get_engine
     engine = get_engine(DATABASE_URL)

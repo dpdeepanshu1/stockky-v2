@@ -80,7 +80,7 @@ def _autoload_env_if_missing() -> None:
     folder when the container-only path isn't present. No-op inside the
     container: DATABASE_URL/ORACLE_DSN are already set there, so nothing
     here overrides them (existing env vars always take precedence)."""
-    if os.environ.get("DATABASE_URL") or os.environ.get("ORACLE_DSN"):
+    if (os.environ.get("DATABASE_URL") or "").strip() or (os.environ.get("ORACLE_DSN") or "").strip():
         return  # already configured — inside the container, or exported manually
 
     # scripts/ -> real-trade-service -> services -> repo root
@@ -95,9 +95,11 @@ def _autoload_env_if_missing() -> None:
             key = key.strip()
             value = value.strip().strip('"').strip("'")
             if key:
-                os.environ.setdefault(key, value)
+                # a blank/whitespace-only exported var is "unset", so .env may fill it
+                if not (os.environ.get(key) or "").strip():
+                    os.environ[key] = value
 
-    if not (os.environ.get("DATABASE_URL") or os.environ.get("ORACLE_DSN")):
+    if not ((os.environ.get("DATABASE_URL") or "").strip() or (os.environ.get("ORACLE_DSN") or "").strip()):
         print(
             f"NOTE: no DATABASE_URL/ORACLE_DSN found in the environment or in "
             f"{env_path} — this will fail the same way it just did. Either "
@@ -125,9 +127,9 @@ def _autoload_env_if_missing() -> None:
     def _is_real_wallet(p: Optional[str]) -> bool:
         return bool(p) and (Path(p) / "tnsnames.ora").is_file()
 
-    wallet_dir = os.environ.get("ORACLE_WALLET_DIR") or os.environ.get("TNS_ADMIN")
+    wallet_dir = (os.environ.get("ORACLE_WALLET_DIR") or "").strip() or (os.environ.get("TNS_ADMIN") or "").strip()
     if not _is_real_wallet(wallet_dir):
-        candidate = os.environ.get("ORACLE_WALLET_HOST_DIR") or str(repo_root / "oracle_wallet")
+        candidate = (os.environ.get("ORACLE_WALLET_HOST_DIR") or "").strip() or str(repo_root / "oracle_wallet")
         if _is_real_wallet(candidate):
             os.environ["ORACLE_WALLET_DIR"] = candidate
             os.environ["TNS_ADMIN"] = candidate

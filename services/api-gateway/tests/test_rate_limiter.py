@@ -417,9 +417,12 @@ class TestBucketAcquire:
         assert b.tokens == 2.0
         assert clock.sleeps == [1.0]
 
-    def test_unreachable_weight_under_reserve_is_denied(self, clock):
+    def test_weight_in_the_reserve_zone_is_capped_not_denied(self, clock):
+        # group 66: capacity 8 - reserve 2 = 6 usable; weight 7 used to wait out the budget and be
+        # skipped forever. It is now a request for everything the caller may take.
         b = bucket(clock, rps=1, capacity=8, tokens=8.0)
-        assert b.acquire(weight=7, reserve=2.0, max_wait=1.0, fail_fast=True) == -1.0
+        assert b.acquire(weight=7, reserve=2.0, max_wait=1.0, fail_fast=True) == 0.0
+        assert b.tokens == 2.0 and b.denied_events == 0
 
     # ── weight > capacity: capped at what the caller may take, no budget stall ──
 

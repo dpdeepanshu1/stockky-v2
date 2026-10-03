@@ -43,7 +43,7 @@ def _get_outbound_ip() -> Optional[str]:
 
 
 def _resolve_client_public_ip() -> str:
-    explicit = config.ANGELONE_STATIC_IP
+    explicit = (config.ANGELONE_STATIC_IP or "").strip()
     if explicit:
         return explicit
     now = time.time()

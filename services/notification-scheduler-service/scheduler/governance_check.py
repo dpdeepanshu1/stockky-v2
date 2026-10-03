@@ -47,12 +47,12 @@ def _install_httpx_token_filter() -> None:
 
 _install_httpx_token_filter()
 
-NOTIFY_URL = os.getenv("REAL_TRADE_URL", "").rstrip("/")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+NOTIFY_URL = (os.getenv("REAL_TRADE_URL") or "").strip().rstrip("/")
+TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+TELEGRAM_CHAT_ID   = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 DB_URL = (
-    os.getenv("CACHE_DATABASE_URL")
-    or os.getenv("DATABASE_URL")
+    (os.getenv("CACHE_DATABASE_URL") or "").strip()
+    or (os.getenv("DATABASE_URL") or "").strip()
     or ""
 )
 

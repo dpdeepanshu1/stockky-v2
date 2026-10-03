@@ -294,11 +294,15 @@ def get_cache_ttl() -> int:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("market-data-service")
 
-UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL")
-UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
-ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
-TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY") or os.getenv("TWELVEDATA_API_KEY")
-POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
+UPSTASH_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip() or None
+UPSTASH_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip() or None
+ALPHA_VANTAGE_API_KEY = (os.getenv("ALPHA_VANTAGE_API_KEY") or "").strip() or None
+TWELVE_DATA_API_KEY = (
+    (os.getenv("TWELVE_DATA_API_KEY") or "").strip()
+    or (os.getenv("TWELVEDATA_API_KEY") or "").strip()
+    or None
+)
+POLYGON_API_KEY = (os.getenv("POLYGON_API_KEY") or "").strip() or None
 
 # ── API-key-in-URL hygiene (session99) ────────────────────────────────────────
 # The waterfall fallbacks below all put the provider's API key IN THE URL:
@@ -1441,7 +1445,7 @@ def _fetch_nse_fundamentals(symbol: str) -> Optional[dict]:
     }
 
 
-INDIANAPI_KEY = os.environ.get("INDIANAPI_KEY")
+INDIANAPI_KEY = (os.environ.get("INDIANAPI_KEY") or "").strip() or None
 
 
 def _waterfall_indianapi_price(symbol: str) -> Optional[float]:

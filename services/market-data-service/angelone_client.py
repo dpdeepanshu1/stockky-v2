@@ -196,10 +196,10 @@ class AngelOneSession:
     """
 
     def __init__(self) -> None:
-        self.client_id   = os.environ.get("ANGELONE_CLIENT_ID", "")
-        self.mpin        = os.environ.get("ANGELONE_MPIN", "")
-        self.api_key     = os.environ.get("ANGELONE_API_KEY", "")
-        self.totp_secret = os.environ.get("ANGELONE_TOTP_SECRET", "")
+        self.client_id   = (os.environ.get("ANGELONE_CLIENT_ID") or "").strip()
+        self.mpin        = (os.environ.get("ANGELONE_MPIN") or "").strip()
+        self.api_key     = (os.environ.get("ANGELONE_API_KEY") or "").strip()
+        self.totp_secret = (os.environ.get("ANGELONE_TOTP_SECRET") or "").strip()
         self.token:        Optional[str]      = None
         self.feed_token:   Optional[str]      = None
         self.token_expiry: Optional[datetime] = None

@@ -67,12 +67,12 @@ def _db_url() -> Optional[str]:
     # The durable core (kv_cache + models) runs on Oracle via ORACLE_DSN; this
     # secondary premarket scanner stays Neon-only. On Render/Neon (no ORACLE_DSN
     # and no oracle:// URL) this guard is False, so behaviour is unchanged.
-    if os.environ.get("ORACLE_DSN"):
+    if (os.environ.get("ORACLE_DSN") or "").strip():
         return None
     url = (
-        os.getenv("CACHE_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
-        or os.getenv("TRAINING_DATABASE_URL")
+        (os.getenv("CACHE_DATABASE_URL") or "").strip()
+        or (os.getenv("DATABASE_URL") or "").strip()
+        or (os.getenv("TRAINING_DATABASE_URL") or "").strip()
     )
     if url and url.lower().startswith("oracle"):
         return None

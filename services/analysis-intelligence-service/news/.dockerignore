@@ -1,0 +1,41 @@
+# .dockerignore — keeps the Docker build context (and therefore the image + the `COPY . .`
+# layer cache) free of things the running service never uses. Patterns use `**/` because a
+# bare name only matches at the context root in .dockerignore.
+#
+# Safe by construction: nothing here is imported or opened at runtime (verified by
+# services/api-gateway/tests/test_dockerignore.py, which fails if an ignore rule ever
+# drops a source/data file the image needs).
+
+# VCS / editor
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+.DS_Store
+**/.DS_Store
+
+# Secrets — never bake into an image (docker-compose passes config via env_file/environment;
+# the Oracle wallet is mounted as a volume at /oracle_wallet)
+.env
+.env.*
+**/oracle_wallet
+
+# Python caches / virtualenvs
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.venv
+venv
+**/*.egg-info
+
+# Tests + coverage output (never imported by the app)
+**/tests
+**/.pytest_cache
+.pytest_cache
+.coverage
+.coverage.*
+htmlcov
+**/*,cover
+.coveragerc
+run_tests.sh

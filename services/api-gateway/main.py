@@ -295,8 +295,8 @@ if os.getenv("DISABLE_REDIS", "0").lower() in ("1", "true", "yes") or \
     _USE_REDIS = False
 
 if _USE_REDIS:
-    url = os.getenv("UPSTASH_REDIS_REST_URL")
-    tok = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+    url = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
+    tok = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
     if url and tok:
         try:
             from upstash_redis import Redis as _UpstashRedis
@@ -2569,7 +2569,7 @@ async def _fetch_prediction_cached(symbol: str, client: httpx.AsyncClient) -> tu
 # ── Gemini-powered summary (optional — falls back to the Hinglish template
 # below if GEMINI_API_KEY isn't set, or if the call fails/times out/gets
 # truncated) ─────────────────────────────────────────────────────────────
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip() or None
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 # Free-tier Gemini has its own RPM limit, independent of MAX_PARALLEL_WORKERS
@@ -11242,10 +11242,10 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
     patched = []
     cooldown = max(0.1, float(REPAIR_COOLDOWN_SEC))
 
-    market_url = (os.getenv("MARKET_DATA_URL") or MARKET_DATA_URL or "").rstrip("/")
-    technical_url = (os.getenv("TECHNICAL_URL") or TECHNICAL_URL or "").rstrip("/")
-    fundamental_url = (os.getenv("FUNDAMENTAL_URL") or FUNDAMENTAL_URL or "").rstrip("/")
-    news_url = (os.getenv("NEWS_URL") or NEWS_URL or "").rstrip("/")
+    market_url = ((os.getenv("MARKET_DATA_URL") or "").strip() or MARKET_DATA_URL or "").strip().rstrip("/")
+    technical_url = ((os.getenv("TECHNICAL_URL") or "").strip() or TECHNICAL_URL or "").strip().rstrip("/")
+    fundamental_url = ((os.getenv("FUNDAMENTAL_URL") or "").strip() or FUNDAMENTAL_URL or "").strip().rstrip("/")
+    news_url = ((os.getenv("NEWS_URL") or "").strip() or NEWS_URL or "").strip().rstrip("/")
 
     # Genuinely delisted/merged symbols (TATAMTRDVR etc.) and known non-NSE
     # tickers: purge immediately instead of burning a /quote round trip that

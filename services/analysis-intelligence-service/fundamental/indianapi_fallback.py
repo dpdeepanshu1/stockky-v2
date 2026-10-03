@@ -50,7 +50,7 @@ IST = ZoneInfo("Asia/Kolkata")
 NSE_MARKET_OPEN = dtime(9, 15)
 
 INDIANAPI_BASE_URL = "https://stock.indianapi.in"
-INDIANAPI_KEY = os.environ.get("INDIANAPI_KEY")
+INDIANAPI_KEY = (os.environ.get("INDIANAPI_KEY") or "").strip() or None
 
 CACHE_KEY_PREFIX = "indianapi:fundamentals:"
 CACHE_TRADING_DAYS = 5

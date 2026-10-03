@@ -36,7 +36,22 @@ import os as _os
 # Oracle Autonomous DB" — the same convention used by oracle_compat.py and
 # get_engine() below. Evaluated at import time; docker compose always exports it
 # before the app starts.
-_ORACLE_MODE = bool(_os.environ.get("ORACLE_DSN"))
+_ORACLE_MODE = bool((_os.environ.get("ORACLE_DSN") or "").strip())
+
+
+def _secret_env(*names):
+    """First non-blank value among the named env vars, returned VERBATIM (never stripped: a
+    password may legitimately keep edge whitespace; a whitespace-only value counts as unset)."""
+    for name in names:
+        value = _os.environ.get(name) or ""
+        if value.strip():
+            return value
+    return ""
+
+
+def _wallet_dir():
+    """ORACLE_WALLET_DIR, else TNS_ADMIN -- trimmed; whitespace-only counts as unset."""
+    return (_os.environ.get("ORACLE_WALLET_DIR") or "").strip() or (_os.environ.get("TNS_ADMIN") or "").strip()
 
 
 def _pk_column():
@@ -403,7 +418,7 @@ class ModelRegistry:
     def __init__(self, session_factory=None):
         if session_factory is None:
             import os
-            db_url = os.environ.get("DATABASE_URL", "sqlite:///./training.db")
+            db_url = (os.environ.get("DATABASE_URL") or "").strip() or "sqlite:///./training.db"
             # Oracle Cloud side (ORACLE_DSN set): route model artifacts to the ONE
             # Oracle DB via the Oracle-aware, singleton get_engine() — so trained
             # models, scalers and metrics land in Oracle like the rest of the
@@ -712,7 +727,33 @@ def _oracle_is_configured(url: str) -> bool:
     is what lets the SAME code run on Render (Neon/Postgres) and on the Oracle
     VM (Oracle ADB) with only environment differences."""
     import os
-    return url.lower().startswith("oracle") or bool(os.environ.get("ORACLE_DSN"))
+    return url.lower().startswith("oracle") or bool((os.environ.get("ORACLE_DSN") or "").strip())
+
+
+def resolve_database_url(*names: str) -> str:
+    """First non-blank (stripped) value among the named env vars, else the ephemeral sqlite default.
+
+    docker-compose passes `DATABASE_URL: ${DATABASE_URL:-}`, i.e. an EMPTY string on the Oracle VM, and
+    `os.environ.get(NAME, default)` returns that empty string instead of the default. Every caller that
+    resolves the URL goes through here so blank / whitespace-only counts as unset. With no names it uses
+    TRAINING_DATABASE_URL then DATABASE_URL (the same order get_engine() uses)."""
+    import os
+    for name in (names or ("TRAINING_DATABASE_URL", "DATABASE_URL")):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return "sqlite:///./training.db"
+
+
+def db_backend_name(url: str) -> str:
+    """'oracle' | 'postgres' | 'sqlite' for the backend a resolved URL ends up on.
+
+    Oracle wins exactly when get_engine() would pick it (oracle:// URL or ORACLE_DSN set), so the health
+    endpoint can no longer report "ephemeral sqlite" for a process that is really writing to Oracle."""
+    url = (url or "").strip()
+    if _oracle_is_configured(url):
+        return "oracle"
+    return "postgres" if url.lower().startswith(("postgres://", "postgresql://")) else "sqlite"
 
 
 def _oracle_engine_kwargs(full_url_provided: bool) -> dict:
@@ -724,14 +765,14 @@ def _oracle_engine_kwargs(full_url_provided: bool) -> dict:
     if not full_url_provided:
         # Empty URL ("oracle+oracledb://") + connect_args — cleanest for wallet
         # auth and avoids URL-encoding the ADMIN password.
-        ca["user"] = os.environ.get("ORACLE_USER", "ADMIN")
-        pw = os.environ.get("ORACLE_PASSWORD") or os.environ.get("ORACLE_ADMIN_PASSWORD")
+        ca["user"] = (os.environ.get("ORACLE_USER") or "").strip() or "ADMIN"
+        pw = _secret_env("ORACLE_PASSWORD", "ORACLE_ADMIN_PASSWORD")
         if pw:
             ca["password"] = pw
-        ca["dsn"] = os.environ.get("ORACLE_DSN", "")  # TNS alias e.g. stockkydb_high
+        ca["dsn"] = (os.environ.get("ORACLE_DSN") or "").strip()  # TNS alias e.g. stockkydb_high
     # Wallet location applies to both URL and discrete-var forms.
-    wallet_dir = os.environ.get("ORACLE_WALLET_DIR") or os.environ.get("TNS_ADMIN")
-    wallet_pw = os.environ.get("ORACLE_WALLET_PASSWORD")
+    wallet_dir = _wallet_dir()
+    wallet_pw = _secret_env("ORACLE_WALLET_PASSWORD")
     if wallet_dir:
         ca["config_dir"] = wallet_dir
         ca["wallet_location"] = wallet_dir
@@ -767,7 +808,12 @@ def get_engine(database_url=None):
     if _ENGINE_LOCK is None:
         _ENGINE_LOCK = threading.Lock()
 
-    url = database_url or os.environ.get("TRAINING_DATABASE_URL") or os.environ.get("DATABASE_URL", "sqlite:///./training.db")
+    url = (
+        database_url
+        or (os.environ.get("TRAINING_DATABASE_URL") or "").strip()
+        or (os.environ.get("DATABASE_URL") or "").strip()
+        or "sqlite:///./training.db"
+    )
 
     # Oracle Autonomous DB (Oracle Cloud side only). When enabled, skip ALL the
     # Postgres/Neon-specific URL surgery below — those transforms assume psycopg2
@@ -803,12 +849,12 @@ def get_engine(database_url=None):
                 url = "oracle+oracledb://"
             _log.info(
                 "Oracle Autonomous DB engine ready (dsn=%s, wallet=%s)",
-                os.environ.get("ORACLE_DSN", "from-url"),
-                os.environ.get("ORACLE_WALLET_DIR") or os.environ.get("TNS_ADMIN") or "none",
+                (os.environ.get("ORACLE_DSN") or "").strip() or "from-url",
+                _wallet_dir() or "none",
             )
         elif url.startswith("sqlite"):
             kwargs["connect_args"] = {"check_same_thread": False}
-            if not os.environ.get("DATABASE_URL"):
+            if not (os.environ.get("DATABASE_URL") or "").strip():
                 _log.warning(
                     "DATABASE_URL not set — using ephemeral sqlite. "
                     "Set Neon DATABASE_URL for durable trades/training."

@@ -182,9 +182,8 @@ class _Bucket:
         `reserve` keeps that many tokens out of reach for this caller, so bulk
         background jobs cannot drain the bucket that user-facing lookups need.
 
-        A `weight` above the bucket's capacity is capped at what the caller may
-        take (capacity minus `reserve`) instead of waiting for tokens that can
-        never exist.
+        A `weight` above what the caller may take (capacity minus `reserve`) is
+        capped at that amount instead of waiting for tokens that can never exist.
 
         The wait budget is `max_wait / queue_depth` (floored at MIN_WAIT_FLOOR).
         With one caller that is the full max_wait; with a queue it shrinks, which
@@ -192,20 +191,28 @@ class _Bucket:
         while the bucket has no realistic chance of refilling that fast.
         """
         budget = MAX_WAIT_DEFAULT if max_wait is None else float(max_wait)
-        # A request heavier than the whole bucket can never be satisfied in
-        # full (tokens are capped at `capacity`), so it used to wait out the
-        # entire budget on every call and then proceed anyway (or, with
-        # fail_fast, be skipped forever). Treat it as a request for everything
-        # this caller is allowed to take: wait for the bucket to fill, then
-        # drain it. Nothing attainable (reserve >= capacity) -> unchanged.
+        # A request heavier than what this caller may ever hold can never be satisfied in full:
+        # tokens are capped at `capacity`, and a background caller must also leave `reserve`
+        # behind, so the most it can ever see is `capacity - reserve`. Such a request used to wait
+        # out the entire budget on every call and then proceed anyway (or, with fail_fast, be
+        # skipped forever) - including weights between `capacity - reserve` and `capacity`, which
+        # the old `weight > capacity` test let through. Treat it as a request for everything this
+        # caller is allowed to take: wait for the bucket to fill, then drain it down to the
+        # reserve. Nothing attainable (reserve >= capacity) -> unchanged.
         need = weight
         attainable = self.capacity - reserve
-        if weight > self.capacity and attainable > 0:
+        if weight > attainable and attainable > 0:
             need = attainable
-            logger.debug(
-                "rate_limiter: weight %s exceeds bucket capacity %s, treating as %s",
-                weight, self.capacity, need,
-            )
+            if weight > self.capacity:
+                logger.debug(
+                    "rate_limiter: weight %s exceeds bucket capacity %s, treating as %s",
+                    weight, self.capacity, need,
+                )
+            else:
+                logger.debug(
+                    "rate_limiter: weight %s exceeds usable capacity %s (capacity %s minus reserve %s), treating as %s",
+                    weight, attainable, self.capacity, reserve, need,
+                )
         start = time.time()
         with self.lock:
             self.waiters += 1

@@ -113,6 +113,7 @@ class Net:
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     notifier._dedup_cache.clear()
+    notifier._failed_hashes.clear()
     monkeypatch.setattr(notifier, "_NOTIFICATION_SERVICE_URL", SERVICE)
     monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "")
     monkeypatch.setattr(config, "TELEGRAM_CHAT_ID", "")
@@ -275,15 +276,85 @@ class TestNotifySync:
         assert notifier.notify_sync("hello") is False
         assert net.telegram_requests == []
 
-    def test_a_failed_delivery_still_consumes_the_dedup_slot(self, net, caplog):
-        # Pinned CURRENT behaviour (see session note observation): dedup is
-        # recorded BEFORE delivery, so if every channel is down the retry of the
-        # same text is reported as "sent" (True) and never attempted for 5 min.
+    def test_a_failed_delivery_can_be_retried_after_the_short_backoff(self, net, clock):
+        # FIXED (open item #2): the dedup slot is reserved before delivery, but a FAILED
+        # delivery now shortens it to _DEDUP_RETRY_AFTER_FAIL_S instead of keeping the full
+        # 5 minutes, so the same alert is retried once the back-off passes.
         net.service = lambda req: httpx.ConnectError("down")
         assert notifier.notify_sync("SELL AAA sent") is False
         net.requests.clear()
-        assert notifier.notify_sync("SELL AAA sent") is True
+        clock["t"] += notifier._DEDUP_RETRY_AFTER_FAIL_S - 1
+        assert notifier.notify_sync("SELL AAA sent") is False   # still inside the back-off
+        assert net.requests == []                                # ...and not attempted
+        clock["t"] += 2
+        net.service = lambda req: httpx.Response(200, json={"delivered": True})
+        assert notifier.notify_sync("SELL AAA sent") is True    # back-off over -> real retry
+        assert len(net.service_requests) == 1
+
+    def test_a_suppressed_duplicate_of_a_failed_send_is_not_reported_as_sent(self, net, clock):
+        net.service = lambda req: httpx.ConnectError("down")
+        assert notifier.notify_sync("m") is False
+        assert notifier.notify_sync("m") is False
+
+    def test_a_successful_send_keeps_the_full_dedup_window(self, net, clock):
+        net.service = lambda req: httpx.Response(200, json={"delivered": True})
+        assert notifier.notify_sync("m") is True
+        net.requests.clear()
+        clock["t"] += notifier._DEDUP_RETRY_AFTER_FAIL_S + 5
+        assert notifier.notify_sync("m") is True                 # suppressed duplicate
         assert net.requests == []
+        clock["t"] += notifier._DEDUP_WINDOW_S
+        assert notifier.notify_sync("m") is True
+        assert len(net.service_requests) == 1
+
+    def test_recovery_clears_the_failed_flag(self, net, clock):
+        net.service = lambda req: httpx.ConnectError("down")
+        notifier.notify_sync("m")
+        clock["t"] += notifier._DEDUP_RETRY_AFTER_FAIL_S + 1
+        net.service = lambda req: httpx.Response(200, json={"delivered": True})
+        assert notifier.notify_sync("m") is True
+        assert notifier._failed_hashes == set()
+        assert notifier.notify_sync("m") is True                 # now a normal suppressed duplicate
+
+    def test_a_hard_outage_cannot_cause_a_retry_storm(self, net, clock):
+        net.service = lambda req: httpx.ConnectError("down")
+        for _ in range(20):
+            notifier.notify_sync("SELL AAA sent")
+        assert len(net.service_requests) == 1                    # one real attempt inside the back-off
+
+    def test_async_failed_delivery_is_retryable_too(self, net, clock):
+        net.service = lambda req: httpx.ConnectError("down")
+        assert run(notifier.notify_async("m")) is False
+        assert run(notifier.notify_async("m")) is False          # inside back-off, honest False
+        clock["t"] += notifier._DEDUP_RETRY_AFTER_FAIL_S + 1
+        net.service = lambda req: httpx.Response(200, json={"delivered": True})
+        assert run(notifier.notify_async("m")) is True
+        assert notifier._failed_hashes == set()
+
+    def test_fire_and_forget_failure_is_marked_failed(self, net, clock):
+        net.service = lambda req: httpx.ConnectError("down")
+        assert notifier._should_send("m") is True
+        notifier._deliver_background("m")
+        assert notifier._should_send("m") is False
+        clock["t"] += notifier._DEDUP_RETRY_AFTER_FAIL_S + 1
+        assert notifier._should_send("m") is True                # retry allowed again
+
+    def test_a_crash_inside_background_delivery_is_also_marked_failed(self, monkeypatch, clock):
+        monkeypatch.setattr(notifier, "_deliver_sync", lambda t: (_ for _ in ()).throw(RuntimeError("boom")))
+        assert notifier._should_send("m") is True
+        notifier._deliver_background("m")
+        assert notifier._suppressed_result("m") is False
+
+    def test_failed_set_is_bounded_by_the_dedup_cache(self, net, clock):
+        net.service = lambda req: httpx.ConnectError("down")
+        for i in range(notifier._DEDUP_CACHE_SIZE + 10):
+            notifier.notify_sync(f"m-{i}")
+        assert len(notifier._failed_hashes) <= notifier._DEDUP_CACHE_SIZE
+
+    def test_result_helpers_never_raise(self, monkeypatch):
+        monkeypatch.setattr(notifier, "_dedup_hash", lambda t: (_ for _ in ()).throw(RuntimeError("x")))
+        assert notifier._note_delivery_result("m", False) is False
+        assert notifier._suppressed_result("m") is True
 
 
 # ══════════════════════════════════════════════════════════════════════════

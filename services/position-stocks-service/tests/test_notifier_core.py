@@ -50,8 +50,10 @@ LOGGER = "position-stocks-notifier"
 @pytest.fixture(autouse=True)
 def _clean_dedup():
     notifier._dedup_cache.clear()
+    notifier._failed_hashes.clear()
     yield
     notifier._dedup_cache.clear()
+    notifier._failed_hashes.clear()
 
 
 @pytest.fixture()
@@ -198,3 +200,56 @@ class TestTokenFilterMalformedRecord:
         # the filter must catch it (not propagate) and still return True so
         # logging itself is never broken by a hygiene filter.
         assert notifier._TelegramTokenRedactingFilter().filter(rec) is True
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Failed-delivery retry (open item #2): a failed send must not eat the dedup window
+# ══════════════════════════════════════════════════════════════════════════
+class TestFailedDeliveryRetry:
+    def test_failed_send_is_retryable_after_the_short_backoff(self, real_httpx, clock):
+        real_httpx["service"] = httpx.ConnectError("down")
+        assert notifier.notify_sync("EXIT BLOCKED X") is False
+        real_httpx["requests"].clear()
+        clock["t"] += notifier._DEDUP_RETRY_AFTER_FAIL_S - 1
+        assert notifier.notify_sync("EXIT BLOCKED X") is False     # inside back-off, honest False
+        assert real_httpx["requests"] == []
+        clock["t"] += 2
+        real_httpx["service"] = httpx.Response(200, json={"delivered": True})
+        assert notifier.notify_sync("EXIT BLOCKED X") is True
+        assert len(real_httpx["requests"]) == 1
+        assert notifier._failed_hashes == set()
+
+    def test_successful_send_keeps_the_full_window(self, real_httpx, clock):
+        real_httpx["service"] = httpx.Response(200, json={"delivered": True})
+        assert notifier.notify_sync("m") is True
+        real_httpx["requests"].clear()
+        clock["t"] += notifier._DEDUP_RETRY_AFTER_FAIL_S + 5
+        assert notifier.notify_sync("m") is True
+        assert real_httpx["requests"] == []
+
+    def test_hard_outage_does_not_storm(self, real_httpx, clock):
+        real_httpx["service"] = httpx.ConnectError("down")
+        for _ in range(20):
+            notifier.notify_sync("m")
+        assert len(real_httpx["requests"]) == 1
+
+    def test_background_failure_and_crash_are_marked_failed(self, real_httpx, clock, monkeypatch):
+        real_httpx["service"] = httpx.ConnectError("down")
+        assert notifier._should_send("a") is True
+        notifier._deliver_background("a")
+        assert notifier._suppressed_result("a") is False
+        monkeypatch.setattr(notifier, "_deliver_sync", lambda t: (_ for _ in ()).throw(RuntimeError("boom")))
+        assert notifier._should_send("b") is True
+        notifier._deliver_background("b")
+        assert notifier._suppressed_result("b") is False
+
+    def test_failed_set_is_bounded(self, real_httpx, clock):
+        real_httpx["service"] = httpx.ConnectError("down")
+        for i in range(notifier._DEDUP_CACHE_SIZE + 10):
+            notifier.notify_sync(f"m-{i}")
+        assert len(notifier._failed_hashes) <= notifier._DEDUP_CACHE_SIZE
+
+    def test_helpers_never_raise(self, monkeypatch):
+        monkeypatch.setattr(notifier, "_dedup_hash", lambda t: (_ for _ in ()).throw(RuntimeError("x")))
+        assert notifier._note_delivery_result("m", False) is False
+        assert notifier._suppressed_result("m") is True

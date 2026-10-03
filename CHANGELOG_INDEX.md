@@ -6,6 +6,18 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-03 (group 35) — `notifier.py` in real-trade-service and position-stocks-service: a FAILED
+  delivery no longer eats the 5-minute dedup window. `_should_send` still reserves the slot before
+  delivery (keeps simultaneous identical sends race-free), but when every channel fails the slot is
+  shortened to `_DEDUP_RETRY_AFTER_FAIL_S` (30s), so the same alert (SELL failed / exit blocked) is
+  retried after 30s instead of being reported "sent" and never attempted for 5 min. A call
+  suppressed during that back-off now returns False (was True). A hard outage still cannot storm:
+  one real attempt per 30s per message. Covers notify_sync, notify_async, notify_fire_and_forget
+  (incl. a crash inside the background thread). Old pin `test_a_failed_delivery_still_consumes_the_dedup_slot`
+  rewritten + 9 new tests (real-trade) and 6 (position-stocks). notifier.py 100% in both.
+  real-trade test_notifier 81 passed; position-stocks full suite 2339 passed. Unrelated sandbox
+  failures (oracledb/dhanhq not installed) fail identically on the original upload. NEEDS REBUILD:
+  `docker compose build real-trade-service position-stocks-service && docker compose up -d` both.
 - 2026-10-03 (group 34) — api-gateway `requirements.txt`: added `pyjwt==2.8.0` (same pin as
   real-trade-service / position-stocks-service). It was only in `requirements-test.txt`, so the
   Docker image had no PyJWT and `qstash_client.verify_signature` hit its ImportError path and

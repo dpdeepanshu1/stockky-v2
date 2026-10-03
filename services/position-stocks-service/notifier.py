@@ -119,7 +119,49 @@ def _should_send(text: str) -> bool:
     _dedup_cache[h] = now
     while len(_dedup_cache) > _DEDUP_CACHE_SIZE:
         _dedup_cache.popitem(last=False)
+    _failed_hashes.discard(h)
     return True
+
+# ── Failed-delivery retry (session: notifier dedup fix) ───────────────────────
+# _should_send() reserves the dedup slot BEFORE delivery is attempted (that is what
+# keeps two near-simultaneous identical sends race-free). Previously that slot was
+# kept even when EVERY channel failed, so the retry of the same alert was reported
+# as "sent" and never attempted for the whole 5-minute window — i.e. a SELL-failed /
+# exit-blocked alert lost to a brief notification-service + Telegram blip stayed lost.
+# Now a failed delivery shortens the slot to _DEDUP_RETRY_AFTER_FAIL_S so the alert
+# can be retried quickly (still rate-limited: a hard outage cannot cause a retry storm),
+# and a call suppressed during that short back-off honestly returns False, not True.
+_DEDUP_RETRY_AFTER_FAIL_S = 30
+_failed_hashes: set = set()
+
+
+def _dedup_hash(text: str) -> str:
+    return hashlib.md5(text.encode("utf-8", errors="replace")).hexdigest()  # noqa: S324
+
+
+def _note_delivery_result(text: str, ok: bool) -> bool:
+    """Record the outcome of a delivery attempt for the dedup slot reserved by
+    _should_send(). Never raises. Returns `ok` unchanged."""
+    try:
+        h = _dedup_hash(text)
+        if ok:
+            _failed_hashes.discard(h)
+        elif h in _dedup_cache:
+            _dedup_cache[h] = time.monotonic() - (_DEDUP_WINDOW_S - _DEDUP_RETRY_AFTER_FAIL_S)
+            _failed_hashes.add(h)
+            _failed_hashes.intersection_update(_dedup_cache.keys())
+    except Exception:
+        logger.debug("notifier: failed to record delivery result", exc_info=True)
+    return ok
+
+
+def _suppressed_result(text: str) -> bool:
+    """Return value for a call suppressed as a duplicate: True (operator was already
+    notified) unless the earlier attempt FAILED to deliver, then False."""
+    try:
+        return _dedup_hash(text) not in _failed_hashes
+    except Exception:
+        return True
 
 
 def notify_sync(text: str) -> bool:
@@ -139,8 +181,8 @@ def notify_sync(text: str) -> bool:
     caller with nothing else waiting on it."""
     if not _should_send(text):
         logger.debug("notifier: duplicate message suppressed within dedup window")
-        return True   # treat as "delivered" — operator was already notified
-    return _deliver_sync(text)
+        return _suppressed_result(text)   # True = operator already notified; False = earlier attempt failed
+    return _note_delivery_result(text, _deliver_sync(text))
 
 
 def notify_fire_and_forget(text: str) -> None:
@@ -191,8 +233,9 @@ def _deliver_background(text: str) -> None:
     network exceptions, this is just a last-resort guard so a bug in the
     delivery path can never crash the (silent, unjoined) thread loudly."""
     try:
-        _deliver_sync(text)
+        _note_delivery_result(text, _deliver_sync(text))
     except Exception:
+        _note_delivery_result(text, False)
         logger.debug("notify_fire_and_forget: background delivery failed", exc_info=True)
 
 

@@ -312,6 +312,7 @@ class TestNormalizeDbUrl:
         ("postgresql://h/db?channel_binding=require", "postgresql://h/db?sslmode=require"),
         ("postgresql://h/db?channel_binding=require&sslmode=require", "postgresql://h/db?sslmode=require"),
         ("postgresql://h/db?sslmode=require&channel_binding=require", "postgresql://h/db?sslmode=require"),
+        ("postgresql://h/db?a=1&channel_binding=require&b=2", "postgresql://h/db?a=1&b=2&sslmode=require"),
         ("postgresql://h/db?a=1", "postgresql://h/db?a=1&sslmode=require"),
     ])
     def test_cases(self, sc, url, want):

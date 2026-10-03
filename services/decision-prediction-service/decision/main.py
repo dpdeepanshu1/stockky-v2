@@ -60,7 +60,7 @@ FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_AI.rstrip('/')}/fundamental")
 NEWS_URL = os.getenv("NEWS_URL", f"{_AI.rstrip('/')}/news")
 EVENT_URL = os.getenv("EVENT_URL", f"{_AI.rstrip('/')}/event")
 PREDICTION_URL = os.getenv("PREDICTION_URL", f"{_DP.rstrip('/')}/prediction")
-API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "https://api-gateway-puwd.onrender.com")
+API_GATEWAY_URL = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/") or "https://api-gateway-puwd.onrender.com"
 TRAINING_SERVICE_URL = os.getenv("TRAINING_SERVICE_URL", f"{_DP.rstrip('/')}/training")
 
 EARNINGS_RISK_DAYS = 3

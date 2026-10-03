@@ -130,15 +130,28 @@ def record_metric(db: Session, name: str, value: float) -> None:
             pass
 
 
-def purge_legacy_universe_adx(db: Session) -> int:
+# Set once a purge has completed in this process, so the delete + commit run once instead of on
+# every candidate cycle (nothing writes the legacy name any more). A failed purge leaves it False
+# and is retried next cycle; a restart purges once more, which also catches rows written by an
+# older instance during a rolling deploy.
+_legacy_adx_purged = False
+
+
+def purge_legacy_universe_adx(db: Session, force: bool = False) -> int:
     """Delete readings stored under the pre-Wilder metric name. They are no longer
     read, and record_metric only prunes the name it is writing, so without this they
-    would sit in the table forever. Best-effort, never raises; returns rows removed."""
+    would sit in the table forever. Runs once per process after its first successful
+    delete (a later call returns 0 without touching the database; ``force=True`` runs it
+    anyway). Best-effort, never raises; returns rows removed."""
+    global _legacy_adx_purged
+    if _legacy_adx_purged and not force:
+        return 0
     try:
         n = db.query(AdaptiveMetricSnapshot).filter(
             AdaptiveMetricSnapshot.metric_name == LEGACY_UNIVERSE_ADX_METRIC,
         ).delete(synchronize_session=False)
         db.commit()
+        _legacy_adx_purged = True
         return int(n or 0)
     except Exception as e:
         logger.debug("purge_legacy_universe_adx failed (non-fatal): %s", e)

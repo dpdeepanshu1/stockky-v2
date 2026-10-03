@@ -126,5 +126,85 @@ class TestPrometheusText:
         assert 'stockky_lat_p95_ms{dep="db"} 30.0' in lines
 
 
+import re
+
+# Strict-enough Prometheus text-format line check: name{label="value",...} number, where a label value
+# may contain only non-quote/non-backslash/non-newline characters or the escapes \\, \" and \n.
+_LV = r'"(?:[^"\\\n]|\\[\\"n])*"'
+_SAMPLE = re.compile(
+    r'^[a-zA-Z_:][a-zA-Z0-9_:]*(?:\{[a-zA-Z_][a-zA-Z0-9_]*=' + _LV + r'(?:,[a-zA-Z_][a-zA-Z0-9_]*=' + _LV + r')*\})? \S+$'
+)
+
+
+def _unescape(v):
+    out, i = [], 0
+    while i < len(v):
+        if v[i] == "\\":
+            out.append({"\\": "\\", '"': '"', "n": "\n"}[v[i + 1]])
+            i += 2
+        else:
+            out.append(v[i])
+            i += 1
+    return "".join(out)
+
+
+class TestLabelValueEscaping:
+    def test_backslash_quote_newline_are_escaped(self):
+        key = MetricsRegistry._key("c", {"a": 'x"y\\z\nq'})
+        assert key == 'c{a="x\\"y\\\\z\\nq"}'
+
+    def test_backslash_escaped_before_quote(self):
+        # value  \"  must become  \\\"  (not \\"), i.e. backslash first, then the quote.
+        assert MetricsRegistry._key("c", {"a": '\\"'}) == 'c{a="\\\\\\""}'
+
+    def test_plain_values_unchanged(self):
+        assert MetricsRegistry._key("hits", {"b": 2, "a": "x"}) == 'hits{a="x",b="2"}'
+
+    @pytest.mark.parametrize("value,expected", [(None, "None"), (7, "7"), (1.5, "1.5"), (True, "True")])
+    def test_non_string_values_are_stringified_as_before(self, value, expected):
+        assert MetricsRegistry._key("c", {"a": value}) == f'c{{a="{expected}"}}'
+
+    def test_unprintable_value_falls_back_instead_of_raising(self):
+        class Boom:
+            def __str__(self):
+                raise RuntimeError("no str")
+
+        assert MetricsRegistry._key("c", {"a": Boom()}) == 'c{a="<unprintable>"}'
+
+    def test_distinct_label_sets_do_not_collide(self, reg):
+        # Without escaping both of these produced the key  c{a="x",b="y"}  and shared one counter.
+        reg.inc("c", a='x",b="y')
+        reg.inc("c", a="x", b="y")
+        c = reg.snapshot()["counters"]
+        assert len(c) == 2 and all(v == 1.0 for v in c.values())
+
+    def test_hostile_value_cannot_inject_a_series_line(self, reg):
+        reg.inc("rate_limit_events", source='evil"} 1\nforged_metric{x="y', status="429")
+        lines = reg.prometheus_text().splitlines()
+        assert not any(l.startswith("forged_metric") for l in lines)
+        assert sum(1 for l in lines if l.startswith("rate_limit_events{")) == 1
+
+    def test_every_sample_line_is_valid_exposition_for_hostile_values(self, reg):
+        nasty = ['plain', 'q"uote', 'back\\slash', 'new\nline', '\\"', '"} 9\nx{a="', 'trail\\', '', 'a b', '{x}', '日本']
+        for i, v in enumerate(nasty):
+            reg.inc("stockky_c_total", source=v)
+            reg.set_gauge("stockky_g", float(i), source=v)
+            reg.observe_ms("stockky_lat", 10 + i, source=v)
+        for line in reg.prometheus_text().splitlines():
+            if line.startswith("#"):
+                continue
+            assert _SAMPLE.match(line), line
+
+    def test_label_value_round_trips_through_escape_and_parse(self, reg):
+        for v in ['q"uote', 'back\\slash', 'new\nline', '\\"', 'trail\\', 'mix"\\\n"']:
+            key = MetricsRegistry._key("c", {"a": v})
+            inner = key[len('c{a="'):-len('"}')]
+            assert _unescape(inner) == v
+
+    def test_escaped_key_is_what_the_json_snapshot_exposes(self, reg):
+        reg.inc("c", a='x"y')
+        assert 'c{a="x\\"y"}' in reg.snapshot()["counters"]
+
+
 def test_module_singleton_is_a_registry():
     assert isinstance(metrics_mod.metrics, MetricsRegistry)

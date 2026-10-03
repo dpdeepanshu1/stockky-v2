@@ -1754,8 +1754,9 @@ async def _refresh_volume_shock_candidates(
         adx_samples = [qr.get("adx") for qr in quality_scores.values() if qr.get("adx") is not None]
         if adx_samples:
             amp.record_metric(db, amp.UNIVERSE_ADX_METRIC, sum(adx_samples) / len(adx_samples))
-            # One-off cleanup of readings under the pre-Wilder metric name (a no-op
-            # delete once they are gone); see adaptive_market_params.UNIVERSE_ADX_METRIC.
+            # One-off cleanup of readings under the pre-Wilder metric name; it runs once per
+            # process (later calls return without touching the DB), see
+            # adaptive_market_params.purge_legacy_universe_adx / UNIVERSE_ADX_METRIC.
             amp.purge_legacy_universe_adx(db)
     except Exception as e:
         logger.debug("candidate_engine: universe_adx recording failed (non-fatal): %s", e)

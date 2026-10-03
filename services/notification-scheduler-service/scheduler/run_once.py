@@ -17,7 +17,11 @@ import httpx
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scheduler-once")
 
-API_GATEWAY_URL = os.environ["API_GATEWAY_URL"]
+# Required (fail fast at import). A blank / whitespace-only value is as unusable as a missing one,
+# so it fails the same way instead of producing "/watchlist"-style URLs at run time.
+API_GATEWAY_URL = os.environ["API_GATEWAY_URL"].strip().rstrip("/")
+if not API_GATEWAY_URL:
+    raise KeyError("API_GATEWAY_URL is set but blank")
 EVENT_TRACKER_URL = os.environ.get("EVENT_TRACKER_URL", "")
 NOTIFICATION_URL = os.environ.get("NOTIFICATION_URL", "")
 IST = ZoneInfo("Asia/Kolkata")

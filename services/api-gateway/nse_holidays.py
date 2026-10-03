@@ -6,8 +6,11 @@ official calendar — when in doubt, treat as open and let market data fail soft
 """
 from __future__ import annotations
 
-from datetime import date
-from typing import Set
+from datetime import date, datetime
+from typing import Set, Union
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 # Fixed / common market holidays (YYYY-MM-DD). Extend each year.
 _NSE_HOLIDAYS: Set[date] = {
@@ -60,11 +63,28 @@ _NSE_HOLIDAYS: Set[date] = {
 }
 
 
-def is_nse_holiday(d: date) -> bool:
-    return d in _NSE_HOLIDAYS
+def _as_calendar_date(d: Union[date, datetime]) -> Union[date, datetime]:
+    """Reduce a datetime to the IST calendar date the exchange calendar is keyed on.
+
+    The holiday set holds plain `date` objects and a `datetime` never equals (or hashes like) a `date`,
+    so `is_nse_holiday(datetime(2026, 9, 14, 10, 0))` used to answer False for a day the exchange was
+    closed - silently, no error - and a caller that forgot `.date()` would trade on a holiday. A naive
+    datetime is taken as already being IST wall-clock time (every caller builds it from an IST `now`);
+    an aware one is converted to IST first, so 2026-09-13 20:00 UTC (= 14 Sep 01:30 IST) is the 14th.
+    Anything else (a `date`, or a value that was never a date) is returned unchanged.
+    """
+    if isinstance(d, datetime):
+        if d.tzinfo is not None and d.utcoffset() is not None:
+            d = d.astimezone(_IST)
+        return d.date()
+    return d
 
 
-def holiday_name(d: date) -> str | None:
-    if d not in _NSE_HOLIDAYS:
+def is_nse_holiday(d: Union[date, datetime]) -> bool:
+    return _as_calendar_date(d) in _NSE_HOLIDAYS
+
+
+def holiday_name(d: Union[date, datetime]) -> str | None:
+    if _as_calendar_date(d) not in _NSE_HOLIDAYS:
         return None
     return "NSE holiday"

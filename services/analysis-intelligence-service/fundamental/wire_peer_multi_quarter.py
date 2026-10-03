@@ -131,6 +131,18 @@ def apply_to_analyze_response(
             payload["peer_count"] = ranking.get("total_compared")
 
         base = payload.get("fundamental_score")
+        # Idempotent: a payload that was already blended carries the pre-blend score in
+        # fundamental_score_raw. Blend from THAT, not from the already-adjusted fundamental_score,
+        # so applying this twice gives the same result as applying it once instead of compounding
+        # the peer/consistency weights and overwriting the raw score with the adjusted one.
+        prior_raw = payload.get("fundamental_score_raw")
+        if (
+            payload.get("fundamental_score_adjusted") is True
+            and isinstance(prior_raw, (int, float))
+            and not isinstance(prior_raw, bool)
+            and prior_raw == prior_raw  # not NaN
+        ):
+            base = prior_raw
         if isinstance(base, (int, float)):
             payload["fundamental_score_raw"] = float(base)
             cons = _first_score(payload.get("consistency_score"))

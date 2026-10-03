@@ -275,8 +275,13 @@ def upsert_sql(dialect: str, table: str, with_expires: bool) -> str:
     )
 
 
-def exec_ddl_safe(engine, sql: str, dialect: str) -> None:
+def exec_ddl_safe(engine, sql: str, dialect: str) -> bool:
     """Run one DDL statement in its own transaction, swallowing 'already exists'.
+
+    Returns True when the statement ran or the object was already there (benign),
+    False when it genuinely FAILED. A real failure never raises (startup must not
+    die on one index) but is logged at WARNING, not DEBUG, so a missing index or
+    column is visible. Callers that log "ensured ..." should check the result.
 
     Each DDL gets its own begin() so a benign ORA-00955 on one statement cannot
     poison the others. Oracle auto-commits DDL anyway.
@@ -296,13 +301,18 @@ def exec_ddl_safe(engine, sql: str, dialect: str) -> None:
     try:
         with engine.begin() as conn:
             conn.execute(text(sql))
+        return True
     except Exception as e:  # noqa: BLE001
         m = str(e)
         if dialect == "oracle" and any(
             code in m
             for code in ("ORA-00955", "ORA-01408", "ORA-00957", "ORA-02260", "ORA-02264")
         ):
-            return
-        if "already exists" in m.lower():
-            return
-        _log.debug("exec_ddl_safe skip (%s): %s", dialect, m[:160])
+            return True
+        low = m.lower()
+        if "already exists" in low or "duplicate column name" in low:
+            return True
+        _log.warning(
+            "exec_ddl_safe FAILED (%s): %s [sql: %s]", dialect, m[:160], " ".join(str(sql).split())[:100]
+        )
+        return False

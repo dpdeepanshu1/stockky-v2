@@ -55,7 +55,7 @@ import httpx
 
 logger = logging.getLogger("overnight-orchestrator")
 
-API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "http://api-gateway:8000").rstrip("/")
+API_GATEWAY_URL = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/") or "http://api-gateway:8000"
 # decision-prediction-service is a separate container from api-gateway (see
 # docker-compose.yml) -- only evaluate_outcomes below needs this, everything
 # else in this file talks to api-gateway only. /training is where

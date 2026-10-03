@@ -163,8 +163,19 @@ async def run_in_batches(
                 raw = await asyncio.gather(*tasks, return_exceptions=True)
             except Exception as e:
                 logger.error("batch gather failed: %s", e)
-                raw = []
                 await _cancel_tasks(tasks)
+                # gather() itself failed (return_exceptions=True means a worker error never gets here), so
+                # there is no result list. This used to be `raw = []`, and zip(to_fetch, []) then skipped
+                # every item of the batch: not counted in `processed`, not in `results`, not in `errors` -
+                # the universe total silently came up short and progress under-reported. Rebuild one entry
+                # per item instead: a task that had already finished keeps its real result or exception;
+                # one that was cancelled (or would not stop) is recorded as failed with the gather error.
+                raw = []
+                for t in tasks:
+                    if t.done() and not t.cancelled():
+                        raw.append(t.exception() or t.result())
+                    else:
+                        raw.append(e)
 
             for item, result in zip(to_fetch, raw):
                 out.processed += 1

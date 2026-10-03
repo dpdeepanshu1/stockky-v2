@@ -346,16 +346,62 @@ class TestLoaderIsolation:
         assert sibling not in seen_tech
         assert os.path.realpath(seen_tech[0]) == os.path.realpath(os.path.join(root, "technical"))
 
-    def test_empty_sys_path_entry_is_left_alone_while_loading(self, build):
-        # Pinned: only the five sibling folders are filtered; '' (cwd) is NOT stripped.
+    def _reload_with_path(self, build, *entries):
         root = build().ROOT
         for alias in _ALIASES.values():
             sys.modules.pop(alias, None)
-        sys.path.insert(0, "")
-        spec = importlib.util.spec_from_file_location("_svc_main_empty", os.path.join(root, "main.py"))
+        for e in reversed(entries):
+            sys.path.insert(0, e)
+        spec = importlib.util.spec_from_file_location("_svc_main_hyg", os.path.join(root, "main.py"))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        assert "" in sys.modules["ai_technical_main"].SEEN["path"]
+        return root
+
+    def test_empty_sys_path_entry_is_stripped_while_loading(self, build):
+        self._reload_with_path(build, "")
+        for alias in _ALIASES.values():
+            assert "" not in sys.modules[alias].SEEN["path"]
+
+    def test_empty_sys_path_entry_is_restored_after_loading(self, build):
+        self._reload_with_path(build, "")
+        assert "" in sys.path
+
+    def test_sibling_folder_with_trailing_slash_is_hidden(self, build):
+        root = build().ROOT
+        sibling = os.path.join(root, "news") + os.sep
+        for alias in _ALIASES.values():
+            sys.modules.pop(alias, None)
+        sys.path.insert(0, sibling)
+        spec = importlib.util.spec_from_file_location("_svc_main_slash", os.path.join(root, "main.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        seen = sys.modules["ai_technical_main"].SEEN["path"]
+        assert sibling not in seen and sibling.rstrip(os.sep) not in seen
+
+    def test_sibling_folder_relative_spelling_is_hidden(self, build):
+        root = build().ROOT
+        for alias in _ALIASES.values():
+            sys.modules.pop(alias, None)
+        os.chdir(root)                      # relative "news" now resolves to <root>/news
+        sys.path.insert(0, "news")
+        spec = importlib.util.spec_from_file_location("_svc_main_rel", os.path.join(root, "main.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert "news" not in sys.modules["ai_technical_main"].SEEN["path"]
+
+    def test_unrelated_and_non_string_entries_are_kept(self, build):
+        root = build().ROOT
+        for alias in _ALIASES.values():
+            sys.modules.pop(alias, None)
+        keep = os.path.join(root, "not_a_subapp")
+        marker = object()
+        sys.path.insert(0, keep)
+        sys.path.insert(0, marker)          # non-str entries must not crash the loader
+        spec = importlib.util.spec_from_file_location("_svc_main_keep", os.path.join(root, "main.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        seen = sys.modules["ai_technical_main"].SEEN["path"]
+        assert keep in seen and marker in seen
 
     def test_sys_path_and_cwd_restored_after_success(self, build):
         cwd = os.getcwd()

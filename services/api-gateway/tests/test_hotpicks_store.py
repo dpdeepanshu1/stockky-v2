@@ -1683,7 +1683,8 @@ class TestRepairScoresFetch:
             "holding_period_estimate": "3-7d", "confidence": "HIGH", "reasons": ["r1", "r2"],
             "ignored_field": "nope"})
         out = m.hotpicks_repair_scores(decision_url=DEC)
-        assert out == {"status": "completed", "repaired": ["AAA"], "attempted": 0}
+        # attempted used to stay 0 here (pinned as current behaviour); it now counts the row tried.
+        assert out == {"status": "completed", "repaired": ["AAA"], "attempted": 1}
         sql, params, blob = self._saved(env)
         assert sql == ("UPDATE hotpicks_static_feed SET item_json = :item_json, "
                        "updated_at = NOW[postgresql] WHERE symbol = :symbol AND section = :section")
@@ -1781,6 +1782,34 @@ class TestRepairScoresFetch:
         assert out["repaired"] == ["GOOD"]
         assert any("hotpicks score-repair BAD failed" in r.getMessage() for r in caplog.records)
         assert env.clock.slept == [0.4, 0.4]
+
+    def test_attempted_counts_every_row_tried_not_just_repaired(self, m, env):
+        env.hp.shared.target_rows = [
+            ("OK", "news_driven", _needs()),
+            ("DOWN", "news_driven", _needs()),
+            ("EMPTY", "news_driven", _needs()),
+            ("BOOM", "news_driven", _needs()),
+        ]
+        env.http.routes[f"{DEC}/decide/OK"] = FakeResp(200, {"decision": "BUY"})
+        env.http.routes[f"{DEC}/decide/DOWN"] = FakeResp(500, {})
+        env.http.routes[f"{DEC}/decide/EMPTY"] = FakeResp(200, {})
+        env.http.routes[f"{DEC}/decide/BOOM"] = RuntimeError("net")
+        out = m.hotpicks_repair_scores(decision_url=DEC)
+        assert out["attempted"] == 4 and out["repaired"] == ["OK"]
+
+    def test_attempted_is_zero_when_no_row_needs_scores(self, m, env):
+        env.hp.shared.target_rows = [("FULL", "news_driven", json.dumps(_FULL))]
+        assert m.hotpicks_repair_scores(decision_url=DEC)["attempted"] == 0
+
+    @pytest.mark.parametrize("limit, expected", [(None, 15), (3, 3), (1000, 100)])
+    def test_attempted_respects_the_limit_clamp(self, m, env, limit, expected):
+        env.hp.shared.target_rows = [(f"S{i}", "news_driven", _needs()) for i in range(120)]
+        assert m.hotpicks_repair_scores(limit=limit, decision_url=DEC)["attempted"] == expected
+
+    def test_attempted_is_one_for_a_forced_symbol(self, m, env):
+        env.hp.shared.target_rows = [("RELIANCE", "news_driven", _needs()), ("TCS", "news_driven", _needs())]
+        env.http.routes[f"{DEC}/decide/RELIANCE"] = FakeResp(200, {"decision": "BUY"})
+        assert m.hotpicks_repair_scores(symbol="reliance", decision_url=DEC)["attempted"] == 1
 
     def test_audit_cache_is_invalidated(self, m, env):
         m._AUDIT_CACHE["v"] = (1.0, {"ok": True})

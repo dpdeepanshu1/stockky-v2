@@ -460,8 +460,13 @@ class TestNormalizeDbUrl:
             "postgresql://h/db?sslmode=require"
 
     def test_channel_binding_middle(self, kv):
+        # Was pinned as "a=1&&sslmode=require" (libpq rejects the empty key); the doubled '&' is now collapsed.
         assert kv._normalize_db_url("postgresql://h/db?a=1&channel_binding=require&sslmode=require") == \
-            "postgresql://h/db?a=1&&sslmode=require"
+            "postgresql://h/db?a=1&sslmode=require"
+
+    def test_channel_binding_middle_never_leaves_a_doubled_ampersand(self, kv):
+        out = kv._normalize_db_url("postgresql://h/db?a=1&channel_binding=require&b=2")
+        assert "&&" not in out and out == "postgresql://h/db?a=1&b=2&sslmode=require"
 
     def test_sslmode_required_is_fixed(self, kv):
         assert kv._normalize_db_url("postgresql://h/db?sslmode=required") == "postgresql://h/db?sslmode=require"

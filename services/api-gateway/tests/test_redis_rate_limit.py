@@ -205,12 +205,42 @@ class TestBucketAcquire:
         assert clock.sleeps[0] == 0.5
         assert b.tokens == 0.0
 
-    def test_weight_larger_than_capacity_stalls_until_max_wait(self, clock):
-        # Documents current behaviour: a request heavier than the burst can never be
-        # satisfied, so it waits the full max_wait and then proceeds anyway.
+    def test_weight_larger_than_capacity_takes_the_whole_bucket_without_stalling(self, clock):
+        # A request heavier than the burst can never be satisfied in full; it used to wait the
+        # whole max_wait and then proceed anyway. It now means "the entire bucket".
         b = make_bucket(clock, rps=10.0, capacity=3.0)
-        waited = b.acquire(weight=10, max_wait=5.0)
-        assert waited >= 5.0
+        assert b.acquire(weight=10, max_wait=5.0) == 0.0
+        assert b.tokens == 0.0
+        assert clock.sleeps == []
+
+    def test_oversized_weight_waits_only_for_the_bucket_to_fill(self, clock):
+        b = make_bucket(clock, rps=1.0, capacity=3.0)
+        b.acquire(weight=3)                              # drain
+        assert b.acquire(weight=10, max_wait=60.0) == pytest.approx(3.0)
+        assert clock.sleeps == [2.0, 1.0]
+        assert b.tokens == 0.0 and b.waiters == 0
+
+    def test_oversized_weight_is_noted_at_debug(self, clock, caplog):
+        b = make_bucket(clock, rps=10.0, capacity=3.0)
+        with caplog.at_level(logging.DEBUG, logger="rate-limiter"):
+            b.acquire(weight=10)
+        assert any("exceeds bucket capacity" in r.getMessage() for r in caplog.records)
+
+    def test_weight_equal_to_capacity_is_not_logged_as_oversized(self, clock, caplog):
+        b = make_bucket(clock, rps=10.0, capacity=3.0)
+        with caplog.at_level(logging.DEBUG, logger="rate-limiter"):
+            assert b.acquire(weight=3) == 0.0
+        assert not any("exceeds bucket capacity" in r.getMessage() for r in caplog.records)
+
+    def test_oversized_weight_is_still_bounded_when_nothing_refills(self, clock):
+        b = make_bucket(clock, rps=0.0, capacity=3.0)
+        b.acquire(weight=3)
+        waited = b.acquire(weight=10, max_wait=1.0)
+        assert waited >= 1.0 and b.tokens == 0.0
+
+    def test_zero_capacity_is_left_alone(self, clock):
+        b = make_bucket(clock, rps=1.0, capacity=0.0)
+        assert b.acquire(weight=1, max_wait=1.0) >= 1.0
         assert b.tokens == 0.0
 
     def test_refill_never_exceeds_capacity(self, clock):
@@ -264,9 +294,27 @@ class TestBucketAllow:
 
     def test_weighted_allow(self, clock):
         b = make_bucket(clock, capacity=5.0)
+        assert b.allow(weight=3) is True
+        assert b.allow(weight=3) is False
+        assert b.tokens == pytest.approx(2.0)  # a denied call consumes nothing
+        assert b.allow(weight=2) is True
+
+    def test_oversized_allow_takes_the_whole_bucket_when_full(self, clock):
+        # allow(weight > capacity) used to be False forever (the gateway's _cb_get would then
+        # raise CircuitOpenError for good); it now means "the whole bucket".
+        b = make_bucket(clock, rps=1.0, capacity=5.0)
+        assert b.allow(weight=6) is True
+        assert b.tokens == 0.0
+
+    def test_oversized_allow_is_denied_while_the_bucket_is_not_full(self, clock):
+        b = make_bucket(clock, rps=1.0, capacity=5.0)
+        b.allow(weight=1)
         assert b.allow(weight=6) is False
-        assert b.tokens == 5.0  # a denied call consumes nothing
-        assert b.allow(weight=5) is True
+        assert b.tokens == pytest.approx(4.0)  # denied -> nothing consumed
+
+    def test_zero_capacity_allow_is_left_alone(self, clock):
+        b = make_bucket(clock, rps=1.0, capacity=0.0)
+        assert b.allow(weight=1) is False
 
 
 class TestBucketWaitBudget:
@@ -299,6 +347,18 @@ class TestBucketWaitBudget:
         b = make_bucket(clock, rps=0.0, capacity=1.0)
         b.allow()
         assert b.wait_budget_sec() == 0.5
+
+    def test_oversized_weight_budget_is_time_to_fill_not_to_an_impossible_target(self, clock):
+        # wait_budget_sec(weight > capacity) used to report deficit against a target the bucket
+        # can never reach (10 tokens vs capacity 2 -> 2.5s even when the bucket is full).
+        b = make_bucket(clock, rps=4.0, capacity=2.0)
+        assert b.wait_budget_sec(weight=10) == 0.0       # full bucket: granted immediately
+        b.allow(weight=2)
+        assert b.wait_budget_sec(weight=10) == pytest.approx(0.5)   # 2 tokens at 4/s
+
+    def test_zero_capacity_budget_is_left_alone(self, clock):
+        b = make_bucket(clock, rps=1.0, capacity=0.0)
+        assert b.wait_budget_sec(weight=1) == pytest.approx(1.0)
 
 
 class TestBucketSnapshot:
@@ -447,8 +507,15 @@ class TestAllowFn:
     def test_weight_forwarded(self, clock):
         b = rrl._get_bucket("nse")
         b.updated = clock.now
-        assert rrl.allow("nse", weight=4) is False
-        assert rrl.allow("nse", weight=3) is True
+        assert rrl.allow("nse", weight=2) is True
+        assert rrl.allow("nse", weight=2) is False      # only 1 token left
+        assert rrl.allow("nse", weight=1) is True
+
+    def test_oversized_weight_forwarded_means_the_whole_bucket(self, clock):
+        b = rrl._get_bucket("nse")                       # nse burst is 3
+        b.updated = clock.now
+        assert rrl.allow("nse", weight=4) is True
+        assert b.tokens == 0.0
 
     def test_fails_open(self, monkeypatch, caplog):
         def boom(_):

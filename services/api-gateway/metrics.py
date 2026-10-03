@@ -82,10 +82,27 @@ class MetricsRegistry:
         return "\n".join(lines) + "\n"
 
     @staticmethod
+    def _escape_label_value(value: Any) -> str:
+        """Escape a label value per the Prometheus text format (backslash, double quote, newline).
+
+        Backslash must be escaped FIRST or the escapes added for the other two would be doubled.
+        Values reach here from request payloads (e.g. /ops/rate-limits/event's `source`), so an
+        unescaped quote or newline would corrupt the whole /metrics?format=prom exposition (scrape
+        fails) or inject a forged series line. Escaping here, at key-build time, also keeps distinct
+        label sets from colliding on the same registry key.
+        """
+        try:
+            text = str(value)
+        except Exception:
+            text = "<unprintable>"
+        return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+    @staticmethod
     def _key(name: str, labels: dict) -> str:
         if not labels:
             return name
-        parts = ",".join(f'{k}="{v}"' for k, v in sorted(labels.items()))
+        esc = MetricsRegistry._escape_label_value
+        parts = ",".join(f'{k}="{esc(v)}"' for k, v in sorted(labels.items()))
         return f"{name}{{{parts}}}"
 
     @staticmethod

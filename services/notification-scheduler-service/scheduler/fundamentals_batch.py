@@ -27,7 +27,7 @@ FUNDAMENTAL_URL = os.getenv(
     "FUNDAMENTAL_URL",
     "https://analysis-intelligence-service.onrender.com/fundamental",
 ).rstrip("/")
-API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "https://api-gateway.onrender.com").rstrip("/")
+API_GATEWAY_URL = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/") or "https://api-gateway.onrender.com"
 DB_URL = (
     os.getenv("CACHE_DATABASE_URL")
     or os.getenv("DATABASE_URL")

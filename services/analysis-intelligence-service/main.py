@@ -32,6 +32,31 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 MOUNT_STATUS: dict = {}
 
 
+_SUBAPP_DIRS = frozenset(
+    os.path.normcase(os.path.join(BASE, d))
+    for d in ("technical", "fundamental", "news", "event", "sentiment")
+)
+
+
+def _hidden_while_loading(entry) -> bool:
+    """True for sys.path entries a sub-app must NOT see while it is being imported.
+
+    * '' (the implicit cwd): the loader chdir()s into the sub-app folder, so '' would
+      silently resolve to a folder the loader did not choose to expose.
+    * any sibling sub-app folder (technical/fundamental/news/event/sentiment), compared
+      after abspath/normcase so relative or trailing-slash spellings are caught too.
+    Non-string entries are left alone (never raise from path hygiene).
+    """
+    if not isinstance(entry, str):
+        return False
+    if entry == "":
+        return True
+    try:
+        return os.path.normcase(os.path.abspath(entry)) in _SUBAPP_DIRS
+    except Exception:  # pragma: no cover - abspath only fails on exotic embedded NULs
+        return entry in _SUBAPP_DIRS
+
+
 def _load_subapp(folder: str, module_alias: str):
     """Load folder/main.py as an isolated module name; temporarily prefer that folder on path."""
     folder_path = os.path.join(BASE, folder)
@@ -40,15 +65,9 @@ def _load_subapp(folder: str, module_alias: str):
         raise FileNotFoundError(main_py)
     prev = sys.path[:]
     try:
-        sys.path = [folder_path] + [
-            p
-            for p in prev
-            if p
-            not in (
-                os.path.join(BASE, d)
-                for d in ("technical", "fundamental", "news", "event", "sentiment")
-            )
-        ]
+        # Computed BEFORE os.chdir below, so relative entries resolve against the cwd
+        # the process was started with.
+        sys.path = [folder_path] + [p for p in prev if not _hidden_while_loading(p)]
         spec = importlib.util.spec_from_file_location(module_alias, main_py)
         mod = importlib.util.module_from_spec(spec)
         sys.modules[module_alias] = mod

@@ -243,6 +243,70 @@ class TestExtractPrice:
         assert ins._extract_price("A", {"price": 3}, {"cmp": 7}) == 7.0
 
 
+# Group 49: a None / non-dict feed or tick used to raise AttributeError in the fallback walk (and in the two
+# score functions and _metrics). Real callers always pass a dict, so this was latent, but the fallback only
+# runs when the price resolver is already failing - the worst moment to crash instead of returning 0.
+BAD_SHAPES = [None, "x", [1, 2], 5, 0, ()]
+
+
+class TestNonDictInputsDoNotCrash:
+    @pytest.mark.parametrize("bad", BAD_SHAPES)
+    def test_as_dict(self, ins, bad):
+        assert ins._as_dict(bad) == {}
+
+    def test_as_dict_keeps_a_dict_itself(self, ins):
+        d = {"a": 1}
+        assert ins._as_dict(d) is d
+
+    @pytest.mark.parametrize("bad", BAD_SHAPES)
+    def test_metrics(self, ins, bad):
+        assert ins._metrics(bad) == {}
+
+    @pytest.mark.parametrize("bad", BAD_SHAPES)
+    def test_extract_price_fallback_with_a_bad_feed(self, ins, broken_resolver, bad):
+        assert ins._extract_price("A", bad, None) == 0.0
+        assert ins._extract_price("A", bad, {}) == 0.0
+
+    @pytest.mark.parametrize("bad", BAD_SHAPES)
+    def test_extract_price_fallback_with_a_bad_tick(self, ins, broken_resolver, bad):
+        assert ins._extract_price("A", {}, bad) == 0.0
+
+    @pytest.mark.parametrize("bad", BAD_SHAPES)
+    def test_a_bad_feed_does_not_hide_a_good_tick(self, ins, broken_resolver, bad):
+        assert ins._extract_price("A", bad, {"price": 25.5}) == 25.5
+
+    @pytest.mark.parametrize("bad", BAD_SHAPES)
+    def test_a_bad_tick_does_not_hide_a_good_feed(self, ins, broken_resolver, bad):
+        assert ins._extract_price("A", {"close": 40.0}, bad) == 40.0
+
+    @pytest.mark.parametrize("bad", BAD_SHAPES)
+    def test_missing_resolver_with_a_bad_feed(self, ins, no_resolver, bad):
+        assert ins._extract_price("A", bad, None) == 0.0
+        assert ins._extract_price("A", bad, {"cmp": 7}) == 7.0
+
+    @pytest.mark.parametrize("bad", BAD_SHAPES)
+    def test_compute_technical_score_with_a_bad_feed_equals_the_empty_feed(self, ins, bad):
+        assert ins.compute_technical_score(bad, 100.0, 100.0) == ins.compute_technical_score({}, 100.0, 100.0)
+
+    @pytest.mark.parametrize("bad", BAD_SHAPES)
+    def test_compute_fundamental_score_with_a_bad_feed_equals_the_empty_feed(self, ins, bad):
+        assert ins.compute_fundamental_score(bad) == ins.compute_fundamental_score({})
+        assert ins.compute_fundamental_score(bad) == 48 + 22 + 14  # the documented default baseline
+
+    @pytest.mark.parametrize("bad", BAD_SHAPES)
+    def test_compute_instant_scores_with_a_bad_feed_and_tick(self, ins, bad):
+        out = ins.compute_instant_scores("TCS", bad, bad)
+        assert out["decision"] == "AVOID" and out["verdict"] == "NO DATA / MISSING FROM FEED"
+        # ...and a good tick alone still gives a priced, non-crashing card
+        priced = ins.compute_instant_scores("TCS", bad, {"price": 120.0})
+        assert priced["price"] == 120.0 and priced["from_data_feed"] is False
+
+    @pytest.mark.parametrize("bad", BAD_SHAPES)
+    def test_process_single_stock_with_a_bad_feed_row(self, ins, bad):
+        out = asyncio.run(ins.process_single_stock("TCS", {"TCS": bad}, asyncio.Semaphore(1), None, "", ""))
+        assert out["decision"] == "AVOID" and out["data_insufficient"] is True
+
+
 # ── resolve_stock_features ────────────────────────────────────────────────────
 
 class TestResolveStockFeatures:

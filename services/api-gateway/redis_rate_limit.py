@@ -97,6 +97,16 @@ class _Bucket:
         """Blocks until `weight` tokens are available (or max_wait elapses,
         to avoid an unbounded stall if a caller mis-sizes a batch). Returns
         the actual wait time in seconds."""
+        # A request heavier than the whole bucket can never be satisfied in full
+        # (tokens are capped at `capacity`), so it used to wait out all of
+        # max_wait on every call and then "proceed anyway". Treat it as a request
+        # for the entire bucket: wait for it to fill, drain it, return.
+        if weight > self.capacity > 0:
+            logger.debug(
+                "rate_limiter: weight %s exceeds bucket capacity %s, treating as %s",
+                weight, self.capacity, self.capacity,
+            )
+            weight = self.capacity
         start = time.time()
         with self.lock:
             self.waiters += 1
@@ -131,6 +141,7 @@ class _Bucket:
         """Non-blocking check: consume `weight` tokens if available and return
         True, else return False immediately (never sleeps). Used by the gateway
         to pace internal fan-out without ever stalling the event loop."""
+        weight = min(weight, self.capacity) if self.capacity > 0 else weight  # see acquire()
         with self.lock:
             now = time.time()
             elapsed = now - self.updated
@@ -144,6 +155,7 @@ class _Bucket:
     def wait_budget_sec(self, weight: float = 1.0) -> float:
         """How many seconds until `weight` tokens would be available (0.0 if
         available right now). Does not consume tokens."""
+        weight = min(weight, self.capacity) if self.capacity > 0 else weight  # see acquire()
         with self.lock:
             now = time.time()
             elapsed = now - self.updated

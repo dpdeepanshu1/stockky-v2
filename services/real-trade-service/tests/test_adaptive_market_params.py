@@ -120,7 +120,61 @@ class TestRecordMetric:
 
 # ── purge_legacy_universe_adx ───────────────────────────────────────────
 
+@pytest.fixture(autouse=False)
+def fresh_purge_flag():
+    """The once-per-process flag must not leak between tests."""
+    amp._legacy_adx_purged = False
+    yield
+    amp._legacy_adx_purged = False
+
+
 class TestPurgeLegacyUniverseAdx:
+    @pytest.fixture(autouse=True)
+    def _reset(self, fresh_purge_flag):
+        pass
+
+    def test_runs_once_per_process_after_a_successful_purge(self, db):
+        now = datetime.now(timezone.utc)
+        _insert_metric(db, amp.LEGACY_UNIVERSE_ADX_METRIC, 40.0, now)
+        assert amp.purge_legacy_universe_adx(db) == 1
+        # A reading that shows up afterwards (e.g. an older instance mid-deploy) is left alone by
+        # the per-cycle call: no DELETE, no commit.
+        _insert_metric(db, amp.LEGACY_UNIVERSE_ADX_METRIC, 41.0, now)
+        mock_db = MagicMock()
+        assert amp.purge_legacy_universe_adx(mock_db) == 0
+        mock_db.query.assert_not_called()
+        mock_db.commit.assert_not_called()
+        assert db.query(models.AdaptiveMetricSnapshot).filter(
+            models.AdaptiveMetricSnapshot.metric_name == amp.LEGACY_UNIVERSE_ADX_METRIC).count() == 1
+
+    def test_a_noop_purge_also_counts_as_done(self, db):
+        assert amp.purge_legacy_universe_adx(db) == 0
+        assert amp._legacy_adx_purged is True
+        mock_db = MagicMock()
+        amp.purge_legacy_universe_adx(mock_db)
+        mock_db.query.assert_not_called()
+
+    def test_force_runs_again(self, db):
+        now = datetime.now(timezone.utc)
+        assert amp.purge_legacy_universe_adx(db) == 0
+        _insert_metric(db, amp.LEGACY_UNIVERSE_ADX_METRIC, 41.0, now)
+        assert amp.purge_legacy_universe_adx(db, force=True) == 1
+
+    def test_a_failed_purge_is_retried_next_cycle(self, db):
+        bad = MagicMock()
+        bad.query.side_effect = Exception("purge boom")
+        assert amp.purge_legacy_universe_adx(bad) == 0
+        assert amp._legacy_adx_purged is False
+        _insert_metric(db, amp.LEGACY_UNIVERSE_ADX_METRIC, 40.0, datetime.now(timezone.utc))
+        assert amp.purge_legacy_universe_adx(db) == 1
+        assert amp._legacy_adx_purged is True
+
+    def test_a_failed_commit_is_retried_next_cycle(self):
+        bad = MagicMock()
+        bad.commit.side_effect = Exception("commit boom")
+        assert amp.purge_legacy_universe_adx(bad) == 0
+        assert amp._legacy_adx_purged is False
+
     def test_deletes_only_legacy_rows(self, db):
         now = datetime.now(timezone.utc)
         _insert_metric(db, amp.LEGACY_UNIVERSE_ADX_METRIC, 40.0, now)

@@ -352,3 +352,101 @@ class TestPatchYfinance:
         # history is now patched — call it (hard timeout applies)
         result = ticker.history(period="1d")
         assert result == "history_result"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# weight > capacity — an oversized request means "the whole bucket", not "never"
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestOversizedWeight:
+    """Tokens are capped at `capacity`, so `tokens >= weight` could never become true for a heavier
+    weight: acquire() burned the whole max_wait (20s default) on every call and then proceeded anyway,
+    try_acquire() burned it and returned False, and would_block() was True forever."""
+
+    @staticmethod
+    def _fake_clock(monkeypatch):
+        state = {"now": 1000.0, "sleeps": []}
+
+        def _sleep(s):
+            state["sleeps"].append(s)
+            state["now"] += s
+
+        monkeypatch.setattr(rl, "time", types.SimpleNamespace(time=lambda: state["now"], sleep=_sleep))
+        return state
+
+    @staticmethod
+    def _bucket(state, rps, capacity, tokens=None):
+        b = rl._Bucket(rps=rps, capacity=capacity)
+        b.updated = state["now"]
+        if tokens is not None:
+            b.tokens = tokens
+        return b
+
+    def test_full_bucket_is_granted_immediately(self, monkeypatch):
+        st = self._fake_clock(monkeypatch)
+        b = self._bucket(st, rps=2.0, capacity=6.0)
+        assert b.acquire(weight=50, max_wait=20.0) == 0.0
+        assert b.tokens == 0.0 and st["sleeps"] == []
+
+    def test_waits_only_for_the_bucket_to_fill(self, monkeypatch):
+        st = self._fake_clock(monkeypatch)
+        b = self._bucket(st, rps=2.0, capacity=6.0, tokens=0.0)
+        assert b.acquire(weight=50, max_wait=20.0) == 3.0     # 6 tokens at 2/s, not the 20s budget
+        assert st["sleeps"] == [2.0, 1.0]
+        assert b.tokens == 0.0 and b.waiters == 0
+
+    def test_just_above_capacity_is_capped_too(self, monkeypatch):
+        st = self._fake_clock(monkeypatch)
+        b = self._bucket(st, rps=2.0, capacity=6.0)
+        assert b.acquire(weight=6.5) == 0.0 and b.tokens == 0.0
+
+    def test_fail_closed_variant_is_granted_not_shed(self, monkeypatch):
+        st = self._fake_clock(monkeypatch)
+        b = self._bucket(st, rps=2.0, capacity=6.0)
+        assert b.acquire(weight=50, max_wait=5.0, fail_open=False) == 0.0   # used to be -1.0 after 5s
+
+    def test_fail_closed_variant_is_still_bounded_when_nothing_refills(self, monkeypatch):
+        st = self._fake_clock(monkeypatch)
+        b = self._bucket(st, rps=0.0, capacity=6.0, tokens=1.0)
+        assert b.acquire(weight=50, max_wait=1.0, fail_open=False) == -1.0
+        assert b.tokens == 1.0                                  # nothing consumed on a shed call
+
+    def test_weight_equal_to_capacity_is_unchanged(self, monkeypatch, caplog):
+        import logging
+        st = self._fake_clock(monkeypatch)
+        b = self._bucket(st, rps=2.0, capacity=6.0)
+        with caplog.at_level(logging.DEBUG):
+            assert b.acquire(weight=6.0) == 0.0
+        assert not any("exceeds bucket capacity" in r.getMessage() for r in caplog.records)
+
+    def test_oversized_weight_is_noted_at_debug(self, monkeypatch, caplog):
+        import logging
+        st = self._fake_clock(monkeypatch)
+        b = self._bucket(st, rps=2.0, capacity=6.0)
+        with caplog.at_level(logging.DEBUG):
+            b.acquire(weight=50)
+        assert any("exceeds bucket capacity" in r.getMessage() for r in caplog.records)
+
+    def test_zero_capacity_is_left_alone(self, monkeypatch):
+        st = self._fake_clock(monkeypatch)
+        b = self._bucket(st, rps=1.0, capacity=0.0)
+        assert b.acquire(weight=1, max_wait=1.0) == 1.0 and b.tokens == 0.0
+
+    def test_module_acquire_and_try_acquire_accept_oversized_weight(self, monkeypatch):
+        st = self._fake_clock(monkeypatch)
+        rl._buckets["yfinance"] = self._bucket(st, rps=2.0, capacity=6.0)
+        assert rl.acquire("yfinance", weight=50) == 0.0
+        st["now"] += 100                                        # refill to capacity
+        assert rl.try_acquire("yfinance", weight=50) is True
+
+    def test_would_block_oversized_weight_follows_a_full_bucket(self, monkeypatch):
+        st = self._fake_clock(monkeypatch)
+        rl._buckets["wb_big"] = self._bucket(st, rps=2.0, capacity=6.0)
+        assert rl.would_block("wb_big", weight=50) is False     # used to be True forever
+        rl._buckets["wb_big"].acquire(weight=1.0)
+        assert rl.would_block("wb_big", weight=50) is True      # not full any more -> would wait
+
+    def test_would_block_zero_capacity_is_left_alone(self, monkeypatch):
+        st = self._fake_clock(monkeypatch)
+        rl._buckets["wb_zero"] = self._bucket(st, rps=1.0, capacity=0.0)
+        assert rl.would_block("wb_zero", weight=1.0) is True

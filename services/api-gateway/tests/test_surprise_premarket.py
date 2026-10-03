@@ -380,6 +380,7 @@ class TestNormalizeDbUrl:
         ("postgresql://h/db?channel_binding=require", "postgresql://h/db?sslmode=require"),
         ("postgresql://h/db?channel_binding=require&sslmode=require", "postgresql://h/db?sslmode=require"),
         ("postgresql://h/db?sslmode=require&channel_binding=require", "postgresql://h/db?sslmode=require"),
+        ("postgresql://h/db?a=1&channel_binding=require&b=2", "postgresql://h/db?a=1&b=2&sslmode=require"),
         ("postgresql://h/db?a=1", "postgresql://h/db?a=1&sslmode=require"),
     ])
     def test_cases(self, pm, url, want):
@@ -688,13 +689,31 @@ class TestBulkYfinance:
         assert [len(t.split()) for t, _ in yf.downloads] == [2, 2, 1]
         assert pm._clock.sleeps == [pm.YF_BULK_BATCH_PAUSE, pm.YF_BULK_BATCH_PAUSE]
 
-    def test_no_pause_after_a_failed_or_empty_batch(self, bulk):
-        # Pinned current behaviour: the pacing sleep sits AFTER the `continue`s for a failed download and
-        # for an empty/None frame, so exactly the batches that most likely hit a rate limit skip the pause.
+    def test_pause_before_every_batch_after_the_first_even_when_earlier_ones_fail(self, bulk):
+        # A failed download and an empty/None frame used to `continue` past the pacing sleep, so exactly the
+        # batches that most likely hit a rate limit got no pause. The pause now sits before each batch.
         pm, yf = bulk
         yf.results = [RuntimeError("429"), None, ohlc()]
         pm.bulk_baselines_from_yfinance([f"S{i}" for i in range(5)], batch_size=2)
-        assert len(yf.downloads) == 3 and pm._clock.sleeps == []
+        assert len(yf.downloads) == 3
+        assert pm._clock.sleeps == [pm.YF_BULK_BATCH_PAUSE, pm.YF_BULK_BATCH_PAUSE]
+
+    def test_pause_lands_before_the_next_download_not_after_the_last(self, bulk):
+        pm, yf = bulk
+        order = []
+        real_sleep = pm._clock.sleep
+        pm._clock.sleep = lambda s: (order.append("sleep"), real_sleep(s))[1]
+        orig = yf.yf.download
+        yf.yf.download = lambda tickers, **kw: (order.append("download"), orig(tickers, **kw))[1]
+        yf.results = [RuntimeError("429"), RuntimeError("429")]
+        pm.bulk_baselines_from_yfinance(["A", "B"], batch_size=1)
+        assert order == ["download", "sleep", "download"]
+
+    def test_single_batch_never_pauses(self, bulk):
+        pm, yf = bulk
+        yf.results = [RuntimeError("429")]
+        pm.bulk_baselines_from_yfinance(["A", "B"], batch_size=50)
+        assert pm._clock.sleeps == []
 
     def test_download_failure_skips_the_batch(self, bulk, caplog):
         pm, yf = bulk

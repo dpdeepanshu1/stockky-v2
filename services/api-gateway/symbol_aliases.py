@@ -127,6 +127,14 @@ KNOWN_DELISTED = {
     # rename). Confirmed via NSE/Zerodha bulletin. Kept out of
     # SYMBOL_RENAMES on purpose — see module note above.
     "TATAMTRDVR": "merged into TATAMOTORS 2024-08-30 (7:10 ratio, not 1:1)",
+    # Confirmed via Yahoo 404 logs on 2026-09-01 ("Quote not found" / "possibly
+    # delisted; no price data found" on every cycle). market-data-service already
+    # short-circuits both (KNOWN_DELISTED_SYMBOLS in its main.py); the gateway's
+    # list lacked them, so its own resolvers kept sending them to yfinance and
+    # kept them in the scan universe. Keep the two lists identical — a drift
+    # guard (tests/test_known_delisted_drift.py) enforces it.
+    "AAKASH": "not found on Yahoo/BSE (AAKASH.BO) — repeated 404s, treated as delisted",
+    "ANNAPURNA": "not found on Yahoo/BSE (ANNAPURNA.BO) — repeated 404s, treated as delisted",
 }
 
 
@@ -298,16 +306,27 @@ def resolve_base_symbol(symbol: str) -> Optional[str]:
     return _apply_all_renames(base)
 
 
-def _apply_all_renames(base: str) -> str:
-    learned = _load_learned_renames()
-    entry = learned.get(base)
-    if isinstance(entry, dict) and entry.get("to"):
-        base = entry["to"]
-    # Chase multi-hop renames (e.g. MINDTREE -> LTIM -> LTM, both real,
-    # years apart) instead of stopping after one substitution — a single
-    # lookup here would silently leave a symbol pointed at an
-    # already-superseded ticker. Cycle-guarded since these are static/
-    # learned data, not meant to loop, but a bad entry should never hang.
+def _learned_target(learned: Any, base: str) -> Optional[str]:
+    """The usable rename target for `base` in a learned-renames dict, or None.
+
+    The learned store is durable KV data, so an entry can be anything a past
+    bug or a manual edit left there (a bare string, None, a number, a list, a
+    dict without "to"). Only {"to": "<non-empty str>"} counts; everything else
+    is ignored rather than raising."""
+    entry = learned.get(base) if isinstance(learned, dict) else None
+    if isinstance(entry, dict):
+        to = entry.get("to")
+        if isinstance(to, str) and to.strip():
+            return to.strip()
+    return None
+
+
+def _chase_static_renames(base: str) -> str:
+    """Follow SYMBOL_RENAMES to the end of the chain (e.g. MINDTREE -> LTIM -> LTM,
+    both real, years apart) instead of stopping after one substitution — a single
+    lookup would silently leave a symbol pointed at an already-superseded ticker.
+    Cycle-guarded since these are static data, not meant to loop, but a bad entry
+    should never hang."""
     seen = {base}
     for _ in range(len(SYMBOL_RENAMES) + 1):
         nxt = SYMBOL_RENAMES.get(base)
@@ -316,6 +335,13 @@ def _apply_all_renames(base: str) -> str:
         base = nxt
         seen.add(base)
     return base
+
+
+def _apply_all_renames(base: str) -> str:
+    target = _learned_target(_load_learned_renames(), base)
+    if target:
+        base = target
+    return _chase_static_renames(base)
 
 
 # ── Dynamic durable rename learning ─────────────────────────────────────────
@@ -548,13 +574,17 @@ def resolve_with_fallback(symbol: str) -> Tuple[Optional[str], Dict[str, Any]]:
     if is_learned_delisted(base):
         return None, {"resolution": "skip_delisted"}
 
+    # Both rename paths end at the FINAL ticker, the same one resolve_ns_ticker()
+    # / _apply_all_renames() produce (before this, the static path returned only
+    # the first hop, so MINDTREE came back as LTIM here but LTM everywhere else,
+    # and a learned rename was never chased through the static chain).
     if base in SYMBOL_RENAMES:
-        target = SYMBOL_RENAMES[base]
+        target = _chase_static_renames(base)
         return f"{target}.NS", {"resolution": "static_rename", "to": target}
 
-    learned = _load_learned_renames()
-    if base in learned and learned[base].get("to"):
-        target = learned[base]["to"]
+    learned_to = _learned_target(_load_learned_renames(), base)
+    if learned_to:
+        target = _chase_static_renames(learned_to)
         return f"{target}.NS", {"resolution": "learned_rename", "to": target}
 
     discovered = try_discover_rename(base)

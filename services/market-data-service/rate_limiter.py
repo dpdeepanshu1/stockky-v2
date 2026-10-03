@@ -111,6 +111,16 @@ class _Bucket:
         fail_open=False: after max_wait NO token is consumed and -1.0 is
                         returned, so the caller can skip/degrade instead of
                         bursting through (see try_acquire)."""
+        # A request heavier than the whole bucket can never be satisfied in full
+        # (tokens are capped at `capacity`), so it used to wait out all of
+        # max_wait on every call and then "proceed anyway". Treat it as a request
+        # for the entire bucket: wait for it to fill, drain it, return.
+        if weight > self.capacity > 0:
+            logger.debug(
+                "rate_limiter: weight %s exceeds bucket capacity %s, treating as %s",
+                weight, self.capacity, self.capacity,
+            )
+            weight = self.capacity
         start = time.time()
         with self.lock:
             self.waiters += 1
@@ -221,6 +231,8 @@ def would_block(provider: str, weight: float = 1.0) -> bool:
             now = time.time()
             elapsed = now - b.updated
             tokens = min(b.capacity, b.tokens + elapsed * b.rps)
+            if weight > b.capacity > 0:
+                weight = b.capacity  # see _Bucket.acquire(): an oversized request means "the whole bucket"
             return tokens < weight
     except Exception:
         return False

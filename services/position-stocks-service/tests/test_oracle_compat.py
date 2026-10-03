@@ -734,7 +734,7 @@ class TestExecDdlSafe:
         m.exec_ddl_safe(eng, sql, "sqlite")
         with caplog.at_level(logging.DEBUG, logger="oracle-compat"):
             m.exec_ddl_safe(eng, sql, "sqlite")  # 'table ... already exists'
-        assert "exec_ddl_safe skip" not in caplog.text  # benign -> silent
+        assert "exec_ddl_safe FAILED" not in caplog.text  # benign -> silent
         with eng.connect() as conn:  # table intact, engine still usable
             assert conn.execute(text("SELECT COUNT(*) FROM test_kv2")).scalar() == 0
 
@@ -749,39 +749,40 @@ class TestExecDdlSafe:
         eng, _ = _raising_engine(f"{code}: {msg}")
         with caplog.at_level(logging.DEBUG, logger="oracle-compat"):
             m.exec_ddl_safe(eng, "DDL", "oracle")
-        assert "exec_ddl_safe skip" not in caplog.text
+        assert "exec_ddl_safe FAILED" not in caplog.text
 
     def test_oracle_code_on_non_oracle_dialect_is_logged_not_silent(self, m, caplog):
         # the ORA-* shortcut is gated on dialect == 'oracle'
         eng, _ = _raising_engine("ORA-00955: name is already used")
         with caplog.at_level(logging.DEBUG, logger="oracle-compat"):
             m.exec_ddl_safe(eng, "DDL", "postgresql")
-        assert "exec_ddl_safe skip (postgresql)" in caplog.text
+        assert "exec_ddl_safe FAILED (postgresql)" in caplog.text
 
     def test_already_exists_message_swallowed_for_postgres(self, m, caplog):
         eng, _ = _raising_engine('relation "x" ALREADY EXISTS')  # case-insensitive
         with caplog.at_level(logging.DEBUG, logger="oracle-compat"):
             m.exec_ddl_safe(eng, "DDL", "postgresql")
-        assert "exec_ddl_safe skip" not in caplog.text
+        assert "exec_ddl_safe FAILED" not in caplog.text
 
     def test_already_exists_message_swallowed_for_oracle_dialect_too(self, m, caplog):
         eng, _ = _raising_engine("object already exists")
         with caplog.at_level(logging.DEBUG, logger="oracle-compat"):
             m.exec_ddl_safe(eng, "DDL", "oracle")
-        assert "exec_ddl_safe skip" not in caplog.text
+        assert "exec_ddl_safe FAILED" not in caplog.text
 
-    def test_other_oracle_error_logged_at_debug_and_swallowed(self, m, caplog):
+    def test_other_oracle_error_logged_as_warning_and_swallowed(self, m, caplog):
         eng, _ = _raising_engine("ORA-00001: unique constraint violated")
         with caplog.at_level(logging.DEBUG, logger="oracle-compat"):
             m.exec_ddl_safe(eng, "INSERT INTO x VALUES (1)", "oracle")  # no raise
-        assert "exec_ddl_safe skip (oracle)" in caplog.text
+        assert "exec_ddl_safe FAILED (oracle)" in caplog.text
+        assert any(r.levelno == logging.WARNING for r in caplog.records if "exec_ddl_safe FAILED" in r.getMessage())
         assert "ORA-00001" in caplog.text
 
-    def test_unknown_postgres_error_logged_at_debug_and_swallowed(self, m, caplog):
+    def test_unknown_postgres_error_logged_as_warning_and_swallowed(self, m, caplog):
         eng, _ = _raising_engine("syntax error near SELECT")
         with caplog.at_level(logging.DEBUG, logger="oracle-compat"):
             m.exec_ddl_safe(eng, "BAD SQL", "postgresql")
-        assert "exec_ddl_safe skip (postgresql): syntax error near SELECT" in caplog.text
+        assert "exec_ddl_safe FAILED (postgresql): syntax error near SELECT" in caplog.text
 
     def test_logged_message_truncated_to_160_chars(self, m, caplog):
         eng, _ = _raising_engine("E" * 500)
@@ -797,3 +798,29 @@ class TestExecDdlSafe:
         eng = MagicMock()
         eng.begin.side_effect = Exception("connection refused")
         m.exec_ddl_safe(eng, "DDL", "postgresql")  # must not raise
+
+    def test_returns_true_on_success_and_when_the_object_already_exists(self, m):
+        eng = _sqlite()
+        sql = "CREATE TABLE ret_t (k TEXT)"
+        assert m.exec_ddl_safe(eng, sql, "sqlite") is True
+        assert m.exec_ddl_safe(eng, sql, "sqlite") is True      # 'already exists' is benign
+
+    def test_returns_false_and_warns_with_the_sql_on_a_real_failure(self, m, caplog):
+        with caplog.at_level(logging.WARNING, logger="oracle-compat"):
+            assert m.exec_ddl_safe(_sqlite(), "THIS IS NOT SQL", "sqlite") is False
+        recs = [r for r in caplog.records if "exec_ddl_safe FAILED" in r.getMessage()]
+        assert len(recs) == 1 and recs[0].levelno == logging.WARNING
+        assert "THIS IS NOT SQL" in recs[0].getMessage()
+
+    def test_returns_false_when_the_connection_itself_fails(self, m):
+        eng = MagicMock()
+        eng.begin.side_effect = Exception("connection refused")
+        assert m.exec_ddl_safe(eng, "DDL", "postgresql") is False
+
+    def test_sqlite_duplicate_column_is_benign(self, m, caplog):
+        eng = _sqlite()
+        m.exec_ddl_safe(eng, "CREATE TABLE col_t (k TEXT)", "sqlite")
+        m.exec_ddl_safe(eng, "ALTER TABLE col_t ADD COLUMN v TEXT", "sqlite")
+        with caplog.at_level(logging.WARNING, logger="oracle-compat"):
+            assert m.exec_ddl_safe(eng, "ALTER TABLE col_t ADD COLUMN v TEXT", "sqlite") is True
+        assert "exec_ddl_safe FAILED" not in caplog.text

@@ -857,16 +857,20 @@ class TestIndexEnsurers:
             getattr(db, fn)(eng, "oracle")          # must not raise
         assert _warnings(caplog) == []
 
-    def test_a_real_ddl_error_is_swallowed_by_exec_ddl_safe_but_still_reported_as_ensured(self, discovered, caplog):
-        # Pinned CURRENT behaviour (see session note observation): exec_ddl_safe
-        # logs anything but "already exists" at DEBUG only, and the caller then
-        # logs "ensured index" regardless.
+    @pytest.mark.parametrize("fn, indexes", INDEX_CASES)
+    def test_a_real_ddl_error_is_warned_and_not_reported_as_ensured(self, discovered, fn, indexes, caplog):
+        # Was pinned as current behaviour: exec_ddl_safe logged a real failure at DEBUG only and the
+        # caller then logged "ensured index" regardless, so a missing index was invisible. Now the
+        # failure is a WARNING and the caller no longer claims the index was ensured.
         eng, _ = legacy_engine(discovered)
         eng._rules.append(("CREATE INDEX", "syntax error near INDEX"))
+        name, table, _cols = indexes[0]
         with caplog.at_level(logging.INFO, logger=LOGGER):
-            db._ensure_hot_path_indexes(eng, "postgresql")
-        assert "ensured index ix_trade_orders_mode_created" in caplog.text
-        assert "ix_trade_orders_mode_created" not in _index_map(eng, "trade_orders")
+            getattr(db, fn)(eng, "postgresql")          # must not raise
+        assert f"ensured index {name} on {table}" not in caplog.text
+        assert f"could NOT ensure index {name} on {table}" in " ".join(_warnings(caplog))
+        assert "exec_ddl_safe FAILED (postgresql)" in caplog.text
+        assert name not in _index_map(eng, table)
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -269,9 +269,10 @@ class TestBucketAcquire:
         assert b.throttle_events == 1
 
     def test_max_wait_exceeded_proceeds_and_drains_tokens(self, rl, clock, caplog):
-        b = _mk(rl, 1.0, 1)
+        b = _mk(rl, 1.0, 5)
+        b.acquire(weight=5)                              # drain: the next 5-token ask needs 5s of refill
         with caplog.at_level(logging.DEBUG, logger="rate-limiter"):
-            waited = b.acquire(weight=5, max_wait=3)     # weight > capacity: never satisfiable
+            waited = b.acquire(weight=5, max_wait=3)     # satisfiable, but not within the 3s budget
         assert clock.sleeps == [2.0, 2.0]
         assert waited == pytest.approx(4.0, abs=1e-3)
         assert b.tokens == 0.0
@@ -281,13 +282,51 @@ class TestBucketAcquire:
         assert b.throttle_events == 0
         assert b.last_wait_sec == 0.0
 
-    def test_weight_above_burst_capacity_always_stalls_the_full_max_wait(self, rl, clock):
-        # yfinance burst is 6; a weight of 7 can never be satisfied (tokens are capped
-        # at capacity), so the default max_wait of 20s is always burned.
+    def test_weight_above_burst_capacity_is_capped_and_does_not_stall(self, rl, clock):
+        # yfinance burst is 6; a weight of 7 used to be unsatisfiable (tokens are capped at
+        # capacity) and burned the whole default 20s max_wait. It now means "the whole bucket".
         _prime(rl, "yfinance")
-        waited = rl.acquire("yfinance", weight=7)
-        assert waited >= 20.0
-        assert sum(clock.sleeps) >= 20.0
+        assert rl.acquire("yfinance", weight=7) == 0.0
+        assert clock.sleeps == []
+        assert rl._get_bucket("yfinance").tokens == 0.0
+
+    def test_oversized_weight_waits_only_for_the_bucket_to_fill(self, rl, clock):
+        b = _mk(rl, 2.0, 6)
+        b.acquire(weight=6)                              # drain
+        assert b.acquire(weight=50, max_wait=20) == pytest.approx(3.0, abs=1e-6)   # 6 tokens at 2/s
+        assert clock.sleeps == [2.0, 1.0]
+        assert b.tokens == 0.0 and b.waiters == 0
+        assert b.throttle_events == 1
+
+    def test_oversized_weight_just_above_capacity_is_capped_too(self, rl, clock):
+        b = _mk(rl, 2.0, 6)
+        assert b.acquire(weight=6.5) == 0.0
+        assert b.tokens == 0.0
+
+    def test_weight_equal_to_capacity_is_not_logged_as_oversized(self, rl, clock, caplog):
+        b = _mk(rl, 2.0, 6)
+        with caplog.at_level(logging.DEBUG, logger="rate-limiter"):
+            assert b.acquire(weight=6) == 0.0
+        assert not any("exceeds bucket capacity" in r.getMessage() for r in caplog.records)
+
+    def test_oversized_weight_is_noted_at_debug(self, rl, clock, caplog):
+        b = _mk(rl, 2.0, 6)
+        with caplog.at_level(logging.DEBUG, logger="rate-limiter"):
+            b.acquire(weight=50)
+        msgs = [r for r in caplog.records if "exceeds bucket capacity" in r.getMessage()]
+        assert len(msgs) == 1 and msgs[0].levelno == logging.DEBUG
+
+    def test_oversized_weight_is_still_bounded_when_nothing_refills(self, rl, clock):
+        b = _mk(rl, 0.0, 6)
+        b.acquire(weight=6)                              # drain, rps=0 so it never refills
+        waited = b.acquire(weight=50, max_wait=1.0)
+        assert clock.sleeps == [0.5, 0.5] and waited == pytest.approx(1.0, abs=1e-6)
+        assert b.tokens == 0.0
+
+    def test_zero_capacity_is_left_alone(self, rl, clock):
+        b = _mk(rl, 1.0, 0)
+        waited = b.acquire(weight=1, max_wait=1.0)       # capacity 0: nothing to clamp to
+        assert waited == pytest.approx(1.0, abs=1e-6) and b.tokens == 0.0
 
     def test_zero_rps_falls_back_to_half_second_polling_until_max_wait(self, rl, clock):
         b = _mk(rl, 0.0, 1)
@@ -499,22 +538,57 @@ class TestImportTimeEnv:
         assert rl.YFINANCE_HARD_TIMEOUT_SEC == 5.0
         assert rl._yf_hardcap_pool._max_workers == 3
 
-    def test_bad_timeout_env_breaks_import(self, monkeypatch):
-        # Unlike the RL_* settings (swallowed), these two are parsed at import time
-        # with no guard, so a typo stops the service from starting. Pinned.
+    # The two settings below used to be parsed at import with no guard, so a typo stopped the service
+    # from starting (pinned as ValueError). They now fall back to the default and log a WARNING.
+    @pytest.mark.parametrize("bad", ["18s", "abc", "0", "-5", "nan", "inf", "-inf", "1e999"])
+    def test_bad_timeout_env_falls_back_and_warns(self, monkeypatch, caplog, bad):
+        monkeypatch.setenv("YFINANCE_HARD_TIMEOUT_SEC", bad)
+        with caplog.at_level(logging.WARNING, logger="rate-limiter"):
+            rl = _load()
+        assert rl.YFINANCE_HARD_TIMEOUT_SEC == 18.0
+        assert any("ignoring invalid YFINANCE_HARD_TIMEOUT_SEC" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("bad", ["many", "0", "-2", "3.5", "1e2"])
+    def test_bad_worker_count_env_falls_back_and_warns(self, monkeypatch, caplog, bad):
+        monkeypatch.setenv("YFINANCE_POOL_WORKERS", bad)
+        with caplog.at_level(logging.WARNING, logger="rate-limiter"):
+            rl = _load()
+        assert rl._yf_hardcap_pool._max_workers == 8
+        assert any("ignoring invalid YFINANCE_POOL_WORKERS" in r.getMessage() for r in caplog.records)
+
+    def test_one_bad_value_does_not_discard_the_other(self, monkeypatch):
         monkeypatch.setenv("YFINANCE_HARD_TIMEOUT_SEC", "18s")
-        with pytest.raises(ValueError):
-            _load()
-
-    def test_bad_worker_count_env_breaks_import(self, monkeypatch):
+        monkeypatch.setenv("YFINANCE_POOL_WORKERS", "3")
+        rl = _load()
+        assert rl.YFINANCE_HARD_TIMEOUT_SEC == 18.0 and rl._yf_hardcap_pool._max_workers == 3
+        monkeypatch.setenv("YFINANCE_HARD_TIMEOUT_SEC", "5")
         monkeypatch.setenv("YFINANCE_POOL_WORKERS", "many")
-        with pytest.raises(ValueError):
-            _load()
+        rl = _load()
+        assert rl.YFINANCE_HARD_TIMEOUT_SEC == 5.0 and rl._yf_hardcap_pool._max_workers == 8
 
-    def test_zero_workers_breaks_import(self, monkeypatch):
-        monkeypatch.setenv("YFINANCE_POOL_WORKERS", "0")
-        with pytest.raises(ValueError):
-            _load()
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_blank_env_means_default_without_a_warning(self, monkeypatch, caplog, blank):
+        monkeypatch.setenv("YFINANCE_HARD_TIMEOUT_SEC", blank)
+        monkeypatch.setenv("YFINANCE_POOL_WORKERS", blank)
+        with caplog.at_level(logging.WARNING, logger="rate-limiter"):
+            rl = _load()
+        assert rl.YFINANCE_HARD_TIMEOUT_SEC == 18.0 and rl._yf_hardcap_pool._max_workers == 8
+        assert not [r for r in caplog.records if "ignoring invalid" in r.getMessage()]
+
+    def test_valid_values_with_whitespace_and_fractions_are_accepted(self, monkeypatch, caplog):
+        monkeypatch.setenv("YFINANCE_HARD_TIMEOUT_SEC", " 7.5 ")
+        monkeypatch.setenv("YFINANCE_POOL_WORKERS", " 2 ")
+        with caplog.at_level(logging.WARNING, logger="rate-limiter"):
+            rl = _load()
+        assert rl.YFINANCE_HARD_TIMEOUT_SEC == 7.5 and rl._yf_hardcap_pool._max_workers == 2
+        assert not [r for r in caplog.records if "ignoring invalid" in r.getMessage()]
+
+    def test_a_service_with_bad_env_still_enforces_the_default_hard_timeout(self, monkeypatch):
+        monkeypatch.setenv("YFINANCE_HARD_TIMEOUT_SEC", "oops")
+        rl = _load()
+        monkeypatch.setattr(rl, "YFINANCE_HARD_TIMEOUT_SEC", 0.05)   # keep the test fast, same code path
+        with pytest.raises(TimeoutError, match="hard timeout"):
+            rl._yf_call_with_hard_timeout(lambda: _real_time.sleep(0.5))
 
 
 # ── patch_yfinance (fake yfinance) ────────────────────────────────────────────

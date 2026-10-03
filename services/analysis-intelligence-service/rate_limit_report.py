@@ -134,7 +134,10 @@ def record_rate_limit_hit(
     # Optional gateway in-process monitor
     try:
         import requests
-        gw = os.environ.get("API_GATEWAY_URL", "").rstrip("/")
+        # Strip whitespace BEFORE the trailing slash: a whitespace-only value
+        # (e.g. an env file line `API_GATEWAY_URL= `) must count as "unset",
+        # not as a truthy URL that requests then rejects with MissingSchema.
+        gw = (os.environ.get("API_GATEWAY_URL") or "").strip().rstrip("/")
         if gw:
             requests.post(
                 f"{gw}/ops/rate-limits/event",

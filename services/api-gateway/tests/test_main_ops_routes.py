@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
+import time
 from types import SimpleNamespace
 
 import httpx
@@ -369,6 +371,92 @@ class TestCircuitsAndMetrics:
         for p in ("/ops/rate-limits", "/api/rate-limits", "/api/ops/rate-limits"):
             assert tc.get(p).status_code == 200
 
+    # Group 51: RateLimitMonitor.snapshot() does blocking I/O (durable kv_get, Redis lrange), and this async
+    # handler used to call it inline, stalling the event loop for a DB round trip on every dashboard poll.
+    def test_rate_limits_snapshot_runs_off_the_event_loop_thread(self, monkeypatch):
+        seen = {}
+
+        class ThreadProbeMonitor(FakeMonitor):
+            def snapshot(self, circuits=None):
+                seen["thread"] = threading.current_thread().name
+                try:
+                    asyncio.get_running_loop()
+                    seen["on_loop"] = True
+                except RuntimeError:
+                    seen["on_loop"] = False
+                return super().snapshot(circuits)
+
+        monkeypatch.setattr(gw, "rate_limit_monitor", ThreadProbeMonitor())
+        monkeypatch.setattr(gw, "all_snapshots", lambda: {"x": {"state": "closed"}})
+
+        async def go():
+            seen["loop_thread"] = threading.current_thread().name
+            return await gw.ops_rate_limits()
+
+        out = _run(go())
+        assert out["circuits"] == {"x": {"state": "closed"}}
+        assert seen["on_loop"] is False
+        assert seen["thread"] != seen["loop_thread"]
+
+    def test_a_slow_snapshot_does_not_stall_the_event_loop(self, monkeypatch):
+        class SlowMonitor(FakeMonitor):
+            def snapshot(self, circuits=None):
+                time.sleep(0.3)  # stands in for a slow Neon kv_get / Redis lrange
+                return super().snapshot(circuits)
+
+        monkeypatch.setattr(gw, "rate_limit_monitor", SlowMonitor())
+        monkeypatch.setattr(gw, "all_snapshots", lambda: {})
+
+        async def go():
+            ticks = 0
+            stop = False
+
+            async def ticker():
+                nonlocal ticks
+                while not stop:
+                    await _REAL_SLEEP(0.01)
+                    ticks += 1
+
+            t = asyncio.create_task(ticker())
+            await gw.ops_rate_limits()
+            stop = True
+            await t
+            return ticks
+
+        # inline (the old behaviour) the loop is frozen for the whole 0.3 s, so ticks stays ~0-1
+        assert _run(go()) >= 10
+
+    def test_rate_limits_reads_circuits_on_the_loop_and_hands_them_over_unchanged(self, monkeypatch):
+        mon = FakeMonitor()
+        calls = []
+        circuits = {"a": {"state": "open"}}
+
+        def snaps():
+            calls.append(threading.current_thread().name)
+            return circuits
+
+        monkeypatch.setattr(gw, "rate_limit_monitor", mon)
+        monkeypatch.setattr(gw, "all_snapshots", snaps)
+
+        async def go():
+            name = threading.current_thread().name
+            await gw.ops_rate_limits()
+            return name
+
+        loop_thread = _run(go())
+        assert calls == [loop_thread]            # cheap in-memory read stays on the loop
+        assert mon.snap_args == [circuits] and mon.snap_args[0] is circuits
+
+    def test_rate_limits_snapshot_errors_still_propagate(self, monkeypatch):
+        class Boom(FakeMonitor):
+            def snapshot(self, circuits=None):
+                raise RuntimeError("neon down")
+
+        monkeypatch.setattr(gw, "rate_limit_monitor", Boom())
+        monkeypatch.setattr(gw, "all_snapshots", lambda: {})
+        with pytest.raises(RuntimeError, match="neon down"):
+            _run(gw.ops_rate_limits())
+
     def test_event_records_with_coercions(self, monkeypatch, fm):
         mon = FakeMonitor()
         monkeypatch.setattr(gw, "rate_limit_monitor", mon)
@@ -404,6 +492,24 @@ class TestCircuitsAndMetrics:
         fm.raise_on_inc = True
         r = _run(gw.ops_rate_limits_event({"source": "y", "status": 429}))
         assert r == {"ok": True} and len(mon.recorded) == 1
+
+    def test_hostile_source_cannot_corrupt_prometheus_output(self, monkeypatch, tc):
+        # End to end with the REAL registry: a quote / newline / backslash in `source` used to break
+        # /metrics?format=prom (and could forge a series line). Now every sample line stays valid.
+        import re
+        import metrics as metrics_mod
+        reg = metrics_mod.MetricsRegistry()
+        monkeypatch.setattr(gw, "metrics", reg)
+        monkeypatch.setattr(gw, "rate_limit_monitor", FakeMonitor())
+        evil = 'bad"} 1\nforged_total{x="y\\'
+        assert tc.post("/ops/rate-limits/event", json={"source": evil, "status": 429}).json() == {"ok": True}
+        text = tc.get("/metrics", params={"format": "prom"}).text
+        lv = r'"(?:[^"\\\n]|\\[\\"n])*"'
+        sample = re.compile(r'^[a-zA-Z_:][a-zA-Z0-9_:]*(?:\{[a-zA-Z_]\w*=' + lv + r'(?:,[a-zA-Z_]\w*=' + lv + r')*\})? \S+$')
+        lines = [l for l in text.splitlines() if l and not l.startswith("#")]
+        assert lines and all(sample.match(l) for l in lines), lines
+        assert not any(l.startswith("forged_total") for l in lines)
+        assert any(l.startswith("rate_limit_events{") for l in lines)
 
     def test_event_over_http_rejects_non_object(self, tc):
         assert tc.post("/ops/rate-limits/event", json=[1, 2]).status_code == 422
@@ -1072,6 +1178,18 @@ class TestQstashTick:
         r = tc.post("/ops/qstash/tick", content=b'{"action":"noop"}', headers={"Upstash-Signature": "sig1"})
         assert r.status_code == 200
         assert env.q.verify_calls == [("sig1", b'{"action":"noop"}', "https://gw.example/ops/qstash/tick")]
+
+    @pytest.mark.parametrize("raw", ["", "   ", "\t", "/", "  /  "])
+    def test_expected_url_is_none_when_gateway_url_blank(self, env, monkeypatch, tc, raw):
+        monkeypatch.setenv("API_GATEWAY_URL", raw)
+        r = tc.post("/ops/qstash/tick")
+        assert r.status_code == 200
+        assert env.q.verify_calls[0][2] is None
+
+    def test_expected_url_trims_padded_gateway_url(self, env, monkeypatch, tc):
+        monkeypatch.setenv("API_GATEWAY_URL", "  https://gw.example/ \n")
+        tc.post("/ops/qstash/tick")
+        assert env.q.verify_calls[0][2] == "https://gw.example/ops/qstash/tick"
 
     def test_expected_url_is_none_when_gateway_url_unset(self, env, tc):
         tc.post("/ops/qstash/tick")

@@ -70,7 +70,7 @@ def schedule_gateway_tick(
     delay_seconds: int = 0,
     body: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    base = (os.environ.get("API_GATEWAY_URL") or "").rstrip("/")
+    base = (os.environ.get("API_GATEWAY_URL") or "").strip().rstrip("/")
     if not base:
         return {"ok": False, "error": "API_GATEWAY_URL not set"}
     return publish(f"{base}{path}", body or {"source": "qstash"}, delay_seconds=delay_seconds)

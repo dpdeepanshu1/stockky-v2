@@ -84,6 +84,16 @@ class _Bucket:
         """Blocks until `weight` tokens are available (or max_wait elapses,
         to avoid an unbounded stall if a caller mis-sizes a batch). Returns
         the actual wait time in seconds."""
+        # A request heavier than the whole bucket can never be satisfied in full
+        # (tokens are capped at `capacity`), so it used to wait out all of
+        # max_wait on every call and then "proceed anyway". Treat it as a request
+        # for the entire bucket: wait for it to fill, drain it, return.
+        if weight > self.capacity > 0:
+            logger.debug(
+                "rate_limiter: weight %s exceeds bucket capacity %s, treating as %s",
+                weight, self.capacity, self.capacity,
+            )
+            weight = self.capacity
         start = time.time()
         with self.lock:
             self.waiters += 1
@@ -188,10 +198,34 @@ _yf_patch_lock = threading.Lock()
 # hard ceiling here means every call site gets a clean, fast exception
 # instead of hanging indefinitely.
 import concurrent.futures as _cf
+import math as _math
 
-YFINANCE_HARD_TIMEOUT_SEC = float(os.getenv("YFINANCE_HARD_TIMEOUT_SEC", "18"))
+
+def _env_number(name: str, default, cast, valid):
+    """Read a numeric env var at import time WITHOUT being able to stop the service.
+
+    A typo ("18s", "many") or an unusable value (0 workers, a zero/negative/NaN/inf
+    timeout) used to raise out of module import, so one bad line in .env took the
+    whole service down. Now it logs a WARNING and falls back to the default instead.
+    Unset or blank counts as "use the default" (no warning)."""
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        val = cast(str(raw).strip())
+    except (TypeError, ValueError):
+        val = None
+    if val is None or not valid(val):
+        logger.warning("rate_limiter: ignoring invalid %s=%r — using default %r", name, raw, default)
+        return default
+    return val
+
+
+YFINANCE_HARD_TIMEOUT_SEC = _env_number(
+    "YFINANCE_HARD_TIMEOUT_SEC", 18.0, float, lambda v: _math.isfinite(v) and v > 0
+)
 _yf_hardcap_pool = _cf.ThreadPoolExecutor(
-    max_workers=int(os.getenv("YFINANCE_POOL_WORKERS", "8")),
+    max_workers=_env_number("YFINANCE_POOL_WORKERS", 8, int, lambda v: v >= 1),
     thread_name_prefix="yf-hardcap",
 )
 

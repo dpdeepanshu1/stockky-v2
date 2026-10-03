@@ -42,6 +42,10 @@ class TestNormalizeDbUrl:
         url = "postgresql://h/db?channel_binding=prefer"
         assert "channel_binding" not in sp._normalize_db_url(url)
 
+    def test_channel_binding_in_the_middle_leaves_no_doubled_ampersand(self):
+        assert sp._normalize_db_url("postgresql://h/db?a=1&channel_binding=require&b=2") == \
+            "postgresql://h/db?a=1&b=2&sslmode=require"
+
     def test_sslmode_required_replaced(self):
         url = "postgresql://h/db?sslmode=required"
         result = sp._normalize_db_url(url)

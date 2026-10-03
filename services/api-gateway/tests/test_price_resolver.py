@@ -17,9 +17,14 @@ class TestAsPositiveFloat:
     def test_rejected(self, v):
         assert pr._as_positive_float(v) is None
 
-    def test_infinity_is_accepted_as_positive(self):
-        # Documents current behaviour: +inf is > 0 and not NaN, so it passes through.
-        assert pr._as_positive_float(float("inf")) == float("inf")
+    @pytest.mark.parametrize("v", [
+        float("inf"), float("-inf"), "inf", "+inf", "Infinity", "-inf", "1e400", "nan",
+    ])
+    def test_infinity_and_nan_rejected(self, v):
+        assert pr._as_positive_float(v) is None
+
+    def test_large_finite_still_accepted(self):
+        assert pr._as_positive_float(1e15) == 1e15
 
 
 class TestExtractSafePrice:
@@ -59,6 +64,39 @@ class TestExtractSafePrice:
 
     def test_all_invalid_returns_zero(self):
         assert pr.extract_safe_price(tick={"price": -1}, decision={"close": float("nan")}, feed={"ltp": 0}) == 0.0
+
+
+class TestInfinityNeverResolves:
+    def test_inf_tick_falls_through_to_next_valid_key(self):
+        assert pr.extract_safe_price(tick={"price": float("inf"), "close": 5}) == 5.0
+
+    def test_inf_tick_falls_through_to_decision_then_feed(self):
+        assert pr.extract_safe_price(tick={"ltp": float("inf")}, decision={"close": 7}) == 7.0
+        assert pr.extract_safe_price(tick={"ltp": float("inf")}, decision={"close": "inf"},
+                                     feed={"prev_close": 9}) == 9.0
+
+    def test_inf_in_nested_feed_skipped(self):
+        assert pr.extract_safe_price(feed={"metrics": {"close": float("inf"), "ltp": 12}}) == 12.0
+
+    def test_only_inf_available_returns_zero(self):
+        assert pr.extract_safe_price(tick={"price": float("inf")}, feed={"close": "1e400"}) == 0.0
+        assert math.isfinite(pr.resolve_display_price("X", {"ltp": float("inf")}, None))
+
+    def test_apply_aliases_inf_price_keeps_existing_positive(self):
+        row = pr.apply_price_aliases({"close": 50}, float("inf"))
+        assert row["close"] == row["ltp"] == row["price"] == 50.0
+
+    def test_apply_aliases_inf_price_and_nothing_existing_leaves_row_untouched(self):
+        assert pr.apply_price_aliases({"symbol": "X"}, float("inf")) == {"symbol": "X"}
+
+    def test_apply_aliases_inf_prev_close_is_replaced(self):
+        assert pr.apply_price_aliases({"prev_close": float("inf")}, 110)["prev_close"] == 110.0
+
+    def test_ensure_row_price_never_stamps_inf(self):
+        row = pr.ensure_row_price({"symbol": "X", "close": float("inf")})
+        assert row == {"symbol": "X", "close": float("inf")}  # untouched, no alias stamped
+        row = pr.ensure_row_price({"symbol": "X", "close": float("inf")}, feed={"close": 15})
+        assert row["close"] == row["cmp"] == row["ltp"] == 15.0
 
 
 class TestResolveDisplayPrice:

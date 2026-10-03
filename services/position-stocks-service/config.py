@@ -230,7 +230,7 @@ MARKET_GATE_ENABLED = _get_bool("MARKET_GATE_ENABLED", True)
 MARKET_GATE_MIN_NIFTY_CHANGE_PCT = _get_float("MARKET_GATE_MIN_NIFTY_CHANGE_PCT", -0.10)
 MARKET_GATE_CACHE_TTL_S = _get_float("MARKET_GATE_CACHE_TTL_S", 120.0)
 MARKET_GATE_TIMEOUT_S = _get_float("MARKET_GATE_TIMEOUT_S", 3.0)
-_API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "https://api-gateway-puwd.onrender.com").rstrip("/")
+_API_GATEWAY_URL = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/") or "https://api-gateway-puwd.onrender.com"
 MARKET_INDICES_URL = os.getenv("MARKET_INDICES_URL", f"{_API_GATEWAY_URL}/market/indices")
 
 # 2. Loss brake (softer and earlier than MAX_DAILY_LOSS_PCT_OF_POOL's 4% kill

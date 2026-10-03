@@ -150,6 +150,11 @@ class TestNormalizeDbUrl:
         result = kv._normalize_db_url(url)
         assert "channel_binding" not in result
 
+    def test_channel_binding_in_the_middle_leaves_no_doubled_ampersand(self):
+        # used to leave "a=1&&b=2", which libpq rejects (empty key)
+        assert kv._normalize_db_url("postgresql://host/db?a=1&channel_binding=require&b=2") == \
+            "postgresql://host/db?a=1&b=2&sslmode=require"
+
     def test_sslmode_required_replaced(self):
         url = "postgresql://host/db?sslmode=required"
         result = kv._normalize_db_url(url)

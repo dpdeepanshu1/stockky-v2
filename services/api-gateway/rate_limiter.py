@@ -182,12 +182,30 @@ class _Bucket:
         `reserve` keeps that many tokens out of reach for this caller, so bulk
         background jobs cannot drain the bucket that user-facing lookups need.
 
+        A `weight` above the bucket's capacity is capped at what the caller may
+        take (capacity minus `reserve`) instead of waiting for tokens that can
+        never exist.
+
         The wait budget is `max_wait / queue_depth` (floored at MIN_WAIT_FLOOR).
         With one caller that is the full max_wait; with a queue it shrinks, which
         is what stops twenty symbols from each burning the whole budget in series
         while the bucket has no realistic chance of refilling that fast.
         """
         budget = MAX_WAIT_DEFAULT if max_wait is None else float(max_wait)
+        # A request heavier than the whole bucket can never be satisfied in
+        # full (tokens are capped at `capacity`), so it used to wait out the
+        # entire budget on every call and then proceed anyway (or, with
+        # fail_fast, be skipped forever). Treat it as a request for everything
+        # this caller is allowed to take: wait for the bucket to fill, then
+        # drain it. Nothing attainable (reserve >= capacity) -> unchanged.
+        need = weight
+        attainable = self.capacity - reserve
+        if weight > self.capacity and attainable > 0:
+            need = attainable
+            logger.debug(
+                "rate_limiter: weight %s exceeds bucket capacity %s, treating as %s",
+                weight, self.capacity, need,
+            )
         start = time.time()
         with self.lock:
             self.waiters += 1
@@ -203,14 +221,14 @@ class _Bucket:
                     self.updated = now
                     # Background callers must leave `reserve` tokens behind.
                     usable = self.tokens - reserve
-                    if usable >= weight:
-                        self.tokens -= weight
+                    if usable >= need:
+                        self.tokens -= need
                         waited = now - start
                         self.last_wait_sec = waited
                         if waited > 0.05:
                             self.throttle_events += 1
                         return waited
-                    deficit = weight - usable
+                    deficit = need - usable
                     sleep_for = min(deficit / self.rps if self.rps > 0 else 0.5, 2.0)
                 if time.time() - start >= budget:
                     with self.lock:

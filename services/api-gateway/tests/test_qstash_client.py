@@ -276,6 +276,21 @@ class TestScheduleGatewayTick:
         result = qstash_client.schedule_gateway_tick()
         assert result == {"ok": False, "error": "API_GATEWAY_URL not set"}
 
+    @pytest.mark.parametrize("raw", ["", "   ", "\t", " \n ", "/", "  /  "])
+    def test_blank_api_gateway_url_is_treated_as_unset(self, monkeypatch, raw):
+        monkeypatch.setenv("API_GATEWAY_URL", raw)
+        monkeypatch.setattr(qstash_client, "publish",
+                            lambda *a, **kw: pytest.fail("publish must not be called"))
+        assert qstash_client.schedule_gateway_tick() == {"ok": False, "error": "API_GATEWAY_URL not set"}
+
+    @pytest.mark.parametrize("raw", ["  https://gw.example.com  ", "https://gw.example.com/ ", " https://gw.example.com/\n"])
+    def test_padded_api_gateway_url_is_trimmed(self, monkeypatch, raw):
+        monkeypatch.setenv("API_GATEWAY_URL", raw)
+        seen = []
+        monkeypatch.setattr(qstash_client, "publish", lambda url, *a, **kw: seen.append(url) or {"ok": True})
+        qstash_client.schedule_gateway_tick()
+        assert seen == ["https://gw.example.com/ops/qstash/tick"]
+
     def test_calls_publish_with_composed_url_and_default_body(self, monkeypatch):
         monkeypatch.setenv("API_GATEWAY_URL", "https://gw.example.com/")
         captured = {}

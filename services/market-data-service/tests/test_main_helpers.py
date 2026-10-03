@@ -126,6 +126,149 @@ class TestNormalizeDeRatio:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# _debt_to_equity_from_yahoo + the Yahoo / NSE call sites of _get_fundamentals_inner
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _balance(debt=None, equity=None):
+    import pandas as pd
+    rows, vals = [], []
+    if debt is not None:
+        rows.append("Total Debt"); vals.append([debt])
+    if equity is not None:
+        rows.append("Total Equity Gross Minority Interest"); vals.append([equity])
+    return pd.DataFrame(vals, index=rows)
+
+
+class TestDebtToEquityFromYahoo:
+    @pytest.mark.parametrize("pct, multiple", [(30, 0.3), (50, 0.5), (95.4, 0.95), (150, 1.5), (0, 0.0)])
+    def test_info_value_is_a_percent_and_is_scaled_to_a_multiple(self, pct, multiple):
+        # The group 33 fix: a Yahoo "30" is 0.3x, not 30x.
+        got = m._debt_to_equity_from_yahoo({"debtToEquity": pct, "sector": "Technology"})
+        assert got == pytest.approx(multiple)
+
+    def test_numeric_string_from_info_is_accepted(self):
+        assert m._debt_to_equity_from_yahoo({"debtToEquity": "30"}) == pytest.approx(0.3)
+
+    def test_financial_sector_rule_is_unchanged(self):
+        assert m._debt_to_equity_from_yahoo({"debtToEquity": 150, "sector": "Financial Services"}) == 150.0
+        assert m._debt_to_equity_from_yahoo({"debtToEquity": 250, "sector": "Banks"}) == pytest.approx(2.5)
+
+    @pytest.mark.parametrize("raw", [None, "N/A", float("nan"), []])
+    def test_present_but_unusable_info_value_is_none_with_no_balance_fallback(self, raw):
+        bal = _balance(debt=100, equity=50)
+        assert m._debt_to_equity_from_yahoo({"debtToEquity": raw}, bal) is None
+
+    def test_missing_key_uses_the_balance_sheet_ratio_unscaled(self):
+        # Total Debt / Equity is already a multiple: 30 / 100 stays 0.3 and 300 / 100 stays 3.0.
+        assert m._debt_to_equity_from_yahoo({}, _balance(debt=30, equity=100)) == pytest.approx(0.3)
+        assert m._debt_to_equity_from_yahoo({}, _balance(debt=300, equity=100)) == pytest.approx(3.0)
+
+    def test_zero_equity_gives_none(self):
+        assert m._debt_to_equity_from_yahoo({}, _balance(debt=30, equity=0)) is None
+
+    def test_negative_equity_gives_a_negative_ratio_as_before(self):
+        assert m._debt_to_equity_from_yahoo({}, _balance(debt=30, equity=-100)) == pytest.approx(-0.3)
+
+    @pytest.mark.parametrize("bal", [None, _balance(debt=30), _balance(equity=100)])
+    def test_no_usable_balance_sheet_gives_none(self, bal):
+        assert m._debt_to_equity_from_yahoo({}, bal) is None
+
+
+class _FakeTicker:
+    """yfinance.Ticker stand-in for _get_fundamentals_inner: only .info is populated."""
+    info = {}
+
+    def __init__(self, sym):
+        import pandas as pd
+        self._tz = None
+        self.financials = pd.DataFrame()
+        self.balance_sheet = pd.DataFrame()
+        self.cashflow = pd.DataFrame()
+        self.dividends = pd.Series(dtype="float64")
+
+
+@pytest.fixture
+def inner(monkeypatch):
+    """Run _get_fundamentals_inner against a fake Yahoo ticker with all caches stubbed out."""
+    kv = types.ModuleType("kv_cache")
+    kv.get = lambda key: None
+    kv.set = lambda key, val, ttl=None: None
+    monkeypatch.setitem(sys.modules, "kv_cache", kv)
+    monkeypatch.setattr(m, "_in_cooldown", lambda name: False)
+    monkeypatch.setattr(m, "_with_retry", lambda fn, **kw: fn())
+    monkeypatch.setattr(m, "_fallback_set", lambda k, v: None)
+    monkeypatch.setattr(m, "_fallback_get", lambda k: None)
+    monkeypatch.setattr(m, "_cache_set", lambda *a, **kw: None)
+
+    def run(info):
+        ticker = type("T", (_FakeTicker,), {"info": info})
+        monkeypatch.setattr(m.yf, "Ticker", ticker, raising=False)
+        return m._get_fundamentals_inner("TESTCO", force=True)
+
+    return run
+
+
+class TestFundamentalsDebtToEquityCallSite:
+    def test_yahoo_percent_info_reaches_the_result_as_a_multiple(self, inner):
+        out = inner({"debtToEquity": 30, "sector": "Industrials", "trailingPE": 20})
+        assert out["debt_to_equity"] == pytest.approx(0.3)
+
+    def test_yahoo_value_above_fifty_is_also_divided(self, inner):
+        assert inner({"debtToEquity": 95.4, "sector": "Industrials"})["debt_to_equity"] == pytest.approx(0.95)
+
+    def test_financial_sector_value_is_not_divided_under_200(self, inner):
+        assert inner({"debtToEquity": 150, "sector": "Financial Services"})["debt_to_equity"] == 150.0
+
+    def test_missing_debt_to_equity_stays_none(self, inner):
+        assert inner({"sector": "Industrials", "trailingPE": 20})["debt_to_equity"] is None
+
+
+class TestNseFundamentalsFallbackDebtToEquity:
+    """The NSE quote-equity fallback never carries a debt/equity figure, so its scale cannot matter:
+    `secInfo.debtToEquity` is always None and the fallback result's debt_to_equity is None. If a real
+    source is ever wired in there, its scale must be decided and normalised at that time."""
+
+    def _client(self, payload):
+        resp = types.SimpleNamespace(status_code=200, content=b"{}", json=lambda: payload)
+        return types.SimpleNamespace(get=lambda url, **kw: resp)
+
+    def test_sec_info_debt_to_equity_is_always_none(self, monkeypatch):
+        bh = types.ModuleType("bhavcopy")
+        bh._nse_client = lambda: self._client({
+            "info": {"industry": "Cement"},
+            "industryInfo": {"sector": "Construction Materials", "industry": "Cement"},
+            "securityInfo": {"faceValue": 10, "debtToEquity": 85},   # even if NSE sent one, it is not read
+            "priceInfo": {"lastPrice": 250.5},
+        })
+        monkeypatch.setitem(sys.modules, "bhavcopy", bh)
+        monkeypatch.setattr(m, "_waterfall_equity_base", lambda s: "TESTCO")
+        out = m._fetch_nse_fundamentals("TESTCO")
+        assert out["secInfo"]["debtToEquity"] is None
+        assert out["secInfo"]["sector"] == "Construction Materials"
+
+    def test_fallback_result_has_no_debt_to_equity(self, monkeypatch):
+        kv = types.ModuleType("kv_cache")
+        kv.get = lambda key: None
+        kv.set = lambda key, val, ttl=None: None
+        monkeypatch.setitem(sys.modules, "kv_cache", kv)
+        monkeypatch.setattr(m, "_in_cooldown", lambda name: False)
+        monkeypatch.setattr(m, "_with_retry", lambda fn, **kw: fn())
+        monkeypatch.setattr(m, "_fallback_set", lambda k, v: None)
+        monkeypatch.setattr(m, "_fallback_get", lambda k: None)
+        monkeypatch.setattr(m, "_cache_set", lambda *a, **kw: None)
+
+        def _boom(sym):
+            raise RuntimeError("yahoo down")
+
+        monkeypatch.setattr(m.yf, "Ticker", _boom, raising=False)
+        monkeypatch.setattr(m, "_fetch_nse_fundamentals", lambda sym: {"secInfo": {
+            "sector": "Cement", "industry": "Cement", "pe": None, "marketCap": None, "dividendYield": None,
+            "roe": None, "debtToEquity": None, "faceValue": 10, "lastPrice": 250.5}})
+        out = m._get_fundamentals_inner("TESTCO", force=True)
+        assert out["debt_to_equity"] is None and out["sector"] == "Cement"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # _safe / _safe_int / _compute_growth
 # ══════════════════════════════════════════════════════════════════════════════
 

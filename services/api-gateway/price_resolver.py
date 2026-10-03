@@ -6,6 +6,7 @@ Every scan row should set all of these to the same positive float when known.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Optional
 
 
@@ -39,13 +40,16 @@ _FEED_KEYS = (
 
 
 def _as_positive_float(val: Any) -> Optional[float]:
+    """Return val as a finite float > 0 rounded to 2dp, else None."""
     if val is None:
         return None
     try:
         px = float(val)
     except (TypeError, ValueError):
         return None
-    if px <= 0 or px != px:  # NaN
+    # Reject NaN, +/-inf (incl. "inf"/"1e400" strings) and non-positive values:
+    # an infinite price would flow into scoring, % change and order sizing.
+    if not math.isfinite(px) or px <= 0:
         return None
     return round(px, 2)
 

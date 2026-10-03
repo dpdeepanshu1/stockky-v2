@@ -103,7 +103,13 @@ def _f(val: Any, default: float = 0.0) -> float:
         return default
 
 
+def _as_dict(val: Any) -> dict:
+    """A dict stays itself; None / str / list / number become {} so `.get()` never raises."""
+    return val if isinstance(val, dict) else {}
+
+
 def _metrics(feed: dict) -> dict:
+    feed = _as_dict(feed)
     m = feed.get("metrics") if isinstance(feed.get("metrics"), dict) else {}
     return m if isinstance(m, dict) else {}
 
@@ -113,7 +119,9 @@ def _extract_price(sym: str, feed: dict, tick: Optional[dict]) -> float:
         from price_resolver import extract_safe_price
         return float(extract_safe_price(sym, tick=tick or {}, feed=feed, decision=None) or 0.0)
     except Exception:
-        for src in (tick or {}, feed):
+        # Fallback walk. A None / non-dict feed or tick used to raise AttributeError here (`feed.get`),
+        # turning "no data" into a crash exactly when the resolver was already failing.
+        for src in (_as_dict(tick), _as_dict(feed)):
             for k in ("price", "cmp", "last_price", "ltp", "close", "current_price", "prev_close"):
                 px = _f(src.get(k))
                 if px > 0:
@@ -188,6 +196,7 @@ def resolve_stock_features(
 
 def compute_technical_score(feed: dict, price: float, prev_close: float) -> int:
     """0–100 technical score from cached indicators + price action."""
+    feed = _as_dict(feed)
     feats = resolve_stock_features("", feed, {"price": price, "prev_close": prev_close})
     rsi = feats["rsi"]
     macd_hist = feats["macd_hist"]
@@ -246,6 +255,7 @@ def compute_technical_score(feed: dict, price: float, prev_close: float) -> int:
 
 def compute_fundamental_score(feed: dict) -> int:
     """0–100 fundamental score from Neon metrics / stored score."""
+    feed = _as_dict(feed)
     stored = feed.get("fundamental_score")
     if stored is not None:
         try:

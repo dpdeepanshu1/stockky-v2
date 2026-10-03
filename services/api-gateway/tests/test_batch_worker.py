@@ -353,11 +353,107 @@ class TestErrors:
                 monkeypatch.undo()
 
         out = run(main())
-        # first batch: gather failed -> raw=[] -> the batch's items are neither processed nor recorded
-        # second batch ("b") ran normally
+        # first batch: gather failed -> its item is now COUNTED and RECORDED as an error (it used to vanish:
+        # raw=[] -> neither processed nor in errors); second batch ("b") ran normally
         assert out.results == ["b"]
-        assert out.processed == 1
+        assert out.processed == 2
+        assert out.errors == [{"item": "hang", "error": "RuntimeError: gather blew up"}]
         assert any("batch gather failed" in r.getMessage() for r in caplog.records)
+
+    def _fail_first_gather(self, monkeypatch, exc):
+        """Make the FIRST asyncio.gather call (the batch's worker gather) raise `exc`."""
+        real_gather = asyncio.gather
+        state = {"raised": False}
+
+        def flaky_gather(*aws, **kw):
+            if not state["raised"]:
+                state["raised"] = True
+                raise exc
+            return real_gather(*aws, **kw)
+
+        monkeypatch.setattr(bw.asyncio, "gather", flaky_gather)
+        return real_gather
+
+    def test_gather_failure_keeps_the_universe_total_whole(self, gc_calls, monkeypatch):
+        # 5 items, batch_size 5, gather fails: every item is accounted for exactly once.
+        self._fail_first_gather(monkeypatch, RuntimeError("boom"))
+
+        async def worker(i):
+            await asyncio.sleep(3600)
+
+        out = run(bw.run_in_batches([1, 2, 3, 4, 5], worker, batch_size=5))
+        assert out.processed == 5 and out.results == []
+        assert [e["item"] for e in out.errors] == ["1", "2", "3", "4", "5"]
+        assert all(e["error"] == "RuntimeError: boom" for e in out.errors)
+        assert out.processed == len(out.results) + len(out.errors)
+
+    def test_gather_failure_still_reports_progress_for_the_batch(self, gc_calls, monkeypatch):
+        self._fail_first_gather(monkeypatch, RuntimeError("boom"))
+        seen = []
+
+        async def on_progress(p):
+            seen.append((p.batch_index, p.processed))
+
+        async def worker(i):
+            await asyncio.sleep(3600)
+
+        run(bw.run_in_batches([1, 2, 3], worker, batch_size=3, on_progress=on_progress))
+        assert seen == [(0, 3)]  # it used to report 0 processed for a batch whose items were dropped
+
+    def test_gather_failure_keeps_workers_that_had_already_finished(self, gc_calls, monkeypatch):
+        # "fast" finishes before the failure is handled; "slow" is still running and gets cancelled.
+        self._fail_first_gather(monkeypatch, RuntimeError("boom"))
+        seen_cancel = []
+
+        async def worker(i):
+            if i == "fast":
+                return "FAST"
+            if i == "bad":
+                raise ValueError("worker error")
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                seen_cancel.append(i)
+                raise
+
+        async def main():
+            # let the tasks start and the quick ones finish before the (injected) gather failure surfaces
+            orig_cancel = bw._cancel_tasks
+
+            async def delayed_cancel(tasks, timeout=2.0):
+                await asyncio.sleep(0)
+                await orig_cancel(tasks, timeout)
+
+            monkeypatch.setattr(bw, "_cancel_tasks", delayed_cancel)
+            return await bw.run_in_batches(["fast", "bad", "slow"], worker, batch_size=3)
+
+        out = run(main())
+        assert out.results == ["FAST"]
+        errs = {e["item"]: e["error"] for e in out.errors}
+        assert errs == {"bad": "ValueError: worker error", "slow": "RuntimeError: boom"}
+        assert out.processed == 3 and seen_cancel == ["slow"]
+
+    def test_gather_failure_without_error_collection_still_counts_the_items(self, gc_calls, monkeypatch):
+        self._fail_first_gather(monkeypatch, RuntimeError("boom"))
+
+        async def worker(i):
+            await asyncio.sleep(3600)
+
+        out = run(bw.run_in_batches([1, 2], worker, batch_size=2, collect_errors_from_exceptions=False))
+        assert out.processed == 2 and out.errors == [] and out.results == []
+
+    def test_gather_failure_in_one_batch_does_not_touch_the_next(self, gc_calls, monkeypatch):
+        self._fail_first_gather(monkeypatch, RuntimeError("boom"))
+
+        async def worker(i):
+            if i in (1, 2):
+                await asyncio.sleep(3600)
+            return i * 10
+
+        out = run(bw.run_in_batches([1, 2, 3, 4], worker, batch_size=2))
+        assert out.results == [30, 40]
+        assert [e["item"] for e in out.errors] == ["1", "2"]
+        assert out.processed == 4
 
     def test_cache_get_cancellation_propagates(self, gc_calls):
         def cache_get(item):

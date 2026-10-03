@@ -226,6 +226,8 @@ class RateLimitMonitor:
         return events
 
     def snapshot(self, circuits: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Dashboard payload. BLOCKING: reads Redis (when enabled) and does a durable kv_get, so an async
+        caller must run it off the event loop (asyncio.to_thread), as GET /ops/rate-limits does."""
         now = time.time()
         events = self._all_events()
         recent = [e for e in events if now - float(e.get("ts") or 0) <= WINDOW_SEC]

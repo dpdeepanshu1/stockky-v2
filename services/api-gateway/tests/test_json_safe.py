@@ -75,6 +75,55 @@ class TestNumpy:
         assert json_safe.sanitize(np.float64("nan")) is None
 
 
+class TestNumpyBool:
+    @pytest.mark.parametrize("v,expected", [(np.bool_(True), True), (np.bool_(False), False)])
+    def test_numpy_bool_becomes_python_bool(self, v, expected):
+        out = json_safe.sanitize(v)
+        assert out is expected and type(out) is bool
+
+    def test_numpy_bool_nested_is_strict_json_serialisable(self):
+        payload = {"ok": np.bool_(True), "rows": [{"flag": np.bool_(False)}], "t": (np.bool_(True),)}
+        out = json_safe.sanitize(payload)
+        assert out == {"ok": True, "rows": [{"flag": False}], "t": [True]}
+        json.dumps(out, allow_nan=False)
+
+    def test_numpy_bool_array_still_works(self):
+        assert json_safe.sanitize(np.array([True, False])) == [True, False]
+
+    def test_numpy_bool_from_comparison_of_numpy_values(self):
+        # The realistic source: `np.float64(3) > np.float64(2)` is an np.bool_.
+        out = json_safe.sanitize({"up": np.float64(3) > np.float64(2)})
+        assert out == {"up": True} and type(out["up"]) is bool
+
+
+class TestSets:
+    def test_set_becomes_sorted_list(self):
+        assert json_safe.sanitize({3, 1, 2}) == [1, 2, 3]
+        assert json_safe.sanitize({"b", "a"}) == ["a", "b"]
+
+    def test_frozenset_becomes_sorted_list(self):
+        assert json_safe.sanitize(frozenset({"y", "x"})) == ["x", "y"]
+
+    def test_empty_set(self):
+        assert json_safe.sanitize(set()) == []
+
+    def test_unorderable_members_fall_back_without_raising(self):
+        out = json_safe.sanitize({1, "a", None})
+        assert sorted(map(repr, out)) == sorted(map(repr, [1, "a", None]))
+        assert isinstance(out, list)
+
+    def test_members_are_sanitized_recursively(self):
+        out = json_safe.sanitize({float("nan"), 1.0})
+        assert sorted(out, key=lambda x: (x is None, x)) == [1.0, None]
+        out = json_safe.sanitize({np.int64(5), np.int64(2)})
+        assert out == [2, 5] and all(type(x) is int for x in out)
+
+    def test_set_nested_in_dict_and_list_is_strict_json_serialisable(self):
+        out = json_safe.sanitize({"tags": {"b", "a"}, "rows": [{"ids": frozenset({2, 1})}]})
+        assert out == {"tags": ["a", "b"], "rows": [{"ids": [1, 2]}]}
+        json.dumps(out, allow_nan=False)
+
+
 class TestFallbacks:
     def test_unknown_object_returned_unchanged(self):
         o = object()

@@ -471,3 +471,70 @@ class TestReportRateLimit:
                             lambda **kw: (_ for _ in ()).throw(RuntimeError("boom")))
         # Must not raise
         m._report_rate_limit(429)
+
+    @pytest.mark.parametrize("raw", ["", "   ", "\t", " \n ", "/", "  /  "])
+    def test_blank_gateway_url_skips_gateway(self, monkeypatch, raw):
+        monkeypatch.setenv("API_GATEWAY_URL", raw)
+        called = []
+        monkeypatch.setattr(m.requests, "post", lambda *a, **kw: called.append(True))
+        m._report_rate_limit(429)
+        assert not called
+
+    @pytest.mark.parametrize("raw", ["  http://gw:1  ", "http://gw:1/ ", " http://gw:1/\n"])
+    def test_padded_gateway_url_is_trimmed(self, monkeypatch, raw):
+        monkeypatch.setenv("API_GATEWAY_URL", raw)
+        seen = []
+        monkeypatch.setattr(m.requests, "post", lambda url, **kw: seen.append(url))
+        m._report_rate_limit(429)
+        assert seen == ["http://gw:1/ops/rate-limits/event"]
+
+
+class TestFeedUniverseLoopGatewayUrl:
+    """_refresh_feed_universe_loop must treat a blank API_GATEWAY_URL as unset and return
+    immediately (no sleep, no HTTP client) instead of looping against '   /scan/universe'."""
+
+    @pytest.mark.parametrize("raw", ["", "   ", "\t\n", "/", "  /  "])
+    def test_blank_url_returns_without_fetching(self, monkeypatch, raw, caplog):
+        import asyncio
+        monkeypatch.setenv("API_GATEWAY_URL", raw)
+
+        class _Boom:
+            def __init__(self, *a, **kw):
+                raise AssertionError("httpx client must not be created for a blank gateway URL")
+
+        monkeypatch.setattr(m.httpx, "AsyncClient", _Boom)
+        with caplog.at_level("WARNING"):
+            asyncio.run(asyncio.wait_for(m._refresh_feed_universe_loop(), timeout=2))
+        assert "API_GATEWAY_URL not set" in caplog.text
+
+    def test_padded_url_is_trimmed_before_first_fetch(self, monkeypatch):
+        import asyncio
+        monkeypatch.setenv("API_GATEWAY_URL", "  http://gw:1/ ")
+        monkeypatch.setenv("FEED_UNIVERSE_INITIAL_DELAY_S", "0")
+        urls = []
+
+        class _Stop(Exception):
+            pass
+
+        class _Client:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, url, **kw):
+                urls.append(url)
+                raise _Stop()
+
+        monkeypatch.setattr(m.httpx, "AsyncClient", _Client)
+        real_sleep = asyncio.sleep
+        calls = {"n": 0}
+
+        async def _sleep(d):
+            calls["n"] += 1
+            if calls["n"] > 1:        # first call is the initial delay; stop on the retry wait
+                raise _Stop()
+            await real_sleep(0)
+
+        monkeypatch.setattr(m.asyncio, "sleep", _sleep)
+        with pytest.raises(_Stop):
+            asyncio.run(m._refresh_feed_universe_loop())
+        assert urls == ["http://gw:1/scan/universe"]

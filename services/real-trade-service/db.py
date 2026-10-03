@@ -892,8 +892,10 @@ def _ensure_hot_path_indexes(engine, dialect_name: str) -> None:
     ]
     for index_name, table, cols in indexes:
         sql = _oc.create_index_sql(dialect_name, index_name, table, cols)
-        _oc.exec_ddl_safe(engine, sql, dialect_name)
-        logger.info("real-trade-db: ensured index %s on %s", index_name, table)
+        if _oc.exec_ddl_safe(engine, sql, dialect_name) is False:
+            logger.warning("real-trade-db: could NOT ensure index %s on %s (see exec_ddl_safe warning)", index_name, table)
+        else:
+            logger.info("real-trade-db: ensured index %s on %s", index_name, table)
 
 
 def _ensure_oracle_autoincrement(engine, base) -> None:
@@ -1157,8 +1159,10 @@ def _ensure_nextday_watchlist_indexes(engine, dialect_name: str) -> None:
     import oracle_compat as _oc
     for index_name, table, cols in indexes:
         sql = _oc.create_index_sql(dialect_name, index_name, table, cols)
-        _oc.exec_ddl_safe(engine, sql, dialect_name)
-        logger.info("real-trade-db: ensured index %s on %s", index_name, table)
+        if _oc.exec_ddl_safe(engine, sql, dialect_name) is False:
+            logger.warning("real-trade-db: could NOT ensure index %s on %s (see exec_ddl_safe warning)", index_name, table)
+        else:
+            logger.info("real-trade-db: ensured index %s on %s", index_name, table)
 
 
 # 2026-09-18 audit fix #2 (regime-override win-rate tracking — see models.py

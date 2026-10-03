@@ -779,6 +779,9 @@ def get_engine(database_url=None):
     # Neon dashboard often appends channel_binding=require — psycopg2 can choke
     if (not _is_oracle) and "channel_binding=" in url:
         url = re.sub(r"([&?])channel_binding=[^&]*", r"\1", url)
+        # a channel_binding param in the MIDDLE of the query ("?a=1&channel_binding=require&b=2")
+        # used to leave "a=1&&b=2", which libpq rejects (empty key). Collapse doubled '&' first.
+        url = re.sub(r"&{2,}", "&", url)
         url = url.replace("?&", "?").rstrip("?&")
     # Prefer transaction pooler port 6543
     if os.environ.get("FORCE_DB_POOLER", "1").lower() in ("1", "true", "yes") and url.startswith("postgresql"):

@@ -179,6 +179,11 @@ class TestStaticTables:
     def test_tatamtrdvr_is_delisted_not_renamed(self):
         assert "TATAMTRDVR" in sa.KNOWN_DELISTED and "TATAMTRDVR" not in sa.SYMBOL_RENAMES
 
+    @pytest.mark.parametrize("sym", ["AAKASH", "ANNAPURNA"])
+    def test_aakash_and_annapurna_are_delisted_not_renamed(self, sym):
+        assert sym in sa.KNOWN_DELISTED and sym not in sa.SYMBOL_RENAMES
+        assert sa.KNOWN_DELISTED[sym]          # carries a human-readable reason
+
     def test_max_failure_streak(self):
         assert sa.MAX_FAILURE_STREAK == 5
 
@@ -186,7 +191,8 @@ class TestStaticTables:
 # ── is_known_delisted ─────────────────────────────────────────────────────────
 
 class TestIsKnownDelisted:
-    @pytest.mark.parametrize("sym", ["TATAMTRDVR", "tatamtrdvr", " TATAMTRDVR.NS ", "TATAMTRDVR.BO"])
+    @pytest.mark.parametrize("sym", ["TATAMTRDVR", "tatamtrdvr", " TATAMTRDVR.NS ", "TATAMTRDVR.BO",
+                                     "AAKASH", "aakash.ns", "ANNAPURNA", " ANNAPURNA.BO "])
     def test_true(self, sym):
         assert sa.is_known_delisted(sym) is True
 
@@ -326,6 +332,15 @@ class TestApplyAllRenames:
         kv.store[RENAMES_KEY] = {"OLDCO": entry}
         assert sa._apply_all_renames("OLDCO") == "OLDCO"
 
+    @pytest.mark.parametrize("entry", [{"to": 5}, {"to": "  "}])
+    def test_non_string_or_blank_learned_target_is_ignored(self, kv, entry):
+        kv.store[RENAMES_KEY] = {"OLDCO": entry}
+        assert sa._apply_all_renames("OLDCO") == "OLDCO"
+
+    def test_learned_target_is_stripped(self, kv):
+        kv.store[RENAMES_KEY] = {"OLDCO": {"to": " NEWCO "}}
+        assert sa._apply_all_renames("OLDCO") == "NEWCO"
+
     def test_cycle_is_broken(self, kv, monkeypatch):
         monkeypatch.setattr(sa, "SYMBOL_RENAMES", {"A": "B", "B": "A"})
         assert sa._apply_all_renames("A") == "B"
@@ -388,6 +403,11 @@ class TestResolve:
     @BOTH
     def test_merged_away_symbol_is_skipped(self, kv, fn, suffix):
         assert fn("TATAMTRDVR") is None
+
+    @BOTH
+    @pytest.mark.parametrize("sym", ["AAKASH", "aakash.ns", "ANNAPURNA", "ANNAPURNA.BO"])
+    def test_aakash_and_annapurna_are_skipped(self, kv, fn, suffix, sym):
+        assert fn(sym) is None
 
     @BOTH
     @pytest.mark.parametrize("sym", ["ABC-RE", "ABC-W1", "ABC-NCD", "APLAPOLLO29SEP26FUT", "BANKNIFTY29SEP2648000CE"])
@@ -791,6 +811,14 @@ class TestResolveWithFallback:
         assert t is None
         assert info == {"resolution": "skip_delisted_merged", "detail": sa.KNOWN_DELISTED["TATAMTRDVR"]}
 
+    @pytest.mark.parametrize("sym", ["AAKASH", "annapurna.ns", "ANNAPURNA.BO"])
+    def test_aakash_annapurna_skip_without_a_network_call(self, kv, http, sym):
+        t, info = sa.resolve_with_fallback(sym)
+        base = sym.upper().replace(".NS", "").replace(".BO", "")
+        assert t is None
+        assert info == {"resolution": "skip_delisted_merged", "detail": sa.KNOWN_DELISTED[base]}
+        assert http.calls == []
+
     @pytest.mark.parametrize("sym", ["ABC-RE", "APLAPOLLO29SEP26FUT"])
     def test_non_equity(self, kv, http, sym):
         assert sa.resolve_with_fallback(sym) == (None, {"resolution": "skip_non_equity"})
@@ -807,6 +835,44 @@ class TestResolveWithFallback:
         kv.store[RENAMES_KEY] = {"OLDCO": {"to": "NEWCO"}}
         assert sa.resolve_with_fallback("OLDCO") == ("NEWCO.NS", {"resolution": "learned_rename", "to": "NEWCO"})
         assert http.calls == []
+
+    def test_static_multi_hop_returns_the_final_ticker(self, kv, http):
+        # MINDTREE -> LTIM -> LTM. Used to stop at LTIM, disagreeing with resolve_ns_ticker().
+        assert sa.resolve_with_fallback("mindtree") == ("LTM.NS", {"resolution": "static_rename", "to": "LTM"})
+        assert sa.resolve_with_fallback("MINDTREE")[0] == sa.resolve_ns_ticker("MINDTREE")
+        assert http.calls == []
+
+    def test_one_hop_static_rename_is_unchanged(self, kv, http):
+        assert sa.resolve_with_fallback("LTIM") == ("LTM.NS", {"resolution": "static_rename", "to": "LTM"})
+
+    def test_identity_static_entry_reports_itself(self, kv, http):
+        assert sa.resolve_with_fallback("SBILIFE") == ("SBILIFE.NS", {"resolution": "static_rename", "to": "SBILIFE"})
+
+    def test_learned_rename_is_chased_through_the_static_chain(self, kv, http):
+        kv.store[RENAMES_KEY] = {"OLDCO": {"to": "MINDTREE"}}
+        assert sa.resolve_with_fallback("OLDCO") == ("LTM.NS", {"resolution": "learned_rename", "to": "LTM"})
+        assert sa.resolve_with_fallback("OLDCO")[0] == sa.resolve_ns_ticker("OLDCO")
+
+    def test_static_cycle_terminates(self, kv, http, monkeypatch):
+        monkeypatch.setattr(sa, "SYMBOL_RENAMES", {"A": "B", "B": "A"})
+        assert sa.resolve_with_fallback("A") == ("B.NS", {"resolution": "static_rename", "to": "B"})
+
+    @pytest.mark.parametrize("entry", ["NEWCO", {"to": ""}, {"to": "  "}, {"to": None}, {"to": 5}, {"source": "x"},
+                                       None, 5, ["NEWCO"]])
+    def test_malformed_learned_entry_is_ignored_not_raised(self, kv, http, entry):
+        # A bare string / list / None / number used to raise AttributeError on .get("to").
+        kv.store[RENAMES_KEY] = {"OLDCO": entry}
+        http.api = FakeResp(200, [_notice("Change of Symbol to NEWCO")])
+        assert sa.resolve_with_fallback("OLDCO") == ("NEWCO.NS", {"resolution": "discovered_rename", "to": "NEWCO"})
+
+    def test_malformed_learned_entry_with_no_discovery_ends_unresolved(self, kv, http):
+        kv.store[RENAMES_KEY] = {"OLDCO": "NEWCO"}
+        t, info = sa.resolve_with_fallback("OLDCO")
+        assert t == "OLDCO.NS" and info["resolution"] == "unresolved"
+
+    def test_learned_target_is_stripped(self, kv, http):
+        kv.store[RENAMES_KEY] = {"OLDCO": {"to": " NEWCO "}}
+        assert sa.resolve_with_fallback("OLDCO") == ("NEWCO.NS", {"resolution": "learned_rename", "to": "NEWCO"})
 
     def test_learned_entry_without_a_target_falls_through_to_discovery(self, kv, http):
         kv.store[RENAMES_KEY] = {"OLDCO": {"source": "x"}}

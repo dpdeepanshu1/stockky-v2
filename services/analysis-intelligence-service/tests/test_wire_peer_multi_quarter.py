@@ -482,13 +482,43 @@ class TestScoreBlend:
         assert out["consistency_score"] == 50.0
         assert out["fundamental_score"] == 85.0          # .7*100 + .2*50 + .1*50
 
-    def test_applying_twice_compounds_and_overwrites_the_raw_score(self, w):
-        # Pinned: the wiring is not idempotent. main.py calls it once per analyze().
+    def test_applying_twice_is_idempotent(self, w):
+        # Fixed: a second pass used to blend the already-adjusted score again (80 -> 71 -> 64.7) and
+        # overwrite fundamental_score_raw with the adjusted value. It now blends from the stored raw score.
         first = run(w, {"fundamental_score": 80}, url="")
         assert first["fundamental_score"] == 71.0
         second = run(w, first, url="")
-        assert second["fundamental_score_raw"] == 71.0   # the adjusted value, not 80
-        assert second["fundamental_score"] == 64.7
+        assert second["fundamental_score_raw"] == 80.0
+        assert second["fundamental_score"] == 71.0
+        assert second == first
+
+    def test_applying_three_times_is_still_stable(self, w):
+        out = run(w, {"fundamental_score": 80, "peer_relative_score": 60, "multi_quarter_score": 40}, url="")
+        for _ in range(3):
+            out = run(w, out, url="")
+        assert out["fundamental_score_raw"] == 80.0 and out["fundamental_score"] == 72.0
+
+    def test_second_pass_with_enrichment_blends_from_the_raw_score(self, w):
+        w.rec["enrich_result"] = {"peer_score": 100, "consistency_score": 100}
+        first = run(w, {"fundamental_score": 50})
+        second = run(w, first)
+        assert first["fundamental_score"] == second["fundamental_score"] == 65.0
+        assert second["fundamental_score_raw"] == 50.0
+
+    def test_adjusted_flag_without_a_numeric_raw_blends_the_current_score(self, w):
+        out = run(w, {"fundamental_score": 80, "fundamental_score_adjusted": True}, url="")
+        assert out["fundamental_score_raw"] == 80.0 and out["fundamental_score"] == 71.0
+
+    @pytest.mark.parametrize("raw", ["80", None, True, float("nan")])
+    def test_unusable_stored_raw_is_ignored(self, w, raw):
+        out = run(w, {"fundamental_score": 80, "fundamental_score_adjusted": True,
+                      "fundamental_score_raw": raw}, url="")
+        assert out["fundamental_score_raw"] == 80.0 and out["fundamental_score"] == 71.0
+
+    def test_raw_without_the_adjusted_flag_is_overwritten(self, w):
+        # A stray raw field alone does not mean the payload was blended; only the flag does.
+        out = run(w, {"fundamental_score": 80, "fundamental_score_raw": 10}, url="")
+        assert out["fundamental_score_raw"] == 80.0 and out["fundamental_score"] == 71.0
 
 
 # ── never raises ──────────────────────────────────────────────────────────────

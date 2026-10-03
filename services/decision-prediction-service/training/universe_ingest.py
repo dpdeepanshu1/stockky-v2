@@ -71,7 +71,10 @@ def _get_engine():
     if url.startswith("postgresql") and "sslmode=" not in url.lower():
         url += ("&" if "?" in url else "?") + "sslmode=require"
     if "channel_binding=" in url:
-        url = re.sub(r"([&?])channel_binding=[^&]*", r"\1", url).replace("?&", "?").rstrip("?&")
+        url = re.sub(r"([&?])channel_binding=[^&]*", r"\1", url)
+        # a channel_binding param in the MIDDLE of the query ("?a=1&channel_binding=require&b=2")
+        # used to leave "a=1&&b=2", which libpq rejects (empty key). Collapse doubled '&' first.
+        url = re.sub(r"&{2,}", "&", url).replace("?&", "?").rstrip("?&")
     return create_engine(url, pool_pre_ping=True, pool_size=3, max_overflow=1, echo=False)
 
 

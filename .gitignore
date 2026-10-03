@@ -12,3 +12,5 @@ real_data/
 stockky_test_report_*/
 .coverage
 htmlcov/
+# `coverage annotate` output (one <file>.py,cover next to every source file)
+*,cover

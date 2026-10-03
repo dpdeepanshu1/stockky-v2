@@ -61,7 +61,8 @@ def _report_rate_limit(status: int, path: str = "", detail: str = "", symbol: st
     except Exception:
         pass
     try:
-        gw = os.environ.get("API_GATEWAY_URL", "").rstrip("/")
+        # .strip() first: a whitespace-only value must count as "unset" (see group 56).
+        gw = (os.environ.get("API_GATEWAY_URL") or "").strip().rstrip("/")
         if not gw:
             return
         requests.post(
@@ -126,6 +127,25 @@ def _normalize_de_ratio(val, sector=None, yahoo_percent=False):
     elif v > 200 and is_fin:
         v = v / 100.0
     return round(v, 2)
+
+
+def _debt_to_equity_from_yahoo(info, balance=None):
+    """Debt/equity as a multiple (0.95 = 0.95x) from a Yahoo ``info`` dict, else the balance sheet.
+
+    Extracted from ``_get_fundamentals_inner`` so the Yahoo scale handling is testable: Yahoo's
+    ``info["debtToEquity"]`` is ALWAYS a percent (``yahoo_percent=True``). When the key is present it
+    wins even if its value is unusable (None/NaN/text gives None, no balance-sheet fallback). Only when
+    the key is absent is ``Total Debt / Total Equity Gross Minority Interest`` taken from ``balance``
+    (a DataFrame, or None when unavailable); that ratio is already a multiple and is not rescaled.
+    """
+    if "debtToEquity" in info:
+        return _normalize_de_ratio(info.get("debtToEquity"), info.get("sector"), yahoo_percent=True)
+    if balance is not None and "Total Debt" in balance.index and "Total Equity Gross Minority Interest" in balance.index:
+        total_debt = balance.loc["Total Debt"].iloc[0]
+        equity = balance.loc["Total Equity Gross Minority Interest"].iloc[0]
+        if equity != 0:
+            return total_debt / equity
+    return None
 
 
 def _safe(val, decimals=2):
@@ -450,7 +470,7 @@ async def _refresh_feed_universe_loop():
     the existing feed running untouched — never tear down a working feed
     because one refresh call failed."""
     global _current_feed_universe
-    gw = os.environ.get("API_GATEWAY_URL", "").rstrip("/")
+    gw = (os.environ.get("API_GATEWAY_URL") or "").strip().rstrip("/")
     if not gw:
         logger.warning("feed universe refresh: API_GATEWAY_URL not set, skipping")
         return
@@ -2956,14 +2976,7 @@ def _get_fundamentals_inner(symbol: str, force: bool = False):
                 if equity != 0:
                     roe = (net_income / equity) * 100
 
-        debt_to_equity = None
-        if "debtToEquity" in info:
-            debt_to_equity = _normalize_de_ratio(_safe_info("debtToEquity"), info.get("sector"), yahoo_percent=True)
-        elif balance_available and "Total Debt" in balance.index and "Total Equity Gross Minority Interest" in balance.index:
-            total_debt = balance.loc["Total Debt"].iloc[0]
-            equity = balance.loc["Total Equity Gross Minority Interest"].iloc[0]
-            if equity != 0:
-                debt_to_equity = total_debt / equity
+        debt_to_equity = _debt_to_equity_from_yahoo(info, balance if balance_available else None)
 
         free_cashflow = None
         if "freeCashflow" in info:

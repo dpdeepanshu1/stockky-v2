@@ -380,15 +380,45 @@ class TestGatewayPost:
         monkeypatch.setattr(requests, "post", boom)
         rlr.record_rate_limit_hit("analysis")    # must not raise
 
-    def test_whitespace_only_gateway_url_still_posts(self, monkeypatch):
+    def test_whitespace_only_gateway_url_does_not_post(self, monkeypatch):
         _install_kv(monkeypatch)
         monkeypatch.setenv("API_GATEWAY_URL", "   ")
         import requests
         called = []
         monkeypatch.setattr(requests, "post", lambda *a, **kw: called.append(a))
         rlr.record_rate_limit_hit("analysis")
-        # Pinned: "   ".rstrip("/") is still truthy, so a post IS attempted.
-        assert len(called) == 1
+        assert called == []
+
+    @pytest.mark.parametrize("raw", ["", "\t", " \n ", "/", "  /  ", "///"])
+    def test_blank_or_slash_only_gateway_url_does_not_post(self, monkeypatch, raw):
+        store = _install_kv(monkeypatch)
+        monkeypatch.setenv("API_GATEWAY_URL", raw)
+        import requests
+        called = []
+        monkeypatch.setattr(requests, "post", lambda *a, **kw: called.append(a))
+        rlr.record_rate_limit_hit("analysis", 429, "/x")
+        assert called == []
+        # Neon reporting is independent of the gateway POST and must still happen.
+        assert store.get(rlr.NEON_EVENTS_KEY)
+
+    @pytest.mark.parametrize("raw", ["  http://gw:1  ", "http://gw:1/ ", " http://gw:1/\n"])
+    def test_padded_gateway_url_is_trimmed(self, monkeypatch, raw):
+        _install_kv(monkeypatch)
+        monkeypatch.setenv("API_GATEWAY_URL", raw)
+        import requests
+        seen = []
+        monkeypatch.setattr(requests, "post", lambda url, **kw: seen.append(url))
+        rlr.record_rate_limit_hit("analysis")
+        assert seen == ["http://gw:1/ops/rate-limits/event"]
+
+    def test_unset_gateway_url_does_not_post(self, monkeypatch):
+        _install_kv(monkeypatch)
+        monkeypatch.delenv("API_GATEWAY_URL", raising=False)
+        import requests
+        called = []
+        monkeypatch.setattr(requests, "post", lambda *a, **kw: called.append(a))
+        rlr.record_rate_limit_hit("analysis")
+        assert called == []
 
 
 class TestReportEdgeCases:

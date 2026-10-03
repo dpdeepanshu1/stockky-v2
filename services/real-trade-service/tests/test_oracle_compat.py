@@ -470,6 +470,18 @@ class TestExecDdlSafe:
             # falls through to logger.debug, but is still fully swallowed
             oc.exec_ddl_safe(eng, "CREATE INDEX idx1 ON kv (k)", "postgresql")
 
+    def test_returns_true_on_success_and_when_already_exists(self):
+        eng = self._engine()
+        assert oc.exec_ddl_safe(eng, "CREATE TABLE ret_kv (k TEXT)", "postgresql") is True
+        assert oc.exec_ddl_safe(eng, "CREATE TABLE ret_kv (k TEXT)", "postgresql") is True
+
+    def test_a_real_failure_returns_false_and_is_logged_as_a_warning(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="oracle-compat"):
+            assert oc.exec_ddl_safe(self._engine(), "THIS IS NOT SQL", "postgresql") is False
+        recs = [r for r in caplog.records if "exec_ddl_safe FAILED" in r.getMessage()]
+        assert len(recs) == 1 and recs[0].levelno == logging.WARNING
+
     def test_unrelated_error_is_also_swallowed_non_fatal_by_design(self):
         eng = self._engine()
 

@@ -176,6 +176,9 @@ def _normalize_db_url(url: str) -> str:
     # Neon pooler rejects channel_binding & invalid sslmode=required
     if "channel_binding=" in url:
         url = re.sub(r"([&?])channel_binding=[^&]*", r"\1", url)
+        # a channel_binding param in the MIDDLE of the query ("?a=1&channel_binding=require&b=2")
+        # used to leave "a=1&&b=2", which libpq rejects (empty key). Collapse doubled '&' first.
+        url = re.sub(r"&{2,}", "&", url)
         url = url.replace("?&", "?").rstrip("?&")
     url = re.sub(r"(?i)([?&]sslmode=)required\b", r"\1require", url)
     if "sslmode=" not in url.lower():

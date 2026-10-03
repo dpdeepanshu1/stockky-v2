@@ -53,6 +53,9 @@ def _normalize_db_url(url: str) -> str:
         url = "postgresql://" + url[len("postgres://") :]
     if "channel_binding=" in url:
         url = re.sub(r"([&?])channel_binding=[^&]*", r"\1", url)
+        # a channel_binding param in the MIDDLE of the query ("?a=1&channel_binding=require&b=2")
+        # used to leave "a=1&&b=2", which libpq rejects (empty key). Collapse doubled '&' first.
+        url = re.sub(r"&{2,}", "&", url)
         url = url.replace("?&", "?").rstrip("?&")
     url = re.sub(r"(?i)([?&]sslmode=)required\b", r"\1require", url)
     if "sslmode=" not in url.lower():
@@ -373,6 +376,11 @@ def bulk_baselines_from_yfinance(
     found = set()
 
     for i in range(0, len(clean), batch_size):
+        # Pace BEFORE every batch except the first. This used to sit at the bottom of the loop,
+        # after the `continue`s for a failed or empty download, so exactly the batches that most
+        # likely hit a rate limit got no pause before the next call.
+        if i > 0:
+            time.sleep(YF_BULK_BATCH_PAUSE)
         batch = clean[i : i + batch_size]
         yf_tickers = [f"{b}.NS" for b in batch]
         if rl_acquire:
@@ -436,9 +444,6 @@ def bulk_baselines_from_yfinance(
             except Exception as e:
                 logger.debug("surprise bulk extract failed for %s: %s", base, e)
                 continue
-
-        if i + batch_size < len(clean):
-            time.sleep(YF_BULK_BATCH_PAUSE)
 
     remaining = [b for b in clean if b not in found]
     logger.info(

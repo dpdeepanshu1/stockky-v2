@@ -305,6 +305,19 @@ class TestExecDdlSafe:
             def begin(self): return _FakeCtx()
         oc.exec_ddl_safe(_FakeEng(), "CREATE INDEX idx ON x (id)", "oracle")
 
+    def test_returns_true_on_success_and_when_already_exists(self):
+        eng = self._eng()
+        sql = "CREATE TABLE ret_t (id INTEGER PRIMARY KEY)"
+        assert oc.exec_ddl_safe(eng, sql, "sqlite") is True
+        assert oc.exec_ddl_safe(eng, sql, "sqlite") is True
+
+    def test_returns_false_and_warns_on_a_real_failure(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="oracle-compat"):
+            assert oc.exec_ddl_safe(self._eng(), "THIS IS NOT SQL", "sqlite") is False
+        recs = [r for r in caplog.records if "exec_ddl_safe FAILED" in r.getMessage()]
+        assert len(recs) == 1 and recs[0].levelno == logging.WARNING
+
     def test_reraises_unexpected_error(self):
         class _FakeConn:
             def execute(self, *a): raise RuntimeError("network error")

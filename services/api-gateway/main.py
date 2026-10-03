@@ -4220,7 +4220,13 @@ def circuits_status():
 @app.get("/api/ops/rate-limits")
 async def ops_rate_limits():
     """Dashboard payload: rate-limit events + circuit breakers (last 1h)."""
-    return rate_limit_monitor.snapshot(circuits=all_snapshots())
+    # snapshot() does blocking I/O: a Neon/Oracle kv_get for the durable aggregate and, when Redis is
+    # enabled, an lrange. Called inline from this async handler it stalled the whole event loop for a
+    # DB round trip on every dashboard poll (same bug class as record(), which already hands its I/O to a
+    # pool), so every other request waited behind it. all_snapshots() is in-memory and cheap, so it
+    # stays here; only the monitor read goes to a worker thread.
+    circuits = all_snapshots()
+    return await asyncio.to_thread(rate_limit_monitor.snapshot, circuits=circuits)
 
 
 @app.post("/ops/rate-limits/event")
@@ -4663,7 +4669,7 @@ async def ops_qstash_tick(request: Request):
         sig = request.headers.get("Upstash-Signature") or request.headers.get("upstash-signature") or ""
         body = await request.body()
         if qstash_client is not None:
-            _gw_base = (os.environ.get("API_GATEWAY_URL") or "").rstrip("/")
+            _gw_base = (os.environ.get("API_GATEWAY_URL") or "").strip().rstrip("/")
             _expected_url = f"{_gw_base}{request.url.path}" if _gw_base else None
             if not qstash_client.verify_signature(sig, body, expected_url=_expected_url):
                 raise HTTPException(status_code=401, detail="Invalid QStash signature")

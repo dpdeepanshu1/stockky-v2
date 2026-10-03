@@ -421,6 +421,72 @@ class TestBucketAcquire:
         b = bucket(clock, rps=1, capacity=8, tokens=8.0)
         assert b.acquire(weight=7, reserve=2.0, max_wait=1.0, fail_fast=True) == -1.0
 
+    # ── weight > capacity: capped at what the caller may take, no budget stall ──
+
+    def test_oversized_weight_takes_a_full_bucket_immediately(self, clock):
+        b = bucket(clock, rps=2, capacity=6, tokens=6.0)
+        assert b.acquire(weight=50) == 0.0
+        assert b.tokens == 0.0
+        assert clock.sleeps == []
+        assert (b.denied_events, b.throttle_events) == (0, 0)
+
+    def test_oversized_weight_waits_for_refill_not_for_max_wait(self, clock):
+        b = bucket(clock, rps=2, capacity=6, tokens=0.0)
+        assert b.acquire(weight=50, max_wait=20) == 3.0   # 6 tokens at 2/s, not the 20s budget
+        assert clock.sleeps == [2.0, 1.0]
+        assert b.tokens == 0.0
+        assert (b.denied_events, b.throttle_events) == (0, 1)
+
+    def test_oversized_weight_just_above_capacity_is_capped_too(self, clock):
+        b = bucket(clock, rps=2, capacity=6, tokens=6.0)
+        assert b.acquire(weight=6.5) == 0.0
+        assert b.tokens == 0.0
+
+    def test_oversized_weight_fail_fast_is_granted_not_skipped(self, clock):
+        b = bucket(clock, rps=2, capacity=6, tokens=6.0)
+        assert b.acquire(weight=50, fail_fast=True) == 0.0   # used to be -1.0 after a full stall
+        assert b.denied_events == 0
+
+    def test_oversized_weight_leaves_the_interactive_reserve(self, clock):
+        b = bucket(clock, rps=1, capacity=8, tokens=8.0)
+        assert b.acquire(weight=50, reserve=2.0) == 0.0
+        assert b.tokens == 2.0                                # reserve untouched
+
+    def test_oversized_weight_with_reserve_waits_only_for_the_usable_part(self, clock):
+        b = bucket(clock, rps=1, capacity=8, tokens=2.0)
+        assert b.acquire(weight=50, reserve=2.0, max_wait=20) == 6.0
+        assert b.tokens == 2.0
+
+    def test_oversized_weight_is_noted_at_debug_only(self, clock, log):
+        b = bucket(clock, rps=2, capacity=6.0, tokens=6.0)
+        b.acquire(weight=50)
+        assert [lv for lv, _ in log.rec] == ["debug"]
+        assert "weight 50 exceeds bucket capacity 6.0, treating as 6.0" in log.text("debug")
+
+    def test_oversized_weight_still_gives_up_when_budget_runs_out(self, clock, log):
+        # no refill at all: the capped request is still bounded by the budget
+        b = bucket(clock, rps=0.0, capacity=6, tokens=1.0)
+        assert b.acquire(weight=50, max_wait=1.0, fail_fast=True) == -1.0
+        assert b.denied_events == 1 and b.tokens == 1.0
+        assert "skipping (weight=50, queue=1)" in log.text("warning")
+
+    def test_oversized_weight_when_reserve_leaves_nothing_is_unchanged(self, clock):
+        b = bucket(clock, rps=1, capacity=4, tokens=4.0)
+        assert b.acquire(weight=10, reserve=4.0, max_wait=1.0, fail_fast=True) == -1.0
+        assert b.acquire(weight=10, reserve=5.0, max_wait=1.0, fail_fast=True) == -1.0
+        assert b.tokens == 4.0
+
+    def test_weight_equal_to_capacity_is_not_treated_as_oversized(self, clock, log):
+        b = bucket(clock, rps=2, capacity=6, tokens=6.0)
+        assert b.acquire(weight=6) == 0.0
+        assert b.tokens == 0.0 and log.rec == []
+
+    def test_module_acquire_and_try_acquire_accept_oversized_weight(self, clock):
+        rl._buckets["yfinance"] = bucket(clock, rps=2, capacity=6, tokens=6.0)
+        assert rl.acquire("yfinance", weight=50) == 0.0
+        clock.now += 100                                       # refill to capacity
+        assert rl.try_acquire("yfinance", weight=50) is True
+
     def test_waiters_restored_when_sleep_raises(self, clock):
         b = bucket(clock, rps=1, capacity=1, tokens=0.0)
         clock.sleep_raises = KeyboardInterrupt()

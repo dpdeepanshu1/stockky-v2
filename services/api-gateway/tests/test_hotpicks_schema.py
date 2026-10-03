@@ -207,6 +207,9 @@ class TestNormalizeDbUrl:
          "postgresql://u@h/db?sslmode=require"),
         ("postgresql://u@h/db?sslmode=require&channel_binding=require",
          "postgresql://u@h/db?sslmode=require"),
+        # in the MIDDLE: used to leave "a=1&&b=2", which libpq rejects
+        ("postgresql://u@h/db?a=1&channel_binding=require&b=2",
+         "postgresql://u@h/db?a=1&b=2&sslmode=require"),
     ])
     def test_shapes(self, m, raw, expected):
         assert m._normalize_db_url(raw) == expected

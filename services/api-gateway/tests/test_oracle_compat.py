@@ -680,7 +680,7 @@ class TestExecDdlSafe:
         monkeypatch.setattr(m, "_log", spy)
         eng = DdlEngine(raises=Exception("ORA-00955: something"))
         m.exec_ddl_safe(eng, "CREATE TABLE t (k int)", "postgresql")
-        assert spy.levels() == ["debug"] and "ORA-00955" in spy.text()
+        assert spy.levels() == ["warning"] and "ORA-00955" in spy.text()
 
     @pytest.mark.parametrize("dialect", ["postgresql", "oracle"])
     def test_already_exists_text_is_swallowed_silently_any_dialect(self, m, sa, monkeypatch, dialect):
@@ -690,12 +690,12 @@ class TestExecDdlSafe:
         m.exec_ddl_safe(eng, "CREATE TABLE t (k int)", dialect)
         assert spy.rec == []
 
-    def test_other_errors_are_swallowed_but_logged_at_debug(self, m, sa, monkeypatch):
+    def test_other_errors_are_swallowed_but_logged_at_warning(self, m, sa, monkeypatch):
         spy = LogSpy()
         monkeypatch.setattr(m, "_log", spy)
         eng = DdlEngine(raises=Exception("ORA-01031: insufficient privileges"))
         m.exec_ddl_safe(eng, "CREATE TABLE t (k int)", "oracle")   # must not raise
-        assert spy.levels() == ["debug"]
+        assert spy.levels() == ["warning"]
         assert "oracle" in spy.text() and "ORA-01031" in spy.text()
 
     def test_logged_message_is_truncated_to_160_chars(self, m, sa, monkeypatch):
@@ -711,6 +711,29 @@ class TestExecDdlSafe:
         eng = DdlEngine(begin_raises=Exception("connection refused"))
         m.exec_ddl_safe(eng, "X", "oracle")     # must not raise
         assert "connection refused" in spy.text()
+
+    def test_returns_true_on_success_and_on_benign_already_exists(self, m, sa):
+        assert m.exec_ddl_safe(DdlEngine(), "CREATE TABLE t (k int)", "oracle") is True
+        eng = DdlEngine(raises=Exception("ORA-00955: name is already used by an existing object"))
+        assert m.exec_ddl_safe(eng, "CREATE TABLE t (k int)", "oracle") is True
+
+    def test_returns_false_on_a_real_failure_and_logs_the_statement(self, m, sa, monkeypatch):
+        spy = LogSpy()
+        monkeypatch.setattr(m, "_log", spy)
+        eng = DdlEngine(raises=Exception("ORA-01031: insufficient privileges"))
+        assert m.exec_ddl_safe(eng, "CREATE INDEX ix_a ON t (k)", "oracle") is False
+        assert "CREATE INDEX ix_a ON t (k)" in spy.text()
+
+    def test_returns_false_when_a_transaction_cannot_be_opened(self, m, sa):
+        eng = DdlEngine(begin_raises=Exception("connection refused"))
+        assert m.exec_ddl_safe(eng, "X", "oracle") is False
+
+    def test_duplicate_column_name_text_is_benign_on_any_dialect(self, m, sa, monkeypatch):
+        spy = LogSpy()
+        monkeypatch.setattr(m, "_log", spy)
+        eng = DdlEngine(raises=Exception("duplicate column name: v"))
+        assert m.exec_ddl_safe(eng, "ALTER TABLE t ADD COLUMN v TEXT", "sqlite") is True
+        assert spy.rec == []
 
     def test_one_failure_does_not_poison_the_next_statement(self, m, sa):
         bad = DdlEngine(raises=Exception("ORA-00955"))

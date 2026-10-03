@@ -533,6 +533,29 @@ class TestEnsureHotPathIndexes:
         db._ensure_hot_path_indexes(eng, "postgresql")
         db._ensure_hot_path_indexes(eng, "postgresql")  # must not raise
 
+    def test_a_failed_ddl_is_warned_and_not_reported_as_ensured(self, monkeypatch, caplog):
+        monkeypatch.setattr(_oc, "exec_ddl_safe", lambda *a, **k: False)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            db._ensure_hot_path_indexes(new_engine(), "postgresql")
+        assert "could NOT ensure index ix_scalp_positions_opened_at" in caplog.text
+        assert "ensured index" not in caplog.text
+
+    def test_a_successful_ddl_is_reported_as_ensured(self, caplog):
+        eng = new_engine()
+        md = MetaData()
+        Table("scalp_positions", md, Column("id", Integer, primary_key=True), Column("opened_at", String(32)))
+        md.create_all(eng)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            db._ensure_hot_path_indexes(eng, "postgresql")
+        assert "ensured index ix_scalp_positions_opened_at on scalp_positions" in caplog.text
+        assert "could NOT" not in caplog.text
+
+    def test_a_stub_returning_none_still_counts_as_ensured(self, monkeypatch, caplog):
+        monkeypatch.setattr(_oc, "exec_ddl_safe", lambda *a, **k: None)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            db._ensure_hot_path_indexes(new_engine(), "postgresql")
+        assert "ensured index ix_scalp_positions_opened_at" in caplog.text
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # _ensure_oracle_autoincrement

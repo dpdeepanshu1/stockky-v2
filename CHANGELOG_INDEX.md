@@ -6,6 +6,372 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-03 (group 55)  #13 item (continued from group 54): the same `weight > capacity` flaw in the four other token
+  buckets, all fixed the same way. Tokens are capped at `capacity`, so `tokens >= weight` can never become true for a
+  heavier weight; a plain `acquire()` slept out the whole `max_wait` on every call and then "proceeded anyway".
+  Files: `market-data-service/rate_limiter.py` (default `max_wait` 20 s; `acquire`, which also covers the fail-closed
+  `try_acquire`, plus `would_block`, which was True forever for an oversized weight), `analysis-intelligence-service/
+  fundamental/rate_limiter.py` and `notification-scheduler-service/scheduler/rate_limiter.py` (`acquire`), and
+  `api-gateway/redis_rate_limit.py` (`acquire`, `allow`, `wait_budget_sec`; `main.py::_cb_get` uses the last two to
+  decide on CircuitOpenError). An oversized weight now means "the whole bucket": it waits only for the bucket to fill
+  (at most `capacity / rps`), drains it, and returns; `allow()` grants it when the bucket is full; `wait_budget_sec()`
+  reports the time to fill; `would_block()` is False when the bucket is full. Logged once per call at DEBUG
+  ("weight X exceeds bucket capacity Y, treating as Y"). Weight at or below capacity and `capacity == 0` are
+  untouched. These copies have no reserve concept, so the clamp is simply `capacity`. Real call site affected:
+  `market-data-service/surprise_premarket.py` `rl_acquire("yfinance", weight=len(batch))` (batches of up to 50).
+  Tests: 5 existing tests that pinned the stall as "current behaviour" were rewritten (analysis-intelligence
+  `test_max_wait_exceeded_proceeds_and_drains_tokens` now reaches the give-up path with an ordinary weight and
+  `test_weight_above_burst_capacity_always_stalls_the_full_max_wait` became `..._is_capped_and_does_not_stall`;
+  api-gateway `test_redis_rate_limit.py` `test_weight_larger_than_capacity_stalls_until_max_wait`, `test_weighted_allow`
+  and `test_weight_forwarded`). New tests: market-data `tests/test_rate_limiter.py` 42 -> 53 (`TestOversizedWeight`);
+  analysis-intelligence `tests/test_rate_limiter.py` 89 -> 95; api-gateway `tests/test_redis_rate_limit.py` 71 -> 82;
+  NEW FILE `notification-scheduler-service/tests/test_rate_limiter_oversized_weight.py` (9; that service had no bucket
+  tests, the file is loaded fresh from its path like `test_rate_limiter_env.py`). On the group 54 code 22 of the new/
+  rewritten tests fail (market-data 7, analysis 4, redis 6, notification-scheduler 5); the group 54 versions of the
+  three edited test files fail only on the 5 tests that were rewritten. Sandbox has no pytest and no network, so a small
+  stand-in runner was used (fixtures, parametrize, raises, monkeypatch, caplog): these four files plus the unchanged
+  `api-gateway/tests/test_rate_limiter.py` (160) all pass; other test files and the other tests in these services were
+  NOT run (market-data `test_rate_limiter_fail_closed.py` is plain functions + real threads, uses weight 1, not run).
+  Run each service's `bash run_tests.sh` / pytest on the VM. ZIP NOW HAS 831 ENTRIES (one new test file). NEEDS REBUILD of
+  api-gateway, market-data-service, analysis-intelligence-service and notification-scheduler-service (`docker compose
+  build <service> && docker compose up -d`).
+  STILL OPEN: a caller whose weight is above `capacity - reserve` but not above `capacity` is still denied/stalled in the
+  gateway's reserve-aware bucket (`test_unreachable_weight_under_reserve_is_denied` pins it as intended); needs your call.
+- 2026-10-03 (group 54)  #13 item: `api-gateway/rate_limiter.py::_Bucket.acquire(weight > capacity)` stalled for the
+  whole budget on every call. Tokens are capped at `capacity` (`min(capacity, tokens + elapsed * rps)`), so
+  `usable >= weight` can never become true for a weight above it. A plain `acquire()` therefore slept out the full
+  budget (5 s by default) and then "proceeded anyway", draining the bucket and bumping `denied_events`; `try_acquire()`
+  (fail_fast) waited the same budget and then returned False, i.e. the call was skipped on every attempt. The one real
+  call site is `surprise_premarket.py::bulk_baselines_from_yfinance`, which does
+  `rl_acquire("yfinance", weight=len(batch))` with `SURPRISE_YF_BULK_BATCH=50` against a 6-token bucket. Fixed in
+  `acquire()`: when `weight > capacity` the request is treated as a request for everything the caller may take,
+  `need = capacity - reserve` (so a background pipeline still leaves the interactive reserve alone). It waits only
+  for that to refill (at most `capacity / rps`, e.g. 3 s for yfinance), drains it, and returns. Logged once per call at
+  DEBUG. If nothing is attainable (`reserve >= capacity`) behaviour is unchanged, and a weight at or below capacity is
+  untouched. The give-up path and its log line still report the caller's original weight. `snapshot()` output is
+  unchanged (no new counter). Tests (`tests/test_rate_limiter.py`, 149 -> 160): 11 new in `TestBucketAcquire`
+  (full bucket taken immediately, waits for refill not `max_wait`, just-above-capacity, fail_fast granted instead of
+  skipped, reserve left intact, reserve + refill wait, DEBUG-only log, still bounded by the budget when nothing refills,
+  reserve >= capacity unchanged, weight == capacity not treated as oversized, module `acquire`/`try_acquire`); 8 of
+  the 11 fail on the group 53 code, the other 3 guard behaviour that must not change. All 149 existing tests still
+  pass unchanged on the new code. Sandbox has no pytest and no network, so this round used a small stand-in runner
+  that supports fixtures (autouse/yield), `parametrize`, `raises` and `monkeypatch`: the whole file runs 160/160 on the
+  fix, 152 pass / 8 fail on the old code. The rest of the gateway suite was NOT re-run (7530 passed in group 51); the
+  other test files that mention the limiter stub it. Run `bash run_tests.sh` on the VM. NEEDS REBUILD:
+  `docker compose build api-gateway && docker compose up -d`.
+  STILL OPEN, same flaw, NOT changed: (1) the sibling copies of this bucket in market-data-service/rate_limiter.py,
+  analysis-intelligence-service/fundamental/rate_limiter.py and notification-scheduler-service/scheduler/rate_limiter.py
+  (default `max_wait` 20 s, and market-data-service/surprise_premarket.py also calls
+  `rl_acquire("yfinance", weight=len(batch))`), plus `api-gateway/redis_rate_limit.py`'s `_Bucket` (acquire / allow /
+  wait_budget_sec). (2) A background caller whose weight is above `capacity - reserve` but not above `capacity` is
+  still denied/stalled: `test_unreachable_weight_under_reserve_is_denied` pins that as intended, so I left it for your
+  call.
+- 2026-10-03 (group 53)  #13 item: `api-gateway/json_safe.py::sanitize` left `np.bool_` and `set` / `frozenset`
+  unchanged. `sanitize()` is what `_safe_json_response` runs every payload through before Starlette's
+  `json.dumps(..., allow_nan=False)`; anything it returns that `json.dumps` cannot encode becomes a 500 for the
+  whole response. `np.bool_` is not a `bool` subclass and was not in the numpy branch (which only handled
+  floating / integer / ndarray), so a flag such as `np.float64(3) > np.float64(2)` in a row raised
+  `TypeError: Object of type bool is not JSON serializable`; a `set` value (tag sets, id sets) raised
+  `Object of type set is not JSON serializable`. Fixed: `np.bool_` -> `bool(obj)` in the numpy branch; `set` /
+  `frozenset` -> list, sorted for a stable wire order (falls back to iteration order when members are not mutually
+  orderable, e.g. `{1, "a", None}`), members sanitised recursively (so a NaN member becomes null and numpy ints
+  become ints). Arrays of bools already worked via `tolist()`. Only `json_safe.py` changed; the training service's
+  own `json_safe.py` already handled both and is untouched. Tests (`tests/test_json_safe.py`, 32 -> 42): new
+  `TestNumpyBool` (4) and `TestSets` (6); 10 of the 42 fail on the group 52 code. Sandbox has no pytest this round
+  (and the network is off), so the file was run through a minimal pytest shim (parametrize / approx /
+  monkeypatch.setattr only): 42/42 pass on the fix, 32 pass / 10 fail on the old code. The whole gateway suite was
+  NOT re-run (7530 passed in group 51); `test_main_core` / `test_main_surprise_routes` only reference `json_safe`
+  through stubs, so nothing else pins the old behaviour. Run `bash run_tests.sh` on the VM. NEEDS REBUILD:
+  `docker compose build api-gateway && docker compose up -d`.
+- 2026-10-03 (group 52)  #13 item: `api-gateway/price_resolver.py::_as_positive_float` accepted `+inf`. The guard
+  was `px <= 0 or px != px`, which rejects zero, negatives and NaN but lets `+inf` through (also the strings
+  `"inf"`, `"Infinity"` and `"1e400"`, which `float()` turns into inf). `extract_safe_price` / `resolve_display_price`
+  / `apply_price_aliases` / `ensure_row_price` would then stamp `inf` into close/price/cmp/current_price/ltp/
+  last_price/prev_close, and from there into scoring, % change and order sizing. The guard is now
+  `not math.isfinite(px) or px <= 0`, so an infinite value is skipped like any other bad one: the resolver falls
+  through to the next key / source, and returns 0.0 (or leaves the row untouched) when nothing finite is available.
+  The old test `test_infinity_is_accepted_as_positive` pinned the bug and is replaced by
+  `test_infinity_and_nan_rejected` (+/-inf, inf strings, 1e400, nan) and `test_large_finite_still_accepted`; new
+  class `TestInfinityNeverResolves` (8 tests) covers fall-through across tick/decision/feed/nested feed, the
+  only-inf-available case, `apply_price_aliases` (inf price keeps an existing positive value; inf `prev_close` is
+  replaced) and `ensure_row_price`. 13 of the 72 tests in `tests/test_price_resolver.py` fail on the group 51 code.
+  Sandbox has no pytest this round, so this file was run through a minimal pytest shim (parametrize/approx only):
+  72/72 pass on the fix, 13 fail on the old code; I did NOT re-run the whole gateway suite (7530 passed in
+  group 51). Run `bash run_tests.sh` on the VM. Only `price_resolver.py` and its test file changed, so the other
+  callers (`instant_scanner`, `main.py`) are untouched. NEEDS REBUILD: `docker compose build api-gateway &&
+  docker compose up -d`.
+- 2026-10-03 (group 51)  #13 item: `GET /ops/rate-limits` (and its `/api/rate-limits` and `/api/ops/rate-limits`
+  aliases) blocked the event loop. `RateLimitMonitor.snapshot()` is blocking: it does a durable `kv_get` of the
+  Neon/Oracle aggregate (`stockky:rate_limit_stats`) and, when Redis is enabled, an `lrange`. The route is
+  `async def` and called it inline, so every dashboard poll froze the whole gateway for a DB round trip while other
+  requests waited. `record()` had already been moved to a thread pool for exactly this reason; `snapshot()` was the
+  read-side leftover. `main.py::ops_rate_limits` now does `circuits = all_snapshots()` on the loop (in-memory, cheap)
+  and `await asyncio.to_thread(rate_limit_monitor.snapshot, circuits=circuits)`. `snapshot()` itself is unchanged
+  apart from a docstring saying it is blocking and must be called off-loop. It has no other caller. Tests
+  (`tests/test_main_ops_routes.py::TestCircuitsAndMetrics`, 211 total in the file): the snapshot runs on a thread
+  with no running event loop and not the loop's thread; a 0.3 s blocking snapshot leaves the loop free to tick at
+  least 10 times (it ticks ~0-1 inline); the circuits are read on the loop and handed over as the same object; a
+  snapshot error still propagates. 2 of the 4 fail on the group 50 code (the other 2 pin behaviour that must not
+  change). Sandbox now has the gateway's pinned requirements (fastapi 0.111, httpx 0.27, pydantic 2.11, numpy 2.2 /
+  pandas 3.0 for yfinance), so this round ran the WHOLE gateway suite in one process: 7530 passed, which also
+  re-verifies the group 47-50 changes together. NEEDS REBUILD: `docker compose build api-gateway && docker compose
+  up -d`.
+- 2026-10-03 (group 50)  #13 item: `api-gateway/batch_worker.py::run_in_batches` dropped a whole batch from the
+  totals when `asyncio.gather` itself failed. The worker gather uses `return_exceptions=True`, so a worker error
+  never reaches the `except`; what does is a failure of gather itself. That branch set `raw = []` after cancelling
+  the tasks, and `zip(to_fetch, raw)` then skipped every item of the batch: not counted in `processed`, not in
+  `results`, not in `errors`. The scan's universe total silently came up short, the batch's progress callback
+  reported the old `processed` figure, and `main.py`'s scan summary (which reads `processed`/`errors`) never
+  mentioned those symbols. The branch now rebuilds one entry per item after the cancel: a task that had already
+  finished keeps its real result or its own exception, and one that was cancelled (or would not stop within
+  `_cancel_tasks`' 2 s) is recorded as failed with the gather error (`{"item": ..., "error": "RuntimeError:
+  boom"}`), through the same per-item path as any other failure, so `collect_errors_from_exceptions=False` still
+  suppresses the error entry but the item is still counted. Invariant now tested: `processed == len(results) +
+  len(errors)` for a batch whose gather failed. Tests (`tests/test_batch_worker.py`, 75 total): the old
+  `test_gather_failure_cancels_tasks_and_moves_on` pinned the bug (`processed == 1`, item "neither processed nor
+  recorded") and now asserts `processed == 2` and the recorded error; 5 new tests cover a full 5-item batch, the
+  progress callback, a mix of finished / failed / cancelled workers, error collection off, and a failed batch not
+  touching the next one. 6 of the 75 fail on the group 49 code; module coverage stays 100% / 100% (130
+  statements, 54 branches); 3 repeated runs green. Sandbox: `tests/test_batch_worker.py` run directly. Not
+  changed: a gather failure is only reachable in practice by an outer cancellation / interpreter-level fault, so
+  this is a correctness-of-accounting fix, not a fix for a failure seen in production. NEEDS REBUILD:
+  `docker compose build api-gateway && docker compose up -d`.
+- 2026-10-03 (group 49)  #13 item: `api-gateway/instant_scanner.py` crashed on a `None` / non-dict feed. First
+  recorded in the session 141 notes as "`_extract_price` fallback crashes on `feed=None` (`feed.get`)". Re-checked
+  against the code: the same unguarded `.get()` was in three more places. `_extract_price`'s `except` branch looped
+  over `(tick or {}, feed)` and called `src.get(...)` on the feed (and on a non-dict tick); `compute_technical_score`
+  and `compute_fundamental_score` called `feed.get("technical_score")` / `feed.get("fundamental_score")` first
+  thing; `_metrics` called `feed.get("metrics")`. All real callers pass a dict (`compute_instant_scores` and
+  `process_single_stock` normalise first), so nothing failed in production, but the fallback only runs when
+  `price_resolver` is already failing, so a bad row there would have turned "no data" into an exception inside a
+  scan worker. New `_as_dict()` returns the value if it is a dict and `{}` otherwise; it is applied in `_metrics`,
+  in `_extract_price`'s fallback (feed AND tick), and at the top of both score functions. A bad feed no longer
+  hides a good tick, and a bad tick no longer hides a good feed. Scores for a bad feed equal the empty-feed scores
+  (fundamental default baseline 84). Tests (`tests/test_instant_scanner.py::TestNonDictInputsDoNotCrash`, 67
+  new, 416 total): None / str / list / int / 0 / tuple through `_as_dict`, `_metrics`, `_extract_price` (broken
+  resolver and missing resolver), both score functions, `compute_instant_scores` and `process_single_stock`; 43 of
+  them fail on the group 48 code. Branch coverage of the module stays 100% / 100% (253 statements, 124 branches).
+  Left alone on purpose, still open in #13: the price-only PREPARE TO BUY case (a priced row with no feed data is
+  flagged `provisional_defaults` but can still reach a decision from default indicators; that changes what the board
+  shows, so it is its own item). The session 141 note about it and about `from_data_feed` possibly being a dict/str
+  are unchanged. Sandbox: `tests/test_instant_scanner.py` run directly, 416 passed. NEEDS REBUILD:
+  `docker compose build api-gateway && docker compose up -d`.
+- 2026-10-03 (group 48)  First #13 item: `api-gateway/nse_holidays.py::is_nse_holiday()` answered False for a
+  `datetime`. The holiday set holds plain `date` objects and a `datetime` neither equals nor hashes like a `date`, so
+  `is_nse_holiday(datetime(2026, 9, 14, 10, 0))` (Ganesh Chaturthi, a closed day) returned False with no error; the
+  old test even pinned that as a "documented gotcha". Every current caller passes `.date()` (`main.py`,
+  `surprise_scanner.py`, `data_feed.py`), so nothing was wrong in production today, but one forgotten `.date()` would
+  have scanned/notified on a holiday. New helper `_as_calendar_date()` reduces a datetime to its IST calendar date
+  before the lookup, used by both `is_nse_holiday()` and `holiday_name()`: a naive datetime is read as IST wall-clock
+  time (all callers build it from an IST `now`), an aware one is converted to IST first (2026-09-13 20:00 UTC is the
+  14th in India), a `date` is unchanged, and `None` / strings / ints are still "not a holiday" rather than raising.
+  `real-trade-service` and `position-stocks-service` have a different `is_nse_holiday(now: datetime)` that already
+  converts to IST and is untouched. Tests (`tests/test_nse_holidays.py`): the old "datetime is not a match" test is
+  replaced by naive-holiday, naive-ordinary-day, midnight boundaries, aware-IST, aware-UTC across the date line, `date`
+  unchanged, non-date values, and `holiday_name` for a datetime; 25 pass, and 5 of them fail on the group 47 code.
+  `scripts/check_holiday_lists_sync.py` still reports all 4 lists agreeing on 16 dates. Sandbox: pytest only,
+  `tests/test_nse_holidays.py` and the kv drift guard run (84 passed); the gateway's other tests that need httpx etc.
+  were not run, so run the gateway suite on your VM. NEEDS REBUILD: `docker compose build api-gateway && docker compose up -d`.
+- 2026-10-03 (group 47)  Item #12, the six `kv_cache.py` copies: compared, nothing merged, nothing broken. There
+  are three variants, not "identical copies": four byte-identical plain copies (analysis-intelligence
+  `fundamental/`, decision-prediction `decision/` and `training/`, notification-scheduler `notification/`);
+  `market-data-service` = plain + the `fundamentals:` durable prefix (its own `/fundamentals/{symbol}` cache); and
+  `api-gateway` = plain + durable prefixes `stockky:hot_premarket_job`, `stockky:ipo:`, `stockky:ipoalerts:`,
+  `system:surprise_feed`, `system:bulk_quote_cache`, `stockky:hot_stocks`, `stockky:surprise_scan:` + the stale-read
+  helpers `kv_get_stale()` / `get_stale()` (the only other difference is an unused `text` import dropped from
+  `_get_neon`). The differences are intentional: every key the other services read or write through their copy
+  (rate-limit stats/events, notification config, `stockky:decide_cache:`, `indianapi:`) is already durable there, the
+  90 s `trades:` report cache is deliberately memory-only, and no file outside `api-gateway` references a
+  gateway-only prefix or helper (likewise nothing in the gateway uses `fundamentals:`). Merging would only make
+  every service carry prefixes it never uses. The risk is silent drift: a prefix missing from a copy does not raise,
+  `_is_durable()` just returns False and the key becomes memory-only until the next restart. New
+  `api-gateway/tests/test_kv_cache_drift.py` (59 tests, reads the copies as source, no imports) pins: all six copies
+  found and no seventh; the four plain copies byte-identical; no copy drops a shared prefix; market-data extras are
+  exactly `{fundamentals:}` and gateway extras exactly the seven above; keys several services write are durable in
+  every copy; the stale helpers exist only in the gateway copy and nobody else calls them; no other service uses a
+  gateway-only prefix. Checked against four deliberate breakages (dropped prefix, foreign use of `stockky:ipo:`, a
+  one-line drift in a plain copy, gateway using `fundamentals:`): each fails the guard, and the clean tree passes.
+  No source changes. Sandbox had pytest only for this file (59 passed); run `pytest tests/test_kv_cache_drift.py`
+  (or the gateway's full run) on your VM. No rebuild needed.
+- 2026-10-03 (group 46)  Removed three stale `coverage annotate` artefacts from `real-trade-service`:
+  `exit_engine/exit.py,cover`, `portfolio/portfolio.py,cover` and `execution/dhan_client.py,cover` (~230 KB; each is a
+  line-by-line copy of its source with `>` / `!` coverage marks, and two of them no longer matched their source:
+  exit.py 1622 lines vs 1611, dhan_client.py 1257 vs 1244). Nothing in the repo references them (checked every file
+  outside the changelog and archive notes). Added `*,cover` to `.gitignore` so a future `coverage annotate` run does
+  not put them back into the tree. Not done: there is no `.dockerignore`, so `COPY . .` in the service Dockerfiles
+  still copies whatever is in the directory at build time; add one only if you want to keep annotate output and other
+  local files out of the images (it changes the build context, so check each service's needs first). No code or test
+  changes. No rebuild needed.
+- 2026-10-03 (group 45)  `purge_legacy_universe_adx` ran a DELETE + commit on every volume-shock candidate
+  cycle although its comment (and the call-site comment) called it a one-off. `real-trade-service/
+  adaptive_market_params.py` now keeps a per-process flag (`_legacy_adx_purged`): the first purge that completes
+  (including one that deletes nothing) sets it and later calls return 0 without touching the DB;
+  `purge_legacy_universe_adx(db, force=True)` runs anyway. A failed purge (query or commit error, already
+  swallowed and rolled back) leaves the flag unset, so it is retried next cycle. A restart purges once more, which
+  also catches legacy rows written by an older instance during a rolling deploy. The call site in
+  `candidate_engine/candidates.py` is unchanged apart from its comment. This entry also documents the ADX change
+  that never had one (written from the code and its comments; the original date is not recorded there):
+  `analysis-intelligence-service/technical/main.py` ADX switched from plain rolling means to Wilder smoothing
+  (`_wilder_smooth`) and stopped reporting a fake 15 / NaN-turned-0.0 for histories too short for two Wilder
+  periods. The old readings were a different, systematically higher and polluted measure, so the regime metric was
+  renamed `universe_adx` -> `universe_adx_wilder` (`UNIVERSE_ADX_METRIC`; old name `LEGACY_UNIVERSE_ADX_METRIC`):
+  `adaptive_signal_weights` stays on static 1.0/1.0 weights until `ADAPTIVE_MIN_HISTORY_DAYS` of new-method
+  readings exist. Tests (`tests/test_adaptive_market_params.py`, `TestPurgeLegacyUniverseAdx`): once-per-process,
+  no-op counts as done, `force`, retry after a failed query, retry after a failed commit; the existing four purge
+  tests now reset the flag per test. Sandbox had no pytest/sqlalchemy, so the SQLite-backed tests were NOT run:
+  the purge logic was checked with 8 assertions against stub modules and a fake DB (all pass on the fix, the
+  once-per-process one fails on the group 44 code). Run `pytest tests/test_adaptive_market_params.py
+  tests/test_candidates_orchestration.py` (or the service's full run) on your VM.
+  NEEDS REBUILD: `docker compose build real-trade-service && docker compose up -d`.
+- 2026-10-03 (group 44)  Loose ends from group 33 (debt-to-equity scale). (1) NSE `secInfo` scale: resolved by
+  reading the code, not by guessing a scale - `market-data-service/main.py::_fetch_nse_fundamentals` hard-codes
+  `secInfo["debtToEquity"]` to `None` (NSE quote-equity carries no ratios), so the NSE fallback never produces a
+  D/E value and its scale cannot matter; nothing was rescaled. Pinned by tests (even a `debtToEquity` present in
+  the NSE payload is not read), with a note that a real source wired in there later must have its scale decided
+  and normalised at that time. (2) Untested Yahoo call site: the D/E selection inside `_get_fundamentals_inner`
+  moved, behaviour unchanged, into `_debt_to_equity_from_yahoo(info, balance=None)` (info key present -> Yahoo
+  percent via `_normalize_de_ratio(..., yahoo_percent=True)`, and an unusable value is None with NO balance-sheet
+  fallback; key absent -> Total Debt / Total Equity Gross Minority Interest as an unscaled multiple, None on zero
+  equity or missing rows). `_get_fundamentals_inner` now calls it with `balance if balance_available else None`.
+  New tests in `market-data-service/tests/test_main_helpers.py`: 20 for the helper (percent scaling, numeric
+  string, financial-sector rule, 4 unusable values, balance fallback, zero/negative equity, missing rows) and
+  end-to-end tests that run the real `_get_fundamentals_inner` against a fake Yahoo ticker (30 -> 0.3x, 95.4 ->
+  0.95x, bank 150 stays, absent stays None) and through the NSE fallback (debt_to_equity None). The end-to-end
+  and NSE tests also pass on the group 43 code (they pin existing behaviour); removing `yahoo_percent=True` makes
+  the helper and call-site tests fail. (3) NOT fixable in code: models trained on rows stored with the old D/E
+  scale (and 24h-cached values) still carry the old scale until retrained / expired. Retrain the
+  decision-prediction-service models, or wait out the 24h cache; there is no scale marker on stored rows to filter
+  on. Sandbox had no pytest/fastapi/httpx/pydantic: `test_main_helpers.py` ran under a pytest stand-in with stub
+  modules, 159 passed and 2 failed, the same 2 (`TestCooldown::test_non_yf_name_only_in_upstream_dict`,
+  `TestCacheHelpers::test_should_soft_refresh_true_when_ttl_low`) that also fail on the original file under that
+  stand-in, so they are runner artefacts; run `bash run_tests.sh` in market-data-service for the real result.
+  NEEDS REBUILD: `docker compose build market-data-service && docker compose up -d`.
+- 2026-10-03 (group 43)  `wire_peer_multi_quarter.apply_to_analyze_response` was not idempotent. Each call
+  blended `fundamental_score` (0.70 base + 0.20 peer + 0.10 consistency) and overwrote `fundamental_score_raw`
+  with whatever `fundamental_score` held, so a second pass blended the already-adjusted score again (80 -> 71 ->
+  64.7) and destroyed the real raw score. Latent today: `fundamental/main.py` calls it once per `analyze()`, but
+  any retry, re-wrap or second caller would compound silently. Now, when the payload already has
+  `fundamental_score_adjusted is True` and a numeric (non-bool, non-NaN) `fundamental_score_raw`, the blend starts
+  from that raw score, so applying it N times equals applying it once. A stray raw field without the adjusted
+  flag, or an unusable raw value (string, None, bool, NaN), is ignored and the current score is blended as before.
+  Tests (`analysis-intelligence-service/tests/test_wire_peer_multi_quarter.py`): the pin
+  `test_applying_twice_compounds_and_overwrites_the_raw_score` rewritten as `test_applying_twice_is_idempotent`,
+  plus 3-pass stability, a second pass through enrichment, flag-without-raw, 4 unusable-raw shapes and
+  raw-without-flag; 3 fail on the group 42 code. Not changed: if enrichment inputs differ between passes the
+  result follows the new inputs (only the score compounding is removed). Sandbox had no pytest/httpx: this file
+  (88 tests) was run under a small pytest stand-in with a stub httpx, all pass; the full
+  analysis-intelligence suite was NOT run - run `bash run_tests.sh`.
+  NEEDS REBUILD: `docker compose build analysis-intelligence-service && docker compose up -d`.
+- 2026-10-03 (group 42)  `surprise_premarket.bulk_baselines_from_yfinance` skipped its inter-batch pause after a
+  failed or empty batch. The `time.sleep(YF_BULK_BATCH_PAUSE)` sat at the bottom of the loop, after the
+  `continue`s for a raised `yf.download()` and for a None/empty frame, so exactly the batches that most likely hit
+  a 429 got no pause before the next call. The pause now sits at the top of the loop (`if i > 0`), so every batch
+  after the first is preceded by one whatever happened to the previous batch; successful runs sleep the same
+  number of times as before (batches - 1) and a single batch never sleeps. Fixed in both copies
+  (`api-gateway/surprise_premarket.py` and `market-data-service/surprise_premarket.py`; the two files differ
+  elsewhere, only this loop was changed). api-gateway `tests/test_surprise_premarket.py`:
+  `test_no_pause_after_a_failed_or_empty_batch` (pinned `sleeps == []`) rewritten as
+  `test_pause_before_every_batch_after_the_first_even_when_earlier_ones_fail`, plus
+  `test_pause_lands_before_the_next_download_not_after_the_last` and `test_single_batch_never_pauses`.
+  market-data-service had no direct tests of this function, so new `tests/test_surprise_premarket_bulk_pause.py`
+  (6 tests). Sandbox had no pytest/sqlalchemy: the bulk-yfinance tests were run under a small pytest stand-in
+  (api-gateway: 2 new tests pass on the fix and fail on the group 41 code; market-data: 6 pass, 3 of them fail on
+  the group 41 code). The full api-gateway and market-data suites were NOT run - run `bash run_tests.sh` in both.
+  NEEDS REBUILD: `docker compose build api-gateway market-data-service && docker compose up -d`.
+- 2026-10-03 (group 41)  yfinance env vars parsed at import without a guard, so one typo stopped the service.
+  `YFINANCE_HARD_TIMEOUT_SEC` (`float(...)`) and `YFINANCE_POOL_WORKERS` (`int(...)` into the
+  ThreadPoolExecutor) were read at module import in `rate_limiter.py`; "18s", "many", or an unusable value
+  (0 workers, a zero/negative/NaN/inf timeout) raised out of the import. The pasted list named only
+  analysis-intelligence-service `fundamental/rate_limiter.py`, but notification-scheduler-service
+  `scheduler/rate_limiter.py` had the identical lines; both fixed (the api-gateway and market-data copies do not
+  read these vars). New `_env_number(name, default, cast, valid)`: blank/unset -> default silently; invalid ->
+  WARNING `rate_limiter: ignoring invalid <NAME>=<raw> - using default <d>` and the default (18s / 8 workers).
+  Each var is parsed independently, so one bad value does not discard the other. Strict parsing: a fractional
+  worker count ("3.5") or "1e2" workers is treated as invalid, not rounded. Old pins
+  `test_bad_timeout_env_breaks_import`, `test_bad_worker_count_env_breaks_import` and
+  `test_zero_workers_breaks_import` (analysis-intelligence `test_rate_limiter.py`, asserted ValueError) rewritten
+  as fallback+warning cases (+ independence, blank, whitespace/fraction accepted, default timeout still enforced).
+  New `notification-scheduler-service/tests/test_rate_limiter_env.py` (that service had no rate_limiter tests):
+  39 tests in the service now pass, 16 of the new ones fail on the group 40 code. Sandbox: analysis-intelligence
+  `run_tests.sh` all files pass (2012 tests), 100% on all modules; notification-scheduler tests 39 passed.
+  NEEDS REBUILD: `docker compose build analysis-intelligence-service notification-scheduler-service && docker compose up -d`.
+- 2026-10-03 (group 40)  api-gateway `symbol_aliases.resolve_with_fallback` (two bugs). (1) The learned-rename
+  branch did `learned[base].get("to")` unguarded, so a malformed durable entry (a bare string, list, number or
+  None left in the KV store) raised AttributeError out of the failure-recovery path; `_apply_all_renames` already
+  guarded this with isinstance. (2) It returned only the FIRST rename hop: `mindtree` came back as `LTIM.NS`
+  while `resolve_ns_ticker` / `_apply_all_renames` gave `LTM` (MINDTREE -> LTIM -> LTM), and a learned rename was
+  never chased through the static chain. New helpers `_learned_target` (only `{"to": "<non-empty str>"}` counts,
+  stripped; anything else is ignored) and `_chase_static_renames` (the existing cycle-guarded loop, extracted);
+  `_apply_all_renames` and `resolve_with_fallback` both use them, so the three resolvers now agree. A malformed
+  learned entry now falls through to discovery / unresolved instead of raising. Side effect: a learned entry whose
+  "to" is a non-string (e.g. 5) is now ignored in `_apply_all_renames` too (it used to be accepted). `info["to"]`
+  is now the final ticker; for one-hop renames (ZOMATO -> ETERNAL, LTIM -> LTM) nothing changes. Tests: 13 new
+  cases (multi-hop static, learned->static chain, cycle, 9 malformed-entry shapes, strip) plus 3 for
+  `_apply_all_renames`; 13 fail on the group 39 code. Sandbox: api-gateway `run_tests.sh` all files pass (7384
+  tests), 100% on all modules. NEEDS REBUILD: `docker compose build api-gateway && docker compose up -d`.
+- 2026-10-03 (group 39)  api-gateway `symbol_aliases.KNOWN_DELISTED` lacked AAKASH and ANNAPURNA, which
+  market-data-service's `KNOWN_DELISTED_SYMBOLS` already short-circuits (confirmed dead by Yahoo 404 logs,
+  2026-09-01). The gateway's resolvers (`resolve_ns_ticker`, `resolve_base_symbol`, `resolve_with_fallback`,
+  `is_known_delisted`) therefore still mapped both to `<SYM>.NS` and sent them to yfinance, and kept them
+  in the scan universe. Both are now in the gateway dict with a reason string (the dict value is what
+  `resolve_with_fallback` returns as `detail`). New drift guard `tests/test_known_delisted_drift.py` reads
+  market-data's set as source (no import) and requires the two lists to be identical, so a symbol added to
+  one service can't be forgotten in the other again. Tests: AAKASH/ANNAPURNA added to the
+  `is_known_delisted`, `resolve_ns_ticker`/`resolve_base_symbol` and `resolve_with_fallback` cases plus a
+  "delisted, not renamed" pin; 18 of the new/extended cases fail on the group 38 code. Sandbox: api-gateway
+  `run_tests.sh` all files pass (7365 tests), 100% on all modules; market-data `test_main_helpers` 139 passed.
+  Only api-gateway code changed. NEEDS REBUILD: `docker compose build api-gateway && docker compose up -d`.
+  Caveat: the symbols are treated as dead on the strength of the 2026-09-01 Yahoo 404s; if either ever
+  relists, remove it from BOTH lists (the drift guard will fail until you do).
+- 2026-10-03 (group 38)  api-gateway `hotpicks_store.hotpicks_repair_scores` never set `attempted`: only the
+  price pass (`hotpicks_repair_batch`) did, so a score repair that tried rows reported `attempted: 0`, and the
+  combined `POST /stockky-hot/repair-batch` total (price + score) under-counted. The score pass now sets
+  `attempted = len(targets)` after the limit clamp, the same meaning as the price pass (rows tried, whether or
+  not they ended up repaired; 0 when nothing needs scores). The old pin in
+  `test_copies_decision_scores_and_levels` asserted `"attempted": 0` next to a successful repair and is
+  rewritten to 1; 5 new tests (every row tried counts incl. non-200/empty/exception, 0 when nothing needs
+  scores, limit clamp 15/3/100, forced symbol). 6 tests fail on the group 37 code. Sandbox: full api-gateway
+  `run_tests.sh` all files pass, 100% on all modules. NEEDS REBUILD: `docker compose build api-gateway && docker compose up -d`.
+  Note: items #1 (group 36) and #2 (group 37) of the pasted open-bug list were already fixed in the group 37 zip.
+- 2026-10-03 (group 37)  Neon URL normaliser, doubled `&&` (14 copies): stripping a `channel_binding=`
+  param from the MIDDLE of the query ("?a=1&channel_binding=require&b=2") left "a=1&&b=2", which libpq
+  rejects (empty key). real-trade-service (session97) and position-stocks-service (session112) were
+  fixed earlier; the rest were not. Now every copy collapses `&{2,}` before the leading/trailing
+  cleanup: api-gateway (`hotpicks_schema`, `ipo_schema`, `surprise_schema`, `surprise_premarket`,
+  `surprise_scanner`, `kv_cache`), market-data-service (`surprise_premarket`, `kv_cache`),
+  analysis-intelligence-service `fundamental/kv_cache`, decision-prediction-service (`training/kv_cache`,
+  `decision/kv_cache`, `training/universe_ingest`, `training/models`), notification-scheduler-service
+  `notification/kv_cache`. Production was unaffected while Neon puts `channel_binding` last. Old pin
+  `test_channel_binding_middle` (api-gateway and analysis-intelligence `test_kv_cache`) asserted the
+  buggy "a=1&&sslmode=require" and is rewritten; middle-position cases added to the api-gateway
+  hotpicks/ipo/surprise schema, surprise_premarket and surprise_scanner tests and to market-data's
+  kv_cache and surprise_premarket tests. New drift guard `api-gateway/tests/test_db_url_normalizer_drift.py`
+  reads every service's copies as source (no imports) and checks each one collapses `&&`; it is 32 tests
+  and 26 of them fail on the group 36 code. Sandbox: api-gateway 1176 passed (the six touched modules
+  plus the guard), analysis-intelligence kv_cache 240, market-data 176. The decision-prediction and
+  notification copies are covered by the guard only (their modules were not imported here). NEEDS REBUILD:
+  api-gateway, market-data-service, analysis-intelligence-service, decision-prediction-service,
+  notification-scheduler-service.
+- 2026-10-03 (group 36)  `oracle_compat.exec_ddl_safe` (all 8 byte-identical copies, kept identical): a real
+  DDL failure (anything other than "already exists" / the benign ORA codes) used to be logged at DEBUG
+  only, and callers then logged "ensured index ..." anyway, so a failed index/column was invisible.
+  Now it returns a bool (True = ran or already there, False = genuinely failed), logs
+  `exec_ddl_safe FAILED (<dialect>): <error> [sql: <first 100 chars>]` at WARNING, and still never
+  raises (startup must not die on one index). SQLite's "duplicate column name" is also treated as
+  benign. The three "ensured index" callers (real-trade-service `_ensure_hot_path_indexes` and
+  `_ensure_nextday_watchlist_indexes`, position-stocks-service `_ensure_hot_path_indexes`) log
+  "could NOT ensure index ..." at WARNING on False; a stub returning None still counts as success, so
+  existing monkeypatched tests are unaffected. The other callers (kv_cache, hotpicks/ipo/surprise
+  schema, angelone_ws_feed) ignore the result and now get the WARNING for free. Old pin
+  `test_a_real_ddl_error_is_swallowed_by_exec_ddl_safe_but_still_reported_as_ensured` rewritten
+  (both ensurers); DEBUG-level expectations in the api-gateway / analysis-intelligence / position-stocks
+  oracle_compat tests changed to WARNING; new tests for the return value, SQL-in-log, duplicate-column
+  and the three callers. Sandbox: oracle_compat tests api-gateway 108, analysis-intelligence 108,
+  market-data 39, position-stocks 110 (+2 skipped) passed; real-trade 4 pre-existing failures (oracledb
+  not installed, identical on the group 35 upload); test_db real-trade 225 / position-stocks 49;
+  api-gateway kv_cache + hotpicks/ipo/surprise schema 548; analysis-intelligence kv_cache 239. The new
+  tests fail against the old oracle_compat. NEEDS REBUILD: all services that bundle oracle_compat
+  (`docker compose build` then `up -d`); expect WARNING lines only if a DDL genuinely fails.
 - 2026-10-03 (group 35) — `notifier.py` in real-trade-service and position-stocks-service: a FAILED
   delivery no longer eats the 5-minute dedup window. `_should_send` still reserves the slot before
   delivery (keeps simultaneous identical sends race-free), but when every channel fails the slot is

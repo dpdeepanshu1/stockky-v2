@@ -36,7 +36,7 @@ PORT = int(os.getenv("PORT", "8005"))
 
 # ── Upstream Stockky services (recommendations only — this service never
 #    writes back into api-gateway's data) ───────────────────────────────────
-API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "https://stockky-api-gateway.onrender.com").rstrip("/")
+API_GATEWAY_URL = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/") or "https://stockky-api-gateway.onrender.com"
 
 # Short-Term Trading Upgrade (2026-09-02): analysis-intelligence-service's
 # event sub-service, used only by watchlist_engine/sources.py's Tier 2

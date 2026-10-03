@@ -336,8 +336,10 @@ def _ensure_columns(engine) -> None:
 def _ensure_hot_path_indexes(engine, dialect_name: str) -> None:
     index_name, table, cols = "ix_scalp_positions_opened_at", "scalp_positions", "opened_at"
     sql = _oc.create_index_sql(dialect_name, index_name, table, cols)
-    _oc.exec_ddl_safe(engine, sql, dialect_name)
-    logger.info("position-stocks-service: ensured index %s on %s", index_name, table)
+    if _oc.exec_ddl_safe(engine, sql, dialect_name) is False:
+        logger.warning("position-stocks-service: could NOT ensure index %s on %s (see exec_ddl_safe warning)", index_name, table)
+    else:
+        logger.info("position-stocks-service: ensured index %s on %s", index_name, table)
 
 
 def _ensure_oracle_autoincrement(engine, base) -> None:

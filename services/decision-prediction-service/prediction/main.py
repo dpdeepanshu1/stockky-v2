@@ -36,7 +36,8 @@ MODEL_PATH = os.getenv("MODEL_PATH", "model.pkl")
 def _report_rate_limit(source: str, status: int, path: str = "", detail: str = "", symbol: str = "") -> None:
     """Best-effort notify gateway rate-limit dashboard (non-blocking)."""
     try:
-        gw = os.getenv("API_GATEWAY_URL", "").rstrip("/")
+        # .strip() first: a whitespace-only value must count as "unset" (see group 56).
+        gw = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/")
         if not gw:
             return
         httpx.post(

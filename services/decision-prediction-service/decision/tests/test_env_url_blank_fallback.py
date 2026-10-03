@@ -72,6 +72,16 @@ def _sites(rel):
     return sites, names
 
 
+def _purge_repo_modules(mods_before):
+    """Drop modules these tests imported FROM THIS REPO. Third-party C-extension packages (numpy, pandas ...)
+    must stay in sys.modules: numpy cannot be imported twice in one process."""
+    repo = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+    for k in set(sys.modules) - mods_before:
+        f = getattr(sys.modules.get(k), "__file__", None) or ""
+        if f and os.path.realpath(f).startswith(repo + os.sep):
+            sys.modules.pop(k, None)
+
+
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch, tmp_path):
     """Fresh import state per test: nothing a loaded module imports (or writes to cwd) leaks out."""
@@ -83,8 +93,7 @@ def _isolated(monkeypatch, tmp_path):
     yield
     os.chdir(cwd)
     sys.path[:] = path_before
-    for k in set(sys.modules) - mods_before:
-        sys.modules.pop(k, None)
+    _purge_repo_modules(mods_before)
 
 
 def _load(rel, monkeypatch, env):
@@ -108,8 +117,7 @@ def _load(rel, monkeypatch, env):
     finally:
         sys.path.pop(0)
         sys.path.pop(0)
-        for k in set(sys.modules) - before:                       # drop what the load imported
-            sys.modules.pop(k, None)
+        _purge_repo_modules(before)                               # drop what the load imported (repo modules only)
 
 
 @pytest.mark.parametrize("rel", _MODULES)

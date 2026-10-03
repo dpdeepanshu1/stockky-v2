@@ -84,7 +84,7 @@ logger = logging.getLogger("real-trade-exit")
 # ── Exit constants — market-intelligence tuned ────────────────────────────────
 # Lock in 60% at first target (was 50%) — in choppy market, don't let
 # profits turn into losses. The 40% remainder rides an ever-tightening trail.
-PARTIAL_EXIT_FRACTION = float(os.getenv("EXIT_PARTIAL_FRACTION", "0.60"))
+PARTIAL_EXIT_FRACTION = float(((os.getenv("EXIT_PARTIAL_FRACTION") or "").strip() or "0.60"))
 
 # Age → ATR multiplier mapping for trailing stop.
 # 2026-09-15 calibration (session42): tightened across all phases.
@@ -100,16 +100,16 @@ TRAIL_ATR_SCHEDULE = [
 ]
 
 # Breakeven stop: move stop to entry once unrealized gain >= this many ATRs.
-BREAKEVEN_ATR_TRIGGER = float(os.getenv("EXIT_BREAKEVEN_ATR_TRIGGER", "1.0"))
+BREAKEVEN_ATR_TRIGGER = float(((os.getenv("EXIT_BREAKEVEN_ATR_TRIGGER") or "").strip() or "1.0"))
 
 # Emergency exit: fire if unrealized loss > this × original stop distance.
 # Catches gap-down scenarios where price breaks through the stop level.
-EMERGENCY_LOSS_MULT = float(os.getenv("EXIT_EMERGENCY_LOSS_MULT", "1.5"))
+EMERGENCY_LOSS_MULT = float(((os.getenv("EXIT_EMERGENCY_LOSS_MULT") or "").strip() or "1.5"))
 
 # Time-stop: max days to hold a non-performing position.
-MAX_HOLD_DAYS = int(os.getenv("EXIT_MAX_HOLD_DAYS", "10"))
+MAX_HOLD_DAYS = int(((os.getenv("EXIT_MAX_HOLD_DAYS") or "").strip() or "10"))
 # Day at which we log an early warning (no exit yet, just visibility).
-EARLY_WARN_DAYS = int(os.getenv("EXIT_EARLY_WARN_DAYS", "6"))
+EARLY_WARN_DAYS = int(((os.getenv("EXIT_EARLY_WARN_DAYS") or "").strip() or "6"))
 
 # 2026-09-07 fix: CDSL eDIS/TPIN rejections (see dhan_client.is_cdsl_edis_error's
 # docstring) are not a transient/retryable-into-success failure the same
@@ -121,13 +121,13 @@ EARLY_WARN_DAYS = int(os.getenv("EXIT_EARLY_WARN_DAYS", "6"))
 # position per this many minutes; the underlying retry (still attempted
 # every cycle, in case the human completes the CDSL step mid-day) is
 # unaffected — only the notification is throttled.
-CDSL_ALERT_COOLDOWN_MIN = int(os.getenv("EXIT_CDSL_ALERT_COOLDOWN_MIN", "60"))
+CDSL_ALERT_COOLDOWN_MIN = int(((os.getenv("EXIT_CDSL_ALERT_COOLDOWN_MIN") or "").strip() or "60"))
 
 # 2026-09-07: after this many CONSECUTIVE unrecognized SELL rejections for
 # the same position, escalate to a distinctly-worded alert (see the generic
 # rejection branch in _send_real_sell) instead of sending an identical
 # "rejected" message every single cycle forever.
-EXIT_REJECT_STREAK_ESCALATE_AT = int(os.getenv("EXIT_REJECT_STREAK_ESCALATE_AT", "3"))
+EXIT_REJECT_STREAK_ESCALATE_AT = int(((os.getenv("EXIT_REJECT_STREAK_ESCALATE_AT") or "").strip() or "3"))
 
 
 def _trail_atr_mult(held_days: int, schedule=None) -> float:

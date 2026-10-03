@@ -32,7 +32,7 @@ import os
 
 # ── Service identity ────────────────────────────────────────────────────────
 SERVICE_NAME = "real-trade-service"
-PORT = int(os.getenv("PORT", "8005"))
+PORT = int(((os.getenv("PORT") or "").strip() or "8005"))
 
 # ── Upstream Stockky services (recommendations only — this service never
 #    writes back into api-gateway's data) ───────────────────────────────────
@@ -108,7 +108,7 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 # short (real-money surface) — every mutating call re-validates the session,
 # not just page load (see auth/admin_auth.py).
 SESSION_SECRET = (os.getenv("SESSION_SECRET") or "").strip()
-SESSION_IDLE_TIMEOUT_MINUTES = int(os.getenv("SESSION_IDLE_TIMEOUT_MINUTES", "30"))
+SESSION_IDLE_TIMEOUT_MINUTES = int(((os.getenv("SESSION_IDLE_TIMEOUT_MINUTES") or "").strip() or "30"))
 
 # ── Dhan credential encryption (Layer 2) ─────────────────────────────────────
 # Fernet key encrypting the stored Dhan client-id/access-token at rest.
@@ -184,8 +184,8 @@ DHAN_BASE_URL = {
 
 # ── Decision 1: entry style — bounded limit order, time-boxed ──────────────
 ENTRY_ORDER_TYPE = "LIMIT"
-ENTRY_ZONE_UPPER_PCT = float(os.getenv("ENTRY_ZONE_UPPER_PCT", "0.5"))   # limit at most +0.5% above signal price
-ENTRY_VALIDITY_MINUTES = int(os.getenv("ENTRY_VALIDITY_MINUTES", "15"))  # one candle; cancel-and-reassess if unfilled
+ENTRY_ZONE_UPPER_PCT = float(((os.getenv("ENTRY_ZONE_UPPER_PCT") or "").strip() or "0.5"))   # limit at most +0.5% above signal price
+ENTRY_VALIDITY_MINUTES = int(((os.getenv("ENTRY_VALIDITY_MINUTES") or "").strip() or "15"))  # one candle; cancel-and-reassess if unfilled
 ENTRY_NO_CHASE = True  # never re-price an unfilled entry upward; re-evaluate next cycle instead
 
 # 2026-09-08 fix (holdings-sync ghost-position reconciliation — see
@@ -200,7 +200,7 @@ ENTRY_NO_CHASE = True  # never re-price an unfilled entry upward; re-evaluate ne
 # positions/holdings feed isn't guaranteed to reflect a same-cycle fill
 # instantly, so a position younger than this is left alone and re-checked
 # next cycle instead of being force-closed on its very first pass.
-HOLDINGS_SYNC_GUARD_MINUTES = int(os.getenv("HOLDINGS_SYNC_GUARD_MINUTES", "30"))
+HOLDINGS_SYNC_GUARD_MINUTES = int(((os.getenv("HOLDINGS_SYNC_GUARD_MINUTES") or "").strip() or "30"))
 
 # ── 2026-09-08 — cycle-level entry quality filter (user-requested calibration
 # improvement, SyncContext STOCKKY decision #30) ────────────────────────────
@@ -222,9 +222,9 @@ HOLDINGS_SYNC_GUARD_MINUTES = int(os.getenv("HOLDINGS_SYNC_GUARD_MINUTES", "30")
 # risk-approved but didn't make the cut is left WAIT (not REJECTED — a
 # genuinely good setup, just not the best of this cycle's batch) so it's
 # still visible next cycle instead of being silently discarded.
-ENTRY_CYCLE_QUALITY_FILTER_ENABLED = os.getenv("ENTRY_CYCLE_QUALITY_FILTER_ENABLED", "true").lower() == "true"
-ENTRY_MAX_NEW_PER_CYCLE = int(os.getenv("ENTRY_MAX_NEW_PER_CYCLE", "3"))
-ENTRY_MIN_COMPOSITE_SCORE = float(os.getenv("ENTRY_MIN_COMPOSITE_SCORE", "50.0"))
+ENTRY_CYCLE_QUALITY_FILTER_ENABLED = ((os.getenv("ENTRY_CYCLE_QUALITY_FILTER_ENABLED") or "").strip() or "true").lower() == "true"
+ENTRY_MAX_NEW_PER_CYCLE = int(((os.getenv("ENTRY_MAX_NEW_PER_CYCLE") or "").strip() or "3"))
+ENTRY_MIN_COMPOSITE_SCORE = float(((os.getenv("ENTRY_MIN_COMPOSITE_SCORE") or "").strip() or "50.0"))
 # Weights must sum to 1.0 — conviction (the pipeline's own scoring across
 # analysis-intelligence/decision-prediction), reward:risk (how much upside
 # per unit of downside this specific setup offers), and drift safety (how
@@ -251,13 +251,13 @@ ENTRY_MIN_COMPOSITE_SCORE = float(os.getenv("ENTRY_MIN_COMPOSITE_SCORE", "50.0")
 # reward. RR keeps a small (10%) weight rather than 0 in case a future fix
 # to _atr_stop_target_pct (e.g. technical-level-based targets) makes it
 # genuinely variable again — no need to touch this file when that happens.
-ENTRY_COMPOSITE_WEIGHT_CONVICTION = float(os.getenv("ENTRY_COMPOSITE_WEIGHT_CONVICTION", "0.65"))
-ENTRY_COMPOSITE_WEIGHT_RR = float(os.getenv("ENTRY_COMPOSITE_WEIGHT_RR", "0.10"))
-ENTRY_COMPOSITE_WEIGHT_DRIFT = float(os.getenv("ENTRY_COMPOSITE_WEIGHT_DRIFT", "0.25"))
+ENTRY_COMPOSITE_WEIGHT_CONVICTION = float(((os.getenv("ENTRY_COMPOSITE_WEIGHT_CONVICTION") or "").strip() or "0.65"))
+ENTRY_COMPOSITE_WEIGHT_RR = float(((os.getenv("ENTRY_COMPOSITE_WEIGHT_RR") or "").strip() or "0.10"))
+ENTRY_COMPOSITE_WEIGHT_DRIFT = float(((os.getenv("ENTRY_COMPOSITE_WEIGHT_DRIFT") or "").strip() or "0.25"))
 # R:R at or above this is scored as "excellent" (100/100 on that sub-score) —
 # not a hard ceiling on trades, only on how much extra composite credit an
 # already-generous R:R keeps earning past this point.
-ENTRY_COMPOSITE_RR_CEILING = float(os.getenv("ENTRY_COMPOSITE_RR_CEILING", "4.0"))
+ENTRY_COMPOSITE_RR_CEILING = float(((os.getenv("ENTRY_COMPOSITE_RR_CEILING") or "").strip() or "4.0"))
 
 # 2026-09-09 fix (session20 — see candidate_engine/candidates.py's
 # _recently_candidated_symbols docstring for the full incident): a candidate
@@ -272,7 +272,7 @@ ENTRY_COMPOSITE_RR_CEILING = float(os.getenv("ENTRY_COMPOSITE_RR_CEILING", "4.0"
 # AUTO_PILOT_INTERVAL_SECONDS (180s default) with headroom, not to the
 # multi-hour dedupe window. Gate 1-5/risk_engine WAITs and real ENTERs are
 # unaffected — they keep the full cooldown.
-ENTRY_GATE6_REQUEUE_MINUTES = int(os.getenv("ENTRY_GATE6_REQUEUE_MINUTES", "15"))
+ENTRY_GATE6_REQUEUE_MINUTES = int(((os.getenv("ENTRY_GATE6_REQUEUE_MINUTES") or "").strip() or "15"))
 
 # 2026-09-10 (session22): candidates re-queued overnight by the EOD signal
 # scan (see auto_pilot._eod_signal_scan / _prepick and config's
@@ -286,7 +286,7 @@ ENTRY_GATE6_REQUEUE_MINUTES = int(os.getenv("ENTRY_GATE6_REQUEUE_MINUTES", "15")
 # bypass like UPPER_CIRCUIT's. Still has to clear every individual gate
 # (extension/drift caps, risk_engine, cash) fresh at tomorrow's open — the
 # bonus only affects Gate 6's cross-candidate ranking, never gates 1-5.
-ENTRY_OVERNIGHT_PRIORITY_BONUS = float(os.getenv("ENTRY_OVERNIGHT_PRIORITY_BONUS", "12.0"))
+ENTRY_OVERNIGHT_PRIORITY_BONUS = float(((os.getenv("ENTRY_OVERNIGHT_PRIORITY_BONUS") or "").strip() or "12.0"))
 
 # ── Decision 2: conservative risk defaults (seed values only — admin can
 #    edit via UI while disarmed; risk_engine always reads the live DB row,
@@ -299,12 +299,12 @@ ENTRY_OVERNIGHT_PRIORITY_BONUS = float(os.getenv("ENTRY_OVERNIGHT_PRIORITY_BONUS
 # so a normal ATR-based stop distance can actually size a trade. Existing
 # DB rows already seeded at the old 1.0 default are corrected on startup —
 # see main.py's _migrate_risk_defaults().
-DEFAULT_RISK_PER_TRADE_PCT = float(os.getenv("DEFAULT_RISK_PER_TRADE_PCT", "5.0"))
-DEFAULT_MAX_DAILY_LOSS_PCT = float(os.getenv("DEFAULT_MAX_DAILY_LOSS_PCT", "3.0"))
-DEFAULT_MAX_CONCURRENT_POSITIONS = int(os.getenv("DEFAULT_MAX_CONCURRENT_POSITIONS", "3"))
-DEFAULT_MAX_PORTFOLIO_RISK_PCT = float(os.getenv("DEFAULT_MAX_PORTFOLIO_RISK_PCT", "5.0"))
-DEFAULT_STALE_DATA_SECONDS = int(os.getenv("DEFAULT_STALE_DATA_SECONDS", "30"))
-DEFAULT_MAX_TICK_VOLATILITY_MULT = float(os.getenv("DEFAULT_MAX_TICK_VOLATILITY_MULT", "2.0"))
+DEFAULT_RISK_PER_TRADE_PCT = float(((os.getenv("DEFAULT_RISK_PER_TRADE_PCT") or "").strip() or "5.0"))
+DEFAULT_MAX_DAILY_LOSS_PCT = float(((os.getenv("DEFAULT_MAX_DAILY_LOSS_PCT") or "").strip() or "3.0"))
+DEFAULT_MAX_CONCURRENT_POSITIONS = int(((os.getenv("DEFAULT_MAX_CONCURRENT_POSITIONS") or "").strip() or "3"))
+DEFAULT_MAX_PORTFOLIO_RISK_PCT = float(((os.getenv("DEFAULT_MAX_PORTFOLIO_RISK_PCT") or "").strip() or "5.0"))
+DEFAULT_STALE_DATA_SECONDS = int(((os.getenv("DEFAULT_STALE_DATA_SECONDS") or "").strip() or "30"))
+DEFAULT_MAX_TICK_VOLATILITY_MULT = float(((os.getenv("DEFAULT_MAX_TICK_VOLATILITY_MULT") or "").strip() or "2.0"))
 
 # ── Decision 3: same Oracle DB, new schema — see oracle_compat.py / db.py.
 #    No separate DATABASE_URL default here on purpose: this service must be
@@ -314,14 +314,14 @@ DEFAULT_MAX_TICK_VOLATILITY_MULT = float(os.getenv("DEFAULT_MAX_TICK_VOLATILITY_
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 
 # ── Paper-mode default capital (DEMO account seed, admin-editable) ─────────
-DEFAULT_DEMO_CAPITAL = float(os.getenv("DEFAULT_DEMO_CAPITAL", "100000"))
+DEFAULT_DEMO_CAPITAL = float(((os.getenv("DEFAULT_DEMO_CAPITAL") or "").strip() or "100000"))
 
 # ── Auto-Pilot (2026-08-27) — runs /cycle/run/{mode} on a server-side timer
 #    so armed trading keeps working with the dashboard closed. Off by
 #    default per mode (see models.TradeGateState.auto_pilot_enabled) —
 #    this only controls HOW OFTEN it ticks once an admin turns it on for
 #    a given mode; it never arms anything by itself. ──────────────────────
-AUTO_PILOT_INTERVAL_SECONDS = max(30, int(os.getenv("AUTO_PILOT_INTERVAL_SECONDS", "180")))
+AUTO_PILOT_INTERVAL_SECONDS = max(30, int(((os.getenv("AUTO_PILOT_INTERVAL_SECONDS") or "").strip() or "180")))
 # If true, sends a Telegram message on every tick even when nothing
 # happened (useful to confirm the loop is alive); default is quiet —
 # only notify when a cycle actually entered/filled/exited something.
@@ -371,7 +371,7 @@ EOD_SQUAREOFF_TIME_IST = os.getenv("EOD_SQUAREOFF_TIME_IST", "15:00")
 EOD_SIGNAL_SCAN_TIME_IST = os.getenv("EOD_SIGNAL_SCAN_TIME_IST", "15:05")
 
 # How often the time-trigger loop wakes to check the clock (seconds).
-SCHEDULE_CHECK_INTERVAL_SECONDS = max(20, int(os.getenv("SCHEDULE_CHECK_INTERVAL_SECONDS", "60")))
+SCHEDULE_CHECK_INTERVAL_SECONDS = max(20, int(((os.getenv("SCHEDULE_CHECK_INTERVAL_SECONDS") or "").strip() or "60")))
 
 # ── EOD signal scan (2026-09-10, session22 — user request) ─────────────────
 # "When market closes for the day, pick some stocks based on end-of-day
@@ -384,11 +384,11 @@ SCHEDULE_CHECK_INTERVAL_SECONDS = max(20, int(os.getenv("SCHEDULE_CHECK_INTERVAL
 # fetch), then keeps only the top few by conviction as an "overnight
 # priority" list consumed by tomorrow's pre-pick. See auto_pilot.py's
 # _eod_signal_scan / _prepick and models.py's TradeCandidate.overnight_priority.
-EOD_SIGNAL_SCAN_MAX_CANDIDATES = int(os.getenv("EOD_SIGNAL_SCAN_MAX_CANDIDATES", "5"))
+EOD_SIGNAL_SCAN_MAX_CANDIDATES = int(((os.getenv("EOD_SIGNAL_SCAN_MAX_CANDIDATES") or "").strip() or "5"))
 # Below this conviction score, a late-day candidate isn't strong enough to
 # carry as an overnight priority pick — matches the same conviction scale
 # (0-100) the rest of entry_engine/candidate_engine already use.
-EOD_SIGNAL_SCAN_MIN_CONVICTION = float(os.getenv("EOD_SIGNAL_SCAN_MIN_CONVICTION", "60.0"))
+EOD_SIGNAL_SCAN_MIN_CONVICTION = float(((os.getenv("EOD_SIGNAL_SCAN_MIN_CONVICTION") or "").strip() or "60.0"))
 
 # 2026-09-11 (session23, user request): "if the system stock looks good it
 # can place an order that day too — better than next day's open, which is
@@ -408,8 +408,8 @@ EOD_SIGNAL_SCAN_MIN_CONVICTION = float(os.getenv("EOD_SIGNAL_SCAN_MIN_CONVICTION
 # rejection, disarmed mode, insufficient cash) automatically falls back
 # into the normal overnight-priority queue for tomorrow rather than being
 # lost — see auto_pilot._eod_signal_scan.
-EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION = float(os.getenv("EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION", "75.0"))
-EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES = int(os.getenv("EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES", "2"))
+EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION = float(((os.getenv("EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION") or "").strip() or "75.0"))
+EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES = int(((os.getenv("EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES") or "").strip() or "2"))
 
 # ── After-hours news scan (2026-09-17, session56 — user request) ────────────
 # After market close, poll Moneycontrol/LiveMint/ET RSS feeds hourly, classify
@@ -420,25 +420,68 @@ EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES = int(os.getenv("EOD_SIGNAL_SCAN_ENTRY_MAX_
 # scheduled feature). No order placement — only pre-seeds the candidate queue.
 #
 # Active window: AFTERHOURS_SCAN_START_IST (default 15:45) to
-#   AFTERHOURS_SCAN_END_IST (default 08:45 next day). The loop fires every
-#   AFTERHOURS_SCAN_INTERVAL_SECONDS (default 3600 = hourly). A final
+#   AFTERHOURS_SCAN_END_IST (default 08:45 next day). The loop fires every 6 h off-market
+#   and every 30 min 08:00-09:00 IST (see the 2026-10-04 block below). A final
 #   "finalize" pass runs at AFTERHOURS_FINALIZE_TIME_IST (default 08:45) to
 #   trim to the top-N shortlist before the open.
 AFTERHOURS_SCAN_START_IST     = os.getenv("AFTERHOURS_SCAN_START_IST", "15:45")
 AFTERHOURS_SCAN_END_IST       = os.getenv("AFTERHOURS_SCAN_END_IST", "08:45")
 AFTERHOURS_FINALIZE_TIME_IST  = os.getenv("AFTERHOURS_FINALIZE_TIME_IST", "08:45")
 AFTERHOURS_SCAN_INTERVAL_SECONDS = max(
-    300, int(os.getenv("AFTERHOURS_SCAN_INTERVAL_SECONDS", "3600"))
+    300, int(((os.getenv("AFTERHOURS_SCAN_INTERVAL_SECONDS") or "").strip() or "3600"))
 )  # floor 5 min — RSS feeds are NOT rate-limited like quote APIs, but no point scanning faster than 5 min
+# 2026-10-04 (user request): TIME-OF-DAY scan cadence instead of one fixed interval.
+#   * off-market hours (15:45 -> 08:00 IST): one scan every AFTERHOURS_SCAN_OFFHOURS_INTERVAL_SECONDS
+#     (default 21600 = 6 h) - RSS news barely moves overnight, no point polling every 30 min
+#   * pre-open ramp (08:00 -> 09:00 IST): one scan every AFTERHOURS_SCAN_RAMP_INTERVAL_SECONDS
+#     (default 1800 = 30 min) so the shortlist is fresh when the 08:45 finalize pass runs
+# AFTERHOURS_SCAN_INTERVAL_SECONDS is kept (status endpoint / old env files) but the loop no longer sleeps on it.
+AFTERHOURS_SCAN_RAMP_START_IST = os.getenv("AFTERHOURS_SCAN_RAMP_START_IST", "08:00")
+AFTERHOURS_SCAN_RAMP_END_IST   = os.getenv("AFTERHOURS_SCAN_RAMP_END_IST", "09:00")
+AFTERHOURS_SCAN_RAMP_INTERVAL_SECONDS = max(
+    300, int(((os.getenv("AFTERHOURS_SCAN_RAMP_INTERVAL_SECONDS") or "").strip() or "1800"))
+)
+AFTERHOURS_SCAN_OFFHOURS_INTERVAL_SECONDS = max(
+    300, int(((os.getenv("AFTERHOURS_SCAN_OFFHOURS_INTERVAL_SECONDS") or "").strip() or "21600"))
+)
+# 2026-10-04 (user request): LIGHTWEIGHT MARKET-HOURS NEWS CHECK. The after-hours loop sleeps through
+# 09:00-15:45; news still breaks during the session, so a second, much lighter loop polls the same RSS
+# feeds every INTRADAY_NEWS_INTERVAL_SECONDS (default 900 = 15 min) inside INTRADAY_NEWS_START_IST ..
+# INTRADAY_NEWS_END_IST (default 09:00-15:45 IST, trading days only). It only looks at NEW headlines
+# published in the last INTRADAY_NEWS_MAX_AGE_MINUTES, never calls the quote APIs, never places or
+# injects anything - it stores a small CAPPED score nudge per symbol that Gate 6 ranking adds to a
+# candidate that is ALREADY in the queue (+ for fresh positive news, - for fresh negative news).
+# Runs only while gate.afterhours_news_scan_enabled is on for at least one mode (same single toggle).
+INTRADAY_NEWS_START_IST = os.getenv("INTRADAY_NEWS_START_IST", "09:00")
+INTRADAY_NEWS_END_IST   = os.getenv("INTRADAY_NEWS_END_IST", "15:45")
+INTRADAY_NEWS_INTERVAL_SECONDS = max(
+    300, int(((os.getenv("INTRADAY_NEWS_INTERVAL_SECONDS") or "").strip() or "900"))
+)  # floor 5 min - RSS is cheap, but there is no value polling faster than feeds publish
+INTRADAY_NEWS_MAX_AGE_MINUTES = max(
+    15, int(((os.getenv("INTRADAY_NEWS_MAX_AGE_MINUTES") or "").strip() or "180"))
+)  # a headline older than this is ignored and an old nudge expires after it
+INTRADAY_NEWS_MIN_SCORE = float(
+    ((os.getenv("INTRADAY_NEWS_MIN_SCORE") or "").strip() or "20.0")
+)  # positive headlines scoring below this (see afterhours_scan._score_headline) give no nudge
+INTRADAY_NEWS_BONUS_CAP = float(
+    ((os.getenv("INTRADAY_NEWS_BONUS_CAP") or "").strip() or "8.0")
+)  # max points ADDED to a candidate's Gate 6 ranking score for fresh positive news
+INTRADAY_NEWS_PENALTY_CAP = float(
+    ((os.getenv("INTRADAY_NEWS_PENALTY_CAP") or "").strip() or "10.0")
+)  # points SUBTRACTED for fresh negative news (probe, downgrade, fraud...) - can push a marginal candidate under the Gate 6 floor
+INTRADAY_NEWS_ALERT_MIN_SCORE = float(
+    ((os.getenv("INTRADAY_NEWS_ALERT_MIN_SCORE") or "").strip() or "45.0")
+)  # Telegram alert for strong positive hits at/above this score (set 101 to turn positive-only alerts off); any hit on a queued candidate always alerts
+
 AFTERHOURS_SCAN_MAX_NEXTDAY_CANDIDATES = int(
-    os.getenv("AFTERHOURS_SCAN_MAX_NEXTDAY_CANDIDATES", "8")
+    ((os.getenv("AFTERHOURS_SCAN_MAX_NEXTDAY_CANDIDATES") or "").strip() or "8")
 )  # top-N kept after finalize pass; rest are marked consumed (discarded)
 # Minimum priority_score a NextDayWatchlistEntry must have to be injected as
 # a TradeCandidate by _prepick. Set conservatively — the score formula tops
 # at 100; 30 means at least a weak-news hit on a decent source, 50 means a
 # real catalyst (results/bulk/insider) on a trusted feed.
 AFTERHOURS_SCAN_MIN_INJECT_SCORE = float(
-    os.getenv("AFTERHOURS_SCAN_MIN_INJECT_SCORE", "30.0")
+    ((os.getenv("AFTERHOURS_SCAN_MIN_INJECT_SCORE") or "").strip() or "30.0")
 )
 # 2026-09-17 fix (session58, user request): both the RSS headlines and the
 # bulk/block-deal hits pulled into the after-hours scan need to actually be
@@ -452,7 +495,7 @@ AFTERHOURS_SCAN_MIN_INJECT_SCORE = float(
 # scanned before a long weekend" against "not so loose it lets week-old
 # news back in".
 AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS = min(7, max(3, int(
-    os.getenv("AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS", "5")
+    ((os.getenv("AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS") or "").strip() or "5")
 )))
 
 # ── US sector overnight signal (2026-09-11, session23 — user request) ──────
@@ -473,8 +516,8 @@ US_SECTOR_SIGNAL_ENABLED = os.getenv("US_SECTOR_SIGNAL_ENABLED", "false").lower(
 # Max points added/subtracted at the extreme (a sector ETF at
 # +/-US_SECTOR_BONUS_FULL_SCALE_PCT% or beyond gets the full +/-cap;
 # scaled linearly in between, capped both ends).
-US_SECTOR_BONUS_CAP = float(os.getenv("US_SECTOR_BONUS_CAP", "6.0"))
-US_SECTOR_BONUS_FULL_SCALE_PCT = float(os.getenv("US_SECTOR_BONUS_FULL_SCALE_PCT", "1.5"))
+US_SECTOR_BONUS_CAP = float(((os.getenv("US_SECTOR_BONUS_CAP") or "").strip() or "6.0"))
+US_SECTOR_BONUS_FULL_SCALE_PCT = float(((os.getenv("US_SECTOR_BONUS_FULL_SCALE_PCT") or "").strip() or "1.5"))
 
 # ── Telegram — direct bot notifications for fills/exits/auto-pilot ticks.
 #    Separate from notification-scheduler-service's own Telegram config on
@@ -508,26 +551,26 @@ def startup_config_errors() -> list[str]:
 #   These are mathematical safety caps, not market-regime judgments. They
 #   should stay constant regardless of bull/bear market.
 #
-RISK_MAX_POSITION_CONCENTRATION_PCT = float(os.getenv("RISK_MAX_POSITION_CONCENTRATION_PCT", "25.0"))
-RISK_MIN_STOCK_PRICE                = float(os.getenv("RISK_MIN_STOCK_PRICE", "20.0"))
-CANDIDATE_MIN_STOCK_PRICE           = float(os.getenv("CANDIDATE_MIN_STOCK_PRICE", "20.0"))
+RISK_MAX_POSITION_CONCENTRATION_PCT = float(((os.getenv("RISK_MAX_POSITION_CONCENTRATION_PCT") or "").strip() or "25.0"))
+RISK_MIN_STOCK_PRICE                = float(((os.getenv("RISK_MIN_STOCK_PRICE") or "").strip() or "20.0"))
+CANDIDATE_MIN_STOCK_PRICE           = float(((os.getenv("CANDIDATE_MIN_STOCK_PRICE") or "").strip() or "20.0"))
 # How long a symbol that already has a candidate row (this mode, any source
 # track) is skipped from being re-fetched/re-inserted. Without this, a
 # symbol that keeps qualifying every cycle (e.g. still sitting in the
 # volume-shock universe) got a brand-new TradeCandidate row every cycle,
 # which is what produced repeated duplicate cards on the Watchlist tab.
-CANDIDATE_DEDUPE_COOLDOWN_HOURS     = float(os.getenv("CANDIDATE_DEDUPE_COOLDOWN_HOURS", "6.0"))
-CANDIDATE_MAX_ATR_PCT               = float(os.getenv("CANDIDATE_MAX_ATR_PCT", "7.0"))
-CANDIDATE_VOLUME_HEALTH_RATIO       = float(os.getenv("CANDIDATE_VOLUME_HEALTH_RATIO", "0.80"))
-CANDIDATE_BULLISH_THRESHOLD_PCT     = float(os.getenv("CANDIDATE_BULLISH_THRESHOLD_PCT", "0.5"))
-ENTRY_MAX_DRIFT_ATR                 = float(os.getenv("ENTRY_MAX_DRIFT_ATR", "0.75"))
-ENTRY_CONVICTION_MIDPOINT           = float(os.getenv("ENTRY_CONVICTION_MIDPOINT", "65.0"))
-ENTRY_CONVICTION_MAX_SCALE          = float(os.getenv("ENTRY_CONVICTION_MAX_SCALE", "0.25"))
-EXIT_BREAKEVEN_ATR_TRIGGER          = float(os.getenv("EXIT_BREAKEVEN_ATR_TRIGGER", "1.0"))
-EXIT_EMERGENCY_LOSS_MULT            = float(os.getenv("EXIT_EMERGENCY_LOSS_MULT", "1.5"))
-EXIT_PARTIAL_FRACTION               = float(os.getenv("EXIT_PARTIAL_FRACTION", "0.60"))
-EXIT_MAX_HOLD_DAYS                  = int(os.getenv("EXIT_MAX_HOLD_DAYS", "10"))
-EXIT_EARLY_WARN_DAYS                = int(os.getenv("EXIT_EARLY_WARN_DAYS", "6"))
+CANDIDATE_DEDUPE_COOLDOWN_HOURS     = float(((os.getenv("CANDIDATE_DEDUPE_COOLDOWN_HOURS") or "").strip() or "6.0"))
+CANDIDATE_MAX_ATR_PCT               = float(((os.getenv("CANDIDATE_MAX_ATR_PCT") or "").strip() or "7.0"))
+CANDIDATE_VOLUME_HEALTH_RATIO       = float(((os.getenv("CANDIDATE_VOLUME_HEALTH_RATIO") or "").strip() or "0.80"))
+CANDIDATE_BULLISH_THRESHOLD_PCT     = float(((os.getenv("CANDIDATE_BULLISH_THRESHOLD_PCT") or "").strip() or "0.5"))
+ENTRY_MAX_DRIFT_ATR                 = float(((os.getenv("ENTRY_MAX_DRIFT_ATR") or "").strip() or "0.75"))
+ENTRY_CONVICTION_MIDPOINT           = float(((os.getenv("ENTRY_CONVICTION_MIDPOINT") or "").strip() or "65.0"))
+ENTRY_CONVICTION_MAX_SCALE          = float(((os.getenv("ENTRY_CONVICTION_MAX_SCALE") or "").strip() or "0.25"))
+EXIT_BREAKEVEN_ATR_TRIGGER          = float(((os.getenv("EXIT_BREAKEVEN_ATR_TRIGGER") or "").strip() or "1.0"))
+EXIT_EMERGENCY_LOSS_MULT            = float(((os.getenv("EXIT_EMERGENCY_LOSS_MULT") or "").strip() or "1.5"))
+EXIT_PARTIAL_FRACTION               = float(((os.getenv("EXIT_PARTIAL_FRACTION") or "").strip() or "0.60"))
+EXIT_MAX_HOLD_DAYS                  = int(((os.getenv("EXIT_MAX_HOLD_DAYS") or "").strip() or "10"))
+EXIT_EARLY_WARN_DAYS                = int(((os.getenv("EXIT_EARLY_WARN_DAYS") or "").strip() or "6"))
 
 # 2026-09-15 fix (session40 — DATAMATICS position 81, 89 consecutive
 # REJECTED zero-fill exit-SELL attempts over ~4.5h, see
@@ -540,9 +583,9 @@ EXIT_EARLY_WARN_DAYS                = int(os.getenv("EXIT_EARLY_WARN_DAYS", "6")
 # rejection for the SAME position, and an operator alert fires once the
 # streak crosses the threshold (and again every additional multiple of it,
 # so a very long stuck streak doesn't go silent after the first alert).
-EXIT_RETRY_BASE_COOLDOWN_SECONDS    = int(os.getenv("EXIT_RETRY_BASE_COOLDOWN_SECONDS", "60"))
-EXIT_RETRY_MAX_COOLDOWN_SECONDS     = int(os.getenv("EXIT_RETRY_MAX_COOLDOWN_SECONDS", "900"))
-EXIT_RETRY_ALERT_THRESHOLD          = int(os.getenv("EXIT_RETRY_ALERT_THRESHOLD", "5"))
+EXIT_RETRY_BASE_COOLDOWN_SECONDS    = int(((os.getenv("EXIT_RETRY_BASE_COOLDOWN_SECONDS") or "").strip() or "60"))
+EXIT_RETRY_MAX_COOLDOWN_SECONDS     = int(((os.getenv("EXIT_RETRY_MAX_COOLDOWN_SECONDS") or "").strip() or "900"))
+EXIT_RETRY_ALERT_THRESHOLD          = int(((os.getenv("EXIT_RETRY_ALERT_THRESHOLD") or "").strip() or "5"))
 
 #
 # REGIME-DEPENDENT (review monthly or on material market-regime shift):
@@ -554,7 +597,7 @@ EXIT_RETRY_ALERT_THRESHOLD          = int(os.getenv("EXIT_RETRY_ALERT_THRESHOLD"
 #   LAST REVIEWED: 2026-08-28 (Nifty 24,090, FII net-short, Midcap outperforming)
 #   Next review: trigger on Nifty crossing 25,500 OR monthly on the 1st.
 #
-ENTRY_REGIME_MIN_SCORE              = int(os.getenv("ENTRY_REGIME_MIN_SCORE", "25"))   # ADAPTIVE: auto-computed from history. 2026-09-03: lowered 38→25. Rationale: Nifty flat (+0.05%) but individual stocks making 7-17% moves (Hikal, Raymond, GOCL etc). Broad market regime score should not block individual volume-shock movers. REGIME_OVERRIDE still lets top-1 high-conviction candidate through even below this gate.
+ENTRY_REGIME_MIN_SCORE              = int(((os.getenv("ENTRY_REGIME_MIN_SCORE") or "").strip() or "25"))   # ADAPTIVE: auto-computed from history. 2026-09-03: lowered 38→25. Rationale: Nifty flat (+0.05%) but individual stocks making 7-17% moves (Hikal, Raymond, GOCL etc). Broad market regime score should not block individual volume-shock movers. REGIME_OVERRIDE still lets top-1 high-conviction candidate through even below this gate.
 # 2026-08-31: the adaptive regime gate (see adaptive_thresholds.py) is a
 # TRAILING 90-day p20 — after a sharp, recent regime break it can sit far
 # above today's actual score for weeks (e.g. gate=65 vs today's score=19),
@@ -565,13 +608,13 @@ ENTRY_REGIME_MIN_SCORE              = int(os.getenv("ENTRY_REGIME_MIN_SCORE", "2
 # engine) unchanged, and get sized at REGIME_OVERRIDE_RISK_SCALE of normal
 # risk as an extra margin for trading against a still-weak market read. Set
 # to 0 to fully restore the old "regime weak = nothing enters" behavior.
-ENTRY_REGIME_OVERRIDE_TOP_N         = int(os.getenv("ENTRY_REGIME_OVERRIDE_TOP_N", "1"))
-ENTRY_REGIME_OVERRIDE_RISK_SCALE    = float(os.getenv("ENTRY_REGIME_OVERRIDE_RISK_SCALE", "0.5"))
-ENTRY_MIN_REWARD_RISK               = float(os.getenv("ENTRY_MIN_REWARD_RISK", "2.0"))  # LAST_REVIEWED: 2026-09-03
-CANDIDATE_MIN_CONVICTION            = float(os.getenv("CANDIDATE_MIN_CONVICTION", "55")) # LAST_REVIEWED: 2026-09-03
-CANDIDATE_MIN_BULLISH_TF            = int(os.getenv("CANDIDATE_MIN_BULLISH_TF", "4"))   # LAST_REVIEWED: 2026-09-03
-CANDIDATE_DOWNTREND_6M_PCT          = float(os.getenv("CANDIDATE_DOWNTREND_6M_PCT", "-10.0")) # LAST_REVIEWED: 2026-09-03
-CANDIDATE_OVEREXTENDED_52W_TOP_PCT  = float(os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT", "12.0")) # LAST_REVIEWED: 2026-09-03
+ENTRY_REGIME_OVERRIDE_TOP_N         = int(((os.getenv("ENTRY_REGIME_OVERRIDE_TOP_N") or "").strip() or "1"))
+ENTRY_REGIME_OVERRIDE_RISK_SCALE    = float(((os.getenv("ENTRY_REGIME_OVERRIDE_RISK_SCALE") or "").strip() or "0.5"))
+ENTRY_MIN_REWARD_RISK               = float(((os.getenv("ENTRY_MIN_REWARD_RISK") or "").strip() or "2.0"))  # LAST_REVIEWED: 2026-09-03
+CANDIDATE_MIN_CONVICTION            = float(((os.getenv("CANDIDATE_MIN_CONVICTION") or "").strip() or "55")) # LAST_REVIEWED: 2026-09-03
+CANDIDATE_MIN_BULLISH_TF            = int(((os.getenv("CANDIDATE_MIN_BULLISH_TF") or "").strip() or "4"))   # LAST_REVIEWED: 2026-09-03
+CANDIDATE_DOWNTREND_6M_PCT          = float(((os.getenv("CANDIDATE_DOWNTREND_6M_PCT") or "").strip() or "-10.0")) # LAST_REVIEWED: 2026-09-03
+CANDIDATE_OVEREXTENDED_52W_TOP_PCT  = float(((os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT") or "").strip() or "12.0")) # LAST_REVIEWED: 2026-09-03
 
 # ── Volume-shock quality gate (2026-09-11 fix) ─────────────────────────────
 # User-reported bug: the volume-shock track (candidate_engine._refresh_
@@ -592,11 +635,11 @@ CANDIDATE_OVEREXTENDED_52W_TOP_PCT  = float(os.getenv("CANDIDATE_OVEREXTENDED_52
 #      VOLUME_SHOCK_SECTOR_MIN_PEERS/PCTL_FLOOR below. Skipped when a
 #      sector doesn't have enough same-cycle peers to make "adaptive"
 #      meaningful; the absolute floors still apply either way.
-VOLUME_SHOCK_QUALITY_GATE_ENABLED   = os.getenv("VOLUME_SHOCK_QUALITY_GATE_ENABLED", "true").lower() == "true"
-VOLUME_SHOCK_FUND_ABS_FLOOR         = float(os.getenv("VOLUME_SHOCK_FUND_ABS_FLOOR", "35"))
-VOLUME_SHOCK_TECH_ABS_FLOOR         = float(os.getenv("VOLUME_SHOCK_TECH_ABS_FLOOR", "35"))
-VOLUME_SHOCK_SECTOR_MIN_PEERS       = int(os.getenv("VOLUME_SHOCK_SECTOR_MIN_PEERS", "3"))
-VOLUME_SHOCK_SECTOR_PCTL_FLOOR      = float(os.getenv("VOLUME_SHOCK_SECTOR_PCTL_FLOOR", "30"))
+VOLUME_SHOCK_QUALITY_GATE_ENABLED   = ((os.getenv("VOLUME_SHOCK_QUALITY_GATE_ENABLED") or "").strip() or "true").lower() == "true"
+VOLUME_SHOCK_FUND_ABS_FLOOR         = float(((os.getenv("VOLUME_SHOCK_FUND_ABS_FLOOR") or "").strip() or "35"))
+VOLUME_SHOCK_TECH_ABS_FLOOR         = float(((os.getenv("VOLUME_SHOCK_TECH_ABS_FLOOR") or "").strip() or "35"))
+VOLUME_SHOCK_SECTOR_MIN_PEERS       = int(((os.getenv("VOLUME_SHOCK_SECTOR_MIN_PEERS") or "").strip() or "3"))
+VOLUME_SHOCK_SECTOR_PCTL_FLOOR      = float(((os.getenv("VOLUME_SHOCK_SECTOR_PCTL_FLOOR") or "").strip() or "30"))
 # 2026-09-18 audit fix #3: the sector-relative check above compares a
 # candidate only against THIS CYCLE's other same-sector candidates — often
 # just 1-3 names — so the same stock can pass or fail purely because of
@@ -610,8 +653,8 @@ VOLUME_SHOCK_SECTOR_PCTL_FLOOR      = float(os.getenv("VOLUME_SHOCK_SECTOR_PCTL_
 # _sector_peer_history) and merging them in alongside this cycle's peers
 # before the percentile check, so the comparison window is less sensitive
 # to which handful of names happened to show up this one cycle.
-VOLUME_SHOCK_SECTOR_HISTORY_MAX_AGE_MINUTES = int(os.getenv("VOLUME_SHOCK_SECTOR_HISTORY_MAX_AGE_MINUTES", "180"))
-VOLUME_SHOCK_SECTOR_HISTORY_MAX_SAMPLES     = int(os.getenv("VOLUME_SHOCK_SECTOR_HISTORY_MAX_SAMPLES", "40"))
+VOLUME_SHOCK_SECTOR_HISTORY_MAX_AGE_MINUTES = int(((os.getenv("VOLUME_SHOCK_SECTOR_HISTORY_MAX_AGE_MINUTES") or "").strip() or "180"))
+VOLUME_SHOCK_SECTOR_HISTORY_MAX_SAMPLES     = int(((os.getenv("VOLUME_SHOCK_SECTOR_HISTORY_MAX_SAMPLES") or "").strip() or "40"))
 # Bound on how many symbols get fund/technical HTTP lookups per cycle —
 # analysis-intelligence-service calls are the most expensive step in this
 # gate; cap so a huge volume-shock universe day can't turn one cycle into
@@ -619,7 +662,7 @@ VOLUME_SHOCK_SECTOR_HISTORY_MAX_SAMPLES     = int(os.getenv("VOLUME_SHOCK_SECTOR
 # subject to the underlying price/volume checks, just not the quality gate
 # — same "don't silently guess" spirit as the rest of this module, applied
 # to cost control rather than a trading decision.
-VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS = int(os.getenv("VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS", "40"))
+VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS = int(((os.getenv("VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS") or "").strip() or "40"))
 
 # ── Market-cap filter (2026-09-11 addition) ────────────────────────────────
 # User request: "on volume stock pick... add only those which is fundamental
@@ -634,16 +677,16 @@ VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS = int(os.getenv("VOLUME_SHOCK_QUALITY_GATE
 # small-cap 251+ — cumulative full-universe ranking, re-set every 6 months,
 # which this service doesn't compute). Good enough for a practical filter;
 # override via env if your own scan universe skews differently.
-MARKET_CAP_LARGE_CR = float(os.getenv("MARKET_CAP_LARGE_CR", "20000"))
-MARKET_CAP_MID_CR   = float(os.getenv("MARKET_CAP_MID_CR", "5000"))
-MARKET_CAP_SMALL_CR = float(os.getenv("MARKET_CAP_SMALL_CR", "500"))
+MARKET_CAP_LARGE_CR = float(((os.getenv("MARKET_CAP_LARGE_CR") or "").strip() or "20000"))
+MARKET_CAP_MID_CR   = float(((os.getenv("MARKET_CAP_MID_CR") or "").strip() or "5000"))
+MARKET_CAP_SMALL_CR = float(((os.getenv("MARKET_CAP_SMALL_CR") or "").strip() or "500"))
 # Absolute floor — enforced regardless of regime/adaptive tilt (see
 # adaptive_market_params.adaptive_min_market_cap_cr). This is a structural
 # liquidity/manipulation-risk floor, same category as RISK_MIN_STOCK_PRICE
 # in risk_engine/engine.py, not a tactical call — sub-₹500cr names have the
 # thinnest institutional coverage and are most exposed to pump-and-dump/
 # operator activity on NSE.
-MIN_MARKET_CAP_CR_ABSOLUTE_FLOOR = float(os.getenv("CANDIDATE_MIN_MARKET_CAP_CR_ABSOLUTE_FLOOR", "500"))
+MIN_MARKET_CAP_CR_ABSOLUTE_FLOOR = float(((os.getenv("CANDIDATE_MIN_MARKET_CAP_CR_ABSOLUTE_FLOOR") or "").strip() or "500"))
 # Static fallback (used until adaptive_market_params has 30 distinct days
 # of self-recorded history, or if it errors) and base value the regime tilt
 # is applied around.
@@ -674,19 +717,19 @@ MIN_MARKET_CAP_CR_ABSOLUTE_FLOOR = float(os.getenv("CANDIDATE_MIN_MARKET_CAP_CR_
 # file's own Aug-28 header already documented (Midcap100 +12.88% 1Y vs
 # Nifty -1.08% at the time) once the adaptive tilt below loosens it back
 # down in a stronger reading.
-MIN_MARKET_CAP_CR_STATIC = float(os.getenv("CANDIDATE_MIN_MARKET_CAP_CR", "1500"))
+MIN_MARKET_CAP_CR_STATIC = float(((os.getenv("CANDIDATE_MIN_MARKET_CAP_CR") or "").strip() or "1500"))
 
 # ── Adaptive threshold engine configuration ───────────────────────────────────
 # Controls how adaptive_thresholds.py computes the live regime gate.
-ADAPTIVE_HISTORY_DAYS      = int(os.getenv("ADAPTIVE_HISTORY_DAYS", "90"))
-ADAPTIVE_MIN_HISTORY_DAYS  = int(os.getenv("ADAPTIVE_MIN_HISTORY_DAYS", "30"))
-ADAPTIVE_PERCENTILE        = float(os.getenv("ADAPTIVE_PERCENTILE", "20.0"))
-ADAPTIVE_STALE_THRESHOLD_DAYS = int(os.getenv("ADAPTIVE_STALE_THRESHOLD_DAYS", "30"))
+ADAPTIVE_HISTORY_DAYS      = int(((os.getenv("ADAPTIVE_HISTORY_DAYS") or "").strip() or "90"))
+ADAPTIVE_MIN_HISTORY_DAYS  = int(((os.getenv("ADAPTIVE_MIN_HISTORY_DAYS") or "").strip() or "30"))
+ADAPTIVE_PERCENTILE        = float(((os.getenv("ADAPTIVE_PERCENTILE") or "").strip() or "20.0"))
+ADAPTIVE_STALE_THRESHOLD_DAYS = int(((os.getenv("ADAPTIVE_STALE_THRESHOLD_DAYS") or "").strip() or "30"))
 
 # ── Shared Dhan account-wide order-rate budget (session 7 audit finding —
 # shared with position-stocks-service via the same Dhan account and the
 # same physical DB; see execution/shared_order_budget.py) ────────────────────
-SHARED_DAILY_ORDER_BUDGET = int(os.getenv("SHARED_DAILY_ORDER_BUDGET", "5000"))
+SHARED_DAILY_ORDER_BUDGET = int(((os.getenv("SHARED_DAILY_ORDER_BUDGET") or "").strip() or "5000"))
 
 # ── Cross-service capital split (session52 fix) ───────────────────────────────
 # This service and position-stocks-service share ONE real Dhan account.
@@ -706,7 +749,7 @@ SHARED_DAILY_ORDER_BUDGET = int(os.getenv("SHARED_DAILY_ORDER_BUDGET", "5000"))
 # See execution/equity_sync.py (caps cash_available/current_equity) and
 # risk_engine/engine.py's new "capital_share_cap" check (caps this
 # service's TOTAL exposure — cash + open positions — not just new cash).
-CAPITAL_SHARE_PCT = float(os.getenv("REAL_TRADE_CAPITAL_SHARE_PCT", "50.0"))
+CAPITAL_SHARE_PCT = float(((os.getenv("REAL_TRADE_CAPITAL_SHARE_PCT") or "").strip() or "50.0"))
 
 # ── Transaction-cost model (2026-09-18 — user audit finding) ─────────────────
 # Codebase audit found ZERO awareness of brokerage/STT/exchange charges/GST/
@@ -726,28 +769,28 @@ CAPITAL_SHARE_PCT = float(os.getenv("REAL_TRADE_CAPITAL_SHARE_PCT", "50.0"))
 # intraday) — correct this env var if that ever changes. All estimates are
 # deliberately conservative/approximate — verify against a real Dhan
 # contract note periodically and adjust via env vars, no code change needed.
-COST_MODEL_ENABLED = os.getenv("COST_MODEL_ENABLED", "true").lower() == "true"
+COST_MODEL_ENABLED = ((os.getenv("COST_MODEL_ENABLED") or "").strip() or "true").lower() == "true"
 
 # Brokerage: flat ₹ per executed leg (BUY and SELL each count as one leg).
 # Dhan's discount plans are ₹0 for both CNC and intraday as of 2026 — set
 # BROKERAGE_PER_ORDER if that ever changes for this account.
-BROKERAGE_PER_ORDER = float(os.getenv("BROKERAGE_PER_ORDER", "0.0"))
+BROKERAGE_PER_ORDER = float(((os.getenv("BROKERAGE_PER_ORDER") or "").strip() or "0.0"))
 
 # STT (Securities Transaction Tax) — statutory, not broker-specific.
 # Delivery (CNC): charged on BOTH legs. Intraday: SELL leg only.
-STT_DELIVERY_PCT_PER_LEG   = float(os.getenv("STT_DELIVERY_PCT_PER_LEG", "0.10"))
-STT_INTRADAY_SELL_PCT      = float(os.getenv("STT_INTRADAY_SELL_PCT", "0.025"))
+STT_DELIVERY_PCT_PER_LEG   = float(((os.getenv("STT_DELIVERY_PCT_PER_LEG") or "").strip() or "0.10"))
+STT_INTRADAY_SELL_PCT      = float(((os.getenv("STT_INTRADAY_SELL_PCT") or "").strip() or "0.025"))
 
 # Exchange transaction charges + SEBI turnover fee — both legs, both product types.
-EXCHANGE_TXN_PCT   = float(os.getenv("EXCHANGE_TXN_PCT", "0.00325"))
-SEBI_TURNOVER_PCT  = float(os.getenv("SEBI_TURNOVER_PCT", "0.0001"))
+EXCHANGE_TXN_PCT   = float(((os.getenv("EXCHANGE_TXN_PCT") or "").strip() or "0.00325"))
+SEBI_TURNOVER_PCT  = float(((os.getenv("SEBI_TURNOVER_PCT") or "").strip() or "0.0001"))
 
 # GST — applied on (brokerage + exchange txn charges + SEBI fee), both legs.
-GST_PCT = float(os.getenv("GST_PCT", "18.0"))
+GST_PCT = float(((os.getenv("GST_PCT") or "").strip() or "18.0"))
 
 # Stamp duty — BUY leg only. Delivery rate is higher than intraday.
-STAMP_DUTY_BUY_PCT_DELIVERY = float(os.getenv("STAMP_DUTY_BUY_PCT_DELIVERY", "0.015"))
-STAMP_DUTY_BUY_PCT_INTRADAY = float(os.getenv("STAMP_DUTY_BUY_PCT_INTRADAY", "0.003"))
+STAMP_DUTY_BUY_PCT_DELIVERY = float(((os.getenv("STAMP_DUTY_BUY_PCT_DELIVERY") or "").strip() or "0.015"))
+STAMP_DUTY_BUY_PCT_INTRADAY = float(((os.getenv("STAMP_DUTY_BUY_PCT_INTRADAY") or "").strip() or "0.003"))
 
 # DP (Depository Participant) charge — flat ₹ + GST, per scrip per day, ONLY
 # when actual T+1-settled demat holdings are sold (a genuine multi-day CNC
@@ -755,7 +798,7 @@ STAMP_DUTY_BUY_PCT_INTRADAY = float(os.getenv("STAMP_DUTY_BUY_PCT_INTRADAY", "0.
 # product-type logic, which never touches real holdings). Applied by
 # cost_model.py only when the caller explicitly says the sell is a real
 # delivery sell of a previously-settled holding.
-DP_CHARGE_FLAT = float(os.getenv("DP_CHARGE_FLAT", "15.0"))
+DP_CHARGE_FLAT = float(((os.getenv("DP_CHARGE_FLAT") or "").strip() or "15.0"))
 
 # Entry-time cost gate (see entry_engine/entry.py's Gate 5.6):
 #   1. Position value must clear MIN_TRADE_VALUE — below this, fixed/
@@ -771,8 +814,8 @@ DP_CHARGE_FLAT = float(os.getenv("DP_CHARGE_FLAT", "15.0"))
 # for "no min trade value... if needed set one like 10 or 20 rs", so this
 # is now just a sanity floor against near-zero, cost-dominated orders, not
 # a sizing constraint.
-MIN_TRADE_VALUE          = float(os.getenv("MIN_TRADE_VALUE", "20.0"))
-MIN_EDGE_TO_COST_RATIO   = float(os.getenv("MIN_EDGE_TO_COST_RATIO", "3.0"))
+MIN_TRADE_VALUE          = float(((os.getenv("MIN_TRADE_VALUE") or "").strip() or "20.0"))
+MIN_EDGE_TO_COST_RATIO   = float(((os.getenv("MIN_EDGE_TO_COST_RATIO") or "").strip() or "3.0"))
 
 # 2026-09-21 NEW (session79): flat rupee ceiling on a single trade's
 # position value (entry_price × final_qty), separate from and in addition
@@ -784,7 +827,7 @@ MIN_EDGE_TO_COST_RATIO   = float(os.getenv("MIN_EDGE_TO_COST_RATIO", "3.0"))
 # Enforced in risk_engine/engine.py (§5c-ii), which downsizes qty to fit
 # under the cap the same way the concentration cap does, rather than
 # rejecting outright.
-MAX_TRADE_VALUE          = float(os.getenv("MAX_TRADE_VALUE", "3000.0"))
+MAX_TRADE_VALUE          = float(((os.getenv("MAX_TRADE_VALUE") or "").strip() or "3000.0"))
 
 # ── Selective overnight hold (2026-09-18 — user audit finding) ───────────────
 # _eod_squareoff (execution/auto_pilot.py) used to flatten EVERY open
@@ -800,7 +843,7 @@ MAX_TRADE_VALUE          = float(os.getenv("MAX_TRADE_VALUE", "3000.0"))
 # off exactly as before — this does not change behavior for the bulk of
 # positions, only for the specific cases the pipeline already has strong
 # evidence for.
-OVERNIGHT_HOLD_ENABLED = os.getenv("OVERNIGHT_HOLD_ENABLED", "true").lower() == "true"
+OVERNIGHT_HOLD_ENABLED = ((os.getenv("OVERNIGHT_HOLD_ENABLED") or "").strip() or "true").lower() == "true"
 
 # Only these entry decision labels are eligible — deliberately excludes the
 # base "VOLUME_SHOCK" tier (48.1% backtested win rate, +0.66% mean — too
@@ -815,20 +858,20 @@ OVERNIGHT_HOLD_ELIGIBLE_LABELS = {
 
 # Must be at/above breakeven right now — never hold a currently-losing
 # position overnight on the strength of a tier-level backtest statistic.
-OVERNIGHT_HOLD_REQUIRE_PROFITABLE = os.getenv("OVERNIGHT_HOLD_REQUIRE_PROFITABLE", "true").lower() == "true"
+OVERNIGHT_HOLD_REQUIRE_PROFITABLE = ((os.getenv("OVERNIGHT_HOLD_REQUIRE_PROFITABLE") or "").strip() or "true").lower() == "true"
 
 # Skip the hold if price is already this far into today's range (near the
 # high) — mirrors entry_engine's own _range_adjusted_stop_target near_high
 # logic (rpos >= 0.80): a position that's already run to the top of its
 # day's range is more likely exhausted than mid-breakout.
-OVERNIGHT_HOLD_MAX_RANGE_POS = float(os.getenv("OVERNIGHT_HOLD_MAX_RANGE_POS", "0.80"))
+OVERNIGHT_HOLD_MAX_RANGE_POS = float(((os.getenv("OVERNIGHT_HOLD_MAX_RANGE_POS") or "").strip() or "0.80"))
 
 # Total value held overnight across ALL kept positions cannot exceed this %
 # of equity, regardless of how many individually qualify — caps aggregate
 # gap-risk exposure. When more positions qualify than the cap allows, the
 # highest-conviction ones are kept first and the rest are squared off as
 # usual (see execution/auto_pilot.py's _select_overnight_holds).
-OVERNIGHT_HOLD_MAX_EXPOSURE_PCT = float(os.getenv("OVERNIGHT_HOLD_MAX_EXPOSURE_PCT", "40.0"))
+OVERNIGHT_HOLD_MAX_EXPOSURE_PCT = float(((os.getenv("OVERNIGHT_HOLD_MAX_EXPOSURE_PCT") or "").strip() or "40.0"))
 
 # 2026-09-19 (audit finding, fixed): the exposure cap above bounds TOTAL
 # overnight value but does nothing to stop that value concentrating into
@@ -843,8 +886,8 @@ OVERNIGHT_HOLD_MAX_EXPOSURE_PCT = float(os.getenv("OVERNIGHT_HOLD_MAX_EXPOSURE_P
 # overnight, and a cap on how much of equity any ONE symbol can occupy
 # overnight — both enforced in execution/auto_pilot.py's
 # _select_overnight_holds alongside the aggregate % cap above.
-OVERNIGHT_HOLD_MAX_POSITIONS = int(os.getenv("OVERNIGHT_HOLD_MAX_POSITIONS", "3"))
-OVERNIGHT_HOLD_MAX_SINGLE_SYMBOL_PCT = float(os.getenv("OVERNIGHT_HOLD_MAX_SINGLE_SYMBOL_PCT", "15.0"))
+OVERNIGHT_HOLD_MAX_POSITIONS = int(((os.getenv("OVERNIGHT_HOLD_MAX_POSITIONS") or "").strip() or "3"))
+OVERNIGHT_HOLD_MAX_SINGLE_SYMBOL_PCT = float(((os.getenv("OVERNIGHT_HOLD_MAX_SINGLE_SYMBOL_PCT") or "").strip() or "15.0"))
 # 2026-09-20 (audit fix — sector/correlation diversification): session72's
 # MAX_POSITIONS/MAX_SINGLE_SYMBOL_PCT caps bound how MANY names and how much
 # of ANY ONE name can be held overnight, but say nothing about whether those
@@ -859,7 +902,7 @@ OVERNIGHT_HOLD_MAX_SINGLE_SYMBOL_PCT = float(os.getenv("OVERNIGHT_HOLD_MAX_SINGL
 # nothing to compare — see _select_overnight_holds for how this degrades
 # honestly rather than either blocking everything on missing data or
 # silently skipping the check).
-OVERNIGHT_HOLD_MAX_PER_SECTOR = int(os.getenv("OVERNIGHT_HOLD_MAX_PER_SECTOR", "1"))
+OVERNIGHT_HOLD_MAX_PER_SECTOR = int(((os.getenv("OVERNIGHT_HOLD_MAX_PER_SECTOR") or "").strip() or "1"))
 
 # 2026-09-19 (audit finding, fixed): OVERNIGHT_HOLD_REQUIRE_PROFITABLE
 # above only checked raw LTP >= avg_entry_price — a position sitting at
@@ -870,7 +913,7 @@ OVERNIGHT_HOLD_MAX_PER_SECTOR = int(os.getenv("OVERNIGHT_HOLD_MAX_PER_SECTOR", "
 # check requires unrealized gross P&L to exceed the estimated round-trip
 # cost of exiting now, not just to be >= 0. Kept togglable in case the
 # stricter bar ever needs to be relaxed for testing.
-OVERNIGHT_HOLD_PROFITABLE_NET_OF_COSTS = os.getenv("OVERNIGHT_HOLD_PROFITABLE_NET_OF_COSTS", "true").lower() == "true"
+OVERNIGHT_HOLD_PROFITABLE_NET_OF_COSTS = ((os.getenv("OVERNIGHT_HOLD_PROFITABLE_NET_OF_COSTS") or "").strip() or "true").lower() == "true"
 
 # ── Overnight-hold × CDSL eDIS morning check (2026-09-19, audit finding) ────
 # Every same-day exit in this service sells product_type=INTRADAY, which
@@ -886,7 +929,7 @@ OVERNIGHT_HOLD_PROFITABLE_NET_OF_COSTS = os.getenv("OVERNIGHT_HOLD_PROFITABLE_NE
 # window (the open gap). When enabled, a scheduled pre-market check
 # (execution/auto_pilot.py) calls it once per day and sends a loud
 # reminder notification if any held-overnight symbol isn't yet verified.
-EDIS_MORNING_CHECK_ENABLED = os.getenv("EDIS_MORNING_CHECK_ENABLED", "true").lower() == "true"
+EDIS_MORNING_CHECK_ENABLED = ((os.getenv("EDIS_MORNING_CHECK_ENABLED") or "").strip() or "true").lower() == "true"
 EDIS_MORNING_CHECK_TIME_IST = os.getenv("EDIS_MORNING_CHECK_TIME_IST", "09:00")
 
 # ── Limit orders for profit-target exits (2026-09-18 — user audit finding) ───
@@ -896,8 +939,8 @@ EDIS_MORNING_CHECK_TIME_IST = os.getenv("EDIS_MORNING_CHECK_TIME_IST", "09:00")
 # Only affects the target_hit_partial path in exit_engine/exit.py — stop_hit,
 # emergency_gap_down, time_stop, and eod_squareoff are all unchanged and
 # always MARKET, on purpose (must fill regardless of price).
-EXIT_TARGET_USE_LIMIT = os.getenv("EXIT_TARGET_USE_LIMIT", "true").lower() == "true"
-EXIT_TARGET_LIMIT_BUFFER_PCT = float(os.getenv("EXIT_TARGET_LIMIT_BUFFER_PCT", "0.1"))
+EXIT_TARGET_USE_LIMIT = ((os.getenv("EXIT_TARGET_USE_LIMIT") or "").strip() or "true").lower() == "true"
+EXIT_TARGET_LIMIT_BUFFER_PCT = float(((os.getenv("EXIT_TARGET_LIMIT_BUFFER_PCT") or "").strip() or "0.1"))
 
 # ── Exit-side LIMIT sell expiry (2026-09-18 audit fix #1) ────────────────────
 # EXIT_TARGET_USE_LIMIT above fixed slippage on winners but opened a real gap:
@@ -917,4 +960,4 @@ EXIT_TARGET_LIMIT_BUFFER_PCT = float(os.getenv("EXIT_TARGET_LIMIT_BUFFER_PCT", "
 # unfilled one at that point and immediately resends the remaining qty as
 # MARKET, so the position is never left with a dark stop for longer than
 # this window.
-EXIT_LIMIT_VALIDITY_MINUTES = int(os.getenv("EXIT_LIMIT_VALIDITY_MINUTES", "3"))
+EXIT_LIMIT_VALIDITY_MINUTES = int(((os.getenv("EXIT_LIMIT_VALIDITY_MINUTES") or "").strip() or "3"))

@@ -202,13 +202,13 @@ def _select_top_picks(actionable: list, limit: int = 5) -> list:
     eligible.sort(key=lambda r: _value_adjusted_score(r)[0], reverse=True)
     return eligible[:limit]
 
-SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "60"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "12"))          # max symbols per batch (gateway limit 15)
-MAX_CONCURRENT_BATCHES = int(os.getenv("MAX_CONCURRENT_BATCHES", "2"))
-BATCH_TIMEOUT = int(os.getenv("BATCH_TIMEOUT", "300"))   # seconds per batch (free-tier cold)
-SCAN_TIMEOUT_TOTAL = int(os.getenv("SCAN_TIMEOUT_TOTAL", "5400"))  # 90 min hard cap
-USE_FULL_UNIVERSE = os.getenv("USE_FULL_UNIVERSE", "true").lower() in ("1", "true", "yes")
-USE_GATEWAY_ASYNC_SCAN = os.getenv("USE_GATEWAY_ASYNC_SCAN", "true").lower() in ("1", "true", "yes")
+SCAN_INTERVAL_MINUTES = int(((os.getenv("SCAN_INTERVAL_MINUTES") or "").strip() or "60"))
+BATCH_SIZE = int(((os.getenv("BATCH_SIZE") or "").strip() or "12"))          # max symbols per batch (gateway limit 15)
+MAX_CONCURRENT_BATCHES = int(((os.getenv("MAX_CONCURRENT_BATCHES") or "").strip() or "2"))
+BATCH_TIMEOUT = int(((os.getenv("BATCH_TIMEOUT") or "").strip() or "300"))   # seconds per batch (free-tier cold)
+SCAN_TIMEOUT_TOTAL = int(((os.getenv("SCAN_TIMEOUT_TOTAL") or "").strip() or "5400"))  # 90 min hard cap
+USE_FULL_UNIVERSE = ((os.getenv("USE_FULL_UNIVERSE") or "").strip() or "true").lower() in ("1", "true", "yes")
+USE_GATEWAY_ASYNC_SCAN = ((os.getenv("USE_GATEWAY_ASYNC_SCAN") or "").strip() or "true").lower() in ("1", "true", "yes")
 FORCE_SCAN = os.getenv("FORCE_SCAN", "false").lower() == "true"
 
 
@@ -683,7 +683,7 @@ def main():
 
 def _prefer_data_feed_then_scan():
     """If data-feed has fresh data, skip heavy upstream fan-out where possible."""
-    if os.environ.get("PREFER_DATA_FEED", "1").lower() not in ("1", "true", "yes"):
+    if ((os.environ.get("PREFER_DATA_FEED") or "").strip() or "1").lower() not in ("1", "true", "yes"):
         return
     try:
         with httpx.Client(timeout=20.0) as c:

@@ -52,8 +52,8 @@ logger = logging.getLogger("peer_multi_quarter")
 # is unchanged — only how the data underneath is obtained.
 _FUND_CACHE: Dict[str, tuple] = {}  # symbol -> (fetched_at_epoch, data)
 _FUND_CACHE_LOCK = threading.Lock()
-_FUND_CACHE_TTL = float(os.getenv("PEER_FUNDAMENTALS_CACHE_TTL_SECONDS", "60"))
-_FUND_FETCH_MAX_WORKERS = int(os.getenv("PEER_FUNDAMENTALS_FETCH_WORKERS", "6"))
+_FUND_CACHE_TTL = float(((os.getenv("PEER_FUNDAMENTALS_CACHE_TTL_SECONDS") or "").strip() or "60"))
+_FUND_FETCH_MAX_WORKERS = int(((os.getenv("PEER_FUNDAMENTALS_FETCH_WORKERS") or "").strip() or "6"))
 
 # Single default for "how many peers to compare" - rank_against_peers() and
 # compute_peer_relative() used to default to 6 and 5, so the same call could

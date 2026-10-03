@@ -52,12 +52,12 @@ EVENT_URL = _env_url("EVENT_URL", f"{_AI}/event")
 # symbols — long past a free/cron worker's realistic run window, so batches
 # routinely never finished. Bounded concurrency (like the API gateway's
 # refill_additional.py) gets the same work done in minutes, not hours.
-BATCH_HOURS = int(os.getenv("HYDRATOR_BATCH_HOURS", "48"))
-REQUEST_TIMEOUT = float(os.getenv("HYDRATOR_TIMEOUT_SEC", "25.0"))
-PERSIST_TIMEOUT = float(os.getenv("HYDRATOR_PERSIST_TIMEOUT_SEC", "20.0"))
-CONCURRENCY = int(os.getenv("HYDRATOR_CONCURRENCY", "4"))
+BATCH_HOURS = int(((os.getenv("HYDRATOR_BATCH_HOURS") or "").strip() or "48"))
+REQUEST_TIMEOUT = float(((os.getenv("HYDRATOR_TIMEOUT_SEC") or "").strip() or "25.0"))
+PERSIST_TIMEOUT = float(((os.getenv("HYDRATOR_PERSIST_TIMEOUT_SEC") or "").strip() or "20.0"))
+CONCURRENCY = int(((os.getenv("HYDRATOR_CONCURRENCY") or "").strip() or "4"))
 # Kept for backward-compat env overrides; no longer used as a per-symbol sleep.
-DELAY_SEC = float(os.getenv("HYDRATOR_DELAY_SEC", "0"))
+DELAY_SEC = float(((os.getenv("HYDRATOR_DELAY_SEC") or "").strip() or "0"))
 
 
 def _check_regime_constant_staleness() -> None:
@@ -349,7 +349,7 @@ _HYDRATE_JOB: dict[str, Any] = {
     "updated_epoch": None,
 }
 _HYDRATE_LOCK = threading.Lock()
-_STALE_AFTER_SEC = float(os.getenv("HYDRATOR_STALE_AFTER_SEC", "1800"))
+_STALE_AFTER_SEC = float(((os.getenv("HYDRATOR_STALE_AFTER_SEC") or "").strip() or "1800"))
 
 
 def get_hydrate_job() -> dict:

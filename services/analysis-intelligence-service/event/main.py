@@ -1247,5 +1247,5 @@ def symbols_with_events(days_ahead: int = 7):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8006))
+    port = int(((os.getenv("PORT") or "").strip() or 8006))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)

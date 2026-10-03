@@ -44,7 +44,7 @@ MARKET_DATA_URL = os.environ.get("MARKET_DATA_URL", "").rstrip("/")
 
 # Global Yahoo cool-down after 429 (shared across T+1/T+5 batch)
 _yf_rate_limited_until = 0.0
-_YF_COOLDOWN_SEC = float(os.environ.get("YF_EVAL_COOLDOWN_SEC", "180"))
+_YF_COOLDOWN_SEC = float(((os.environ.get("YF_EVAL_COOLDOWN_SEC") or "").strip() or "180"))
 
 # Session 72 (open-issue #10): history_backfill labels a prediction with the LAST TWO BARS OF HISTORY when
 # its own next session isn't available yet. Those bars are, by construction, at or BEFORE the prediction

@@ -73,6 +73,8 @@ services:
     env_file:
       - .env
     environment:
+      # 2026-10-04: rate_limit_report.py posts events to the gateway only when this is set.
+      API_GATEWAY_URL: http://api-gateway:8000
       MARKET_DATA_URL: http://market-data-service:8001
       UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}
       UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:-}
@@ -109,6 +111,11 @@ services:
     env_file:
       - .env
     environment:
+      # 2026-10-04 fix: without this the service fell back to its hard-coded
+      # https://api-gateway-puwd.onrender.com default (a dead Render deployment),
+      # so every /market/indices sentiment call failed and the decision engine
+      # scored every stock with a neutral market_score of 50.
+      API_GATEWAY_URL: http://api-gateway:8000
       MARKET_DATA_URL: http://market-data-service:8001
       TECHNICAL_URL: http://analysis-intelligence-service:8000/technical
       FUNDAMENTAL_URL: http://analysis-intelligence-service:8000/fundamental
@@ -396,6 +403,9 @@ services:
     env_file:
       - .env
     environment:
+      # 2026-10-04 fix: config.py builds MARKET_INDICES_URL from API_GATEWAY_URL and
+      # otherwise falls back to the dead api-gateway-puwd.onrender.com host.
+      - API_GATEWAY_URL=http://api-gateway:8000
       - PORT=8006
       # Inherits DATABASE_URL, ORACLE_DSN/USER/PASSWORD, DHAN_CREDENTIAL_ENC_KEY,
       # ANGELONE_CLIENT_ID/MPIN/API_KEY/TOTP_SECRET/STATIC_IP from .env (same

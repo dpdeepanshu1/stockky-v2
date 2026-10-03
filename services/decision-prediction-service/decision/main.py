@@ -82,10 +82,10 @@ EARNINGS_BOOST_DAYS = 7
 
 # ── Decide cache (avoids re-running full fan-out for same symbol within TTL) ──
 IST = ZoneInfo("Asia/Kolkata")
-DECIDE_CACHE_TTL_OPEN = int(os.getenv("DECIDE_CACHE_TTL_OPEN", "600"))
-DECIDE_CACHE_TTL_CLOSED = int(os.getenv("DECIDE_CACHE_TTL_CLOSED", "43200"))
-BATCH_MAX_SYMBOLS = int(os.getenv("DECIDE_BATCH_MAX", "25"))
-BATCH_CONCURRENCY = int(os.getenv("DECIDE_BATCH_CONCURRENCY", "8"))
+DECIDE_CACHE_TTL_OPEN = int(((os.getenv("DECIDE_CACHE_TTL_OPEN") or "").strip() or "600"))
+DECIDE_CACHE_TTL_CLOSED = int(((os.getenv("DECIDE_CACHE_TTL_CLOSED") or "").strip() or "43200"))
+BATCH_MAX_SYMBOLS = int(((os.getenv("DECIDE_BATCH_MAX") or "").strip() or "25"))
+BATCH_CONCURRENCY = int(((os.getenv("DECIDE_BATCH_CONCURRENCY") or "").strip() or "8"))
 
 _decide_mem_cache: dict = {}  # symbol -> (expires_ts, payload)
 _redis = None
@@ -303,7 +303,7 @@ async def _fetch_optional(client: httpx.AsyncClient, url: str, label: str):
 
 # ── Market Sentiment fetch from API Gateway ──────────────────────
 _sentiment_cache = {"ts": 0.0, "data": None}
-_SENTIMENT_TTL = float(os.getenv("MARKET_SENTIMENT_TTL_SEC", "120"))
+_SENTIMENT_TTL = float(((os.getenv("MARKET_SENTIMENT_TTL_SEC") or "").strip() or "120"))
 
 
 async def get_market_sentiment() -> dict:

@@ -413,6 +413,22 @@ class ModelArtifact(Base):
     promoted_at = Column(DateTime, nullable=True)
 
 
+_SCHEMA_ENGINES: dict = {}
+_SCHEMA_LOCK = __import__("threading").Lock()
+
+
+def _create_all_once(engine) -> None:
+    """Base.metadata.create_all(engine) the first time this engine is seen (idempotent anyway)."""
+    key = id(engine)
+    with _SCHEMA_LOCK:
+        got = _SCHEMA_ENGINES.get(key)
+        if got is engine:
+            return
+    Base.metadata.create_all(engine)       # raises -> not recorded, so the next call retries
+    with _SCHEMA_LOCK:
+        _SCHEMA_ENGINES[key] = engine
+
+
 class ModelRegistry:
     """Model store — Neon/Postgres on Render, single Oracle ADB on the Oracle VM."""
     def __init__(self, session_factory=None):
@@ -428,10 +444,12 @@ class ModelRegistry:
                 engine = get_engine()
             else:
                 engine = create_engine(db_url, echo=False)
-            Base.metadata.create_all(engine)
+            # create_all() issues an existence check per table, so do it once per engine, not on
+            # every ModelRegistry() (built per request via TrainingScanner).
+            _create_all_once(engine)
             # Oracle: pre-existing model_artifacts may lack an IDENTITY on id
             # (ORA-01400 on save_candidate_model / save_production_model).
-            # No-op on Postgres.
+            # No-op on Postgres; once per engine on Oracle.
             ensure_oracle_identity(engine)
             session_factory = sessionmaker(bind=engine)
         self._session_factory = session_factory
@@ -781,10 +799,10 @@ def _oracle_engine_kwargs(full_url_provided: bool) -> dict:
     return {
         "echo": False,
         "pool_pre_ping": True,
-        "pool_recycle": int(os.environ.get("DB_POOL_RECYCLE", "300")),
-        "pool_size": int(os.environ.get("DB_POOL_SIZE", "3")),
-        "max_overflow": int(os.environ.get("DB_MAX_OVERFLOW", "2")),
-        "pool_timeout": int(os.environ.get("DB_POOL_TIMEOUT", "30")),
+        "pool_recycle": int(((os.environ.get("DB_POOL_RECYCLE") or "").strip() or "300")),
+        "pool_size": int(((os.environ.get("DB_POOL_SIZE") or "").strip() or "3")),
+        "max_overflow": int(((os.environ.get("DB_MAX_OVERFLOW") or "").strip() or "2")),
+        "pool_timeout": int(((os.environ.get("DB_POOL_TIMEOUT") or "").strip() or "30")),
         "connect_args": ca,
     }
 
@@ -830,14 +848,20 @@ def get_engine(database_url=None):
         url = re.sub(r"&{2,}", "&", url)
         url = url.replace("?&", "?").rstrip("?&")
     # Prefer transaction pooler port 6543
-    if os.environ.get("FORCE_DB_POOLER", "1").lower() in ("1", "true", "yes") and url.startswith("postgresql"):
+    if ((os.environ.get("FORCE_DB_POOLER") or "").strip() or "1").lower() in ("1", "true", "yes") and url.startswith("postgresql"):
         if ":5432/" in url:
             url = url.replace(":5432/", ":6543/")
             _log.info("DB URL rewritten to pooler port 6543")
         # Neon -pooler host is preferred when present in dashboard connection string
 
+    # Cache key = the URL as resolved ABOVE, before the Oracle branch rewrites `url` to
+    # "oracle+oracledb://" (discrete ORACLE_* vars). The singleton used to store the rewritten
+    # value and compare it with the un-rewritten one, so on the Oracle VM the check never matched:
+    # every call built a brand-new engine/pool and logged "Oracle Autonomous DB engine ready".
+    _cache_key = url
+
     with _ENGINE_LOCK:
-        if _ENGINE is not None and _ENGINE_URL == url and not database_url:
+        if _ENGINE is not None and _ENGINE_URL == _cache_key and not database_url:
             return _ENGINE
 
         kwargs = {"echo": False}
@@ -871,18 +895,18 @@ def get_engine(database_url=None):
             use_null = os.environ.get("DB_NULL_POOL", "0").lower() in ("1", "true", "yes")
             if use_null:
                 kwargs["poolclass"] = NullPool
-                kwargs["connect_args"] = {"connect_timeout": int(os.environ.get("DB_CONNECT_TIMEOUT", "10"))}
+                kwargs["connect_args"] = {"connect_timeout": int(((os.environ.get("DB_CONNECT_TIMEOUT") or "").strip() or "10"))}
                 _log.info("Using NullPool (serverless / Neon extreme free-tier)")
             else:
                 kwargs["pool_pre_ping"] = True
-                kwargs["pool_recycle"] = int(os.environ.get("DB_POOL_RECYCLE", "180"))  # < typical idle timeout
-                kwargs["pool_size"] = int(os.environ.get("DB_POOL_SIZE", "2"))
-                kwargs["max_overflow"] = int(os.environ.get("DB_MAX_OVERFLOW", "1"))
-                kwargs["pool_timeout"] = int(os.environ.get("DB_POOL_TIMEOUT", "20"))
+                kwargs["pool_recycle"] = int(((os.environ.get("DB_POOL_RECYCLE") or "").strip() or "180"))  # < typical idle timeout
+                kwargs["pool_size"] = int(((os.environ.get("DB_POOL_SIZE") or "").strip() or "2"))
+                kwargs["max_overflow"] = int(((os.environ.get("DB_MAX_OVERFLOW") or "").strip() or "1"))
+                kwargs["pool_timeout"] = int(((os.environ.get("DB_POOL_TIMEOUT") or "").strip() or "20"))
                 kwargs["pool_use_lifo"] = True  # prefer hot connections under burst
                 # Neon pooler rejects startup options like statement_timeout
                 kwargs["connect_args"] = {
-                    "connect_timeout": int(os.environ.get("DB_CONNECT_TIMEOUT", "10")),
+                    "connect_timeout": int(((os.environ.get("DB_CONNECT_TIMEOUT") or "").strip() or "10")),
                 }
                 _log.info(
                     "Neon/Postgres pool ready (size=%s overflow=%s recycle=%ss lifo=1)",
@@ -894,7 +918,7 @@ def get_engine(database_url=None):
         eng = create_engine(url, **kwargs)
         if not database_url:
             _ENGINE = eng
-            _ENGINE_URL = url
+            _ENGINE_URL = _cache_key
         return eng
 
 def create_tables(engine):
@@ -915,7 +939,43 @@ _PK_TABLES = (
 )
 
 
+_IDENTITY_RETRY_SEC = 300.0
+_IDENTITY_STATE: dict = {}      # id(engine) -> (engine, done: bool, last_attempt_monotonic)
+_IDENTITY_LOCK = __import__("threading").Lock()
+
+
 def ensure_oracle_identity(engine) -> None:
+    """Run the Oracle id-generator repair at most once per engine (see _ensure_oracle_identity_impl).
+
+    It used to run on EVERY call: ModelRegistry() is built per request (TrainingScanner on
+    /training-score, twice per stock analysis), and each run issued a user_tables lookup, an
+    identity-column lookup and sometimes DDL for each of 8 tables, all on the critical path.
+    Now: a clean pass marks the engine done for good; a pass where any table failed is retried at
+    most every _IDENTITY_RETRY_SEC, so a transient start-up error still heals without per-request DDL.
+    No-op (and nothing recorded) on Postgres/SQLite.
+    """
+    import time as _t
+    try:
+        if engine.dialect.name != "oracle":
+            return
+    except Exception:
+        return
+    key = id(engine)
+    with _IDENTITY_LOCK:
+        st = _IDENTITY_STATE.get(key)
+        if st is not None and st[0] is engine:
+            if st[1]:
+                return
+            if (_t.monotonic() - st[2]) < _IDENTITY_RETRY_SEC:
+                return
+        # claim the attempt before releasing the lock so concurrent requests don't all repair
+        _IDENTITY_STATE[key] = (engine, False, _t.monotonic())
+    ok = _ensure_oracle_identity_impl(engine)
+    with _IDENTITY_LOCK:
+        _IDENTITY_STATE[key] = (engine, bool(ok), _t.monotonic())
+
+
+def _ensure_oracle_identity_impl(engine) -> bool:
     """Give `id` a server-side generator on Oracle tables that lack one.
 
     ``_pk_column()`` fixes tables created from now on, but the Oracle VM already
@@ -946,10 +1006,11 @@ def ensure_oracle_identity(engine) -> None:
     _log = logging.getLogger("training-db")
     try:
         if engine.dialect.name != "oracle":
-            return
+            return True
     except Exception:
-        return
+        return True
 
+    all_ok = True
     for table in _PK_TABLES:
         tbl = table.upper()  # SQLAlchemy creates unquoted names -> stored uppercase
         try:
@@ -1001,7 +1062,9 @@ def ensure_oracle_identity(engine) -> None:
                 start_at,
             )
         except Exception as e:  # noqa: BLE001
+            all_ok = False
             _log.warning("ensure_oracle_identity(%s) skipped: %s", tbl, str(e)[:200])
+    return all_ok
 
 
 _INIT_DONE = False

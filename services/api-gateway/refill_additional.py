@@ -53,14 +53,14 @@ EVENT_URL = _env_url("EVENT_URL", f"{_AI}/event")
 # Per-request timeout — short and single-attempt so one slow symbol can't
 # stall the whole job. Concurrency (below) is what gives real throughput,
 # not long per-request waits.
-REQUEST_TIMEOUT = float(os.getenv("REFILL_TIMEOUT_SEC", "25.0"))
+REQUEST_TIMEOUT = float(((os.getenv("REFILL_TIMEOUT_SEC") or "").strip() or "25.0"))
 # Bounded concurrency — mirrors DATA_FEED_FUND_CONCURRENCY used by the main
 # /data-feed/run fundamentals phase, so we don't cause a fresh 429 storm.
-CONCURRENCY = int(os.getenv("REFILL_CONCURRENCY", "4"))
+CONCURRENCY = int(((os.getenv("REFILL_CONCURRENCY") or "").strip() or "4"))
 MAX_SYMBOLS = int(os.getenv("REFILL_MAX_SYMBOLS", "0") or 0)  # 0 = full universe
 # If a "running" job hasn't updated in this long, treat it as dead (Render
 # free-tier idle-kill or crash) so the UI can recover instead of spinning.
-STALE_AFTER_SEC = float(os.getenv("REFILL_STALE_AFTER_SEC", "300"))
+STALE_AFTER_SEC = float(((os.getenv("REFILL_STALE_AFTER_SEC") or "").strip() or "300"))
 
 # Process-local job mirror (status also written to data_feed job when available)
 _REFILL_JOB: Dict[str, Any] = {

@@ -106,7 +106,7 @@ def _ensure_trade_tables():
 
 
 # ── Redis read-through cache for portfolio/reports (cuts Supabase egress) ──
-_REPORT_TTL = int(os.environ.get("REPORT_CACHE_TTL_SEC", "90"))
+_REPORT_TTL = int(((os.environ.get("REPORT_CACHE_TTL_SEC") or "").strip() or "90"))
 _trades_redis = None  # Redis disconnected — memory report cache only
 try:
     from kv_cache import kv_get as _t_kv_get, kv_set as _t_kv_set
@@ -586,7 +586,7 @@ def get_weekly_trade_report(weeks: int = 12):
 # ── Clear All + Backup (paper trades / tracking) ──────────────────────────
 # (json, os, datetime/timezone already imported at module top)
 BACKUP_DIR = os.getenv("TRADE_BACKUP_DIR", "/app/data/trade_backups")
-BACKUP_RETENTION_DAYS = int(os.getenv("TRADE_BACKUP_RETENTION_DAYS", "14"))
+BACKUP_RETENTION_DAYS = int(((os.getenv("TRADE_BACKUP_RETENTION_DAYS") or "").strip() or "14"))
 
 
 def _purge_expired_backups(db_session):

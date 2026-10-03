@@ -66,27 +66,27 @@ IPO_WEIGHTS = {
     "recency": 0.10,
 }
 
-BUY_NOW_BAR = float(os.getenv("IPO_BUY_NOW_BAR", "70"))  # raised 66→70: weak market, higher bar
-PREPARE_BAR = float(os.getenv("IPO_PREPARE_BAR", "58"))  # raised 54→58: choppy market, fewer marginal signals
-DO_NOT_BUY_BAR = float(os.getenv("IPO_DO_NOT_BUY_BAR", "40"))
-FRESH_WINDOW_DAYS = int(os.getenv("IPO_FRESH_WINDOW_DAYS", "30"))
+BUY_NOW_BAR = float(((os.getenv("IPO_BUY_NOW_BAR") or "").strip() or "70"))  # raised 66→70: weak market, higher bar
+PREPARE_BAR = float(((os.getenv("IPO_PREPARE_BAR") or "").strip() or "58"))  # raised 54→58: choppy market, fewer marginal signals
+DO_NOT_BUY_BAR = float(((os.getenv("IPO_DO_NOT_BUY_BAR") or "").strip() or "40"))
+FRESH_WINDOW_DAYS = int(((os.getenv("IPO_FRESH_WINDOW_DAYS") or "").strip() or "30"))
 # IPO_CHECKER_DEFAULT_DISPLAY_DAYS is the "IPO Checker" tab's default DISPLAY
 # filter (last ~1 month) — but the DISCOVERY/scan window below (LOOKBACK_DAYS_MAX
 # / HARD_CAP) is intentionally much wider (last ~1 year) so the scan itself
 # actually finds every IPO that listed within the last year; the frontend then
 # filters the returned list down to the last IPO_CHECKER_DEFAULT_DISPLAY_DAYS
 # days by default, with the option to widen the filter without re-scanning.
-IPO_CHECKER_DEFAULT_DISPLAY_DAYS = int(os.getenv("IPO_CHECKER_DEFAULT_DISPLAY_DAYS", "30"))
-LOOKBACK_DAYS_MAX = int(os.getenv("IPO_LOOKBACK_DAYS_MAX", "365"))
+IPO_CHECKER_DEFAULT_DISPLAY_DAYS = int(((os.getenv("IPO_CHECKER_DEFAULT_DISPLAY_DAYS") or "").strip() or "30"))
+LOOKBACK_DAYS_MAX = int(((os.getenv("IPO_LOOKBACK_DAYS_MAX") or "").strip() or "365"))
 # Hard ceiling regardless of IPO_LOOKBACK_DAYS_MAX — "recent IPO" stops
 # meaning anything past a year no matter how that env var is set (previously
 # hard-capped at 60 days, which silently dropped nearly every real-world IPO
 # candidate from ipoalerts/NSE discovery and made the Scan button look broken
 # — it was working, just filtering its own results down to ~nothing).
-IPO_LOOKBACK_DAYS_HARD_CAP = int(os.getenv("IPO_LOOKBACK_DAYS_HARD_CAP", "365"))
+IPO_LOOKBACK_DAYS_HARD_CAP = int(((os.getenv("IPO_LOOKBACK_DAYS_HARD_CAP") or "").strip() or "365"))
 # Not-yet-listed IPOs (listing today/tomorrow/this week) — how far forward
 # to look for those.
-IPO_UPCOMING_WINDOW_DAYS = int(os.getenv("IPO_UPCOMING_WINDOW_DAYS", "21"))
+IPO_UPCOMING_WINDOW_DAYS = int(((os.getenv("IPO_UPCOMING_WINDOW_DAYS") or "").strip() or "21"))
 
 def _env_url(name: str, default: str, rstrip: bool = True) -> str:
     """URL setting from the environment with a blank-safe fallback.
@@ -410,7 +410,7 @@ def _ipo_db_freshness_hours() -> Optional[float]:
         return None
 
 
-IPO_DB_FRESH_HOURS = float(os.getenv("IPO_DB_FRESH_HOURS", "24"))
+IPO_DB_FRESH_HOURS = float(((os.getenv("IPO_DB_FRESH_HOURS") or "").strip() or "24"))
 
 # The KV cache backing IPO_LIST_KEY used to live for a flat 4h regardless of
 # IPO_DB_FRESH_HOURS (default 24h). That mismatch was the actual cause of

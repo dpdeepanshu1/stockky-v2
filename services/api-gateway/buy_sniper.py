@@ -42,10 +42,10 @@ import os as _os
 
 # ── Thresholds (market-intelligence derived, env-overridable) ─────────────────
 # Raised from 58 → 62: choppy/weak market, only high-conviction signals.
-MIN_CONVICTION = int(_os.getenv("SNIPER_MIN_CONVICTION", "62"))
+MIN_CONVICTION = int(((_os.getenv("SNIPER_MIN_CONVICTION") or "").strip() or "62"))
 
 # Raised from 5 → 20: sub-₹20 = operator risk + illiquid exits on NSE.
-MIN_PRICE = float(_os.getenv("SNIPER_MIN_PRICE", "20.0"))
+MIN_PRICE = float(((_os.getenv("SNIPER_MIN_PRICE") or "").strip() or "20.0"))
 
 # Price ceiling — OFF by default.
 MAX_PRICE = float(_os.getenv("MAX_PRICE", "0") or 0)
@@ -70,7 +70,7 @@ STOP_LOSS_PCT  = 3.2
 
 # Minimum reward:risk ratio for a card to be surfaced at all.
 # In a weak/choppy market, a 1.5:1 setup is not worth the capital risk.
-MIN_REWARD_RISK = float(_os.getenv("SNIPER_MIN_REWARD_RISK", "1.8"))
+MIN_REWARD_RISK = float(((_os.getenv("SNIPER_MIN_REWARD_RISK") or "").strip() or "1.8"))
 
 # Outperforming sectors in Aug-2026 — get a small conviction bonus so
 # equal-scored stocks from winning sectors rank above laggards.
@@ -80,13 +80,13 @@ _OUTPERFORMING_SECTORS = {
     "metal", "metals", "steel", "mining",
     "private bank", "private sector bank",
 }
-SECTOR_BONUS = int(_os.getenv("SNIPER_SECTOR_BONUS", "3"))
+SECTOR_BONUS = int(((_os.getenv("SNIPER_SECTOR_BONUS") or "").strip() or "3"))
 
 # Underperforming sectors — slight penalty so weak-sector stocks don't
 # crowd out better setups from better sectors.
 _UNDERPERFORMING_SECTORS = {"it", "technology", "tech", "pharma", "pharmaceutical",
                              "energy", "oil", "gas", "power"}
-SECTOR_PENALTY = int(_os.getenv("SNIPER_SECTOR_PENALTY", "3"))
+SECTOR_PENALTY = int(((_os.getenv("SNIPER_SECTOR_PENALTY") or "").strip() or "3"))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

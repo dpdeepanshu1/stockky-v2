@@ -49,7 +49,7 @@ logger = logging.getLogger("real-trade-risk-engine")
 # Single position cannot be > 25% of equity. Forces diversification and caps
 # damage if one holding gaps down in a weak market environment.
 MAX_POSITION_CONCENTRATION_PCT = float(
-    os.getenv("RISK_MAX_POSITION_CONCENTRATION_PCT", "25.0")
+    ((os.getenv("RISK_MAX_POSITION_CONCENTRATION_PCT") or "").strip() or "25.0")
 )
 # Minimum stock price — sub-₹20 = operator risk, wide spreads, illiquid exits.
 # 2026-09-01 cleanup: this used to be duplicated as two independently-
@@ -58,14 +58,15 @@ MAX_POSITION_CONCENTRATION_PCT = float(
 # HARD_FLOOR_PRICE only ever fed the dead passes_hard_floor() helper removed
 # in the same cleanup (see below). Collapsed to one knob so retuning the
 # floor only ever requires touching one env var.
-MIN_STOCK_PRICE = float(os.getenv("RISK_MIN_STOCK_PRICE", os.getenv("HARD_FLOOR_PRICE", "20.0")))
+MIN_STOCK_PRICE = float(((os.getenv("RISK_MIN_STOCK_PRICE") or "").strip()
+                         or (os.getenv("HARD_FLOOR_PRICE") or "").strip() or "20.0"))
 # ── Cross-service capital split (session52 fix — see config.py's
 # CAPITAL_SHARE_PCT comment in the main service config for the full
 # incident writeup). Kept as its own os.getenv() constant here, matching
 # this module's existing style of self-contained env-driven caps, rather
 # than importing config.py — avoids a cross-import for one shared number.
 # MUST match config.py's CAPITAL_SHARE_PCT (both default 50.0).
-CAPITAL_SHARE_PCT = float(os.getenv("REAL_TRADE_CAPITAL_SHARE_PCT", "50.0"))
+CAPITAL_SHARE_PCT = float(((os.getenv("REAL_TRADE_CAPITAL_SHARE_PCT") or "").strip() or "50.0"))
 
 # Maximum per-share price. Stocks above this threshold require a minimum position
 # value (entry_price / stop_pct) that exceeds the per-trade risk budget at the
@@ -73,7 +74,15 @@ CAPITAL_SHARE_PCT = float(os.getenv("REAL_TRADE_CAPITAL_SHARE_PCT", "50.0"))
 # rejection. Setting an explicit ceiling here gives a cleaner rejection reason
 # and prevents the risk engine from wasting time sizing an impossible order.
 # Default ₹3000. Override via RISK_MAX_STOCK_PRICE env var as account grows.
-MAX_STOCK_PRICE = float(os.getenv("RISK_MAX_STOCK_PRICE", "3000.0"))
+def _blank_safe_float(name: str, default: float) -> float:
+    """float(env) where a missing, blank or unparseable value gives `default` (a bare float("") crashed the import)."""
+    try:
+        return float((os.getenv(name) or "").strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
+MAX_STOCK_PRICE = _blank_safe_float("RISK_MAX_STOCK_PRICE", 3000.0)
 
 # 2026-09-18 audit fix #4: the ₹3000 default above was a static number with
 # a comment telling the operator to raise it manually "as account equity
@@ -87,15 +96,15 @@ MAX_STOCK_PRICE = float(os.getenv("RISK_MAX_STOCK_PRICE", "3000.0"))
 # outright, adaptive or not. RISK_MAX_STOCK_PRICE_ADAPTIVE is a kill switch
 # back to the pure static behavior with no code change if live behavior
 # ever shows a problem with the derived figure.
-MAX_STOCK_PRICE_EXPLICITLY_SET = os.getenv("RISK_MAX_STOCK_PRICE") is not None
-RISK_MAX_STOCK_PRICE_ADAPTIVE = os.getenv("RISK_MAX_STOCK_PRICE_ADAPTIVE", "true").lower() == "true"
+MAX_STOCK_PRICE_EXPLICITLY_SET = bool((os.getenv("RISK_MAX_STOCK_PRICE") or "").strip())   # blank = not set
+RISK_MAX_STOCK_PRICE_ADAPTIVE = ((os.getenv("RISK_MAX_STOCK_PRICE_ADAPTIVE") or "").strip() or "true").lower() == "true"
 # Conservative representative stop distance for the "can at least 1 share
 # still be sized" math below — deliberately entry_engine's WIDEST possible
 # stop (entry_engine/entry.py's MAX_STOP_PCT, not its typical/flat one), so
 # the derived ceiling stays conservative: it should never let through a
 # stock that a wide-ATR stop would actually make unsizeable at 1 share.
-ADAPTIVE_MAX_PRICE_STOP_PCT = float(os.getenv("RISK_ADAPTIVE_MAX_PRICE_STOP_PCT", "6.0"))
-HARD_FLOOR_LIQUIDITY = float(os.getenv("HARD_FLOOR_LIQUIDITY", "5000000"))
+ADAPTIVE_MAX_PRICE_STOP_PCT = float(((os.getenv("RISK_ADAPTIVE_MAX_PRICE_STOP_PCT") or "").strip() or "6.0"))
+HARD_FLOOR_LIQUIDITY = float(((os.getenv("HARD_FLOOR_LIQUIDITY") or "").strip() or "5000000"))
 # 2026-09-01 cleanup: HARD_FLOOR_CONVICTION and the passes_hard_floor()
 # helper below it were removed here — both were dead code, never called
 # from evaluate() or anywhere else. A conviction floor is already enforced

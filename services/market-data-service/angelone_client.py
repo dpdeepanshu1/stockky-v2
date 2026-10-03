@@ -114,7 +114,7 @@ def _resolve_client_public_ip() -> str:
 # rate", "errorcode": "..."} per multiple SmartAPI Forum reports (topics
 # 5560, 5636/5637) — detect it and cool down rather than let the caller's
 # normal retry logic hammer it again immediately.
-_ANGELONE_COOLDOWN_SEC = float(os.environ.get("ANGELONE_COOLDOWN_SEC", "30"))
+_ANGELONE_COOLDOWN_SEC = float(((os.environ.get("ANGELONE_COOLDOWN_SEC") or "").strip() or "30"))
 
 
 def _is_rate_limit_response(status_code: int, body: Optional[dict]) -> bool:
@@ -157,7 +157,7 @@ def _log_denied(endpoint: str, r: httpx.Response) -> None:
 # Candle calls that can't get a rate-limit token within this many seconds are
 # SKIPPED (caller falls back to yfinance) instead of being let through anyway —
 # see rate_limiter.try_acquire.
-_CANDLE_MAX_WAIT_S = float(os.environ.get("ANGELONE_CANDLE_MAX_WAIT_S", "15"))
+_CANDLE_MAX_WAIT_S = float(((os.environ.get("ANGELONE_CANDLE_MAX_WAIT_S") or "").strip() or "15"))
 
 
 class AngelOneSession:

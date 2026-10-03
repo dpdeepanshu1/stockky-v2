@@ -45,9 +45,9 @@ DB_URL = (
     or ""
 )
 
-BATCH_DELAY_S    = float(os.getenv("FUNDAMENTALS_BATCH_DELAY_S", "0.5"))   # ~2 req/s
-REQUEST_TIMEOUT  = float(os.getenv("FUNDAMENTALS_REQUEST_TIMEOUT", "30.0"))
-MAX_SYMBOLS      = int(os.getenv("FUNDAMENTALS_MAX_SYMBOLS", "500"))
+BATCH_DELAY_S    = float(((os.getenv("FUNDAMENTALS_BATCH_DELAY_S") or "").strip() or "0.5"))   # ~2 req/s
+REQUEST_TIMEOUT  = float(((os.getenv("FUNDAMENTALS_REQUEST_TIMEOUT") or "").strip() or "30.0"))
+MAX_SYMBOLS      = int(((os.getenv("FUNDAMENTALS_MAX_SYMBOLS") or "").strip() or "500"))
 
 
 def _fetch_universe() -> list:

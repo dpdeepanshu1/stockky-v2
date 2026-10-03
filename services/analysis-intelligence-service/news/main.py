@@ -19,6 +19,13 @@ from urllib.parse import quote
 import feedparser
 import httpx
 from fastapi import FastAPI, HTTPException
+
+try:
+    # 2026-10-04 (item 9): shared downloader - browser User-Agent, 10 s timeout, status logging, per-URL cache.
+    from feed_fetch import fetch_feed
+except Exception:  # pragma: no cover - degrade to the old direct feedparser call rather than break start-up
+    def fetch_feed(url, source="feed"):  # type: ignore
+        return feedparser.parse(url)
 from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(level=logging.INFO)
@@ -328,7 +335,7 @@ def _fetch_google_news(symbol: str, max_items: int = 15) -> List[Dict[str, Any]]
     for q in queries[:3]:
         feed_url = f"https://news.google.com/rss/search?q={quote(q)}&hl=en-IN&gl=IN&ceid=IN:en"
         try:
-            parsed = feedparser.parse(feed_url)
+            parsed = fetch_feed(feed_url, "news")
             all_items.extend(_parse_feed_items(parsed, "Google News", keywords, max_items, days=14))
         except Exception as e:
             logger.warning("Google News fetch failed for %s: %s", q, e)
@@ -338,7 +345,7 @@ def _fetch_google_news(symbol: str, max_items: int = 15) -> List[Dict[str, Any]]
 def _fetch_moneycontrol(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
     feed_url = "https://www.moneycontrol.com/rss/latestnews.xml"
     try:
-        parsed = feedparser.parse(feed_url)
+        parsed = fetch_feed(feed_url, "news")
         return _parse_feed_items(parsed, "Moneycontrol", _match_keywords(symbol), max_items)
     except Exception as e:
         logger.warning("Moneycontrol fetch failed: %s", e)
@@ -348,7 +355,7 @@ def _fetch_moneycontrol(symbol: str, max_items: int = 10) -> List[Dict[str, Any]
 def _fetch_economic_times(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
     feed_url = "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"
     try:
-        parsed = feedparser.parse(feed_url)
+        parsed = fetch_feed(feed_url, "news")
         return _parse_feed_items(parsed, "Economic Times", _match_keywords(symbol), max_items)
     except Exception as e:
         logger.warning("Economic Times fetch failed: %s", e)
@@ -358,7 +365,7 @@ def _fetch_economic_times(symbol: str, max_items: int = 10) -> List[Dict[str, An
 def _fetch_business_standard(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
     feed_url = "https://www.business-standard.com/rss/markets-106.rss"
     try:
-        parsed = feedparser.parse(feed_url)
+        parsed = fetch_feed(feed_url, "news")
         return _parse_feed_items(parsed, "Business Standard", _match_keywords(symbol), max_items)
     except Exception as e:
         logger.warning("Business Standard fetch failed: %s", e)
@@ -366,9 +373,9 @@ def _fetch_business_standard(symbol: str, max_items: int = 10) -> List[Dict[str,
 
 
 def _fetch_ndtv_profit(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
-    feed_url = "https://www.ndtv.com/business/rss"
+    feed_url = "https://prod-qt-images.s3.amazonaws.com/production/bloombergquint/feed.xml"  # 2026-10-04: www.ndtv.com/business/rss is not a live feed; this Atom feed is the one afterhours_scan verified live
     try:
-        parsed = feedparser.parse(feed_url)
+        parsed = fetch_feed(feed_url, "news")
         return _parse_feed_items(parsed, "NDTV Profit", _match_keywords(symbol), max_items)
     except Exception as e:
         logger.warning("NDTV Profit fetch failed: %s", e)
@@ -378,7 +385,7 @@ def _fetch_ndtv_profit(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]
 def _fetch_livemint(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
     feed_url = "https://www.livemint.com/rss/markets"
     try:
-        parsed = feedparser.parse(feed_url)
+        parsed = fetch_feed(feed_url, "news")
         return _parse_feed_items(parsed, "LiveMint", _match_keywords(symbol), max_items)
     except Exception as e:
         logger.warning("LiveMint fetch failed: %s", e)
@@ -388,7 +395,7 @@ def _fetch_livemint(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
 def _fetch_financial_express(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
     feed_url = "https://www.financialexpress.com/market/feed/"
     try:
-        parsed = feedparser.parse(feed_url)
+        parsed = fetch_feed(feed_url, "news")
         return _parse_feed_items(parsed, "Financial Express", _match_keywords(symbol), max_items)
     except Exception as e:
         logger.warning("Financial Express fetch failed: %s", e)
@@ -401,7 +408,7 @@ def _fetch_reuters_india(symbol: str, max_items: int = 8) -> List[Dict[str, Any]
     q = quote(f"{name} site:reuters.com")
     feed_url = f"https://news.google.com/rss/search?q={q}&hl=en-IN&gl=IN&ceid=IN:en"
     try:
-        parsed = feedparser.parse(feed_url)
+        parsed = fetch_feed(feed_url, "news")
         return _parse_feed_items(parsed, "Reuters", _match_keywords(symbol), max_items)
     except Exception as e:
         logger.warning("Reuters proxy fetch failed: %s", e)
@@ -600,6 +607,9 @@ def health():
 @app.get("/analyze/{symbol}")
 def analyze(symbol: str, company_name: str | None = None, force: bool = False):
     # INTEGRATION: news_quality multi-source + better summary (fallback to legacy below)
+    # 2026-10-04 (item 9): without a company name the quality path only matched the bare ticker ("tcs"), so a
+    # headline saying "Tata Consultancy Services ..." was never found. Use the known display name when we have one.
+    company_name = company_name or NAME_HINTS.get(_base_symbol(symbol))
     if build_news_response is not None:
         try:
             payload = build_news_response(symbol, company_name=company_name, llm_summarizer=None)
@@ -619,6 +629,12 @@ def analyze(symbol: str, company_name: str | None = None, force: bool = False):
             "reasons": ["No recent relevant news found — treating as neutral"],
             "summary": summary,
             "headlines": [],
+            "data_quality": {
+                "level": "none",
+                "sources_used": [],
+                "hf_sentiment": bool(HF_API_KEY),
+                "note": "No headline matched from any source - score is a neutral placeholder, not a reading",
+            },
         }
 
     scored = [(_score_headline(h["title"]), h) for h in headlines]
@@ -667,5 +683,5 @@ def analyze(symbol: str, company_name: str | None = None, force: bool = False):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8005))
+    port = int(((os.getenv("PORT") or "").strip() or 8005))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)

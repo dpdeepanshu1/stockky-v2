@@ -40,7 +40,7 @@ from pydantic import BaseModel
 import httpx
 from circuit_breaker import get_breaker, all_snapshots
 import gc
-MAX_HISTORY_ROWS = int(os.environ.get('MAX_HISTORY_ROWS', '260'))  # ~1y daily, 512MB-safe
+MAX_HISTORY_ROWS = int(((os.environ.get("MAX_HISTORY_ROWS") or "").strip() or "260"))  # ~1y daily, 512MB-safe
 MAX_HISTORY_PERIOD = os.environ.get('MAX_HISTORY_PERIOD', '1y')
 
 def _report_rate_limit(status: int, path: str = "", detail: str = "", symbol: str = "") -> None:
@@ -178,9 +178,9 @@ def _compute_growth(current, previous):
 # Caps concurrent Yahoo calls across quote + history + fundamentals so a
 # parallel market scan does not stampede Yahoo and get empty responses.
 import threading
-_YFINANCE_MAX_CONCURRENT = int(os.getenv("YFINANCE_MAX_CONCURRENT", "1"))
+_YFINANCE_MAX_CONCURRENT = int(((os.getenv("YFINANCE_MAX_CONCURRENT") or "").strip() or "1"))
 _yf_semaphore = threading.Semaphore(_YFINANCE_MAX_CONCURRENT)
-_YF_MIN_INTERVAL = float(os.getenv("YFINANCE_MIN_INTERVAL_SEC", "0.35"))
+_YF_MIN_INTERVAL = float(((os.getenv("YFINANCE_MIN_INTERVAL_SEC") or "").strip() or "0.35"))
 _yf_last_call = 0.0
 _yf_lock = threading.Lock()
 
@@ -389,7 +389,7 @@ async def _raise_sync_thread_pool_capacity():
     try:
         import anyio.to_thread
         limiter = anyio.to_thread.current_default_thread_limiter()
-        new_capacity = int(os.getenv("SYNC_THREAD_POOL_CAPACITY", "150"))
+        new_capacity = int(((os.getenv("SYNC_THREAD_POOL_CAPACITY") or "").strip() or "150"))
         old_capacity = limiter.total_tokens
         limiter.total_tokens = new_capacity
         logger.info(
@@ -461,7 +461,7 @@ async def _start_yahoo_ws_feed():
 # live-feed cache. This periodically re-points both feeds at api-gateway's
 # live /scan/universe (movers/bulk-deals/52w/news/watchlist — the same set
 # candidate_engine trades from).
-UNIVERSE_REFRESH_INTERVAL_S = float(os.getenv("FEED_UNIVERSE_REFRESH_INTERVAL_S", "900"))
+UNIVERSE_REFRESH_INTERVAL_S = float(((os.getenv("FEED_UNIVERSE_REFRESH_INTERVAL_S") or "").strip() or "900"))
 
 _current_feed_universe: list = []
 
@@ -487,8 +487,8 @@ async def _refresh_feed_universe_loop():
     # First refresh now happens shortly after boot (giving api-gateway time to
     # come up), retries quickly until it succeeds once, then settles into the
     # normal cadence.
-    _initial_delay = float(os.getenv("FEED_UNIVERSE_INITIAL_DELAY_S", "20"))
-    _retry_delay = min(UNIVERSE_REFRESH_INTERVAL_S, float(os.getenv("FEED_UNIVERSE_RETRY_DELAY_S", "60")))
+    _initial_delay = float(((os.getenv("FEED_UNIVERSE_INITIAL_DELAY_S") or "").strip() or "20"))
+    _retry_delay = min(UNIVERSE_REFRESH_INTERVAL_S, float(((os.getenv("FEED_UNIVERSE_RETRY_DELAY_S") or "").strip() or "60")))
     delay = _initial_delay
     async with httpx.AsyncClient(timeout=15.0) as client:
         while True:
@@ -727,7 +727,7 @@ FALLBACK_TTL_SECONDS = 30 * 24 * 60 * 60
 
 # Global Yahoo/upstream cooldown after 429 (stops stampede + Redis write storm)
 _YF_COOLDOWN_UNTIL = 0.0
-_YF_COOLDOWN_SEC = float(os.getenv("YFINANCE_COOLDOWN_SEC", "180"))  # 3 min
+_YF_COOLDOWN_SEC = float(((os.getenv("YFINANCE_COOLDOWN_SEC") or "").strip() or "180"))  # 3 min
 _UPSTREAM_COOLDOWN = {}  # name -> until epoch
 
 def _in_cooldown(name: str = "yfinance") -> bool:
@@ -2610,7 +2610,7 @@ def _nse_history_candles(sym: str, period: str, interval: str, days: Optional[in
 # 1.5 req/s candle bucket and the 8-worker yfinance pool. Now only the first
 # request for a given key goes upstream; identical concurrent requests wait
 # (bounded) for it and are then served from the cache it just filled.
-_HISTORY_FLIGHT_WAIT_S = float(os.getenv("HISTORY_SINGLE_FLIGHT_WAIT_S", "20"))
+_HISTORY_FLIGHT_WAIT_S = float(((os.getenv("HISTORY_SINGLE_FLIGHT_WAIT_S") or "").strip() or "20"))
 _history_flights: dict = {}
 _history_flights_guard = threading.Lock()
 
@@ -3294,7 +3294,7 @@ def surprise_static_list(limit: int = 50):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8001))
+    port = int(((os.environ.get("PORT") or "").strip() or 8001))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
 
 

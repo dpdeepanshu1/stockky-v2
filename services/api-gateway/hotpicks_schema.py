@@ -147,8 +147,8 @@ _ORACLE_VARCHAR2_BYTES = {
 # TEXT insert on Postgres, so one code path is correct on both. The TO_CLOB()
 # wrapper in upsert_sql() then makes the select-list datatype explicit rather
 # than leaving it to implicit conversion.
-JSON_MAX_BYTES = int(os.getenv("HOTPICKS_JSON_MAX_BYTES", "30000"))
-SUMMARY_MAX_BYTES = int(os.getenv("HOTPICKS_SUMMARY_MAX_BYTES", "4000"))
+JSON_MAX_BYTES = int(((os.getenv("HOTPICKS_JSON_MAX_BYTES") or "").strip() or "30000"))
+SUMMARY_MAX_BYTES = int(((os.getenv("HOTPICKS_SUMMARY_MAX_BYTES") or "").strip() or "4000"))
 
 
 def _clip_utf8(value, max_bytes: int):

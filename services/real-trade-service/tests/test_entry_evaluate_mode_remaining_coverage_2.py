@@ -303,6 +303,36 @@ class TestRankingBonuses:
         assert tally["entered"] == 1
 
 
+class TestIntradayNewsNudge:
+    """2026-10-04: fresh market-hours news nudges Gate 6 ranking; shown on the PLACED event."""
+
+    def _run_with_bonus(self, db, monkeypatch, bonus):
+        from watchlist_engine import intraday_news
+        monkeypatch.setattr(intraday_news, "intraday_news_bonus", lambda db_, sym, now=None: bonus)
+        fake_regime(monkeypatch, ok=True)
+        make_candidate(db, decision_label="BUY NOW")
+        quotes(monkeypatch, {"TESTCO": tick(100.0)})
+        approve_all(monkeypatch)
+        tally = run(entry.evaluate_mode(db, "DEMO", gate_armed=True))
+        details = [e.detail or "" for e in db.query(models.TradeOrderEvent).all()]
+        return tally, details
+
+    def test_positive_news_is_noted_on_the_order(self, db, monkeypatch):
+        tally, details = self._run_with_bonus(db, monkeypatch, 5.0)
+        assert tally["entered"] == 1
+        assert any("[news +5.0]" in d for d in details)
+
+    def test_negative_news_is_noted_on_the_order(self, db, monkeypatch):
+        tally, details = self._run_with_bonus(db, monkeypatch, -4.0)
+        assert tally["entered"] == 1
+        assert any("[news -4.0]" in d for d in details)
+
+    def test_no_news_adds_no_note(self, db, monkeypatch):
+        tally, details = self._run_with_bonus(db, monkeypatch, 0.0)
+        assert tally["entered"] == 1
+        assert not any("[news" in d for d in details)
+
+
 # ── line 1129: shared Dhan order-budget exhausted ────────────────────────────
 
 class TestSharedOrderBudgetExhausted:

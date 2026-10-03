@@ -69,9 +69,9 @@ _DEFAULTS = {
 #     the full max_wait. Scans now stop drawing at the reserve line, so a quick
 #     lookup always finds tokens waiting for it.
 # ─────────────────────────────────────────────────────────────────────────────
-MAX_WAIT_DEFAULT = float(os.getenv("RL_MAX_WAIT_SEC", "5.0"))
-MIN_WAIT_FLOOR = float(os.getenv("RL_MIN_WAIT_SEC", "0.5"))
-INTERACTIVE_RESERVE_FRACTION = float(os.getenv("RL_INTERACTIVE_RESERVE", "0.34"))
+MAX_WAIT_DEFAULT = float(((os.getenv("RL_MAX_WAIT_SEC") or "").strip() or "5.0"))
+MIN_WAIT_FLOOR = float(((os.getenv("RL_MIN_WAIT_SEC") or "").strip() or "0.5"))
+INTERACTIVE_RESERVE_FRACTION = float(((os.getenv("RL_INTERACTIVE_RESERVE") or "").strip() or "0.34"))
 
 # Pipelines that run as bulk background jobs. Anything not listed here (a plain
 # symbol lookup, a chart request, a repair button) counts as interactive and may
@@ -447,8 +447,8 @@ def is_skippable(symbol) -> bool:
 RENAME_DISCOVERY = os.getenv("RL_RENAME_DISCOVERY", "1").strip().lower() not in (
     "0", "false", "no", "off",
 )
-DISCOVERY_AT_STREAK = int(os.getenv("RL_DISCOVERY_AT_STREAK", "2"))
-DISCOVERY_TIMEOUT = float(os.getenv("RL_DISCOVERY_TIMEOUT", "8"))
+DISCOVERY_AT_STREAK = int(((os.getenv("RL_DISCOVERY_AT_STREAK") or "").strip() or "2"))
+DISCOVERY_TIMEOUT = float(((os.getenv("RL_DISCOVERY_TIMEOUT") or "").strip() or "8"))
 SKIP_HIGH_PRICE = os.getenv("RL_SKIP_HIGH_PRICE", "0").strip().lower() in (
     "1", "true", "yes", "on",
 )
@@ -596,9 +596,9 @@ def _empty_frame():
 # had raised any other error.
 import concurrent.futures as _cf
 
-YFINANCE_HARD_TIMEOUT_SEC = float(os.getenv("YFINANCE_HARD_TIMEOUT_SEC", "18"))
+YFINANCE_HARD_TIMEOUT_SEC = float(((os.getenv("YFINANCE_HARD_TIMEOUT_SEC") or "").strip() or "18"))
 _yf_hardcap_pool = _cf.ThreadPoolExecutor(
-    max_workers=int(os.getenv("YFINANCE_POOL_WORKERS", "8")),
+    max_workers=int(((os.getenv("YFINANCE_POOL_WORKERS") or "").strip() or "8")),
     thread_name_prefix="yf-hardcap",
 )
 

@@ -59,7 +59,7 @@ MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.
 
 # §1 — max age for live_quotes rows before we consider them stale.
 # If the AngelOne row is older than this, fall through to the yfinance path.
-LIVE_QUOTE_MAX_AGE_S = float(os.getenv("LIVE_QUOTE_MAX_AGE_S", "5.0"))
+LIVE_QUOTE_MAX_AGE_S = float(((os.getenv("LIVE_QUOTE_MAX_AGE_S") or "").strip() or "5.0"))
 
 # §2 — Process-scoped ATR cache.
 #
@@ -108,9 +108,9 @@ _ATR_HISTORY_PERIOD = os.getenv("FEED_ATR_HISTORY_PERIOD", "1mo")  # 14+ daily c
 # was also busy warming up after a redeploy). Cap in-flight lookups per batch
 # and bound the batch's wall-clock so a slow upstream degrades to "partial
 # results, on time" instead of a stalled cycle.
-FEED_QUOTE_CONCURRENCY = max(1, int(os.getenv("FEED_QUOTE_CONCURRENCY", "32")))
-FEED_BATCH_DEADLINE_S = float(os.getenv("FEED_BATCH_DEADLINE_S", "45"))
-FEED_HTTP_MAX_CONNECTIONS = max(8, int(os.getenv("FEED_HTTP_MAX_CONNECTIONS", "64")))
+FEED_QUOTE_CONCURRENCY = max(1, int(((os.getenv("FEED_QUOTE_CONCURRENCY") or "").strip() or "32")))
+FEED_BATCH_DEADLINE_S = float(((os.getenv("FEED_BATCH_DEADLINE_S") or "").strip() or "45"))
+FEED_HTTP_MAX_CONNECTIONS = max(8, int(((os.getenv("FEED_HTTP_MAX_CONNECTIONS") or "").strip() or "64")))
 
 # ATR background refresh policy. Before: Source 2 fired a /history fetch on
 # EVERY call for EVERY symbol (even with a warm ATR — the ATR cache has no
@@ -119,9 +119,9 @@ FEED_HTTP_MAX_CONNECTIONS = max(8, int(os.getenv("FEED_HTTP_MAX_CONNECTIONS", "6
 # endpoint that is the 403 storm. Now: only when the ATR is missing or older
 # than the TTL, never twice concurrently for one symbol, at most N in flight
 # process-wide, and a failed attempt backs off instead of retrying next cycle.
-_ATR_REFRESH_TTL_S = float(os.getenv("FEED_ATR_REFRESH_TTL_S", str(6 * 3600)))
-_ATR_RETRY_BACKOFF_S = float(os.getenv("FEED_ATR_RETRY_BACKOFF_S", "300"))
-_ATR_MAX_INFLIGHT = max(1, int(os.getenv("FEED_ATR_MAX_INFLIGHT", "8")))
+_ATR_REFRESH_TTL_S = float(((os.getenv("FEED_ATR_REFRESH_TTL_S") or "").strip() or str(6 * 3600)))
+_ATR_RETRY_BACKOFF_S = float(((os.getenv("FEED_ATR_RETRY_BACKOFF_S") or "").strip() or "300"))
+_ATR_MAX_INFLIGHT = max(1, int(((os.getenv("FEED_ATR_MAX_INFLIGHT") or "").strip() or "8")))
 _ATR_INFLIGHT_MAX_AGE_S = 30.0   # a slot older than this is presumed leaked (e.g. its loop was torn down)
 _ATR_STATE_LOCK = _threading.Lock()          # plain threading lock: state is touched from >1 event loop/thread
 _ATR_INFLIGHT: dict[str, float] = {}         # clean symbol -> monotonic start

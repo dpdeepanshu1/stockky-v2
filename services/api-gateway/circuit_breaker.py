@@ -20,9 +20,9 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger("circuit-breaker")
 
-DEFAULT_FAILURE_THRESHOLD = int(os.getenv("CB_FAILURE_THRESHOLD", "12"))
-DEFAULT_RECOVERY_TIMEOUT = float(os.getenv("CB_RECOVERY_TIMEOUT", "30"))  # faster half-open after cold start
-DEFAULT_HALF_OPEN_SUCCESS = int(os.getenv("CB_HALF_OPEN_SUCCESS", "2"))
+DEFAULT_FAILURE_THRESHOLD = int(((os.getenv("CB_FAILURE_THRESHOLD") or "").strip() or "12"))
+DEFAULT_RECOVERY_TIMEOUT = float(((os.getenv("CB_RECOVERY_TIMEOUT") or "").strip() or "30"))  # faster half-open after cold start
+DEFAULT_HALF_OPEN_SUCCESS = int(((os.getenv("CB_HALF_OPEN_SUCCESS") or "").strip() or "2"))
 
 _redis = None
 _redis_init = False
@@ -100,7 +100,7 @@ class CircuitBreaker:
         if os.getenv("CB_REDIS_SYNC", "0").lower() not in ("1", "true", "yes"):
             return
         now = time.time()
-        min_iv = float(os.getenv("CB_REDIS_MIN_INTERVAL", "15"))
+        min_iv = float(((os.getenv("CB_REDIS_MIN_INTERVAL") or "").strip() or "15"))
         if (now - getattr(self, "_last_load_at", 0.0)) < min_iv:
             return
         self._last_load_at = now
@@ -140,7 +140,7 @@ class CircuitBreaker:
         if os.getenv("CB_REDIS_SYNC", "0").lower() not in ("1", "true", "yes"):
             return
         now = time.time()
-        min_iv = float(os.getenv("CB_REDIS_MIN_INTERVAL", "15"))
+        min_iv = float(((os.getenv("CB_REDIS_MIN_INTERVAL") or "").strip() or "15"))
         last = getattr(self, "_last_persist_at", 0.0)
         sig = (self._state, self._failures)
         if sig == getattr(self, "_last_persist_sig", None) and (now - last) < min_iv:

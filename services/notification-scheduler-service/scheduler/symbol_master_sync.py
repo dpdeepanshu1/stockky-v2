@@ -184,7 +184,7 @@ def run_sync() -> dict:
     # skip delisting rather than risk mass-marking active symbols delisted
     # off an incomplete list. Upserts above are unaffected either way; they
     # only ever add/refresh rows, never remove.
-    MIN_PLAUSIBLE_UNIVERSE = int(os.getenv("SYMBOL_MASTER_MIN_UNIVERSE", "1000"))
+    MIN_PLAUSIBLE_UNIVERSE = int(((os.getenv("SYMBOL_MASTER_MIN_UNIVERSE") or "").strip() or "1000"))
     delisting_safe = len(all_syms) >= MIN_PLAUSIBLE_UNIVERSE
     if all_syms and not delisting_safe:
         logger.warning(

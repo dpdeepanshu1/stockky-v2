@@ -65,7 +65,7 @@ REGIME_CONSTANTS = {
     "CANDIDATE_MIN_BULLISH_TF":       ("4",     "2026-08-28", 2, 5),
 }
 
-STALE_DAYS      = int(os.getenv("GOVERNANCE_STALE_DAYS", "30"))
+STALE_DAYS      = int(((os.getenv("GOVERNANCE_STALE_DAYS") or "").strip() or "30"))
 MIN_SECTOR_SAMPLE = 8
 THIN_SECTOR_SESSIONS = 5  # alert after this many consecutive thin sessions
 

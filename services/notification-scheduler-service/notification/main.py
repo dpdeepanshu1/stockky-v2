@@ -456,6 +456,37 @@ def _send_slack(cfg: dict, title: str, message: str):
         return f"failed: {_redact_secrets(e)}"
 
 
+# Telegram hard limit is 4096 chars per message. Keep a margin for the title /
+# "(i/N)" label and HTML tags added around each part.
+_TELEGRAM_PART_CHARS = 3800
+
+
+def _split_for_telegram(message: str, limit: int = _TELEGRAM_PART_CHARS) -> list:
+    """Split `message` into parts of at most `limit` chars, breaking on line
+    boundaries (a single over-long line is hard-split). Always returns >= 1 part;
+    a message that already fits is returned unchanged as one part."""
+    message = message or ""
+    if len(message) <= limit:
+        return [message]
+    parts, cur = [], ""
+    for line in message.split("\n"):
+        while len(line) > limit:
+            if cur:
+                parts.append(cur)
+                cur = ""
+            parts.append(line[:limit])
+            line = line[limit:]
+        add = line if not cur else cur + "\n" + line
+        if len(add) > limit:
+            parts.append(cur)
+            cur = line
+        else:
+            cur = add
+    if cur:
+        parts.append(cur)
+    return parts or [""]
+
+
 def _send_telegram(cfg: dict, title: str, message: str):
     token = _cfg_text(cfg, "telegram_bot_token")
     chat_id = _cfg_text(cfg, "telegram_chat_id")
@@ -477,37 +508,49 @@ def _send_telegram(cfg: dict, title: str, message: str):
     # rest of `message` as plain text (trade messages from notifier.py use
     # *bold* Markdown — strip those asterisks so they don't appear literally).
     import re as _re
-    html_title = f"<b>{title}</b>"
-    html_message = _re.sub(r'\*([^*]+)\*', r'<b>\1</b>', message)
-    payload = {
-        "chat_id": chat_id,
-        "text": f"{html_title}\n\n{html_message}",
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-    try:
-        resp = httpx.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            logger.info("Telegram notification sent successfully")
-            return "sent"
-        else:
+
+    # LONG-MESSAGE FIX (2026-10-04): Telegram rejects any sendMessage text over
+    # 4096 chars (HTTP 400 "message is too long"), and the plain-text retry has the
+    # same limit, so a long scan/summary alert was lost. Split on LINE boundaries
+    # into parts of at most _TELEGRAM_PART_CHARS and send them in order, labelled
+    # (1/N). Short messages are one part, sent exactly as before.
+    parts = _split_for_telegram(message, _TELEGRAM_PART_CHARS)
+    total = len(parts)
+    for idx, part in enumerate(parts, 1):
+        label = f"{title} ({idx}/{total})" if total > 1 else title
+        html_message = _re.sub(r'\*([^*]+)\*', r'<b>\1</b>', part)
+        payload = {
+            "chat_id": chat_id,
+            "text": f"<b>{label}</b>\n\n{html_message}",
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        try:
+            resp = httpx.post(url, json=payload, timeout=10)
+            if resp.status_code == 200:
+                continue
             logger.error(f"Telegram API error: {resp.status_code} - {resp.text[:200]}")
             # Second attempt: plain text (no parse_mode) as last resort
             try:
                 plain_payload = {
                     "chat_id": chat_id,
-                    "text": f"{title}\n\n{message}",
+                    "text": f"{label}\n\n{part}",
                 }
                 resp2 = httpx.post(url, json=plain_payload, timeout=10)
                 if resp2.status_code == 200:
-                    logger.info("Telegram sent (plain-text fallback)")
-                    return "sent (plain-text fallback)"
+                    logger.info("Telegram part %d/%d sent (plain-text fallback)", idx, total)
+                    continue
             except Exception:
                 pass
-            return f"failed: HTTP {resp.status_code}"
-    except httpx.HTTPError as e:
-        logger.error("Telegram notification failed: %s", _redact_secrets(e))
-        return f"failed: {_redact_secrets(e)}"
+            return f"failed: HTTP {resp.status_code}" + (f" (part {idx}/{total})" if total > 1 else "")
+        except httpx.HTTPError as e:
+            logger.error("Telegram notification failed: %s", _redact_secrets(e))
+            return f"failed: {_redact_secrets(e)}"
+    if total > 1:
+        logger.info("Telegram notification sent in %d parts", total)
+        return "sent"
+    logger.info("Telegram notification sent successfully")
+    return "sent"
 
 
 def _callmebot_recipients(cfg: dict):
@@ -884,7 +927,7 @@ def test_notifications():
 
 
 # ── Neon keep-alive (every ~4 minutes) — prevents free-tier auto-suspend ──
-_NEON_KEEPALIVE_SEC = int(os.getenv("NEON_KEEPALIVE_INTERVAL_SEC", "240"))
+_NEON_KEEPALIVE_SEC = int(((os.getenv("NEON_KEEPALIVE_INTERVAL_SEC") or "").strip() or "240"))
 _neon_keepalive_task = None
 
 
@@ -965,7 +1008,7 @@ async def _start_neon_keepalive_loop():
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8008))
+    port = int(((os.getenv("PORT") or "").strip() or 8008))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
 
 # ── CallMeBot free Telegram voice call ─────────────────────────────────────

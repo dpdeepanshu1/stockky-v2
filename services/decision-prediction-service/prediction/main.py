@@ -543,4 +543,4 @@ def predict(symbol: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8007)), reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=int(((os.getenv("PORT") or "").strip() or 8007)), reload=True)

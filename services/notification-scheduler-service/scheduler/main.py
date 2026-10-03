@@ -18,7 +18,7 @@ logger = logging.getLogger("scheduler")
 
 app = FastAPI(title="Stockky Scheduler (merged)", version="0.1.0")
 
-_NEON_INTERVAL = int(os.getenv("NEON_KEEPALIVE_INTERVAL_SEC", "240"))
+_NEON_INTERVAL = int(((os.getenv("NEON_KEEPALIVE_INTERVAL_SEC") or "").strip() or "240"))
 _task: Optional[asyncio.Task] = None
 
 

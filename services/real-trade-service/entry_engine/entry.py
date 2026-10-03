@@ -59,15 +59,15 @@ FLAT_STOP_PCT   = 3.2
 FLAT_TARGET_PCT = 6.5
 
 # ── Entry quality gates (env-overridable, adaptive layer applies on top) ──────
-MIN_REWARD_RISK_RATIO = float(os.getenv("ENTRY_MIN_REWARD_RISK", "2.0"))
-MAX_ENTRY_DRIFT_ATR   = float(os.getenv("ENTRY_MAX_DRIFT_ATR", "0.75"))
+MIN_REWARD_RISK_RATIO = float(((os.getenv("ENTRY_MIN_REWARD_RISK") or "").strip() or "2.0"))
+MAX_ENTRY_DRIFT_ATR   = float(((os.getenv("ENTRY_MAX_DRIFT_ATR") or "").strip() or "0.75"))
 
 # Static fallback for regime gate — adaptive layer overrides this at runtime.
-REGIME_MIN_SCORE_STATIC = int(os.getenv("ENTRY_REGIME_MIN_SCORE", "38"))
+REGIME_MIN_SCORE_STATIC = int(((os.getenv("ENTRY_REGIME_MIN_SCORE") or "").strip() or "38"))
 
 # Conviction sizing
-CONVICTION_MIDPOINT  = float(os.getenv("ENTRY_CONVICTION_MIDPOINT", "65.0"))
-CONVICTION_MAX_SCALE = float(os.getenv("ENTRY_CONVICTION_MAX_SCALE", "0.25"))
+CONVICTION_MIDPOINT  = float(((os.getenv("ENTRY_CONVICTION_MIDPOINT") or "").strip() or "65.0"))
+CONVICTION_MAX_SCALE = float(((os.getenv("ENTRY_CONVICTION_MAX_SCALE") or "").strip() or "0.25"))
 
 # BUG FIX (31-Aug-2026): this set used to be {"BUY NOW", "PREPARE TO BUY"}
 # only — a straight copy-paste of candidate_engine/candidates.py's own
@@ -893,6 +893,17 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         us_sector_bonus = float(getattr(cand, "us_sector_bonus", 0.0) or 0.0)
         if us_sector_bonus:
             raw_composite_score = max(0.0, min(100.0, raw_composite_score + us_sector_bonus))
+        # 2026-10-04 (user request): small CAPPED nudge from fresh market-hours news on this symbol
+        # (watchlist_engine/intraday_news.py - +bonus for fresh positive news, -penalty for fresh
+        # negative news such as a probe/downgrade). 0.0 when there is none / it expired / the
+        # feature is off. Ranking nudge only, never a gate; every gate above still applied.
+        try:
+            from watchlist_engine.intraday_news import intraday_news_bonus
+            news_bonus = float(intraday_news_bonus(db, cand.symbol) or 0.0)
+        except Exception:
+            news_bonus = 0.0
+        if news_bonus:
+            raw_composite_score = max(0.0, min(100.0, raw_composite_score + news_bonus))
         is_upper_circuit = (cand.decision_label or "").upper() == "VOLUME_SHOCK_UPPER_CIRCUIT"
         # BUG FIX (2026-09-10): comment at Gate 6 said "UC scores now 85
         # so they sort first" but _composite_quality_score() was never told
@@ -922,6 +933,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             "is_upper_circuit": is_upper_circuit,
             "is_overnight_priority": is_overnight_priority,
             "us_sector_bonus": us_sector_bonus,
+            "intraday_news_bonus": news_bonus,
         })
 
         # BUG FIX (2026-09-10, session21c audit): reserved_cash exists to make
@@ -1087,6 +1099,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         _op_note = f" [overnight-priority +{config.ENTRY_OVERNIGHT_PRIORITY_BONUS:.0f}]" if e.get("is_overnight_priority") else ""
         _sb = e.get("us_sector_bonus", 0.0)
         _sb_note = f" [US-sector {'+' if _sb >= 0 else ''}{_sb:.1f}]" if _sb else ""
+        _nb = e.get("intraday_news_bonus", 0.0)
+        _sb_note += f" [news {'+' if _nb >= 0 else ''}{_nb:.1f}]" if _nb else ""
         db.add(models.TradeOrderEvent(
             order_id=order.id, event_type="PLACED",
             detail=(

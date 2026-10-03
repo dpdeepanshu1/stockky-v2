@@ -1535,6 +1535,8 @@ class TestAfterhoursScanBody:
         db.add(models.TradeGateState(mode="REAL", afterhours_news_scan_enabled=True))
         db.commit()
         monkeypatch.setattr(ap, "_is_afterhours_window_active", lambda: False)
+        # pin the clock to midday: a real 08:45-09:00 clock now lets the finalize tick through
+        monkeypatch.setattr("tz_utils.ist_now", lambda now=None: datetime(2026, 9, 23, 12, 0))
         result = run(ap._afterhours_scan_body("REAL"))
         assert result["reason"] == "outside_window"
 

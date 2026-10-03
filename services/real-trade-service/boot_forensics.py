@@ -35,8 +35,8 @@ import uuid
 logger = logging.getLogger("boot-forensics")
 
 _STATE_PATH = os.getenv("BOOT_FORENSICS_PATH", "/tmp/stockky_boot_state.json")
-_HEARTBEAT_S = float(os.getenv("BOOT_FORENSICS_HEARTBEAT_S", "15"))
-_MEM_WARN_PCT = float(os.getenv("BOOT_FORENSICS_MEM_WARN_PCT", "85"))
+_HEARTBEAT_S = float(((os.getenv("BOOT_FORENSICS_HEARTBEAT_S") or "").strip() or "15"))
+_MEM_WARN_PCT = float(((os.getenv("BOOT_FORENSICS_MEM_WARN_PCT") or "").strip() or "85"))
 
 _state: dict = {}
 _lock = threading.Lock()

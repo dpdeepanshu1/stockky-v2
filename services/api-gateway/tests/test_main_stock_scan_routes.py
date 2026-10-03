@@ -292,11 +292,13 @@ class TestStockHappyPath:
         stock("TCS")
         assert env.client.calls[1][2]["params"]["already_owned"] == "false"
 
-    def test_handler_builds_its_own_client_with_a_20s_timeout(self, env):
+    def test_handler_builds_its_own_client_with_the_configured_decide_timeout(self, env):
+        # FIXED (group 81): was a hard 20 s read timeout, which the first analysis after a boot
+        # (cold caches) overran. Now STOCK_DECIDE_TIMEOUT_SEC (default 60 s).
         env.decide("TCS")
         stock("TCS")
         t = env.client_timeouts[0]
-        assert t.read == 20.0 and t.connect == 5.0
+        assert t.read == gw.STOCK_DECIDE_TIMEOUT_SEC == 60.0 and t.connect == 5.0
 
     def test_symbol_is_stripped_and_recorded_as_searched(self, env):
         env.decide("TCS")
@@ -604,17 +606,18 @@ class TestStockEnrichment:
         stock("TCS")
         assert any("enrich" in m for m in logs["debug"])
 
-    def test_an_exception_escaping_a_gather_slot_is_recorded_as_none(self, env, logs, monkeypatch):
-        # Defensive branch: `_get` swallows Exception itself, so this slot only fills if a task
-        # dies another way. Forced by wrapping gather.
+    def test_an_exception_escaping_an_enrichment_task_is_recorded_as_none(self, env, logs):
+        # Defensive branch: `_get` swallows Exception itself, so a task only ends with an exception
+        # if it dies another way (a BaseException that is not CancelledError).
         self._bare(env, news_score=None)
-        real = asyncio.gather
 
-        async def fake_gather(*aws, return_exceptions=False):
-            res = await real(*aws, return_exceptions=True)
-            return [RuntimeError("boom") for _ in res]
+        class Boom(BaseException):
+            pass
 
-        monkeypatch.setattr(gw.asyncio, "gather", fake_gather)
+        def _die(url, kw):
+            raise Boom("boom")
+
+        env.client.routes[N("TCS")] = _die
         out = stock("TCS")
         assert out["enrichment"]["fetched"] == []
         assert any("enrich task" in m and "boom" in m for m in logs["debug"])
@@ -736,7 +739,7 @@ class TestStockUpstreamFailures:
         # same key set on every degraded path (one shared builder)
         assert set(out) == set(gw._degraded_hold("X", "e", "s", "f", "n"))
 
-    @pytest.mark.parametrize("exc", [httpx.ConnectError("refused"), httpx.ReadTimeout("slow")])
+    @pytest.mark.parametrize("exc", [httpx.ConnectError("refused")])
     def test_unreachable_decision_service_degrades_to_hold(self, env, exc, logs):
         env.client.routes[D("TCS")] = exc
         out = stock("TCS")
@@ -1524,3 +1527,163 @@ class TestLiteEvaluate:
         assert out == {"symbol": "TCS", "decision": "HOLD", "combined_score": 50,
                        "technical_score": 50, "fundamental_score": 50, "price": 33.0,
                        "lite_fastpath": True}
+
+
+# ── group 81: decide timeout, one retry, overall deadline ───────────────────────────────────
+
+class _ClockShim:
+    """Stand-in for the `time` module as seen by main.py ONLY (patching time.monotonic globally would
+    also freeze asyncio's event loop). Delegates everything else to the real module."""
+
+    def __init__(self, fn):
+        import time as _real
+        self._real = _real
+        self.monotonic = fn
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class TestStockTimeBudget:
+    def _decide_calls(self, env):
+        return [(u, kw) for _, u, kw in env.client.calls if u.startswith(D("TCS"))]
+
+    def test_defaults(self):
+        assert gw.STOCK_DECIDE_TIMEOUT_SEC == 60.0
+        assert gw.STOCK_OVERALL_DEADLINE_SEC == 100.0      # under the browser's 120 s request timeout
+        assert gw.STOCK_DECIDE_RETRY_MIN_SEC == 15.0
+
+    @pytest.mark.parametrize("raw,want", [
+        (None, 7.0), ("", 7.0), ("  ", 7.0), ("abc", 7.0), ("nan", 7.0), ("inf", 7.0),
+        ("-5", 7.0), ("0", 7.0), ("1", 7.0),                 # below the allowed floor (5)
+        ("500", 7.0),                                          # above the allowed ceiling (170)
+        ("45", 45.0), (" 45.5 ", 45.5), ("5", 5.0), ("170", 170.0),
+    ])
+    def test_budget_env_parsing_is_blank_and_garbage_safe(self, monkeypatch, raw, want):
+        if raw is None:
+            monkeypatch.delenv("X_BUDGET", raising=False)
+        else:
+            monkeypatch.setenv("X_BUDGET", raw)
+        assert gw._stock_budget_sec("X_BUDGET", 7.0, 5.0, 170.0) == want
+
+    def test_a_slow_first_decide_is_retried_once_without_force(self, env):
+        seen = []
+
+        def _decide(url, kw):
+            seen.append(kw["params"]["force"])
+            if len(seen) == 1:
+                return httpx.ReadTimeout("cold caches")
+            return FakeResp(200, _full_decide())
+
+        env.client.routes[D("TCS")] = _decide
+        out = stock("TCS")
+        assert out["decision"] == "BUY" and "error" not in out
+        assert seen == ["true", "false"]
+
+    def test_decide_call_timeout_is_bounded_by_the_remaining_budget(self, env, monkeypatch):
+        monkeypatch.setattr(gw, "STOCK_DECIDE_TIMEOUT_SEC", 60.0)
+        monkeypatch.setattr(gw, "STOCK_OVERALL_DEADLINE_SEC", 30.0)
+        env.decide("TCS")
+        stock("TCS")
+        (url, kw), = self._decide_calls(env)
+        assert kw["timeout"].read <= 30.0 and kw["timeout"].connect == 5.0
+
+    def test_no_retry_when_too_little_budget_is_left(self, env, monkeypatch):
+        monkeypatch.setattr(gw, "STOCK_DECIDE_RETRY_MIN_SEC", 500.0)     # never enough
+        env.client.routes[D("TCS")] = httpx.ReadTimeout("slow")
+        out = stock("TCS")
+        assert len(self._decide_calls(env)) == 1
+        assert out["decision"] == "HOLD"
+
+    def test_only_a_read_timeout_is_retried(self, env):
+        env.client.routes[D("TCS")] = httpx.ConnectError("refused")
+        stock("TCS")
+        assert len(self._decide_calls(env)) == 1
+
+    def test_still_slow_after_the_retry_gives_an_honest_timeout_hold(self, env, logs):
+        env.client.routes[D("TCS")] = httpx.ReadTimeout("slow")
+        out = stock("TCS")
+        assert len(self._decide_calls(env)) == 2
+        assert out["decision"] == "HOLD" and out["data_insufficient"] is True
+        assert out["error"].startswith("decision engine timed out after ") and "ReadTimeout" in out["error"]
+        assert "taking longer than usual" in out["natural_language_summary"]
+        assert "unreachable" not in out["natural_language_summary"]
+        assert out["data_quality"]["flags"] == ["Decision engine slow"]
+        assert any("timed out for TCS" in m for m in logs["warning"])
+        assert any("retrying once without force" in m for m in logs["warning"])
+
+    def test_enrichment_calls_never_outlive_the_overall_deadline(self, env, monkeypatch):
+        monkeypatch.setattr(gw, "STOCK_OVERALL_DEADLINE_SEC", 20.0)
+        env.passthrough()
+        env.decide("TCS", {"decision": "BUY", "combined_score": 60, "close": 100.0,
+                           "technical_score": None, "fundamental_score": None, "news_score": None,
+                           "prediction_score": None, "reasons": {}})
+        for u in (T("TCS"), F("TCS"), N("TCS"), E("TCS"), P("TCS")):
+            env.client.routes[u] = FakeResp(200, {})
+        stock("TCS")
+        timeouts = [kw["timeout"] for _, u, kw in env.client.calls if not u.startswith(D("TCS"))]
+        assert timeouts and all(t <= 20.0 for t in timeouts)        # 60 / 45 / 30 clamped to the budget
+
+    def test_slow_enrichment_is_dropped_at_the_deadline_and_finished_ones_are_kept(self, env, monkeypatch, logs):
+        import time as real_time
+        monkeypatch.setattr(gw, "STOCK_OVERALL_DEADLINE_SEC", 10.0)
+        env.passthrough()
+        # decide lacks news and events -> both are enriched concurrently
+        env.decide("TCS", {"decision": "BUY", "combined_score": 60, "close": 100.0,
+                           "technical_score": 61, "fundamental_score": 62, "news_score": None,
+                           "prediction_score": 63, "fundamental_metrics": {"pe": 1},
+                           "reasons": {"technical": ["ok"], "fundamental": ["ok"]}})
+        env.client.routes[E("TCS")] = FakeResp(200, {"next_earnings_date": "2026-11-01"})
+        base = real_time.monotonic()
+        clock = {"t": 0.0}
+        monkeypatch.setattr(gw, "time", _ClockShim(lambda: base + clock["t"]))
+        scripted_get = env.client.get
+
+        async def _get(url, **kw):
+            if url.startswith(N("TCS")):
+                clock["t"] = 11.0           # the deadline passes while the news call is still pending
+                await asyncio.sleep(30)
+            return await scripted_get(url, **kw)
+
+        env.client.get = _get
+        out = asyncio.run(asyncio.wait_for(gw.get_stock_decision("TCS"), timeout=20))
+        assert out["news_score"] is None
+        assert "news" not in out["enrichment"]["fetched"]
+        assert "events" in out["enrichment"]["fetched"]               # the finished call is kept
+        assert any("deadline hit" in m and "news" in m for m in logs["warning"])
+
+    def test_gemini_is_skipped_when_the_budget_is_spent(self, env, monkeypatch):
+        import time as real_time
+        monkeypatch.setattr(gw, "STOCK_OVERALL_DEADLINE_SEC", 10.0)
+        env.decide("TCS")
+        calls = []
+
+        async def _ai(result, client):
+            calls.append(1)
+            return "AI-SUMMARY"
+
+        monkeypatch.setattr(gw, "_generate_ai_summary", _ai)
+        base = real_time.monotonic()
+        clock = {"t": 0.0}
+        monkeypatch.setattr(gw, "time", _ClockShim(lambda: base + clock["t"]))
+        scripted_get = env.client.get
+
+        async def _get(url, **kw):
+            clock["t"] = 9.0                # decide returns 9 s into a 10 s budget -> 1 s left (< 3 s reserve)
+            return await scripted_get(url, **kw)
+
+        env.client.get = _get
+        out = stock("TCS")
+        assert calls == [] and out["natural_language_summary"] == "TEMPLATE-SUMMARY"
+
+    def test_a_hung_gemini_call_is_cut_off_by_the_budget(self, env, monkeypatch):
+        monkeypatch.setattr(gw, "STOCK_OVERALL_DEADLINE_SEC", 3.5)
+        env.decide("TCS")
+
+        async def _ai(result, client):
+            await asyncio.sleep(60)
+            return "AI-SUMMARY"
+
+        monkeypatch.setattr(gw, "_generate_ai_summary", _ai)
+        out = stock("TCS")
+        assert out["natural_language_summary"] == "TEMPLATE-SUMMARY"

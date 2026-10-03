@@ -433,7 +433,12 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
             "afterhours_news_scan": {
                 "enabled": bool(getattr(gate, "afterhours_news_scan_enabled", False)),
                 "window_ist": f"{config.AFTERHOURS_SCAN_START_IST}–{config.AFTERHOURS_SCAN_END_IST}",
-                "interval_seconds": config.AFTERHOURS_SCAN_INTERVAL_SECONDS,
+                "interval_seconds": config.AFTERHOURS_SCAN_OFFHOURS_INTERVAL_SECONDS,  # legacy key = off-hours cadence
+                "offhours_interval_seconds": config.AFTERHOURS_SCAN_OFFHOURS_INTERVAL_SECONDS,
+                "ramp_window_ist": f"{config.AFTERHOURS_SCAN_RAMP_START_IST}–{config.AFTERHOURS_SCAN_RAMP_END_IST}",
+                "ramp_interval_seconds": config.AFTERHOURS_SCAN_RAMP_INTERVAL_SECONDS,
+                "intraday_news_window_ist": f"{config.INTRADAY_NEWS_START_IST}–{config.INTRADAY_NEWS_END_IST}",
+                "intraday_news_interval_seconds": config.INTRADAY_NEWS_INTERVAL_SECONDS,
                 "finalize_time_ist": config.AFTERHOURS_FINALIZE_TIME_IST,
                 "max_candidates": config.AFTERHOURS_SCAN_MAX_NEXTDAY_CANDIDATES,
                 # 2026-09-17 (session58, user request): manual-trigger

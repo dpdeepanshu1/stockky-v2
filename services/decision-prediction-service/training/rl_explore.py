@@ -60,7 +60,7 @@ class EpsilonGreedyBandit:
     """
 
     def __init__(self, epsilon: float = 0.08):
-        self.epsilon = float(os.getenv("RL_EPSILON", str(epsilon)))
+        self.epsilon = float(((os.getenv("RL_EPSILON") or "").strip() or str(epsilon)))
         self._n: Dict[str, Dict[str, int]] = {}
         self._q: Dict[str, Dict[str, float]] = {}
 

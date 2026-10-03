@@ -35,7 +35,7 @@ DATA_FEED_META_KEY = "stockky:data_feed:meta"
 DATA_FEED_JOB_KEY = "stockky:data_feed:job"
 DATA_FEED_INDEX_KEY = "stockky:data_feed:index"  # list of symbols currently in feed
 # Default 24h — long enough for full trading day + overnight; midnight scheduler refreshes
-DATA_FEED_TTL = int(os.getenv("DATA_FEED_TTL_SECONDS", str(24 * 3600)))
+DATA_FEED_TTL = int(((os.getenv("DATA_FEED_TTL_SECONDS") or "").strip() or str(24 * 3600)))
 
 # Process-local hot cache (speed). Durable source of truth is Neon via _get/_set.
 _LOCAL_SYMBOLS: Dict[str, dict] = {}
@@ -1563,7 +1563,7 @@ def download_nse_bhavcopy_bulk(force: bool = False) -> Dict[str, dict]:
     # data-feed's PHASE 0 — a thread pool call can't be cancelled once
     # started, so it must check the flag itself). Cap total time here and
     # bail out to the Yahoo-bulk fallback instead.
-    _deadline = _time.time() + float(os.getenv("BHAV_BULK_MAX_SEC", "45"))
+    _deadline = _time.time() + float(((os.getenv("BHAV_BULK_MAX_SEC") or "").strip() or "45"))
     try:
         with _httpx.Client(timeout=15, headers=_NSE_BHAV_HEADERS, follow_redirects=True) as client:
             try:

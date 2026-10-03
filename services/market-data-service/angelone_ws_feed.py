@@ -45,10 +45,10 @@ IDLE_RECHECK_S = 60.0
 # How often a full poll cycle restarts once it finishes the whole universe.
 # The file itself only updates once/day, but this governs freshness of
 # live_quotes during market hours.
-POLL_INTERVAL_S = float(os.getenv("ANGELONE_POLL_INTERVAL_S", "3.0"))
+POLL_INTERVAL_S = float(((os.getenv("ANGELONE_POLL_INTERVAL_S") or "").strip() or "3.0"))
 # Small pause between successive batches within one cycle, so a large
 # universe doesn't fire every batch back-to-back with zero spacing.
-BATCH_GAP_S = float(os.getenv("ANGELONE_BATCH_GAP_S", "0.35"))
+BATCH_GAP_S = float(((os.getenv("ANGELONE_BATCH_GAP_S") or "").strip() or "0.35"))
 BATCH_SIZE = 50  # AngelOne's documented per-request token cap for this endpoint
 
 # In-memory dict — same pattern as yahoo_ws_feed.py

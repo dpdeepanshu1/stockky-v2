@@ -297,9 +297,9 @@ _yf_patch_lock = threading.Lock()
 # instead of hanging indefinitely.
 import concurrent.futures as _cf
 
-YFINANCE_HARD_TIMEOUT_SEC = float(os.getenv("YFINANCE_HARD_TIMEOUT_SEC", "18"))
+YFINANCE_HARD_TIMEOUT_SEC = float(((os.getenv("YFINANCE_HARD_TIMEOUT_SEC") or "").strip() or "18"))
 _yf_hardcap_pool = _cf.ThreadPoolExecutor(
-    max_workers=int(os.getenv("YFINANCE_POOL_WORKERS", "8")),
+    max_workers=int(((os.getenv("YFINANCE_POOL_WORKERS") or "").strip() or "8")),
     thread_name_prefix="yf-hardcap",
 )
 

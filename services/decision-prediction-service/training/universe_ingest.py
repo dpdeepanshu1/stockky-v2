@@ -28,7 +28,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 logger = logging.getLogger("universe_ingest")
 
 IST = ZoneInfo("Asia/Kolkata")
-RETENTION_HOURS = int(os.getenv("TRAINING_SAMPLE_RETENTION_HOURS", "48"))  # 24–48h
+RETENTION_HOURS = int(((os.getenv("TRAINING_SAMPLE_RETENTION_HOURS") or "").strip() or "48"))  # 24–48h
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip() or (os.getenv("TRAINING_DATABASE_URL") or "").strip() or "sqlite:///./training.db"
 
 Base = declarative_base()

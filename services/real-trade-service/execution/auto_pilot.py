@@ -119,6 +119,7 @@ _exit_task: Optional[asyncio.Task] = None
 _schedule_task: Optional[asyncio.Task] = None
 _totp_task: Optional[asyncio.Task] = None
 _afterhours_task: Optional[asyncio.Task] = None
+_intraday_news_task: Optional[asyncio.Task] = None
 _STARTUP_DELAY_SECONDS = 20
 
 # Per-mode locks — prevent concurrent cycles (manual + auto-pilot race).
@@ -153,7 +154,7 @@ _mode_locks_meta: threading.Lock = threading.Lock()
 # there is open exposure that needed evaluating" state observable. Throttled
 # per mode (same idea as exit.py's CDSL_ALERT_COOLDOWN_MIN) so a gate left
 # off on purpose overnight/over a weekend doesn't spam Telegram every tick.
-GATE_OFF_ALERT_COOLDOWN_MIN = int(os.getenv("AUTO_PILOT_GATE_OFF_ALERT_COOLDOWN_MIN", "30"))
+GATE_OFF_ALERT_COOLDOWN_MIN = int(((os.getenv("AUTO_PILOT_GATE_OFF_ALERT_COOLDOWN_MIN") or "").strip() or "30"))
 _gate_off_alert_last_sent: dict = {}  # mode -> aware datetime of last alert
 
 
@@ -214,7 +215,7 @@ import os as _os
 # Floor lowered to 5s and default to 8s per explicit request (stops/targets
 # checked every 5-10s during market hours, independent of full-cycle timing).
 EXIT_CHECK_INTERVAL_SECONDS = max(
-    5, int(_os.getenv("EXIT_CHECK_INTERVAL_SECONDS", "8"))
+    5, int(((_os.getenv("EXIT_CHECK_INTERVAL_SECONDS") or "").strip() or "8"))
 )
 
 
@@ -317,7 +318,7 @@ def _get_exit_lock(mode: str) -> threading.Lock:
 # always actually run) — they just also update the shared timestamp so nothing
 # double-fires right after.
 REAL_RECONCILE_MIN_INTERVAL_SECONDS = max(
-    10, int(_os.getenv("REAL_RECONCILE_MIN_INTERVAL_SECONDS", "20"))
+    10, int(((_os.getenv("REAL_RECONCILE_MIN_INTERVAL_SECONDS") or "").strip() or "20"))
 )
 _last_real_reconcile_at: dict = {}  # mode -> aware datetime of last reconcile_real_orders() call (any caller)
 
@@ -1734,8 +1735,21 @@ async def _afterhours_scan_body(mode: str, manual: bool = False) -> dict:
                 result["reason"] = "feature_disabled"
                 return result
             if not _is_afterhours_window_active():
-                result["reason"] = "outside_window"
-                return result
+                # 2026-10-04 fix: the window ends at 08:45 - the SAME minute the finalize pass is
+                # due - so a scheduled tick at/after 08:45 was always rejected here and the
+                # finalize pass could never fire on the schedule. Let a tick through ONLY when
+                # finalize is due (08:45 up to ramp end, not yet run today); it takes the finalize
+                # branch below and never reaches the regular scan.
+                _n = ist_now().time()
+                _fin_t = parse_hhmm(config.AFTERHOURS_FINALIZE_TIME_IST, 8, 45)
+                _ramp_end = parse_hhmm(config.AFTERHOURS_SCAN_RAMP_END_IST, 9, 0)
+                _finalize_due = (
+                    _fin_t <= _n < _ramp_end
+                    and gate.afterhours_finalize_last_run != ist_today_str()
+                )
+                if not _finalize_due:
+                    result["reason"] = "outside_window"
+                    return result
         # A10 fix: is_ist_weekday() guard removed — Sat/Sun nights are valid scan
         # windows for Monday open. market_date calculation below already skips weekends.
 
@@ -1770,6 +1784,12 @@ async def _afterhours_scan_body(mode: str, manual: bool = False) -> dict:
             result["ran"] = True
             result["finalized"] = True
             return result  # finalize is the last action before open — no scan this tick
+
+        if not manual and not _is_afterhours_window_active():
+            # Finalize-only tick (08:45+) that did not finalize (e.g. holiday: market_date != today)
+            # must not fall through to a regular scan outside the scan window.
+            result["reason"] = "outside_window"
+            return result
 
         # ── Regular scan pass ─────────────────────────────────────────────────
         written = await run_afterhours_scan(db, mode, market_date)
@@ -1859,13 +1879,52 @@ def run_afterhours_scan_manual_sync(mode: str) -> dict:
         lock.release()
 
 
+def _afterhours_next_sleep_seconds(now=None) -> float:
+    """Seconds the after-hours loop should sleep before its next tick (2026-10-04).
+
+    Time-of-day cadence: 30 min inside the pre-open ramp (RAMP_START..RAMP_END, default
+    08:00-09:00 IST), 6 h everywhere else. The long off-hours sleep is CAPPED at the next
+    boundary (ramp start, finalize time, ramp end, scan-window start 15:45) - otherwise a
+    6 h sleep started at 03:45 would wake at 09:45 and skip the whole morning ramp, and one
+    started at 09:00 would wake at 15:00/21:00 and miss the 15:45 evening start.
+    Never returns less than 30 s (avoids a hot loop when a boundary is 'now')."""
+    from datetime import datetime as _dt, timedelta as _td
+    from tz_utils import ist_now, parse_hhmm
+    now = now or ist_now()
+    now_t = now.time()
+    ramp_start = parse_hhmm(config.AFTERHOURS_SCAN_RAMP_START_IST, 8, 0)
+    ramp_end   = parse_hhmm(config.AFTERHOURS_SCAN_RAMP_END_IST, 9, 0)
+    finalize_t = parse_hhmm(config.AFTERHOURS_FINALIZE_TIME_IST, 8, 45)
+    scan_start = parse_hhmm(config.AFTERHOURS_SCAN_START_IST, 15, 45)
+
+    if ramp_start <= now_t < ramp_end:
+        base = float(config.AFTERHOURS_SCAN_RAMP_INTERVAL_SECONDS)
+    elif ramp_end <= now_t < scan_start:
+        base = 86400.0   # market hours: nothing to scan - the boundary cap below wakes us at 15:45
+    else:
+        base = float(config.AFTERHOURS_SCAN_OFFHOURS_INTERVAL_SECONDS)
+
+    def _until(t) -> float:
+        target = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+        if target <= now:
+            target += _td(days=1)
+        return (target - now).total_seconds()
+
+    nearest = min(_until(ramp_start), _until(finalize_t), _until(ramp_end), _until(scan_start))
+    return max(30.0, min(base, nearest))
+
+
 async def _afterhours_scan_loop() -> None:
     """After-hours news scan loop. Runs 24/7; does nothing outside the
-    15:45–08:45 window or when the toggle is off. Interval from config."""
+    15:45–08:45 window (plus the 08:45 finalize tick) or when the toggle is off.
+    Cadence is time-of-day based - see _afterhours_next_sleep_seconds()."""
     await asyncio.sleep(_STARTUP_DELAY_SECONDS + 25)
     logger.info(
-        "Auto-pilot AFTERHOURS SCAN loop running (interval=%ss, window=%s–%s IST)",
-        config.AFTERHOURS_SCAN_INTERVAL_SECONDS,
+        "Auto-pilot AFTERHOURS SCAN loop running (off-hours every %ss, %s–%s IST ramp every %ss, window=%s–%s IST)",
+        config.AFTERHOURS_SCAN_OFFHOURS_INTERVAL_SECONDS,
+        config.AFTERHOURS_SCAN_RAMP_START_IST,
+        config.AFTERHOURS_SCAN_RAMP_END_IST,
+        config.AFTERHOURS_SCAN_RAMP_INTERVAL_SECONDS,
         config.AFTERHOURS_SCAN_START_IST,
         config.AFTERHOURS_SCAN_END_IST,
     )
@@ -1875,12 +1934,130 @@ async def _afterhours_scan_loop() -> None:
                 await asyncio.to_thread(_run_afterhours_tick_sync, mode)
             except Exception:
                 logger.exception("afterhours scan loop: unexpected error for %s", mode)
-        await asyncio.sleep(config.AFTERHOURS_SCAN_INTERVAL_SECONDS)
+        try:
+            _sleep_s = _afterhours_next_sleep_seconds()
+        except Exception:
+            logger.exception("afterhours scan loop: sleep calc failed - using ramp interval")
+            _sleep_s = float(config.AFTERHOURS_SCAN_RAMP_INTERVAL_SECONDS)
+        await asyncio.sleep(_sleep_s)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Market-hours news check (2026-10-04, user request)
+#
+# The after-hours loop above sleeps through 09:00-15:45 IST. News still breaks during the
+# session, so this second loop polls the same RSS feeds every
+# config.INTRADAY_NEWS_INTERVAL_SECONDS (default 15 min) - on a worker thread, with one cheap
+# pass that only scores NEW headlines (see watchlist_engine/intraday_news.py). It never places or
+# injects anything; it stores a capped score nudge that Gate 6 ranking applies to candidates that
+# are already queued. Runs only on trading days inside INTRADAY_NEWS_START_IST..END_IST and only
+# while gate.afterhours_news_scan_enabled is on for at least one mode.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _is_trading_day_ist(now=None) -> bool:
+    from tz_utils import ist_now, is_nse_holiday
+    n = now or ist_now()
+    return n.weekday() < 5 and not is_nse_holiday(n)
+
+
+def _intraday_news_window_active(now=None) -> bool:
+    """True on a trading day between INTRADAY_NEWS_START_IST and INTRADAY_NEWS_END_IST (IST)."""
+    from tz_utils import ist_now, parse_hhmm
+    n = now or ist_now()
+    if not _is_trading_day_ist(n):
+        return False
+    start_t = parse_hhmm(config.INTRADAY_NEWS_START_IST, 9, 0)
+    end_t = parse_hhmm(config.INTRADAY_NEWS_END_IST, 15, 45)
+    return start_t <= n.time() < end_t
+
+
+def _intraday_news_next_sleep_seconds(now=None) -> float:
+    """Seconds to sleep before the next market-hours news tick. Inside the window: the configured
+    interval, capped at the window end. Outside it (evening, night, weekend, holiday): straight to
+    the next window start, capped at 6 h so a config/holiday-table change is picked up. Min 30 s."""
+    from datetime import timedelta as _td
+    from tz_utils import ist_now, parse_hhmm
+    n = now or ist_now()
+    start_t = parse_hhmm(config.INTRADAY_NEWS_START_IST, 9, 0)
+    end_t = parse_hhmm(config.INTRADAY_NEWS_END_IST, 15, 45)
+
+    def _at(t, day_offset=0):
+        return n.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0) + _td(days=day_offset)
+
+    if _intraday_news_window_active(n):
+        wait = min(float(config.INTRADAY_NEWS_INTERVAL_SECONDS), (_at(end_t) - n).total_seconds())
+        return max(30.0, wait)
+    target = _at(start_t)
+    if target <= n:
+        target = _at(start_t, 1)
+    return max(30.0, min(6 * 3600.0, (target - n).total_seconds()))
+
+
+_intraday_news_lock = threading.Lock()
+
+
+async def _intraday_news_body() -> dict:
+    """One market-hours news tick (worker thread). Best-effort - never raises."""
+    result = {"ran": False, "reason": None}
+    try:
+        if not _intraday_news_window_active():
+            result["reason"] = "outside_window"
+            return result
+        Session = get_session_factory()
+        db = Session()
+        try:
+            enabled = (
+                db.query(models.TradeGateState)
+                .filter(models.TradeGateState.afterhours_news_scan_enabled.is_(True))
+                .first()
+            )
+            if enabled is None:
+                result["reason"] = "feature_disabled"
+                return result
+            from watchlist_engine.intraday_news import run_intraday_news_check
+            return await run_intraday_news_check(db)
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("intraday news tick failed (non-fatal)")
+        result["reason"] = "error"
+        return result
+
+
+def _run_intraday_news_tick_sync() -> None:
+    """Worker-thread wrapper: skip-if-busy lock, then the tick in its own event loop."""
+    if not _intraday_news_lock.acquire(blocking=False):
+        logger.info("intraday news: skipping tick - previous one still running")
+        return
+    try:
+        _run_coro_in_new_loop(_intraday_news_body)
+    finally:
+        _intraday_news_lock.release()
+
+
+async def _intraday_news_loop() -> None:
+    """Market-hours news loop. Runs 24/7; cheap no-op outside the window or while the toggle is off."""
+    await asyncio.sleep(_STARTUP_DELAY_SECONDS + 40)
+    logger.info(
+        "Auto-pilot INTRADAY NEWS loop running (every %ss, %s-%s IST, trading days)",
+        config.INTRADAY_NEWS_INTERVAL_SECONDS, config.INTRADAY_NEWS_START_IST, config.INTRADAY_NEWS_END_IST,
+    )
+    while True:
+        try:
+            await asyncio.to_thread(_run_intraday_news_tick_sync)
+        except Exception:
+            logger.exception("intraday news loop: unexpected error")
+        try:
+            _sleep_s = _intraday_news_next_sleep_seconds()
+        except Exception:
+            logger.exception("intraday news loop: sleep calc failed - using interval")
+            _sleep_s = float(config.INTRADAY_NEWS_INTERVAL_SECONDS)
+        await asyncio.sleep(_sleep_s)
 
 
 def start() -> None:
     """Idempotent — safe to call from startup() even if hot-reloaded."""
-    global _full_task, _exit_task, _schedule_task, _totp_task, _afterhours_task
+    global _full_task, _exit_task, _schedule_task, _totp_task, _afterhours_task, _intraday_news_task
     if _full_task is None or _full_task.done():
         _full_task = asyncio.create_task(_full_cycle_loop())
         logger.info("Auto-pilot FULL CYCLE background task created.")
@@ -1909,6 +2086,14 @@ def start() -> None:
     if _afterhours_task is None or _afterhours_task.done():
         _afterhours_task = asyncio.create_task(_afterhours_scan_loop())
         logger.info(
-            "Auto-pilot AFTERHOURS SCAN background task created (interval=%ss).",
-            config.AFTERHOURS_SCAN_INTERVAL_SECONDS,
+            "Auto-pilot AFTERHOURS SCAN background task created (off-hours=%ss, ramp=%ss).",
+            config.AFTERHOURS_SCAN_OFFHOURS_INTERVAL_SECONDS,
+            config.AFTERHOURS_SCAN_RAMP_INTERVAL_SECONDS,
+        )
+    # Market-hours news check - cheap no-op unless the same afterhours_news_scan_enabled toggle is on.
+    if _intraday_news_task is None or _intraday_news_task.done():
+        _intraday_news_task = asyncio.create_task(_intraday_news_loop())
+        logger.info(
+            "Auto-pilot INTRADAY NEWS background task created (interval=%ss).",
+            config.INTRADAY_NEWS_INTERVAL_SECONDS,
         )

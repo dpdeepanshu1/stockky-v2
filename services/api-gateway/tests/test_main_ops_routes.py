@@ -1389,18 +1389,53 @@ class TestWakeAndHealth:
 
     def test_health_reflects_redis_and_ignores_warm(self, monkeypatch):
         monkeypatch.setattr(gw, "_redis", None)
-        assert gw.health() == {"status": "ok", "service": "api-gateway", "redis": False, "ready": True}
+        monkeypatch.setattr(gw, "_kv_cache", None)
+        assert gw.health() == {"status": "ok", "service": "api-gateway", "redis": False,
+                               "durable_cache": False, "ready": True}
         monkeypatch.setattr(gw, "_redis", object())
-        assert gw.health(warm=True)["redis"] is True
+        out = gw.health(warm=True)
+        assert out["redis"] is True and out["durable_cache"] is True
 
-    def test_ready_is_503_without_redis_and_200_with_it(self, monkeypatch, tc):
+    def test_ready_is_503_without_any_durable_cache_and_200_with_redis(self, monkeypatch, tc):
         # FIXED: "not ready" is now an HTTP 503, so an orchestrator probing status codes sees it.
         monkeypatch.setattr(gw, "_redis", None)
+        monkeypatch.setattr(gw, "_kv_cache", None)
         r = tc.get("/ready")
         assert r.status_code == 503 and r.json() == {"ready": False}
         monkeypatch.setattr(gw, "_redis", object())
         r = tc.get("/ready")
         assert r.status_code == 200 and r.json() == {"ready": True}
+
+    @pytest.mark.parametrize("var", ["ORACLE_DSN", "CACHE_DATABASE_URL", "DATABASE_URL"])
+    def test_ready_is_200_with_only_the_kv_cache_database_configured(self, monkeypatch, tc, var):
+        # group 77: the Oracle VM has no Upstash Redis (UPSTASH_* blank) but a configured kv_cache database
+        import kv_cache as real_kv
+        for v in ("ORACLE_DSN", "CACHE_DATABASE_URL", "KV_DATABASE_URL", "DATABASE_URL", "TRAINING_DATABASE_URL"):
+            monkeypatch.delenv(v, raising=False)
+        monkeypatch.setattr(gw, "_redis", None)
+        monkeypatch.setattr(gw, "_kv_cache", real_kv)
+        monkeypatch.setenv(var, "stockkydb_high" if var == "ORACLE_DSN" else "postgresql://u:p@h/db")
+        r = tc.get("/ready")
+        assert r.status_code == 200 and r.json() == {"ready": True}
+        assert gw.health()["durable_cache"] is True
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_ready_stays_503_when_the_database_vars_are_blank(self, monkeypatch, tc, blank):
+        import kv_cache as real_kv
+        for v in ("ORACLE_DSN", "CACHE_DATABASE_URL", "KV_DATABASE_URL", "DATABASE_URL", "TRAINING_DATABASE_URL"):
+            monkeypatch.setenv(v, blank)
+        monkeypatch.setattr(gw, "_redis", None)
+        monkeypatch.setattr(gw, "_kv_cache", real_kv)
+        assert tc.get("/ready").status_code == 503
+
+    def test_ready_never_raises_if_the_cache_module_is_odd(self, monkeypatch, tc):
+        class Odd:
+            @staticmethod
+            def _neon_url():
+                raise RuntimeError("boom")
+        monkeypatch.setattr(gw, "_redis", None)
+        monkeypatch.setattr(gw, "_kv_cache", Odd)
+        assert tc.get("/ready").status_code == 503
 
 
 class TestSystemHealth:

@@ -499,17 +499,17 @@ FUNDAMENTAL_CACHE_PREFIX = "stockky:fundamental:"
 EVENT_CACHE_PREFIX = "stockky:event:"
 NEWS_CACHE_PREFIX = "stockky:news:"
 # Slow-changing layers: 24h. Nightly cron refreshes them after midnight IST.
-STATIC_PARAM_TTL = int(os.getenv("STATIC_PARAM_TTL", "86400"))  # 24 hours
+STATIC_PARAM_TTL = int(((os.getenv("STATIC_PARAM_TTL") or "").strip() or "86400"))  # 24 hours
 LAST_FULL_SCAN_KEY = "stockky:last_full_scan"
-LAST_FULL_SCAN_TTL = int(os.getenv("LAST_FULL_SCAN_TTL", "86400"))  # 24h — survive refresh / stop partial
+LAST_FULL_SCAN_TTL = int(((os.getenv("LAST_FULL_SCAN_TTL") or "").strip() or "86400"))  # 24h — survive refresh / stop partial
 DECIDE_CACHE_PREFIX = "stockky:decide_cache:"
-DECIDE_CACHE_TTL_OPEN = int(os.getenv("DECIDE_CACHE_TTL_OPEN", "300"))   # 5 min market open
-DECIDE_CACHE_TTL_CLOSED = int(os.getenv("DECIDE_CACHE_TTL_CLOSED", "21600"))  # 6 h closed
+DECIDE_CACHE_TTL_OPEN = int(((os.getenv("DECIDE_CACHE_TTL_OPEN") or "").strip() or "300"))   # 5 min market open
+DECIDE_CACHE_TTL_CLOSED = int(((os.getenv("DECIDE_CACHE_TTL_CLOSED") or "").strip() or "21600"))  # 6 h closed
 BATCH_RESULT_CACHE_PREFIX = "stockky:batch_result:"
-BATCH_RESULT_CACHE_ENABLED = os.getenv("BATCH_RESULT_CACHE", "true").lower() in ("1", "true", "yes")
+BATCH_RESULT_CACHE_ENABLED = ((os.getenv("BATCH_RESULT_CACHE") or "").strip() or "true").lower() in ("1", "true", "yes")
 SCAN_LITE_DEFAULT = os.getenv("SCAN_LITE_DEFAULT", "false").lower() in ("1", "true", "yes")
-WAKE_BEFORE_SCAN = os.getenv("WAKE_BEFORE_SCAN", "true").lower() in ("1", "true", "yes")
-WAKE_WAIT_SECONDS = float(os.getenv("WAKE_WAIT_SECONDS", "12"))
+WAKE_BEFORE_SCAN = ((os.getenv("WAKE_BEFORE_SCAN") or "").strip() or "true").lower() in ("1", "true", "yes")
+WAKE_WAIT_SECONDS = float(((os.getenv("WAKE_WAIT_SECONDS") or "").strip() or "12"))
 
 # ── Symbol Aliases ──────────────────────────────────────────────────────────
 SYMBOL_ALIASES: Dict[str, Union[str, List[str]]] = {
@@ -1633,8 +1633,8 @@ VALUE_BUY_THRESHOLD = float(os.getenv("VALUE_BUY_THRESHOLD", "2000") or 2000)
 # symbols so a bug in universe assembly (dedup failure, a runaway source,
 # etc.) can never grow the feed unboundedly; it should never actually be hit
 # in normal operation at a 500-symbol target.
-SCAN_UNIVERSE_TARGET = int(os.getenv("SCAN_UNIVERSE_TARGET", "500"))
-SCAN_UNIVERSE_HARD_CAP = int(os.getenv("SCAN_UNIVERSE_HARD_CAP", "5000"))
+SCAN_UNIVERSE_TARGET = int(((os.getenv("SCAN_UNIVERSE_TARGET") or "").strip() or "500"))
+SCAN_UNIVERSE_HARD_CAP = int(((os.getenv("SCAN_UNIVERSE_HARD_CAP") or "").strip() or "5000"))
 
 
 def _row_price_over_cap(row: dict, symbol: Optional[str] = None) -> bool:
@@ -2575,8 +2575,8 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 # Free-tier Gemini has its own RPM limit, independent of MAX_PARALLEL_WORKERS
 # (which bounds calls to decision-engine, not Gemini) — a scan running 10
 # concurrent symbol analyses shouldn't also fire 10 concurrent Gemini calls.
-GEMINI_SEMAPHORE = asyncio.Semaphore(int(os.getenv("GEMINI_MAX_CONCURRENT", "3")))
-GEMINI_MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "400"))
+GEMINI_SEMAPHORE = asyncio.Semaphore(int(((os.getenv("GEMINI_MAX_CONCURRENT") or "").strip() or "3")))
+GEMINI_MAX_OUTPUT_TOKENS = int(((os.getenv("GEMINI_MAX_OUTPUT_TOKENS") or "").strip() or "400"))
 
 def _build_gemini_prompt(data: dict) -> str:
     decision = data.get("decision")
@@ -2801,7 +2801,7 @@ def _cleanup_scan_resources(pool, client, not_done, deadline_seconds):
     then force-releases the thread pool and HTTP client either way so a
     slow watchlist scan can never leak connections/threads across calls.
     """
-    grace = float(os.getenv("WATCHLIST_SCAN_GRACE_SECONDS", "30"))
+    grace = float(((os.getenv("WATCHLIST_SCAN_GRACE_SECONDS") or "").strip() or "30"))
     try:
         if not_done:
             wait(not_done, timeout=grace)
@@ -2833,8 +2833,8 @@ def _wake_notification_service() -> bool:
 # requests into analysis-intelligence-service, causing PoolTimeout / ReadTimeout and
 # circuit-breaker opens that feed neutral 50.0 scores into the ML model.
 # Override via MAX_PARALLEL_SCAN_WORKERS if you move to paid tier.
-MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_SCAN_WORKERS", "8"))  # free-tier safe
-SCAN_BATCH_SIZE = int(os.getenv("SCAN_BATCH_SIZE", "8"))  # aligned with workers; bulk Neon removes DB N+1
+MAX_PARALLEL_WORKERS = int(((os.getenv("MAX_PARALLEL_SCAN_WORKERS") or "").strip() or "8"))  # free-tier safe
+SCAN_BATCH_SIZE = int(((os.getenv("SCAN_BATCH_SIZE") or "").strip() or "8"))  # aligned with workers; bulk Neon removes DB N+1
 
 MAX_RETRIES = 1
 RETRY_BACKOFF = 1.0
@@ -4293,7 +4293,7 @@ _ops_alert_clock = time.monotonic
 
 def _ops_alert_cooldown_sec() -> float:
     try:
-        return max(0.0, float(os.getenv("OPS_ALERT_COOLDOWN_SEC", "900")))
+        return max(0.0, float(((os.getenv("OPS_ALERT_COOLDOWN_SEC") or "").strip() or "900")))
     except (TypeError, ValueError):
         return 900.0
 
@@ -4781,18 +4781,35 @@ def momentum_movers_route():
     return {"symbols": symbols, "count": len(symbols)}
 
 
+def _durable_cache_configured() -> bool:
+    """True when a persistent cache backend is wired up: legacy Upstash Redis OR the Neon/Postgres/Oracle
+    kv_cache database. Config only — never opens a connection, so it is safe for a liveness-style probe.
+
+    /ready used to test `_redis` alone, but the Redis client is None by default and the Oracle VM
+    (UPSTASH_* blank, ORACLE_DSN set) keeps everything in the kv_cache database, so /ready answered 503
+    forever on a perfectly healthy deployment."""
+    if _redis:
+        return True
+    try:
+        neon_url = getattr(_kv_cache, "_neon_url", None)
+        return bool(callable(neon_url) and neon_url())
+    except Exception:
+        return False
+
+
 @app.get("/health")
 def health(warm: bool = False):
     return {
         "status": "ok",
         "service": "api-gateway",
         "redis": bool(_redis),
+        "durable_cache": _durable_cache_configured(),
         "ready": True
     }
 
 @app.get("/ready")
 def ready():
-    is_ready = bool(_redis)
+    is_ready = _durable_cache_configured()
     if not is_ready:
         return JSONResponse({"ready": False}, status_code=503)
     return {"ready": True}
@@ -4953,6 +4970,30 @@ def get_searched_symbols():
     return {"symbols": _load_searched()}
 
 # ── Stock decision ──────────────────────────────────────────────────────────
+def _stock_budget_sec(name: str, default: float, lo: float, hi: float) -> float:
+    """Blank / non-numeric / out-of-range env values fall back to `default` (never raise at import)."""
+    raw = (os.getenv(name) or "").strip()
+    try:
+        v = float(raw) if raw else default
+    except ValueError:
+        return default
+    if v != v or v < lo or v > hi:          # NaN or outside the allowed range
+        return default
+    return v
+
+
+# /stock/{symbol} time budget. The decide call used to have a hard 20 s read timeout: the first
+# analysis after a boot (cold caches, competing with the start-up warm-ups and the hot-picks scan)
+# ran past it, the gateway gave up with a neutral HOLD, and the decision service's finished work was
+# thrown away. Now: a longer per-call read timeout, ONE retry that can use what the first attempt
+# warmed, and an overall deadline (kept under the browser's 120 s request timeout) that also bounds
+# the enrichment fan-out and the Gemini summary.
+STOCK_DECIDE_TIMEOUT_SEC = _stock_budget_sec("STOCK_DECIDE_TIMEOUT_SEC", 60.0, 5.0, 170.0)
+STOCK_OVERALL_DEADLINE_SEC = _stock_budget_sec("STOCK_OVERALL_DEADLINE_SEC", 100.0, 10.0, 170.0)
+STOCK_DECIDE_RETRY_MIN_SEC = _stock_budget_sec("STOCK_DECIDE_RETRY_MIN_SEC", 15.0, 1.0, 120.0)
+_STOCK_SUMMARY_RESERVE_SEC = 3.0    # below this much budget left, skip Gemini and use the template
+
+
 @app.get("/stock/{symbol}")
 async def get_stock_decision(symbol: str, already_owned: bool = False):
     """
@@ -4997,13 +5038,36 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
         )
         return any(n in blob for n in needles)
 
+    _t0 = time.monotonic()
+
+    def _remaining() -> float:
+        return STOCK_OVERALL_DEADLINE_SEC - (time.monotonic() - _t0)
+
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(STOCK_DECIDE_TIMEOUT_SEC, connect=5.0)) as client:
             # ── 1) Live decide (already fans out in parallel downstream) ──
-            resp = await client.get(
-                f"{DECISION_URL}/decide/{symbol_to_use}",
-                params={"already_owned": str(already_owned).lower(), "force": "true"},
-            )
+            try:
+                resp = await client.get(
+                    f"{DECISION_URL}/decide/{symbol_to_use}",
+                    params={"already_owned": str(already_owned).lower(), "force": "true"},
+                    timeout=httpx.Timeout(max(1.0, min(STOCK_DECIDE_TIMEOUT_SEC, _remaining())), connect=5.0),
+                )
+            except httpx.ReadTimeout as _slow:
+                # The decision service was reachable but still working (cold caches). A second forced
+                # run would redo everything, so ask WITHOUT force: the downstream analysis caches the
+                # first attempt warmed are now usable, and a finished decision may already be cached.
+                _left = _remaining()
+                if _left < STOCK_DECIDE_RETRY_MIN_SEC:
+                    raise
+                logger.warning(
+                    "decide/%s read-timeout after %.0fs; retrying once without force (%.0fs of budget left)",
+                    symbol_to_use, STOCK_DECIDE_TIMEOUT_SEC, _left,
+                )
+                resp = await client.get(
+                    f"{DECISION_URL}/decide/{symbol_to_use}",
+                    params={"already_owned": str(already_owned).lower(), "force": "false"},
+                    timeout=httpx.Timeout(max(1.0, min(STOCK_DECIDE_TIMEOUT_SEC, _left)), connect=5.0),
+                )
             resp.raise_for_status()
             try:
                 raw = resp.json()
@@ -5068,7 +5132,7 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
 
             async def _get(url: str, timeout: float = 45.0):
                 try:
-                    r = await client.get(url, timeout=timeout)
+                    r = await client.get(url, timeout=max(1.0, min(timeout, _remaining())))
                     if r.status_code == 200 and r.content:
                         data = r.json()
                         return data if isinstance(data, dict) else None
@@ -5100,14 +5164,30 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
 
             fetched = {}
             if tasks:
+                # Overall deadline: keep whatever finished in time, cancel the rest. (A plain
+                # gather() could outlive the budget by the slowest per-call timeout.)
                 keys = list(tasks.keys())
-                vals = await asyncio.gather(*(tasks[k] for k in keys), return_exceptions=True)
-                for k, v in zip(keys, vals):
-                    if isinstance(v, Exception):
-                        logger.debug("enrich task %s failed: %s", k, v)
+                _done, _pending = await asyncio.wait(
+                    [tasks[k] for k in keys], timeout=max(0.0, _remaining())
+                )
+                for _t in _pending:
+                    _t.cancel()
+                if _pending:
+                    await asyncio.gather(*_pending, return_exceptions=True)
+                    logger.warning(
+                        "stock %s: overall %.0fs deadline hit; dropped enrichment %s",
+                        symbol_to_use, STOCK_OVERALL_DEADLINE_SEC,
+                        [k for k in keys if tasks[k] in _pending],
+                    )
+                for k in keys:
+                    t = tasks[k]
+                    if t in _pending or t.cancelled():
+                        fetched[k] = None
+                    elif t.exception() is not None:
+                        logger.debug("enrich task %s failed: %s", k, t.exception())
                         fetched[k] = None
                     else:
-                        fetched[k] = v
+                        fetched[k] = t.result()
 
             # Apply enrichment
             td = fetched.get("tech")
@@ -5185,8 +5265,14 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
         # to the Hinglish template automatically if GEMINI_API_KEY is unset or
         # the call fails/times out — see _generate_ai_summary.
         try:
-            result["natural_language_summary"] = await _generate_ai_summary(result, client)
-        except Exception:
+            _left = _remaining()
+            if _left < _STOCK_SUMMARY_RESERVE_SEC:
+                result["natural_language_summary"] = _generate_summary(result)
+            else:
+                result["natural_language_summary"] = await asyncio.wait_for(
+                    _generate_ai_summary(result, client), timeout=_left
+                )
+        except Exception:      # includes asyncio.TimeoutError from the budget
             result["natural_language_summary"] = _generate_summary(result)
 
         flags = []
@@ -5246,8 +5332,23 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
                 "Decision engine error",
                 "Upstream decision-prediction-service returned an error — scores unavailable.",
             )
+    except httpx.TimeoutException as e:
+        # Reachable but too slow even after the retry (cold caches / heavy load). Say so, instead of
+        # claiming an outage: a second try a minute later normally succeeds.
+        logger.warning(
+            "decision engine timed out for %s after %.0fs: %s: %s",
+            symbol_to_use, time.monotonic() - _t0, type(e).__name__, e,
+        )
+        return _degraded_hold(
+            symbol_to_use,
+            f"decision engine timed out after {time.monotonic() - _t0:.0f}s ({type(e).__name__})",
+            f"{symbol_to_use}: the decision engine is taking longer than usual to respond "
+            f"(caches warming up) — showing a neutral HOLD. Please try again in a minute.",
+            "Decision engine slow",
+            "decision-prediction-service did not answer in time — scores unavailable.",
+        )
     except httpx.HTTPError as e:
-        # Connection refused / timeout / DNS failure — service is down or
+        # Connection refused / DNS failure — service is down or
         # asleep (Render free-tier cold start), not a client error. Same
         # graceful-degrade as above instead of bubbling a raw 502.
         logger.warning("decision engine unreachable for %s: %s", symbol_to_use, e)
@@ -5845,7 +5946,7 @@ async def stream_market_scan(
                         batch.append({"symbol": base, "decision": "ERROR", "error": str(e)[:200]})
             else:
                 # Full mode: bounded wait per symbol; cold microservices must not stall the stream
-                STREAM_SYM_TIMEOUT = float(os.getenv("SCAN_STREAM_SYMBOL_TIMEOUT", "12"))
+                STREAM_SYM_TIMEOUT = float(((os.getenv("SCAN_STREAM_SYMBOL_TIMEOUT") or "").strip() or "12"))
 
                 async def _ultra_or_instant(sym: str):
                     base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
@@ -6132,9 +6233,9 @@ def scan_watchlist():
     # pattern already used by /scan's own asyncio.Semaphore(8). Outer
     # concurrency is back down to a modest default; it no longer needs to
     # carry the load-limiting responsibility, the semaphore does.
-    _SCAN_CONCURRENCY = int(os.getenv("WATCHLIST_SCAN_CONCURRENCY", "4"))
-    _SCAN_HTTP_CONCURRENCY = int(os.getenv("WATCHLIST_SCAN_HTTP_CONCURRENCY", str(MAX_PARALLEL_WORKERS)))
-    _SCAN_DEADLINE_SECONDS = float(os.getenv("WATCHLIST_SCAN_TIMEOUT_SECONDS", "18"))
+    _SCAN_CONCURRENCY = int(((os.getenv("WATCHLIST_SCAN_CONCURRENCY") or "").strip() or "4"))
+    _SCAN_HTTP_CONCURRENCY = int(((os.getenv("WATCHLIST_SCAN_HTTP_CONCURRENCY") or "").strip() or str(MAX_PARALLEL_WORKERS)))
+    _SCAN_DEADLINE_SECONDS = float(((os.getenv("WATCHLIST_SCAN_TIMEOUT_SECONDS") or "").strip() or "18"))
     _http_sem = threading.BoundedSemaphore(max(1, _SCAN_HTTP_CONCURRENCY))
 
     def _scan_one_symbol(client: httpx.Client, symbol: str):
@@ -6725,8 +6826,8 @@ def get_market_indices(force_refresh: bool = False):
 # for tens of seconds. It now runs in a worker thread under a deadline; on
 # timeout the thread keeps running (it warms MOMENTUM_MOVERS_CACHE_KEY for the
 # next caller) and this request returns without movers, flagged partial.
-SCAN_UNIVERSE_MOVERS_DEADLINE_S = float(os.getenv("SCAN_UNIVERSE_MOVERS_DEADLINE_S", "12"))
-SCAN_UNIVERSE_BUILD_DEADLINE_S = float(os.getenv("SCAN_UNIVERSE_BUILD_DEADLINE_S", "20"))
+SCAN_UNIVERSE_MOVERS_DEADLINE_S = float(((os.getenv("SCAN_UNIVERSE_MOVERS_DEADLINE_S") or "").strip() or "12"))
+SCAN_UNIVERSE_BUILD_DEADLINE_S = float(((os.getenv("SCAN_UNIVERSE_BUILD_DEADLINE_S") or "").strip() or "20"))
 
 
 async def _movers_with_deadline() -> tuple[List[str], bool]:
@@ -7349,9 +7450,9 @@ async def training_other_proxy(path: str, request: Request):
 HOT_STOCKS_CACHE_KEY = "stockky:hot_stocks"
 # Market hours: short cache (2–5 min) so UI stays light but not spammy.
 # Off-hours: until next market open (see _hot_stocks_ttl).
-HOT_STOCKS_TTL_OPEN_MIN = int(os.getenv("HOT_STOCKS_TTL_OPEN_MIN", "120"))    # 2 min
-HOT_STOCKS_TTL_OPEN_MAX = int(os.getenv("HOT_STOCKS_TTL_OPEN_MAX", "300"))    # 5 min
-HOT_STOCKS_TTL_OPEN_DEFAULT = int(os.getenv("HOT_STOCKS_TTL_OPEN", "180"))    # 3 min default when open
+HOT_STOCKS_TTL_OPEN_MIN = int(((os.getenv("HOT_STOCKS_TTL_OPEN_MIN") or "").strip() or "120"))    # 2 min
+HOT_STOCKS_TTL_OPEN_MAX = int(((os.getenv("HOT_STOCKS_TTL_OPEN_MAX") or "").strip() or "300"))    # 5 min
+HOT_STOCKS_TTL_OPEN_DEFAULT = int(((os.getenv("HOT_STOCKS_TTL_OPEN") or "").strip() or "180"))    # 3 min default when open
 
 
 def _seconds_until_next_market_open() -> int:
@@ -7961,7 +8062,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
     if stopped_early:
         # A user-stopped scan is incomplete by definition — keep it just long
         # enough to paint the tab, then let the next call do a real scan.
-        ttl = min(ttl, int(os.getenv("HOT_PARTIAL_CACHE_TTL", "300")))
+        ttl = min(ttl, int(((os.getenv("HOT_PARTIAL_CACHE_TTL") or "").strip() or "300")))
         payload["cache_ttl_seconds"] = ttl
         payload["quality_note"] = (
             f"PARTIAL — scan stopped after {processed_symbols}/{len(universe)} symbols. "
@@ -8119,7 +8220,7 @@ async def api_surprise_audit():
         }
 
 
-SURPRISE_SCAN_DEADLINE_S = float(os.getenv("SURPRISE_SCAN_DEADLINE_S", "20"))
+SURPRISE_SCAN_DEADLINE_S = float(((os.getenv("SURPRISE_SCAN_DEADLINE_S") or "").strip() or "20"))
 
 
 @app.get("/api/surprise/scan")
@@ -10581,7 +10682,7 @@ def data_feed_status():
     meta = store.meta()
     try:
         if job.get("status") == "running":
-            stale_sec = int(os.getenv("DATA_FEED_STALE_SEC", "900"))  # 15 min — free-tier sleep is not a restart signal
+            stale_sec = int(((os.getenv("DATA_FEED_STALE_SEC") or "").strip() or "900"))  # 15 min — free-tier sleep is not a restart signal
             updated = None
             # Prefer checkpoint/elapsed; fall back to started_at
             for key in ("updated_at", "resumed_at", "started_at"):
@@ -10675,7 +10776,7 @@ _REQUIRED_FEED_FIELDS = ("price", "rsi", "pe_ratio", "roce", "sentiment_score")
 # job writes, and those take minutes; the response carries "cached": true so the
 # UI can tell a memoised answer from a fresh one, and any Refresh button that
 # passes cache=False still forces a real recount.
-AUDIT_TTL_SEC = float(os.getenv("AUDIT_TTL_SEC", "20"))
+AUDIT_TTL_SEC = float(((os.getenv("AUDIT_TTL_SEC") or "").strip() or "20"))
 _AUDIT_MEMO: dict = {}
 _AUDIT_MEMO_LOCK = __import__("threading").Lock()
 
@@ -11027,7 +11128,7 @@ async def data_feed_update_batch_refresh(request: Request):
     if not isinstance(symbols, list) or not symbols:
         return {"ok": False, "error": "symbols list required", "ok_count": 0, "error_count": 0}
     # Hard cap protects free-tier CPU / upstream rate limits
-    max_n = int(os.getenv("DATA_FEED_UPDATE_BATCH_MAX", "15"))
+    max_n = int(((os.getenv("DATA_FEED_UPDATE_BATCH_MAX") or "").strip() or "15"))
     symbols = [
         str(s).upper().replace(".NS", "").replace(".BO", "").strip()
         for s in symbols
@@ -11103,7 +11204,7 @@ async def data_feed_update_batch_refresh(request: Request):
 # ── Surgical Data Repair (audit + non-destructive patch) ───────────────────
 # _REQUIRED_FEED_FIELDS defined above (before audit-missing route)
 
-REPAIR_COOLDOWN_SEC = float(os.getenv("REPAIR_COOLDOWN_SEC", "0.5"))
+REPAIR_COOLDOWN_SEC = float(((os.getenv("REPAIR_COOLDOWN_SEC") or "").strip() or "0.5"))
 
 
 def _safe_float(val, default: float = 0.0) -> float:
@@ -11950,7 +12051,7 @@ async def data_feed_run(
                 )
                 logger.info("data-feed bulk phase: %s", bulk_result)
                 # Skip sequential /analyze peer storms when bulk covered ≥80% of universe
-                skip_fund = os.getenv("DATA_FEED_SKIP_FUNDAMENTALS_AFTER_BULK", "1").strip().lower() in (
+                skip_fund = ((os.getenv("DATA_FEED_SKIP_FUNDAMENTALS_AFTER_BULK") or "").strip() or "1").lower() in (
                     "1", "true", "yes", "on",
                 )
                 if skip_fund and saved >= max(1, int(0.35 * len(universe))):
@@ -11987,7 +12088,7 @@ async def data_feed_run(
         # covered enough OR DATA_FEED_SKIP_FUNDAMENTALS_AFTER_BULK=1 and any seed exists.
         # Default ON: after bulk seed, do not sequential /fundamental/analyze (rate-limit storm).
         # Set DATA_FEED_SKIP_SEQUENTIAL_FUND=0 to force slow fund fill.
-        _skip_seq = os.getenv("DATA_FEED_SKIP_SEQUENTIAL_FUND", "1").strip().lower() in (
+        _skip_seq = ((os.getenv("DATA_FEED_SKIP_SEQUENTIAL_FUND") or "").strip() or "1").lower() in (
             "1", "true", "yes", "on",
         )
         # Only when this run actually did the bulk seed. A resumed run carries `ok_count` from the earlier
@@ -12005,7 +12106,7 @@ async def data_feed_run(
 
         if True:
             # Concurrent fund-only fill (no news storm) — max 3 in-flight
-            fund_sem = asyncio.Semaphore(int(os.getenv("DATA_FEED_FUND_CONCURRENCY", "3")))
+            fund_sem = asyncio.Semaphore(int(((os.getenv("DATA_FEED_FUND_CONCURRENCY") or "").strip() or "3")))
 
             async def _feed_one(base: str):
                 async with fund_sem:
@@ -12093,7 +12194,7 @@ async def data_feed_run(
                     updated_at=datetime.now(IST).isoformat(),
                     checkpoint={"cursor": i + 1, "done": list(done_set), "universe": universe},
                 )
-                feed_batch = max(5, int(os.getenv("DATA_FEED_BATCH_SIZE", "20")))
+                feed_batch = max(5, int(((os.getenv("DATA_FEED_BATCH_SIZE") or "").strip() or "20")))
                 if (i + 1) % feed_batch == 0:
                     # Complete batch → warm all upstreams, then continue
                     store.set_job(
@@ -12500,7 +12601,7 @@ async def stockky_hot_run(background_tasks: BackgroundTasks, force: bool = True)
         # universe, but cap it so a large universe cannot hammer the DB.
         state = {"last_write": 0.0, "last_processed": -1}
         try:
-            min_interval = float(os.getenv("HOT_PROGRESS_MIN_INTERVAL_SEC", "1.0"))
+            min_interval = float(((os.getenv("HOT_PROGRESS_MIN_INTERVAL_SEC") or "").strip() or "1.0"))
         except (TypeError, ValueError):
             # A bad env value must not kill the worker before the try block below
             # (job stuck "running", stop flag never cleared) — use the default.
@@ -12828,5 +12929,5 @@ except Exception as _sig_err:  # pragma: no cover - defensive, handler install a
 
 if __name__ == "__main__":  # pragma: no cover - uvicorn entrypoint, never imported by tests
     import uvicorn
-    port = int(os.getenv("PORT", 8000))
+    port = int(((os.getenv("PORT") or "").strip() or 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)

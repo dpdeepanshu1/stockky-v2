@@ -6,6 +6,53 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-04 (group 81)  Log-audit item 1: the 20 s `/decide` timeout (and no overall deadline) in `api-gateway/main.py::
+  get_stock_decision` (`GET /stock/{symbol}`). The first analysis after a boot (cold caches, competing with the start-up
+  warm-ups and the hot-picks scan) overran the hard 20 s read timeout, the gateway returned a neutral HOLD, and the decision
+  service's finished work was thrown away. Now: (1) decide read timeout `STOCK_DECIDE_TIMEOUT_SEC` (default 60 s);
+  (2) one retry on `ReadTimeout` only, WITHOUT `force` (so it can use the downstream caches the first attempt warmed, or a
+  decision that finished meanwhile), only if >= `STOCK_DECIDE_RETRY_MIN_SEC` (15 s) of the deadline is left; (3) an overall
+  deadline `STOCK_OVERALL_DEADLINE_SEC` (default 100 s, under the browser's 120 s timeout): every call's timeout is clamped
+  to the time left, the enrichment fan-out uses `asyncio.wait` so finished calls are kept and slow ones cancelled (was
+  `gather`, which could outlive the budget), and Gemini is skipped (template) with < 3 s left or cut off at the deadline;
+  (4) a timeout that survives the retry now returns an honest HOLD ("taking longer than usual ... try again in a minute",
+  flag "Decision engine slow", error "decision engine timed out after Ns") instead of claiming the service is unreachable.
+  Env values are blank/garbage/out-of-range safe (`_stock_budget_sec`). Documented in `.env.oracle.example`. Tests
+  (`api-gateway/tests/test_main_stock_scan_routes.py`, 187 -> 210): 14 new in `TestStockTimeBudget` (defaults, env parsing,
+  retry without force, no retry when budget is short / for non-read-timeouts, honest timeout HOLD, call timeouts clamped,
+  slow enrichment dropped while finished kept, Gemini skipped / cut off); 3 existing tests rewritten (the 20 s pin, the
+  `gather`-slot defensive test, the ReadTimeout-is-"unreachable" parametrisation). 24 of the new/rewritten fail on the
+  group 80 code. Whole api-gateway suite ran to completion with no failure here (`-x`). NEEDS REBUILD: `docker compose build
+  api-gateway && docker compose up -d api-gateway`. NOT FIXED here: the `/health?warm=true` and decision-side timeouts
+  (`_HTTP_TIMEOUT` 45 s in decision/main.py) are unchanged; the frontend still retries `/stock` up to 3x on abort.
+- 2026-10-04 (group 80)  Log-audit item 2: `ensure_oracle_identity` + "Oracle engine ready" on every `/training-score` call
+  (twice per stock analysis). Three causes, all in `decision-prediction-service/training`: (1) `models.py::ensure_oracle_identity`
+  had no once-per-engine guard, so each `ModelRegistry()` re-ran 2 lookups (+ DDL) for 8 tables; now a clean pass is final per
+  engine and a pass with any failed table is retried at most every 300 s (body moved to `_ensure_oracle_identity_impl`, returns
+  True/False). (2) `get_engine()` stored the REWRITTEN url (`oracle+oracledb://`, discrete ORACLE_* vars) but compared the
+  un-rewritten one, so the singleton never hit on the Oracle VM: every call built a new engine/pool and logged "Oracle
+  Autonomous DB engine ready"; the cache key is now the pre-rewrite url. (3) `app.py::/training-score` built a new
+  `TrainingScanner` per request (model load + unpickle); now `_get_training_scanner()` shares one, rebuilt every
+  `TRAINING_SCANNER_TTL_SEC` (default 120) and dropped on `promote_model`. `ModelRegistry()` also runs `create_all` once per
+  engine (`_create_all_once`). Tests: NEW `training/tests/test_identity_once_and_engine_cache.py` (8) and
+  `test_scanner_cache.py` (4); the engine-singleton case builds 3 engines on the group 79 code, 1 now. Training suite here:
+  37 passed, 1 failed (`test_oracle_first_db_url.py::test_app_still_reports_sqlite_and_postgres_without_oracle`, fails the
+  same way on the group 79 zip, not touched). decision/ suite 22 passed, 9 skipped. prediction/ suite not run (errored at
+  collection on the sandbox, unrelated). NEEDS REBUILD: `docker compose build decision-prediction-service && docker compose
+  up -d decision-prediction-service`. Check: after the first call, `/training-score` should no longer log the identity lines.
+  NOT FIXED here: `train.py` / `scanner.py` still build their own `ModelRegistry()` (rare paths, now cheap).
+- 2026-10-04 (group 79)  Log-audit item 8: market sentiment was always 50 in the decision engine. `docker-compose.yml`
+  never set `API_GATEWAY_URL` for `decision-prediction-service`, so `decision/main.py` fell back to its hard-coded
+  `https://api-gateway-puwd.onrender.com` (dead Render host); every `/market/indices` call failed and the neutral 50
+  fallback was used for every stock. Set `API_GATEWAY_URL: http://api-gateway:8000` for `decision-prediction-service`,
+  and for the two other services with the same silent Render fallback: `position-stocks-service` (`config.py` builds
+  `MARKET_INDICES_URL` from it) and `analysis-intelligence-service` (`rate_limit_report.py` only posts events when it is
+  set). No Python code changed. New `scripts/check_compose_gateway_url.py` (2 tests, runs with plain python or pytest):
+  fails on the previous compose for those 3 services, passes now. NEEDS RECREATE (env change, no rebuild):
+  `docker compose up -d decision-prediction-service position-stocks-service analysis-intelligence-service`.
+  Check afterwards: decision log should show "Market sentiment fetched from API Gateway: <score>" instead of
+  "All market sentiment fetches failed, using neutral 50". NOT FIXED here: the onrender defaults in code (harmless once
+  compose sets the var), and the other audit items (next by priority: #2 `ensure_oracle_identity` on every request).
 - 2026-10-03 (group 55)  #13 item (continued from group 54): the same `weight > capacity` flaw in the four other token
   buckets, all fixed the same way. Tokens are capped at `capacity`, so `tokens >= weight` can never become true for a
   heavier weight; a plain `acquire()` slept out the whole `max_wait` on every call and then "proceeded anyway".

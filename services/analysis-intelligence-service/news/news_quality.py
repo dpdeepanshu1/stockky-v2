@@ -17,6 +17,14 @@ from urllib.parse import quote
 import feedparser
 import httpx
 
+try:
+    # 2026-10-04 (item 9): shared downloader - browser User-Agent, timeout, status logging, per-URL cache.
+    from feed_fetch import fetch_feed_ex
+except Exception:  # pragma: no cover - degrade to the old direct feedparser call
+    def fetch_feed_ex(url, source="feed"):  # type: ignore
+        parsed = feedparser.parse(url)
+        return parsed, {"status": None, "error": None, "entries": len(getattr(parsed, "entries", None) or []), "cached": False}
+
 logger = logging.getLogger("news_quality")
 
 
@@ -63,7 +71,8 @@ def _rss_urls(query: str) -> List[Tuple[str, str]]:
         ("LiveMint", f"https://www.livemint.com/rss/markets"),
         ("Business Standard", f"https://www.business-standard.com/rss/markets-106.rss"),
         ("Financial Express", f"https://www.financialexpress.com/market/rss"),
-        ("NDTV Profit", f"https://feeds.feedburner.com/ndtvprofit-latest"),
+        # 2026-10-04: feedburner ndtvprofit-latest is retired; this Atom feed is the one real-trade-service's after-hours scan verified live.
+        ("NDTV Profit", "https://prod-qt-images.s3.amazonaws.com/production/bloombergquint/feed.xml"),
     ]
 
 
@@ -98,7 +107,17 @@ def expand_keywords(symbol: str, company_name: Optional[str] = None) -> List[str
 
 def _is_relevant(title: str, desc: str, keywords: List[str]) -> bool:
     text = f"{title} {desc}".lower()
-    return any(k in text for k in keywords if len(k) >= 2)
+    for k in keywords:
+        if len(k) < 2:
+            continue
+        if len(k) < 5 and " " not in k:
+            # 2026-10-04 (item 9): short tickers (LT, BEL, ITC, PNB ...) as a plain substring matched words like
+            # "built", "label", "pitch" and fed unrelated headlines into the News score - require a whole word.
+            if re.search(r"(?<![a-z0-9])" + re.escape(k) + r"(?![a-z0-9])", text):
+                return True
+        elif k in text:
+            return True
+    return False
 
 
 def _parse_entries(parsed, publisher: str, keywords: List[str], max_items: int = 8, days: int = 14) -> List[Dict[str, Any]]:
@@ -133,8 +152,12 @@ def fetch_multi_source(
     symbol: str,
     company_name: Optional[str] = None,
     max_per_source: int = 6,
+    stats: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Fetch from multiple free sources, filter, dedupe."""
+    """Fetch from multiple free sources, filter, dedupe.
+
+    `stats` (optional dict) is filled per publisher with {status, entries, matched, error, cached} so callers can
+    tell "source blocked / dead" apart from "source fine, nothing about this stock"."""
     keywords = expand_keywords(symbol, company_name)
     query = company_name or symbol
     all_items: List[Dict[str, Any]] = []
@@ -142,11 +165,18 @@ def fetch_multi_source(
     for publisher, url in _rss_urls(query):
         try:
             # For generic feeds, still filter by keywords
-            parsed = feedparser.parse(url)
+            parsed, info = fetch_feed_ex(url, publisher)
             items = _parse_entries(parsed, publisher, keywords, max_per_source)
             all_items.extend(items)
+            if stats is not None:
+                stats[publisher] = {
+                    "status": info.get("status"), "entries": info.get("entries"),
+                    "matched": len(items), "error": info.get("error"), "cached": bool(info.get("cached")),
+                }
         except Exception as e:
             logger.warning("news source %s failed: %s", publisher, e)
+            if stats is not None:
+                stats[publisher] = {"status": None, "entries": 0, "matched": 0, "error": type(e).__name__, "cached": False}
 
     # Dedupe by normalized title
     seen = set()
@@ -206,7 +236,8 @@ def build_news_response(
     llm_summarizer=None,
 ) -> Dict[str, Any]:
     """Full news payload for /analyze or /news endpoints."""
-    items = fetch_multi_source(symbol, company_name)
+    stats: Dict[str, Any] = {}
+    items = fetch_multi_source(symbol, company_name, stats=stats)
     summary = summarize_headlines(items, symbol, llm_summarizer=llm_summarizer)
     # Simple sentiment proxy from keywords
     pos = sum(1 for it in items if any(w in (it.get("title") or "").lower() for w in (
@@ -227,6 +258,10 @@ def build_news_response(
         "summary": summary,
         "headline_count": len(items),
         "headlines": items[:12],
-        "sources_checked": 8,
+        "sources_checked": len(stats) or 8,
+        # 2026-10-04 (item 9): per-source health - a source with error set (http_403, html_instead_of_feed,
+        # zero_entries, a transport error) is blocked/dead; entries>0 and matched=0 just means no news on this stock.
+        "sources_status": stats,
+        "sources_failed": sorted(k for k, v in stats.items() if v.get("error")),
         "keywords_used": expand_keywords(symbol, company_name)[:12],
     }

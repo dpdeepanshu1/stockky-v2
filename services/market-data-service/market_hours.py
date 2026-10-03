@@ -30,8 +30,8 @@ _MARKET_CLOSE = _time(15, 30)
 # A few minutes of slack on each side so a feed doesn't stop/start right
 # at the bell — lets it warm up just before open and finish flushing just
 # after close. Configurable without a code change.
-_PRE_OPEN_SLACK_MIN = int(os.getenv("MARKET_HOURS_PRE_OPEN_SLACK_MIN", "10"))
-_POST_CLOSE_SLACK_MIN = int(os.getenv("MARKET_HOURS_POST_CLOSE_SLACK_MIN", "5"))
+_PRE_OPEN_SLACK_MIN = int(((os.getenv("MARKET_HOURS_PRE_OPEN_SLACK_MIN") or "").strip() or "10"))
+_POST_CLOSE_SLACK_MIN = int(((os.getenv("MARKET_HOURS_POST_CLOSE_SLACK_MIN") or "").strip() or "5"))
 
 # Escape hatch: force the feeds to poll 24/7 anyway (e.g. local dev/testing
 # outside market hours). Off by default.

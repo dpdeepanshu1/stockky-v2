@@ -161,7 +161,7 @@ BASE_TRAINING_UNIVERSE = [
 ]
 
 # Cap how many optional extras we add from disk (keep training time sane)
-MAX_DYNAMIC_EXTRAS = int(os.getenv("PRED_MAX_DYNAMIC_EXTRAS", "80"))
+MAX_DYNAMIC_EXTRAS = int(((os.getenv("PRED_MAX_DYNAMIC_EXTRAS") or "").strip() or "80"))
 
 
 def load_dynamic_training_universe():
@@ -218,10 +218,10 @@ logger.info("Total symbols : %d", len(TRAINING_UNIVERSE))
 logger.info("=" * 80)
 
 LOOKAHEAD_DAYS = 10
-TARGET_GAIN_PCT = float(os.getenv('PRED_TARGET_GAIN_PCT', '4.0'))  # ~4% in 10 sessions
-DECISION_THRESHOLD_FALLBACK = float(os.getenv('PRED_DECISION_THRESHOLD', '0.35'))
-MIN_PRECISION_AT_THRESHOLD = float(os.getenv('PRED_MIN_PRECISION', '0.30'))
-MIN_RECALL_AT_THRESHOLD = float(os.getenv('PRED_MIN_RECALL', '0.15'))
+TARGET_GAIN_PCT = float(((os.getenv("PRED_TARGET_GAIN_PCT") or "").strip() or "4.0"))  # ~4% in 10 sessions
+DECISION_THRESHOLD_FALLBACK = float(((os.getenv("PRED_DECISION_THRESHOLD") or "").strip() or "0.35"))
+MIN_PRECISION_AT_THRESHOLD = float(((os.getenv("PRED_MIN_PRECISION") or "").strip() or "0.30"))
+MIN_RECALL_AT_THRESHOLD = float(((os.getenv("PRED_MIN_RECALL") or "").strip() or "0.15"))
 
 
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -764,12 +764,12 @@ def _apply_smote(X, y, random_state: int = 42):
         return X, y, info
 
     # Target: bring minority up toward ~40% of majority (not full 1:1 to limit noise)
-    target_ratio = float(os.getenv("PRED_SMOTE_RATIO", "0.45"))
+    target_ratio = float(((os.getenv("PRED_SMOTE_RATIO") or "").strip() or "0.45"))
     target_ratio = min(max(target_ratio, 0.25), 1.0)
     sampling_strategy = min(target_ratio, n_pos / max(n_neg, 1) + 0.35)
     sampling_strategy = min(max(sampling_strategy, float(n_pos) / max(n_neg, 1) + 1e-6), 1.0)
 
-    k = int(os.getenv("PRED_SMOTE_K", "5"))
+    k = int(((os.getenv("PRED_SMOTE_K") or "").strip() or "5"))
     k = max(1, min(k, n_pos - 1))
 
     try:
@@ -994,7 +994,7 @@ def main():
     )
 
     # SMOTE only on fit fold (no leakage into calib/test)
-    use_smote = os.getenv("PRED_USE_SMOTE", "true").lower() in ("1", "true", "yes")
+    use_smote = ((os.getenv("PRED_USE_SMOTE") or "").strip() or "true").lower() in ("1", "true", "yes")
     smote_info = {"enabled": False}
     X_fit_train, y_fit_train = X_fit, y_fit
     if use_smote:
@@ -1007,9 +1007,9 @@ def main():
             logger.info("scale_pos_weight after SMOTE adjusted to %.2f", scale_pos_weight)
 
     base_model = XGBClassifier(
-        n_estimators=int(os.getenv("PRED_N_ESTIMATORS", "400")),
-        max_depth=int(os.getenv("PRED_MAX_DEPTH", "5")),
-        learning_rate=float(os.getenv("PRED_LR", "0.04")),
+        n_estimators=int(((os.getenv("PRED_N_ESTIMATORS") or "").strip() or "400")),
+        max_depth=int(((os.getenv("PRED_MAX_DEPTH") or "").strip() or "5")),
+        learning_rate=float(((os.getenv("PRED_LR") or "").strip() or "0.04")),
         subsample=0.85,
         colsample_bytree=0.85,
         min_child_weight=3,
@@ -1038,7 +1038,7 @@ def main():
 
     # SHAP feature importance on a sample of the fit set (original, not synthetic)
     shap_info = {}
-    if os.getenv("PRED_USE_SHAP", "true").lower() in ("1", "true", "yes"):
+    if ((os.getenv("PRED_USE_SHAP") or "").strip() or "true").lower() in ("1", "true", "yes"):
         try:
             shap_info = _log_shap_importance(
                 calibrated_model,

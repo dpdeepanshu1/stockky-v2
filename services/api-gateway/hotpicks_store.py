@@ -34,18 +34,18 @@ logger = logging.getLogger("hotpicks-store")
 
 # A scan within this many hours of the last one can be served from the table
 # instead of re-walking the universe (same default/meaning as IPO_DB_FRESH_HOURS).
-HOTPICKS_DB_FRESH_HOURS = float(os.getenv("HOTPICKS_DB_FRESH_HOURS", "24"))
+HOTPICKS_DB_FRESH_HOURS = float(((os.getenv("HOTPICKS_DB_FRESH_HOURS") or "").strip() or "24"))
 # Rows older than this are pruned after each successful write.
-HOTPICKS_RETENTION_HOURS = float(os.getenv("HOTPICKS_RETENTION_HOURS", "72"))
+HOTPICKS_RETENTION_HOURS = float(((os.getenv("HOTPICKS_RETENTION_HOURS") or "").strip() or "72"))
 # Default display window for /stockky-hot/table.
-HOTPICKS_TABLE_HOURS = float(os.getenv("HOTPICKS_TABLE_HOURS", "24"))
+HOTPICKS_TABLE_HOURS = float(((os.getenv("HOTPICKS_TABLE_HOURS") or "").strip() or "24"))
 
 SECTIONS = ("news_driven", "results_driven", "bulk_insider_driven")
 
 # Short-lived memo for the feed-health audit. The tab re-mounts on every switch
 # and the panel refetches; the counts cannot change meaningfully inside this
 # window, so serving a memoised copy removes the query round-trip from tab load.
-HOTPICKS_AUDIT_TTL_SEC = float(os.getenv("HOTPICKS_AUDIT_TTL_SEC", "20"))
+HOTPICKS_AUDIT_TTL_SEC = float(((os.getenv("HOTPICKS_AUDIT_TTL_SEC") or "").strip() or "20"))
 _AUDIT_CACHE: Dict[str, Any] = {}
 _AUDIT_LOCK = threading.Lock()
 

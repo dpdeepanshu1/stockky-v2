@@ -45,14 +45,14 @@ logger = logging.getLogger("surprise-scanner")
 
 # ── Thresholds (market-intelligence derived, all env-overridable) ─────────────
 # Raised from 60 → 65: only genuine breakouts in choppy/weak-index market.
-MIN_SCORE = int(os.getenv("SURPRISE_MIN_SCORE", "65"))
+MIN_SCORE = int(((os.getenv("SURPRISE_MIN_SCORE") or "").strip() or "65"))
 # §5 — hard floor: average daily traded value (price × vol × ~25 intraday bars)
 # ₹50 lakh/day minimum. Never adaptive — unconditional BUY-side gate.
-HARD_FLOOR_LIQUIDITY = float(os.getenv("HARD_FLOOR_LIQUIDITY", "5000000"))
+HARD_FLOOR_LIQUIDITY = float(((os.getenv("HARD_FLOOR_LIQUIDITY") or "").strip() or "5000000"))
 # Raised from 1.0 → 1.5: 1% moves in a choppy market are noise.
-MIN_CHANGE_PCT = float(os.getenv("SURPRISE_MIN_CHANGE_PCT", "1.5"))
-CONCURRENCY = int(os.getenv("SURPRISE_SCAN_CONCURRENCY", "20"))
-QUOTE_TIMEOUT = float(os.getenv("SURPRISE_QUOTE_TIMEOUT", "3"))
+MIN_CHANGE_PCT = float(((os.getenv("SURPRISE_MIN_CHANGE_PCT") or "").strip() or "1.5"))
+CONCURRENCY = int(((os.getenv("SURPRISE_SCAN_CONCURRENCY") or "").strip() or "20"))
+QUOTE_TIMEOUT = float(((os.getenv("SURPRISE_QUOTE_TIMEOUT") or "").strip() or "3"))
 # 2026-09-03 fix: default cached_max_age_sec (below, in SurpriseStockEngine.scan)
 # was 90s while real-trade-service's pipeline cycle (AUTO_PILOT_INTERVAL_SECONDS,
 # config.py) defaults to 180s. That mismatch meant candidate_engine's
@@ -61,7 +61,7 @@ QUOTE_TIMEOUT = float(os.getenv("SURPRISE_QUOTE_TIMEOUT", "3"))
 # what produced the recurring "surprise/scan ... ReadTimeout" in the logs
 # (candidate_engine's own client-side timeout on that call is 25s). Widened
 # so one full-universe scan reliably covers a full pipeline cycle with margin.
-SURPRISE_CACHE_MAX_AGE_SEC = float(os.getenv("SURPRISE_CACHE_MAX_AGE_SEC", "220"))
+SURPRISE_CACHE_MAX_AGE_SEC = float(((os.getenv("SURPRISE_CACHE_MAX_AGE_SEC") or "").strip() or "220"))
 # 2026-09-18 fix: self._last_result/self._last_scan_ts (below) are plain
 # in-process attributes, wiped on every container restart. A live diagnostic
 # measured /surprise/scan?cached=true taking 320s right after a restart —
@@ -100,18 +100,18 @@ _DERIVATIVE_CONTRACT_RE = re.compile(
 )
 
 # Building tier
-BUILDING_MIN_SCORE = int(os.getenv("SURPRISE_BUILDING_MIN_SCORE", "35"))
+BUILDING_MIN_SCORE = int(((os.getenv("SURPRISE_BUILDING_MIN_SCORE") or "").strip() or "35"))
 BUILDING_MAX_SCORE = MIN_SCORE
-BUILDING_MIN_CHANGE_PCT = float(os.getenv("SURPRISE_BUILDING_MIN_CHANGE_PCT", "0.3"))
+BUILDING_MIN_CHANGE_PCT = float(((os.getenv("SURPRISE_BUILDING_MIN_CHANGE_PCT") or "").strip() or "0.3"))
 # Raised from 0.4 → 0.6: need stronger volume acceleration in choppy market
-RVOL_SLOPE_MIN = float(os.getenv("SURPRISE_RVOL_SLOPE_MIN", "0.6"))
-SECTOR_SYMPATHY_MIN_SCORE = int(os.getenv("SURPRISE_SECTOR_SYMPATHY_MIN_SCORE", "45"))
+RVOL_SLOPE_MIN = float(((os.getenv("SURPRISE_RVOL_SLOPE_MIN") or "").strip() or "0.6"))
+SECTOR_SYMPATHY_MIN_SCORE = int(((os.getenv("SURPRISE_SECTOR_SYMPATHY_MIN_SCORE") or "").strip() or "45"))
 
 # 52W proximity gate: within 8% of 52W high = genuine relative strength.
 # Tightened from 12% — in a falling index, only near-52W-high stocks are
 # showing real strength independent of the market.
-DIST_52W_BREAKOUT_PCT = float(os.getenv("SURPRISE_DIST_52W_BREAKOUT_PCT", "8.0"))
-DIST_52W_NEAR_PCT = float(os.getenv("SURPRISE_DIST_52W_NEAR_PCT", "15.0"))
+DIST_52W_BREAKOUT_PCT = float(((os.getenv("SURPRISE_DIST_52W_BREAKOUT_PCT") or "").strip() or "8.0"))
+DIST_52W_NEAR_PCT = float(((os.getenv("SURPRISE_DIST_52W_NEAR_PCT") or "").strip() or "15.0"))
 
 # ── Volume-Shocker override (added 31-Aug-2026) ───────────────────────────────
 # BUG: score_stock() requires MIN_SCORE=65/100 for the "breakout" tier, but
@@ -128,15 +128,15 @@ DIST_52W_NEAR_PCT = float(os.getenv("SURPRISE_DIST_52W_NEAR_PCT", "15.0"))
 # move itself was weak. A large price move CONFIRMED by real volume is
 # exactly what "Volume shockers" means, independent of 52W distance or
 # order-book depth — so it must be able to reach "breakout" on its own.
-SHOCKER_MIN_CHANGE_PCT = float(os.getenv("SURPRISE_SHOCKER_MIN_CHANGE_PCT", "5.0"))
-SHOCKER_MIN_RVOL = float(os.getenv("SURPRISE_SHOCKER_MIN_RVOL", "2.0"))
+SHOCKER_MIN_CHANGE_PCT = float(((os.getenv("SURPRISE_SHOCKER_MIN_CHANGE_PCT") or "").strip() or "5.0"))
+SHOCKER_MIN_RVOL = float(((os.getenv("SURPRISE_SHOCKER_MIN_RVOL") or "").strip() or "2.0"))
 
 # ── ORB-proxy tuning (added 31-Aug-2026, see BUGFIX note in score_stock) ─────
 # Fraction of a stock's normal daily ATR used as the "opening range" buffer
 # above the open when the feed has no true opening-range high.
-ORB_ATR_FRACTION = float(os.getenv("SURPRISE_ORB_ATR_FRACTION", "0.3"))
+ORB_ATR_FRACTION = float(((os.getenv("SURPRISE_ORB_ATR_FRACTION") or "").strip() or "0.3"))
 # Fallback buffer (as a fraction of open price) when daily_atr is unknown/0.
-ORB_FALLBACK_PCT = float(os.getenv("SURPRISE_ORB_FALLBACK_PCT", "0.005"))
+ORB_FALLBACK_PCT = float(((os.getenv("SURPRISE_ORB_FALLBACK_PCT") or "").strip() or "0.005"))
 
 
 def _normalize_db_url(url: str) -> str:

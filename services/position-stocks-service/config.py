@@ -42,14 +42,14 @@ def _get_bool(name: str, default: bool) -> bool:
 
 def _get_float(name: str, default: float) -> float:
     try:
-        return float(os.getenv(name, str(default)))
+        return float(((os.getenv(name) or "").strip() or str(default)))
     except (TypeError, ValueError):
         return default
 
 
 def _get_int(name: str, default: int) -> int:
     try:
-        return int(os.getenv(name, str(default)))
+        return int(((os.getenv(name) or "").strip() or str(default)))
     except (TypeError, ValueError):
         return default
 

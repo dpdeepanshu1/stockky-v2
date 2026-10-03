@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("bhavcopy-archive")
 
-RETENTION_DAYS = int(os.environ.get("BHAVCOPY_RETENTION_DAYS", "90"))
+RETENTION_DAYS = int(((os.environ.get("BHAVCOPY_RETENTION_DAYS") or "").strip() or "90"))
 ARCHIVE_DIR = Path(os.environ.get("BHAVCOPY_ARCHIVE_DIR", "./archive_parquet"))
 
 

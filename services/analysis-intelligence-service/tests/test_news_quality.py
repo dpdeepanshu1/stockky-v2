@@ -24,6 +24,58 @@ def _parsed(*entries):
     return types.SimpleNamespace(entries=list(entries))
 
 
+@pytest.fixture(autouse=True)
+def _no_network_feeds(monkeypatch):
+    """2026-10-04 (item 9): feeds now go through feed_fetch._download (httpx). Tests keep faking feedparser.parse;
+    this stub stands in for the download so no test touches the network, and the per-URL cache starts empty."""
+    import feed_fetch
+    feed_fetch.clear_cache()
+    monkeypatch.setattr(feed_fetch, "_download", lambda url: (b"<rss/>", {"status": 200, "error": None}))
+    yield
+    feed_fetch.clear_cache()
+
+
+class TestRelevanceWholeWordForShortKeys:
+    def test_short_ticker_needs_whole_word(self):
+        assert nq._is_relevant("Larsen wins order, LT shares rise", "", ["lt"]) is True
+        assert nq._is_relevant("Built a new label for the pitch", "", ["lt"]) is False
+
+    def test_long_keyword_still_substring(self):
+        assert nq._is_relevant("Reliancejio launch", "", ["reliance"]) is True
+
+    def test_short_keyword_punctuation_boundaries(self):
+        assert nq._is_relevant("ITC's Q3 profit up", "", ["itc"]) is True
+        assert nq._is_relevant("Switch to digital", "", ["itc"]) is False
+
+
+class TestSourcesStatus:
+    def test_stats_filled_per_publisher(self, monkeypatch):
+        import feed_fetch
+        import feedparser
+        monkeypatch.setattr(feedparser, "parse", lambda raw: _parsed(_entry("Reliance profit up", "", None, "http://x")))
+        stats = {}
+        nq.fetch_multi_source("RELIANCE", stats=stats)
+        assert set(stats) == {p for p, _ in nq._rss_urls("RELIANCE")}
+        assert all(v["entries"] == 1 and v["matched"] == 1 and not v["error"] for v in stats.values())
+
+    def test_failed_source_is_reported(self, monkeypatch):
+        import feed_fetch
+        monkeypatch.setattr(feed_fetch, "_download", lambda url: (None, {"status": 403, "error": "http_403"}))
+        stats = {}
+        assert nq.fetch_multi_source("RELIANCE", stats=stats) == []
+        assert all(v["error"] == "http_403" and v["status"] == 403 for v in stats.values())
+
+    def test_build_response_lists_failed_sources(self, monkeypatch):
+        import feed_fetch
+        monkeypatch.setattr(feed_fetch, "_download", lambda url: (None, {"status": 403, "error": "http_403"}))
+        out = nq.build_news_response("RELIANCE")
+        assert out["headline_count"] == 0 and out["sources_failed"] and out["sources_checked"] == len(out["sources_status"])
+
+    def test_ndtv_uses_live_atom_feed(self):
+        urls = dict(nq._rss_urls("X"))
+        assert "feedburner" not in urls["NDTV Profit"] and "bloombergquint" in urls["NDTV Profit"]
+
+
 # ── expand_keywords ──────────────────────────────────────────────────────────
 
 class TestExpandKeywords:
@@ -267,7 +319,7 @@ class TestSummarizeHeadlines:
 
 class TestBuildNewsResponse:
     def test_structure(self, monkeypatch):
-        monkeypatch.setattr(nq, "fetch_multi_source", lambda s, cn=None: [
+        monkeypatch.setattr(nq, "fetch_multi_source", lambda s, cn=None, **k: [
             {"title": "Reliance profit up", "description": "",
              "url": "http://x.com", "publisher": "Test", "published_at": None}
         ])
@@ -280,7 +332,7 @@ class TestBuildNewsResponse:
         assert result["sources_checked"] == 8
 
     def test_empty_headlines_score_50(self, monkeypatch):
-        monkeypatch.setattr(nq, "fetch_multi_source", lambda s, cn=None: [])
+        monkeypatch.setattr(nq, "fetch_multi_source", lambda s, cn=None, **k: [])
         result = nq.build_news_response("X")
         assert result["news_score"] == 50.0
 
@@ -288,7 +340,7 @@ class TestBuildNewsResponse:
         items = [{"title": "profit surge rally beat growth",
                   "description": "", "url": "", "publisher": "", "published_at": None}
                  for _ in range(5)]
-        monkeypatch.setattr(nq, "fetch_multi_source", lambda s, cn=None: items)
+        monkeypatch.setattr(nq, "fetch_multi_source", lambda s, cn=None, **k: items)
         result = nq.build_news_response("X")
         assert result["news_score"] > 50.0
 
@@ -296,7 +348,7 @@ class TestBuildNewsResponse:
         items = [{"title": "loss fraud ban probe delay",
                   "description": "", "url": "", "publisher": "", "published_at": None}
                  for _ in range(5)]
-        monkeypatch.setattr(nq, "fetch_multi_source", lambda s, cn=None: items)
+        monkeypatch.setattr(nq, "fetch_multi_source", lambda s, cn=None, **k: items)
         result = nq.build_news_response("X")
         assert result["news_score"] < 50.0
 
@@ -304,12 +356,12 @@ class TestBuildNewsResponse:
         items = [{"title": "profit " * 20,
                   "description": "", "url": "", "publisher": "", "published_at": None}
                  for _ in range(50)]
-        monkeypatch.setattr(nq, "fetch_multi_source", lambda s, cn=None: items)
+        monkeypatch.setattr(nq, "fetch_multi_source", lambda s, cn=None, **k: items)
         result = nq.build_news_response("X")
         assert 0.0 <= result["news_score"] <= 100.0
 
     def test_keywords_included(self, monkeypatch):
-        monkeypatch.setattr(nq, "fetch_multi_source", lambda s, cn=None: [])
+        monkeypatch.setattr(nq, "fetch_multi_source", lambda s, cn=None, **k: [])
         result = nq.build_news_response("PWL")
         assert "physics wallah" in result["keywords_used"]
 
@@ -317,6 +369,6 @@ class TestBuildNewsResponse:
         items = [{"title": f"News {i}", "description": "",
                   "url": "", "publisher": "", "published_at": None}
                  for i in range(20)]
-        monkeypatch.setattr(nq, "fetch_multi_source", lambda s, cn=None: items)
+        monkeypatch.setattr(nq, "fetch_multi_source", lambda s, cn=None, **k: items)
         result = nq.build_news_response("X")
         assert len(result["headlines"]) <= 12

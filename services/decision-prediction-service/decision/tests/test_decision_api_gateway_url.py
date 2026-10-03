@@ -36,14 +36,23 @@ _CASES = [
 ]
 
 
+def _purge_repo_modules(mods_before):
+    """Drop modules these tests imported FROM THIS REPO. Third-party C-extension packages (numpy, pandas ...)
+    must stay in sys.modules: numpy cannot be imported twice in one process."""
+    repo = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+    for k in set(sys.modules) - mods_before:
+        f = getattr(sys.modules.get(k), "__file__", None) or ""
+        if f and os.path.realpath(f).startswith(repo + os.sep):
+            sys.modules.pop(k, None)
+
+
 @pytest.fixture(autouse=True)
 def _isolate():
     path_before, mods_before = list(sys.path), set(sys.modules)
     sys.path.insert(0, _DIR)
     yield
     sys.path[:] = path_before
-    for k in set(sys.modules) - mods_before:
-        sys.modules.pop(k, None)
+    _purge_repo_modules(mods_before)
 
 
 def _load(raw, monkeypatch):

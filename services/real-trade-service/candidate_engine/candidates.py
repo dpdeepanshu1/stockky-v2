@@ -104,25 +104,25 @@ MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.
 # ── Quality thresholds — market-intelligence derived, all env-overridable ────
 # Raised from 45 → 55 because in a choppy/weak market, borderline signals
 # lose more often. Only take high-conviction setups.
-MIN_CONVICTION = float(os.getenv("CANDIDATE_MIN_CONVICTION", "55"))
+MIN_CONVICTION = float(((os.getenv("CANDIDATE_MIN_CONVICTION") or "").strip() or "55"))
 
 # Raised from 3 → 4: need stronger multi-TF alignment when the index itself
 # is in a correction. A single-day event alone is not enough.
-MIN_BULLISH_TIMEFRAMES = int(os.getenv("CANDIDATE_MIN_BULLISH_TF", "4"))
+MIN_BULLISH_TIMEFRAMES = int(((os.getenv("CANDIDATE_MIN_BULLISH_TF") or "").strip() or "4"))
 
 # §10 weighted timeframe vote (1-day = 0.5×, all others 1.0×)
 TIMEFRAME_WEIGHTS = {"1d": 0.5, "1w": 1.0, "1m": 1.0, "3m": 1.0, "6m": 1.0, "1y": 1.0, "2y": 1.0}
 
 # 6m downtrend: tightened to −10% (was −12%) because in a market where the
 # index itself is −7% in 6m, a stock down −10% in 6m has no relative strength.
-DOWNTREND_6M_THRESHOLD = float(os.getenv("CANDIDATE_DOWNTREND_6M_PCT", "-10.0"))
+DOWNTREND_6M_THRESHOLD = float(((os.getenv("CANDIDATE_DOWNTREND_6M_PCT") or "").strip() or "-10.0"))
 
 # 52w overextension: tightened to top 12% (was 15%) — in a choppy market,
 # stocks near yearly highs face heavy profit-booking.
-OVEREXTENDED_52W_TOP_PCT = float(os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT", "12.0"))
+OVEREXTENDED_52W_TOP_PCT = float(((os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT") or "").strip() or "12.0"))
 
 # ATR cap: slightly tightened (7% vs 8%) for safer sizing in volatile conditions.
-MAX_ATR_PCT = float(os.getenv("CANDIDATE_MAX_ATR_PCT", "7.0"))
+MAX_ATR_PCT = float(((os.getenv("CANDIDATE_MAX_ATR_PCT") or "").strip() or "7.0"))
 
 # ── 2026-09-11 addition: cycle-scoped adaptive parameter cache ────────────
 # MAX_ATR_PCT above is read directly (no `db` in scope) by both
@@ -237,15 +237,15 @@ def _refresh_cycle_adaptive_params(db: Session) -> None:
         logger.warning("candidate_engine: adaptive param refresh failed (%s), keeping prior values", e)
 
 # Minimum stock price: sub-₹20 stocks = operator risk + wide spreads + illiquid
-MIN_STOCK_PRICE = float(os.getenv("CANDIDATE_MIN_STOCK_PRICE", "20.0"))
+MIN_STOCK_PRICE = float(((os.getenv("CANDIDATE_MIN_STOCK_PRICE") or "").strip() or "20.0"))
 
 # Volume health: recent 5-day avg must be ≥ this fraction of 20-day avg.
 # Low-volume moves in choppy markets are fake — they reverse fast.
-VOLUME_HEALTH_RATIO = float(os.getenv("CANDIDATE_VOLUME_HEALTH_RATIO", "0.80"))
+VOLUME_HEALTH_RATIO = float(((os.getenv("CANDIDATE_VOLUME_HEALTH_RATIO") or "").strip() or "0.80"))
 
 # A positive return must be at least +0.5% to count as "bullish" in a TF.
 # Pure flat or near-zero returns are not bullish signals.
-BULLISH_THRESHOLD_PCT = float(os.getenv("CANDIDATE_BULLISH_THRESHOLD_PCT", "0.5"))
+BULLISH_THRESHOLD_PCT = float(((os.getenv("CANDIDATE_BULLISH_THRESHOLD_PCT") or "").strip() or "0.5"))
 
 _ACTIONABLE_DECISIONS = {"BUY NOW", "PREPARE TO BUY"}
 
@@ -323,7 +323,7 @@ _SOURCES = {
 # actually unquotable, the fetch never had a chance to complete. Bounding
 # concurrency here keeps the in-flight request count sane so the fast ones
 # succeed instead of all of them queuing behind each other into a timeout.
-CANDIDATE_ANALYSIS_CONCURRENCY = int(os.getenv("CANDIDATE_ANALYSIS_CONCURRENCY", "15"))
+CANDIDATE_ANALYSIS_CONCURRENCY = int(((os.getenv("CANDIDATE_ANALYSIS_CONCURRENCY") or "").strip() or "15"))
 
 # 2026-09-01 tuning: loosened from 2.0x/5.0% to widen the entry gate so more
 # of /scan/universe's momentum_movers survive into the candidate list. This
@@ -335,7 +335,7 @@ CANDIDATE_ANALYSIS_CONCURRENCY = int(os.getenv("CANDIDATE_ANALYSIS_CONCURRENCY",
 # signals and loosening them would dilute the one part of this gate with
 # the most backtest support. Both remain env-overridable with no code
 # change if this turns out too loose (or not loose enough) in practice.
-VOLUME_SHOCK_MULTIPLIER = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MULTIPLIER", "1.5"))
+VOLUME_SHOCK_MULTIPLIER = float(((os.getenv("CANDIDATE_VOLUME_SHOCK_MULTIPLIER") or "").strip() or "1.5"))
 # 2026-09-03 recalibration: lowered from 3.5% → 2.5%.
 # Rationale: real NSE volume-shocker sessions (Groww screenshots 2026-09-03)
 # show genuine institutional movers like Hikal +16.95%, Raymond +14.13%,
@@ -345,18 +345,18 @@ VOLUME_SHOCK_MULTIPLIER = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MULTIPLIER", "
 # inserted. Lowering to 2.5% lets moderate-strength movers through while
 # the HIGH_CONVICTION (15x vol + 15% return) and UPPER_CIRCUIT (19.9%)
 # tiers — which have the strongest backtest evidence — remain unchanged.
-VOLUME_SHOCK_MIN_RETURN_PCT = float(os.getenv("CANDIDATE_VOLUME_SHOCK_MIN_RETURN_PCT", "2.5"))
+VOLUME_SHOCK_MIN_RETURN_PCT = float(((os.getenv("CANDIDATE_VOLUME_SHOCK_MIN_RETURN_PCT") or "").strip() or "2.5"))
 
 # HIGH CONVICTION tier — from 1-year NSE backtest (30-Aug-2026):
 # vol >= 15x AND return >= 15% → 55.7% next-day win rate, mean +2.28%
 # Upper circuit (>=19.9%) → 69.7% win rate, mean +5.22% — strongest signal
-HIGH_CONVICTION_VOL_MULTIPLIER = float(os.getenv("CANDIDATE_HC_VOL_MULTIPLIER", "15.0"))
-HIGH_CONVICTION_MIN_RETURN_PCT = float(os.getenv("CANDIDATE_HC_MIN_RETURN_PCT", "15.0"))
-UPPER_CIRCUIT_THRESHOLD_PCT = float(os.getenv("CANDIDATE_UPPER_CIRCUIT_PCT", "19.9"))
+HIGH_CONVICTION_VOL_MULTIPLIER = float(((os.getenv("CANDIDATE_HC_VOL_MULTIPLIER") or "").strip() or "15.0"))
+HIGH_CONVICTION_MIN_RETURN_PCT = float(((os.getenv("CANDIDATE_HC_MIN_RETURN_PCT") or "").strip() or "15.0"))
+UPPER_CIRCUIT_THRESHOLD_PCT = float(((os.getenv("CANDIDATE_UPPER_CIRCUIT_PCT") or "").strip() or "19.9"))
 
 # Delivery % quality tiers — from 1-year NSE backtest:
 # >60% = institutional quality; include in payload for frontend display
-DELIVERY_HIGH_QUALITY_PCT = float(os.getenv("CANDIDATE_DELIVERY_HIGH_QUALITY_PCT", "60.0"))
+DELIVERY_HIGH_QUALITY_PCT = float(((os.getenv("CANDIDATE_DELIVERY_HIGH_QUALITY_PCT") or "").strip() or "60.0"))
 
 # ── 2026-09-01 re-backtest (819,906-row NSE bhavcopy, reproduced independently) ──
 # Confirmed the tiered structure above holds (win rate rises with each tier,
@@ -377,7 +377,7 @@ DELIVERY_HIGH_QUALITY_PCT = float(os.getenv("CANDIDATE_DELIVERY_HIGH_QUALITY_PCT
 # alone, since a missing-data reject would be indistinguishable from a
 # low-delivery reject in the logs and this filter is meant to catch
 # intraday-churn moves specifically, not unrelated data gaps.
-BASE_TIER_MIN_DELIVERY_PCT = float(os.getenv("CANDIDATE_BASE_MIN_DELIVERY_PCT", "30.0"))
+BASE_TIER_MIN_DELIVERY_PCT = float(((os.getenv("CANDIDATE_BASE_MIN_DELIVERY_PCT") or "").strip() or "30.0"))
 
 
 # ── Fetch helpers ─────────────────────────────────────────────────────────────
@@ -686,8 +686,8 @@ def _quality_gate_fund_tech(scored: dict, sector_peers: list, cross_cycle_peer_s
 # fetches below run means _fetch_quote() mostly hits a warm cache (fast,
 # no rate-limiter contention) instead of racing 200 other requests for the
 # same few tokens/sec.
-BULK_QUOTE_CHUNK_SIZE = int(os.getenv("CANDIDATE_BULK_QUOTE_CHUNK_SIZE", "40"))
-BULK_QUOTE_TIMEOUT_SECONDS = float(os.getenv("CANDIDATE_BULK_QUOTE_TIMEOUT_SECONDS", "90.0"))
+BULK_QUOTE_CHUNK_SIZE = int(((os.getenv("CANDIDATE_BULK_QUOTE_CHUNK_SIZE") or "").strip() or "40"))
+BULK_QUOTE_TIMEOUT_SECONDS = float(((os.getenv("CANDIDATE_BULK_QUOTE_TIMEOUT_SECONDS") or "").strip() or "90.0"))
 
 # 2026-09-01 incident fix (504 / 300+s "Fetching candidates" stall): this
 # loop used to `await` one chunk POST at a time in a plain `for`, so N
@@ -704,7 +704,7 @@ BULK_QUOTE_TIMEOUT_SECONDS = float(os.getenv("CANDIDATE_BULK_QUOTE_TIMEOUT_SECON
 # of the sum. Paired with rate_limiter.py's new breaker check on the bulk
 # yf.download() path, a Yahoo outage now fails the whole prefetch in
 # roughly one hard-timeout window, not one per chunk.
-BULK_QUOTE_CONCURRENCY = int(os.getenv("CANDIDATE_BULK_QUOTE_CONCURRENCY", "4"))
+BULK_QUOTE_CONCURRENCY = int(((os.getenv("CANDIDATE_BULK_QUOTE_CONCURRENCY") or "").strip() or "4"))
 
 
 async def _prefetch_quotes_bulk(client: httpx.AsyncClient, symbols: list[str]) -> None:

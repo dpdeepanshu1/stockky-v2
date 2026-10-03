@@ -30,6 +30,17 @@ import pytest
 import main as nm  # noqa: E402  (news/main.py)
 
 
+@pytest.fixture(autouse=True)
+def _no_network_feeds(monkeypatch):
+    """2026-10-04 (item 9): feeds go through feed_fetch._download (httpx); these tests keep faking
+    feedparser.parse, so stub the download (no network) and start each test with an empty per-URL cache."""
+    import feed_fetch
+    feed_fetch.clear_cache()
+    monkeypatch.setattr(feed_fetch, "_download", lambda url: (b"<rss/>", {"status": 200, "error": None}))
+    yield
+    feed_fetch.clear_cache()
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _now():
@@ -783,6 +794,34 @@ class TestAnalyze:
         monkeypatch.setattr(nm, "build_news_response", fake_build)
         assert nm.analyze("TCS.NS", company_name="Tata") is payload
         assert seen == {"symbol": "TCS.NS", "company_name": "Tata", "llm": None}
+
+    def test_known_symbol_gets_company_name_hint(self, monkeypatch):
+        seen = {}
+
+        def fake_build(symbol, company_name=None, llm_summarizer=None):
+            seen["cn"] = company_name
+            return {"headline_count": 1, "headlines": [1]}
+
+        monkeypatch.setattr(nm, "build_news_response", fake_build)
+        nm.analyze("TCS.NS")
+        assert seen["cn"] == "Tata Consultancy Services"
+        nm.analyze("NEWCO")
+        assert seen["cn"] is None
+
+    def test_empty_news_payload_marks_quality_none(self, monkeypatch):
+        monkeypatch.setattr(nm, "build_news_response", None)
+        monkeypatch.setattr(nm, "_fetch_headlines", lambda s, max_items=15: [])
+        out = nm.analyze("NEWCO")
+        assert out["data_quality"]["level"] == "none" and out["headline_count"] == 0
+
+    def test_ndtv_feed_is_the_live_atom_url(self, monkeypatch):
+        urls = []
+        monkeypatch.setattr(nm.feedparser, "parse", lambda u: (urls.append(1), _parsed())[1])
+        import feed_fetch
+        seen = []
+        monkeypatch.setattr(feed_fetch, "_download", lambda url: (seen.append(url), (b"x", {"status": 200}))[1])
+        nm._fetch_ndtv_profit("INFY")
+        assert "ndtv.com/business/rss" not in seen[0] and "bloombergquint" in seen[0]
 
     def test_falls_through_when_payload_empty(self, monkeypatch):
         monkeypatch.setattr(nm, "build_news_response", lambda *a, **k: {"headline_count": 0, "headlines": []})

@@ -134,7 +134,7 @@ except Exception:
 LOCK_FILE = os.path.join(_DATA_DIR, "training.lock")
 # Training a full universe can exceed 5 minutes — a short timeout made the lock
 # look "stale" mid-run so a second Trigger would delete the lock and abort the job.
-LOCK_TIMEOUT_SECONDS = int(os.environ.get("TRAINING_LOCK_TIMEOUT_SECONDS", "2700"))  # 45 min default
+LOCK_TIMEOUT_SECONDS = int(((os.environ.get("TRAINING_LOCK_TIMEOUT_SECONDS") or "").strip() or "2700"))  # 45 min default
 
 
 # ---------- Pydantic models for prediction recording ----------
@@ -476,6 +476,8 @@ def promote_model(version: str):
     ok = registry.promote_model(version)
     if not ok:
         raise HTTPException(status_code=404, detail=f"Model version {version} not found")
+    with _scanner_lock:                       # next /training-score picks up the promoted model
+        _scanner_cache["obj"] = None
     logger.info(f"Promoted model {version} to production")
     return {"status": "success", "version": version}
 
@@ -532,7 +534,7 @@ async def health(warm: bool = False):
     Pass ?db=1 only when you need connectivity diagnostics.
     """
     import os as _os
-    skip = _os.environ.get("HEALTH_SKIP_DB", "1").lower() in ("1", "true", "yes")
+    skip = ((_os.environ.get("HEALTH_SKIP_DB") or "").strip() or "1").lower() in ("1", "true", "yes")
     # warm is for waking the dyno only
     if skip:
         return JSONResponse(content={
@@ -1457,11 +1459,36 @@ async def train_clear_lock_alias():
 async def model_status():
     return JSONResponse(content=get_training_status())
 
+_SCANNER_TTL_SEC = float(((os.environ.get("TRAINING_SCANNER_TTL_SEC") or "").strip() or "120"))
+_scanner_cache = {"obj": None, "ts": 0.0}
+_scanner_lock = __import__("threading").Lock()
+
+
+def _get_training_scanner():
+    """Shared TrainingScanner, rebuilt at most every _SCANNER_TTL_SEC.
+
+    TrainingScanner.__init__ loads the production model (ModelRegistry -> DB read + unpickle) and
+    used to be built on EVERY /training-score request, which the decision service calls twice per
+    stock analysis. The scanner keeps no per-request state (score_symbol opens its own session), so
+    one instance is safe to share; the TTL keeps a newly promoted model from being missed for long.
+    """
+    from scanner import TrainingScanner
+    now = time.monotonic()
+    with _scanner_lock:
+        obj = _scanner_cache["obj"]
+        if obj is not None and (now - _scanner_cache["ts"]) < _SCANNER_TTL_SEC:
+            return obj
+    obj = TrainingScanner(SessionLocal, MODEL_STORE_PATH)     # slow part outside the lock
+    with _scanner_lock:
+        _scanner_cache["obj"] = obj
+        _scanner_cache["ts"] = time.monotonic()
+    return obj
+
+
 @app.get("/training-score/{symbol}")
 async def training_score(symbol: str):
     """Per-symbol training intelligence + global live win-rate for closed-loop thresholds."""
-    from scanner import TrainingScanner
-    scanner = TrainingScanner(SessionLocal, MODEL_STORE_PATH)
+    scanner = _get_training_scanner()
     score = scanner.score_symbol(symbol)
     live_wr = None
     try:
@@ -1518,7 +1545,7 @@ async def api_rl_explore_info():
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get('PORT', 5001))
+    port = int(((os.environ.get("PORT") or "").strip() or 5001))
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 # ----------------------------------------------------------------------

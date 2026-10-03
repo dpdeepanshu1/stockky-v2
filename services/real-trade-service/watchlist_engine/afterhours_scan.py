@@ -3,8 +3,8 @@ watchlist_engine/afterhours_scan.py — After-hours news scan (2026-09-17, sessi
 
 Polls Moneycontrol, LiveMint, NDTV Profit, and Business Standard RSS/Atom
 feeds (Economic Times removed 2026-09-17, session58 — see the ET / ET-companies
-REMOVED comment on _RSS_FEEDS below) once per
-AFTERHOURS_SCAN_INTERVAL_SECONDS (default 3600s = hourly) between market
+REMOVED comment on _RSS_FEEDS below) on a time-of-day cadence
+(every 6 h off-market, every 30 min 08:00-09:00 IST; see auto_pilot._afterhours_next_sleep_seconds) between market
 close (~15:45 IST) and pre-market (~08:45 IST next day). Classifies headlines,
 scores and deduplicates by symbol, and upserts into NextDayWatchlistEntry so
 _prepick can pull them at 09:00 as pre-seeded high-priority candidates.
@@ -141,6 +141,11 @@ from event_depth_local import classify_text
 from resilience.circuit_breaker import api_gateway_breaker
 
 logger = logging.getLogger("real-trade-afterhours-scan")
+
+# Telegram alert size bounds (2026-10-04). Long messages are split into parts by
+# notification-scheduler-service, so these are only sanity caps.
+_NOTIFY_MAX_SYMBOLS = 30
+_NOTIFY_MAX_HEADLINE = 400
 
 _HTTP_TIMEOUT = 10.0
 
@@ -888,17 +893,21 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
             lines.append(f"{written} row(s) new/updated · {len(best)} total scored this pass\n")
         else:
             lines.append(f"No new rows — {len(best)} symbol(s) already at best score\n")
-        for sym, hit in sorted_hits[:8]:  # top 8 in notification
+        for sym, hit in sorted_hits[:_NOTIFY_MAX_SYMBOLS]:  # was top 8 (2026-10-04: show all, cap only as a sanity bound)
             cat_icon = {"results": "📊", "bulk_block": "🏦", "board": "🗂️", "insider": "👤", "news": "📰"}.get(
                 hit["catalyst_type"], "📰"
             )
             lines.append(
                 f"{cat_icon} *{sym}* · score {hit['score']:.0f} · {hit['catalyst_type']} · {hit['source']}"
             )
-            # Truncate headline to keep message readable
+            # 2026-10-04: full headline (was cut at 80 chars + '…'). Telegram's 4096
+            # limit is handled by the notification service, which splits long
+            # messages into numbered parts, so no truncation is needed here.
             hl = hit.get("headline", "")
             if hl:
-                lines.append(f"   _{hl[:80]}{'…' if len(hl) > 80 else ''}_")
+                lines.append(f"   _{hl[:_NOTIFY_MAX_HEADLINE]}_")
+        if len(sorted_hits) > _NOTIFY_MAX_SYMBOLS:
+            lines.append(f"\n…and {len(sorted_hits) - _NOTIFY_MAX_SYMBOLS} more not shown")
         await notify_async("\n".join(lines))
     except Exception:
         logger.debug("afterhours-scan: Telegram notification failed (non-fatal)", exc_info=True)
@@ -954,7 +963,7 @@ async def finalize_nextday_watchlist(db, mode: str, market_date: str) -> list[st
                 f"[{r.catalyst_type}·{r.catalyst_source}]"
             )
             if r.headline:
-                lines.append(f"   _{r.headline[:90]}{'…' if len(r.headline) > 90 else ''}_")
+                lines.append(f"   _{r.headline[:_NOTIFY_MAX_HEADLINE]}_")
         lines.append("\n_These will be injected as overnight-priority candidates at 09:00 IST._")
         await notify_async("\n".join(lines))
     except Exception:

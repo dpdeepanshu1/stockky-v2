@@ -537,7 +537,15 @@ class TestBulkPhase:
         go(fr)
         assert fr.store.metas[0]["source"] == "bulk_5field"
 
-    @pytest.mark.parametrize("val", ["0", "no", "off", "", "false"])
+    @pytest.mark.parametrize("val", ["", "   "])
+    def test_blank_skip_value_means_unset_so_the_default_early_finish_applies(self, fr, val):
+        # group 75: `DATA_FEED_SKIP_FUNDAMENTALS_AFTER_BULK=` in a .env used to read as "off"
+        fr.mp.setenv("DATA_FEED_SKIP_FUNDAMENTALS_AFTER_BULK", val)
+        fr.bulk_result = {"tracked_stocks": 3, "symbols": []}
+        go(fr)
+        assert fr.store.metas[0]["source"] == "bulk_5field"
+
+    @pytest.mark.parametrize("val", ["0", "no", "off", "false", " 0 "])
     def test_falsy_skip_values_disable_the_early_finish(self, fr, val):
         fr.mp.setenv("DATA_FEED_SKIP_FUNDAMENTALS_AFTER_BULK", val)
         fr.mp.setenv("DATA_FEED_SKIP_SEQUENTIAL_FUND", "0")

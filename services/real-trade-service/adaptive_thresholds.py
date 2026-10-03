@@ -52,10 +52,10 @@ _REGIME_CONSTANTS = {
     "CANDIDATE_OVEREXTENDED_52W_TOP_PCT": (config.CANDIDATE_OVEREXTENDED_52W_TOP_PCT, "2026-09-03"),
 }
 
-ADAPTIVE_HISTORY_DAYS     = int(os.getenv("ADAPTIVE_HISTORY_DAYS", "90"))
-ADAPTIVE_MIN_HISTORY_DAYS = int(os.getenv("ADAPTIVE_MIN_HISTORY_DAYS", "30"))
-ADAPTIVE_PERCENTILE       = float(os.getenv("ADAPTIVE_PERCENTILE", "20.0"))
-STALE_THRESHOLD_DAYS      = int(os.getenv("ADAPTIVE_STALE_THRESHOLD_DAYS", "30"))
+ADAPTIVE_HISTORY_DAYS     = int(((os.getenv("ADAPTIVE_HISTORY_DAYS") or "").strip() or "90"))
+ADAPTIVE_MIN_HISTORY_DAYS = int(((os.getenv("ADAPTIVE_MIN_HISTORY_DAYS") or "").strip() or "30"))
+ADAPTIVE_PERCENTILE       = float(((os.getenv("ADAPTIVE_PERCENTILE") or "").strip() or "20.0"))
+STALE_THRESHOLD_DAYS      = int(((os.getenv("ADAPTIVE_STALE_THRESHOLD_DAYS") or "").strip() or "30"))
 
 
 # ── Score recording ───────────────────────────────────────────────────────────

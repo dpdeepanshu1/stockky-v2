@@ -82,10 +82,10 @@ STATE_DIR = os.getenv("SCHEDULER_STATE_DIR", "/data")
 CONFIG_PATH = os.path.join(STATE_DIR, "overnight_config.json")
 
 _DEFAULT_CONFIG = {
-    "enabled": os.getenv("OVERNIGHT_ORCH_ENABLED", "true").lower() == "true",
+    "enabled": ((os.getenv("OVERNIGHT_ORCH_ENABLED") or "").strip() or "true").lower() == "true",
     "datafeed_time": os.getenv("OVERNIGHT_DATAFEED_TIME", "00:30"),
     "premarket_time": os.getenv("OVERNIGHT_PREMARKET_TIME", "07:00"),
-    "rest_between_steps_sec": int(os.getenv("OVERNIGHT_REST_SEC", "45")),
+    "rest_between_steps_sec": int(((os.getenv("OVERNIGHT_REST_SEC") or "").strip() or "45")),
 }
 
 _CONFIG_LOCK = threading.Lock()

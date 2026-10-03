@@ -125,7 +125,7 @@ _LEGACY_NULL_DATE_SENTINEL = "1900-01-01"
 # perfectly fine on Render, i.e. a data-dependent, backend-specific failure.
 # Clipping below the ceiling keeps the bind in VARCHAR2 territory; the TO_CLOB()
 # wrapper in upsert_sql() then makes the select-list type explicit.
-CLOB_BIND_MAX_BYTES = int(os.getenv("IPO_JSON_MAX_BYTES", "30000"))
+CLOB_BIND_MAX_BYTES = int(((os.getenv("IPO_JSON_MAX_BYTES") or "").strip() or "30000"))
 
 
 def _clip_utf8(value: str, max_bytes: int) -> str:

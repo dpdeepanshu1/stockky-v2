@@ -51,17 +51,31 @@ def _safe_float(val, default=None):
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("decision-engine-service")
 
+def _env_url(name: str, default: str, rstrip: bool = True) -> str:
+    """URL setting from the environment with a blank-safe fallback.
+
+    os.getenv(name, default) only falls back when the variable is UNSET, so an empty or
+    whitespace-only value (a blank Render dashboard variable, `NAME=` in an env_file) overrode a working
+    default and every request went to "/path". Blank / whitespace-only (and, with rstrip, slash-only)
+    values now use `default`; padded values are trimmed.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if rstrip:
+        raw = raw.rstrip("/")
+    return raw or (default.rstrip("/") if rstrip else default)
+
+
 # ---- Service URLs (env-driven; aligned with config/service_urls.py) ----
-_AI = os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com")
-_DP = os.getenv("DECISION_PREDICTION_URL", "https://decision-prediction-service.onrender.com")
-TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_AI.rstrip('/')}/technical")
-MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
-FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_AI.rstrip('/')}/fundamental")
-NEWS_URL = os.getenv("NEWS_URL", f"{_AI.rstrip('/')}/news")
-EVENT_URL = os.getenv("EVENT_URL", f"{_AI.rstrip('/')}/event")
-PREDICTION_URL = os.getenv("PREDICTION_URL", f"{_DP.rstrip('/')}/prediction")
+_AI = _env_url("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com", rstrip=False)
+_DP = _env_url("DECISION_PREDICTION_URL", "https://decision-prediction-service.onrender.com", rstrip=False)
+TECHNICAL_URL = _env_url("TECHNICAL_URL", f"{_AI.rstrip('/')}/technical", rstrip=False)
+MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
+FUNDAMENTAL_URL = _env_url("FUNDAMENTAL_URL", f"{_AI.rstrip('/')}/fundamental", rstrip=False)
+NEWS_URL = _env_url("NEWS_URL", f"{_AI.rstrip('/')}/news", rstrip=False)
+EVENT_URL = _env_url("EVENT_URL", f"{_AI.rstrip('/')}/event", rstrip=False)
+PREDICTION_URL = _env_url("PREDICTION_URL", f"{_DP.rstrip('/')}/prediction", rstrip=False)
 API_GATEWAY_URL = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/") or "https://api-gateway-puwd.onrender.com"
-TRAINING_SERVICE_URL = os.getenv("TRAINING_SERVICE_URL", f"{_DP.rstrip('/')}/training")
+TRAINING_SERVICE_URL = _env_url("TRAINING_SERVICE_URL", f"{_DP.rstrip('/')}/training", rstrip=False)
 
 EARNINGS_RISK_DAYS = 3
 EARNINGS_BOOST_DAYS = 7

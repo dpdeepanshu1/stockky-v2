@@ -38,12 +38,26 @@ PORT = int(os.getenv("PORT", "8005"))
 #    writes back into api-gateway's data) ───────────────────────────────────
 API_GATEWAY_URL = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/") or "https://stockky-api-gateway.onrender.com"
 
+def _env_url(name: str, default: str, rstrip: bool = True) -> str:
+    """URL setting from the environment with a blank-safe fallback.
+
+    os.getenv(name, default) only falls back when the variable is UNSET, so an empty or
+    whitespace-only value (a blank Render dashboard variable, `NAME=` in an env_file) overrode a working
+    default and every request went to "/path". Blank / whitespace-only (and, with rstrip, slash-only)
+    values now use `default`; padded values are trimmed.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if rstrip:
+        raw = raw.rstrip("/")
+    return raw or (default.rstrip("/") if rstrip else default)
+
+
 # Short-Term Trading Upgrade (2026-09-02): analysis-intelligence-service's
 # event sub-service, used only by watchlist_engine/sources.py's Tier 2
 # fallback (raw catalyst feed, pre-scoring — see that module's docstring).
 # Independent from API_GATEWAY_URL so Tier 2 keeps working via its own
 # circuit breaker even when api-gateway (Tier 1) is unhealthy.
-EVENT_URL = os.getenv("EVENT_URL", "https://stockky-event-tracker.onrender.com").rstrip("/")
+EVENT_URL = _env_url("EVENT_URL", "https://stockky-event-tracker.onrender.com")
 
 # 2026-09-11 fix — needed for the volume-shock quality gate (see
 # candidate_engine/candidates.py's _quality_gate_fund_tech). Mirrors the
@@ -54,9 +68,9 @@ EVENT_URL = os.getenv("EVENT_URL", "https://stockky-event-tracker.onrender.com")
 # TECHNICAL_URL/FUNDAMENTAL_URL explicitly for the container network; the
 # onrender.com defaults below match the Render-hosted deployment already
 # used by ANALYSIS_INTELLIGENCE_URL elsewhere in this codebase.
-_ANALYSIS_INTELLIGENCE_URL = os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com").rstrip("/")
-TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/technical").rstrip("/")
-FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/fundamental").rstrip("/")
+_ANALYSIS_INTELLIGENCE_URL = _env_url("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com")
+TECHNICAL_URL = _env_url("TECHNICAL_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/technical")
+FUNDAMENTAL_URL = _env_url("FUNDAMENTAL_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/fundamental")
 
 # ── Admin auth (Layer 1) ─────────────────────────────────────────────────────
 # Argon2id hash of the admin password — generate once with:

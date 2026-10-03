@@ -31,10 +31,24 @@ logger = logging.getLogger("refill-additional")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-_AI = os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com").rstrip("/")
-FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_AI}/fundamental").rstrip("/")
-TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_AI}/technical").rstrip("/")
-EVENT_URL = os.getenv("EVENT_URL", f"{_AI}/event").rstrip("/")
+def _env_url(name: str, default: str, rstrip: bool = True) -> str:
+    """URL setting from the environment with a blank-safe fallback.
+
+    os.getenv(name, default) only falls back when the variable is UNSET, so an empty or
+    whitespace-only value (a blank Render dashboard variable, `NAME=` in an env_file) overrode a working
+    default and every request went to "/path". Blank / whitespace-only (and, with rstrip, slash-only)
+    values now use `default`; padded values are trimmed.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if rstrip:
+        raw = raw.rstrip("/")
+    return raw or (default.rstrip("/") if rstrip else default)
+
+
+_AI = _env_url("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com")
+FUNDAMENTAL_URL = _env_url("FUNDAMENTAL_URL", f"{_AI}/fundamental")
+TECHNICAL_URL = _env_url("TECHNICAL_URL", f"{_AI}/technical")
+EVENT_URL = _env_url("EVENT_URL", f"{_AI}/event")
 
 # Per-request timeout — short and single-attempt so one slow symbol can't
 # stall the whole job. Concurrency (below) is what gives real throughput,

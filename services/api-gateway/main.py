@@ -63,7 +63,7 @@ from data_feed import (
     request_data_feed_stop, clear_data_feed_stop, data_feed_stop_requested,
 )
 from circuit_breaker import get_breaker, CircuitOpenError, all_snapshots
-from metrics import metrics
+from metrics import metrics, label_limiter
 from rate_limit_monitor import monitor as rate_limit_monitor
 try:
     import kv_cache as _kv_cache
@@ -94,17 +94,31 @@ logger = logging.getLogger("api-gateway")
 # ---- IST timezone ----
 IST = ZoneInfo("Asia/Kolkata")
 
-# ---- Service URLs (env-driven; defaults match config/service_urls.py) ----
-_DP = os.getenv("DECISION_PREDICTION_URL", "https://decision-prediction-service.onrender.com")
-_AI = os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com")
-_NS = os.getenv("NOTIFICATION_SCHEDULER_URL", "https://notification-scheduler-service-x8vc.onrender.com/notification")
+def _env_url(name: str, default: str, rstrip: bool = True) -> str:
+    """URL setting from the environment with a blank-safe fallback.
 
-DECISION_URL = os.getenv("DECISION_URL", f"{_DP.rstrip('/')}/decision")
-NOTIFICATION_URL = os.getenv("NOTIFICATION_URL", _NS.rstrip('/') if _NS.rstrip('/').endswith('notification') else f"{_NS.rstrip('/')}/notification")
-NEWS_URL = os.getenv("NEWS_URL", f"{_AI.rstrip('/')}/news")
-MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
-TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_AI.rstrip('/')}/technical")
-FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_AI.rstrip('/')}/fundamental")
+    os.getenv(name, default) only falls back when the variable is UNSET, so an empty or
+    whitespace-only value (a blank Render dashboard variable, `NAME=` in an env_file) overrode a working
+    default and every request went to "/path". Blank / whitespace-only (and, with rstrip, slash-only)
+    values now use `default`; padded values are trimmed.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if rstrip:
+        raw = raw.rstrip("/")
+    return raw or (default.rstrip("/") if rstrip else default)
+
+
+# ---- Service URLs (env-driven; defaults match config/service_urls.py) ----
+_DP = _env_url("DECISION_PREDICTION_URL", "https://decision-prediction-service.onrender.com", rstrip=False)
+_AI = _env_url("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com", rstrip=False)
+_NS = _env_url("NOTIFICATION_SCHEDULER_URL", "https://notification-scheduler-service-x8vc.onrender.com/notification", rstrip=False)
+
+DECISION_URL = _env_url("DECISION_URL", f"{_DP.rstrip('/')}/decision", rstrip=False)
+NOTIFICATION_URL = _env_url("NOTIFICATION_URL", _NS.rstrip('/') if _NS.rstrip('/').endswith('notification') else f"{_NS.rstrip('/')}/notification", rstrip=False)
+NEWS_URL = _env_url("NEWS_URL", f"{_AI.rstrip('/')}/news", rstrip=False)
+MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com", rstrip=False)
+TECHNICAL_URL = _env_url("TECHNICAL_URL", f"{_AI.rstrip('/')}/technical", rstrip=False)
+FUNDAMENTAL_URL = _env_url("FUNDAMENTAL_URL", f"{_AI.rstrip('/')}/fundamental", rstrip=False)
 # 2026-09-11: base URL for the overnight-orchestrator proxy routes below —
 # same service as NOTIFICATION_URL, different sub-app mount (scheduler/
 # main.py is mounted at /scheduler, not /notification — see that service's
@@ -112,13 +126,13 @@ FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_AI.rstrip('/')}/fundamental")
 _NS_BASE = _NS.rstrip('/')
 if _NS_BASE.endswith("/notification"):
     _NS_BASE = _NS_BASE[: -len("/notification")]
-SCHEDULER_URL = os.getenv("SCHEDULER_URL", f"{_NS_BASE}/scheduler")
-EVENT_URL = os.getenv("EVENT_URL", f"{_AI.rstrip('/')}/event")
-PREDICTION_URL = os.getenv("PREDICTION_URL", f"{_DP.rstrip('/')}/prediction")
+SCHEDULER_URL = _env_url("SCHEDULER_URL", f"{_NS_BASE}/scheduler", rstrip=False)
+EVENT_URL = _env_url("EVENT_URL", f"{_AI.rstrip('/')}/event", rstrip=False)
+PREDICTION_URL = _env_url("PREDICTION_URL", f"{_DP.rstrip('/')}/prediction", rstrip=False)
 
 # ---- Market Sentiment & Training ----
-MARKET_SENTIMENT_URL = os.getenv("MARKET_SENTIMENT_URL", f"{_AI.rstrip('/')}/sentiment")
-TRAINING_URL = os.getenv("TRAINING_URL", f"{_DP.rstrip('/')}/training")
+MARKET_SENTIMENT_URL = _env_url("MARKET_SENTIMENT_URL", f"{_AI.rstrip('/')}/sentiment", rstrip=False)
+TRAINING_URL = _env_url("TRAINING_URL", f"{_DP.rstrip('/')}/training", rstrip=False)
 
 # Service definitions for system health
 SYSTEM_SERVICES = {
@@ -4233,15 +4247,25 @@ async def ops_rate_limits():
 async def ops_rate_limits_event(payload: dict):
     """Services may POST {source, status, path?, detail?, symbol?} when they hit 429/503."""
     try:
+        _src = str(payload.get("source") or "unknown")
+        _status = int(payload.get("status") or 0)
         rate_limit_monitor.record(
-            source=str(payload.get("source") or "unknown"),
-            status=int(payload.get("status") or 0),
+            source=_src,
+            status=_status,
             path=str(payload.get("path") or ""),
             detail=str(payload.get("detail") or ""),
             symbol=str(payload.get("symbol") or ""),
         )
         try:
-            metrics.inc("rate_limit_events", source=str(payload.get("source") or "unknown"), status=str(payload.get("status") or 0))
+            # Both labels come from the request body, and every distinct value is a new series kept
+            # for the life of the process: bound them (see metrics.LabelLimiter). The monitor above
+            # keeps the raw values; only the counter's labels are collapsed.
+            _status_label = str(_status) if (_status == 0 or 100 <= _status <= 599) else "other"
+            metrics.inc(
+                "rate_limit_events",
+                source=label_limiter.clean("rate_limit_events.source", _src),
+                status=label_limiter.clean("rate_limit_events.status", _status_label, max_distinct=24),
+            )
         except Exception as me:
             # the event is already recorded — a counter failure must not report 400
             logger.warning("rate_limit_events metric failed: %s", me)
@@ -6852,7 +6876,7 @@ async def get_universe():
     # 2) Training universe fallback
     if not symbols:
         try:
-            decision_base = os.getenv("DECISION_URL", DECISION_URL)
+            decision_base = _env_url("DECISION_URL", DECISION_URL, rstrip=False)
             root = decision_base.rstrip("/")
             if root.endswith("/decision"):
                 root = root[: -len("/decision")]
@@ -12737,8 +12761,8 @@ def stockky_hot_repair_batch(limit: int = Query(15, ge=1, le=100), symbol: Optio
         from hotpicks_store import hotpicks_repair_batch, hotpicks_repair_scores
     except Exception as e:
         return {"status": "error", "error": f"hotpicks store unavailable: {str(e)[:160]}"}
-    market_url = os.getenv("MARKET_DATA_URL", "")
-    decision_url = os.getenv("DECISION_URL", DECISION_URL)
+    market_url = _env_url("MARKET_DATA_URL", "", rstrip=False)
+    decision_url = _env_url("DECISION_URL", DECISION_URL, rstrip=False)
     try:
         price_res = hotpicks_repair_batch(limit=limit, symbol=symbol, market_data_url=market_url)
     except Exception as e:

@@ -16,7 +16,21 @@ import httpx
 
 logger = logging.getLogger("qstash")
 
-QSTASH_URL = os.environ.get("QSTASH_URL", "https://qstash.upstash.io/v2/publish")
+def _env_url(name: str, default: str, rstrip: bool = True) -> str:
+    """URL setting from the environment with a blank-safe fallback.
+
+    os.getenv(name, default) only falls back when the variable is UNSET, so an empty or
+    whitespace-only value (a blank Render dashboard variable, `NAME=` in an env_file) overrode a working
+    default and every request went to "/path". Blank / whitespace-only (and, with rstrip, slash-only)
+    values now use `default`; padded values are trimmed.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if rstrip:
+        raw = raw.rstrip("/")
+    return raw or (default.rstrip("/") if rstrip else default)
+
+
+QSTASH_URL = _env_url("QSTASH_URL", "https://qstash.upstash.io/v2/publish", rstrip=False)
 QSTASH_TOKEN = os.environ.get("QSTASH_TOKEN", "").strip()
 SIGN_CURRENT = os.environ.get("QSTASH_CURRENT_SIGNING_KEY", "").strip()
 SIGN_NEXT = os.environ.get("QSTASH_NEXT_SIGNING_KEY", "").strip()

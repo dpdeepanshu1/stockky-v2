@@ -56,14 +56,26 @@ import httpx
 logger = logging.getLogger("overnight-orchestrator")
 
 API_GATEWAY_URL = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/") or "http://api-gateway:8000"
+def _env_url(name: str, default: str, rstrip: bool = True) -> str:
+    """URL setting from the environment with a blank-safe fallback.
+
+    os.getenv(name, default) only falls back when the variable is UNSET, so an empty or
+    whitespace-only value (a blank Render dashboard variable, `NAME=` in an env_file) overrode a working
+    default and every request went to "/path". Blank / whitespace-only (and, with rstrip, slash-only)
+    values now use `default`; padded values are trimmed.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if rstrip:
+        raw = raw.rstrip("/")
+    return raw or (default.rstrip("/") if rstrip else default)
+
+
 # decision-prediction-service is a separate container from api-gateway (see
 # docker-compose.yml) -- only evaluate_outcomes below needs this, everything
 # else in this file talks to api-gateway only. /training is where
 # training/app.py's evaluate routes are mounted (services/decision-
 # prediction-service/main.py).
-DECISION_PREDICTION_URL = os.getenv(
-    "DECISION_PREDICTION_URL", "http://decision-prediction-service:8000"
-).rstrip("/")
+DECISION_PREDICTION_URL = _env_url("DECISION_PREDICTION_URL", "http://decision-prediction-service:8000")
 IST = ZoneInfo("Asia/Kolkata")
 
 STATE_DIR = os.getenv("SCHEDULER_STATE_DIR", "/data")

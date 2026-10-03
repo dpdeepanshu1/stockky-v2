@@ -87,13 +87,24 @@ def _install_httpx_token_filter() -> None:
 
 _install_httpx_token_filter()
 
+def _env_url(name: str, default: str, rstrip: bool = True) -> str:
+    """URL setting from the environment with a blank-safe fallback.
+
+    os.getenv(name, default) only falls back when the variable is UNSET, so an empty or
+    whitespace-only value (a blank Render dashboard variable, `NAME=` in an env_file) overrode a working
+    default and every request went to "/path". Blank / whitespace-only (and, with rstrip, slash-only)
+    values now use `default`; padded values are trimmed.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if rstrip:
+        raw = raw.rstrip("/")
+    return raw or (default.rstrip("/") if rstrip else default)
+
+
 # Internal URL to notification-scheduler-service (docker-compose service name)
 # Injected via NOTIFICATION_SERVICE_URL env var (added to docker-compose.yml)
 # Falls back to the standard compose hostname if not set.
-_NOTIFICATION_SERVICE_URL = os.getenv(
-    "NOTIFICATION_SERVICE_URL",
-    "http://notification-scheduler-service:8000/notification",
-).rstrip("/")
+_NOTIFICATION_SERVICE_URL = _env_url("NOTIFICATION_SERVICE_URL", "http://notification-scheduler-service:8000/notification",)
 
 # ── Message deduplication (session42 audit) ───────────────────────────────────
 # Prevents alert storms: identical messages within _DEDUP_WINDOW_S are dropped.

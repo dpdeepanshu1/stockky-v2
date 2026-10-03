@@ -23,10 +23,21 @@ import httpx
 
 logger = logging.getLogger("fundamentals-batch")
 
-FUNDAMENTAL_URL = os.getenv(
-    "FUNDAMENTAL_URL",
-    "https://analysis-intelligence-service.onrender.com/fundamental",
-).rstrip("/")
+def _env_url(name: str, default: str, rstrip: bool = True) -> str:
+    """URL setting from the environment with a blank-safe fallback.
+
+    os.getenv(name, default) only falls back when the variable is UNSET, so an empty or
+    whitespace-only value (a blank Render dashboard variable, `NAME=` in an env_file) overrode a working
+    default and every request went to "/path". Blank / whitespace-only (and, with rstrip, slash-only)
+    values now use `default`; padded values are trimmed.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if rstrip:
+        raw = raw.rstrip("/")
+    return raw or (default.rstrip("/") if rstrip else default)
+
+
+FUNDAMENTAL_URL = _env_url("FUNDAMENTAL_URL", "https://analysis-intelligence-service.onrender.com/fundamental",)
 API_GATEWAY_URL = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/") or "https://api-gateway.onrender.com"
 DB_URL = (
     os.getenv("CACHE_DATABASE_URL")

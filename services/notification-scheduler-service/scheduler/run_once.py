@@ -22,8 +22,22 @@ logger = logging.getLogger("scheduler-once")
 API_GATEWAY_URL = os.environ["API_GATEWAY_URL"].strip().rstrip("/")
 if not API_GATEWAY_URL:
     raise KeyError("API_GATEWAY_URL is set but blank")
-EVENT_TRACKER_URL = os.environ.get("EVENT_TRACKER_URL", "")
-NOTIFICATION_URL = os.environ.get("NOTIFICATION_URL", "")
+def _env_url(name: str, default: str, rstrip: bool = True) -> str:
+    """URL setting from the environment with a blank-safe fallback.
+
+    os.getenv(name, default) only falls back when the variable is UNSET, so an empty or
+    whitespace-only value (a blank Render dashboard variable, `NAME=` in an env_file) overrode a working
+    default and every request went to "/path". Blank / whitespace-only (and, with rstrip, slash-only)
+    values now use `default`; padded values are trimmed.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if rstrip:
+        raw = raw.rstrip("/")
+    return raw or (default.rstrip("/") if rstrip else default)
+
+
+EVENT_TRACKER_URL = _env_url("EVENT_TRACKER_URL", "", rstrip=False)
+NOTIFICATION_URL = _env_url("NOTIFICATION_URL", "", rstrip=False)
 IST = ZoneInfo("Asia/Kolkata")
 USE_REDIS = os.environ.get("USE_REDIS", "0").lower() in ("1", "true", "yes")
 

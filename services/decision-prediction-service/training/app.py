@@ -80,10 +80,29 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MARKET_DATA_URL = os.environ.get("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com").rstrip("/")
-SERVICE_URL = os.environ.get(
+def _env_url(name: str, default: str, rstrip: bool = True) -> str:
+    """URL setting from the environment with a blank-safe fallback.
+
+    os.getenv(name, default) only falls back when the variable is UNSET, so an empty or
+    whitespace-only value (a blank Render dashboard variable, `NAME=` in an env_file) overrode a working
+    default and every request went to "/path". Blank / whitespace-only (and, with rstrip, slash-only)
+    values now use `default`; padded values are trimmed.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if rstrip:
+        raw = raw.rstrip("/")
+    return raw or (default.rstrip("/") if rstrip else default)
+
+
+MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
+SERVICE_URL = _env_url(
     "SERVICE_URL",
-    os.environ.get("TRAINING_URL", f"{os.environ.get('DECISION_PREDICTION_URL', 'https://decision-prediction-service.onrender.com').rstrip('/')}/training"),
+    _env_url(
+        "TRAINING_URL",
+        _env_url("DECISION_PREDICTION_URL", "https://decision-prediction-service.onrender.com") + "/training",
+        rstrip=False,
+    ),
+    rstrip=False,
 )
 DATABASE_URL = os.environ.get('TRAINING_DATABASE_URL') or os.environ.get('DATABASE_URL', 'sqlite:///./training.db')
 _db_backend = 'postgres' if DATABASE_URL.startswith(('postgres://', 'postgresql://')) else 'sqlite'

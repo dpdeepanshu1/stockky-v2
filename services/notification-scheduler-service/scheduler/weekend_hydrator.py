@@ -27,10 +27,24 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("weekend-hydrator")
 
 API_GATEWAY_URL = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/") or "http://localhost:8000"
-_AI = os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com").rstrip("/")
-FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_AI}/fundamental").rstrip("/")
-TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_AI}/technical").rstrip("/")
-EVENT_URL = os.getenv("EVENT_URL", f"{_AI}/event").rstrip("/")
+def _env_url(name: str, default: str, rstrip: bool = True) -> str:
+    """URL setting from the environment with a blank-safe fallback.
+
+    os.getenv(name, default) only falls back when the variable is UNSET, so an empty or
+    whitespace-only value (a blank Render dashboard variable, `NAME=` in an env_file) overrode a working
+    default and every request went to "/path". Blank / whitespace-only (and, with rstrip, slash-only)
+    values now use `default`; padded values are trimmed.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if rstrip:
+        raw = raw.rstrip("/")
+    return raw or (default.rstrip("/") if rstrip else default)
+
+
+_AI = _env_url("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com")
+FUNDAMENTAL_URL = _env_url("FUNDAMENTAL_URL", f"{_AI}/fundamental")
+TECHNICAL_URL = _env_url("TECHNICAL_URL", f"{_AI}/technical")
+EVENT_URL = _env_url("EVENT_URL", f"{_AI}/event")
 
 # Fix: the old sequential loop (one symbol at a time, 18s fixed sleep, up to
 # 2 retries x 90s timeout per endpoint) could take >10 min/symbol in the

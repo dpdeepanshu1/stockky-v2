@@ -148,6 +148,14 @@ class FakeMonitor:
         return {"events": [], "circuits": circuits}
 
 
+@pytest.fixture(autouse=True)
+def _reset_label_limiter():
+    # The limiter is process-global; keep each test's source/status labels independent.
+    gw.label_limiter.reset()
+    yield
+    gw.label_limiter.reset()
+
+
 @pytest.fixture
 def client(monkeypatch):
     c = FakeClient()
@@ -510,6 +518,52 @@ class TestCircuitsAndMetrics:
         assert lines and all(sample.match(l) for l in lines), lines
         assert not any(l.startswith("forged_total") for l in lines)
         assert any(l.startswith("rate_limit_events{") for l in lines)
+
+    def test_many_distinct_sources_cannot_grow_the_counter_without_bound(self, monkeypatch):
+        import metrics as metrics_mod
+        reg = metrics_mod.MetricsRegistry()
+        mon = FakeMonitor()
+        monkeypatch.setattr(gw, "metrics", reg)
+        monkeypatch.setattr(gw, "rate_limit_monitor", mon)
+        for i in range(200):
+            assert _run(gw.ops_rate_limits_event({"source": f"svc-{i}", "status": 429})) == {"ok": True}
+        series = {k: v for k, v in reg.snapshot()["counters"].items() if k.startswith("rate_limit_events{")}
+        assert len(series) == 33                                  # 32 admitted sources + "other"
+        assert sum(series.values()) == 200.0                      # nothing is dropped, only collapsed
+        assert series['rate_limit_events{source="other",status="429"}'] == 168.0
+        # the monitor (bounded by its own deque) still receives every raw source unchanged
+        assert [r["source"] for r in mon.recorded] == [f"svc-{i}" for i in range(200)]
+
+    @pytest.mark.parametrize("status,label", [
+        (0, "0"), ("429", "429"), (100, "100"), (599, "599"),
+        (99, "other"), (600, "other"), (-5, "other"), (10 ** 30, "other"),
+    ])
+    def test_status_label_is_bounded_to_http_codes(self, monkeypatch, fm, status, label):
+        monkeypatch.setattr(gw, "rate_limit_monitor", FakeMonitor())
+        assert _run(gw.ops_rate_limits_event({"source": "x", "status": status})) == {"ok": True}
+        assert fm.incs[0][1] == {"source": "x", "status": label}
+
+    def test_distinct_statuses_are_capped_too(self, monkeypatch):
+        import metrics as metrics_mod
+        reg = metrics_mod.MetricsRegistry()
+        monkeypatch.setattr(gw, "metrics", reg)
+        monkeypatch.setattr(gw, "rate_limit_monitor", FakeMonitor())
+        for code in range(200, 300):
+            _run(gw.ops_rate_limits_event({"source": "x", "status": code}))
+        statuses = {k.split('status="')[1].rstrip('"}') for k in reg.snapshot()["counters"]}
+        assert len(statuses) == 25 and "other" in statuses
+
+    def test_padded_source_label_is_trimmed_but_monitor_keeps_raw(self, monkeypatch, fm):
+        mon = FakeMonitor()
+        monkeypatch.setattr(gw, "rate_limit_monitor", mon)
+        _run(gw.ops_rate_limits_event({"source": "  yahoo ", "status": 429}))
+        assert fm.incs[0][1] == {"source": "yahoo", "status": "429"}
+        assert mon.recorded[0]["source"] == "  yahoo "
+
+    def test_overlong_source_label_is_truncated(self, monkeypatch, fm):
+        monkeypatch.setattr(gw, "rate_limit_monitor", FakeMonitor())
+        _run(gw.ops_rate_limits_event({"source": "s" * 500, "status": 429}))
+        assert fm.incs[0][1]["source"] == "s" * 64
 
     def test_event_over_http_rejects_non_object(self, tc):
         assert tc.post("/ops/rate-limits/event", json=[1, 2]).status_code == 422

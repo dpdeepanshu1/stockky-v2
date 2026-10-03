@@ -231,7 +231,21 @@ MARKET_GATE_MIN_NIFTY_CHANGE_PCT = _get_float("MARKET_GATE_MIN_NIFTY_CHANGE_PCT"
 MARKET_GATE_CACHE_TTL_S = _get_float("MARKET_GATE_CACHE_TTL_S", 120.0)
 MARKET_GATE_TIMEOUT_S = _get_float("MARKET_GATE_TIMEOUT_S", 3.0)
 _API_GATEWAY_URL = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/") or "https://api-gateway-puwd.onrender.com"
-MARKET_INDICES_URL = os.getenv("MARKET_INDICES_URL", f"{_API_GATEWAY_URL}/market/indices")
+def _env_url(name: str, default: str, rstrip: bool = True) -> str:
+    """URL setting from the environment with a blank-safe fallback.
+
+    os.getenv(name, default) only falls back when the variable is UNSET, so an empty or
+    whitespace-only value (a blank Render dashboard variable, `NAME=` in an env_file) overrode a working
+    default and every request went to "/path". Blank / whitespace-only (and, with rstrip, slash-only)
+    values now use `default`; padded values are trimmed.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if rstrip:
+        raw = raw.rstrip("/")
+    return raw or (default.rstrip("/") if rstrip else default)
+
+
+MARKET_INDICES_URL = _env_url("MARKET_INDICES_URL", f"{_API_GATEWAY_URL}/market/indices", rstrip=False)
 
 # 2. Loss brake (softer and earlier than MAX_DAILY_LOSS_PCT_OF_POOL's 4% kill
 #    switch): pause new entries after N consecutive losing closes today (for
@@ -283,12 +297,10 @@ QUALITY_GATE_TOP_N = _get_int("QUALITY_GATE_TOP_N", 3)
 # loop ticks every 10s, so anything slower than a couple seconds isn't "quick".
 QUALITY_GATE_TIMEOUT_S = _get_float("QUALITY_GATE_TIMEOUT_S", 2.5)
 
-_ANALYSIS_INTELLIGENCE_URL = os.getenv(
-    "ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com"
-).rstrip("/")
-TECHNICAL_URL = os.getenv("TECHNICAL_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/technical").rstrip("/")
-FUNDAMENTAL_URL = os.getenv("FUNDAMENTAL_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/fundamental").rstrip("/")
-EVENT_URL = os.getenv("EVENT_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/event").rstrip("/")
+_ANALYSIS_INTELLIGENCE_URL = _env_url("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com")
+TECHNICAL_URL = _env_url("TECHNICAL_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/technical")
+FUNDAMENTAL_URL = _env_url("FUNDAMENTAL_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/fundamental")
+EVENT_URL = _env_url("EVENT_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/event")
 
 # Lenient floors — same philosophy as real-trade-service's VOLUME_SHOCK_*
 # quality gate: only reject when data IS available and clearly below floor;
@@ -539,10 +551,7 @@ SESSION_IDLE_TIMEOUT_MINUTES = _get_int("SESSION_IDLE_TIMEOUT_MINUTES", 30)
 # a human instead of sitting log-only.
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-NOTIFICATION_SERVICE_URL = os.getenv(
-    "NOTIFICATION_SERVICE_URL",
-    "http://notification-scheduler-service:8000/notification",
-).rstrip("/")
+NOTIFICATION_SERVICE_URL = _env_url("NOTIFICATION_SERVICE_URL", "http://notification-scheduler-service:8000/notification",)
 
 # ── Cross-service PnL sync (Issue #2 fix) ──────────────────────────────
 # Used by capital/ledger.py's sync_peer_pnl() to fetch real-trade-service's

@@ -1836,13 +1836,14 @@ class TestAnalyzePostListing:
         assert "IPO score 83/100 — 10d since listing, +42.0% vs issue price" in bs["rationale"]
         assert "fundamentals_snapshot" not in r
 
-    def test_rationale_carries_hardcoded_market_note(self, stubs):
-        """Pins current behaviour: every rationale ends with a static 'Aug-2026 … Nifty -7% in 6m,
-        FII net-short' sentence that never changes with real market data. NOT FIXED."""
+    def test_rationale_has_no_hardcoded_market_claim(self, stubs):
+        """The rationale used to end with a static 'Aug-2026 … Nifty -7% in 6m, FII net-short'
+        sentence that never tracked real data. It now states only the decision bars in force."""
         stubs["hist"] = _hist([120, 125, 130, 128, 135, 140, 138, 142])
         r = ipo.analyze_ipo(_entry("2026-09-20"), NOW)
-        assert "Market context (Aug-2026): Nifty -7% in 6m, FII net-short" in r["buy_suggestion"]["rationale"]
-        assert "BUY_NOW≥70, PREPARE≥58" in r["buy_suggestion"]["rationale"]
+        rationale = r["buy_suggestion"]["rationale"]
+        assert "Nifty" not in rationale and "FII" not in rationale and "Aug-2026" not in rationale
+        assert rationale.endswith("Decision bars: BUY_NOW≥70, PREPARE≥58.")
 
     def test_fundamentals_snapshot_attached(self, stubs):
         stubs["hist"] = _hist([120, 125])

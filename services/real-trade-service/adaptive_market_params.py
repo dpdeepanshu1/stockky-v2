@@ -80,6 +80,17 @@ from adaptive_thresholds import (  # noqa: E402
     ADAPTIVE_MIN_HISTORY_DAYS,
 )
 
+# Metric name for the universe-average ADX regime read. Renamed from the original
+# "universe_adx" when analysis-intelligence-service's ADX switched to Wilder
+# smoothing (and stopped reporting a fake 15 / NaN-turned-0.0 for short histories):
+# the old readings are a different, systematically higher and polluted measure, and
+# averaging them with new ones would blend two scales for up to ADAPTIVE_HISTORY_DAYS.
+# Reading under a new name starts the history clean, so adaptive_signal_weights stays
+# on the static 1.0/1.0 weights until ADAPTIVE_MIN_HISTORY_DAYS of new-method readings
+# exist.
+UNIVERSE_ADX_METRIC = "universe_adx_wilder"
+LEGACY_UNIVERSE_ADX_METRIC = "universe_adx"
+
 
 # ── Generic building block ─────────────────────────────────────────────────
 
@@ -117,6 +128,25 @@ def record_metric(db: Session, name: str, value: float) -> None:
             db.rollback()
         except Exception:
             pass
+
+
+def purge_legacy_universe_adx(db: Session) -> int:
+    """Delete readings stored under the pre-Wilder metric name. They are no longer
+    read, and record_metric only prunes the name it is writing, so without this they
+    would sit in the table forever. Best-effort, never raises; returns rows removed."""
+    try:
+        n = db.query(AdaptiveMetricSnapshot).filter(
+            AdaptiveMetricSnapshot.metric_name == LEGACY_UNIVERSE_ADX_METRIC,
+        ).delete(synchronize_session=False)
+        db.commit()
+        return int(n or 0)
+    except Exception as e:
+        logger.debug("purge_legacy_universe_adx failed (non-fatal): %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return 0
 
 
 def _readings_and_distinct_days(db: Session, name: str, history_days: int):
@@ -339,7 +369,7 @@ def adaptive_signal_weights(db: Session) -> tuple[float, float, str]:
     scales HOW MUCH each signal family counts toward technical_score,
     based on a genuine measured "is the market trending or range-bound
     right now" reading — average ADX across the quality-gate's own
-    scanned batch (recorded once per cycle as "universe_adx" by
+    scanned batch (recorded once per cycle as UNIVERSE_ADX_METRIC by
     candidate_engine.candidates, the same self-recording pattern as
     universe_atr_pct).
     This is real, standard technical-analysis practice: trend-following
@@ -363,7 +393,7 @@ def adaptive_signal_weights(db: Session) -> tuple[float, float, str]:
     the way extension thresholds do).
     """
     try:
-        values, distinct_days = _readings_and_distinct_days(db, "universe_adx", ADAPTIVE_HISTORY_DAYS)
+        values, distinct_days = _readings_and_distinct_days(db, UNIVERSE_ADX_METRIC, ADAPTIVE_HISTORY_DAYS)
         if distinct_days < ADAPTIVE_MIN_HISTORY_DAYS or not values:
             return 1.0, 1.0, "static"
         avg_adx = sum(values) / len(values)
@@ -490,7 +520,7 @@ def adaptive_params_status(db: Session) -> dict:
         "signal_weights": {
             "trend_weight": trend_w, "meanrev_weight": meanrev_w, "source": weight_src,
             "static_fallback": {"trend_weight": 1.0, "meanrev_weight": 1.0},
-            "history": _history_note("universe_adx"),
+            "history": _history_note(UNIVERSE_ADX_METRIC),
         },
         "data_freshness": {
             "last_universe_atr_pct_reading_hours_ago": atr_age_hrs,

@@ -636,9 +636,11 @@ class TestScoring:
         assert out["fundamental_score"] == 50                               # moderate leverage
         assert any("moderate leverage" in r for r in out["reasons"])
 
-    def test_percent_style_debt_at_or_below_50_is_not_rescaled(self, env):
-        # Pins current behaviour: the percent->multiple heuristic only kicks in
-        # above 50, so a Yahoo "30" (= 0.3x) is scored as 30x leverage.
+    def test_debt_at_or_below_50_is_taken_as_an_already_normalised_multiple(self, env):
+        # Input contract: market-data-service now converts Yahoo's percent debtToEquity to a
+        # multiple at the source (yahoo_percent=True), so a value here is a multiple unless it
+        # is large enough (>50) to be a leftover percent from older cached data. Values <=50 are
+        # therefore NOT rescaled; rescaling here would double-divide fresh data (0.3 -> 0.003).
         out = env.analyze({"debt_to_equity": 30, "sector": "Technology"})
         assert out["metrics"]["debt_to_equity"] == 30
         assert out["fundamental_score"] == 38

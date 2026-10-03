@@ -1563,8 +1563,7 @@ def analyze_ipo(entry: Dict[str, Any], now: Optional[datetime] = None) -> Dict[s
         f"{current_vs_issue_pct:+.1f}% vs issue price, "
         f"{current_vs_high_pct:.1f}% off post-listing high, "
         f"5d momentum {momentum_5d:+.1f}%. "
-        f"Market context (Aug-2026): Nifty -7% in 6m, FII net-short — "
-        f"bars raised to BUY_NOW≥{BUY_NOW_BAR:.0f}, PREPARE≥{PREPARE_BAR:.0f}."
+        f"Decision bars: BUY_NOW≥{BUY_NOW_BAR:.0f}, PREPARE≥{PREPARE_BAR:.0f}."
     )
     result["buy_suggestion"] = _build_ipo_suggestion(
         symbol, company_name, current_price, decision, score,
@@ -1605,10 +1604,6 @@ def _build_ipo_suggestion(
     this straight into the existing BuySniperModal — no new modal needed."""
     if decision not in ("BUY NOW", "PREPARE TO BUY"):
         return None
-
-    # Market context (Aug-2026): Nifty in correction, IPO listings need extra scrutiny.
-    # Only surface IPO suggestions with score > PREPARE_BAR + 2 cushion in weak market.
-    # (BUY_NOW_BAR and PREPARE_BAR are already raised; this is belt-and-suspenders.)
 
     # Expected move scales with conviction and the stock's own volatility —
     # a jumpy small-cap IPO can realistically move more in a few days than

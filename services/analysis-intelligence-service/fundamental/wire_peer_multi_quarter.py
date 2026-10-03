@@ -35,6 +35,23 @@ except ImportError:
 MARKET_DATA_URL = os.getenv("MARKET_DATA_URL", "").rstrip("/")
 
 
+def _first_score(*candidates: Any, default: float = 50.0) -> float:
+    """First candidate that is actually present, as a float.
+
+    Only None, "" and NaN count as missing. The old `a or b or 50.0` also treated a
+    genuine 0 as missing, so a consistency score of 0 (the worst possible) was
+    silently replaced by the neutral 50. Upstream already supplies 50.0 explicitly
+    when there is no data, so 0 here is a real score, not a sentinel."""
+    for c in candidates:
+        if c is None or c == "":
+            continue
+        f = float(c)
+        if f != f:  # NaN
+            continue
+        return f
+    return default
+
+
 def apply_to_analyze_response(
     symbol: str,
     analyze_payload: Dict[str, Any],
@@ -56,10 +73,9 @@ def apply_to_analyze_response(
         fund = {**raw, **metrics}
 
         multi_q = payload.get("multi_quarter_detail") or {}
-        payload["consistency_score"] = float(
-            payload.get("multi_quarter_score")
-            or multi_q.get("score")
-            or 50.0
+        payload["consistency_score"] = _first_score(
+            payload.get("multi_quarter_score"),
+            multi_q.get("score"),
         )
         payload["consistent_growth"] = bool(
             payload.get("multi_quarter_ok") or multi_q.get("ok")
@@ -117,7 +133,7 @@ def apply_to_analyze_response(
         base = payload.get("fundamental_score")
         if isinstance(base, (int, float)):
             payload["fundamental_score_raw"] = float(base)
-            cons = float(payload.get("consistency_score") or 50.0)
+            cons = _first_score(payload.get("consistency_score"))
             adjusted = 0.70 * float(base) + 0.20 * peer_score + 0.10 * cons
             payload["fundamental_score"] = round(max(0.0, min(100.0, adjusted)), 2)
             payload["fundamental_score_adjusted"] = True

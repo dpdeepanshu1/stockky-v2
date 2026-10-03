@@ -496,15 +496,43 @@ class TestAttachCallTimeout:
         sa.listeners[0][2](Strict(), None)   # must not raise -> connection stays usable
         assert "driver says no" in spy.text()
 
-    def test_bad_timeout_env_disables_timeout_with_warning(self, m, sa, monkeypatch):
-        """Pinned quirk: a typo in ORACLE_CALL_TIMEOUT_MS does not fail startup, but it
-        silently leaves every Oracle round trip UNBOUNDED (only a warning is logged)."""
+    @pytest.mark.parametrize("raw", ["8s", "abc", "1.5", "-5", "-1"])
+    def test_bad_timeout_env_falls_back_to_default_with_warning(self, m, sa, monkeypatch, raw):
+        """Fixed: a typo (or negative value) in ORACLE_CALL_TIMEOUT_MS used to leave every
+        Oracle round trip UNBOUNDED. It now keeps the 8000 ms default and warns."""
         spy = LogSpy()
         monkeypatch.setattr(m, "_log", spy)
-        monkeypatch.setenv("ORACLE_CALL_TIMEOUT_MS", "8s")
+        monkeypatch.setenv("ORACLE_CALL_TIMEOUT_MS", raw)
         m._attach_call_timeout(object())
-        assert sa.listeners == []
-        assert "warning" in spy.levels() and "non-fatal" in spy.text()
+        (target, name, fn), = sa.listeners
+        conn = FakeDbapi()
+        fn(conn, object())
+        assert conn.call_timeout == 8000
+        assert "warning" in spy.levels() and "ORACLE_CALL_TIMEOUT_MS" in spy.text()
+
+    @pytest.mark.parametrize("raw", ["", "   "])
+    def test_blank_timeout_env_uses_default_silently(self, m, sa, monkeypatch, raw):
+        spy = LogSpy()
+        monkeypatch.setattr(m, "_log", spy)
+        monkeypatch.setenv("ORACLE_CALL_TIMEOUT_MS", raw)
+        m._attach_call_timeout(object())
+        conn = FakeDbapi()
+        sa.listeners[0][2](conn, None)
+        assert conn.call_timeout == 8000 and "warning" not in spy.levels()
+
+    def test_explicit_zero_is_still_honoured_as_no_timeout(self, m, sa, monkeypatch):
+        monkeypatch.setenv("ORACLE_CALL_TIMEOUT_MS", "0")
+        m._attach_call_timeout(object())
+        conn = FakeDbapi()
+        sa.listeners[0][2](conn, None)
+        assert conn.call_timeout == 0
+
+    def test_whitespace_around_a_valid_number_is_accepted(self, m, sa, monkeypatch):
+        monkeypatch.setenv("ORACLE_CALL_TIMEOUT_MS", " 3000 ")
+        m._attach_call_timeout(object())
+        conn = FakeDbapi()
+        sa.listeners[0][2](conn, None)
+        assert conn.call_timeout == 3000
 
     def test_listener_registration_failure_is_non_fatal(self, m, sa, monkeypatch):
         spy = LogSpy()

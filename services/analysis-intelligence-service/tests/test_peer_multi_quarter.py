@@ -353,3 +353,191 @@ class TestEnrichFundamentals:
         result = pmq.enrich_fundamentals_with_peer_and_consistency(
             "X", {"custom": "value"}, "http://mds/")
         assert result["custom"] == "value"
+
+
+# ── _pick: primary key first, alias only when the primary is unusable ──────────
+
+class TestPick:
+    K = ("a", "b", "c")
+
+    def test_primary_wins(self):
+        assert pmq._pick({"a": 1, "b": 2}, self.K) == 1.0
+
+    def test_zero_primary_is_a_real_value(self):
+        assert pmq._pick({"a": 0, "b": 2}, self.K) == 0.0   # `a or b` returned 2
+
+    def test_zero_primary_skipped_when_skip_zero(self):
+        assert pmq._pick({"a": 0, "b": 2}, self.K, skip_zero=True) == 2.0
+
+    def test_skip_zero_with_no_alias_returns_default(self):
+        assert pmq._pick({"a": 0}, self.K, skip_zero=True) == 0.0
+        assert pmq._pick({"a": 0}, self.K, skip_zero=True, default=7.0) == 7.0
+
+    @pytest.mark.parametrize("bad", [None, "N/A", "", float("nan"), [], object()])
+    def test_unusable_primary_falls_through(self, bad):
+        assert pmq._pick({"a": bad, "b": 5}, self.K) == 5.0
+
+    def test_falls_through_several_keys(self):
+        assert pmq._pick({"a": None, "b": "x", "c": 3}, self.K) == 3.0
+
+    def test_numeric_string_is_accepted(self):
+        assert pmq._pick({"a": "12.5"}, self.K) == 12.5
+
+    def test_negative_value_is_kept(self):
+        assert pmq._pick({"a": -4, "b": 9}, self.K) == -4.0
+
+    def test_nothing_usable_returns_default(self):
+        assert pmq._pick({}, self.K) == 0.0
+        assert pmq._pick({"a": None}, self.K, default=3.0) == 3.0
+
+    @pytest.mark.parametrize("not_a_dict", [None, [], "abc", 5])
+    def test_non_dict_returns_default(self, not_a_dict):
+        assert pmq._pick(not_a_dict, self.K, default=9.0) == 9.0
+
+
+class TestZeroPrimaryInPeerRelativeAndConsistency:
+    def _patch(self, monkeypatch, fetched):
+        monkeypatch.setattr(pmq, "fetch_fundamentals_batch", lambda url, syms, timeout=15.0: fetched)
+
+    def test_stock_zero_growth_and_roe_not_replaced_by_alias(self, monkeypatch):
+        self._patch(monkeypatch, {})
+        stock = {"roe": 0, "returnOnEquity": 15, "revenue_growth_yoy": 0, "revenueGrowth": 20,
+                 "profit_growth_yoy": 0, "earningsGrowth": 30}
+        out = pmq.compute_peer_relative("A", stock, "http://x", peers=["B"])
+        assert out["stock"]["roe"] == 0.0
+        assert out["stock"]["revenue_growth_yoy"] == 0.0
+        assert out["stock"]["profit_growth_yoy"] == 0.0
+
+    def test_stock_zero_pe_still_uses_alias(self, monkeypatch):
+        self._patch(monkeypatch, {})
+        out = pmq.compute_peer_relative("A", {"pe_ratio": 0, "trailingPE": 18}, "http://x", peers=["B"])
+        assert out["stock"]["pe"] == 18.0
+
+    def test_peer_zero_primary_not_replaced_by_alias(self, monkeypatch):
+        self._patch(monkeypatch, {"B.NS": {"pe_ratio": 20, "roe": 0, "returnOnEquity": 15,
+                                           "revenue_growth_yoy": 0, "revenueGrowth": 20,
+                                           "profit_growth_yoy": 0, "earningsGrowth": 30}})
+        out = pmq.compute_peer_relative("A", {"pe_ratio": 20}, "http://x", peers=["B"])
+        d = out["peer_details"][0]
+        assert (d["roe"], d["rev_g"], d["profit_g"]) == (0.0, 0.0, 0.0)
+        assert out["peer_avg"]["roe"] == 0.0           # a 0 is not averaged in as "15"
+
+    def test_peer_nan_primary_falls_through_to_alias(self, monkeypatch):
+        self._patch(monkeypatch, {"B.NS": {"pe_ratio": 20, "roe": float("nan"), "returnOnEquity": 15}})
+        d = pmq.compute_peer_relative("A", {"pe_ratio": 20}, "http://x", peers=["B"])["peer_details"][0]
+        assert d["roe"] == 15.0
+
+    def test_quarterly_zero_primary_not_replaced_by_alias(self):
+        q = [{"period": "Q1", "revenue_growth": 0, "revenue_growth_yoy": 9,
+              "profit_growth": 0, "net_income_growth": 8}]
+        r = pmq.compute_multi_quarter_consistency(quarterly=q)
+        assert r["detail"][0]["revenue_growth"] == 0.0
+        assert r["detail"][0]["profit_growth"] == 0.0
+        assert r["positive_revenue_quarters"] == 0     # a flat quarter is not "positive"
+
+    def test_quarterly_missing_primary_uses_aliases_in_order(self):
+        q = [{"period": "Q1", "revenue_growth": None, "revenueGrowth": 6,
+              "profit_growth": "n/a", "earningsGrowth": None, "net_income_growth": 4}]
+        r = pmq.compute_multi_quarter_consistency(quarterly=q)
+        assert (r["detail"][0]["revenue_growth"], r["detail"][0]["profit_growth"]) == (6.0, 4.0)
+
+    def test_fundamentals_fallback_zero_primary_not_replaced_by_alias(self):
+        # primary YoY 0 + alias 12: previously read 12 and produced a 1-quarter signal.
+        fund = {"revenue_growth_yoy": 0, "revenueGrowth": 12, "profit_growth_yoy": 0, "earningsGrowth": 12}
+        assert pmq.compute_multi_quarter_consistency(fundamentals=fund)["quarters_checked"] == 0
+
+    def test_fundamentals_fallback_alias_used_when_primary_absent(self):
+        fund = {"revenueGrowth": 12, "earningsGrowth": 7}
+        r = pmq.compute_multi_quarter_consistency(fundamentals=fund)
+        assert (r["avg_revenue_growth"], r["avg_profit_growth"]) == (12.0, 7.0)
+
+
+# ── build_peer_list / compute_peer_relative peer-set handling ─────────────────
+
+class TestBuildPeerList:
+    def test_normalises_bare_symbols(self):
+        assert pmq.build_peer_list("A", "IT", ["tcs", " infy "]) == ["TCS.NS", "INFY.NS"]
+
+    def test_keeps_bo_suffix(self):
+        assert pmq.build_peer_list("A", "IT", ["X.BO", "Y"]) == ["X.BO", "Y.NS"]
+
+    def test_removes_duplicates_across_spellings(self):
+        assert pmq.build_peer_list("A", "IT", ["B", "b", "B.NS", "C", "C"]) == ["B.NS", "C.NS"]
+
+    def test_excludes_the_symbol_in_any_spelling(self):
+        assert pmq.build_peer_list("tcs", "IT", ["TCS", "tcs.ns", "INFY"]) == ["INFY.NS"]
+
+    def test_duplicates_do_not_consume_max_peers_slots(self):
+        assert pmq.build_peer_list("A", "IT", ["B", "B", "B", "C", "D"], max_peers=2) == ["B.NS", "C.NS"]
+
+    def test_self_does_not_consume_max_peers_slots(self):
+        assert pmq.build_peer_list("A", "IT", ["A", "B", "C"], max_peers=2) == ["B.NS", "C.NS"]
+
+    @pytest.mark.parametrize("n", [0, -1, -5])
+    def test_zero_or_negative_max_peers_means_no_peers(self, n):
+        # a negative max_peers used to slice from the END of the list ([:-1])
+        assert pmq.build_peer_list("A", "IT", ["B", "C", "D"], max_peers=n) == []
+
+    def test_default_limit_is_default_max_peers(self):
+        many = [f"S{i}" for i in range(20)]
+        assert len(pmq.build_peer_list("A", "IT", many)) == pmq.DEFAULT_MAX_PEERS == 5
+
+    def test_none_and_empty_use_the_sector_default(self):
+        assert pmq.build_peer_list("A", "BANK", None) == pmq.DEFAULT_PEERS["BANK"]
+        assert pmq.build_peer_list("A", "BANK", []) == pmq.DEFAULT_PEERS["BANK"]
+
+    def test_unknown_sector_uses_default_list(self):
+        assert pmq.build_peer_list("A", "NOPE", None) == pmq.DEFAULT_PEERS["DEFAULT"]
+
+    def test_default_list_containing_the_symbol_drops_it(self):
+        out = pmq.build_peer_list("TCS", "IT", None)
+        assert "TCS.NS" not in out and len(out) == len(pmq.DEFAULT_PEERS["IT"]) - 1
+
+    def test_empty_symbol_is_normalised_not_crashing(self):
+        assert pmq.build_peer_list("", "IT", ["B"]) == ["B.NS"]
+
+
+class TestComputePeerRelativePeerSet:
+    @staticmethod
+    def _spy(monkeypatch, data=None):
+        seen = []
+
+        def fake(url, syms, timeout=15.0):
+            seen.append(list(syms))
+            return {s: (data or {}) for s in syms}
+
+        monkeypatch.setattr(pmq, "fetch_fundamentals_batch", fake)
+        return seen
+
+    def test_bare_peer_symbols_are_fetched_in_canonical_form(self, monkeypatch):
+        seen = self._spy(monkeypatch, {"pe_ratio": 20, "roe": 10})
+        out = pmq.compute_peer_relative("A", {"pe_ratio": 20}, "http://x", peers=["B", "C"])
+        assert seen == [["B.NS", "C.NS"]]                      # was ["B", "C"] -> never found
+        assert out["peers_used"] == ["B.NS", "C.NS"]
+
+    def test_duplicate_spellings_are_counted_once_in_the_average(self, monkeypatch):
+        seen = self._spy(monkeypatch, {"pe_ratio": 20})
+        out = pmq.compute_peer_relative("A", {"pe_ratio": 20}, "http://x", peers=["B", "b", "B.NS", "C"])
+        assert seen == [["B.NS", "C.NS"]]
+        assert out["peers_used"] == ["B.NS", "C.NS"]
+
+    def test_max_peers_zero_and_negative_use_no_peers(self, monkeypatch):
+        for n in (0, -1):
+            seen = self._spy(monkeypatch)
+            out = pmq.compute_peer_relative("A", {"pe_ratio": 20}, "http://x", peers=["B", "C"], max_peers=n)
+            assert seen == [[]] and out["peers_used"] == []
+            assert out["peer_score"] == pytest.approx(50.0)
+
+    def test_default_max_peers_is_five(self, monkeypatch):
+        seen = self._spy(monkeypatch)
+        pmq.compute_peer_relative("A", {}, "http://x", peers=[f"S{i}" for i in range(9)])
+        assert seen == [[f"S{i}.NS" for i in range(5)]]
+
+    def test_stock_listed_in_peers_in_a_different_spelling_is_excluded(self, monkeypatch):
+        seen = self._spy(monkeypatch)
+        pmq.compute_peer_relative("tcs", {}, "http://x", peers=["TCS.NS", "INFY"])
+        assert seen == [["INFY.NS"]]
+
+    def test_signature_default_matches_constant(self):
+        import inspect
+        assert inspect.signature(pmq.compute_peer_relative).parameters["max_peers"].default == pmq.DEFAULT_MAX_PEERS

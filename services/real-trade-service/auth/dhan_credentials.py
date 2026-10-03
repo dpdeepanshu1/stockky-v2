@@ -409,9 +409,11 @@ def refresh_if_totp_enabled(db: Session) -> bool:
     client_id   = os.environ.get("DHAN_CLIENT_ID", "")
     dhan_pin    = os.environ.get("DHAN_PIN", "")
 
-    if not totp_secret or not client_id:
+    # All three are required by generateAccessToken. An unset DHAN_PIN used to be
+    # sent as pin="" and burn a TOTP attempt on a request Dhan can only reject.
+    if not totp_secret or not client_id or not dhan_pin:
         logger.error(
-            "DHAN_TOTP_ENABLED=true but DHAN_TOTP_SECRET or DHAN_CLIENT_ID not set."
+            "DHAN_TOTP_ENABLED=true but DHAN_TOTP_SECRET, DHAN_CLIENT_ID or DHAN_PIN not set."
         )
         return False
 

@@ -3325,13 +3325,23 @@ async def _analyze_one_symbol_ultra(
                     if need_pred:
                         tasks["pred"] = asyncio.create_task(_fetch_prediction_cached(symbol, client))
 
+                    # Take results straight from gather(return_exceptions=True)
+                    # instead of calling task.result() afterwards: .result()
+                    # re-raises a child's CancelledError (a BaseException that
+                    # `except Exception` does not catch) and would abort the
+                    # whole scan for one cancelled enrichment call. Any child
+                    # outcome that is an exception, cancellation included, now
+                    # falls back to the same default as a failed call. If the
+                    # OUTER task is cancelled, gather itself raises here, so
+                    # real cancellation still propagates.
+                    task_out = {}
                     if tasks:
-                        await asyncio.gather(*tasks.values(), return_exceptions=True)
+                        _gathered = await asyncio.gather(*tasks.values(), return_exceptions=True)
+                        task_out = dict(zip(tasks.keys(), _gathered))
 
                     if "fund" in tasks:
-                        try:
-                            fund_res = tasks["fund"].result()
-                        except Exception:
+                        fund_res = task_out.get("fund")
+                        if isinstance(fund_res, BaseException):
                             fund_res = ({}, True)
                         if isinstance(fund_res, tuple):
                             fund_metrics, fund_fallback = fund_res
@@ -3342,9 +3352,8 @@ async def _analyze_one_symbol_ultra(
                             normalized["fundamental_fallback"] = fund_fallback
 
                     if "event" in tasks:
-                        try:
-                            event_data = tasks["event"].result()
-                        except Exception:
+                        event_data = task_out.get("event")
+                        if isinstance(event_data, BaseException):
                             event_data = None
                         if event_data:
                             # Previously only next_earnings_date survived here —
@@ -3362,9 +3371,8 @@ async def _analyze_one_symbol_ultra(
                                 normalized["reasons"] = reasons
 
                     if "news" in tasks:
-                        try:
-                            news_data = tasks["news"].result()
-                        except Exception:
+                        news_data = task_out.get("news")
+                        if isinstance(news_data, BaseException):
                             news_data = None
                         if news_data:
                             # A news payload with no score must not wipe a score the
@@ -3377,9 +3385,8 @@ async def _analyze_one_symbol_ultra(
                                 normalized["reasons"] = reasons
 
                     if "pred" in tasks:
-                        try:
-                            pred_res = tasks["pred"].result()
-                        except Exception:
+                        pred_res = task_out.get("pred")
+                        if isinstance(pred_res, BaseException):
                             pred_res = (None, None)
                         if isinstance(pred_res, tuple):
                             pred_score, pred_note = pred_res
@@ -4246,11 +4253,27 @@ def metrics_endpoint(request: Request):
     return metrics.snapshot()
 
 
+# Alert cool-down (best-effort, per process): the same set of problems is notified at most once
+# per OPS_ALERT_COOLDOWN_SEC (default 15 min; 0 disables). A NEW problem (different open-circuit
+# set, or the error-rate condition appearing) alerts immediately; the state is cleared when the
+# system is healthy again, and only recorded after a successful delivery so a failed send retries.
+_OPS_ALERT_STATE: Dict[str, Any] = {}
+_ops_alert_clock = time.monotonic
+
+
+def _ops_alert_cooldown_sec() -> float:
+    try:
+        return max(0.0, float(os.getenv("OPS_ALERT_COOLDOWN_SEC", "900")))
+    except (TypeError, ValueError):
+        return 900.0
+
+
 @app.post("/ops/check-alert")
 async def ops_check_alert():
     """Evaluate simple thresholds and notify if unhealthy (for cron).
 
     Alerts when any circuit is open or recent dependency error rate is high.
+    Repeats of the same problem set are suppressed for OPS_ALERT_COOLDOWN_SEC.
     """
     snaps = all_snapshots()
     open_circuits = [k for k, v in snaps.items() if v.get("state") == "open"]
@@ -4268,7 +4291,25 @@ async def ops_check_alert():
         problems.append(f"Dependency error rate {err_rate:.0%} ({int(errors)}/{int(total)})")
 
     if not problems:
+        _OPS_ALERT_STATE.clear()
         return {"alerted": False, "ok": True, "open_circuits": [], "error_rate": err_rate}
+
+    # Signature is stable across calls (the error-rate text changes every minute, so it is
+    # keyed on the condition, not the message).
+    signature = (tuple(sorted(open_circuits)), bool(total >= 20 and err_rate >= 0.4))
+    cooldown = _ops_alert_cooldown_sec()
+    last = _OPS_ALERT_STATE.get("last")
+    if cooldown > 0 and last and last["signature"] == signature:
+        elapsed = _ops_alert_clock() - last["at"]
+        if elapsed < cooldown:
+            return {
+                "alerted": False,
+                "suppressed": True,
+                "cooldown_remaining_sec": int(cooldown - elapsed),
+                "problems": problems,
+                "open_circuits": open_circuits,
+                "error_rate": err_rate,
+            }
 
     title = "⚠️ Stockky ops alert"
     message = " | ".join(problems)
@@ -4289,6 +4330,8 @@ async def ops_check_alert():
     except Exception as e:
         logger.warning("ops alert notify failed: %s", e)
     metrics.inc("stockky_ops_alerts_total")
+    if delivered:
+        _OPS_ALERT_STATE["last"] = {"signature": signature, "at": _ops_alert_clock()}
     return {
         "alerted": True,
         "delivered": delivered,
@@ -4627,14 +4670,17 @@ async def ops_qstash_tick(request: Request):
     except HTTPException:
         raise
     except Exception:
-        pass
+        # Fail CLOSED: if the signature check itself crashes we cannot tell a real
+        # QStash callback from a forged one, so refuse rather than run the tick
+        # unauthenticated. (Missing keys / PyJWT are handled inside
+        # qstash_client.verify_signature, which still accepts by design.)
+        logger.exception("QStash signature verification crashed — rejecting tick")
+        raise HTTPException(status_code=503, detail="QStash signature verification unavailable")
     # Light warm only
-    results = {"ok": True, "source": "qstash", "warm": []}
+    # The callback itself is what wakes this instance; the response no longer claims
+    # to have "warmed" /health and /ops/keepalive (it only ever listed their names).
+    results = {"ok": True, "source": "qstash"}
     try:
-        client = _get_http_client()
-        for path in ["/health", "/ops/keepalive"]:
-            # local self (list.append cannot raise, so no per-path try/except)
-            results["warm"].append(path)
         # Fan-out wake is expensive — only if body asks
         try:
             import json as _json

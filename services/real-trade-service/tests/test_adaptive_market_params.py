@@ -118,6 +118,35 @@ class TestRecordMetric:
         amp.record_metric(mock_db, "m4b", 1.0)  # must not raise
 
 
+# ── purge_legacy_universe_adx ───────────────────────────────────────────
+
+class TestPurgeLegacyUniverseAdx:
+    def test_deletes_only_legacy_rows(self, db):
+        now = datetime.now(timezone.utc)
+        _insert_metric(db, amp.LEGACY_UNIVERSE_ADX_METRIC, 40.0, now)
+        _insert_metric(db, amp.LEGACY_UNIVERSE_ADX_METRIC, 41.0, now - timedelta(days=3))
+        _insert_metric(db, amp.UNIVERSE_ADX_METRIC, 18.0, now)
+        _insert_metric(db, "universe_atr_pct", 2.0, now)
+        assert amp.purge_legacy_universe_adx(db) == 2
+        names = sorted(r.metric_name for r in db.query(models.AdaptiveMetricSnapshot).all())
+        assert names == sorted([amp.UNIVERSE_ADX_METRIC, "universe_atr_pct"])
+
+    def test_noop_when_nothing_to_delete(self, db):
+        assert amp.purge_legacy_universe_adx(db) == 0
+
+    def test_failure_is_swallowed_and_rolls_back(self):
+        mock_db = MagicMock()
+        mock_db.query.side_effect = Exception("purge boom")
+        assert amp.purge_legacy_universe_adx(mock_db) == 0
+        mock_db.rollback.assert_called_once()
+
+    def test_failure_with_rollback_also_raising_is_swallowed(self):
+        mock_db = MagicMock()
+        mock_db.query.side_effect = Exception("purge boom")
+        mock_db.rollback.side_effect = Exception("rollback boom too")
+        assert amp.purge_legacy_universe_adx(mock_db) == 0
+
+
 # ── adaptive_percentile_value / _readings_and_distinct_days ─────────────
 
 class TestAdaptivePercentileValue:
@@ -338,7 +367,7 @@ class TestAdaptiveSignalWeights:
         assert source == "static"
 
     def test_thin_history_static_fallback(self, db):
-        _spread_readings(db, "universe_adx", [25.0, 26.0], start_days_ago=1)
+        _spread_readings(db, amp.UNIVERSE_ADX_METRIC, [25.0, 26.0], start_days_ago=1)
         trend_w, meanrev_w, source = amp.adaptive_signal_weights(db)
         assert trend_w == 1.0
         assert meanrev_w == 1.0
@@ -346,7 +375,7 @@ class TestAdaptiveSignalWeights:
 
     def test_strongly_trending_saturates_tilt(self, db):
         values = [50.0] * 35  # avg 50 >= 45 saturation point
-        _spread_readings(db, "universe_adx", values, start_days_ago=34)
+        _spread_readings(db, amp.UNIVERSE_ADX_METRIC, values, start_days_ago=34)
         trend_w, meanrev_w, source = amp.adaptive_signal_weights(db)
         assert trend_w == pytest.approx(1.3)
         assert meanrev_w == pytest.approx(0.8)
@@ -354,7 +383,7 @@ class TestAdaptiveSignalWeights:
 
     def test_partially_trending_scales_tilt(self, db):
         values = [30.0] * 35  # avg 30, between 25 and 45
-        _spread_readings(db, "universe_adx", values, start_days_ago=34)
+        _spread_readings(db, amp.UNIVERSE_ADX_METRIC, values, start_days_ago=34)
         trend_w, meanrev_w, _ = amp.adaptive_signal_weights(db)
         strength = min(1.0, (30.0 - 25.0) / 20.0)
         assert trend_w == pytest.approx(round(1.0 + 0.3 * strength, 3))
@@ -362,14 +391,14 @@ class TestAdaptiveSignalWeights:
 
     def test_strongly_range_bound_saturates_tilt(self, db):
         values = [2.0] * 35  # avg 2 <= 5 saturation point
-        _spread_readings(db, "universe_adx", values, start_days_ago=34)
+        _spread_readings(db, amp.UNIVERSE_ADX_METRIC, values, start_days_ago=34)
         trend_w, meanrev_w, _ = amp.adaptive_signal_weights(db)
         assert trend_w == pytest.approx(0.8)
         assert meanrev_w == pytest.approx(1.3)
 
     def test_partially_range_bound_scales_tilt(self, db):
         values = [15.0] * 35  # avg 15, between 5 and 20
-        _spread_readings(db, "universe_adx", values, start_days_ago=34)
+        _spread_readings(db, amp.UNIVERSE_ADX_METRIC, values, start_days_ago=34)
         trend_w, meanrev_w, _ = amp.adaptive_signal_weights(db)
         strength = min(1.0, (20.0 - 15.0) / 15.0)
         assert trend_w == pytest.approx(round(1.0 - 0.2 * strength, 3))
@@ -377,10 +406,25 @@ class TestAdaptiveSignalWeights:
 
     def test_neutral_between_20_and_25_no_tilt(self, db):
         values = [22.0] * 35
-        _spread_readings(db, "universe_adx", values, start_days_ago=34)
+        _spread_readings(db, amp.UNIVERSE_ADX_METRIC, values, start_days_ago=34)
         trend_w, meanrev_w, _ = amp.adaptive_signal_weights(db)
         assert trend_w == 1.0
         assert meanrev_w == 1.0
+
+    def test_legacy_pre_wilder_readings_are_ignored(self, db):
+        # 35 days of old-method readings must not switch the adaptive weights on: the
+        # metric was renamed when ADX moved to Wilder smoothing, so history starts clean.
+        _spread_readings(db, amp.LEGACY_UNIVERSE_ADX_METRIC, [50.0] * 35, start_days_ago=34)
+        assert amp.adaptive_signal_weights(db) == (1.0, 1.0, "static")
+
+    def test_new_metric_name_is_distinct_from_legacy(self):
+        assert amp.UNIVERSE_ADX_METRIC != amp.LEGACY_UNIVERSE_ADX_METRIC
+
+    def test_legacy_readings_do_not_blend_with_new_ones(self, db):
+        _spread_readings(db, amp.LEGACY_UNIVERSE_ADX_METRIC, [50.0] * 35, start_days_ago=34)
+        _spread_readings(db, amp.UNIVERSE_ADX_METRIC, [15.0] * 35, start_days_ago=34)
+        _, _, source = amp.adaptive_signal_weights(db)
+        assert "avgadx15" in source and "_35r_" in source
 
     def test_exception_falls_back_to_static(self):
         mock_db = MagicMock()

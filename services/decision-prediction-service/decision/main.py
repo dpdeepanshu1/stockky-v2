@@ -1575,7 +1575,7 @@ async def _decide_impl(
             response["market_regime"] = {
                 "score": market_score,
                 "note": (
-                    "Correction (−7% in 6m, FII net-short)" if market_score < 38
+                    "Correction (weak market regime)" if market_score < 38
                     else "Weak/Neutral" if market_score < 50
                     else "Neutral-Bullish" if market_score < 65
                     else "Bullish"

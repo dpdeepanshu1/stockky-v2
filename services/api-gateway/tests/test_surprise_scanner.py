@@ -1133,7 +1133,7 @@ class TestScoreStockTiers:
         assert h["value_buy"] is True
         for alias in ("cmp", "ltp", "last_price", "close", "current_price"):
             assert h[alias] == 105.0
-        assert "Nifty" in h["market_note"]
+        assert h["market_note"] == "high buy_pct = strong signal"
 
     def test_score_over_65_but_small_move_is_only_building(self, sc, monkeypatch):
         h = scored(sc, flat_tick(price=101, open=101, high=101, low=101, vol_15m=35000, buy_pct=75),
@@ -1547,7 +1547,8 @@ class TestScanResult:
         assert out["min_score"] == sc.MIN_SCORE
         assert out["min_change_pct"] == sc.MIN_CHANGE_PCT
         assert out["building_min_score"] == sc.BUILDING_MIN_SCORE
-        assert "thresholds raised" in out["market_note"]
+        assert out["market_note"] == "thresholds raised for quality"
+        assert "Nifty" not in out["market_note"] and "Aug-2026" not in out["market_note"]
 
     def test_duplicate_symbols_are_deduped(self, rig):
         r = rig(static={"A": static_row(sector="IT"), "B": static_row(sector="IT")},

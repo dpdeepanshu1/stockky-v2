@@ -423,8 +423,12 @@ class TestCircuitsAndMetrics:
 class TestCheckAlert:
     @pytest.fixture
     def env(self, monkeypatch, fm, client):
-        e = SimpleNamespace(snaps={}, fm=fm, client=client)
+        e = SimpleNamespace(snaps={}, fm=fm, client=client, now=1000.0)
         monkeypatch.setattr(gw, "all_snapshots", lambda: e.snaps)
+        # Fresh cool-down state + controllable clock per test (state is module-level).
+        monkeypatch.setattr(gw, "_OPS_ALERT_STATE", {})
+        monkeypatch.setattr(gw, "_ops_alert_clock", lambda: e.now)
+        monkeypatch.delenv("OPS_ALERT_COOLDOWN_SEC", raising=False)
         client.default = FakeResp(200, {"delivered": True})
         return e
 
@@ -494,13 +498,68 @@ class TestCheckAlert:
         _run(gw.ops_check_alert())
         assert len(env.client.calls[0][2]["json"]["message"]) == 1500
 
-    def test_repeated_calls_alert_every_time(self, env):
-        # NOT FIXED (low): no de-duplication/cool-down — a cron that fires every minute during a
-        # long outage sends a notification every minute.
+    def test_repeat_of_same_problem_is_suppressed_during_cooldown(self, env):
+        env.snaps = {"a": {"state": "open"}}
+        assert _run(gw.ops_check_alert())["alerted"] is True
+        env.now += 60
+        out = _run(gw.ops_check_alert())
+        assert out["alerted"] is False and out["suppressed"] is True
+        assert out["cooldown_remaining_sec"] == 840
+        assert out["problems"] == ["Open circuits: a"] and out["open_circuits"] == ["a"]
+        assert len(env.client.urls("POST")) == 1
+        assert env.fm.incs == [("stockky_ops_alerts_total", {})]
+
+    def test_alerts_again_once_cooldown_has_elapsed(self, env):
         env.snaps = {"a": {"state": "open"}}
         _run(gw.ops_check_alert())
-        _run(gw.ops_check_alert())
+        env.now += 900
+        assert _run(gw.ops_check_alert())["alerted"] is True
         assert len(env.client.urls("POST")) == 2
+
+    def test_new_problem_alerts_immediately_inside_cooldown(self, env):
+        env.snaps = {"a": {"state": "open"}}
+        _run(gw.ops_check_alert())
+        env.now += 30
+        env.snaps = {"a": {"state": "open"}, "b": {"state": "open"}}
+        assert _run(gw.ops_check_alert())["alerted"] is True
+        assert len(env.client.urls("POST")) == 2
+
+    def test_recovery_resets_cooldown_so_a_recurrence_alerts(self, env):
+        env.snaps = {"a": {"state": "open"}}
+        _run(gw.ops_check_alert())
+        env.now += 30
+        env.snaps = {}
+        assert _run(gw.ops_check_alert())["ok"] is True
+        env.now += 30
+        env.snaps = {"a": {"state": "open"}}
+        assert _run(gw.ops_check_alert())["alerted"] is True
+        assert len(env.client.urls("POST")) == 2
+
+    def test_failed_delivery_is_not_suppressed_so_it_retries(self, env):
+        env.snaps = {"a": {"state": "open"}}
+        env.client.default = FakeResp(500, {})
+        assert _run(gw.ops_check_alert())["delivered"] is False
+        env.now += 60
+        assert _run(gw.ops_check_alert())["alerted"] is True
+        assert len(env.client.urls("POST")) == 2
+
+    def test_error_rate_text_changing_does_not_defeat_cooldown(self, env):
+        env.fm.snap = {"counters": {"x_dependency_errors": 10, "x_dependency_ok": 10}}
+        _run(gw.ops_check_alert())
+        env.now += 60
+        env.fm.snap = {"counters": {"x_dependency_errors": 12, "x_dependency_ok": 10}}
+        assert _run(gw.ops_check_alert())["suppressed"] is True
+        assert len(env.client.urls("POST")) == 1
+
+    @pytest.mark.parametrize("val, expect", [("0", 2), ("-5", 2), ("30", 1), ("abc", 1)])
+    def test_cooldown_env_var(self, env, monkeypatch, val, expect):
+        # 0 / negative disables suppression; a bad value falls back to the 900s default.
+        monkeypatch.setenv("OPS_ALERT_COOLDOWN_SEC", val)
+        env.snaps = {"a": {"state": "open"}}
+        _run(gw.ops_check_alert())
+        env.now += 60 if val != "30" else 29
+        _run(gw.ops_check_alert())
+        assert len(env.client.urls("POST")) == expect
 
 
 # ── /ops/refresh-static-params ───────────────────────────────────────────────
@@ -1024,20 +1083,30 @@ class TestQstashTick:
         assert r.status_code == 401 and r.json()["detail"] == "Invalid QStash signature"
         assert env.calls == []
 
-    def test_verifier_crash_fails_open(self, env, tc):
-        # NOT FIXED (low): any non-HTTP error while verifying is swallowed and the tick proceeds
-        # unauthenticated (qstash_client itself already fails open when PyJWT/keys are missing).
+    def test_verifier_crash_fails_closed(self, env, tc):
+        # A non-HTTP error while verifying is no longer swallowed: the tick is refused (503)
+        # and nothing runs. (qstash_client itself still accepts when PyJWT/keys are missing —
+        # that is a deliberate, separate degraded-mode choice.)
         env.q.verify_exc = RuntimeError("jwt exploded")
-        assert tc.post("/ops/qstash/tick").status_code == 200
+        r = tc.post("/ops/qstash/tick", json={"action": "wake"})
+        assert r.status_code == 503
+        assert r.json()["detail"] == "QStash signature verification unavailable"
+        assert env.calls == [] and env.client.calls == []
+
+    def test_verifier_crash_is_logged(self, env, tc, caplog):
+        env.q.verify_exc = RuntimeError("jwt exploded")
+        with caplog.at_level("ERROR"):
+            tc.post("/ops/qstash/tick")
+        assert "signature verification crashed" in caplog.text
 
     def test_served_on_get_too(self, env, tc):
         assert tc.get("/ops/qstash/tick").json()["ok"] is True
 
-    def test_warm_list_names_paths_but_nothing_is_called(self, env, tc):
-        # NOT FIXED (low): "warm" reports /health and /ops/keepalive but the loop only appends
-        # the names — no request is made and no handler is invoked.
+    def test_plain_tick_makes_no_calls_and_no_longer_claims_to_warm_anything(self, env, tc):
+        # The old "warm" list only named /health and /ops/keepalive without calling them;
+        # the field is gone so the response doesn't claim work that never happened.
         j = tc.post("/ops/qstash/tick").json()
-        assert j["warm"] == ["/health", "/ops/keepalive"]
+        assert j == {"ok": True, "source": "qstash"}
         assert env.client.calls == [] and env.calls == []
 
     @pytest.mark.parametrize("action", ["wake", "wake-all", "scan"])

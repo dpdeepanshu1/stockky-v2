@@ -39,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -77,8 +77,16 @@ def _rss_mock(per_source: dict):
     return AsyncMock(side_effect=_fake)
 
 
-def _item(title, pub_date="2026-09-24"):
-    return {"title": title, "link": "https://example.com/x", "pubDate": pub_date}
+def _fresh_pub_date():
+    # run_afterhours_scan drops headlines older than
+    # config.AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS measured against the REAL clock,
+    # so a hardcoded date silently turns every "fresh" item stale as time passes.
+    return (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _item(title, pub_date=None):
+    return {"title": title, "link": "https://example.com/x",
+            "pubDate": pub_date or _fresh_pub_date()}
 
 
 # Common patch targets bundled so each test only lists what it overrides.

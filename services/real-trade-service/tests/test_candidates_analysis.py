@@ -160,7 +160,7 @@ class TestMultiTfAnalysisHappyPath:
         # 1d is flat (doesn't count) -> 5.0, comfortably >= MIN_BULLISH_TIMEFRAMES
         assert result["bullish_count"] == 5.0
         assert result["atr_pct"] is None  # <15 1m candles -> ATR check skipped
-        assert "market_note" in result
+        assert result["market_note"] == ""   # no hardcoded market-regime claim
 
 
 class TestMultiTfAnalysisDataStarved:

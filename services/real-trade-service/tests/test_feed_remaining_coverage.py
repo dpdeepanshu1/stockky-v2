@@ -50,7 +50,14 @@ import market_feed.feed as f
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # Own loop per call. asyncio.get_event_loop() raises on Python 3.12+ once any
+    # earlier test file has used asyncio.run() (which clears the current loop), so
+    # this file passed alone but failed 19 tests inside the full suite.
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 def _transport(*handlers):

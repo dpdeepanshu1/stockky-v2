@@ -380,12 +380,19 @@ class TestCache:
         tm._cache_set("k", {"d": _dt.date(2026, 1, 2)}, ttl=5)
         assert '"2026-01-02"' in r.setex_calls[0][2]
 
-    def test_set_redis_failure_propagates(self, monkeypatch):
-        # Pin current behaviour: memory is written first, then the Redis error surfaces.
+    def test_set_redis_failure_is_swallowed_and_memory_still_written(self, monkeypatch, caplog):
+        # Redis is best-effort (same as _cache_get): a failed write must not raise.
         monkeypatch.setattr(tm, "cache", _FakeRedis(set_exc=RuntimeError("down")))
-        with pytest.raises(RuntimeError):
-            tm._cache_set("k", {"a": 1}, ttl=5)
+        with caplog.at_level("WARNING", logger="technical-analysis-service"):
+            tm._cache_set("k", {"a": 1}, ttl=5)   # no exception
         assert tm._cache_get("k") == {"a": 1}
+        assert any("Redis cache write failed for k" in m for m in caplog.messages)
+
+    def test_set_redis_success_logs_no_warning(self, monkeypatch, caplog):
+        monkeypatch.setattr(tm, "cache", _FakeRedis())
+        with caplog.at_level("WARNING", logger="technical-analysis-service"):
+            tm._cache_set("k", {"a": 1}, ttl=5)
+        assert not caplog.messages
 
 
 # ── small helpers ─────────────────────────────────────────────────────────────
@@ -885,12 +892,32 @@ class TestRsi:
     def test_monotonic_fall_is_zero(self):
         assert tm._rsi(_series(np.arange(40, 0, -1))).iloc[-1] == 0.0
 
-    def test_monotonic_rise_is_nan_not_100(self):
-        # Source quirk, pinned: no losses → loss.replace(0, nan) → RS NaN → RSI NaN.
-        assert np.isnan(tm._rsi(_series(np.arange(1, 40))).iloc[-1])
+    def test_monotonic_rise_is_100(self):
+        # No losses in the window → maximally overbought, not NaN/"missing".
+        assert tm._rsi(_series(np.arange(1, 40))).iloc[-1] == 100.0
 
-    def test_flat_series_is_nan(self):
-        assert np.isnan(tm._rsi(_series([10.0] * 30)).iloc[-1])
+    def test_flat_series_is_neutral_50(self):
+        # No gains and no losses → no momentum either way → neutral 50.
+        assert tm._rsi(_series([10.0] * 30)).iloc[-1] == 50.0
+
+    def test_rise_then_flat_is_neutral_50(self):
+        # Once the rally leaves the 14-bar window, gain and loss are both 0.
+        s = _series(list(np.arange(20, 40)) + [40.0] * 30)
+        assert tm._rsi(s).iloc[-1] == 50.0
+
+    def test_fall_then_flat_is_neutral_50(self):
+        s = _series(list(np.arange(40, 20, -1)) + [20.0] * 30)
+        assert tm._rsi(s).iloc[-1] == 50.0
+
+    def test_no_loss_window_after_a_dip_is_100(self):
+        # One early loss, then only gains: once the loss leaves the window → 100.
+        s = _series([10, 9] + list(np.arange(10, 40)))
+        assert tm._rsi(s).iloc[-1] == 100.0
+
+    def test_no_loss_warmup_stays_nan(self):
+        # The zero-loss fix must not fill the warm-up rows (no full window yet).
+        assert tm._rsi(_series(np.arange(1, 40))).iloc[:13].isna().all()
+        assert tm._rsi(_series([10.0] * 30)).iloc[:13].isna().all()
 
     def test_warmup_is_nan(self):
         assert tm._rsi(_series(np.arange(1, 40) % 3)).iloc[:13].isna().all()
@@ -988,6 +1015,81 @@ class TestAdxAtr:
     def test_adx_choppy_low(self):
         c = _series(100 + np.tile([0, 1, 0, -1], 30))
         assert tm._adx(c + 1, c - 1, c).iloc[-1] < 25
+
+    # ── Wilder smoothing ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _ref_adx(H, L, C, n=14):
+        """Independent textbook Wilder ADX (plain loops, running Wilder sums)."""
+        N = len(H)
+        tr, pdm, ndm = [0.0] * N, [0.0] * N, [0.0] * N
+        for i in range(1, N):
+            tr[i] = max(H[i] - L[i], abs(H[i] - C[i - 1]), abs(L[i] - C[i - 1]))
+            up, dn = H[i] - H[i - 1], L[i - 1] - L[i]
+            pdm[i] = up if (up > dn and up > 0) else 0.0
+            ndm[i] = dn if (dn > up and dn > 0) else 0.0
+
+        def dx(sT, sP, sN):
+            p, m = 100 * sP / sT, 100 * sN / sT
+            return 0.0 if p + m == 0 else 100 * abs(p - m) / (p + m)
+
+        out = [float("nan")] * N
+        sT, sP, sN = sum(tr[1:n + 1]), sum(pdm[1:n + 1]), sum(ndm[1:n + 1])
+        dxs = [dx(sT, sP, sN)]
+        for i in range(n + 1, N):
+            sT, sP, sN = sT - sT / n + tr[i], sP - sP / n + pdm[i], sN - sN / n + ndm[i]
+            dxs.append(dx(sT, sP, sN))
+        adx = sum(dxs[:n]) / n
+        out[2 * n - 1] = adx
+        for k in range(n, len(dxs)):
+            adx = (adx * (n - 1) + dxs[k]) / n
+            out[n + k] = adx
+        return out
+
+    @pytest.mark.parametrize("seed", [1, 7, 42])
+    def test_adx_matches_independent_wilder_reference(self, seed):
+        rng = np.random.default_rng(seed)
+        n = 250
+        c = 100 * np.exp(np.cumsum(rng.normal(0.0002, 0.015, n)))
+        h = c * (1 + np.abs(rng.normal(0, 0.01, n)))
+        l = c * (1 - np.abs(rng.normal(0, 0.01, n)))
+        got = tm._adx(_series(h), _series(l), _series(c)).to_numpy()
+        exp = np.array(self._ref_adx(list(h), list(l), list(c)))
+        assert np.array_equal(np.isnan(got), np.isnan(exp))
+        ok = ~np.isnan(exp)
+        assert np.abs(got[ok] - exp[ok]).max() < 1e-9
+
+    def test_adx_first_value_after_two_periods(self):
+        h, l, c = self._ohlc(n=60, step=1.0)
+        out = tm._adx(h, l, c)
+        assert out.iloc[:27].isna().all() and out.iloc[27:].notna().all()
+
+    def test_adx_equal_up_and_down_move_is_neither(self):
+        # Range expands by exactly 1 on both sides every bar (up == down > 0):
+        # that is no directional movement, so ADX is 0. The old masking counted
+        # it as a down move and reported a near-100 "strong trend".
+        i = np.arange(60, dtype=float)
+        h, l = _series(100 + i), _series(100 - i)
+        c = (h + l) / 2
+        assert tm._adx(h, l, c).iloc[-1] == 0.0
+
+    def test_adx_range_without_direction_is_zero_not_nan(self):
+        s = _series([100.0] * 60)
+        assert tm._adx(s + 1, s - 1, s).iloc[-1] == 0.0
+
+    def test_wilder_smooth_seed_and_recursion(self):
+        out = tm._wilder_smooth(_series([1, 2, 3, 4, 5, 6]), 3)
+        assert out.iloc[:2].isna().all()
+        assert out.iloc[2] == pytest.approx(2.0)                 # mean(1,2,3)
+        assert out.iloc[3] == pytest.approx((2.0 * 2 + 4) / 3)
+        assert out.iloc[4] == pytest.approx((out.iloc[3] * 2 + 5) / 3)
+
+    def test_wilder_smooth_nan_breaks_chain_and_reseeds(self):
+        s = _series([1.0] * 20 + [float("nan")] + [2.0] * 20)
+        out = tm._wilder_smooth(s, 5)
+        assert out.iloc[19] == pytest.approx(1.0)
+        assert out.iloc[20:25].isna().all()                      # gap + re-seed warm-up
+        assert out.iloc[25] == pytest.approx(2.0)                # no stale state carried
 
 
 class TestBollingerSupportResistance:
@@ -1110,9 +1212,82 @@ class TestAnalyzeFallbacks:
         r = tm.analyze("TCS")
         assert r["price"] == 99.0 and r["data_insufficient"] is True
 
-    def test_fallback_result_is_cached(self, env):
+    def test_quote_fallback_result_is_cached(self, env):
         env.quote = 10.0
         tm.analyze("TCS")
+        assert "tech_analysis:TCS" in tm._mem_tech
+
+    def test_quote_fallback_cached_briefly_after_close(self, env, monkeypatch):
+        # After close the default TTL is 6 h; a thin-history stopgap must only live 60 s.
+        monkeypatch.setattr(tm, "get_cache_ttl", lambda: 21600)
+        monkeypatch.setattr(tm.time, "time", lambda: 1000.0)
+        env.quote = 10.0
+        tm.analyze("TCS")
+        assert tm._mem_tech_exp["tech_analysis:TCS"] == 1060.0
+
+    def test_quote_fallback_cached_briefly_during_market_hours(self, env, monkeypatch):
+        monkeypatch.setattr(tm, "get_cache_ttl", lambda: 300)
+        monkeypatch.setattr(tm.time, "time", lambda: 1000.0)
+        env.quote = 10.0
+        tm.analyze("TCS")
+        assert tm._mem_tech_exp["tech_analysis:TCS"] == 1060.0
+
+    def test_quote_fallback_never_outlives_a_shorter_default_ttl(self, env, monkeypatch):
+        monkeypatch.setattr(tm, "get_cache_ttl", lambda: 20)
+        monkeypatch.setattr(tm.time, "time", lambda: 1000.0)
+        env.quote = 10.0
+        tm.analyze("TCS")
+        assert tm._mem_tech_exp["tech_analysis:TCS"] == 1020.0
+
+    def test_quote_fallback_expires_and_history_is_retried(self, env, monkeypatch):
+        now = {"t": 1000.0}
+        monkeypatch.setattr(tm.time, "time", lambda: now["t"])
+        monkeypatch.setattr(tm, "get_cache_ttl", lambda: 21600)
+        env.quote = 10.0
+        assert tm.analyze("TCS")["data_insufficient"] is True
+        env.df = _df(60)          # history recovers
+        now["t"] = 1030.0         # still inside the 60 s window → stale stopgap served
+        assert tm.analyze("TCS")["data_insufficient"] is True
+        now["t"] = 1061.0         # expired → real analysis
+        assert tm.analyze("TCS")["data_insufficient"] is False
+        assert len(env.history_calls) == 2
+
+    def test_unavailable_result_is_not_cached(self, env):
+        r = tm.analyze("TCS")
+        assert r["price"] is None and r["data_insufficient"] is True
+        assert "tech_analysis:TCS" not in tm._mem_tech
+        assert "tech_analysis:TCS" not in tm._mem_tech_exp
+
+    def test_unavailable_result_not_written_to_redis(self, env, monkeypatch):
+        r = _FakeRedis()
+        monkeypatch.setattr(tm, "cache", r)
+        tm.analyze("TCS")
+        assert r.setex_calls == []
+
+    def test_retry_after_unavailable_picks_up_recovered_history(self, env):
+        first = tm.analyze("TCS")
+        assert first["price"] is None
+        env.df = _df(60)          # upstream recovers
+        second = tm.analyze("TCS")
+        assert second["data_insufficient"] is False
+        assert len(env.history_calls) == 2
+
+    def test_retry_after_unavailable_picks_up_recovered_quote(self, env):
+        assert tm.analyze("TCS")["price"] is None
+        env.quote = 42.0
+        assert tm.analyze("TCS")["price"] == 42.0
+
+    def test_redis_write_failure_does_not_break_full_analysis(self, env, monkeypatch):
+        monkeypatch.setattr(tm, "cache", _FakeRedis(set_exc=RuntimeError("down")))
+        env.df = _df(60)
+        r = tm.analyze("TCS")
+        assert r["data_insufficient"] is False
+        assert "tech_analysis:TCS" in tm._mem_tech
+
+    def test_redis_write_failure_does_not_break_quote_fallback(self, env, monkeypatch):
+        monkeypatch.setattr(tm, "cache", _FakeRedis(set_exc=RuntimeError("down")))
+        env.quote = 10.0
+        assert tm.analyze("TCS")["price"] == 10.0
         assert "tech_analysis:TCS" in tm._mem_tech
 
     def test_fallback_cached_result_served_next_call(self, env):
@@ -1161,11 +1336,16 @@ class TestAnalyzeFallbacks:
         r = tm.analyze("TCS")
         assert tm._mem_tech["tech_analysis:TCS"] is r
 
-    def test_fallback_result_cached_even_with_overrides(self, env):
-        # Pin current behaviour: the insufficient-data branch caches unconditionally.
+    def test_quote_fallback_cached_even_with_overrides(self, env):
+        # Pin current behaviour: the quote-only stopgap is threshold-independent, so it is
+        # cached (briefly) even when adaptive overrides were passed.
         env.quote = 10.0
         tm.analyze("TCS", trend_weight=2.0)
         assert "tech_analysis:TCS" in tm._mem_tech
+
+    def test_unavailable_result_not_cached_with_overrides_either(self, env):
+        tm.analyze("TCS", trend_weight=2.0)
+        assert "tech_analysis:TCS" not in tm._mem_tech
 
 
 # ── analyze(): full path with controlled indicators ───────────────────────────
@@ -1224,6 +1404,48 @@ class TestAnalyzeRsiBranches:
         # flat frame: SMA20 not above (-8), MACD equal (-5), close not above 200 EMA (-5) → 32; +12 oversold
         assert r["technical_score"] == 44
 
+    BEARISH_EMA = (101.0, 102.0, 103.0)    # close 100 < ema20 < ema50 < ema200
+
+    def test_oversold_earns_no_credit_under_bearish_ema_stack(self, env, monkeypatch):
+        env.df = _flat_df(60)
+        _Ind(monkeypatch, 60, rsi=25.0, ema=self.BEARISH_EMA)
+        oversold = tm.analyze("TCS")
+        _Ind(monkeypatch, 60, rsi=50.0, ema=self.BEARISH_EMA)
+        neutral = tm.analyze("TCS")
+        assert "Bearish EMA stack" in _reasons(oversold)
+        assert "oversold, but no bounce credit under a bearish EMA stack" in _reasons(oversold)
+        assert oversold["technical_score"] == neutral["technical_score"]
+
+    def test_near_lower_bb_earns_no_credit_under_bearish_ema_stack(self, env, monkeypatch):
+        env.df = _flat_df(60, close=100.0)
+        _Ind(monkeypatch, 60, bb=(200.0, 95.0), ema=self.BEARISH_EMA)   # pct ~5%
+        low = tm.analyze("TCS")
+        _Ind(monkeypatch, 60, bb=(110.0, 90.0), ema=self.BEARISH_EMA)   # pct 50%
+        mid = tm.analyze("TCS")
+        assert "Near lower BB (5%) — no bounce credit under a bearish EMA stack" in _reasons(low)
+        assert low["technical_score"] == mid["technical_score"]
+
+    def test_bounce_credit_kept_without_a_bearish_stack(self, env, monkeypatch):
+        # Stack is not bearish (close above ema20): both bonuses still apply.
+        env.df = _flat_df(60, close=100.0)
+        _Ind(monkeypatch, 60, rsi=25.0, ema=(99.0, 102.0, 103.0), bb=(200.0, 95.0))
+        r = tm.analyze("TCS")
+        assert "oversold (adaptive floor 30, weight 1.00x)" in _reasons(r)
+        assert "Near lower BB (5%, weight 1.00x)" in _reasons(r)
+
+    def test_bearish_stack_guard_needs_30_bars(self, env, monkeypatch):
+        # The EMA stack is only evaluated from 30 bars, so with 29 the guard is off.
+        env.df = _flat_df(29)
+        _Ind(monkeypatch, 29, rsi=25.0, ema=self.BEARISH_EMA[:2])
+        assert "oversold (adaptive floor 30, weight 1.00x)" in _reasons(tm.analyze("TCS"))
+
+    def test_overbought_penalty_still_applies_under_bearish_ema_stack(self, env, monkeypatch):
+        env.df = _flat_df(60)
+        _Ind(monkeypatch, 60, rsi=75.0, ema=self.BEARISH_EMA)
+        _Ind_neutral = tm.analyze("TCS")["technical_score"]
+        _Ind(monkeypatch, 60, rsi=50.0, ema=self.BEARISH_EMA)
+        assert _Ind_neutral == tm.analyze("TCS")["technical_score"] - 12
+
     def test_overbought_subtracts_12(self, env, monkeypatch):
         env.df = _flat_df(60)
         _Ind(monkeypatch, 60, rsi=75.0)
@@ -1254,12 +1476,22 @@ class TestAnalyzeRsiBranches:
         _Ind(monkeypatch, 60, rsi=70.0)
         assert "neutral" in _reasons(tm.analyze("TCS"))
 
-    def test_rsi_zero_is_reported_as_50_source_quirk(self, env, monkeypatch):
-        # `_safe(0.0) or 50.0` treats a genuine RSI of 0.0 as missing. Pinned.
+    def test_rsi_zero_is_reported_as_zero_and_oversold(self, env, monkeypatch):
+        # A genuine RSI of 0.0 (every day a loss) is a computed value, not "missing".
         env.df = _flat_df(60)
         _Ind(monkeypatch, 60, rsi=0.0)
         r = tm.analyze("TCS")
-        assert r["rsi"] == 50.0 and "neutral" in _reasons(r)
+        assert r["rsi"] == 0.0
+        assert "RSI at 0.0 — oversold" in _reasons(r)
+        assert r["technical_score"] == 44  # same as the rsi=25 case: 32 base + 12
+
+    def test_rsi_100_is_overbought(self, env, monkeypatch):
+        env.df = _flat_df(60)
+        _Ind(monkeypatch, 60, rsi=100.0)
+        r = tm.analyze("TCS")
+        assert r["rsi"] == 100.0
+        assert "RSI at 100.0 — overbought" in _reasons(r)
+        assert r["technical_score"] == 20  # 32 base - 12
 
     def test_nan_rsi_falls_back_to_50(self, env, monkeypatch):
         env.df = _flat_df(60)
@@ -1419,14 +1651,39 @@ class TestAnalyzeSmaAdxBb:
         _Ind(monkeypatch, 60, bb=(110.0, 90.0))
         assert "BB" not in _reasons(tm.analyze("TCS"))
 
-    def test_degenerate_bb_uses_range_of_one_and_reads_as_near_lower(self, env, monkeypatch):
-        # Source quirk, pinned: collapsed bands (flat/halted stock) give bb_range=1 → pct=0
-        # → "Near lower BB" and a +8 mean-reversion bonus, even though price is mid-band.
+    def test_collapsed_bb_gives_no_signal(self, env, monkeypatch):
+        # Collapsed bands (flat/halted stock): no volatility → no mean-reversion signal,
+        # not a bogus "Near lower BB" +8 bonus.
         env.df = _flat_df(60, close=100.0)
         _Ind(monkeypatch, 60, bb=(100.0, 100.0))
         r = tm.analyze("TCS")
         assert r["bb_upper"] == r["bb_lower"] == 100.0
-        assert "Near lower BB (0%, weight 1.00x)" in _reasons(r)
+        text = _reasons(r)
+        assert "Near lower BB" not in text and "Near upper BB" not in text
+        assert "Bollinger Bands: flat price, no signal" in text
+
+    def test_collapsed_bb_scores_same_as_mid_band(self, env, monkeypatch):
+        env.df = _flat_df(60, close=100.0)
+        _Ind(monkeypatch, 60, bb=(110.0, 90.0))
+        mid = tm.analyze("TCS")["technical_score"]
+        _Ind(monkeypatch, 60, bb=(100.0, 100.0))
+        collapsed = tm.analyze("TCS")["technical_score"]
+        assert collapsed == mid
+
+    def test_collapsed_bb_ignores_meanrev_weight(self, env, monkeypatch):
+        env.df = _flat_df(60, close=100.0)
+        _Ind(monkeypatch, 60, bb=(100.0, 100.0))
+        a = tm.analyze("TCS", meanrev_weight=0.0)["technical_score"]
+        b = tm.analyze("TCS", meanrev_weight=2.0)["technical_score"]
+        assert a == b
+
+    def test_collapsed_bb_not_reported_under_20_bars(self, env, monkeypatch):
+        # Under 20 bars the existing "insufficient data" reason still applies.
+        env.df = _flat_df(15, close=100.0)
+        _Ind(monkeypatch, 15, bb=(100.0, 100.0))
+        text = _reasons(tm.analyze("TCS"))
+        assert "Bollinger Bands: insufficient data" in text
+        assert "flat price" not in text
 
     def test_meanrev_weight_scales_bb(self, env, monkeypatch):
         env.df = _flat_df(60, close=100.0)
@@ -1737,14 +1994,42 @@ class TestAnalyzeShortHistoryPaths:
         env.df = _df(5)
         r = tm.analyze("TCS")
         reasons = _reasons(r)
-        assert r["rsi"] == 50.0 and r["adx"] == 15.0 and r["atr"] == 0.0
+        assert r["rsi"] == 50.0 and r["adx"] is None and r["atr"] == 0.0
+        assert r["trend_strength"] == "unknown"
+        assert "ADX: insufficient data" in reasons
         assert "MACD: insufficient data" in reasons
         assert "EMA trend: insufficient data" in reasons
         assert "Bollinger Bands: insufficient data" in reasons
 
-    def test_placeholder_adx_under_20_bars_is_15(self, env):
-        env.df = _df(15)
-        assert tm.analyze("TCS")["adx"] == 15.0
+    @pytest.mark.parametrize("n", [15, 20, 25, 27])
+    def test_adx_unknown_below_two_periods(self, env, n):
+        # ADX has no value before bar 28. It used to be a fake 15 (<20 bars) or a
+        # NaN-turned-0.0 "weak" (20-27 bars); both polluted the universe_adx average.
+        env.df = _df(n)
+        r = tm.analyze("TCS")
+        assert r["adx"] is None and r["trend_strength"] == "unknown"
+        assert "ADX: insufficient data" in _reasons(r)
+        assert "weak/no trend" not in _reasons(r)
+
+    def test_adx_known_from_two_periods(self, env):
+        env.df = _df(28, start=100.0, step=0.5)
+        r = tm.analyze("TCS")
+        assert r["adx"] is not None and r["adx"] > 25
+        assert r["trend_strength"] == "strong"
+        assert "ADX: insufficient data" not in _reasons(r)
+
+    def test_adx_min_bars_matches_first_valid_adx(self):
+        h = _series(100 + np.arange(40, dtype=float))
+        out = tm._adx(h + 1, h - 1, h, tm._ADX_PERIOD)
+        assert out.first_valid_index() == tm._ADX_MIN_BARS - 1
+
+    def test_unknown_adx_does_not_change_the_score(self, env, monkeypatch):
+        # ADX only feeds the reason text / trend_strength, never the score.
+        env.df = _df(27, start=100.0, step=0.5)
+        r27 = tm.analyze("TCS")
+        monkeypatch.setattr(tm, "_ADX_MIN_BARS", 20)
+        tm._mem_tech.clear()
+        assert tm.analyze("TCS")["technical_score"] == r27["technical_score"]
 
     def test_placeholder_atr_under_14_bars_is_zero(self, env):
         env.df = _df(10)
@@ -1762,21 +2047,41 @@ class TestAnalyzeRealIndicators:
         assert r["ema20"] > r["ema50"] > r["ema200"]
         assert r["trend_strength"] == "strong"
 
-    def test_uptrend_rsi_reports_50_due_to_nan_quirk(self, env):
-        # A relentlessly rising series has no down days → RSI is NaN → reported as 50.
+    def test_uptrend_rsi_reports_100_and_overbought(self, env):
+        # A relentlessly rising series has no down days → RSI 100, overbought.
         env.df = _df(250, start=100.0, step=1.0)
-        assert tm.analyze("TCS")["rsi"] == 50.0
+        r = tm.analyze("TCS")
+        assert r["rsi"] == 100.0
+        assert "RSI at 100.0 — overbought" in _reasons(r)
 
     def test_strong_downtrend_scores_bearishly(self, env):
         env.df = _df(250, start=400.0, step=-1.0)
         r = tm.analyze("TCS")
         text = _reasons(r)
         assert "Bearish EMA stack" in text and "Below 20-day SMA" in text
-        assert r["technical_score"] < 50
+        # A relentless fall reads RSI 0 ("oversold") and sits near the lower BB, but under
+        # a bearish EMA stack neither earns bounce credit (they used to add +12 +8 and
+        # offset the stack back up to neutral). The score is the trend-only reading.
+        trend_only = tm.analyze("TCS", meanrev_weight=0.0)["technical_score"]
+        assert trend_only < 50
+        assert r["technical_score"] == trend_only
+        assert "no bounce credit under a bearish EMA stack" in text
 
-    def test_downtrend_rsi_zero_reports_50_quirk(self, env):
+    def test_downtrend_rsi_reports_zero_and_oversold(self, env):
         env.df = _df(250, start=400.0, step=-1.0)
-        assert tm.analyze("TCS")["rsi"] == 50.0
+        r = tm.analyze("TCS")
+        assert r["rsi"] == 0.0
+        assert "RSI at 0.0 — oversold" in _reasons(r)
+
+    def test_flat_stock_real_indicators_neutral_rsi_and_no_bb_bonus(self, env):
+        # Flat/halted stock end to end: RSI 50 (neutral), bands collapse, no BB bonus.
+        env.df = _df(60, closes=[100.0] * 60)
+        r = tm.analyze("TCS")
+        text = _reasons(r)
+        assert r["rsi"] == 50.0 and "RSI at 50.0 — neutral" in text
+        assert r["bb_upper"] == r["bb_lower"] == 100.0
+        assert "Bollinger Bands: flat price, no signal" in text
+        assert "Near lower BB" not in text
 
     def test_noisy_series_produces_plausible_rsi(self, env):
         rng = np.random.default_rng(42)
@@ -2030,3 +2335,88 @@ class TestMainBlock:
     def test_port_default(self, monkeypatch):
         monkeypatch.delenv("PORT", raising=False)
         assert self._run(monkeypatch)[0][1]["port"] == 8002
+
+
+# ── _num / full-precision indicator values ────────────────────────────────────
+
+class TestNum:
+    def test_keeps_full_precision(self):
+        assert tm._num(0.004321, 9.0) == 0.004321          # _safe() rounded this to 0.0
+
+    def test_real_zero_is_kept_not_replaced(self):
+        assert tm._num(0.0, 5.0) == 0.0                    # `_safe(x) or 5.0` gave 5.0
+
+    def test_negative_is_kept(self):
+        assert tm._num(-1.5, 5.0) == -1.5
+
+    @pytest.mark.parametrize("bad", [None, float("nan"), float("inf"), float("-inf"), "abc", [], object()])
+    def test_missing_or_non_finite_uses_default(self, bad):
+        assert tm._num(bad, 7.0) == 7.0
+
+    def test_numeric_string_is_parsed(self):
+        assert tm._num("2.5", 0.0) == 2.5
+
+
+class TestAnalyzeFullPrecisionIndicators:
+    """A low-priced stock's MACD / signal values are tiny; they used to be rounded to
+    2 decimals before comparing, so crossovers were missed or invented."""
+
+    def test_tiny_macd_above_signal_is_detected(self, env, monkeypatch):
+        env.df = _flat_df(60, close=3.0)
+        _Ind(monkeypatch, 60, macd=(0.004, 0.002), prev_macd=(0.004, 0.002))
+        assert "MACD above signal line" in _reasons(tm.analyze("PENNY"))     # was "below" (0.0 vs 0.0)
+
+    def test_tiny_macd_bullish_crossover_is_detected(self, env, monkeypatch):
+        env.df = _flat_df(60, close=3.0)
+        _Ind(monkeypatch, 60, macd=(0.004, 0.002), prev_macd=(0.001, 0.003))
+        assert "MACD bullish crossover" in _reasons(tm.analyze("PENNY"))
+
+    def test_tiny_macd_bearish_crossover_is_detected(self, env, monkeypatch):
+        env.df = _flat_df(60, close=3.0)
+        _Ind(monkeypatch, 60, macd=(0.001, 0.003), prev_macd=(0.004, 0.002))
+        assert "MACD bearish crossover" in _reasons(tm.analyze("PENNY"))
+
+    def test_tiny_macd_equal_after_rounding_but_not_equal_scores_differently(self, env, monkeypatch):
+        env.df = _flat_df(60, close=3.0)
+        _Ind(monkeypatch, 60, macd=(0.004, 0.002), prev_macd=(0.004, 0.002))
+        up = tm.analyze("PENNY")["technical_score"]
+        _Ind(monkeypatch, 60, macd=(0.002, 0.004), prev_macd=(0.002, 0.004))
+        down = tm.analyze("PENNY")["technical_score"]
+        assert up - down == 10                             # +5 vs -5
+
+    def test_low_price_ema_stack_is_detected(self, env, monkeypatch):
+        # EMAs differ by < 0.005, so rounded to 2dp they all tie and no stack is seen.
+        env.df = _flat_df(60, close=1.0100)
+        _Ind(monkeypatch, 60, ema=(1.0040, 1.0030, 1.0020), bb=(1.2, 0.8), sr=(0.5, 2.0))
+        assert "Bullish EMA stack" in _reasons(tm.analyze("PENNY"))
+
+    def test_bollinger_lower_band_of_exactly_zero_is_kept(self, env, monkeypatch):
+        # bb_lo == 0.0 used to be replaced by the close (`or close_val`), putting the
+        # price at 0% of the band and handing it a "near lower BB" +8 bonus.
+        env.df = _flat_df(60, close=5.0)
+        _Ind(monkeypatch, 60, bb=(10.0, 0.0), sr=(1.0, 20.0))
+        r = tm.analyze("PENNY")
+        assert "Near lower BB" not in _reasons(r) and "Near upper BB" not in _reasons(r)
+        assert r["bb_lower"] == 0.0 and r["bb_upper"] == 10.0
+
+    def test_reported_values_are_still_rounded(self, env, monkeypatch):
+        env.df = _flat_df(60, close=100.0)
+        _Ind(monkeypatch, 60, ema=(100.126, 100.0, 100.0), atr=1.2349, bb=(110.555, 90.444), adx=19.96, rsi=48.76)
+        r = tm.analyze("TCS")
+        assert (r["ema20"], r["atr"], r["bb_upper"], r["bb_lower"]) == (100.13, 1.23, 110.56, 90.44)
+        assert (r["adx"], r["rsi"]) == (20.0, 48.8)
+
+    def test_rsi_just_under_threshold_is_oversold_without_rounding(self, env, monkeypatch):
+        env.df = _flat_df(60)
+        _Ind(monkeypatch, 60, rsi=29.996)                  # rounded to 30.0 -> used to read "neutral"
+        assert "oversold" in _reasons(tm.analyze("TCS"))
+
+    def test_nan_indicator_values_use_the_fallbacks(self, env, monkeypatch):
+        env.df = _flat_df(60, close=100.0)
+        _Ind(monkeypatch, 60, rsi=float("nan"), macd=(float("nan"), float("nan")),
+             prev_macd=(float("nan"), float("nan")), ema=(float("nan"),) * 3,
+             adx=float("nan"), atr=float("nan"), bb=(float("nan"), float("nan")))
+        r = tm.analyze("TCS")
+        assert r["rsi"] == 50.0 and r["adx"] == 0.0 and r["atr"] == 0.0
+        assert r["ema20"] == r["ema50"] == r["ema200"] == 100.0
+        assert r["bb_upper"] == r["bb_lower"] == 100.0

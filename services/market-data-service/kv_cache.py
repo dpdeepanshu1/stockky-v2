@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -332,10 +333,31 @@ def _get_neon():
 
 
 
-def _neon_get(key: str) -> Any:
+_NEON_MEM_TTL = 600
+
+
+def _capped_mem_ttl(remaining, default: int = _NEON_MEM_TTL) -> int:
+    """TTL for the in-memory copy of a value just read from the durable store.
+
+    The copy used to get a flat ``default`` seconds even when the Neon row itself
+    expired sooner, so a value could be served from memory long after its row was
+    gone. Cap it at the row's remaining life. ``remaining`` is seconds left (None
+    = the row never expires). Never returns < 1: MemoryTTLCache treats a falsy
+    ttl as "never expires", which would be the opposite of the intent."""
+    if remaining is None:
+        return default
+    try:
+        return max(1, min(default, int(math.ceil(remaining))))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _neon_fetch(key: str):
+    """(value, seconds_until_row_expiry) for a live durable row, else (None, None).
+    seconds is None when the row has no expiry."""
     eng = _get_neon()
     if not eng:
-        return None
+        return None, None
     try:
         from sqlalchemy import text
         import datetime as _dt
@@ -346,8 +368,9 @@ def _neon_get(key: str) -> Any:
                 {"k": key},
             ).fetchone()
             if not row:
-                return None
+                return None, None
             v, exp = row[0], row[1]
+            remaining = None
             if exp is not None:
                 now = _dt.datetime.now(_dt.timezone.utc)
                 if getattr(exp, "tzinfo", None) is None:
@@ -355,14 +378,19 @@ def _neon_get(key: str) -> Any:
                 if exp < now:
                     with eng.begin() as c2:
                         c2.execute(text("DELETE FROM stockky_kv WHERE k = :k"), {"k": key})
-                    return None
+                    return None, None
+                remaining = (exp - now).total_seconds()
             try:
-                return json.loads(v)
+                return json.loads(v), remaining
             except Exception:
-                return v
+                return v, remaining
     except Exception as e:
         logger.debug("neon get %s: %s", key, e)
-        return None
+        return None, None
+
+
+def _neon_get(key: str) -> Any:
+    return _neon_fetch(key)[0]
 
 
 def _neon_set(key: str, value: Any, ttl: Optional[int] = None) -> None:
@@ -446,9 +474,9 @@ def kv_get(key: str) -> Any:
         except Exception as e:
             logger.debug("redis get %s: %s", key, e)
     if _is_durable(key):
-        val = _neon_get(key)
+        val, remaining = _neon_fetch(key)
         if val is not None:
-            _mem.set(key, val, ttl=600)
+            _mem.set(key, val, ttl=_capped_mem_ttl(remaining))
             return val
     return None
 
@@ -669,16 +697,18 @@ def kv_get_many(keys: list) -> dict:
                     now = _dt.datetime.now(_dt.timezone.utc)
                     for row in rows:
                         k, v, exp = row[0], row[1], row[2]
+                        remaining = None
                         if exp is not None:
                             if getattr(exp, "tzinfo", None) is None:
                                 exp = exp.replace(tzinfo=_dt.timezone.utc)
                             if exp < now:
                                 continue
+                            remaining = (exp - now).total_seconds()
                         try:
                             val = json.loads(v)
                         except Exception:
                             val = v
-                        _mem.set(k, val, ttl=600)
+                        _mem.set(k, val, ttl=_capped_mem_ttl(remaining))
                         result[k] = val
             except Exception as e:
                 logger.debug("neon get_many failed: %s", e)
@@ -1012,8 +1042,14 @@ def settings_set(table: str, key: str, value: Any) -> bool:
     """Upsert into dedicated durable table (no expiry). Survives hard_reset."""
     table = _settings_table_ok(table)
     mk = f"{table}:{key}"
+    # Always JSON-encode, strings included. settings_get() json-decodes what it
+    # reads, so a string stored verbatim ("123", "true", "null") came back from the
+    # DB as an int/bool/None while the in-memory copy still held the str -- the
+    # value's type depended on whether the process had restarted. Encoding strings
+    # makes the DB round-trip exact. (Rows written before this change keep their old
+    # verbatim form; settings_get still reads those, a non-JSON string as itself.)
     try:
-        payload = json.dumps(value) if not isinstance(value, str) else value
+        payload = json.dumps(value)
     except Exception:
         payload = json.dumps(value, default=str)
     with _SETTINGS_LOCK:

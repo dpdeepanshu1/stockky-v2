@@ -1020,7 +1020,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
         "bullish_count": bullish_count,
         "atr_pct":       atr_pct,
         "current_price": current_price,
-        "market_note":   "Aug-2026: Nifty -7% 6m, FII net-short, Midcap outperforming",
+        "market_note":   "",
     }
 
 
@@ -1753,7 +1753,10 @@ async def _refresh_volume_shock_candidates(
     try:
         adx_samples = [qr.get("adx") for qr in quality_scores.values() if qr.get("adx") is not None]
         if adx_samples:
-            amp.record_metric(db, "universe_adx", sum(adx_samples) / len(adx_samples))
+            amp.record_metric(db, amp.UNIVERSE_ADX_METRIC, sum(adx_samples) / len(adx_samples))
+            # One-off cleanup of readings under the pre-Wilder metric name (a no-op
+            # delete once they are gone); see adaptive_market_params.UNIVERSE_ADX_METRIC.
+            amp.purge_legacy_universe_adx(db)
     except Exception as e:
         logger.debug("candidate_engine: universe_adx recording failed (non-fatal): %s", e)
 

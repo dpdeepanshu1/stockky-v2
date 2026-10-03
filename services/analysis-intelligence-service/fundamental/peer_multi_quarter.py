@@ -55,6 +55,11 @@ _FUND_CACHE_LOCK = threading.Lock()
 _FUND_CACHE_TTL = float(os.getenv("PEER_FUNDAMENTALS_CACHE_TTL_SECONDS", "60"))
 _FUND_FETCH_MAX_WORKERS = int(os.getenv("PEER_FUNDAMENTALS_FETCH_WORKERS", "6"))
 
+# Single default for "how many peers to compare" - rank_against_peers() and
+# compute_peer_relative() used to default to 6 and 5, so the same call could
+# rank against one peer set and score against another.
+DEFAULT_MAX_PEERS = 5
+
 # Default peer maps for common Indian sectors (extend as needed)
 DEFAULT_PEERS: Dict[str, List[str]] = {
     "IT": ["TCS.NS", "INFY.NS", "HCLTECH.NS", "WIPRO.NS", "TECHM.NS"],
@@ -79,12 +84,69 @@ def _safe(val: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
 
+_PE_KEYS = ("pe_ratio", "trailingPE", "pe")
+_ROE_KEYS = ("roe", "returnOnEquity")
+_REV_G_KEYS = ("revenue_growth_yoy", "revenueGrowth")
+_PROFIT_G_KEYS = ("profit_growth_yoy", "earningsGrowth")
+
+
+def _pick(d: Any, keys: Tuple[str, ...], skip_zero: bool = False, default: float = 0.0) -> float:
+    """First usable numeric value among `keys` (primary key first, then aliases).
+
+    Replaces the `_safe(d.get("a") or d.get("b"))` idiom, where `or` treated a
+    genuine 0.0 in the primary key (e.g. 0% growth, 0% ROE) as missing and
+    silently read the alias instead - which could be a different number.
+    A value is skipped only if it is absent, None, NaN or non-numeric. With
+    skip_zero=True a 0 is skipped too; that is for P/E, where 0 means "not
+    reported", not a real ratio.
+    """
+    if not isinstance(d, dict):
+        return default
+    for k in keys:
+        v = d.get(k)
+        if v is None:
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if f != f or (skip_zero and f == 0):
+            continue
+        return f
+    return default
+
 
 def _norm_symbol(symbol: str) -> str:
     s = (symbol or "").strip().upper()
     if not s.endswith(".NS") and not s.endswith(".BO"):
         s = f"{s}.NS"
     return s
+
+
+def build_peer_list(
+    symbol: str,
+    sector: str,
+    peers: Optional[List[str]] = None,
+    max_peers: int = DEFAULT_MAX_PEERS,
+) -> List[str]:
+    """The peers to compare `symbol` against: canonical (".NS"/".BO"), de-duplicated,
+    never containing the symbol itself, at most `max_peers` long (zero or negative
+    -> none). Shared by rank_against_peers() and compute_peer_relative() so both
+    always use the same peer set.
+
+    Previously compute_peer_relative() kept peers exactly as given, so a bare
+    "TCS" was fetched as "TCS" (a symbol market-data does not know) instead of
+    "TCS.NS", spellings like "B"/"b"/"B.NS" were fetched and averaged as three
+    peers, and a negative max_peers sliced from the END of the list.
+    """
+    symbol = _norm_symbol(symbol)
+    raw = peers or DEFAULT_PEERS.get(sector, DEFAULT_PEERS["DEFAULT"])
+    out: List[str] = []
+    for p in raw:
+        n = _norm_symbol(p)
+        if n != symbol and n not in out:
+            out.append(n)
+    return out[: max(max_peers, 0)]
 
 
 def detect_sector(fundamentals: Dict[str, Any]) -> str:
@@ -181,7 +243,7 @@ def compute_peer_relative(
     stock_fund: Dict[str, Any],
     market_data_url: str,
     peers: Optional[List[str]] = None,
-    max_peers: int = 5,
+    max_peers: int = DEFAULT_MAX_PEERS,
 ) -> Dict[str, Any]:
     """
     Compare stock vs sector peers on PE, ROE, growth.
@@ -191,13 +253,12 @@ def compute_peer_relative(
     """
     symbol = _norm_symbol(symbol)
     sector = detect_sector(stock_fund)
-    peer_list = peers or DEFAULT_PEERS.get(sector, DEFAULT_PEERS["DEFAULT"])
-    peer_list = [p for p in peer_list if _norm_symbol(p) != symbol][:max_peers]
+    peer_list = build_peer_list(symbol, sector, peers, max_peers)
 
-    stock_pe = _safe(stock_fund.get("pe_ratio") or stock_fund.get("trailingPE") or stock_fund.get("pe"))
-    stock_roe = _safe(stock_fund.get("roe") or stock_fund.get("returnOnEquity"))
-    stock_rev_g = _safe(stock_fund.get("revenue_growth_yoy") or stock_fund.get("revenueGrowth"))
-    stock_profit_g = _safe(stock_fund.get("profit_growth_yoy") or stock_fund.get("earningsGrowth"))
+    stock_pe = _pick(stock_fund, _PE_KEYS, skip_zero=True)
+    stock_roe = _pick(stock_fund, _ROE_KEYS)
+    stock_rev_g = _pick(stock_fund, _REV_G_KEYS)
+    stock_profit_g = _pick(stock_fund, _PROFIT_G_KEYS)
 
     peer_pes, peer_roes, peer_rev, peer_profit = [], [], [], []
     peer_details = []
@@ -209,10 +270,10 @@ def compute_peer_relative(
         f = fetched.get(p) or {}
         if not f:
             continue
-        pe = _safe(f.get("pe_ratio") or f.get("trailingPE") or f.get("pe"))
-        roe = _safe(f.get("roe") or f.get("returnOnEquity"))
-        rg = _safe(f.get("revenue_growth_yoy") or f.get("revenueGrowth"))
-        pg = _safe(f.get("profit_growth_yoy") or f.get("earningsGrowth"))
+        pe = _pick(f, _PE_KEYS, skip_zero=True)
+        roe = _pick(f, _ROE_KEYS)
+        rg = _pick(f, _REV_G_KEYS)
+        pg = _pick(f, _PROFIT_G_KEYS)
         if pe > 0:
             peer_pes.append(pe)
         if roe != 0:
@@ -302,18 +363,18 @@ def compute_multi_quarter_consistency(
     rows: List[Dict[str, Any]] = []
     if quarterly:
         for q in quarterly:
-            rg = q.get("revenue_growth") or q.get("revenue_growth_yoy") or q.get("revenueGrowth")
-            pg = q.get("profit_growth") or q.get("profit_growth_yoy") or q.get("earningsGrowth") or q.get("net_income_growth")
+            rg = _pick(q, ("revenue_growth", "revenue_growth_yoy", "revenueGrowth"))
+            pg = _pick(q, ("profit_growth", "profit_growth_yoy", "earningsGrowth", "net_income_growth"))
             rows.append({
                 "period": q.get("period") or q.get("date") or q.get("quarter"),
-                "revenue_growth": _safe(rg),
-                "profit_growth": _safe(pg),
+                "revenue_growth": rg,
+                "profit_growth": pg,
             })
 
     # Fallback: single YoY numbers → treat as 1 "quarter" signal
     if not rows:
-        rg = _safe(fundamentals.get("revenue_growth_yoy") or fundamentals.get("revenueGrowth"))
-        pg = _safe(fundamentals.get("profit_growth_yoy") or fundamentals.get("earningsGrowth"))
+        rg = _pick(fundamentals, _REV_G_KEYS)
+        pg = _pick(fundamentals, _PROFIT_G_KEYS)
         if rg != 0 or pg != 0:
             rows = [{"period": "TTM/YoY", "revenue_growth": rg, "profit_growth": pg}]
 

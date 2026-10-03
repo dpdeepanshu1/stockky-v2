@@ -844,22 +844,23 @@ class TestRefreshGuards:
         assert rec.calls == [] and sent == []
         assert db.query(models.TradeCredential).count() == 0
 
-    @pytest.mark.parametrize("missing", ["DHAN_TOTP_SECRET", "DHAN_CLIENT_ID"])
-    def test_missing_secret_or_client_id_is_rejected_before_any_http(self, db, monkeypatch, totp_env, sent, caplog, missing):
+    @pytest.mark.parametrize("missing", ["DHAN_TOTP_SECRET", "DHAN_CLIENT_ID", "DHAN_PIN"])
+    def test_missing_secret_client_id_or_pin_is_rejected_before_any_http(self, db, monkeypatch, totp_env, sent, caplog, missing):
         monkeypatch.delenv(missing)
         rec = _post(monkeypatch, body=GOOD_BODY)
         with caplog.at_level(logging.ERROR, logger=LOGGER):
             assert dc.refresh_if_totp_enabled(db) is False
         assert rec.calls == []
-        assert "DHAN_TOTP_SECRET or DHAN_CLIENT_ID not set" in caplog.text
+        assert "DHAN_TOTP_SECRET, DHAN_CLIENT_ID or DHAN_PIN not set" in caplog.text
+        assert db.query(models.TradeCredential).count() == 0
 
-    def test_missing_pin_is_not_validated_and_is_sent_empty(self, db, monkeypatch, totp_env, sent, frozen):
-        # Pinned CURRENT behaviour (session note observation): only the secret
-        # and client id are guarded, so an unset DHAN_PIN goes out as pin="".
-        monkeypatch.delenv("DHAN_PIN")
+    def test_empty_pin_is_rejected_like_a_missing_one(self, db, monkeypatch, totp_env, sent, caplog):
+        monkeypatch.setenv("DHAN_PIN", "")
         rec = _post(monkeypatch, body=GOOD_BODY)
-        assert dc.refresh_if_totp_enabled(db) is True
-        assert rec.calls[0]["params"]["pin"] == ""
+        with caplog.at_level(logging.ERROR, logger=LOGGER):
+            assert dc.refresh_if_totp_enabled(db) is False
+        assert rec.calls == []
+        assert "DHAN_PIN not set" in caplog.text
 
 
 class TestRefreshHappyPath:

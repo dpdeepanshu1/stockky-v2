@@ -838,3 +838,55 @@ def test_engine_row_that_is_not_a_usable_dict_is_replaced_by_the_default_row_and
     out = analyze("TCS", skip_gemini=True)
     assert out["decision"] == "DO NOT BUY" and out["symbol"] == "TCS"
     assert env.kv_sets == [] and DKEY not in env.kv
+
+
+# ── cancelled enrichment child (session: task.result() hardening) ───────────
+# A child that ends in CancelledError is a BaseException; the old post-gather
+# `task.result()` re-raised it past `except Exception` and aborted the whole
+# scan for that symbol. Results now come straight from gather(return_exceptions=True).
+
+@pytest.mark.parametrize("exc_attr, field", [
+    ("fund_exc", "fundamental_metrics"),
+    ("event_exc", "event_data"),
+    ("news_exc", "news_score"),
+    ("pred_exc", "prediction_score"),
+])
+def test_cancelled_enrichment_child_degrades_instead_of_aborting_the_scan(env, exc_attr, field):
+    env.get_result = DResp(dict(ALL_SUPPLIED, fundamental_metrics=None, event_data=None,
+                                news_score=None, prediction_score=None))
+    setattr(env, exc_attr, asyncio.CancelledError())
+    out = analyze("TCS")
+    assert out["decision"] and not out.get(field)
+
+
+def test_cancelled_children_do_not_block_the_surviving_ones(env):
+    env.get_result = DResp(dict(ALL_SUPPLIED, fundamental_metrics=None, event_data=None,
+                                news_score=None, prediction_score=None))
+    env.fund_exc = asyncio.CancelledError()
+    env.news_exc = asyncio.CancelledError()
+    env.pred = (64.0, "model says up")
+    env.event = {"next_earnings_date": "2026-10-20"}
+    out = analyze("TCS")
+    assert out["prediction_score"] == 64.0 and out["event_risk"] is True
+    assert not out.get("fundamental_metrics")
+
+
+def test_outer_cancellation_still_propagates_through_the_enrichment_gather(env):
+    env.get_result = DResp(dict(ALL_SUPPLIED, fundamental_metrics=None))
+
+    async def never(symbol, client):
+        await asyncio.sleep(0)            # faked sleep returns at once, so park on a future
+        await asyncio.get_running_loop().create_future()
+
+    gw._fetch_fundamental_cached = never   # env fixture's monkeypatch restores the original
+
+    async def go():
+        sem = asyncio.Semaphore(2)
+        t = asyncio.create_task(gw._analyze_one_symbol_ultra("TCS", object(), sem))
+        for _ in range(50):
+            await asyncio.sleep(0)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+    asyncio.run(go())

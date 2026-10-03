@@ -109,6 +109,21 @@ class TestNormalizeDeRatio:
     def test_zero_returned(self):
         assert m._normalize_de_ratio(0) == 0.0
 
+    @pytest.mark.parametrize("pct, multiple", [(30, 0.3), (50, 0.5), (95.4, 0.95), (150, 1.5), (0, 0.0)])
+    def test_yahoo_percent_non_financial_always_divided(self, pct, multiple):
+        # Yahoo's debtToEquity is always a percent: 30 means 0.3x, not 30x.
+        assert m._normalize_de_ratio(pct, sector="Technology", yahoo_percent=True) == pytest.approx(multiple)
+        assert m._normalize_de_ratio(pct, yahoo_percent=True) == pytest.approx(multiple)
+
+    def test_yahoo_percent_leaves_financial_rule_unchanged(self):
+        assert m._normalize_de_ratio(150.0, sector="banking", yahoo_percent=True) == 150.0
+        assert m._normalize_de_ratio(250.0, sector="insurance", yahoo_percent=True) == pytest.approx(2.5)
+
+    def test_without_flag_low_values_are_left_alone(self):
+        # Unknown scale (already a multiple): the legacy heuristic must not shrink it.
+        assert m._normalize_de_ratio(30) == 30.0
+        assert m._normalize_de_ratio(0.3) == 0.3
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # _safe / _safe_int / _compute_growth

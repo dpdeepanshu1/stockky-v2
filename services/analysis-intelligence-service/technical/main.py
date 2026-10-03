@@ -92,6 +92,14 @@ def is_market_open() -> bool:
 def get_cache_ttl() -> int:
     return 300 if is_market_open() else 21600
 
+# A "history too thin" quote-only result is a stopgap, not an analysis: cache
+# it only briefly so full technicals come back as soon as history recovers.
+_INSUFFICIENT_CACHE_TTL = 60
+# ADX needs two Wilder periods of history before its first value exists (one to
+# seed the smoothed TR/DM, one to seed the smoothed DX). Below this it is unknown.
+_ADX_PERIOD = 14
+_ADX_MIN_BARS = 2 * _ADX_PERIOD
+
 def _cache_get(key: str):
     exp = _mem_tech_exp.get(key)
     if key in _mem_tech and (exp is None or exp > time.time()):
@@ -111,7 +119,14 @@ def _cache_set(key: str, value: dict, ttl: int = None):
     _mem_tech_exp[key] = time.time() + int(ttl)
     if not cache:
         return
-    cache.setex(key, ttl, json.dumps(value, default=str))
+    # Redis is a best-effort shared layer (_cache_get already swallows its
+    # errors). A failed write used to raise out of here AFTER the memory
+    # write, so analyze() 500'd on a result it had already computed and
+    # cached locally. Log it and carry on.
+    try:
+        cache.setex(key, ttl, json.dumps(value, default=str))
+    except Exception as e:
+        logger.warning("Technical: Redis cache write failed for %s (%s); memory cache only.", key, e)
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def normalize_symbol(symbol: str) -> str:
@@ -123,6 +138,23 @@ def _safe(val, decimals=2):
         return round(f, decimals) if math.isfinite(f) else None
     except (TypeError, ValueError):
         return None
+
+def _num(val, default):
+    """Full-precision float for internal comparisons; `default` only when the value is
+    missing (None / NaN / inf / non-numeric).
+
+    analyze() used `_safe(x) or default`, which had two problems: _safe rounds to 2
+    decimals, so on a low-priced stock MACD/signal/EMA/Bollinger values tied or
+    collapsed to 0.0 and crossovers, EMA stacks and band position were decided on
+    rounded numbers; and `or` replaced a genuine 0.0 (a Bollinger lower band that
+    reaches 0) with the fallback. Rounding is now applied only to the values the
+    response reports."""
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return default
+    return f if math.isfinite(f) else default
+
 
 def _fetch_quote_price(symbol: str) -> float | None:
     try:
@@ -305,7 +337,16 @@ def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
     gain = delta.where(delta > 0, 0.0).rolling(period).mean()
     loss = (-delta.where(delta < 0, 0.0)).rolling(period).mean()
     rs = gain / loss.replace(0, float("nan"))
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    # No losses in the window: the division above yields NaN, which analyze()
+    # then read as "missing" and reported as a neutral 50 — a stock rising
+    # every day looked neutral instead of maximally overbought. Resolve the
+    # zero-loss windows explicitly: gains only -> 100, no movement at all ->
+    # 50 (neutral). Warm-up rows (gain/loss NaN) stay NaN.
+    no_loss = loss.eq(0) & gain.notna()
+    rsi = rsi.mask(no_loss & (gain > 0), 100.0)
+    rsi = rsi.mask(no_loss & (gain == 0), 50.0)
+    return rsi
 
 def _ema(close: pd.Series, span: int) -> pd.Series:
     return close.ewm(span=span, adjust=False).mean()
@@ -317,21 +358,63 @@ def _macd(close: pd.Series):
     signal = _ema(macd_line, 9)
     return macd_line, signal
 
+def _wilder_smooth(s: pd.Series, period: int) -> pd.Series:
+    """Wilder's smoothing (RMA): seed with the plain mean of the first `period`
+    valid values, then out[i] = (out[i-1] * (period - 1) + s[i]) / period.
+    A NaN input breaks the chain: the output is NaN there and the smoother
+    re-seeds from the next `period` consecutive valid values, so bad data never
+    silently carries stale state forward."""
+    vals = [float(x) for x in s.tolist()]
+    out = [float("nan")] * len(vals)
+    run = 0  # consecutive valid inputs since the last NaN / re-seed
+    prev = float("nan")
+    for i, v in enumerate(vals):
+        if math.isnan(v):
+            run = 0
+            prev = float("nan")
+            continue
+        run += 1
+        if math.isnan(prev):
+            if run >= period:
+                prev = sum(vals[i - period + 1:i + 1]) / period
+                out[i] = prev
+        else:
+            prev = (prev * (period - 1) + v) / period
+            out[i] = prev
+    return pd.Series(out, index=s.index)
+
 def _adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    """ADX with Wilder smoothing (same definition charting tools use), so the
+    25/20 trend thresholds mean what they conventionally mean. The previous
+    version used plain rolling means instead of Wilder smoothing."""
     tr = pd.concat([
         high - low,
         (high - close.shift()).abs(),
         (low - close.shift()).abs(),
     ], axis=1).max(axis=1)
-    dm_pos = high.diff()
-    dm_neg = -low.diff()
-    dm_pos = dm_pos.where((dm_pos > dm_neg) & (dm_pos > 0), 0.0)
-    dm_neg = dm_neg.where((dm_neg > dm_pos) & (dm_neg > 0), 0.0)
-    atr   = tr.rolling(period).mean()
-    di_pos = 100 * dm_pos.rolling(period).mean() / atr.replace(0, float("nan"))
-    di_neg = 100 * dm_neg.rolling(period).mean() / atr.replace(0, float("nan"))
-    dx = 100 * (di_pos - di_neg).abs() / (di_pos + di_neg).replace(0, float("nan"))
-    return dx.rolling(period).mean()
+    up = high.diff()
+    down = -low.diff()
+    # Both directional moves are classified from the RAW up/down values. The old
+    # code masked dm_neg against the already-zeroed dm_pos, so an exact tie
+    # (up == down > 0) was counted as a down move instead of neither.
+    dm_pos = up.where((up > down) & (up > 0), 0.0)
+    dm_neg = down.where((down > up) & (down > 0), 0.0)
+    # DM/TR start at the second bar (the first has no previous bar), as in Wilder.
+    dm_pos = dm_pos.where(up.notna())
+    dm_neg = dm_neg.where(down.notna())
+    tr = tr.where(up.notna())
+    atr = _wilder_smooth(tr, period)
+    sm_pos = _wilder_smooth(dm_pos, period)
+    sm_neg = _wilder_smooth(dm_neg, period)
+    atr_ok = atr.where(atr > 0)
+    di_pos = 100 * sm_pos / atr_ok
+    di_neg = 100 * sm_neg / atr_ok
+    di_sum = di_pos + di_neg
+    dx = 100 * (di_pos - di_neg).abs() / di_sum.where(di_sum > 0)
+    # Real range but zero directional movement in the window: DX is 0 (no
+    # trend), not undefined -- a NaN here would break the ADX smoothing chain.
+    dx = dx.mask(atr_ok.notna() & di_sum.eq(0), 0.0)
+    return _wilder_smooth(dx, period)
 
 def _atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
     """§6 — ATR with corporate-action clamp. Excludes single-day jumps > 30%
@@ -499,6 +582,10 @@ def analyze(
                     f"Limited history for {sym}; using last quote ₹{price:.2f}. Retry for full technicals."
                 ],
             }
+            # Short TTL only: this used to be cached for 5 min (market hours)
+            # or 6 h (after close), pinning a neutral 50 long after the
+            # history fetch had recovered.
+            _cache_set(cache_key, result, ttl=min(get_cache_ttl(), _INSUFFICIENT_CACHE_TTL))
         else:
             result = {
                 "symbol": sym,
@@ -518,7 +605,9 @@ def analyze(
                     f"Price history unavailable for {sym} right now (upstream busy). Retry shortly."
                 ],
             }
-        _cache_set(cache_key, result)
+            # Deliberately NOT cached: it says "retry shortly", but caching it
+            # for 5 min-6 h made every retry return the same empty neutral
+            # result even after the upstream recovered.
         return result
 
     close  = df["Close"]
@@ -532,7 +621,11 @@ def analyze(
     ema20 = _ema(close, min(20, data_length)) if data_length >= 5 else close
     ema50 = _ema(close, min(50, data_length)) if data_length >= 10 else close
     ema200 = _ema(close, min(200, data_length)) if data_length >= 30 else close
-    adx_series = _adx(high, low, close) if data_length >= 20 else pd.Series([15]*data_length, index=df.index)
+    # Below _ADX_MIN_BARS ADX does not exist yet. The old code ran _adx from 20
+    # bars (all-NaN until bar 28, then reported as a real 0.0 "weak") and used a
+    # fake 15 under 20 bars; both leaked into the universe_adx regime average.
+    adx_known = data_length >= _ADX_MIN_BARS
+    adx_series = _adx(high, low, close, _ADX_PERIOD) if adx_known else None
     atr_series = _atr(high, low, close) if data_length >= 14 else pd.Series([0]*data_length, index=df.index)
     bb_upper, bb_lower = _bollinger(close, min(20, data_length)) if data_length >= 5 else (close, close)
 
@@ -540,27 +633,41 @@ def analyze(
     close_val = float(latest["Close"])
     support, resistance = _support_resistance(df, min(20, len(df)))
 
-    rsi_val    = _safe(rsi_series.iloc[-1])   or 50.0
-    macd_val   = _safe(macd_line.iloc[-1])    or 0.0
-    macd_s_val = _safe(macd_sig.iloc[-1])     or 0.0
-    prev_macd  = _safe(macd_line.iloc[-2])    or 0.0 if len(macd_line) > 1 else 0.0
-    prev_sig   = _safe(macd_sig.iloc[-2])     or 0.0 if len(macd_sig) > 1 else 0.0
-    ema20_val  = _safe(ema20.iloc[-1])        or close_val
-    ema50_val  = _safe(ema50.iloc[-1])        or close_val
-    ema200_val = _safe(ema200.iloc[-1])       or close_val
-    adx_val    = _safe(adx_series.iloc[-1])   or 0.0
-    atr_val    = _safe(atr_series.iloc[-1])   or 0.0
-    bb_up      = _safe(bb_upper.iloc[-1])     or close_val
-    bb_lo      = _safe(bb_lower.iloc[-1])     or close_val
+    # `_safe(x) or 50.0` treated a genuine RSI of 0.0 (every day a loss) as
+    # missing and reported a neutral 50; only None means missing.
+    rsi_val    = _num(rsi_series.iloc[-1], 50.0)
+    macd_val   = _num(macd_line.iloc[-1], 0.0)
+    macd_s_val = _num(macd_sig.iloc[-1], 0.0)
+    prev_macd  = _num(macd_line.iloc[-2], 0.0) if len(macd_line) > 1 else 0.0
+    prev_sig   = _num(macd_sig.iloc[-2], 0.0) if len(macd_sig) > 1 else 0.0
+    ema20_val  = _num(ema20.iloc[-1], close_val)
+    ema50_val  = _num(ema50.iloc[-1], close_val)
+    ema200_val = _num(ema200.iloc[-1], close_val)
+    adx_val    = _num(adx_series.iloc[-1], 0.0) if adx_known else None
+    atr_val    = _num(atr_series.iloc[-1], 0.0)
+    bb_up      = _num(bb_upper.iloc[-1], close_val)
+    bb_lo      = _num(bb_lower.iloc[-1], close_val)
     vol_now    = float(latest["Volume"])
     vol_avg20  = float(volume.tail(min(20, len(volume))).mean()) if len(volume) >= 5 else vol_now
 
     score   = 50
     reasons = []
 
+    # Mean-reversion bonuses (oversold RSI, price near the lower Bollinger band) are
+    # a bet on a bounce. In a confirmed downtrend (bearish EMA stack) RSI can stay
+    # oversold and price can ride the lower band for weeks, and the two bonuses
+    # (+12, +8) used to add up to cancel the stack's -15 and lift a falling stock
+    # to neutral. No bounce credit while the stack is bearish; penalties
+    # (overbought / near upper band) are unaffected, so the guard only ever
+    # makes a score more cautious.
+    bearish_stack = data_length >= 30 and close_val < ema20_val < ema50_val < ema200_val
+
     if rsi_val < rsi_oversold:
-        score += 12 * meanrev_weight
-        reasons.append(f"RSI at {rsi_val:.1f} — oversold (adaptive floor {rsi_oversold:.0f}, weight {meanrev_weight:.2f}x)")
+        if bearish_stack:
+            reasons.append(f"RSI at {rsi_val:.1f} — oversold, but no bounce credit under a bearish EMA stack")
+        else:
+            score += 12 * meanrev_weight
+            reasons.append(f"RSI at {rsi_val:.1f} — oversold (adaptive floor {rsi_oversold:.0f}, weight {meanrev_weight:.2f}x)")
     elif rsi_val > rsi_overbought:
         score -= 12 * meanrev_weight
         reasons.append(f"RSI at {rsi_val:.1f} — overbought (adaptive ceiling {rsi_overbought:.0f}, weight {meanrev_weight:.2f}x)")
@@ -612,21 +719,31 @@ def analyze(
     else:
         reasons.append("Short-term momentum: insufficient data")
 
-    trend_strength = "strong" if adx_val >= 25 else "moderate" if adx_val >= 20 else "weak"
-    if data_length >= 20:
+    if adx_val is None:
+        trend_strength = "unknown"
+        reasons.append("ADX: insufficient data")
+    else:
+        trend_strength = "strong" if adx_val >= 25 else "moderate" if adx_val >= 20 else "weak"
         if adx_val >= 25:
             reasons.append(f"ADX {adx_val:.1f} — strong trend")
         else:
             reasons.append(f"ADX {adx_val:.1f} — weak/no trend")
-    else:
-        reasons.append("ADX: insufficient data")
 
-    if data_length >= 20:
-        bb_range = bb_up - bb_lo if bb_up != bb_lo else 1
+    if data_length >= 20 and not bb_up > bb_lo:
+        # Collapsed bands (flat or halted stock, zero std-dev). The old code
+        # substituted a range of 1, which put a mid-band price at 0% and
+        # handed a flat stock a "near lower BB" +8 bonus. No volatility
+        # means no mean-reversion signal.
+        reasons.append("Bollinger Bands: flat price, no signal")
+    elif data_length >= 20:
+        bb_range = bb_up - bb_lo
         bb_pct   = (close_val - bb_lo) / bb_range * 100
         if bb_pct < 20:
-            score += 8 * meanrev_weight
-            reasons.append(f"Near lower BB ({bb_pct:.0f}%, weight {meanrev_weight:.2f}x)")
+            if bearish_stack:
+                reasons.append(f"Near lower BB ({bb_pct:.0f}%) — no bounce credit under a bearish EMA stack")
+            else:
+                score += 8 * meanrev_weight
+                reasons.append(f"Near lower BB ({bb_pct:.0f}%, weight {meanrev_weight:.2f}x)")
         elif bb_pct > 80:
             score -= 8 * meanrev_weight
             reasons.append(f"Near upper BB ({bb_pct:.0f}%, weight {meanrev_weight:.2f}x)")
@@ -729,7 +846,7 @@ def analyze(
         "support": round(support, 2) if support else None,
         "resistance": round(resistance, 2) if resistance else None,
         "rsi": round(rsi_val, 1),
-        "adx": round(adx_val, 1),
+        "adx": round(adx_val, 1) if adx_val is not None else None,
         "atr": round(atr_val, 2),
         "ema20": round(ema20_val, 2),
         "ema50": round(ema50_val, 2),

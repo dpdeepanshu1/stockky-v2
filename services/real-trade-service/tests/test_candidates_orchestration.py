@@ -533,6 +533,43 @@ class TestRefreshVolumeShockCandidates:
         inserted = run(cd._refresh_volume_shock_candidates(db, "REAL", set()))
         assert inserted == 0
 
+    def test_universe_adx_recorded_under_wilder_metric_and_legacy_purged(self, db, monkeypatch):
+        """The universe-average ADX goes to amp.UNIVERSE_ADX_METRIC (not the pre-Wilder
+        name) and the legacy rows are purged in the same pass; symbols whose adx is None
+        (history < 28 bars) are left out of the average."""
+        _no_restricted(monkeypatch)
+        monkeypatch.setattr(config, "VOLUME_SHOCK_QUALITY_GATE_ENABLED", True)
+
+        async def fake_universe(client):
+            return ["A", "B", "NEW"]
+        monkeypatch.setattr(cd, "_fetch_volume_shock_universe", fake_universe)
+        monkeypatch.setattr(cd, "_prefetch_quotes_bulk", _noop_prefetch)
+
+        async def fake_vs(client, symbol):
+            return {"reject_reason": None, "today_return_pct": 3.0, "vol_multiple": 2.0,
+                    "atr_pct": 1.5, "current_price": 100.0, "high_conviction": False,
+                    "upper_circuit": False, "delivery_pct": None, "high_delivery": None,
+                    "time_stop_hint": "EOD+1", "backtest_note": "vol_shock"}
+        monkeypatch.setattr(cd, "_volume_shock_analysis", fake_vs)
+
+        adx_by_symbol = {"A": 20.0, "B": 30.0, "NEW": None}
+
+        async def fake_qt(client, symbol):
+            return {"symbol": symbol, "fundamental_score": 80.0, "technical_score": 80.0,
+                    "sector": "IT", "market_cap_cr": 5000.0, "adx": adx_by_symbol[symbol]}
+        monkeypatch.setattr(cd, "_fetch_fund_tech_score", fake_qt)
+
+        recorded, purged = [], []
+        monkeypatch.setattr(cd.amp, "record_metric", lambda db_, name, value: recorded.append((name, value)))
+        monkeypatch.setattr(cd.amp, "purge_legacy_universe_adx", lambda db_: purged.append(True))
+
+        run(cd._refresh_volume_shock_candidates(db, "REAL", set()))
+
+        adx_rows = [r for r in recorded if r[0] == cd.amp.UNIVERSE_ADX_METRIC]
+        assert adx_rows == [(cd.amp.UNIVERSE_ADX_METRIC, 25.0)]      # mean of 20 and 30, None skipped
+        assert all(name != cd.amp.LEGACY_UNIVERSE_ADX_METRIC for name, _ in recorded)
+        assert purged == [True]
+
     def test_metric_recording_failures_and_per_symbol_scoring_exception(
         self, db, monkeypatch, caplog
     ):

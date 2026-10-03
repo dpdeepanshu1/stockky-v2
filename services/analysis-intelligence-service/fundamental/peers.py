@@ -82,6 +82,18 @@ def _f(v) -> Optional[float]:
         return None
 
 
+def _first_f(d: dict, keys, skip_zero: bool = False) -> Optional[float]:
+    """First usable number among `keys`, else None. Unlike `a or b`, a real
+    0.0 in the primary key is kept (skip_zero=True is for P/E only, where 0
+    means "not reported")."""
+    for k in keys:
+        v = _f(d.get(k))
+        if v is None or v != v or (skip_zero and v == 0):
+            continue
+        return v
+    return None
+
+
 def average_metrics(rows: List[dict]) -> Dict[str, Optional[float]]:
     keys = ["pe_ratio", "pe", "roe", "roce", "revenue_growth", "earnings_growth", "debt_to_equity", "profit_margins"]
     acc: Dict[str, list] = {k: [] for k in keys}
@@ -112,8 +124,8 @@ def peer_relative_score(symbol_metrics: dict, peer_avg: Optional[dict]) -> Dict[
     score = 50.0
     components = {}
 
-    pe = _f(symbol_metrics.get("pe_ratio") or symbol_metrics.get("pe"))
-    peer_pe = _f(peer_avg.get("pe_ratio") or peer_avg.get("pe"))
+    pe = _first_f(symbol_metrics, ("pe_ratio", "pe"), skip_zero=True)
+    peer_pe = _first_f(peer_avg, ("pe_ratio", "pe"), skip_zero=True)
     if pe is not None and peer_pe is not None and peer_pe > 0 and pe > 0:
         # relative valuation: peer/me ; >1 means cheaper than peers
         rel = peer_pe / pe
@@ -128,8 +140,8 @@ def peer_relative_score(symbol_metrics: dict, peer_avg: Optional[dict]) -> Dict[
         score += delta
         components["roe"] = round(delta, 2)
 
-    g = _f(symbol_metrics.get("revenue_growth") or symbol_metrics.get("earnings_growth"))
-    pg = _f(peer_avg.get("revenue_growth") or peer_avg.get("earnings_growth"))
+    g = _first_f(symbol_metrics, ("revenue_growth", "earnings_growth"))
+    pg = _first_f(peer_avg, ("revenue_growth", "earnings_growth"))
     if g is not None and pg is not None:
         delta = max(-10.0, min(10.0, (g - pg) * 0.3))
         score += delta

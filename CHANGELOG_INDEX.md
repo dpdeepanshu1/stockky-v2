@@ -6,6 +6,74 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-02 (group 33) — debt-to-equity scale fixed at the source. `market-data-service/main.py`
+  `_normalize_de_ratio` gained `yahoo_percent=False`; the Yahoo `info["debtToEquity"]` call site
+  now passes `True`, because Yahoo's field is ALWAYS a percent (30 = 0.3x), so non-financials are
+  divided by 100 at any magnitude (before, a Yahoo "30" stayed 30 and was scored as 30x leverage
+  and penalised). Financial-sector rule and the default (flag off) heuristic unchanged; the NSE
+  `secInfo` fallback is untouched (its scale is unknown). The `analysis-intelligence-service` pin
+  in `test_fundamental_main.py` is rewritten as an input contract (values <=50 are taken as
+  already-normalised multiples; rescaling there would double-divide). IMPACT: stocks with Yahoo
+  D/E under ~50% will now score as low leverage, the fundamental score rises for them, and
+  `decision-prediction-service` features built from stored `debt_to_equity` change scale for new
+  rows (models trained on old rows, and 24h-cached values, see the old scale until retrained /
+  expired). The one-line call site is not covered by any test (no existing test exercises
+  `_get_fundamentals_inner`); the helper has new unit tests. market-data suite 577 passed.
+- 2026-10-02 (group 32) — removed the remaining hardcoded "Aug-2026: Nifty -7% 6m, FII net-short"
+  claims that never tracked real data: `real-trade-service/candidate_engine/candidates.py`
+  (`market_note` is now `""`), `api-gateway/surprise_scanner.py` (`market_note` is now
+  "high buy_pct = strong signal" on hits and "thresholds raised for quality" on the scan summary),
+  `decision-prediction-service/decision/main.py` (regime label for market_score < 38 is now
+  "Correction (weak market regime)"). Keys/shapes unchanged; the frontend does not read
+  `market_note`. Tests updated in `test_surprise_scanner.py` and `test_candidates_analysis.py`.
+  Comments/docstrings mentioning Aug-2026 left alone. decision-prediction-service has no test
+  suite (syntax-checked only). api-gateway `run_tests.sh` exit 0 / 100%; real-trade-service
+  `pytest --cov=.` 2751 passed, 1 skipped, 100%.
+- 2026-10-02 (group 31) — api-gateway `main.py` `/ops/check-alert`: added a per-process cool-down.
+  The same problem set (same open-circuit set / error-rate condition) is notified at most once per
+  `OPS_ALERT_COOLDOWN_SEC` (default 900; 0 disables; bad value -> 900). A new problem alerts
+  immediately, recovery clears the state, and the cool-down is only recorded after a SUCCESSFUL
+  delivery (a failed send retries next call). Suppressed calls return `alerted: false,
+  suppressed: true, cooldown_remaining_sec`. State is in-memory, so a restart can repeat one alert.
+  Pin in `test_main_ops_routes.py` rewritten + 7 new tests. `bash run_tests.sh` for api-gateway:
+  exit 0, 100% coverage.
+- 2026-10-02 (group 30) — api-gateway `ipo_scanner.py`: dropped the hardcoded "Market context
+  (Aug-2026): Nifty -7% in 6m, FII net-short" sentence from every IPO `buy_suggestion.rationale`
+  (it never tracked real data and was already stale); the rationale now ends with the bars in
+  force: "Decision bars: BUY_NOW≥70, PREPARE≥58." Removed the matching stale comment in
+  `_build_ipo_suggestion`. Pin in `test_ipo_scanner.py` rewritten. NOT changed: the same stale
+  Aug-2026 market text still appears in `real-trade-service/candidate_engine/candidates.py`
+  (`market_note`), `api-gateway/surprise_scanner.py` (`market_note`, 2 places),
+  `decision-prediction-service/decision/main.py` (a label) and in docstrings. `bash run_tests.sh`
+  for api-gateway: exit 0, 100% coverage.
+- 2026-10-02 (group 29) — api-gateway `main.py` `/ops/qstash/tick`: removed the no-op "warm" list
+  (it only appended the names `/health` and `/ops/keepalive`, nothing was called) and the unused
+  `_get_http_client()` call; the response is now `{"ok": true, "source": "qstash"}` plus
+  `keepalive` / `keepalive_error` when the body asks for a wake. Nothing in the repo reads
+  `warm`. Pin in `test_main_ops_routes.py` rewritten. The alert cool-down pin is left as is (needs
+  a de-dup state/TTL design). `bash run_tests.sh` for api-gateway: exit 0, 100% coverage.
+- 2026-10-02 (group 28) — api-gateway `main.py` `/ops/qstash/tick`: a crash inside the QStash
+  signature check now fails CLOSED (503 "QStash signature verification unavailable", logged with
+  traceback, nothing runs) instead of being swallowed and running the tick unauthenticated. Missing
+  signing keys / PyJWT in `qstash_client.verify_signature` still accept by design (unchanged).
+  Pin in `test_main_ops_routes.py` rewritten; log test added. Two other NOT FIXED pins in that file
+  (alert cool-down, "warm" list) left as is, they need a product decision. `bash run_tests.sh` for
+  api-gateway: exit 0, 100% coverage.
+- 2026-10-02 (group 27) — real-trade-service, tests only, no production code changed. Fixed the 26
+  failing tests in the full suite: (1) `test_feed_remaining_coverage.py` `_run` used
+  `asyncio.get_event_loop()`, which raises on Python 3.12+ after any earlier file calls
+  `asyncio.run()`; it now uses its own loop per call (19 tests). (2) `test_afterhours_scan_orchestration.py`
+  hardcoded `pubDate="2026-09-24"` while `run_afterhours_scan` drops news older than
+  `AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS` (5) against the real clock; the default is now yesterday
+  (7 tests; these failed even when the file was run alone). `pytest --cov=.` in a clean venv:
+  2751 passed, 1 skipped, 100% coverage.
+- 2026-10-02 (group 26) — real-trade-service `auth/dhan_credentials.py`: `refresh_if_totp_enabled`
+  now also rejects a missing/empty `DHAN_PIN` before any HTTP call (was sent as `pin=""`, wasting a
+  TOTP attempt on a request Dhan can only reject). Pin in `test_dhan_credentials.py` rewritten
+  (PIN added to the missing-credential parametrize, plus an empty-PIN test; log message now names
+  all three vars). `test_dhan_credentials.py`: 157 passed. (Group 26 note corrected in group 27:
+  the 26 full-suite failures were 19 in `test_feed_remaining_coverage.py` + 7 in
+  `test_afterhours_scan_orchestration.py`, not all in the feed file; both fixed in group 27.)
 - 2026-10-02 (group 25) — analysis-intelligence-service `fundamental/peers.py`: `normalize_sector`
   is now idempotent (canonical names like "IT", "Finance", "Infra", "Capital Goods" map to
   themselves). `analyze()` feeds the normalised sector back into `peers_for()`, which returned no

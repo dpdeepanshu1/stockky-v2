@@ -185,3 +185,49 @@ class TestPeerRelativeScore:
         peer_avg = {"pe_ratio": 20.0}
         result = p.peer_relative_score(stock, peer_avg)
         assert "pe" not in result["components"]
+
+
+class TestFirstF:
+    """_first_f(): primary key first; alias only when the primary is absent/unusable."""
+
+    def test_primary_wins(self):
+        assert p._first_f({"a": 1, "b": 2}, ("a", "b")) == 1.0
+
+    def test_zero_primary_is_kept(self):
+        assert p._first_f({"a": 0, "b": 2}, ("a", "b")) == 0.0
+
+    def test_zero_primary_skipped_with_skip_zero(self):
+        assert p._first_f({"a": 0, "b": 2}, ("a", "b"), skip_zero=True) == 2.0
+
+    @pytest.mark.parametrize("bad", [None, "abc", "", float("nan")])
+    def test_unusable_primary_falls_through(self, bad):
+        assert p._first_f({"a": bad, "b": 2}, ("a", "b")) == 2.0
+
+    def test_nothing_usable_is_none(self):
+        assert p._first_f({}, ("a", "b")) is None
+        assert p._first_f({"a": 0}, ("a",), skip_zero=True) is None
+
+
+class TestPeerRelativeScoreZeroGrowthKept:
+    def test_zero_revenue_growth_not_replaced_by_earnings_growth(self):
+        # stock growth really is 0 vs peers at 10 -> growth delta -3.0, not
+        # the +6.0 that the 40% earnings_growth alias used to produce.
+        stock = {"revenue_growth": 0.0, "earnings_growth": 40.0}
+        peer_avg = {"revenue_growth": 10.0, "earnings_growth": 10.0}
+        r = p.peer_relative_score(stock, peer_avg)
+        assert r["components"]["growth"] == -3.0
+        assert r["score"] == 47.0
+
+    def test_zero_peer_average_growth_not_replaced_by_alias(self):
+        stock = {"revenue_growth": 10.0}
+        peer_avg = {"revenue_growth": 0.0, "earnings_growth": 50.0}
+        r = p.peer_relative_score(stock, peer_avg)
+        assert r["components"]["growth"] == 3.0       # (10 - 0) * 0.3
+
+    def test_earnings_growth_alias_used_when_revenue_growth_missing(self):
+        r = p.peer_relative_score({"earnings_growth": 20.0}, {"earnings_growth": 5.0})
+        assert r["components"]["growth"] == 4.5
+
+    def test_zero_primary_pe_still_falls_through_to_alias(self):
+        r = p.peer_relative_score({"pe_ratio": 0, "pe": 10.0}, {"pe_ratio": 20.0})
+        assert r["components"]["pe"] == 15.0          # rel 2 -> (2-1)*20 clamped to 15

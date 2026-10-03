@@ -889,11 +889,24 @@ class TestKvGet:
         assert kv.kv_get("stockky:watchlist") == {"x": 1}
         assert 595 <= kv._mem.ttl("stockky:watchlist") <= 600
 
-    def test_neon_hit_gets_600s_even_if_row_expires_sooner(self, kv):
-        """Pinned quirk: the memory copy outlives the Neon row's own expiry."""
+    def test_neon_hit_memory_copy_is_capped_at_the_rows_remaining_life(self, kv):
+        """Fixed: the memory copy used to get a flat 600s even when the Neon row
+        expired in 5s, so it was served from memory long after the row was gone."""
         install(kv, FakeEngine(lambda s, p: FakeResult([("1", _future(5))])))
         assert kv.kv_get("stockky:watchlist") == 1
-        assert kv._mem.ttl("stockky:watchlist") > 500
+        assert 1 <= kv._mem.ttl("stockky:watchlist") <= 5
+
+    def test_neon_hit_with_long_lived_row_still_gets_the_600s_ceiling(self, kv):
+        install(kv, FakeEngine(lambda s, p: FakeResult([("1", _future(7200))])))
+        assert kv.kv_get("stockky:watchlist") == 1
+        assert 595 <= kv._mem.ttl("stockky:watchlist") <= 600
+
+    def test_neon_hit_about_to_expire_never_becomes_an_immortal_memory_entry(self, kv):
+        """A row with <1s left must not produce ttl=0 (MemoryTTLCache treats a falsy
+        ttl as 'never expires')."""
+        install(kv, FakeEngine(lambda s, p: FakeResult([("1", _future(0.2))])))
+        assert kv.kv_get("stockky:watchlist") == 1
+        assert kv._mem.ttl("stockky:watchlist") != -1
 
     def test_durable_miss(self, kv):
         install(kv, FakeEngine())
@@ -1128,6 +1141,13 @@ class TestKvGetMany:
         assert len(eng.calls) == 1 and "= ANY(:keys)" in eng.calls[0][0]
         assert "plain:not-durable" not in eng.calls[0][1]["keys"]
         assert 595 <= kv._mem.ttl("feed:ok") <= 600
+
+    def test_get_many_memory_copy_is_capped_at_the_rows_remaining_life(self, kv):
+        rows = [("feed:soon", "1", _future(7)), ("feed:later", "2", _future(7200))]
+        install(kv, FakeEngine(lambda s, p: FakeResult(rows)))
+        assert kv.kv_get_many(["feed:soon", "feed:later"]) == {"feed:soon": 1, "feed:later": 2}
+        assert 1 <= kv._mem.ttl("feed:soon") <= 7
+        assert 595 <= kv._mem.ttl("feed:later") <= 600
 
     def test_only_non_durable_missing_skips_query(self, kv):
         eng = install(kv, FakeEngine())
@@ -1514,11 +1534,16 @@ class TestSettingsGet:
         install(kv, FakeEngine(lambda s, p: FakeResult([({"already": "dict"},)])))
         assert kv.settings_get("stockky_watchlist") == {"already": "dict"}
 
-    def test_numeric_looking_string_comes_back_as_number(self, kv):
-        """Pinned quirk: settings_set stores str values verbatim, but settings_get
-        json-decodes them, so a stored "123" is read back from the DB as 123."""
+    def test_legacy_verbatim_numeric_row_still_decodes_as_number(self, kv):
+        """Rows written BEFORE settings_set started JSON-encoding strings were stored
+        verbatim; a legacy "123" still reads back as 123 until it is next rewritten.
+        New writes round-trip exactly (see TestSettingsSet)."""
         install(kv, FakeEngine(lambda s, p: FakeResult([("123",)])))
         assert kv.settings_get("stockky_watchlist") == 123
+
+    def test_legacy_verbatim_plain_string_row_is_returned_as_is(self, kv):
+        install(kv, FakeEngine(lambda s, p: FakeResult([("hello",)])))
+        assert kv.settings_get("stockky_watchlist") == "hello"
 
     def test_db_error_returns_none(self, kv, monkeypatch):
         spy = LogSpy()
@@ -1549,11 +1574,22 @@ class TestSettingsSet:
         assert "INSERT INTO stockky_notification" in sql and "ON CONFLICT (k) DO UPDATE" in sql
         assert params == {"k": "config", "v": json.dumps({"tg": "x"})}
 
-    def test_string_value_stored_verbatim(self, kv):
+    def test_string_value_is_json_encoded_so_it_round_trips(self, kv):
         eng = install(kv, FakeEngine())
         kv.settings_set("stockky_watchlist", "default", "hello")
-        assert eng.calls[1][1]["v"] == "hello"
+        assert eng.calls[1][1]["v"] == json.dumps("hello")
         assert kv._SETTINGS_MEM["stockky_watchlist:default"] == "hello"
+
+    @pytest.mark.parametrize("value", ["123", "true", "null", "1.5", '{"a": 1}', "[1]", "hello", ""])
+    def test_string_survives_a_db_round_trip_as_a_string(self, kv, value):
+        """Fixed: settings_get json-decodes, so a verbatim "123" used to come back as 123
+        (and "null" as None) after a restart, while memory still returned the str."""
+        eng = install(kv, FakeEngine())
+        kv.settings_set("stockky_watchlist", "default", value)
+        stored = eng.calls[1][1]["v"]
+        kv._SETTINGS_MEM.clear()                                   # simulate a restart
+        install(kv, FakeEngine(lambda s, p: FakeResult([(stored,)])))
+        assert kv.settings_get("stockky_watchlist") == value
 
     def test_non_dict_non_str_value_kept_as_is_in_memory(self, kv):
         install(kv, FakeEngine())
@@ -1866,3 +1902,20 @@ class TestGetStaleWrapper:
     def test_end_to_end_through_module_api(self, kv):
         install(kv, FakeEngine(lambda s, p: FakeResult([('[1, 2]',)])))
         assert kv.get_stale("k") == [1, 2]
+
+
+# ── _capped_mem_ttl ───────────────────────────────────────────────────────────
+
+class TestCappedMemTtl:
+    @pytest.mark.parametrize("remaining, expected", [
+        (None, 600), (5, 5), (4.2, 5), (0.2, 1), (0, 1), (-3, 1), (599.5, 600), (7200, 600),
+    ])
+    def test_values(self, kv, remaining, expected):
+        assert kv._capped_mem_ttl(remaining) == expected
+
+    @pytest.mark.parametrize("bad", ["soon", object(), float("nan"), float("inf")])
+    def test_unusable_remaining_falls_back_to_default(self, kv, bad):
+        assert kv._capped_mem_ttl(bad) == 600
+
+    def test_custom_default(self, kv):
+        assert kv._capped_mem_ttl(None, 120) == 120 and kv._capped_mem_ttl(500, 120) == 120

@@ -164,10 +164,35 @@ def build_oracle_engine(url: str = "", **pool_overrides):
 # 25s Tier-1 HTTP timeout real-trade-service uses, so a stalled DB round trip
 # fails fast enough that the caller gets a clean fallback response instead of
 # tripping its own client-side timeout.
+_DEFAULT_CALL_TIMEOUT_MS = 8000
+
+
+def _call_timeout_ms() -> int:
+    """Parse ORACLE_CALL_TIMEOUT_MS. A mistyped value (e.g. "8s") or a negative
+    one used to abort the whole setup and silently leave every Oracle round trip
+    UNBOUNDED -- the very hang this setting exists to prevent. It now logs a
+    warning and keeps the protective default instead. An explicit 0 is still
+    honoured (oracledb treats 0 as "no timeout")."""
+    raw = os.environ.get("ORACLE_CALL_TIMEOUT_MS")
+    if raw is None or not str(raw).strip():
+        return _DEFAULT_CALL_TIMEOUT_MS
+    try:
+        value = int(str(raw).strip())
+        if value < 0:
+            raise ValueError("must not be negative")
+    except ValueError as e:
+        _log.warning(
+            "invalid ORACLE_CALL_TIMEOUT_MS=%r (%s); using default %d ms",
+            raw, e, _DEFAULT_CALL_TIMEOUT_MS,
+        )
+        return _DEFAULT_CALL_TIMEOUT_MS
+    return value
+
+
 def _attach_call_timeout(eng) -> None:
     try:
         from sqlalchemy import event
-        timeout_ms = int(os.environ.get("ORACLE_CALL_TIMEOUT_MS", "8000"))
+        timeout_ms = _call_timeout_ms()
 
         @event.listens_for(eng, "connect")
         def _set_call_timeout(dbapi_connection, connection_record):  # noqa: ANN001

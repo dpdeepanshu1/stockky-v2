@@ -103,7 +103,14 @@ except AttributeError:
     pass
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
-def _normalize_de_ratio(val, sector=None):
+def _normalize_de_ratio(val, sector=None, yahoo_percent=False):
+    """Normalise a debt/equity value to a multiple (0.95 = 0.95x).
+
+    ``yahoo_percent=True`` is for Yahoo's ``info["debtToEquity"]``, which is ALWAYS a percent
+    (95.4 = 0.954x, 30 = 0.3x), so non-financials are divided by 100 at any magnitude. Without
+    it the value's scale is unknown and the legacy ">50 means percent" heuristic applies, which
+    mis-scales a low-leverage Yahoo value of 50 or below (30 was scored as 30x).
+    """
     if val is None:
         return None
     try:
@@ -114,7 +121,7 @@ def _normalize_de_ratio(val, sector=None):
         return None
     sec = (str(sector or "")).lower()
     is_fin = any(x in sec for x in ("bank", "financial", "insurance"))
-    if v > 50 and not is_fin:
+    if not is_fin and (yahoo_percent or v > 50):
         v = v / 100.0
     elif v > 200 and is_fin:
         v = v / 100.0
@@ -2951,7 +2958,7 @@ def _get_fundamentals_inner(symbol: str, force: bool = False):
 
         debt_to_equity = None
         if "debtToEquity" in info:
-            debt_to_equity = _normalize_de_ratio(_safe_info("debtToEquity"), info.get("sector"))
+            debt_to_equity = _normalize_de_ratio(_safe_info("debtToEquity"), info.get("sector"), yahoo_percent=True)
         elif balance_available and "Total Debt" in balance.index and "Total Equity Gross Minority Interest" in balance.index:
             total_debt = balance.loc["Total Debt"].iloc[0]
             equity = balance.loc["Total Equity Gross Minority Interest"].iloc[0]

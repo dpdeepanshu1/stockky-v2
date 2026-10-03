@@ -707,7 +707,7 @@ class SurpriseStockEngine:
             "sector":       static.get("sector"),
             "dist_52w_pct": round(dist, 2),
             # Market context stamp for dashboard audit trail
-            "market_note":  "Aug-2026: Nifty -7% 6m, FII net-short, high buy_pct = strong signal",
+            "market_note":  "high buy_pct = strong signal",
         }
         hit["cmp"]           = px
         hit["ltp"]           = px
@@ -929,7 +929,7 @@ class SurpriseStockEngine:
             "min_score":       MIN_SCORE,
             "min_change_pct":  MIN_CHANGE_PCT,
             "building_min_score": BUILDING_MIN_SCORE,
-            "market_note":     "Aug-2026: Nifty -7% 6m, FII net-short — thresholds raised for quality",
+            "market_note":     "thresholds raised for quality",
         }
         # Only cache full-universe scans (symbols=None) — a filtered
         # request isn't representative of "the last scored result" that

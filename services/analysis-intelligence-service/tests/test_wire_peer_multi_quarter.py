@@ -219,9 +219,27 @@ class TestConsistencyFromPayload:
     def test_numeric_string_is_accepted(self, w):
         assert run(w, {"multi_quarter_score": "72.5"}, url="")["consistency_score"] == 72.5
 
-    def test_a_real_zero_score_is_replaced_by_fifty(self, w):
-        # Pinned quirk: `x or y or 50.0` treats a genuine 0 as "missing".
-        assert run(w, {"multi_quarter_score": 0}, url="")["consistency_score"] == 50.0
+    def test_a_real_zero_score_is_kept(self, w):
+        """Fixed: `x or y or 50.0` used to treat a genuine 0 (the worst score) as
+        missing and replace it with the neutral 50."""
+        assert run(w, {"multi_quarter_score": 0}, url="")["consistency_score"] == 0.0
+
+    def test_a_real_zero_beats_a_nonzero_detail_score(self, w):
+        out = run(w, {"multi_quarter_score": 0, "multi_quarter_detail": {"score": 64}}, url="")
+        assert out["consistency_score"] == 0.0
+
+    def test_a_real_zero_detail_score_is_kept(self, w):
+        assert run(w, {"multi_quarter_detail": {"score": 0}}, url="")["consistency_score"] == 0.0
+
+    @pytest.mark.parametrize("missing", [None, "", float("nan")])
+    def test_missing_top_level_values_fall_through_to_the_detail_score(self, w, missing):
+        out = run(w, {"multi_quarter_score": missing, "multi_quarter_detail": {"score": 64}}, url="")
+        assert out["consistency_score"] == 64.0
+
+    @pytest.mark.parametrize("missing", [None, "", float("nan")])
+    def test_missing_everywhere_is_still_neutral_fifty(self, w, missing):
+        out = run(w, {"multi_quarter_score": missing, "multi_quarter_detail": {"score": missing}}, url="")
+        assert out["consistency_score"] == 50.0
 
     @pytest.mark.parametrize("payload,expected", [
         ({"multi_quarter_ok": True}, True),
@@ -451,13 +469,18 @@ class TestScoreBlend:
         assert "fundamental_score" not in out
         assert "fundamental_score_adjusted" not in out
 
-    def test_zero_consistency_counts_as_fifty_in_the_blend(self, w):
-        # Pinned quirk: the payload keeps consistency_score == 0.0, but the blend does
-        # `float(x or 50.0)` so a genuine 0 contributes 50.
+    def test_zero_consistency_counts_as_zero_in_the_blend(self, w):
+        """Fixed: the blend used `float(x or 50.0)`, so the payload kept
+        consistency_score == 0.0 while the blend quietly used 50."""
         w.rec["enrich_result"] = {"consistency_score": 0.0}
         out = run(w, {"fundamental_score": 100})
         assert out["consistency_score"] == 0.0
-        assert out["fundamental_score"] == 85.0          # .7*100 + .2*50 + .1*50, not 80.0
+        assert out["fundamental_score"] == 80.0          # .7*100 + .2*50 + .1*0
+
+    def test_missing_consistency_in_the_blend_is_still_neutral(self, w):
+        out = run(w, {"fundamental_score": 100}, url="")
+        assert out["consistency_score"] == 50.0
+        assert out["fundamental_score"] == 85.0          # .7*100 + .2*50 + .1*50
 
     def test_applying_twice_compounds_and_overwrites_the_raw_score(self, w):
         # Pinned: the wiring is not idempotent. main.py calls it once per analyze().

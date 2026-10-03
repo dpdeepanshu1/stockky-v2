@@ -530,14 +530,37 @@ class TestAttachCallTimeout:
         with eng.connect() as conn:
             assert conn.execute(text("SELECT 1")).scalar() == 1
 
-    def test_invalid_timeout_env_is_swallowed_and_registers_nothing(self, m, monkeypatch, caplog):
-        monkeypatch.setenv("ORACLE_CALL_TIMEOUT_MS", "not-a-number")
+    @pytest.mark.parametrize("raw", ["not-a-number", "8s", "-5"])
+    def test_invalid_timeout_env_falls_back_to_default_with_warning(self, m, monkeypatch, caplog, raw):
+        """Fixed: an invalid value used to register no listener at all, leaving every
+        Oracle round trip unbounded. It now keeps the 8000 ms default and warns."""
+        monkeypatch.setenv("ORACLE_CALL_TIMEOUT_MS", raw)
         eng = _sqlite()
         before = len(eng.pool.dispatch.connect)
         with caplog.at_level(logging.WARNING, logger="oracle-compat"):
-            m._attach_call_timeout(eng)  # must not raise
-        assert len(eng.pool.dispatch.connect) == before
-        assert "_attach_call_timeout setup failed" in caplog.text
+            m._attach_call_timeout(eng)
+        assert len(eng.pool.dispatch.connect) == before + 1
+        conn = MagicMock()
+        self._fire_connect(eng, conn)
+        assert conn.call_timeout == 8000
+        assert "invalid ORACLE_CALL_TIMEOUT_MS" in caplog.text
+
+    def test_blank_timeout_env_uses_default_silently(self, m, monkeypatch, caplog):
+        monkeypatch.setenv("ORACLE_CALL_TIMEOUT_MS", "  ")
+        eng = _sqlite()
+        with caplog.at_level(logging.WARNING, logger="oracle-compat"):
+            m._attach_call_timeout(eng)
+        conn = MagicMock()
+        self._fire_connect(eng, conn)
+        assert conn.call_timeout == 8000 and "invalid ORACLE_CALL_TIMEOUT_MS" not in caplog.text
+
+    def test_explicit_zero_is_still_honoured(self, m, monkeypatch):
+        monkeypatch.setenv("ORACLE_CALL_TIMEOUT_MS", "0")
+        eng = _sqlite()
+        m._attach_call_timeout(eng)
+        conn = MagicMock()
+        self._fire_connect(eng, conn)
+        assert conn.call_timeout == 0
 
     def test_non_engine_target_is_swallowed(self, m, caplog):
         with caplog.at_level(logging.WARNING, logger="oracle-compat"):

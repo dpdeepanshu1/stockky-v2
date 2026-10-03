@@ -6,6 +6,16 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-03 (group 34) — api-gateway `requirements.txt`: added `pyjwt==2.8.0` (same pin as
+  real-trade-service / position-stocks-service). It was only in `requirements-test.txt`, so the
+  Docker image had no PyJWT and `qstash_client.verify_signature` hit its ImportError path and
+  accepted every `/ops/qstash/tick` callback unverified (warning log only). New drift guard
+  `tests/test_requirements_pins.py` (3 tests: PyJWT in production requirements, exact pin, matches
+  the other services). `requirements-test.txt` comment updated. The fail-open-on-ImportError
+  behaviour in `qstash_client.py` is unchanged. NEEDS REBUILD: `docker compose build api-gateway`
+  then restart; confirm with `docker compose exec api-gateway python -c "import jwt;print(jwt.__version__)"`.
+  Tests: test_requirements_pins + test_qstash_client 31 passed (sandbox, httpx/pytest only; full
+  `bash run_tests.sh` not run here, re-run on the VM).
 - 2026-10-02 (group 33) — debt-to-equity scale fixed at the source. `market-data-service/main.py`
   `_normalize_de_ratio` gained `yahoo_percent=False`; the Yahoo `info["debtToEquity"]` call site
   now passes `True`, because Yahoo's field is ALWAYS a percent (30 = 0.3x), so non-financials are

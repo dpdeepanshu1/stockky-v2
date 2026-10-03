@@ -1,7 +1,8 @@
 # Test-only dependencies for services/api-gateway (NOT installed in the Docker image).
 #   pip install -r requirements.txt -r requirements-test.txt
-# PyJWT is needed by tests/test_qstash_client.py (qstash_client.py imports it lazily and
-# fail-opens with a warning when it is missing — see that file's tests).
+# PyJWT is now a production dependency (requirements.txt, pinned); the line below only
+# lets the tests run with a newer version if you prefer. qstash_client.py imports it lazily and
+# fail-opens with a warning when it is missing — see tests/test_qstash_client.py.
 pytest>=8
 pytest-cov>=5
 PyJWT>=2.8

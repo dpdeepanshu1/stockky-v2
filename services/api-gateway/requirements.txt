@@ -11,3 +11,6 @@ numpy==1.26.4
 # Oracle Autonomous DB driver (thin mode) — used only when ORACLE_* env is set (Oracle Cloud VM).
 # Harmless on Render/Neon: pure-Python, imported lazily, never loaded on the Postgres path.
 oracledb==2.5.1
+# QStash signature verification (qstash_client.verify_signature imports it lazily; if it is
+# missing every /ops/qstash/tick callback is accepted UNVERIFIED). Same pin as real-trade-service.
+pyjwt==2.8.0

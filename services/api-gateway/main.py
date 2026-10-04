@@ -337,14 +337,14 @@ if _USE_REDIS:
             _redis.ping()
             logger.info("Connected to Upstash Redis (USE_REDIS=1)")
         except Exception as e:
-            logger.warning("Redis unavailable (falling back to memory+Neon): %s", e)
+            logger.warning("Redis unavailable (falling back to memory + durable DB): %s", e)
             _redis = None
     else:
-        logger.info("USE_REDIS=1 but UPSTASH credentials missing — memory+Neon only")
+        logger.info("USE_REDIS=1 but UPSTASH credentials missing — memory + durable DB only")
 else:
     logger.info(
         "Gateway Redis disabled (USE_REDIS=0 / DISABLE_REDIS) — "
-        "in-memory + Neon durable cache only; no Upstash handshake"
+        "in-memory + durable-DB cache only; no Upstash handshake"
     )
 
 # In-memory fallback so scan status / universe work without Redis
@@ -923,6 +923,16 @@ _DERIVATIVE_CONTRACT_RE = re.compile(
     r"(FUT|\d+(\.\d+)?(CE|PE))$"
 )
 
+# 2026-10-04 (startup-log audit): ETFs / index funds trade in the NSE cash segment as plain "EQ"
+# series, so AngelOne's whole-market scrip master (the source of /angelone/movers) includes them,
+# and illiquid ones with a stale previous close show up as >=5% "movers" (COMMOIETF, NV20IETF,
+# NIFTY1 were then quoted + news-analysed by every stockky-hot run). They are not single-stock
+# picks. Conservative suffix/prefix patterns only: *ETF, *BEES (NIFTYBEES, GOLDBEES, ...), SBI's
+# SETF* series, and NIFTY/BANKNIFTY index-style tickers. Applied ONLY in the universe builders
+# (_clean_equity_symbol); symbol_aliases.is_non_equity_instrument is intentionally untouched so a
+# user can still run /stock/<ETF> by hand.
+_ETF_INDEX_FUND_SYMBOL_RE = re.compile(r"(?:ETF|BEES)$|^SETF[A-Z0-9]|^(?:NIFTY|BANKNIFTY)\d*$")
+
 
 def _clean_equity_symbol(sym) -> Optional[str]:
     """Return a tradable NSE equity symbol, or None if it's an index
@@ -946,6 +956,8 @@ def _clean_equity_symbol(sym) -> Optional[str]:
     if s in _INDEX_PSEUDO_TOKENS:
         return None
     if _DERIVATIVE_CONTRACT_RE.search(s):
+        return None
+    if _ETF_INDEX_FUND_SYMBOL_RE.search(s):
         return None
     if s in _DELISTED_RENAME:
         return _DELISTED_RENAME[s]  # may be a renamed ticker or None (drop)
@@ -1482,6 +1494,30 @@ def _get_momentum_movers() -> List[str]:
         logger.debug("momentum movers cache set failed (non-fatal): %s", e)
     return out
 
+# Tickers that are also ordinary English words / exchange names. The news scan
+# upper-cases the whole feed text, so e.g. "consumer demand", "chemical sector",
+# "oil prices", "clean energy" or "BSE Sensex" matched the tickers CONSUMER /
+# CHEMICAL / OIL / CLEAN / BSE and pushed them into the hot-picks universe (seen
+# in the 2026-10-04 startup log: /news/analyze/CONSUMER, CHEMICAL, CONS, CLEAN,
+# AFFORDABLE, APOLLO, OIL). For these the mention only counts when the ORIGINAL
+# text spells the ticker in ALL CAPS (how a ticker is written in a headline), not
+# when it is a lower/Title-case dictionary word.
+_NEWS_AMBIGUOUS_WORD_SYMBOLS = frozenset({
+    "CONSUMER", "CHEMICAL", "CHEMICALS", "CLEAN", "CONS", "AFFORDABLE",
+    "APOLLO", "OIL", "FACT", "GATEWAY", "ELEVATE", "ENDURANCE", "CELEBRITY",
+})
+# Never taken from news text at all: "BSE"/"NSE" in these feeds almost always
+# means the exchange (the queries themselves contain them), not the listed stock.
+_NEWS_EXCLUDED_SYMBOLS = frozenset({"BSE", "NSE"})
+# ETF / index-instrument tickers (COMMOIETF, NV20IETF, NIFTY1, ...) are not
+# single-stock news targets.
+_NEWS_ETF_INDEX_SYMBOL_RE = _ETF_INDEX_FUND_SYMBOL_RE
+
+
+def _news_symbol_is_ambiguous(sym: str) -> bool:
+    return sym in _NEWS_AMBIGUOUS_WORD_SYMBOLS
+
+
 def _get_news_mentioned_symbols() -> List[str]:
     """Symbols appearing in fresh market news (results, bulk deals, upgrades)."""
     mentioned: list[str] = []
@@ -1504,7 +1540,8 @@ def _get_news_mentioned_symbols() -> List[str]:
                     text_parts.append(getattr(e, "summary", "") or "")
             except Exception:
                 continue
-        text = " ".join(text_parts).upper()
+        raw_text = " ".join(text_parts)
+        text = raw_text.upper()
         # Prefer longer tickers first to avoid short false positives (e.g. ITC inside words is ok as whole token)
         # Cover the full scan universe (was a hardcoded 400, stale since
         # SCAN_UNIVERSE_TARGET went 300 -> 500) or a news mention of a symbol in
@@ -1516,10 +1553,13 @@ def _get_news_mentioned_symbols() -> List[str]:
         for sym in candidates:
             if len(sym) < 2:
                 continue
+            if sym in _NEWS_EXCLUDED_SYMBOLS or _NEWS_ETF_INDEX_SYMBOL_RE.search(sym):
+                continue
             # Whole-token match for every symbol length: "IDEA" must not match "IDEAS" and
             # "TITAN" must not match "TITANIUM", while punctuation next to a ticker
             # ("TCS," / "(ITC)") still counts as a boundary.
-            if re.search(r"(?<![A-Z0-9&])" + re.escape(sym) + r"(?![A-Z0-9&])", text):
+            haystack = raw_text if _news_symbol_is_ambiguous(sym) else text
+            if re.search(r"(?<![A-Za-z0-9&])" + re.escape(sym) + r"(?![A-Za-z0-9&])", haystack):
                 mentioned.append(sym)
     except Exception as e:
         logger.warning("Could not parse news for symbols: %s", e)
@@ -1890,7 +1930,7 @@ def _build_scan_universe() -> List[str]:
                 if len(stale) >= 50:  # sanity: must be a real universe, not a stub
                     logger.info(
                         "scan_universe: live cache cold — serving %d-symbol stale copy "
-                        "from Neon (background rebuild will follow)",
+                        "from the durable DB (background rebuild will follow)",
                         len(stale),
                     )
                     # Write it back into the live cache with a short TTL so the
@@ -3729,7 +3769,7 @@ async def _run_scan_parallel_impl(task_id: str, universe: List[str], lite: bool 
         payload.update({k: v for k, v in extra.items() if v is not None})
         _redis_set(SCAN_TASK_PREFIX + task_id, payload, ttl=3600)
 
-    _status(0, message="Starting — Neon data-feed preferred; upstream only for live fields")
+    _status(0, message="Starting — DB data-feed preferred; upstream only for live fields")
     logger.info("Scan %s started universe=%s lite=%s", task_id, total, lite)
 
     sem = asyncio.Semaphore(MAX_PARALLEL_WORKERS)
@@ -3740,7 +3780,7 @@ async def _run_scan_parallel_impl(task_id: str, universe: List[str], lite: bool 
     feed_hit = 0
     prefetched_feeds: dict = {}
     try:
-        _status(0, message="Bulk-loading Neon data-feed (single query)…")
+        _status(0, message="Bulk-loading DB data-feed (single query)…")
         from data_feed import get_all_stock_feeds
         bases = [s.upper().replace(".NS", "").replace(".BO", "").strip() for s in universe]
         prefetched_feeds = get_all_stock_feeds(bases) or {}
@@ -3756,7 +3796,7 @@ async def _run_scan_parallel_impl(task_id: str, universe: List[str], lite: bool 
             "Scan Data Feed bulk coverage: %s/%s symbols (%.0f%%) in 1 query",
             feed_hit, total, (100.0 * feed_hit / total) if total else 0,
         )
-        _status(0, message=f"Neon bulk feed {feed_hit}/{total} — starting batches")
+        _status(0, message=f"DB bulk feed {feed_hit}/{total} — starting batches")
     except Exception as e:
         logger.debug("feed bulk coverage: %s", e)
         prefetched_feeds = {}
@@ -3772,10 +3812,10 @@ async def _run_scan_parallel_impl(task_id: str, universe: List[str], lite: bool 
             logger.info("Pre-scan wake: %s", {k: v.get("ok") for k, v in wake_results.items()})
             await asyncio.sleep(min(float(WAKE_WAIT_SECONDS or 4), 6.0))
         except Exception as e:
-            logger.warning("Pre-scan wake failed/timeout (continuing Neon-first): %s", e)
+            logger.warning("Pre-scan wake failed/timeout (continuing DB-first): %s", e)
     else:
         logger.info(
-            "Skipping long pre-scan wake (Neon feed coverage %.0f%%) — proceed to batches",
+            "Skipping long pre-scan wake (DB feed coverage %.0f%%) — proceed to batches",
             feed_ratio * 100,
         )
 
@@ -3837,10 +3877,10 @@ async def _run_scan_parallel_impl(task_id: str, universe: List[str], lite: bool 
         _SCAN_IN_PROGRESS = False
         return
     logger.info(
-        "Scan full universe=%s batch_size=%s workers=%s (Neon data-feed preferred)",
+        "Scan full universe=%s batch_size=%s workers=%s (DB data-feed preferred)",
         total, batch_size, MAX_PARALLEL_WORKERS,
     )
-    _status(0, message=f"Processing {total} symbols — Neon feed first, upstream for live fields only")
+    _status(0, message=f"Processing {total} symbols — DB feed first, upstream for live fields only")
 
     async def _worker(sym: str):
         base = (sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
@@ -4217,6 +4257,11 @@ def _movers_fallback_when_yahoo_empty() -> List[dict]:
     return []
 
 
+# Group 122: once-per-window throttle state for the "no last-known movers" line.
+_MOVERS_EMPTY_LOG_WINDOW_SEC = 600.0
+_MOVERS_EMPTY_LOG_AT: Dict[str, float] = {}
+
+
 def _get_nifty50_data() -> List[dict]:
     today = datetime.now().strftime("%Y-%m-%d")
     cache_key = f"{MARKET_MOVERS_CACHE_PREFIX}{today}"
@@ -4255,10 +4300,18 @@ def _get_nifty50_data() -> List[dict]:
                 phase,
             )
             return _mark_movers_stale(last_known)
-        logger.info(
-            "Market session phase=%s and no last-known movers cached yet — "
-            "returning empty rather than a guaranteed-empty fetch", phase,
-        )
+        # Group 122: the three Movers routes and the momentum-movers collector each
+        # hit this branch in the same pass, so the line printed 4x per pass (and on
+        # every poll). Log it at INFO once per window per phase; repeats go to DEBUG.
+        _msg = ("Market session phase=%s and no last-known movers cached yet — "
+                "returning empty rather than a guaranteed-empty fetch")
+        _now_mono = time.monotonic()
+        _last = _MOVERS_EMPTY_LOG_AT.get(phase)
+        if _last is None or _now_mono - _last >= _MOVERS_EMPTY_LOG_WINDOW_SEC:
+            _MOVERS_EMPTY_LOG_AT[phase] = _now_mono
+            logger.info(_msg, phase)
+        else:
+            logger.debug(_msg, phase)
         return []
 
     # Fix (30 Aug 2026): test_20260830_134442.log — market/top-gainers and
@@ -5778,7 +5831,7 @@ async def run_scan(force_refresh: bool = False, lite: bool = False):
     Previously: sequential httpx loop over the full universe hitting decide/{symbol}
     live with no Neon prefetch (slow + rate-limit heavy).
 
-    Now: thin wrapper around the same parallel Neon-prefetch pipeline used by
+    Now: thin wrapper around the same parallel DB-prefetch pipeline used by
     POST /scan/start and GET /api/scan/stream. Starts run_scan_parallel, waits for
     completion, returns the final result payload (or task status if still running
     past the wait budget).
@@ -5843,7 +5896,7 @@ async def run_scan(force_refresh: bool = False, lite: bool = False):
         "task_id": task_id,
         "status": data.get("status"),
         "parallel": True,
-        "deprecated_note": "GET /scan now uses parallel Neon-prefetch pipeline (same as /scan/start)",
+        "deprecated_note": "GET /scan now uses parallel DB-prefetch pipeline (same as /scan/start)",
     }
 
 
@@ -5984,7 +6037,7 @@ def start_scan(
                 else:
                     logger.info(
                         "Last scan was partial (%s/%s) — continuing full universe "
-                        "(batch_result/Neon cache hits for already scored symbols)",
+                        "(batch_result/DB cache hits for already scored symbols)",
                         processed, total,
                     )
 
@@ -6013,7 +6066,7 @@ def start_scan(
             "from_cache": False,
             "lite": use_lite,
             "universe_size": len(universe),
-            "message": f"Scanning {len(universe)} symbols (dynamic universe; Neon/batch cache for hits, upstream for rest)",
+            "message": f"Scanning {len(universe)} symbols (dynamic universe; DB/batch cache for hits, upstream for rest)",
         }
     except Exception as e:
         logger.error(f"Scan start failed: {e}")
@@ -10257,13 +10310,41 @@ async def startup_event():
 # above, but as a genuine background task (create_task, not awaited)
 # since a full surprise-universe scan can legitimately take longer than
 # the 8s budget used for indices, and must never delay app readiness.
+# group120 (startup quote burst): the warm above used to run a FULL quote sweep (one /quote call per
+# liquid static symbol, ~1,000 of them) the instant the process started, every time, while
+# market-data-service was itself still booting and the momentum/universe warms were running beside
+# it. Three changes, all in this hook:
+#   1. wait SURPRISE_BOOT_WARM_DELAY_SEC (default 20, 0 = old behaviour) so the other warms and
+#      market-data-service settle first;
+#   2. outside market hours (closed / holiday) restore the last durable result and skip the sweep:
+#      the cached=true fast path only honours a result younger than SURPRISE_CACHE_MAX_AGE_SEC
+#      (220s), so a night-time warm could never serve the next morning's first cycle anyway;
+#   3. otherwise call scan(cached=True) so a restart seconds after a good scan reuses the durable
+#      copy instead of sweeping again (restarts in quick succession were already observed).
+def _surprise_boot_warm_delay_sec() -> float:
+    try:
+        return max(0.0, float(((os.getenv("SURPRISE_BOOT_WARM_DELAY_SEC") or "").strip() or "20")))
+    except ValueError:
+        return 20.0
+
+
 @app.on_event("startup")
 async def _warm_surprise_scan_cache():
     async def _warm():
         try:
+            delay = _surprise_boot_warm_delay_sec()
+            if delay > 0:
+                await asyncio.sleep(delay)
             from surprise_scanner import surprise_engine
+            if _market_session_phase_ist() in ("closed", "holiday"):
+                loader = getattr(surprise_engine, "_load_last_result_from_durable_cache", None)
+                if callable(loader):
+                    await asyncio.to_thread(loader)
+                if getattr(surprise_engine, "_last_result", None) is not None:
+                    logger.info("Startup: market closed — restored the last surprise/scan result, skipped the boot quote sweep")
+                    return
             client = _get_http_client()
-            await surprise_engine.scan(client=client, market_data_url=MARKET_DATA_URL)
+            await surprise_engine.scan(client=client, market_data_url=MARKET_DATA_URL, cached=True)
             logger.info("Startup: surprise/scan cache pre-warmed (first pipeline cycle will hit cached=true)")
         except Exception as e:
             logger.warning("Startup warning (surprise-scan warm, non-fatal): %s", e)
@@ -10728,7 +10809,7 @@ async def hard_reset_database(preserve_days: int = 7):
             store.set_meta(
                 last_success_at=None,
                 last_count=0,
-                last_message="Hard-reset — memory + Neon wiped",
+                last_message="Hard-reset — memory + DB wiped",
                 stock_count=0,
             )
         except Exception as e:

@@ -6,6 +6,35 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-04 (group 126)  Guard test: the built-in 250-symbol boot universe has no known-delisted symbol (market-data-service).
+  Checked the real list (no AAKASH/ANNAPURNA/TATAMTRDVR, no duplicates or blanks) and pinned it with 2 tests. No production change. The "248/250" unresolved symbols are other names; group124's warning will list them.
+  Details: `docs/GROUP126_FALLBACK_UNIVERSE_GUARD.md`.
+- 2026-10-04 (group 125)  Feed universe drops known-delisted symbols (market-data-service).
+  `_refresh_feed_universe_loop` now passes api-gateway's `/scan/universe` through `_clean_feed_universe`, which skips names in `KNOWN_DELISTED_SYMBOLS` (AAKASH, ANNAPURNA, TATAMTRDVR) so neither WS feed subscribes to them; logged once per change.
+  5 new tests (helper run standalone here, not under pytest). Details: `docs/GROUP125_FEED_UNIVERSE_DROPS_DELISTED.md`.
+- 2026-10-04 (group 124)  AngelOne feed "resolved 248/250 requested symbols" warning now lists the unresolved names (market-data-service).
+  `angelone_ws_feed.py` appends `; unresolved: A, B (+N more)` (max 20, normalised like the scrip master). Reporting only; ticks and the Yahoo fallback are unchanged.
+  5 new tests (run standalone here, not under pytest). Details: `docs/GROUP124_ANGELONE_FEED_UNRESOLVED_NAMES.md`.
+- 2026-10-04 (group 123)  yfinance "Failed to create TzCache folder ... File exists" x3 at boot (market-data-service).
+  Already fixed in `main.py` (dir pre-created with `exist_ok=True` before `set_tz_cache_location`); the pasted log predates it and the fix had no entry or test. Added 2 source-level guard tests and this note; no production change. Rebuild to see the effect.
+  Details: `docs/GROUP123_TZ_CACHE_DIR_PINNED.md`.
+- 2026-10-04 (group 122)  Log-audit item: "no last-known movers cached yet" printed 4x per pass (api-gateway).
+  The three Movers routes and the momentum collector all hit the same empty branch of `_get_nifty50_data()`. The line is now INFO once per phase per 600 s, DEBUG after; return values unchanged.
+  The gateway's "No supported WebSocket library" warning was not changed (requirements already have `uvicorn[standard]`; likely a stale image, check command in the doc).
+  1 new test (unrun here: no pytest/fastapi; branch run against stubs). Details: `docs/GROUP122_MOVERS_EMPTY_LOG_THROTTLE.md`.
+- 2026-10-04 (group 121)  Log-audit item: after-hours "10 symbol(s) scored -> 1 rows upserted" (real-trade-service).
+  Not lost symbols: after a restart the earlier pass's rows are already stored, so only the 1 new symbol was written. The summary line now says
+  `N scored -> W new/updated, U already stored at an equal or higher score (unchanged), F failed`, and the Telegram header adds `· U already stored`.
+  No write/scoring/notification-rule change. 3 new tests (unrun here: no pytest/sqlalchemy; function run against stubs). Details: `docs/GROUP121_AFTERHOURS_ALREADY_STORED_LOG.md`.
+- 2026-10-04 (group 120)  Log-audit item: startup quote burst (api-gateway).
+  The boot pre-warm ran a full ~1,000-symbol surprise quote sweep immediately on every start. It now waits `SURPRISE_BOOT_WARM_DELAY_SEC` (default 20, 0 = old), skips the sweep when the market is closed and a saved result exists, and otherwise reuses a fresh saved result (`cached=True`).
+  Details: `docs/GROUP120_STARTUP_QUOTE_BURST.md`.
+- 2026-10-04 (group 119)  Log-audit item: "Neon" wording in logs and status text on the Oracle deployment (api-gateway, market-data, notification-scheduler, decision-prediction).
+  Runtime messages that run on both databases (scan status lines, KV fallbacks, bhavcopy progress, keep-alive loop) now say "DB"/"durable DB"; Neon-only branches keep their wording. No behaviour change.
+  Details: `docs/GROUP119_DB_NEUTRAL_WORDING.md`.
+- 2026-10-04 (group 118)  Log-audit item: AAKASH/ANNAPURNA still 404'd after group 99 (api-gateway + market-data).
+  The surprise static-cache loaders and `/quotes/bulk`, `/history`, `/fundamentals` had no delisted check (only `/quote` did); all now skip or fast-fail.
+  Details: `docs/GROUP118_DELISTED_404_FAST_PATHS.md`.
 - 2026-10-04 (group 114)  Log-audit item 25: owner reviewed the six regime constants, kept every value, and had the review dates moved to 2026-10-04 (real-trade-service + notification-scheduler-service).
   No value changed, so trading behaviour is unchanged; the "stale regime constant" warnings stop until the dates are 30 days old again (2026-11-03). The scheduler's two copies and real-trade-service's
   `_REGIME_CONSTANTS` must now agree on dates, guarded by two new drift tests. Tests unrun here (no pytest/sqlalchemy in sandbox). Doc: `docs/GROUP114_REGIME_CONSTANTS_REVIEWED.md`.

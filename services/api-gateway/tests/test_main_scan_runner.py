@@ -5,7 +5,7 @@ legacy /scan wrapper go through) and `_get_nifty50_data` (the movers fetch behin
 /market/top-gainers, /top-losers and /most-active):
 
 * start-up: progress flag, pause / cancel-flag reset, first status write, universe prioritising;
-* the single bulk Neon feed read (hit counting, every failure shape) and the cold-feed pre-wake;
+* the single bulk DB feed read (hit counting, every failure shape) and the cold-feed pre-wake;
 * seeding the batch-result cache from the last scan, and the "Power Off" abort;
 * cancel detection (task flag, ``__ALL__``, pause, Redis key), per-batch progress + WS push,
   the mid-scan warm rule, batch sizing, and the batch-result cache on / off;
@@ -322,7 +322,7 @@ class TestBulkFeed:
         }
         env.run(list("ABCDEF"))
         msgs = [w.get("message") for w in env.task_writes()]
-        assert "Neon bulk feed 4/6 — starting batches" in msgs
+        assert "DB bulk feed 4/6 — starting batches" in msgs
 
     def test_feed_rows_are_handed_to_the_matching_worker(self, env):
         env.feeds = {"ABC": {"close": 10.0}}
@@ -1122,6 +1122,8 @@ class Movers:
 
 @pytest.fixture
 def mv(monkeypatch):
+    # group122: the "no last-known movers" INFO line is throttled per phase; reset it per test
+    gw._MOVERS_EMPTY_LOG_AT.clear()
     return Movers(monkeypatch)
 
 
@@ -1158,6 +1160,26 @@ class TestNifty50Data:
         assert mv.tickers_built == []
         assert mv.log.any("info", "no last-known movers cached yet")
         assert mv.sets == []                                    # nothing written either
+
+    def test_nothing_known_line_is_logged_once_per_window_then_debug(self, mv, monkeypatch):
+        # group122: four callers hit this branch per pass; only the first logs at INFO
+        mv.phase = "closed"
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(gw.time, "monotonic", lambda: clock["t"])
+        frag = "no last-known movers cached yet"
+        for _ in range(4):
+            assert gw._get_nifty50_data() == []
+        assert sum(frag in m for m in mv.log.msgs["info"]) == 1
+        assert sum(frag in m for m in mv.log.msgs["debug"]) == 3
+        # a different phase has its own window
+        mv.phase = "preopen"
+        assert gw._get_nifty50_data() == []
+        assert sum(frag in m for m in mv.log.msgs["info"]) == 2
+        # after the window passes, the closed phase logs at INFO again
+        clock["t"] += gw._MOVERS_EMPTY_LOG_WINDOW_SEC + 1
+        mv.phase = "closed"
+        assert gw._get_nifty50_data() == []
+        assert sum(frag in m for m in mv.log.msgs["info"]) == 3
 
     def test_open_session_fetches_nifty50_plus_the_first_hundred_of_the_tail_deduplicated(self, mv):
         mv.indices = [f"N{i:02d}" for i in range(50)] + ["N03"] + [f"R{i:03d}" for i in range(130)]

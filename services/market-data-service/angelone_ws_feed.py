@@ -33,6 +33,29 @@ from typing import Dict, List, Optional
 
 from market_hours import is_feed_window_ist
 
+
+_UNRESOLVED_NAMES_MAX = 20
+
+
+def _unresolved_suffix(symbols, token_map) -> str:
+    """Group 124: the "resolved 248/250" warning never said WHICH symbols had no
+    AngelOne token (usually delisted/renamed names such as AAKASH). Returns
+    ": SYM1, SYM2, ..." (at most 20, then "+N more"), or "" when nothing is missing
+    or the names cannot be worked out. Never raises."""
+    try:
+        have = set(token_map)
+        missing = sorted({
+            (str(x or "").upper().replace(".NS", "").replace(".BO", "").strip())
+            for x in symbols
+        } - have - {""})
+        if not missing:
+            return ""
+        shown = ", ".join(missing[:_UNRESOLVED_NAMES_MAX])
+        extra = len(missing) - _UNRESOLVED_NAMES_MAX
+        return f"; unresolved: {shown}" + (f" (+{extra} more)" if extra > 0 else "")
+    except Exception:
+        return ""
+
 logger = logging.getLogger("angelone-ws-feed")
 
 _running = False
@@ -306,8 +329,8 @@ def start_feed_background(symbols: list) -> None:
                 logger.warning(
                     "AngelOne feed: resolved %d/%d requested symbols to tokens "
                     "(unresolved ones will simply never appear in live_quotes; "
-                    "the quote waterfall falls through to Yahoo for those)",
-                    len(token_map), len(symbols),
+                    "the quote waterfall falls through to Yahoo for those)%s",
+                    len(token_map), len(symbols), _unresolved_suffix(symbols, token_map),
                 )
             reverse_map = {v: k for k, v in token_map.items()}   # token -> clean symbol
             tokens = list(token_map.values())

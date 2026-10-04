@@ -150,3 +150,48 @@ class TestRunExplainsZeroRows:
         # RELIANCE fails; add a second known symbol that is already stored
         assert _scan(db, rss=rss, known=("RELIANCE",)) == 0
         assert "FAILED" in caplog.text
+
+
+class TestRunReportsAlreadyStoredSplit:
+    """Group 121: "10 symbol(s) scored -> 1 rows upserted" read as 9 lost symbols.
+    The summary line now splits scored / new-or-updated / already stored / failed."""
+
+    def test_summary_line_counts_already_stored(self, db, caplog):
+        rss = {"Moneycontrol": [_item(HEADLINE)]}
+        assert _scan(db, rss=rss, known=("RELIANCE", "TCS")) == 1
+        caplog.clear()
+        caplog.set_level(logging.INFO)
+        # second pass: RELIANCE already stored, TCS arrives as a new bulk hit
+        bulk = {"TCS": {"score": 60.0, "catalyst_type": "bulk_block", "source": "NSE",
+                        "headline": "TCS bulk deal"}}
+        assert _scan(db, rss=rss, known=("RELIANCE", "TCS"), bulk=bulk) == 1
+        assert ("2 symbol(s) scored → 1 new/updated row(s), "
+                "1 already stored at an equal or higher score (unchanged), 0 failed") in caplog.text
+
+    def test_summary_line_counts_failures(self, db, caplog):
+        caplog.set_level(logging.INFO)
+        bad = MagicMock()
+        bad.query.side_effect = RuntimeError("db down")
+        assert _scan(bad, rss={"Moneycontrol": [_item(HEADLINE)]}) == 0
+        assert "0 new/updated row(s), 0 already stored at an equal or higher score (unchanged), 1 failed" in caplog.text
+
+    def test_telegram_header_mentions_already_stored(self, db):
+        rss = {"Moneycontrol": [_item(HEADLINE)]}
+        assert _scan(db, rss=rss, known=("RELIANCE", "TCS")) == 1
+        sent = []
+
+        async def _notify(text):
+            sent.append(text)
+
+        bulk = {"TCS": {"score": 60.0, "catalyst_type": "bulk_block", "source": "NSE",
+                        "headline": "TCS bulk deal"}}
+
+        async def _fake(feed):
+            return rss.get(feed["source"], [])
+
+        with patch("symbol_master.get_all_symbols", AsyncMock(return_value={"RELIANCE", "TCS"})), \
+             patch("watchlist_engine.afterhours_scan._fetch_rss_items", AsyncMock(side_effect=_fake)), \
+             patch("watchlist_engine.afterhours_scan._fetch_bulk_deal_hits", AsyncMock(return_value=bulk)), \
+             patch("notifier.notify_async", _notify):
+            assert run(ahs.run_afterhours_scan(db, "DEMO", "2026-10-05")) == 1
+        assert "1 row(s) new/updated · 2 total scored this pass · 1 already stored" in sent[0]

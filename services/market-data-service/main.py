@@ -98,9 +98,15 @@ except AttributeError:
     except AttributeError:
         pass
 
+# Create the directory ourselves (exist_ok=True) so concurrent boot-time
+# yfinance calls don't race on the mkdir and log "Failed to create TzCache
+# folder ... File exists" (seen 3x in the 2026-10-04 startup log). Same fix
+# api-gateway/main.py already has; path is env-overridable the same way.
 try:
-    yf.set_tz_cache_location("/tmp/yfinance_tz")
-except AttributeError:
+    _TZ_CACHE_DIR = os.getenv("YF_TZ_CACHE_DIR", "/tmp/yfinance_tz")
+    os.makedirs(_TZ_CACHE_DIR, exist_ok=True)
+    yf.set_tz_cache_location(_TZ_CACHE_DIR)
+except (AttributeError, OSError):
     pass
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -499,6 +505,28 @@ UNIVERSE_REFRESH_INTERVAL_S = float(((os.getenv("FEED_UNIVERSE_REFRESH_INTERVAL_
 _current_feed_universe: list = []
 
 
+_last_dropped_dead: list = []
+
+
+def _clean_feed_universe(raw):
+    """Group 125: normalise api-gateway's /scan/universe symbol list for the WS feeds and
+    drop known-delisted names (AAKASH, ANNAPURNA, ...) so the AngelOne/Yahoo feeds do not
+    subscribe to symbols that can never produce a tick. Returns (symbols, dropped_sorted).
+    Order is preserved; non-list input gives ([], [])."""
+    if not isinstance(raw, (list, tuple)):
+        return [], []
+    symbols, dropped = [], set()
+    for s in raw:
+        if not s:
+            continue
+        base = str(s).upper().replace(".NS", "").replace(".BO", "")
+        if is_known_delisted(base):
+            dropped.add(base.strip())
+            continue
+        symbols.append(base)
+    return symbols, sorted(dropped)
+
+
 async def _refresh_feed_universe_loop():
     """Every UNIVERSE_REFRESH_INTERVAL_S (default 15 min), pull the live
     scan universe from api-gateway (GET /scan/universe — movers/bulk-deals/
@@ -506,7 +534,7 @@ async def _refresh_feed_universe_loop():
     and re-point both WS feeds at it. A fetch failure or empty result leaves
     the existing feed running untouched — never tear down a working feed
     because one refresh call failed."""
-    global _current_feed_universe
+    global _current_feed_universe, _last_dropped_dead
     gw = (os.environ.get("API_GATEWAY_URL") or "").strip().rstrip("/")
     if not gw:
         logger.warning("feed universe refresh: API_GATEWAY_URL not set, skipping")
@@ -529,11 +557,7 @@ async def _refresh_feed_universe_loop():
             try:
                 r = await client.get(f"{gw}/scan/universe")
                 r.raise_for_status()
-                symbols = r.json().get("symbols") or []
-                symbols = [
-                    str(s).upper().replace(".NS", "").replace(".BO", "")
-                    for s in symbols if s
-                ]
+                symbols, _dropped_dead = _clean_feed_universe(r.json().get("symbols"))
             except Exception as e:
                 logger.warning(
                     "feed universe refresh: fetch failed, keeping existing feed: %s", e
@@ -541,6 +565,13 @@ async def _refresh_feed_universe_loop():
                 delay = _retry_delay
                 continue
             delay = UNIVERSE_REFRESH_INTERVAL_S
+            if _dropped_dead and _dropped_dead != _last_dropped_dead:
+                # Group 125: log once per change, not on every 15-min refresh.
+                logger.info(
+                    "feed universe refresh: dropped %d known-delisted symbol(s) from the feed: %s",
+                    len(_dropped_dead), ", ".join(_dropped_dead),
+                )
+            _last_dropped_dead = _dropped_dead
 
             if not symbols or set(symbols) == set(_current_feed_universe):
                 continue
@@ -2152,6 +2183,11 @@ def get_quotes_bulk(req: BulkQuoteRequest):
         raw = (sym or "").strip()
         if not raw:
             continue
+        # group118: confirmed-delisted names (AAKASH, ANNAPURNA, TATAMTRDVR) used to go
+        # straight into the yf.download batch and 404 upstream on every call, although
+        # /quote/{symbol} already short-circuits them. Drop them before any lookup.
+        if is_known_delisted(raw):
+            continue
         mapped = normalize_symbol(raw)
         if not mapped or mapped in seen:
             continue
@@ -2776,6 +2812,15 @@ def get_history(
         ),
     ),
 ):
+    # group118: same fast 404 as /quote/{symbol} for confirmed-delisted names, so a
+    # history request never reaches Yahoo (which answers "possibly delisted") or the
+    # single-flight lock.
+    _hist_base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    if is_known_delisted(_hist_base):
+        raise HTTPException(
+            status_code=404,
+            detail=f"{_hist_base} is delisted/merged — not a live NSE symbol (see KNOWN_DELISTED_SYMBOLS)",
+        )
     # force=True is an explicit cache bypass — never coalesce those... unless
     # HISTORY_FORCE_REUSE_S > 0 (default), in which case identical forced
     # requests queue behind the first and are then served by the freshness
@@ -2990,6 +3035,17 @@ def get_fundamentals_raw(
     symbol: str,
     force: bool = Query(False, description="Bypass cache for real-time sniper analysis"),
 ):
+    # group118: a confirmed-delisted name has no fundamentals; answer with the same
+    # "unavailable" shape the failure path below uses instead of asking Yahoo.
+    _fund_base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    if is_known_delisted(_fund_base):
+        return _sanitize_for_json({
+            "symbol": _fund_base + ".NS",
+            "error": "delisted",
+            "message": f"{_fund_base} is delisted/merged — no fundamentals",
+            "pe_ratio": None,
+            "roe": None,
+        })
     try:
         # _sanitize_for_json wraps EVERY return path here, not just the
         # early cache-hit/cooldown branches inside _get_fundamentals_inner.

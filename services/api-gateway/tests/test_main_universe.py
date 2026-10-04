@@ -156,6 +156,23 @@ def test_clean_rejects_derivative_contracts(raw):
     assert gw._clean_equity_symbol(raw) is None
 
 
+@pytest.mark.parametrize("raw", ["COMMOIETF", "nv20ietf", "NIFTYBEES", "GOLDBEES", "SETFNIF50", "NIFTY1", "BANKNIFTY2"])
+def test_clean_rejects_etf_and_index_fund_tickers(raw):
+    """2026-10-04 startup-log audit: ETFs trade as plain EQ series, so AngelOne's whole-market sweep
+    surfaced illiquid ones as >=5% 'movers'; they must never enter the stock-picking universe."""
+    assert gw._clean_equity_symbol(raw) is None
+
+
+@pytest.mark.parametrize("raw", ["TCS", "BEL", "ETFLAB", "BEESL", "SETTL", "NIFTYWORKS"])
+def test_clean_etf_filter_does_not_clip_ordinary_equities(raw, aliases):
+    """Only a trailing ETF/BEES, a leading SETF, or NIFTY/BANKNIFTY(+digits) is rejected."""
+    assert gw._clean_equity_symbol(raw) == raw
+
+
+def test_filter_equities_drops_etfs_from_a_movers_list(aliases):
+    assert gw._filter_equities(["COMMOIETF", "TCS", "NV20IETF", "NIFTY1", "INFY"]) == ["TCS", "INFY"]
+
+
 def test_clean_local_rename_table_wins_before_symbol_aliases(aliases):
     aliases.resolve_map["MOTHERSUMI"] = "SHOULD_NOT_BE_USED"
     assert gw._clean_equity_symbol("mothersumi") == "MOTHERSON"
@@ -1853,3 +1870,30 @@ def test_symbol_suggestions_limit_and_empty_known():
     assert gw._symbol_suggestions("ZZZ", set()) == []
     assert gw._symbol_suggestions("ZZZ", None, first="X") == ["X"]
 
+
+
+# ── news symbol false positives (2026-10-04 startup-log audit) ───────────────
+
+def test_news_ambiguous_word_tickers_ignore_lowercase_dictionary_words(news):
+    """CONSUMER/CHEMICAL/CLEAN/OIL/APOLLO are tickers AND ordinary words; "consumer demand",
+    "chemical sector", "clean energy", "oil prices" must not make them news-mentioned symbols."""
+    news.securities = ["CONSUMER", "CHEMICAL", "CLEAN", "OIL", "APOLLO", "TCS"]
+    news.feeds["results+earnings"] = [
+        Entry("Consumer demand slows; chemical sector and clean energy lag as oil prices rise"),
+        Entry("Apollo hospitals expand", "TCS wins deal"),
+    ]
+    assert gw._get_news_mentioned_symbols() == ["TCS"]
+
+
+def test_news_ambiguous_word_tickers_still_match_when_written_as_all_caps_ticker(news):
+    news.securities = ["CLEAN", "OIL", "TCS"]
+    news.feeds["results+earnings"] = [Entry("CLEAN shares jump 8% after order win")]
+    assert set(gw._get_news_mentioned_symbols()) == {"CLEAN"}
+
+
+def test_news_exchange_names_and_etf_index_tickers_are_never_news_symbols(news):
+    news.securities = ["BSE", "NSE", "COMMOIETF", "NV20IETF", "NIFTYBEES", "NIFTY1", "TCS"]
+    news.feeds["results+earnings"] = [
+        Entry("BSE Sensex, NSE Nifty: COMMOIETF NV20IETF NIFTYBEES NIFTY1 TCS rally")
+    ]
+    assert gw._get_news_mentioned_symbols() == ["TCS"]

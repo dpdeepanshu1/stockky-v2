@@ -1263,7 +1263,7 @@ class TestStartScan:
     def test_cold_start_queues_the_parallel_run(self):
         out, bt = self.start()
         assert out["from_cache"] is False and out["universe_size"] == 2 and out["lite"] is False
-        assert out["message"] == ("Scanning 2 symbols (dynamic universe; Neon/batch cache for hits, "
+        assert out["message"] == ("Scanning 2 symbols (dynamic universe; DB/batch cache for hits, "
                                   "upstream for rest)")
         uuid.UUID(out["task_id"])
         task = bt.tasks[0]

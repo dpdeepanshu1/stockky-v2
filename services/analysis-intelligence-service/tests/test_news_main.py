@@ -43,6 +43,18 @@ def _no_network_feeds(monkeypatch):
     feed_fetch.clear_cache()
 
 
+@pytest.fixture(autouse=True)
+def _no_company_name_lookup(monkeypatch):
+    """2026-10-04: _company_query() now resolves unknown tickers' names via Yahoo (cached). Existing tests
+    must never hit the network for that; the dedicated TestCompanyNameLookup class re-enables it with a fake."""
+    monkeypatch.setattr(nm, "_NAME_LOOKUP_ENABLED", False)
+    nm._NAME_CACHE.clear()
+    nm._NAME_CACHE_TS.clear()
+    yield
+    nm._NAME_CACHE.clear()
+    nm._NAME_CACHE_TS.clear()
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _now():
@@ -1065,3 +1077,146 @@ class TestYahooNewsBackoff:
         monkeypatch.setenv("YAHOO_NEWS_BACKOFF_SECONDS", " ")
         g = runpy.run_path(nm.__file__, run_name="news_main_fresh")
         assert g["_YAHOO_BACKOFF_AFTER"] == 10 and g["_YAHOO_BACKOFF_SECONDS"] == 600.0
+
+
+
+# ── company-name lookup for tickers outside NAME_HINTS (2026-10-04 startup-log audit, issue 3) ──
+
+def _fake_yf_info(info=None, raises=False):
+    mod = types.ModuleType("yfinance")
+    seen = []
+
+    class Ticker:
+        def __init__(self, sym):
+            seen.append(sym)
+            if raises:
+                raise RuntimeError("yahoo down")
+            self.info = info
+
+    mod.Ticker = Ticker
+    mod._seen = seen
+    return mod
+
+
+class TestCompanyNameLookup:
+    @pytest.fixture(autouse=True)
+    def _enable(self, monkeypatch):
+        monkeypatch.setattr(nm, "_NAME_LOOKUP_ENABLED", True)
+
+    def test_unknown_ticker_uses_yahoo_long_name_without_ltd_suffix(self, monkeypatch):
+        yf = _fake_yf_info({"longName": "Shree Tirupati Balajee Agro Trading Co. Limited"})
+        monkeypatch.setitem(sys.modules, "yfinance", yf)
+        assert nm._company_query("shreetnb.ns") == "Shree Tirupati Balajee Agro Trading Co"
+        assert yf._seen == ["SHREETNB.NS"]
+
+    def test_falls_back_to_short_name_when_no_long_name(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "yfinance", _fake_yf_info({"shortName": "DEVIT LTD"}))
+        assert nm._company_query("DEVIT") == "DEVIT"      # cleaned name == ticker -> no information, ticker used
+
+    def test_name_hint_wins_and_never_calls_yahoo(self, monkeypatch):
+        yf = _fake_yf_info({"longName": "Should Not Be Used"})
+        monkeypatch.setitem(sys.modules, "yfinance", yf)
+        assert nm._company_query("TCS") == "Tata Consultancy Services"
+        assert yf._seen == []
+
+    def test_result_is_cached_so_yahoo_is_called_once(self, monkeypatch):
+        yf = _fake_yf_info({"longName": "Delta Magnets Limited"})
+        monkeypatch.setitem(sys.modules, "yfinance", yf)
+        assert nm._company_query("DELTAMAGNT") == "Delta Magnets"
+        assert nm._company_query("DELTAMAGNT.NS") == "Delta Magnets"
+        assert len(yf._seen) == 1
+
+    def test_failed_lookup_falls_back_to_ticker_and_is_cached_for_the_miss_ttl(self, monkeypatch):
+        yf = _fake_yf_info(raises=True)
+        monkeypatch.setitem(sys.modules, "yfinance", yf)
+        assert nm._company_query("ZZZCO") == "ZZZCO"
+        assert nm._company_query("ZZZCO") == "ZZZCO"
+        assert len(yf._seen) == 1                         # miss cached - no retry storm
+
+    def test_miss_is_retried_after_the_miss_ttl(self, monkeypatch):
+        yf = _fake_yf_info(raises=True)
+        monkeypatch.setitem(sys.modules, "yfinance", yf)
+        monkeypatch.setattr(nm, "_NAME_MISS_TTL_S", 0.0)
+        nm._company_query("ZZZCO")
+        nm._company_query("ZZZCO")
+        assert len(yf._seen) == 2
+
+    def test_hit_is_refreshed_after_the_hit_ttl(self, monkeypatch):
+        yf = _fake_yf_info({"longName": "Acme Widgets Limited"})
+        monkeypatch.setitem(sys.modules, "yfinance", yf)
+        monkeypatch.setattr(nm, "_NAME_HIT_TTL_S", 0.0)
+        nm._company_query("ACMEW")
+        nm._company_query("ACMEW")
+        assert len(yf._seen) == 2
+
+    def test_yahoo_backoff_window_skips_lookup_and_does_not_cache_a_false_miss(self, monkeypatch):
+        yf = _fake_yf_info({"longName": "Acme Widgets Limited"})
+        monkeypatch.setitem(sys.modules, "yfinance", yf)
+        nm._yahoo_state["skip_until"] = nm._mono() + 600
+        assert nm._company_query("ACMEW") == "ACMEW"
+        assert yf._seen == [] and "ACMEW" not in nm._NAME_CACHE
+        nm._yahoo_state["skip_until"] = 0.0
+        assert nm._company_query("ACMEW") == "Acme Widgets"      # recovered once the window closes
+
+    def test_lookup_can_be_switched_off(self, monkeypatch):
+        yf = _fake_yf_info({"longName": "Acme Widgets Limited"})
+        monkeypatch.setitem(sys.modules, "yfinance", yf)
+        monkeypatch.setattr(nm, "_NAME_LOOKUP_ENABLED", False)
+        assert nm._company_query("ACMEW") == "ACMEW" and yf._seen == []
+
+    def test_clean_company_name_edge_cases(self):
+        assert nm._clean_company_name(None, "X") == ""
+        assert nm._clean_company_name("   ", "X") == ""
+        assert nm._clean_company_name("AB", "X") == ""                       # too short to be a useful query
+        assert nm._clean_company_name("Infosys Ltd.", "INFY") == "Infosys"
+        assert nm._clean_company_name("Acme Corporation", "ACMEX") == "Acme"
+
+    def test_match_keywords_include_the_resolved_name_parts(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "yfinance", _fake_yf_info({"longName": "Delta Magnets Limited"}))
+        keys = nm._match_keywords("DELTAMAGNT")
+        assert "delta magnets" in keys and "magnets" in keys and "deltamagnt" in keys
+
+    def test_analyze_passes_the_resolved_name_to_the_quality_path(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "yfinance", _fake_yf_info({"longName": "Delta Magnets Limited"}))
+        seen = {}
+
+        def fake_build(symbol, company_name=None, llm_summarizer=None):
+            seen["name"] = company_name
+            return {"headline_count": 1, "headlines": [{"title": "x"}]}
+
+        monkeypatch.setattr(nm, "build_news_response", fake_build)
+        nm.analyze("DELTAMAGNT")
+        assert seen["name"] == "Delta Magnets"
+
+    def test_analyze_explicit_company_name_is_not_overridden(self, monkeypatch):
+        yf = _fake_yf_info({"longName": "Delta Magnets Limited"})
+        monkeypatch.setitem(sys.modules, "yfinance", yf)
+        seen = {}
+
+        def fake_build(symbol, company_name=None, llm_summarizer=None):
+            seen["name"] = company_name
+            return {"headline_count": 1, "headlines": [{"title": "x"}]}
+
+        monkeypatch.setattr(nm, "build_news_response", fake_build)
+        nm.analyze("DELTAMAGNT", company_name="Custom Name")
+        assert seen["name"] == "Custom Name" and yf._seen == []
+
+
+class TestNameLookupEnvIsBlankSafe:
+    """A stray `NEWS_NAME_*=` (set but empty) in a .env must keep the defaults - a blank TTL used to be able
+    to crash the import with float('') and a blank flag must not switch the lookup off."""
+
+    def test_blank_env_values_keep_the_defaults(self, monkeypatch):
+        for k in ("NEWS_NAME_LOOKUP", "NEWS_NAME_CACHE_TTL_S", "NEWS_NAME_MISS_TTL_S"):
+            monkeypatch.setenv(k, "   ")
+        g = runpy.run_path(nm.__file__, run_name="news_main_blank_env")
+        assert g["_NAME_LOOKUP_ENABLED"] is True
+        assert g["_NAME_HIT_TTL_S"] == 604800.0 and g["_NAME_MISS_TTL_S"] == 3600.0
+
+    def test_explicit_values_are_honoured(self, monkeypatch):
+        monkeypatch.setenv("NEWS_NAME_LOOKUP", "off")
+        monkeypatch.setenv("NEWS_NAME_CACHE_TTL_S", "60")
+        monkeypatch.setenv("NEWS_NAME_MISS_TTL_S", "5")
+        g = runpy.run_path(nm.__file__, run_name="news_main_explicit_env")
+        assert g["_NAME_LOOKUP_ENABLED"] is False
+        assert g["_NAME_HIT_TTL_S"] == 60.0 and g["_NAME_MISS_TTL_S"] == 5.0

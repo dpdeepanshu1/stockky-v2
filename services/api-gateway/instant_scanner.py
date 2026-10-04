@@ -466,14 +466,14 @@ def compute_instant_scores(
         "status": status,
         "reasons": {
             "technical": [
-                f"Tech score {tech}/100 from Neon indicators + price vs EMA/momentum",
+                f"Tech score {tech}/100 from stored indicators + price vs EMA/momentum",
             ],
             "fundamental": [
-                f"Fund score {fund}/100 from Neon quarterly / valuation metrics"
+                f"Fund score {fund}/100 from stored quarterly / valuation metrics"
                 + (" (defaults)" if not has_feed else ""),
             ],
             "lite": [
-                "Instant scanner: Neon data-feed + live quote (no downstream HTTP)",
+                "Instant scanner: DB data-feed + live quote (no downstream HTTP)",
             ],
         },
         "natural_language_summary": (

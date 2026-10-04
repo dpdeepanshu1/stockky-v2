@@ -94,7 +94,7 @@ def ensure_schema() -> bool:
     if not url:
         logger.warning(
             "No DATABASE_URL/CACHE_DATABASE_URL — cannot ensure surprise_static_feed. "
-            "Set Neon pooler URL on api-gateway env."
+            "Set DATABASE_URL/CACHE_DATABASE_URL (Neon pooler URL) or the ORACLE_* env on api-gateway."
         )
         return False
     try:
@@ -554,7 +554,7 @@ def bulk_baselines_from_bhavcopy(symbols: List[str]) -> Tuple[List[Dict[str, Any
 
         remaining = [s for s in bases if s not in found]
         logger.info(
-            "bulk bhavcopy: %s baselines from Neon, %s remaining for yfinance",
+            "bulk bhavcopy: %s baselines from the DB, %s remaining for yfinance",
             len(rows), len(remaining),
         )
         return rows, remaining
@@ -783,7 +783,7 @@ def precalculate_surprise_baselines(symbols: List[str]) -> Dict[str, Any]:
                 "eta_sec": None,
                 "is_running": True,
                 "current_symbol": None,
-                "message": f"Neon bhavcopy: {source_bhav} · yfinance left: {len(remaining)}",
+                "message": f"DB bhavcopy: {source_bhav} · yfinance left: {len(remaining)}",
             })
         else:
             remaining = list(uniq)

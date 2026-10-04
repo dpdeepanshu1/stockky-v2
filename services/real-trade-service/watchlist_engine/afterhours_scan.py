@@ -968,9 +968,14 @@ async def run_afterhours_scan(db, mode: str, market_date: str, manual: bool = Fa
             )
             continue
 
+    # Group 121: the old line ("10 symbol(s) scored → 1 rows upserted") read as
+    # if 9 symbols were lost. They were not: after a restart or a repeat pass the
+    # earlier pass's rows are already stored at an equal or higher score, so only
+    # genuinely new/improved symbols are written. Say so, with the full split.
     logger.info(
-        "afterhours-scan [%s %s]: %d symbol(s) scored → %d rows upserted",
-        mode, market_date, len(best), written,
+        "afterhours-scan [%s %s]: %d symbol(s) scored → %d new/updated row(s), "
+        "%d already stored at an equal or higher score (unchanged), %d failed",
+        mode, market_date, len(best), written, unchanged, failed,
     )
     if written == 0:
         # Item 17: say why nothing was written.
@@ -997,7 +1002,8 @@ async def run_afterhours_scan(db, mode: str, market_date: str, manual: bool = Fa
         sorted_hits = sorted(best.items(), key=lambda kv: kv[1]["score"], reverse=True)
         lines = [f"📡 *After-hours scan — {mode}* ({market_date})"]
         if written:
-            lines.append(f"{written} row(s) new/updated · {len(best)} total scored this pass\n")
+            kept = f" · {unchanged} already stored" if unchanged else ""
+            lines.append(f"{written} row(s) new/updated · {len(best)} total scored this pass{kept}\n")
         else:
             if failed:
                 lines.append(f"No new rows — {unchanged} symbol(s) already at best score, {failed} failed to save\n")

@@ -207,9 +207,63 @@ def _base_symbol(symbol: str) -> str:
     return base
 
 
+# 2026-10-04 (startup-log audit, issue 3): only ~45 tickers are in NAME_HINTS, so for every
+# other symbol (SHREETNB, DELTAMAGNT, DEVIT, BHARTIHEXA ...) all Google/Reuters queries fell
+# back to the bare ticker, which almost never appears in a headline -> "HTTP 200 but 0
+# entries" on every source. Resolve the real company name from Yahoo (longName/shortName),
+# cache it, and fall back to the ticker only when Yahoo has nothing.
+_NAME_CACHE: Dict[str, str] = {}          # base -> resolved name ("" = looked up, nothing found)
+_NAME_CACHE_TS: Dict[str, float] = {}     # base -> monotonic time the entry was stored
+_NAME_CACHE_LOCK = threading.Lock()
+_NAME_HIT_TTL_S = float((os.getenv("NEWS_NAME_CACHE_TTL_S") or "").strip() or "604800")   # names rarely change: 7d
+_NAME_MISS_TTL_S = float((os.getenv("NEWS_NAME_MISS_TTL_S") or "").strip() or "3600")   # retry failed lookups hourly
+_NAME_LOOKUP_ENABLED = ((os.getenv("NEWS_NAME_LOOKUP") or "").strip() or "1").lower() not in ("0", "false", "no", "off")
+_NAME_SUFFIX_RE = re.compile(r"\b(limited|ltd\.?|inc\.?|corporation|corp\.?)\s*$", re.IGNORECASE)
+
+
+def _clean_company_name(raw: Any, base: str) -> str:
+    """Strip a trailing Ltd/Limited so the news query matches how headlines write the name."""
+    name = str(raw or "").strip()
+    if not name:
+        return ""
+    name = _NAME_SUFFIX_RE.sub("", name).strip(" .,-")
+    # A "name" that is just the ticker adds nothing over the fallback.
+    if len(name) < 3 or name.upper().replace(" ", "") == base:
+        return ""
+    return name
+
+
+def _lookup_company_name(base: str) -> str:
+    """Yahoo longName/shortName for an NSE ticker, cached. Never raises; "" when unknown."""
+    if not _NAME_LOOKUP_ENABLED:
+        return ""
+    now = _mono()
+    with _NAME_CACHE_LOCK:
+        if base in _NAME_CACHE:
+            ttl = _NAME_HIT_TTL_S if _NAME_CACHE[base] else _NAME_MISS_TTL_S
+            if now - _NAME_CACHE_TS.get(base, 0.0) < ttl:
+                return _NAME_CACHE[base]
+    if _yahoo_backoff_active():
+        return ""                      # Yahoo is being skipped right now - don't cache a false miss
+    name = ""
+    try:
+        import yfinance as yf
+        info = yf.Ticker(f"{base}.NS").info or {}
+        name = _clean_company_name(info.get("longName") or info.get("shortName"), base)
+    except Exception as e:
+        logger.debug("company name lookup %s: %s", base, e)
+    with _NAME_CACHE_LOCK:
+        _NAME_CACHE[base] = name
+        _NAME_CACHE_TS[base] = _mono()
+    return name
+
+
 def _company_query(symbol: str) -> str:
     base = _base_symbol(symbol)
-    return NAME_HINTS.get(base, base)
+    hint = NAME_HINTS.get(base)
+    if hint:
+        return hint
+    return _lookup_company_name(base) or base
 
 
 def _match_keywords(symbol: str) -> List[str]:
@@ -223,7 +277,7 @@ def _match_keywords(symbol: str) -> List[str]:
     keys = set()
     if len(base) >= 3:
         keys.add(base.lower())
-    name = NAME_HINTS.get(base, base)
+    name = _company_query(symbol)
     keys.add(name.lower())
     # Split multi-word names — keep parts with length > 2 only
     for part in name.lower().replace("&", " ").replace("-", " ").split():
@@ -652,7 +706,7 @@ def analyze(symbol: str, company_name: str | None = None, force: bool = False):
     # INTEGRATION: news_quality multi-source + better summary (fallback to legacy below)
     # 2026-10-04 (item 9): without a company name the quality path only matched the bare ticker ("tcs"), so a
     # headline saying "Tata Consultancy Services ..." was never found. Use the known display name when we have one.
-    company_name = company_name or NAME_HINTS.get(_base_symbol(symbol))
+    company_name = company_name or NAME_HINTS.get(_base_symbol(symbol)) or _lookup_company_name(_base_symbol(symbol)) or None
     if build_news_response is not None:
         try:
             payload = build_news_response(symbol, company_name=company_name, llm_summarizer=None)

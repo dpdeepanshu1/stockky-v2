@@ -428,7 +428,7 @@ def _get_redis():
         return _redis
     _redis_init = True
     if not USE_REDIS:
-        logger.info("KV: USE_REDIS=0 — Upstash disconnected (memory + optional Neon)")
+        logger.info("KV: USE_REDIS=0 — Upstash disconnected (memory + optional durable DB)")
         return None
     url = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
     tok = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
@@ -1052,7 +1052,7 @@ def settings_set(table: str, key: str, value: Any) -> bool:
             _SETTINGS_MEM[mk] = value
     eng = _get_neon()
     if eng is None:
-        logger.warning("settings_set: no Neon — memory only for %s/%s", table, key)
+        logger.warning("settings_set: no durable DB — memory only for %s/%s", table, key)
         return True
     try:
         from sqlalchemy import text

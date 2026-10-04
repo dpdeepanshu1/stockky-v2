@@ -964,19 +964,29 @@ def _drain():
 class TestWarmSurpriseScanCache:
     @pytest.fixture
     def env(self, monkeypatch, lenv):
-        e = types.SimpleNamespace(scan_calls=[], scan_raises=None)
+        e = types.SimpleNamespace(scan_calls=[], scan_kwargs=[], scan_raises=None, loads=0,
+                                  restored=None, phase="open")
 
         class Engine:
-            async def scan(self, client=None, market_data_url=None):
+            _last_result = None
+
+            async def scan(self, client=None, market_data_url=None, cached=False):
                 e.scan_calls.append((client, market_data_url))
+                e.scan_kwargs.append({"cached": cached})
                 if e.scan_raises:
                     raise e.scan_raises
+
+            def _load_last_result_from_durable_cache(self):
+                e.loads += 1
+                self._last_result = e.restored
 
         client = object()
         e.client = client
         monkeypatch.setattr(surprise_scanner, "surprise_engine", Engine())
         monkeypatch.setattr(gw, "_get_http_client", lambda: client)
         monkeypatch.setattr(gw, "MARKET_DATA_URL", "http://md.local")
+        monkeypatch.setattr(gw, "_surprise_boot_warm_delay_sec", lambda: 0)
+        monkeypatch.setattr(gw, "_market_session_phase_ist", lambda: e.phase)
         return e
 
     def test_the_first_scan_runs_in_the_background(self, env, caplog):
@@ -990,6 +1000,50 @@ class TestWarmSurpriseScanCache:
             before = _run(go())
         assert before == [] and env.scan_calls == [(env.client, "http://md.local")]       # scheduled, not awaited
         assert "pre-warmed" in caplog.text
+
+    def test_the_boot_scan_reuses_a_fresh_durable_result(self, env):
+        async def go():
+            await gw._warm_surprise_scan_cache()
+            await _drain()()
+
+        _run(go())
+        assert env.scan_kwargs == [{"cached": True}]
+
+    @pytest.mark.parametrize("phase", ["closed", "holiday"])
+    def test_closed_market_with_a_saved_result_skips_the_sweep(self, env, caplog, phase):
+        env.phase = phase
+        env.restored = {"count": 3}
+
+        async def go():
+            await gw._warm_surprise_scan_cache()
+            await _drain()()
+
+        with caplog.at_level("INFO"):
+            _run(go())
+        assert env.loads == 1 and env.scan_calls == []
+        assert "skipped the boot quote sweep" in caplog.text
+
+    def test_closed_market_without_a_saved_result_still_warms(self, env):
+        env.phase = "closed"
+        env.restored = None
+
+        async def go():
+            await gw._warm_surprise_scan_cache()
+            await _drain()()
+
+        _run(go())
+        assert env.loads == 1 and len(env.scan_calls) == 1
+
+    @pytest.mark.parametrize("phase", ["preopen", "open", "post"])
+    def test_other_phases_never_try_the_restore_shortcut(self, env, phase):
+        env.phase = phase
+
+        async def go():
+            await gw._warm_surprise_scan_cache()
+            await _drain()()
+
+        _run(go())
+        assert env.loads == 0 and len(env.scan_calls) == 1
 
     def test_a_scan_failure_is_a_non_fatal_warning(self, env, caplog):
         env.scan_raises = RuntimeError("scan down")
@@ -1007,6 +1061,39 @@ class TestWarmSurpriseScanCache:
         with caplog.at_level("DEBUG"):
             _run(gw._warm_surprise_scan_cache())
         assert env.scan_calls == [] and "warm task not scheduled" in caplog.text
+
+
+class TestSurpriseBootWarmDelay:
+    @pytest.mark.parametrize("raw,expected", [(None, 20.0), ("", 20.0), ("   ", 20.0), ("0", 0.0),
+                                              ("7.5", 7.5), ("-3", 0.0), ("abc", 20.0)])
+    def test_env_parsing_is_blank_safe(self, monkeypatch, raw, expected):
+        if raw is None:
+            monkeypatch.delenv("SURPRISE_BOOT_WARM_DELAY_SEC", raising=False)
+        else:
+            monkeypatch.setenv("SURPRISE_BOOT_WARM_DELAY_SEC", raw)
+        assert gw._surprise_boot_warm_delay_sec() == expected
+
+    def test_a_positive_delay_is_slept_before_scanning(self, monkeypatch, lenv):
+        order = []
+
+        class Engine:
+            _last_result = None
+
+            async def scan(self, client=None, market_data_url=None, cached=False):
+                order.append("scan")
+
+        lenv.limit = 99
+        monkeypatch.setattr(surprise_scanner, "surprise_engine", Engine())
+        monkeypatch.setattr(gw, "_get_http_client", lambda: object())
+        monkeypatch.setattr(gw, "_surprise_boot_warm_delay_sec", lambda: 20)
+        monkeypatch.setattr(gw, "_market_session_phase_ist", lambda: "open")
+
+        async def go():
+            await gw._warm_surprise_scan_cache()
+            await _drain()()
+
+        _run(go())
+        assert lenv.sleeps == [20] and order == ["scan"]
 
 
 class TestWarmMomentumMoversCache:

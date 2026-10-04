@@ -91,7 +91,7 @@ def test_a_strong_feed_backed_setup_is_still_buy_now(ins):
                                      {"price": 102})
     assert (out["decision"], out["confidence"]) == ("BUY NOW", "High")
     assert out["decision_capped"] is False
-    assert out["reasons"]["lite"] == ["Instant scanner: Neon data-feed + live quote (no downstream HTTP)"]
+    assert out["reasons"]["lite"] == ["Instant scanner: DB data-feed + live quote (no downstream HTTP)"]
 
 
 def test_feed_without_any_price_keeps_the_existing_low_confidence_card(ins):

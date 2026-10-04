@@ -118,7 +118,7 @@ class RateLimitMonitor:
                         if isinstance(item, dict) and item.get("ts"):
                             self._events.appendleft(item)
                 self._neon_backed = True
-                logger.info("RateLimitMonitor hydrated %s events from Neon", len(raw))
+                logger.info("RateLimitMonitor hydrated %s events from the durable DB", len(raw))
             elif isinstance(raw, dict) and isinstance(raw.get("events"), list):
                 ev = raw["events"]
                 with self._lock:

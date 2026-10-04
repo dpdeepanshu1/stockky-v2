@@ -695,9 +695,9 @@ class TestInstantScoresCard:
         assert out["provisional_defaults"] is False and out["value_buy"] is True
         assert out["lite_fastpath"] is True and out["instant_scanner"] is True and out["status"] == "READY"
         assert out["reasons"] == {
-            "technical": ["Tech score 78/100 from Neon indicators + price vs EMA/momentum"],
-            "fundamental": ["Fund score 60/100 from Neon quarterly / valuation metrics"],
-            "lite": ["Instant scanner: Neon data-feed + live quote (no downstream HTTP)"],
+            "technical": ["Tech score 78/100 from stored indicators + price vs EMA/momentum"],
+            "fundamental": ["Fund score 60/100 from stored quarterly / valuation metrics"],
+            "lite": ["Instant scanner: DB data-feed + live quote (no downstream HTTP)"],
         }
         assert out["natural_language_summary"] == "TCS: instant — PREPARE TO BUY · tech 78 · fund 60 · combined 69 · Δ +2.00%"
 
@@ -718,7 +718,7 @@ class TestInstantScoresCard:
         assert out["provisional_defaults"] is True and out["from_data_feed"] is False
         assert out["status"] == "READY" and out["price"] == 100.0 and out["change_pct"] == 0.0
         assert out["prev_close"] == 100.0
-        assert out["reasons"]["fundamental"][0].endswith("Neon quarterly / valuation metrics (defaults)")
+        assert out["reasons"]["fundamental"][0].endswith("stored quarterly / valuation metrics (defaults)")
 
     def test_feed_without_a_price_is_provisional_low_confidence(self, ins):
         out = scores(ins, "XYZ", {"rsi": 50}, {})

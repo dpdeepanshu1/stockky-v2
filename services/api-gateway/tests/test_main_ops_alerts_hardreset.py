@@ -865,7 +865,7 @@ class TestHardReset:
         }
         assert hr.store.meta_kw == {
             "last_success_at": None, "last_count": 0,
-            "last_message": "Hard-reset — memory + Neon wiped", "stock_count": 0,
+            "last_message": "Hard-reset — memory + DB wiped", "stock_count": 0,
         }
 
     def test_preserve_days_is_forwarded(self, hr):

@@ -1382,15 +1382,15 @@ class TestPrecalcBhavcopyStage:
         assert out == {"ok": True, "symbols_requested": 4, "computed": 4, "errors": 0, "elapsed_sec": 0.0,
                        "table": "surprise_static_feed", "upserted": 4, "upserted_last_batch": 4, "workers": 4,
                        "source_bhavcopy": 2, "source_yfinance": 2}
-        hit = next(p for p in pre.progress if str(p.get("message", "")).startswith("Neon bhavcopy"))
-        assert hit["message"] == "Neon bhavcopy: 2 · yfinance left: 2"
+        hit = next(p for p in pre.progress if str(p.get("message", "")).startswith("DB bhavcopy"))
+        assert hit["message"] == "DB bhavcopy: 2 · yfinance left: 2"
         assert hit["percent"] == 50 and hit["processed"] == 2 and hit["computed"] == 2
 
     def test_bhavcopy_percent_has_a_floor_of_five(self, pre):
         pre.bhav = lambda s: (rows_for("A"), [f"S{i}" for i in range(49)])
         pre.yfbulk = lambda s: ([], [])
         pre.run([f"S{i}" for i in range(50)])
-        hit = next(p for p in pre.progress if str(p.get("message", "")).startswith("Neon bhavcopy"))
+        hit = next(p for p in pre.progress if str(p.get("message", "")).startswith("DB bhavcopy"))
         assert hit["percent"] == 5
 
     def test_bhavcopy_miss_sends_the_whole_universe_to_yfinance(self, pre):
@@ -1545,7 +1545,7 @@ class TestPrecalcEmptyAndDefensive:
         pre.yfbulk = lambda s: ([], ["Z"])
         out = pre.run([])
         assert out["ok"] is True
-        bhav_progress = next(p for p in pre.progress if str(p.get("message", "")).startswith("Neon bhavcopy"))
+        bhav_progress = next(p for p in pre.progress if str(p.get("message", "")).startswith("DB bhavcopy"))
         assert bhav_progress["percent"] == 5
         residual = next(p for p in pre.progress if str(p.get("message", "")).startswith("residual"))
         assert residual["percent"] == 0

@@ -169,10 +169,10 @@ if _USE_REDIS and Redis is not None:
             _redis.ping()
             logger.info("Connected to Upstash Redis (USE_REDIS=1)")
     except Exception as e:
-        logger.warning("Redis unavailable — using Neon/memory: %s", e)
+        logger.warning("Redis unavailable — using DB/memory: %s", e)
         _redis = None
 else:
-    logger.info("Notification Redis OFF (USE_REDIS=0) — Neon/memory config")
+    logger.info("Notification Redis OFF (USE_REDIS=0) — DB/memory config")
 
 # In-memory fallback so the service still works (for the current process
 # lifetime) when Redis isn't configured, e.g. local `docker compose up`.
@@ -926,7 +926,7 @@ def test_notifications():
     return {"delivered": delivered, "results": attempted, "note": note}
 
 
-# ── Neon keep-alive (every ~4 minutes) — prevents free-tier auto-suspend ──
+# ── DB keep-alive (every ~4 minutes) — prevents free-tier auto-suspend ──
 _NEON_KEEPALIVE_SEC = int(((os.getenv("NEON_KEEPALIVE_INTERVAL_SEC") or "").strip() or "240"))
 _neon_keepalive_task = None
 
@@ -992,18 +992,18 @@ async def _start_neon_keepalive_loop():
             try:
                 result = await asyncio.get_event_loop().run_in_executor(None, _neon_select_1)
                 if result.get("ok"):
-                    logger.info("Neon keep-alive OK (%s)", result.get("source"))
+                    logger.info("DB keep-alive OK (%s)", result.get("source"))
                 else:
-                    logger.debug("Neon keep-alive skip/fail: %s", result.get("error"))
+                    logger.debug("DB keep-alive skip/fail: %s", result.get("error"))
             except Exception as e:
-                logger.debug("Neon keep-alive loop: %s", e)
+                logger.debug("DB keep-alive loop: %s", e)
             await asyncio.sleep(max(60, _NEON_KEEPALIVE_SEC))
 
     try:
         _neon_keepalive_task = asyncio.create_task(_loop())
-        logger.info("Neon keep-alive loop started (every %ss)", _NEON_KEEPALIVE_SEC)
+        logger.info("DB keep-alive loop started (every %ss)", _NEON_KEEPALIVE_SEC)
     except Exception as e:
-        logger.warning("Could not start Neon keep-alive loop: %s", e)
+        logger.warning("Could not start DB keep-alive loop: %s", e)
 
 
 if __name__ == "__main__":

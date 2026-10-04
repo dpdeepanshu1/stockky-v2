@@ -2484,3 +2484,41 @@ class TestRepairSurpriseBatch:
         assert out["repaired"] == [] and out["status"] == "completed"
         assert "repair_surprise_batch" in caplog.text
         assert len(repair.kv.kv_sets) == 1
+
+
+# ── group118: delisted symbols never enter the static cache ──────────────────
+
+class TestStaticCacheSkipsDelisted:
+    def test_table_rows_for_delisted_symbols_are_dropped(self, db_setup):
+        e, db, _ = db_setup
+        db.rows = [db_row("AAKASH"), db_row("TCS"), db_row(" annapurna "), db_row("TATAMTRDVR")]
+        assert e.load_static_cache() == 1
+        assert set(e.static_cache) == {"TCS"}
+
+    def test_dead_rows_are_never_quoted_or_scored(self, db_setup):
+        e, db, _ = db_setup
+        db.rows = [db_row("AAKASH"), db_row("INFY")]
+        e.load_static_cache()
+        assert [k for k, v in e.static_cache.items() if v.get("is_liquid", True)] == ["INFY"]
+
+    def test_unimportable_symbol_aliases_keeps_every_row(self, db_setup, monkeypatch):
+        e, db, _ = db_setup
+        monkeypatch.setitem(sys.modules, "symbol_aliases", None)  # import raises ImportError
+        db.rows = [db_row("AAKASH"), db_row("TCS")]
+        assert e.load_static_cache() == 2
+
+    def test_is_dead_symbol_helper(self, sc):
+        assert sc._is_dead_symbol("AAKASH") is True
+        assert sc._is_dead_symbol("annapurna.ns") is True
+        assert sc._is_dead_symbol("RELIANCE") is False
+        assert sc._is_dead_symbol("") is False
+
+
+class TestSeedSkipsDelisted:
+    def test_kv_seed_skips_delisted_keys(self, seeder):
+        sc, db, e = seeder
+        good = {"price": 10}
+        db.rows = [("feed:AAKASH", good), ("stockky:data_feed:ANNAPURNA.NS", good), ("feed:TCS", good)]
+        cache = {}
+        assert e._seed_from_data_feed_kv(cache) == 1
+        assert set(cache) == {"TCS"}

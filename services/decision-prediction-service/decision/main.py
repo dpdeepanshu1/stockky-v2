@@ -109,7 +109,7 @@ if _USE_REDIS:
         logger.warning("Decision-engine Redis unavailable: %s", e)
         _redis = None
 else:
-    logger.info("Decision-engine Redis OFF — memory + optional Neon decide cache")
+    logger.info("Decision-engine Redis OFF — memory + optional DB decide cache")
 
 def _is_market_open() -> bool:
     now = datetime.now(IST)
@@ -987,7 +987,7 @@ def _derive_technical_from_payload(payload: dict) -> dict:
         "rsi": rsi,
         "macd": payload.get("macd") or payload.get("macd_hist"),
         "ema20": payload.get("ema20") or payload.get("ema"),
-        "reasons": ["Short-circuit: technical derived from gateway/Neon payload (no HTTP)"],
+        "reasons": ["Short-circuit: technical derived from gateway/DB payload (no HTTP)"],
         "from_payload": True,
         "data_insufficient": close is None,
     }
@@ -1020,7 +1020,7 @@ def _derive_fundamental_from_payload(payload: dict) -> dict:
         "industry": payload.get("industry"),
         "quality_score": payload.get("quality_score"),
         "metrics": metrics,
-        "reasons": ["Short-circuit: fundamental derived from gateway/Neon payload (no HTTP)"],
+        "reasons": ["Short-circuit: fundamental derived from gateway/DB payload (no HTTP)"],
         "from_payload": True,
         "fallback_used": False,
     }

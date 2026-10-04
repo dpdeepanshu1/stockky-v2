@@ -99,6 +99,18 @@ _DERIVATIVE_CONTRACT_RE = re.compile(
     r"(FUT|\d+(\.\d+)?(CE|PE))$"
 )
 
+
+def _is_dead_symbol(sym: str) -> bool:
+    """True for a confirmed-delisted symbol (symbol_aliases.KNOWN_DELISTED: AAKASH,
+    ANNAPURNA, TATAMTRDVR). group118: the static-cache loaders had no such gate, so rows that
+    pre-date the delisted list (surprise_static_feed, KV feed keys) were quoted on every scan and
+    404'd upstream. Never raises; an unimportable symbol_aliases means nothing is treated as dead."""
+    try:
+        from symbol_aliases import is_known_delisted
+        return bool(is_known_delisted(sym))
+    except Exception:
+        return False
+
 # Building tier
 BUILDING_MIN_SCORE = int(((os.getenv("SURPRISE_BUILDING_MIN_SCORE") or "").strip() or "35"))
 BUILDING_MAX_SCORE = MIN_SCORE
@@ -369,6 +381,8 @@ class SurpriseStockEngine:
                 sym = str(d.get("symbol") or "").upper().strip()
                 if not sym:
                     continue
+                if _is_dead_symbol(sym):
+                    continue
                 for k in ("prev_close", "daily_atr", "high_52w", "dist_52w_pct"):
                     try:
                         d[k] = float(d[k]) if d.get(k) is not None else 0.0
@@ -448,6 +462,8 @@ class SurpriseStockEngine:
                     # the main.py derivative filter — same regex used in
                     # _clean_sym() and main.py's _clean_equity_symbol().
                     if _DERIVATIVE_CONTRACT_RE.search(sym):
+                        continue
+                    if _is_dead_symbol(sym):
                         continue
                     try:
                         data = raw if isinstance(raw, dict) else _json.loads(raw) if isinstance(raw, str) else {}

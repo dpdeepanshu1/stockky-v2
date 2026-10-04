@@ -19,7 +19,7 @@ MID = "postgresql://h/db?a=1&channel_binding=require&b=2"
 
 def _py_files():
     for dirpath, dirnames, filenames in os.walk(SERVICES):
-        dirnames[:] = [d for d in dirnames if d not in ("tests", "__pycache__", "node_modules", ".git")]
+        dirnames[:] = [d for d in dirnames if d not in ("tests", "__pycache__", "node_modules", ".git", ".venv", "venv", "site-packages", ".tox", "build", "dist")]
         for fn in filenames:
             if fn.endswith(".py"):
                 yield os.path.join(dirpath, fn)

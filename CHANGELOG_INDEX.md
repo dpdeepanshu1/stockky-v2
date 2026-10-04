@@ -6,6 +6,8 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-04 (group 134)  Tests: repo-wide source sweeps no longer scan a virtualenv inside `services/` (api-gateway tests).
+  The VM run failed 2 of 8194 api-gateway tests (`test_env_flag_sweep`, `test_env_numeric_sweep`) because `real-trade-service/.venv/.../site-packages` (pandas, coverage) was scanned as Stockky code. Five tree walkers now also skip `.venv`, `venv`, `site-packages`, `.tox`, `build`, `dist`. Reproduced here with a fake in-tree venv; no application code changed. Also records the subshell loop for running all four suites. Details: `docs/GROUP134_SWEEP_TESTS_SKIP_VENVS.md`.
 - 2026-10-04 (group 133)  Tooling: `scripts/diagnose_group132.sh`, a read-only one-command report for the two items that need the VM.
   Shows whether the closed-market boot restore fired and how many `/quote` calls followed the boot, the durable last-result row and its expiry, and every AngelOne scrip-master row (segment/series) for HFCL, MTARTECH, STLTECH or any names you pass. No application code changed, nothing to rebuild. Details: `docs/GROUP133_DIAGNOSE_SCRIPT.md`.
 - 2026-10-04 (group 132)  Closed-market boot restore: the saved surprise result was deleted by the read meant to restore it (api-gateway).

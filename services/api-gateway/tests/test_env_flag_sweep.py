@@ -26,7 +26,7 @@ _NUMERIC_HINTS = ("int(", "float(", "_OVERFLOW", "POOL_SIZE")
 
 def _sources():
     for cur, dirs, files in os.walk(SERVICES):
-        dirs[:] = [d for d in dirs if d not in {"tests", "__pycache__", "node_modules", ".git"}]
+        dirs[:] = [d for d in dirs if d not in {"tests", "__pycache__", "node_modules", ".git", ".venv", "venv", "site-packages", ".tox", "build", "dist"}]
         for f in files:
             if f.endswith(".py"):
                 yield os.path.join(cur, f)

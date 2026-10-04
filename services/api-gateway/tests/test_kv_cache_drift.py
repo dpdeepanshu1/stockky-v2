@@ -94,7 +94,7 @@ BASE = PREFIXES[PLAIN_COPIES[0]]
 def _service_py_files():
     """Every non-test .py under services/ except the kv_cache.py copies themselves."""
     for dirpath, dirnames, filenames in os.walk(SERVICES):
-        dirnames[:] = [d for d in dirnames if d not in ("tests", "__pycache__", "node_modules", ".git")]
+        dirnames[:] = [d for d in dirnames if d not in ("tests", "__pycache__", "node_modules", ".git", ".venv", "venv", "site-packages", ".tox", "build", "dist")]
         for fn in filenames:
             if not fn.endswith(".py"):
                 continue
@@ -124,7 +124,7 @@ def test_the_guard_found_all_six_copies():
     # A seventh copy would be invisible to this guard.
     found = []
     for dirpath, dirnames, filenames in os.walk(SERVICES):
-        dirnames[:] = [d for d in dirnames if d not in ("__pycache__", "node_modules", ".git")]
+        dirnames[:] = [d for d in dirnames if d not in ("__pycache__", "node_modules", ".git", ".venv", "venv", "site-packages", ".tox", "build", "dist")]
         if "kv_cache.py" in filenames:
             found.append(os.path.relpath(os.path.join(dirpath, "kv_cache.py"), SERVICES).replace(os.sep, "/"))
     assert sorted(found) == sorted(ALL_COPIES), "a kv_cache.py copy was added or moved - register it here"

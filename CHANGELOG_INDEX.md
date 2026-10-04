@@ -6,6 +6,26 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-04 (group 133)  Tooling: `scripts/diagnose_group132.sh`, a read-only one-command report for the two items that need the VM.
+  Shows whether the closed-market boot restore fired and how many `/quote` calls followed the boot, the durable last-result row and its expiry, and every AngelOne scrip-master row (segment/series) for HFCL, MTARTECH, STLTECH or any names you pass. No application code changed, nothing to rebuild. Details: `docs/GROUP133_DIAGNOSE_SCRIPT.md`.
+- 2026-10-04 (group 132)  Closed-market boot restore: the saved surprise result was deleted by the read meant to restore it (api-gateway).
+  Group 131's caveat was right: `kv_cache`'s plain read DELETEs an expired row, and `_warm_surprise_scan_cache` ran the plain loader before the stale one, so the row was gone before `get_stale` looked. Reproduced against the real `kv_cache` + a SQL table. Now the closed branch does one stale read first (deletes nothing), and the last result is saved for 7 days (`SURPRISE_LAST_RESULT_TTL_SEC`, floor = old ~340 s; freshness is still age-checked at read time).
+  6 new real-kv tests + 3 updated/added; all four service suites run for real in the sandbox this time and pass. Details: `docs/GROUP132_LAST_RESULT_SURVIVES_EXPIRY.md`.
+- 2026-10-04 (group 131)  Closed-market boot warm now actually skips the sweep (api-gateway).
+  Group 120's skip restored the last surprise result with a TTL-respecting read, but that result is saved with a ~340 s TTL, so overnight nothing was restored and the full quote sweep ran (the post-deploy boot log printed "pre-warmed", not "restored ... skipped"). New `_load_last_result_stale_from_durable_cache` (get_stale) is tried in the closed/holiday branch; freshness is still age-checked at read time.
+  Also corrects my earlier "burst looks gone" reading (logs can't show it). 6 new tests (loader and warm branch run standalone here, not under pytest). Details: `docs/GROUP131_CLOSED_MARKET_WARM_STALE_RESTORE.md`.
+- 2026-10-04 (group 130)  After-hours scan: the group 121 split line is logged only when rows were written (real-trade-service).
+  The post-deploy boot log printed it right before group 85's "0 rows written - <why>" line, duplicating it. Zero-write passes now log just the "0 rows written" line + funnel. No behaviour change.
+  Tests adjusted/added (function run against stubs here, not under pytest). Details: `docs/GROUP130_AFTERHOURS_NO_DUPLICATE_SUMMARY.md`.
+- 2026-10-04 (group 129)  News fetch logging: one INFO summary per symbol instead of 7+ per-source lines (analysis-intelligence-service).
+  `_fetch_headlines` now logs `news sources for SYM: yahoo_news=0 google_news=1 ... (total N)`; per-source lines are DEBUG, failures stay WARNING. No behaviour change.
+  1 new test (loop run against stubs here, not under pytest). Details: `docs/GROUP129_NEWS_SOURCE_LOG_SUMMARY.md`.
+- 2026-10-04 (group 128)  Hugging Face news sentiment moved to the Inference Providers router (analysis-intelligence-service).
+  The old `api-inference.huggingface.co` host no longer resolves, so every headline fell back to neutral 0.0. `_score_headline` now posts chat-completions to `router.huggingface.co` (env `HF_MODEL`, `HF_API_URL`), and skips the call for 300 s after a network failure. Unverified: whether the default model is served to your token; see the doc for what to set.
+  Tests updated/added (function run against stub httpx here, not under pytest). Details: `docs/GROUP128_HF_SENTIMENT_ROUTER_MIGRATION.md`.
+- 2026-10-04 (group 127)  AngelOne `/angelone/movers`: rate-limited sweeps are flagged (market-data-service).
+  Post-deploy boot log: AngelOne 403 "exceeding access rate" mid-sweep, yet `status=ok, quotes_fetched=2610 of 2710` was cached for the full TTL. Now under 98 % coverage adds `partial: true` + `missing_quotes`, logs a WARNING and caches 120 s so the next poll retries; complete sweeps unchanged.
+  5 new tests (helper run standalone, not under pytest). Log findings with no code change (unresolved HFCL/MTARTECH/STLTECH etc. are real `-EQ`-less names; Hugging Face `api-inference` endpoint retired so sentiment is always neutral): `docs/GROUP127_ANGELONE_MOVERS_PARTIAL_SWEEP.md`.
 - 2026-10-04 (group 126)  Guard test: the built-in 250-symbol boot universe has no known-delisted symbol (market-data-service).
   Checked the real list (no AAKASH/ANNAPURNA/TATAMTRDVR, no duplicates or blanks) and pinned it with 2 tests. No production change. The "248/250" unresolved symbols are other names; group124's warning will list them.
   Details: `docs/GROUP126_FALLBACK_UNIVERSE_GUARD.md`.

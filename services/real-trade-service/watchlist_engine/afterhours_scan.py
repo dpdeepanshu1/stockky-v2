@@ -972,11 +972,14 @@ async def run_afterhours_scan(db, mode: str, market_date: str, manual: bool = Fa
     # if 9 symbols were lost. They were not: after a restart or a repeat pass the
     # earlier pass's rows are already stored at an equal or higher score, so only
     # genuinely new/improved symbols are written. Say so, with the full split.
-    logger.info(
-        "afterhours-scan [%s %s]: %d symbol(s) scored → %d new/updated row(s), "
-        "%d already stored at an equal or higher score (unchanged), %d failed",
-        mode, market_date, len(best), written, unchanged, failed,
-    )
+    # Group 130: when nothing was written, the "0 rows written - <why>" line below already says
+    # the same thing (the boot log printed both back to back), so the split line is for writes only.
+    if written > 0:
+        logger.info(
+            "afterhours-scan [%s %s]: %d symbol(s) scored → %d new/updated row(s), "
+            "%d already stored at an equal or higher score (unchanged), %d failed",
+            mode, market_date, len(best), written, unchanged, failed,
+        )
     if written == 0:
         # Item 17: say why nothing was written.
         if failed and failed == len(best):

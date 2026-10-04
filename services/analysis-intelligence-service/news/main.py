@@ -42,7 +42,15 @@ def _utcnow() -> datetime:
 app = FastAPI(title="Stockky News Intelligence Service", version="0.5.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+# Group 128: Hugging Face retired api-inference.huggingface.co (DNS no longer resolves: boot log showed
+# "HF API call failed: [Errno -5] No address associated with hostname" for every headline, so sentiment
+# was always the neutral 0.0 fallback). Inference Providers are reached through the OpenAI-compatible router.
+# Both are overridable; the model must be one your HF token can use through Inference Providers.
+HF_API_URL = (os.getenv("HF_API_URL") or "").strip() or "https://router.huggingface.co/v1/chat/completions"
+HF_MODEL = (os.getenv("HF_MODEL") or "").strip() or "mistralai/Mistral-7B-Instruct-v0.2"
+# After a network-level failure (DNS/connect/timeout) skip the call for a while instead of retrying per headline.
+HF_FAILURE_BACKOFF_SEC = 300.0
+_HF_BACKOFF_UNTIL = 0.0
 HF_API_KEY = (os.getenv("HF_API_KEY") or "").strip() or None
 
 # Optional NewsAPI key (free tier)
@@ -583,13 +591,20 @@ def _fetch_headlines(symbol: str, max_items: int = 15) -> List[dict]:
     if NEWSAPI_KEY:
         sources.append(_fetch_newsapi)
 
+    # Group 129: this used to log one INFO line per source (7+ lines per symbol, hundreds per
+    # stockky-hot pass). One summary line per symbol now; the per-source line is DEBUG.
+    per_source = []
     for source_func in sources:
+        short = source_func.__name__.replace("_fetch_", "")
         try:
             items = source_func(symbol, max_items=10)
             all_news.extend(items)
-            logger.info("Fetched %d items from %s", len(items), source_func.__name__)
+            per_source.append(f"{short}={len(items)}")
+            logger.debug("Fetched %d items from %s", len(items), source_func.__name__)
         except Exception as e:
+            per_source.append(f"{short}=failed")
             logger.warning("Source %s failed: %s", source_func.__name__, e)
+    logger.info("news sources for %s: %s (total %d)", symbol, " ".join(per_source), len(all_news))
 
     seen = set()
     unique = []
@@ -635,14 +650,25 @@ def _summarize_headlines(headlines: List[dict], symbol: str) -> str:
 
 
 def _score_headline(title: str) -> float:
-    """Call Hugging Face Inference API to get sentiment score."""
+    """Call Hugging Face Inference Providers (router, chat-completions) to get a sentiment score."""
+    global _HF_BACKOFF_UNTIL
     if not HF_API_KEY:
         logger.warning("HF_API_KEY not set; using neutral fallback")
         return 0.0
+    if time.monotonic() < _HF_BACKOFF_UNTIL:
+        return 0.0
     try:
         payload = {
-            "inputs": f"Classify the sentiment of this stock news headline as positive, negative, or neutral: {title}",
-            "parameters": {"max_new_tokens": 10, "temperature": 0.1}
+            "model": HF_MODEL,
+            "messages": [{
+                "role": "user",
+                "content": (
+                    "Classify the sentiment of this stock news headline as positive, negative, "
+                    f"or neutral. Answer with one word: {title}"
+                ),
+            }],
+            "max_tokens": 10,
+            "temperature": 0.1,
         }
         headers = {
             "Authorization": f"Bearer {HF_API_KEY}",
@@ -651,7 +677,7 @@ def _score_headline(title: str) -> float:
         resp = httpx.post(HF_API_URL, json=payload, headers=headers, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
-            result = data[0]['generated_text'].strip().lower()
+            result = str(data["choices"][0]["message"]["content"]).strip().lower()
             if "positive" in result:
                 return 0.8
             elif "negative" in result:
@@ -672,7 +698,13 @@ def _score_headline(title: str) -> float:
                     pass
             return 0.0
     except Exception as e:
-        logger.warning(f"HF API call failed: {e}")
+        if isinstance(e, httpx.TransportError):
+            _HF_BACKOFF_UNTIL = time.monotonic() + HF_FAILURE_BACKOFF_SEC
+            logger.warning(
+                f"HF API call failed: {e} - skipping Hugging Face sentiment for {int(HF_FAILURE_BACKOFF_SEC)}s"
+            )
+        else:
+            logger.warning(f"HF API call failed: {e}")
         try:
             from rate_limit_report import report_if_rate_limited
             report_if_rate_limited(e, provider="analysis", path="news/huggingface")

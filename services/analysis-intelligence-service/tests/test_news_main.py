@@ -635,6 +635,23 @@ class TestFetchHeadlines:
         assert called == _ACTIVE_SOURCE_NAMES and len(called) == 7
         assert not set(called) & set(_RETIRED)
 
+    def test_one_info_summary_line_per_symbol_not_one_per_source(self, monkeypatch, caplog):
+        # group129: was 7+ INFO lines per symbol ("Fetched N items from _fetch_x")
+        import logging
+        monkeypatch.setattr(nm, "NEWSAPI_KEY", None)
+        _patch_sources(monkeypatch, {
+            "_fetch_google_news": [{"title": "a", "published": "2026-01-01"}],
+            "_fetch_livemint": RuntimeError("boom"),
+        })
+        caplog.set_level(logging.INFO)
+        nm._fetch_headlines("INFY")
+        info = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        assert not any(m.startswith("Fetched ") for m in info)
+        summary = [m for m in info if m.startswith("news sources for INFY:")]
+        assert len(summary) == 1
+        assert "yahoo_news=0" in summary[0] and "google_news=1" in summary[0]
+        assert "livemint=failed" in summary[0] and summary[0].endswith("(total 1)")
+
     def test_newsapi_added_when_key_present(self, monkeypatch):
         monkeypatch.setattr(nm, "NEWSAPI_KEY", "K")
         called = _patch_sources(monkeypatch)
@@ -727,6 +744,41 @@ class TestSummarizeHeadlines:
 # ── _score_headline ───────────────────────────────────────────────────────────
 
 class TestScoreHeadline:
+    @pytest.fixture(autouse=True)
+    def _reset_hf_backoff(self, monkeypatch):
+        monkeypatch.setattr(nm, "_HF_BACKOFF_UNTIL", 0.0)
+
+    def test_default_endpoint_is_the_router_not_the_retired_host(self):
+        assert "api-inference.huggingface.co" not in nm.HF_API_URL
+        assert nm.HF_API_URL.startswith("https://router.huggingface.co/")
+
+    def test_network_failure_backs_off_then_skips_calls(self, monkeypatch):
+        monkeypatch.setattr(nm, "HF_API_KEY", "K")
+        calls = []
+
+        def boom(*a, **k):
+            calls.append(1)
+            raise nm.httpx.ConnectError("No address associated with hostname")
+
+        monkeypatch.setattr(nm.httpx, "post", boom)
+        assert nm._score_headline("h1") == 0.0
+        assert nm._score_headline("h2") == 0.0
+        assert nm._score_headline("h3") == 0.0
+        assert len(calls) == 1  # backed off after the first transport failure
+
+    def test_backoff_expires(self, monkeypatch):
+        monkeypatch.setattr(nm, "HF_API_KEY", "K")
+        monkeypatch.setattr(nm, "_HF_BACKOFF_UNTIL", nm.time.monotonic() - 1)
+        monkeypatch.setattr(nm.httpx, "post",
+                            lambda *a, **k: _Resp(200, {"choices": [{"message": {"content": "positive"}}]}))
+        assert nm._score_headline("h") == 0.8
+
+    def test_non_network_error_does_not_back_off(self, monkeypatch):
+        monkeypatch.setattr(nm, "HF_API_KEY", "K")
+        monkeypatch.setattr(nm.httpx, "post", lambda *a, **k: _Resp(200, {"unexpected": True}))
+        assert nm._score_headline("h") == 0.0
+        assert nm._HF_BACKOFF_UNTIL == 0.0
+
     def test_no_key_returns_zero(self, monkeypatch):
         monkeypatch.setattr(nm, "HF_API_KEY", None)
         assert nm._score_headline("anything") == 0.0
@@ -740,12 +792,13 @@ class TestScoreHeadline:
 
         def fake_post(url, json=None, headers=None, timeout=None):
             captured.update(url=url, json=json, headers=headers, timeout=timeout)
-            return _Resp(200, [{"generated_text": f"  {text} "}])
+            return _Resp(200, {"choices": [{"message": {"content": f"  {text} "}}]})
 
         monkeypatch.setattr(nm.httpx, "post", fake_post)
         assert nm._score_headline("Some headline") == expected
         assert captured["headers"]["Authorization"] == "Bearer K"
-        assert "Some headline" in captured["json"]["inputs"]
+        assert "Some headline" in captured["json"]["messages"][0]["content"]
+        assert captured["json"]["model"] == nm.HF_MODEL
         assert captured["url"] == nm.HF_API_URL
 
     @pytest.mark.parametrize("status", [429, 503])

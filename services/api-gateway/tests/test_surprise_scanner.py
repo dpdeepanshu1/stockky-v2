@@ -125,6 +125,8 @@ class FakeKV(types.ModuleType):
     def __init__(self):
         super().__init__("kv_cache")
         self.store = {}
+        self.stale = {}           # expired rows: visible to get_stale only (group131)
+        self.get_stale_raises = None
         self.sets = []            # (key, value, ttl) for kv_cache.set
         self.kv_sets = []         # (key, value, ttl) for kv_cache.kv_set
         self.get_raises = None
@@ -136,6 +138,11 @@ class FakeKV(types.ModuleType):
         if self.get_raises is not None:
             raise self.get_raises
         return self.store.get(key)
+
+    def get_stale(self, key):
+        if self.get_stale_raises is not None:
+            raise self.get_stale_raises
+        return self.store.get(key) if self.store.get(key) is not None else self.stale.get(key)
 
     def set(self, key, value, ttl=None):
         if self.set_raises is not None:
@@ -539,6 +546,40 @@ class TestLoadLastResultFromDurableCache:
         monkeypatch.setitem(sys.modules, "kv_cache", None)
         eng._load_last_result_from_durable_cache()
         assert eng._last_result is None
+
+
+class TestLoadLastResultStaleFromDurableCache:
+    """group131: the saved last result expires ~340 s after the scan, so overnight only get_stale sees it."""
+
+    KEY = "stockky:surprise_scan:last_result"
+
+    def test_plain_read_misses_but_stale_read_restores(self, eng, kv):
+        kv.stale[self.KEY] = {"result": {"count": 7}, "scan_ts": "100.0"}
+        eng._load_last_result_from_durable_cache()
+        assert eng._last_result is None
+        eng._load_last_result_stale_from_durable_cache()
+        assert eng._last_result == {"count": 7} and eng._last_scan_ts == 100.0
+
+    @pytest.mark.parametrize("payload", [None, "str", {"result": "x", "scan_ts": 1}, {"result": {"a": 1}}])
+    def test_unusable_payload_is_ignored(self, eng, kv, payload):
+        kv.stale[self.KEY] = payload
+        eng._load_last_result_stale_from_durable_cache()
+        assert eng._last_result is None and eng._last_scan_ts == 0.0
+
+    def test_errors_are_swallowed(self, eng, kv, monkeypatch):
+        kv.get_stale_raises = RuntimeError("db down")
+        eng._load_last_result_stale_from_durable_cache()
+        assert eng._last_result is None
+        monkeypatch.setitem(sys.modules, "kv_cache", None)
+        eng._load_last_result_stale_from_durable_cache()
+        assert eng._last_result is None
+
+    def test_a_stale_restore_is_not_served_as_fresh(self, eng, kv):
+        import time as _t
+        kv.stale[self.KEY] = {"result": {"count": 7}, "scan_ts": str(_t.time() - 6 * 3600)}
+        eng._load_last_result_stale_from_durable_cache()
+        assert eng._last_result is not None
+        assert (_t.time() - eng._last_scan_ts) > 220  # scan(cached=True) age check rejects it
 
 
 # ── load_static_cache ─────────────────────────────────────────────────────────
@@ -1642,12 +1683,20 @@ class TestScanLastResultPersistence:
         key, payload, ttl = kv.sets[-1]
         assert key == sc.SURPRISE_LAST_RESULT_CACHE_KEY
         assert payload == {"result": out, "scan_ts": r.clock.now}
-        assert ttl == int(sc.SURPRISE_CACHE_MAX_AGE_SEC) + 120
+        # group132: kept for days (age is checked at read time), no longer ~340 s
+        assert ttl == sc.SURPRISE_LAST_RESULT_TTL_DEFAULT_SEC == 7 * 24 * 3600
 
-    def test_ttl_follows_the_max_age_argument(self, rig, kv):
+    def test_ttl_never_drops_below_the_max_age_floor(self, rig, kv, monkeypatch):
+        monkeypatch.setenv("SURPRISE_LAST_RESULT_TTL_SEC", "60")
         r = rig(static={"A": static_row()})
         r.scan(cached_max_age_sec=30.9)
-        assert kv.sets[-1][2] == 150
+        assert kv.sets[-1][2] == 150          # max(60, 30 + 120)
+
+    @pytest.mark.parametrize("raw,expected", [("", 604800), ("  ", 604800), ("junk", 604800),
+                                              ("3600", 3600), ("3600.9", 3600), ("-5", 340), ("0", 340)])
+    def test_ttl_env_parsing(self, sc, monkeypatch, raw, expected):
+        monkeypatch.setenv("SURPRISE_LAST_RESULT_TTL_SEC", raw)
+        assert sc._last_result_durable_ttl_sec(220) == expected
 
     def test_filtered_scans_are_not_cached(self, rig, kv):
         r = rig(static={"A": static_row()})

@@ -10337,7 +10337,12 @@ async def _warm_surprise_scan_cache():
                 await asyncio.sleep(delay)
             from surprise_scanner import surprise_engine
             if _market_session_phase_ist() in ("closed", "holiday"):
-                loader = getattr(surprise_engine, "_load_last_result_from_durable_cache", None)
+                # group132: ONE stale read, tried first. group131 ran the plain read first, but kv_cache's
+                # plain read DELETES an expired row, so the stale read that followed never found it. The
+                # stale read accepts expired rows and removes nothing (freshness is age-checked in scan()).
+                # An engine without it (older build) falls back to the plain read as before.
+                loader = (getattr(surprise_engine, "_load_last_result_stale_from_durable_cache", None)
+                          or getattr(surprise_engine, "_load_last_result_from_durable_cache", None))
                 if callable(loader):
                     await asyncio.to_thread(loader)
                 if getattr(surprise_engine, "_last_result", None) is not None:

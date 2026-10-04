@@ -79,6 +79,26 @@ SURPRISE_CACHE_MAX_AGE_SEC = float(((os.getenv("SURPRISE_CACHE_MAX_AGE_SEC") or 
 # longer forces a full 320s scan before the fast path can work again — the
 # last real scan survives the restart.
 SURPRISE_LAST_RESULT_CACHE_KEY = "stockky:surprise_scan:last_result"
+
+
+# group132: how long the durable copy of the last result is kept. It used to be cached_max_age_sec + 120
+# (~340 s), and kv_cache's plain read DELETES a row it finds expired, so the first plain read after that
+# (or group 120's own closed-market restore) removed the only copy: a night-time or weekend restart then
+# had nothing to restore and ran the full ~1,000-quote sweep. Freshness never depends on this TTL: the
+# only consumer of _last_result is scan(cached=True), which age-checks scan_ts against cached_max_age_sec.
+# Default 7 days (covers a long weekend plus a holiday); env SURPRISE_LAST_RESULT_TTL_SEC overrides, and the
+# old cached_max_age_sec + 120 is kept as a floor.
+SURPRISE_LAST_RESULT_TTL_DEFAULT_SEC = 7 * 24 * 3600
+
+
+def _last_result_durable_ttl_sec(cached_max_age_sec: float) -> int:
+    floor = int(cached_max_age_sec) + 120
+    try:
+        configured = int(float(((os.getenv("SURPRISE_LAST_RESULT_TTL_SEC") or "").strip()
+                                or str(SURPRISE_LAST_RESULT_TTL_DEFAULT_SEC))))
+    except ValueError:
+        configured = SURPRISE_LAST_RESULT_TTL_DEFAULT_SEC
+    return max(floor, configured)
 MAX_STOCK_PRICE = float(os.getenv("MAX_STOCK_PRICE", "0") or 0)
 # Value-buy badge: ₹20–₹500 (same as buy_sniper — midcaps/smallcaps outperforming)
 VALUE_BUY_THRESHOLD = float(os.getenv("VALUE_BUY_THRESHOLD", "500") or 500)
@@ -332,6 +352,26 @@ class SurpriseStockEngine:
                 self._last_scan_ts = float(payload["scan_ts"])
         except Exception as e:
             logger.debug("surprise last-result durable cache parse failed (non-fatal): %s", e)
+
+    def _load_last_result_stale_from_durable_cache(self) -> None:
+        """Group 131: same as _load_last_result_from_durable_cache, but also accepts an EXPIRED row
+        (kv_cache.get_stale). The last result is saved with a ~340 s TTL (cached_max_age_sec + 120),
+        so after market hours or a night-time restart a plain read finds nothing, and the closed-market
+        boot warm (group 120) fell through to the full ~1,000-quote sweep it was meant to skip.
+        Freshness is still decided at read time: scan(cached=True) serves a result only when its
+        scan_ts age is <= cached_max_age_sec, so a stale restore never gets served as fresh."""
+        try:
+            import kv_cache
+            payload = kv_cache.get_stale(SURPRISE_LAST_RESULT_CACHE_KEY)
+        except Exception as e:
+            logger.debug("surprise last-result stale durable cache load failed (non-fatal): %s", e)
+            return
+        try:
+            if isinstance(payload, dict) and isinstance(payload.get("result"), dict) and payload.get("scan_ts"):
+                self._last_result = payload["result"]
+                self._last_scan_ts = float(payload["scan_ts"])
+        except Exception as e:
+            logger.debug("surprise last-result stale durable cache parse failed (non-fatal): %s", e)
 
     def load_static_cache(self, force: bool = False) -> int:
         if self.static_cache and not force and (time.time() - self._loaded_at) < 300:
@@ -958,8 +998,9 @@ class SurpriseStockEngine:
             # 2026-09-18 fix: also persist durably so a restart doesn't force
             # the next cached=true caller through another full ~320s scan —
             # see SURPRISE_LAST_RESULT_CACHE_KEY docstring above. TTL gives
-            # some margin over cached_max_age_sec since the age check above
-            # (not this TTL) is what actually decides freshness at read time.
+            # margin over cached_max_age_sec (group132: now days, see
+            # _last_result_durable_ttl_sec) since the age check above (not this TTL)
+            # is what actually decides freshness at read time.
             try:
                 import kv_cache
                 # AUDIT FIX (2026-09-19): blocking Neon write — see the
@@ -969,7 +1010,7 @@ class SurpriseStockEngine:
                     kv_cache.set,
                     SURPRISE_LAST_RESULT_CACHE_KEY,
                     {"result": result, "scan_ts": self._last_scan_ts},
-                    int(cached_max_age_sec) + 120,
+                    _last_result_durable_ttl_sec(cached_max_age_sec),
                 )
             except Exception as e:
                 logger.debug("surprise last-result durable cache set failed (non-fatal): %s", e)

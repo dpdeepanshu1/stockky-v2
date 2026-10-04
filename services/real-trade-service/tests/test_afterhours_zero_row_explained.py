@@ -173,7 +173,18 @@ class TestRunReportsAlreadyStoredSplit:
         bad = MagicMock()
         bad.query.side_effect = RuntimeError("db down")
         assert _scan(bad, rss={"Moneycontrol": [_item(HEADLINE)]}) == 0
-        assert "0 new/updated row(s), 0 already stored at an equal or higher score (unchanged), 1 failed" in caplog.text
+        # group130: with nothing written only the "0 rows written - <why>" line is logged
+        assert "0 rows written — every one of 1 upsert(s) FAILED" in caplog.text
+        assert "new/updated row(s)" not in caplog.text
+
+    def test_no_duplicate_summary_when_everything_already_stored(self, db, caplog):
+        rss = {"Moneycontrol": [_item(HEADLINE)]}
+        assert _scan(db, rss=rss, known=("RELIANCE", "TCS")) == 1
+        caplog.clear()
+        caplog.set_level(logging.INFO)
+        assert _scan(db, rss=rss, known=("RELIANCE", "TCS")) == 0
+        assert "0 rows written — all 1 scored symbol(s) already stored" in caplog.text
+        assert "new/updated row(s)" not in caplog.text
 
     def test_telegram_header_mentions_already_stored(self, db):
         rss = {"Moneycontrol": [_item(HEADLINE)]}

@@ -1023,6 +1023,53 @@ class TestWarmSurpriseScanCache:
         assert env.loads == 1 and env.scan_calls == []
         assert "skipped the boot quote sweep" in caplog.text
 
+    def test_closed_overnight_restores_the_expired_saved_result_and_skips_the_sweep(self, env, caplog):
+        # group131/132: the saved result may be expired; only the stale loader (accepts expired rows and
+        # deletes nothing) can restore it. It is tried FIRST: the plain read deletes an expired row.
+        env.phase = "closed"
+        env.restored = None
+        stale_calls = []
+
+        def stale_loader():
+            stale_calls.append(1)
+            surprise_scanner.surprise_engine._last_result = {"count": 5}
+
+        surprise_scanner.surprise_engine._load_last_result_stale_from_durable_cache = stale_loader
+
+        async def go():
+            await gw._warm_surprise_scan_cache()
+            await _drain()()
+
+        with caplog.at_level("INFO"):
+            _run(go())
+        assert stale_calls == [1] and env.loads == 0     # plain read never runs, so it cannot purge the row
+        assert env.scan_calls == []
+        assert "restored the last surprise/scan result" in caplog.text
+
+    def test_closed_market_with_nothing_saved_still_warms_after_one_stale_read(self, env):
+        env.phase = "closed"
+        stale_calls = []
+        surprise_scanner.surprise_engine._load_last_result_stale_from_durable_cache = lambda: stale_calls.append(1)
+
+        async def go():
+            await gw._warm_surprise_scan_cache()
+            await _drain()()
+
+        _run(go())
+        assert stale_calls == [1] and env.loads == 0 and len(env.scan_calls) == 1
+
+    def test_open_market_never_uses_the_stale_loader(self, env):
+        env.phase = "open"
+        stale_calls = []
+        surprise_scanner.surprise_engine._load_last_result_stale_from_durable_cache = lambda: stale_calls.append(1)
+
+        async def go():
+            await gw._warm_surprise_scan_cache()
+            await _drain()()
+
+        _run(go())
+        assert stale_calls == [] and env.scan_kwargs == [{"cached": True}]
+
     def test_closed_market_without_a_saved_result_still_warms(self, env):
         env.phase = "closed"
         env.restored = None

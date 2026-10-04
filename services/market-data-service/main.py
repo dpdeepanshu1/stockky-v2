@@ -2082,6 +2082,19 @@ def get_quote(symbol: str):
 
 
 
+_MOVERS_MIN_COVERAGE = 0.98
+_MOVERS_PARTIAL_TTL_S = 120
+
+
+def _movers_sweep_coverage(fetched: int, universe: int):
+    """Group 127: (is_partial, missing_count) for an AngelOne movers sweep. Partial means fewer
+    than _MOVERS_MIN_COVERAGE of the universe came back. An empty universe is never partial."""
+    if universe <= 0:
+        return False, 0
+    missing = max(universe - max(fetched, 0), 0)
+    return (fetched / universe) < _MOVERS_MIN_COVERAGE, missing
+
+
 @app.get("/angelone/movers")
 def angelone_movers():
     """
@@ -2159,7 +2172,21 @@ def angelone_movers():
             "quotes_fetched": len(rows_raw),
             "fetched_at": datetime.utcnow().isoformat(),
         }
-        _cache_set(cache_key, result)
+        # Group 127: a rate-limited sweep (AngelOne 403 "exceeding access rate" cooldown mid-sweep)
+        # silently skipped whole batches yet came back as a plain status=ok result that was then
+        # cached for the full TTL (boot log: quotes_fetched=2610 of 2710). Flag it and retry sooner.
+        _partial, _missing = _movers_sweep_coverage(len(rows_raw), len(tokens))
+        if _partial:
+            result["partial"] = True
+            result["missing_quotes"] = _missing
+            logger.warning(
+                "angelone/movers: partial sweep - %d of %d quotes fetched (%d missing, likely an "
+                "AngelOne rate-limit cooldown); caching for %ds instead of the full TTL",
+                len(rows_raw), len(tokens), _missing, _MOVERS_PARTIAL_TTL_S,
+            )
+            _cache_set(cache_key, result, ttl=_MOVERS_PARTIAL_TTL_S)
+        else:
+            _cache_set(cache_key, result)
         return result
     except Exception as e:
         logger.warning("angelone/movers failed: %s", e)

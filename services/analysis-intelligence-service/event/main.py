@@ -503,11 +503,63 @@ def _fetch_google_news(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]
         return []
 
 
+# ── Shared site-wide feed cache (group 144) ───────────────────────────────────
+# Moneycontrol, Economic Times and CNBC TV18 are ONE document each that every symbol filters by
+# keyword, yet each symbol lookup used to download all three again (a 97-symbol scan = ~290
+# identical downloads, and CNBC TV18 returns 0 entries every time). They are now fetched at most
+# once per EVENT_FEED_CACHE_SECONDS (default 300; blank = default; 0 = off = old behaviour). An
+# empty or failed fetch is remembered for EVENT_FEED_EMPTY_CACHE_SECONDS (default 600) so a dead
+# feed is not retried per symbol. The per-symbol Google News query is NOT cached (it differs by symbol).
+import threading as _threading
+
+_FEED_CACHE: Dict[str, tuple] = {}
+_FEED_LOCKS: Dict[str, "_threading.Lock"] = {}
+_FEED_LOCKS_GUARD = _threading.Lock()
+
+
+def _feed_cache_seconds(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0, int(float(raw)))
+    except ValueError:
+        return default
+
+
+def _parse_site_feed(feed_url: str):
+    """feedparser.parse(feed_url) behind a small shared TTL cache. Exceptions propagate to the
+    caller exactly as before (the caller's own except clause logs them); a failure is cached as a
+    miss for the empty-TTL so the next symbol does not retry at once."""
+    ttl = _feed_cache_seconds("EVENT_FEED_CACHE_SECONDS", 300)
+    if ttl <= 0:
+        return feedparser.parse(feed_url)
+    empty_ttl = _feed_cache_seconds("EVENT_FEED_EMPTY_CACHE_SECONDS", 600)
+    with _FEED_LOCKS_GUARD:
+        lock = _FEED_LOCKS.setdefault(feed_url, _threading.Lock())
+    with lock:  # one thread downloads; the others wait and then read the cache
+        hit = _FEED_CACHE.get(feed_url)
+        now = time.time()
+        if hit and hit[0] > now:
+            if hit[2] is not None:
+                raise hit[2]
+            return hit[1]
+        try:
+            parsed = feedparser.parse(feed_url)
+        except Exception as e:
+            _FEED_CACHE[feed_url] = (now + empty_ttl, None, e)
+            raise
+        n = len(getattr(parsed, "entries", None) or [])
+        _FEED_CACHE[feed_url] = (now + (ttl if n else empty_ttl), parsed, None)
+        return parsed
+
+
+
 def _fetch_moneycontrol_news(symbol: str, max_items: int = 5) -> List[Dict[str, Any]]:
     keywords = _get_keywords(symbol)
     feed_url = "https://www.moneycontrol.com/rss/latestnews.xml"
     try:
-        parsed = feedparser.parse(feed_url)
+        parsed = _parse_site_feed(feed_url)
         logger.info(f"Moneycontrol feed entries for {symbol}: {len(parsed.entries)}")
         items = []
         cutoff = _utcnow() - timedelta(days=30)
@@ -539,7 +591,7 @@ def _fetch_economic_times(symbol: str, max_items: int = 5) -> List[Dict[str, Any
     keywords = _get_keywords(symbol)
     feed_url = "https://economictimes.indiatimes.com/rssfeedstopstories.cms"
     try:
-        parsed = feedparser.parse(feed_url)
+        parsed = _parse_site_feed(feed_url)
         logger.info(f"Economic Times feed entries for {symbol}: {len(parsed.entries)}")
         items = []
         cutoff = _utcnow() - timedelta(days=30)
@@ -571,7 +623,7 @@ def _fetch_cnbc_tv18(symbol: str, max_items: int = 5) -> List[Dict[str, Any]]:
     keywords = _get_keywords(symbol)
     feed_url = "https://www.cnbctv18.com/feed/"
     try:
-        parsed = feedparser.parse(feed_url)
+        parsed = _parse_site_feed(feed_url)
         logger.info(f"CNBC TV18 feed entries for {symbol}: {len(parsed.entries)}")
         items = []
         cutoff = _utcnow() - timedelta(days=30)

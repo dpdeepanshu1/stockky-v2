@@ -852,6 +852,7 @@ class TestSeedsAndEnvelope:
         row = stored(cold)
         assert row["rsi"] == 50.0 and row["rsi_seed"] is True
         assert row["pe_ratio"] == 22.5 and row["pe_seed"] is True
+        assert row["pe_ratio_seed"] is True          # group 145: the flag merge_feed_payload actually reads
         assert row["roce"] == 15.0 and row["roce_seed"] is True
         assert row["sentiment_score"] == 0.65 and row["sentiment_seed"] is True and row["news_score"] == 0.65
         assert "price" not in row
@@ -906,3 +907,11 @@ class TestSeedsAndEnvelope:
         assert out["patched_fields"] == ["price", "rsi", "pe_ratio", "roce", "sentiment_score"]
         assert out["complete"] is True and out["still_missing"] == [] and out["price"] == 55.0
         assert out["message"] == "Repaired A: price, rsi, pe_ratio, roce, sentiment_score — complete"
+
+
+def test_repair_pe_seed_cannot_overwrite_a_real_stored_pe():
+    """Group 145: the repair's PE seed must carry the flag merge_feed_payload recognises, so it is
+    rejected when a real PE is already stored."""
+    import data_feed as df
+    out = df.merge_feed_payload({"pe_ratio": 30.0}, {"pe_ratio": 22.5, "pe_seed": True, "pe_ratio_seed": True})
+    assert out["pe_ratio"] == 30.0 and not out.get("pe_ratio_seed")

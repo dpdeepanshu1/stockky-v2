@@ -12104,6 +12104,10 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
     if "pe_ratio" in missing:
         current["pe_ratio"] = 22.5
         current["pe_seed"] = True
+        # Group 145: data_feed.merge_feed_payload only recognises "pe_ratio_seed" (the name bulk uses).
+        # The repair wrote only "pe_seed", so its 22.5 was not protected from overwriting a real stored
+        # PE and was not labelled as a seed. Set both; "pe_seed" stays for anything already reading it.
+        current["pe_ratio_seed"] = True
         patched.append("pe_ratio")
         missing.discard("pe_ratio")
         logger.info("repair %s: seeded baseline PE=22.5", base)

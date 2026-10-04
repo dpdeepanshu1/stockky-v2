@@ -1768,3 +1768,116 @@ class TestSymbolsWithEvents:
         first = em.symbols_with_events()
         em._mem.pop(f"{em.EVENT_CACHE_PREFIX}A.NS")
         assert em.symbols_with_events() == first
+
+
+# ── group 144: shared site-wide feed cache ───────────────────────────────────
+
+class TestSiteFeedCache:
+    URL = "https://www.cnbctv18.com/feed/"
+
+    def _count(self, monkeypatch, result):
+        calls = []
+
+        def parse(u):
+            calls.append(u)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        monkeypatch.setattr(em.feedparser, "parse", parse)
+        return calls
+
+    def test_second_symbol_reuses_the_download(self, monkeypatch, company):
+        calls = self._count(monkeypatch, _feed([_entry("Zenith Widgets posts profit", "http://z")]))
+        a = em._fetch_moneycontrol_news("ZWID.NS")
+        b = em._fetch_moneycontrol_news("ZWID.NS")
+        assert len(calls) == 1
+        assert a == b and len(a) == 1
+
+    def test_each_feed_is_cached_separately(self, monkeypatch, company):
+        calls = self._count(monkeypatch, _feed([_entry()]))
+        em._fetch_moneycontrol_news("ZWID.NS")
+        em._fetch_economic_times("ZWID.NS")
+        em._fetch_cnbc_tv18("ZWID.NS")
+        em._fetch_cnbc_tv18("ZWID.NS")
+        assert len(calls) == 3
+
+    def test_empty_feed_not_refetched_per_symbol(self, monkeypatch, company):
+        calls = self._count(monkeypatch, _feed([]))
+        for _ in range(5):
+            assert em._fetch_cnbc_tv18("ZWID.NS") == []
+        assert len(calls) == 1
+
+    def test_failure_is_cached_and_still_returns_empty(self, monkeypatch, company):
+        calls = self._count(monkeypatch, RuntimeError("boom"))
+        for _ in range(3):
+            assert em._fetch_economic_times("ZWID.NS") == []
+        assert len(calls) == 1
+
+    def test_expiry_refetches(self, monkeypatch, company):
+        calls = self._count(monkeypatch, _feed([_entry()]))
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(em.time, "time", lambda: clock["t"])
+        em._fetch_moneycontrol_news("ZWID.NS")
+        clock["t"] += 299
+        em._fetch_moneycontrol_news("ZWID.NS")
+        assert len(calls) == 1
+        clock["t"] += 2
+        em._fetch_moneycontrol_news("ZWID.NS")
+        assert len(calls) == 2
+
+    def test_empty_ttl_is_longer_than_success_ttl(self, monkeypatch, company):
+        calls = self._count(monkeypatch, _feed([]))
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(em.time, "time", lambda: clock["t"])
+        em._fetch_cnbc_tv18("ZWID.NS")
+        clock["t"] += 599
+        em._fetch_cnbc_tv18("ZWID.NS")
+        assert len(calls) == 1
+        clock["t"] += 2
+        em._fetch_cnbc_tv18("ZWID.NS")
+        assert len(calls) == 2
+
+    def test_zero_turns_the_cache_off(self, monkeypatch, company):
+        monkeypatch.setenv("EVENT_FEED_CACHE_SECONDS", "0")
+        calls = self._count(monkeypatch, _feed([_entry()]))
+        em._fetch_moneycontrol_news("ZWID.NS")
+        em._fetch_moneycontrol_news("ZWID.NS")
+        assert len(calls) == 2
+
+    @pytest.mark.parametrize("raw", ["", "   ", "abc"])
+    def test_blank_or_bad_env_means_default(self, monkeypatch, raw):
+        monkeypatch.setenv("EVENT_FEED_CACHE_SECONDS", raw)
+        assert em._feed_cache_seconds("EVENT_FEED_CACHE_SECONDS", 300) == 300
+
+    def test_custom_seconds_parsed(self, monkeypatch):
+        monkeypatch.setenv("EVENT_FEED_CACHE_SECONDS", "45")
+        assert em._feed_cache_seconds("EVENT_FEED_CACHE_SECONDS", 300) == 45
+
+    def test_google_news_is_not_cached(self, monkeypatch, company):
+        calls = self._count(monkeypatch, _feed([_entry()]))
+        em._fetch_google_news("ZWID.NS")
+        em._fetch_google_news("ZWID.NS")
+        assert len(calls) == 2
+
+    def test_concurrent_threads_download_once(self, monkeypatch, company):
+        import threading
+        calls = []
+        gate = threading.Event()
+
+        def parse(u):
+            calls.append(u)
+            gate.wait(2)
+            return _feed([_entry()])
+
+        monkeypatch.setattr(em.feedparser, "parse", parse)
+        out = []
+        ts = [threading.Thread(target=lambda: out.append(em._fetch_moneycontrol_news("ZWID.NS"))) for _ in range(6)]
+        for t in ts:
+            t.start()
+        time.sleep(0.2)
+        gate.set()
+        for t in ts:
+            t.join(5)
+        assert len(calls) == 1
+        assert len(out) == 6

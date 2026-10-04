@@ -34,3 +34,19 @@ def pytest_collectstart(collector):
 
 import os as _os_logcfg
 _os_logcfg.environ.setdefault("HTTPX_LOG_LEVEL", "INFO")  # 2026-10-04: tests assert on httpx INFO lines; production default is WARNING
+
+
+def _clear_feed_caches(module) -> None:
+    for v in list(vars(module).values()):
+        cache = getattr(v, "_FEED_CACHE", None)
+        if isinstance(cache, dict):
+            cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_event_feed_cache(request):
+    """group 144: event/main.py caches the site-wide RSS feeds; every test starts with it empty,
+    whichever name the test module imported event/main.py under."""
+    _clear_feed_caches(request.module)
+    yield
+    _clear_feed_caches(request.module)

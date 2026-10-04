@@ -492,18 +492,18 @@ def promote_model(version: str):
     return {"status": "success", "version": version}
 
 def get_learning_insights():
-    if not HAS_INSIGHTS:
-        raise HTTPException(status_code=501, detail="Insights module not available")
-    report_path = 'training_report.joblib'
-    if not os.path.exists(report_path):
-        raise HTTPException(status_code=404, detail="No training report found")
+    """Learned insights for the Training tab.
+
+    Group 146: this used to return three HARD-CODED example insights (with made-up sample sizes)
+    whenever a training report existed in the working directory, and a 404 otherwise, so the UI could
+    show invented numbers as if they were learned from real trades. Nothing in the service computes
+    learned insights yet (insights.InsightGenerator is not wired to any data source), so the honest
+    answer is an empty list. The Training tab renders an empty list as "No insights available yet."
+    """
     return {
-        "insights": [
-            {"insight": "Bullish market regimes show higher T+5 success rates", "sample_size": 124, "confidence": "high", "active": True},
-            {"insight": "RSI between 50-65 performs best for BUY signals", "sample_size": 87, "confidence": "medium", "active": True},
-            {"insight": "Volume > 1.5x average improves win rate by 12%", "sample_size": 65, "confidence": "high", "active": True}
-        ],
-        "last_updated": ist_now().isoformat()
+        "insights": [],
+        "last_updated": ist_now().isoformat(),
+        "note": "No learned insights are computed yet.",
     }
 
 def get_summary_metrics():

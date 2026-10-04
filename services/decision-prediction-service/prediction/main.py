@@ -446,8 +446,21 @@ def _call_gemini(system_prompt: str, user_prompt: str) -> Optional[str]:
         )
         if resp.status_code == 200:
             data = resp.json()
-            note = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            return note or None
+            # Group 144: a 200 can carry no text part (finishReason SAFETY / MAX_TOKENS / RECITATION,
+            # or a blocked prompt). That used to raise KeyError('parts') and log "Gemini call failed:
+            # KeyError('parts')". Treat it as "no note" and say why. The template note is used instead.
+            cands = data.get("candidates") or []
+            cand = cands[0] if cands else {}
+            parts = ((cand.get("content") or {}).get("parts")) or []
+            text = (parts[0].get("text") if parts and isinstance(parts[0], dict) else None) or ""
+            if not text.strip():
+                logger.info(
+                    "Gemini returned no text (finishReason=%s, blockReason=%s) — using template note",
+                    cand.get("finishReason"),
+                    (data.get("promptFeedback") or {}).get("blockReason"),
+                )
+                return None
+            return text.strip() or None
         if resp.status_code == 429:
             import time as _time
             global _gemini_cooldown_until

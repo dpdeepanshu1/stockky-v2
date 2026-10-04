@@ -1410,6 +1410,15 @@ async def _eod_signal_scan(db, mode: str, gate_armed: bool) -> None:
     await notify_async("\n".join(lines))
 
 
+def _is_nse_holiday_today() -> bool:
+    """True when today (IST) is an NSE/BSE weekday trading holiday. False on any lookup error."""
+    try:
+        from tz_utils import ist_now, is_nse_holiday
+        return bool(is_nse_holiday(ist_now()))
+    except Exception:
+        return False
+
+
 async def _schedule_tick(mode: str) -> None:
     """One pass of the time-trigger loop for a mode. Each feature is gated by
     its per-mode toggle + armed, fires once/day, and is time-of-day bound.
@@ -1423,6 +1432,12 @@ async def _schedule_tick(mode: str) -> None:
     which _run_schedule_tick_sync below preserves as a single atomic
     acquire(blocking=False)."""
     if not is_ist_weekday():
+        return
+    # Group 143: pre-pick and the eDIS morning check are "market need not be open" jobs, so a
+    # weekday NSE holiday (Fri 2026-10-02, Tue 2026-10-20) used to run them and send a picks /
+    # eDIS notification for a day with no session. Skip the whole tick on a holiday. A failed
+    # lookup keeps the old weekday-only behaviour.
+    if _is_nse_holiday_today():
         return
     await asyncio.to_thread(_run_schedule_tick_sync, mode)
 

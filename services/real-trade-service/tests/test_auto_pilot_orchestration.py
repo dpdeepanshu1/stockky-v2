@@ -171,6 +171,33 @@ class TestRunScheduleTickSync:
         assert calls == [(ap._schedule_tick_body, "SCHEDRUN")]
 
 
+class TestScheduleTickHoliday:
+    """Group 143: a weekday NSE holiday skips the schedule tick (no pre-pick / eDIS notification)."""
+
+    def test_holiday_weekday_skips(self, monkeypatch):
+        monkeypatch.setattr(ap, "is_ist_weekday", lambda: True)
+        monkeypatch.setattr(ap, "_is_nse_holiday_today", lambda: True)
+        calls = []
+        monkeypatch.setattr(ap.asyncio, "to_thread", _async_recorder(calls))
+        run(ap._schedule_tick("REAL"))
+        assert calls == []
+
+    def test_holiday_lookup_uses_real_calendar(self, monkeypatch):
+        import tz_utils
+        ist = tz_utils.IST
+        monkeypatch.setattr(tz_utils, "ist_now", lambda now=None: datetime(2026, 10, 2, 9, 0, tzinfo=ist))
+        assert ap._is_nse_holiday_today() is True
+        monkeypatch.setattr(tz_utils, "ist_now", lambda now=None: datetime(2026, 10, 1, 9, 0, tzinfo=ist))
+        assert ap._is_nse_holiday_today() is False
+
+    def test_holiday_lookup_failure_is_false(self, monkeypatch):
+        import tz_utils
+        def boom(now=None):
+            raise RuntimeError("x")
+        monkeypatch.setattr(tz_utils, "is_nse_holiday", boom)
+        assert ap._is_nse_holiday_today() is False
+
+
 class TestTopLevelAsyncWrappers:
     def test_exit_only_tick_delegates_to_thread(self, monkeypatch):
         calls = []
@@ -193,6 +220,7 @@ class TestTopLevelAsyncWrappers:
 
     def test_schedule_tick_delegates_to_thread_on_weekday(self, monkeypatch):
         monkeypatch.setattr(ap, "is_ist_weekday", lambda: True)
+        monkeypatch.setattr(ap, "_is_nse_holiday_today", lambda: False)
         calls = []
         monkeypatch.setattr(ap.asyncio, "to_thread", _async_recorder(calls))
         run(ap._schedule_tick("DEMO"))

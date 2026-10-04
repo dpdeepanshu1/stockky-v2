@@ -45,6 +45,29 @@ def test_night_and_weekend_idle(monkeypatch):
     assert ws_client._offhours_idle() is True
 
 
+def test_weekday_holiday_idles_like_a_weekend(monkeypatch):
+    """Group 140: Fri 2026-10-02 (Gandhi Jayanti) is a trading holiday - no ticks, so do not connect."""
+    monkeypatch.delenv("POSITION_WS_OFFHOURS_IDLE", raising=False)
+    _at(monkeypatch, 2026, 10, 2, 10, 0)
+    assert ws_client._offhours_idle() is True
+    _at(monkeypatch, 2026, 10, 1, 10, 0)           # the day before is a normal trading day
+    assert ws_client._offhours_idle() is False
+
+
+def test_holiday_with_off_switch_still_always_connects(monkeypatch):
+    _at(monkeypatch, 2026, 10, 2, 10, 0)
+    monkeypatch.setenv("POSITION_WS_OFFHOURS_IDLE", "0")
+    assert ws_client._offhours_idle() is False
+
+
+def test_failed_holiday_lookup_falls_back_to_hours_rule(monkeypatch):
+    import tz_utils
+    monkeypatch.delenv("POSITION_WS_OFFHOURS_IDLE", raising=False)
+    monkeypatch.delattr(tz_utils, "_NSE_HOLIDAYS_2026")      # import of the name now fails
+    _at(monkeypatch, 2026, 10, 2, 10, 0)
+    assert ws_client._offhours_idle() is False               # old hours-only answer, no exception
+
+
 def test_env_off_switch(monkeypatch):
     _at(monkeypatch, 2026, 10, 3, 11, 0)
     monkeypatch.setenv("POSITION_WS_OFFHOURS_IDLE", "0")

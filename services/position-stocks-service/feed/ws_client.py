@@ -420,6 +420,12 @@ def _offhours_idle() -> bool:
         ist = _dt.now(_tz.utc) + _td(hours=5, minutes=30)
         if ist.weekday() >= 5:
             return True
+        try:  # group 140: an NSE/BSE weekday holiday idles like a weekend (no ticks to receive)
+            from tz_utils import _NSE_HOLIDAYS_2026 as _hol
+            if ist.strftime("%Y-%m-%d") in _hol:
+                return True
+        except Exception:  # noqa: BLE001 - calendar lookup must never block the feed decision
+            pass
         return not (_t(8, 55) <= ist.time() <= _t(15, 45))
     except Exception:  # noqa: BLE001 - never block the feed over a clock helper
         return False

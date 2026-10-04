@@ -58,6 +58,16 @@ def _unresolved_suffix(symbols, token_map) -> str:
 
 logger = logging.getLogger("angelone-ws-feed")
 
+# Group 148: the scrip master downloads in the background after boot, so the feed thread normally
+# finds it "not loaded yet" for the first few tries (10 s, 20 s, 30 s). That was logged at ERROR on
+# EVERY boot even though it resolves itself. Early attempts are now WARNING; ERROR only once the wait
+# has gone on past _SCRIP_WAIT_ERROR_AFTER attempts (about a minute) and is a real problem.
+_SCRIP_WAIT_ERROR_AFTER = 3
+
+
+def _scrip_wait_log_level(attempt: int) -> int:
+    return logging.WARNING if attempt <= _SCRIP_WAIT_ERROR_AFTER else logging.ERROR
+
 _running = False
 _thread: Optional[threading.Thread] = None
 # 2026-10-04 (log-audit item 26): generation counter. Every start_feed_background()
@@ -315,7 +325,8 @@ def start_feed_background(symbols: list) -> None:
                     return
                 attempt += 1
                 delay = min(60.0, 10.0 * attempt)
-                logger.error(
+                logger.log(
+                    _scrip_wait_log_level(attempt),
                     "AngelOne feed: scrip master not loaded yet (attempt %d) — retrying in %.0fs",
                     attempt, delay,
                 )

@@ -6,6 +6,8 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-04 (group 148)  AngelOne feed "scrip master not loaded yet" is a WARNING for the first 3 attempts, ERROR only if it drags on (market-data-service).
+  From the 8 h VM log audit: this self-resolving boot condition was logged at ERROR on every start. New `_scrip_wait_log_level(attempt)`; retry/backoff unchanged. Other audit lines reviewed, no code change (AngelOne 403 rate limit already has a cooldown; NSE 403 shares the VM-IP block with Yahoo, still 429). +3 tests, market-data suite 760 passed. Rebuild market-data-service. Details: `docs/GROUP148_SCRIP_MASTER_WAIT_LOG_LEVEL.md`.
 - 2026-10-04 (group 147)  Feed-universe refresh warning now names the error (market-data-service); item 6 closed.
   From the VM log audit: `feed universe refresh: fetch failed, keeping existing feed:` ended with nothing because httpx timeouts have an empty `str()`. New `_exc_detail` logs the exception type (and message when present); behaviour unchanged. Other audit lines reviewed: no code change (NSE 403 / bhavcopy and IPO static fallbacks share the VM-IP block with Yahoo). Item 6 closed: Yahoo 429s the VM's IPv4, no IPv6 route. +3 tests, market-data suite 757 passed. Rebuild market-data-service. Details: `docs/GROUP147_FEED_UNIVERSE_ERROR_DETAIL.md`.
 - 2026-10-04 (group 146)  `/training/api/insights` no longer returns invented insights (decision-prediction-service).

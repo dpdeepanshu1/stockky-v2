@@ -124,3 +124,50 @@ def test_a_plain_read_three_days_later_restores_it_instead_of_purging(db):
     assert e._last_result == {"count": 2}
     assert (time.time() - e._last_scan_ts) > sc.SURPRISE_CACHE_MAX_AGE_SEC
     assert _rows(db) == 1
+
+
+# ── group 137: scan(cached=True) on a cold process must not purge an expired row ─────────────────────────────
+def test_scan_cached_true_on_a_cold_process_uses_the_stale_loader_not_the_plain_one():
+    import asyncio
+    e = _engine()
+    calls = []
+
+    def plain():
+        raise AssertionError("plain loader deletes an expired row; scan() must not use it")
+
+    def stale():
+        calls.append("stale")
+        e._last_result = {"count": 4, "stocks": []}
+        e._last_scan_ts = time.time() - 5
+
+    e._load_last_result_from_durable_cache = plain
+    e._load_last_result_stale_from_durable_cache = stale
+    out = asyncio.run(e.scan(client=None, market_data_url="http://x", cached=True))
+    assert calls == ["stale"] and out["from_cache"] is True and out["count"] == 4
+
+
+def test_early_cached_scan_keeps_an_expired_row_for_the_boot_warm(db, monkeypatch):
+    """Real kv_cache + SQL table: the cold-process load that scan(cached=True) performs removes nothing, and the
+    old (expired) result is age-rejected rather than served as fresh."""
+    import asyncio
+    _insert(db, age_sec=3600, expired_sec_ago=3200)
+    e = _engine()
+
+    async def no_live(*a, **k):                       # the live scan that follows an age-rejected cache
+        raise RuntimeError("live scan reached")
+
+    # run only the cold-process load + age check part: patch what comes after it
+    loaded = {}
+    orig = e._load_last_result_stale_from_durable_cache
+
+    def spy():
+        orig()
+        loaded["result"] = e._last_result
+
+    e._load_last_result_stale_from_durable_cache = spy
+    try:
+        asyncio.run(e.scan(client=None, market_data_url="http://x", cached=True))
+    except Exception:
+        pass                                          # the live-scan path is out of scope for this test
+    assert loaded.get("result") == {"count": 3, "stocks": []}
+    assert _rows(db) == 1                             # row survived the early cached=true call

@@ -42,7 +42,7 @@ for n in names:
         print("  (no row at all: not in AngelOne's file; a name/ticker problem, not a series problem)")
     else:
         in_map = any(str(r.get("exch_seg")) == "NSE" and str(r.get("symbol", "")).endswith("-EQ") for r in rows)
-        in_be = any(str(r.get("exch_seg")) == "NSE" and str(r.get("symbol", "")).endswith("-BE") for r in rows)
+        in_be = any(str(r.get("exch_seg")) == "NSE" and str(r.get("symbol", "")).endswith(("-BE", "-BZ")) for r in rows)
         print("  resolves today (NSE + -EQ):", "YES" if in_map else "NO -> only other series/segments exist")
         if not in_map:
-            print("  group 135 -BE fallback:", "YES (NSE -BE row exists, resolved by get_token)" if in_be else "NO (no NSE -BE row either)")
+            print("  group 135/136 -BE/-BZ fallback:", "YES (NSE -BE/-BZ row exists, resolved by get_token)" if in_be else "NO (no NSE -BE/-BZ row either)")

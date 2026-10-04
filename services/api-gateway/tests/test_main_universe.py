@@ -1658,13 +1658,25 @@ def test_build_result_is_cut_to_the_target_and_the_hard_cap(ub, monkeypatch):
     ((2026, 9, 30, 15, 31), 21600),      # a minute after the close
     ((2026, 10, 3, 10, 0), 21600),       # Saturday
     ((2026, 10, 4, 10, 0), 21600),       # Sunday
-    ((2026, 10, 2, 12, 0), 1800),        # Friday
+    ((2026, 10, 1, 12, 0), 1800),        # Thursday, a normal trading day
+    ((2026, 10, 2, 12, 0), 21600),       # Friday 2 Oct = Gandhi Jayanti, an NSE holiday (group 141)
+    ((2026, 10, 20, 11, 0), 21600),      # Tuesday 20 Oct = Dussehra, an NSE holiday (group 141)
 ])
 def test_build_cache_ttl_follows_the_ist_market_window(ub, when, ttl):
     ub.time.at(*when)
     ub.securities = ["AAA"]
     gw._build_scan_universe()
     assert _sets(ub, gw.SCAN_UNIVERSE_KEY)[0][1] == ttl
+
+
+def test_build_cache_ttl_holiday_lookup_failure_keeps_the_weekday_answer(ub, monkeypatch):
+    def boom(_d):
+        raise RuntimeError("calendar broke")
+    monkeypatch.setattr(gw, "is_nse_holiday", boom)
+    ub.time.at(2026, 10, 2, 12, 0)                   # holiday, but the lookup fails -> old weekday-only rule
+    ub.securities = ["AAA"]
+    gw._build_scan_universe()
+    assert _sets(ub, gw.SCAN_UNIVERSE_KEY)[0][1] == 1800
 
 
 def test_build_cache_ttl_falls_back_to_one_hour_when_the_clock_fails(ub):

@@ -98,9 +98,32 @@ except Exception as e:
     logger.warning("Redis unavailable (%s). Memory-only.", e)
     cache = None
 
+# Group 140: NSE/BSE trading holidays (IST dates). Same literal as the other copies (no shared import path
+# between services); run scripts/check_holiday_lists_sync.py after editing any one. Extend each year.
+_NSE_HOLIDAYS_2026 = {
+    "2026-01-15",  # Maharashtra Municipal Corporation elections
+    "2026-01-26",  # Republic Day
+    "2026-03-03",  # Holi
+    "2026-03-26",  # Ram Navami
+    "2026-03-31",  # Mahavir Jayanti
+    "2026-04-03",  # Good Friday
+    "2026-04-14",  # Dr. Ambedkar Jayanti
+    "2026-05-01",  # Maharashtra Day
+    "2026-05-28",  # Bakri Eid (Eid ul-Adha)
+    "2026-06-26",  # Muharram
+    "2026-09-14",  # Ganesh Chaturthi
+    "2026-10-02",  # Gandhi Jayanti
+    "2026-10-20",  # Dussehra
+    "2026-11-10",  # Diwali Balipratipada
+    "2026-11-24",  # Guru Nanak Jayanti
+    "2026-12-25",  # Christmas
+}
+
 def is_market_open() -> bool:
     now = datetime.now(ZoneInfo("Asia/Kolkata"))
     if now.weekday() >= 5:
+        return False
+    if now.strftime("%Y-%m-%d") in _NSE_HOLIDAYS_2026:  # group 140: weekday holiday = closed
         return False
     return dtime(9, 15) <= now.time() <= dtime(15, 30)
 

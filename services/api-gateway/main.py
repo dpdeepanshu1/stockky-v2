@@ -2117,6 +2117,13 @@ def _build_scan_universe() -> List[str]:
         ist = timezone(timedelta(hours=5, minutes=30))
         now = datetime.now(ist)
         is_weekday = now.weekday() < 5
+        # Group 141: an NSE weekday holiday is a closed day too (30 min TTL would rebuild the universe
+        # all day for nothing). A failed calendar lookup keeps the weekday-only answer.
+        try:
+            if is_weekday and is_nse_holiday(now.date()):
+                is_weekday = False
+        except Exception:
+            pass
         mins = now.hour * 60 + now.minute
         market_open = is_weekday and (9 * 60 + 15) <= mins <= (15 * 60 + 30)
         ttl = 1800 if market_open else 21600  # 30m vs 6h

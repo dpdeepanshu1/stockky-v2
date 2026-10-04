@@ -91,6 +91,53 @@ SURPRISE_LAST_RESULT_CACHE_KEY = "stockky:surprise_scan:last_result"
 SURPRISE_LAST_RESULT_TTL_DEFAULT_SEC = 7 * 24 * 3600
 
 
+# group138: while the market is closed prices cannot change, so a result computed AFTER the last session close is as
+# fresh as it will ever get. scan(cached=True) used to age-reject it after SURPRISE_CACHE_MAX_AGE_SEC (~220 s) and run the
+# full ~1000-quote sweep again for every caller, all night and all weekend. Set SURPRISE_CLOSED_MARKET_CACHE=0 to turn off.
+SURPRISE_CLOSED_MARKET_GRACE_SEC = 600.0   # a scan must finish this long after the 15:30 close (the sweep takes ~5 min)
+
+
+def _closed_market_cache_enabled() -> bool:
+    return ((os.getenv("SURPRISE_CLOSED_MARKET_CACHE") or "").strip() or "1").lower() in ("1", "true", "yes", "on", "y")
+
+
+def _is_trading_day(d) -> bool:
+    if d.weekday() >= 5:
+        return False
+    try:
+        from nse_holidays import is_nse_holiday
+        return not is_nse_holiday(d)
+    except Exception:
+        return True
+
+
+def _session_over_ist(now_ts: float) -> bool:
+    """True on weekends/holidays and outside 08:30-15:30 IST (pre-open 08:30-09:15 is excluded: that window wants live data)."""
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+    now = datetime.fromtimestamp(now_ts, ZoneInfo("Asia/Kolkata"))
+    if not _is_trading_day(now.date()):
+        return True
+    tt = now.time()
+    return tt > dtime(15, 30) or tt < dtime(8, 30)
+
+
+def _last_session_close_ts(now_ts: float) -> Optional[float]:
+    """Epoch seconds of the most recent 15:30 IST close of a trading day at or before now_ts (None if none in 14 days)."""
+    from datetime import datetime, time as dtime, timedelta
+    from zoneinfo import ZoneInfo
+    ist = ZoneInfo("Asia/Kolkata")
+    now = datetime.fromtimestamp(now_ts, ist)
+    d = now.date()
+    for _ in range(14):
+        if _is_trading_day(d):
+            close = datetime.combine(d, dtime(15, 30), tzinfo=ist)
+            if close <= now:
+                return close.timestamp()
+        d -= timedelta(days=1)
+    return None
+
+
 def _last_result_durable_ttl_sec(cached_max_age_sec: float) -> int:
     floor = int(cached_max_age_sec) + 120
     try:
@@ -886,14 +933,31 @@ class SurpriseStockEngine:
                 # not block the event loop). Same asyncio.to_thread idiom
                 # already used repeatedly in api-gateway/main.py's own
                 # event-loop-blocking-I/O audit (session55).
-                await asyncio.to_thread(self._load_last_result_from_durable_cache)
+                # group137: use the STALE-aware loader here. The plain kv read DELETES an expired row, so an
+                # early cached=true caller (real-trade-service / the after-hours scan often call within seconds of
+                # a restart, before the closed-market boot warm's own read) used to destroy the only saved copy.
+                # Freshness is still decided by the age check just below, so nothing stale is ever served as fresh.
+                await asyncio.to_thread(self._load_last_result_stale_from_durable_cache)
             if self._last_result is not None:
-                age = time.time() - self._last_scan_ts
+                _now_ts = time.time()
+                age = _now_ts - self._last_scan_ts
                 if age <= cached_max_age_sec:
                     result = dict(self._last_result)
                     result["from_cache"] = True
                     result["cache_age_sec"] = round(age, 1)
                     return result
+                # group138: market closed and this result was computed after the last close -> nothing newer exists.
+                try:
+                    if _closed_market_cache_enabled() and _session_over_ist(_now_ts):
+                        _close = _last_session_close_ts(_now_ts)
+                        if _close is not None and self._last_scan_ts >= _close + SURPRISE_CLOSED_MARKET_GRACE_SEC:
+                            result = dict(self._last_result)
+                            result["from_cache"] = True
+                            result["cache_age_sec"] = round(age, 1)
+                            result["market_closed_cache"] = True
+                            return result
+                except Exception as e:  # never let this shortcut break a scan: fall through to the live path
+                    logger.debug("closed-market cache check failed (non-fatal): %s", e)
 
         # AUDIT FIX (2026-09-19): load_static_cache() does a blocking SQL
         # query against the surprise-static-feed table (see its own body,

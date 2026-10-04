@@ -1434,6 +1434,11 @@ def rig(sc, monkeypatch, kv):
 
 
 class TestScanCachedFastPath:
+    @pytest.fixture(autouse=True)
+    def _closed_market_cache_off(self, monkeypatch):
+        # group138: the fake clock (epoch 1_000_000) falls after a close; these tests are about the age rule itself
+        monkeypatch.setenv("SURPRISE_CLOSED_MARKET_CACHE", "0")
+
     def _prime(self, r, age=10.0, result=None):
         r.e._last_result = result or {"count": 1, "stocks": []}
         r.e._last_scan_ts = r.clock.now - age
@@ -2571,3 +2576,95 @@ class TestSeedSkipsDelisted:
         cache = {}
         assert e._seed_from_data_feed_kv(cache) == 1
         assert set(cache) == {"TCS"}
+
+
+# ── group 138: closed market serves a post-close result regardless of age ────────────────────────────────────
+import datetime as _dt138
+
+_IST138 = _dt138.timezone(_dt138.timedelta(hours=5, minutes=30))
+
+
+def _ist(y, mo, d, h, mi):
+    return _dt138.datetime(y, mo, d, h, mi, tzinfo=_IST138).timestamp()
+
+
+class TestClosedMarketCache:
+    # 2026-10-01 Thu (trading day); 2026-10-02 Fri is an NSE holiday in nse_holidays; 10-03 Sat; 10-04 Sun; 10-05 Mon
+    def _rig(self, rig, now_ts, scan_ts):
+        r = rig(static={"A": static_row()})
+        r.clock.now = now_ts
+        r.e._last_result = {"count": 7, "stocks": []}
+        r.e._last_scan_ts = scan_ts
+        return r
+
+    def test_sunday_serves_the_last_trading_days_post_close_result(self, rig, monkeypatch):
+        monkeypatch.delenv("SURPRISE_CLOSED_MARKET_CACHE", raising=False)
+        r = self._rig(rig, _ist(2026, 10, 4, 21, 30), _ist(2026, 10, 1, 15, 50))
+        out = r.scan(cached=True)
+        assert out["from_cache"] is True and out["market_closed_cache"] is True and out["count"] == 7
+        assert r.loads == [] and r.fetched == []
+
+    def test_a_result_computed_before_the_close_is_not_served(self, rig, monkeypatch):
+        monkeypatch.delenv("SURPRISE_CLOSED_MARKET_CACHE", raising=False)
+        r = self._rig(rig, _ist(2026, 10, 4, 21, 30), _ist(2026, 10, 1, 14, 0))
+        out = r.scan(cached=True)
+        assert "from_cache" not in out and r.loads == [False]
+
+    def test_a_scan_that_finished_inside_the_grace_window_after_close_is_not_trusted(self, rig, monkeypatch):
+        monkeypatch.delenv("SURPRISE_CLOSED_MARKET_CACHE", raising=False)
+        r = self._rig(rig, _ist(2026, 10, 4, 21, 30), _ist(2026, 10, 1, 15, 36))     # < close + 600 s
+        assert "from_cache" not in r.scan(cached=True)
+
+    def test_open_market_still_age_rejects(self, rig, monkeypatch):
+        monkeypatch.delenv("SURPRISE_CLOSED_MARKET_CACHE", raising=False)
+        r = self._rig(rig, _ist(2026, 10, 1, 11, 0), _ist(2026, 9, 30, 15, 50))
+        assert "from_cache" not in r.scan(cached=True)
+
+    def test_preopen_window_still_wants_live_data(self, rig, monkeypatch):
+        monkeypatch.delenv("SURPRISE_CLOSED_MARKET_CACHE", raising=False)
+        r = self._rig(rig, _ist(2026, 10, 5, 8, 45), _ist(2026, 10, 1, 15, 50))
+        assert "from_cache" not in r.scan(cached=True)
+
+    def test_early_morning_before_preopen_serves_the_last_close_result(self, rig, monkeypatch):
+        monkeypatch.delenv("SURPRISE_CLOSED_MARKET_CACHE", raising=False)
+        r = self._rig(rig, _ist(2026, 10, 5, 7, 0), _ist(2026, 10, 1, 15, 50))
+        assert r.scan(cached=True)["market_closed_cache"] is True
+
+    def test_weekday_evening_serves_a_result_from_after_todays_close(self, rig, monkeypatch):
+        monkeypatch.delenv("SURPRISE_CLOSED_MARKET_CACHE", raising=False)
+        r = self._rig(rig, _ist(2026, 10, 1, 20, 0), _ist(2026, 10, 1, 15, 45))
+        assert r.scan(cached=True)["market_closed_cache"] is True
+
+    def test_weekday_evening_rejects_yesterdays_result(self, rig, monkeypatch):
+        monkeypatch.delenv("SURPRISE_CLOSED_MARKET_CACHE", raising=False)
+        r = self._rig(rig, _ist(2026, 10, 1, 20, 0), _ist(2026, 9, 30, 15, 45))
+        assert "from_cache" not in r.scan(cached=True)
+
+    def test_env_off_switch_and_blank_value(self, rig, monkeypatch):
+        r = self._rig(rig, _ist(2026, 10, 4, 21, 30), _ist(2026, 10, 1, 15, 50))
+        monkeypatch.setenv("SURPRISE_CLOSED_MARKET_CACHE", "0")
+        assert "from_cache" not in r.scan(cached=True)
+        monkeypatch.setenv("SURPRISE_CLOSED_MARKET_CACHE", "   ")           # blank -> default ON
+        r2 = self._rig(rig, _ist(2026, 10, 4, 21, 30), _ist(2026, 10, 1, 15, 50))
+        assert r2.scan(cached=True)["market_closed_cache"] is True
+
+    def test_per_symbol_requests_are_never_served_from_this_cache(self, rig, monkeypatch):
+        monkeypatch.delenv("SURPRISE_CLOSED_MARKET_CACHE", raising=False)
+        r = self._rig(rig, _ist(2026, 10, 4, 21, 30), _ist(2026, 10, 1, 15, 50))
+        assert "from_cache" not in r.scan(cached=True, symbols=["A"])
+
+    def test_a_helper_failure_falls_through_to_the_live_scan(self, rig, sc, monkeypatch):
+        monkeypatch.delenv("SURPRISE_CLOSED_MARKET_CACHE", raising=False)
+        monkeypatch.setattr(sc, "_session_over_ist", lambda t: (_ for _ in ()).throw(RuntimeError("boom")))
+        r = self._rig(rig, _ist(2026, 10, 4, 21, 30), _ist(2026, 10, 1, 15, 50))
+        assert "from_cache" not in r.scan(cached=True)
+
+    def test_last_session_close_skips_weekend_and_holiday(self, sc, monkeypatch):
+        # the real calendar: Fri 2026-10-02 is a holiday, so from Sunday the last close is Thursday's
+        assert sc._last_session_close_ts(_ist(2026, 10, 4, 12, 0)) == _ist(2026, 10, 1, 15, 30)
+        import nse_holidays
+        monkeypatch.setattr(nse_holidays, "is_nse_holiday", lambda d: d == _dt138.date(2026, 10, 1))
+        assert sc._last_session_close_ts(_ist(2026, 10, 4, 12, 0)) == _ist(2026, 10, 2, 15, 30)
+        monkeypatch.setattr(nse_holidays, "is_nse_holiday", lambda d: True)
+        assert sc._last_session_close_ts(_ist(2026, 10, 4, 12, 0)) is None
+        assert sc._session_over_ist(_ist(2026, 10, 1, 11, 0)) is True      # holiday -> over all day

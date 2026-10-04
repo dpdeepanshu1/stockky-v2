@@ -236,10 +236,18 @@ def _with_retry(func, max_retries=4, base_delay=1.0):
 
 
 def is_market_open() -> bool:
-    """Return True if current time is within NSE trading hours (Mon-Fri, 09:15-15:30 IST)."""
+    """Return True if current time is within NSE trading hours (Mon-Fri, 09:15-15:30 IST, not an NSE holiday)."""
     now = datetime.now(ZoneInfo("Asia/Kolkata"))
     if now.weekday() >= 5:
         return False
+    # Group 139: an NSE/BSE weekday holiday is closed too, so cached quotes/history get the long
+    # closed-market TTL instead of the 5-15 minute open-session one. A failed lookup = old behaviour.
+    try:
+        from market_hours import is_nse_holiday_ist
+        if is_nse_holiday_ist(now):
+            return False
+    except Exception:
+        pass
     return dtime(9, 15) <= now.time() <= dtime(15, 30)
 
 

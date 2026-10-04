@@ -80,8 +80,8 @@ _MAX_PENDING_CHARS = 8 * 1024 * 1024
 _lock = threading.Lock()        # guards the map swap + failure bookkeeping (held for microseconds)
 _load_lock = threading.Lock()   # single-flight: held for the whole duration of a network fetch
 _token_map: Dict[str, str] = {}   # e.g. "SBIN" -> "3045"
-# group 135: NSE "-BE" (trade-to-trade) rows, ONLY for names that have no "-EQ" row (e.g. HFCL-BE, MTARTECH-BE,
-# STLTECH-BE). Used as a lookup fallback by get_token/get_tokens_bulk so quotes/ticks/history resolve; deliberately
+# group 135/136: NSE "-BE" (trade-to-trade) then "-BZ" rows, ONLY for names that have no "-EQ" row (e.g. HFCL-BE,
+# MTARTECH-BE, STLTECH-BE, WARDINMOBI-BZ). Used as a lookup fallback by get_token/get_tokens_bulk so quotes/ticks/history resolve; deliberately
 # NOT part of get_all_symbols() (the whole-market movers sweep keeps its EQ-only universe).
 _be_map: Dict[str, str] = {}
 _loaded_at: float = 0.0
@@ -147,9 +147,14 @@ def _rows_to_maps(rows: Iterable[dict]) -> Tuple[Dict[str, str], Dict[str, str]]
     Returns (eq_map, be_map). be_map holds NSE "-BE" rows (trade-to-trade series)
     for names that have NO "-EQ" row: a stock moved to the BE series disappears
     from "-EQ" but is still listed and quotable on NSE (HFCL, MTARTECH, STLTECH
-    in the group 133 report). If a name has both, "-EQ" always wins."""
+    in the group 133 report). If a name has both, "-EQ" always wins.
+
+    group 136: NSE "-BZ" rows (trade-to-trade / "permitted to trade", e.g.
+    WARDINMOBI-BZ) are a last-resort tier behind "-EQ" and "-BE"; both land in
+    the second map. Priority: -EQ > -BE > -BZ."""
     eq_map: Dict[str, str] = {}
     be_map: Dict[str, str] = {}
+    bz_map: Dict[str, str] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -160,8 +165,12 @@ def _rows_to_maps(rows: Iterable[dict]) -> Tuple[Dict[str, str], Dict[str, str]]
             eq_map[sym_field[:-3].upper()] = str(row["token"])
         elif sym_field.endswith("-BE"):
             be_map[sym_field[:-3].upper()] = str(row["token"])
+        elif sym_field.endswith("-BZ"):
+            bz_map[sym_field[:-3].upper()] = str(row["token"])
+    for k, tok in bz_map.items():
+        be_map.setdefault(k, tok)          # -BE beats -BZ
     for k in [k for k in be_map if k in eq_map]:
-        del be_map[k]
+        del be_map[k]                      # -EQ beats both
     return eq_map, be_map
 
 

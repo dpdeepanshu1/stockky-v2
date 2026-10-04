@@ -1,35 +1,39 @@
 #!/usr/bin/env python3
 """
-check_holiday_lists_sync.py — verifies the four NSE-holiday-list copies in
+check_holiday_lists_sync.py — verifies the seven NSE-holiday-list copies in
 this repo agree with each other.
 
 WHY THIS EXISTS (2026-09-14 incident): there is no shared import path
 between services (each is a separately-deployed container — see any
 service's config.py isolation note), so the 2026 NSE/BSE trading-holiday
-calendar is duplicated in FOUR places:
+calendar is duplicated in SEVEN places:
   - services/position-stocks-service/tz_utils.py   (_NSE_HOLIDAYS_2026)
   - services/real-trade-service/tz_utils.py         (_NSE_HOLIDAYS_2026)
   - services/api-gateway/nse_holidays.py            (_NSE_HOLIDAYS, has 2025+2026)
   - services/notification-scheduler-service/scheduler/run_once.py (HOLIDAYS_2026)
+  - services/market-data-service/market_hours.py    (_NSE_HOLIDAYS_2026; group 139)
+  - services/analysis-intelligence-service/technical/main.py (_NSE_HOLIDAYS_2026; group 140)
+  - services/decision-prediction-service/decision/main.py    (_NSE_HOLIDAYS_2026; group 140)
 
-On 2026-09-14 (Ganesh Chaturthi) all four had drifted apart and every one
+On 2026-09-14 (Ganesh Chaturthi) all four then-existing copies had drifted apart and every one
 of them was ALSO missing that date, so the exchange-closed day ran full
 scan/entry cycles and sent notifications as if the market were open. This
-script parses all four with plain regex (deliberately NOT importing the
+script parses all copies with plain regex (deliberately NOT importing the
 modules — run_once.py needs API_GATEWAY_URL etc. set just to import, which
 defeats the point of a quick CI-friendly check) and fails loudly if they
-don't all contain exactly the same 2026 date set.
+don't all contain exactly the same holiday date set (2026 and later).
 
 Usage:
     python3 scripts/check_holiday_lists_sync.py
 
-Exit code 0 = all four agree. Exit code 1 = drift detected (details printed).
-Run this after editing any one of the four files.
+Exit code 0 = all seven agree. Exit code 1 = drift detected (details printed).
+Run this after editing any one of the seven files.
 """
 from __future__ import annotations
 
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -47,12 +51,25 @@ FILES = {
     "notification-scheduler-service/scheduler/run_once.py": (
         REPO_ROOT / "services/notification-scheduler-service/scheduler/run_once.py"
     ),
+    "market-data-service/market_hours.py": (
+        REPO_ROOT / "services/market-data-service/market_hours.py"
+    ),
+    "analysis-intelligence-service/technical/main.py": (
+        REPO_ROOT / "services/analysis-intelligence-service/technical/main.py"
+    ),
+    "decision-prediction-service/decision/main.py": (
+        REPO_ROOT / "services/decision-prediction-service/decision/main.py"
+    ),
 }
 
 # Matches "2026-01-26" (tz_utils.py / run_once.py string form) and
 # "date(2026, 1, 26)" (nse_holidays.py form) — normalize both to YYYY-MM-DD.
-_STR_DATE_RE = re.compile(r'"(2026-\d{2}-\d{2})"')
-_TUPLE_DATE_RE = re.compile(r"date\(\s*2026\s*,\s*(\d{1,2})\s*,\s*(\d{1,2})\s*\)")
+# Group 142: any year from 2026 on (was 2026 only), so the 2027+ dates added to one copy are
+# compared too. Years before 2026 are ignored on purpose: api-gateway/nse_holidays.py also keeps
+# 2025 dates the other copies never had, which would otherwise be reported as drift forever.
+_YEAR = r"20(?:2[6-9]|[3-9]\d)"
+_STR_DATE_RE = re.compile(rf'"({_YEAR}-\d{{2}}-\d{{2}})"')
+_TUPLE_DATE_RE = re.compile(rf"date\(\s*({_YEAR})\s*,\s*(\d{{1,2}})\s*,\s*(\d{{1,2}})\s*\)")
 
 # Only the ACTUAL literal (list/set) assigned to one of these names counts —
 # dates mentioned in prose comments/docstrings (e.g. explaining what the old,
@@ -80,16 +97,37 @@ def _extract_literal_block(text: str, name: str) -> str | None:
     return text[start:i]
 
 
-def _extract_2026_dates(text: str) -> set[str]:
+def _extract_dates(text: str) -> set[str]:
+    """Every holiday date (2026 or later) in the literals named in _LITERAL_NAMES, as YYYY-MM-DD."""
     dates: set[str] = set()
     for name in _LITERAL_NAMES:
         block = _extract_literal_block(text, name)
         if block is None:
             continue
         dates |= set(_STR_DATE_RE.findall(block))
-        for month, day in _TUPLE_DATE_RE.findall(block):
-            dates.add(f"2026-{int(month):02d}-{int(day):02d}")
+        for year, month, day in _TUPLE_DATE_RE.findall(block):
+            dates.add(f"{year}-{int(month):02d}-{int(day):02d}")
     return dates
+
+
+_extract_2026_dates = _extract_dates  # old name, kept for anything that imports it
+
+
+def year_coverage_note(all_dates: set[str], today: date | None = None) -> str | None:
+    """Group 142: a reminder (never a failure) when the lists have no dates for the year that is
+    about to start. A date missing from a list counts as a normal trading day, so a list that has
+    run out silently stops skipping holidays on 1 January. From 1 October on, if no copy has any
+    date for next year, say so; also say so if the current year itself has no dates."""
+    today = today or date.today()
+    years = {d[:4] for d in all_dates}
+    if str(today.year) not in years:
+        return (f"NOTE: no holiday dates for {today.year} in any copy - every day is treated as a trading "
+                f"day. Add the {today.year} NSE holiday list to all {len(FILES)} files.")
+    if today.month >= 10 and str(today.year + 1) not in years:
+        return (f"NOTE: no {today.year + 1} holiday dates yet. NSE publishes the next year's list in "
+                f"December; add it to all {len(FILES)} files then, or on 1 Jan {today.year + 1} every "
+                f"holiday is treated as a trading day.")
+    return None
 
 
 def main() -> int:
@@ -98,7 +136,7 @@ def main() -> int:
         if not path.exists():
             print(f"MISSING FILE: {label} not found at {path}")
             return 1
-        per_file[label] = _extract_2026_dates(path.read_text())
+        per_file[label] = _extract_dates(path.read_text())
 
     all_dates = set()
     for dates in per_file.values():
@@ -112,16 +150,20 @@ def main() -> int:
             print(f"DRIFT in {label}: missing {sorted(missing)}")
 
     if ok:
-        print(f"OK — all {len(FILES)} holiday lists agree on {len(all_dates)} 2026 dates:")
+        years = ", ".join(sorted({d[:4] for d in all_dates}))
+        print(f"OK — all {len(FILES)} holiday lists agree on {len(all_dates)} dates ({years}):")
         for d in sorted(all_dates):
             print(f"  {d}")
+        note = year_coverage_note(all_dates)
+        if note:
+            print(note)
         return 0
 
     print(
-        "\nFAILED — the four holiday-list copies have drifted apart. "
+        "\nFAILED — the holiday-list copies have drifted apart. "
         "This is exactly the bug that caused cycles/notifications to run "
         "on Ganesh Chaturthi (2026-09-14). Bring every file above back in "
-        "sync with the same 2026 date set before deploying."
+        "sync with the same date set before deploying."
     )
     return 1
 

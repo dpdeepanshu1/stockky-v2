@@ -22,8 +22,9 @@ IST = ZoneInfo("Asia/Kolkata")
 def _ist(weekday: int, hour: int, minute: int) -> datetime:
     """Build an IST-aware datetime on the nearest weekday matching `weekday`
     (0=Mon … 6=Sun), at the given time."""
-    # 2026-09-28 is a Monday (weekday=0)
-    base = datetime(2026, 9, 28, tzinfo=IST)
+    # 2026-10-05 is a Monday (weekday=0). Group 139: the week must contain no NSE holiday -
+    # the old base week (2026-09-28) had Fri 2026-10-02 (Gandhi Jayanti), now a closed day.
+    base = datetime(2026, 10, 5, tzinfo=IST)
     delta = (weekday - base.weekday()) % 7
     return base.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=delta)
 

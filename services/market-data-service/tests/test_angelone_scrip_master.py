@@ -268,3 +268,32 @@ def test_garbage_be_map_in_snapshot_is_ignored(sm, monkeypatch):
     monkeypatch.setattr(sm, "_fetch_map", lambda: (_ for _ in ()).throw(AssertionError("must not fetch")))
     assert sm.get_token("SBIN") == "3045"
     assert sm.status()["be_fallback_symbols"] == 0
+
+
+# ── group 136: NSE "-BZ" last-resort tier ────────────────────────────────────
+def _bz_rows():
+    return [
+        {"token": "3045", "symbol": "SBIN-EQ", "exch_seg": "NSE"},
+        {"token": "766360", "symbol": "WARDINMOBI-BZ", "exch_seg": "NSE"},     # BZ only -> fallback
+        {"token": "538970", "symbol": "WARDINMOBI", "exch_seg": "BSE"},         # BSE never used
+        {"token": "1", "symbol": "ALL3-EQ", "exch_seg": "NSE"},
+        {"token": "2", "symbol": "ALL3-BE", "exch_seg": "NSE"},
+        {"token": "3", "symbol": "ALL3-BZ", "exch_seg": "NSE"},                 # EQ wins over BE and BZ
+        {"token": "4", "symbol": "BEBZ-BZ", "exch_seg": "NSE"},                 # listed first on purpose
+        {"token": "5", "symbol": "BEBZ-BE", "exch_seg": "NSE"},                 # BE beats BZ regardless of row order
+        {"token": "6", "symbol": "X-BZ", "exch_seg": "BSE"},                    # wrong segment -> ignored
+    ]
+
+
+def test_bz_is_last_resort_behind_eq_and_be(sm):
+    eq, be = sm._rows_to_maps(_bz_rows())
+    assert eq == {"SBIN": "3045", "ALL3": "1"}
+    assert be == {"WARDINMOBI": "766360", "BEBZ": "5"}
+
+
+def test_bz_only_name_resolves_via_lookups_but_not_get_all_symbols(sm, monkeypatch):
+    monkeypatch.setattr(sm, "_fetch_map", lambda: sm._rows_to_maps(_bz_rows()))
+    assert sm.get_token("WARDINMOBI") == "766360"
+    assert sm.get_token("BEBZ") == "5" and sm.get_token("ALL3") == "1"
+    assert sm.get_tokens_bulk(["WARDINMOBI", "SBIN", "NOPE"]) == {"WARDINMOBI": "766360", "SBIN": "3045"}
+    assert "WARDINMOBI" not in sm.get_all_symbols()

@@ -27,6 +27,33 @@ IST = ZoneInfo("Asia/Kolkata")
 _MARKET_OPEN = _time(9, 15)
 _MARKET_CLOSE = _time(15, 30)
 
+# NSE/BSE trading holidays for 2026 (IST calendar dates). Group 139: this service had NO holiday
+# awareness, so on a weekday holiday (e.g. Fri 2026-10-02, Gandhi Jayanti) the AngelOne and Yahoo
+# feeds still polled the whole universe 09:05-15:35 for prices that cannot change, and the quote /
+# history caches used the 5-15 minute open-session TTLs. Same literal, same dates, as the other
+# copies (no shared import path between services): services/real-trade-service/tz_utils.py and
+# position-stocks-service/tz_utils.py (_NSE_HOLIDAYS_2026), api-gateway/nse_holidays.py
+# (_NSE_HOLIDAYS), notification-scheduler-service/scheduler/run_once.py (HOLIDAYS_2026).
+# Run scripts/check_holiday_lists_sync.py after editing any one of them. Extend each year.
+_NSE_HOLIDAYS_2026 = {
+    "2026-01-15",  # Maharashtra Municipal Corporation elections
+    "2026-01-26",  # Republic Day
+    "2026-03-03",  # Holi
+    "2026-03-26",  # Ram Navami
+    "2026-03-31",  # Mahavir Jayanti
+    "2026-04-03",  # Good Friday
+    "2026-04-14",  # Dr. Ambedkar Jayanti
+    "2026-05-01",  # Maharashtra Day
+    "2026-05-28",  # Bakri Eid (Eid ul-Adha)
+    "2026-06-26",  # Muharram
+    "2026-09-14",  # Ganesh Chaturthi
+    "2026-10-02",  # Gandhi Jayanti
+    "2026-10-20",  # Dussehra
+    "2026-11-10",  # Diwali Balipratipada
+    "2026-11-24",  # Guru Nanak Jayanti
+    "2026-12-25",  # Christmas
+}
+
 # A few minutes of slack on each side so a feed doesn't stop/start right
 # at the bell — lets it warm up just before open and finish flushing just
 # after close. Configurable without a code change.
@@ -40,16 +67,27 @@ _ALWAYS_ON = os.getenv("MARKET_HOURS_FEED_ALWAYS_ON", "false").strip().lower() i
 )
 
 
+def is_nse_holiday_ist(now: datetime | None = None) -> bool:
+    """True if the given (or current) IST calendar date is an NSE/BSE trading holiday
+    (_NSE_HOLIDAYS_2026 above). A naive datetime is taken as IST wall-clock time."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    ist_now = now.astimezone(IST) if now.tzinfo is not None else now
+    return ist_now.strftime("%Y-%m-%d") in _NSE_HOLIDAYS_2026
+
+
 def is_feed_window_ist(now: datetime | None = None) -> bool:
-    """True during Mon-Fri, roughly 09:05-15:35 IST (open/close +/- slack).
-    Deliberately does NOT know about exchange holidays — same tradeoff as
-    real-trade-service's is_market_open_ist(): a holiday just means the
-    feed idles for nothing that day rather than crashing anything. Good
-    enough for gating a background polling/streaming thread."""
+    """True during Mon-Fri, roughly 09:05-15:35 IST (open/close +/- slack), except on NSE/BSE
+    trading holidays (group 139: before that a weekday holiday kept both feeds polling all day
+    for prices that cannot change). The holiday list is a plain 2026 date set: a date it does
+    not know about is treated as a normal trading day, so a stale list errs on the side of
+    polling, never of silencing a live feed."""
     if _ALWAYS_ON:
         return True
     ist_now = (now or datetime.now(timezone.utc)).astimezone(IST)
     if ist_now.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    if is_nse_holiday_ist(ist_now):
         return False
     open_dt = datetime.combine(ist_now.date(), _MARKET_OPEN, tzinfo=IST) - timedelta(minutes=_PRE_OPEN_SLACK_MIN)
     close_dt = datetime.combine(ist_now.date(), _MARKET_CLOSE, tzinfo=IST) + timedelta(minutes=_POST_CLOSE_SLACK_MIN)

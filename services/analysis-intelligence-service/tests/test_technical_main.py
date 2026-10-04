@@ -297,6 +297,20 @@ class TestMarketHours:
         assert isinstance(tm.is_market_open(), bool)
         assert tm.get_cache_ttl() in (300, 21600)
 
+    # Group 140: an NSE weekday holiday is closed, so it gets the long closed-market TTL.
+    # 2026-10-02 (Fri, Gandhi Jayanti) and 2026-10-20 (Tue, Dussehra) are in _NSE_HOLIDAYS_2026.
+    def test_weekday_holiday_midday_closed(self, monkeypatch):
+        _fake_now(monkeypatch, 2026, 10, 2, 11, 0)
+        assert tm.is_market_open() is False
+        assert tm.get_cache_ttl() == 21600
+
+    def test_dussehra_tuesday_closed_but_next_day_open(self, monkeypatch):
+        _fake_now(monkeypatch, 2026, 10, 20, 11, 0)
+        assert tm.is_market_open() is False
+        _fake_now(monkeypatch, 2026, 10, 21, 11, 0)
+        assert tm.is_market_open() is True
+        assert tm.get_cache_ttl() == 300
+
 
 # ── cache ─────────────────────────────────────────────────────────────────────
 

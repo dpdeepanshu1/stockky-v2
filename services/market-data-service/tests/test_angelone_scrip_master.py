@@ -199,9 +199,72 @@ def test_real_http_stream_parse_is_correct_and_memory_light(sm, monkeypatch):
         got = sm._fetch_map()
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
-        assert got == sm._rows_to_map(rows)
-        assert len(got) == 2700
+        assert got == sm._rows_to_maps(rows)
+        assert len(got[0]) == 2700
         # the old resp.json() path needs several x the payload size; streaming stays far below it
         assert peak < len(payload) * 0.5, f"peak {peak/1e6:.1f}MB vs payload {len(payload)/1e6:.1f}MB"
     finally:
         srv.shutdown()
+
+
+# ── group 135: NSE "-BE" (trade-to-trade) fallback ───────────────────────────
+def _be_rows():
+    return [
+        {"token": "3045", "symbol": "SBIN-EQ", "exch_seg": "NSE"},
+        {"token": "21954", "symbol": "HFCL-BE", "exch_seg": "NSE"},            # BE only -> fallback
+        {"token": "500183", "symbol": "HFCL", "exch_seg": "BSE"},              # BSE row must never be used
+        {"token": "2715", "symbol": "MTARTECH-BE", "exch_seg": "NSE"},
+        {"token": "7777", "symbol": "BOTH-EQ", "exch_seg": "NSE"},
+        {"token": "8888", "symbol": "BOTH-BE", "exch_seg": "NSE"},             # has EQ too -> EQ wins, BE dropped
+        {"token": "", "symbol": "NOTOK-BE", "exch_seg": "NSE"},                # no token -> ignored
+        {"token": "9", "symbol": "XYZ-BE", "exch_seg": "BSE"},                 # wrong segment -> ignored
+        {"token": "10", "symbol": "ABC-SM", "exch_seg": "NSE"},                # other series -> ignored
+        "not-a-dict",
+    ]
+
+
+def test_rows_to_maps_splits_eq_and_be_and_eq_wins(sm):
+    eq, be = sm._rows_to_maps(_be_rows())
+    assert eq == {"SBIN": "3045", "BOTH": "7777"}
+    assert be == {"HFCL": "21954", "MTARTECH": "2715"}
+    assert sm._rows_to_map(_be_rows()) == eq
+
+
+def test_be_only_names_resolve_via_get_token_and_bulk_but_not_get_all_symbols(sm, monkeypatch):
+    monkeypatch.setattr(sm, "_fetch_map", lambda: sm._rows_to_maps(_be_rows()))
+    assert sm.get_token("SBIN") == "3045"
+    assert sm.get_token("HFCL") == "21954"          # BE fallback
+    assert sm.get_token("hfcl.ns") == "21954"
+    assert sm.get_token("BOTH") == "7777"           # EQ preferred
+    assert sm.get_token("ABC") is None and sm.get_token("NOPE") is None
+    assert sm.get_tokens_bulk(["SBIN", "HFCL", "MTARTECH", "NOPE"]) == {
+        "SBIN": "3045", "HFCL": "21954", "MTARTECH": "2715"}
+    assert "HFCL" not in sm.get_all_symbols()        # movers universe stays EQ-only
+    st = sm.status()
+    assert st["loaded_symbols"] == 2 and st["be_fallback_symbols"] == 2
+
+
+def test_be_map_survives_disk_snapshot_warm_start(sm, monkeypatch):
+    monkeypatch.setattr(sm, "_fetch_map", lambda: sm._rows_to_maps(_be_rows()))
+    assert sm.get_token("HFCL") == "21954"          # loads + saves snapshot incl. be_map
+    mod = importlib.reload(sm)
+    monkeypatch.setattr(mod, "_fetch_map", lambda: (_ for _ in ()).throw(AssertionError("must not fetch")))
+    assert mod.get_token("HFCL") == "21954"
+    assert mod.get_token("SBIN") == "3045"
+
+
+def test_old_snapshot_without_be_map_still_warm_starts(sm, monkeypatch):
+    with open(sm._CACHE_PATH, "w") as f:
+        json.dump({"saved_at": time.time(), "map": {"SBIN": "3045"}}, f)    # pre-group-135 format
+    monkeypatch.setattr(sm, "_fetch_map", lambda: (_ for _ in ()).throw(AssertionError("must not fetch")))
+    assert sm.get_token("SBIN") == "3045"
+    assert sm.get_token("HFCL") is None
+    assert sm.status()["be_fallback_symbols"] == 0
+
+
+def test_garbage_be_map_in_snapshot_is_ignored(sm, monkeypatch):
+    with open(sm._CACHE_PATH, "w") as f:
+        json.dump({"saved_at": time.time(), "map": {"SBIN": "3045"}, "be_map": ["bad"]}, f)
+    monkeypatch.setattr(sm, "_fetch_map", lambda: (_ for _ in ()).throw(AssertionError("must not fetch")))
+    assert sm.get_token("SBIN") == "3045"
+    assert sm.status()["be_fallback_symbols"] == 0

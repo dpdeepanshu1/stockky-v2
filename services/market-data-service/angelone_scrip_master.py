@@ -44,7 +44,7 @@ import os
 import tempfile
 import threading
 import time
-from typing import Dict, Iterable, Iterator, List, Optional
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 import httpx
 
@@ -80,6 +80,10 @@ _MAX_PENDING_CHARS = 8 * 1024 * 1024
 _lock = threading.Lock()        # guards the map swap + failure bookkeeping (held for microseconds)
 _load_lock = threading.Lock()   # single-flight: held for the whole duration of a network fetch
 _token_map: Dict[str, str] = {}   # e.g. "SBIN" -> "3045"
+# group 135: NSE "-BE" (trade-to-trade) rows, ONLY for names that have no "-EQ" row (e.g. HFCL-BE, MTARTECH-BE,
+# STLTECH-BE). Used as a lookup fallback by get_token/get_tokens_bulk so quotes/ticks/history resolve; deliberately
+# NOT part of get_all_symbols() (the whole-market movers sweep keeps its EQ-only universe).
+_be_map: Dict[str, str] = {}
 _loaded_at: float = 0.0
 _fail_count: int = 0
 _next_retry_at: float = 0.0
@@ -135,22 +139,39 @@ def _iter_json_array(chunks: Iterable[str]) -> Iterator[dict]:
             pos = end
 
 
-def _rows_to_map(rows: Iterable[dict]) -> Dict[str, str]:
+def _rows_to_maps(rows: Iterable[dict]) -> Tuple[Dict[str, str], Dict[str, str]]:
     """NSE cash-equity rows are suffixed "-EQ" (e.g. "SBIN-EQ") — strip it to
     match the plain symbols used everywhere else in this codebase
-    (symbol_master, candidate_engine, etc)."""
-    new_map: Dict[str, str] = {}
+    (symbol_master, candidate_engine, etc).
+
+    Returns (eq_map, be_map). be_map holds NSE "-BE" rows (trade-to-trade series)
+    for names that have NO "-EQ" row: a stock moved to the BE series disappears
+    from "-EQ" but is still listed and quotable on NSE (HFCL, MTARTECH, STLTECH
+    in the group 133 report). If a name has both, "-EQ" always wins."""
+    eq_map: Dict[str, str] = {}
+    be_map: Dict[str, str] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
+        if row.get("exch_seg") != "NSE" or not row.get("token"):
+            continue
         sym_field = str(row.get("symbol", ""))
-        if row.get("exch_seg") == "NSE" and sym_field.endswith("-EQ") and row.get("token"):
-            new_map[sym_field[:-3].upper()] = str(row["token"])
-    return new_map
+        if sym_field.endswith("-EQ"):
+            eq_map[sym_field[:-3].upper()] = str(row["token"])
+        elif sym_field.endswith("-BE"):
+            be_map[sym_field[:-3].upper()] = str(row["token"])
+    for k in [k for k in be_map if k in eq_map]:
+        del be_map[k]
+    return eq_map, be_map
 
 
-def _fetch_map() -> Dict[str, str]:
-    """Download + stream-parse the scrip master. Raises on any failure."""
+def _rows_to_map(rows: Iterable[dict]) -> Dict[str, str]:
+    """The "-EQ" map only (kept for callers/tests that predate the -BE fallback)."""
+    return _rows_to_maps(rows)[0]
+
+
+def _fetch_map() -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Download + stream-parse the scrip master -> (eq_map, be_map). Raises on any failure."""
     deadline = time.monotonic() + _MAX_DOWNLOAD_S
     timeout = httpx.Timeout(connect=10.0, read=_READ_TIMEOUT_S, write=10.0, pool=10.0)
 
@@ -162,18 +183,18 @@ def _fetch_map() -> Dict[str, str]:
 
     with httpx.stream("GET", SCRIP_MASTER_URL, timeout=timeout) as resp:
         resp.raise_for_status()
-        return _rows_to_map(_iter_json_array(_text_chunks(resp)))
+        return _rows_to_maps(_iter_json_array(_text_chunks(resp)))
 
 
 # ── Disk snapshot ────────────────────────────────────────────────────────────
-def _save_disk(new_map: Dict[str, str]) -> None:
+def _save_disk(new_map: Dict[str, str], be_map: Optional[Dict[str, str]] = None) -> None:
     try:
         d = os.path.dirname(_CACHE_PATH) or "."
         os.makedirs(d, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".scrip_master_", suffix=".tmp", dir=d)
         try:
             with os.fdopen(fd, "w") as f:
-                json.dump({"saved_at": time.time(), "map": new_map}, f)
+                json.dump({"saved_at": time.time(), "map": new_map, "be_map": be_map or {}}, f)
             os.replace(tmp, _CACHE_PATH)
         except Exception:
             try:
@@ -188,7 +209,7 @@ def _save_disk(new_map: Dict[str, str]) -> None:
 def _warm_from_disk() -> None:
     """One-shot per process: seed the in-memory map from the disk snapshot if
     a recent enough one exists. Cheap (tens of KB) so it runs inline."""
-    global _token_map, _loaded_at, _disk_tried
+    global _token_map, _be_map, _loaded_at, _disk_tried
     with _lock:
         if _disk_tried:
             return
@@ -204,13 +225,17 @@ def _warm_from_disk() -> None:
         if not snap or not isinstance(snap, dict) or age > _CACHE_MAX_AGE_S or saved_at <= 0:
             return
         snap = {str(k): str(v) for k, v in snap.items()}
+        # snapshots written before group 135 have no "be_map" key -> empty fallback until the next refresh
+        be_snap = blob.get("be_map") or {}
+        be_snap = {str(k): str(v) for k, v in be_snap.items()} if isinstance(be_snap, dict) else {}
         with _lock:
             if not _token_map:
                 _token_map = snap
+                _be_map = be_snap
                 _loaded_at = saved_at
         logger.info(
-            "AngelOne scrip master warm-started from disk snapshot: %d NSE-EQ symbols (%.1fh old)",
-            len(snap), age / 3600.0,
+            "AngelOne scrip master warm-started from disk snapshot: %d NSE-EQ symbols (+%d -BE fallback) (%.1fh old)",
+            len(snap), len(be_snap), age / 3600.0,
         )
     except FileNotFoundError:
         pass
@@ -239,11 +264,13 @@ def _record_failure(reason: str) -> None:
 def _refresh_locked(force: bool = False) -> None:
     """Fetch + swap. Caller MUST hold _load_lock. Re-checks staleness/backoff
     first because another thread may have completed a fetch while we waited."""
-    global _token_map, _loaded_at, _fail_count, _next_retry_at
+    global _token_map, _be_map, _loaded_at, _fail_count, _next_retry_at
     if not force and (not _is_stale() or time.time() < _next_retry_at):
         return
     try:
-        new_map = _fetch_map()
+        fetched = _fetch_map()
+        # tolerate a plain dict (EQ only) from a stubbed/older _fetch_map
+        new_map, new_be = fetched if isinstance(fetched, tuple) else (fetched, {})
     except Exception as e:
         # httpx timeouts often stringify to "" — always include the class name.
         _record_failure(f"{type(e).__name__}: {e}")
@@ -255,11 +282,12 @@ def _refresh_locked(force: bool = False) -> None:
         return
     with _lock:
         _token_map = new_map      # atomic reference swap; readers never see a partial map
+        _be_map = new_be
         _loaded_at = time.time()
         _fail_count = 0
         _next_retry_at = 0.0
-    logger.info("AngelOne scrip master loaded: %d NSE-EQ symbols", len(new_map))
-    _save_disk(new_map)
+    logger.info("AngelOne scrip master loaded: %d NSE-EQ symbols (+%d -BE fallback)", len(new_map), len(new_be))
+    _save_disk(new_map, new_be)
 
 
 def _bg_refresh_and_release() -> None:
@@ -318,7 +346,8 @@ def ensure_loaded(wait_s: Optional[float] = None) -> None:
 
 def get_token(symbol: str) -> Optional[str]:
     ensure_loaded()
-    return _token_map.get(_clean(symbol))
+    c = _clean(symbol)
+    return _token_map.get(c) or _be_map.get(c)
 
 
 def get_tokens_bulk(symbols: List[str], wait_s: Optional[float] = None) -> Dict[str, str]:
@@ -330,10 +359,11 @@ def get_tokens_bulk(symbols: List[str], wait_s: Optional[float] = None) -> Dict[
     short default)."""
     ensure_loaded(wait_s=wait_s)
     tmap = _token_map
+    bmap = _be_map
     out: Dict[str, str] = {}
     for s in symbols:
         clean = _clean(s)
-        tok = tmap.get(clean)
+        tok = tmap.get(clean) or bmap.get(clean)
         if tok:
             out[clean] = tok
     return out
@@ -346,7 +376,11 @@ def get_all_symbols() -> Dict[str, str]:
     LTP sweep (see market-data-service main.py's /angelone/movers), which
     needs every symbol's token to compute day_change_pct itself instead of
     depending on NSE's (blockable) gainers/losers boards or a sampled
-    yfinance seed."""
+    yfinance seed.
+
+    group 135: stays EQ-only on purpose. The -BE fallback (trade-to-trade
+    names) is for named lookups; adding ~hundreds of BE names to the
+    whole-market movers sweep would change what that list contains."""
     ensure_loaded()
     return dict(_token_map)
 
@@ -355,6 +389,7 @@ def status() -> dict:
     now = time.time()
     return {
         "loaded_symbols": len(_token_map),
+        "be_fallback_symbols": len(_be_map),
         "loaded_at": _loaded_at or None,
         "age_seconds": (now - _loaded_at) if _loaded_at else None,
         "source_url": SCRIP_MASTER_URL,

@@ -1,6 +1,6 @@
 """Read-only: list every AngelOne scrip-master row whose symbol starts with each given name.
 Run inside the market-data-service container (see diagnose_group132.sh). Names come in as argv;
-none given -> HFCL MTARTECH STLTECH. Prints exch_seg / symbol / name / token / instrumenttype so the
+none given -> HFCL MTARTECH STLTECH HINDCON SHREETNB WARDINMOBI (the names the feed could not resolve). Prints exch_seg / symbol / name / token / instrumenttype so the
 series suffix (-EQ, -BE, -SM ...) is visible. Nothing is written."""
 import sys
 import time
@@ -9,7 +9,7 @@ import httpx
 
 import angelone_scrip_master as m
 
-names = [a.strip().upper() for a in sys.argv[1:] if a.strip()] or ["HFCL", "MTARTECH", "STLTECH"]
+names = [a.strip().upper() for a in sys.argv[1:] if a.strip()] or ["HFCL", "MTARTECH", "STLTECH", "HINDCON", "SHREETNB", "WARDINMOBI"]
 want = {n: [] for n in names}
 total = nse = eq = 0
 t = time.time()
@@ -42,4 +42,7 @@ for n in names:
         print("  (no row at all: not in AngelOne's file; a name/ticker problem, not a series problem)")
     else:
         in_map = any(str(r.get("exch_seg")) == "NSE" and str(r.get("symbol", "")).endswith("-EQ") for r in rows)
+        in_be = any(str(r.get("exch_seg")) == "NSE" and str(r.get("symbol", "")).endswith("-BE") for r in rows)
         print("  resolves today (NSE + -EQ):", "YES" if in_map else "NO -> only other series/segments exist")
+        if not in_map:
+            print("  group 135 -BE fallback:", "YES (NSE -BE row exists, resolved by get_token)" if in_be else "NO (no NSE -BE row either)")

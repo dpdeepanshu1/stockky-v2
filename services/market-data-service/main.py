@@ -1665,8 +1665,9 @@ def _waterfall_angelone_price(symbol: str) -> Optional[float]:
         logger.debug("angelone waterfall: scrip master lookup %s: %s", base, e)
         return None
     if not token:
-        # Not every symbol resolves — scrip master only carries NSE cash-
-        # equity "-EQ" rows (see angelone_scrip_master.py), and a brand new
+        # Not every symbol resolves — scrip master carries NSE cash-equity
+        # "-EQ" rows plus a "-BE" fallback for names with no "-EQ" row
+        # (see angelone_scrip_master.py), and a brand new
         # SME IPO can take a day or two to appear in AngelOne's own daily
         # scrip master refresh too. Fall through quietly, same as every
         # other waterfall tier when it has nothing.

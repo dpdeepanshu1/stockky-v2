@@ -535,6 +535,16 @@ def _clean_feed_universe(raw):
     return symbols, sorted(dropped)
 
 
+def _exc_detail(e) -> str:
+    """Group 147: describe an exception for a log line. Many httpx errors (ReadTimeout,
+    ConnectTimeout, RemoteProtocolError, ...) have an EMPTY str(), so a log line ending in
+    ``: %s`` printed nothing after the colon and hid the cause. Always names the type and adds
+    the message when there is one."""
+    msg = str(e).strip()
+    name = type(e).__name__
+    return f"{name}: {msg}" if msg else name
+
+
 async def _refresh_feed_universe_loop():
     """Every UNIVERSE_REFRESH_INTERVAL_S (default 15 min), pull the live
     scan universe from api-gateway (GET /scan/universe — movers/bulk-deals/
@@ -568,7 +578,7 @@ async def _refresh_feed_universe_loop():
                 symbols, _dropped_dead = _clean_feed_universe(r.json().get("symbols"))
             except Exception as e:
                 logger.warning(
-                    "feed universe refresh: fetch failed, keeping existing feed: %s", e
+                    "feed universe refresh: fetch failed, keeping existing feed: %s", _exc_detail(e)
                 )
                 delay = _retry_delay
                 continue

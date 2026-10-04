@@ -6,6 +6,8 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-04 (group 147)  Feed-universe refresh warning now names the error (market-data-service); item 6 closed.
+  From the VM log audit: `feed universe refresh: fetch failed, keeping existing feed:` ended with nothing because httpx timeouts have an empty `str()`. New `_exc_detail` logs the exception type (and message when present); behaviour unchanged. Other audit lines reviewed: no code change (NSE 403 / bhavcopy and IPO static fallbacks share the VM-IP block with Yahoo). Item 6 closed: Yahoo 429s the VM's IPv4, no IPv6 route. +3 tests, market-data suite 757 passed. Rebuild market-data-service. Details: `docs/GROUP147_FEED_UNIVERSE_ERROR_DETAIL.md`.
 - 2026-10-04 (group 146)  `/training/api/insights` no longer returns invented insights (decision-prediction-service).
   `get_learning_insights` returned three hard-coded examples (sample sizes 124/87/65) when a training report existed in the working directory, and a 404 otherwise, so the Training tab could show made-up statistics as learned results. Nothing computes real insights yet, so it now returns an empty list (the tab already shows "No insights available yet."). Items 9 (remainder) and 12 closed as keep-as-is. +4 tests, training suite 42 passed. Rebuild decision-prediction-service. Details: `docs/GROUP146_LEARNING_INSIGHTS_NO_PLACEHOLDERS.md`.
 - 2026-10-04 (group 145)  Repair-seeded PE now carries the seed flag the feed merge reads (api-gateway); remaining list corrected (item 25 was already closed).

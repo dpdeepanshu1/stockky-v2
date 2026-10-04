@@ -120,12 +120,82 @@ def _nse_client(force_new: bool = False) -> httpx.Client:
         return c
 
 
+# 2026-10-04 (group 96, log-audit item 23): NSE answers quote-equity with 403
+# from this VM's datacenter IP for long stretches. delivery_from_quote() used
+# to return None silently on every such response, so each symbol in a repair
+# batch still paid a full NSE round trip (and fed the same block) before
+# falling through to the bhavcopy archives, which is what actually works.
+# After a 403/401/429 the quote path now steps aside for a while (default
+# 10 minutes, NSE_QUOTE_BLOCK_SECONDS; 0 disables the step-aside), drops the
+# cached cookie session so the first call after the pause re-bootstraps, and
+# logs ONE line when the pause starts instead of nothing or one per symbol.
+# Other statuses (404 for an unknown symbol, 5xx) never start a pause.
+_QUOTE_BLOCK_STATUSES = frozenset({401, 403, 429})
+_QUOTE_BLOCK: Dict[str, Any] = {"until": 0.0, "status": None, "skipped": 0}
+_QUOTE_BLOCK_LOCK = threading.Lock()
+
+
+def _quote_block_seconds() -> float:
+    try:
+        return max(0.0, float(_os.getenv("NSE_QUOTE_BLOCK_SECONDS", "600") or 0))
+    except (TypeError, ValueError):
+        return 600.0
+
+
+def nse_quote_blocked() -> bool:
+    """True while the quote-equity path is paused after a 401/403/429."""
+    with _QUOTE_BLOCK_LOCK:
+        if time.time() < _QUOTE_BLOCK["until"]:
+            _QUOTE_BLOCK["skipped"] += 1
+            return True
+        return False
+
+
+def _note_quote_status(status: int) -> None:
+    """Start a pause on a blocking status; end one early on a 200."""
+    if status == 200:
+        with _QUOTE_BLOCK_LOCK:
+            _QUOTE_BLOCK["until"] = 0.0
+        return
+    if status not in _QUOTE_BLOCK_STATUSES:
+        return
+    secs = _quote_block_seconds()
+    if secs <= 0:
+        return
+    with _QUOTE_BLOCK_LOCK:
+        already = time.time() < _QUOTE_BLOCK["until"]
+        _QUOTE_BLOCK["until"] = time.time() + secs
+        _QUOTE_BLOCK["status"] = status
+        skipped = _QUOTE_BLOCK["skipped"]
+        _QUOTE_BLOCK["skipped"] = 0
+    if already:
+        return
+    # Cookies that earned a 403 are no use; rebuild them after the pause.
+    with _NSE_SESSION_LOCK:
+        old = _NSE_SESSION_CACHE.get("client")
+        _NSE_SESSION_CACHE["client"] = None
+        _NSE_SESSION_CACHE["ts"] = 0.0
+    if old is not None:
+        try:
+            old.close()
+        except Exception:
+            pass
+    logger.warning(
+        "NSE quote-equity returned %s; skipping it for %.0fs and using bhavcopy "
+        "for delivery %% (%s call(s) skipped during the previous pause)",
+        status, secs, skipped,
+    )
+
+
 def delivery_from_quote(symbol: str) -> Optional[Dict[str, Any]]:
     """Live delivery % from NSE quote-equity (securityWiseDP)."""
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    if nse_quote_blocked():
+        return None
     try:
         client = _nse_client()
         r = client.get(f"https://www.nseindia.com/api/quote-equity?symbol={sym}")
+        _note_quote_status(r.status_code)
         if r.status_code != 200:
                 return None
         data = r.json()

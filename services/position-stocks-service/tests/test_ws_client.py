@@ -450,3 +450,12 @@ class TestRedactSecretsEdgeCases:
     def test_no_secrets_unchanged(self):
         text = "no secrets here at all"
         assert wsc._redact_secrets(text) == text
+
+
+import pytest as _pytest_idle
+
+
+@_pytest_idle.fixture(autouse=True)
+def _no_offhours_idle(monkeypatch):
+    """2026-10-04: the WS loop now idles off-hours; these tests drive it at any wall-clock time."""
+    monkeypatch.setenv("POSITION_WS_OFFHOURS_IDLE", "0")

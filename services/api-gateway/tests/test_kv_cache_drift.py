@@ -47,6 +47,7 @@ GATEWAY_ONLY = {
     "system:bulk_quote_cache",
     "stockky:hot_stocks",
     "stockky:surprise_scan:",
+    "stockky:market_movers_last_known",  # 2026-10-04: closed-market Movers panel survives a restart
 }
 GATEWAY_ONLY_HELPERS = ("kv_get_stale", "get_stale")
 

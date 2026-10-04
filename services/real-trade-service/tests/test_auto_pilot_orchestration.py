@@ -1553,7 +1553,7 @@ class TestAfterhoursScanBody:
         assert result["ran"] is True
         assert result["written"] == 3
 
-    def test_finalize_pass_fires_and_notifies_on_shortlist(self, db, monkeypatch):
+    def test_finalize_pass_fires_and_leaves_the_telegram_message_to_finalize_nextday_watchlist(self, db, monkeypatch):
         db.add(models.TradeGateState(
             mode="REAL", afterhours_news_scan_enabled=True,
             afterhours_finalize_last_run=None,
@@ -1574,8 +1574,9 @@ class TestAfterhoursScanBody:
         result = run(ap._afterhours_scan_body("REAL"))
         assert result["ran"] is True
         assert result["finalized"] is True
-        assert len(notes) == 1
-        assert "SYMA" in notes[0][0][0]
+        # Item 19: finalize_nextday_watchlist sends the detailed FINALIZED message itself; the
+        # orchestrator used to send a second, shorter one with the same symbols.
+        assert notes == []
 
     def test_finalize_pass_no_shortlist_no_notify(self, db, monkeypatch):
         db.add(models.TradeGateState(
@@ -1596,6 +1597,24 @@ class TestAfterhoursScanBody:
         monkeypatch.setattr(ap, "notify_async", _async_recorder(notes))
         run(ap._afterhours_scan_body("REAL"))
         assert notes == []
+
+    def test_scheduled_scan_passes_manual_false_and_manual_run_passes_true(self, db, monkeypatch):
+        db.add(models.TradeGateState(mode="REAL", afterhours_news_scan_enabled=True))
+        db.commit()
+        monkeypatch.setattr(ap, "_is_afterhours_window_active", lambda: True)
+        monkeypatch.setattr(ap, "_compute_afterhours_market_date", lambda now_t: "2026-09-24")
+        monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-09-23")
+        monkeypatch.setattr("tz_utils.ist_now", lambda now=None: datetime(2026, 9, 23, 20, 0))
+        seen = []
+
+        async def scan(db_, mode, market_date, manual=False):
+            seen.append(manual)
+            return 0
+
+        monkeypatch.setattr("watchlist_engine.afterhours_scan.run_afterhours_scan", scan)
+        run(ap._afterhours_scan_body("REAL"))
+        run(ap._afterhours_scan_body("REAL", manual=True))
+        assert seen == [False, True]
 
     def test_regular_scan_pass_runs_and_records_success(self, db, monkeypatch):
         db.add(models.TradeGateState(mode="REAL", afterhours_news_scan_enabled=True))
@@ -1745,7 +1764,7 @@ async def _fake_coro(value):
 # ---------------------------------------------------------------------------
 
 class TestStart:
-    def test_creates_all_five_background_tasks(self, monkeypatch):
+    def test_creates_all_six_background_tasks(self, monkeypatch):
         created = []
 
         def _fake_create_task(coro):
@@ -1758,13 +1777,14 @@ class TestStart:
         monkeypatch.setattr(ap, "_schedule_task", None)
         monkeypatch.setattr(ap, "_totp_task", None)
         monkeypatch.setattr(ap, "_afterhours_task", None)
+        monkeypatch.setattr(ap, "_intraday_news_task", None)   # added in group82 (intraday news loop)
         monkeypatch.setattr(ap.asyncio, "create_task", _fake_create_task)
 
         async def _runner():
             ap.start()
 
         run(_runner())
-        assert len(created) == 5
+        assert len(created) == 6
 
     def test_idempotent_when_tasks_already_running(self, monkeypatch):
         running_task = _FakeTask(done=False)
@@ -1773,6 +1793,7 @@ class TestStart:
         monkeypatch.setattr(ap, "_schedule_task", running_task)
         monkeypatch.setattr(ap, "_totp_task", running_task)
         monkeypatch.setattr(ap, "_afterhours_task", running_task)
+        monkeypatch.setattr(ap, "_intraday_news_task", running_task)
         created = []
         monkeypatch.setattr(ap.asyncio, "create_task", lambda coro: created.append(coro))
 
@@ -1796,13 +1817,14 @@ class TestStart:
         monkeypatch.setattr(ap, "_schedule_task", finished_task)
         monkeypatch.setattr(ap, "_totp_task", finished_task)
         monkeypatch.setattr(ap, "_afterhours_task", finished_task)
+        monkeypatch.setattr(ap, "_intraday_news_task", finished_task)
         monkeypatch.setattr(ap.asyncio, "create_task", _fake_create_task)
 
         async def _runner():
             ap.start()
 
         run(_runner())
-        assert len(created) == 5
+        assert len(created) == 6
 
 
 class _FakeTask:

@@ -372,8 +372,15 @@ class Tick:
         self.day_low  = day_low
 
 
-async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
+async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool = False) -> Optional[Tick]:
     """
+    for_display=True (dashboard price column only — never trading): no ATR
+    background refresh is scheduled (the dashboard never reads ATR, and each
+    refresh is a /history call against AngelOne's candle limit), and while the
+    market is closed the live_quotes lookup is skipped (a tick can never be
+    fresher than LIVE_QUOTE_MAX_AGE_S then, so that call was always wasted).
+    Default False leaves every trading caller exactly as before.
+
     §1 — Quote with live_quotes-first cascade:
       1. live_quotes table (AngelOne WS feed, freshness ≤ LIVE_QUOTE_MAX_AGE_S)
          → price from tick, ATR from _cached_atr(); fires _bg_refresh_atr if
@@ -387,7 +394,10 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
     on frozen data rather than acting on a stale AngelOne tick.
     """
     # ── Source 1: live_quotes table (AngelOne / Yahoo WS) ─────────────────────
+    _skip_live = for_display and not _market_open_now()
     try:
+        if _skip_live:
+            raise _SkipLiveQuote()
         r_lq = await client.get(f"{MARKET_DATA_URL}/live-quote/{symbol}", timeout=3.0)
         if r_lq.status_code == 200:
             lq = r_lq.json()
@@ -408,7 +418,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
                     # Fire-and-forget — doesn't delay this return at all. The
                     # scheduler itself decides whether a refresh is warranted
                     # (cold / past TTL / not already in flight / not backing off).
-                    if _schedule_atr_refresh(client, symbol) and atr is None:
+                    if not for_display and _schedule_atr_refresh(client, symbol) and atr is None:
                         logger.debug(
                             "ATR cache cold for %s (AngelOne hit) — background refresh scheduled",
                             symbol,
@@ -427,6 +437,8 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
                         "live_quotes %s is %.1fs old > %.1fs limit — falling through",
                         symbol, age_s, LIVE_QUOTE_MAX_AGE_S,
                     )
+    except _SkipLiveQuote:
+        pass
     except Exception as e:
         # 2026-09-21 visibility fix: same silent-debug problem as
         # candidate_engine.py's _fetch_quote — a genuine dashboard "No
@@ -443,7 +455,8 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
         # in cache for this and future calls) is only scheduled when the
         # scheduler says one is warranted — it used to fire unconditionally
         # here, i.e. one /history request per quote per cycle for every symbol.
-        _schedule_atr_refresh(client, symbol)
+        if not for_display:
+            _schedule_atr_refresh(client, symbol)
 
         r = await client.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=8.0)
         # the ATR refresh task runs in the background; we don't await it here.
@@ -495,6 +508,107 @@ async def get_quote(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
     except Exception as e:
         logger.warning("get_quote(%s): source-2 (market-data-service /quote) failed: %s: %s", symbol, type(e).__name__, e)
         return None
+
+
+class _SkipLiveQuote(Exception):
+    """Internal control-flow marker: skip Source 1 (never escapes get_quote)."""
+
+
+def _market_open_now() -> bool:
+    """True during NSE cash hours. Fails OPEN (True) if the helper is
+    unavailable, so a broken import can only ever cost one extra lookup,
+    never hide a live tick."""
+    try:
+        from tz_utils import is_market_open_ist
+        return bool(is_market_open_ist())
+    except Exception:  # noqa: BLE001
+        return True
+
+
+# ── Dashboard price cache (2026-10-04, items 3 & 15) ─────────────────────────
+# Positions / Orders / Candidates each priced their symbols independently on
+# every poll, and the Real Trade tab polls all three (plus /pipeline/status)
+# every few seconds: ~35 /live-quote + ~35 /quote + ~14 /history per burst, all
+# for a display-only price column. Now one short-TTL cache is shared by the
+# three routes, concurrent callers wait for the first one's fetch instead of
+# repeating it, and the display path never triggers ATR /history refreshes.
+DISPLAY_PRICE_TTL_OPEN_S = float(((os.getenv("DISPLAY_PRICE_TTL_OPEN_S") or "").strip() or "8"))
+DISPLAY_PRICE_TTL_CLOSED_S = float(((os.getenv("DISPLAY_PRICE_TTL_CLOSED_S") or "").strip() or "120"))
+# A symbol that returned nothing is remembered briefly so an unquotable symbol
+# is not re-requested on every poll.
+DISPLAY_PRICE_MISS_TTL_S = float(((os.getenv("DISPLAY_PRICE_MISS_TTL_S") or "").strip() or "30"))
+_DISPLAY_CACHE: dict = {}                 # clean symbol -> (monotonic ts, price | None)
+_DISPLAY_CACHE_LOCK = _threading.Lock()   # guards the dict only (never held across an await)
+_DISPLAY_FETCH_LOCKS: dict = {}           # running loop id -> asyncio.Lock (single-flight per loop)
+
+
+def _display_ttl() -> float:
+    return DISPLAY_PRICE_TTL_OPEN_S if _market_open_now() else DISPLAY_PRICE_TTL_CLOSED_S
+
+
+def _display_lookup(symbols: list, ttl: float) -> tuple:
+    """Split `symbols` into (hits: {sym: price}, misses: [sym])."""
+    now = _time.monotonic()
+    hits: dict = {}
+    misses: list = []
+    with _DISPLAY_CACHE_LOCK:
+        for sym in symbols:
+            ent = _DISPLAY_CACHE.get(_clean_sym(sym))
+            if ent is not None:
+                ts, price = ent
+                if price is not None and (now - ts) <= ttl:
+                    hits[sym] = price
+                    continue
+                if price is None and (now - ts) <= DISPLAY_PRICE_MISS_TTL_S:
+                    continue          # known-unquotable: skip the lookup, report no price
+            misses.append(sym)
+    return hits, misses
+
+
+def clear_display_price_cache() -> None:
+    with _DISPLAY_CACHE_LOCK:
+        _DISPLAY_CACHE.clear()
+
+
+async def get_display_prices(symbols: list[str]) -> dict[str, float]:
+    """Dashboard-only LTP lookup: {symbol: price}. NEVER use for sizing,
+    pricing or evaluating an order (entry/exit call get_quote(s) directly).
+    Never raises into the caller beyond what get_quotes-style code would."""
+    out: dict[str, float] = {}
+    if not symbols:
+        return out
+    uniq = list(dict.fromkeys(symbols))
+    ttl = _display_ttl()
+    hits, misses = _display_lookup(uniq, ttl)
+    out.update(hits)
+    if not misses:
+        return out
+
+    loop_id = id(asyncio.get_running_loop())
+    lock = _DISPLAY_FETCH_LOCKS.get(loop_id)
+    if lock is None:
+        lock = _DISPLAY_FETCH_LOCKS[loop_id] = asyncio.Lock()
+        if len(_DISPLAY_FETCH_LOCKS) > 8:            # loops are short-lived in tests; don't grow forever
+            for k in list(_DISPLAY_FETCH_LOCKS)[:-4]:
+                _DISPLAY_FETCH_LOCKS.pop(k, None)
+    async with lock:
+        # Another request may have fetched these while we waited for the lock.
+        hits2, misses2 = _display_lookup(misses, ttl)
+        out.update(hits2)
+        if misses2:
+            async def _one(client, sym):
+                return await get_quote(client, sym, for_display=True)
+            results = await _bounded_gather(misses2, _one, "get_display_prices")
+            now = _time.monotonic()
+            with _DISPLAY_CACHE_LOCK:
+                if len(_DISPLAY_CACHE) > 4000:
+                    _DISPLAY_CACHE.clear()
+                for sym, tick in zip(misses2, results):
+                    price = float(tick.price) if tick is not None and tick.price else None
+                    _DISPLAY_CACHE[_clean_sym(sym)] = (now, price)
+                    if price is not None:
+                        out[sym] = price
+    return out
 
 
 async def get_quotes(symbols: list[str]) -> dict[str, Tick]:

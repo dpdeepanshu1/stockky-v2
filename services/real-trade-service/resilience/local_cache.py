@@ -165,13 +165,13 @@ def reconcile_on_startup(db) -> None:
             # PARTIALLY_CLOSED, not a real drift. Matching the same status
             # set the snapshot itself uses fixes the false alarm without
             # weakening the actual mismatch check.
-            live_symbols = {
-                p.symbol
-                for p in db.query(models.TradePosition)
+            live_rows = (
+                db.query(models.TradePosition)
                 .filter(models.TradePosition.mode == mode,
                         models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")))
                 .all()
-            }
+            )
+            live_symbols = {p.symbol for p in live_rows}
             snap_symbols = {row["symbol"] for row in snap.get("positions", [])}
 
             if live_symbols != snap_symbols:
@@ -187,6 +187,22 @@ def reconcile_on_startup(db) -> None:
                 logger.warning(
                     "real-trade startup reconcile: MISMATCH detected — %s", detail
                 )
+                # 2026-10-04 (group 97, log-audit item 24): report a drift ONCE.
+                # The snapshot is only rewritten by run_cycle_core, and a mode
+                # whose gate is disarmed / auto-pilot off (DEMO here) never runs
+                # a cycle, so its snapshot froze (snap_as_of=2026-09-21) and the
+                # same mismatch was logged and audited on every boot even after
+                # the audit row had already recorded it. The mismatch above is
+                # now on record; re-baseline the snapshot to the live DB state
+                # (the DB is not touched) so the next boot compares against
+                # today, not against the frozen day. A failure here is
+                # non-fatal and just leaves the old snapshot (old behaviour).
+                try:
+                    snapshot_open_positions(db, mode, live_rows)
+                except Exception as exc:
+                    logger.warning(
+                        "real-trade startup reconcile: %s snapshot refresh failed: %s", mode, exc
+                    )
             else:
                 logger.info(
                     "real-trade startup reconcile: %s OK (%d open positions match snapshot)",

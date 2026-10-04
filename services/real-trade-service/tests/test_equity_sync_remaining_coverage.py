@@ -126,7 +126,8 @@ def test_balance_key_change_after_first_sync_is_tracked(monkeypatch, fresh_db, c
         equity_sync.sync_real_equity(fresh_db)
 
     assert equity_sync._last_balance_key == "sodLimit"
-    assert any("changed" in r.getMessage() for r in caplog.records)
+    warns = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("FALLBACK Dhan balance field 'sodLimit' (was 'availabelBalance')" in m and "overstates" in m for m in warns)
 
 
 def test_balance_key_unchanged_across_syncs_does_not_re_warn(monkeypatch, fresh_db, caplog):
@@ -139,7 +140,55 @@ def test_balance_key_unchanged_across_syncs_does_not_re_warn(monkeypatch, fresh_
     with caplog.at_level("WARNING"):
         equity_sync.sync_real_equity(fresh_db)
 
-    assert not any("changed" in r.getMessage() for r in caplog.records)
+    assert not any("balance field" in r.getMessage() for r in caplog.records)
+
+
+def test_documented_balance_key_logs_info_only(monkeypatch, fresh_db, caplog):
+    monkeypatch.setattr(dhan_client, "get_funds", lambda db_: {"availabelBalance": 40_000.0})
+    with caplog.at_level("INFO"):
+        equity_sync.sync_real_equity(fresh_db)
+    recs = [r for r in caplog.records if "balance field" in r.getMessage()]
+    assert len(recs) == 1 and recs[0].levelname == "INFO"
+    assert "documented as the amount available to trade" in recs[0].getMessage()
+    assert not [r for r in caplog.records if r.levelname == "WARNING" and "balance field" in r.getMessage()]
+
+
+def test_switching_between_documented_spellings_and_back_from_fallback_is_info(monkeypatch, fresh_db, caplog):
+    monkeypatch.setattr(dhan_client, "get_funds", lambda db_: {"availabelBalance": 40_000.0})
+    equity_sync.sync_real_equity(fresh_db)
+    caplog.clear()
+    monkeypatch.setattr(dhan_client, "get_funds", lambda db_: {"availableBalance": 40_000.0})
+    with caplog.at_level("INFO"):
+        equity_sync.sync_real_equity(fresh_db)
+    monkeypatch.setattr(equity_sync, "_last_balance_key", "sodLimit")
+    monkeypatch.setattr(dhan_client, "get_funds", lambda db_: {"availabelBalance": 40_000.0})
+    with caplog.at_level("INFO"):
+        equity_sync.sync_real_equity(fresh_db)
+    changed = [r for r in caplog.records if "balance field changed" in r.getMessage()]
+    assert len(changed) == 2 and all(r.levelname == "INFO" for r in changed)
+    assert not [r for r in caplog.records if r.levelname == "WARNING" and "balance field" in r.getMessage()]
+
+
+@pytest.mark.parametrize("funds,key,fragment", [
+    ({"withdrawableBalance": 40_000.0}, "withdrawableBalance", "can sit below the tradeable balance"),
+    ({"availableCash": 40_000.0}, "availableCash", "not in Dhan's documented fundlimit response"),
+    ({"sodLimit": 40_000.0}, "sodLimit", "overstates the balance"),
+])
+def test_fallback_balance_key_warns_with_what_it_is(monkeypatch, fresh_db, caplog, funds, key, fragment):
+    monkeypatch.setattr(dhan_client, "get_funds", lambda db_: funds)
+    with caplog.at_level("INFO"):
+        assert equity_sync.sync_real_equity(fresh_db) is not None   # sizing behaviour unchanged
+    warns = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and "balance field" in r.getMessage()]
+    assert len(warns) == 1 and f"FALLBACK Dhan balance field '{key}'" in warns[0] and fragment in warns[0]
+
+
+def test_unknown_balance_key_note_fallback(monkeypatch, fresh_db, caplog):
+    monkeypatch.setattr(equity_sync, "_PRIMARY_BALANCE_KEYS", ())
+    monkeypatch.setattr(equity_sync, "_FALLBACK_BALANCE_NOTES", {})
+    monkeypatch.setattr(dhan_client, "get_funds", lambda db_: {"availabelBalance": 40_000.0})
+    with caplog.at_level("WARNING"):
+        equity_sync.sync_real_equity(fresh_db)
+    assert "is not a known Dhan balance field" in caplog.text
 
 
 if __name__ == "__main__":

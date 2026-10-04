@@ -714,7 +714,61 @@ async def _validate_symbols(symbols: list[str]) -> set[str]:
 
 # ── Main scan entry point ────────────────────────────────────────────────────
 
-async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
+def _format_funnel(funnel: list[dict], bulk_count: int) -> str:
+    """One-line per-feed funnel: items/stale/no-symbol/score<=0/scored, plus bulk-deal hits."""
+    parts = [
+        f"{f['source']}: {f['items']} items, {f['stale']} stale, {f['no_symbol']} no-symbol, "
+        f"{f['score0']} score<=0, {f['scored']} scored"
+        for f in funnel
+    ]
+    parts.append(f"bulk/block: {bulk_count} hit(s)")
+    return " | ".join(parts)
+
+
+def _explain_empty(funnel: list[dict], bulk_count: int, have_master: bool) -> str:
+    """Plain-English reason a pass found nothing to score."""
+    total = sum(f["items"] for f in funnel)
+    if total == 0 and bulk_count == 0:
+        return "every RSS feed returned 0 items (fetch failed or blocked — see the feed warnings) and there were no bulk/block-deal hits"
+    stale = sum(f["stale"] for f in funnel)
+    no_sym = sum(f["no_symbol"] for f in funnel)
+    zero = sum(f["score0"] for f in funnel)
+    reasons = []
+    if stale:
+        reasons.append(f"{stale} older than the max news age")
+    if no_sym:
+        reasons.append(f"{no_sym} matched no NSE symbol" + ("" if have_master else " (symbol master unavailable, whitelist fallback)"))
+    if zero:
+        reasons.append(f"{zero} scored <= 0")
+    if not reasons:
+        reasons.append("none passed the filters")
+    return f"{total} RSS item(s) fetched: " + ", ".join(reasons) + f"; {bulk_count} bulk/block-deal hit(s)"
+
+
+# Telegram noise control (group 95, item 19). A scan runs every few minutes for both modes and on
+# every service boot; it used to send a message each time, including "No new rows - N symbol(s)
+# already at best score" (nothing to act on) and, after a restart, a repeat of the same list. Now a
+# SCHEDULED scan messages only when it wrote something new; a manual scan always replies; a pass
+# that failed to save everything is reported once per (mode, date, failed-count), not every tick.
+_zero_row_notice_seen: dict = {}
+
+
+def _should_notify_scan(mode: str, market_date: str, written: int, failed: int, manual: bool) -> bool:
+    if manual or written:
+        return True
+    if failed:
+        key = (mode, market_date)
+        if _zero_row_notice_seen.get(key) == failed:
+            return False
+        _zero_row_notice_seen[key] = failed
+        if len(_zero_row_notice_seen) > 64:      # bounded: keep only the newest entries
+            for k in list(_zero_row_notice_seen)[:-32]:
+                _zero_row_notice_seen.pop(k, None)
+        return True
+    return False
+
+
+async def run_afterhours_scan(db, mode: str, market_date: str, manual: bool = False) -> int:
     """Run one after-hours scan pass for `mode`.
 
     Fetches all RSS feeds plus api-gateway's bulk/block-deal bucket,
@@ -738,9 +792,17 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
     # Collect all scored hits: symbol → best {score, headline, catalyst_type, source}
     best: dict[str, dict] = {}
 
+    # 2026-10-04 (item 17): per-feed funnel so a pass that writes 0 rows says
+    # WHY (feed empty / all stale / no symbol matched / all scored <= 0 /
+    # already stored at best score / upsert failed) instead of ending silently.
+    funnel: list[dict] = []
+
     for feed in _RSS_FEEDS:
         items = await _fetch_rss_items(feed)
         stale_dropped = 0
+        no_symbol = 0
+        zero_score = 0
+        scored = 0
         for item in items:
             headline = item["title"]
             # 2026-09-17 fix (session58, user request): drop items whose
@@ -758,11 +820,14 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
                 continue
             symbol = _extract_symbol(headline, known_symbols)
             if not symbol:
+                no_symbol += 1
                 continue
             catalyst_types = classify_text(headline) or ["news"]
             score = _score_headline(headline, catalyst_types, feed["source_bonus"])
             if score <= 0:
+                zero_score += 1
                 continue
+            scored += 1
             primary_catalyst = catalyst_types[0] if catalyst_types else "news"
             existing = best.get(symbol)
             if existing is None or score > existing["score"]:
@@ -777,6 +842,10 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
                 "afterhours-scan: %s → dropped %d item(s) older than %dd",
                 feed["source"], stale_dropped, config.AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS,
             )
+        funnel.append({
+            "source": feed["source"], "items": len(items), "stale": stale_dropped,
+            "no_symbol": no_symbol, "score0": zero_score, "scored": scored,
+        })
 
     # RSS-derived symbols: if known_symbols (NSE master, 2681 symbols) is
     # available, every symbol in `best` already passed _extract_symbol's
@@ -819,17 +888,37 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
     # Bulk/block-deal hits come pre-resolved by api-gateway — merge in,
     # keeping the higher score if a symbol also had an RSS hit.
     bulk_hits = await _fetch_bulk_deal_hits()
+    funnel_summary = _format_funnel(funnel, len(bulk_hits))
     for symbol, hit in bulk_hits.items():
         existing = best.get(symbol)
         if existing is None or hit["score"] > existing["score"]:
             best[symbol] = hit
 
     if not best:
-        logger.info("afterhours-scan [%s %s]: no scored items found this pass", mode, market_date)
+        logger.info(
+            "afterhours-scan [%s %s]: no scored items found this pass — 0 rows written (%s)",
+            mode, market_date, _explain_empty(funnel, len(bulk_hits), bool(known_symbols)),
+        )
+        logger.info("afterhours-scan [%s %s]: funnel %s", mode, market_date, funnel_summary)
+        # Group 97: group95 documented "a manual scan always replies", but this
+        # empty-pass early return never sent anything, so the Run Now button
+        # got no Telegram reply when nothing scored. Scheduled passes stay silent.
+        if manual:
+            try:
+                from notifier import notify_async
+                await notify_async(
+                    f"📡 *After-hours scan — {mode}* ({market_date})\n"
+                    f"No scored items this pass — 0 rows written.\n"
+                    f"{_explain_empty(funnel, len(bulk_hits), bool(known_symbols))}"
+                )
+            except Exception:
+                logger.debug("afterhours-scan: Telegram notification failed (non-fatal)", exc_info=True)
         return 0
 
     now = datetime.now(timezone.utc)
     written = 0
+    unchanged = 0
+    failed = 0
 
     # 2026-09-17 fix (session56 audit): commit PER SYMBOL instead of once
     # after the whole loop. The previous shape called db.flush() per symbol
@@ -868,8 +957,11 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
                 existing_row.updated_at = now
                 db.commit()
                 written += 1
+            else:
+                unchanged += 1
         except Exception as e:
             db.rollback()
+            failed += 1
             logger.warning(
                 "afterhours-scan [%s %s]: failed to upsert %s — skipping: %s",
                 mode, market_date, symbol, e,
@@ -880,10 +972,25 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
         "afterhours-scan [%s %s]: %d symbol(s) scored → %d rows upserted",
         mode, market_date, len(best), written,
     )
+    if written == 0:
+        # Item 17: say why nothing was written.
+        if failed and failed == len(best):
+            why = f"every one of {failed} upsert(s) FAILED (see the warnings above)"
+        elif failed:
+            why = (f"{unchanged} already stored at an equal/higher score, "
+                   f"{failed} upsert(s) FAILED (see the warnings above)")
+        else:
+            why = (f"all {unchanged} scored symbol(s) already stored for {market_date} "
+                   "at an equal or higher score (nothing new to write)")
+        logger.info("afterhours-scan [%s %s]: 0 rows written — %s", mode, market_date, why)
+        logger.info("afterhours-scan [%s %s]: funnel %s", mode, market_date, funnel_summary)
 
     # ── Telegram notification (2026-09-18 fix, session67) ────────────────────
     # Notify on every scan tick (auto or manual) with what was found/updated.
     # Best-effort — a Telegram failure must never fail the scan.
+    if not _should_notify_scan(mode, market_date, written, failed, manual):
+        logger.info("afterhours-scan [%s %s]: no Telegram message (nothing new to report)", mode, market_date)
+        return written
     try:
         from notifier import notify_async
         # Sort by score descending for the notification summary
@@ -892,7 +999,10 @@ async def run_afterhours_scan(db, mode: str, market_date: str) -> int:
         if written:
             lines.append(f"{written} row(s) new/updated · {len(best)} total scored this pass\n")
         else:
-            lines.append(f"No new rows — {len(best)} symbol(s) already at best score\n")
+            if failed:
+                lines.append(f"No new rows — {unchanged} symbol(s) already at best score, {failed} failed to save\n")
+            else:
+                lines.append(f"No new rows — {len(best)} symbol(s) already at best score\n")
         for sym, hit in sorted_hits[:_NOTIFY_MAX_SYMBOLS]:  # was top 8 (2026-10-04: show all, cap only as a sanity bound)
             cat_icon = {"results": "📊", "bulk_block": "🏦", "board": "🗂️", "insider": "👤", "news": "📰"}.get(
                 hit["catalyst_type"], "📰"

@@ -31,3 +31,6 @@ def pytest_collectstart(collector):
     if isinstance(collector, pytest.Module):
         for name in _COLLIDING_MODULES:
             sys.modules.pop(name, None)
+
+import os as _os_logcfg
+_os_logcfg.environ.setdefault("HTTPX_LOG_LEVEL", "INFO")  # 2026-10-04: tests assert on httpx INFO lines; production default is WARNING

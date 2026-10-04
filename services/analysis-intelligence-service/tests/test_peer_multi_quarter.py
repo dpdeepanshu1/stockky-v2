@@ -91,6 +91,75 @@ class TestDetectSector:
         assert pmq.detect_sector({"sectorDisp": "Technology"}) == "IT"
 
 
+class TestDetectSectorWordMatching:
+    """Log-audit item 10: wrong peer sets (Auto -> FMCG peers, Utilities -> IT peers, retail -> generic set)."""
+
+    @pytest.mark.parametrize("payload,expected", [
+        # Yahoo's real sector / industry pairs
+        ({"sector": "Consumer Cyclical", "industry": "Auto Manufacturers"}, "AUTO"),
+        ({"sector": "Consumer Cyclical", "industry": "Auto Parts"}, "AUTO"),
+        ({"sector": "Utilities", "industry": "Utilities - Renewable"}, "POWER"),
+        ({"sector": "Utilities", "industry": "Utilities - Regulated Electric"}, "POWER"),
+        ({"sector": "Consumer Cyclical", "industry": "Specialty Retail"}, "RETAIL"),
+        ({"sector": "Consumer Cyclical", "industry": "Apparel Retail"}, "RETAIL"),
+        ({"sector": "Consumer Defensive", "industry": "Packaged Foods"}, "FMCG"),
+        ({"sector": "Consumer Defensive", "industry": "Household & Personal Products"}, "FMCG"),
+        ({"sector": "Technology", "industry": "Information Technology Services"}, "IT"),
+        ({"sector": "Technology", "industry": "Software - Application"}, "IT"),
+        ({"sector": "Financial Services", "industry": "Banks - Regional"}, "BANK"),
+        ({"sector": "Financial Services", "industry": "Capital Markets"}, "BANK"),   # industry unmapped -> sector
+        ({"sector": "Healthcare", "industry": "Drug Manufacturers - General"}, "PHARMA"),
+        ({"sector": "Healthcare", "industry": "Biotechnology"}, "PHARMA"),            # BIOTECH is not TECH
+        ({"sector": "Basic Materials", "industry": "Steel"}, "METAL"),
+        ({"sector": "Energy", "industry": "Oil & Gas Refining & Marketing"}, "ENERGY"),
+        ({"sector": "Industrials", "industry": "Waste Management"}, "DEFAULT"),
+    ])
+    def test_real_yahoo_sector_industry_pairs(self, payload, expected):
+        assert pmq.detect_sector(payload) == expected
+
+    @pytest.mark.parametrize("text", [
+        "Capital Goods", "Utilities", "Hospitality", "Capital Markets", "Digital Infrastructure",
+    ])
+    def test_it_is_not_matched_inside_other_words(self, text):
+        assert pmq.detect_sector({"sector": text}) != "IT"
+
+    @pytest.mark.parametrize("text", ["Consumer Cyclical", "Consumer Discretionary", "Consumer Durables"])
+    def test_consumer_cyclical_is_not_fmcg(self, text):
+        assert pmq.detect_sector({"sector": text}) == "DEFAULT"
+
+    @pytest.mark.parametrize("text", ["Consumer", "Consumer Staples", "Consumer Defensive"])
+    def test_consumer_staples_and_bare_consumer_stay_fmcg(self, text):
+        assert pmq.detect_sector({"sector": text}) == "FMCG"
+
+    def test_industry_beats_a_misleading_sector(self):
+        assert pmq.detect_sector({"sector": "Consumer Defensive", "industry": "Auto Parts"}) == "AUTO"
+
+    def test_sector_is_used_when_industry_names_nothing(self):
+        assert pmq.detect_sector({"sector": "Technology", "industry": "Scientific & Technical Instruments".replace("Technical", "Gadgets")}) == "IT"
+
+    def test_sectordisp_is_the_last_resort(self):
+        assert pmq.detect_sector({"industry": "Misc", "sector": "", "sectorDisp": "Utilities"}) == "POWER"
+
+    @pytest.mark.parametrize("bad", [None, 0, 12.5, ["Auto"], {}])
+    def test_non_string_values_do_not_raise(self, bad):
+        assert pmq.detect_sector({"sector": bad, "industry": bad, "sectorDisp": bad}) == "DEFAULT"
+
+    def test_punctuation_separated_words_still_match(self):
+        assert pmq.detect_sector({"industry": "Oil&Gas"}) == "ENERGY"
+        assert pmq.detect_sector({"industry": "Auto-Components"}) == "AUTO"
+
+    def test_automation_is_not_auto(self):
+        assert pmq.detect_sector({"industry": "Industrial Automation"}) == "DEFAULT"
+
+    def test_new_sectors_have_peer_sets_and_exclude_the_symbol_itself(self):
+        for key in ("POWER", "RETAIL"):
+            assert pmq.DEFAULT_PEERS[key] and all(p.endswith(".NS") for p in pmq.DEFAULT_PEERS[key])
+        assert "NTPC.NS" not in pmq.build_peer_list("NTPC", "POWER")
+        assert pmq.build_peer_list("CLEANMAX", "POWER")[0] == "NTPC.NS"
+        assert pmq.build_peer_list("SSRETAIL", "RETAIL")[0] == "DMART.NS"
+        assert "RELIANCE.NS" not in pmq.build_peer_list("SSRETAIL", "RETAIL")
+
+
 # ── _fund_cache_get / _fund_cache_set ────────────────────────────────────────
 
 class TestFundCache:
@@ -224,12 +293,12 @@ class TestComputePeerRelative:
 
     def test_cheaper_pe_raises_score(self, monkeypatch):
         self._patch_batch(monkeypatch, {"pe_ratio": 30.0})
-        result = pmq.compute_peer_relative("X", {"pe_ratio": 10.0}, "http://mds/")
+        result = pmq.compute_peer_relative("X", {"pe_ratio": 10.0, "sector": "Basic Materials"}, "http://mds/")
         assert result["peer_score"] > 50.0
 
     def test_expensive_pe_lowers_score(self, monkeypatch):
         self._patch_batch(monkeypatch, {"pe_ratio": 10.0})
-        result = pmq.compute_peer_relative("X", {"pe_ratio": 50.0}, "http://mds/")
+        result = pmq.compute_peer_relative("X", {"pe_ratio": 50.0, "sector": "Basic Materials"}, "http://mds/")
         assert result["peer_score"] < 50.0
 
     def test_empty_peer_data_returns_neutral(self, monkeypatch):

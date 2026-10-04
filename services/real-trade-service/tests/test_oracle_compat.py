@@ -494,3 +494,28 @@ class TestExecDdlSafe:
             begin_mock.return_value.__enter__.return_value = fake_conn
             begin_mock.return_value.__exit__.return_value = False
             oc.exec_ddl_safe(eng, "CREATE INDEX idx1 ON kv (k)", "postgresql")
+
+
+# 2026-10-04: ORA-00936 on every boot -- `mode` is an Oracle reserved word; SQLAlchemy created the column quoted.
+class TestCreateIndexQuotesReservedColumns:
+    def test_mode_is_quoted_on_oracle(self):
+        import oracle_compat as oc
+        assert oc.create_index_sql("oracle", "ix_trade_orders_mode_created", "trade_orders", "mode, created_at") == \
+            'CREATE INDEX ix_trade_orders_mode_created ON trade_orders ("mode", created_at)'
+
+    def test_all_four_failing_indexes(self):
+        import oracle_compat as oc
+        for cols, expect in (("mode, consumed, received_at", '("mode", consumed, received_at)'),
+                             ("mode, market_date, consumed", '("mode", market_date, consumed)'),
+                             ("mode, symbol, market_date", '("mode", symbol, market_date)')):
+            assert oc.create_index_sql("oracle", "i", "t", cols).endswith(expect)
+
+    def test_non_reserved_and_postgres_untouched(self):
+        import oracle_compat as oc
+        assert oc.create_index_sql("oracle", "i", "t", "symbol, created_at") == "CREATE INDEX i ON t (symbol, created_at)"
+        assert oc.create_index_sql("postgresql", "i", "t", "mode, x") == "CREATE INDEX IF NOT EXISTS i ON t (mode, x)"
+
+    def test_already_quoted_and_uppercase_and_desc(self):
+        import oracle_compat as oc
+        assert oc.create_index_sql("oracle", "i", "t", '"mode", x').endswith('("mode", x)')
+        assert oc.create_index_sql("oracle", "i", "t", "MODE desc, x").endswith('("mode" desc, x)')

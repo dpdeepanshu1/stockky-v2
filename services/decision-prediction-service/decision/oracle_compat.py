@@ -257,10 +257,28 @@ def create_table_sql(dialect: str, table: str, with_expires: bool) -> str:
     return f"CREATE TABLE IF NOT EXISTS {table} ({cols})"
 
 
+# 2026-10-04 (ORA-00936 on every boot): SQLAlchemy quotes reserved-word columns when it creates the
+# table (a column named `mode` is stored as lowercase "mode"), but this raw DDL passed `mode` bare, and
+# MODE is an Oracle reserved word -> "missing expression" and the index was never built. Quote exactly
+# those tokens, the same way SQLAlchemy does.
+_ORACLE_QUOTE_COLS = frozenset({"mode", "level", "comment", "user", "size", "start", "uid"})
+
+
+def _oracle_quote_cols(col: str) -> str:
+    parts = []
+    for tok in str(col).split(","):
+        t = tok.strip()
+        bare = t.split()[0] if t else ""
+        if bare.lower() in _ORACLE_QUOTE_COLS and not bare.startswith('"'):
+            t = '"' + bare.lower() + '"' + t[len(bare):]
+        parts.append(t)
+    return ", ".join(parts)
+
+
 def create_index_sql(dialect: str, index: str, table: str, col: str) -> str:
     if dialect == "oracle":
         # No IF NOT EXISTS before 23c; caller swallows ORA-00955/ORA-01408.
-        return f"CREATE INDEX {index} ON {table} ({col})"
+        return f"CREATE INDEX {index} ON {table} ({_oracle_quote_cols(col)})"
     return f"CREATE INDEX IF NOT EXISTS {index} ON {table} ({col})"
 
 

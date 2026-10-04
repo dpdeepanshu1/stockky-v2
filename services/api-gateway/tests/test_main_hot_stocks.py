@@ -641,6 +641,62 @@ class TestHotUniverse:
         assert out["universe_size"] == 1 and _syms(out["results_driven"]) == ["AAA"]
 
 
+class TestHotUniverseDropsDeadSymbols:
+    """Group 99 / log-audit item 28: AAKASH and ANNAPURNA (KNOWN_DELISTED) came
+    in through the watchlist / searched list and 404'd on every upstream."""
+
+    def test_known_delisted_symbols_never_reach_evaluation(self, henv):
+        henv.watch = ["AAKASH", "GOOD1"]
+        henv.searched = ["ANNAPURNA", "GOOD2"]
+        seen = []
+        out = _hot(progress_cb=lambda i, n, s, batch=None: seen.append(s))
+        assert seen == ["GOOD1", "GOOD2"]
+        assert out["universe_size"] == 2
+        assert "AAKASH" not in henv.news_calls and "ANNAPURNA" not in henv.news_calls
+
+    def test_dotted_and_lowercase_spellings_are_dropped_too(self, henv):
+        henv.watch = ["aakash.ns", "ANNAPURNA.BO", "KEEP"]
+        assert _hot()["universe_size"] == 1
+
+    def test_non_equity_instruments_are_dropped(self, henv):
+        henv.event_syms = ["ABC-RE", "ABC-W1", "APLAPOLLO29SEP26FUT", "ABC"]
+        seen = []
+        _hot(progress_cb=lambda i, n, s, batch=None: seen.append(s))
+        assert seen == ["ABC"]
+
+    def test_the_drop_is_logged_once_with_the_names(self, henv, caplog):
+        henv.watch = ["AAKASH", "ANNAPURNA", "KEEP"]
+        with caplog.at_level(logging.INFO, logger=gw.logger.name):
+            _hot()
+        msgs = [r.getMessage() for r in caplog.records if "dropped" in r.getMessage() and "stockky-hot universe" in r.getMessage()]
+        assert len(msgs) == 1 and "AAKASH" in msgs[0] and "ANNAPURNA" in msgs[0]
+
+    def test_only_dead_symbols_gives_an_empty_universe_not_the_nifty_fallback_for_them(self, henv):
+        henv.nifty = ["NIFTY1"]
+        henv.watch = ["AAKASH"]
+        seen = []
+        _hot(progress_cb=lambda i, n, s, batch=None: seen.append(s))
+        assert seen == ["NIFTY1"]            # empty universe -> existing nifty fallback, never AAKASH
+
+    def test_helper_drops_in_place_and_returns_the_keys(self):
+        seen = {"AAKASH": "AAKASH", "OK": "OK.NS", "X-RE": "X-RE"}
+        assert sorted(gw._drop_dead_hot_symbols(seen)) == ["AAKASH", "X-RE"]
+        assert seen == {"OK": "OK.NS"}
+
+    def test_helper_keeps_everything_when_symbol_aliases_is_unavailable(self, monkeypatch):
+        import builtins
+        real = builtins.__import__
+
+        def fake(name, *a, **k):
+            if name == "symbol_aliases":
+                raise ImportError("gone")
+            return real(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", fake)
+        seen = {"AAKASH": "AAKASH"}
+        assert gw._drop_dead_hot_symbols(seen) == [] and seen == {"AAKASH": "AAKASH"}
+
+
 # ── batching, progress, stop ────────────────────────────────────────────────
 
 class TestHotBatching:

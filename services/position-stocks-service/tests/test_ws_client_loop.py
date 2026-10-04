@@ -536,3 +536,12 @@ class TestParseFrameExceptionPath:
         )
         data = b"\x00" * 60
         assert _wsc_mod._parse_frame(data) is None
+
+
+import pytest as _pytest_idle
+
+
+@_pytest_idle.fixture(autouse=True)
+def _no_offhours_idle(monkeypatch):
+    """2026-10-04: the WS loop now idles off-hours; these tests drive it at any wall-clock time."""
+    monkeypatch.setenv("POSITION_WS_OFFHOURS_IDLE", "0")

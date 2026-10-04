@@ -66,6 +66,48 @@ _BALANCE_KEYS = (
 )
 _last_balance_key: Optional[str] = None
 
+# Dhan's fundlimit docs (dhanhq.co/docs/v2/funds): `availabelBalance` (sic) = "Available amount to
+# trade"; `sodLimit` = start-of-day amount; `withdrawableBalance` = amount withdrawable to a bank
+# account. So the first two names (the typo and its corrected spelling) are the documented tradeable
+# balance, and every other key is a FALLBACK that measures something different or undocumented.
+# The old log said "verify this reflects a sensible tradeable balance" on every boot even for the
+# documented key; now only a fallback gets a WARNING, with what that key actually is.
+_PRIMARY_BALANCE_KEYS = ("availabelBalance", "availableBalance")
+_FALLBACK_BALANCE_NOTES = {
+    "availableCash": "is not in Dhan's documented fundlimit response, so what it measures is unverified",
+    "withdrawableBalance": "is the amount withdrawable to a bank account and can sit below the tradeable balance "
+                           "(funds blocked as margin/collateral are not withdrawable)",
+    "sodLimit": "is the start-of-day amount and ignores intraday usage, so it overstates the balance after any "
+                "spending or losses",
+}
+
+
+def _log_balance_key(matched_key: str) -> None:
+    """Log once when the Dhan field in use first appears or changes. INFO for the documented
+    tradeable-balance field, WARNING for a fallback field (with what that field is)."""
+    global _last_balance_key
+    prev = _last_balance_key
+    if matched_key == prev:
+        return
+    _last_balance_key = matched_key
+    if matched_key in _PRIMARY_BALANCE_KEYS:
+        if prev is None:
+            logger.info(
+                "ledger.sync_from_broker: using Dhan balance field '%s' (documented as the amount "
+                "available to trade) for the scalp pool.", matched_key,
+            )
+        else:
+            logger.info(
+                "ledger.sync_from_broker: Dhan balance field changed '%s' -> '%s'.", prev, matched_key,
+            )
+        return
+    note = _FALLBACK_BALANCE_NOTES.get(matched_key, "is not a known Dhan balance field")
+    logger.warning(
+        "ledger.sync_from_broker: using FALLBACK Dhan balance field '%s'%s — it %s. The scalp pool is "
+        "sized from it; the documented field 'availabelBalance' was absent or unusable in the funds "
+        "response.", matched_key, f" (was '{prev}')" if prev else "", note,
+    )
+
 
 def _pick_balance(funds: dict) -> tuple[Optional[float], Optional[str]]:
     for key in _BALANCE_KEYS:
@@ -137,30 +179,21 @@ def sync_from_broker(db: Session) -> float:
         return 0.0
 
     available_balance, matched_key = _pick_balance(funds)
-    if available_balance is None or available_balance <= 0:
+    if available_balance is None:
         logger.warning(
             "ledger.sync_from_broker: no usable available-balance field in "
             "Dhan funds response (checked %s): %s",
             _BALANCE_KEYS, funds,
         )
         return 0.0
+    if available_balance <= 0:
+        logger.warning(
+            "ledger.sync_from_broker: Dhan field '%s' reports %s (<= 0) — nothing to allocate, "
+            "ledger left as it was.", matched_key, available_balance,
+        )
+        return 0.0
 
-    global _last_balance_key
-    if matched_key != _last_balance_key:
-        if _last_balance_key is None:
-            logger.warning(
-                "ledger.sync_from_broker: using Dhan balance field '%s' for "
-                "the scalp pool — verify this reflects a sensible current "
-                "tradeable balance.", matched_key,
-            )
-        else:
-            logger.warning(
-                "ledger.sync_from_broker: Dhan balance field in use changed "
-                "'%s' -> '%s' — the funds response shape shifted; verify the "
-                "new field still reflects a sensible tradeable balance.",
-                _last_balance_key, matched_key,
-            )
-        _last_balance_key = matched_key
+    _log_balance_key(matched_key)
 
     scalp_alloc = available_balance * (config.SCALP_POOL_CAPITAL_SHARE_PCT / 100.0)
     row = _get_or_create(db)

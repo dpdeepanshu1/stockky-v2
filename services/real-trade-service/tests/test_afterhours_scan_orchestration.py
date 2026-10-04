@@ -414,3 +414,73 @@ class TestFinalizeNextdayWatchlist:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ── Telegram noise control (group 95, item 19) ───────────────────────────────
+
+class TestScanTelegramGating:
+    HEADLINE = "Reliance record profit growth beat estimates"
+
+    @pytest.fixture(autouse=True)
+    def _reset_notice_memory(self):
+        ahs._zero_row_notice_seen.clear()
+        yield
+        ahs._zero_row_notice_seen.clear()
+
+    def _scan(self, db, manual=False, items=True):
+        patchers = _patched(
+            known_symbols={"RELIANCE"},
+            rss_items={"Moneycontrol": [_item(self.HEADLINE)]} if items else {},
+        )
+        with _Patches(patchers):
+            import notifier
+            written = run(ahs.run_afterhours_scan(db, "DEMO", "2026-09-25", manual=manual))
+            return written, notifier.notify_async
+
+    def test_scan_that_wrote_rows_notifies(self, db):
+        written, notify = self._scan(db)
+        assert written == 1 and notify.await_count == 1
+
+    def test_repeat_scan_with_nothing_new_is_silent(self, db):
+        self._scan(db)                                  # writes the row
+        written, notify = self._scan(db)                # same headline, already stored
+        assert written == 0 and notify.await_count == 0
+
+    def test_manual_scan_with_nothing_new_still_replies(self, db):
+        self._scan(db)
+        written, notify = self._scan(db, manual=True)
+        assert written == 0 and notify.await_count == 1
+
+    def test_scan_that_finds_nothing_is_silent_unless_manual(self, db):
+        _, notify = self._scan(db, items=False)
+        assert notify.await_count == 0
+        _, notify = self._scan(db, items=False, manual=True)
+        assert notify.await_count == 1
+
+
+class TestShouldNotifyScan:
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        ahs._zero_row_notice_seen.clear()
+        yield
+        ahs._zero_row_notice_seen.clear()
+
+    def test_written_or_manual_always_notifies(self):
+        assert ahs._should_notify_scan("DEMO", "d", 3, 0, False) is True
+        assert ahs._should_notify_scan("DEMO", "d", 0, 0, True) is True
+
+    def test_nothing_written_nothing_failed_is_silent(self):
+        assert ahs._should_notify_scan("DEMO", "d", 0, 0, False) is False
+
+    def test_save_failures_are_reported_once_per_mode_date_and_count(self):
+        assert ahs._should_notify_scan("DEMO", "d", 0, 2, False) is True
+        assert ahs._should_notify_scan("DEMO", "d", 0, 2, False) is False
+        assert ahs._should_notify_scan("DEMO", "d", 0, 3, False) is True       # count changed
+        assert ahs._should_notify_scan("REAL", "d", 0, 3, False) is True       # other mode
+        assert ahs._should_notify_scan("DEMO", "d2", 0, 3, False) is True      # other date
+
+    def test_memory_is_bounded(self):
+        for i in range(100):
+            ahs._should_notify_scan("DEMO", f"d{i}", 0, 1, False)
+        assert len(ahs._zero_row_notice_seen) <= 64
+

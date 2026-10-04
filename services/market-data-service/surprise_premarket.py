@@ -983,14 +983,30 @@ _FALLBACK_LIQUID_UNIVERSE: List[str] = [
 ]
 
 
+_fallback_universe_logged = False
+
+
 def default_universe_from_env() -> List[str]:
+    """SURPRISE_UNIVERSE / SCAN_UNIVERSE if set, else the built-in liquid list.
+
+    Group 98 (log-audit item 27): with both env vars unset (the normal setup)
+    this is the BOOT-TIME universe only. main.py's _refresh_feed_universe_loop
+    re-points both live feeds at api-gateway's /scan/universe about 20 s after
+    boot, so the fallback is expected, not an error. The warning used to claim
+    "live universe build returned nothing" (this function never tries a live
+    build) and was repeated by every caller (each feed startup plus the
+    premarket route). It is now logged once per process, with accurate text.
+    """
+    global _fallback_universe_logged
     raw = os.getenv("SURPRISE_UNIVERSE", "") or os.getenv("SCAN_UNIVERSE", "")
     if raw.strip():
         return [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]
-    logger.warning(
-        "surprise: SURPRISE_UNIVERSE/SCAN_UNIVERSE not set and live universe "
-        "build returned nothing — using %s-symbol liquid fallback universe "
-        "(large/mid/small cap mix, not just mega-caps)",
-        len(_FALLBACK_LIQUID_UNIVERSE),
-    )
+    if not _fallback_universe_logged:
+        _fallback_universe_logged = True
+        logger.warning(
+            "surprise: SURPRISE_UNIVERSE/SCAN_UNIVERSE not set - using the built-in %s-symbol "
+            "liquid universe (large/mid/small cap mix) until the live /scan/universe refresh "
+            "replaces it (about 20 s after boot); this is logged once per process",
+            len(_FALLBACK_LIQUID_UNIVERSE),
+        )
     return list(_FALLBACK_LIQUID_UNIVERSE)

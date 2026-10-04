@@ -260,6 +260,27 @@ def test_securities_unusable_nse_response_uses_bhavcopy(nse_api, http, log, bad)
     assert log.any("warning", "bhavcopy universe fallback")
 
 
+def test_securities_no_response_warns_unreachable(nse_api, http, log):
+    # 2026-10-04 (log-audit item 22): no usable NSE response at all -> "unreachable".
+    nse_api.responses[SECURITIES_EP] = None
+    http.responses["/bhavcopy/universe"] = Resp(200, {"symbols": ["ABC"]})
+    assert gw._get_all_nse_securities() == ["ABC"]
+    assert log.any("warning", "NSE live API unreachable")
+    assert not log.any("warning", "returned 0 securities rows")
+
+
+@pytest.mark.parametrize("empty", [{}, {"data": []}, {"data": "x"}, {"other": [1]}])
+def test_securities_http200_empty_rows_is_not_called_unreachable(nse_api, http, log, empty):
+    # 2026-10-04 (log-audit item 22): NSE answered (dict body) but carried no rows ->
+    # the warning must say so instead of claiming the API was unreachable.
+    nse_api.responses[SECURITIES_EP] = empty
+    http.responses["/bhavcopy/universe"] = Resp(200, {"symbols": ["ABC"]})
+    assert gw._get_all_nse_securities() == ["ABC"]
+    assert log.any("warning", "returned 0 securities rows")
+    assert not log.any("warning", "NSE live API unreachable")
+    assert log.any("warning", "bhavcopy universe fallback")
+
+
 def test_securities_bhavcopy_symbols_are_cleaned_and_uppercased(nse_api, http):
     http.responses["/bhavcopy/universe"] = Resp(200, {"symbols": ["abc", "DEF", "NIFTY50"]})
     assert gw._get_all_nse_securities() == ["ABC", "DEF"]
@@ -1777,3 +1798,58 @@ def test_resolve_returns_the_closest_of_several_candidates(resolve):
 def test_resolve_with_no_known_symbols_returns_none(resolve):
     resolve.known = set()
     assert gw._resolve_symbol("ANYTHING") is None
+
+
+# ── whitespace squash, confidence gate, suggestions (group 93, item 11) ───────
+
+@pytest.mark.parametrize("typed,want", [
+    ("hero moters", "HEROMOTERS"),
+    ("  Hero  Motors .NS", "HEROMOTORS"),
+    ("bajaj-auto", "BAJAJ-AUTO"),          # real symbols keep their hyphen / ampersand
+    ("m&m.ns", "M&M"),
+    ("", ""), (None, ""),
+])
+def test_squash_symbol(typed, want):
+    assert gw._squash_symbol(typed) == want
+
+
+def test_resolve_symbol_ignores_spaces_in_a_typed_company_name(resolve):
+    assert gw._resolve_symbol("reli ance") == "RELIANCE"
+    assert gw._resolve_symbol("t c s") == "TCS"
+
+
+def test_resolve_symbol_of_only_whitespace_is_none(resolve):
+    assert gw._resolve_symbol("   ") is None
+    assert resolve.calls == 0
+
+
+def test_hero_motors_spellings_are_aliases_of_the_real_nse_symbol():
+    for typed in ("HEROMOTORS", "HEROMOTERS", "HEROMOTER", "HEROMOTO", "HEROMOTOR"):
+        assert gw.SYMBOL_ALIASES[typed] == "HEROMOTOCO"
+
+
+def test_fuzzy_correction_confident_for_a_close_unique_match():
+    assert gw._fuzzy_correction_is_confident("TATAMOTOR", "TATAMOTORS", {"TATAMOTORS", "TCS"}) is True
+
+
+def test_fuzzy_correction_not_confident_below_the_ratio_bar():
+    # 0.75: a plausible guess, but not good enough to analyse a different company silently
+    assert gw._fuzzy_correction_is_confident("INFI", "INFY", {"INFY"}) is False
+
+
+def test_fuzzy_correction_not_confident_when_a_runner_up_is_nearly_as_close():
+    known = {"HEROMOTOCO", "HEROMOTORS"}
+    assert gw._fuzzy_correction_is_confident("HEROMOTO", "HEROMOTOCO", known) is False
+
+
+def test_symbol_suggestions_lead_with_the_found_match_and_dedupe():
+    got = gw._symbol_suggestions("HDFCBAN", {"HDFCBANK", "HDFCLIFE", "TCS"}, first="HDFCBANK")
+    assert got[0] == "HDFCBANK" and got.count("HDFCBANK") == 1 and "TCS" not in got
+
+
+def test_symbol_suggestions_limit_and_empty_known():
+    known = {f"ABCD{c}" for c in "EFGHIJ"}
+    assert len(gw._symbol_suggestions("ABCD", known, limit=3)) == 3
+    assert gw._symbol_suggestions("ZZZ", set()) == []
+    assert gw._symbol_suggestions("ZZZ", None, first="X") == ["X"]
+

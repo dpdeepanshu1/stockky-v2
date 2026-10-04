@@ -792,51 +792,124 @@ class TestFetchHistory:
     def test_first_period_with_20_plus_rows_wins(self, monkeypatch):
         c = _Chain(monkeypatch)
         good = _df(25)
-        c.md_results["6mo"] = good
+        c.md_results["1y"] = good
         assert tm._fetch_history("TCS") is good
-        assert c.md_calls == [("TCS", "6mo", False)]
+        assert c.md_calls == [("TCS", "1y", False)]     # one call, the period every consumer shares
         assert c.yf_calls == 0
 
     def test_warms_market_data_health_first(self, monkeypatch):
+        monkeypatch.setenv("WAKE_PINGS", "1")
         c = _Chain(monkeypatch)
-        c.md_results["6mo"] = _df(25)
+        c.md_results["1y"] = _df(25)
         tm._fetch_history("TCS")
         url, params, timeout = c.health_calls[0]
         assert url.endswith("/health") and params == {"warm": "true"} and timeout == 8
 
+    def test_no_warm_ping_on_always_on_host(self, monkeypatch):
+        monkeypatch.setenv("ORACLE_DSN", "stockkydb_tp")
+        monkeypatch.delenv("WAKE_PINGS", raising=False)
+        c = _Chain(monkeypatch)
+        c.md_results["1y"] = _df(25)
+        tm._fetch_history("TCS")
+        assert c.health_calls == []
+
+    def test_wake_rule(self, monkeypatch):
+        monkeypatch.delenv("WAKE_PINGS", raising=False)
+        monkeypatch.delenv("ORACLE_DSN", raising=False)
+        assert tm._wake_pings_enabled() is True
+        monkeypatch.setenv("ORACLE_DSN", "x")
+        assert tm._wake_pings_enabled() is False
+        monkeypatch.setenv("WAKE_PINGS", "yes")
+        assert tm._wake_pings_enabled() is True
+        monkeypatch.setenv("WAKE_PINGS", "off")
+        assert tm._wake_pings_enabled() is False
+
     def test_health_failure_ignored(self, monkeypatch):
+        monkeypatch.setenv("WAKE_PINGS", "1")
         c = _Chain(monkeypatch)
         c.health_exc = httpx.ConnectError("cold")
-        c.md_results["6mo"] = _df(25)
+        c.md_results["1y"] = _df(25)
         assert len(tm._fetch_history("TCS")) == 25
 
-    def test_falls_through_periods_in_order(self, monkeypatch):
+    def test_no_data_falls_through_to_shorter_periods_in_order(self, monkeypatch):
+        # "no_data" (HTTP 404 — e.g. a recent listing the long period cannot serve)
+        # is the only failure that justifies asking for a different period.
         c = _Chain(monkeypatch)
         c.md_results["1mo"] = _df(22)
         df = tm._fetch_history("TCS", force=True)
         assert len(df) == 22
-        assert [p for _, p, _ in c.md_calls] == ["6mo", "3mo", "1mo"]
+        assert [p for _, p, _ in c.md_calls] == ["1y", "3mo", "1mo"]
         assert all(f is True for _, _, f in c.md_calls)
 
-    def test_short_series_accepted_after_all_periods_tried(self, monkeypatch):
+    def test_short_series_is_accepted_without_asking_other_periods(self, monkeypatch):
         c = _Chain(monkeypatch)
         short = _df(8)
-        c.md_results = {"6mo": short, "3mo": short, "1mo": short, "1y": short}
+        c.md_results = {"1y": short, "3mo": short, "1mo": short}
         assert tm._fetch_history("TCS") is short
-        # 4 period attempts + 1 final "accept short" 6mo retry
-        assert [p for _, p, _ in c.md_calls] == ["6mo", "3mo", "1mo", "1y", "6mo"]
+        # a different period cannot add bars to a short listing: ONE call, no retry
+        assert [p for _, p, _ in c.md_calls] == ["1y"]
 
-    def test_mixed_short_then_none_still_uses_final_retry(self, monkeypatch):
-        c = _Chain(monkeypatch)
-        short = _df(6)
-        c.md_results = {"6mo": short}   # only the first/last 6mo attempts hit
-        assert tm._fetch_history("TCS") is short
-
-    def test_very_short_series_below_5_rows_also_returned_by_final_retry(self, monkeypatch):
+    def test_very_short_series_below_5_rows_also_returned(self, monkeypatch):
         c = _Chain(monkeypatch)
         tiny = _df(3)
-        c.md_results = {"6mo": tiny}
+        c.md_results = {"1y": tiny}
         assert tm._fetch_history("TCS") is tiny
+        assert [p for _, p, _ in c.md_calls] == ["1y"]
+
+    def test_transient_failure_stops_the_chain_and_goes_to_yfinance(self, monkeypatch):
+        # AngelOne 403 / 429 / 503 / timeout: other periods hit the same wall.
+        c = _Chain(monkeypatch)
+        c.yf = _df(40)
+
+        def md(symbol, period="6mo", force=False):
+            c.md_calls.append((symbol, period, force))
+            tm._set_md_failure("transient")
+            return None
+
+        monkeypatch.setattr(tm, "_fetch_history_from_market_data", md)
+        assert len(tm._fetch_history("TCS", force=True)) == 40
+        assert [p for _, p, _ in c.md_calls] == ["1y"]
+        assert c.yf_calls == 1
+
+    def test_thin_response_stops_the_chain(self, monkeypatch):
+        c = _Chain(monkeypatch)
+
+        def md(symbol, period="6mo", force=False):
+            c.md_calls.append((symbol, period, force))
+            tm._set_md_failure("thin")
+            return None
+
+        monkeypatch.setattr(tm, "_fetch_history_from_market_data", md)
+        tm._fetch_history("TCS")
+        assert [p for _, p, _ in c.md_calls] == ["1y"]
+
+    def test_stale_failure_flag_from_an_earlier_call_does_not_leak(self, monkeypatch):
+        tm._set_md_failure("transient")           # left over from some previous request on this thread
+        c = _Chain(monkeypatch)
+        c.md_results["1mo"] = _df(22)
+        assert len(tm._fetch_history("TCS")) == 22
+        assert [p for _, p, _ in c.md_calls] == ["1y", "3mo", "1mo"]
+
+    def test_fetch_period_is_configurable(self, monkeypatch):
+        c = _Chain(monkeypatch)
+        monkeypatch.setattr(tm, "_TECH_FETCH_PERIOD", "6mo")
+        c.md_results["6mo"] = _df(25)
+        tm._fetch_history("TCS")
+        assert c.md_calls == [("TCS", "6mo", False)]
+
+    def test_configured_short_period_is_not_asked_twice(self, monkeypatch):
+        c = _Chain(monkeypatch)
+        monkeypatch.setattr(tm, "_TECH_FETCH_PERIOD", "3mo")
+        tm._fetch_history("TCS")
+        assert [p for _, p, _ in c.md_calls] == ["3mo", "1mo"]
+
+    def test_long_fetch_is_trimmed_to_the_six_month_window(self, monkeypatch):
+        c = _Chain(monkeypatch)
+        long_df = _df(300)
+        c.md_results["1y"] = long_df
+        df = tm._fetch_history("TCS")
+        assert len(df) < 300 and df.index[-1] == long_df.index[-1]
+        assert (df.index.max() - df.index.min()).days <= tm._TECH_WINDOW_DAYS
 
     def test_all_market_data_none_falls_to_yfinance(self, monkeypatch):
         c = _Chain(monkeypatch)
@@ -872,6 +945,62 @@ class TestFetchHistory:
     def test_everything_fails_returns_none(self, monkeypatch):
         _Chain(monkeypatch)
         assert tm._fetch_history("TCS") is None
+
+
+class TestFetchFailureKinds:
+    def _get(self, monkeypatch, resp=None, exc=None):
+        def fake_get(url, params=None, timeout=None):
+            if exc:
+                raise exc
+            return resp
+        monkeypatch.setattr(tm.httpx, "get", fake_get)
+
+    @pytest.mark.parametrize("status,kind", [(404, "no_data"), (429, "transient"), (503, "transient"),
+                                             (403, "transient"), (500, "transient")])
+    def test_status_kind(self, monkeypatch, status, kind):
+        self._get(monkeypatch, _Resp(status))
+        assert tm._fetch_history_from_market_data("TCS") is None
+        assert tm._md_state.last_failure == kind
+
+    def test_timeout_is_transient(self, monkeypatch):
+        self._get(monkeypatch, exc=httpx.ReadTimeout("slow"))
+        assert tm._fetch_history_from_market_data("TCS") is None
+        assert tm._md_state.last_failure == "transient"
+
+    def test_ok_response_with_too_few_bars_is_thin(self, monkeypatch):
+        self._get(monkeypatch, _Resp(200, {"candles": _candles(3)}))
+        assert tm._fetch_history_from_market_data("TCS") is None
+        assert tm._md_state.last_failure == "thin"
+
+    def test_success_clears_previous_failure(self, monkeypatch):
+        tm._set_md_failure("transient")
+        self._get(monkeypatch, _Resp(200, {"candles": _candles(30)}))
+        assert len(tm._fetch_history_from_market_data("TCS")) == 30
+        assert tm._md_state.last_failure == ""
+
+
+class TestTrimToAnalysisWindow:
+    def test_short_enough_frame_is_returned_untouched(self):
+        df = _df(100)
+        assert tm._trim_to_analysis_window(df) is df
+
+    def test_trims_long_frame_keeping_latest_bars(self):
+        df = _df(400)
+        out = tm._trim_to_analysis_window(df)
+        assert out.index[-1] == df.index[-1]
+        assert len(out) == tm._TECH_WINDOW_DAYS + 1
+
+    def test_sparse_series_that_would_trim_below_20_bars_is_kept_whole(self):
+        idx = pd.date_range("2025-01-01", periods=30, freq="10D")
+        df = pd.DataFrame({"Close": range(30)}, index=idx)
+        assert tm._trim_to_analysis_window(df) is df
+
+    def test_non_datetime_index_and_garbage_are_returned_as_is(self):
+        df = pd.DataFrame({"Close": range(300)})
+        assert tm._trim_to_analysis_window(df) is df
+        assert tm._trim_to_analysis_window(None) is None
+        sentinel = object()
+        assert tm._trim_to_analysis_window(sentinel) is sentinel
 
 
 # ── indicators ────────────────────────────────────────────────────────────────

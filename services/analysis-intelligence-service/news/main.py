@@ -475,12 +475,12 @@ def _fetch_headlines(symbol: str, max_items: int = 15) -> List[dict]:
     sources = [
         _fetch_yahoo_news,   # LEVEL 1
         _fetch_google_news,  # LEVEL 2 waterfall
-        _fetch_moneycontrol,
+        # _fetch_moneycontrol,        # 2026-10-04: HTTP 403 from the VM (bot-gated) - re-add if unblocked
         _fetch_economic_times,
         _fetch_business_standard,
         _fetch_ndtv_profit,
         _fetch_livemint,
-        _fetch_financial_express,
+        # _fetch_financial_express,   # 2026-10-04: HTTP 403 from the VM (bot-gated) - re-add if unblocked
         _fetch_reuters_india,
     ]
     if NEWSAPI_KEY:

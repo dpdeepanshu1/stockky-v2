@@ -231,7 +231,7 @@ class Env:
     # stubs
     def _resolve(self, original):
         if self.resolved == "SAME":
-            return original.upper()
+            return gw._squash_symbol(original)
         return self.resolved
 
     def _price(self, sym):
@@ -331,6 +331,49 @@ class TestStockSymbolResolution:
         env.resolved = "TCS"
         env.decide("TCS")
         assert "corrected_from" not in stock("TCS")
+
+    def test_typed_name_with_a_space_is_squashed_before_use(self, env):
+        env.decide("TCS")
+        out = stock("t c s")
+        assert out["symbol"] == "TCS" and "corrected_from" not in out
+        assert env.client.urls()[0] == D("TCS")
+
+    def test_alias_correction_is_applied_and_reported(self, env):
+        # HEROMOTORS is not an NSE symbol; the curated alias maps it to HEROMOTOCO.
+        env.resolved = "HEROMOTOCO"
+        env.decide("HEROMOTOCO")
+        out = stock("hero moters")             # squashes to HEROMOTERS, an alias
+        assert out["symbol"] == "HEROMOTOCO" and out["corrected_from"] == "HEROMOTERS"
+
+    def test_weak_fuzzy_match_asks_did_you_mean_instead_of_analysing(self, env):
+        # FIXED (group 93, item 11): "HERO MOTERS" used to resolve silently to a near-miss.
+        env.known = {"HEROMOTOCO", "HEROMOTORX"}
+        env.resolved = "HEROMOTORX"
+        with pytest.raises(gw.HTTPException) as ei:
+            stock("heromotr")
+        assert ei.value.status_code == 404
+        assert "Did you mean" in ei.value.detail and "HEROMOTORX" in ei.value.detail
+        assert env.client.calls == [] and env.searched == []
+
+    def test_confident_fuzzy_match_is_still_corrected_silently(self, env):
+        env.known = {"TATAMOTORS", "TCS"}
+        env.resolved = "TATAMOTORS"
+        env.decide("TATAMOTORS")
+        assert stock("tatamotor")["corrected_from"] == "TATAMOTOR"
+
+
+class TestStockSearchedRecording:
+    def test_degraded_hold_is_not_recorded(self, env):
+        env.decide("ZZZ", status=500)
+        stock("ZZZ")
+        assert env.searched == []
+
+    def test_recording_failure_does_not_fail_the_analysis(self, env):
+        env.decide("TCS")
+        def boom(sym):
+            raise RuntimeError("redis down")
+        env.mp.setattr(gw, "_add_searched", boom)
+        assert stock("TCS")["symbol"] == "TCS"
 
 
 class TestStockRedisClear:
@@ -1687,3 +1730,57 @@ class TestStockTimeBudget:
         monkeypatch.setattr(gw, "_generate_ai_summary", _ai)
         out = stock("TCS")
         assert out["natural_language_summary"] == "TEMPLATE-SUMMARY"
+
+
+class TestStockThinTechnicalFlag:
+    """Item 12: a technical read built from a minimal/fallback bar gets a visible data-quality flag."""
+
+    def _dq(self, env, tech_reasons, **over):
+        env.passthrough()
+        over.setdefault("reasons", {"technical": tech_reasons, "fundamental": ["ok"], "news": ["ok"]})
+        env.decide("TCS", _full_decide(**over))
+        return stock("TCS")["data_quality"]
+
+    def test_limited_history_reason_adds_the_flag_first_and_lowers_level(self, env):
+        dq = self._dq(env, ["Limited history for TCS; using last quote. Retry for full technicals."])
+        assert dq["flags"] == [gw.THIN_TECHNICAL_FLAG] and dq["level"] == "medium"
+        assert dq["note"] == "Scores may be soft — limited free data"
+
+    @pytest.mark.parametrize("reason", [
+        "Fallback quote 100.0; full technicals retry recommended",
+        "Fallback technical from market history (12 bars); trend up",
+        "Technical built from market-data fallback",
+        "Price history unavailable for TCS right now (upstream busy). Retry shortly.",
+        "EMA trend: insufficient data",
+    ])
+    def test_each_thin_marker_triggers_the_flag(self, env, reason):
+        assert gw.THIN_TECHNICAL_FLAG in self._dq(env, [reason])["flags"]
+
+    def test_full_history_reasons_do_not_add_the_flag(self, env):
+        dq = self._dq(env, ["RSI at 55.0 - neutral", "Bullish EMA stack"])
+        assert dq["flags"] == [] and dq["level"] == "high"
+
+    def test_decision_pillar_map_saying_technical_is_not_live_adds_the_flag(self, env):
+        dq = self._dq(env, ["RSI at 55.0 - neutral"], data_quality={"pillars": {"technical": False}})
+        assert dq["flags"] == [gw.THIN_TECHNICAL_FLAG]
+
+    def test_flag_leads_other_flags_and_does_not_raise_a_low_level(self, env):
+        env.client.routes[N("TCS")] = FakeResp(503)
+        dq = self._dq(env, [], fundamental_fallback=True, news_score=None,
+                      reasons={"technical": ["Limited history for TCS"], "news": ["x"]})
+        assert dq["level"] == "low"
+        assert dq["flags"] == [gw.THIN_TECHNICAL_FLAG, "Fundamentals partial/fallback", "News unavailable"]
+
+
+@pytest.mark.parametrize("result,reasons,want", [
+    ({}, None, False),
+    ({}, [], False),
+    ({}, ["Limited history"], True),
+    ({"data_quality": {"pillars": {"technical": True}}}, ["fine"], False),
+    ({"data_quality": {"pillars": {"technical": False}}}, [], True),
+    ({"data_quality": "not-a-dict"}, ["fine"], False),
+    ({"data_quality": {"pillars": "x"}}, ["fine"], False),
+])
+def test_thin_technical_history_helper(result, reasons, want):
+    assert gw._thin_technical_history(result, reasons) is want
+

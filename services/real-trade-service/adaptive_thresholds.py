@@ -31,8 +31,10 @@ dynamically, and only once 30 days of history exists.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
@@ -192,6 +194,46 @@ def check_threshold_staleness() -> list[dict]:
     return stale
 
 
+# Telegram noise control (group 95, item 19): the stale-constant notice used to go out on EVERY boot
+# (every deploy, every restart). The warning is about constants that change on a scale of weeks, so
+# it is now sent when the stale set changes, or at most once per STALE_NOTICE_INTERVAL_HOURS
+# (default 168 = weekly). The log lines are unchanged and still appear on every boot. State lives in
+# a small file (default /tmp, like boot_forensics): it survives a container restart but not a
+# container re-create, so a fresh deploy sends one message.
+_STALE_NOTICE_PATH = os.getenv("STALE_NOTICE_STATE_PATH", "/tmp/stockky_stale_notice.json")
+try:
+    _STALE_NOTICE_INTERVAL_S = max(0.0, float((os.getenv("STALE_NOTICE_INTERVAL_HOURS") or "").strip() or 168)) * 3600.0
+except ValueError:
+    _STALE_NOTICE_INTERVAL_S = 168 * 3600.0
+
+
+def _stale_signature(stale: list[dict]) -> str:
+    return ",".join(sorted(f"{i['constant']}={i['current_value']}@{i['last_reviewed']}" for i in stale))
+
+
+def _stale_notice_due(stale: list[dict], now: float | None = None) -> bool:
+    """True when the stale-constants Telegram notice should be sent now. Never raises; any problem
+    reading the state file means "send" (a duplicate message beats a missed warning)."""
+    try:
+        now = time.time() if now is None else now
+        with open(_STALE_NOTICE_PATH, "r", encoding="utf-8") as f:
+            st = json.load(f)
+        if st.get("sig") != _stale_signature(stale):
+            return True
+        age = now - float(st.get("ts"))
+        return age < 0 or age >= _STALE_NOTICE_INTERVAL_S
+    except Exception:
+        return True
+
+
+def _stale_notice_record(stale: list[dict], now: float | None = None) -> None:
+    try:
+        with open(_STALE_NOTICE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"sig": _stale_signature(stale), "ts": time.time() if now is None else now}, f)
+    except Exception:
+        pass    # an unwritable state file only means the next boot may notify again
+
+
 def startup_staleness_warning() -> None:
     """Log (and optionally Telegram-notify) stale constants at service boot.
     Called from main.py startup event — never blocks boot."""
@@ -205,6 +247,9 @@ def startup_staleness_warning() -> None:
             "re-run market research if the market regime has changed significantly.",
             item["constant"], item["last_reviewed"], item["age_days"],
         )
+    if not _stale_notice_due(stale):
+        logger.info("adaptive_thresholds: stale-constant Telegram notice already sent recently - not repeating on boot")
+        return
     # Best-effort Telegram notify (non-blocking)
     try:
         from notifier import notify_sync
@@ -220,8 +265,9 @@ def startup_staleness_warning() -> None:
             "non-adaptive constants."
         )
         notify_sync("\n".join(lines))
+        _stale_notice_record(stale)
     except Exception:
-        pass  # Telegram failure never affects startup
+        pass  # Telegram failure never affects startup (and is not recorded, so the next boot retries)
 
 
 # ── Threshold age annotation for reasoning strings ───────────────────────────

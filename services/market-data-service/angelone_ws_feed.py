@@ -37,6 +37,14 @@ logger = logging.getLogger("angelone-ws-feed")
 
 _running = False
 _thread: Optional[threading.Thread] = None
+# 2026-10-04 (log-audit item 26): generation counter. Every start_feed_background()
+# bumps it and the new thread captures its own number; a thread whose number is no
+# longer current is "superseded" and exits at its next check. Before this, a thread
+# that outlived stop_feed_background()'s join timeout was RE-ENABLED by the next
+# start (which set the shared _running flag back to True) so two feed threads
+# polled at once, and the old thread's `finally` then cleared _running under the
+# new one.
+_generation = 0
 
 # How often an idling (outside market hours) loop rechecks whether the
 # window has opened. Cheap — just a datetime compare, no upstream call.
@@ -232,10 +240,21 @@ def start_feed_background(symbols: list) -> None:
     Start the AngelOne polling feed in a background thread.
     Idempotent — safe to call multiple times.
     """
-    global _running, _thread
+    global _running, _thread, _generation
     if _running and _thread and _thread.is_alive():
         return
+    if _thread is not None and _thread.is_alive():
+        logger.warning(
+            "AngelOne feed: previous thread is still winding down — it is superseded "
+            "and will exit at its next check; starting the new feed thread"
+        )
+    _generation += 1
+    my_gen = _generation
     _running = True
+
+    def _current() -> bool:
+        """True while THIS thread is the live feed (not stopped, not superseded)."""
+        return _running and _generation == my_gen
 
     def _run():
         global _running
@@ -259,7 +278,7 @@ def start_feed_background(symbols: list) -> None:
             # resolves none of the requested symbols.
             token_map: dict = {}
             attempt = 0
-            while _running:
+            while _current():
                 token_map = scrip_master.get_tokens_bulk(symbols, wait_s=5.0)   # {clean_symbol: token}
                 if token_map:
                     break
@@ -278,7 +297,7 @@ def start_feed_background(symbols: list) -> None:
                     attempt, delay,
                 )
                 slept = 0.0
-                while _running and slept < delay:   # short slices so stop_feed_background() isn't held up
+                while _current() and slept < delay:   # short slices so stop_feed_background() isn't held up
                     time.sleep(1.0)
                     slept += 1.0
             if not token_map:
@@ -323,11 +342,13 @@ def start_feed_background(symbols: list) -> None:
                     )
                     return
                 for i in range(0, len(tokens), BATCH_SIZE):
-                    if not _running:
+                    if not _current():
                         return
                     batch = tokens[i:i + BATCH_SIZE]
                     try:
                         fetched = await session.get_quotes_batch("NSE", batch)
+                        if not _current():
+                            return   # superseded/stopped while the request was in flight: drop the stale ticks
                         for row in fetched:
                             tok = str(row.get("symbolToken") or "")
                             sym = reverse_map.get(tok)
@@ -354,9 +375,20 @@ def start_feed_background(symbols: list) -> None:
                         )
                     await asyncio.sleep(BATCH_GAP_S)
 
+            async def _sleep_while_current(total_s: float) -> None:
+                """Sleep in 1s slices so stop_feed_background() (10s join) is honoured
+                even during the 60s off-hours idle wait — that single 60s sleep was why
+                the thread 'did not stop within 10.0s' on every off-hours restart."""
+                end = time.time() + total_s
+                while _current():
+                    left = end - time.time()
+                    if left <= 0:
+                        return
+                    await asyncio.sleep(min(1.0, left))
+
             async def _poll_forever():
                 was_idle = False
-                while _running:
+                while _current():
                     # 2026-09-01 fix: this loop used to poll AngelOne for the
                     # whole universe every ~3s, 24/7, with no market-hours
                     # awareness — the trading-decision loop (auto_pilot.py)
@@ -371,7 +403,7 @@ def start_feed_background(symbols: list) -> None:
                                 "rechecking every %.0fs", IDLE_RECHECK_S,
                             )
                             was_idle = True
-                        await asyncio.sleep(IDLE_RECHECK_S)
+                        await _sleep_while_current(IDLE_RECHECK_S)
                         continue
                     if was_idle:
                         logger.info("AngelOne feed: market window open — resuming polling")
@@ -389,13 +421,16 @@ def start_feed_background(symbols: list) -> None:
                     # trade-critical set (open positions + watchlist) rather than
                     # the full scan universe, or raise max_age_sec/LIVE_QUOTE_MAX_AGE_S.
                     if elapsed < POLL_INTERVAL_S:
-                        await asyncio.sleep(POLL_INTERVAL_S - elapsed)
+                        await _sleep_while_current(POLL_INTERVAL_S - elapsed)
 
             loop.run_until_complete(_poll_forever())
         except Exception as e:
             logger.error("AngelOne feed error: %s", e)
         finally:
-            _running = False
+            # Only the CURRENT thread may clear the shared flag; a superseded
+            # thread exiting late must not stop the thread that replaced it.
+            if _generation == my_gen:
+                _running = False
 
     _thread = threading.Thread(target=_run, daemon=True, name="angelone-ws-feed")
     _thread.start()
@@ -416,5 +451,7 @@ def stop_feed_background(timeout: float = 10.0) -> None:
         _thread.join(timeout=timeout)
         if _thread.is_alive():
             logger.warning(
-                "AngelOne feed: thread did not stop within %.1fs", timeout
+                "AngelOne feed: thread did not stop within %.1fs (a following "
+                "start_feed_background() supersedes it, so only one feed thread polls)",
+                timeout,
             )

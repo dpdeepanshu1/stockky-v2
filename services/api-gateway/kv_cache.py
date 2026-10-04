@@ -66,6 +66,7 @@ _DURABLE_PREFIXES = (
                             # — must be durable or a restart silently resets
                             # the quota tracking and defeats the 25/day budget
     "stockky:last_full_scan",
+    "stockky:market_movers_last_known",  # 2026-10-04: closed-market Movers panel was empty after every restart (memory-only)
     "stockky:lock:",
     "stockky:notification_config",
     "stockky:notification:",

@@ -44,6 +44,39 @@ from execution import dhan_client, shared_exposure, shared_symbol_lock
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("real-trade-service")
 
+# 2026-10-04 (log noise): httpx logs every outbound request at INFO and uvicorn logs every /health probe
+# (container healthchecks + the browser's api.ping()) -- together most of the log volume. httpx -> WARNING
+# (HTTPX_LOG_LEVEL=INFO restores it); successful /health access lines are dropped (ACCESS_LOG_HEALTH=1 restores
+# them; a non-200 /health still logs).
+def _quiet_noisy_loggers() -> None:
+    import re as _re
+    import logging as _lg
+    import os as _os
+    _lvl = getattr(_lg, (_os.getenv("HTTPX_LOG_LEVEL") or "WARNING").strip().upper(), _lg.WARNING)
+    if not isinstance(_lvl, int):
+        _lvl = _lg.WARNING
+    for _n in ("httpx", "httpcore"):
+        _lg.getLogger(_n).setLevel(_lvl)
+    if (_os.getenv("ACCESS_LOG_HEALTH") or "").strip().lower() in ("1", "true", "yes"):
+        return
+    _pat = _re.compile(r'"GET \S*/health(\?\S*)? HTTP/[\d.]+" 200')
+
+    class _NoHealthAccess(_lg.Filter):
+        def filter(self, record):  # noqa: A003
+            try:
+                return not _pat.search(record.getMessage())
+            except Exception:  # noqa: BLE001
+                return True
+
+    _acc = _lg.getLogger("uvicorn.access")
+    if not any(getattr(f, "_stockky_health_filter", False) for f in _acc.filters):
+        _flt = _NoHealthAccess()
+        _flt._stockky_health_filter = True
+        _acc.addFilter(_flt)
+
+
+_quiet_noisy_loggers()
+
 app = FastAPI(title="Stockky Real Automatic Trade", version="0.1.0-phase1")
 app.add_middleware(
     CORSMiddleware,
@@ -1549,9 +1582,19 @@ async def _live_prices(symbols: list[str]) -> dict[str, float]:
     and never block the positions/orders/candidates list from returning."""
     if not symbols:
         return {}
+    uniq = list(dict.fromkeys(symbols))  # de-dupe, preserve order
+    # 2026-10-04 (items 3 & 15): positions/orders/candidates all price through
+    # the shared display cache (short TTL, single-flight, no ATR /history
+    # refreshes, no stale-tick lookup while the market is closed) instead of
+    # re-fetching every symbol on every poll of every tab.
+    try:
+        from market_feed.feed import get_display_prices
+        return await get_display_prices(uniq)
+    except Exception as e:
+        logger.warning("display price cache lookup failed, falling back to direct quotes: %s", e)
     try:
         from market_feed.feed import get_quotes
-        ticks = await get_quotes(list(dict.fromkeys(symbols)))  # de-dupe, preserve order
+        ticks = await get_quotes(uniq)
         return {sym: t.price for sym, t in ticks.items() if t is not None}
     except Exception as e:
         logger.warning("live price lookup failed (display-only, non-fatal): %s", e)

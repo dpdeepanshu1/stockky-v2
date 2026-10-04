@@ -191,6 +191,24 @@ class TestLogin:
         assert sess.token_expiry is not None
         assert sess.token_expiry > datetime.utcnow()
 
+    @pytest.mark.parametrize("feed_token,expected", [("FEED_SECRET_123456", "received"), (None, "MISSING"), ("", "MISSING")])
+    def test_login_log_never_contains_any_part_of_the_feed_token(self, caplog, feed_token, expected):
+        sess = _make_session()
+        fake_resp = _make_login_response(jwt="JWT_OK", feed_token=feed_token)
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=fake_resp)
+
+        with caplog.at_level("DEBUG"):
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                with patch.object(aosess, "_resolve_client_public_ip", return_value="1.2.3.4"):
+                    self._run(sess._login())
+
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert f"feed_token={expected}" in text
+        assert "FEED_SEC" not in text and "FEED_SECRET_123456" not in text and "JWT_OK" not in text
+
     def test_login_status_false_raises(self):
         sess = _make_session()
         fake_resp = _make_login_response(status=False, message="INVALID_CREDENTIALS")

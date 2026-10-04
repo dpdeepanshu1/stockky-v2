@@ -481,28 +481,38 @@ function BreakerDot({ state }: { state: "closed" | "open" | "half_open" }) {
   return <span className={`inline-block w-2 h-2 rounded-full ${color}`} />;
 }
 
-function CatalystWatchlistPanel({ mode }: { mode: Mode }) {
+function CatalystWatchlistPanel({ mode, loggedIn }: { mode: Mode; loggedIn: boolean }) {
   const [entries, setEntries] = useState<WatchlistEntry[] | null>(null);
   const [resilience, setResilience] = useState<ResilienceStatus | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
+    // Item 29: /resilience/status is admin-only on the server and REAL
+    // watchlist entries need the admin session too. This panel polls every
+    // 30 s, so with no session (logged out, or DEMO mode where login is not
+    // needed) every poll was a guaranteed 401, and because both calls shared
+    // one Promise.all a 401 on the admin-only one also blanked the DEMO
+    // watchlist. Only ask for what the current session may read, and let each
+    // result land on its own.
+    const authed = !!getSessionToken();
+    const wantWatchlist = mode !== "REAL" || authed;
+    if (!wantWatchlist && !authed) return;
     setLoading(true);
     try {
-      const [wl, res] = await Promise.all([
-        realTradeApi.watchlistEntries(mode, statusFilter || undefined),
-        realTradeApi.resilienceStatus(),
+      const [wl, res] = await Promise.allSettled([
+        wantWatchlist ? realTradeApi.watchlistEntries(mode, statusFilter || undefined) : Promise.resolve(null),
+        authed ? realTradeApi.resilienceStatus() : Promise.resolve(null),
       ]);
-      setEntries(wl.entries);
-      setResilience(res);
-    } catch {
       // Best-effort observability panel — a failure here shouldn't disrupt
-      // the rest of the Pipeline tab. Leaves last-known data on screen.
+      // the rest of the Pipeline tab. A failed or skipped call leaves its
+      // last-known data on screen.
+      if (wl.status === "fulfilled" && wl.value) setEntries(wl.value.entries);
+      if (res.status === "fulfilled" && res.value) setResilience(res.value);
     } finally {
       setLoading(false);
     }
-  }, [mode, statusFilter]);
+  }, [mode, statusFilter, loggedIn]);
 
   useEffect(() => {
     void load();
@@ -2496,7 +2506,7 @@ export default function RealAutoTrade() {
 
               <PipelineLiveStatus pipeline={pipeline} mode={mode} />
 
-              <CatalystWatchlistPanel mode={mode} />
+              <CatalystWatchlistPanel mode={mode} loggedIn={loggedIn} />
 
               <div className="bg-graphite border border-slate rounded-2xl p-4">
                 <div className="flex items-center justify-between mb-3">

@@ -6,6 +6,125 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-04 (group 101)  Remaining log-audit items 7, 10, 11, 23, 28 (api-gateway, market-data, analysis-intelligence, decision-prediction).
+  Item 7: the leftover `/health?warm=true` wake pings (gateway history + deep keepalive, decision, prediction, training) now follow the `WAKE_PINGS`/`ORACLE_DSN`
+  rule. Item 23: `_waterfall_nse_direct_price` and `_fetch_nse_fundamentals` share group96's quote-equity pause. Items 11/28: the stored searched-symbols list
+  cleans itself on read (delisted, non-equity, junk, curated typo aliases) and is written back once. Item 10: a payload with no sector/industry compares against no
+  peers instead of the generic big-cap list. Item 19 reviewed, no change needed. Full suites: gateway 8101, analysis-intelligence 2161, market-data 684,
+  decision 38, prediction 20, training 38 passed. Doc: `docs/GROUP101_REMAINING_FIXES.md`.
+- 2026-10-04 (group 100)  Log-audit item 29: protected endpoints called before login caused 401 bursts (frontend).
+  The Pipeline tab's `CatalystWatchlistPanel` polled admin-only `/resilience/status` every 30 s with or without a session (and the REAL watchlist when logged
+  out), and one shared `Promise.all` meant that 401 also blanked the DEMO watchlist. It now asks only for what the session may read (resilience with a token,
+  REAL watchlist with a token, DEMO watchlist always), settles each result separately, and reloads on login. `rtRequest` and the backend are unchanged; other
+  default-auth callers were not changed (some routes are admin-only only in REAL mode). `tsc --noEmit` clean; no frontend test runner exists. Doc: `docs/GROUP100_PIPELINE_PANEL_401_BURSTS.md`.
+- 2026-10-04 (group 99)  Log-audit item 28: delisted symbols (AAKASH, ANNAPURNA) in the Hot Picks universe returned 404 on every run (api-gateway).
+  `stockky_hot_stocks` merged movers/news/events/scan seeds/watchlist/searched/IPOs with no delisted or non-equity gate (the scan universe has one). It now drops
+  `KNOWN_DELISTED` and non-equity symbols after de-duplication and logs one line with the names; nothing is renamed and the nifty fallback is unchanged. Stored
+  watchlist/searched entries are not purged. Also fixed a group93 test (`test_symbol_alias_table_is_consistent_with_extra_new_symbols`) that failed on the new
+  HEROMOTOCO aliases; no production change. Full api-gateway suite run here: 8090 passed. Doc: `docs/GROUP99_HOTPICKS_DEAD_SYMBOLS.md`.
+- 2026-10-04 (group 98)  Log-audit item 27: "SURPRISE_UNIVERSE/SCAN_UNIVERSE not set ... live universe build returned nothing" (market-data-service).
+  Unset is a supported setup: the built-in 250-symbol list is only the boot-time universe, and the feed-universe refresh loop swaps in api-gateway's live
+  `/scan/universe` about 20 s after boot. The warning was inaccurate (nothing tries a live build there) and repeated by every caller. Now logged once per process
+  with accurate text; returned list unchanged; not set in docker-compose on purpose. Premarket baselines run with no symbols still use the built-in list.
+  Full market-data-service suite run here: 677 passed. Doc: `docs/GROUP98_FALLBACK_UNIVERSE_LOG.md`.
+- 2026-10-04 (group 97)  Log-audit item 24: stale DEMO open-positions snapshot (snap_as_of 2026-09-21) re-reported on every boot (real-trade-service).
+  The snapshot is only written by a running cycle, so a mode with the gate disarmed / auto-pilot off (DEMO) froze it, and `reconcile_on_startup` re-raised the
+  same RECONCILE_MISMATCH on every boot. Now a reported mismatch re-baselines that mode's snapshot from the live OPEN/PARTIALLY_CLOSED rows (DB untouched,
+  matching modes untouched, a failed re-save is non-fatal). Also fixed: a MANUAL after-hours scan that scored nothing sent no Telegram reply, contrary to the
+  group95 note (found by the first real pytest run of group95's tests). Full real-trade-service suite run here: 2948 passed, 1 skipped.
+  Doc: `docs/GROUP97_STALE_DEMO_SNAPSHOT.md`.
+- 2026-10-04 (group 96)  Log-audit item 23: NSE `quote-equity` returns 403 on delivery lookups (market-data-service).
+  `bhavcopy.delivery_from_quote()` returned None silently on every 403 and kept calling NSE for each symbol before falling back to bhavcopy. Now a
+  401/403/429 pauses the quote path for `NSE_QUOTE_BLOCK_SECONDS` (default 600, 0 = off): no NSE call during the pause, the cached cookie session is dropped,
+  one warning is logged when the pause starts, and a 200 ends it early. Delivery values/sources unchanged. `_waterfall_nse_direct_price` and
+  `_fetch_nse_fundamentals` in main.py are not on the pause; the 403 itself (datacenter IP) is not fixed. Full market-data-service suite run here: 673 passed.
+  Doc: `docs/GROUP96_NSE_QUOTE_403_PAUSE.md`.
+- 2026-10-04 (group 95)  Log-audit item 19: Telegram messages on every boot and every after-hours scan (real-trade-service).
+  A scheduled after-hours scan messaged on every tick even with nothing new (and once per mode right after each boot); finalize sent two messages for the
+  same shortlist; the stale-regime-constants notice went out on every boot. Now: scheduled scans message only when rows were written (manual runs always
+  reply; a save-failure pass is reported once per mode/date/count), the duplicate finalize message is removed, and the stale notice is sent when the stale set
+  changes or at most weekly (`STALE_NOTICE_INTERVAL_HOURS`, state file `STALE_NOTICE_STATE_PATH`, default /tmp so a container re-create sends one).
+  Other Telegram senders were not reviewed; item 25 (the stale constants themselves) is unchanged. Not run under real pytest in the sandbox (helpers checked
+  standalone, files compiled). Doc: `docs/GROUP95_TELEGRAM_NOISE.md`.
+- 2026-10-04 (group 94)  Log-audit item 12: no UI note when technical analysis ran on the minimal bar.
+  The technical service already writes "Limited history..." / "Fallback quote..." reasons for a one-bar or fallback history, but `/stock/{symbol}` never
+  turned them into a data-quality flag, so the card could say "Data quality: high" over a neutral 50 from one bar. `api-gateway/main.py` now adds the flag
+  `Technicals on minimal price history` (first in the list, level high -> medium) when `reasons.technical` carries a thin/fallback marker or the decision
+  pillar map says technical is not live. Scoring and the frontend are unchanged; other entry points (scan, hot picks, real-trade) do not show it.
+  Not run under real pytest in the sandbox (helper checked standalone, files compiled). Doc: `docs/GROUP94_THIN_TECHNICAL_HISTORY_NOTE.md`.
+- 2026-10-04 (group 93)  Log-audit item 11: a mistyped name ("HERO MOTERS") silently resolved to HEROMOTORS, which is not an NSE symbol.
+  `api-gateway/main.py` `/stock/{symbol}` recorded every typed name as "searched" before analysing it, and the searched list feeds the known-symbol set, so
+  typos became fuzzy targets (HEROMOTERS scores 0.90 vs HEROMOTORS, 0.70 vs HEROMOTOCO). Now: spaces removed, fuzzy corrections applied silently only at
+  >= 0.90 and 0.05 clear of the runner-up (otherwise 404 "Did you mean: ..."), HEROMOTORS-style spellings aliased to HEROMOTOCO, and a symbol is recorded as
+  searched only after an analysis with a real close. Entries already in `stockky:searched_symbols` are not cleaned. Not run under real pytest in the sandbox
+  (helpers checked standalone, tests compiled). Doc: `docs/GROUP93_SYMBOL_DID_YOU_MEAN.md`.
+- 2026-10-04 (group 92)  Log-audit item 10: wrong peer sets (an auto maker got FMCG peers, a utility got IT peers, a retailer the generic list).
+  `analysis-intelligence-service/fundamental/peer_multi_quarter.py::detect_sector` matched substrings (`"IT"` inside UTILITIES/CAPITAL; any "CONSUMER" -> FMCG,
+  which is where Yahoo files autos and retail) and read `sector` before the more specific `industry`. Now: whole-word matching, `industry` -> `sector` ->
+  `sectorDisp`, Consumer Cyclical is not FMCG, new `POWER` and `RETAIL` peer sets, non-string values ignored. Unknown sectors still use `DEFAULT`.
+  The three named symbols' payloads were not seen (causes are the likely ones, not confirmed); `HEROMOTORS` is not an NSE symbol (item 11). New
+  `TestDetectSectorWordMatching` (39 cases, 20 fail on the old code). Real pytest in a clean venv: peer tests 231 passed, full analysis-intelligence-service
+  suite 2148 passed. Doc: `docs/GROUP92_PEER_SECTOR_WORD_MATCHING.md`.
+- 2026-10-04 (group 91)  Log-audit item 31: `ledger.sync_from_broker` (and `equity_sync`) warned "verify this is the tradeable balance" for Dhan's `availabelBalance`.
+  Dhan's fundlimit docs call that field "Available amount to trade", so the warning was stale for it; the real risk is a silent fallback to
+  `sodLimit` (start-of-day, overstates intraday), `withdrawableBalance` (can understate) or `availableCash` (undocumented). Both services now log
+  INFO for the documented keys and a WARNING naming the key, the previous key and what it is only for a fallback. Fallback chain and sizing unchanged.
+  ledger also distinguishes "field present but <= 0" from "no field". Which key your account populates is not known from here; the log will show it.
+  Tests updated/added in `test_ledger_coverage.py` and `test_equity_sync_remaining_coverage.py`; real pytest in clean venvs: position-stocks-service
+  2412 passed, real-trade-service 2922 passed + 1 skipped. Doc: `docs/GROUP91_DHAN_BALANCE_KEY_LOGGING.md`.
+- 2026-10-04 (group 90)  Log-audit item 30: the position-stocks log printed the first 8 characters of the AngelOne feed token on every login.
+  `position-stocks-service/feed/angelone_session.py::_login` now logs `feed_token=received` / `feed_token=MISSING` and nothing of the value.
+  Sweep of all services for other truncated-secret slices found only `notification-scheduler-service`'s `_mask`, which feeds the settings UI,
+  not a log, so it is unchanged. The shared `SESSION_SECRET` between real-trade-service and position-stocks-service is NOT changed: it is the
+  design for one admin login across both (risk and the larger alternative are in the doc). 1 new test function (3 cases), fails on the old code;
+  real pytest in a clean venv: position-stocks-service 2406 passed. Doc: `docs/GROUP90_ANGELONE_FEED_TOKEN_LOG.md`.
+- 2026-10-04 (group 89)  Log-audit item 5: the gateway had no Gemini cooldown, so every `/stock` call fired a Gemini request that 429'd.
+  `api-gateway/main.py::_generate_ai_summary` now starts a cooldown on a 429 (`GEMINI_COOLDOWN_SECONDS`, default 600; a `Retry-After`
+  header wins, clamped 30..3600 s; a later 429 never shortens it) and, while it runs, returns the Hinglish template with no request and
+  no log line. One warning + one `rate_limit_monitor` event per cooldown window. Other non-200s and exceptions behave as before.
+  Per-process (a restart clears it); decision-prediction-service keeps its own cooldown. 7 new test functions (14 cases) in
+  `tests/test_main_scoring.py`, existing 429 test updated, fixture resets the state. Real pytest in a clean venv: full api-gateway suite
+  8047 passed. Not run against live Gemini. Doc: `docs/GROUP89_GATEWAY_GEMINI_COOLDOWN.md`.
+- 2026-10-04 (group 88)  Log-audit item 4: peer fundamentals fetched twice per analysis, as `INFY` and `INFY.NS`.
+  `analysis-intelligence-service/fundamental/peer_multi_quarter.py`: the in-process fundamentals cache was keyed by whatever
+  spelling the caller used and the market-data URL used that spelling too, so the two spellings were two cache entries and
+  two HTTP calls. Now (1) cache get/set key on the canonical `.NS`/`.BO` form (`_norm_symbol`), (2) `fetch_fundamentals`
+  always requests the canonical symbol, (3) a per-symbol lock makes concurrent asks for the same symbol one call (the others
+  wait and read the cache), (4) `fetch_fundamentals_batch` fetches once when a list holds both spellings and returns both
+  keys. `.BO` is kept distinct from `.NS`. Failed fetches are still not cached. NOT changed: `fundamental/main.py::analyze()` and
+  `decision-prediction-service/prediction/main.py::_fetch_fundamentals` still call market-data with the bare symbol (market-data
+  normalises its own cache key, so Yahoo is not hit twice; it is only a second cheap HTTP call). New
+  `tests/test_peer_fundamentals_canonical_key.py` (9 tests) passes under a stand-in runner, as do the 98 in
+  `test_peer_multi_quarter.py` and 80 of 85 in `test_peer_ranking.py` (the 5 are stand-in limits: caplog / parametrize forms);
+  not run under real pytest/httpx. Doc: `docs/GROUP88_PEER_FUNDAMENTALS_CANONICAL_KEY.md`.
+- 2026-10-04 (group 87)  Log-audit item 14: the browser `/ws` loop (1-5 requests/s answered `200 483`). `frontend/src/useRealtime.ts::
+  toWsUrl` replaced the whole URL path with `/ws`, so with `VITE_API_URL=https://host/api` the socket went to `wss://host/ws`.
+  The host nginx only proxies/upgrades WebSockets under `/api/`, so `/ws` fell through to the frontend container (index.html,
+  483 bytes), the handshake failed and the client retried; live quotes fell back to polling. The base path is now kept
+  (`https://host/api` -> `wss://host/api/ws`; nginx strips `/api/`, the gateway sees `/ws`; a bare host still gives `/ws`).
+  Reconnect back-off: after 6 failed attempts in a row without ever opening, retries slow from 15 s to 2 min. `toWsUrl` is now
+  exported. Checked the URL building in node for 7 inputs; no frontend test runner exists in the repo, so nothing added under
+  `frontend/`; no `npm run build` was run. Doc: `docs/GROUP87_WS_URL_KEEP_API_PREFIX.md`.
+- 2026-10-04 (group 86)  Log-audit items 22 and 26. (22) api-gateway `_get_all_nse_securities`: "Fetched 0 securities from NSE"
+  was followed by "NSE live API unreachable" even when NSE answered HTTP 200 with no rows. It now says "answered but returned 0
+  securities rows" when a response came back and keeps "unreachable" for no response; the bhavcopy fallback itself is unchanged.
+  (26) market-data `angelone_ws_feed.py`: "thread did not stop within 10.0s" on every off-hours restart. Cause: the off-hours idle
+  wait was one 60 s sleep, longer than the 10 s join. It now sleeps in 1 s slices. A thread that still outlived the join was
+  re-enabled by the next start (shared `_running` flag) so two feed threads could poll at once, and its `finally` cleared the flag
+  under the new one; a per-start generation number now makes the old thread exit and keeps it from touching the flag or writing
+  ticks. `main.py` runs `stop_feed_background` via `asyncio.to_thread` so the join no longer blocks the event loop. New
+  `market-data-service/tests/test_angelone_feed_single_thread.py` (4 tests, run under a stand-in runner: pass; not run under real
+  pytest) and 3 new cases in `api-gateway/tests/test_main_universe.py` (unrun, no fastapi/pytest in sandbox). Doc:
+  `docs/GROUP86_NSE_EMPTY_ROWS_FEED_SINGLE_THREAD.md`.
+- 2026-10-04 (group 85)  Log-audit item 17: the real-trade-service after-hours scan (`watchlist_engine/afterhours_scan.py::
+  run_afterhours_scan`) could finish with 0 rows written and no explanation. It now keeps a per-feed funnel (items fetched /
+  stale / no NSE symbol / score <= 0 / scored, plus bulk/block-deal hits) and logs a plain-English reason whenever a pass
+  writes 0 rows: every feed empty, items all dropped (with the counts per reason, and a note if the symbol master was
+  unavailable), all scored symbols already stored at an equal or higher score, or upserts FAILED. Upsert failures are now
+  counted, and the Telegram "No new rows" line says so when some failed to save. No scoring or DB-write behaviour changed.
+  New `tests/test_afterhours_zero_row_explained.py` (unrun here: no pytest/sqlalchemy in the sandbox; the function was run
+  against stubs and printed the expected lines). Items 22 and 26 not done (their text was not in the zip). Doc:
+  `docs/GROUP85_AFTERHOURS_ZERO_ROW_EXPLAINED.md`.
 - 2026-10-04 (group 81)  Log-audit item 1: the 20 s `/decide` timeout (and no overall deadline) in `api-gateway/main.py::
   get_stock_decision` (`GET /stock/{symbol}`). The first analysis after a boot (cold caches, competing with the start-up
   warm-ups and the hot-picks scan) overran the hard 20 s read timeout, the gateway returned a neutral HOLD, and the decision

@@ -182,6 +182,16 @@ class PredictionSnapshotCreate(BaseModel):
         extra = "ignore"
 
 # ---------- Numpy conversion helper ----------
+def _wake_pings_enabled() -> bool:
+    """Same rule as api-gateway: off on the always-on Oracle VM (ORACLE_DSN set), WAKE_PINGS=1/0 overrides."""
+    v = (os.getenv("WAKE_PINGS") or "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return not (os.getenv("ORACLE_DSN") or "").strip()
+
+
 def convert_numpy(obj):
     """Make values JSON-safe (no NaN/Inf — those break JSON.parse)."""
     if isinstance(obj, np.integer):
@@ -1216,7 +1226,7 @@ async def stock_history(symbol: str, period: str = "1mo"):
     data = None
     for attempt in range(3):
         try:
-            if attempt == 0:
+            if attempt == 0 and _wake_pings_enabled():
                 try:
                     (await asyncio.to_thread(httpx.get, f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=8))
                 except Exception:

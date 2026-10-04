@@ -28,12 +28,23 @@ export type LiveQuote = {
   change_pct?: number;
 };
 
-function toWsUrl(httpBase: string): string | null {
+/**
+ * Build the gateway WebSocket URL from the HTTP API base.
+ *
+ * 2026-10-04 (log-audit item 14): this used to REPLACE the path with "/ws", so a
+ * base such as https://host/api became wss://host/ws. The host nginx only proxies
+ * (and upgrades) WebSockets under /api/, so /ws fell through to the frontend
+ * container, which answered 200 with index.html (483 bytes) instead of a 101
+ * upgrade; the handshake failed and the client retried forever, and live quotes
+ * fell back to polling. The base path is now kept: https://host/api -> wss://host/api/ws
+ * (nginx strips /api/ and the gateway sees /ws); a bare host still gives /ws.
+ */
+export function toWsUrl(httpBase: string): string | null {
   if (!httpBase) return null;
   try {
     const u = new URL(httpBase);
     u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
-    u.pathname = "/ws";
+    u.pathname = `${u.pathname.replace(/\/+$/, "")}/ws`;
     u.search = "";
     u.hash = "";
     return u.toString();
@@ -123,7 +134,10 @@ export function useStockkyRealtime(onMessage?: (msg: RealtimeMessage) => void) {
           typeof document !== "undefined" &&
           document.visibilityState === "visible"
         ) {
-          const delay = Math.min(15000, 1500 * Math.pow(1.5, retries.current++));
+          // After 6 failed attempts in a row without ever opening (wrong path,
+          // gateway down) back off to 2 min instead of hammering every 15 s.
+          const cap = retries.current >= 6 ? 120000 : 15000;
+          const delay = Math.min(cap, 1500 * Math.pow(1.5, retries.current++));
           setTimeout(() => connect(), delay);
         }
       };

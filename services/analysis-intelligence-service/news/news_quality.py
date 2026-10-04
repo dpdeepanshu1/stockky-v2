@@ -56,7 +56,7 @@ def _rss_urls(query: str) -> List[Tuple[str, str]]:
     return [
         ("Google News", f"https://news.google.com/rss/search?q={q}+when:14d&hl=en-IN&gl=IN&ceid=IN:en"),
         ("Google News Finance", f"https://news.google.com/rss/search?q={q}+stock+OR+shares+OR+NSE+when:14d&hl=en-IN&gl=IN&ceid=IN:en"),
-        ("Moneycontrol", f"https://www.moneycontrol.com/rss/latestnews.xml"),  # filtered later
+        # "Moneycontrol" REMOVED (2026-10-04): HTTP 403 from the VM on every request (bot-gated).
         # "Economic Times" REMOVED (2026-09-17, session58 — live-verified from the
         # deploy VM): https://economictimes.indiatimes.com/markets/stocks/rssreports/2146842.cms
         # now returns HTTP 404 with an HTML "Most Viewed Business News Articles"
@@ -70,7 +70,7 @@ def _rss_urls(query: str) -> List[Tuple[str, str]]:
         # markets RSS URL again, re-add it here.
         ("LiveMint", f"https://www.livemint.com/rss/markets"),
         ("Business Standard", f"https://www.business-standard.com/rss/markets-106.rss"),
-        ("Financial Express", f"https://www.financialexpress.com/market/rss"),
+        # "Financial Express" REMOVED (2026-10-04): HTTP 403 from the VM on every request (bot-gated).
         # 2026-10-04: feedburner ndtvprofit-latest is retired; this Atom feed is the one real-trade-service's after-hours scan verified live.
         ("NDTV Profit", "https://prod-qt-images.s3.amazonaws.com/production/bloombergquint/feed.xml"),
     ]

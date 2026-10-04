@@ -21,6 +21,8 @@ from peer_multi_quarter import (
     build_peer_list,
     compute_peer_relative,
     detect_sector,
+    has_sector_data,
+    peers_for,
     fetch_fundamentals,
     fetch_fundamentals_batch,
 )
@@ -50,13 +52,15 @@ def rank_against_peers(
     """
     symbol = _norm_symbol(symbol)
     sector = detect_sector(stock_fund)
+    if not peers and not has_sector_data(stock_fund):
+        sector = "UNKNOWN"      # no sector/industry in the payload: reported as unknown, no generic peers
     # build_peer_list (shared with compute_peer_relative) normalises, drops
     # duplicates (e.g. "TCS" and "TCS.NS" in the same list) and takes the symbol
     # out of the peer list; the symbol is then always put first so it can never
     # be sliced off by max_peers (it used to vanish when the caller's list had it
     # past position max_peers, leaving no is_self row and reporting the top PEER
     # as "self"). Zero or negative max_peers means no peers.
-    peer_list = [symbol] + build_peer_list(symbol, sector, peers, max_peers)
+    peer_list = [symbol] + peers_for(symbol, stock_fund, sector, peers, max_peers)
 
     # Fix (30 Aug 2026): fetch all non-self peers concurrently (cache-aware,
     # shared with compute_peer_relative below) instead of one blocking

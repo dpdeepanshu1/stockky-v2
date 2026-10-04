@@ -24,8 +24,10 @@ def _clean():
     bh._NSE_SESSION_CACHE["client"] = None
     bh._NSE_SESSION_CACHE["ts"] = 0.0
     bh._denied_last_logged = {} if hasattr(bh, "_denied_last_logged") else {}
+    bh._QUOTE_BLOCK.update({"until": 0.0, "status": None, "skipped": 0})
     bh.MAX_STOCK_PRICE = 0.0
     yield
+    bh._QUOTE_BLOCK.update({"until": 0.0, "status": None, "skipped": 0})
     bh._BHAV_DAY_CACHE.clear()
     bh._NSE_SESSION_CACHE["client"] = None
     bh._NSE_SESSION_CACHE["ts"] = 0.0
@@ -459,6 +461,104 @@ class TestDeliveryFromQuote:
                 return resp
         monkeypatch.setattr(bh, "_nse_client", lambda: _FC())
         bh.delivery_from_quote("RELIANCE.NS")
+
+
+class TestQuoteBlockPause:
+    """Group 96 / item 23: a 403 from quote-equity pauses that path."""
+
+    class _Counting:
+        def __init__(self, status):
+            self.status, self.calls = status, 0
+        def get(self, *a, **kw):
+            self.calls += 1
+            return _FakeResp(self.status, "")
+        def close(self): pass
+
+    def test_403_pauses_following_calls(self, monkeypatch):
+        fc = self._Counting(403)
+        monkeypatch.setattr(bh, "_nse_client", lambda: fc)
+        assert bh.delivery_from_quote("A") is None
+        assert bh.delivery_from_quote("B") is None
+        assert bh.delivery_from_quote("C") is None
+        assert fc.calls == 1            # B and C never reached NSE
+
+    @pytest.mark.parametrize("status", [401, 429])
+    def test_401_and_429_also_pause(self, monkeypatch, status):
+        fc = self._Counting(status)
+        monkeypatch.setattr(bh, "_nse_client", lambda: fc)
+        bh.delivery_from_quote("A"); bh.delivery_from_quote("B")
+        assert fc.calls == 1
+
+    @pytest.mark.parametrize("status", [404, 500, 503])
+    def test_other_statuses_do_not_pause(self, monkeypatch, status):
+        fc = self._Counting(status)
+        monkeypatch.setattr(bh, "_nse_client", lambda: fc)
+        bh.delivery_from_quote("A"); bh.delivery_from_quote("B")
+        assert fc.calls == 2
+
+    def test_exception_does_not_pause(self, monkeypatch):
+        n = {"c": 0}
+        class _FC:
+            def get(self, *a, **kw):
+                n["c"] += 1; raise RuntimeError("timeout")
+        monkeypatch.setattr(bh, "_nse_client", lambda: _FC())
+        bh.delivery_from_quote("A"); bh.delivery_from_quote("B")
+        assert n["c"] == 2
+
+    def test_pause_expires(self, monkeypatch):
+        fc = self._Counting(403)
+        monkeypatch.setattr(bh, "_nse_client", lambda: fc)
+        bh.delivery_from_quote("A")
+        bh._QUOTE_BLOCK["until"] = time.time() - 1      # pause over
+        bh.delivery_from_quote("B")
+        assert fc.calls == 2
+
+    def test_success_clears_pause(self):
+        bh._note_quote_status(403)
+        assert bh.nse_quote_blocked() is True
+        bh._note_quote_status(200)
+        assert bh.nse_quote_blocked() is False
+
+    def test_zero_seconds_disables_pause(self, monkeypatch):
+        monkeypatch.setenv("NSE_QUOTE_BLOCK_SECONDS", "0")
+        fc = self._Counting(403)
+        monkeypatch.setattr(bh, "_nse_client", lambda: fc)
+        bh.delivery_from_quote("A"); bh.delivery_from_quote("B")
+        assert fc.calls == 2
+
+    def test_bad_env_value_uses_default(self, monkeypatch):
+        monkeypatch.setenv("NSE_QUOTE_BLOCK_SECONDS", "soon")
+        assert bh._quote_block_seconds() == 600.0
+
+    def test_cached_session_dropped_and_closed_on_403(self, monkeypatch):
+        closed = []
+        class _Old:
+            def close(self): closed.append(1)
+        bh._NSE_SESSION_CACHE["client"] = _Old()
+        bh._NSE_SESSION_CACHE["ts"] = time.time()
+        bh._note_quote_status(403)
+        assert bh._NSE_SESSION_CACHE["client"] is None and closed == [1]
+
+    def test_one_warning_per_pause(self, monkeypatch, caplog):
+        import logging
+        fc = self._Counting(403)
+        monkeypatch.setattr(bh, "_nse_client", lambda: fc)
+        with caplog.at_level(logging.WARNING, logger="market-data-bhavcopy"):
+            for sym in "ABCDE":
+                bh.delivery_from_quote(sym)
+            bh._note_quote_status(403)           # a late 403 inside the pause
+        msgs = [r.getMessage() for r in caplog.records if "quote-equity returned" in r.getMessage()]
+        assert len(msgs) == 1 and "403" in msgs[0]
+
+    def test_get_delivery_falls_back_to_bhavcopy_while_paused(self, monkeypatch):
+        bh._note_quote_status(403)
+        def _boom():
+            raise AssertionError("NSE quote must not be called while paused")
+        monkeypatch.setattr(bh, "_nse_client", _boom)
+        monkeypatch.setattr(bh, "delivery_from_bhavcopy",
+                            lambda sym: {"symbol": sym, "delivery_pct": 42.0, "source": "nse_bhavcopy"})
+        out = bh.get_delivery("RELIANCE")
+        assert out["delivery_pct"] == 42.0 and out["source"] == "nse_bhavcopy"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -91,6 +91,39 @@ from nse_holidays import is_nse_holiday
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api-gateway")
 
+# 2026-10-04 (log noise): httpx logs every outbound request at INFO and uvicorn logs every /health probe
+# (container healthchecks + the browser's api.ping()) -- together most of the log volume. httpx -> WARNING
+# (HTTPX_LOG_LEVEL=INFO restores it); successful /health access lines are dropped (ACCESS_LOG_HEALTH=1 restores
+# them; a non-200 /health still logs).
+def _quiet_noisy_loggers() -> None:
+    import re as _re
+    import logging as _lg
+    import os as _os
+    _lvl = getattr(_lg, (_os.getenv("HTTPX_LOG_LEVEL") or "WARNING").strip().upper(), _lg.WARNING)
+    if not isinstance(_lvl, int):
+        _lvl = _lg.WARNING
+    for _n in ("httpx", "httpcore"):
+        _lg.getLogger(_n).setLevel(_lvl)
+    if (_os.getenv("ACCESS_LOG_HEALTH") or "").strip().lower() in ("1", "true", "yes"):
+        return
+    _pat = _re.compile(r'"GET \S*/health(\?\S*)? HTTP/[\d.]+" 200')
+
+    class _NoHealthAccess(_lg.Filter):
+        def filter(self, record):  # noqa: A003
+            try:
+                return not _pat.search(record.getMessage())
+            except Exception:  # noqa: BLE001
+                return True
+
+    _acc = _lg.getLogger("uvicorn.access")
+    if not any(getattr(f, "_stockky_health_filter", False) for f in _acc.filters):
+        _flt = _NoHealthAccess()
+        _flt._stockky_health_filter = True
+        _acc.addFilter(_flt)
+
+
+_quiet_noisy_loggers()
+
 # ---- IST timezone ----
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -521,6 +554,14 @@ SYMBOL_ALIASES: Dict[str, Union[str, List[str]]] = {
     "LTIMINDTREE": "LTM",
     "ZOMATO": "ETERNAL",
     "ZOMAT": "ETERNAL",
+    # Hero MotoCorp's NSE symbol is HEROMOTOCO. "HEROMOTORS" (and the typos around it) is not a
+    # symbol, but it is what people type; without this a typed "HERO MOTERS" fuzzy-matched
+    # whatever near-miss had been recorded as "searched" and analysed that.
+    "HEROMOTORS": "HEROMOTOCO",
+    "HEROMOTERS": "HEROMOTOCO",
+    "HEROMOTER": "HEROMOTOCO",
+    "HEROMOTO": "HEROMOTOCO",
+    "HEROMOTOR": "HEROMOTOCO",
 }
 EXTRA_NEW_SYMBOLS = ["TMPV", "TMLCV", "LTM", "ETERNAL"]
 
@@ -677,7 +718,35 @@ def _save_watchlist(symbols: List[str]):
         _redis_set(WATCHLIST_KEY, clean, ttl=None)
 
 def _load_searched() -> List[str]:
-    return _redis_get(SEARCHED_KEY) or []
+    """The stored searched-symbol list, self-cleaned (group101, items 11 and 28).
+
+    Old entries could be anything a past version stored: padded/lowercase/.NS spellings, non-strings,
+    misspelt names (HEROMOTORS) recorded before group93 stopped recording failed lookups, and symbols that
+    have since been delisted (AAKASH, ANNAPURNA). Every read now normalises and runs the list through
+    `_filter_equities` (the same delisted / index / non-equity / rename gate as the scan universe), and
+    writes the cleaned list back once when it differs, so the stored key heals itself. Never raises: a
+    failed cleanup or write-back returns what could be cleaned and leaves the key as it was."""
+    raw = _redis_get(SEARCHED_KEY) or []
+    if not isinstance(raw, list):
+        return []
+    normed = [str(x).strip().upper().replace(".NS", "").replace(".BO", "").strip()
+              for x in raw if isinstance(x, str) and x.strip()]
+    # A typed name that has a curated one-to-one alias (HEROMOTORS -> HEROMOTOCO, TATAMOTORS -> TMPV) is stored
+    # as its real symbol; list-valued aliases are ambiguous and left as they are.
+    normed = [SYMBOL_ALIASES[x] if isinstance(SYMBOL_ALIASES.get(x), str) else x for x in normed]
+    try:
+        cleaned = _filter_equities(normed)
+    except Exception as e:  # pragma: no cover - _filter_equities itself never raises
+        logger.debug("searched-list cleanup failed: %s", e)
+        return normed
+    if cleaned != raw:
+        try:
+            _redis_set(SEARCHED_KEY, cleaned[-200:])
+            if len(cleaned) != len(raw):
+                logger.info("searched symbols: cleaned stored list (%d -> %d entries)", len(raw), len(cleaned))
+        except Exception as e:
+            logger.debug("searched-list write-back failed: %s", e)
+    return cleaned
 
 
 async def _load_searched_safe() -> List[str]:
@@ -909,6 +978,11 @@ def _get_all_nse_securities() -> List[str]:
         for item in data["data"]:
             if isinstance(item, dict) and item.get("symbol"):
                 symbols.append(item["symbol"].upper())
+    # 2026-10-04 (log-audit item 22): tell "unreachable" (no usable response at
+    # all) apart from "reachable but empty" (HTTP 200 with a body that carries no
+    # symbol rows). The old text said "unreachable" for both, which was misleading
+    # when NSE answered 200 with zero rows.
+    _nse_reachable = isinstance(data, dict)
     logger.info(f"Fetched {len(symbols)} securities from NSE")
     if not symbols:
         # §3: NSE live API unreachable — use bhavcopy universe (real EQ/BE/BZ
@@ -920,10 +994,16 @@ def _get_all_nse_securities() -> List[str]:
             )
             resp.raise_for_status()
             symbols = resp.json().get("symbols") or []
-            logger.warning(
-                "NSE live API unreachable — using bhavcopy universe fallback "
-                "(%d symbols)", len(symbols)
-            )
+            if _nse_reachable:
+                logger.warning(
+                    "NSE live API answered but returned 0 securities rows — using "
+                    "bhavcopy universe fallback (%d symbols)", len(symbols)
+                )
+            else:
+                logger.warning(
+                    "NSE live API unreachable — using bhavcopy universe fallback "
+                    "(%d symbols)", len(symbols)
+                )
         except Exception as e:
             logger.error("bhavcopy universe fallback failed: %s", e)
             symbols = []
@@ -2061,10 +2141,50 @@ def _get_all_known_symbols() -> Set[str]:
     _redis_set(KNOWN_SYMBOLS_KEY, list(cleaned), ttl=21600)
     return cleaned
 
+def _squash_symbol(text: str) -> str:
+    """Upper-case, drop .NS/.BO and every whitespace character ("hero moters" -> "HEROMOTERS").
+    NSE symbols never contain spaces, so a space is always a name typed as words. Hyphens and
+    '&' are kept: BAJAJ-AUTO and M&M are real symbols."""
+    return "".join((text or "").upper().replace(".NS", "").replace(".BO", "").split())
+
+
+# A fuzzy (typo) correction is applied silently only when it is this close AND clearly ahead of
+# the runner-up; anything weaker is returned to the user as "did you mean" instead of analysing
+# a different company than the one they meant.
+FUZZY_AUTO_CORRECT_MIN_RATIO = 0.90
+FUZZY_AUTO_CORRECT_MIN_GAP = 0.05
+FUZZY_SUGGEST_CUTOFF = 0.6
+
+
+def _symbol_suggestions(typed: str, known, first: Optional[str] = None, limit: int = 3) -> List[str]:
+    """Closest known symbols to `typed`, best first; `first` (an already-found match) leads."""
+    out: List[str] = [first] if first else []
+    try:
+        for m in difflib.get_close_matches(typed, list(known or ()), n=limit + 1, cutoff=FUZZY_SUGGEST_CUTOFF):
+            if m not in out:
+                out.append(m)
+    except Exception as e:
+        logger.debug("symbol suggestions failed for %s: %s", typed, e)
+    return out[:limit]
+
+
+def _fuzzy_correction_is_confident(typed: str, match: str, known) -> bool:
+    """True when `match` is a close enough, unambiguous correction of `typed`."""
+    best = difflib.SequenceMatcher(None, typed, match).ratio()
+    if best < FUZZY_AUTO_CORRECT_MIN_RATIO:
+        return False
+    for other in difflib.get_close_matches(typed, list(known or ()), n=3, cutoff=FUZZY_SUGGEST_CUTOFF):
+        if other != match and best - difflib.SequenceMatcher(None, typed, other).ratio() < FUZZY_AUTO_CORRECT_MIN_GAP:
+            return False
+    return True
+
+
 def _resolve_symbol(misspelled: str) -> Optional[str]:
     if not misspelled:
         return None
-    symbol = misspelled.upper().replace(".NS", "").replace(".BO", "")
+    symbol = _squash_symbol(misspelled)
+    if not symbol:
+        return None
     if symbol in SYMBOL_ALIASES:
         alias = SYMBOL_ALIASES[symbol]
         if isinstance(alias, list):
@@ -2577,6 +2697,43 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 # concurrent symbol analyses shouldn't also fire 10 concurrent Gemini calls.
 GEMINI_SEMAPHORE = asyncio.Semaphore(int(((os.getenv("GEMINI_MAX_CONCURRENT") or "").strip() or "3")))
 GEMINI_MAX_OUTPUT_TOKENS = int(((os.getenv("GEMINI_MAX_OUTPUT_TOKENS") or "").strip() or "400"))
+# After a 429 from Gemini, stop calling it for a while and serve the template straight away.
+# Without this every /stock call made a Gemini request that was certain to 429 again (same
+# approach as decision-prediction-service's _gemini_cooldown_until, which uses 10 minutes).
+# A Retry-After header on the 429 wins over the default, clamped to 30s..1h.
+def _gemini_cooldown_default() -> float:
+    try:
+        v = float(((os.getenv("GEMINI_COOLDOWN_SECONDS") or "").strip() or "600"))
+    except ValueError:
+        v = 600.0
+    return v if v > 0 else 600.0
+
+GEMINI_COOLDOWN_SECONDS = _gemini_cooldown_default()
+_gemini_cooldown_until = 0.0  # epoch seconds; Gemini is skipped while time.time() is below this
+
+
+def _gemini_cooldown_remaining() -> float:
+    return max(0.0, _gemini_cooldown_until - time.time())
+
+
+def _start_gemini_cooldown(resp, symbol) -> None:
+    """Called on a 429. Logs once per cooldown window (not once per request)."""
+    global _gemini_cooldown_until
+    secs = GEMINI_COOLDOWN_SECONDS
+    try:
+        ra = (getattr(resp, "headers", None) or {}).get("retry-after")
+        if ra is not None and str(ra).strip():
+            secs = min(3600.0, max(30.0, float(str(ra).strip())))
+    except (TypeError, ValueError, AttributeError):
+        pass
+    already = _gemini_cooldown_remaining() > 0
+    _gemini_cooldown_until = max(_gemini_cooldown_until, time.time() + secs)
+    if not already:
+        logger.warning(f"Gemini 429 for {symbol} — skipping Gemini for {secs:.0f}s, using template")
+        try:
+            rate_limit_monitor.record(source="gemini", status=429, path="generateContent", symbol=str(symbol or ""))
+        except Exception:
+            pass
 
 def _build_gemini_prompt(data: dict) -> str:
     decision = data.get("decision")
@@ -2617,6 +2774,8 @@ async def _generate_ai_summary(data: dict, client: httpx.AsyncClient) -> str:
     this call always gets whichever client is currently alive."""
     if not GEMINI_API_KEY:
         return _generate_summary(data)
+    if _gemini_cooldown_remaining() > 0:
+        return _generate_summary(data)  # in cooldown after a 429: no request, no log line
     client = _get_http_client()  # always use the live client, ignore a possibly-stale one passed in
     try:
         async with GEMINI_SEMAPHORE:
@@ -2632,6 +2791,9 @@ async def _generate_ai_summary(data: dict, client: httpx.AsyncClient) -> str:
                 },
                 timeout=15,
             )
+        if resp.status_code == 429:
+            _start_gemini_cooldown(resp, data.get("symbol"))
+            return _generate_summary(data)
         if resp.status_code != 200:
             logger.warning(f"Gemini call failed ({resp.status_code}) for {data.get('symbol')} — using template")
             return _generate_summary(data)
@@ -3027,8 +3189,22 @@ async def _cb_post(client: httpx.AsyncClient, name: str, url: str, timeout: floa
         raise last_err
 
 
+def _wake_pings_enabled() -> bool:
+    """Render-era "wake the free-tier dyno" pings. On an always-on host (the Oracle VM: ORACLE_DSN set) they are
+    pure noise -- every stockky-hot batch sent 6 /health?warm=true calls. WAKE_PINGS=1 forces them on, =0 off;
+    unset -> off when ORACLE_DSN is set, on otherwise (Render/Neon deployments keep the old behaviour)."""
+    v = (os.getenv("WAKE_PINGS") or "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return not (os.getenv("ORACLE_DSN") or "").strip()
+
+
 async def _wake_required_services(client: httpx.AsyncClient = None) -> dict:
     """Wake free-tier services before scan. Market-data gets a warm yfinance touch + double ping."""
+    if not _wake_pings_enabled():
+        return {n: {"ok": True, "status": None, "warmed": False, "skipped": True} for n in SYSTEM_SERVICES}
     own_client = client is None
     if own_client:
         client = _get_http_client()
@@ -4438,10 +4614,11 @@ async def market_history(symbol: str, period: str = "1mo"):
     _hist_timeout = httpx.Timeout(10.0, connect=5.0)  # fast-fail; both sources 404 on current deploy
     if True:
         try:
-            try:
-                await client.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=_hist_timeout)
-            except Exception:
-                pass
+            if _wake_pings_enabled():
+                try:
+                    await client.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=_hist_timeout)
+                except Exception:
+                    pass
             r = await client.get(f"{MARKET_DATA_URL}/history/{sym}", params={"period": md_period, "interval": "1d"}, timeout=_hist_timeout)
             if r.status_code == 200:
                 data = r.json()
@@ -4994,6 +5171,38 @@ STOCK_DECIDE_RETRY_MIN_SEC = _stock_budget_sec("STOCK_DECIDE_RETRY_MIN_SEC", 15.
 _STOCK_SUMMARY_RESERVE_SEC = 3.0    # below this much budget left, skip Gemini and use the template
 
 
+# Technical-analysis reasons that mean the indicators were computed from a minimal or fallback price
+# history (a single quote/bhavcopy bar, a market-data fallback, or fewer than ~30 daily bars) rather than
+# a full history. The technical service already writes these into reasons["technical"]; nothing used to
+# turn them into a visible note, so a neutral 50 from one bar looked like a real technical read.
+_THIN_TECHNICAL_MARKERS = (
+    "limited history",
+    "history temporarily thin",
+    "price history unavailable",
+    "fallback quote",
+    "fallback technical",
+    "technical built from market-data fallback",
+    "market-data fallback",
+    "full technicals retry",
+    "ema trend: insufficient data",
+    "macd: insufficient data",
+)
+THIN_TECHNICAL_FLAG = "Technicals on minimal price history"
+
+
+def _thin_technical_history(result: dict, tech_reasons) -> bool:
+    """True when the technical pillar rests on a minimal / fallback bar (see _THIN_TECHNICAL_MARKERS),
+    or the decision service's own pillar map says the technical pillar is not live
+    (data_quality.pillars.technical is False). The payload's overall `data_insufficient` is NOT used:
+    it can be set for non-technical reasons."""
+    dq = result.get("data_quality") if isinstance(result, dict) else None
+    pillars = dq.get("pillars") if isinstance(dq, dict) else None
+    if isinstance(pillars, dict) and pillars.get("technical") is False:
+        return True
+    blob = " ".join(str(r) for r in (tech_reasons or [])).lower()
+    return any(m in blob for m in _THIN_TECHNICAL_MARKERS)
+
+
 @app.get("/stock/{symbol}")
 async def get_stock_decision(symbol: str, already_owned: bool = False):
     """
@@ -5005,19 +5214,37 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
        re-fetches run concurrently via asyncio.gather (no serial waterfall).
     """
     original = symbol.strip()
+    typed = _squash_symbol(original)
     resolved = (await asyncio.to_thread(_resolve_symbol, original))
     if resolved is None:
-        symbol_to_use = original.upper()
+        symbol_to_use = typed
         corrected_from = None
-    elif resolved != original.upper():
+    elif resolved != typed:
+        # An alias (HEROMOTORS -> HEROMOTOCO) is a curated, deliberate mapping. A fuzzy match is
+        # only a guess: below the confidence bar, ask instead of analysing a different company.
+        if typed not in SYMBOL_ALIASES:
+            _known = await asyncio.to_thread(_get_all_known_symbols)
+            if typed not in _known and not _fuzzy_correction_is_confident(typed, resolved, _known):
+                _hints = _symbol_suggestions(typed, _known, first=resolved)
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Symbol '{typed}' not found. Did you mean: {', '.join(_hints)}?",
+                )
         symbol_to_use = resolved
-        corrected_from = original.upper()
+        corrected_from = typed
     else:
-        symbol_to_use = original.upper()
+        symbol_to_use = typed
         corrected_from = None
 
-    _add_searched(symbol_to_use)
-    _drop_cache_keys(SCAN_UNIVERSE_KEY)
+    async def _remember_searched() -> None:
+        """Record the symbol only after a real analysis came back. It used to be recorded up front,
+        so every typo (and every unknown name) became a 'known' symbol and then won the next fuzzy
+        match: that is how a mistyped Hero Motors kept resolving to the non-symbol HEROMOTORS."""
+        try:
+            await asyncio.to_thread(_add_searched, symbol_to_use)
+            await asyncio.to_thread(_drop_cache_keys, SCAN_UNIVERSE_KEY)
+        except Exception as e:
+            logger.debug("stock: recording searched symbol %s failed: %s", symbol_to_use, e)
 
     def _reason_blob(reasons: dict, key: str) -> str:
         return " ".join(str(x) for x in (reasons.get(key) or [])).lower()
@@ -5291,6 +5518,11 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
             level = "medium"
         if result.get("training_score") in (None, 0, 50):
             flags.append("Training signal thin")
+        if _thin_technical_history(result, tech_reasons):
+            # First in the list: the UI shows only the first three flags, and this one changes how far
+            # the technical score can be trusted.
+            flags.insert(0, THIN_TECHNICAL_FLAG)
+            level = "medium" if level == "high" else level
         result["data_quality"] = {
             "level": level if flags else "high",
             "flags": flags,
@@ -5300,6 +5532,8 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
                 else "Core inputs present"
             ),
         }
+        if result.get("close") is not None:
+            await _remember_searched()
         return result
 
     except httpx.HTTPStatusError as e:
@@ -7497,6 +7731,8 @@ def _hot_payload_fingerprint(payload: dict) -> str:
 
 async def _warm_upstream_services(client: Optional[httpx.AsyncClient] = None) -> None:
     """Ping gateway deps so free-tier does not sleep between batches."""
+    if not _wake_pings_enabled():
+        return
     urls = []
     for name in ("FUNDAMENTAL_URL", "EVENT_URL", "NEWS_URL", "TECHNICAL_URL", "MARKET_DATA_URL", "NOTIFICATION_URL"):
         u = globals().get(name) or os.getenv(name)
@@ -7604,6 +7840,21 @@ def _hot_base(sym) -> str:
         if t.endswith(suf):
             t = t[: -len(suf)]
     return t
+
+
+def _drop_dead_hot_symbols(seen: dict) -> list:
+    """Remove confirmed-delisted and non-equity symbols from `seen` (normalised
+    symbol -> original spelling) in place; return the dropped keys. Uses only the
+    static KNOWN_DELISTED / non-equity rules, never renames a symbol, and keeps
+    everything if symbol_aliases cannot be imported."""
+    try:
+        from symbol_aliases import is_known_delisted, is_non_equity_instrument
+    except Exception:
+        return []
+    dead = [k for k in list(seen) if is_known_delisted(k) or is_non_equity_instrument(k)]
+    for k in dead:
+        seen.pop(k, None)
+    return dead
 
 
 def _hot_float(v):
@@ -7734,6 +7985,14 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
         _k = _hot_base(_u)
         if _k and _k not in _seen_u:
             _seen_u[_k] = _u
+    # Log-audit item 28 (group 99): this universe merges the watchlist, searched
+    # symbols, news and events WITHOUT the delisted/non-equity gate that
+    # _clean_equity_symbol applies to the scan universe, so confirmed-dead names
+    # (AAKASH, ANNAPURNA) were fetched every run and 404'd on every upstream.
+    _dropped_dead = _drop_dead_hot_symbols(_seen_u)
+    if _dropped_dead:
+        logger.info("stockky-hot universe: dropped %s delisted/non-equity symbol(s): %s",
+                    len(_dropped_dead), ",".join(sorted(_dropped_dead)[:20]))
     universe = list(_seen_u.values())
     if not universe:
         universe = list(_get_nifty_indices() or [])[:80]
@@ -10063,6 +10322,10 @@ async def ops_keepalive(deep: bool = False):
     """
     out = {"ok": True, "gateway": True, "services": {}, "ts": datetime.now(IST).isoformat()}
     if not deep:
+        return out
+    if not _wake_pings_enabled():
+        # Always-on host: nothing sleeps, so the browser's keep-alive ping has nothing to wake.
+        out["skipped"] = True
         return out
     # Soft sequential pings — never block more than ~12s total
     client = _get_http_client()

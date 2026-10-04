@@ -451,19 +451,32 @@ class TestLivePrices:
         result = _run(main._live_prices([]))
         assert result == {}
 
-    def test_success_returns_price_dict(self):
+    def test_success_uses_display_cache_path_and_dedupes(self):
+        seen = {}
+
+        async def _fake_display(symbols):
+            seen["symbols"] = list(symbols)
+            return {"AAA": 101.5}
+
+        with mock.patch("market_feed.feed.get_display_prices", side_effect=_fake_display):
+            result = _run(main._live_prices(["AAA", "AAA", "BBB"]))  # de-dupe check
+        assert result == {"AAA": 101.5}
+        assert seen["symbols"] == ["AAA", "BBB"]
+
+    def test_display_failure_falls_back_to_direct_quotes(self):
         tick_a = mock.Mock(price=101.5)
-        tick_b = mock.Mock(price=None)  # a None tick means "no quote" — must be filtered out
 
         async def _fake_get_quotes(symbols):
-            return {"AAA": tick_a, "BBB": None}
+            return {"AAA": tick_a, "BBB": None}   # a None tick means "no quote" — must be filtered out
 
-        with mock.patch("market_feed.feed.get_quotes", side_effect=_fake_get_quotes):
-            result = _run(main._live_prices(["AAA", "AAA", "BBB"]))  # de-dupe check
+        with mock.patch("market_feed.feed.get_display_prices", side_effect=RuntimeError("cache broke")), \
+             mock.patch("market_feed.feed.get_quotes", side_effect=_fake_get_quotes):
+            result = _run(main._live_prices(["AAA", "BBB"]))
         assert result == {"AAA": 101.5}
 
     def test_exception_is_swallowed_returns_empty(self):
-        with mock.patch("market_feed.feed.get_quotes", side_effect=RuntimeError("feed down")):
+        with mock.patch("market_feed.feed.get_display_prices", side_effect=RuntimeError("cache broke")), \
+             mock.patch("market_feed.feed.get_quotes", side_effect=RuntimeError("feed down")):
             result = _run(main._live_prices(["AAA"]))
         assert result == {}
 

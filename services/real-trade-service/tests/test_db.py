@@ -845,8 +845,10 @@ class TestIndexEnsurers:
             creates = [s for s in eng._sql if s.startswith("CREATE INDEX")]
             assert len(creates) == len(indexes)
             for (name, table, cols), sql in zip(indexes, creates):
+                # Oracle: the reserved-word column `mode` is quoted (2026-10-04, ORA-00936 fix)
+                ora_cols = ', '.join('"mode"' if c == "mode" else c for c in cols)
                 assert sql == (f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({', '.join(cols)})" if expect_if_not_exists
-                               else f"CREATE INDEX {name} ON {table} ({', '.join(cols)})")
+                               else f"CREATE INDEX {name} ON {table} ({ora_cols})")
 
     @pytest.mark.parametrize("fn, indexes", INDEX_CASES)
     @pytest.mark.parametrize("message", ["ORA-00955: name is already used by an existing object", "ORA-01408: such column list already indexed"])

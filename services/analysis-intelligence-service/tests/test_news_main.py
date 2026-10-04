@@ -36,7 +36,9 @@ def _no_network_feeds(monkeypatch):
     feedparser.parse, so stub the download (no network) and start each test with an empty per-URL cache."""
     import feed_fetch
     feed_fetch.clear_cache()
-    monkeypatch.setattr(feed_fetch, "_download", lambda url: (b"<rss/>", {"status": 200, "error": None}))
+    # The body IS the URL (bytes): feed_fetch hands the downloaded body to feedparser.parse, so a faked
+    # parse() sees which feed was requested via _url(raw). Real parse() of it yields zero entries.
+    monkeypatch.setattr(feed_fetch, "_download", lambda url: (url.encode(), {"status": 200, "error": None}))
     yield
     feed_fetch.clear_cache()
 
@@ -59,6 +61,11 @@ def _entry(title="Infosys wins deal", desc="", days_ago=1, link="http://x/1", **
     for k, v in kw.items():
         setattr(e, k, v)
     return e
+
+
+def _url(raw):
+    """The feed URL a faked feedparser.parse() was asked for (see _no_network_feeds)."""
+    return raw.decode() if isinstance(raw, bytes) else raw
 
 
 def _parsed(*entries):
@@ -390,7 +397,7 @@ class TestFetchGoogleNews:
         urls = []
 
         def fake_parse(url):
-            urls.append(url)
+            urls.append(_url(url))
             return _parsed(_entry(title=f"Tata Consultancy Services item {len(urls)}", link=f"l{len(urls)}"))
 
         monkeypatch.setattr(nm.feedparser, "parse", fake_parse)
@@ -402,7 +409,7 @@ class TestFetchGoogleNews:
 
     def test_unknown_symbol_only_two_queries(self, monkeypatch):
         urls = []
-        monkeypatch.setattr(nm.feedparser, "parse", lambda u: (urls.append(u), _parsed())[1])
+        monkeypatch.setattr(nm.feedparser, "parse", lambda u: (urls.append(_url(u)), _parsed())[1])
         nm._fetch_google_news("NEWCO.NS")
         assert len(urls) == 2
 
@@ -434,7 +441,7 @@ RSS_FETCHERS = [
     ("_fetch_moneycontrol", "Moneycontrol", "moneycontrol.com"),
     ("_fetch_economic_times", "Economic Times", "economictimes"),
     ("_fetch_business_standard", "Business Standard", "business-standard"),
-    ("_fetch_ndtv_profit", "NDTV Profit", "ndtv.com"),
+    ("_fetch_ndtv_profit", "NDTV Profit", "bloombergquint"),
     ("_fetch_livemint", "LiveMint", "livemint.com"),
     ("_fetch_financial_express", "Financial Express", "financialexpress"),
     ("_fetch_reuters_india", "Reuters", "news.google.com"),
@@ -447,7 +454,7 @@ class TestRssFetchers:
         urls = []
 
         def fake_parse(url):
-            urls.append(url)
+            urls.append(_url(url))
             return _parsed(_entry(title="Infosys results beat"), _entry(title="Something else"))
 
         monkeypatch.setattr(nm.feedparser, "parse", fake_parse)
@@ -466,7 +473,7 @@ class TestRssFetchers:
 
     def test_reuters_query_uses_company_name(self, monkeypatch):
         urls = []
-        monkeypatch.setattr(nm.feedparser, "parse", lambda u: (urls.append(u), _parsed())[1])
+        monkeypatch.setattr(nm.feedparser, "parse", lambda u: (urls.append(_url(u)), _parsed())[1])
         nm._fetch_reuters_india("TCS.NS")
         assert "Tata%20Consultancy%20Services" in urls[0]
         assert "reuters.com" in urls[0]
@@ -591,18 +598,24 @@ def _patch_sources(monkeypatch, mapping=None, newsapi=None):
     return called
 
 
+# 2026-10-04: Moneycontrol and Financial Express return HTTP 403 from the VM and are no longer queried.
+_RETIRED = ("_fetch_moneycontrol", "_fetch_financial_express")
+_ACTIVE_SOURCE_NAMES = [n for n in _SOURCE_NAMES if n not in _RETIRED]
+
+
 class TestFetchHeadlines:
-    def test_calls_all_nine_sources_without_newsapi_key(self, monkeypatch):
+    def test_calls_all_seven_sources_without_newsapi_key(self, monkeypatch):
         monkeypatch.setattr(nm, "NEWSAPI_KEY", None)
         called = _patch_sources(monkeypatch)
         assert nm._fetch_headlines("INFY") == []
-        assert called == _SOURCE_NAMES
+        assert called == _ACTIVE_SOURCE_NAMES and len(called) == 7
+        assert not set(called) & set(_RETIRED)
 
     def test_newsapi_added_when_key_present(self, monkeypatch):
         monkeypatch.setattr(nm, "NEWSAPI_KEY", "K")
         called = _patch_sources(monkeypatch)
         nm._fetch_headlines("INFY")
-        assert called[-1] == "_fetch_newsapi" and len(called) == 10
+        assert called[-1] == "_fetch_newsapi" and len(called) == 8
 
     def test_dedupes_by_title_case_insensitive_and_drops_blank(self, monkeypatch):
         monkeypatch.setattr(nm, "NEWSAPI_KEY", None)

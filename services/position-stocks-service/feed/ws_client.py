@@ -405,6 +405,26 @@ _reconnect_attempts = 0
 _last_tick_at: Optional[float] = None  # unix seconds of the most recent parsed tick, any symbol
 
 
+_OFFHOURS_RECHECK_S = 60.0
+
+
+def _offhours_idle() -> bool:
+    """True outside 08:55-15:45 IST on weekdays (and all weekend). AngelOne drops a feed with no live ticks every
+    ~2 min, so connecting off-hours just churned reconnect + a 2710-token resubscribe forever. Open positions do
+    not need ticks off-hours (square-off is 15:00). POSITION_WS_OFFHOURS_IDLE=0 restores always-connect."""
+    import os as _os
+    if (_os.getenv("POSITION_WS_OFFHOURS_IDLE") or "1").strip().lower() in ("0", "false", "no", "off"):
+        return False
+    try:
+        from datetime import datetime as _dt, time as _t, timedelta as _td, timezone as _tz
+        ist = _dt.now(_tz.utc) + _td(hours=5, minutes=30)
+        if ist.weekday() >= 5:
+            return True
+        return not (_t(8, 55) <= ist.time() <= _t(15, 45))
+    except Exception:  # noqa: BLE001 - never block the feed over a clock helper
+        return False
+
+
 async def _ws_loop() -> None:
     """Persistent WS loop with exponential-backoff reconnect."""
     global _subscribed_tokens, _connected, _reconnect_attempts, _last_tick_at
@@ -412,8 +432,17 @@ async def _ws_loop() -> None:
     backoff = config.ANGELONE_WS_RECONNECT_BACKOFF_S
     max_backoff = config.ANGELONE_WS_RECONNECT_BACKOFF_MAX_S
     heartbeat_interval = config.ANGELONE_WS_HEARTBEAT_INTERVAL_S
+    _idle_logged = False
 
     while _running:
+        if _offhours_idle():
+            _connected = False
+            if not _idle_logged:
+                logger.info("position-stocks WS: outside market hours (IST) - idling, rechecking every %.0fs", _OFFHOURS_RECHECK_S)
+                _idle_logged = True
+            await asyncio.sleep(_OFFHOURS_RECHECK_S)
+            continue
+        _idle_logged = False
         try:
             await session.ensure_session()
             if not session.token or not session.feed_token or not session.client_id:

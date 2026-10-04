@@ -193,6 +193,82 @@ class TestCheckThresholdStaleness:
             assert "current_value" in item and "age_days" in item
 
 
+@pytest.fixture(autouse=True)
+def _isolated_stale_notice_state(tmp_path, monkeypatch):
+    """The boot notice throttle keeps a state file; give every test its own."""
+    monkeypatch.setattr(at, "_STALE_NOTICE_PATH", str(tmp_path / "stale_notice.json"))
+
+
+class TestStaleNoticeThrottle:
+    """Item 19: the stale-constants Telegram notice must not repeat on every boot."""
+
+    STALE = [{"constant": "A", "current_value": 1, "last_reviewed": "2026-01-01"},
+             {"constant": "B", "current_value": 2, "last_reviewed": "2026-01-02"}]
+
+    def test_due_when_no_state_file(self):
+        assert at._stale_notice_due(self.STALE, now=1000.0) is True
+
+    def test_not_due_right_after_a_send_with_the_same_set(self):
+        at._stale_notice_record(self.STALE, now=1000.0)
+        assert at._stale_notice_due(self.STALE, now=1000.0 + 3600) is False
+
+    def test_due_again_after_the_interval(self, monkeypatch):
+        monkeypatch.setattr(at, "_STALE_NOTICE_INTERVAL_S", 100.0)
+        at._stale_notice_record(self.STALE, now=1000.0)
+        assert at._stale_notice_due(self.STALE, now=1099.0) is False
+        assert at._stale_notice_due(self.STALE, now=1100.0) is True
+
+    def test_due_when_the_stale_set_changes(self):
+        at._stale_notice_record(self.STALE, now=1000.0)
+        assert at._stale_notice_due(self.STALE[:1], now=1001.0) is True
+        changed = [dict(self.STALE[0], current_value=9), self.STALE[1]]
+        assert at._stale_notice_due(changed, now=1001.0) is True
+
+    def test_set_order_does_not_matter(self):
+        at._stale_notice_record(self.STALE, now=1000.0)
+        assert at._stale_notice_due(list(reversed(self.STALE)), now=1001.0) is False
+
+    def test_clock_going_backwards_or_corrupt_state_means_send(self, tmp_path):
+        at._stale_notice_record(self.STALE, now=5000.0)
+        assert at._stale_notice_due(self.STALE, now=1000.0) is True
+        with open(at._STALE_NOTICE_PATH, "w") as f:
+            f.write("not json")
+        assert at._stale_notice_due(self.STALE, now=1000.0) is True
+
+    def test_unwritable_state_path_is_swallowed(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(at, "_STALE_NOTICE_PATH", str(tmp_path / "no" / "such" / "dir" / "x.json"))
+        at._stale_notice_record(self.STALE, now=1.0)        # must not raise
+        assert at._stale_notice_due(self.STALE, now=2.0) is True
+
+    def test_second_boot_does_not_notify_again(self, monkeypatch):
+        monkeypatch.setattr(at, "STALE_THRESHOLD_DAYS", 0)
+        fake_notifier = MagicMock()
+        with patch.dict(sys.modules, {"notifier": fake_notifier}):
+            at.startup_staleness_warning()
+            at.startup_staleness_warning()
+        fake_notifier.notify_sync.assert_called_once()
+
+    def test_failed_send_is_not_recorded_so_next_boot_retries(self, monkeypatch):
+        monkeypatch.setattr(at, "STALE_THRESHOLD_DAYS", 0)
+        bad = MagicMock()
+        bad.notify_sync.side_effect = RuntimeError("telegram down")
+        with patch.dict(sys.modules, {"notifier": bad}):
+            at.startup_staleness_warning()
+        good = MagicMock()
+        with patch.dict(sys.modules, {"notifier": good}):
+            at.startup_staleness_warning()
+        good.notify_sync.assert_called_once()
+
+    def test_stale_lines_are_still_logged_when_the_notice_is_throttled(self, monkeypatch, caplog):
+        import logging
+        monkeypatch.setattr(at, "STALE_THRESHOLD_DAYS", 0)
+        with patch.dict(sys.modules, {"notifier": MagicMock()}):
+            at.startup_staleness_warning()
+            with caplog.at_level(logging.INFO, logger="real-trade-adaptive"):
+                at.startup_staleness_warning()
+        assert "STALE REGIME CONSTANT" in caplog.text and "not repeating on boot" in caplog.text
+
+
 class TestStartupStalenessWarning:
     def test_logs_and_returns_when_nothing_stale(self, monkeypatch, caplog):
         monkeypatch.setattr(at, "STALE_THRESHOLD_DAYS", 10**9)

@@ -120,7 +120,9 @@ def fetch_feed_ex(url: str, source: str = "feed") -> Tuple[Any, Dict[str, Any]]:
         info["entries"] = len(getattr(parsed, "entries", None) or [])
         if info["entries"] == 0:
             info["error"] = "zero_entries"
-            logger.warning("news feed %s (%s) -> HTTP 200 but 0 entries (dead URL or bot page)", source, _short(url))
+            # A Google News search with no hits (small / obscure ticker) is normal, not a dead feed.
+            (logger.info if "news.google.com" in url else logger.warning)(
+                "news feed %s (%s) -> HTTP 200 but 0 entries (dead URL or bot page)", source, _short(url))
         keep = ttl
     if keep > 0:
         with _lock:

@@ -22,6 +22,7 @@ import surprise_premarket as sp
 @pytest.fixture(autouse=True)
 def _reset(tmp_path, monkeypatch):
     sp._job_lock = False
+    sp._fallback_universe_logged = False
     monkeypatch.setenv("SURPRISE_PREMARKET_PROGRESS_PATH",
                        str(tmp_path / "progress.json"))
     # Ensure ORACLE_DSN is NOT set (so _db_url can return something)
@@ -482,6 +483,40 @@ class TestDefaultUniverseFromEnv:
         monkeypatch.setenv("SURPRISE_UNIVERSE", " RELIANCE , TCS ")
         result = sp.default_universe_from_env()
         assert "RELIANCE" in result and "TCS" in result
+
+
+class TestFallbackUniverseLogsOnce:
+    """Group 98 / item 27: boot fallback is expected, so say so once."""
+
+    def _calls(self, caplog, n):
+        import logging
+        with caplog.at_level(logging.WARNING, logger=sp.logger.name):
+            for _ in range(n):
+                sp.default_universe_from_env()
+        return [r for r in caplog.records if "not set" in r.getMessage()]
+
+    def test_warns_once_per_process_not_per_call(self, monkeypatch, caplog):
+        monkeypatch.delenv("SURPRISE_UNIVERSE", raising=False)
+        monkeypatch.delenv("SCAN_UNIVERSE", raising=False)
+        assert len(self._calls(caplog, 4)) == 1
+
+    def test_message_no_longer_claims_a_live_build_failed(self, monkeypatch, caplog):
+        monkeypatch.delenv("SURPRISE_UNIVERSE", raising=False)
+        monkeypatch.delenv("SCAN_UNIVERSE", raising=False)
+        msg = self._calls(caplog, 1)[0].getMessage()
+        assert "returned nothing" not in msg
+        assert "/scan/universe" in msg and str(len(sp._FALLBACK_LIQUID_UNIVERSE)) in msg
+
+    def test_every_call_still_returns_a_full_copy(self, monkeypatch):
+        monkeypatch.delenv("SURPRISE_UNIVERSE", raising=False)
+        monkeypatch.delenv("SCAN_UNIVERSE", raising=False)
+        a = sp.default_universe_from_env()
+        a.clear()
+        assert len(sp.default_universe_from_env()) == len(sp._FALLBACK_LIQUID_UNIVERSE)
+
+    def test_env_set_never_warns(self, monkeypatch, caplog):
+        monkeypatch.setenv("SURPRISE_UNIVERSE", "TCS,INFY")
+        assert self._calls(caplog, 3) == []
 
 
 # ══════════════════════════════════════════════════════════════════════════════

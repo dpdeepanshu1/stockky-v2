@@ -334,8 +334,12 @@ def test_kv_key_constants_are_namespaced_and_distinct():
 
 
 def test_symbol_alias_table_is_consistent_with_extra_new_symbols():
+    # Group 99: group93 added HEROMOTORS-style typo aliases that point at HEROMOTOCO, an
+    # established symbol (not a recent rename), so it is allowed explicitly here. Every
+    # other alias target must still be one of the recently-renamed EXTRA_NEW_SYMBOLS.
+    established_targets = {"HEROMOTOCO"}
     for target in gw.SYMBOL_ALIASES.values():
-        assert target in gw.EXTRA_NEW_SYMBOLS
+        assert target in gw.EXTRA_NEW_SYMBOLS or target in established_targets
     assert gw.SYMBOL_ALIASES["TATAMOTORS"] == "TMPV"
     assert gw.SYMBOL_ALIASES["ZOMATO"] == "ETERNAL"
 

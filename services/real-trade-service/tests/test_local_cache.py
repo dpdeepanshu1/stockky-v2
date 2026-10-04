@@ -469,3 +469,79 @@ class TestReconcileOnStartup:
             lc.reconcile_on_startup(db)                      # must not raise
         assert "reconcile_on_startup failed (non-fatal)" in caplog.text
         assert "cache unreadable" in caplog.text
+
+
+class TestReconcileReportsDriftOnce:
+    """Group 97 / log-audit item 24: a mode that never runs a cycle (gate
+    disarmed / auto-pilot off, DEMO in the incident) left a frozen snapshot
+    (snap_as_of=2026-09-21) that re-raised the same mismatch on every boot."""
+
+    def test_second_boot_after_a_mismatch_is_clean(self, db):
+        _add_position(db, "TCS")
+        _snapshot(db, "DEMO", ["TCS", "OLD"], as_of="2026-09-21T09:30:00+00:00")
+        db.query(models.TradePosition).update({"mode": "DEMO"})
+        db.commit()
+        lc.reconcile_on_startup(db)                      # boot 1: drift recorded
+        assert len(_audit_rows(db)) == 1
+        lc.reconcile_on_startup(db)                      # boot 2: nothing new
+        assert len(_audit_rows(db)) == 1
+
+    def test_snapshot_is_rebaselined_to_live_state(self, db):
+        _add_position(db, "TCS", mode="DEMO")
+        _add_position(db, "INFY", mode="DEMO", status="PARTIALLY_CLOSED")
+        _snapshot(db, "DEMO", ["GONE"], as_of="2026-09-21T09:30:00+00:00")
+        lc.reconcile_on_startup(db)
+        snap = lc.load_snapshot(db, "open_positions_last_known_good_DEMO")
+        assert {r["symbol"] for r in snap["positions"]} == {"TCS", "INFY"}
+        assert snap["as_of"] > "2026-09-21T09:30:00+00:00"
+        assert {r["qty_open"] for r in snap["positions"]} == {10}
+
+    def test_zero_live_positions_rebaselines_to_empty(self, db):
+        _snapshot(db, "DEMO", ["GONE"], as_of="2026-09-21T09:30:00+00:00")
+        lc.reconcile_on_startup(db)
+        snap = lc.load_snapshot(db, "open_positions_last_known_good_DEMO")
+        assert snap["positions"] == []
+        lc.reconcile_on_startup(db)
+        assert len(_audit_rows(db)) == 1
+
+    def test_matching_state_leaves_the_snapshot_untouched(self, db):
+        _add_position(db, "TCS")
+        _snapshot(db, "REAL", ["TCS"], as_of="2026-09-24T09:32:49+00:00")
+        lc.reconcile_on_startup(db)
+        snap = lc.load_snapshot(db, "open_positions_last_known_good_REAL")
+        assert snap["as_of"] == "2026-09-24T09:32:49+00:00"
+
+    def test_only_the_drifted_mode_is_rebaselined(self, db):
+        _add_position(db, "AAA", mode="DEMO")
+        _snapshot(db, "DEMO", ["AAA"], as_of="2026-09-21T09:30:00+00:00")   # matches
+        _add_position(db, "BBB", mode="REAL")
+        _snapshot(db, "REAL", [], as_of="2026-09-21T09:30:00+00:00")        # drifted
+        lc.reconcile_on_startup(db)
+        demo = lc.load_snapshot(db, "open_positions_last_known_good_DEMO")
+        real = lc.load_snapshot(db, "open_positions_last_known_good_REAL")
+        assert demo["as_of"] == "2026-09-21T09:30:00+00:00"
+        assert [r["symbol"] for r in real["positions"]] == ["BBB"]
+
+    def test_rebaseline_failure_is_non_fatal_and_keeps_the_audit_row(self, db, monkeypatch, caplog):
+        _add_position(db, "TCS", mode="DEMO")
+        _snapshot(db, "DEMO", [], as_of="2026-09-21T09:30:00+00:00")
+
+        def boom(db_, mode, positions):
+            raise RuntimeError("write failed")
+
+        monkeypatch.setattr(lc, "snapshot_open_positions", boom)
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            lc.reconcile_on_startup(db)                  # must not raise
+        assert len(_audit_rows(db)) == 1
+        assert "DEMO snapshot refresh failed" in caplog.text
+        assert "write failed" in caplog.text
+
+    def test_other_mode_is_still_checked_after_a_rebaseline_failure(self, db, monkeypatch):
+        _add_position(db, "TCS", mode="DEMO")
+        _snapshot(db, "DEMO", [])
+        _add_position(db, "BBB", mode="REAL")
+        _snapshot(db, "REAL", [])
+        monkeypatch.setattr(lc, "snapshot_open_positions",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+        lc.reconcile_on_startup(db)
+        assert sorted(r.mode for r in _audit_rows(db)) == ["DEMO", "REAL"]

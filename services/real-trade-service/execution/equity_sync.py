@@ -68,6 +68,46 @@ _BALANCE_KEYS = (
 
 _last_balance_key: Optional[str] = None
 
+# Dhan's fundlimit docs (dhanhq.co/docs/v2/funds): `availabelBalance` (sic) = "Available amount to
+# trade"; `sodLimit` = start-of-day amount; `withdrawableBalance` = amount withdrawable to a bank
+# account. The first two names (the typo and its corrected spelling) are the documented tradeable
+# balance; every other key is a FALLBACK that measures something different or undocumented. Only a
+# fallback gets a WARNING now (the old "verify this reflects a tradeable balance" fired on every boot
+# even for the documented key). Same wording/logic as position-stocks-service capital/ledger.py.
+_PRIMARY_BALANCE_KEYS = ("availabelBalance", "availableBalance")
+_FALLBACK_BALANCE_NOTES = {
+    "availableCash": "is not in Dhan's documented fundlimit response, so what it measures is unverified",
+    "withdrawableBalance": "is the amount withdrawable to a bank account and can sit below the tradeable balance "
+                           "(funds blocked as margin/collateral are not withdrawable)",
+    "sodLimit": "is the start-of-day amount and ignores intraday usage, so it overstates the balance after any "
+                "spending or losses",
+}
+
+
+def _log_balance_key(matched_key: str) -> None:
+    """Log once when the Dhan field in use first appears or changes. INFO for the documented
+    tradeable-balance field, WARNING for a fallback field (with what that field is)."""
+    global _last_balance_key
+    prev = _last_balance_key
+    if matched_key == prev:
+        return
+    _last_balance_key = matched_key
+    if matched_key in _PRIMARY_BALANCE_KEYS:
+        if prev is None:
+            logger.info(
+                "equity_sync: using Dhan balance field '%s' (documented as the amount available to "
+                "trade) for REAL equity.", matched_key,
+            )
+        else:
+            logger.info("equity_sync: Dhan balance field changed '%s' -> '%s'.", prev, matched_key)
+        return
+    note = _FALLBACK_BALANCE_NOTES.get(matched_key, "is not a known Dhan balance field")
+    logger.warning(
+        "equity_sync: using FALLBACK Dhan balance field '%s'%s for REAL equity — it %s. The documented "
+        "field 'availabelBalance' was absent or unusable in the funds response.",
+        matched_key, f" (was '{prev}')" if prev else "", note,
+    )
+
 
 def _pick_balance(funds: dict) -> tuple[Optional[float], Optional[str]]:
     for key in _BALANCE_KEYS:
@@ -102,23 +142,7 @@ def sync_real_equity(db: Session) -> Optional[float]:
         logger.warning("equity_sync: Dhan funds response had no recognizable balance field: %s", funds)
         return None
 
-    global _last_balance_key
-    if matched_key != _last_balance_key:
-        if _last_balance_key is None:
-            logger.warning(
-                "equity_sync: using Dhan balance field '%s' for REAL equity — "
-                "verify this reflects a sensible current tradeable balance.",
-                matched_key,
-            )
-        else:
-            logger.warning(
-                "equity_sync: Dhan balance field in use changed '%s' -> '%s' — "
-                "the funds response shape shifted; verify the new field still "
-                "reflects a sensible tradeable balance, not a stale/different-"
-                "scoped figure.",
-                _last_balance_key, matched_key,
-            )
-        _last_balance_key = matched_key
+    _log_balance_key(matched_key)
 
     account = get_account(db, "REAL")
     market_value = _open_positions_market_value(db, "REAL")

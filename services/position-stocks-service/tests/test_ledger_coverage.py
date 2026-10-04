@@ -344,35 +344,80 @@ class TestSyncFromBroker:
         assert row.total_allocated_capital == pytest.approx(50_000.0)
         assert row.available_capital == pytest.approx(40_000.0)
 
-    def test_first_sync_logs_key_warning_and_sets_total(self, env, monkeypatch, caplog):
+    def test_first_sync_with_documented_key_logs_info_not_warning(self, env, monkeypatch, caplog):
         db, _ = env
         _funds(monkeypatch, {"availabelBalance": 200_000.0})
-        with caplog.at_level(logging.WARNING, logger=LOGGER):
+        with caplog.at_level(logging.INFO, logger=LOGGER):
             result = ledger.sync_from_broker(db)
         assert result == pytest.approx(200_000.0 * config.SCALP_POOL_CAPITAL_SHARE_PCT / 100.0)
-        assert "using Dhan balance field" in caplog.text
-        assert "shifted" not in caplog.text
+        recs = [r for r in caplog.records if "balance field" in r.getMessage()]
+        assert len(recs) == 1 and recs[0].levelno == logging.INFO
+        assert "documented as the amount available to trade" in recs[0].getMessage()
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert ledger._last_balance_key == "availabelBalance"
 
-    def test_same_key_second_sync_does_not_warn_again(self, env, monkeypatch, caplog):
+    def test_same_key_second_sync_does_not_log_again(self, env, monkeypatch, caplog):
         db, _ = env
         _funds(monkeypatch, {"availabelBalance": 200_000.0})
         ledger.sync_from_broker(db)
         caplog.clear()
-        with caplog.at_level(logging.WARNING, logger=LOGGER):
+        with caplog.at_level(logging.INFO, logger=LOGGER):
             ledger.sync_from_broker(db)
-        assert "using Dhan balance field" not in caplog.text
-        assert "shifted" not in caplog.text
+        assert "balance field" not in caplog.text
 
-    def test_key_change_logs_shifted_warning(self, env, monkeypatch, caplog):
+    def test_switch_between_documented_spellings_is_info(self, env, monkeypatch, caplog):
         db, _ = env
         monkeypatch.setattr(ledger, "_last_balance_key", "availabelBalance")
         _funds(monkeypatch, {"availableBalance": 200_000.0})
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            ledger.sync_from_broker(db)
+        rec = [r for r in caplog.records if "balance field changed" in r.getMessage()]
+        assert len(rec) == 1 and rec[0].levelno == logging.INFO
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert ledger._last_balance_key == "availableBalance"
+
+    @pytest.mark.parametrize("funds,key,fragment", [
+        ({"sodLimit": 100_000.0}, "sodLimit", "overstates the balance"),
+        ({"withdrawableBalance": 100_000.0}, "withdrawableBalance", "can sit below the tradeable balance"),
+        ({"availableCash": 100_000.0}, "availableCash", "not in Dhan's documented fundlimit response"),
+    ])
+    def test_fallback_key_logs_a_warning_that_says_what_it_is(self, env, monkeypatch, caplog, funds, key, fragment):
+        db, _ = env
+        _funds(monkeypatch, funds)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            result = ledger.sync_from_broker(db)
+        assert result == pytest.approx(100_000.0 * config.SCALP_POOL_CAPITAL_SHARE_PCT / 100.0)  # sizing unchanged
+        warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warns) == 1
+        msg = warns[0].getMessage()
+        assert f"FALLBACK Dhan balance field '{key}'" in msg and fragment in msg
+        assert ledger._last_balance_key == key
+
+    def test_primary_to_fallback_change_names_the_previous_key(self, env, monkeypatch, caplog):
+        db, _ = env
+        monkeypatch.setattr(ledger, "_last_balance_key", "availabelBalance")
+        _funds(monkeypatch, {"sodLimit": 100_000.0})
         with caplog.at_level(logging.WARNING, logger=LOGGER):
             ledger.sync_from_broker(db)
-        assert "funds response shape shifted" in caplog.text
-        assert "using Dhan balance field" not in caplog.text
-        assert ledger._last_balance_key == "availableBalance"
+        assert "(was 'availabelBalance')" in caplog.text
+
+    def test_fallback_back_to_primary_is_info(self, env, monkeypatch, caplog):
+        db, _ = env
+        monkeypatch.setattr(ledger, "_last_balance_key", "sodLimit")
+        _funds(monkeypatch, {"availabelBalance": 100_000.0})
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            ledger.sync_from_broker(db)
+        rec = [r for r in caplog.records if "balance field changed 'sodLimit' -> 'availabelBalance'" in r.getMessage().replace("  ", " ")]
+        assert len(rec) == 1 and rec[0].levelno == logging.INFO
+
+    def test_zero_balance_says_the_field_reported_zero_not_that_it_is_missing(self, env, monkeypatch, caplog):
+        db, _ = env
+        _funds(monkeypatch, {"availabelBalance": 0})
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            assert ledger.sync_from_broker(db) == pytest.approx(0.0)
+        assert "Dhan field 'availabelBalance' reports 0" in caplog.text
+        assert "no usable available-balance field" not in caplog.text
+        assert ledger._last_balance_key is None   # a zero reading must not count as "field in use"
 
     def test_no_open_positions_resets_available_to_total(self, env, monkeypatch):
         db, _ = env

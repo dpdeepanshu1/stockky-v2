@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -69,6 +70,11 @@ DEFAULT_PEERS: Dict[str, List[str]] = {
     "FMCG": ["HINDUNILVR.NS", "ITC.NS", "NESTLEIND.NS", "BRITANNIA.NS", "DABUR.NS"],
     "METAL": ["TATASTEEL.NS", "JSWSTEEL.NS", "HINDALCO.NS", "VEDL.NS", "COALINDIA.NS"],
     "ENERGY": ["RELIANCE.NS", "ONGC.NS", "BPCL.NS", "IOC.NS", "GAIL.NS"],
+    # 2026-10-04 (log-audit item 10): utilities / renewables (Yahoo "Utilities") used to be read as "IT"
+    # because the substring "IT" sits inside "UTILITIES"; and retailers (Yahoo "...Retail") had no peer
+    # set at all and fell through to the generic large-cap DEFAULT list below.
+    "POWER": ["NTPC.NS", "POWERGRID.NS", "TATAPOWER.NS", "ADANIPOWER.NS", "JSWENERGY.NS", "NHPC.NS"],
+    "RETAIL": ["DMART.NS", "TRENT.NS", "ABFRL.NS", "SHOPERSTOP.NS", "VMART.NS", "BATAINDIA.NS"],
     "DEFAULT": ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS"],
 }
 
@@ -149,32 +155,79 @@ def build_peer_list(
     return out[: max(max_peers, 0)]
 
 
-def detect_sector(fundamentals: Dict[str, Any]) -> str:
-    """Best-effort sector from fundamental payload."""
-    sector = (
-        fundamentals.get("sector")
-        or fundamentals.get("industry")
-        or fundamentals.get("sectorDisp")
-        or ""
-    ).upper()
-    if any(k in sector for k in ("IT", "SOFTWARE", "TECH")):
-        return "IT"
-    if any(k in sector for k in ("BANK", "FINANCIAL", "NBFC")):
-        return "BANK"
-    if any(k in sector for k in ("AUTO", "AUTOMOBILE")):
-        return "AUTO"
-    if any(k in sector for k in ("PHARMA", "DRUG", "HEALTH")):
-        return "PHARMA"
-    if any(k in sector for k in ("FMCG", "CONSUMER")):
+# Sector words, matched against whole WORDS of the sector/industry text (never substrings):
+# the old `"IT" in text` test fired inside "CAPITAL", "UTILITIES", "HOSPITALITY"..., and the old bare
+# "CONSUMER" -> FMCG sent Yahoo's whole "Consumer Cyclical" sector (autos, retail, apparel) to FMCG peers.
+# Each entry is (sector key, exact words, word prefixes), checked in this order (first hit wins).
+_SECTOR_WORDS = (
+    ("IT", ("IT",), ("SOFTWARE", "TECH")),                      # TECH also covers TECHNOLOGY, not BIOTECHNOLOGY
+    ("BANK", (), ("BANK", "FINANCIAL", "NBFC")),
+    ("AUTO", ("AUTO", "AUTOS"), ("AUTOMOB", "AUTOMOT")),
+    ("PHARMA", (), ("PHARMA", "DRUG", "HEALTH", "BIOTECH")),
+    ("FMCG", ("FMCG", "DEFENSIVE", "STAPLES"), ("FOOD", "BEVERAGE", "TOBACCO", "HOUSEHOLD", "PACKAGED")),
+    ("METAL", ("METAL", "METALS", "STEEL", "MINING", "ALUMINUM", "ALUMINIUM"), ()),
+    ("POWER", ("POWER", "UTILITIES", "UTILITY"), ()),
+    ("ENERGY", ("ENERGY", "OIL", "GAS"), ()),
+    ("RETAIL", (), ("RETAIL",)),
+)
+# "Consumer Cyclical / Discretionary / Durables" is not FMCG; a bare "Consumer" (older payloads) still is.
+_CONSUMER_NOT_FMCG = ("CYCLICAL", "DISCRETIONARY", "DURABLE", "DURABLES")
+
+
+def _sector_from_text(text: Any) -> Optional[str]:
+    """Sector key for one sector/industry string, or None when no sector word is in it."""
+    if not isinstance(text, str):
+        return None            # None / numbers / lists are "no sector data", not text to stringify and match
+    words = re.findall(r"[A-Z0-9]+", text.upper())
+    if not words:
+        return None
+    for key, exact, prefixes in _SECTOR_WORDS:
+        for w in words:
+            if w in exact or any(w.startswith(pre) for pre in prefixes):
+                return key
+    if "CONSUMER" in words and not any(w in _CONSUMER_NOT_FMCG for w in words):
         return "FMCG"
-    if any(k in sector for k in ("METAL", "STEEL", "MINING")):
-        return "METAL"
-    if any(k in sector for k in ("ENERGY", "OIL", "GAS", "POWER")):
-        return "ENERGY"
+    return None
+
+
+def detect_sector(fundamentals: Dict[str, Any]) -> str:
+    """Best-effort sector key from a fundamentals payload.
+
+    2026-10-04 (log-audit item 10): looks at the more specific `industry` first, then `sector`, then
+    `sectorDisp`, and uses the first one that names a known sector, so Yahoo's "Consumer Cyclical" +
+    "Auto Manufacturers" is AUTO (it used to be FMCG) and "Utilities" is POWER (it used to be IT).
+    Anything unrecognised is still "DEFAULT"."""
+    for field in ("industry", "sector", "sectorDisp"):
+        found = _sector_from_text(fundamentals.get(field))
+        if found:
+            return found
     return "DEFAULT"
 
 
+def has_sector_data(fundamentals: Any) -> bool:
+    """True when the payload carries at least one non-blank sector / industry / sectorDisp string.
+
+    group101 (log-audit item 10): with none, detect_sector() still answers "DEFAULT", and the DEFAULT list
+    (RELIANCE, TCS, HDFCBANK, INFY, ICICIBANK) would be compared against a company whose sector is unknown,
+    which says nothing about it. Callers use this to compare against no peers instead (unless the caller
+    passed an explicit peer list). An unrecognised but present sector (e.g. "Agriculture") is not affected."""
+    if not isinstance(fundamentals, dict):
+        return False
+    return any(isinstance(fundamentals.get(k), str) and fundamentals.get(k).strip()
+               for k in ("industry", "sector", "sectorDisp"))
+
+
+def peers_for(symbol: str, stock_fund: Any, sector: str, peers: Optional[List[str]], max_peers: int) -> List[str]:
+    """build_peer_list(), except: no caller-supplied peers and no sector data at all -> no peers."""
+    if not peers and not has_sector_data(stock_fund):
+        return []
+    return build_peer_list(symbol, sector, peers, max_peers)
+
+
 def _fund_cache_get(symbol: str) -> Optional[Dict[str, Any]]:
+    # 2026-10-04 (log-audit item 4): key by the canonical ".NS"/".BO" form so "INFY"
+    # and "INFY.NS" share ONE entry (they used to be two keys -> two market-data calls).
+    symbol = _norm_symbol(symbol)
     with _FUND_CACHE_LOCK:
         entry = _FUND_CACHE.get(symbol)
     if not entry:
@@ -186,26 +239,46 @@ def _fund_cache_get(symbol: str) -> Optional[Dict[str, Any]]:
 
 
 def _fund_cache_set(symbol: str, data: Dict[str, Any]) -> None:
+    symbol = _norm_symbol(symbol)
     with _FUND_CACHE_LOCK:
         _FUND_CACHE[symbol] = (time.time(), data)
+
+
+# One lock per canonical symbol so two threads asking for the same symbol at the
+# same moment make ONE market-data call (the second waits, then reads the cache).
+_FUND_INFLIGHT: Dict[str, threading.Lock] = {}
+
+
+def _fund_inflight_lock(symbol: str) -> threading.Lock:
+    with _FUND_CACHE_LOCK:
+        lock = _FUND_INFLIGHT.get(symbol)
+        if lock is None:
+            lock = _FUND_INFLIGHT[symbol] = threading.Lock()
+        return lock
 
 
 def fetch_fundamentals(market_data_url: str, symbol: str, timeout: float = 15.0) -> Dict[str, Any]:
     """Fetch fundamentals from market-data-service (short-TTL cached — see
     module docstring above for why)."""
+    # Always ask market-data for the canonical form, whichever spelling the caller used.
+    symbol = _norm_symbol(symbol)
     cached = _fund_cache_get(symbol)
     if cached is not None:
         return cached
-    try:
-        url = f"{market_data_url.rstrip('/')}/fundamentals/{symbol}"
-        resp = httpx.get(url, timeout=timeout)
-        if resp.status_code == 200:
-            data = resp.json() or {}
-            _fund_cache_set(symbol, data)
-            return data
-    except Exception as e:
-        logger.warning("Fundamentals fetch failed for %s: %s", symbol, e)
-    return {}
+    with _fund_inflight_lock(symbol):
+        cached = _fund_cache_get(symbol)      # another thread may have just fetched it
+        if cached is not None:
+            return cached
+        try:
+            url = f"{market_data_url.rstrip('/')}/fundamentals/{symbol}"
+            resp = httpx.get(url, timeout=timeout)
+            if resp.status_code == 200:
+                data = resp.json() or {}
+                _fund_cache_set(symbol, data)
+                return data
+        except Exception as e:
+            logger.warning("Fundamentals fetch failed for %s: %s", symbol, e)
+        return {}
 
 
 def fetch_fundamentals_batch(
@@ -216,14 +289,25 @@ def fetch_fundamentals_batch(
     """
     result: Dict[str, Dict[str, Any]] = {}
     to_fetch = []
+    seen_canon = set()
+    dup_of: Dict[str, str] = {}     # spelling -> first spelling with the same canonical symbol
+    first_for: Dict[str, str] = {}
     for s in symbols:
         cached = _fund_cache_get(s)
         if cached is not None:
             result[s] = cached
-        else:
-            to_fetch.append(s)
+            continue
+        canon = _norm_symbol(s)
+        if canon in seen_canon:
+            dup_of[s] = first_for[canon]       # "INFY" + "INFY.NS" -> one fetch
+            continue
+        seen_canon.add(canon)
+        first_for[canon] = s
+        to_fetch.append(s)
 
     if not to_fetch:
+        for s, first in dup_of.items():
+            result[s] = result.get(first, {})
         return result
 
     with ThreadPoolExecutor(max_workers=min(_FUND_FETCH_MAX_WORKERS, len(to_fetch))) as pool:
@@ -235,6 +319,8 @@ def fetch_fundamentals_batch(
             except Exception as e:
                 logger.warning("Batch fundamentals fetch failed for %s: %s", s, e)
                 result[s] = {}
+    for s, first in dup_of.items():
+        result[s] = result.get(first, {})
     return result
 
 
@@ -253,7 +339,7 @@ def compute_peer_relative(
     """
     symbol = _norm_symbol(symbol)
     sector = detect_sector(stock_fund)
-    peer_list = build_peer_list(symbol, sector, peers, max_peers)
+    peer_list = peers_for(symbol, stock_fund, sector, peers, max_peers)
 
     stock_pe = _pick(stock_fund, _PE_KEYS, skip_zero=True)
     stock_roe = _pick(stock_fund, _ROE_KEYS)

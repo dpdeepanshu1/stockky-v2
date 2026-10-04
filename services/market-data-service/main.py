@@ -294,6 +294,39 @@ def get_cache_ttl() -> int:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("market-data-service")
 
+# 2026-10-04 (log noise): httpx logs every outbound request at INFO and uvicorn logs every /health probe
+# (container healthchecks + the browser's api.ping()) -- together most of the log volume. httpx -> WARNING
+# (HTTPX_LOG_LEVEL=INFO restores it); successful /health access lines are dropped (ACCESS_LOG_HEALTH=1 restores
+# them; a non-200 /health still logs).
+def _quiet_noisy_loggers() -> None:
+    import re as _re
+    import logging as _lg
+    import os as _os
+    _lvl = getattr(_lg, (_os.getenv("HTTPX_LOG_LEVEL") or "WARNING").strip().upper(), _lg.WARNING)
+    if not isinstance(_lvl, int):
+        _lvl = _lg.WARNING
+    for _n in ("httpx", "httpcore"):
+        _lg.getLogger(_n).setLevel(_lvl)
+    if (_os.getenv("ACCESS_LOG_HEALTH") or "").strip().lower() in ("1", "true", "yes"):
+        return
+    _pat = _re.compile(r'"GET \S*/health(\?\S*)? HTTP/[\d.]+" 200')
+
+    class _NoHealthAccess(_lg.Filter):
+        def filter(self, record):  # noqa: A003
+            try:
+                return not _pat.search(record.getMessage())
+            except Exception:  # noqa: BLE001
+                return True
+
+    _acc = _lg.getLogger("uvicorn.access")
+    if not any(getattr(f, "_stockky_health_filter", False) for f in _acc.filters):
+        _flt = _NoHealthAccess()
+        _flt._stockky_health_filter = True
+        _acc.addFilter(_flt)
+
+
+_quiet_noisy_loggers()
+
 UPSTASH_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip() or None
 UPSTASH_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip() or None
 ALPHA_VANTAGE_API_KEY = (os.getenv("ALPHA_VANTAGE_API_KEY") or "").strip() or None
@@ -523,7 +556,9 @@ async def _refresh_feed_universe_loop():
                 from angelone_client import get_session
                 if get_session().is_configured():
                     import angelone_ws_feed
-                    angelone_ws_feed.stop_feed_background()
+                    # stop_feed_background() joins the thread for up to 10s — run it
+                    # off the event loop so the service stays responsive meanwhile.
+                    await asyncio.to_thread(angelone_ws_feed.stop_feed_background)
                     angelone_ws_feed.start_feed_background(symbols)
             except Exception as e:
                 logger.warning("feed universe refresh: angelone restart failed: %s", e)
@@ -1398,6 +1433,28 @@ def _waterfall_polygon_price(symbol: str) -> Optional[float]:
     return None
 
 
+def _nse_quote_paused() -> bool:
+    """group101 (item 23): True while NSE quote-equity is paused after a 401/403/429.
+
+    The pause state lives in bhavcopy (group96, NSE_QUOTE_BLOCK_SECONDS). One block now steps all three
+    quote-equity callers aside (delivery lookup, NSE-direct price, NSE fundamentals) instead of each paying
+    its own 403 round trip. Never raises: if bhavcopy cannot supply the helper the call proceeds as before."""
+    try:
+        from bhavcopy import nse_quote_blocked
+        return bool(nse_quote_blocked())
+    except Exception:
+        return False
+
+
+def _note_nse_quote_status(status) -> None:
+    """Feed a quote-equity HTTP status to the shared pause (starts it on 401/403/429, ends it on 200)."""
+    try:
+        from bhavcopy import _note_quote_status
+        _note_quote_status(int(status))
+    except Exception:
+        pass
+
+
 def _fetch_nse_fundamentals(symbol: str) -> Optional[dict]:
     """NSE quote-equity fallback for get_fundamentals() when yfinance fails.
 
@@ -1417,8 +1474,11 @@ def _fetch_nse_fundamentals(symbol: str) -> Optional[dict]:
         return None
     try:
         from bhavcopy import _nse_client
+        if _nse_quote_paused():
+            return None
         client = _nse_client()
         r = client.get(f"https://www.nseindia.com/api/quote-equity?symbol={base}")
+        _note_nse_quote_status(r.status_code)
         if r.status_code != 200 or not r.content:
             return None
         data = r.json() or {}
@@ -1508,8 +1568,11 @@ def _waterfall_nse_direct_price(symbol: str) -> Optional[float]:
         return None
     try:
         from bhavcopy import _nse_client
+        if _nse_quote_paused():
+            return None
         client = _nse_client()
         r = client.get(f"https://www.nseindia.com/api/quote-equity?symbol={base}")
+        _note_nse_quote_status(r.status_code)
         if r.status_code == 429:
             _set_cooldown("nse_direct", 90)
             return None
@@ -2600,6 +2663,65 @@ def _nse_history_candles(sym: str, period: str, interval: str, days: Optional[in
         return None
 
 
+# ── /history reuse (2026-10-04, item 3: AngelOne 403 "exceeding access rate") ──
+# One analysis made ~6 history calls (technical 6mo/3mo/1mo/1y, decision 1y,
+# chart 1mo) against AngelOne's ~3 req/s candle limit, each under its own
+# cache key, and technical's force=true bypassed the cache entirely. Two
+# fixes here (the callers' own fan-out is trimmed in analysis-intelligence):
+#   1. A request for a SHORTER period of the same symbol/interval is answered
+#      by slicing a longer period that is already cached (1y covers 6mo/3mo/1mo).
+#   2. force=true no longer means "always go upstream": a result fetched in the
+#      last HISTORY_FORCE_REUSE_S seconds (default 60) is reused, and identical
+#      forced requests coalesce through the single-flight below. Daily candles
+#      do not change inside a minute. 0 restores the old always-upstream force.
+_HISTORY_FORCE_REUSE_S = float(((os.getenv("HISTORY_FORCE_REUSE_S") or "").strip() or "60"))
+_HISTORY_DERIVE_MIN_BARS = 5
+_HISTORY_PERIOD_ORDER = ["1mo", "3mo", "6mo", "1y", "2y", "5y"]
+_HISTORY_PERIOD_DAYS = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
+
+
+def _history_store(cache_key: str, result: dict, ttl: int) -> None:
+    """Cache an upstream-fetched history result and stamp it "fresh" so a
+    force=true request arriving within HISTORY_FORCE_REUSE_S can reuse it."""
+    _cache_set(cache_key, result, ttl=ttl)
+    if _HISTORY_FORCE_REUSE_S > 0:
+        try:
+            _mem.set(f"{cache_key}:fresh", True, ttl=int(max(1, _HISTORY_FORCE_REUSE_S)))
+        except Exception:  # noqa: BLE001 - reuse stamp is an optimisation only
+            pass
+
+
+def _history_from_longer_cache(sym: str, period: str, interval: str, days, require_fresh: bool = False):
+    """Serve `period` by slicing an already-cached LONGER period for the same
+    symbol/interval. Returns a result dict (not cached, so it can never shadow
+    a real fetch) or None. Never raises."""
+    try:
+        if days is not None or period not in _HISTORY_PERIOD_DAYS:
+            return None
+        want_days = _HISTORY_PERIOD_DAYS[period]
+        cutoff = (datetime.now(ZoneInfo("Asia/Kolkata")).date() - timedelta(days=want_days)).isoformat()
+        idx = _HISTORY_PERIOD_ORDER.index(period)
+        for longer in _HISTORY_PERIOD_ORDER[idx + 1:]:
+            key = f"history:{sym}:{longer}:{interval}:"
+            if require_fresh and not _mem.get(f"{key}:fresh"):
+                continue
+            src = _cache_get(key)
+            candles = src.get("candles") if isinstance(src, dict) else None
+            if not candles or not isinstance(candles, list):
+                continue
+            sliced = [c for c in candles if isinstance(c, dict) and str(c.get("date", ""))[:10] >= cutoff]
+            if len(sliced) < _HISTORY_DERIVE_MIN_BARS:
+                continue
+            out = dict(src)
+            out["period"] = period
+            out["candles"] = sliced
+            out["derived_from"] = longer
+            return out
+    except Exception as e:  # noqa: BLE001
+        logger.debug("history derive-from-longer failed for %s %s: %s", sym, period, e)
+    return None
+
+
 # ── /history single-flight (2026-09-21) ─────────────────────────────────────
 # The cache check at the top of the history implementation and the fetch that
 # fills it are not atomic, so N concurrent requests for the SAME
@@ -2654,8 +2776,11 @@ def get_history(
         ),
     ),
 ):
-    # force=True is an explicit cache bypass — never coalesce those.
-    if force:
+    # force=True is an explicit cache bypass — never coalesce those... unless
+    # HISTORY_FORCE_REUSE_S > 0 (default), in which case identical forced
+    # requests queue behind the first and are then served by the freshness
+    # reuse inside _get_history_impl instead of each going upstream.
+    if force and _HISTORY_FORCE_REUSE_S <= 0:
         return _get_history_impl(symbol, period, interval, force, days)
     key = f"{(symbol or '').upper()}|{period}|{interval}|{days or ''}"
     entry = _history_flight_enter(key)
@@ -2704,10 +2829,22 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
         start_date = end_date - timedelta(days=days)
 
     cache_key = f"history:{sym}:{period}:{interval}:{days or ''}"
+    if force and _HISTORY_FORCE_REUSE_S > 0:
+        # Fetched within the last HISTORY_FORCE_REUSE_S seconds (by anyone)? Reuse it.
+        if _mem.get(f"{cache_key}:fresh"):
+            _recent = _cache_get(cache_key)
+            if _recent:
+                return _recent
+        _derived = _history_from_longer_cache(sym, period, interval, days, require_fresh=True)
+        if _derived:
+            return _derived
     if not force:
         cached = _cache_get(cache_key)
         if cached:
             return cached
+        _derived = _history_from_longer_cache(sym, period, interval, days)
+        if _derived:
+            return _derived
         # 2026-09-01 incident fix: a symbol that just came back "possibly
         # delisted" / 404-not-found from every candidate ticker is going to
         # fail the exact same way again next cycle (~180s later) — nothing
@@ -2738,7 +2875,7 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
             "source": "angelone",
         }
         hist_ttl = 900 if is_market_open() else 21600
-        _cache_set(cache_key, result, ttl=hist_ttl)
+        _history_store(cache_key, result, hist_ttl)
         return result
 
     last_err = None
@@ -2804,7 +2941,7 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
                 "candles": candles,
             }
             hist_ttl = 900 if is_market_open() else 21600
-            _cache_set(cache_key, result, ttl=hist_ttl)
+            _history_store(cache_key, result, hist_ttl)
             if cand != sym:
                 logger.info("History for %s served via fallback ticker %s", symbol, cand)
             return result
@@ -2830,7 +2967,7 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
             "source": "nse_direct",
         }
         hist_ttl = 900 if is_market_open() else 21600
-        _cache_set(cache_key, result, ttl=hist_ttl)
+        _history_store(cache_key, result, hist_ttl)
         return result
 
     # All candidates failed

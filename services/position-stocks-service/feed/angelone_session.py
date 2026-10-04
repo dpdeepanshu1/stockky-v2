@@ -135,9 +135,11 @@ class AngelOneSession:
             self.token       = data["jwtToken"]
             self.feed_token  = data.get("feedToken")
             self.token_expiry = datetime.utcnow() + timedelta(hours=20)
+            # Log only whether a feed token came back, never any part of it: the feed token is the
+            # credential in the WebSocket URL, and an 8-character prefix is still part of a secret.
             logger.info(
-                "position-stocks: AngelOne session refreshed (feed_token=%s...)",
-                (self.feed_token or "")[:8],
+                "position-stocks: AngelOne session refreshed (feed_token=%s)",
+                "received" if self.feed_token else "MISSING",
             )
 
 # Module-level singleton — one session per process

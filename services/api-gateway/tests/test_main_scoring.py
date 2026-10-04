@@ -1018,6 +1018,7 @@ def test_ai_summary_without_a_key_uses_the_template(monkeypatch):
 @pytest.fixture
 def gemini(monkeypatch):
     monkeypatch.setattr(gw, "GEMINI_API_KEY", "KEY")
+    monkeypatch.setattr(gw, "_gemini_cooldown_until", 0.0)  # a 429 in one test must not leak into the next
     holder = types.SimpleNamespace(client=GeminiClient())
     monkeypatch.setattr(gw, "_get_http_client", lambda: holder.client)
     return holder
@@ -1064,12 +1065,91 @@ def test_ai_summary_empty_payloads_fall_back(gemini, payload):
 def test_ai_summary_non_200_and_exceptions_fall_back(gemini, log):
     gemini.client = GeminiClient(Resp(429, {}))
     assert run(gw._generate_ai_summary(DATA, None)) == gw._generate_summary(DATA)
-    assert log.any("warning", "Gemini call failed (429) for TCS")
+    assert log.any("warning", "Gemini 429 for TCS")
+    gemini.client = GeminiClient(Resp(500, {}))
+    gw._gemini_cooldown_until = 0.0
+    assert run(gw._generate_ai_summary(DATA, None)) == gw._generate_summary(DATA)
+    assert log.any("warning", "Gemini call failed (500) for TCS")
     gemini.client = GeminiClient(exc=RuntimeError("closed"))
     assert run(gw._generate_ai_summary(DATA, None)) == gw._generate_summary(DATA)
     assert log.any("warning", "Gemini summary failed for TCS")
     gemini.client = GeminiClient(Resp(200, json_raises=ValueError("bad")))
     assert run(gw._generate_ai_summary(DATA, None)) == gw._generate_summary(DATA)
+
+
+class Resp429(Resp):
+    def __init__(self, headers=None):
+        super().__init__(429, {})
+        self.headers = headers or {}
+
+
+def test_ai_summary_429_starts_a_cooldown_and_later_calls_skip_gemini(gemini, log):
+    gemini.client = GeminiClient(Resp(429, {}))
+    assert run(gw._generate_ai_summary(DATA, None)) == gw._generate_summary(DATA)
+    assert len(gemini.client.posts) == 1
+    assert gw._gemini_cooldown_remaining() > 0
+    n_logs = len(log.msgs["warning"])
+    for _ in range(3):
+        assert run(gw._generate_ai_summary(DATA, None)) == gw._generate_summary(DATA)
+    assert len(gemini.client.posts) == 1              # no further request while cooling down
+    assert len(log.msgs["warning"]) == n_logs         # and no further log line
+
+
+def test_ai_summary_cooldown_uses_the_default_length_without_retry_after(gemini, monkeypatch):
+    monkeypatch.setattr(gw.time, "time", lambda: 1000.0)
+    gemini.client = GeminiClient(Resp429())
+    run(gw._generate_ai_summary(DATA, None))
+    assert gw._gemini_cooldown_until == 1000.0 + gw.GEMINI_COOLDOWN_SECONDS
+
+
+@pytest.mark.parametrize("header,expected", [("120", 120.0), ("5", 30.0), ("99999", 3600.0), ("soon", None), ("  ", None)])
+def test_ai_summary_cooldown_honours_a_clamped_retry_after(gemini, monkeypatch, header, expected):
+    monkeypatch.setattr(gw.time, "time", lambda: 1000.0)
+    gemini.client = GeminiClient(Resp429({"retry-after": header}))
+    run(gw._generate_ai_summary(DATA, None))
+    assert gw._gemini_cooldown_until == 1000.0 + (expected if expected is not None else gw.GEMINI_COOLDOWN_SECONDS)
+
+
+def test_ai_summary_calls_gemini_again_once_the_cooldown_has_passed(gemini, monkeypatch):
+    monkeypatch.setattr(gw.time, "time", lambda: 5000.0)
+    monkeypatch.setattr(gw, "_gemini_cooldown_until", 4999.0)
+    gemini.client = GeminiClient(Resp(200, _cand("Fine.")))
+    assert run(gw._generate_ai_summary(DATA, None)) == "Fine."
+    assert len(gemini.client.posts) == 1
+
+
+def test_ai_summary_cooldown_never_shortens_an_existing_longer_one(gemini, monkeypatch):
+    monkeypatch.setattr(gw.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(gw, "_gemini_cooldown_until", 9000.0)
+    gw._start_gemini_cooldown(Resp429({"retry-after": "60"}), "TCS")
+    assert gw._gemini_cooldown_until == 9000.0
+
+
+def test_ai_summary_cooldown_survives_a_failing_rate_limit_monitor(gemini, monkeypatch):
+    def boom(**kw):
+        raise RuntimeError("monitor down")
+    monkeypatch.setattr(gw.rate_limit_monitor, "record", boom)
+    gemini.client = GeminiClient(Resp(429, {}))
+    assert run(gw._generate_ai_summary(DATA, None)) == gw._generate_summary(DATA)
+    assert gw._gemini_cooldown_remaining() > 0
+
+
+def test_ai_summary_cooldown_event_is_reported_once_to_the_monitor(gemini, monkeypatch):
+    seen = []
+    monkeypatch.setattr(gw.rate_limit_monitor, "record", lambda **kw: seen.append(kw))
+    gemini.client = GeminiClient(Resp(429, {}))
+    for _ in range(3):
+        run(gw._generate_ai_summary(DATA, None))
+    assert seen == [{"source": "gemini", "status": 429, "path": "generateContent", "symbol": "TCS"}]
+
+
+@pytest.mark.parametrize("raw,expected", [(None, 600.0), ("", 600.0), ("  ", 600.0), ("90", 90.0), ("abc", 600.0), ("0", 600.0), ("-5", 600.0)])
+def test_gemini_cooldown_seconds_env_is_blank_and_garbage_safe(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv("GEMINI_COOLDOWN_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("GEMINI_COOLDOWN_SECONDS", raw)
+    assert gw._gemini_cooldown_default() == expected
 
 
 # ── _send_scan_notification ──────────────────────────────────────────────────

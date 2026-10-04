@@ -1,5 +1,6 @@
 import time
 import gc
+import threading
 """
 Technical Analysis Service
 ---------------------------
@@ -230,8 +231,43 @@ def _fetch_history_yfinance(symbol: str):
         return None
 
 
+# ── History fetch policy (2026-10-04, item 3: AngelOne 403 "exceeding access rate") ──
+# analyze() used to walk 6mo -> 3mo -> 1mo -> 1y (+ a final 6mo "accept short"
+# retry), every one force=true, so a single analysis cost up to 5 /history
+# calls and an upstream 403/429/503 was simply retried four more times against
+# the same wall. Now: ONE call for the period every other consumer already
+# shares (default "1y", which the decision service also requests and which
+# market-data can slice shorter periods out of), trimmed locally to the same
+# ~6-month window the scoring has always used; other periods are tried only
+# when the symbol genuinely has no data for the long one (HTTP 404, e.g. a
+# recent listing), never after a rate-limit / busy / timeout failure.
+# TECHNICAL_HISTORY_FETCH_PERIOD=6mo restores the old request period.
+_TECH_FETCH_PERIOD = ((os.getenv("TECHNICAL_HISTORY_FETCH_PERIOD") or "").strip() or "1y")
+_TECH_WINDOW_DAYS = 186          # the 6mo window the indicators were tuned on
+_md_state = threading.local()    # why the last _fetch_history_from_market_data returned None
+
+
+def _set_md_failure(kind: str) -> None:
+    _md_state.last_failure = kind
+
+
+def _trim_to_analysis_window(df):
+    """Return only the trailing ~6 months of a longer fetch so scores do not
+    change with the fetch period. Returns `df` itself when nothing is cut."""
+    try:
+        if df is None or df.empty or not isinstance(df.index, pd.DatetimeIndex):
+            return df
+        trimmed = df[df.index >= df.index.max() - pd.Timedelta(days=_TECH_WINDOW_DAYS)]
+        if len(trimmed) == len(df) or len(trimmed) < 20:
+            return df
+        return trimmed
+    except Exception:  # noqa: BLE001 - trimming is cosmetic, never fail analysis over it
+        return df
+
+
 def _fetch_history_from_market_data(symbol: str, period: str = "6mo", force: bool = False):
     """One attempt against market-data /history."""
+    _set_md_failure("")
     try:
         resp = httpx.get(
             f"{MARKET_DATA_URL}/history/{symbol}",
@@ -243,8 +279,10 @@ def _fetch_history_from_market_data(symbol: str, period: str = "6mo", force: boo
             df = _candles_to_df(data.get("candles", []))
             if df is not None and len(df) >= 5:
                 return df
+            _set_md_failure("thin")       # 200 but (almost) no bars: another period cannot add any
         else:
             logger.warning("market-data history HTTP %s for %s period=%s", resp.status_code, symbol, period)
+            _set_md_failure("no_data" if resp.status_code == 404 else "transient")
             if resp.status_code in (429, 503):
                 try:
                     from rate_limit_report import record_rate_limit_hit
@@ -257,6 +295,7 @@ def _fetch_history_from_market_data(symbol: str, period: str = "6mo", force: boo
                 except Exception:
                     pass
     except httpx.HTTPError as e:
+        _set_md_failure("transient")
         logger.warning("market-data history error %s period=%s: %s", symbol, period, e)
         try:
             from rate_limit_report import report_if_rate_limited
@@ -305,26 +344,42 @@ def _fetch_history_bhavcopy_hint(symbol: str):
         return None
 
 
+def _wake_pings_enabled() -> bool:
+    """Same rule as api-gateway: off on the always-on Oracle VM (ORACLE_DSN set), WAKE_PINGS=1/0 overrides."""
+    v = (os.getenv("WAKE_PINGS") or "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return not (os.getenv("ORACLE_DSN") or "").strip()
+
+
 def _fetch_history(symbol: str, force: bool = False):
     # 1) market-data-service (preferred, shared cache) — try multiple periods
     try:
-        try:
-            httpx.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=8)
-        except Exception:
-            pass
-        for period in ("6mo", "3mo", "1mo", "1y"):
+        if _wake_pings_enabled():
+            try:
+                httpx.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=8)
+            except Exception:
+                pass
+        periods = [_TECH_FETCH_PERIOD] + [p for p in ("3mo", "1mo") if p != _TECH_FETCH_PERIOD]
+        best_short = None
+        for period in periods:
+            _set_md_failure("no_data")   # default for a None return that never said why
             df = _fetch_history_from_market_data(symbol, period=period, force=force)
-            if df is not None and len(df) >= 20:
-                return df
-            if df is not None and len(df) >= 5:
-                # Keep short series but continue trying longer periods first
-                short = df
-            else:
-                short = None
-        # Accept short series if that is all we got
-        df = _fetch_history_from_market_data(symbol, period="6mo", force=force)
-        if df is not None:
-            return df
+            if df is not None:
+                if len(df) >= 20:
+                    return _trim_to_analysis_window(df)
+                # Short but real data (e.g. a recent listing): a different period
+                # cannot add bars, so keep it and stop instead of asking again.
+                best_short = df
+                break
+            if getattr(_md_state, "last_failure", "") != "no_data":
+                # rate-limited / busy / timed out / too-thin response: every other
+                # period would hit the same wall (and count against the same limit).
+                break
+        if best_short is not None:
+            return best_short
     except Exception as e:
         logger.warning("Market data history chain failed for %s: %s — trying yfinance", symbol, e)
 

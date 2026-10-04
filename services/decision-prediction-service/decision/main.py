@@ -239,6 +239,16 @@ class Decision(str, Enum):
     SELL = "SELL"
 
 
+def _wake_pings_enabled() -> bool:
+    """Same rule as api-gateway: off on the always-on Oracle VM (ORACLE_DSN set), WAKE_PINGS=1/0 overrides."""
+    v = (os.getenv("WAKE_PINGS") or "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return not (os.getenv("ORACLE_DSN") or "").strip()
+
+
 @app.get("/")
 def root():
     return {"service": "Stockky Decision Engine", "version": "0.7.6", "status": "running",
@@ -249,7 +259,7 @@ def root():
 def health(warm: bool = False):
     """warm=true pings downstream URLs so free-tier dynos stay responsive."""
     warmed = {}
-    if warm:
+    if warm and _wake_pings_enabled():
         import httpx as _hx
         for name, url in [
             ("technical", f"{TECHNICAL_URL}/health"),
@@ -893,10 +903,11 @@ async def _fallback_technical_from_market_data(symbol: str) -> dict:
     try:
         client = _get_http_client()
         if True:
-            try:
-                await client.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"})
-            except Exception:
-                pass
+            if _wake_pings_enabled():
+                try:
+                    await client.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"})
+                except Exception:
+                    pass
             close = None
             try:
                 qr = await client.get(f"{MARKET_DATA_URL}/quote/{symbol}")

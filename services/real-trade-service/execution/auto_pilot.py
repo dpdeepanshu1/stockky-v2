@@ -1774,13 +1774,10 @@ async def _afterhours_scan_body(mode: str, manual: bool = False) -> dict:
             gate.afterhours_scan_last_run_at = ist_now()
             gate.afterhours_scan_last_run_ok = True
             db.commit()
+            # finalize_nextday_watchlist already sends the detailed "FINALIZED" Telegram message; a
+            # second, shorter one with the same symbols used to follow it (item 19: two messages per
+            # mode at 08:45).
             shortlist = await finalize_nextday_watchlist(db, mode, market_date)
-            if shortlist:
-                await notify_async(
-                    f"📋 *After-hours watchlist finalized — {mode}*\n"
-                    f"Top {len(shortlist)} symbol(s) ready for today's open:\n"
-                    + "\n".join(f"  • {s}" for s in shortlist)
-                )
             result["ran"] = True
             result["finalized"] = True
             return result  # finalize is the last action before open — no scan this tick
@@ -1792,7 +1789,7 @@ async def _afterhours_scan_body(mode: str, manual: bool = False) -> dict:
             return result
 
         # ── Regular scan pass ─────────────────────────────────────────────────
-        written = await run_afterhours_scan(db, mode, market_date)
+        written = await run_afterhours_scan(db, mode, market_date, manual=manual)
         if written:
             logger.info(
                 "[afterhours] scan tick [%s]: %d row(s) upserted for market_date=%s",

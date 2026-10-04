@@ -84,6 +84,16 @@ INDEX_SYMBOL_ALIASES = {
 _gemini_cooldown_until = 0.0  # epoch seconds — skip Gemini after 429
 
 
+def _wake_pings_enabled() -> bool:
+    """Same rule as api-gateway: off on the always-on Oracle VM (ORACLE_DSN set), WAKE_PINGS=1/0 overrides."""
+    v = (os.getenv("WAKE_PINGS") or "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return not (os.getenv("ORACLE_DSN") or "").strip()
+
+
 def _history_symbol(symbol: str) -> str:
     s = (symbol or "").strip()
     key = s.upper().replace("_", " ").replace("  ", " ").strip()
@@ -212,7 +222,7 @@ def _fetch_history(symbol: str) -> pd.DataFrame:
     data = None
     for attempt in range(4):
         try:
-            if attempt == 0:
+            if attempt == 0 and _wake_pings_enabled():
                 try:
                     httpx.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=8)
                 except Exception:

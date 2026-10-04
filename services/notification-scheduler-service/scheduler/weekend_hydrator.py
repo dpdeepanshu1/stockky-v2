@@ -65,10 +65,10 @@ def _check_regime_constant_staleness() -> None:
     Called at hydrator start so the warning appears in scheduler logs weekly."""
     from datetime import datetime, timezone
     REGIME_CONSTANTS = {
-        "ENTRY_REGIME_MIN_SCORE":     ("38",   "2026-08-28"),
-        "ENTRY_MIN_REWARD_RISK":      ("2.0",  "2026-08-28"),
-        "CANDIDATE_MIN_CONVICTION":   ("55",   "2026-08-28"),
-        "CANDIDATE_DOWNTREND_6M_PCT": ("-10.0","2026-08-28"),
+        "ENTRY_REGIME_MIN_SCORE":     ("25",   "2026-10-04"),  # mirrors real-trade-service config; see tests/test_regime_constants_drift.py
+        "ENTRY_MIN_REWARD_RISK":      ("2.0",  "2026-10-04"),
+        "CANDIDATE_MIN_CONVICTION":   ("55",   "2026-10-04"),
+        "CANDIDATE_DOWNTREND_6M_PCT": ("-10.0","2026-10-04"),
     }
     now = datetime.now(timezone.utc)
     for name, (val, reviewed) in REGIME_CONSTANTS.items():

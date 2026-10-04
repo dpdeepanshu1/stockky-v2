@@ -890,3 +890,53 @@ def test_outer_cancellation_still_propagates_through_the_enrichment_gather(env):
             await t
 
     asyncio.run(go())
+
+
+# ── group105 (log-audit item 12): label-only `technical_thin` on scan / Hot Picks rows ──────────────
+
+def test_full_analysis_marks_technical_thin_when_reason_says_minimal_history(env):
+    env.get_result = DResp(dict(ALL_SUPPLIED, reasons={"technical": ["Limited history for TCS; using last quote"]}))
+    out = analyze("TCS")
+    assert out["technical_thin"] is True
+
+
+def test_full_analysis_marks_technical_thin_false_with_normal_history(env):
+    env.get_result = DResp(dict(ALL_SUPPLIED, reasons={"technical": ["RSI 55", "Above 50-DMA"]}))
+    out = analyze("TCS")
+    assert out["technical_thin"] is False
+
+
+def test_technical_thin_follows_the_decision_pillar_map(env):
+    env.get_result = DResp(dict(ALL_SUPPLIED, data_quality={"pillars": {"technical": False}}))
+    assert analyze("TCS")["technical_thin"] is True
+
+
+def test_technical_thin_never_changes_score_or_decision(env):
+    base = dict(ALL_SUPPLIED, combined_score=64, reasons={"technical": ["RSI 55"]})
+    thin = dict(ALL_SUPPLIED, combined_score=64, reasons={"technical": ["Limited history for TCS; using last quote"]})
+    env.get_result = DResp(base)
+    a = analyze("TCS")
+    env.get_result = DResp(thin)
+    b = analyze("TCS")
+    for k in ("decision", "combined_score", "confidence"):
+        assert a.get(k) == b.get(k)
+
+
+def test_lite_fastpath_rows_get_no_technical_thin_field(env):
+    out = analyze("TCS", lite=True, feed_row={"close": "123.5", "combined_score": 61, "decision": "HOLD"})
+    assert "technical_thin" not in out
+
+
+def test_mark_thin_technical_is_safe_on_bad_input():
+    assert gw._mark_thin_technical(None) is None
+    r = {"reasons": "not a dict"}
+    assert gw._mark_thin_technical(r)["technical_thin"] is False
+    r2 = {"reasons": {"technical": None}}
+    assert gw._mark_thin_technical(r2)["technical_thin"] is False
+
+
+def test_hot_pick_extra_carries_technical_thin_even_when_false():
+    out = gw._build_hot_conviction_extra({"technical_thin": False}, {"technical_thin": True})
+    assert out["technical_thin"] is False          # fuller decide record wins, False is kept (not None)
+    out2 = gw._build_hot_conviction_extra(None, {"technical_thin": True})
+    assert out2["technical_thin"] is True

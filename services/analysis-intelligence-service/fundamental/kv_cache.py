@@ -276,10 +276,10 @@ def _get_neon():
                 # ORA-12520 "no more sessions" -- lower these via env.
                 eng, _ = _oc.build_oracle_engine(
                     url,
-                    db_pool_size=os.getenv("CACHE_DB_POOL_SIZE_ORACLE", os.getenv("CACHE_DB_POOL_SIZE", "5")),
-                    db_max_overflow=os.getenv("CACHE_DB_MAX_OVERFLOW_ORACLE", os.getenv("CACHE_DB_MAX_OVERFLOW", "3")),
-                    db_pool_recycle=os.getenv("CACHE_DB_POOL_RECYCLE", "300"),
-                    db_pool_timeout=os.getenv("CACHE_DB_POOL_TIMEOUT", "10"),
+                    db_pool_size=((os.getenv("CACHE_DB_POOL_SIZE_ORACLE") or "").strip() or (os.getenv("CACHE_DB_POOL_SIZE") or "").strip() or "5"),
+                    db_max_overflow=((os.getenv("CACHE_DB_MAX_OVERFLOW_ORACLE") or "").strip() or (os.getenv("CACHE_DB_MAX_OVERFLOW") or "").strip() or "3"),
+                    db_pool_recycle=((os.getenv("CACHE_DB_POOL_RECYCLE") or "").strip() or "300"),
+                    db_pool_timeout=((os.getenv("CACHE_DB_POOL_TIMEOUT") or "").strip() or "10"),
                 )
                 _neon_dialect = "oracle"
                 _init_durable_schema(eng)

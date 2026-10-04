@@ -739,6 +739,11 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
                         DATA {qualityLabel(r).toUpperCase()}
                       </span>
                     )}
+                    {r.technical_thin === true && (
+                      <span className="text-amber-300" title="Technical read rests on a minimal / fallback price history (label only, score unchanged)">
+                        THIN TECH
+                      </span>
+                    )}
                     {rowSummary(r) && (
                       <span className="text-mist/70">{rowSummary(r).slice(0, 100)}</span>
                     )}

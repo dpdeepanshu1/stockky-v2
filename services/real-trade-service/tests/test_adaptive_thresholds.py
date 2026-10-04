@@ -14,7 +14,7 @@ blocks rather than assuming they work.
 
 Two module bits would otherwise make staleness-related tests depend on
 whatever the real wall-clock date happens to be when the suite runs:
-  - _REGIME_CONSTANTS's hardcoded "last reviewed" dates (2026-09-03)
+  - _REGIME_CONSTANTS's hardcoded "last reviewed" dates (2026-10-04)
   - STALE_THRESHOLD_DAYS (computed once at import time from an env var, so
     re-setting the env var after import has no effect)
 Tests that care about staleness monkeypatch these two module attributes

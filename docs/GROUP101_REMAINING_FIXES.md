@@ -1,4 +1,4 @@
-# group101 (2026-10-04) - remaining log-audit items: 7, 10, 11, 23, 28 (plus 19 reviewed)
+# group101 (2026-10-04) - remaining log-audit items: 7, 10, 11, 23, 27, 28 (plus 19 reviewed)
 
 Cumulative on group100. Rebuild what changed: `docker compose build api-gateway market-data-service analysis-intelligence-service decision-prediction-service && docker compose up -d`.
 
@@ -19,11 +19,14 @@ Rule (same as api-gateway/technical): pings are off when `ORACLE_DSN` is set, `W
 ## Item 10 - no sector/industry in the payload
 A fundamentals payload with no non-blank `industry`/`sector`/`sectorDisp` string used to be compared with the generic list (RELIANCE, TCS, HDFCBANK, INFY, ICICIBANK). It now compares against no peers: `rank_against_peers` reports sector `UNKNOWN` and "No peers compared in UNKNOWN", `compute_peer_relative` returns a neutral 50. Explicit peer lists, known sectors and a present-but-unrecognised sector (`Basic Materials` -> DEFAULT list) are unchanged. Two existing tests used an empty payload and relied on the generic list; they now carry a sector. Tests: `tests/test_peer_no_sector_no_generic_peers.py` (12 cases).
 
+## Item 27 remainder - premarket baselines with no symbols
+`POST/GET /surprise/premarket` with no `symbols` used the built-in 250-symbol list even after the feed-refresh loop had loaded the live `/scan/universe`. New `_premarket_default_symbols()` in `market-data-service/main.py`: `SURPRISE_UNIVERSE`/`SCAN_UNIVERSE` (when set) still wins, otherwise the live universe once loaded, otherwise the built-in list as before. Explicit `symbols` are untouched. Tests: `tests/test_premarket_default_symbols.py` (6). Not changed: the api-gateway cron that triggers the run, and whether the live universe should be filtered further for baselines.
+
 ## Item 19 - other Telegram senders: reviewed, no change
 The remaining senders are already bounded: the gate-off alert has a 30-minute per-mode cooldown, eDIS alerts fire at most once per morning per mode, the TOTP messages are per-refresh events, and the notifier drops identical text for 5 minutes. I did not add throttles I could not justify from your log.
 
 ## Not done (unchanged from group100)
-Items 6 (environment), 9 remainder (news sources need a decision), 25 (needs your review of the six regime constants), 12 (other routes), 24 (other drift paths), 27 (premarket baselines without `symbols`), 20 (Movers panel until one market session), 4 (`analyze()` bare symbol), 29 remainder (armed-but-logged-out pollers' server gates), 30 (`SESSION_SECRET` shared on purpose).
+Items 6 (environment), 9 remainder (news sources need a decision), 25 (needs your review of the six regime constants), 12 (scan results, hot picks and the real-trade decision path do not show the thin-technicals flag; whether scoring should discount a one-bar read is a decision, not a bug), 24 (other drift paths), 20 (Movers panel until one market session), 4 (`analyze()` bare symbol), 29 remainder (armed-but-logged-out pollers' server gates), 30 (`SESSION_SECRET` shared on purpose).
 
 ## Tests run here
-api-gateway 8101 passed (8090 + 11 new); analysis-intelligence 2161; market-data 684; decision 38; prediction 20; training 38.
+api-gateway 8101 passed (8090 + 11 new); analysis-intelligence 2161; market-data 690; decision 38; prediction 20; training 38.

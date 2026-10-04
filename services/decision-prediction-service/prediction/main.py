@@ -6,6 +6,7 @@ Walk-forward and calibration remain on the training side.
 """
 
 import os
+import re
 import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -296,10 +297,27 @@ def _fetch_history(symbol: str) -> pd.DataFrame:
 
 
 
+def _md_fundamentals_symbol(symbol: str) -> str:
+    """Spelling to request from market-data's /fundamentals/{symbol} (group112, log-audit item 4 leftover).
+
+    A plain NSE ticker ("INFY", "infy") becomes "INFY.NS", the same canonical form the peer step uses, so one
+    company is one URL in the market-data log. Anything else is passed through unchanged: names with spaces,
+    "^" indices, symbols that already carry a ".NS"/".BO" suffix, and the index names market-data maps itself
+    (NIFTY*, BANKNIFTY, SENSEX, INDIAVIX). market-data strips the suffix before its own alias mapping, so this
+    only changes the URL spelling, never which company or index is returned."""
+    raw = (symbol or "").strip()
+    up = raw.upper()
+    if not up or not re.fullmatch(r"[A-Z0-9&\-]+", up):
+        return symbol
+    if up.startswith("NIFTY") or up in ("BANKNIFTY", "SENSEX", "INDIAVIX"):
+        return symbol
+    return f"{up}.NS"
+
+
 def _fetch_fundamentals(symbol: str) -> Dict[str, Any]:
     """Fetch latest available fundamentals from market-data (point-in-time for live = latest)."""
     try:
-        url = f"{MARKET_DATA_URL}/fundamentals/{symbol}"
+        url = f"{MARKET_DATA_URL}/fundamentals/{_md_fundamentals_symbol(symbol)}"
         resp = httpx.get(url, timeout=20)
         if resp.status_code == 200:
             data = resp.json()

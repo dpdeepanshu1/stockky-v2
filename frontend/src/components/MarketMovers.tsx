@@ -8,6 +8,8 @@ export default function MarketMovers({ onSelect }: { onSelect: (symbol: string) 
   const [data, setData] = useState<MarketStock[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [stale, setStale] = useState(false);
+  const [staleSince, setStaleSince] = useState("");
 
   useEffect(() => {
     fetchData(activeTab);
@@ -16,6 +18,8 @@ export default function MarketMovers({ onSelect }: { onSelect: (symbol: string) 
   async function fetchData(type: MarketType) {
     setLoading(true);
     setError("");
+    setStale(false);
+    setStaleSince("");
     try {
       let res;
       switch (type) {
@@ -33,9 +37,12 @@ export default function MarketMovers({ onSelect }: { onSelect: (symbol: string) 
           break;
       }
       setData(res.data || []);
+      setStale(res.stale === true);
+      setStaleSince(res.stale === true && typeof res.stale_since === "string" ? res.stale_since : "");
     } catch (e) {
       setError((e as Error).message);
       setData([]);
+      setStale(false);
     } finally {
       setLoading(false);
     }
@@ -79,6 +86,13 @@ export default function MarketMovers({ onSelect }: { onSelect: (symbol: string) 
       {!loading && !error && data.length === 0 && (
         <p className="text-mist/60 text-sm font-mono text-center py-8">
           No market data available at the moment. Please try again later.
+        </p>
+      )}
+
+      {!loading && !error && stale && data.length > 0 && (
+        <p className="text-signal-prepare/80 text-[11px] font-mono mb-2">
+          Live data unavailable — showing the last known list
+          {staleSince ? ` (saved ${staleSince} IST)` : " (may be from an earlier session)"}.
         </p>
       )}
 

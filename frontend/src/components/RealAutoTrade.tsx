@@ -1119,13 +1119,15 @@ export default function RealAutoTrade() {
   }, []);
 
   useEffect(() => {
-    // Load read-only data when armed even without an active admin session —
-    // auto-pilot runs through market hours with dashboard closed/logged-out.
-    if (getRealTradeApiUrl() && (mode === "DEMO" || loggedIn || status?.armed)) {
+    // Item 29 (group102): this used to also load when the gate was merely armed, on the idea that auto-pilot
+    // runs with the dashboard logged out. But REAL positions/orders/candidates/pipeline are admin-only on the
+    // server (require_admin_if_real), so armed-but-logged-out could only ever produce 401s (and the 2 s / 5 s /
+    // 10 s pollers below made that a steady stream). Auto-pilot is unaffected: it runs server-side.
+    if (getRealTradeApiUrl() && (mode === "DEMO" || loggedIn)) {
       void loadPositionsAndOrders(mode);
       void loadCandidates(mode); // one-shot, just for the tab count badge — the watchlist tab itself polls
     }
-  }, [mode, loggedIn, status?.armed, loadPositionsAndOrders, loadCandidates]);
+  }, [mode, loggedIn, loadPositionsAndOrders, loadCandidates]);
 
   useEffect(() => {
     if ((activeTab === "live" || activeTab === "charges") && mode === "REAL" && loggedIn) {
@@ -1141,11 +1143,11 @@ export default function RealAutoTrade() {
   // Polls every 2s while the Pipeline tab is open; stops the moment it
   // isn't, so this never runs up requests in the background.
   useEffect(() => {
-    // Pipeline tab is readable when armed even without login session
+    // REAL needs a login session even when armed (admin-only on the server); DEMO is open
     // Also polls while the Positions tab is open (session48 addition) so
     // PipelineLiveStatus can be shown there too — see the Positions tab
     // render block below.
-    if ((activeTab !== "pipeline" && activeTab !== "positions") || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn && !status?.armed)) return;
+    if ((activeTab !== "pipeline" && activeTab !== "positions") || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn)) return;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -1161,7 +1163,7 @@ export default function RealAutoTrade() {
   }, [activeTab, mode, loggedIn]);
 
   useEffect(() => {
-    if (activeTab !== "watchlist" || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn && !status?.armed)) return;
+    if (activeTab !== "watchlist" || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn)) return;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -1183,7 +1185,7 @@ export default function RealAutoTrade() {
   // the user kept clicking refresh by hand. Poll every 10s while the tab is
   // open, same "stop the moment it isn't" pattern as the other two tabs.
   useEffect(() => {
-    if (activeTab !== "positions" || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn && !status?.armed)) return;
+    if (activeTab !== "positions" || !getRealTradeApiUrl() || (mode === "REAL" && !loggedIn)) return;
     let cancelled = false;
     const poll = async () => {
       try {

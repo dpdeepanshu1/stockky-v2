@@ -14,6 +14,7 @@ Single responsibility: turn raw fundamental data (fetched from Market Data
 Service) into a fundamental quality score (0-100) and readable reasons.
 """
 import os
+import re
 import logging
 
 import httpx
@@ -255,13 +256,31 @@ def _pct(x):
     return x * 100 if abs(x) < 5 else x
 
 @app.get("/analyze/{symbol}")
+def _md_fundamentals_symbol(symbol: str) -> str:
+    """Spelling to request from market-data's /fundamentals/{symbol} (group112, log-audit item 4 leftover).
+
+    A plain NSE ticker ("INFY", "infy") becomes "INFY.NS", the same canonical form the peer step uses, so one
+    company is one URL in the market-data log. Anything else is passed through unchanged: names with spaces,
+    "^" indices, symbols that already carry a ".NS"/".BO" suffix, and the index names market-data maps itself
+    (NIFTY*, BANKNIFTY, SENSEX, INDIAVIX). market-data strips the suffix before its own alias mapping, so this
+    only changes the URL spelling, never which company or index is returned."""
+    raw = (symbol or "").strip()
+    up = raw.upper()
+    if not up or not re.fullmatch(r"[A-Z0-9&\-]+", up):
+        return symbol
+    if up.startswith("NIFTY") or up in ("BANKNIFTY", "SENSEX", "INDIAVIX"):
+        return symbol
+    return f"{up}.NS"
+
+
 def analyze(symbol: str, force: bool = False):
     f = {}
     fallback_used = False
     try:
         # Propagate force so market-data does not serve a 24h-old fundamentals cache
         force_param = str(force).lower()
-        resp = httpx.get(f"{MARKET_DATA_URL}/fundamentals/{symbol}?force={force_param}", timeout=60)
+        md_symbol = _md_fundamentals_symbol(symbol)
+        resp = httpx.get(f"{MARKET_DATA_URL}/fundamentals/{md_symbol}?force={force_param}", timeout=60)
         resp.raise_for_status()
         f = resp.json()
         if not f or not isinstance(f, dict):
@@ -276,7 +295,7 @@ def analyze(symbol: str, force: bool = False):
             report_if_rate_limited(
                 e,
                 provider="analysis" if e.response.status_code < 500 else "market_data",
-                path=f"/fundamentals/{symbol}",
+                path=f"/fundamentals/{_md_fundamentals_symbol(symbol)}",
                 symbol=symbol,
                 status=e.response.status_code,
             )

@@ -52,6 +52,7 @@ export type ConvictionData = {
     live_win_rate_n?: number;
   } | string | null;
   provisional?: boolean;
+  technical_thin?: boolean;
   block_buy_now?: boolean;
   data_insufficient?: boolean;
   news_data?: { summary?: string; headline_count?: number } | null;
@@ -156,6 +157,12 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
       </div>
 
       <QualityGate data={data} />
+      {data.technical_thin === true && (
+        <div className="cc-quality qg-med" title="Technical read rests on a minimal / fallback price history (label only, score unchanged)">
+          <span className="cc-quality-badge">THIN TECH</span>
+          <span className="cc-quality-note">Technicals on minimal price history</span>
+        </div>
+      )}
 
       <div className="cc-metrics">
         <div className="cc-metric">

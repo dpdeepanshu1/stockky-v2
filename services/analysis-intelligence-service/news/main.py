@@ -12,6 +12,8 @@ except Exception:
     build_news_response = None  # type: ignore
 import logging
 import re
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 from urllib.parse import quote
@@ -285,8 +287,48 @@ def _parse_feed_items(parsed, publisher: str, keywords: List[str], max_items: in
 
 
 
+# Yahoo news backoff (group108, log-audit item 9). From the VM Yahoo news often returns nothing for every
+# symbol, and each symbol still paid a yfinance call (and its network wait) before the other sources ran.
+# After YAHOO_NEWS_BACKOFF_AFTER results in a row that are empty or raised, Yahoo is skipped for
+# YAHOO_NEWS_BACKOFF_SECONDS; the first non-empty result resets the count. Only Yahoo is skipped: every
+# other headline source still runs, so what comes back is unchanged except for the wasted Yahoo attempts.
+# Set YAHOO_NEWS_BACKOFF_AFTER=0 to turn the backoff off. State is per process.
+_YAHOO_BACKOFF_AFTER = int(((os.getenv("YAHOO_NEWS_BACKOFF_AFTER") or "").strip() or "10"))
+_YAHOO_BACKOFF_SECONDS = float(((os.getenv("YAHOO_NEWS_BACKOFF_SECONDS") or "").strip() or "600"))
+_yahoo_lock = threading.Lock()
+_yahoo_state: Dict[str, Any] = {"misses": 0, "skip_until": 0.0}
+_mono = time.monotonic
+
+
+def _yahoo_backoff_active() -> bool:
+    if _YAHOO_BACKOFF_AFTER <= 0:
+        return False
+    with _yahoo_lock:
+        return _mono() < _yahoo_state["skip_until"]
+
+
+def _yahoo_record(got_items: bool) -> None:
+    """Count one Yahoo attempt; open the backoff window after enough consecutive misses."""
+    if _YAHOO_BACKOFF_AFTER <= 0:
+        return
+    with _yahoo_lock:
+        if got_items:
+            _yahoo_state["misses"] = 0
+            return
+        _yahoo_state["misses"] += 1
+        if _yahoo_state["misses"] >= _YAHOO_BACKOFF_AFTER:
+            _yahoo_state["misses"] = 0
+            _yahoo_state["skip_until"] = _mono() + max(0.0, _YAHOO_BACKOFF_SECONDS)
+            logger.warning(
+                "Yahoo news: %d empty/failed lookups in a row - skipping Yahoo for %.0fs (other sources unaffected)",
+                _YAHOO_BACKOFF_AFTER, _YAHOO_BACKOFF_SECONDS,
+            )
+
+
 def _fetch_yahoo_news(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
     """LEVEL 1: Yahoo Finance news (free, often rate-limited → fall through)."""
+    if _yahoo_backoff_active():
+        return []
     base = _base_symbol(symbol)
     items: List[Dict[str, Any]] = []
     try:
@@ -316,6 +358,7 @@ def _fetch_yahoo_news(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
             })
     except Exception as e:
         logger.debug("yahoo news %s: %s", base, e)
+    _yahoo_record(bool(items))
     return items
 
 

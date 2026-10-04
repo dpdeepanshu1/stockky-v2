@@ -1079,6 +1079,22 @@ class Movers:
         mp.setattr(gw.yf, "Ticker", self._ticker)
         mp.setattr(gw, "MAX_PARALLEL_WORKERS", 4)
         mp.setattr(gw, "logger", self.log)
+        self.angel = None               # dict payload for /angelone/movers, or an Exception (default: unreachable)
+        self.http_calls = []
+        mp.setattr(gw.httpx, "get", self._http_get)
+
+    def _http_get(self, url, timeout=None, **kw):
+        self.http_calls.append(url)
+        if self.angel is None or isinstance(self.angel, BaseException):
+            raise (self.angel or RuntimeError("market-data unreachable"))
+        payload = self.angel
+
+        class R:
+            status_code = 200
+
+            def json(self_inner):
+                return payload
+        return R()
 
     def _set(self, key, value, ttl=None):
         self.sets.append((key, value, ttl))
@@ -1127,7 +1143,9 @@ class TestNifty50Data:
     def test_outside_the_open_session_the_last_known_list_is_served_and_yahoo_is_not_called(self, mv, phase):
         mv.phase = phase
         mv.store[gw.MARKET_MOVERS_LAST_KNOWN] = [{"symbol": "OLD", "change_pct": 2.0}]
-        assert gw._get_nifty50_data() == [{"symbol": "OLD", "change_pct": 2.0}]
+        # group110: last-known rows are returned as copies marked stale; the stored list is untouched
+        assert gw._get_nifty50_data() == [{"symbol": "OLD", "change_pct": 2.0, "stale": True}]
+        assert mv.store[gw.MARKET_MOVERS_LAST_KNOWN] == [{"symbol": "OLD", "change_pct": 2.0}]
         assert mv.indices_calls == 0 and mv.tickers_built == []
         assert mv.log.any("info", f"Market session phase={phase} — serving last-known movers")
 
@@ -1207,18 +1225,140 @@ class TestNifty50Data:
     def test_fresh_data_is_cached_for_a_day_and_kept_as_last_known_for_a_week(self, mv):
         mv.indices = ["A"]
         data = gw._get_nifty50_data()
-        assert mv.sets == [(CACHE_KEY, data, 86400), (gw.MARKET_MOVERS_LAST_KNOWN, data, 7 * 86400)]
+        # group111: the save time is stored beside it (FixedDT -> 2026-09-30 10:00)
+        assert mv.sets == [(CACHE_KEY, data, 86400), (gw.MARKET_MOVERS_LAST_KNOWN, data, 7 * 86400),
+                           (gw.MARKET_MOVERS_LAST_KNOWN_AT, "2026-09-30 10:00", 7 * 86400)]
 
     def test_an_all_failed_fetch_caches_the_empty_list_but_does_not_replace_last_known(self, mv):
         mv.indices = ["A", "B"]
         mv.hists["A"] = mv.hists["B"] = RuntimeError("down")
         mv.store[gw.MARKET_MOVERS_LAST_KNOWN] = [{"symbol": "OLD"}]
-        assert gw._get_nifty50_data() == []
+        # group109: AngelOne unreachable here, so the open-session fallback serves the last-known list
+        assert gw._get_nifty50_data() == [{"symbol": "OLD", "stale": True}]     # group110: marked stale
         assert mv.sets == [(CACHE_KEY, [], 86400)]
         assert mv.store[gw.MARKET_MOVERS_LAST_KNOWN] == [{"symbol": "OLD"}]
         # an empty list is falsy, so the next request re-fetches instead of trusting it
         mv.hists.clear()
         assert [d["symbol"] for d in gw._get_nifty50_data()] == ["A", "B"]
+
+    # ── group109 (item 20): open-session fallback when yfinance returns nothing ──────────────────────
+    def _all_fail(self, mv):
+        mv.indices = ["A", "B"]
+        mv.hists["A"] = mv.hists["B"] = RuntimeError("down")
+
+    def test_open_session_empty_yahoo_serves_angelone_movers_with_derived_change(self, mv):
+        self._all_fail(mv)
+        mv.angel = {"status": "ok", "data": [
+            {"symbol": "UP", "pct_change": 10.0, "ltp": 110.0},
+            {"symbol": "DOWN", "pct_change": -5.0, "ltp": 95.0},
+        ]}
+        data = gw._get_nifty50_data()
+        assert data == [
+            {"symbol": "UP", "price": 110.0, "change": 10.0, "change_pct": 10.0, "source": "angelone"},
+            {"symbol": "DOWN", "price": 95.0, "change": -5.0, "change_pct": -5.0, "source": "angelone"},
+        ]
+        assert mv.log.any("warning", "serving 2 AngelOne movers")
+        assert gw.MARKET_MOVERS_LAST_KNOWN not in mv.store          # fallback rows never become "last known"
+        assert mv.sets == [(CACHE_KEY, [], 86400)]                  # and are not cached under the daily key
+
+    def test_angelone_rows_that_are_malformed_are_skipped(self, mv):
+        self._all_fail(mv)
+        mv.angel = {"data": ["x", {"symbol": "", "pct_change": 6, "ltp": 1}, {"symbol": "NOLTP", "pct_change": 6},
+                             {"symbol": "ZERO", "pct_change": 6, "ltp": 0}, {"symbol": "GONE", "pct_change": -100, "ltp": 5},
+                             {"symbol": "OK", "pct_change": 6.0, "ltp": 106.0}]}
+        assert [d["symbol"] for d in gw._get_nifty50_data()] == ["OK"]
+
+    def test_angelone_empty_or_error_falls_back_to_last_known_then_empty(self, mv):
+        self._all_fail(mv)
+        mv.angel = {"status": "error", "data": []}
+        mv.store[gw.MARKET_MOVERS_LAST_KNOWN] = [{"symbol": "OLD", "change_pct": 2.0}]
+        assert gw._get_nifty50_data() == [{"symbol": "OLD", "change_pct": 2.0, "stale": True}]
+        assert mv.log.any("warning", "serving last-known movers (stale)")
+        del mv.store[gw.MARKET_MOVERS_LAST_KNOWN]
+        assert gw._get_nifty50_data() == []
+
+    def test_ranking_endpoints_work_on_angelone_rows_and_most_active_has_nothing_to_rank(self, mv):
+        self._all_fail(mv)
+        mv.angel = {"data": [{"symbol": "UP", "pct_change": 10.0, "ltp": 110.0},
+                             {"symbol": "DOWN", "pct_change": -8.0, "ltp": 92.0}]}
+        assert [r["symbol"] for r in gw.market_top_gainers()["data"]] == ["UP", "DOWN"]
+        assert [r["symbol"] for r in gw.market_top_losers()["data"]] == ["DOWN", "UP"]
+        assert gw.market_most_active()["data"] == []
+
+    # ── group110: last-known rows are marked stale, and the routes say so ───────────────────────────
+    def test_stale_marking_copies_rows_and_leaves_non_dicts_alone(self, mv):
+        src = [{"symbol": "A"}, "junk", {"symbol": "B", "stale": False}]
+        out = gw._mark_movers_stale(src)
+        assert out == [{"symbol": "A", "stale": True}, "junk", {"symbol": "B", "stale": True}]
+        assert src == [{"symbol": "A"}, "junk", {"symbol": "B", "stale": False}]     # input not mutated
+
+    def test_routes_flag_the_response_stale_only_when_last_known_rows_are_served(self, mv):
+        self._all_fail(mv)
+        mv.store[gw.MARKET_MOVERS_LAST_KNOWN] = [
+            {"symbol": "OLD1", "change_pct": 3.0, "volume": 500},
+            {"symbol": "OLD2", "change_pct": -2.0, "volume": 900},
+        ]
+        for fn in (gw.market_top_gainers, gw.market_top_losers, gw.market_most_active):
+            out = fn()
+            assert out["stale"] is True and out["count"] == 2
+            assert all(r["stale"] is True for r in out["data"])
+        # most active ranks the last-known volumes (AngelOne rows have none)
+        assert [r["symbol"] for r in gw.market_most_active()["data"]] == ["OLD2", "OLD1"]
+
+    def test_routes_have_no_stale_key_for_fresh_or_angelone_rows(self, mv):
+        mv.indices = ["A"]
+        out = gw.market_top_gainers()
+        assert "stale" not in out and "stale" not in out["data"][0]
+        mv.store.clear()
+        self._all_fail(mv)
+        mv.angel = {"data": [{"symbol": "UP", "pct_change": 10.0, "ltp": 110.0}]}
+        out = gw.market_top_gainers()
+        assert "stale" not in out and out["data"][0]["source"] == "angelone"
+
+    # ── group111: stale rows say when the last-known list was saved ─────────────────────────────────
+    def test_stale_rows_carry_the_save_time_and_the_routes_report_it(self, mv):
+        self._all_fail(mv)
+        mv.store[gw.MARKET_MOVERS_LAST_KNOWN] = [{"symbol": "OLD", "change_pct": 3.0, "volume": 5}]
+        mv.store[gw.MARKET_MOVERS_LAST_KNOWN_AT] = "2026-09-29 15:30"
+        rows = gw._get_nifty50_data()
+        assert rows == [{"symbol": "OLD", "change_pct": 3.0, "volume": 5, "stale": True, "stale_since": "2026-09-29 15:30"}]
+        out = gw.market_top_gainers()
+        assert out["stale"] is True and out["stale_since"] == "2026-09-29 15:30"
+
+    @pytest.mark.parametrize("bad", [None, "", "   ", 123, ["x"]])
+    def test_a_missing_or_malformed_save_time_is_simply_left_out(self, mv, bad):
+        mv.phase = "closed"
+        mv.store[gw.MARKET_MOVERS_LAST_KNOWN] = [{"symbol": "OLD", "change_pct": 3.0}]
+        if bad is not None:
+            mv.store[gw.MARKET_MOVERS_LAST_KNOWN_AT] = bad
+        rows = gw._get_nifty50_data()
+        assert rows == [{"symbol": "OLD", "change_pct": 3.0, "stale": True}]
+        out = gw.market_top_gainers()
+        assert out["stale"] is True and "stale_since" not in out
+
+    def test_a_failing_timestamp_write_does_not_break_the_fetch(self, mv):
+        mv.indices = ["A"]
+        orig = mv._set
+
+        def set_(key, value, ttl=None):
+            if key == gw.MARKET_MOVERS_LAST_KNOWN_AT:
+                raise RuntimeError("kv down")
+            orig(key, value, ttl)
+        gw._redis_set = set_
+        try:
+            assert [d["symbol"] for d in gw._get_nifty50_data()] == ["A"]
+        finally:
+            gw._redis_set = orig
+
+    def test_fallback_is_not_used_when_yahoo_returned_data_or_outside_the_open_session(self, mv):
+        mv.indices = ["A"]
+        mv.angel = {"data": [{"symbol": "UP", "pct_change": 10.0, "ltp": 110.0}]}
+        assert [d["symbol"] for d in gw._get_nifty50_data()] == ["A"]
+        assert mv.http_calls == []
+        mv.store.clear()
+        mv.phase = "closed"
+        gw._get_nifty50_data()
+        assert mv.http_calls == []
 
     def test_cache_filled_while_waiting_for_the_lock_is_reused_without_fetching(self, mv):
         def fill():                                             # runs inside the locked section

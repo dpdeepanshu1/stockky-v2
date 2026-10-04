@@ -58,11 +58,11 @@ DB_URL = (
 
 # Regime-dependent constants with their review dates and guardrail bands
 REGIME_CONSTANTS = {
-    "ENTRY_REGIME_MIN_SCORE":         ("38",    "2026-08-28", 20, 60),
-    "ENTRY_MIN_REWARD_RISK":          ("2.0",   "2026-08-28", 1.5, 3.0),
-    "CANDIDATE_MIN_CONVICTION":       ("55",    "2026-08-28", 40, 75),
-    "CANDIDATE_DOWNTREND_6M_PCT":     ("-10.0", "2026-08-28", -20, -5),
-    "CANDIDATE_MIN_BULLISH_TF":       ("4",     "2026-08-28", 2, 5),
+    "ENTRY_REGIME_MIN_SCORE":         ("25",    "2026-10-04", 20, 60),   # value mirrors real-trade-service config (25 since 2026-09-03); see tests/test_regime_constants_drift.py
+    "ENTRY_MIN_REWARD_RISK":          ("2.0",   "2026-10-04", 1.5, 3.0),
+    "CANDIDATE_MIN_CONVICTION":       ("55",    "2026-10-04", 40, 75),
+    "CANDIDATE_DOWNTREND_6M_PCT":     ("-10.0", "2026-10-04", -20, -5),
+    "CANDIDATE_MIN_BULLISH_TF":       ("4",     "2026-10-04", 2, 5),
 }
 
 STALE_DAYS      = int(((os.getenv("GOVERNANCE_STALE_DAYS") or "").strip() or "30"))

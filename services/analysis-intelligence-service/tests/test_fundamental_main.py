@@ -376,6 +376,28 @@ class TestAnalyzeFetching:
         env.analyze({"roe": 25}, symbol="INFY.NS", force=False)
         assert env.urls[-1].endswith("?force=false")
 
+    # ── group112 (item 4 leftover): bare tickers are requested as .NS, everything else unchanged ──
+    @pytest.mark.parametrize("given, requested", [
+        ("INFY", "INFY.NS"), ("infy", "INFY.NS"), ("  tcs ", "TCS.NS"), ("M&M", "M&M.NS"), ("BAJAJ-AUTO", "BAJAJ-AUTO.NS"),
+        ("360ONE", "360ONE.NS"),
+        ("INFY.NS", "INFY.NS"), ("RELIANCE.BO", "RELIANCE.BO"), ("infy.ns", "infy.ns"),
+        ("NIFTY", "NIFTY"), ("NIFTY50", "NIFTY50"), ("NIFTYBANK", "NIFTYBANK"), ("BANKNIFTY", "BANKNIFTY"),
+        ("SENSEX", "SENSEX"), ("INDIAVIX", "INDIAVIX"), ("^NSEI", "^NSEI"),
+        ("NIFTY BANK", "NIFTY BANK"), ("KFIN TECHNOLOGIES", "KFIN TECHNOLOGIES"),
+    ])
+    def test_market_data_url_uses_the_canonical_spelling_only_for_plain_tickers(self, env, given, requested):
+        env.analyze({"roe": 25}, symbol=given)
+        assert env.urls[-1] == f"{fm.MARKET_DATA_URL}/fundamentals/{requested}?force=false"
+
+    def test_both_spellings_of_one_company_make_the_same_request(self, env):
+        env.analyze({"roe": 25}, symbol="INFY")
+        env.analyze({"roe": 25}, symbol="INFY.NS")
+        assert env.urls[-2] == env.urls[-1]
+
+    @pytest.mark.parametrize("blank", ["", "   ", None])
+    def test_blank_symbol_is_passed_through_unchanged(self, blank):
+        assert fm._md_fundamentals_symbol(blank) == blank
+
     def test_symbol_uppercased_in_result(self, env):
         assert env.analyze({"roe": 25}, symbol="infy")["symbol"] == "INFY"
 
@@ -422,7 +444,8 @@ class TestAnalyzeFetching:
         env.analyze(symbol="TCS")
         exc, kw = rl[0]
         assert exc is env.http_exc
-        assert kw == {"provider": "analysis", "path": "/fundamentals/TCS", "symbol": "TCS", "status": 429}
+        # group112: the reported path is the URL actually requested (canonical .NS spelling)
+        assert kw == {"provider": "analysis", "path": "/fundamentals/TCS.NS", "symbol": "TCS", "status": 429}
 
     def test_5xx_reported_as_market_data_provider(self, env, rl):
         env.http_exc = _status_error(503)

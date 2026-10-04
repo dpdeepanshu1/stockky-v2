@@ -3607,6 +3607,7 @@ async def _analyze_one_symbol_ultra(
                         normalized["natural_language_summary"] = _generate_summary(normalized)
                     except Exception:
                         normalized["natural_language_summary"] = None
+                _mark_thin_technical(normalized)
                 return normalized
 
             except CircuitOpenError as e:
@@ -4140,6 +4141,80 @@ _nifty50_fetch_lock = threading.Lock()
 # something real to fall back to instead of an empty list. Mirrors the
 # indices endpoint's INDICES_LAST_KNOWN pattern (get_market_indices, above).
 MARKET_MOVERS_LAST_KNOWN = "stockky:market_movers_last_known"
+# group111: when the last-known list was saved (IST, "YYYY-MM-DD HH:MM"). Starts with the last-known key,
+# so kv_cache's durable-prefix rule already covers it.
+MARKET_MOVERS_LAST_KNOWN_AT = "stockky:market_movers_last_known_at"
+
+
+def _mark_movers_stale(rows: List[dict]) -> List[dict]:
+    """Copies of last-known mover rows with `stale: True` (group110), plus `stale_since` (group111: when the
+    list was saved) when that timestamp is known. The stored list is never mutated, and non-dict entries are
+    passed through untouched. Never raises."""
+    since = None
+    try:
+        v = _redis_get(MARKET_MOVERS_LAST_KNOWN_AT)
+        if isinstance(v, str) and v.strip():
+            since = v.strip()
+    except Exception:
+        since = None
+    out = []
+    for r in rows:
+        if isinstance(r, dict):
+            r = {**r, "stale": True}
+            if since:
+                r["stale_since"] = since
+        out.append(r)
+    return out
+
+
+def _movers_fallback_when_yahoo_empty() -> List[dict]:
+    """Rows for the dashboard Movers panel when the open-session yfinance fetch returned nothing.
+
+    1) AngelOne's whole-market sweep (market-data-service /angelone/movers: authenticated broker quotes,
+       not NSE- or Yahoo-exposed). It lists only moves of 5% or more and carries no volume, so rows have
+       symbol/price/change/change_pct and `source: "angelone"`; "most active" has nothing to rank in
+       this mode and stays empty. Not cached here (market-data caches it).
+    2) The last-known list from the previous good fetch (up to 7 days old, same as the pre-open path).
+    3) [] when neither exists. Never raises."""
+    try:
+        resp = httpx.get(f"{MARKET_DATA_URL}/angelone/movers", timeout=25.0)
+        if resp.status_code == 200:
+            payload = resp.json() or {}
+            rows = []
+            for r in (payload.get("data") or []):
+                if not isinstance(r, dict):
+                    continue
+                sym = _clean_equity_symbol((r.get("symbol") or "").upper())
+                ltp = _hot_float(r.get("ltp"))
+                pct = _hot_float(r.get("pct_change"))
+                if not sym or ltp is None or pct is None or ltp <= 0 or pct <= -100.0:
+                    continue
+                prev = ltp / (1.0 + pct / 100.0)
+                rows.append({
+                    "symbol": sym,
+                    "price": round(ltp, 2),
+                    "change": round(ltp - prev, 2),
+                    "change_pct": round(pct, 2),
+                    "source": "angelone",
+                })
+            if rows:
+                logger.warning(
+                    "Movers: yfinance returned nothing during the open session - serving %d AngelOne movers (>=5%%)",
+                    len(rows),
+                )
+                return rows
+    except Exception as e:
+        logger.debug("Movers AngelOne fallback failed: %s", e)
+    try:
+        last_known = _redis_get(MARKET_MOVERS_LAST_KNOWN)
+        if last_known and isinstance(last_known, list) and len(last_known) > 0:
+            logger.warning(
+                "Movers: yfinance returned nothing during the open session - serving last-known movers (stale)"
+            )
+            return _mark_movers_stale(last_known)
+    except Exception:
+        pass
+    return []
 
 
 def _get_nifty50_data() -> List[dict]:
@@ -4179,7 +4254,7 @@ def _get_nifty50_data() -> List[dict]:
                 "a guaranteed-empty pre-open/closed yfinance 1m-interval fetch",
                 phase,
             )
-            return last_known
+            return _mark_movers_stale(last_known)
         logger.info(
             "Market session phase=%s and no last-known movers cached yet — "
             "returning empty rather than a guaranteed-empty fetch", phase,
@@ -4282,7 +4357,16 @@ def _get_nifty50_data() -> List[dict]:
             # pre-open/closed-market window (see the phase check above) has
             # real data to serve instead of an empty list.
             _redis_set(MARKET_MOVERS_LAST_KNOWN, data, ttl=7 * 86400)
-        return data
+            try:
+                _redis_set(MARKET_MOVERS_LAST_KNOWN_AT, datetime.now().strftime("%Y-%m-%d %H:%M"), ttl=7 * 86400)
+            except Exception:
+                pass            # the timestamp is only a label; never fail the fetch over it
+            return data
+    # group109 (log-audit item 20): the yfinance fetch above came back empty DURING the open session
+    # (Yahoo blocked / rate limited from the VM, item 6). That used to leave the dashboard Movers panel
+    # empty even though last-known data existed and AngelOne's whole-market sweep was reachable.
+    # Done outside the fetch lock so a slow fallback never blocks other callers.
+    return _movers_fallback_when_yahoo_empty()
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
 class WatchlistUpdate(BaseModel):
@@ -5201,6 +5285,22 @@ def _thin_technical_history(result: dict, tech_reasons) -> bool:
         return True
     blob = " ".join(str(r) for r in (tech_reasons or [])).lower()
     return any(m in blob for m in _THIN_TECHNICAL_MARKERS)
+
+
+def _mark_thin_technical(result: dict) -> dict:
+    """Scan / Hot Picks rows: add `technical_thin` (bool), the same test /stock/{symbol} uses for its
+    "Technicals on minimal price history" data-quality flag (group105, log-audit item 12).
+
+    Label only: it changes no score, decision or ranking, and it is set only on full analyses (rows built from
+    the Data Feed fast path carry no technical reasons, so they get no field). Never raises."""
+    try:
+        if isinstance(result, dict):
+            reasons = result.get("reasons")
+            tech = reasons.get("technical") if isinstance(reasons, dict) else None
+            result["technical_thin"] = bool(_thin_technical_history(result, tech or []))
+    except Exception:
+        pass
+    return result
 
 
 @app.get("/stock/{symbol}")
@@ -6832,20 +6932,29 @@ def _rank_market_rows(rows, key: str, reverse: bool, n: int = 10) -> list:
     return [r for _, r in scored[:n]]
 
 
+def _movers_response(sorted_data: list) -> dict:
+    """{data, count}, plus `stale: true` when any returned row came from the last-known list (group110)."""
+    out = {"data": sorted_data, "count": len(sorted_data)}
+    stale_rows = [r for r in sorted_data if isinstance(r, dict) and r.get("stale")]
+    if stale_rows:
+        out["stale"] = True
+        since = next((r.get("stale_since") for r in stale_rows if r.get("stale_since")), None)
+        if since:
+            out["stale_since"] = since      # group111: when the last-known list was saved
+    return out
+
+
 @app.get("/market/top-gainers")
 def market_top_gainers():
-    sorted_data = _rank_market_rows(_get_nifty50_data(), "change_pct", True)
-    return {"data": sorted_data, "count": len(sorted_data)}
+    return _movers_response(_rank_market_rows(_get_nifty50_data(), "change_pct", True))
 
 @app.get("/market/top-losers")
 def market_top_losers():
-    sorted_data = _rank_market_rows(_get_nifty50_data(), "change_pct", False)
-    return {"data": sorted_data, "count": len(sorted_data)}
+    return _movers_response(_rank_market_rows(_get_nifty50_data(), "change_pct", False))
 
 @app.get("/market/most-active")
 def market_most_active():
-    sorted_data = _rank_market_rows(_get_nifty50_data(), "volume", True)
-    return {"data": sorted_data, "count": len(sorted_data)}
+    return _movers_response(_rank_market_rows(_get_nifty50_data(), "volume", True))
 
 @app.get("/market/trending")
 async def market_trending():
@@ -7791,7 +7900,7 @@ def _build_hot_conviction_extra(decide_full, last_decision):
         "combined_score", "technical_score", "fundamental_score", "news_score",
         "prediction_score", "market_score", "training_score",
         "entry_range", "target", "stop_loss", "holding_period",
-        "holding_period_estimate", "confidence",
+        "holding_period_estimate", "confidence", "technical_thin",
     )
     # last_decision first, decide_full last → the fuller record wins.
     for src in (last_decision, decide_full):
@@ -7937,6 +8046,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                                 "news_score", "prediction_score", "market_score",
                                 "training_score", "entry_range", "target", "stop_loss",
                                 "holding_period", "holding_period_estimate", "confidence",
+                                "technical_thin",
                             ):
                                 _v = r.get(_k)
                                 if _v is not None:

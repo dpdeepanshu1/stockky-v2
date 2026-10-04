@@ -595,6 +595,7 @@ EXIT_RETRY_ALERT_THRESHOLD          = int(((os.getenv("EXIT_RETRY_ALERT_THRESHOL
 #   the others below are static-with-staleness-warning until the next review.
 #
 #   LAST REVIEWED: 2026-08-28 (Nifty 24,090, FII net-short, Midcap outperforming)
+#   RE-REVIEWED 2026-10-04: owner kept all six values unchanged (dates below moved to match).
 #   Next review: trigger on Nifty crossing 25,500 OR monthly on the 1st.
 #
 ENTRY_REGIME_MIN_SCORE              = int(((os.getenv("ENTRY_REGIME_MIN_SCORE") or "").strip() or "25"))   # ADAPTIVE: auto-computed from history. 2026-09-03: lowered 38→25. Rationale: Nifty flat (+0.05%) but individual stocks making 7-17% moves (Hikal, Raymond, GOCL etc). Broad market regime score should not block individual volume-shock movers. REGIME_OVERRIDE still lets top-1 high-conviction candidate through even below this gate.
@@ -610,11 +611,11 @@ ENTRY_REGIME_MIN_SCORE              = int(((os.getenv("ENTRY_REGIME_MIN_SCORE") 
 # to 0 to fully restore the old "regime weak = nothing enters" behavior.
 ENTRY_REGIME_OVERRIDE_TOP_N         = int(((os.getenv("ENTRY_REGIME_OVERRIDE_TOP_N") or "").strip() or "1"))
 ENTRY_REGIME_OVERRIDE_RISK_SCALE    = float(((os.getenv("ENTRY_REGIME_OVERRIDE_RISK_SCALE") or "").strip() or "0.5"))
-ENTRY_MIN_REWARD_RISK               = float(((os.getenv("ENTRY_MIN_REWARD_RISK") or "").strip() or "2.0"))  # LAST_REVIEWED: 2026-09-03
-CANDIDATE_MIN_CONVICTION            = float(((os.getenv("CANDIDATE_MIN_CONVICTION") or "").strip() or "55")) # LAST_REVIEWED: 2026-09-03
-CANDIDATE_MIN_BULLISH_TF            = int(((os.getenv("CANDIDATE_MIN_BULLISH_TF") or "").strip() or "4"))   # LAST_REVIEWED: 2026-09-03
-CANDIDATE_DOWNTREND_6M_PCT          = float(((os.getenv("CANDIDATE_DOWNTREND_6M_PCT") or "").strip() or "-10.0")) # LAST_REVIEWED: 2026-09-03
-CANDIDATE_OVEREXTENDED_52W_TOP_PCT  = float(((os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT") or "").strip() or "12.0")) # LAST_REVIEWED: 2026-09-03
+ENTRY_MIN_REWARD_RISK               = float(((os.getenv("ENTRY_MIN_REWARD_RISK") or "").strip() or "2.0"))  # LAST_REVIEWED: 2026-10-04
+CANDIDATE_MIN_CONVICTION            = float(((os.getenv("CANDIDATE_MIN_CONVICTION") or "").strip() or "55")) # LAST_REVIEWED: 2026-10-04
+CANDIDATE_MIN_BULLISH_TF            = int(((os.getenv("CANDIDATE_MIN_BULLISH_TF") or "").strip() or "4"))   # LAST_REVIEWED: 2026-10-04
+CANDIDATE_DOWNTREND_6M_PCT          = float(((os.getenv("CANDIDATE_DOWNTREND_6M_PCT") or "").strip() or "-10.0")) # LAST_REVIEWED: 2026-10-04
+CANDIDATE_OVEREXTENDED_52W_TOP_PCT  = float(((os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT") or "").strip() or "12.0")) # LAST_REVIEWED: 2026-10-04
 
 # ── Volume-shock quality gate (2026-09-11 fix) ─────────────────────────────
 # User-reported bug: the volume-shock track (candidate_engine._refresh_

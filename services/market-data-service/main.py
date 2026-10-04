@@ -3312,6 +3312,21 @@ def _get_fundamentals_inner(symbol: str, force: bool = False):
 
 
 # ── Surprise pre-market baselines (Neon surprise_static_feed) ───────────────
+def _premarket_default_symbols() -> list:
+    """Symbols for a premarket baseline run that was given none (group101, log-audit item 27 remainder).
+
+    SURPRISE_UNIVERSE / SCAN_UNIVERSE, when set, still wins (explicit operator choice). Otherwise the live
+    universe the feed-refresh loop pulled from api-gateway's /scan/universe is used once it has loaded, so the
+    08:55 baseline run covers the symbols candidate_engine actually evaluates instead of the built-in list.
+    Before the first refresh (or if api-gateway was never reachable) it is the built-in list, as before."""
+    from surprise_premarket import default_universe_from_env
+    base = default_universe_from_env()
+    if (os.getenv("SURPRISE_UNIVERSE", "") or os.getenv("SCAN_UNIVERSE", "")).strip():
+        return base
+    live = [str(x).strip() for x in (_current_feed_universe or []) if str(x).strip()]
+    return live or base
+
+
 class SurprisePremarketRequest(BaseModel):
     symbols: Optional[list] = None
 
@@ -3340,7 +3355,7 @@ def surprise_premarket_run(
     elif symbols:
         syms = [x.strip() for x in symbols.split(",") if x.strip()]
     if not syms:
-        syms = default_universe_from_env()
+        syms = _premarket_default_symbols()
 
     prog = get_premarket_progress()
     if prog.get("is_running"):

@@ -6,11 +6,57 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
-- 2026-10-04 (group 101)  Remaining log-audit items 7, 10, 11, 23, 28 (api-gateway, market-data, analysis-intelligence, decision-prediction).
+- 2026-10-04 (group 114)  Log-audit item 25: owner reviewed the six regime constants, kept every value, and had the review dates moved to 2026-10-04 (real-trade-service + notification-scheduler-service).
+  No value changed, so trading behaviour is unchanged; the "stale regime constant" warnings stop until the dates are 30 days old again (2026-11-03). The scheduler's two copies and real-trade-service's
+  `_REGIME_CONSTANTS` must now agree on dates, guarded by two new drift tests. Tests unrun here (no pytest/sqlalchemy in sandbox). Doc: `docs/GROUP114_REGIME_CONSTANTS_REVIEWED.md`.
+- 2026-10-04 (group 113)  Log-audit item 6 tooling: `scripts/diagnose_yfinance.sh`, a read-only one-command report for the yfinance-returns-nothing problem on the VM.
+  Prints DNS, Yahoo chart status with a default and a browser user-agent, a yfinance probe inside the api-gateway container and the recent yfinance/Movers log lines. No application code
+  changed, nothing to rebuild. The report is what item 6 has been waiting for. Doc: `docs/GROUP113_YFINANCE_DIAGNOSTIC_SCRIPT.md`.
+- 2026-10-04 (group 112)  Log-audit item 4 leftover: `analyze()` and the decision service asked market-data for `/fundamentals/INFY`, the peer step for `INFY.NS` (analysis-intelligence + decision-prediction).
+  A plain NSE ticker is now requested as `.NS` in both places (same canonical form as the peer step); indices, names with spaces, `^` symbols and already-suffixed symbols are passed through unchanged. market-data
+  already normalised its own cache key, so this changes URL spelling in logs only, no Yahoo calls. Tests unrun here (no pytest/fastapi/httpx in sandbox). Doc: `docs/GROUP112_FUNDAMENTALS_CANONICAL_URL.md`.
+- 2026-10-04 (group 111)  Movers stale label now says when the last-known list was saved (api-gateway + frontend).
+  The last-known list is stamped with its save time (new key `stockky:market_movers_last_known_at`, 7-day TTL, durable via the existing prefix rule). Stale rows carry
+  `stale_since`, the three Movers routes add `stale_since` beside `stale`, and the panel note reads "(saved YYYY-MM-DD HH:MM IST)". A missing or bad stamp just falls back to
+  the group110 wording. Tests unrun here (no pytest/fastapi in sandbox). Doc: `docs/GROUP111_MOVERS_STALE_SINCE.md`.
+- 2026-10-04 (group 110)  Movers panel marks last-known rows as stale (api-gateway + frontend).
+  When the panel serves the last-known list (pre-open/closed, or open session with yfinance and AngelOne both empty), each row now carries `stale: true`, the
+  `/market/top-gainers`, `/top-losers` and `/most-active` responses add `stale: true`, and the panel shows a one-line "last known list" note. Fresh and AngelOne rows are
+  unchanged. Tests unrun here (no pytest/fastapi in sandbox). Doc: `docs/GROUP110_MOVERS_STALE_LABEL.md`.
+- 2026-10-04 (group 109)  Log-audit item 20: Movers panel no longer goes empty when yfinance returns nothing during the open session (api-gateway).
+  The panel never used NSE; it used a yfinance fetch with no open-session fallback. It now falls back to AngelOne whole-market movers (5%+ only, no volume, so Most Active stays
+  empty), then to the last-known list. Fallback rows are not cached. api-gateway: 8123 passed. Doc: `docs/GROUP109_MOVERS_OPEN_SESSION_FALLBACK.md`.
+- 2026-10-04 (group 108)  Log-audit item 9: Yahoo news is skipped for 10 minutes after 10 empty/failed lookups in a row (analysis-intelligence news).
+  Saves a wasted yfinance call per symbol; the other headline sources are untouched, so results are unchanged. Tunable with `YAHOO_NEWS_BACKOFF_AFTER` (0 = off) and
+  `YAHOO_NEWS_BACKOFF_SECONDS`. A replacement news source is still the owner's call. analysis-intelligence: 2167 passed. Doc: `docs/GROUP108_YAHOO_NEWS_BACKOFF.md`.
+- 2026-10-04 (group 107)  Scheduler's stale-constant warning named `ENTRY_REGIME_MIN_SCORE=38`; real-trade-service has used 25 since 2026-09-03.
+  Both scheduler copies now show 25, and a new drift test compares their values with real-trade-service's config defaults. Review dates deliberately not moved (item 25
+  still needs the owner's review). notification-scheduler: 181 passed. Doc: `docs/GROUP107_SCHEDULER_REGIME_CONSTANT_VALUES.md`.
+- 2026-10-04 (group 106)  `technical_thin` is now visible: amber `THIN TECH` tag on scan rows and a strip on Hot Picks conviction cards (frontend only).
+  Label only, nothing filtered or scored by it; absent/false shows nothing. `tsc --noEmit` clean; no frontend test runner; not viewed in a browser.
+  Doc: `docs/GROUP106_TECHNICAL_THIN_BADGE.md`.
+- 2026-10-04 (group 105)  Log-audit item 12 remainder: label-only `technical_thin` on scan and Hot Picks rows (api-gateway).
+  Same test as the `/stock/{symbol}` "Technicals on minimal price history" flag (group94), now set as a bool on full-analysis scan rows and carried into Hot Picks cards.
+  No score, decision or ranking change; fast-path/error rows get no field; no frontend display yet. Tests: 7 new in `test_main_analyze_symbol.py`. api-gateway: 8118 passed.
+  Doc: `docs/GROUP105_TECHNICAL_THIN_LABEL.md`.
+- 2026-10-04 (group 104)  Test fix: `test_telegram_long_message_split` expected 2-4 parts for a 22,279-character message, which correctly splits into 6 (3,800 per part).
+  The splitter was right (parts under 4,096, joined text identical); the test's bound was a miscount and failed since it was written. It now derives the expected
+  count from the splitter's own limit. No production code changed. notification-scheduler: 178 passed. Doc: `docs/GROUP104_TELEGRAM_SPLIT_TEST.md`.
+- 2026-10-04 (group 103)  kv_cache pool-settings audit: a blank pool env value aborted Oracle engine creation (all services).
+  `oracle_compat.oracle_engine_kwargs` did int() on values that `os.getenv` returns as "" when a variable is set but empty (`CACHE_DB_POOL_SIZE_ORACLE=`), raising
+  ValueError; kv_cache's Oracle branch also skipped its shared-variable fallback on a blank. Blank now means unset (override -> env var -> default) in all 8 identical
+  `oracle_compat.py` copies and 6 `kv_cache.py` copies; a real non-numeric typo still raises. Defaults unchanged. Tests: api-gateway `test_oracle_pool_blank_env.py` (10).
+  Suites: gateway 8111, market-data 690, analysis 2161, real-trade 2948, decision 38, prediction 20, training 38 passed; position-stocks and notification-scheduler each
+  have one failure that also fails on the untouched code (dhanhq not installed here; a Telegram long-message split test). Doc: `docs/GROUP103_ORACLE_POOL_BLANK_ENV.md`.
+- 2026-10-04 (group 102)  Log-audit item 29 remainder: REAL pollers ran while armed but logged out (frontend).
+  The Pipeline (2 s), Watchlist (5 s) and Positions (10 s) pollers and the one-shot positions/orders/candidates load were allowed to run when the gate was only
+  armed, but REAL positions/orders/candidates/pipeline are admin-only on the server regardless of arming, so every call was a 401. They now need a login session
+  in REAL (DEMO unchanged). Auto-pilot is server-side and unaffected. `tsc --noEmit` clean; no frontend test runner. Doc: `docs/GROUP102_ARMED_LOGGED_OUT_POLLERS.md`.
+- 2026-10-04 (group 101)  Remaining log-audit items 7, 10, 11, 23, 27, 28 (api-gateway, market-data, analysis-intelligence, decision-prediction).
   Item 7: the leftover `/health?warm=true` wake pings (gateway history + deep keepalive, decision, prediction, training) now follow the `WAKE_PINGS`/`ORACLE_DSN`
   rule. Item 23: `_waterfall_nse_direct_price` and `_fetch_nse_fundamentals` share group96's quote-equity pause. Items 11/28: the stored searched-symbols list
   cleans itself on read (delisted, non-equity, junk, curated typo aliases) and is written back once. Item 10: a payload with no sector/industry compares against no
-  peers instead of the generic big-cap list. Item 19 reviewed, no change needed. Full suites: gateway 8101, analysis-intelligence 2161, market-data 684,
+  peers instead of the generic big-cap list. Item 27: premarket baselines with no symbols use the live scan universe once loaded. Item 19 reviewed, no change needed. Full suites: gateway 8101, analysis-intelligence 2161, market-data 690,
   decision 38, prediction 20, training 38 passed. Doc: `docs/GROUP101_REMAINING_FIXES.md`.
 - 2026-10-04 (group 100)  Log-audit item 29: protected endpoints called before login caused 401 bursts (frontend).
   The Pipeline tab's `CatalystWatchlistPanel` polled admin-only `/resilience/status` every 30 s with or without a session (and the REAL watchlist when logged

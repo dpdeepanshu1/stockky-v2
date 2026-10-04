@@ -70,7 +70,11 @@ def test_send_telegram_long_message_goes_out_in_numbered_parts(wire):
     assert len(msg) > 4096
     assert nmain._send_telegram(CFG, "Stockky Trade", msg) == "sent"
     n = len(wire)
-    assert 2 <= n <= 4
+    # ~22k chars at <= 3800 per part is 6 parts (the old "2 <= n <= 4" bound was a miscount of the message size);
+    # derive the expectation from the splitter's own limit instead of a hard-coded range.
+    assert n == len(nmain._split_for_telegram(msg, nmain._TELEGRAM_PART_CHARS))
+    assert n == -(-len(msg) // nmain._TELEGRAM_PART_CHARS)            # no wasted extra parts
+    assert n >= 2
     for i, body in enumerate(wire, 1):
         assert len(body["text"]) <= 4096
         assert body["text"].startswith(f"<b>Stockky Trade ({i}/{n})</b>")

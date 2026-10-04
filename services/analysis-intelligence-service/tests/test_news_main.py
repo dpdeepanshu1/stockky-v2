@@ -338,6 +338,18 @@ def _fake_yf(news=None, raises=False):
     return mod
 
 
+@pytest.fixture(autouse=True)
+def _reset_yahoo_backoff(monkeypatch):
+    """The Yahoo backoff keeps per-process state; start every test with it closed and the defaults."""
+    nm._yahoo_state["misses"] = 0
+    nm._yahoo_state["skip_until"] = 0.0
+    monkeypatch.setattr(nm, "_YAHOO_BACKOFF_AFTER", 10)
+    monkeypatch.setattr(nm, "_YAHOO_BACKOFF_SECONDS", 600.0)
+    yield
+    nm._yahoo_state["misses"] = 0
+    nm._yahoo_state["skip_until"] = 0.0
+
+
 class TestFetchYahooNews:
     def test_flat_shape(self, monkeypatch):
         yf = _fake_yf([{"title": "T1", "link": "L1", "publisher": "Pub", "providerPublishTime": 123}])
@@ -972,3 +984,84 @@ class TestModuleLevel:
             t = nm._utcnow()
         assert t.tzinfo is None
         assert abs((_now() - t).total_seconds()) < 5
+
+
+# ── Yahoo news backoff (group108, item 9) ─────────────────────────────────────
+
+_real_yahoo = nm._fetch_yahoo_news
+
+
+class TestYahooNewsBackoff:
+    def _clock(self, monkeypatch, start=1000.0):
+        now = {"t": start}
+        monkeypatch.setattr(nm, "_mono", lambda: now["t"])
+        return now
+
+    def test_skips_yahoo_after_consecutive_empty_results_then_resumes(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        monkeypatch.setattr(nm, "_YAHOO_BACKOFF_AFTER", 3)
+        yf = _fake_yf([])
+        monkeypatch.setitem(sys.modules, "yfinance", yf)
+        for _ in range(3):
+            assert nm._fetch_yahoo_news("TCS") == []
+        assert len(yf._seen) == 3
+        assert nm._fetch_yahoo_news("TCS") == [] and len(yf._seen) == 3   # skipped, no yfinance call
+        now["t"] += 599
+        nm._fetch_yahoo_news("TCS")
+        assert len(yf._seen) == 3                                          # still inside the window
+        now["t"] += 2
+        nm._fetch_yahoo_news("TCS")
+        assert len(yf._seen) == 4                                          # window over, Yahoo tried again
+
+    def test_exceptions_count_as_misses(self, monkeypatch):
+        self._clock(monkeypatch)
+        monkeypatch.setattr(nm, "_YAHOO_BACKOFF_AFTER", 2)
+        yf = _fake_yf(raises=True)
+        monkeypatch.setitem(sys.modules, "yfinance", yf)
+        nm._fetch_yahoo_news("A")
+        nm._fetch_yahoo_news("B")
+        nm._fetch_yahoo_news("C")
+        assert len(yf._seen) == 2
+
+    def test_a_result_with_items_resets_the_count(self, monkeypatch):
+        self._clock(monkeypatch)
+        monkeypatch.setattr(nm, "_YAHOO_BACKOFF_AFTER", 3)
+        empty, good = _fake_yf([]), _fake_yf([{"title": "ok"}])
+        monkeypatch.setitem(sys.modules, "yfinance", empty)
+        nm._fetch_yahoo_news("A")
+        nm._fetch_yahoo_news("B")
+        monkeypatch.setitem(sys.modules, "yfinance", good)
+        assert nm._fetch_yahoo_news("C")[0]["title"] == "ok"
+        monkeypatch.setitem(sys.modules, "yfinance", empty)
+        nm._fetch_yahoo_news("D")
+        nm._fetch_yahoo_news("E")
+        assert nm._yahoo_backoff_active() is False                         # 2 misses since the reset, below 3
+        nm._fetch_yahoo_news("F")
+        assert nm._yahoo_backoff_active() is True
+
+    def test_zero_disables_the_backoff(self, monkeypatch):
+        self._clock(monkeypatch)
+        monkeypatch.setattr(nm, "_YAHOO_BACKOFF_AFTER", 0)
+        yf = _fake_yf([])
+        monkeypatch.setitem(sys.modules, "yfinance", yf)
+        for _ in range(25):
+            nm._fetch_yahoo_news("TCS")
+        assert len(yf._seen) == 25
+
+    def test_other_sources_still_run_while_yahoo_is_skipped(self, monkeypatch):
+        self._clock(monkeypatch)
+        nm._yahoo_state["skip_until"] = 10 ** 9
+        monkeypatch.setitem(sys.modules, "yfinance", _fake_yf([{"title": "never"}]))
+        called = _patch_sources(monkeypatch, {"_fetch_google_news": [{"title": "G", "published": "2026-10-01"}]})
+        # _patch_sources replaced _fetch_yahoo_news with a stub; restore the real one to exercise the skip
+        monkeypatch.setattr(nm, "_fetch_yahoo_news", _real_yahoo)
+        out = nm._fetch_headlines("TCS")
+        assert [h["title"] for h in out] == ["G"]
+        assert "_fetch_google_news" in called
+
+    def test_blank_env_values_mean_the_defaults(self, monkeypatch):
+        # Run the file fresh (not importlib.reload: several test files import a module named `main`).
+        monkeypatch.setenv("YAHOO_NEWS_BACKOFF_AFTER", "")
+        monkeypatch.setenv("YAHOO_NEWS_BACKOFF_SECONDS", " ")
+        g = runpy.run_path(nm.__file__, run_name="news_main_fresh")
+        assert g["_YAHOO_BACKOFF_AFTER"] == 10 and g["_YAHOO_BACKOFF_SECONDS"] == 600.0

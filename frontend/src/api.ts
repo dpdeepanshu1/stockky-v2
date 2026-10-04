@@ -45,6 +45,8 @@ export interface FundamentalMetrics {
 
 export interface Decision {
   symbol: string;
+  /** Label only (group105): technical read rests on a minimal / fallback price history. Absent on fast-path rows. */
+  technical_thin?: boolean;
   decision: "BUY NOW" | "PREPARE TO BUY" | "HOLD" | "DO NOT BUY" | "SELL" | "WAIT";
   confidence: "High" | "Medium" | "Low";
   combined_score: number;
@@ -212,6 +214,10 @@ export interface IpoAnalysis {
 export interface MarketResponse {
   data: MarketStock[];
   count: number;
+  /** true when the rows come from the last-known list (live data unavailable) */
+  stale?: boolean;
+  /** when the last-known list was saved ("YYYY-MM-DD HH:MM", IST); absent if unknown */
+  stale_since?: string;
 }
 
 export interface NotificationChannelStatus {

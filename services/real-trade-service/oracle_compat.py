@@ -129,7 +129,15 @@ def oracle_engine_kwargs(full_url_provided: bool, **pool_overrides) -> dict:
         ca["wallet_password"] = wallet_pw
 
     def _int(name, default):
-        return int(pool_overrides.get(name, os.environ.get(name.upper(), default)))
+        # group103: a BLANK value (e.g. `CACHE_DB_POOL_SIZE_ORACLE=` left empty in a compose/.env file, which
+        # os.getenv returns as "" rather than the default) used to raise ValueError here and abort engine
+        # creation. Blank now means "unset" and falls through: override -> env var -> default. A non-blank
+        # value that is not a number (a real typo) still raises, so a misconfiguration is not hidden.
+        for raw in (pool_overrides.get(name), os.environ.get(name.upper()), default):
+            s = str(raw).strip() if raw is not None else ""
+            if s:
+                return int(s)
+        return int(default)
 
     return {
         "echo": False,

@@ -130,7 +130,9 @@ async def refresh_dynamic_universe(db=None) -> Optional[dict]:
             r.raise_for_status()
         logger.info("dynamic_universe: triggered /check to warm the event cache")
     except Exception as e:
-        logger.warning("dynamic_universe: /check trigger failed (%s) — Tier 2 cache may be stale", e)
+        # group170: httpx timeouts stringify to "", which logged "failed ()" - name the type as well
+        logger.warning("dynamic_universe: /check trigger failed (%s) — Tier 2 cache may be stale",
+                       f"{type(e).__name__}: {e}" if str(e).strip() else type(e).__name__)
 
     return result
 

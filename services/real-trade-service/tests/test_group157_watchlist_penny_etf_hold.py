@@ -36,6 +36,8 @@ def _clean_env(monkeypatch):
     for k in ("WATCHLIST_ADVERSE_GUARD", "WATCHLIST_ETF_SYMBOLS", "CANDIDATE_MIN_STOCK_PRICE",
               "WATCHLIST_MAX_DROP_PCT", "WATCHLIST_TIER3_MIN_DAY_CHANGE_PCT"):
         monkeypatch.delenv(k, raising=False)
+    # group169 retires penny/ETF rows by default; this file covers the group157 hold-back path (row stays active).
+    monkeypatch.setenv("WATCHLIST_INSTRUMENT_RETIRE", "0")
     entry._adverse_last_log.clear()
 
 

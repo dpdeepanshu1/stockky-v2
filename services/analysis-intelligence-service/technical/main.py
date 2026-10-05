@@ -194,9 +194,44 @@ def _num(val, default):
     return f if math.isfinite(f) else default
 
 
+_md_guard_mod = None
+_md_guard_tried = False
+
+
+def _guard():
+    """group170: the shared md_guard module (concurrency cap, single-flight, short cool-down for calls to
+    market-data-service), or None when it cannot be imported. Imported on first use, not at load time:
+    while a sub-app is being loaded its folder is preferred on sys.path, the same reason rate_limit_report is
+    imported inside functions."""
+    global _md_guard_mod, _md_guard_tried
+    if not _md_guard_tried:
+        _md_guard_tried = True
+        try:
+            import md_guard as _m
+            _md_guard_mod = _m
+        except Exception:
+            _md_guard_mod = None
+    return _md_guard_mod
+
+
+def _md_get(url, **kw):
+    g = _guard()
+    if g is None:
+        return httpx.get(url, **kw)
+    return g.md_get(url, **kw)
+
+
+def _exc_detail(e) -> str:
+    g = _guard()
+    if g is not None:
+        return g.exc_detail(e)
+    msg = str(e).strip()
+    return f"{type(e).__name__}: {msg}" if msg else type(e).__name__
+
+
 def _fetch_quote_price(symbol: str) -> float | None:
     try:
-        resp = httpx.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=10)
+        resp = _md_get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             return data.get("price")
@@ -292,7 +327,7 @@ def _fetch_history_from_market_data(symbol: str, period: str = "6mo", force: boo
     """One attempt against market-data /history."""
     _set_md_failure("")
     try:
-        resp = httpx.get(
+        resp = _md_get(
             f"{MARKET_DATA_URL}/history/{symbol}",
             params={"period": period, "force": str(force).lower()},
             timeout=35,
@@ -319,7 +354,7 @@ def _fetch_history_from_market_data(symbol: str, period: str = "6mo", force: boo
                     pass
     except httpx.HTTPError as e:
         _set_md_failure("transient")
-        logger.warning("market-data history error %s period=%s: %s", symbol, period, e)
+        logger.warning("market-data history error %s period=%s: %s", symbol, period, _exc_detail(e))
         try:
             from rate_limit_report import report_if_rate_limited
             report_if_rate_limited(e, provider="market_data", path=f"/history/{symbol}", symbol=symbol)
@@ -334,7 +369,7 @@ def _fetch_history_bhavcopy_hint(symbol: str):
     Builds a minimal 1-row frame so analyze() can still attach a price-based fallback.
     """
     try:
-        resp = httpx.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=12)
+        resp = _md_get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=12)
         if resp.status_code != 200:
             return None
         q = resp.json() if resp.content else {}

@@ -26,6 +26,8 @@ in the SAME shape once that's wired, without changing this schema again.
 from __future__ import annotations
 
 import logging
+import os
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -205,6 +207,30 @@ def held_exposure_positions(db: Session, mode: str) -> list[models.TradePosition
         )
         .all()
     )
+
+
+# 2026-10-06 (group 174, log noise): import_broker_holdings() runs every reconcile cycle, and a lagging
+# holdings feed (LATENTVIEW) made the "skipping re-import" INFO line repeat every cycle for up to 24 h.
+# It now logs once per (symbol, closed_at) and again at most every RECENT_CLOSE_SKIP_LOG_EVERY_S
+# (default 1800 s; 0 = every cycle, as before; blank/invalid = default). The skip itself is unchanged.
+_recent_close_skip_logged: dict = {}
+
+
+def _should_log_recent_close_skip(symbol: str, closed_at) -> bool:
+    raw = (os.getenv("RECENT_CLOSE_SKIP_LOG_EVERY_S") or "").strip()
+    try:
+        every = float(raw) if raw else 1800.0
+    except ValueError:
+        every = 1800.0
+    if every < 0:
+        every = 1800.0
+    now = time.monotonic()
+    key = (symbol, str(closed_at))
+    last = _recent_close_skip_logged.get(key)
+    if every <= 0 or last is None or (now - last) >= every:
+        _recent_close_skip_logged[key] = now
+        return True
+    return False
 
 
 async def import_broker_holdings(db: Session) -> int:
@@ -496,13 +522,14 @@ async def import_broker_holdings(db: Session) -> int:
             _old_avg = recently_closed.avg_entry_price
             _same_lot = bool(_old_avg) and abs(avg_price - _old_avg) <= max(_old_avg * 0.01, 0.05)
             if _same_lot:
-                logger.info(
-                    "import_broker_holdings: skipping re-import of %s — closed by this "
-                    "system at %s (avg cost %.2f matches current broker avg cost %.2f), "
-                    "within the %dh settlement-lag guard window.",
-                    symbol, recently_closed.closed_at, _old_avg, avg_price,
-                    _RECENT_CLOSE_REIMPORT_GUARD_HOURS,
-                )
+                if _should_log_recent_close_skip(symbol, recently_closed.closed_at):
+                    logger.info(
+                        "import_broker_holdings: skipping re-import of %s — closed by this "
+                        "system at %s (avg cost %.2f matches current broker avg cost %.2f), "
+                        "within the %dh settlement-lag guard window.",
+                        symbol, recently_closed.closed_at, _old_avg, avg_price,
+                        _RECENT_CLOSE_REIMPORT_GUARD_HOURS,
+                    )
                 continue
             logger.info(
                 "import_broker_holdings: %s has a CLOSED row from %s within the %dh "

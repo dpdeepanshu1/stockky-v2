@@ -272,6 +272,41 @@ def _md_fundamentals_symbol(symbol: str) -> str:
     return f"{up}.NS"
 
 
+_md_guard_mod = None
+_md_guard_tried = False
+
+
+def _guard():
+    """group170: the shared md_guard module (concurrency cap, single-flight, short cool-down for calls to
+    market-data-service), or None when it cannot be imported. Imported on first use, not at load time:
+    while a sub-app is being loaded its folder is preferred on sys.path, the same reason rate_limit_report is
+    imported inside functions."""
+    global _md_guard_mod, _md_guard_tried
+    if not _md_guard_tried:
+        _md_guard_tried = True
+        try:
+            import md_guard as _m
+            _md_guard_mod = _m
+        except Exception:
+            _md_guard_mod = None
+    return _md_guard_mod
+
+
+def _md_get(url, **kw):
+    g = _guard()
+    if g is None:
+        return httpx.get(url, **kw)
+    return g.md_get(url, **kw)
+
+
+def _exc_detail(e) -> str:
+    g = _guard()
+    if g is not None:
+        return g.exc_detail(e)
+    msg = str(e).strip()
+    return f"{type(e).__name__}: {msg}" if msg else type(e).__name__
+
+
 @app.get("/analyze/{symbol}")
 def analyze(symbol: str, force: bool = False):
     f = {}
@@ -280,13 +315,17 @@ def analyze(symbol: str, force: bool = False):
         # Propagate force so market-data does not serve a 24h-old fundamentals cache
         force_param = str(force).lower()
         md_symbol = _md_fundamentals_symbol(symbol)
-        resp = httpx.get(f"{MARKET_DATA_URL}/fundamentals/{md_symbol}?force={force_param}", timeout=60)
+        resp = _md_get(f"{MARKET_DATA_URL}/fundamentals/{md_symbol}?force={force_param}", timeout=60)
         resp.raise_for_status()
         f = resp.json()
         if not f or not isinstance(f, dict):
             f = {}
-    except httpx.TimeoutException:
-        logger.warning(f"Market data service timed out for {symbol}")
+    except httpx.TimeoutException as e:
+        logger.warning("Market data service timed out for %s (%s)", symbol, _exc_detail(e))
+        fallback_used = True
+    except httpx.TransportError as e:
+        # group170: includes md_guard.MarketDataUnavailable (cool-down / no free call slot)
+        logger.warning("Market data service unavailable for %s (%s)", symbol, _exc_detail(e))
         fallback_used = True
     except httpx.HTTPStatusError as e:
         logger.error(f"Market data service error for {symbol}: {e}")
@@ -306,7 +345,7 @@ def analyze(symbol: str, force: bool = False):
         else:
             raise HTTPException(status_code=e.response.status_code, detail=f"Market data service error: {e}")
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        logger.error("Unexpected error fetching market-data fundamentals for %s: %s", symbol, _exc_detail(e))
         fallback_used = True
 
     if not f or not isinstance(f, dict):

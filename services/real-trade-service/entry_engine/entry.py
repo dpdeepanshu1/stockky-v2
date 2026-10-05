@@ -1597,6 +1597,52 @@ def _log_adverse_once(mode: str, row, reason: str) -> None:
                     mode, row.symbol, row.catalyst_type, row.source_tier, reason)
 
 
+# ── group169 (item 5, rest): penny / ETF rows are retired instead of re-polled, and the per-row INFO lines ─
+# are folded into one summary line per cycle ─────────────────────────────────────────────────────────────
+# group157 kept penny/ETF rows "active", so every cycle priced them again and logged one SKIPPED line per row;
+# the 30-minute throttle is in memory and per row, so after a boot (and again every 30 minutes) ALL of them
+# logged in the same cycle (about 450 INFO lines). Now: an ETF name or a live price below the penny floor
+# retires the row (status "expired", missed_reason starts with INSTRUMENT_EXPIRE_PREFIX). refresh_watchlist
+# does not re-add that symbol+catalyst for WATCHLIST_DROP_COOLDOWN_HOURS (default 24) and never inserts
+# ETF names at all. WATCHLIST_INSTRUMENT_RETIRE=0 restores group157 (held back, stays active).
+# The per-row lines (SKIPPED / EXPIRED) are now ONE INFO line per cycle with the first few names; the
+# per-row line is DEBUG. Row state, tally keys and queueing are unchanged.
+INSTRUMENT_EXPIRE_PREFIX = "instrument: "
+_SUMMARY_MAX_NAMES = 8
+
+
+def _wl_instrument_retire_on() -> bool:
+    return _wl_adverse_guard_on() and (
+        (os.getenv("WATCHLIST_INSTRUMENT_RETIRE") or "").strip() or "1") not in ("0", "false", "False")
+
+
+def _adverse_should_log(mode: str, row) -> bool:
+    """Same 30-minute per-row throttle as _log_adverse_once, without logging."""
+    import time as _t
+    key = (mode, row.symbol, "adverse")
+    now_m = _t.monotonic()
+    if now_m - _adverse_last_log.get(key, -1e12) >= _ADVERSE_LOG_INTERVAL_S:
+        _adverse_last_log[key] = now_m
+        return True
+    return False
+
+
+def _log_watchlist_summary(mode: str, verb: str, note: str, items: list) -> None:
+    """One INFO line for a whole batch of rows: the first few 'SYMBOL [tier N] reason' items plus a count.
+    The full per-row lines go to DEBUG. Never raises."""
+    if not items:
+        return
+    try:
+        for it in items:
+            logger.debug("watchlist trigger[%s/%s]: %s — %s", mode, it[0], verb, it[1])
+        shown = "; ".join(f"{sym} ({reason})" for sym, reason in items[:_SUMMARY_MAX_NAMES])
+        more = len(items) - _SUMMARY_MAX_NAMES
+        logger.info("watchlist trigger[%s]: %s %d row(s) %s — %s%s", mode, verb, len(items), note, shown,
+                    f"; +{more} more (DEBUG logs list them all)" if more > 0 else "")
+    except Exception:  # logging must never stop the trigger pass
+        pass
+
+
 async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
     """
     Trigger pass over active WatchlistEntry rows.
@@ -1638,6 +1684,20 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
             db.commit()
             active = [r for r in active if r not in _idx_rows]
             extra_tally["index_expired"] = len(_idx_rows)
+    # group169: ETF names are retired before any price lookup (their name alone decides it).
+    if active and _wl_instrument_retire_on():
+        _etf_rows = [r for r in active if _wl_is_etf_symbol(r.symbol)]
+        if _etf_rows:
+            _now_etf = datetime.now(timezone.utc)
+            for r in _etf_rows:
+                r.status = "expired"
+                r.missed_reason = f"{INSTRUMENT_EXPIRE_PREFIX}looks like an ETF (name match), not a stock"[:255]
+                r.updated_at = _now_etf
+            db.commit()
+            _etf_ids = {id(r) for r in _etf_rows}
+            active = [r for r in active if id(r) not in _etf_ids]
+            extra_tally["instrument_expired"] = len(_etf_rows)
+            _log_watchlist_summary(mode, "EXPIRED", "(ETF names, retired)", [(r.symbol, "ETF name") for r in _etf_rows])
     if active and _symbol_filter.one_row_per_symbol_on():
         active, _dups = _symbol_filter.split_primary_rows(active)
         if _dups:
@@ -1658,6 +1718,8 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
 
     band_ok = missed = queued = adverse = 0
     now = datetime.now(timezone.utc)
+    _held: list = []      # group169: rows held back this cycle (logged as one summary line)
+    _retired: list = []   # group169: rows retired this cycle (logged as one summary line)
 
     for row in active:
         tick = ticks.get(row.symbol)
@@ -1681,6 +1743,20 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
         # `tick is None` case above, and try again next cycle.
         if price <= 0:
             continue
+
+        # group169: a price under the penny floor retires the row (group157 only held it back, so it was
+        # re-priced and logged every cycle). Fails open: any error keeps the old hold-back path.
+        if _wl_instrument_retire_on():
+            _pen = _watchlist_instrument_reason(row.symbol, price)
+            if _pen:
+                row.status = "expired"
+                row.missed_reason = f"{INSTRUMENT_EXPIRE_PREFIX}{_pen}"[:255]
+                row.updated_at = now
+                db.commit()
+                adverse += 1
+                extra_tally["instrument_expired"] = extra_tally.get("instrument_expired", 0) + 1
+                _retired.append((row.symbol, _pen))
+                continue
 
         # catalyst_price == 0.0 means the price was not known at insert time.
         # Two distinct cases:
@@ -1743,7 +1819,7 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
             row.updated_at = now
             db.commit()
             adverse += 1
-            logger.info("watchlist trigger[%s/%s]: EXPIRED — %s", mode, row.symbol, row.missed_reason)
+            _retired.append((row.symbol, row.missed_reason))
             continue
 
         # group155: do not queue a stock that has fallen away from its catalyst, or a Tier-3
@@ -1751,7 +1827,8 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
         _adv = _watchlist_adverse_reason(row, pct_move, tick)
         if _adv:
             adverse += 1
-            _log_adverse_once(mode, row, _adv)
+            if _adverse_should_log(mode, row):
+                _held.append((row.symbol, f"catalyst={row.catalyst_type} tier={row.source_tier} {_adv}"))
             continue
 
         band_ok += 1
@@ -1784,6 +1861,9 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
             mode, row.symbol, row.catalyst_type, row.source_tier,
             row.catalyst_price, price, pct_move * 100,
         )
+
+    _log_watchlist_summary(mode, "EXPIRED", "(retired)", _retired)
+    _log_watchlist_summary(mode, "SKIPPED", "(not queued, stay active)", _held)
 
     if queued:
         db.commit()

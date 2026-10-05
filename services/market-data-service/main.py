@@ -447,17 +447,33 @@ async def _raise_sync_thread_pool_capacity():
         logger.warning("could not raise sync thread pool capacity (non-fatal, keeping default): %s", e)
 
 
-@app.on_event("startup")
-async def _start_angelone_ws_feed():
-    """
-    §1 of the master prompt: AngelOne is meant to be the PRIMARY quote
-    source, with Yahoo/yfinance as fallback. angelone_client.py and
-    angelone_ws_feed.py were fully built for this, but nothing ever
-    called start_feed_background() at startup, so the feed never
-    connected and live_quotes/_LIVE never populated — the app kept
-    running entirely on Yahoo/yfinance regardless of AngelOne being
-    configured. This starts it, only when AngelOne creds are present.
-    """
+# group173 (item 7 of the open list, "boot burst"): both feeds used to start at once on the boot-time default
+# universe (~250 symbols) and, ~20 s later, the first /scan/universe answer (~491 symbols) made the AngelOne
+# feed stop (a join of up to 10 s), log in and subscribe a second time - two logins and two subscribe waves
+# inside the first minute, against the rate limits the open already strains. When API_GATEWAY_URL is set the
+# boot hooks now wait for the first universe and start each feed ONCE with it. If no universe arrives within
+# FEED_BOOT_UNIVERSE_WAIT_S (default 60) the feeds start on the default universe exactly as before, and the
+# normal refresh loop still re-points them later. FEED_BOOT_WAIT_FOR_UNIVERSE=0 restores the old behaviour.
+FEED_BOOT_WAIT_FOR_UNIVERSE = ((os.getenv("FEED_BOOT_WAIT_FOR_UNIVERSE") or "").strip() or "1") not in ("0", "false", "False", "off", "no")
+
+
+def _feed_boot_wait_s() -> float:
+    try:
+        v = float(((os.getenv("FEED_BOOT_UNIVERSE_WAIT_S") or "").strip() or "60"))
+    except ValueError:
+        return 60.0
+    return v if v == v and v >= 0 else 60.0
+
+
+def _boot_defers_feeds() -> bool:
+    """True when the feeds should wait for the first scan universe instead of starting on the default one."""
+    return bool(FEED_BOOT_WAIT_FOR_UNIVERSE
+                and (os.environ.get("API_GATEWAY_URL") or "").strip()
+                and _feed_boot_wait_s() > 0)
+
+
+def _boot_start_angelone_feed() -> None:
+    """Start the AngelOne feed on the default universe (only when AngelOne creds are present). Never raises."""
     try:
         from angelone_client import get_session
         if not get_session().is_configured():
@@ -474,6 +490,37 @@ async def _start_angelone_ws_feed():
         logger.warning("angelone_ws_feed startup skipped: %s", e)
 
 
+def _boot_start_yahoo_feed() -> None:
+    """Start the Yahoo feed on the default universe. Never raises."""
+    try:
+        from surprise_premarket import default_universe_from_env
+        import yahoo_ws_feed
+        universe = default_universe_from_env()
+        if universe:
+            yahoo_ws_feed.start_feed_background(universe)
+        else:
+            logger.warning("yahoo_ws_feed: no universe configured (SURPRISE_UNIVERSE/SCAN_UNIVERSE), not starting")
+    except Exception as e:
+        logger.warning("yahoo_ws_feed startup skipped: %s", e)
+
+
+@app.on_event("startup")
+async def _start_angelone_ws_feed():
+    """
+    §1 of the master prompt: AngelOne is meant to be the PRIMARY quote
+    source, with Yahoo/yfinance as fallback. angelone_client.py and
+    angelone_ws_feed.py were fully built for this, but nothing ever
+    called start_feed_background() at startup, so the feed never
+    connected and live_quotes/_LIVE never populated — the app kept
+    running entirely on Yahoo/yfinance regardless of AngelOne being
+    configured. This starts it, only when AngelOne creds are present.
+    (group173: deferred until the first scan universe arrives when API_GATEWAY_URL is set.)
+    """
+    if _boot_defers_feeds():
+        return
+    _boot_start_angelone_feed()
+
+
 @app.on_event("startup")
 async def _start_yahoo_ws_feed():
     """
@@ -486,17 +533,31 @@ async def _start_yahoo_ws_feed():
     backend from the crumb-protected REST path, so it doesn't share that
     rate limit. Runs regardless of AngelOne, so it's ready the moment
     AngelOne quota/connection drops out.
+    (group173: deferred until the first scan universe arrives when API_GATEWAY_URL is set.)
     """
-    try:
-        from surprise_premarket import default_universe_from_env
-        import yahoo_ws_feed
-        universe = default_universe_from_env()
-        if universe:
-            yahoo_ws_feed.start_feed_background(universe)
-        else:
-            logger.warning("yahoo_ws_feed: no universe configured (SURPRISE_UNIVERSE/SCAN_UNIVERSE), not starting")
-    except Exception as e:
-        logger.warning("yahoo_ws_feed startup skipped: %s", e)
+    if _boot_defers_feeds():
+        return
+    _boot_start_yahoo_feed()
+
+
+async def _boot_feed_fallback():
+    """group173: if the first scan universe has not arrived FEED_BOOT_WAIT_FOR_UNIVERSE seconds after boot,
+    start both feeds on the default universe, as the boot hooks used to do immediately."""
+    wait = _feed_boot_wait_s()
+    logger.info("feed boot: waiting up to %.0fs for the first scan universe before starting the live feeds", wait)
+    await asyncio.sleep(wait)
+    if _current_feed_universe:
+        return          # the refresh loop already started both feeds on the real universe
+    logger.warning("feed boot: no scan universe after %.0fs - starting the live feeds on the default universe "
+                   "(the refresh loop re-points them when the universe arrives)", wait)
+    await asyncio.to_thread(_boot_start_angelone_feed)
+    await asyncio.to_thread(_boot_start_yahoo_feed)
+
+
+@app.on_event("startup")
+async def _start_boot_feed_fallback():
+    if _boot_defers_feeds():
+        asyncio.create_task(_boot_feed_fallback())
 
 
 # ── Issue 2 fix: keep both WS feeds pointed at the REAL candidate universe ──
@@ -597,6 +658,11 @@ async def _refresh_feed_universe_loop():
 
             try:
                 import yahoo_ws_feed
+                # group173: with the boot start deferred the Yahoo feed may not be running yet; starting is
+                # idempotent (no-op when it already is) and ensure_subscribed adds the rest.
+                _start_y = getattr(yahoo_ws_feed, "start_feed_background", None)
+                if _start_y is not None:
+                    _start_y(symbols)
                 yahoo_ws_feed.ensure_subscribed(symbols)
             except Exception as e:
                 logger.warning("feed universe refresh: yahoo ensure_subscribed failed: %s", e)

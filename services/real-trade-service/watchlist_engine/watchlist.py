@@ -43,7 +43,8 @@ def _drop_cooldown_hours() -> float:
 
 
 def _recently_retired_for_drop(db: Session, mode: str, sym: str, ctype: str, hours: float) -> bool:
-    """True when this symbol+catalyst was retired by the group158 deep-drop check within `hours`."""
+    """True when this symbol+catalyst was retired by the group158 deep-drop check or the group169
+    penny/ETF check within `hours`."""
     if hours <= 0:
         return False
     return (
@@ -53,12 +54,22 @@ def _recently_retired_for_drop(db: Session, mode: str, sym: str, ctype: str, hou
             models.WatchlistEntry.symbol.in_([sym, f"{sym}.NS", f"{sym}.BO"]),
             models.WatchlistEntry.catalyst_type == ctype,
             models.WatchlistEntry.status == "expired",
-            models.WatchlistEntry.missed_reason.like("adverse:%"),
+            (models.WatchlistEntry.missed_reason.like("adverse:%")
+             | models.WatchlistEntry.missed_reason.like("instrument:%")),
             models.WatchlistEntry.updated_at >= _now() - timedelta(hours=hours),
         )
         .first()
         is not None
     )
+
+
+def _etf_name_skip(sym: str) -> bool:
+    """group169: True when ETF rows are being retired by the trigger pass (so they must not be re-inserted)."""
+    try:
+        from entry_engine import entry as _entry
+        return _entry._wl_instrument_retire_on() and _entry._wl_is_etf_symbol(sym)
+    except Exception:
+        return False
 
 
 async def refresh_watchlist(db: Session, mode: str) -> int:
@@ -77,6 +88,7 @@ async def refresh_watchlist(db: Session, mode: str) -> int:
 
     added = 0
     skipped_index = 0
+    skipped_etf = 0
     cooldown_h = _drop_cooldown_hours()
     for c in candidates:
         # group159 (item 4): one spelling per stock. Tier 1/2 sources can send "KOTAKBANK.NS" while Tier 3
@@ -89,6 +101,10 @@ async def refresh_watchlist(db: Session, mode: str) -> int:
         # group164: an index name carries the index LEVEL as its price, never a tradable catalyst price.
         if symbol_filter.index_filter_on() and symbol_filter.is_index_symbol(sym):
             skipped_index += 1
+            continue
+        # group169: an ETF is never a row (name test only; same helper the trigger pass uses).
+        if _etf_name_skip(sym):
+            skipped_etf += 1
             continue
         spellings = [sym, f"{sym}.NS", f"{sym}.BO"]
 
@@ -164,6 +180,8 @@ async def refresh_watchlist(db: Session, mode: str) -> int:
     if skipped_index:
         logger.info("refresh_watchlist[%s]: %d index-name item(s) ignored (index level is not a stock price)",
                     mode, skipped_index)
+    if skipped_etf:
+        logger.info("refresh_watchlist[%s]: %d ETF-name item(s) ignored", mode, skipped_etf)
     if added:
         db.commit()
         logger.info("refresh_watchlist[%s]: added %d new entries", mode, added)

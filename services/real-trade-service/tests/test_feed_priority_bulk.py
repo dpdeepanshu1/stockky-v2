@@ -94,6 +94,10 @@ def feed(monkeypatch):
     srv = _Upstream()
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     monkeypatch.setenv("MARKET_DATA_URL", f"http://127.0.0.1:{srv.server_address[1]}")
+    # group171: these tests pin the per-symbol cascade and the /quotes/bulk fallback, so bulk-first for the
+    # priority lane (and the share cache) is off here; tests/test_group171_held_quote_calls.py covers those.
+    monkeypatch.setenv("FEED_PRIORITY_BULK_FIRST", "0")
+    monkeypatch.setenv("FEED_PRIORITY_SHARE_S", "0")
     import importlib
     import market_feed.feed as f
     f = importlib.reload(f)

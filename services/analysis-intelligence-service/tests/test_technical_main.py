@@ -2563,3 +2563,50 @@ class TestAnalyzeFullPrecisionIndicators:
         assert r["rsi"] == 50.0 and r["adx"] == 0.0 and r["atr"] == 0.0
         assert r["ema20"] == r["ema50"] == r["ema200"] == 100.0
         assert r["bb_upper"] == r["bb_lower"] == 100.0
+
+
+# ── group170: guarded market-data door + readable failure logs ───────────────
+class TestMdGuardWiring:
+    def test_guard_unavailable_falls_back_to_plain_httpx(self, monkeypatch):
+        monkeypatch.setattr(tm, "_md_guard_mod", None)
+        monkeypatch.setattr(tm, "_md_guard_tried", True)
+        seen = []
+        monkeypatch.setattr(tm.httpx, "get", lambda url, **kw: seen.append((url, kw)) or _Resp(200, {"price": 5}))
+        assert tm._fetch_quote_price("TCS") == 5
+        assert seen[0][1] == {"timeout": 10}
+        assert tm._exc_detail(httpx.ReadTimeout("")) == "ReadTimeout"
+        assert tm._exc_detail(httpx.ReadTimeout("slow")) == "ReadTimeout: slow"
+
+    def test_guard_import_failure_is_swallowed(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "md_guard", None)
+        monkeypatch.setattr(tm, "_md_guard_mod", "stale")
+        monkeypatch.setattr(tm, "_md_guard_tried", False)
+        assert tm._guard() is None and tm._md_guard_tried is True
+
+    def test_guard_is_used_when_available(self, monkeypatch):
+        import md_guard
+        monkeypatch.setattr(tm, "_md_guard_mod", md_guard)
+        monkeypatch.setattr(tm, "_md_guard_tried", True)
+        seen = []
+        monkeypatch.setattr(md_guard, "md_get", lambda url, **kw: seen.append((url, kw)) or _Resp(200, {"price": 7}))
+        assert tm._fetch_quote_price("TCS") == 7
+        assert seen and tm._exc_detail(httpx.ReadTimeout("")) == "ReadTimeout"
+
+    def test_history_error_log_names_the_exception_type(self, monkeypatch, rl, caplog):
+        def boom(url, **kw):
+            raise httpx.ReadTimeout("")
+        monkeypatch.setattr(tm.httpx, "get", boom)
+        with caplog.at_level("WARNING", logger="technical-analysis-service"):
+            assert tm._fetch_history_from_market_data("TCS") is None
+        assert any("period=6mo: ReadTimeout" in m for m in caplog.messages)
+
+    def test_cooldown_error_is_a_transient_failure(self, monkeypatch, rl):
+        import md_guard
+
+        def cooling(url, **kw):
+            raise md_guard.MarketDataUnavailable("cooling down")
+        monkeypatch.setattr(md_guard, "md_get", cooling)
+        monkeypatch.setattr(tm, "_md_guard_mod", md_guard)
+        monkeypatch.setattr(tm, "_md_guard_tried", True)
+        assert tm._fetch_history_from_market_data("TCS") is None
+        assert tm._md_state.last_failure == "transient"

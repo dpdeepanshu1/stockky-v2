@@ -28,6 +28,8 @@ Daily loss kill switch:
 from __future__ import annotations
 
 import logging
+import os
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -65,6 +67,32 @@ _BALANCE_KEYS = (
     "withdrawableBalance", "sodLimit",
 )
 _last_balance_key: Optional[str] = None
+
+# 2026-10-06 (group 174, log noise): sync_from_broker() runs every trading cycle (~13 s) and logged two
+# INFO lines each time ("synced from broker", "sync_peer_pnl ... cached"), identical in most cycles.
+# Each line now logs when its figures change, and otherwise at most once per LEDGER_SYNC_LOG_EVERY_S
+# (default 300 s; 0 = log every time, as before; blank/invalid = default). Warnings/errors are unchanged.
+_sync_log_state: dict = {}
+
+
+def _sync_log_every_s() -> float:
+    raw = (os.getenv("LEDGER_SYNC_LOG_EVERY_S") or "").strip()
+    try:
+        v = float(raw) if raw else 300.0
+    except ValueError:
+        return 300.0
+    return v if v >= 0 else 300.0
+
+
+def _should_log_sync(key: str, figures) -> bool:
+    """True when `figures` differ from the last logged ones for `key`, or the interval has passed."""
+    every = _sync_log_every_s()
+    now = time.monotonic()
+    prev = _sync_log_state.get(key)
+    if every <= 0 or prev is None or prev[0] != figures or (now - prev[1]) >= every:
+        _sync_log_state[key] = (figures, now)
+        return True
+    return False
 
 # Dhan's fundlimit docs (dhanhq.co/docs/v2/funds): `availabelBalance` (sic) = "Available amount to
 # trade"; `sodLimit` = start-of-day amount; `withdrawableBalance` = amount withdrawable to a bank
@@ -267,10 +295,11 @@ def sync_from_broker(db: Session) -> float:
         row.available_capital = scalp_alloc
     row.last_synced_from_broker_at = datetime.now(timezone.utc)
     db.commit()
-    logger.info(
-        "ledger: synced from broker — total Dhan balance ₹%.2f, scalp pool ₹%.2f",
-        available_balance, scalp_alloc,
-    )
+    if _should_log_sync("broker", (round(available_balance, 2), round(scalp_alloc, 2))):
+        logger.info(
+            "ledger: synced from broker — total Dhan balance ₹%.2f, scalp pool ₹%.2f",
+            available_balance, scalp_alloc,
+        )
     # BUG FIX (Issue #2): sync peer PnL at the same cadence as broker sync
     # so reserve_capital()'s combined kill-switch check stays current.
     sync_peer_pnl(db)
@@ -308,10 +337,11 @@ def sync_peer_pnl(db: Session) -> Optional[float]:
         row.peer_realized_pnl_today = peer_pnl
         row.peer_pnl_last_synced_at = datetime.now(timezone.utc)
         db.commit()
-        logger.info(
-            "ledger.sync_peer_pnl: real-trade-service realized_pnl_today=₹%.2f cached",
-            peer_pnl,
-        )
+        if _should_log_sync("peer_pnl", round(peer_pnl, 2)):
+            logger.info(
+                "ledger.sync_peer_pnl: real-trade-service realized_pnl_today=₹%.2f cached",
+                peer_pnl,
+            )
         return peer_pnl
     except Exception as e:
         logger.warning(

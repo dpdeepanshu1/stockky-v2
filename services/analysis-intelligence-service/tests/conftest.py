@@ -50,3 +50,15 @@ def _reset_event_feed_cache(request):
     _clear_feed_caches(request.module)
     yield
     _clear_feed_caches(request.module)
+
+
+@pytest.fixture(autouse=True)
+def _reset_md_guard():
+    """group170: md_guard keeps a timeout streak / cool-down at module level; start every test clean."""
+    mod = sys.modules.get("md_guard")
+    if mod is not None:
+        mod.reset_state()
+    yield
+    mod = sys.modules.get("md_guard")
+    if mod is not None:
+        mod.reset_state()

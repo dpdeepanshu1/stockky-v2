@@ -907,3 +907,49 @@ class TestModuleLevel:
     def test_main_block_port_default(self, monkeypatch):
         monkeypatch.delenv("PORT", raising=False)
         assert self._run_main(monkeypatch)[0][1]["port"] == 8003
+
+
+# ── group170: guarded market-data door + readable failure logs ───────────────
+class TestMdGuardWiring:
+    def test_guard_unavailable_falls_back_to_plain_httpx(self, env, monkeypatch):
+        monkeypatch.setattr(fm, "_md_guard_mod", None)
+        monkeypatch.setattr(fm, "_md_guard_tried", True)
+        out = env.analyze({"pe_ratio": 20})
+        assert out["fallback_used"] is False and env.urls
+        assert fm._exc_detail(httpx.ReadTimeout("")) == "ReadTimeout"
+        assert fm._exc_detail(httpx.ReadTimeout("slow")) == "ReadTimeout: slow"
+
+    def test_guard_import_failure_is_swallowed(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "md_guard", None)
+        monkeypatch.setattr(fm, "_md_guard_mod", "stale")
+        monkeypatch.setattr(fm, "_md_guard_tried", False)
+        assert fm._guard() is None and fm._md_guard_tried is True
+
+    def test_guard_is_used_when_available(self, env, monkeypatch):
+        import md_guard
+        monkeypatch.setattr(fm, "_md_guard_mod", md_guard)
+        monkeypatch.setattr(fm, "_md_guard_tried", True)
+        seen = []
+        monkeypatch.setattr(md_guard, "md_get", lambda url, **kw: seen.append((url, kw)) or _Resp({"pe_ratio": 20}))
+        env.analyze({"pe_ratio": 20})
+        assert seen and seen[0][1] == {"timeout": 60} and fm._exc_detail(httpx.ReadTimeout("")) == "ReadTimeout"
+
+    def test_cooldown_error_falls_back_with_a_readable_warning(self, env, caplog):
+        import md_guard
+        env.http_exc = md_guard.MarketDataUnavailable("market-data cooling down after repeated timeouts (9s left)")
+        with caplog.at_level(logging.WARNING):
+            out = env.analyze()
+        assert out["fallback_used"] is True and out["fundamental_score"] == 50
+        assert "unavailable for TESTCO" in caplog.text and "MarketDataUnavailable" in caplog.text
+
+    def test_timeout_log_names_the_exception_type(self, env, caplog):
+        env.http_exc = httpx.ReadTimeout("")
+        with caplog.at_level(logging.WARNING):
+            env.analyze()
+        assert "timed out for TESTCO (ReadTimeout)" in caplog.text
+
+    def test_unexpected_error_log_has_symbol_and_type(self, env, caplog):
+        env.http_exc = RuntimeError("")
+        with caplog.at_level(logging.ERROR):
+            assert env.analyze()["fallback_used"] is True
+        assert "TESTCO: RuntimeError" in caplog.text

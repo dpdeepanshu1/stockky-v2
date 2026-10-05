@@ -262,7 +262,7 @@ class TestRefreshDynamicUniverseSync:
 
     def _run_with_desired_and_current(self, desired, current,
                                        subscribe_ok=True, unsubscribe_ok=True,
-                                       check_ok=True):
+                                       check_ok=True, check_exc=None):
         """Helper: run refresh_dynamic_universe with controlled desired/current sets."""
         _reset_timer()
 
@@ -274,7 +274,7 @@ class TestRefreshDynamicUniverseSync:
                                         else MagicMock(side_effect=Exception("unsub failed")))
         check_resp = MagicMock()
         check_resp.raise_for_status = (MagicMock() if check_ok
-                                        else MagicMock(side_effect=Exception("check failed")))
+                                        else MagicMock(side_effect=check_exc or Exception("check failed")))
 
         # /check is always a GET; subscribe/unsubscribe are POST
         call_state = {"posts": 0}
@@ -390,6 +390,19 @@ class TestRefreshDynamicUniverseSync:
         # /check failed but result is still returned
         assert "added" in result
         assert "INFY" in result["added"]
+
+    def test_check_failure_log_names_the_exception_type(self, caplog):
+        # group170: a timeout has an empty str(); the warning used to read "failed ()"
+        import httpx
+        with caplog.at_level("WARNING"):
+            self._run_with_desired_and_current(desired=["INFY"], current=[], check_ok=False,
+                                               check_exc=httpx.ReadTimeout(""))
+        assert any("/check trigger failed (ReadTimeout)" in r.getMessage() for r in caplog.records)
+
+    def test_check_failure_log_keeps_the_message_when_there_is_one(self, caplog):
+        with caplog.at_level("WARNING"):
+            self._run_with_desired_and_current(desired=["INFY"], current=[], check_ok=False)
+        assert any("/check trigger failed (Exception: check failed)" in r.getMessage() for r in caplog.records)
 
     def test_empty_desired_after_cap_does_not_subscribe(self):
         result = self._run_with_desired_and_current(

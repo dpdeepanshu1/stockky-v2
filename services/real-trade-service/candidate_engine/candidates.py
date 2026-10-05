@@ -394,6 +394,36 @@ async def _fetch(client: httpx.AsyncClient, path: str) -> Any:
     return None
 
 
+# group172 (item 5): why a symbol had no daily history. _fetch_history hid every failure behind an empty list,
+# so "16 of 64 symbols have no daily history" could not be told apart (market-data timing out vs the symbol
+# having no history at all). It now leaves the last reason per symbol here (None = got candles); the volume_shock
+# cycle reports the breakdown, and symbols that DEFINITELY have none (HTTP 404/400, an empty answer, or fewer than
+# 6 daily candles) are not asked again for CANDIDATE_VOLUME_SHOCK_NOHIST_TTL_S (default 6 h; 0 = off).
+# Timeouts, 429 and 5xx are never cached: they say nothing about the symbol.
+VOLUME_SHOCK_NOHIST_TTL_S = float(((os.getenv("CANDIDATE_VOLUME_SHOCK_NOHIST_TTL_S") or "").strip() or str(6 * 3600)))
+_HIST_REASON: dict = {}        # symbol -> last failure reason (absent / None = last call returned candles)
+_HIST_NONE_UNTIL: dict = {}    # symbol -> monotonic time until which "no history" is taken as known
+_HIST_DEFINITE = ("empty answer", "HTTP 404", "HTTP 400", "short history")
+
+
+def _note_history_reason(symbol: str, reason: Optional[str]) -> None:
+    try:
+        if reason is None:
+            _HIST_REASON.pop(symbol, None)
+        else:
+            if len(_HIST_REASON) > 5000:
+                _HIST_REASON.clear()
+            _HIST_REASON[symbol] = reason
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def clear_history_state() -> None:
+    """Forget failure reasons and known-no-history pauses (tests, or an operator hook)."""
+    _HIST_REASON.clear()
+    _HIST_NONE_UNTIL.clear()
+
+
 async def _fetch_history(
     client: httpx.AsyncClient, symbol: str, period: str, interval: str = "1d"
 ) -> list[dict]:
@@ -408,9 +438,13 @@ async def _fetch_history(
         )
         if r.status_code == 200:
             data = r.json()
-            return data.get("candles") or []
+            candles = data.get("candles") or []
+            _note_history_reason(symbol, None if candles else "empty answer")
+            return candles
+        _note_history_reason(symbol, f"HTTP {r.status_code}")
     except Exception as e:
-        logger.debug("history %s/%s failed: %s", symbol, period, e)
+        _note_history_reason(symbol, type(e).__name__)      # httpx timeouts have an empty str(e)
+        logger.debug("history %s/%s failed: %s: %s", symbol, period, type(e).__name__, e)
     return []
 
 
@@ -1240,12 +1274,21 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict
                 "atr_pct": None,
             }
 
+    if VOLUME_SHOCK_NOHIST_TTL_S > 0 and _HIST_NONE_UNTIL.get(symbol, 0.0) > time.monotonic():
+        return {"reject_reason": "No daily history on record for volume-shock check (known, not retried yet).",
+                "atr_pct": None}
+
     try:
         candles = await _fetch_history(client, symbol, "1mo", "1d")
     except Exception as e:
         candles = e
     if isinstance(candles, Exception) or not isinstance(candles, list) or len(candles) < 6:
+        if isinstance(candles, list) and 0 < len(candles) < 6:
+            _note_history_reason(symbol, "short history")
+        if VOLUME_SHOCK_NOHIST_TTL_S > 0 and _HIST_REASON.get(symbol) in _HIST_DEFINITE:
+            _HIST_NONE_UNTIL[symbol] = time.monotonic() + VOLUME_SHOCK_NOHIST_TTL_S
         return {"reject_reason": "Insufficient daily history for volume-shock check.", "atr_pct": None}
+    _HIST_NONE_UNTIL.pop(symbol, None)
 
     current_price = float(quote.get("price") or quote.get("cmp") or 0)
 
@@ -1787,6 +1830,8 @@ async def _refresh_volume_shock_candidates(
     skipped  = 0
     no_quote_count = 0
     history_missing = 0
+    history_known_none = 0
+    history_reasons: dict = {}
     quality_rejected = 0
 
     # ── First pass: keep only symbols that cleared the price/volume
@@ -1809,6 +1854,10 @@ async def _refresh_volume_shock_candidates(
                 no_quote_count += 1
             if "insufficient daily history" in reject.lower():
                 history_missing += 1
+                _why = _HIST_REASON.get(sym) or "unknown"
+                history_reasons[_why] = history_reasons.get(_why, 0) + 1
+            elif "no daily history on record" in reject.lower():
+                history_known_none += 1
             continue
 
         passed.append((sym, result))
@@ -1819,9 +1868,14 @@ async def _refresh_volume_shock_candidates(
         logger.warning(
             "volume_shock: daily history unavailable for %d of %d symbol(s) this cycle (mode=%s) - "
             "market-data /history is failing or its candle bucket is shedding; those symbols "
-            "were skipped, not judged",
+            "were skipped, not judged. Reasons: %s",
             history_missing, len(vs_tasks), mode,
+            ", ".join(f"{k} x{v}" for k, v in sorted(history_reasons.items(), key=lambda kv: -kv[1])),
         )
+    if history_known_none:
+        logger.info("volume_shock: %d of %d symbol(s) skipped without a request - no daily history on record "
+                    "(retried after %.0f h; CANDIDATE_VOLUME_SHOCK_NOHIST_TTL_S)",
+                    history_known_none, len(vs_tasks), VOLUME_SHOCK_NOHIST_TTL_S / 3600.0)
 
     # 2026-09-11 addition: record this cycle's average pre-shock ATR%
     # across the batch that cleared the price/volume check — this is what

@@ -92,6 +92,21 @@ POLL_INTERVAL_S = float(((os.getenv("ANGELONE_POLL_INTERVAL_S") or "").strip() o
 BATCH_GAP_S = float(((os.getenv("ANGELONE_BATCH_GAP_S") or "").strip() or "0.35"))
 BATCH_SIZE = 50  # AngelOne's documented per-request token cap for this endpoint
 
+# group153: live_quotes used to be written ONE ROW PER TRANSACTION (491 sequential
+# MERGE/INSERT round trips per poll cycle on a 491-symbol universe, on the polling
+# thread itself), so on a slow Oracle link the DB writes - not AngelOne - stretched a
+# cycle past the 20 s freshness window real-trade-service applies to live_quotes rows,
+# and every position/candidate then fell through to the slow per-symbol /quote route.
+# Rows of one AngelOne batch (<= 50) are now written in ONE transaction (executemany).
+# ANGELONE_FEED_DB_BATCH=0 restores the old per-row writes.
+DB_BATCH_WRITES = ((os.getenv("ANGELONE_FEED_DB_BATCH") or "").strip() or "1") not in ("0", "false", "False")
+# A poll cycle longer than this logs one WARNING (at most every SLOW_CYCLE_LOG_EVERY_S):
+# it means live_quotes rows are about to go stale for the symbols polled first.
+SLOW_CYCLE_WARN_S = float(((os.getenv("ANGELONE_FEED_SLOW_CYCLE_WARN_S") or "").strip() or "15.0"))
+SLOW_CYCLE_LOG_EVERY_S = 300.0
+_last_cycle_s: Optional[float] = None
+_last_slow_cycle_log = 0.0
+
 # In-memory dict — same pattern as yahoo_ws_feed.py
 _LIVE: Dict[str, dict] = {}
 _LIVE_LOCK = threading.Lock()
@@ -207,11 +222,62 @@ def _upsert_tick_sync(sym: str, ltp, o, h, l, c, vol) -> None:
         logger.debug("live_quotes upsert failed for %s (non-fatal): %s", sym, e)
 
 
-def _on_tick_sync(tick: dict) -> None:
-    """Update the in-memory cache AND the live_quotes DB row for one tick."""
+def _upsert_ticks_batch_sync(rows: list) -> None:
+    """group153: write many live_quotes rows in ONE transaction (executemany).
+
+    `rows` is a list of (sym, ltp, o, h, l, c, vol) tuples, the same arguments
+    _upsert_tick_sync takes. Rows without a symbol/price are skipped, like the
+    single-row writer. Never raises (the in-memory cache is the primary store)."""
+    clean = [r for r in rows if r and r[0] and r[1]]
+    if not clean:
+        return
+    engine, dialect = _get_live_quotes_engine()
+    if engine is None:
+        return
+    _ensure_schema(engine, dialect)
+    try:
+        from sqlalchemy import text as _text
+        params = []
+        for sym, ltp, o, h, l, c, vol in clean:
+            params.append({
+                "s": sym,
+                "l": float(ltp),
+                "o": json.dumps({"open": o, "high": h, "low": l, "close": c or ltp}),
+                "v": int(vol or 0),
+            })
+        if dialect == "oracle":
+            sql = (
+                "MERGE INTO live_quotes d USING ("
+                "SELECT :s AS symbol, :l AS ltp, :o AS ohlc_json, :v AS volume FROM dual"
+                ") s ON (d.symbol = s.symbol) "
+                "WHEN MATCHED THEN UPDATE SET d.ltp = s.ltp, d.ohlc_json = s.ohlc_json, "
+                "d.volume = s.volume, d.source = 'angelone', d.updated_at = SYSTIMESTAMP "
+                "WHEN NOT MATCHED THEN INSERT (symbol, ltp, ohlc_json, volume, source, updated_at) "
+                "VALUES (s.symbol, s.ltp, s.ohlc_json, s.volume, 'angelone', SYSTIMESTAMP)"
+            )
+        else:
+            sql = (
+                "INSERT INTO live_quotes (symbol, ltp, ohlc_json, volume, source, updated_at) "
+                "VALUES (:s, :l, :o, :v, 'angelone', now()) "
+                "ON CONFLICT (symbol) DO UPDATE "
+                "SET ltp=EXCLUDED.ltp, ohlc_json=EXCLUDED.ohlc_json, "
+                "volume=EXCLUDED.volume, source=EXCLUDED.source, updated_at=now()"
+            )
+        with engine.begin() as conn:
+            conn.execute(_text(sql), params)
+    except Exception as e:
+        logger.debug("live_quotes batch upsert of %d rows failed (non-fatal): %s", len(clean), e)
+
+
+def _on_tick_sync(tick: dict, write_db: bool = True):
+    """Update the in-memory cache AND the live_quotes DB row for one tick.
+
+    group153: with write_db=False only the in-memory cache is updated and the
+    (sym, ltp, o, h, l, c, vol) tuple is returned so the caller can write a whole
+    batch in one transaction (_upsert_ticks_batch_sync)."""
     sym = _clean(tick.get("tradingSymbol") or tick.get("symbol") or "")
     if not sym:
-        return
+        return None
     ltp = tick.get("ltp") or tick.get("last_price")
     o, h, l, c = tick.get("open"), tick.get("high"), tick.get("low"), tick.get("close")
     vol = tick.get("tradeVolume") or tick.get("volume")
@@ -228,7 +294,10 @@ def _on_tick_sync(tick: dict) -> None:
             "ts":         time.time(),   # cheap float for staleness math, mirrors yahoo_ws_feed.py
             "source":     "angelone_ws",
         }
+    if not write_db:
+        return (sym, ltp, o, h, l, c, vol)
     _upsert_tick_sync(sym, ltp, o, h, l, c, vol)
+    return None
 
 
 def get_live_quote(symbol: str, max_age_sec: float = 20.0) -> Optional[dict]:
@@ -265,7 +334,26 @@ def feed_status() -> dict:
         "cached_symbols": n,
         "newest_tick_age_s": (time.time() - newest) if newest else None,
         "in_market_window": is_feed_window_ist(),
+        "last_cycle_s": _last_cycle_s,
     }
+
+
+def _note_cycle(elapsed_s: float, n_symbols: int) -> None:
+    """group153: remember the last full-cycle wall time and warn (rate-limited) when it
+    exceeds SLOW_CYCLE_WARN_S, i.e. when early-polled symbols will be older than the
+    20 s freshness window by the time the cycle ends."""
+    global _last_cycle_s, _last_slow_cycle_log
+    _last_cycle_s = elapsed_s
+    if elapsed_s > SLOW_CYCLE_WARN_S:
+        now = time.time()
+        if now - _last_slow_cycle_log >= SLOW_CYCLE_LOG_EVERY_S:
+            _last_slow_cycle_log = now
+            logger.warning(
+                "AngelOne feed: a poll cycle over %d symbols took %.1fs (> %.0fs) - live_quotes rows "
+                "polled early in the cycle go stale before the next pass; check DB write latency "
+                "(ANGELONE_FEED_DB_BATCH) and AngelOne batch latency",
+                n_symbols, elapsed_s, SLOW_CYCLE_WARN_S,
+            )
 
 
 def start_feed_background(symbols: list) -> None:
@@ -383,12 +471,13 @@ def start_feed_background(symbols: list) -> None:
                         fetched = await session.get_quotes_batch("NSE", batch)
                         if not _current():
                             return   # superseded/stopped while the request was in flight: drop the stale ticks
+                        db_rows = []
                         for row in fetched:
                             tok = str(row.get("symbolToken") or "")
                             sym = reverse_map.get(tok)
                             if not sym:
                                 continue
-                            _on_tick_sync({
+                            db_row = _on_tick_sync({
                                 "tradingSymbol": sym,
                                 "ltp":           row.get("ltp"),
                                 "open":          row.get("open"),
@@ -396,7 +485,13 @@ def start_feed_background(symbols: list) -> None:
                                 "low":           row.get("low") or row.get("tradeLow"),
                                 "close":         row.get("close"),
                                 "tradeVolume":   row.get("tradeVolume") or row.get("volume"),
-                            })
+                            }, write_db=not DB_BATCH_WRITES)
+                            if db_row is not None:
+                                db_rows.append(db_row)
+                        if db_rows:
+                            # One transaction for the whole AngelOne batch, off the poll loop
+                            # so the DB round trip does not block the event loop.
+                            await asyncio.to_thread(_upsert_ticks_batch_sync, db_rows)
                     except Exception as e:
                         # BUG FIX (2026-09-17): httpx timeout exceptions
                         # stringify to "" — bare `e` produced "quote batch
@@ -445,6 +540,7 @@ def start_feed_background(symbols: list) -> None:
                     cycle_start = time.time()
                     await _poll_cycle()
                     elapsed = time.time() - cycle_start
+                    _note_cycle(elapsed, len(tokens))
                     # Note: a full cycle's wall time scales with universe size
                     # (len(tokens)/BATCH_SIZE batches * BATCH_GAP_S, plus network
                     # latency per batch). For a large universe this can exceed

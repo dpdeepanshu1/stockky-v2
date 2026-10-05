@@ -2468,6 +2468,112 @@ def _fetch_price_from_quote(symbol: str) -> Optional[float]:
     return None
 
 
+# group153 (market-data overload): this helper used to send one GET /quote/{sym} per symbol
+# (8 at a time), so every hot-picks / scan chunk turned into N market-data /quote waterfalls
+# even though market-data already serves AngelOne ticks in bulk - and two overlapping callers
+# (hot-picks pass 2 + a scan chunk) asked for the same symbols again. Now:
+#   * the symbol list is de-duplicated by base symbol;
+#   * lists of GATEWAY_BULK_QUOTE_MIN (15) or more are priced with chunked POST /quotes/bulk
+#     first; only the symbols bulk could not price use the old per-symbol path;
+#   * bulk prices are kept for GATEWAY_BULK_QUOTE_CACHE_S (8 s) so an overlapping caller reuses
+#     them instead of asking again, and a bulk row whose fetched_at is older than
+#     GATEWAY_BULK_QUOTE_MAX_AGE_S (20 s) is ignored (sent per-symbol instead).
+# GATEWAY_BULK_QUOTE_MIN=0 turns the bulk path off (old behaviour, minus the de-duplication).
+_GW_BULK_PX_CACHE: dict = {}   # base -> (monotonic_ts, price)
+from datetime import timezone as _dt_timezone
+
+
+def _gw_env_num(name: str, default: float) -> float:
+    try:
+        raw = (os.getenv(name) or "").strip()
+        return float(raw) if raw else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _gw_quote_px(data) -> Optional[float]:
+    """First positive price field of a market-data quote dict (same order as the per-symbol path)."""
+    if not isinstance(data, dict):
+        return None
+    for k in ("price", "close", "ltp", "regularMarketPrice", "last"):
+        v = data.get(k)
+        if v is not None:
+            try:
+                px = float(v)
+                if px > 0:
+                    return px
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _gw_bulk_row_fresh(row: dict, max_age_s: float) -> bool:
+    """True when the bulk row's fetched_at parses and is at most max_age_s old (UTC, naive or aware)."""
+    raw = row.get("fetched_at")
+    if not raw or not isinstance(raw, str):
+        return False
+    try:
+        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=_dt_timezone.utc)
+    return 0 <= (datetime.now(_dt_timezone.utc) - ts).total_seconds() <= max_age_s
+
+
+async def _fetch_prices_bulk_first(bases: list, client: httpx.AsyncClient) -> dict:
+    """Price `bases` through chunked POST /quotes/bulk. Returns {BASE: float} for the ones it could
+    price; a failing chunk just leaves its symbols for the per-symbol path (never raises)."""
+    out: dict = {}
+    now = time.monotonic()
+    cache_s = _gw_env_num("GATEWAY_BULK_QUOTE_CACHE_S", 8.0)
+    max_age = _gw_env_num("GATEWAY_BULK_QUOTE_MAX_AGE_S", 20.0)
+    chunk = max(1, int(_gw_env_num("GATEWAY_BULK_QUOTE_CHUNK", 50)))
+    timeout_s = _gw_env_num("GATEWAY_BULK_QUOTE_TIMEOUT_S", 12.0)
+    need = []
+    for b in bases:
+        hit = _GW_BULK_PX_CACHE.get(b)
+        if cache_s > 0 and hit and now - hit[0] <= cache_s:
+            out[b] = hit[1]
+        else:
+            need.append(b)
+    sem = asyncio.Semaphore(2)
+
+    async def one_chunk(part: list):
+        async with sem:
+            try:
+                r = await client.post(
+                    f"{MARKET_DATA_URL.rstrip('/')}/quotes/bulk",
+                    json={"symbols": part},
+                    timeout=timeout_s,
+                )
+                if r.status_code != 200:
+                    return
+                body = r.json()
+                rows = body.get("quotes") if isinstance(body, dict) else None
+                wanted = set(part)
+                for q in rows or []:
+                    if not isinstance(q, dict):
+                        continue
+                    base = str(q.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip()
+                    if base not in wanted or not _gw_bulk_row_fresh(q, max_age):
+                        continue
+                    px = _gw_quote_px(q)
+                    if px:
+                        out[base] = px
+                        _GW_BULK_PX_CACHE[base] = (time.monotonic(), px)
+            except Exception as e:
+                logger.debug("gateway bulk quotes chunk failed (%d symbols): %s", len(part), e)
+
+    await asyncio.gather(*(one_chunk(need[i:i + chunk]) for i in range(0, len(need), chunk)),
+                         return_exceptions=True)
+    if len(_GW_BULK_PX_CACHE) > 5000:       # bounded: drop entries past the TTL
+        cutoff = time.monotonic() - max(cache_s, 1.0)
+        for k in [k for k, v in _GW_BULK_PX_CACHE.items() if v[0] < cutoff]:
+            _GW_BULK_PX_CACHE.pop(k, None)
+    return out
+
+
 async def _fetch_prices_bulk_async(symbols: list, client: httpx.AsyncClient) -> dict:
     """Concurrent short quotes for a scan chunk → {BASE: float}."""
     out = {}
@@ -2483,28 +2589,35 @@ async def _fetch_prices_bulk_async(symbols: list, client: httpx.AsyncClient) -> 
                 )
                 if r.status_code != 200:
                     return
-                data = r.json()
-                if not isinstance(data, dict):
-                    return
-                for k in ("price", "close", "ltp", "regularMarketPrice", "last"):
-                    v = data.get(k)
-                    if v is not None:
-                        try:
-                            px = float(v)
-                            if px > 0:
-                                out[base] = px
-                                return
-                        except (TypeError, ValueError):
-                            pass
+                px = _gw_quote_px(r.json())
+                if px:
+                    out[base] = px
             except Exception:
                 return
 
     # A None / blank / non-string symbol used to be requested as ".../quote/None" and stored
-    # under "". Skip it instead of asking the market-data service for nothing.
-    await asyncio.gather(
-        *(one(s) for s in symbols if isinstance(s, str) and s.strip()),
-        return_exceptions=True,
-    )
+    # under "". Skip it instead of asking the market-data service for nothing. group153: the same
+    # stock listed twice (or as SYM and SYM.NS) is requested once.
+    todo, seen = [], set()
+    for s_ in symbols:
+        if not isinstance(s_, str) or not s_.strip():
+            continue
+        base = s_.upper().replace(".NS", "").replace(".BO", "").strip()
+        if base in seen:
+            continue
+        seen.add(base)
+        todo.append(s_)
+
+    bulk_min = int(_gw_env_num("GATEWAY_BULK_QUOTE_MIN", 15))
+    if bulk_min > 0 and len(todo) >= bulk_min:
+        bases = [t.upper().replace(".NS", "").replace(".BO", "").strip() for t in todo]
+        try:
+            out.update(await _fetch_prices_bulk_first(bases, client))
+        except Exception as e:
+            logger.debug("gateway bulk-first pricing failed, using per-symbol path: %s", e)
+        todo = [t for t, b in zip(todo, bases) if b not in out]
+
+    await asyncio.gather(*(one(s_) for s_ in todo), return_exceptions=True)
     return out
 
 async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> tuple[Optional[dict], bool]:

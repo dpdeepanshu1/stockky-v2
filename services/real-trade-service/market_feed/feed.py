@@ -149,7 +149,25 @@ _BG_TASKS: set = set()                       # strong refs so fire-and-forget ta
 
 
 def _clean_sym(symbol: str) -> str:
-    return (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    """Canonical symbol: upper-case, trimmed, percent-decoded ("M%26M" -> "M&M"), exchange suffix removed.
+
+    group159 (item 4 of the 2026-10-05 list): KOTAKBANK and KOTAKBANK.NS were fetched as two symbols and
+    "ARE&M" / "M%26M" were keyed differently. Only a trailing .NS/.BO is stripped (the old replace() also
+    cut ".NS" out of the middle of a string).
+    """
+    from urllib.parse import unquote as _unquote
+    sym = _unquote(str(symbol or "")).strip().upper()
+    for suf in (".NS", ".BO"):
+        if sym.endswith(suf):
+            sym = sym[: -len(suf)].strip()
+            break
+    return sym
+
+
+def _path_sym(symbol: str) -> str:
+    """Symbol as one URL path segment ("M&M" -> "M%26M", "ARE&M" -> "ARE%26M"); decoded first so it is never double-encoded."""
+    from urllib.parse import quote as _quote, unquote as _unquote
+    return _quote(_unquote(str(symbol or "")), safe="")
 
 
 def _compute_atr_from_candles(candles: list) -> Optional[float]:
@@ -309,7 +327,7 @@ async def _bg_refresh_atr(client: Optional[httpx.AsyncClient], symbol: str) -> N
     try:
         async with httpx.AsyncClient(timeout=8.0) as own:
             r = await own.get(
-                f"{MARKET_DATA_URL}/history/{symbol}",
+                f"{MARKET_DATA_URL}/history/{_path_sym(symbol)}",
                 params={"period": _ATR_HISTORY_PERIOD, "interval": "1d"},
                 timeout=8.0,
             )
@@ -395,6 +413,26 @@ class Tick:
         self.prev_close = prev_close
 
 
+def _lq_prev_close(lq, ltp) -> Optional[float]:
+    """group156: previous close from a market-data `/live-quote` answer, or None. Never raises.
+
+    The AngelOne feed stores the broker quote's `close` (the PREVIOUS session's close, the same way
+    market-data's movers sweep reads it) in `ohlc_json`. When that field is missing the writer falls
+    back to the LTP, so a close that equals the LTP is not trustworthy and is treated as unknown
+    (fail-open, as before). Used only by the watchlist day-change guard, never for sizing/orders.
+    """
+    try:
+        ohlc = lq.get("ohlc") if isinstance(lq, dict) else None
+        if not isinstance(ohlc, dict):
+            return None
+        pc = _safe_prev_close(ohlc.get("close"))
+        if pc is None or abs(pc - float(ltp)) < 1e-9:
+            return None
+        return pc
+    except Exception:
+        return None
+
+
 def _safe_prev_close(value) -> Optional[float]:
     """group155: parse an upstream previous-close into a positive float, or None. Never raises."""
     try:
@@ -402,6 +440,80 @@ def _safe_prev_close(value) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return v if v > 0 and v == v else None
+
+
+# ── group160 (item 5): symbols that have no price are paused instead of retried every cycle ─────────────
+# QUALIANCE, BMISL, BAGMANE, EMBASSY, ANNAPURNA and AAKASH (delisted / renamed / not an equity) answered
+# 404 or "no price" on every cycle, and each retry cost a /live-quote + /quote call (plus the bulk miss)
+# against the rate-limit budget that real symbols need. After FEED_DEAD_AFTER_MISSES (default 3) definite
+# misses in a row on /quote (HTTP 404, or HTTP 200 with no usable price), the symbol is left out of
+# non-priority batches for FEED_DEAD_BACKOFF_S (default 30 min), doubling after each further miss up to
+# FEED_DEAD_BACKOFF_MAX_S (default 6 h). Timeouts and 5xx are NOT misses (upstream trouble says nothing
+# about the symbol). One real price clears the count. The priority lane (open positions) never skips.
+# FEED_DEAD_SKIP=0 turns the whole thing off. The state is per process and resets on restart.
+_DEAD_LOCK = _threading.Lock()
+_DEAD: dict[str, list] = {}        # clean symbol -> [consecutive_misses, skip_until_monotonic]
+
+
+def _dead_cfg() -> tuple:
+    def _f(name: str, default: float) -> float:
+        raw = (os.getenv(name) or "").strip()
+        try:
+            v = float(raw) if raw else default
+        except ValueError:
+            return default
+        return v if v == v and v >= 0 else default
+    on = ((os.getenv("FEED_DEAD_SKIP") or "").strip() or "1") not in ("0", "false", "False")
+    return (on, max(1, int(_f("FEED_DEAD_AFTER_MISSES", 3))), _f("FEED_DEAD_BACKOFF_S", 1800.0),
+            _f("FEED_DEAD_BACKOFF_MAX_S", 21600.0))
+
+
+def _note_no_data(symbol: str) -> None:
+    """Record one definite "no price for this symbol" answer. Never raises."""
+    try:
+        on, after, base, cap = _dead_cfg()
+        sym = _clean_sym(symbol)
+        if not on or not sym:
+            return
+        with _DEAD_LOCK:
+            ent = _DEAD.setdefault(sym, [0, 0.0])
+            ent[0] += 1
+            if ent[0] >= after:
+                wait = min(cap, base * (2 ** (ent[0] - after))) if base > 0 else 0.0
+                ent[1] = _time.monotonic() + wait
+                if ent[0] == after or ent[0] - after < 6:
+                    logger.info("get_quotes: %s has had no price %d time(s) in a row — paused for %.0f min "
+                                "(open positions are never paused)", sym, ent[0], wait / 60.0)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("_note_no_data(%s) failed: %s", symbol, e)
+
+
+def _note_priced(symbol: str) -> None:
+    """A real price arrived: forget any misses. Never raises."""
+    try:
+        if _DEAD:
+            with _DEAD_LOCK:
+                _DEAD.pop(_clean_sym(symbol), None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _paused_symbols(symbols: list) -> list:
+    """The subset of (canonical) `symbols` currently paused. Never raises."""
+    try:
+        if not _DEAD or not _dead_cfg()[0]:
+            return []
+        now = _time.monotonic()
+        with _DEAD_LOCK:
+            return [x for x in symbols if x in _DEAD and _DEAD[x][1] > now]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def clear_dead_symbols() -> None:
+    """Forget every pause (tests, or an operator hook)."""
+    with _DEAD_LOCK:
+        _DEAD.clear()
 
 
 async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool = False,
@@ -431,7 +543,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
     try:
         if _skip_live:
             raise _SkipLiveQuote()
-        r_lq = await client.get(f"{MARKET_DATA_URL}/live-quote/{symbol}", timeout=3.0 * timeout_scale)
+        r_lq = await client.get(f"{MARKET_DATA_URL}/live-quote/{_path_sym(symbol)}", timeout=3.0 * timeout_scale)
         if r_lq.status_code == 200:
             lq = r_lq.json()
             ltp = lq.get("ltp")
@@ -443,6 +555,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
                     updated_at = updated_at.replace(tzinfo=timezone.utc)
                 age_s = (datetime.now(timezone.utc) - updated_at).total_seconds()
                 if age_s <= LIVE_QUOTE_MAX_AGE_S:
+                    _note_priced(symbol)
                     vol = lq.get("volume")
 
                     # ATR fix: serve from cache; if cold, schedule a background
@@ -464,6 +577,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
                         atr=atr,   # None on first cycle; populated from next cycle onward
                         source=f"live_quotes({lq.get('source', 'angelone')})",
                         volume=int(vol) if vol not in (None, "") else None,
+                        prev_close=_lq_prev_close(lq, ltp),
                     )
                 else:
                     logger.debug(
@@ -491,9 +605,11 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
         if not for_display:
             _schedule_atr_refresh(client, symbol)
 
-        r = await client.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=8.0 * timeout_scale)
+        r = await client.get(f"{MARKET_DATA_URL}/quote/{_path_sym(symbol)}", timeout=8.0 * timeout_scale)
         # the ATR refresh task runs in the background; we don't await it here.
 
+        if r.status_code == 404:
+            _note_no_data(symbol)   # group160: definite "unknown symbol" (delisted / renamed / not an equity)
         if r.status_code != 200:
             # 2026-09-21 visibility fix: this branch used to return None with
             # zero log line at all — worse than the except below, since a
@@ -508,7 +624,9 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
         q = r.json()
         price = q.get("price") or q.get("cmp")
         if not price or float(price) <= 0:
+            _note_no_data(symbol)   # group160: answered, but with nothing usable
             return None
+        _note_priced(symbol)
         vol = q.get("volume")
 
         # Prefer freshly-refreshed ATR (may already be done by the time we
@@ -723,6 +841,7 @@ async def _bulk_ticks(client: httpx.AsyncClient, symbols: list[str], *, timeout:
                     tick = _tick_from_bulk_item(item, now=now)
                     if tick is not None:
                         out[tick.symbol] = tick
+                        _note_priced(tick.symbol)
                         _schedule_atr_refresh(client, tick.symbol)   # cold ATR -> background refresh, as get_quote()
             except Exception as e:
                 logger.warning("get_quotes: /quotes/bulk chunk of %d failed: %s: %s", len(chunk), type(e).__name__, e)
@@ -764,7 +883,30 @@ async def _priority_quotes(symbols: list[str]) -> dict[str, Tick]:
 
 
 async def get_quotes(symbols: list[str], *, priority: bool = False) -> dict[str, Tick]:
-    """Bulk fetch over a shared client.
+    """Bulk fetch over a shared client. Each distinct stock is fetched once however it is spelled
+    (KOTAKBANK / kotakbank.ns / KOTAKBANK.NS, M&M / M%26M) and the tick is returned under every spelling that
+    was asked for (group159).
+
+    See _get_quotes_unique for the lanes.
+    """
+    out: dict[str, Tick] = {}
+    if not symbols:
+        return out
+    canon_of = {s: _clean_sym(s) for s in symbols}
+    uniq = list(dict.fromkeys(c for c in canon_of.values() if c))
+    if len(uniq) < len(set(symbols)):
+        logger.debug("get_quotes: %d requested spellings collapse to %d distinct symbols",
+                     len(set(symbols)), len(uniq))
+    got = await _get_quotes_unique(uniq, priority=priority) if uniq else {}
+    for s, c in canon_of.items():
+        t = got.get(c)
+        if t is not None:
+            out[s] = t
+    return out
+
+
+async def _get_quotes_unique(symbols: list[str], *, priority: bool = False) -> dict[str, Tick]:
+    """Bulk fetch over a shared client (symbols are already canonical and distinct).
 
     priority=True (open-position exit evaluation): dedicated pool, longer timeouts, /quotes/bulk fallback
     — see the group152 note by FEED_PRIORITY_TIMEOUT_SCALE.
@@ -777,6 +919,14 @@ async def get_quotes(symbols: list[str], *, priority: bool = False) -> dict[str,
         return out
     if priority:
         return await _priority_quotes(symbols)
+
+    paused = _paused_symbols(symbols)
+    if paused:
+        logger.debug("get_quotes: %d paused no-data symbol(s) left out: %s", len(paused), paused[:8])
+        _p = set(paused)
+        symbols = [x for x in symbols if x not in _p]
+        if not symbols:
+            return out
 
     todo = list(symbols)
     if len(set(symbols)) > FEED_BULK_MIN_SYMBOLS:

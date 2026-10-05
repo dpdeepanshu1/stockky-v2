@@ -1495,11 +1495,83 @@ def _tick_day_change_pct(tick) -> Optional[float]:
     return (px / pc - 1.0) * 100.0
 
 
+# ── group157 (item 3 of the 2026-10-05 issue list): penny stocks and ETFs are not queued ─────────
+# MASPTOP50, MAFANG (ETFs) and HARDWYN, JHS, UCOBANK (low-priced) were being queued, each one then
+# cost a history fetch in evaluate_mode only to be rejected downstream (price floor / not a stock).
+# Hold them back at the trigger pass instead. Same semantics as the other guards: the row stays
+# active, nothing downstream changes, and WATCHLIST_ADVERSE_GUARD=0 turns this off with them.
+#   * penny: live price below CANDIDATE_MIN_STOCK_PRICE (the same floor the candidate engine uses).
+#   * ETF: symbol is in the built-in list / matches the name patterns / is in WATCHLIST_ETF_SYMBOLS.
+# The ETF test is by NAME only (there is no instrument-type field on a watchlist row), so it is a
+# heuristic: extend the list with WATCHLIST_ETF_SYMBOLS=SYM1,SYM2 when one slips through.
+_KNOWN_ETF_SYMBOLS = frozenset({
+    "MASPTOP50", "MAFANG", "MON100", "MAHKTECH", "MOM100", "MOM50", "MIDCAPETF", "MIDSMALL",
+    "NIFTYBEES", "BANKBEES", "JUNIORBEES", "GOLDBEES", "SILVERBEES", "LIQUIDBEES", "PSUBNKBEES",
+    "CPSEETF", "GOLDIETF", "SILVERIETF", "N100", "HNGSNGBEES", "ITBEES", "PHARMABEES",
+})
+
+
+def _wl_is_etf_symbol(symbol: str) -> bool:
+    sym = (symbol or "").strip().upper()
+    for suf in (".NS", ".BO"):
+        if sym.endswith(suf):
+            sym = sym[: -len(suf)]
+    if not sym:
+        return False
+    extra = {x.strip().upper() for x in (os.getenv("WATCHLIST_ETF_SYMBOLS") or "").split(",") if x.strip()}
+    if sym in _KNOWN_ETF_SYMBOLS or sym in extra:
+        return True
+    return sym.endswith("BEES") or sym.endswith("ETF") or "ETF" in sym
+
+
+def _watchlist_instrument_reason(symbol: str, price) -> Optional[str]:
+    """Reason to hold back an ETF or a sub-floor-priced stock, else None. Never raises."""
+    try:
+        if _wl_is_etf_symbol(symbol):
+            return "looks like an ETF (name match), not queued"
+        floor = _wl_env_float("CANDIDATE_MIN_STOCK_PRICE", 20.0)
+        px = float(price)
+        if floor > 0 and 0 < px < floor:
+            return f"price ₹{px:.2f} is below the ₹{floor:.0f} penny-stock floor"
+    except Exception as exc:
+        logger.warning("watchlist instrument guard failed for %s (queueing as before): %s: %s",
+                       symbol, type(exc).__name__, exc)
+    return None
+
+
+# ── group158 (item 9): a row that has fallen far below its catalyst is retired, not re-checked for weeks ─
+# group155 stopped such rows being queued, but they stayed "active" until expires_at (3x half-life,
+# up to 36 days for "results"), so the log showed rows 4-45% below their catalyst polled every cycle for
+# nothing. A fall deeper than WATCHLIST_EXPIRE_DROP_PCT (default 15%) means the catalyst thesis is
+# gone: mark the row "expired" (missed_reason starts with ADVERSE_EXPIRE_PREFIX). Smaller falls are
+# unchanged (not queued, stay active, can recover). watchlist.refresh_watchlist does not re-insert the
+# same symbol+catalyst for WATCHLIST_DROP_COOLDOWN_HOURS (default 24) after this, otherwise the next
+# source poll would re-add it with a fresh baseline at the lower price and the drop check would reset.
+# Off with WATCHLIST_ADVERSE_GUARD=0 (with the other guards) or WATCHLIST_EXPIRE_DROP_PCT=0.
+ADVERSE_EXPIRE_PREFIX = "adverse: "
+
+
+def _watchlist_deep_drop_reason(pct_move: float) -> Optional[str]:
+    """Reason text when pct_move is a fall deep enough to retire the row, else None. Never raises."""
+    try:
+        if not _wl_adverse_guard_on():
+            return None
+        limit = abs(_wl_env_float("WATCHLIST_EXPIRE_DROP_PCT", 0.15))
+        if limit > 0 and pct_move < -limit:
+            return f"fell {pct_move:.1%} below catalyst (retire limit -{limit:.1%})"
+    except Exception as exc:
+        logger.warning("watchlist deep-drop check failed (row kept as before): %s: %s", type(exc).__name__, exc)
+    return None
+
+
 def _watchlist_adverse_reason(row, pct_move: float, tick) -> Optional[str]:
     """Return a short reason when this row must NOT be queued this cycle, else None. Never raises."""
     try:
         if not _wl_adverse_guard_on():
             return None
+        _inst = _watchlist_instrument_reason(getattr(row, "symbol", ""), getattr(tick, "price", 0))
+        if _inst:
+            return _inst
         max_drop = abs(_wl_env_float("WATCHLIST_MAX_DROP_PCT", 0.03))
         if max_drop > 0 and pct_move < -max_drop:
             return f"price is {pct_move:.1%} below catalyst (limit -{max_drop:.1%})"
@@ -1638,6 +1710,18 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
                 "watchlist trigger[%s/%s]: MISSED — %s",
                 mode, row.symbol, row.missed_reason,
             )
+            continue
+
+        # group158: a deep fall retires the row (see ADVERSE_EXPIRE_PREFIX above).
+        _deep = _watchlist_deep_drop_reason(pct_move)
+        if _deep:
+            row.status = "expired"
+            row.missed_reason = (f"{ADVERSE_EXPIRE_PREFIX}{_deep} (catalyst ₹{row.catalyst_price:.2f}, "
+                                 f"now ₹{price:.2f})")[:255]
+            row.updated_at = now
+            db.commit()
+            adverse += 1
+            logger.info("watchlist trigger[%s/%s]: EXPIRED — %s", mode, row.symbol, row.missed_reason)
             continue
 
         # group155: do not queue a stock that has fallen away from its catalyst, or a Tier-3

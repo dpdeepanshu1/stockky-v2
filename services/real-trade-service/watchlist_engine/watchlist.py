@@ -12,19 +12,52 @@ candidate/entry/exit passes.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
 import models
 from watchlist_engine.decay import profile_for, expiry_from
 from watchlist_engine.sources import fetch_watchlist_candidates
+from market_feed.feed import _clean_sym
 
 logger = logging.getLogger("real-trade-watchlist")
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _drop_cooldown_hours() -> float:
+    """WATCHLIST_DROP_COOLDOWN_HOURS (default 24). Blank/bad/negative values fall back to 24; 0 disables."""
+    raw = (os.getenv("WATCHLIST_DROP_COOLDOWN_HOURS") or "").strip()
+    if not raw:
+        return 24.0
+    try:
+        v = float(raw)
+    except ValueError:
+        return 24.0
+    return v if v == v and v >= 0 else 24.0
+
+
+def _recently_retired_for_drop(db: Session, mode: str, sym: str, ctype: str, hours: float) -> bool:
+    """True when this symbol+catalyst was retired by the group158 deep-drop check within `hours`."""
+    if hours <= 0:
+        return False
+    return (
+        db.query(models.WatchlistEntry.id)
+        .filter(
+            models.WatchlistEntry.mode == mode,
+            models.WatchlistEntry.symbol.in_([sym, f"{sym}.NS", f"{sym}.BO"]),
+            models.WatchlistEntry.catalyst_type == ctype,
+            models.WatchlistEntry.status == "expired",
+            models.WatchlistEntry.missed_reason.like("adverse:%"),
+            models.WatchlistEntry.updated_at >= _now() - timedelta(hours=hours),
+        )
+        .first()
+        is not None
+    )
 
 
 async def refresh_watchlist(db: Session, mode: str) -> int:
@@ -42,11 +75,16 @@ async def refresh_watchlist(db: Session, mode: str) -> int:
         return 0
 
     added = 0
+    cooldown_h = _drop_cooldown_hours()
     for c in candidates:
-        sym = (c.get("symbol") or "").upper()
+        # group159 (item 4): one spelling per stock. Tier 1/2 sources can send "KOTAKBANK.NS" while Tier 3
+        # sends "KOTAKBANK"; stored raw they became two rows and two price lookups. Rows written before this
+        # change may still carry a suffix, so the duplicate check below matches either spelling.
+        sym = _clean_sym(c.get("symbol") or "")
         ctype = c.get("catalyst_type") or "volume_shock"
         if not sym:
             continue
+        spellings = [sym, f"{sym}.NS", f"{sym}.BO"]
 
         profile = profile_for(ctype)
         ts = c.get("catalyst_ts") or _now()
@@ -78,7 +116,7 @@ async def refresh_watchlist(db: Session, mode: str) -> int:
             db.query(models.WatchlistEntry)
             .filter(
                 models.WatchlistEntry.mode == mode,
-                models.WatchlistEntry.symbol == sym,
+                models.WatchlistEntry.symbol.in_(spellings),
                 models.WatchlistEntry.catalyst_type == ctype,
             )
             .filter(
@@ -88,6 +126,11 @@ async def refresh_watchlist(db: Session, mode: str) -> int:
             .first()
         )
         if existing:
+            continue
+
+        # group158: retired a moment ago for falling far below its catalyst: do not re-add it with a
+        # fresh (lower) baseline, which would reset the drop check.
+        if _recently_retired_for_drop(db, mode, sym, ctype, cooldown_h):
             continue
 
         catalyst_price = c.get("catalyst_price")

@@ -1191,7 +1191,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
         }
 
     symbols = list({p.symbol for p in positions})
-    ticks   = await get_quotes(symbols)
+    ticks   = await get_quotes(symbols, priority=True)   # open positions: priority lane (group152)
 
     # Mark-to-market all DEMO positions even on cycles where we don't act —
     # the dashboard should always show current unrealized P&L.

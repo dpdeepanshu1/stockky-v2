@@ -466,7 +466,7 @@ class TestLivePrices:
     def test_display_failure_falls_back_to_direct_quotes(self):
         tick_a = mock.Mock(price=101.5)
 
-        async def _fake_get_quotes(symbols):
+        async def _fake_get_quotes(symbols, **_kw):
             return {"AAA": tick_a, "BBB": None}   # a None tick means "no quote" — must be filtered out
 
         with mock.patch("market_feed.feed.get_display_prices", side_effect=RuntimeError("cache broke")), \
@@ -833,7 +833,7 @@ class TestManualClosePosition:
         db = _fresh_db()
         p = _open_position(db, symbol="AAA")
 
-        async def _fake_get_quotes(symbols):
+        async def _fake_get_quotes(symbols, **_kw):
             return {"AAA": None}
 
         with mock.patch("market_feed.feed.get_quotes", side_effect=_fake_get_quotes):
@@ -846,7 +846,7 @@ class TestManualClosePosition:
         p = _open_position(db, symbol="AAA", qty_open=10)
         tick = mock.Mock(price=105.0)
 
-        async def _fake_get_quotes(symbols):
+        async def _fake_get_quotes(symbols, **_kw):
             return {"AAA": tick}
 
         with mock.patch("market_feed.feed.get_quotes", side_effect=_fake_get_quotes), \
@@ -861,7 +861,7 @@ class TestManualClosePosition:
         p = _open_position(db, symbol="AAA", qty_open=10)
         tick = mock.Mock(price=105.0)
 
-        async def _fake_get_quotes(symbols):
+        async def _fake_get_quotes(symbols, **_kw):
             return {"AAA": tick}
 
         with mock.patch("market_feed.feed.get_quotes", side_effect=_fake_get_quotes), \

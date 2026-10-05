@@ -344,7 +344,30 @@ _NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "OLAELEC":     ("OLA ELECTRIC",),
     "RAYMONDREL":  ("RAYMOND REALTY",),
     "UTLSOLAR":    ("FUJIYAMA", "UTL SOLAR"),
+    # 2026-10-05 (group 151): OIL and ACE are real tickers (Oil India, Action
+    # Construction Equipment) but also ordinary words, so they resolve ONLY by
+    # company name (see _NAME_ONLY_TICKERS).
+    "OIL":         ("OIL INDIA",),
+    "ACE":         ("ACTION CONSTRUCTION",),
 }
+
+# 2026-10-05 (group 151): tickers that are ALSO everyday headline words, so
+# a bare token match is almost always a false positive. The 2026-10-05 scan
+# kept ['LENSKART','BPCL','CLEANMAX','WIPRO','OIL','TCS','IT','ACE'] - "IT"
+# (the sector: "IT stocks rally"), "OIL" ("oil prices") and "ACE" are words,
+# not the companies. Before this the known-universe path accepted ANY token
+# found in the symbol master and ignored _STOPWORDS entirely, and it returned
+# the first such token, so "IT stocks: TCS jumps" resolved to IT, not TCS.
+#   * _GENERIC_WORD_TICKERS: sector/index/generic words - never a match; the
+#     scan moves on to the next token in the headline.
+#   * _NAME_ONLY_TICKERS: real companies whose ticker is an English word - the
+#     bare token never matches, only the company name in _NAME_ALIASES does.
+_GENERIC_WORD_TICKERS = frozenset({
+    "IT", "ENERGY", "SILVER", "GOLD", "BSE", "NSE", "DIVIDEND", "CRISIL", "INDIA",
+    "BANK", "AUTO", "PHARMA", "METAL", "REALTY", "FMCG", "NIFTY", "SENSEX",
+    "RESULTS", "STOCKS", "SHARES",
+})
+_NAME_ONLY_TICKERS = frozenset({"OIL", "ACE"})
 
 
 def _extract_symbol(headline: str, known_symbols: set[str]) -> Optional[str]:
@@ -373,6 +396,8 @@ def _extract_symbol(headline: str, known_symbols: set[str]) -> Optional[str]:
 
     if known_symbols:
         for t in tokens:
+            if t in _GENERIC_WORD_TICKERS or t in _NAME_ONLY_TICKERS:
+                continue  # a word, not the company - see _GENERIC_WORD_TICKERS
             if t in known_symbols:
                 return t
         for sym, aliases in _NAME_ALIASES.items():

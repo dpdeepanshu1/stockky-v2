@@ -255,7 +255,6 @@ def _pct(x):
         return None
     return x * 100 if abs(x) < 5 else x
 
-@app.get("/analyze/{symbol}")
 def _md_fundamentals_symbol(symbol: str) -> str:
     """Spelling to request from market-data's /fundamentals/{symbol} (group112, log-audit item 4 leftover).
 
@@ -273,6 +272,7 @@ def _md_fundamentals_symbol(symbol: str) -> str:
     return f"{up}.NS"
 
 
+@app.get("/analyze/{symbol}")
 def analyze(symbol: str, force: bool = False):
     f = {}
     fallback_used = False

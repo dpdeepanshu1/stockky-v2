@@ -482,7 +482,7 @@ class TestCircuitLimitBranch:
 
 def _run_eval(db, ticks: dict, mode: str = "REAL"):
     """Run evaluate_mode with minimal mocking - only network/broker edges."""
-    async def _q(symbols): return ticks
+    async def _q(symbols, **_kw): return ticks
     async def _expire(*a, **k): return 0
 
     with mock.patch.object(ex, "get_quotes", _q), \

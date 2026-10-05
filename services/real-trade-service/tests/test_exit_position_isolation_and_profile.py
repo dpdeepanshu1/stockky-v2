@@ -82,7 +82,7 @@ def tick(price, atr=None, symbol="TESTCO"):
 
 
 def quotes(monkeypatch, mapping: dict):
-    async def _q(symbols):
+    async def _q(symbols, **_kw):
         return dict(mapping)
     monkeypatch.setattr(ex, "get_quotes", _q)
 

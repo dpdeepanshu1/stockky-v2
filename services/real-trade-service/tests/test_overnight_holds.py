@@ -64,7 +64,7 @@ def _make_account(db, equity=100_000.0):
 
 
 def _patch_quotes(monkeypatch_ticks: dict):
-    async def _fake_get_quotes(symbols):
+    async def _fake_get_quotes(symbols, **_kw):
         return {s: t for s, t in monkeypatch_ticks.items() if s in symbols}
     feed_module.get_quotes = _fake_get_quotes
 

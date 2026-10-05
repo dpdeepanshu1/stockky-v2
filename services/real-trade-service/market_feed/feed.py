@@ -112,6 +112,24 @@ FEED_QUOTE_CONCURRENCY = max(1, int(((os.getenv("FEED_QUOTE_CONCURRENCY") or "")
 FEED_BATCH_DEADLINE_S = float(((os.getenv("FEED_BATCH_DEADLINE_S") or "").strip() or "45"))
 FEED_HTTP_MAX_CONNECTIONS = max(8, int(((os.getenv("FEED_HTTP_MAX_CONNECTIONS") or "").strip() or "64")))
 
+# ── group152 (log-audit 2026-10-05, items 1 + 2) ────────────────────────────
+# At the open the five REAL positions' /live-quote and /quote calls all hit ReadTimeout on every 8s
+# exit cycle (market-data answered 200, but later than the 3s / 8s client timeouts), because the same
+# process was also running a ~923-symbol one-request-per-symbol batch that hit its 45s deadline
+# (763 symbols never attempted). Two changes:
+#   * priority lane (get_quotes(..., priority=True)): own connection pool (never queued behind a big
+#     batch), timeouts scaled by FEED_PRIORITY_TIMEOUT_SCALE, and a POST /quotes/bulk fallback for any
+#     symbol the per-symbol cascade still could not price. Used for exit evaluation (open positions).
+#   * bulk-first for large non-priority batches: above FEED_BULK_MIN_SYMBOLS symbols, price them with
+#     chunked POST /quotes/bulk first and only fall back to per-symbol /live-quote + /quote for the
+#     ones bulk could not price (or priced with data older than FEED_BULK_MAX_AGE_S).
+FEED_PRIORITY_TIMEOUT_SCALE = max(1.0, float(((os.getenv("FEED_PRIORITY_TIMEOUT_SCALE") or "").strip() or "2.0")))
+FEED_BULK_MIN_SYMBOLS = max(2, int(((os.getenv("FEED_BULK_MIN_SYMBOLS") or "").strip() or "25")))
+FEED_BULK_CHUNK_SIZE = max(5, int(((os.getenv("FEED_BULK_CHUNK_SIZE") or "").strip() or "100")))
+FEED_BULK_CONCURRENCY = max(1, int(((os.getenv("FEED_BULK_CONCURRENCY") or "").strip() or "3")))
+FEED_BULK_TIMEOUT_S = float(((os.getenv("FEED_BULK_TIMEOUT_S") or "").strip() or "12"))
+FEED_BULK_MAX_AGE_S = float(((os.getenv("FEED_BULK_MAX_AGE_S") or "").strip() or "20"))
+
 # ATR background refresh policy. Before: Source 2 fired a /history fetch on
 # EVERY call for EVERY symbol (even with a warm ATR — the ATR cache has no
 # expiry and is also persisted to the DB), i.e. one extra history request per
@@ -372,7 +390,8 @@ class Tick:
         self.day_low  = day_low
 
 
-async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool = False) -> Optional[Tick]:
+async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool = False,
+                    timeout_scale: float = 1.0) -> Optional[Tick]:
     """
     for_display=True (dashboard price column only — never trading): no ATR
     background refresh is scheduled (the dashboard never reads ATR, and each
@@ -398,7 +417,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
     try:
         if _skip_live:
             raise _SkipLiveQuote()
-        r_lq = await client.get(f"{MARKET_DATA_URL}/live-quote/{symbol}", timeout=3.0)
+        r_lq = await client.get(f"{MARKET_DATA_URL}/live-quote/{symbol}", timeout=3.0 * timeout_scale)
         if r_lq.status_code == 200:
             lq = r_lq.json()
             ltp = lq.get("ltp")
@@ -458,7 +477,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
         if not for_display:
             _schedule_atr_refresh(client, symbol)
 
-        r = await client.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=8.0)
+        r = await client.get(f"{MARKET_DATA_URL}/quote/{symbol}", timeout=8.0 * timeout_scale)
         # the ATR refresh task runs in the background; we don't await it here.
 
         if r.status_code != 200:
@@ -611,19 +630,160 @@ async def get_display_prices(symbols: list[str]) -> dict[str, float]:
     return out
 
 
-async def get_quotes(symbols: list[str]) -> dict[str, Tick]:
-    """Bulk fetch — concurrent requests over one shared client, not
-    market-data-service's /quotes/bulk (that endpoint is yf.download-shaped
-    with a different response contract; for the handful of symbols one
-    entry/exit cycle touches, N concurrent /quote calls on a shared
-    keep-alive connection is simple and fast enough for Phase 2)."""
+def _parse_bulk_ts(raw) -> Optional[datetime]:
+    """fetched_at from /quotes/bulk -> aware UTC datetime, or None if missing/unparseable."""
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        from dateutil import parser as _dp
+        dt = _dp.parse(raw)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)   # market-data stamps naive UTC
+    return dt
+
+
+def _tick_from_bulk_item(item, *, now: Optional[datetime] = None) -> Optional[Tick]:
+    """Turn one /quotes/bulk quote dict into a Tick, or None if it has no usable price or is older than
+    FEED_BULK_MAX_AGE_S (a bulk answer may come from market-data's quote cache, so the trading staleness
+    guard is applied here too). ATR comes from the local ATR cache exactly like get_quote()."""
+    if not isinstance(item, dict):
+        return None
+    sym = _clean_sym(item.get("symbol") or "")
+    if not sym:
+        return None
+    try:
+        price = float(item.get("price") or item.get("cmp") or 0)
+    except (TypeError, ValueError):
+        return None
+    if price <= 0 or price != price:
+        return None
+    ts = _parse_bulk_ts(item.get("fetched_at"))
+    if ts is None:
+        return None
+    age_s = ((now or datetime.now(timezone.utc)) - ts).total_seconds()
+    if age_s > FEED_BULK_MAX_AGE_S:
+        return None
+    vol = item.get("volume")
+    dh, dl = item.get("day_high"), item.get("day_low")
+    try:
+        return Tick(
+            symbol=sym,
+            price=price,
+            as_of=ts,
+            atr=_cached_atr(sym),
+            source=f"bulk({item.get('source') or 'market-data-service'})",
+            volume=int(vol) if vol not in (None, "") else None,
+            day_high=float(dh) if dh else None,
+            day_low=float(dl) if dl else None,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+async def _bulk_ticks(client: httpx.AsyncClient, symbols: list[str], *, timeout: Optional[float] = None) -> dict[str, Tick]:
+    """Best-effort chunked POST /quotes/bulk -> {symbol: Tick}. Never raises; a failed chunk just leaves
+    its symbols out so the caller falls back to the per-symbol cascade for them."""
+    out: dict[str, Tick] = {}
+    uniq = list(dict.fromkeys(s for s in symbols if s))
+    if not uniq:
+        return out
+    chunks = [uniq[i:i + FEED_BULK_CHUNK_SIZE] for i in range(0, len(uniq), FEED_BULK_CHUNK_SIZE)]
+    sem = asyncio.Semaphore(FEED_BULK_CONCURRENCY)
+    to = FEED_BULK_TIMEOUT_S if timeout is None else timeout
+
+    async def _post(chunk: list[str]) -> None:
+        async with sem:
+            try:
+                r = await client.post(f"{MARKET_DATA_URL}/quotes/bulk", json={"symbols": chunk}, timeout=to)
+                if r.status_code != 200:
+                    logger.warning("get_quotes: /quotes/bulk returned %d for %d symbol(s) — %s",
+                                   r.status_code, len(chunk), r.text[:160])
+                    return
+                body = r.json()
+                now = datetime.now(timezone.utc)
+                for item in (body.get("quotes") if isinstance(body, dict) else None) or []:
+                    tick = _tick_from_bulk_item(item, now=now)
+                    if tick is not None:
+                        out[tick.symbol] = tick
+                        _schedule_atr_refresh(client, tick.symbol)   # cold ATR -> background refresh, as get_quote()
+            except Exception as e:
+                logger.warning("get_quotes: /quotes/bulk chunk of %d failed: %s: %s", len(chunk), type(e).__name__, e)
+
+    await asyncio.gather(*[_post(c) for c in chunks])
+    return out
+
+
+async def _priority_quotes(symbols: list[str]) -> dict[str, Tick]:
+    """Priority lane for open positions: dedicated client (own pool), scaled timeouts, bulk fallback."""
+    uniq = list(dict.fromkeys(s for s in symbols if s))
+    out: dict[str, Tick] = {}
+    if not uniq:
+        return out
+    limits = httpx.Limits(max_connections=max(8, len(uniq) * 2), max_keepalive_connections=max(2, len(uniq)))
+    async with httpx.AsyncClient(limits=limits) as client:
+        ticks = await asyncio.gather(
+            *[get_quote(client, s, timeout_scale=FEED_PRIORITY_TIMEOUT_SCALE) for s in uniq],
+            return_exceptions=True,
+        )
+        for sym, tick in zip(uniq, ticks):
+            if isinstance(tick, Tick):
+                out[sym] = tick
+        missing = [s for s in uniq if s not in out]
+        if missing:
+            got = await _bulk_ticks(client, missing, timeout=FEED_BULK_TIMEOUT_S * FEED_PRIORITY_TIMEOUT_SCALE / 2)
+            for sym, tick in got.items():
+                # bulk keys come back as clean symbols; map them onto the requested spelling
+                for want in missing:
+                    if _clean_sym(want) == sym and want not in out:
+                        out[want] = tick
+            still = [s for s in uniq if s not in out]
+            logger.warning(
+                "priority quotes: per-symbol path failed for %d/%d symbol(s) %s — /quotes/bulk recovered %d%s",
+                len(missing), len(uniq), missing[:8], len(missing) - len(still),
+                f", still missing {still[:8]}" if still else "",
+            )
+    return out
+
+
+async def get_quotes(symbols: list[str], *, priority: bool = False) -> dict[str, Tick]:
+    """Bulk fetch over a shared client.
+
+    priority=True (open-position exit evaluation): dedicated pool, longer timeouts, /quotes/bulk fallback
+    — see the group152 note by FEED_PRIORITY_TIMEOUT_SCALE.
+
+    Default: above FEED_BULK_MIN_SYMBOLS symbols, chunked /quotes/bulk first (a few requests instead of one
+    or two per symbol), then the per-symbol cascade only for symbols bulk could not price fresh. At or below
+    that size it is the original concurrent per-symbol path."""
     out: dict[str, Tick] = {}
     if not symbols:
         return out
-    results = await _bounded_gather(symbols, get_quote, "get_quotes")
-    for sym, tick in zip(symbols, results):
-        if tick is not None:
-            out[sym] = tick
+    if priority:
+        return await _priority_quotes(symbols)
+
+    todo = list(symbols)
+    if len(set(symbols)) > FEED_BULK_MIN_SYMBOLS:
+        try:
+            limits = httpx.Limits(max_connections=FEED_BULK_CONCURRENCY * 2)
+            async with httpx.AsyncClient(limits=limits) as bulk_client:
+                got = await _bulk_ticks(bulk_client, symbols)
+            for sym in symbols:
+                t = got.get(_clean_sym(sym))
+                if t is not None:
+                    out[sym] = t
+            todo = [s for s in symbols if s not in out]
+            logger.info("get_quotes: bulk-first priced %d/%d symbol(s); %d left for per-symbol lookups",
+                        len(out), len(symbols), len(todo))
+        except Exception as e:
+            logger.warning("get_quotes: bulk-first failed (%s: %s) — per-symbol path for all", type(e).__name__, e)
+            out, todo = {}, list(symbols)
+
+    if todo:
+        results = await _bounded_gather(todo, get_quote, "get_quotes")
+        for sym, tick in zip(todo, results):
+            if tick is not None:
+                out[sym] = tick
     return out
 
 

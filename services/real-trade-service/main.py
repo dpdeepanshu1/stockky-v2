@@ -2136,7 +2136,7 @@ async def manual_close_position(
 
         if mode == "DEMO":
             from market_feed.feed import get_quotes
-            ticks = await get_quotes([position.symbol])
+            ticks = await get_quotes([position.symbol], priority=True)   # open position (group152)
             tick = ticks.get(position.symbol)
             if tick is None:
                 raise HTTPException(status_code=503, detail=f"No current price available for {position.symbol} — try again shortly.")

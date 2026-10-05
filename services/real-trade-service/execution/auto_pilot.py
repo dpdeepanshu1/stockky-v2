@@ -920,7 +920,7 @@ async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, 
     from market_feed.feed import get_quotes
     from portfolio.portfolio import get_account as _pf_get_account
     syms = list({p.symbol for p in candidates})
-    ticks = await get_quotes(syms)
+    ticks = await get_quotes(syms, priority=True)   # open positions (group152)
 
     scored: list[tuple[float, object, float]] = []  # (conviction, position, position_value)
     reasons: dict = {}
@@ -1160,7 +1160,7 @@ async def _eod_squareoff(db, mode: str) -> None:
     elif mode == "DEMO":
         from market_feed.feed import get_quotes
         syms = list({p.symbol for p in positions})
-        ticks = await get_quotes(syms)
+        ticks = await get_quotes(syms, priority=True)   # open positions (group152)
         for p in positions:
             tick = ticks.get(p.symbol)
             if tick is None:

@@ -354,6 +354,8 @@ class TestRunCycleScanOnward:
         _patch_no_op_prechecks(monkeypatch)
         monkeypatch.setattr(m, "ist_now", lambda: datetime(2026, 9, 25, 11, 0, tzinfo=m.IST))
         monkeypatch.setattr(m.ledger, "sync_from_broker", lambda db: 100000.0)
+        # group163: the affordability pre-check reads available_capital before the quality gate
+        monkeypatch.setattr(m.ledger, "get_state", lambda db: {"available_capital": 100000.0})
         monkeypatch.setattr(m.intraday_eligibility, "get_restricted_symbols", lambda db: set())
 
     def test_ledger_sync_error_is_caught(self, db, monkeypatch):
@@ -468,6 +470,8 @@ class TestRunCycleScanOnward:
         monkeypatch.setattr(m, "scan", lambda **kw: [_candidate("STARVED")])
         m._capital_starved.clear()
         m._capital_starved["STARVED"] = (m.time.monotonic() + 999, 100.0)
+        # group163: capital must not have grown past the cooldown's retry-on-growth threshold
+        monkeypatch.setattr(m.ledger, "get_state", lambda db: {"available_capital": 100.0})
         try:
             self._armed_gate(db)
             summary = asyncio.run(m._run_cycle(db, trigger="AUTO"))
@@ -1109,6 +1113,21 @@ def test_reconcile_pending_resolve(client, monkeypatch):
     assert r.json() == {"resolved": 2}
 
 
+def test_reconcile_repair_closed_route_defaults_to_dry_run(client, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(m.reconcile, "repair_closed_entry_prices",
+                        lambda db, apply=False: seen.setdefault("apply", apply) and {"applied": apply} or {"applied": apply})
+    assert client.post("/reconcile/repair-closed").json() == {"applied": False}
+    assert client.post("/reconcile/repair-closed?apply=true").json() == {"applied": True}
+
+
+def test_trades_breakdown_route(client, monkeypatch):
+    monkeypatch.setattr(m.review_stats, "breakdown", lambda rows: {"trades": len(list(rows))})
+    assert client.get("/trades/breakdown").json() == {"days": 3, "trades": 0}
+    assert client.get("/trades/breakdown?days=999").json()["days"] == 30
+    assert client.get("/trades/breakdown?days=0").json()["days"] == 1
+
+
 class TestCandidatesRoute:
     def test_market_open_runs_scan(self, client, monkeypatch):
         monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
@@ -1561,6 +1580,7 @@ def test_run_cycle_no_candidate_passes_quality_gate(db, monkeypatch):
     _patch_no_op_prechecks(monkeypatch)
     monkeypatch.setattr(m, "ist_now", lambda: datetime(2026, 9, 25, 11, 0, tzinfo=m.IST))
     monkeypatch.setattr(m.ledger, "sync_from_broker", lambda db: 100000.0)
+    monkeypatch.setattr(m.ledger, "get_state", lambda db: {"available_capital": 100000.0})
     monkeypatch.setattr(m.intraday_eligibility, "get_restricted_symbols", lambda db: set())
     monkeypatch.setattr(m, "scan", lambda **kw: [_candidate("BAD")])
     monkeypatch.setattr(m.quality_gate, "get_cache_batch", lambda db, syms: {})

@@ -54,7 +54,8 @@ def feed(monkeypatch):
     monkeypatch.setattr(engine, "_WINDOW_THRESHOLDS", {1: 0.7, 5: 1.0, 15: 1.5, 60: 2.5})
     monkeypatch.setattr(engine, "_volume_accum", defaultdict(int))
     monkeypatch.setattr(engine, "_tick_timestamps", defaultdict(list))
-    for k, v in dict(MIN_AVG_VOLUME=50_000, MAX_SPREAD_PCT=0.5, MIN_PREFERRED_THRESHOLD_RELAX_PCT=15.0).items():
+    for k, v in dict(MIN_AVG_VOLUME=50_000, MAX_SPREAD_PCT=0.5, MIN_PREFERRED_THRESHOLD_RELAX_PCT=15.0,
+                     DISABLED_SCAN_WINDOWS=frozenset()).items():
         monkeypatch.setattr(config, k, v)
     return f
 

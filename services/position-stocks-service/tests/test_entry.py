@@ -140,6 +140,8 @@ def env(monkeypatch):
         FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE=False, USE_SUPER_ORDER=True,
         SCALP_PRODUCT_TYPE="INTRADAY", SCALP_EXCHANGE_SEGMENT="NSE_EQ",
         RISK_PER_TRADE_PCT=2.0, MAX_DAILY_LOSS_PCT_OF_POOL=4.0,
+        # 2026-10-05 price guards off by default here (the fake tick buffer uses index timestamps)
+        ENTRY_MAX_SLIPPAGE_PCT=0.0, ENTRY_MAX_TICK_AGE_S=0.0, MAX_DAY_GAIN_PCT=0.0,
     )
     for k, v in pins.items():
         monkeypatch.setattr(config, k, v)
@@ -926,3 +928,127 @@ class TestMkposClaimLock:
         db, _, _ = env
         p = mkpos(db, "LOCKME", claim_lock=True)
         assert lock_held(db, p.symbol)
+
+
+
+# ── 2026-10-05 scalp review: stale-tick / slippage / day-gain guard + exchange range ──
+class TestScalpReviewGuards:
+    @pytest.fixture(autouse=True)
+    def _guards_on(self, env, monkeypatch):   # after env, whose pins switch the guards off
+        import time as _t
+        self.now = _t.time()
+        for k, v in dict(ENTRY_MAX_SLIPPAGE_PCT=0.5, ENTRY_MAX_TICK_AGE_S=45.0, MAX_DAY_GAIN_PCT=7.0).items():
+            monkeypatch.setattr(config, k, v)
+        self.mp = monkeypatch
+
+    def live(self, ticks):
+        """ticks: [(age_seconds, price)] oldest first."""
+        now = self.now
+        self.mp.setattr(ws_client, "get_tick_buffer", lambda s: [(now - a, p) for a, p in ticks])
+
+    def day(self, prev_close=None, rng=None):
+        self.mp.setattr(ws_client, "get_day_stats", lambda s: (None, None, None, prev_close) if prev_close else None)
+        self.mp.setattr(ws_client, "get_day_range", lambda s: rng)
+
+    # slippage
+    def test_live_price_above_signal_beyond_tolerance_is_rejected(self, env):
+        self.live([(3, 101.0)])
+        r = entry._price_guard_reject("ABC", 100.0)
+        assert r.startswith("ENTRY_SLIPPAGE:") and "1.00%" in r
+
+    def test_unitedpoly_case_eight_percent_is_rejected(self, env):
+        self.live([(2, 48.14)])
+        assert entry._price_guard_reject("UNITEDPOLY", 44.58).startswith("ENTRY_SLIPPAGE:")
+
+    def test_within_tolerance_and_exactly_at_tolerance_pass(self, env):
+        self.live([(3, 100.4)])
+        assert entry._price_guard_reject("ABC", 100.0) is None
+        self.live([(3, 100.5)])
+        assert entry._price_guard_reject("ABC", 100.0) is None          # 0.5% is not > 0.5%
+
+    def test_price_dropped_since_signal_is_not_slippage(self, env):
+        self.live([(3, 98.0)])
+        assert entry._price_guard_reject("ABC", 100.0) is None
+
+    def test_slippage_check_can_be_disabled(self, env):
+        self.mp.setattr(config, "ENTRY_MAX_SLIPPAGE_PCT", 0.0)
+        self.live([(3, 150.0)])
+        assert entry._price_guard_reject("ABC", 100.0) is None
+
+    # stale tick
+    def test_stale_last_tick_is_rejected(self, env):
+        self.live([(120, 100.0)])
+        assert entry._price_guard_reject("ABC", 100.0).startswith("STALE_TICK:")
+
+    def test_tick_just_inside_age_limit_passes(self, env):
+        self.live([(40, 100.0)])
+        assert entry._price_guard_reject("ABC", 100.0) is None
+
+    def test_stale_check_can_be_disabled(self, env):
+        self.mp.setattr(config, "ENTRY_MAX_TICK_AGE_S", 0.0)
+        self.live([(5000, 100.0)])
+        assert entry._price_guard_reject("ABC", 100.0) is None
+
+    # day gain
+    def test_stock_up_more_than_cap_on_the_day_is_rejected(self, env):
+        self.live([(2, 108.0)])
+        self.day(prev_close=100.0)
+        assert entry._price_guard_reject("ABC", 108.0).startswith("DAY_GAIN_TOO_HIGH:")
+
+    def test_stock_up_less_than_cap_passes(self, env):
+        self.live([(2, 105.0)])
+        self.day(prev_close=100.0)
+        assert entry._price_guard_reject("ABC", 105.0) is None
+
+    def test_no_prev_close_fails_open(self, env):
+        self.live([(2, 150.0)])
+        self.day(prev_close=None)
+        assert entry._price_guard_reject("ABC", 150.0) is None
+
+    def test_day_gain_check_can_be_disabled(self, env):
+        self.mp.setattr(config, "MAX_DAY_GAIN_PCT", 0.0)
+        self.live([(2, 150.0)])
+        self.day(prev_close=100.0)
+        assert entry._price_guard_reject("ABC", 150.0) is None
+
+    # fail-open
+    def test_no_ticks_at_all_fails_open(self, env):
+        self.live([])
+        assert entry._price_guard_reject("ABC", 100.0) is None
+
+    def test_feed_error_fails_open(self, env):
+        self.mp.setattr(ws_client, "get_tick_buffer", lambda s: (_ for _ in ()).throw(RuntimeError("ws down")))
+        assert entry._price_guard_reject("ABC", 100.0) is None
+
+    # wiring into attempt_entry
+    def test_attempt_entry_skips_cleanly_on_slippage(self, env):
+        db, b, _ = env
+        self.live([(2, 510.0)])
+        assert entry.attempt_entry(db, cand(ltp=500.0)) is None
+        assert_clean_skip(env, "ABC", "PRICE_GUARD:ENTRY_SLIPPAGE")
+
+    def test_attempt_entry_skips_cleanly_on_stale_tick(self, env):
+        db, b, _ = env
+        self.live([(300, 500.0)])
+        assert entry.attempt_entry(db, cand(ltp=500.0)) is None
+        assert_clean_skip(env, "ABC", "PRICE_GUARD:STALE_TICK")
+
+    def test_attempt_entry_places_the_order_when_the_price_is_fresh_and_flat(self, env):
+        db, b, _ = env
+        b.stop_pct = 2.0
+        self.live([(2, 500.0)])
+        assert entry.attempt_entry(db, cand(ltp=500.0)) is not None
+
+    # exchange day range in the range gate
+    def test_range_gate_uses_exchange_range_even_with_a_thin_buffer(self, env):
+        db, b, _ = env
+        b.ticks["ABC"] = [150.0, 151.0]                      # far below MIN_TICKS_FOR_RANGE_GATE
+        self.mp.setattr(ws_client, "get_day_range", lambda s: (100.0, 200.0))
+        assert entry._range_gate_reject("ABC", 199.0).startswith("NEAR_DAY_HIGH:")
+        assert entry._range_gate_reject("ABC", 150.0) is None
+
+    def test_range_gate_exchange_range_beats_a_misleading_buffer(self, env):
+        db, b, _ = env
+        b.ticks["ABC"] = [188.0, 190.0] * 6                  # buffer says "at the high"
+        self.mp.setattr(ws_client, "get_day_range", lambda s: (100.0, 200.0))
+        assert entry._range_gate_reject("ABC", 190.0) is None   # real range position 0.90 < 0.92

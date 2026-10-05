@@ -632,6 +632,295 @@ def _reconcile_overnight_stops(db: Session) -> int:
     return closed
 
 
+def _num(v) -> Optional[float]:
+    """Positive float or None."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f > 0 else None
+
+
+_LEG_PRICE_KEYS = ("averageTradedPrice", "tradedPrice", "avgPrice", "avgTradedPrice")
+
+
+def _leg_has_fill_price(leg: dict) -> bool:
+    """True when Dhan's leg dict carries a real traded-price key (as opposed to
+    only the leg's static trigger `price`)."""
+    return any(_num(leg.get(k)) for k in _LEG_PRICE_KEYS)
+
+
+def _entry_fill_from_row(row: dict) -> Optional[float]:
+    """Real ENTRY_LEG fill price from a /v2/super/orders row, or None.
+
+    2026-10-05 (UNITEDPOLY: dashboard entry 44.58 vs broker fill 48.14, +124
+    phantom P&L): the correction used to require the PARENT row's orderStatus to
+    be TRADED. While exit legs are still pending the parent row may not read
+    TRADED, so the stale scan-time LTP stayed as entry_price and every P&L was
+    computed off it. Now accepted when ANY of these shows the entry actually
+    filled: parent status in the filled set; parent filledQty > 0; or a
+    legDetails ENTRY_LEG entry that is filled / has traded quantity. A price on
+    a row that has not filled at all is never used."""
+    def _qty(d: dict) -> float:
+        for k in ("filledQty", "filled_qty", "tradedQuantity"):
+            q = _num(d.get(k))
+            if q:
+                return q
+        return 0.0
+
+    top_avg = _num(row.get("averageTradedPrice"))
+    if top_avg and (str(row.get("orderStatus", "")).upper() in _FILLED_STATUSES or _qty(row) > 0):
+        return top_avg
+    for leg in row.get("legDetails") or []:
+        if str(leg.get("legName", "")).upper() != "ENTRY_LEG":
+            continue
+        avg = next((_num(leg.get(k)) for k in _LEG_PRICE_KEYS if _num(leg.get(k))), None)
+        if avg and (str(leg.get("orderStatus", "")).upper() in _FILLED_STATUSES or _qty(leg) > 0):
+            return avg
+    return None
+
+
+def _apply_entry_correction(db: Session, pos: ScalpPosition, row: dict) -> bool:
+    """Replace the scan-time LTP in pos.entry_price (and capital_risked, the
+    ledger, the live target/stop legs) with Dhan's real entry fill. Idempotent.
+    Returns True when something changed. See the long AUDIT FIX comment above
+    the call site in run_exit_reconciliation for the original reasoning."""
+    if pos.status not in ("OPEN",) + _FLAT_SELL_PENDING_STATUSES:
+        return False
+    real_entry_price = _entry_fill_from_row(row)
+    if not real_entry_price or not pos.entry_price or abs(real_entry_price - pos.entry_price) <= 1e-6:
+        return False
+
+    old_entry_price = pos.entry_price
+    pos.entry_price = real_entry_price
+    if pos.status in _FLAT_SELL_PENDING_STATUSES and pos.exit_price == old_entry_price:
+        pos.exit_price = real_entry_price   # keep the placeholder's phantom P&L at exactly zero
+
+    # capital_risked was reserved off the same stale estimate — see
+    # capital/ledger.py::reconcile_position_cost for why a positive delta may
+    # push available_capital negative instead of being clamped.
+    old_capital_risked = pos.capital_risked
+    real_capital_cost = pos.quantity * real_entry_price
+    delta = real_capital_cost - old_capital_risked
+    pos.capital_risked = real_capital_cost
+    db.commit()
+    if delta != 0:
+        ledger.reconcile_position_cost(db, delta=delta)
+
+    drift_pct = abs(real_entry_price - old_entry_price) / old_entry_price * 100.0
+    logger.info(
+        "reconcile: %s (id=%d) entry_price corrected ₹%.2f -> ₹%.2f (%.2f%% drift), "
+        "capital_risked ₹%.2f -> ₹%.2f (Dhan's real avg fill vs pre-order LTP estimate)",
+        pos.symbol, pos.id, old_entry_price, real_entry_price, drift_pct,
+        old_capital_risked, real_capital_cost,
+    )
+    alert_pct = float(getattr(config, "ENTRY_FILL_SLIPPAGE_ALERT_PCT", 0.0) or 0.0)
+    if alert_pct > 0 and drift_pct > alert_pct:
+        logger.warning(
+            "reconcile: %s (id=%d) ENTRY FILL SLIPPAGE %.2f%% > %.2f%% (signal ₹%.2f, filled ₹%.2f)",
+            pos.symbol, pos.id, drift_pct, alert_pct, old_entry_price, real_entry_price,
+        )
+        try:
+            notifier.notify_fire_and_forget(
+                f"⚠️ <b>Entry fill slippage</b> — {pos.symbol} x{pos.quantity}\n"
+                f"Signal ₹{old_entry_price:.2f} → filled ₹{real_entry_price:.2f} ({drift_pct:+.2f}% drift)\n"
+                f"P&L is now computed from the real fill."
+            )
+        except Exception as e:  # notification must never break reconciliation
+            logger.warning("reconcile: slippage alert failed for %s: %s", pos.symbol, e)
+
+    # 2026-09-18: the legs sent to Dhan were computed off the pre-fill LTP.
+    # Re-arm them off the real fill — only for a still-OPEN position (a flat-
+    # sell-pending one has its legs cancelled / is on its way out).
+    if pos.status == "OPEN" and config.USE_SUPER_ORDER and pos.dhan_super_order_id:
+        try:
+            new_target = round(real_entry_price * (1 + pos.adaptive_target_pct / 100.0), 2)
+            new_stop = round(real_entry_price * (1 - pos.adaptive_stop_pct / 100.0), 2)
+            dhan_client.modify_super_order(
+                db, order_id=pos.dhan_super_order_id,
+                order_leg="TARGET_LEG", target_price=new_target,
+            )
+            dhan_client.modify_super_order(
+                db, order_id=pos.dhan_super_order_id,
+                order_leg="STOP_LOSS_LEG", stop_loss_price=new_stop,
+            )
+            old_target, old_stop = pos.target_price, pos.stop_price
+            pos.target_price = new_target
+            pos.stop_price = new_stop
+            db.commit()
+            logger.info(
+                "reconcile: %s (id=%d) re-armed target/stop legs for the "
+                "corrected fill price: target ₹%.2f -> ₹%.2f, stop ₹%.2f -> ₹%.2f",
+                pos.symbol, pos.id, old_target, new_target, old_stop, new_stop,
+            )
+        except Exception as e:
+            # Not fatal — legs stay at their original prices (pre-fix behaviour).
+            logger.warning(
+                "reconcile: %s (id=%d) failed to re-arm target/stop legs "
+                "after fill-price correction (%s) — legs remain at their "
+                "original prices",
+                pos.symbol, pos.id, e,
+            )
+    return True
+
+
+def _exit_fill_from_orderbook(db: Session, pos: ScalpPosition, ref_price: float,
+                              orders: Optional[list] = None) -> Optional[float]:
+    """Real TARGET/STOP leg fill price from today's plain order book, used only
+    when the nested leg dict carries no traded-price key (otherwise
+    _extract_leg_price would fall back to the leg's static trigger price, which
+    is not a fill). Same-day only (Dhan's order book is today-only).
+
+    Deliberately conservative: a SELL on this position's own security id, TRADED,
+    for exactly this position's quantity, with a real averageTradedPrice within
+    10% of the leg's trigger price, and EXACTLY ONE such order — otherwise None
+    and the caller keeps its existing fallback chain. Every use is logged.
+    `orders` lets a caller that already fetched the order book (group 165 repair) pass it in."""
+    if orders is None:
+        try:
+            orders = dhan_client.get_order_list(db)
+        except Exception as e:
+            logger.warning("reconcile: exit-fill lookup — failed to fetch order list: %s", e)
+            return None
+    found: list[float] = []
+    for r in orders or []:
+        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != "SELL":
+            continue
+        if str(r.get("securityId") or r.get("security_id") or "") != str(pos.dhan_security_id):
+            continue
+        if str(r.get("orderStatus") or r.get("order_status") or "").upper() not in _FILLED_STATUSES:
+            continue
+        try:
+            qty = int(float(r.get("filledQty") or r.get("tradedQuantity") or r.get("quantity") or 0))
+        except (TypeError, ValueError):
+            continue
+        if qty != int(pos.quantity):
+            continue
+        avg = _num(r.get("averageTradedPrice") or r.get("average_traded_price"))
+        if not avg:
+            continue
+        if ref_price and abs(avg - ref_price) / ref_price > 0.10:
+            continue
+        found.append(avg)
+    if len(found) == 1:
+        logger.info(
+            "reconcile: %s (id=%d) exit fill ₹%.2f taken from today's order book "
+            "(leg dict had no traded-price key; trigger ₹%.2f)",
+            pos.symbol, pos.id, found[0], ref_price,
+        )
+        return found[0]
+    return None
+
+
+_REPAIR_SKIP_STATUSES = ("OPEN", "EXIT_LEGS_REJECTED", "ERROR")
+_REPAIR_MAX_DRIFT_PCT = 25.0
+
+
+def repair_closed_entry_prices(db: Session, *, apply: bool = False) -> dict:
+    """Correct TODAY's already-closed rows whose entry_price is still the stale
+    scan-time LTP (group 162 only fixed trades from then on).
+
+    For each position closed today (IST) that has a super order id: take the real ENTRY fill
+    from Dhan's super-order list (same rule as live reconciliation), and recompute
+    realized_pnl / pct / capital_risked from the stored exit_price. Dry run by default
+    (`apply=False` changes nothing). With apply=True the ledger's cash, today's and the lifetime P&L
+    move by the total P&L difference. Idempotent (a corrected row matches its fill and is
+    skipped). Skipped on purpose, and listed under `skipped` with a reason: rows with
+    overnight partials, rows with no matching super-order row or no real fill, and a fill more than 25%
+    from the stored entry (looks like a wrong match).
+
+    Group 165: TARGET_HIT / STOP_HIT rows also get their EXIT price replaced by the real SELL
+    fill from today's order book when `_exit_fill_from_orderbook` finds exactly one match
+    (own security id, TRADED, exact qty, within 10% of the booked exit). Flat-SELL statuses
+    already book the real fill and are not re-read."""
+    today = ist_today_str()
+    rows = (db.query(ScalpPosition)
+            .filter(ScalpPosition.closed_at.isnot(None),
+                    ScalpPosition.status.notin_(_REPAIR_SKIP_STATUSES),
+                    ScalpPosition.exit_price.isnot(None),
+                    ScalpPosition.dhan_super_order_id.isnot(None))
+            .order_by(ScalpPosition.id).all())
+    rows = [p for p in rows if _ist_date_str(p.closed_at) == today]
+    out: dict = {"date_ist": today, "applied": bool(apply), "changes": [], "skipped": [], "unchanged": 0,
+                 "total_pnl_delta": 0.0}
+    if not rows:
+        return out
+    try:
+        super_rows = dhan_client.get_super_order_list(db)
+    except Exception as e:
+        out["error"] = f"super order list fetch failed: {e}"
+        return out
+    by_id = {str(r.get("orderId") or r.get("order_id") or ""): r for r in super_rows or []}
+    order_book: Optional[list] = None   # fetched lazily, once, for TARGET/STOP exit-fill lookups
+    for pos in rows:
+        label = {"id": pos.id, "symbol": pos.symbol}
+        if int(pos.overnight_stop_prior_qty or 0) + int(pos.overnight_stop_filled_qty_so_far or 0) > 0:
+            out["skipped"].append({**label, "reason": "has overnight partial fills"})
+            continue
+        row = by_id.get(str(pos.dhan_super_order_id))
+        if row is None:
+            out["skipped"].append({**label, "reason": "super order not in today's list"})
+            continue
+        real = _entry_fill_from_row(row)
+        if not real:
+            out["skipped"].append({**label, "reason": "no real entry fill on the row"})
+            continue
+        drift = abs(real - pos.entry_price) / pos.entry_price * 100.0 if pos.entry_price else 0.0
+        if pos.entry_price and drift > _REPAIR_MAX_DRIFT_PCT and abs(real - pos.entry_price) > 1e-6:
+            out["skipped"].append({**label, "reason": f"fill differs {drift:.1f}% from stored entry"})
+            continue
+        new_entry = real if pos.entry_price else pos.entry_price
+        new_exit = pos.exit_price
+        if pos.status in ("TARGET_HIT", "STOP_HIT"):
+            # Exit legs: the booked exit may be the leg's static trigger price, not the fill.
+            if order_book is None:
+                try:
+                    order_book = dhan_client.get_order_list(db) or []
+                except Exception as e:
+                    order_book = []
+                    out["exit_error"] = f"order list fetch failed: {e}"
+            ex = _exit_fill_from_orderbook(db, pos, pos.exit_price, orders=order_book) if order_book else None
+            if ex and abs(ex - pos.exit_price) > 1e-6:
+                new_exit = ex
+        if abs(new_entry - pos.entry_price) <= 1e-6 and abs(new_exit - pos.exit_price) <= 1e-6:
+            out["unchanged"] += 1
+            continue
+        old_pnl = float(pos.realized_pnl or 0.0)
+        new_pnl = (new_exit - new_entry) * pos.quantity
+        new_pct = (new_exit - new_entry) / new_entry * 100.0
+        delta = new_pnl - old_pnl
+        out["changes"].append({**label, "old_entry": pos.entry_price, "real_entry": new_entry,
+                               "old_exit": pos.exit_price, "real_exit": new_exit,
+                               "exit_price": new_exit, "quantity": pos.quantity,
+                               "old_pnl": round(old_pnl, 2), "new_pnl": round(new_pnl, 2),
+                               "delta": round(delta, 2)})
+        out["total_pnl_delta"] = round(out["total_pnl_delta"] + delta, 2)
+        if apply:
+            pos.entry_price = new_entry
+            pos.exit_price = new_exit
+            pos.capital_risked = pos.quantity * new_entry
+            pos.realized_pnl = new_pnl
+            pos.realized_pnl_pct = new_pct
+            db.commit()
+            ledger.adjust_closed_pnl_today(db, delta=delta)
+            logger.info("reconcile: repaired closed %s (id=%d) entry ₹%.2f -> ₹%.2f, exit ₹%.2f -> ₹%.2f, "
+                        "P&L ₹%.2f -> ₹%.2f", pos.symbol, pos.id, out["changes"][-1]["old_entry"], new_entry,
+                        out["changes"][-1]["old_exit"], new_exit, old_pnl, new_pnl)
+    # Group 166: report (never act on) whether today's corrected P&L is past the daily-loss limit.
+    # The kill switch is not re-evaluated by a repair; this tells the operator to decide.
+    try:
+        led = ledger._get_or_create(db)
+        if led.total_allocated_capital and led.total_allocated_capital > 0:
+            loss_pct = abs(min(led.realized_pnl_today, 0.0)) / led.total_allocated_capital * 100.0
+            out["daily_loss_pct"] = round(loss_pct, 2)
+            out["daily_loss_limit_pct"] = config.MAX_DAILY_LOSS_PCT_OF_POOL
+            out["exceeds_daily_loss_limit"] = loss_pct >= config.MAX_DAILY_LOSS_PCT_OF_POOL
+            out["kill_switch_tripped"] = bool(led.daily_loss_kill_switch_tripped)
+    except Exception as e:  # reporting only
+        logger.warning("reconcile: repair loss-limit report failed: %s", e)
+    return out
+
+
 def run_exit_reconciliation(db: Session) -> int:
     """Check every locally-OPEN scalp position against Dhan's live super
     order book. Closes any position whose TARGET_LEG or STOP_LOSS_LEG has
@@ -733,6 +1022,31 @@ def run_exit_reconciliation(db: Session) -> int:
     # picked up by the real-fill lookup in this same pass, not next cycle.
     _backfill_legacy_eod_exit_order_ids(db, eod_pending)
 
+    # 2026-10-05 (UNITEDPOLY phantom +124): a flat-SELL-pending row's P&L is
+    # (real_exit - pos.entry_price) * qty, computed by _reconcile_eod_pending
+    # just below — BEFORE the super-order pass further down ever got to correct
+    # entry_price from the real ENTRY_LEG fill. So every stagnation / EOD /
+    # manual exit booked P&L against the stale scan-time LTP. Correct the entry
+    # first, off one super-order fetch that the main pass then reuses.
+    prefetched_super = None
+    if any(p.dhan_super_order_id for p in eod_pending):
+        try:
+            prefetched_super = dhan_client.get_super_order_list(db)
+        except Exception as e:
+            logger.warning("reconcile: entry pre-correction — failed to fetch super order list: %s", e)
+        if prefetched_super is not None:
+            _pre = {str(r.get("orderId") or ""): r for r in prefetched_super if r.get("orderId")}
+            for p in eod_pending:
+                row_ = _pre.get(str(p.dhan_super_order_id)) if p.dhan_super_order_id else None
+                if row_ is None:
+                    continue
+                try:
+                    _apply_entry_correction(db, p, row_)
+                except Exception as e:
+                    db.rollback()
+                    logger.error("reconcile: entry pre-correction failed for %s (id=%s): %s",
+                                 p.symbol, p.id, e, exc_info=True)
+
     # 2026-09-15 fix (session40): resolve EOD-pending positions' REAL flat-
     # SELL fill first, via get_order_list()/dhan_exit_order_id — see
     # _reconcile_eod_pending's docstring. Positions it resolves (real fill
@@ -759,7 +1073,7 @@ def run_exit_reconciliation(db: Session) -> int:
     open_positions = all_positions
 
     try:
-        super_orders = dhan_client.get_super_order_list(db)
+        super_orders = prefetched_super if prefetched_super is not None else dhan_client.get_super_order_list(db)
     except Exception as e:
         logger.error("reconcile: failed to fetch super order list: %s", e)
         # AUDIT FIX: same as above — don't drop an already-committed
@@ -807,95 +1121,7 @@ def run_exit_reconciliation(db: Session) -> int:
         # estimate). Does NOT touch capital_risked/the ledger — that's a
         # separate, already-reserved software allocation and out of this
         # fix's scope.
-        if pos.status in ("OPEN",) + _FLAT_SELL_PENDING_STATUSES:
-            entry_status_now = str(row.get("orderStatus", "")).upper()
-            if entry_status_now in _FILLED_STATUSES:
-                raw_fill = row.get("averageTradedPrice")
-                real_entry_price: Optional[float] = None
-                if raw_fill:
-                    try:
-                        real_entry_price = float(raw_fill)
-                    except (TypeError, ValueError):
-                        real_entry_price = None
-                if real_entry_price and abs(real_entry_price - pos.entry_price) > 1e-6:
-                    old_entry_price = pos.entry_price
-                    pos.entry_price = real_entry_price
-                    if pos.status in _FLAT_SELL_PENDING_STATUSES and pos.exit_price == old_entry_price:
-                        pos.exit_price = real_entry_price
-
-                    # AUDIT FIX (this session): the previously-flagged
-                    # follow-up — capital_risked was reserved off the same
-                    # stale pre-order LTP estimate as entry_price, and had
-                    # the same "never corrected" gap. Now that the real
-                    # fill price is known, recompute the real cost and
-                    # push the delta through the ledger so
-                    # available_capital stays consistent with what this
-                    # position will actually return at exit (see
-                    # capital/ledger.py::reconcile_position_cost's
-                    # docstring for the full reasoning, including why a
-                    # positive delta is allowed to push available_capital
-                    # negative rather than being silently clamped).
-                    old_capital_risked = pos.capital_risked
-                    real_capital_cost = pos.quantity * real_entry_price
-                    delta = real_capital_cost - old_capital_risked
-                    pos.capital_risked = real_capital_cost
-                    db.commit()
-                    if delta != 0:
-                        ledger.reconcile_position_cost(db, delta=delta)
-
-                    logger.info(
-                        "reconcile: %s (id=%d) entry_price corrected ₹%.2f -> ₹%.2f, "
-                        "capital_risked ₹%.2f -> ₹%.2f (Dhan's real avg fill vs "
-                        "pre-order LTP estimate)",
-                        pos.symbol, pos.id, old_entry_price, real_entry_price,
-                        old_capital_risked, real_capital_cost,
-                    )
-
-                    # 2026-09-18 (user audit finding): the correction above
-                    # fixed the REPORTED entry_price/P&L, but the live
-                    # TARGET_LEG/STOP_LOSS_LEG prices already sent to Dhan
-                    # were computed off the pre-fill LTP and were never
-                    # re-submitted — so the actual R:R being executed on
-                    # the exchange could drift slightly from the intended
-                    # adaptive_target_pct/adaptive_stop_pct on the
-                    # noisiest names. Only meaningful for still-OPEN
-                    # positions (a FLAT_SELL_PENDING one already has its
-                    # legs cancelled or is on its way out — re-arming
-                    # them would be pointless and could race the close).
-                    if pos.status == "OPEN" and config.USE_SUPER_ORDER and pos.dhan_super_order_id:
-                        try:
-                            new_target = round(real_entry_price * (1 + pos.adaptive_target_pct / 100.0), 2)
-                            new_stop = round(real_entry_price * (1 - pos.adaptive_stop_pct / 100.0), 2)
-                            dhan_client.modify_super_order(
-                                db, order_id=pos.dhan_super_order_id,
-                                order_leg="TARGET_LEG", target_price=new_target,
-                            )
-                            dhan_client.modify_super_order(
-                                db, order_id=pos.dhan_super_order_id,
-                                order_leg="STOP_LOSS_LEG", stop_loss_price=new_stop,
-                            )
-                            old_target, old_stop = pos.target_price, pos.stop_price
-                            pos.target_price = new_target
-                            pos.stop_price = new_stop
-                            db.commit()
-                            logger.info(
-                                "reconcile: %s (id=%d) re-armed target/stop legs for the "
-                                "corrected fill price: target ₹%.2f -> ₹%.2f, stop ₹%.2f -> ₹%.2f",
-                                pos.symbol, pos.id, old_target, new_target, old_stop, new_stop,
-                            )
-                        except Exception as e:
-                            # Not fatal — the legs stay at their original
-                            # (slightly-off-fill) prices, which is exactly
-                            # today's pre-fix behavior, not a regression.
-                            # Common benign cause: the leg already filled
-                            # or was cancelled between the entry-price
-                            # correction above and this modify attempt.
-                            logger.warning(
-                                "reconcile: %s (id=%d) failed to re-arm target/stop legs "
-                                "after fill-price correction (%s) — legs remain at their "
-                                "original prices",
-                                pos.symbol, pos.id, e,
-                            )
+        _apply_entry_correction(db, pos, row)
 
         leg_details = row.get("legDetails") or []
         target_leg = next((l for l in leg_details if l.get("legName") == "TARGET_LEG"), None)
@@ -1041,10 +1267,15 @@ def run_exit_reconciliation(db: Session) -> int:
                 )
             continue
 
-        exit_price = _extract_leg_price(
-            hit_leg, row,
-            own_fallback_price=(pos.target_price if hit_kind == "TARGET_HIT" else pos.stop_price),
-        )
+        _trigger_price = pos.target_price if hit_kind == "TARGET_HIT" else pos.stop_price
+        exit_price = None
+        if not _leg_has_fill_price(hit_leg):
+            # 2026-10-05: the leg dict has no traded-price key, so the old chain
+            # would book the leg's static trigger price as the "fill". Try the
+            # real SELL fill in today's order book first (unique-match guarded).
+            exit_price = _exit_fill_from_orderbook(db, pos, _trigger_price)
+        if exit_price is None:
+            exit_price = _extract_leg_price(hit_leg, row, own_fallback_price=_trigger_price)
         realized_pnl = (exit_price - pos.entry_price) * pos.quantity
         realized_pnl_pct = (
             (exit_price - pos.entry_price) / pos.entry_price * 100.0

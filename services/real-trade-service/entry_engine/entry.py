@@ -39,6 +39,7 @@ from portfolio.portfolio import get_account, held_exposure_positions, record_rea
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
 from tz_utils import is_market_open_ist
 import pipeline_status as pstat
+from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
@@ -1623,6 +1624,27 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
     if not active:
         return {"watchlist_checked": 0, "band_ok": 0, "missed": 0, "queued": 0, "adverse": 0}
 
+    # group164 (item 5): index names (NIFTY, BANKNIFTY, SENSEX ...) are retired (their "catalyst price" is an
+    # index level), and each remaining symbol is decided by ONE row per cycle (see watchlist_engine/symbol_filter).
+    extra_tally: dict = {}
+    if _symbol_filter.index_filter_on():
+        _idx_rows = [r for r in active if _symbol_filter.is_index_symbol(r.symbol)]
+        if _idx_rows:
+            _now_idx = datetime.now(timezone.utc)
+            for r in _idx_rows:
+                r.status = "expired"
+                r.missed_reason = "index: index name, not a tradable stock"
+                r.updated_at = _now_idx
+            db.commit()
+            active = [r for r in active if r not in _idx_rows]
+            extra_tally["index_expired"] = len(_idx_rows)
+    if active and _symbol_filter.one_row_per_symbol_on():
+        active, _dups = _symbol_filter.split_primary_rows(active)
+        if _dups:
+            extra_tally["duplicates"] = len(_dups)
+    if not active:
+        return {"watchlist_checked": 0, "band_ok": 0, "missed": 0, "queued": 0, "adverse": 0, **extra_tally}
+
     symbols = list({row.symbol for row in active})
     ticks = await get_quotes(symbols)
 
@@ -1772,4 +1794,5 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
         "missed": missed,
         "queued": queued,
         "adverse": adverse,
+        **extra_tally,
     }

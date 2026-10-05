@@ -1044,7 +1044,14 @@ def run_stagnation_exit(db: Session) -> int:
         except Exception:
             continue
         age_min = (now - opened_at).total_seconds() / 60.0
-        if age_min < config.STAGNATION_EXIT_MINUTES:
+        # 2026-10-05: second rule - no follow-through. Eligible earlier than the
+        # flat-band rule (NO_FOLLOWTHROUGH_EXIT_MINUTES vs STAGNATION_EXIT_MINUTES).
+        nft_on = bool(getattr(config, "NO_FOLLOWTHROUGH_EXIT_ENABLED", False))
+        nft_min = float(getattr(config, "NO_FOLLOWTHROUGH_EXIT_MINUTES", 20.0))
+        nft_gain = float(getattr(config, "NO_FOLLOWTHROUGH_MIN_GAIN_PCT", 0.5))
+        stag_age_ok = age_min >= config.STAGNATION_EXIT_MINUTES
+        nft_age_ok = nft_on and age_min >= nft_min
+        if not (stag_age_ok or nft_age_ok):
             continue
 
         try:
@@ -1057,16 +1064,27 @@ def run_stagnation_exit(db: Session) -> int:
             continue  # no live price to judge stagnation by — leave it to EOD/target/stop
 
         pct_move = abs(ltp - pos.entry_price) / pos.entry_price * 100.0
-        if pct_move >= config.STAGNATION_EXIT_BAND_PCT:
+        reason = None
+        if stag_age_ok and pct_move < config.STAGNATION_EXIT_BAND_PCT:
+            reason = f"{age_min:.0f}m flat within ±{config.STAGNATION_EXIT_BAND_PCT:.2f}%"
+        elif nft_age_ok:
+            # best price seen so far (excursion tracker), never below the live price
+            best = max(ltp, pos.max_price_seen or 0.0)
+            best_gain = (best - pos.entry_price) / pos.entry_price * 100.0
+            if best_gain < nft_gain:
+                reason = (
+                    f"NO_FOLLOWTHROUGH {age_min:.0f}m, best gain {best_gain:.2f}% "
+                    f"< {nft_gain:.2f}%"
+                )
+        if reason is None:
             continue  # moved meaningfully — target/stop logic already owns this case
 
         try:
             close_position_now(db, pos, exit_reason="STAGNATION_EXIT")
             closed += 1
             logger.info(
-                "STAGNATION_EXIT: %s (id=%d) closed after %.0fm flat within ±%.2f%% "
-                "(ltp=₹%.2f entry=₹%.2f) — freeing capital/slot",
-                pos.symbol, pos.id, age_min, config.STAGNATION_EXIT_BAND_PCT, ltp, pos.entry_price,
+                "STAGNATION_EXIT: %s (id=%d) closed — %s (ltp=₹%.2f entry=₹%.2f) — freeing capital/slot",
+                pos.symbol, pos.id, reason, ltp, pos.entry_price,
             )
         except ManualCloseRejected as e:
             logger.info("STAGNATION_EXIT: %s (id=%d) skipped — %s", pos.symbol, pos.id, e)

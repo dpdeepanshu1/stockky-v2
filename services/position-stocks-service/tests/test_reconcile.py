@@ -1023,3 +1023,225 @@ class TestAuditRegressions:
         reconcile.run_exit_reconciliation(db)
         assert p.status == "TARGET_HIT"
         assert available(db) == pytest.approx(LEDGER_AVAILABLE + 1_000.0 + 20.0)    # capital once + the P&L
+
+
+
+# ── 2026-10-05: entry fill + exit fill from the broker, not from stale/trigger prices ──
+def _entry_leg(avg, status="TRADED", **kw):
+    d = {"legName": "ENTRY_LEG", "orderStatus": status, "averageTradedPrice": avg}
+    d.update(kw)
+    return d
+
+
+class TestEntryFillDetection:
+    def test_parent_with_filled_qty_but_non_traded_status_is_accepted(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, qty=10, super_id="SO1")
+        b.super_orders = [super_row("SO1", status="PART_TRADED", avg=101.0, filledQty=10,
+                                    target=("PENDING", 102.0), stop=("PENDING", 99.0))]
+        reconcile.run_exit_reconciliation(db)
+        assert p.entry_price == 101.0 and p.capital_risked == pytest.approx(1_010.0)
+
+    def test_entry_leg_in_leg_details_is_accepted(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, qty=10, super_id="SO1")
+        row = super_row("SO1", status="PENDING", target=("PENDING", 102.0), stop=("PENDING", 99.0))
+        row["legDetails"].append(_entry_leg(101.5))
+        b.super_orders = [row]
+        reconcile.run_exit_reconciliation(db)
+        assert p.entry_price == 101.5
+
+    def test_unfilled_entry_leg_price_is_ignored(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, qty=10, super_id="SO1")
+        row = super_row("SO1", status="PENDING", target=("PENDING", 102.0), stop=("PENDING", 99.0))
+        row["legDetails"].append(_entry_leg(105.0, status="PENDING"))
+        b.super_orders = [row]
+        reconcile.run_exit_reconciliation(db)
+        assert p.entry_price == 100.0
+
+    def test_priced_but_never_filled_parent_is_ignored(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, super_id="SO1")
+        b.super_orders = [super_row("SO1", status="PENDING", avg=105.0, filledQty=0)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.entry_price == 100.0
+
+    @pytest.mark.parametrize("row,expected", [
+        ({"orderStatus": "TRADED", "averageTradedPrice": "101.5"}, 101.5),
+        ({"orderStatus": "TRADED", "averageTradedPrice": 0}, None),
+        ({"orderStatus": "TRADED", "averageTradedPrice": "junk"}, None),
+        ({"orderStatus": "PENDING", "averageTradedPrice": 9.0}, None),
+        ({"orderStatus": "PENDING", "averageTradedPrice": 9.0, "filledQty": 3}, 9.0),
+        ({"orderStatus": "PENDING", "legDetails": [{"legName": "TARGET_LEG", "orderStatus": "TRADED",
+                                                    "averageTradedPrice": 7.0}]}, None),
+        ({"orderStatus": "PENDING", "legDetails": [_entry_leg(8.0, status="PENDING", tradedQuantity=2)]}, 8.0),
+    ])
+    def test_entry_fill_from_row(self, row, expected):
+        assert reconcile._entry_fill_from_row(row) == expected
+
+
+class TestSlippageAlert:
+    def test_large_drift_sends_one_alert_and_is_not_repeated(self, env, monkeypatch):
+        db, b, sent = env
+        monkeypatch.setattr(config, "ENTRY_FILL_SLIPPAGE_ALERT_PCT", 1.0)
+        mkpos(db, entry=100.0, qty=10, super_id="SO1")
+        b.super_orders = [super_row("SO1", avg=108.0, target=("PENDING", 110.0), stop=("PENDING", 99.0))]
+        reconcile.run_exit_reconciliation(db)
+        reconcile.run_exit_reconciliation(db)
+        alerts = [m for m in sent["info"] if "Entry fill slippage" in m]
+        assert len(alerts) == 1 and "100.00" in alerts[0] and "108.00" in alerts[0]
+
+    def test_small_drift_is_silent(self, env, monkeypatch):
+        db, b, sent = env
+        monkeypatch.setattr(config, "ENTRY_FILL_SLIPPAGE_ALERT_PCT", 1.0)
+        mkpos(db, entry=100.0, qty=10, super_id="SO1")
+        b.super_orders = [super_row("SO1", avg=100.5, target=("PENDING", 102.0), stop=("PENDING", 99.0))]
+        reconcile.run_exit_reconciliation(db)
+        assert not [m for m in sent["info"] if "Entry fill slippage" in m]
+
+    def test_alert_can_be_disabled(self, env, monkeypatch):
+        db, b, sent = env
+        monkeypatch.setattr(config, "ENTRY_FILL_SLIPPAGE_ALERT_PCT", 0.0)
+        mkpos(db, entry=100.0, qty=10, super_id="SO1")
+        b.super_orders = [super_row("SO1", avg=108.0, target=("PENDING", 110.0), stop=("PENDING", 99.0))]
+        reconcile.run_exit_reconciliation(db)
+        assert not [m for m in sent["info"] if "Entry fill slippage" in m]
+
+    def test_notifier_failure_does_not_break_the_correction(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(config, "ENTRY_FILL_SLIPPAGE_ALERT_PCT", 1.0)
+        monkeypatch.setattr(notifier, "notify_fire_and_forget",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("telegram down")))
+        p = mkpos(db, entry=100.0, qty=10, super_id="SO1")
+        b.super_orders = [super_row("SO1", avg=108.0, target=("PENDING", 110.0), stop=("PENDING", 99.0))]
+        reconcile.run_exit_reconciliation(db)
+        assert p.entry_price == 108.0
+
+
+class TestFlatSellUsesRealEntry:
+    """The UNITEDPOLY bug: a stagnation/EOD/manual exit booked P&L against the stale scan-time entry."""
+
+    def test_pnl_is_computed_from_the_real_entry_fill(self, env):
+        db, b, _ = env
+        p = pending(db, status="STAGNATION_EXIT", entry=100.0, qty=10, super_id="SO1", exit_order_id="X1")
+        b.super_orders = [super_row("SO1", avg=108.0)]
+        b.plain_orders = [plain_row("X1", avg=108.2)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.entry_price == 108.0 and p.exit_price == 108.2
+        assert p.realized_pnl == pytest.approx(2.0)                 # NOT +82 off the stale 100.0 entry
+        assert len(b.of("get_super_order_list")) == 1               # one fetch, reused by the main pass
+
+    def test_eod_squareoff_row_gets_the_same_treatment(self, env):
+        db, b, _ = env
+        p = pending(db, status="EOD_SQUAREOFF", entry=50.0, qty=4, super_id="SO1", exit_order_id="X1")
+        b.super_orders = [super_row("SO1", avg=52.0)]
+        b.plain_orders = [plain_row("X1", avg=51.0)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.realized_pnl == pytest.approx(-4.0)
+
+    def test_super_order_fetch_failure_still_resolves_with_the_stored_entry(self, env):
+        db, b, _ = env
+        p = pending(db, status="STAGNATION_EXIT", entry=100.0, qty=10, super_id="SO1", exit_order_id="X1")
+        b.super_error = RuntimeError("dhan down")
+        b.plain_orders = [plain_row("X1", avg=102.0)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.realized_pnl == pytest.approx(20.0) and p.error_message is None
+
+    def test_row_without_super_order_id_is_untouched_and_costs_no_extra_fetch(self, env):
+        db, b, _ = env
+        p = pending(db, status="MANUAL_EXIT", entry=100.0, qty=10, exit_order_id="X1")
+        b.plain_orders = [plain_row("X1", avg=101.0)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.realized_pnl == pytest.approx(10.0) and b.of("get_super_order_list") == []
+
+    def test_correction_error_is_isolated(self, env, monkeypatch):
+        db, b, _ = env
+        p = pending(db, status="STAGNATION_EXIT", entry=100.0, qty=10, super_id="SO1", exit_order_id="X1")
+        b.super_orders = [super_row("SO1", avg=108.0)]
+        b.plain_orders = [plain_row("X1", avg=102.0)]
+        monkeypatch.setattr(reconcile, "_apply_entry_correction",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        reconcile.run_exit_reconciliation(db)
+        assert p.realized_pnl == pytest.approx(20.0)                 # resolved from the stored entry, no crash
+
+
+class TestExitFillFromOrderBook:
+    def _setup(self, env, leg_stop=("TRADED", 99.0), **kw):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, qty=10, super_id="SO1", **kw)
+        b.super_orders = [super_row("SO1", avg=100.0, target=("PENDING", 102.0), stop=leg_stop)]
+        return db, b, p
+
+    def _sell(self, p, oid="L1", avg=98.7, **kw):
+        r = {"orderId": oid, "orderStatus": "TRADED", "transactionType": "SELL",
+             "securityId": p.dhan_security_id, "quantity": 10, "averageTradedPrice": avg}
+        r.update(kw)
+        return r
+
+    def test_real_sell_fill_beats_the_static_trigger_price(self, env):
+        db, b, p = self._setup(env)
+        b.plain_orders = [self._sell(p, avg=98.7)]
+        assert reconcile.run_exit_reconciliation(db) == 1
+        assert p.status == "STOP_HIT" and p.exit_price == 98.7 and p.realized_pnl == pytest.approx(-13.0)
+
+    def test_leg_with_its_own_traded_price_never_consults_the_order_book(self, env):
+        db, b, p = self._setup(env, leg_stop=("TRADED", 99.0, 98.9))
+        b.plain_orders = [self._sell(p, avg=98.7)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.exit_price == 98.9 and b.of("get_order_list") == []
+
+    def test_ambiguous_match_falls_back_to_the_trigger_price(self, env):
+        db, b, p = self._setup(env)
+        b.plain_orders = [self._sell(p, "L1", 98.7), self._sell(p, "L2", 98.8)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.exit_price == 99.0
+
+    @pytest.mark.parametrize("override", [
+        {"transactionType": "BUY"}, {"securityId": "999999"}, {"orderStatus": "PENDING"},
+        {"quantity": 7}, {"averageTradedPrice": 80.0}, {"averageTradedPrice": 0},
+    ])
+    def test_non_matching_orders_are_ignored(self, env, override):
+        db, b, p = self._setup(env)
+        b.plain_orders = [self._sell(p, **override)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.exit_price == 99.0
+
+    def test_order_list_failure_falls_back_to_the_trigger_price(self, env):
+        db, b, p = self._setup(env)
+        b.plain_error = RuntimeError("dhan down")
+        reconcile.run_exit_reconciliation(db)
+        assert p.status == "STOP_HIT" and p.exit_price == 99.0
+
+    def test_target_hit_uses_the_same_lookup(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, qty=10, super_id="SO1")
+        b.super_orders = [super_row("SO1", avg=100.0, target=("TRADED", 102.0), stop=("PENDING", 99.0))]
+        b.plain_orders = [self._sell(p, avg=102.3)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.status == "TARGET_HIT" and p.exit_price == 102.3 and p.realized_pnl == pytest.approx(23.0)
+
+
+class TestEntryCorrectionEdges:
+    def test_helper_ignores_a_position_that_is_already_closed(self, env):
+        db, b, _ = env
+        p = mkpos(db, status="TARGET_HIT", entry=100.0, qty=10, super_id="SO1", claim_lock=False)
+        assert reconcile._apply_entry_correction(db, p, super_row("SO1", avg=108.0)) is False
+        assert p.entry_price == 100.0
+
+    def test_exit_lookup_skips_orders_with_an_unparseable_quantity(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, qty=10, super_id="SO1")
+        b.super_orders = [super_row("SO1", avg=100.0, target=("PENDING", 102.0), stop=("TRADED", 99.0))]
+        b.plain_orders = [{"orderId": "L1", "orderStatus": "TRADED", "transactionType": "SELL",
+                           "securityId": p.dhan_security_id, "quantity": "n/a", "averageTradedPrice": 98.7}]
+        reconcile.run_exit_reconciliation(db)
+        assert p.exit_price == 99.0
+
+    def test_pre_correction_skips_a_pending_row_whose_super_order_is_not_in_todays_book(self, env):
+        db, b, _ = env
+        p = pending(db, status="STAGNATION_EXIT", entry=100.0, qty=10, super_id="GONE", exit_order_id="X1")
+        b.super_orders = [super_row("OTHER", avg=108.0)]
+        b.plain_orders = [plain_row("X1", avg=102.0)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.entry_price == 100.0 and p.realized_pnl == pytest.approx(20.0)

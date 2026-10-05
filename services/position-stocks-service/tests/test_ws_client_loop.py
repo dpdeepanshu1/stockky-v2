@@ -545,3 +545,51 @@ import pytest as _pytest_idle
 def _no_offhours_idle(monkeypatch):
     """2026-10-04: the WS loop now idles off-hours; these tests drive it at any wall-clock time."""
     monkeypatch.setenv("POSITION_WS_OFFHOURS_IDLE", "0")
+
+
+class TestDayStatsFromFrame:
+    """2026-10-05: exchange open/high/low/prev-close (frame bytes 91-122) feed the
+    range gate / adaptive / screener instead of the ~65-minute tick buffer."""
+
+    def setup_method(self):
+        _reset_state()
+        wsc._day_stats.clear()
+
+    def test_loop_stores_day_stats_and_range(self, monkeypatch):
+        import struct as _st
+        frame = bytearray(_build_mode3_frame("3045", ltp_paise=100050, volume=5000))
+        _st.pack_into("<qqqq", frame, 91, 99000, 101000, 98000, 97500)   # o, h, l, prev close (paise)
+        ws = _FakeWS([bytes(frame)], close_code=1000, close_reason="")
+        _patch_common(monkeypatch, _FakeSession(ready=True), {"SBIN": "3045"}, _FakeConnect(ws))
+        wsc._running = True
+        asyncio.run(wsc._ws_loop())
+        assert wsc.get_day_stats("SBIN") == (pytest.approx(990.0), pytest.approx(1010.0),
+                                             pytest.approx(980.0), pytest.approx(975.0))
+        assert wsc.get_day_range("SBIN") == (pytest.approx(980.0), pytest.approx(1010.0))
+
+    def test_empty_day_stats_leave_nothing_stored(self, monkeypatch):
+        frame = _build_mode3_frame("3045", ltp_paise=100050, volume=5000)   # builder writes zeros there
+        ws = _FakeWS([frame], close_code=1000, close_reason="")
+        _patch_common(monkeypatch, _FakeSession(ready=True), {"SBIN": "3045"}, _FakeConnect(ws))
+        wsc._running = True
+        asyncio.run(wsc._ws_loop())
+        assert wsc.get_day_stats("SBIN") is None and wsc.get_day_range("SBIN") is None
+
+
+class TestDayStatsGarbageFrame:
+    """2026-10-05 (group 163): a frame whose day-stats bytes are nonsense is ignored."""
+
+    def setup_method(self):
+        _reset_state()
+        wsc._day_stats.clear()
+
+    def test_loop_ignores_implausible_day_stats(self, monkeypatch):
+        import struct as _st
+        frame = bytearray(_build_mode3_frame("3045", ltp_paise=100050, volume=5000))
+        _st.pack_into("<qqqq", frame, 91, 99000, 9_900_000_000, 98000, 97500)   # high 99 million rupees
+        ws = _FakeWS([bytes(frame)], close_code=1000, close_reason="")
+        _patch_common(monkeypatch, _FakeSession(ready=True), {"SBIN": "3045"}, _FakeConnect(ws))
+        wsc._running = True
+        asyncio.run(wsc._ws_loop())
+        assert wsc.get_day_stats("SBIN") is None and wsc.get_day_range("SBIN") is None
+        assert wsc.get_last_ltp("SBIN") == pytest.approx(1000.5)   # the tick itself is still used

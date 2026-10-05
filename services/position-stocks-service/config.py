@@ -286,7 +286,7 @@ SYMBOL_BLOCK_AFTER_LOSS_TODAY = _get_bool("SYMBOL_BLOCK_AFTER_LOSS_TODAY", True)
 # ADAPTIVE_BAR_MINUTES-minute bars, and the mean (high-low)/close of the last
 # ADAPTIVE_BAR_LOOKBACK bars sets the stop. Needs ADAPTIVE_BAR_MIN_BARS bars
 # of history; otherwise the legacy logic runs unchanged (fail-safe).
-ADAPTIVE_BAR_ATR_ENABLED = _get_bool("ADAPTIVE_BAR_ATR_ENABLED", False)
+ADAPTIVE_BAR_ATR_ENABLED = _get_bool("ADAPTIVE_BAR_ATR_ENABLED", True)  # 2026-10-05: ON (was off) - the legacy tick proxy always landed on the 2% stop floor / ~4.4% target
 ADAPTIVE_BAR_MINUTES = _get_int("ADAPTIVE_BAR_MINUTES", 5)
 ADAPTIVE_BAR_LOOKBACK = _get_int("ADAPTIVE_BAR_LOOKBACK", 6)
 ADAPTIVE_BAR_MIN_BARS = _get_int("ADAPTIVE_BAR_MIN_BARS", 3)
@@ -467,8 +467,20 @@ QUALITY_CACHE_MAX_AGE_HOURS = _get_float("QUALITY_CACHE_MAX_AGE_HOURS", 48.0)
 # tab), same pattern as auto_pilot_enabled/service_enabled, so it can be
 # flipped without a redeploy. These two numbers stay config.py-only tuning
 # knobs, same as MAX_ENTRY_RANGE_POSITION etc.
-STAGNATION_EXIT_MINUTES = _get_float("STAGNATION_EXIT_MINUTES", 45.0)
+STAGNATION_EXIT_MINUTES = _get_float("STAGNATION_EXIT_MINUTES", 30.0)  # 2026-10-05: 45 -> 30
 STAGNATION_EXIT_BAND_PCT = _get_float("STAGNATION_EXIT_BAND_PCT", 0.35)
+
+# ── No-follow-through exit (2026-10-05, scalp review) ───────────────────────
+# A trade that never shows follow-through bleeds charges plus a small loss until
+# the stagnation window (or the stop) closes it. If a position has not reached
+# +NO_FOLLOWTHROUGH_MIN_GAIN_PCT at its best within NO_FOLLOWTHROUGH_EXIT_MINUTES,
+# close it and free the slot. Runs inside orders/eod_squareoff.py::
+# run_stagnation_exit, so it shares that function's DB-backed on/off switch
+# (ScalpGateState.stagnation_exit_enabled) and its STAGNATION_EXIT status.
+# NO_FOLLOWTHROUGH_EXIT_ENABLED=false turns just this rule off.
+NO_FOLLOWTHROUGH_EXIT_ENABLED = _get_bool("NO_FOLLOWTHROUGH_EXIT_ENABLED", True)
+NO_FOLLOWTHROUGH_EXIT_MINUTES = _get_float("NO_FOLLOWTHROUGH_EXIT_MINUTES", 20.0)
+NO_FOLLOWTHROUGH_MIN_GAIN_PCT = _get_float("NO_FOLLOWTHROUGH_MIN_GAIN_PCT", 0.5)
 
 # ── Breakeven stop buffer (2026-09-18 audit) ────────────────────────────────
 # orders/breakeven.py previously moved the STOP_LOSS_LEG to EXACTLY
@@ -480,6 +492,14 @@ STAGNATION_EXIT_BAND_PCT = _get_float("STAGNATION_EXIT_BAND_PCT", 0.35)
 # worst-case round-trip exit realizes ~flat instead of a guaranteed small
 # loss. 0 = restore the original exact-entry behaviour.
 BREAKEVEN_STOP_BUFFER_TICKS = int(_get_float("BREAKEVEN_STOP_BUFFER_TICKS", 2))
+
+# 2026-10-05: breakeven used to trigger at 40% of target (~1.8% on a 4.4%
+# target), which these trades rarely reached. The trigger is now
+# min(40% of target, BREAKEVEN_TRIGGER_MAX_PCT). 0 disables the cap.
+# (Only affects positions opened after this change - the trigger is stored per
+# position at entry. The breakeven feature itself is still the DB-backed
+# ScalpGateState.breakeven_stop_enabled toggle, OFF by default.)
+BREAKEVEN_TRIGGER_MAX_PCT = _get_float("BREAKEVEN_TRIGGER_MAX_PCT", 1.0)
 
 # this session: user asked for Trade History to only retain "today" /
 # "last 3 days" and for the ledger to actually only store that much —
@@ -508,6 +528,37 @@ TRADE_HISTORY_RETENTION_DAYS = _get_float("TRADE_HISTORY_RETENTION_DAYS", 3.0)
 # in this service.
 MAX_ENTRY_RANGE_POSITION = _get_float("MAX_ENTRY_RANGE_POSITION", 0.92)
 MIN_TICKS_FOR_RANGE_GATE = _get_int("MIN_TICKS_FOR_RANGE_GATE", 10)
+
+# ── Entry slippage / day-gain guards (2026-10-05, scalp review) ─────────────
+# UNITEDPOLY: signal LTP 44.58, broker filled 48.14 (~8% higher) - the entry is
+# a pure MARKET order sent some seconds after the scan tick. Right before the
+# order goes out, orders/entry.py re-reads the live tick and aborts when it is
+# more than ENTRY_MAX_SLIPPAGE_PCT above the signal price, or when the last
+# tick is older than ENTRY_MAX_TICK_AGE_S (current price unknown). 0 disables
+# each check. Both fail open when there is no tick at all.
+ENTRY_MAX_SLIPPAGE_PCT = _get_float("ENTRY_MAX_SLIPPAGE_PCT", 0.5)
+ENTRY_MAX_TICK_AGE_S = _get_float("ENTRY_MAX_TICK_AGE_S", 45.0)
+# Reject stocks already up more than this % on the day vs the exchange's
+# previous close (mode-3 feed). 0 disables. Fails open when no previous close.
+MAX_DAY_GAIN_PCT = _get_float("MAX_DAY_GAIN_PCT", 7.0)
+# Log + Telegram alert when the real entry fill differs from the signal price
+# by more than this % (stale tick, wrong order matched). 0 disables.
+ENTRY_FILL_SLIPPAGE_ALERT_PCT = _get_float("ENTRY_FILL_SLIPPAGE_ALERT_PCT", 1.0)
+
+
+def _parse_int_set(raw) -> frozenset:
+    out = set()
+    for part in str(raw or "").split(","):
+        part = part.strip()
+        if part.isdigit():
+            out.add(int(part))
+    return frozenset(out)
+
+
+# Scan windows paused (comma-separated minutes). 2026-10-05 review: 15m made 7
+# of 11 trades at -Rs38 (bought after the move, no follow-through); 1m is the
+# noisiest. 5m and 60m stay on. DISABLED_SCAN_WINDOWS=none re-enables all.
+DISABLED_SCAN_WINDOWS = _parse_int_set(_get_str("DISABLED_SCAN_WINDOWS", "1,15"))
 
 # ── Same-symbol re-entry guard (this session) ───────────────────────────────
 # Root cause of the reported "takes a trade, makes profit, exits, then buys
@@ -591,5 +642,10 @@ CAPITAL_STARVED_RETRY_ON_GROWTH_PCT = _get_float("CAPITAL_STARVED_RETRY_ON_GROWT
 # #5: a *_PENDING_RECONCILE sentinel that still cannot be resolved this many
 # days after the row closed is rewritten to *_UNRESOLVED (explicit, no longer
 # "pending forever") and alerted once. See orders/reconcile.py::resolve_stuck_pending.
+# group163 (item 4): cheap checks BEFORE the quality gate. The gate costs up to
+# QUALITY_GATE_TOP_N HTTP calls per cycle (~13 s), and used to run even when
+# nothing could be entered (SATIN, COMSYN: unaffordable; or every slot full).
+# 0 restores the old order (quality gate first, affordability/slots checked in attempt_entry).
+ENTRY_PRECHECK = _get_bool("ENTRY_PRECHECK", True)
 PENDING_RECONCILE_MAX_AGE_DAYS = _get_int("PENDING_RECONCILE_MAX_AGE_DAYS", 3)
 PENDING_RECONCILE_SWEEP_INTERVAL_S = _get_float("PENDING_RECONCILE_SWEEP_INTERVAL_S", 600.0)

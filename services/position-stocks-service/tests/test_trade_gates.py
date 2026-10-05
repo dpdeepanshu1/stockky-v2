@@ -18,6 +18,28 @@ from orders import entry
 from screening import trade_gates
 
 
+# Group 166: these tests build "closed N minutes ago" rows and the gates compare IST dates, so
+# they failed whenever the machine clock was within a few hours after IST midnight. The clock is
+# pinned to 12:00 IST today for the gates (trade_gates and tz_utils) and for the row helper.
+import tz_utils
+from tz_utils import IST
+
+FIXED_NOW = datetime.now(IST).replace(hour=12, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+
+
+class _FrozenDT(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return FIXED_NOW if tz is None else FIXED_NOW.astimezone(tz)
+
+
+@pytest.fixture(autouse=True)
+def _frozen_clock(monkeypatch):
+    monkeypatch.setattr(trade_gates, "datetime", _FrozenDT)
+    monkeypatch.setattr(tz_utils, "datetime", _FrozenDT)
+    monkeypatch.setattr(entry, "datetime", _FrozenDT)
+
+
 @pytest.fixture
 def db(monkeypatch):
     eng = create_engine("sqlite:///:memory:")
@@ -47,7 +69,7 @@ def closed(db, symbol, pnl, mins_ago=1, status="STOP_HIT"):
         entry_price=100.0, quantity=1, target_price=104.0, stop_price=98.0,
         adaptive_target_pct=4.0, adaptive_stop_pct=2.0, capital_risked=100.0,
         exit_price=100.0 + pnl, realized_pnl=pnl,
-        closed_at=datetime.now(timezone.utc) - timedelta(minutes=mins_ago),
+        closed_at=FIXED_NOW - timedelta(minutes=mins_ago),
     )
     db.add(p)
     db.commit()

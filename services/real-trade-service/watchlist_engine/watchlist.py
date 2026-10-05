@@ -21,6 +21,7 @@ import models
 from watchlist_engine.decay import profile_for, expiry_from
 from watchlist_engine.sources import fetch_watchlist_candidates
 from market_feed.feed import _clean_sym
+from watchlist_engine import symbol_filter
 
 logger = logging.getLogger("real-trade-watchlist")
 
@@ -75,6 +76,7 @@ async def refresh_watchlist(db: Session, mode: str) -> int:
         return 0
 
     added = 0
+    skipped_index = 0
     cooldown_h = _drop_cooldown_hours()
     for c in candidates:
         # group159 (item 4): one spelling per stock. Tier 1/2 sources can send "KOTAKBANK.NS" while Tier 3
@@ -83,6 +85,10 @@ async def refresh_watchlist(db: Session, mode: str) -> int:
         sym = _clean_sym(c.get("symbol") or "")
         ctype = c.get("catalyst_type") or "volume_shock"
         if not sym:
+            continue
+        # group164: an index name carries the index LEVEL as its price, never a tradable catalyst price.
+        if symbol_filter.index_filter_on() and symbol_filter.is_index_symbol(sym):
+            skipped_index += 1
             continue
         spellings = [sym, f"{sym}.NS", f"{sym}.BO"]
 
@@ -155,6 +161,9 @@ async def refresh_watchlist(db: Session, mode: str) -> int:
         db.add(row)
         added += 1
 
+    if skipped_index:
+        logger.info("refresh_watchlist[%s]: %d index-name item(s) ignored (index level is not a stock price)",
+                    mode, skipped_index)
     if added:
         db.commit()
         logger.info("refresh_watchlist[%s]: added %d new entries", mode, added)

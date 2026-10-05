@@ -614,6 +614,26 @@ def get_state(db: Session) -> dict:
     }
 
 
+def adjust_closed_pnl_today(db: Session, *, delta: float) -> None:
+    """Apply a correction to P&L already booked today (group 164: a closed position's
+    entry price turned out to be the stale scan-time LTP, not the real fill).
+
+    The position's capital_risked is corrected at the same time, so the proceeds
+    already returned to the pool (exit_price * qty) are unchanged; only the split between
+    cost and P&L moves. Net effect: the pool's cash, today's and the lifetime realized
+    P&L all move by `delta` (new P&L - old P&L). Does NOT re-evaluate the daily-loss
+    kill switch (a correction is not a new loss event)."""
+    if not delta:
+        return
+    row = _get_or_create(db)
+    row.available_capital += delta
+    row.realized_pnl_today += delta
+    row.realized_pnl_total += delta
+    db.commit()
+    logger.info("ledger.adjust_closed_pnl_today: P&L corrected by ₹%.2f (today ₹%.2f, available ₹%.2f)",
+                delta, row.realized_pnl_today, row.available_capital)
+
+
 def book_late_realized_pnl(db: Session, realized_pnl: float) -> None:
     """Session 72: books a P&L that was only learnable AFTER its trading day
     (a prior-day *_PENDING_RECONCILE exit resolved via Dhan trade history).

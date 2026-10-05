@@ -26,7 +26,9 @@ from orders import adaptive
 
 @pytest.fixture(autouse=True)
 def pin_config(monkeypatch):
-    for k, v in dict(MIN_STOP_PCT=2.0, MAX_STOP_PCT=5.0, MIN_TARGET_PCT=3.0, MAX_TARGET_PCT=8.0).items():
+    # legacy-path tests: bar-ATR off and no breakeven cap (both new defaults are covered in TestScalpReview20261005)
+    for k, v in dict(MIN_STOP_PCT=2.0, MAX_STOP_PCT=5.0, MIN_TARGET_PCT=3.0, MAX_TARGET_PCT=8.0,
+                     ADAPTIVE_BAR_ATR_ENABLED=False, BREAKEVEN_TRIGGER_MAX_PCT=0.0).items():
         monkeypatch.setattr(config, k, v)
 
 

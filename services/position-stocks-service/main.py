@@ -158,7 +158,7 @@ from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition
 from orders import breakeven, eod_squareoff, overnight_stop, reconcile
 from orders import adaptive
-from orders import excursion
+from orders import excursion, review_stats
 from orders.entry import (
     attempt_entry, attempt_manual_entry, log_quality_reject,
     ManualEntryRejected, InsufficientCapitalSkip,
@@ -468,6 +468,54 @@ def _note_capital_starved(db: Session, symbol: str) -> None:
     except Exception:
         avail = 0.0
     _capital_starved[symbol] = (time.monotonic() + config.CAPITAL_STARVED_COOLDOWN_S, avail)
+
+
+# group163 (item 4): affordability / free-slot pre-checks that run BEFORE the
+# quality gate. Both are exact lower bounds, so they never drop a candidate that
+# attempt_entry() could have entered:
+#   - a position needs at least 1 share, so ltp > available_capital can never be funded
+#     (reserve_capital + reserve_additional together need max(position_value, qty*ltp));
+#   - attempt_entry() refuses when open positions >= MAX_CONCURRENT_SCALP_POSITIONS
+#     (same OPEN + EXIT_LEGS_REJECTED count).
+_unaffordable_logged_at: float = float("-inf")  # -inf: the first log is never suppressed, even right after boot
+
+
+def _unaffordable_filter(db: Session, candidates: list) -> tuple[list, list]:
+    """Drop candidates whose single-share price already exceeds the pool's
+    available capital. Fail-open: any ledger read problem keeps everyone."""
+    if not config.ENTRY_PRECHECK or not candidates:
+        return candidates, []
+    try:
+        avail = float(ledger.get_state(db).get("available_capital") or 0.0)
+    except Exception:
+        return candidates, []
+    kept, dropped = [], []
+    for c in candidates:
+        try:
+            ltp = float(c.current_ltp)
+        except (TypeError, ValueError):
+            kept.append(c)
+            continue
+        if ltp > avail:
+            dropped.append(c.symbol)
+        else:
+            kept.append(c)
+    return kept, dropped
+
+
+def _open_slots_full(db: Session) -> int | None:
+    """Returns the open-position count when it already meets
+    MAX_CONCURRENT_SCALP_POSITIONS (so no entry can succeed), else None.
+    Fail-open on any DB error."""
+    if not config.ENTRY_PRECHECK:
+        return None
+    try:
+        n = db.query(ScalpPosition).filter(
+            ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED"))
+        ).count()
+    except Exception:
+        return None
+    return n if n >= config.MAX_CONCURRENT_SCALP_POSITIONS else None
 
 
 async def _run_cycle(db: Session, trigger: str) -> dict:
@@ -792,6 +840,15 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
         summary["skipped_reason"] = "AUTO_PILOT_OFF"
         return _finalize()
 
+    # group163 (item 4): every slot already taken -> attempt_entry() could only answer
+    # MAX_POSITIONS, so skip the market filter and quality-gate HTTP calls entirely.
+    _full = _open_slots_full(db)
+    if _full is not None:
+        summary["skipped_reason"] = "MAX_POSITIONS_FULL"
+        _stage("quality_gate", "Quality Gate", time.perf_counter(),
+               detail=f"Skipped — {_full}/{config.MAX_CONCURRENT_SCALP_POSITIONS} position slots already used")
+        return _finalize()
+
     # 2026-10-02 loss-day fix: market filter + loss brake (AUTO entries only;
     # a manual /cycle/run bypasses them like it bypasses auto-pilot). Both
     # fail open — see screening/trade_gates.py.
@@ -826,6 +883,18 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     summary["capital_cooldown_skipped"] = _cooled
     if not candidates:
         summary["skipped_reason"] = "ALL_CANDIDATES_CAPITAL_COOLDOWN"
+        return _finalize()
+    candidates, _unaffordable = _unaffordable_filter(db, candidates)
+    summary["unaffordable_skipped"] = _unaffordable
+    if _unaffordable:
+        global _unaffordable_logged_at
+        _nowm = time.monotonic()
+        if _nowm - _unaffordable_logged_at >= 300:
+            _unaffordable_logged_at = _nowm
+            logger.info("position-stocks: %d candidate(s) priced above available capital, "
+                        "not quality-gated (%s)", len(_unaffordable), ", ".join(_unaffordable[:8]))
+    if not candidates:
+        summary["skipped_reason"] = "ALL_CANDIDATES_UNAFFORDABLE"
         return _finalize()
     top_n = candidates[: max(1, _effective_top_n)]
     # AUDIT FIX (session 30): quality_gate.check() was awaited one candidate
@@ -1585,6 +1654,17 @@ def positions(db: Session = Depends(get_db)):
     return out
 
 
+@app.get("/trades/breakdown")
+def trades_breakdown(days: int = 3, db: Session = Depends(get_db)):
+    """Read-only (group 167): closed trades grouped by entry time (30-min IST bucket), scan window
+    and exit status, with win rate, P&L and average max gain / drawdown per group. Covers the
+    last `days` days (1-30; trade rows are only retained for TRADE_HISTORY_RETENTION_DAYS)."""
+    days = max(1, min(int(days), 30))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = [r for r in db.query(ScalpPosition).filter(ScalpPosition.opened_at >= cutoff.replace(tzinfo=None)).all()]
+    return {"days": days, **review_stats.breakdown(rows)}
+
+
 @app.get("/trades/history")
 def trades_history(
     db: Session = Depends(get_db),
@@ -1729,6 +1809,13 @@ def reconcile_pending(db: Session = Depends(get_db)):
 def reconcile_pending_resolve(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Force the prior-day stuck-sentinel sweep now (bypasses its throttle)."""
     return reconcile.resolve_stuck_pending(db, force=True)
+
+
+@app.post("/reconcile/repair-closed")
+def reconcile_repair_closed(apply: bool = False, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """Group 164: fix today's already-closed rows whose entry price is the stale signal
+    price. Dry run unless `?apply=true`; the response lists every change and every skip."""
+    return reconcile.repair_closed_entry_prices(db, apply=apply)
 
 
 @app.get("/candidates")

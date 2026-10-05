@@ -61,6 +61,126 @@ MIN_REQUEST_INTERVAL_SECONDS = 1.0
 REQUEST_TIMEOUT_SECONDS = 10
 
 
+# ---------------------------------------------------------------------------
+# group162 (item 3): 429 cooldown + per-symbol failure skip.
+#
+# At the open VINCOFE, SATIN, KOHINOOR, COMSYN, KKCL and DCI each hit IndianAPI
+# again and again and got 429 every time, because nothing here remembered a
+# rate-limit answer. A 429 now starts a process-wide cooldown (no request for ANY
+# symbol until it ends, and no rate-limit slot is taken); any other failure keeps
+# only that symbol out for a while. Cached data (fresh or stale) is still served.
+# Settings (blank/invalid values fall back to the defaults):
+#   INDIANAPI_COOLDOWN=0          turn the whole thing off (old behaviour)
+#   INDIANAPI_COOLDOWN_S          first 429 wait, default 120; doubles per 429 in a row
+#   INDIANAPI_COOLDOWN_MAX_S      cap for the wait (and for Retry-After), default 900
+#   INDIANAPI_SYMBOL_FAIL_TTL_S   per-symbol skip after a failure, default 600; 0 = off
+# ---------------------------------------------------------------------------
+_COOLDOWN_UNTIL = 0.0
+_COOLDOWN_STREAK = 0
+_SYMBOL_FAIL: Dict[str, float] = {}
+_SYMBOL_FAIL_MAX = 2000
+
+
+def _env_pos_float(name: str, default: float, allow_zero: bool = False) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        v = float(raw)
+    except ValueError:
+        return default
+    if v != v or v in (float("inf"), float("-inf")):  # nan / inf
+        return default
+    if v < 0 or (v == 0 and not allow_zero):
+        return default
+    return v
+
+
+def _backoff_cfg():
+    """(enabled, first_wait_s, max_wait_s, symbol_fail_ttl_s)"""
+    raw = (os.environ.get("INDIANAPI_COOLDOWN") or "").strip().lower()
+    enabled = raw not in ("0", "false", "no", "off")
+    return (
+        enabled,
+        _env_pos_float("INDIANAPI_COOLDOWN_S", 120.0),
+        _env_pos_float("INDIANAPI_COOLDOWN_MAX_S", 900.0),
+        _env_pos_float("INDIANAPI_SYMBOL_FAIL_TTL_S", 600.0, allow_zero=True),
+    )
+
+
+def reset_backoff() -> None:
+    """Clear cooldown and per-symbol failures (used by tests)."""
+    global _COOLDOWN_UNTIL, _COOLDOWN_STREAK
+    _COOLDOWN_UNTIL = 0.0
+    _COOLDOWN_STREAK = 0
+    _SYMBOL_FAIL.clear()
+
+
+def _in_cooldown() -> bool:
+    try:
+        if not _backoff_cfg()[0]:
+            return False
+        return time.monotonic() < _COOLDOWN_UNTIL
+    except Exception:
+        return False
+
+
+def _symbol_blocked(symbol: str) -> bool:
+    try:
+        enabled, _f, _m, ttl = _backoff_cfg()
+        if not enabled or ttl <= 0:
+            return False
+        until = _SYMBOL_FAIL.get((symbol or "").upper())
+        return until is not None and time.monotonic() < until
+    except Exception:
+        return False
+
+
+def _note_rate_limited(response) -> None:
+    """Start/extend the process-wide cooldown after a 429."""
+    global _COOLDOWN_UNTIL, _COOLDOWN_STREAK
+    try:
+        enabled, first, cap, _ttl = _backoff_cfg()
+        if not enabled:
+            return
+        wait = min(first * (2 ** min(_COOLDOWN_STREAK, 10)), cap)
+        try:
+            ra = float((getattr(response, "headers", None) or {}).get("Retry-After", ""))
+            if ra == ra and ra > wait:
+                wait = ra
+        except (TypeError, ValueError):
+            pass
+        wait = min(wait, cap)
+        _COOLDOWN_STREAK += 1
+        _COOLDOWN_UNTIL = time.monotonic() + wait
+        logger.warning("IndianAPI 429 — pausing all IndianAPI requests for %.0fs (429 #%d in a row)",
+                       wait, _COOLDOWN_STREAK)
+    except Exception:
+        pass
+
+
+def _note_success() -> None:
+    global _COOLDOWN_STREAK
+    _COOLDOWN_STREAK = 0
+
+
+def _note_symbol_failure(symbol: str) -> None:
+    try:
+        enabled, _f, _m, ttl = _backoff_cfg()
+        if not enabled or ttl <= 0:
+            return
+        now = time.monotonic()
+        key = (symbol or "").upper()
+        if key not in _SYMBOL_FAIL and len(_SYMBOL_FAIL) >= _SYMBOL_FAIL_MAX:
+            for k in [k for k, v in _SYMBOL_FAIL.items() if v <= now]:
+                del _SYMBOL_FAIL[k]
+            if len(_SYMBOL_FAIL) >= _SYMBOL_FAIL_MAX:
+                return
+        _SYMBOL_FAIL[key] = now + ttl
+    except Exception:
+        pass
+
+
 def _get_redis_client():
     """Unused — storage is kv_cache (memory + Neon). Kept for call-site compat."""
     return None
@@ -151,6 +271,9 @@ def _fetch_from_indianapi(symbol: str) -> Optional[Dict[str, Any]]:
     if not INDIANAPI_KEY:
         logger.warning("INDIANAPI_KEY not set — cannot use IndianAPI fallback for %s", symbol)
         return None
+    if _in_cooldown() or _symbol_blocked(symbol):
+        logger.debug("IndianAPI skipped for %s (cooldown / recent failure)", symbol)
+        return None
     _enforce_rate_limit(None)
     timeout = REQUEST_TIMEOUT_SECONDS
     try:
@@ -165,10 +288,20 @@ def _fetch_from_indianapi(symbol: str) -> Optional[Dict[str, Any]]:
             headers={"x-api-key": INDIANAPI_KEY},
             timeout=timeout,
         )
+        if getattr(response, "status_code", None) == 429:
+            _note_rate_limited(response)
+            return None
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        _note_success()
+        return data
     except requests.RequestException as e:
+        err_resp = getattr(e, "response", None)
+        if getattr(err_resp, "status_code", None) == 429:
+            _note_rate_limited(err_resp)
+            return None
         logger.error("IndianAPI request failed for %s: %s", symbol, e)
+        _note_symbol_failure(symbol)
         return None
 
 

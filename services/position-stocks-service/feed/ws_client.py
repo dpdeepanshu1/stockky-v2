@@ -216,6 +216,17 @@ _MAX_TICKS = 50_000
 _MAX_BUFFER_AGE_S = 65 * 60  # slightly over the longest screening window (60m)
 _tick_buffers: Dict[str, deque] = defaultdict(lambda: deque(maxlen=_MAX_TICKS))
 _last_volume:  Dict[str, int]   = {}   # latest volume per symbol from feed
+# 2026-10-05: exchange-reported day stats (open, high, low, previous close) from the
+# mode-2/3 frame. The tick buffer only holds ~65 min, so a 'day high/low' computed
+# from it is really the last hour's range; these are the true session values.
+_day_stats: Dict[str, tuple] = {}   # symbol -> (open, high, low, prev_close)
+# 2026-10-05: counters for the plausibility check on those exchange values (the byte
+# offsets are unverified against a live frame, so every frame is sanity-checked).
+_day_stats_accepted = 0
+_day_stats_rejected = 0
+_day_stats_warned = False
+_DAY_STATS_TOL = 0.005      # tick vs. high/low timing slack (0.5%)
+_DAY_STATS_MAX_RATIO = 2.0  # no field may be >2x or <0.5x the last price (circuit limits are far tighter)
 
 # BUG FIX (2026-09-17): _tick_buffers' deques are written by _ws_loop below,
 # which runs as an asyncio task on the event-loop thread, and read by
@@ -284,6 +295,79 @@ def get_last_ltp(symbol: str) -> Optional[float]:
     if not buf:
         return None
     return buf[-1][1]
+
+
+def get_day_stats(symbol: str) -> Optional[tuple]:
+    """(open, high, low, prev_close) as reported by the exchange via the
+    mode-3 feed, or None if no full frame has arrived for the symbol. Any
+    field the frame left at 0 is returned as None."""
+    return _day_stats.get(symbol)
+
+
+def get_day_range(symbol: str) -> Optional[tuple]:
+    """(day_low, day_high) from the exchange's own session stats, or None when
+    unknown / not a usable range (callers then fall back to the tick buffer)."""
+    ds = _day_stats.get(symbol)
+    if not ds:
+        return None
+    hi, lo = ds[1], ds[2]
+    if hi and lo and hi > lo:
+        return (lo, hi)
+    return None
+
+
+def _parse_day_stats(data: bytes) -> Optional[tuple]:
+    """Bytes 91-122 of a mode-2/3 frame: open, high, low, closed price (paise).
+    Returns (open, high, low, prev_close) with 0/negative values as None, or
+    None when the frame is too short or every field is empty."""
+    if len(data) < 123:
+        return None
+    vals = struct.unpack_from("<qqqq", data, 91)   # len >= 123 guarantees these 32 bytes exist
+    out = tuple((v / 100.0) if v > 0 else None for v in vals)
+    return out if any(v is not None for v in out) else None
+
+
+def _day_stats_plausible(ds: tuple, ltp: float) -> bool:
+    """True when parsed exchange day stats are consistent with the last price.
+
+    A wrong byte offset yields garbage (huge, tiny or unordered numbers), which would
+    otherwise feed the range gate, adaptive levels and the entry guard. Checks: every
+    present field is within 0.5x-2x of the last price; high >= low when both exist;
+    the last price sits inside [low, high] allowing 0.5% slack for tick/frame timing.
+    """
+    if not ltp or ltp <= 0:
+        return True   # nothing to compare against; do not reject on missing data
+    _open, hi, lo, prev = ds
+    lo_bound, hi_bound = ltp / _DAY_STATS_MAX_RATIO, ltp * _DAY_STATS_MAX_RATIO
+    for v in ds:
+        if v is not None and not (lo_bound <= v <= hi_bound):
+            return False
+    if hi is not None and lo is not None and hi < lo:
+        return False
+    if hi is not None and hi < ltp * (1 - _DAY_STATS_TOL):
+        return False
+    if lo is not None and lo > ltp * (1 + _DAY_STATS_TOL):
+        return False
+    return True
+
+
+def _accept_day_stats(symbol: str, ds: tuple, ltp: float) -> bool:
+    """Store ds for symbol if plausible; otherwise keep the previous value, count it
+    and warn once per process (callers fall back to the tick buffer)."""
+    global _day_stats_accepted, _day_stats_rejected, _day_stats_warned
+    if _day_stats_plausible(ds, ltp):
+        _day_stats[symbol] = ds
+        _day_stats_accepted += 1
+        return True
+    _day_stats_rejected += 1
+    if not _day_stats_warned:
+        _day_stats_warned = True
+        logger.warning(
+            "position-stocks WS: exchange day stats for %s look wrong "
+            "(open/high/low/prev_close=%s, ltp=%.2f); ignoring them and using the tick "
+            "buffer. If this repeats for most symbols the frame offsets are off - see "
+            "ws_status()['day_stats_rejected'].", symbol, ds, ltp)
+    return False
 
 
 def get_last_volume(symbol: str) -> int:
@@ -580,6 +664,9 @@ async def _ws_loop() -> None:
                                 # see the mode-upgrade docstring note.
                                 if volume:
                                     _last_volume[symbol] = volume
+                                _ds = _parse_day_stats(message)
+                                if _ds is not None:
+                                    _accept_day_stats(symbol, _ds, ltp)
                                 if best_bid is not None and best_ask is not None:
                                     _last_quote[symbol] = (best_bid, best_ask, ts)
                                 for cb in _on_tick_callbacks:
@@ -683,6 +770,9 @@ def ws_status() -> dict:
         "subscribed_symbols": len(_token_to_symbol),
         "task_done": _ws_task.done() if _ws_task else True,
         "reconnect_attempts": _reconnect_attempts,
+        "day_stats_symbols": len(_day_stats),
+        "day_stats_accepted": _day_stats_accepted,
+        "day_stats_rejected": _day_stats_rejected,
         "last_tick_at": (
             datetime.fromtimestamp(_last_tick_at, tz=timezone.utc).isoformat()
             if _last_tick_at else None

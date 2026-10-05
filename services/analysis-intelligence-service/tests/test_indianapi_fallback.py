@@ -16,9 +16,11 @@ import indianapi_fallback as iaf
 def _clean():
     iaf._MEM_LAST_TS = 0.0
     iaf.INDIANAPI_KEY = None
+    iaf.reset_backoff()
     yield
     iaf._MEM_LAST_TS = 0.0
     iaf.INDIANAPI_KEY = None
+    iaf.reset_backoff()
 
 
 class TestAddTradingDays:

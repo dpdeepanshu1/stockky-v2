@@ -86,6 +86,17 @@ _NEAR_HIGH_STOP_MULT   = 0.80  # tighten stop: protect sooner on reversal
 _NEAR_LOW_TARGET_MULT  = 1.15  # widen target: room to bounce from day-low
 
 
+def _breakeven_trigger(target_pct: float) -> float:
+    """40% of target, capped at config.BREAKEVEN_TRIGGER_MAX_PCT (2026-10-05:
+    40% of a ~4.4% target is ~1.8%, which these scalps rarely reach).
+    A cap of 0 disables the cap."""
+    trig = target_pct * BREAKEVEN_FRAC
+    cap = getattr(config, "BREAKEVEN_TRIGGER_MAX_PCT", 0.0) or 0.0
+    if cap > 0:
+        trig = min(trig, cap)
+    return round(trig, 4)
+
+
 @dataclass
 class AdaptiveLevels:
     target_pct:            float
@@ -159,12 +170,17 @@ def _intraday_range_position(symbol: str, current_ltp: float) -> Optional[float]
     intraday high/low derived from the tick buffer. None if unavailable."""
     try:
         from feed import ws_client
-        buf = ws_client.get_tick_buffer(symbol)
-        prices = [p for _t, p in buf if p > 0]
-        if len(prices) < 2:
-            return None
-        day_low  = min(prices)
-        day_high = max(prices)
+        _rng_fn = getattr(ws_client, "get_day_range", None)
+        _rng = _rng_fn(symbol) if _rng_fn else None
+        if _rng:
+            day_low, day_high = _rng      # exchange's true day range (2026-10-05)
+        else:
+            buf = ws_client.get_tick_buffer(symbol)
+            prices = [p for _t, p in buf if p > 0]
+            if len(prices) < 2:
+                return None
+            day_low  = min(prices)
+            day_high = max(prices)
         span     = day_high - day_low
         if span <= 1e-6:
             return None
@@ -205,7 +221,7 @@ def _compute_bar_levels(bar_atr_pct: float, current_ltp: float, symbol: str) -> 
         stop_pct=round(stop_pct, 4),
         target_price=target_price,
         stop_price=stop_price,
-        breakeven_trigger_pct=round(target_pct * BREAKEVEN_FRAC, 4),
+        breakeven_trigger_pct=_breakeven_trigger(target_pct),
         range_regime=range_regime,
         range_position=range_pos_val,
         atr_proxy_pct=round(bar_atr_pct, 4),
@@ -295,7 +311,7 @@ def compute(
         )
 
     # ── Step 4: Breakeven trigger at 40% of target ────────────────────────
-    breakeven_trigger_pct = round(target_pct * BREAKEVEN_FRAC, 4)
+    breakeven_trigger_pct = _breakeven_trigger(target_pct)
 
     # ── Step 5: Convert to prices ──────────────────────────────────────────
     target_price = round_to_tick(current_ltp * (1 + target_pct / 100))

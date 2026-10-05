@@ -10,6 +10,9 @@ Safety checks (in order):
   3. Cross-service symbol lock
   4. Range/high-low hard gate — reject entries sitting at today's high
      (config.MAX_ENTRY_RANGE_POSITION) — see _range_gate_reject()
+  4b. Price guard (2026-10-05) — reject a stale last tick, a live price more than
+      config.ENTRY_MAX_SLIPPAGE_PCT above the signal price, or a stock already up
+      more than config.MAX_DAY_GAIN_PCT on the day — see _price_guard_reject()
   5. Same-symbol re-entry guard — reject buying back a just-closed symbol
      within the cooldown unless price has genuinely pulled back
      (config.SYMBOL_REENTRY_COOLDOWN_MINUTES) — see _reentry_guard_reject()
@@ -24,6 +27,7 @@ Safety checks (in order):
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -61,11 +65,20 @@ def _range_gate_reject(symbol: str, current_ltp: float) -> Optional[str]:
     """
     try:
         from feed import ws_client
-        buf = ws_client.get_tick_buffer(symbol)
-        prices = [p for _t, p in buf if p > 0]
-        if len(prices) < config.MIN_TICKS_FOR_RANGE_GATE:
-            return None
-        day_low, day_high = min(prices), max(prices)
+        # 2026-10-05: prefer the exchange's own day high/low (mode-3 feed). The
+        # tick buffer only spans ~65 minutes, so the range computed from it is the
+        # last hour's range, not the day's. Falls back to the buffer (needing
+        # MIN_TICKS_FOR_RANGE_GATE ticks) when the exchange range is unknown.
+        _rng_fn = getattr(ws_client, "get_day_range", None)
+        _rng = _rng_fn(symbol) if _rng_fn else None
+        if _rng:
+            day_low, day_high = _rng
+        else:
+            buf = ws_client.get_tick_buffer(symbol)
+            prices = [p for _t, p in buf if p > 0]
+            if len(prices) < config.MIN_TICKS_FOR_RANGE_GATE:
+                return None
+            day_low, day_high = min(prices), max(prices)
         span = day_high - day_low
         if span <= 1e-6:
             return None
@@ -79,6 +92,61 @@ def _range_gate_reject(symbol: str, current_ltp: float) -> Optional[str]:
         return None
     except Exception as e:
         logger.debug("entry: range gate check failed for %s: %s", symbol, e)
+        return None
+
+
+def _price_guard_reject(symbol: str, signal_ltp: float) -> Optional[str]:
+    """Pre-order price guards (2026-10-05, scalp review). Returns a skip reason
+    or None.
+
+    1. Stale tick: the last tick for the symbol is older than
+       ENTRY_MAX_TICK_AGE_S, so the current price is unknown.
+    2. Slippage: the entry is a MARKET order sent seconds after the scan tick.
+       UNITEDPOLY signalled at 44.58 and filled at 48.14 (+8%). Re-read the live
+       tick now and reject if it is more than ENTRY_MAX_SLIPPAGE_PCT above the
+       signal price.
+    3. Day gain: reject a stock already up more than MAX_DAY_GAIN_PCT vs the
+       exchange's previous close.
+
+    Every check fails OPEN (returns None) on missing data or an error, like the
+    other gates here. A setting of 0 disables that check."""
+    try:
+        from feed import ws_client
+        buf = ws_client.get_tick_buffer(symbol)
+        live = None
+        if buf:
+            last_ts, last_px = buf[-1]
+            if last_px and last_px > 0:
+                live = float(last_px)
+                max_age = config.ENTRY_MAX_TICK_AGE_S
+                age = time.time() - float(last_ts)
+                if max_age > 0 and age > max_age:
+                    return (
+                        f"STALE_TICK:last tick {age:.0f}s old "
+                        f"> {max_age:.0f}s — current price unknown"
+                    )
+        if live is not None and signal_ltp > 0 and config.ENTRY_MAX_SLIPPAGE_PCT > 0:
+            slip = (live - signal_ltp) / signal_ltp * 100.0
+            if slip > config.ENTRY_MAX_SLIPPAGE_PCT:
+                return (
+                    f"ENTRY_SLIPPAGE:live ₹{live:.2f} is {slip:.2f}% above signal "
+                    f"₹{signal_ltp:.2f} (max {config.ENTRY_MAX_SLIPPAGE_PCT:.2f}%)"
+                )
+        if config.MAX_DAY_GAIN_PCT > 0:
+            _ds_fn = getattr(ws_client, "get_day_stats", None)
+            _ds = _ds_fn(symbol) if _ds_fn else None
+            prev_close = _ds[3] if _ds else None
+            ref = live if live is not None else signal_ltp
+            if prev_close and prev_close > 0 and ref > 0:
+                gain = (ref - prev_close) / prev_close * 100.0
+                if gain > config.MAX_DAY_GAIN_PCT:
+                    return (
+                        f"DAY_GAIN_TOO_HIGH:up {gain:.2f}% vs prev close ₹{prev_close:.2f} "
+                        f"(max {config.MAX_DAY_GAIN_PCT:.2f}%)"
+                    )
+        return None
+    except Exception as e:
+        logger.debug("entry: price guard check failed for %s: %s", symbol, e)
         return None
 
 
@@ -277,6 +345,13 @@ def attempt_entry(
         # (config.MIN_FUNDAMENTAL_SCORE etc.); mixing this in under that
         # label would misattribute the reject reason to the wrong gate.
         _log_candidate(db, candidate, "SKIPPED", f"RANGE_GATE:{range_reject}", quality=quality)
+        return None
+
+    # 2026-10-05: stale-tick / slippage / day-gain guard — see _price_guard_reject().
+    price_reject = _price_guard_reject(candidate.symbol, candidate.current_ltp)
+    if price_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", f"PRICE_GUARD:{price_reject}", quality=quality)
         return None
 
     # AUDIT FIX (this session): same-symbol re-entry guard — reject buying

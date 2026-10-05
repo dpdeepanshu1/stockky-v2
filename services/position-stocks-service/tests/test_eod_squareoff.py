@@ -198,6 +198,7 @@ def env(monkeypatch):
         OVERNIGHT_MIN_FUNDAMENTAL_SCORE=60.0, OVERNIGHT_MIN_TECHNICAL_SCORE=60.0,
         OVERNIGHT_MIN_MARKET_CAP_CR=2000.0, OVERNIGHT_HOLD_MAX_EXPOSURE_PCT_OF_POOL=30.0,
         STAGNATION_EXIT_MINUTES=45.0, STAGNATION_EXIT_BAND_PCT=0.35,
+        NO_FOLLOWTHROUGH_EXIT_ENABLED=False,   # 2026-10-05 rule has its own tests (TestNoFollowThrough)
     )
     for k, v in pins.items():
         monkeypatch.setattr(config, k, v)
@@ -1243,3 +1244,87 @@ class TestExitRetry:
         assert p.consecutive_exit_failures == 0 and p.last_exit_failure_at is None
         exit_retry.reset(p)
         assert p.consecutive_exit_failures == 0
+
+
+
+# ── 2026-10-05: no-follow-through exit ───────────────────────────────────────
+class TestNoFollowThrough:
+    @pytest.fixture(autouse=True)
+    def _on(self, env, monkeypatch):
+        db, _, _ = env
+        g = eod._get_gate_state(db)
+        g.stagnation_exit_enabled = True
+        db.commit()
+        for k, v in dict(NO_FOLLOWTHROUGH_EXIT_ENABLED=True, NO_FOLLOWTHROUGH_EXIT_MINUTES=20.0,
+                         NO_FOLLOWTHROUGH_MIN_GAIN_PCT=0.5).items():
+            monkeypatch.setattr(config, k, v)
+
+    def test_old_enough_and_never_gained_is_closed_even_outside_the_flat_band(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, opened_min_ago=25)
+        b.ticks[p.symbol] = 99.0                              # -1.0%: outside the 0.35% band, 25m < 45m
+        assert eod.run_stagnation_exit(db) == 1 and p.status == "STAGNATION_EXIT"
+
+    def test_flat_position_is_closed_after_20_minutes_not_45(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, opened_min_ago=25)
+        b.ticks[p.symbol] = 100.1
+        assert eod.run_stagnation_exit(db) == 1
+
+    def test_position_that_once_reached_the_gain_is_left_alone(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, opened_min_ago=25, max_price_seen=100.6)   # best +0.6%
+        b.ticks[p.symbol] = 99.0
+        assert eod.run_stagnation_exit(db) == 0 and p.status == "OPEN"
+
+    def test_best_gain_exactly_at_threshold_is_left_alone(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, opened_min_ago=25, max_price_seen=100.5)
+        b.ticks[p.symbol] = 99.0
+        assert eod.run_stagnation_exit(db) == 0
+
+    def test_currently_up_enough_is_left_alone_even_without_recorded_high(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, opened_min_ago=25)
+        b.ticks[p.symbol] = 100.7
+        assert eod.run_stagnation_exit(db) == 0
+
+    def test_younger_than_the_window_is_left_alone(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, opened_min_ago=15)
+        b.ticks[p.symbol] = 99.0
+        assert eod.run_stagnation_exit(db) == 0 and p.status == "OPEN"
+
+    def test_rule_can_be_switched_off_on_its_own(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(config, "NO_FOLLOWTHROUGH_EXIT_ENABLED", False)
+        p = mkpos(db, entry=100.0, opened_min_ago=25)
+        b.ticks[p.symbol] = 99.0
+        assert eod.run_stagnation_exit(db) == 0
+
+    def test_shares_the_stagnation_toggle(self, env):
+        db, b, _ = env
+        g = eod._get_gate_state(db)
+        g.stagnation_exit_enabled = False
+        db.commit()
+        p = mkpos(db, entry=100.0, opened_min_ago=25)
+        b.ticks[p.symbol] = 99.0
+        assert eod.run_stagnation_exit(db) == 0 and b.calls == []
+
+    def test_no_live_price_is_left_alone(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, opened_min_ago=25)
+        assert eod.run_stagnation_exit(db) == 0
+
+    def test_overnight_carried_position_is_never_closed_by_it(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, opened_min_ago=900, cnc=True)
+        b.ticks[p.symbol] = 99.0
+        assert eod.run_stagnation_exit(db) == 0 and p.status == "OPEN"
+
+    def test_flat_band_rule_still_works_with_the_new_rule_off(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(config, "NO_FOLLOWTHROUGH_EXIT_ENABLED", False)
+        p = mkpos(db, entry=100.0, opened_min_ago=60)
+        b.ticks[p.symbol] = 100.1
+        assert eod.run_stagnation_exit(db) == 1

@@ -284,9 +284,17 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
         # ── Range-position multiplier (computed once, shared across windows) ──
         _prices     = [p for _t, p in buf if p > 0]
         _range_mult = 1.0
-        if len(_prices) >= 2:
+        # 2026-10-05: prefer the exchange's true day high/low (mode-3 feed); the
+        # tick buffer only spans ~65 minutes. Falls back to the buffer range.
+        _day_low = _day_high = None
+        _rng_fn = getattr(ws_client, "get_day_range", None)
+        _rng = _rng_fn(symbol) if _rng_fn else None
+        if _rng:
+            _day_low, _day_high = _rng
+        elif len(_prices) >= 2:
             _day_low  = min(_prices)
             _day_high = max(_prices)
+        if _day_low is not None:
             _span     = _day_high - _day_low
             if _span > 1e-6:
                 _rpos = max(0.0, min(1.0, (current_ltp - _day_low) / _span))
@@ -306,6 +314,9 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
                 _vwap_mult = _VWAP_EXTENDED_MULT   # extended vs session avg
 
         for win_minutes, threshold in thresholds.items():
+            # 2026-10-05: windows paused via config.DISABLED_SCAN_WINDOWS
+            if win_minutes in getattr(config, "DISABLED_SCAN_WINDOWS", ()):
+                continue
             pct = _rolling_pct_change(symbol, win_minutes)
             if pct is None or pct < threshold:
                 continue

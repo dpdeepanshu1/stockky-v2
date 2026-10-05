@@ -369,12 +369,13 @@ def _schedule_atr_refresh(client: Optional[httpx.AsyncClient], symbol: str) -> b
 
 
 class Tick:
-    __slots__ = ("symbol", "price", "as_of", "atr", "source", "volume", "day_high", "day_low")
+    __slots__ = ("symbol", "price", "as_of", "atr", "source", "volume", "day_high", "day_low", "prev_close")
 
     def __init__(self, symbol: str, price: float, as_of: datetime, atr: Optional[float], source: str,
                  volume: Optional[int] = None,
                  day_high: Optional[float] = None,
-                 day_low: Optional[float] = None):
+                 day_low: Optional[float] = None,
+                 prev_close: Optional[float] = None):
         self.symbol   = symbol
         self.price    = price
         self.as_of    = as_of
@@ -388,6 +389,19 @@ class Tick:
         # 2026-09-15 (session41b): added to fix "buy at wrong time" losses.
         self.day_high = day_high
         self.day_low  = day_low
+        # group155: previous session close when the source supplies it (None otherwise). Lets
+        # entry_engine tell a stock that is UP today from one that is down, which a bare price
+        # cannot. Never used for sizing or ordering.
+        self.prev_close = prev_close
+
+
+def _safe_prev_close(value) -> Optional[float]:
+    """group155: parse an upstream previous-close into a positive float, or None. Never raises."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 and v == v else None
 
 
 async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool = False,
@@ -523,6 +537,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
             volume=int(vol) if vol not in (None, "") else None,
             day_high=float(_day_high) if _day_high else None,
             day_low=float(_day_low)  if _day_low  else None,
+            prev_close=_safe_prev_close(q.get("previous_close") or q.get("prev_close")),
         )
     except Exception as e:
         logger.warning("get_quote(%s): source-2 (market-data-service /quote) failed: %s: %s", symbol, type(e).__name__, e)
@@ -677,6 +692,7 @@ def _tick_from_bulk_item(item, *, now: Optional[datetime] = None) -> Optional[Ti
             volume=int(vol) if vol not in (None, "") else None,
             day_high=float(dh) if dh else None,
             day_low=float(dl) if dl else None,
+            prev_close=_safe_prev_close(item.get("previous_close") or item.get("prev_close")),
         )
     except (TypeError, ValueError):
         return None

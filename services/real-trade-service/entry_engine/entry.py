@@ -1451,6 +1451,79 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
 # the EXISTING evaluate_mode pipeline (which already has ATR/resistance/volume/
 # risk checks). This keeps one entry pipeline instead of two.
 
+# ── group155 (A3/A4/A5 of the 2026-10-05 open-market log) ────────────────────
+# The trigger pass below only ever rejected an UPWARD overrun of entry_band_pct, so a symbol that
+# had FALLEN any amount since its catalyst was queued (KMSUGAR -20%, GLOTTIS -9.7%, BAJAJHCARE
+# -9.7% in the log) sailed through as "within band", and Tier 3 (the raw momentum-movers list,
+# which includes decliners) had no direction check at all because its baseline is the first live
+# price (move 0.00% by design). Two cheap guards, both fail-open when the data is missing and both
+# only decide whether a row is QUEUED (it stays active and is re-checked next cycle; the normal
+# quality/MTF/risk gates downstream are untouched):
+#   * adverse-move guard: pct_move below -WATCHLIST_MAX_DROP_PCT (default 3%) is not queued.
+#   * Tier-3 direction guard: a volume_shock row is not queued while its day change versus the
+#     previous close is below WATCHLIST_TIER3_MIN_DAY_CHANGE_PCT (default +1.0%).
+# WATCHLIST_ADVERSE_GUARD=0 turns both off (old behaviour).
+_ADVERSE_LOG_INTERVAL_S = 1800
+_adverse_last_log: dict[tuple[str, str, str], float] = {}
+
+
+def _wl_env_float(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        v = float(raw)
+    except ValueError:
+        return default
+    return v if v == v else default
+
+
+def _wl_adverse_guard_on() -> bool:
+    return ((os.getenv("WATCHLIST_ADVERSE_GUARD") or "").strip() or "1") not in ("0", "false", "False")
+
+
+def _tick_day_change_pct(tick) -> Optional[float]:
+    """Today's change in percent versus the previous close, or None when the tick has no usable previous close."""
+    try:
+        pc = getattr(tick, "prev_close", None)
+        pc = float(pc) if pc is not None else 0.0
+        px = float(tick.price)
+    except (TypeError, ValueError):
+        return None
+    if pc <= 0 or px <= 0:
+        return None
+    return (px / pc - 1.0) * 100.0
+
+
+def _watchlist_adverse_reason(row, pct_move: float, tick) -> Optional[str]:
+    """Return a short reason when this row must NOT be queued this cycle, else None. Never raises."""
+    try:
+        if not _wl_adverse_guard_on():
+            return None
+        max_drop = abs(_wl_env_float("WATCHLIST_MAX_DROP_PCT", 0.03))
+        if max_drop > 0 and pct_move < -max_drop:
+            return f"price is {pct_move:.1%} below catalyst (limit -{max_drop:.1%})"
+        if getattr(row, "source_tier", None) == 3:
+            min_chg = _wl_env_float("WATCHLIST_TIER3_MIN_DAY_CHANGE_PCT", 1.0)
+            day_chg = _tick_day_change_pct(tick)
+            if day_chg is not None and day_chg < min_chg:
+                return f"volume-shock stock is {day_chg:+.2f}% on the day (need >= {min_chg:+.2f}%)"
+    except Exception as exc:  # a guard bug must never stop the trigger pass
+        logger.warning("watchlist adverse guard failed for %s (queueing as before): %s: %s",
+                       getattr(row, "symbol", "?"), type(exc).__name__, exc)
+    return None
+
+
+def _log_adverse_once(mode: str, row, reason: str) -> None:
+    import time as _t
+    key = (mode, row.symbol, "adverse")
+    now_m = _t.monotonic()
+    if now_m - _adverse_last_log.get(key, -1e12) >= _ADVERSE_LOG_INTERVAL_S:
+        _adverse_last_log[key] = now_m
+        logger.info("watchlist trigger[%s/%s]: SKIPPED (not queued, stays active) — catalyst=%s tier=%s %s",
+                    mode, row.symbol, row.catalyst_type, row.source_tier, reason)
+
+
 async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
     """
     Trigger pass over active WatchlistEntry rows.
@@ -1476,7 +1549,7 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
         .all()
     )
     if not active:
-        return {"watchlist_checked": 0, "band_ok": 0, "missed": 0, "queued": 0}
+        return {"watchlist_checked": 0, "band_ok": 0, "missed": 0, "queued": 0, "adverse": 0}
 
     symbols = list({row.symbol for row in active})
     ticks = await get_quotes(symbols)
@@ -1489,7 +1562,7 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
         .all()
     }
 
-    band_ok = missed = queued = 0
+    band_ok = missed = queued = adverse = 0
     now = datetime.now(timezone.utc)
 
     for row in active:
@@ -1567,6 +1640,14 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
             )
             continue
 
+        # group155: do not queue a stock that has fallen away from its catalyst, or a Tier-3
+        # volume-shock stock that is not up on the day. The row stays active (re-checked next cycle).
+        _adv = _watchlist_adverse_reason(row, pct_move, tick)
+        if _adv:
+            adverse += 1
+            _log_adverse_once(mode, row, _adv)
+            continue
+
         band_ok += 1
 
         # Already has an unconsumed watchlist-sourced candidate waiting — skip.
@@ -1606,4 +1687,5 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
         "band_ok": band_ok,
         "missed": missed,
         "queued": queued,
+        "adverse": adverse,
     }

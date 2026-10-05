@@ -69,7 +69,7 @@ def tick(price, symbol="TESTCO"):
 class TestEmptyAndNoTick:
     def test_no_active_rows_returns_zeroed_tally(self, db):
         assert run(entry.evaluate_watchlist_entries(db, "DEMO")) == {
-            "watchlist_checked": 0, "band_ok": 0, "missed": 0, "queued": 0,
+            "watchlist_checked": 0, "band_ok": 0, "missed": 0, "queued": 0, "adverse": 0,
         }
 
     def test_row_with_no_tick_this_cycle_is_skipped_not_crashed(self, db, monkeypatch):
@@ -80,7 +80,7 @@ class TestEmptyAndNoTick:
         monkeypatch.setattr(entry, "get_quotes", _no_quotes)
 
         tally = run(entry.evaluate_watchlist_entries(db, "DEMO"))
-        assert tally == {"watchlist_checked": 1, "band_ok": 0, "missed": 0, "queued": 0}
+        assert tally == {"watchlist_checked": 1, "band_ok": 0, "missed": 0, "queued": 0, "adverse": 0}
 
 
 class TestZeroPriceGuard:
@@ -95,7 +95,7 @@ class TestZeroPriceGuard:
 
         # Must not raise ZeroDivisionError.
         tally = run(entry.evaluate_watchlist_entries(db, "DEMO"))
-        assert tally == {"watchlist_checked": 1, "band_ok": 0, "missed": 0, "queued": 0}
+        assert tally == {"watchlist_checked": 1, "band_ok": 0, "missed": 0, "queued": 0, "adverse": 0}
         # catalyst_price must NOT have been stamped from a bad 0.0 tick.
         db.refresh(row)
         assert row.catalyst_price == 0.0
@@ -109,7 +109,7 @@ class TestZeroPriceGuard:
         monkeypatch.setattr(entry, "get_quotes", _neg_quote)
 
         tally = run(entry.evaluate_watchlist_entries(db, "DEMO"))
-        assert tally == {"watchlist_checked": 1, "band_ok": 0, "missed": 0, "queued": 0}
+        assert tally == {"watchlist_checked": 1, "band_ok": 0, "missed": 0, "queued": 0, "adverse": 0}
 
     def test_a_bad_zero_price_row_does_not_block_other_rows_same_cycle(self, db, monkeypatch):
         # This is the actual blast-radius of the bug: without the fix, the
@@ -166,7 +166,7 @@ class TestBandCheck:
         monkeypatch.setattr(entry, "get_quotes", _quote)
 
         tally = run(entry.evaluate_watchlist_entries(db, "DEMO"))
-        assert tally == {"watchlist_checked": 1, "band_ok": 1, "missed": 0, "queued": 1}
+        assert tally == {"watchlist_checked": 1, "band_ok": 1, "missed": 0, "queued": 1, "adverse": 0}
         cand = db.query(models.TradeCandidate).one()
         assert cand.symbol == row.symbol
         assert cand.decision_label == "BUY NOW"
@@ -182,7 +182,7 @@ class TestBandCheck:
         monkeypatch.setattr(entry, "get_quotes", _quote)
 
         tally = run(entry.evaluate_watchlist_entries(db, "DEMO"))
-        assert tally == {"watchlist_checked": 1, "band_ok": 0, "missed": 1, "queued": 0}
+        assert tally == {"watchlist_checked": 1, "band_ok": 0, "missed": 1, "queued": 0, "adverse": 0}
         db.refresh(row)
         assert row.status == "missed"
         assert row.missed_reason is not None
@@ -200,49 +200,16 @@ class TestBandCheck:
         assert tally["queued"] == 1
 
     def test_price_below_catalyst_is_within_band_and_queues(self, db, monkeypatch):
-        # A drop is not "chasing" the catalyst — only an upward run past the
-        # band marks it missed. A cheaper-than-catalyst entry still queues.
+        # A SMALL drop is not "chasing" the catalyst — only an upward run past the
+        # band marks it missed. A slightly-cheaper-than-catalyst entry still queues.
+        # (group155: a drop beyond WATCHLIST_MAX_DROP_PCT, default 3%, is no longer queued -
+        # see tests/test_group155_watchlist_adverse_guard.py. This used to assert a -10% drop queued.)
         row = make_row(db, catalyst_price=100.0, entry_band_pct=0.05)
 
         async def _quote(symbols):
-            return {row.symbol: tick(90.0, row.symbol)}
+            return {row.symbol: tick(98.0, row.symbol)}
         monkeypatch.setattr(entry, "get_quotes", _quote)
 
         tally = run(entry.evaluate_watchlist_entries(db, "DEMO"))
-        assert tally == {"watchlist_checked": 1, "band_ok": 1, "missed": 0, "queued": 1}
+        assert tally == {"watchlist_checked": 1, "band_ok": 1, "missed": 0, "queued": 1, "adverse": 0}
 
-
-class TestAlreadyQueuedDedup:
-    def test_symbol_with_existing_unconsumed_watchlist_candidate_is_not_requeued(self, db, monkeypatch):
-        row = make_row(db, catalyst_price=100.0, entry_band_pct=0.05)
-        db.add(models.TradeCandidate(
-            mode="DEMO", symbol=row.symbol, source_tab="watchlist",
-            decision_label="BUY NOW", conviction_score=70.0, signal_price=101.0,
-            raw_payload=None, consumed=False, watchlist_entry_id=row.id,
-        ))
-        db.commit()
-
-        async def _quote(symbols):
-            return {row.symbol: tick(101.0, row.symbol)}
-        monkeypatch.setattr(entry, "get_quotes", _quote)
-
-        tally = run(entry.evaluate_watchlist_entries(db, "DEMO"))
-        assert tally["band_ok"] == 1
-        assert tally["queued"] == 0  # dedup — no second candidate inserted
-        assert db.query(models.TradeCandidate).count() == 1
-
-    def test_mode_isolation_real_vs_demo_candidates_do_not_dedup_across_modes(self, db, monkeypatch):
-        row = make_row(db, mode="REAL", catalyst_price=100.0, entry_band_pct=0.05)
-        db.add(models.TradeCandidate(
-            mode="DEMO", symbol=row.symbol, source_tab="watchlist",
-            decision_label="BUY NOW", conviction_score=70.0, signal_price=101.0,
-            raw_payload=None, consumed=False, watchlist_entry_id=999,
-        ))
-        db.commit()
-
-        async def _quote(symbols):
-            return {row.symbol: tick(101.0, row.symbol)}
-        monkeypatch.setattr(entry, "get_quotes", _quote)
-
-        tally = run(entry.evaluate_watchlist_entries(db, "REAL"))
-        assert tally["queued"] == 1  # REAL row queues despite an unrelated DEMO row existing

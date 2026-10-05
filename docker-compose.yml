@@ -20,6 +20,15 @@
 #   • Neon / Postgres  → set DATABASE_URL / CACHE_DATABASE_URL (Render uses this).
 #   • Oracle Autonomous → set ORACLE_DSN + ORACLE_* (this compose mounts the wallet).
 #
+#
+# 2026-10-05 (group 149) SECURITY: every published port is now bound to
+# 127.0.0.1. Docker publishes "8000:8000" on 0.0.0.0 AND inserts its own
+# iptables rules ahead of ufw, so the gateway, real-trade and position-stocks
+# ports were reachable from the whole internet (the VM log showed scanners
+# and "Invalid HTTP request received" on api-gateway). The host nginx
+# (deploy/nginx-stockky.conf) reaches them over 127.0.0.1, and local curl /
+# scripts on the VM still work; only direct outside access is closed.
+#
 # CRITICAL: without env_file + DATABASE_* / ORACLE_* below, api-gateway runs
 # memory-only and loses data-feed / trades / training / surprise on every restart.
 
@@ -33,7 +42,7 @@ services:
   market-data-service:
     build: ./services/market-data-service
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     env_file:
       - .env
     environment:
@@ -69,7 +78,7 @@ services:
   analysis-intelligence-service:
     build: ./services/analysis-intelligence-service
     ports:
-      - "8002:8000"
+      - "127.0.0.1:8002:8000"
     env_file:
       - .env
     environment:
@@ -107,7 +116,7 @@ services:
   decision-prediction-service:
     build: ./services/decision-prediction-service
     ports:
-      - "8004:8000"
+      - "127.0.0.1:8004:8000"
     env_file:
       - .env
     environment:
@@ -159,7 +168,7 @@ services:
   notification-scheduler-service:
     build: ./services/notification-scheduler-service
     ports:
-      - "8008:8000"
+      - "127.0.0.1:8008:8000"
     env_file:
       - .env
     environment:
@@ -204,7 +213,7 @@ services:
   api-gateway:
     build: ./services/api-gateway
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file:
       - .env
     environment:
@@ -292,7 +301,7 @@ services:
   real-trade-service:
     build: ./services/real-trade-service
     ports:
-      - "8005:8005"
+      - "127.0.0.1:8005:8005"
     env_file:
       - .env
     environment:
@@ -382,7 +391,7 @@ services:
       args:
         VITE_API_URL: ${VITE_API_URL:-/api}
     ports:
-      - "5173:8080"
+      - "127.0.0.1:5173:8080"
     depends_on:
       - api-gateway
     restart: unless-stopped
@@ -399,7 +408,7 @@ services:
   position-stocks-service:
     build: ./services/position-stocks-service
     ports:
-      - "8006:8006"
+      - "127.0.0.1:8006:8006"
     env_file:
       - .env
     environment:

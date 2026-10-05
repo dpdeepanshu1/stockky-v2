@@ -6,6 +6,8 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-05 (group 149)  Published ports bound to 127.0.0.1; host and container nginx hardened against scanners (deploy config only, no service code).
+  VM logs showed bots probing `/.env`, `phpunit eval-stdin.php`, `/containers/json`, and api-gateway logging `Invalid HTTP request received`: compose published every container port on all interfaces (Docker bypasses ufw). All 8 ports now `127.0.0.1:...` (host nginx already proxies to loopback); container nginx returns 404 for dotfiles/config extensions instead of the SPA `index.html`; host nginx adds `server_tokens off`, basic security headers, `return 444` for probe paths (certbot `/.well-known/` kept) and a per-IP rate limit on `/` only. New `scripts/check_compose_ports_loopback.py`. Tested under nginx 1.24 here; not on the VM. Run `./deploy/deploy.sh`. Also check the Oracle security list allows only 22/80/443. Details: `docs/GROUP149_LOCK_DOWN_PORTS_AND_NGINX_HARDENING.md`.
 - 2026-10-04 (group 148)  AngelOne feed "scrip master not loaded yet" is a WARNING for the first 3 attempts, ERROR only if it drags on (market-data-service).
   From the 8 h VM log audit: this self-resolving boot condition was logged at ERROR on every start. New `_scrip_wait_log_level(attempt)`; retry/backoff unchanged. Other audit lines reviewed, no code change (AngelOne 403 rate limit already has a cooldown; NSE 403 shares the VM-IP block with Yahoo, still 429). +3 tests, market-data suite 760 passed. Rebuild market-data-service. Details: `docs/GROUP148_SCRIP_MASTER_WAIT_LOG_LEVEL.md`.
 - 2026-10-04 (group 147)  Feed-universe refresh warning now names the error (market-data-service); item 6 closed.

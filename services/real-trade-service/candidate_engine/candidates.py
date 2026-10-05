@@ -1134,6 +1134,75 @@ def _rows_from_volume_shock(payload: Any) -> list[dict]:
     return out
 
 
+# ── group154 (item 5 of the 2026-10-05 open-market log): time-of-day volume ────
+# The 1mo/1d history's LAST candle is today's PARTIAL session while the market is open, but
+# the 20-day average it is compared with is made of FULL sessions, and the 1.5x threshold was
+# calibrated on full-day data. At 10:00 IST roughly a fifth of a normal day's volume has traded,
+# so a stock already running at 2x its usual full-day volume showed ~0.4x and was rejected - the
+# track was blind in the morning, when breakouts happen. The partial volume is now projected to
+# a full session with an intraday cumulative-volume curve before the ratio is taken. The curve is
+# an APPROXIMATE typical NSE shape (heavy open, quiet midday, closing surge), not measured from
+# this system's own data - the floor stops the first minutes from inflating a handful of ticks
+# into a "shock", and VOLUME_SHOCK_TOD_ADJUST=0 turns the projection off (old behaviour).
+VOLUME_SHOCK_TOD_ADJUST = ((os.getenv("VOLUME_SHOCK_TOD_ADJUST") or "").strip() or "1") not in ("0", "false", "False")
+VOLUME_SHOCK_TOD_MIN_FRACTION = float(((os.getenv("VOLUME_SHOCK_TOD_MIN_FRACTION") or "").strip() or "0.15"))
+# (minutes since 09:15 IST, cumulative share of the full session's volume)
+_SESSION_VOLUME_CURVE = (
+    (0, 0.00), (15, 0.09), (45, 0.20), (105, 0.34), (165, 0.45),
+    (225, 0.56), (285, 0.68), (345, 0.85), (375, 1.00),
+)
+
+# group154: quote-based pre-check. _volume_shock_analysis used to fetch the quote AND the daily
+# history for every mover; most movers fail the return gate, and the history call (one AngelOne
+# getCandleData each, shared rate bucket, shed under load) is what came back empty for most
+# symbols ("Insufficient daily history"). The quote already carries previous_close, so a symbol
+# whose live return is clearly below the gate is rejected before any history request.
+VOLUME_SHOCK_QUOTE_PREFILTER = ((os.getenv("CANDIDATE_VOLUME_SHOCK_QUOTE_PREFILTER") or "").strip() or "1") not in ("0", "false", "False")
+VOLUME_SHOCK_PREFILTER_MARGIN_PCT = float(((os.getenv("CANDIDATE_VOLUME_SHOCK_PREFILTER_MARGIN_PCT") or "").strip() or "1.0"))
+
+
+def _session_volume_fraction(now_ist: datetime) -> float:
+    """Share of a full session's volume expected to have traded by `now_ist` (1.0 outside 09:15-15:30
+    IST), linear between the curve points and never below VOLUME_SHOCK_TOD_MIN_FRACTION."""
+    mins = (now_ist.hour * 60 + now_ist.minute + now_ist.second / 60.0) - (9 * 60 + 15)
+    if mins <= 0 or mins >= _SESSION_VOLUME_CURVE[-1][0]:
+        return 1.0
+    frac = 1.0
+    for (m0, f0), (m1, f1) in zip(_SESSION_VOLUME_CURVE, _SESSION_VOLUME_CURVE[1:]):
+        if m0 <= mins <= m1:
+            frac = f0 + (f1 - f0) * ((mins - m0) / float(m1 - m0))
+            break
+    return max(min(frac, 1.0), max(0.01, min(VOLUME_SHOCK_TOD_MIN_FRACTION, 1.0)))
+
+
+def _today_volume_fraction(candles: list, now_ist: Optional[datetime] = None) -> float:
+    """Session fraction to divide the last candle's volume by, or 1.0 (no adjustment) when the
+    adjustment is off, the last candle is not today's, or the market is not mid-session."""
+    if not VOLUME_SHOCK_TOD_ADJUST or not candles:
+        return 1.0
+    try:
+        from zoneinfo import ZoneInfo
+        now = now_ist or datetime.now(ZoneInfo("Asia/Kolkata"))
+        last_date = str((candles[-1] or {}).get("date") or "")[:10]
+        if last_date != now.strftime("%Y-%m-%d"):
+            return 1.0
+        return _session_volume_fraction(now)
+    except Exception:
+        return 1.0
+
+
+def _quote_return_pct(quote: dict) -> Optional[float]:
+    """Live return vs previous close from a quote dict, or None when either is missing/unusable."""
+    try:
+        px = float(quote.get("price") or quote.get("cmp") or 0)
+        prev = float(quote.get("previous_close") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if px <= 0 or prev <= 0:
+        return None
+    return (px / prev - 1) * 100
+
+
 async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
     """
     Option A (Issue 1 fix) — momentum-breakout quality gate.
@@ -1150,12 +1219,31 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict
     track). Liquidity is enforced downstream by risk_engine's own hard
     liquidity floor at order time, so it is not duplicated here.
     """
-    quote_task = asyncio.create_task(_fetch_quote(client, symbol))
-    hist_task = asyncio.create_task(_fetch_history(client, symbol, "1mo", "1d"))
-    quote, candles = await asyncio.gather(quote_task, hist_task, return_exceptions=True)
+    try:
+        quote = await _fetch_quote(client, symbol)
+    except Exception as e:
+        quote = e
 
     if isinstance(quote, Exception) or not quote:
         return {"reject_reason": "No quote available for volume-shock check.", "atr_pct": None}
+
+    # group154: reject a clearly-flat/falling symbol on the quote alone, before the history call.
+    if VOLUME_SHOCK_QUOTE_PREFILTER and isinstance(quote, dict):
+        _q_ret = _quote_return_pct(quote)
+        if _q_ret is not None and _q_ret < VOLUME_SHOCK_MIN_RETURN_PCT - VOLUME_SHOCK_PREFILTER_MARGIN_PCT:
+            return {
+                "reject_reason": (
+                    f"Today's return {_q_ret:.1f}% < "
+                    f"{VOLUME_SHOCK_MIN_RETURN_PCT}% volume-shock breakout threshold "
+                    "(quote pre-check, history not fetched)."
+                ),
+                "atr_pct": None,
+            }
+
+    try:
+        candles = await _fetch_history(client, symbol, "1mo", "1d")
+    except Exception as e:
+        candles = e
     if isinstance(candles, Exception) or not isinstance(candles, list) or len(candles) < 6:
         return {"reject_reason": "Insufficient daily history for volume-shock check.", "atr_pct": None}
 
@@ -1203,11 +1291,18 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict
     avg20 = sum(prior_vols) / len(prior_vols) if prior_vols else 0
     if avg20 <= 0:
         return {"reject_reason": "No 20-day average volume available for volume-shock check.", "atr_pct": None}
-    vol_multiple = today_vol / avg20
+    vol_multiple_raw = today_vol / avg20
+    # group154: mid-session the last candle is a partial day - project it to a full session first.
+    tod_fraction = _today_volume_fraction(candles)
+    vol_multiple = vol_multiple_raw / tod_fraction
     if vol_multiple < VOLUME_SHOCK_MULTIPLIER:
+        _tod_note = (
+            f" (raw {vol_multiple_raw:.1f}x, {tod_fraction * 100:.0f}% of the session elapsed)"
+            if tod_fraction < 1.0 else ""
+        )
         return {
             "reject_reason": (
-                f"Today's volume {vol_multiple:.1f}x 20-day average < "
+                f"Today's volume {vol_multiple:.1f}x 20-day average{_tod_note} < "
                 f"{VOLUME_SHOCK_MULTIPLIER}x volume-shock threshold."
             ),
             "atr_pct": None,
@@ -1310,6 +1405,8 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict
         "reject_reason":     None,
         "today_return_pct":  today_return_pct,
         "vol_multiple":      round(vol_multiple, 2),
+        "vol_multiple_raw":  round(vol_multiple_raw, 2),
+        "tod_fraction":      round(tod_fraction, 3),
         "atr_pct":           atr_pct,
         "current_price":     current_price,
         # ── HIGH CONVICTION fields (30-Aug-2026 NSE backtest) ──────────────
@@ -1689,6 +1786,7 @@ async def _refresh_volume_shock_candidates(
     inserted = 0
     skipped  = 0
     no_quote_count = 0
+    history_missing = 0
     quality_rejected = 0
 
     # ── First pass: keep only symbols that cleared the price/volume
@@ -1709,9 +1807,21 @@ async def _refresh_volume_shock_candidates(
             skipped += 1
             if "no quote" in reject.lower() or "insufficient" in reject.lower():
                 no_quote_count += 1
+            if "insufficient daily history" in reject.lower():
+                history_missing += 1
             continue
 
         passed.append((sym, result))
+
+    # group154: one line per cycle when the daily history was missing for some symbols (it used to
+    # surface only as per-symbol INFO rejections).
+    if history_missing:
+        logger.warning(
+            "volume_shock: daily history unavailable for %d of %d symbol(s) this cycle (mode=%s) - "
+            "market-data /history is failing or its candle bucket is shedding; those symbols "
+            "were skipped, not judged",
+            history_missing, len(vs_tasks), mode,
+        )
 
     # 2026-09-11 addition: record this cycle's average pre-shock ATR%
     # across the batch that cleared the price/volume check — this is what

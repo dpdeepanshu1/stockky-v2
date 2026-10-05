@@ -2020,7 +2020,10 @@ async def _intraday_news_body() -> dict:
         try:
             enabled = (
                 db.query(models.TradeGateState)
-                .filter(models.TradeGateState.afterhours_news_scan_enabled.is_(True))
+                # 2026-10-05 (group 150): `== True` (renders `= 1`), NOT `.is_(True)`.
+                # On Oracle (no native BOOLEAN) `.is_(True)` compiles to `IS 1`,
+                # which is ORA-00908; SQLite accepts it, so tests never caught it.
+                .filter(models.TradeGateState.afterhours_news_scan_enabled == True)  # noqa: E712
                 .first()
             )
             if enabled is None:

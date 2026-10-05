@@ -666,38 +666,45 @@ def _fetch_yf_news(symbol: str) -> List[Dict[str, Any]]:
     return items
 
 
+def _news_parallel_enabled() -> bool:
+    return (os.getenv("EVENT_NEWS_PARALLEL") or "").strip().lower() not in ("0", "false", "no", "off")
+
+
 def _fetch_news_from_multiple_sources(symbol: str, max_total: int = 15) -> List[Dict[str, Any]]:
     all_news = []
 
-    # 1. Yahoo Finance
-    yf_news = _fetch_yf_news(symbol)
-    logger.info(f"Yahoo Finance news for {symbol}: {len(yf_news)} items")
-    if yf_news:
-        all_news.extend(yf_news)
+    # 2026-10-06 (group 176): the five sources used to be fetched one after another, so a symbol's news took
+    # the SUM of five network calls (Google News, three RSS feeds, Yahoo). They now run at the same time and
+    # the symbol takes about the slowest one. Results are merged in the fixed order below, so the dedupe
+    # ("first occurrence wins") and the output are the same as before. A source that raises counts as empty.
+    # EVENT_NEWS_PARALLEL=0 restores the sequential fetch.
+    sources = (
+        ("Yahoo Finance", lambda: _fetch_yf_news(symbol)),
+        ("Google News", lambda: _fetch_google_news(symbol, max_items=8)),
+        ("Moneycontrol", lambda: _fetch_moneycontrol_news(symbol, max_items=5)),
+        ("Economic Times", lambda: _fetch_economic_times(symbol, max_items=5)),
+        ("CNBC TV18", lambda: _fetch_cnbc_tv18(symbol, max_items=5)),
+    )
 
-    # 2. Google News
-    google_news = _fetch_google_news(symbol, max_items=8)
-    logger.info(f"Google News for {symbol}: {len(google_news)} items")
-    if google_news:
-        all_news.extend(google_news)
+    def _safe(fn, name):
+        try:
+            return fn() or []
+        except Exception as e:  # noqa: BLE001 - one bad source never loses the others
+            logger.warning("%s news fetch for %s failed: %s", name, symbol, e)
+            return []
 
-    # 3. Moneycontrol
-    mc_news = _fetch_moneycontrol_news(symbol, max_items=5)
-    logger.info(f"Moneycontrol for {symbol}: {len(mc_news)} items")
-    if mc_news:
-        all_news.extend(mc_news)
+    if _news_parallel_enabled():
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=len(sources)) as pool:
+            futures = [pool.submit(_safe, fn, name) for name, fn in sources]
+            results = [f.result() for f in futures]
+    else:
+        results = [_safe(fn, name) for name, fn in sources]
 
-    # 4. Economic Times
-    et_news = _fetch_economic_times(symbol, max_items=5)
-    logger.info(f"Economic Times for {symbol}: {len(et_news)} items")
-    if et_news:
-        all_news.extend(et_news)
-
-    # 5. CNBC TV18
-    cnbc_news = _fetch_cnbc_tv18(symbol, max_items=5)
-    logger.info(f"CNBC TV18 for {symbol}: {len(cnbc_news)} items")
-    if cnbc_news:
-        all_news.extend(cnbc_news)
+    for (name, _), items in zip(sources, results):
+        logger.info(f"{name} for {symbol}: {len(items)} items")
+        if items:
+            all_news.extend(items)
 
     # Deduplicate
     seen = set()

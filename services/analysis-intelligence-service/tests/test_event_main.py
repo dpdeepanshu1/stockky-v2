@@ -997,6 +997,57 @@ class TestMultiSource:
         assert seen == {"g": 8, "m": 5, "e": 5, "c": 5}
 
 
+class TestMultiSourceParallel:
+    """group 176: the five news sources are fetched at the same time, merged in the fixed order."""
+    NAMES = ["_fetch_yf_news", "_fetch_google_news", "_fetch_moneycontrol_news",
+             "_fetch_economic_times", "_fetch_cnbc_tv18"]
+
+    def _slow(self, monkeypatch, delay, raise_in=()):
+        for i, name in enumerate(self.NAMES):
+            def fn(s, *a, _i=i, _n=name, **k):
+                time.sleep(delay)
+                if _n in raise_in:
+                    raise RuntimeError("feed down")
+                return [{"title": f"T{_i}", "published": f"2026-09-2{_i}T10:00:00"}]
+            monkeypatch.setattr(em, name, fn)
+
+    def test_runs_concurrently(self, monkeypatch):
+        monkeypatch.delenv("EVENT_NEWS_PARALLEL", raising=False)
+        self._slow(monkeypatch, 0.3)
+        t0 = time.monotonic()
+        out = em._fetch_news_from_multiple_sources("A.NS")
+        assert time.monotonic() - t0 < 0.9          # sequential would take >= 1.5 s
+        assert [n["title"] for n in out] == ["T4", "T3", "T2", "T1", "T0"]
+
+    def test_switch_off_is_sequential(self, monkeypatch):
+        monkeypatch.setenv("EVENT_NEWS_PARALLEL", "0")
+        self._slow(monkeypatch, 0.1)
+        t0 = time.monotonic()
+        out = em._fetch_news_from_multiple_sources("A.NS")
+        assert time.monotonic() - t0 >= 0.5
+        assert len(out) == 5
+
+    def test_a_failing_source_does_not_lose_the_others(self, monkeypatch):
+        monkeypatch.delenv("EVENT_NEWS_PARALLEL", raising=False)
+        self._slow(monkeypatch, 0.0, raise_in=("_fetch_google_news",))
+        out = em._fetch_news_from_multiple_sources("A.NS")
+        assert sorted(n["title"] for n in out) == ["T0", "T2", "T3", "T4"]
+
+    def test_duplicate_title_keeps_the_earlier_source_in_fixed_order(self, monkeypatch):
+        monkeypatch.delenv("EVENT_NEWS_PARALLEL", raising=False)
+        for name in self.NAMES:
+            monkeypatch.setattr(em, name, lambda s, *a, **k: [])
+        monkeypatch.setattr(em, "_fetch_economic_times", lambda s, *a, **k: [{"title": "Same", "publisher": "ET"}])
+        monkeypatch.setattr(em, "_fetch_google_news", lambda s, *a, **k: (time.sleep(0.2) or [{"title": "same", "publisher": "G"}]))
+        out = em._fetch_news_from_multiple_sources("A.NS")
+        assert len(out) == 1 and out[0]["publisher"] == "G"   # Google precedes ET in the fixed order, even if slower
+
+    @pytest.mark.parametrize("raw,expected", [("", True), ("1", True), ("0", False), ("off", False), (" NO ", False)])
+    def test_switch_parsing(self, monkeypatch, raw, expected):
+        monkeypatch.setenv("EVENT_NEWS_PARALLEL", raw)
+        assert em._news_parallel_enabled() is expected
+
+
 # ── _fetch_events ─────────────────────────────────────────────────────────────
 
 def _earn_df():

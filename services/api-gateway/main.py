@@ -8764,6 +8764,50 @@ async def api_surprise_audit():
 
 SURPRISE_SCAN_DEADLINE_S = float(((os.getenv("SURPRISE_SCAN_DEADLINE_S") or "").strip() or "20"))
 
+# 2026-10-06 (group 175): single-flight for the default full-universe surprise scan. A scan that outlived the
+# 20 s deadline kept running in the background, but every later request (the Surprise tab, the real-trade-service
+# candidate poll) started ANOTHER full scan over the same ~hundreds of symbols, so slow scans piled up and got
+# slower (log: "exceeded 20s -- served last computed result (age 252s)"). While one is in flight, new callers for
+# the same default scan now join it. Explicit `symbols` and `force_reload` calls are never shared.
+# SURPRISE_SCAN_SINGLE_FLIGHT=0 restores one scan per request.
+_surprise_scan_inflight: Optional["asyncio.Future"] = None
+
+
+def _surprise_single_flight_enabled() -> bool:
+    return (os.getenv("SURPRISE_SCAN_SINGLE_FLIGHT") or "").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _start_surprise_scan(engine, *, client, sym_list, force_reload: bool, cached: bool) -> "asyncio.Future":
+    global _surprise_scan_inflight
+
+    def _new():
+        return asyncio.ensure_future(engine.scan(
+            client=client,
+            market_data_url=MARKET_DATA_URL,
+            symbols=sym_list,
+            force_reload_static=bool(force_reload),
+            cached=bool(cached),
+        ))
+
+    if sym_list or force_reload or not _surprise_single_flight_enabled():
+        return _new()
+    cur = _surprise_scan_inflight
+    try:
+        if cur is not None and not cur.done() and cur.get_loop() is asyncio.get_running_loop():
+            logger.debug("surprise/scan: joining the scan already in flight")
+            return cur
+    except Exception:  # noqa: BLE001 - never let the sharing check break a scan
+        pass
+    task = _new()
+    _surprise_scan_inflight = task
+
+    def _clear(t, _g=globals()):
+        if _g.get("_surprise_scan_inflight") is t:
+            _g["_surprise_scan_inflight"] = None
+
+    task.add_done_callback(_clear)
+    return task
+
 
 @app.get("/api/surprise/scan")
 @app.get("/surprise/scan")
@@ -8807,13 +8851,10 @@ async def api_surprise_scan(
     # the last computed result (flagged stale) while the scan finishes and
     # refreshes the cache in the background. With no prior result at all we
     # simply keep waiting (first-ever scan) — never worse than before.
-    _scan_task = asyncio.ensure_future(surprise_engine.scan(
-        client=client,
-        market_data_url=MARKET_DATA_URL,
-        symbols=sym_list,
-        force_reload_static=bool(force_reload),
-        cached=bool(cached),
-    ))
+    _scan_task = _start_surprise_scan(
+        surprise_engine, client=client, sym_list=sym_list,
+        force_reload=bool(force_reload), cached=bool(cached),
+    )
     try:
         result = await asyncio.wait_for(asyncio.shield(_scan_task), timeout=SURPRISE_SCAN_DEADLINE_S)
     except asyncio.TimeoutError:

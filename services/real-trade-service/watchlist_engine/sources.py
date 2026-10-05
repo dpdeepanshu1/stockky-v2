@@ -22,7 +22,9 @@ Tier 3: Pure volume-shock via the existing candidate_engine scanner.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -41,6 +43,10 @@ _HTTP_TIMEOUT = 8.0
 # exact call; matching that here so Tier 1 doesn't falsely trip the circuit
 # breaker on a slow-but-healthy response.
 _TIER1_HTTP_TIMEOUT = 25.0
+
+
+def _ipo_optional() -> bool:
+    return (os.getenv("WATCHLIST_TIER1_IPO_OPTIONAL") or "").strip().lower() not in ("0", "false", "no", "off")
 
 
 def _now() -> datetime:
@@ -68,18 +74,51 @@ async def fetch_watchlist_candidates(db, mode: str) -> list[dict]:
     # draft of this file used placeholder paths (/hot-picks, /ipo) that
     # don't exist on the real service — fixed to match the routes
     # candidate_engine already calls successfully today.
+    # 2026-10-06 (group 177): the log only said "Tier 1 (api-gateway) empty/unavailable", which fits three very
+    # different things: the call failed / the breaker is open, the gateway answered but listed no catalysts
+    # (normal outside market hours), or only the IPO list broke. Also /stockky-hot and /surprise/ipo/list were
+    # fetched one after the other (up to 25 s each) and a failing IPO list threw away a good Hot Picks answer.
+    # Now: both are fetched at the same time, an IPO failure keeps the Hot Picks (WATCHLIST_TIER1_IPO_OPTIONAL=0
+    # restores the strict behaviour), errors carry their type, and the final line says which case it was.
+    outcome = {"reason": "api-gateway call failed or breaker open, and no cached copy"}
+
+    def _why(exc: BaseException) -> str:
+        msg = str(exc).strip()
+        return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+
     async def _tier1_call():
         async with httpx.AsyncClient(timeout=_TIER1_HTTP_TIMEOUT) as client:
-            hot = await client.get(f"{config.API_GATEWAY_URL}/stockky-hot")
-            ipo = await client.get(f"{config.API_GATEWAY_URL}/surprise/ipo/list")
-            hot.raise_for_status()
-            ipo.raise_for_status()
-            return {"hot_picks": hot.json(), "ipo": ipo.json()}
+            hot_res, ipo_res = await asyncio.gather(
+                client.get(f"{config.API_GATEWAY_URL}/stockky-hot"),
+                client.get(f"{config.API_GATEWAY_URL}/surprise/ipo/list"),
+                return_exceptions=True,
+            )
+            if isinstance(hot_res, BaseException):
+                raise RuntimeError(f"/stockky-hot {_why(hot_res)}") from hot_res
+            try:
+                hot_res.raise_for_status()
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"/stockky-hot {_why(exc)}") from exc
+            ipo_json: Any = {}
+            try:
+                if isinstance(ipo_res, BaseException):
+                    raise ipo_res
+                ipo_res.raise_for_status()
+                ipo_json = ipo_res.json()
+            except Exception as exc:  # noqa: BLE001
+                if not _ipo_optional():
+                    raise RuntimeError(f"/surprise/ipo/list {_why(exc)}") from exc
+                logger.warning(
+                    "watchlist/sources: /surprise/ipo/list failed (%s) — using Hot Picks without IPO rows",
+                    _why(exc),
+                )
+            return {"hot_picks": hot_res.json(), "ipo": ipo_json}
 
     async def _tier1_fallback():
         cached = load_snapshot(db, "tier1_hot_picks")
         if cached:
             logger.info("watchlist/sources: Tier 1 api-gateway down — serving local cache")
+            outcome["reason"] = "api-gateway down; the cached copy listed no candidates"
         return cached  # None signals caller to try Tier 2
 
     payload = await api_gateway_breaker.call(_tier1_call, fallback=_tier1_fallback)
@@ -88,8 +127,14 @@ async def fetch_watchlist_candidates(db, mode: str) -> list[dict]:
         candidates = _normalize_tier1(payload)
         if candidates:
             return candidates
+        if outcome["reason"].startswith("api-gateway call failed"):
+            outcome["reason"] = "api-gateway answered but listed no catalysts (Hot Picks buckets and IPO list empty)"
 
-    logger.warning("watchlist/sources: Tier 1 (api-gateway) empty/unavailable — trying Tier 2")
+    _tier1_msg = "watchlist/sources: Tier 1 (api-gateway) empty/unavailable (%s) — trying Tier 2"
+    if outcome["reason"].startswith("api-gateway answered"):
+        logger.info(_tier1_msg, outcome["reason"])      # an empty answer is not an outage
+    else:
+        logger.warning(_tier1_msg, outcome["reason"])
 
     # ── Tier 2: raw events via event-service + local classify ────────────────
     async def _tier2_call():

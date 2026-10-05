@@ -51,6 +51,21 @@ HF_MODEL = (os.getenv("HF_MODEL") or "").strip() or "mistralai/Mistral-7B-Instru
 # After a network-level failure (DNS/connect/timeout) skip the call for a while instead of retrying per headline.
 HF_FAILURE_BACKOFF_SEC = 300.0
 _HF_BACKOFF_UNTIL = 0.0
+# 2026-10-06 (group 176): a 400/401/403/404/410 from the router is a setup problem (model not served to this
+# token, token lacks Inference Providers permission, model retired), not a blip: every headline got the same
+# answer and logged "HF API error: 400" again. The call now pauses for HF_ERROR_BACKOFF_SEC (default 1800 s,
+# 0 = never pause, blank/invalid = default) and ONE warning carries the first part of HF's own message.
+# 429/503 handling is unchanged.
+HF_CONFIG_ERROR_STATUSES = (400, 401, 403, 404, 410)
+
+
+def _hf_error_backoff_sec() -> float:
+    raw = (os.getenv("HF_ERROR_BACKOFF_SEC") or "").strip()
+    try:
+        v = float(raw) if raw else 1800.0
+    except ValueError:
+        return 1800.0
+    return v if v >= 0 else 1800.0
 HF_API_KEY = (os.getenv("HF_API_KEY") or "").strip() or None
 
 # Optional NewsAPI key (free tier)
@@ -685,7 +700,20 @@ def _score_headline(title: str) -> float:
             else:
                 return 0.0
         else:
-            logger.warning(f"HF API error: {resp.status_code}")
+            if resp.status_code in HF_CONFIG_ERROR_STATUSES and _hf_error_backoff_sec() > 0:
+                _pause = _hf_error_backoff_sec()
+                _HF_BACKOFF_UNTIL = time.monotonic() + _pause
+                try:
+                    _detail = " ".join(str(getattr(resp, "text", "") or "").split())[:200]
+                except Exception:  # noqa: BLE001
+                    _detail = ""
+                logger.warning(
+                    "HF API error: %s%s - check HF_MODEL (%s) is served to your token through Inference "
+                    "Providers and the token may call them; skipping Hugging Face sentiment for %ds",
+                    resp.status_code, f" ({_detail})" if _detail else "", HF_MODEL, int(_pause),
+                )
+            else:
+                logger.warning(f"HF API error: {resp.status_code}")
             if resp.status_code in (429, 503):
                 try:
                     from rate_limit_report import record_rate_limit_hit

@@ -447,6 +447,90 @@ class TestSurpriseScanDeadline:
         assert _run(self._call()) == {"stocks": _stocks(1)}
 
 
+class TestSurpriseScanSingleFlight:
+    """group 175: concurrent default scans share one engine.scan instead of piling up."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        monkeypatch.delenv("SURPRISE_SCAN_SINGLE_FLIGHT", raising=False)
+        monkeypatch.setattr(gw, "SURPRISE_SCAN_DEADLINE_S", 5.0)
+        monkeypatch.setattr(gw, "_surprise_scan_inflight", None)
+
+    @staticmethod
+    async def _many(n, **kw):
+        outs = await asyncio.gather(*[gw.api_surprise_scan(**kw) for _ in range(n)])
+        await asyncio.sleep(0.05)
+        return outs
+
+    def test_concurrent_default_calls_run_one_scan(self, senv):
+        eng = senv.engine
+        eng.scan_delay = 0.1
+        eng.scan_result = {"stocks": _stocks(2)}
+        outs = _run(self._many(5, cached=True))
+        assert len(eng.scan_calls) == 1
+        assert all(o == {"stocks": _stocks(2)} for o in outs)
+        assert gw._surprise_scan_inflight is None            # cleared once done
+
+    def test_a_later_call_after_completion_starts_a_new_scan(self, senv):
+        eng = senv.engine
+        eng.scan_delay = 0.01
+
+        async def go():
+            await gw.api_surprise_scan()
+            await asyncio.sleep(0.05)
+            await gw.api_surprise_scan()
+        _run(go())
+        assert len(eng.scan_calls) == 2
+
+    def test_explicit_symbols_are_never_shared(self, senv):
+        eng = senv.engine
+        eng.scan_delay = 0.1
+        _run(self._many(3, symbols="aaa,bbb"))
+        assert len(eng.scan_calls) == 3
+
+    def test_force_reload_is_never_shared(self, senv):
+        eng = senv.engine
+        eng.scan_delay = 0.1
+        _run(self._many(3, force_reload=True))
+        assert len(eng.scan_calls) == 3
+
+    def test_switch_off_restores_one_scan_per_request(self, senv, monkeypatch):
+        monkeypatch.setenv("SURPRISE_SCAN_SINGLE_FLIGHT", "0")
+        eng = senv.engine
+        eng.scan_delay = 0.1
+        _run(self._many(4))
+        assert len(eng.scan_calls) == 4
+
+    def test_slow_scan_past_deadline_is_joined_not_restarted(self, senv, monkeypatch):
+        monkeypatch.setattr(gw, "SURPRISE_SCAN_DEADLINE_S", 0.05)
+        eng = senv.engine
+        eng.scan_delay = 0.3
+        eng._last_result = {"stocks": _stocks(1)}
+        eng._last_scan_ts = time.time() - 252
+
+        async def go():
+            a = await gw.api_surprise_scan(cached=True)      # times out, serves stale, scan keeps running
+            b = await gw.api_surprise_scan(cached=True)      # must join, not start a second scan
+            await asyncio.sleep(0.4)
+            return a, b
+        a, b = _run(go())
+        assert a["stale"] is True and b["stale"] is True
+        assert len(eng.scan_calls) == 1
+
+    def test_failed_scan_is_shared_then_cleared(self, senv):
+        eng = senv.engine
+        eng.scan_delay = 0.05
+        eng.scan_raises = RuntimeError("boom")
+
+        async def go():
+            rs = await asyncio.gather(gw.api_surprise_scan(), gw.api_surprise_scan(), return_exceptions=True)
+            await asyncio.sleep(0.05)
+            return rs
+        rs = _run(go())
+        assert all(isinstance(r, gw.HTTPException) and r.status_code == 500 for r in rs)
+        assert len(eng.scan_calls) == 1 and gw._surprise_scan_inflight is None
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # scan/stream
 # ═════════════════════════════════════════════════════════════════════════════

@@ -856,6 +856,68 @@ class TestScoreHeadline:
         assert nm._score_headline("h") == 0.0
 
 
+class TestScoreHeadlineConfigErrorPause:
+    """group 176: 400/401/403/404/410 from the HF router pause the call and log one explained warning."""
+
+    @pytest.fixture(autouse=True)
+    def _reset(self, monkeypatch):
+        monkeypatch.setattr(nm, "_HF_BACKOFF_UNTIL", 0.0)
+        monkeypatch.setattr(nm, "HF_API_KEY", "K")
+        monkeypatch.delenv("HF_ERROR_BACKOFF_SEC", raising=False)
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 410])
+    def test_config_error_pauses_after_one_call(self, monkeypatch, status):
+        calls = []
+
+        def post(*a, **k):
+            calls.append(1)
+            return _Resp(status)
+
+        monkeypatch.setattr(nm.httpx, "post", post)
+        assert [nm._score_headline(f"h{i}") for i in range(4)] == [0.0] * 4
+        assert len(calls) == 1
+        assert nm._HF_BACKOFF_UNTIL > nm.time.monotonic() + 1700
+
+    def test_one_warning_carries_hf_message_and_model(self, monkeypatch, caplog):
+        resp = _Resp(400)
+        resp.text = '{"error": "The requested model  is not supported by any provider you have enabled."}'
+        monkeypatch.setattr(nm.httpx, "post", lambda *a, **k: resp)
+        with caplog.at_level(logging.WARNING):
+            for i in range(3):
+                nm._score_headline(f"h{i}")
+        msgs = [r.getMessage() for r in caplog.records if "HF API error" in r.getMessage()]
+        assert len(msgs) == 1
+        assert "400" in msgs[0] and "not supported by any provider" in msgs[0] and nm.HF_MODEL in msgs[0]
+        assert "1800" in msgs[0]
+
+    def test_pause_expires(self, monkeypatch):
+        monkeypatch.setattr(nm.httpx, "post", lambda *a, **k: _Resp(400))
+        nm._score_headline("h")
+        monkeypatch.setattr(nm, "_HF_BACKOFF_UNTIL", nm.time.monotonic() - 1)
+        monkeypatch.setattr(nm.httpx, "post",
+                            lambda *a, **k: _Resp(200, {"choices": [{"message": {"content": "negative"}}]}))
+        assert nm._score_headline("h") == -0.8
+
+    def test_zero_means_never_pause(self, monkeypatch):
+        monkeypatch.setenv("HF_ERROR_BACKOFF_SEC", "0")
+        calls = []
+        monkeypatch.setattr(nm.httpx, "post", lambda *a, **k: calls.append(1) or _Resp(400))
+        for i in range(3):
+            nm._score_headline(f"h{i}")
+        assert len(calls) == 3 and nm._HF_BACKOFF_UNTIL == 0.0
+
+    @pytest.mark.parametrize("raw", ["", "  ", "x", "-3"])
+    def test_blank_or_invalid_uses_default(self, monkeypatch, raw):
+        monkeypatch.setenv("HF_ERROR_BACKOFF_SEC", raw)
+        assert nm._hf_error_backoff_sec() == 1800.0
+
+    @pytest.mark.parametrize("status", [429, 500, 503])
+    def test_other_statuses_do_not_pause(self, monkeypatch, status):
+        monkeypatch.setattr(nm.httpx, "post", lambda *a, **k: _Resp(status))
+        nm._score_headline("h")
+        assert nm._HF_BACKOFF_UNTIL == 0.0
+
+
 # ── routes ────────────────────────────────────────────────────────────────────
 
 class TestRoutes:

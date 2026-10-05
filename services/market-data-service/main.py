@@ -1833,8 +1833,117 @@ def get_realtime_price(symbol: str) -> Optional[float]:
     return None
 
 
+# ── group161 (item 1): symbols with no price anywhere get a short "no price" cache ──────────────────
+# BMISL, QUALIANCE, BAGMANE, 3PLAND, MFML, AVALON, CMRGREEN and SUNLOC are not live equities. Every
+# /quote for one of them walked the whole waterfall (Yahoo, NSE, AngelOne REST, IndianAPI, TwelveData,
+# AlphaVantage, Polygon, bhavcopy) and could hold a worker for up to the 18 s yfinance hard timeout, so
+# real-trade-service's 8 s read timed out on every cycle and market-data stayed overloaded. After
+# QUOTE_NEG_AFTER (default 2) full-waterfall failures in a row, /quote answers the same "failed" payload
+# straight away for QUOTE_NEG_TTL_S (default 300 s), doubling after each further failure up to
+# QUOTE_NEG_MAX_S (default 3600 s). One real price clears the count. Failures while yfinance is in
+# cooldown are not counted (an outage says nothing about the symbol), a symbol with a last-good price
+# is never negative-cached, and QUOTE_NEG_CACHE=0 turns the whole thing off. Per process.
+_NEG_LOCK = threading.Lock()
+_NEG_QUOTE: dict = {}          # normalized symbol -> [consecutive_failures, blocked_until_monotonic]
+_NEG_MAX_ENTRIES = 5000
+
+
+def _neg_cfg() -> tuple:
+    def _f(name: str, default: float) -> float:
+        raw = (os.getenv(name) or "").strip()
+        try:
+            v = float(raw) if raw else default
+        except ValueError:
+            return default
+        return v if v == v and v >= 0 else default
+    on = ((os.getenv("QUOTE_NEG_CACHE") or "").strip() or "1") not in ("0", "false", "False")
+    return (on, max(1, int(_f("QUOTE_NEG_AFTER", 2))), _f("QUOTE_NEG_TTL_S", 300.0),
+            _f("QUOTE_NEG_MAX_S", 3600.0))
+
+
+def _neg_blocked(sym: str) -> bool:
+    """True while `sym` is inside its negative-cache window. Never raises."""
+    try:
+        if not _NEG_QUOTE or not _neg_cfg()[0]:
+            return False
+        with _NEG_LOCK:
+            ent = _NEG_QUOTE.get(sym)
+            return bool(ent and ent[1] > time.monotonic())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _neg_record_failure(sym: str) -> None:
+    """One full-waterfall failure for `sym`. Never raises."""
+    try:
+        on, after, base, cap = _neg_cfg()
+        if not on or not sym or _in_cooldown("yfinance"):
+            return
+        with _NEG_LOCK:
+            now = time.monotonic()
+            if len(_NEG_QUOTE) >= _NEG_MAX_ENTRIES:
+                for k in [k for k, v in _NEG_QUOTE.items() if v[1] <= now]:
+                    _NEG_QUOTE.pop(k, None)
+                if len(_NEG_QUOTE) >= _NEG_MAX_ENTRIES:
+                    return
+            ent = _NEG_QUOTE.setdefault(sym, [0, 0.0])
+            ent[0] += 1
+            if ent[0] >= after:
+                wait = min(cap, base * (2 ** (ent[0] - after))) if base > 0 else 0.0
+                ent[1] = now + wait
+                if ent[0] - after < 3:
+                    logger.info("quote: %s had no price from any source %d time(s) in a row — answering "
+                                "\"no price\" from cache for %.0f s", sym, ent[0], wait)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("_neg_record_failure(%s): %s", sym, e)
+
+
+def _neg_clear(sym: str) -> None:
+    try:
+        if _NEG_QUOTE:
+            with _NEG_LOCK:
+                _NEG_QUOTE.pop(sym, None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _neg_reset() -> None:
+    """Forget every entry (tests / operator hook)."""
+    with _NEG_LOCK:
+        _NEG_QUOTE.clear()
+
+
+def _failed_quote_payload(sym: str, source: str = "failed") -> dict:
+    result = _pad_quote_response(sym, {
+        "symbol": sym,
+        "name": sym,
+        "price": None,
+        "cmp": None,
+        "source": source,
+        "fetched_at": datetime.utcnow().isoformat(),
+    })
+    return _sanitize_for_json(result)
+
+
 @app.get("/quote/{symbol}", response_model=QuoteResponse)
 def get_quote(symbol: str):
+    """Quote route. The waterfall lives in _get_quote_inner; this wrapper keeps the group161
+    "no price" bookkeeping in one place."""
+    result = _get_quote_inner(symbol)
+    try:
+        if isinstance(result, dict):
+            sym = normalize_symbol(symbol)
+            src = result.get("source")
+            if src == "failed":
+                _neg_record_failure(sym)
+            elif src != "negative_cache" and result.get("price") is not None:
+                _neg_clear(sym)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("quote bookkeeping %s: %s", symbol, e)
+    return result
+
+
+def _get_quote_inner(symbol: str):
     """
     Short-circuit waterfall quote path (never parallel-fan-out):
 
@@ -1917,6 +2026,13 @@ def get_quote(symbol: str):
         return cached
     if soft_cached and _in_cooldown("yfinance"):
         return soft_cached
+
+    # group161: a symbol that has just failed every source answers "no price" at once, unless a
+    # last-good price exists (then the normal path serves that).
+    if not soft_cached and _neg_blocked(sym):
+        fb_neg = _fallback_get(cache_key)
+        if not (fb_neg and isinstance(fb_neg, dict) and fb_neg.get("price") is not None):
+            return _failed_quote_payload(sym, "negative_cache")
 
     # ── Primary: Yahoo clean OHLCV ──────────────────────────────────────────
     yahoo_full = None
@@ -2099,6 +2215,36 @@ def get_quote(symbol: str):
     })
     return _sanitize_for_json(result)
 
+
+
+@app.get("/last-close/{symbol}")
+def get_last_close(symbol: str):
+    """Cheap last-close lookup (group161). real-trade-service's preview path calls this after /quote,
+    but the route did not exist, so every call was a 404 and a wasted request. It answers from the
+    quote cache / last-good fallback, then the local NSE bhavcopy, and never touches Yahoo or any
+    paid API. 404 when no close is known."""
+    base_check = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    if is_known_delisted(base_check):
+        raise HTTPException(status_code=404, detail=f"{base_check} is delisted/merged — not a live NSE symbol")
+    sym = normalize_symbol(symbol)
+    key = f"quote:{sym}"
+    for src_name, getter in (("cache", _cache_get), ("fallback", _fallback_get)):
+        try:
+            hit = getter(key)
+        except Exception:  # noqa: BLE001
+            hit = None
+        if isinstance(hit, dict):
+            px = hit.get("previous_close") or hit.get("price")
+            try:
+                if px is not None and float(px) > 0:
+                    return _sanitize_for_json({"symbol": sym, "price": float(px), "close": float(px),
+                                               "source": f"last_close_{src_name}"})
+            except (TypeError, ValueError):
+                pass
+    px = _waterfall_bhavcopy_price(sym)
+    if px and px > 0:
+        return {"symbol": sym, "price": float(px), "close": float(px), "source": "bhavcopy_eod"}
+    raise HTTPException(status_code=404, detail=f"No last close known for {sym}")
 
 
 _MOVERS_MIN_COVERAGE = 0.98

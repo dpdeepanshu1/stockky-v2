@@ -126,6 +126,7 @@ from websockets.exceptions import ConnectionClosed
 import config
 from feed.angelone_session import get_session
 from feed.scrip_master import get_all_nse_eq
+from feed.instrument_filter import drop_etfs
 
 logger = logging.getLogger("position-stocks-ws-client")
 
@@ -555,6 +556,11 @@ async def _ws_loop() -> None:
             # documents fixing for its own background loop ("EVENT-LOOP
             # ISOLATION"). Offloading to a worker thread instead.
             symbol_token_map = await asyncio.to_thread(get_all_nse_eq)
+            # group 188 (item 9): ETFs / index and liquid funds are not scalp candidates; skip their tokens
+            if symbol_token_map:
+                symbol_token_map, _etf_skipped = drop_etfs(symbol_token_map)
+                if _etf_skipped:
+                    logger.info("position-stocks WS: leaving %d ETF/fund names out of the subscription", _etf_skipped)
             if not symbol_token_map:
                 # 2026-09-21: a failed scrip-master fetch used to fall straight
                 # through here, connect the WS and "subscribe" to ZERO tokens —

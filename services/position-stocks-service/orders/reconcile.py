@@ -51,12 +51,75 @@ from capital import ledger, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpPosition
 from orders import overnight_stop
+from screening import intraday_eligibility
 from tz_utils import IST, as_aware, ist_today_str
 
 logger = logging.getLogger("position-stocks-reconcile")
 
 _FILLED_STATUSES = {"TRADED", "FILLED", "EXECUTED", "COMPLETE"}
 _DEAD_ENTRY_STATUSES = {"REJECTED", "CANCELLED"}
+
+# Dhan puts the rejection text in different keys depending on the endpoint / SDK version.
+_REJECT_REASON_KEYS = (
+    "omsErrorDescription", "omsErrorCode", "errorMessage", "rejectionReason", "remarks", "reason",
+)
+
+
+def _reason_from_row(row: Optional[dict]) -> str:
+    """First non-empty rejection-text key on an order row ('' when it carries none)."""
+    if not isinstance(row, dict):
+        return ""
+    parts = []
+    for key in _REJECT_REASON_KEYS:
+        val = row.get(key)
+        if val is not None and str(val).strip() and str(val).strip() not in parts:
+            parts.append(str(val).strip())
+    return " | ".join(parts)
+
+
+def _entry_reject_reason(db: Session, pos: ScalpPosition, row: dict) -> str:
+    """Why Dhan rejected/cancelled this position's entry, best effort, never raises.
+
+    The super-order row is tried first; when it carries no reason text, the plain order book is searched
+    for the same orderId (that is where RMS rejection text such as "not allowed to be traded in Intraday"
+    shows up). Returns '' when nothing is found.
+    """
+    reason = _reason_from_row(row)
+    if reason:
+        return reason[:300]
+    order_id = str(pos.dhan_super_order_id or row.get("orderId") or "").strip()
+    if not order_id:
+        return ""
+    try:
+        for plain in dhan_client.get_order_list(db):
+            if str(plain.get("orderId", "")).strip() == order_id:
+                return _reason_from_row(plain)[:300]
+    except Exception as e:
+        logger.info("reconcile: could not look up the rejection reason for %s (order %s): %s",
+                    pos.symbol, order_id, e)
+    return ""
+
+
+def _learn_from_entry_rejection(db: Session, pos: ScalpPosition, entry_status: str, reason: str) -> None:
+    """A permanent RMS rejection (surveillance-restricted for intraday, or outside the circuit band) can
+    never succeed on a retry today, so record the symbol exactly the way the synchronous BUY path in
+    orders/entry.py does. Best effort: a failure here must never stop the position being closed out."""
+    if entry_status != "REJECTED" or not reason:
+        return
+    if dhan_client.is_security_intraday_restricted_error(reason):
+        kind = "INTRADAY_RESTRICTED"
+    elif dhan_client.is_circuit_limit_error(reason):
+        kind = "CIRCUIT_LIMIT"
+    else:
+        return
+    try:
+        intraday_eligibility.record_restriction(db, pos.symbol, detail=f"BUY rejection ({kind}): {reason[:200]}")
+        logger.warning(
+            "reconcile: %s (id=%d) entry REJECTED by Dhan as %s — symbol recorded as restricted so the "
+            "screener stops picking it. Reason: %s", pos.symbol, pos.id, kind, reason[:200],
+        )
+    except Exception as e:
+        logger.warning("reconcile: could not record the %s restriction for %s: %s", kind, pos.symbol, e)
 # BUG FIX (this session): both EOD squareoff and the new manual-exit
 # feature (orders/eod_squareoff.py::close_position_now) flatten a
 # position via a plain MARKET SELL + a "<STATUS>_PENDING_RECONCILE"
@@ -1249,8 +1312,15 @@ def run_exit_reconciliation(db: Session) -> int:
             # leaving the position stuck as OPEN and capital locked.
             leg_name = row.get("legName", "ENTRY_LEG")
             if leg_name in ("ENTRY_LEG", "") and entry_status in _DEAD_ENTRY_STATUSES:
+                # 2026-10-06 (group192): read WHY Dhan killed the entry and learn from it. Before this the
+                # reason was dropped, so an RMS "not allowed to be traded in Intraday" rejection (HEGAM, 13
+                # times in 4 minutes) never reached the restricted-symbol list the screener filters on.
+                reject_reason = _entry_reject_reason(db, pos, row)
                 pos.status = "ERROR"
-                pos.error_message = f"Entry leg {entry_status} on Dhan (reconciled)"
+                pos.error_message = f"Entry leg {entry_status} on Dhan (reconciled)" + (
+                    f": {reject_reason}" if reject_reason else ""
+                )
+                _learn_from_entry_rejection(db, pos, entry_status, reject_reason)
                 pos.closed_at = datetime.now(timezone.utc)
                 db.commit()
                 ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=0.0)

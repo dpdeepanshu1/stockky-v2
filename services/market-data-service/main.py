@@ -577,6 +577,9 @@ _current_feed_universe: list = []
 _last_dropped_dead: list = []
 
 
+from instrument_filter import is_etf_or_fund, drop_etfs  # group 188 (item 9)
+
+
 def _clean_feed_universe(raw):
     """Group 125: normalise api-gateway's /scan/universe symbol list for the WS feeds and
     drop known-delisted names (AAKASH, ANNAPURNA, ...) so the AngelOne/Yahoo feeds do not
@@ -591,6 +594,8 @@ def _clean_feed_universe(raw):
         base = str(s).upper().replace(".NS", "").replace(".BO", "")
         if is_known_delisted(base):
             dropped.add(base.strip())
+            continue
+        if is_etf_or_fund(base):   # group 188 (item 9): ETFs / funds are not stock picks and only cost feed capacity
             continue
         symbols.append(base)
     return symbols, sorted(dropped)
@@ -2438,6 +2443,8 @@ def angelone_movers():
             return {"status": "not_configured", "data": [], "reason": "ANGELONE_* env vars not set"}
 
         token_map = scrip_master.get_all_symbols()  # {clean_symbol: token}
+        # group 188 (item 9): ETFs / funds are not stock picks; skipping them also trims the sweep's AngelOne calls
+        token_map, _etf_skipped = drop_etfs(token_map)
         if not token_map:
             return {"status": "error", "data": [], "error": "scrip master returned 0 symbols"}
         reverse_map = {v: k for k, v in token_map.items()}

@@ -575,6 +575,15 @@ DISABLED_SCAN_WINDOWS = _parse_int_set(_get_str("DISABLED_SCAN_WINDOWS", "1,15")
 SYMBOL_REENTRY_COOLDOWN_MINUTES = _get_int("SYMBOL_REENTRY_COOLDOWN_MINUTES", 30)
 SYMBOL_REENTRY_MIN_PULLBACK_PCT = _get_float("SYMBOL_REENTRY_MIN_PULLBACK_PCT", 1.0)
 
+# 2026-10-06 (group192): a Super Order is ACCEPTED by Dhan's API and then rejected a moment later by RMS
+# (e.g. "not allowed to be traded in Intraday"), so the rejection only shows up in orders/reconcile.py as a
+# dead ENTRY_LEG, long after attempt_entry() returned. HEGAM was re-bought 13 times in four minutes because
+# nothing remembered those rejections. After a dead entry the symbol is skipped for
+# ENTRY_REJECT_COOLDOWN_MINUTES, and once it has had ENTRY_REJECT_MAX_PER_SYMBOL_DAY dead entries today it is
+# skipped for the rest of the day. 0 disables the respective guard.
+ENTRY_REJECT_COOLDOWN_MINUTES = _get_int("ENTRY_REJECT_COOLDOWN_MINUTES", 30)
+ENTRY_REJECT_MAX_PER_SYMBOL_DAY = _get_int("ENTRY_REJECT_MAX_PER_SYMBOL_DAY", 2)
+
 # ── Shared Dhan account-wide order-rate budget (tracking doc §3.8) ─────────
 # Dhan's own account-wide cap is roughly 5,000-7,000 orders/day, shared with
 # real-trade-service (same Dhan account). This is a soft, fail-open governor

@@ -620,6 +620,23 @@ async def _fetch_fund_tech_score(client: httpx.AsyncClient, symbol: str) -> dict
 # last good value (up to CANDIDATE_MCAP_STALE_TTL_S, default 24 h, 0 = off) is used when a fetch fails.
 _MCAP_TIMEOUT_S = float(((os.getenv("CANDIDATE_MCAP_TIMEOUT_S") or "").strip() or "12"))
 _MCAP_STALE_TTL_S = float(((os.getenv("CANDIDATE_MCAP_STALE_TTL_S") or "").strip() or "86400"))
+# ── group191 (item 17): "CANDIDATE REJECTED ..." log lines were cut at 150 characters ─────────────────────────
+# The REJECTED INFO lines printed `reject[:150]`, but the reasons carry the whole timeframe-returns dict and a
+# sentence of advice (HFCL ended mid-dict with no closing brace, REDINGTON at "Wait for a breakout or"), so the
+# line looked cut off by the logger. The limit is now CANDIDATE_REJECT_LOG_MAX (default 500, 0 = never cut) and a cut
+# line ends in " ..." so a real truncation is visible.
+def _reject_log_text(reject) -> str:
+    text = str(reject)
+    try:
+        raw = (os.getenv("CANDIDATE_REJECT_LOG_MAX") or "").strip()
+        limit = int(float(raw)) if raw else 500
+    except ValueError:
+        limit = 500
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + " ..."
+
+
 _MCAP_LAST_GOOD: dict[str, tuple[float, float]] = {}
 
 
@@ -1852,7 +1869,7 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
 
         if reject:
             logger.info(
-                "CANDIDATE REJECTED %s (mode=%s) | %s", sym, mode, reject[:150]
+                "CANDIDATE REJECTED %s (mode=%s) | %s", sym, mode, _reject_log_text(reject)
             )
             skipped += 1
             continue
@@ -1993,7 +2010,7 @@ async def _refresh_volume_shock_candidates(
         reject = result.get("reject_reason")
         if reject:
             logger.info(
-                "VOLUME_SHOCK CANDIDATE REJECTED %s (mode=%s) | %s", sym, mode, reject[:150]
+                "VOLUME_SHOCK CANDIDATE REJECTED %s (mode=%s) | %s", sym, mode, _reject_log_text(reject)
             )
             skipped += 1
             if "no quote" in reject.lower() or "insufficient" in reject.lower():

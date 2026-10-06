@@ -974,7 +974,14 @@ _DERIVATIVE_CONTRACT_RE = re.compile(
 # SETF* series, and NIFTY/BANKNIFTY index-style tickers. Applied ONLY in the universe builders
 # (_clean_equity_symbol); symbol_aliases.is_non_equity_instrument is intentionally untouched so a
 # user can still run /stock/<ETF> by hand.
-_ETF_INDEX_FUND_SYMBOL_RE = re.compile(r"(?:ETF|BEES)$|^SETF[A-Z0-9]|^(?:NIFTY|BANKNIFTY)\d*$")
+# group 188 (item 9): also liquid / gilt funds (LIQUIDPLUS, LIQUIDSBI, HDFCLIQUID, GSEC10YEAR), SILVERADD / GOLDCASE
+# style names, and the ETF names that carry no ETF-looking word (BANKBETA, MONQ50, AONESILVER, GROWWMETAL, ...).
+# Same patterns as market-data-service/instrument_filter.py and position-stocks-service/feed/instrument_filter.py.
+_ETF_INDEX_FUND_SYMBOL_RE = re.compile(
+    r"(?:ETF|BEES)$|^SETF[A-Z0-9]|^(?:NIFTY|BANKNIFTY)\d*$"
+    r"|LIQUID|GSEC|^(?:SILVER|GOLD)(?:ADD|CASE)$"
+    r"|^(?:BANKBETA|MONQ50|AONESILVER|GROWWMETAL|MASPTOP50|MAFANG|MON100|MAHKTECH|MOM100|MOM50|MIDSMALL|N100)$"
+)
 
 
 def _clean_equity_symbol(sym) -> Optional[str]:
@@ -1245,7 +1252,71 @@ def _next_general_pool_slice(general_pool: List[str], sample_size: int) -> List[
 _angelone_movers_warned_at = [0.0]
 
 
+# ── group189 (item 12): single-flight for the momentum-movers computation ───────────────────────────
+# The 2026-10-06 boot log ran the whole NSE gainers / losers / volume-gainers / NIFTY 500 / "momentum_movers step1"
+# sequence twice at the same moment: the result cache is only filled when a computation FINISHES, so two callers
+# that both arrive while it is empty (the startup pre-warm and the first /scan/universe, say) each paid for a full
+# pass (4 NSE board fetches, the AngelOne whole-market sweep, the bulk yfinance fallback). Now the first caller
+# computes and later callers that arrive meanwhile wait for its answer. A follower that waits longer than
+# MOMENTUM_MOVERS_JOIN_WAIT_S (default 45) or finds the leader failed computes for itself, as before; a re-entrant
+# call from the computing thread never waits on itself. MOMENTUM_MOVERS_SINGLE_FLIGHT=0 restores one pass per caller.
+_MM_FLIGHT_LOCK = threading.Lock()
+_mm_flight: Optional["_MomentumFlight"] = None
+
+
+class _MomentumFlight:
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.result: Optional[List[str]] = None
+        self.ok = False
+        self.thread_id = threading.get_ident()
+
+
+def _momentum_single_flight_cfg() -> tuple:
+    on = (os.getenv("MOMENTUM_MOVERS_SINGLE_FLIGHT") or "").strip().lower() not in ("0", "false", "no", "off")
+    try:
+        wait = float((os.getenv("MOMENTUM_MOVERS_JOIN_WAIT_S") or "").strip() or "45")
+    except ValueError:
+        wait = 45.0
+    if wait != wait or wait < 0:
+        wait = 45.0
+    return on, wait
+
+
 def _get_momentum_movers() -> List[str]:
+    """Real-time movers (see _compute_momentum_movers). Concurrent callers share one computation."""
+    global _mm_flight
+    cached = _redis_get(MOMENTUM_MOVERS_CACHE_KEY)
+    if isinstance(cached, list) and cached:
+        return cached
+    on, wait = _momentum_single_flight_cfg()
+    if not on:
+        return _compute_momentum_movers()
+    with _MM_FLIGHT_LOCK:
+        flight = _mm_flight
+        leader = flight is None
+        if leader:
+            flight = _mm_flight = _MomentumFlight()
+    if not leader:
+        if flight.thread_id == threading.get_ident():
+            return _compute_momentum_movers()          # re-entrant call from the computing thread
+        if flight.done.wait(wait) and flight.ok and flight.result is not None:
+            logger.debug("momentum_movers: joined the pass already in flight")
+            return list(flight.result)
+        return _compute_momentum_movers()              # leader failed or is too slow: do it ourselves
+    try:
+        out = _compute_momentum_movers()
+        flight.result = list(out) if isinstance(out, list) else None
+        flight.ok = isinstance(out, list)
+        return out
+    finally:
+        with _MM_FLIGHT_LOCK:
+            if _mm_flight is flight:
+                _mm_flight = None
+        flight.done.set()
+
+
+def _compute_momentum_movers() -> List[str]:
     """Real-time movers: NSE gainers/losers/most-active + ≥5% day/week moves.
 
     BUG FIX (2026-09-18): this function had no result cache of its own —

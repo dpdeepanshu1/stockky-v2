@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import time
+import warnings
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Optional
@@ -241,6 +242,15 @@ def _extract_data(response: dict, key: str = "data") -> any:
     return response.get(key)
 
 
+def _fetch_security_list_quiet(client):
+    """group190 (item 18): dhanhq's fetch_security_list reads Dhan's ~100 MB scrip CSV with pandas and, on every
+    load, prints "DtypeWarning: Columns (...) have mixed types" from inside the SDK. Harmless (we only read a few
+    string columns), so it is silenced for this one call; every other warning is untouched."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=r"Columns \(.*\) have mixed types", category=Warning)
+        return client.fetch_security_list(mode="compact")
+
+
 def _load_security_cache(db: Session) -> None:
     """Loads NSE equity security IDs using dhanhq.fetch_security_list().
     Falls back to direct CSV download if SDK method fails.
@@ -251,7 +261,7 @@ def _load_security_cache(db: Session) -> None:
 
     fresh: dict[str, str] = {}
     try:
-        df = client.fetch_security_list(mode='compact')
+        df = _fetch_security_list_quiet(client)
         if df is not None and not df.empty:
             for _, row in df.iterrows():
                 try:

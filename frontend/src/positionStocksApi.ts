@@ -204,6 +204,9 @@ export interface ScalpPositionRow {
   overnight_converted_to_cnc: boolean;
   overnight_stop_order_id: string | null;
   overnight_stop_price: number | null;
+  // group192: GET /positions has always sent this; "Entry leg REJECTED on Dhan (reconciled): <reason>" marks an
+  // entry order Dhan killed (no shares bought), "<STATUS>_PENDING_RECONCILE..." an unresolved exit.
+  error_message?: string | null;
 }
 
 export interface ScalpCandidateRow {
@@ -301,6 +304,8 @@ export interface ScalpPipelineStatus {
 
 export interface ScalpTradeHistorySummary {
   total_trades: number;
+  // group192: entry orders Dhan rejected/cancelled (no shares held, no P&L) — not part of total_trades.
+  rejected_entries?: number;
   wins: number;
   losses: number;
   win_rate_pct: number | null;

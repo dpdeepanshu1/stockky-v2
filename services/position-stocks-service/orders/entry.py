@@ -150,6 +150,54 @@ def _price_guard_reject(symbol: str, signal_ltp: float) -> Optional[str]:
         return None
 
 
+def _rejected_entry_reject(db: Session, symbol: str) -> Optional[str]:
+    """Skip a symbol whose entry order Dhan has just rejected/cancelled (group192, HEGAM).
+
+    A Super Order is accepted by Dhan's API and rejected a moment later by RMS, so attempt_entry() returned
+    "success" and the dead entry only surfaced in orders/reconcile.py, which marks the row ERROR with an
+    "Entry leg ..." message and frees the symbol again. The re-entry guard below ignores such rows (no exit
+    price), so the symbol was re-bought on every cycle: 13 identical rejected orders in four minutes.
+
+    Blocks the symbol for ENTRY_REJECT_COOLDOWN_MINUTES after the latest dead entry, and for the rest of
+    the IST day once it has ENTRY_REJECT_MAX_PER_SYMBOL_DAY of them. Fails open on any DB error.
+    """
+    cooldown = config.ENTRY_REJECT_COOLDOWN_MINUTES
+    max_day = config.ENTRY_REJECT_MAX_PER_SYMBOL_DAY
+    if cooldown <= 0 and max_day <= 0:
+        return None
+    try:
+        rows = (
+            db.query(ScalpPosition)
+            .filter(ScalpPosition.symbol == symbol)
+            .filter(ScalpPosition.status == "ERROR")
+            .filter(ScalpPosition.error_message.like("Entry leg%"))
+            .filter(ScalpPosition.closed_at.isnot(None))
+            .order_by(ScalpPosition.closed_at.desc())
+            .all()
+        )
+        now = datetime.now(timezone.utc)
+        today = ist_today_str(now)
+        today_rows = [r for r in rows if (c := as_aware(r.closed_at)) is not None and ist_today_str(c) == today]
+        if not today_rows:
+            return None
+        if max_day > 0 and len(today_rows) >= max_day:
+            return (
+                f"ENTRY_REJECTED_TODAY:{len(today_rows)} entry order(s) for {symbol} were rejected/cancelled by "
+                f"Dhan today (limit {max_day}) — skipped for the rest of the day"
+            )
+        last = as_aware(today_rows[0].closed_at)
+        elapsed = (now - last).total_seconds() / 60.0
+        if cooldown > 0 and elapsed < cooldown:
+            return (
+                f"ENTRY_REJECT_COOLDOWN:entry for {symbol} was rejected/cancelled {elapsed:.1f}m ago "
+                f"({(today_rows[0].error_message or '')[:120]}) — waiting {cooldown}m"
+            )
+        return None
+    except Exception as e:
+        logger.warning("entry: rejected-entry check failed for %s (fail-open): %s", symbol, e)
+        return None
+
+
 def _reentry_guard_reject(db: Session, symbol: str, current_ltp: float) -> Optional[str]:
     """Same-symbol re-entry guard (this session).
 
@@ -357,7 +405,9 @@ def attempt_entry(
     # AUDIT FIX (this session): same-symbol re-entry guard — reject buying
     # back into a symbol we just closed at/above the price we exited at,
     # within the cooldown window. See _reentry_guard_reject()'s docstring.
-    reentry_reject = _reentry_guard_reject(db, candidate.symbol, candidate.current_ltp)
+    reentry_reject = _rejected_entry_reject(db, candidate.symbol) or _reentry_guard_reject(
+        db, candidate.symbol, candidate.current_ltp
+    )
     if reentry_reject:
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", reentry_reject, quality=quality)

@@ -652,15 +652,29 @@ export default function PositionStocksTab() {
   // calendar date), falling back to opened_at only in the arguably-
   // impossible case a non-OPEN row has no closed_at.
   const todayIst = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  // group192: an entry order Dhan rejected/cancelled never held any shares — it is not a closed trade. 13
+  // identical HEGAM rejections used to inflate "Closed Today (13)"; they now get their own section below.
+  const isRejectedEntry = (p: ScalpPositionRow) =>
+    p.status === "ERROR" && (p.error_message ?? "").startsWith("Entry leg");
+  const isToday = (p: ScalpPositionRow) => {
+    const ts = p.closed_at ?? p.opened_at;
+    if (!ts) return false;
+    return new Date(ts).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }) === todayIst;
+  };
   const closedToday = useMemo(
     () => positions.filter(p => {
       // BUG FIX (this session): exclude EXIT_LEGS_REJECTED here too — it's
       // still live exposure (see openPositions above), not a closed trade.
       if (p.status === "OPEN" || p.status === "EXIT_LEGS_REJECTED") return false;
-      const ts = p.closed_at ?? p.opened_at;
-      if (!ts) return false;
-      return new Date(ts).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }) === todayIst;
+      if (isRejectedEntry(p)) return false;
+      return isToday(p);
     }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [positions, todayIst]
+  );
+  const rejectedEntriesToday = useMemo(
+    () => positions.filter(p => isRejectedEntry(p) && isToday(p)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [positions, todayIst]
   );
   const filteredCandidates = useMemo(
@@ -1553,6 +1567,16 @@ export default function PositionStocksTab() {
         )}
       </div>
 
+      {/* ── Rejected entries (group192) — orders Dhan refused; no shares bought, not trades ── */}
+      {rejectedEntriesToday.length > 0 && (
+        <details className="bg-graphite border border-slate rounded-2xl p-4">
+          <summary className="dash-section-title cursor-pointer">
+            Rejected Entries Today ({rejectedEntriesToday.length}) — no shares bought
+          </summary>
+          <div className="space-y-2 mt-3">{rejectedEntriesToday.map(p => <PositionRow key={p.id} p={p} />)}</div>
+        </details>
+      )}
+
       </>
       )}
 
@@ -2089,6 +2113,9 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
       {p.status === "ERROR" && (
         <p className="font-display tabular-nums text-[10px] text-signal-avoid mt-1">
           ⚠ Entry order was rejected/never filled — no shares bought, no capital was at risk. Buy price/Total above are the attempted order, not a real fill.
+          {p.error_message?.startsWith("Entry leg") && p.error_message.includes(": ")
+            ? ` Dhan: ${p.error_message.slice(p.error_message.indexOf(": ") + 2)}`
+            : ""}
         </p>
       )}
       <p className="font-display tabular-nums text-[9px] text-mist mt-1">

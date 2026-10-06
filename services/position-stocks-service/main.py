@@ -1700,6 +1700,11 @@ def trades_history(
         ]
 
     closed = [r for r in rows if r.status != "OPEN" and r.realized_pnl is not None]
+    # 2026-10-06 (group192): entry orders Dhan rejected/cancelled never held shares. They carry no P&L so they
+    # were already outside every stat below; counted separately so the dashboard can show them apart from trades.
+    rejected_entries = [
+        r for r in rows if r.status == "ERROR" and (r.error_message or "").startswith("Entry leg")
+    ]
     wins = [r for r in closed if r.realized_pnl > 0]
     losses = [r for r in closed if r.realized_pnl <= 0]
     total_pnl = sum(r.realized_pnl for r in closed) if closed else 0.0
@@ -1709,6 +1714,7 @@ def trades_history(
     return {
         "summary": {
             "total_trades": len(closed),
+            "rejected_entries": len(rejected_entries),
             "wins": len(wins),
             "losses": len(losses),
             "win_rate_pct": round(100.0 * len(wins) / len(closed), 1) if closed else None,

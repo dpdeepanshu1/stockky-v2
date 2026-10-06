@@ -81,6 +81,8 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
     # would sail through the no-pyramiding check. See portfolio.py's
     # held_exposure_positions().
     positions = held_exposure_positions(db, mode)
+    # GROUP 193: age of position-stocks-service's published exposure (shown in the reject message).
+    _peer_age = shared_exposure.get_other_service_exposure_age(db) if mode == "REAL" else None
     return AccountState(
         equity=account.current_equity,
         risk_per_trade_pct=risk.risk_per_trade_pct,
@@ -141,6 +143,10 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
         other_service_open_positions_market_value=(
             shared_exposure.get_other_service_exposure(db) if mode == "REAL" else 0.0
         ),
+        # GROUP 193: BUYs Dhan is still working (not yet booked as positions)
+        # and the age of the peer figure (shown in the reject message).
+        in_flight_buy_value=shared_exposure.get_in_flight_buy_value(db, mode),
+        other_service_exposure_age_s=_peer_age,
         # 2026-09-21 (session79): same flat max-trade-value cap resolution
         # as entry_engine/entry.py's _account_state — DB override first,
         # config.py default second.

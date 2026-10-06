@@ -316,8 +316,10 @@ class TestSyncFromBroker:
             result = ledger.sync_from_broker(db)
         assert result == pytest.approx(0.0)
         assert "failed to get funds" in caplog.text
-        # Bailed out before touching the ledger or the peer/exposure tail.
-        assert calls["peer"] == 0 and calls["exposure"] == []
+        # Bailed out before touching the ledger or the peer tail. Group 193: the exposure is
+        # published BEFORE the funds call (it comes from this service's own DB), so a failed
+        # Dhan read no longer leaves real-trade-service's share-cap total without it.
+        assert calls["peer"] == 0 and calls["exposure"] == [pytest.approx(0.0)]
         assert ledger._get_or_create(db).last_synced_from_broker_at is None
 
     def test_no_balance_field_returns_zero(self, env, monkeypatch, caplog):
@@ -327,13 +329,13 @@ class TestSyncFromBroker:
             result = ledger.sync_from_broker(db)
         assert result == pytest.approx(0.0)
         assert "no usable available-balance field" in caplog.text
-        assert calls["peer"] == 0 and calls["exposure"] == []
+        assert calls["peer"] == 0 and calls["exposure"] == [pytest.approx(0.0)]  # group 193: published first
 
     def test_zero_balance_returns_zero(self, env, monkeypatch):
         db, calls = env
         _funds(monkeypatch, {"availabelBalance": 0})
         assert ledger.sync_from_broker(db) == pytest.approx(0.0)
-        assert calls["exposure"] == []
+        assert calls["exposure"] == [pytest.approx(0.0)]  # group 193: published first
 
     def test_negative_balance_returns_zero_and_leaves_ledger(self, env, monkeypatch):
         db, _ = env

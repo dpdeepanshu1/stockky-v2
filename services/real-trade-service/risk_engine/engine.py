@@ -191,6 +191,18 @@ class AccountState:
     # reproduces the OLD (undercounting but never money-unsafe) behavior
     # rather than a new failure mode.
     other_service_open_positions_market_value: float = 0.0
+    # ADDED (group 193): value of this service's own BUY orders that Dhan is
+    # still working and that reconcile has not yet booked into a position.
+    # Dhan already blocks that cash (so broker_cash_available falls), but the
+    # order was counted nowhere, which shrank the share-cap total and
+    # undercounted this service's exposure at the same time. Defaults to 0.0 =
+    # the old behaviour for any construction site that does not populate it.
+    in_flight_buy_value: float = 0.0
+    # ADDED (group 193): seconds since position-stocks-service last published
+    # its exposure (None = never / unreadable). Diagnostic only: it is shown
+    # in the capital_share_cap reject message so a missing or stale peer figure
+    # can be told apart from a genuinely full account. It never changes the maths.
+    other_service_exposure_age_s: Optional[float] = None
     # ADDED (2026-09-21, session79): flat rupee ceiling on a single trade's
     # position value — see config.MAX_TRADE_VALUE / TradeRiskConfig.
     # max_trade_value. None (the default) means "no cap" — matches the
@@ -475,20 +487,33 @@ def evaluate(
         # rationale. Including it here is what makes this genuinely "the
         # shared account's true total" rather than just "this service's
         # cash-plus-positions".
+        # GROUP 193: this service's own exposure now includes BUY orders Dhan
+        # is still working (not yet booked as positions) — Dhan has already
+        # blocked their cash, so leaving them out shrank the total AND
+        # undercounted exposure. See AccountState.in_flight_buy_value.
+        own_exposure = account.open_positions_market_value + account.in_flight_buy_value
         total_shared_account_value = (
             account.broker_cash_available
-            + account.open_positions_market_value
+            + own_exposure
             + account.other_service_open_positions_market_value
         )
         share_cap = total_shared_account_value * (CAPITAL_SHARE_PCT / 100.0)
-        projected_exposure = account.open_positions_market_value + order_cost
+        projected_exposure = own_exposure + order_cost
         if total_shared_account_value > 0 and projected_exposure > share_cap:
+            if account.other_service_exposure_age_s is None:
+                peer_note = "no published figure"
+            else:
+                peer_note = f"published {account.other_service_exposure_age_s:,.0f}s ago"
             return RiskResult(
                 RiskVerdict.REJECTED, "capital_share_cap",
-                f"This service's exposure (₹{account.open_positions_market_value:,.2f} open "
+                f"This service's exposure (₹{own_exposure:,.2f} = ₹{account.open_positions_market_value:,.2f} "
+                f"open + ₹{account.in_flight_buy_value:,.2f} in-flight BUYs, "
                 f"+ ₹{order_cost:,.2f} proposed = ₹{projected_exposure:,.2f}) would exceed its "
                 f"{CAPITAL_SHARE_PCT:.0f}% share (₹{share_cap:,.2f}) of the shared Dhan account "
-                f"(₹{total_shared_account_value:,.2f} total). The other half is reserved for "
+                f"(₹{total_shared_account_value:,.2f} total = ₹{account.broker_cash_available:,.2f} free cash "
+                f"+ ₹{own_exposure:,.2f} this service "
+                f"+ ₹{account.other_service_open_positions_market_value:,.2f} position-stocks-service "
+                f"[{peer_note}]). The other half is reserved for "
                 "position-stocks-service. Wait for an existing position to close.",
             )
 

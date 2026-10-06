@@ -197,9 +197,50 @@ def _maybe_lazy_reset_daily(db: Session, row: ScalpCapitalLedger) -> None:
     )
 
 
+
+# GROUP 193: position-stocks-service's published exposure feeds real-trade-service's 50% share-cap
+# total. It used to be published only at the very end of a SUCCESSFUL sync_from_broker(), which
+# itself runs only inside a trading cycle that got past the enabled/armed/entry-cutoff gates. So
+# whenever Dhan funds failed, the balance read <= 0, the service was disarmed, or it was past the
+# entry cutoff while still holding positions until the EOD square-off, nothing was published, the
+# peer total silently dropped to a stale or zero figure, and real-trade-service's cap total shrank.
+# The figure comes only from this service's own DB, so it never needed Dhan at all.
+_last_exposure_publish: dict = {"value": None, "ts": 0.0}
+_EXPOSURE_PUBLISH_MIN_INTERVAL_S = 30.0
+
+
+def _own_committed_capital_total(db: Session) -> float:
+    """Cost-basis capital this pool has in positions it still holds (OPEN and EXIT_LEGS_REJECTED)."""
+    from models import ScalpPosition as _SP  # local to avoid circular import
+    return float(db.query(
+        func.coalesce(func.sum(_SP.capital_risked), 0.0)
+    ).filter(_SP.status.in_(("OPEN", "EXIT_LEGS_REJECTED"))).scalar() or 0.0)
+
+
+def publish_exposure(db: Session, force: bool = False) -> None:
+    """Publish this pool's open-position value to the shared exposure table without touching Dhan.
+    Writes when the figure changed or at most every _EXPOSURE_PUBLISH_MIN_INTERVAL_S (a heartbeat so
+    the reader can tell 'quiet' from 'stale'). force=True always writes. Fail-open, never raises."""
+    try:
+        value = round(_own_committed_capital_total(db), 2)
+        now = time.monotonic()
+        last = _last_exposure_publish
+        if (not force and last["value"] == value
+                and now - last["ts"] < _EXPOSURE_PUBLISH_MIN_INTERVAL_S):
+            return
+        shared_exposure.publish_own_exposure(db, value)
+        last["value"] = value
+        last["ts"] = now
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ledger.publish_exposure failed (non-fatal): %s", e)
+
+
 def sync_from_broker(db: Session) -> float:
     """Fetch live fund balance from Dhan, compute 50% scalp allocation,
     store in DB. Returns new total_allocated_capital."""
+    # GROUP 193: publish first, from this service's own DB, so a failed/zero funds read below
+    # (which returns early) can no longer leave real-trade-service with a stale or missing figure.
+    publish_exposure(db, force=True)
     try:
         funds = dhan_client.get_funds(db)
     except Exception as e:
@@ -330,12 +371,10 @@ def sync_from_broker(db: Session) -> float:
     # BUG FIX (Issue #2): sync peer PnL at the same cadence as broker sync
     # so reserve_capital()'s combined kill-switch check stays current.
     sync_peer_pnl(db)
-    # AUDIT FIX (2026-09-20): publish this service's own open-position
-    # market value (own_committed_capital, already computed above) so
-    # real-trade-service's capital_share_cap check can see it — see
-    # shared_exposure.py for the full rationale. Same cadence as the peer
-    # PnL sync above; fail-open, never raises.
-    shared_exposure.publish_own_exposure(db, own_committed_capital)
+    # AUDIT FIX (2026-09-20): this service's own open-position market value is published so
+    # real-trade-service's capital_share_cap check can see it — see shared_exposure.py.
+    # GROUP 193: that publish now happens at the TOP of this function (publish_exposure), so the
+    # early returns above (funds error / no balance key / balance <= 0) no longer skip it.
     return scalp_alloc
 
 

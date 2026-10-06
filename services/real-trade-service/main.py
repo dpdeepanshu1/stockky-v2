@@ -975,6 +975,8 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
     # "the preview can be stale," not real money — but there's no reason
     # for the dry run to disagree with what the real path already uses.
     open_positions = _pf_held_exposure_positions(db, mode)
+    # GROUP 193: age of position-stocks-service's published exposure (shown in the reject message).
+    _peer_age = shared_exposure.get_other_service_exposure_age(db) if mode == "REAL" else None
     account_state = AccountState(
         equity=account_row.current_equity,
         risk_per_trade_pct=risk_row.risk_per_trade_pct,
@@ -1020,6 +1022,10 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
         other_service_open_positions_market_value=(
             shared_exposure.get_other_service_exposure(db) if mode == "REAL" else 0.0
         ),
+        # GROUP 193: BUYs Dhan is still working (not yet booked as positions)
+        # and the age of the peer figure (shown in the reject message).
+        in_flight_buy_value=shared_exposure.get_in_flight_buy_value(db, mode),
+        other_service_exposure_age_s=_peer_age,
         # 2026-09-21 (session79): same flat max-trade-value cap resolution
         # as the live entry/manual paths, so this dry run doesn't disagree
         # with what a real order would actually do.

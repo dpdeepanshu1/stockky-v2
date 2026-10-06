@@ -353,6 +353,11 @@ async def _fast_reconcile_loop() -> None:
                     await asyncio.to_thread(reconcile.resolve_stuck_pending, db)
                 except Exception as e:
                     logger.error("position-stocks: off-hours stuck-pending sweep error: %s", e, exc_info=True)
+            # GROUP 193: keep the shared exposure figure fresh regardless of the screening
+            # loop's gates (disabled / disarmed / past entry cutoff / market closed) — see
+            # ledger.publish_exposure. Throttled + change-detected inside; fail-open.
+            with factory() as db:
+                await asyncio.to_thread(ledger.publish_exposure, db)
             if not is_market_open_ist():
                 continue
             with factory() as db:

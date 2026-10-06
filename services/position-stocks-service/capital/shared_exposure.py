@@ -46,6 +46,7 @@ shared_order_budget.py / shared_symbol_lock.py).
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -67,6 +68,10 @@ def publish_own_exposure(db: Session, market_value: float) -> None:
             row = SharedServiceExposure(service_name=SERVICE_NAME, open_positions_market_value=0.0)
             db.add(row)
         row.open_positions_market_value = max(0.0, float(market_value or 0.0))
+        # GROUP 193: explicit heartbeat. SQLAlchemy skips the UPDATE (and so the
+        # onupdate timestamp) when the value is unchanged, which made updated_at
+        # mean 'last time the figure changed' and a quiet service look stale.
+        row.updated_at = datetime.now(timezone.utc)
         db.commit()
     except Exception as e:
         # BUG FIX (session112 round 7): this handler's own rollback() was

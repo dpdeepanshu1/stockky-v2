@@ -1,2 +1,18 @@
 import os as _os_logcfg
+import sys
 _os_logcfg.environ.setdefault("HTTPX_LOG_LEVEL", "INFO")  # 2026-10-04: tests assert on httpx INFO lines; production default is WARNING
+
+
+import pytest as _pytest_g188
+
+
+@_pytest_g188.fixture(autouse=True)
+def _g188_clear_bo_miss_memory():
+    """group188: the Yahoo .BO miss memory is per process; a test that simulates a miss must not leak into the next."""
+    _m = sys.modules.get("main")
+    if _m is not None and hasattr(_m, "_YF_BO_MISS"):
+        _m._YF_BO_MISS.clear()
+    yield
+    _m = sys.modules.get("main")
+    if _m is not None and hasattr(_m, "_YF_BO_MISS"):
+        _m._YF_BO_MISS.clear()

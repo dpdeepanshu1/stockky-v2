@@ -21,6 +21,7 @@ import bhavcopy as bh
 @pytest.fixture(autouse=True)
 def _clean():
     bh._BHAV_DAY_CACHE.clear()
+    bh._EOD_MISS.clear()
     bh._NSE_SESSION_CACHE["client"] = None
     bh._NSE_SESSION_CACHE["ts"] = 0.0
     bh._denied_last_logged = {} if hasattr(bh, "_denied_last_logged") else {}
@@ -743,3 +744,63 @@ class TestProcessBhavcopydDataframe:
                 return [{"SYMBOL": "X", "SERIES": "EQ", "CLOSE": "100"}]
         result = bh.process_bhavcopy_dataframe(_FakeDf())
         assert result is not None
+
+
+class TestEodMissMemory:
+    """group186: a symbol absent from every recent bhavcopy day (FOCUS, TECH in the 2026-10-06 boot log) is
+    remembered for BHAVCOPY_EOD_MISS_TTL_S so a repeat is instant and not logged again."""
+
+    def _setup(self, monkeypatch, rows):
+        from datetime import date
+        monkeypatch.setattr(bh, "_candidate_session_dates", lambda n=6: [date(2026, 10, 5), date(2026, 10, 2)])
+        bh._BHAV_DAY_CACHE["2026-10-05"] = rows
+        bh._BHAV_DAY_CACHE["2026-10-02"] = rows
+        calls = {"n": 0}
+
+        def _client():
+            calls["n"] += 1
+            return object()
+        monkeypatch.setattr(bh, "_nse_client", _client)
+        return calls
+
+    def test_second_lookup_is_instant_and_silent(self, monkeypatch, caplog):
+        import logging
+        calls = self._setup(monkeypatch, {"TCS": {"close": 3000.0}})
+        assert bh.eod_close_from_bhavcopy("FOCUS") is None
+        assert calls["n"] == 1
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            assert bh.eod_close_from_bhavcopy("focus.NS") is None
+        assert calls["n"] == 1 and caplog.text == ""
+
+    def test_empty_days_prove_nothing_so_nothing_is_remembered(self, monkeypatch):
+        calls = self._setup(monkeypatch, {})
+        bh.eod_close_from_bhavcopy("FOCUS")
+        bh.eod_close_from_bhavcopy("FOCUS")
+        assert calls["n"] == 2 and "FOCUS" not in bh._EOD_MISS
+
+    def test_expires_after_ttl(self, monkeypatch):
+        calls = self._setup(monkeypatch, {"TCS": {"close": 3000.0}})
+        bh.eod_close_from_bhavcopy("TECH")
+        bh._EOD_MISS["TECH"] = time.time() - 1
+        bh.eod_close_from_bhavcopy("TECH")
+        assert calls["n"] == 2
+
+    def test_a_listed_symbol_is_never_remembered_as_missing(self, monkeypatch):
+        self._setup(monkeypatch, {"TCS": {"close": 3000.0}})
+        assert bh.eod_close_from_bhavcopy("TCS") == 3000.0
+        assert "TCS" not in bh._EOD_MISS
+
+    def test_ttl_zero_turns_it_off(self, monkeypatch):
+        calls = self._setup(monkeypatch, {"TCS": {"close": 3000.0}})
+        monkeypatch.setattr(bh, "_EOD_MISS_TTL_S", 0.0)
+        bh.eod_close_from_bhavcopy("FOCUS")
+        bh.eod_close_from_bhavcopy("FOCUS")
+        assert calls["n"] == 2 and not bh._EOD_MISS
+
+    def test_memory_is_bounded(self, monkeypatch):
+        self._setup(monkeypatch, {"TCS": {"close": 3000.0}})
+        for i in range(2005):
+            bh._EOD_MISS[f"X{i}"] = time.time() + 1000
+        bh.eod_close_from_bhavcopy("NEWWORD")
+        assert len(bh._EOD_MISS) <= 2000

@@ -1326,6 +1326,70 @@ def _pad_quote_response(sym: str, data: Optional[dict] = None) -> dict:
     return out
 
 
+# ── group188 (item 10): do not ask Yahoo for NAME.BO when NAME.NS has nothing ────────────────────────
+# The 2026-10-06 boot log had ~15 "$CHEMICAL.BO / AJOONI.BO / SBILIQETF.BO ...: possibly delisted; no price data
+# found (period=1mo)" errors, some twice. Every NSE symbol was tried as NAME.NS and then NAME.BO, and for an NSE
+# equity the BSE twin of the same name almost never exists - each miss cost a rate-limited yfinance call.
+#   * a symbol that is in the AngelOne NSE scrip master (already loaded, never waited for) is NSE-listed: .BO is
+#     not tried (YAHOO_SKIP_BO_FOR_NSE=0 restores it);
+#   * for any other symbol a .BO miss (empty history) is remembered for YAHOO_BO_MISS_TTL_S (default 21600 s,
+#     0 = off) and .BO is left out of the candidates until it expires.
+_YF_BO_MISS: dict = {}          # bare symbol -> wall-clock time until which .BO is not tried
+_YF_BO_MISS_MAX = 3000
+
+
+def _yahoo_bo_cfg() -> tuple:
+    skip_nse = ((os.getenv("YAHOO_SKIP_BO_FOR_NSE") or "").strip() or "1") not in ("0", "false", "False")
+    try:
+        ttl = float((os.getenv("YAHOO_BO_MISS_TTL_S") or "").strip() or "21600")
+    except ValueError:
+        ttl = 21600.0
+    if ttl != ttl:
+        ttl = 21600.0
+    return skip_nse, max(0.0, ttl)
+
+
+def _yahoo_bo_allowed(bare: str) -> bool:
+    """False when NAME.BO should be left out of the Yahoo candidates. Never raises."""
+    try:
+        skip_nse, ttl = _yahoo_bo_cfg()
+        if skip_nse:
+            try:
+                import angelone_scrip_master as _sm
+                if _sm.is_listed(bare):
+                    return False
+            except Exception:  # noqa: BLE001
+                pass
+        if ttl > 0:
+            until = _YF_BO_MISS.get(bare)
+            if until is not None:
+                if time.time() < until:
+                    return False
+                _YF_BO_MISS.pop(bare, None)
+    except Exception:  # noqa: BLE001
+        return True
+    return True
+
+
+def _yahoo_bo_note_miss(ticker: str) -> None:
+    """Remember that `ticker` (NAME.BO) had no history. Other tickers are ignored. Never raises."""
+    try:
+        if not ticker or not ticker.endswith(".BO"):
+            return
+        _skip, ttl = _yahoo_bo_cfg()
+        if ttl <= 0:
+            return
+        now = time.time()
+        if len(_YF_BO_MISS) >= _YF_BO_MISS_MAX:
+            for k in [k for k, v in list(_YF_BO_MISS.items()) if v <= now]:
+                _YF_BO_MISS.pop(k, None)
+            if len(_YF_BO_MISS) >= _YF_BO_MISS_MAX:
+                return
+        _YF_BO_MISS[ticker[:-3]] = now + ttl
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _yahoo_tickers_for(symbol: str) -> list:
     """Yahoo candidates. Never turn ^NSEI into ^NSEI.NS. Apply renames."""
     raw = (symbol or "").strip()
@@ -1351,7 +1415,10 @@ def _yahoo_tickers_for(symbol: str) -> list:
         if idx:
             return [idx]
         return ["^NSEI"] if "NIFTY" in bare else [bare]
-    return [f"{bare}.NS", f"{bare}.BO"]
+    out = [f"{bare}.NS"]
+    if _yahoo_bo_allowed(bare):
+        out.append(f"{bare}.BO")
+    return out
 
 
 def _is_rate_limit_error(err: Exception) -> bool:
@@ -1384,6 +1451,7 @@ def _yahoo_ohlcv_quote(symbol: str) -> Optional[dict]:
             t = yf.Ticker(ticker)
             hist = t.history(period="1mo", interval="1d")
             if hist is None or hist.empty or "Close" not in hist.columns:
+                _yahoo_bo_note_miss(ticker)
                 continue
             latest = hist.iloc[-1]
             price = float(latest["Close"])
@@ -1464,6 +1532,8 @@ def _waterfall_yahoo_history_price(symbol: str) -> Optional[float]:
                 px = float(hist["Close"].dropna().iloc[-1])
                 if px > 0:
                     return px
+            else:
+                _yahoo_bo_note_miss(ticker)
         except Exception as e:
             if _is_rate_limit_error(e):
                 _set_cooldown("yfinance")

@@ -614,6 +614,27 @@ async def _fetch_fund_tech_score(client: httpx.AsyncClient, symbol: str) -> dict
     }
 
 
+# group 186 (item 5): the market-cap fetch (fundamental /analyze, 12 s) timed out for HFCL and REDINGTON at the
+# 2026-10-06 boot and logged "market_cap fetch failed for HFCL ()" - httpx timeouts stringify to ''. A failed fetch
+# also means NO market-cap floor for that candidate (missing data is not a reject). Market caps move slowly, so the
+# last good value (up to CANDIDATE_MCAP_STALE_TTL_S, default 24 h, 0 = off) is used when a fetch fails.
+_MCAP_TIMEOUT_S = float(((os.getenv("CANDIDATE_MCAP_TIMEOUT_S") or "").strip() or "12"))
+_MCAP_STALE_TTL_S = float(((os.getenv("CANDIDATE_MCAP_STALE_TTL_S") or "").strip() or "86400"))
+_MCAP_LAST_GOOD: dict[str, tuple[float, float]] = {}
+
+
+def _mcap_remember(symbol: str, value_cr: float) -> None:
+    if _MCAP_STALE_TTL_S > 0:
+        _MCAP_LAST_GOOD[symbol] = (time.time(), value_cr)
+
+
+def _mcap_stale(symbol: str) -> float | None:
+    got = _MCAP_LAST_GOOD.get(symbol) if _MCAP_STALE_TTL_S > 0 else None
+    if got and time.time() - got[0] <= _MCAP_STALE_TTL_S:
+        return got[1]
+    return None
+
+
 async def _fetch_market_cap_cr(client: httpx.AsyncClient, symbol: str) -> float | None:
     """
     2026-09-11 gap-closure addition. Lightweight companion to
@@ -628,17 +649,25 @@ async def _fetch_market_cap_cr(client: httpx.AsyncClient, symbol: str) -> float 
     the technical service just to get a market cap number.
     """
     try:
-        r = await client.get(f"{config.FUNDAMENTAL_URL}/analyze/{symbol}", timeout=12.0)
+        r = await client.get(f"{config.FUNDAMENTAL_URL}/analyze/{symbol}", timeout=_MCAP_TIMEOUT_S)
         if r.status_code != 200:
-            return None
-        fj = r.json()
-        raw_mcap = fj.get("market_cap") or (fj.get("raw") or {}).get("market_cap")
-        if not raw_mcap:
-            return None
-        return float(raw_mcap) / 1e7
+            reason = f"HTTP {r.status_code}"
+        else:
+            fj = r.json()
+            raw_mcap = fj.get("market_cap") or (fj.get("raw") or {}).get("market_cap")
+            if raw_mcap:
+                val = float(raw_mcap) / 1e7
+                _mcap_remember(symbol, val)
+                return val
+            reason = "no market_cap in the answer"
     except Exception as e:
-        logger.info("standard_track: market_cap fetch failed for %s (%s)", symbol, e)
-        return None
+        reason = f"{type(e).__name__}: {e}" if str(e).strip() else type(e).__name__
+    stale = _mcap_stale(symbol)
+    logger.info(
+        "standard_track: market_cap fetch failed for %s (%s)%s", symbol, reason,
+        f" - using last known Rs {stale:.0f} cr" if stale is not None else "",
+    )
+    return stale
 
 
 def _quality_gate_fund_tech(scored: dict, sector_peers: list, cross_cycle_peer_scores: Optional[list] = None) -> tuple:
@@ -881,6 +910,51 @@ def _is_bullish(pct: Optional[float]) -> bool:
     return pct is not None and pct > BULLISH_THRESHOLD_PCT
 
 
+# ── group 186: timeframe-return sanity + missing-horizon handling ───────────
+# 2026-10-06 boot log: HFCL scored 1w=+211.28% next to 1m=+4.72% and 3m=+17.22%. A
+# window that sits INSIDE the 1-month window cannot have returned 3x the month unless
+# the first bar of the 5d history was bad (stale/odd open), and _pct_return trusts the
+# first open blindly. That bogus +211% counted as a bullish timeframe. And TCS came back
+# with 1d/1w/6m/1y/2y all None (history fetches failed) and was rejected as "weighted
+# bullish score 1.0" - a data gap reported as weak momentum.
+#   * a short horizon above its cap AND far above the next longer horizon is dropped (None)
+#   * if the missing horizons could still lift the score to the threshold, the reject
+#     reason says "incomplete history" (data_incomplete) instead of "weak momentum"
+TF_SANITY_ENABLED = ((os.getenv("CANDIDATE_TF_SANITY") or "").strip() or "1") != "0"
+_TF_SANITY_CAPS = {
+    "1d": float(((os.getenv("CANDIDATE_TF_CAP_1D_PCT") or "").strip() or "25")),
+    "1w": float(((os.getenv("CANDIDATE_TF_CAP_1W_PCT") or "").strip() or "60")),
+    "1m": float(((os.getenv("CANDIDATE_TF_CAP_1M_PCT") or "").strip() or "120")),
+}
+_TF_NEXT_LONGER = {"1d": "1w", "1w": "1m", "1m": "3m"}
+
+
+def _sanitize_tf_returns(tf_returns: dict) -> tuple[dict, list[str]]:
+    """Drop short-horizon returns the next longer horizon contradicts.
+    Returns (clean copy, names of the dropped horizons). A horizon is dropped only when
+    it is above its cap AND the next longer horizon exists and is smaller by more than
+    the cap - with no longer horizon to compare against it is kept (a real new-listing
+    spike must not vanish)."""
+    clean = dict(tf_returns)
+    dropped: list[str] = []
+    if not TF_SANITY_ENABLED:
+        return clean, dropped
+    for tf, cap in _TF_SANITY_CAPS.items():
+        r = tf_returns.get(tf)
+        longer = tf_returns.get(_TF_NEXT_LONGER[tf])
+        if r is None or longer is None:
+            continue
+        if abs(r) > cap and abs(r) > abs(longer) + cap:
+            clean[tf] = None
+            dropped.append(tf)
+    return clean, dropped
+
+
+def _missing_horizon_weight(tf_returns: dict) -> float:
+    """Total score weight of the horizons that came back with no return at all."""
+    return sum(TIMEFRAME_WEIGHTS.get(tf, 1.0) for tf, r in tf_returns.items() if r is None)
+
+
 def _volume_is_healthy(candles: list[dict]) -> bool:
     """Recent 5-day volume >= VOLUME_HEALTH_RATIO × 20-day average.
     Low-volume moves reverse in choppy markets (Aug-2026 condition).
@@ -942,6 +1016,13 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
     for tf in periods:
         raw = fetched.get(tf)
         tf_returns[tf] = _pct_return(raw) if isinstance(raw, list) else None
+    tf_returns, _dropped_tf = _sanitize_tf_returns(tf_returns)
+    if _dropped_tf:
+        logger.warning(
+            "candidate_engine: %s timeframe return(s) %s dropped as implausible "
+            "(far above the next longer horizon - bad first bar in the history?)",
+            symbol, ", ".join(_dropped_tf),
+        )
 
     quote = fetched.get("quote")
     if isinstance(quote, Exception):
@@ -1017,6 +1098,18 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
     # 1-day down-weighted 0.5× — single-day pop is mean-reversion risk.
     bullish_count = _weighted_bullish_score(tf_returns)
     if bullish_count < MIN_BULLISH_TIMEFRAMES:
+        _missing = [tf for tf in periods if tf_returns.get(tf) is None]
+        if _missing and bullish_count + _missing_horizon_weight(tf_returns) >= MIN_BULLISH_TIMEFRAMES:
+            return {
+                "reject_reason": (
+                    f"Incomplete history, cannot judge: no return for {', '.join(_missing)} "
+                    f"(weighted bullish score {bullish_count:.1f} of the {MIN_BULLISH_TIMEFRAMES} "
+                    "needed; the missing horizons could still reach it). "
+                    f"Returns: {tf_returns}. Retried next cycle."
+                ),
+                "tf_returns": tf_returns, "bullish_count": bullish_count, "atr_pct": None,
+                "data_incomplete": True,
+            }
         return {
             "reject_reason": (
                 f"Weighted bullish score {bullish_count:.1f} "
@@ -1724,6 +1817,16 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
         # blip (Yahoo/AngelOne rate limit on that specific chunk), not
         # coincidence — surface it as one loud line, same pattern as the
         # data_starved watchdog just above.
+        incomplete = [sym for sym, result in tf_map.items() if result.get("data_incomplete")]
+        if len(incomplete) >= 3:
+            logger.warning(
+                "candidate_engine: %d symbols had incomplete timeframe history in one cycle "
+                "(mode=%s): %s%s - skipped as 'cannot judge', not as weak momentum; check the "
+                "/history warnings (AngelOne 403 rate limit / yfinance timeouts).",
+                len(incomplete), mode, ", ".join(incomplete[:10]),
+                ", ..." if len(incomplete) > 10 else "",
+            )
+
         quote_only_failed = [
             sym for sym, result in tf_map.items()
             if not result.get("data_starved")

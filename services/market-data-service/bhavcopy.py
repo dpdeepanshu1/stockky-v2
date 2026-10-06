@@ -727,6 +727,15 @@ def delivery_from_bhavcopy(symbol: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+# group 186: symbols that are not on ANY of the recent bhavcopy days (the 2026-10-06 boot log
+# showed eod_close_from_bhavcopy(FOCUS) and (TECH) - plain words that reached the price
+# waterfall) are remembered, so a repeat lookup costs nothing and the INFO line is not
+# logged again. Only a miss against days that really had rows counts (an empty/unparsed
+# day proves nothing). 0 turns the memory off.
+_EOD_MISS_TTL_S = float((_os.getenv("BHAVCOPY_EOD_MISS_TTL_S") or "").strip() or "21600")
+_EOD_MISS: Dict[str, float] = {}
+
+
 def eod_close_from_bhavcopy(symbol: str) -> Optional[float]:
     """Last-resort EOD close price straight from the official NSE bhavcopy.
 
@@ -744,6 +753,12 @@ def eod_close_from_bhavcopy(symbol: str) -> Optional[float]:
     symbols) downloaded the identical CSV redundantly, once per call.
     """
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    if _EOD_MISS_TTL_S > 0:
+        _until = _EOD_MISS.get(sym)
+        if _until is not None:
+            if time.time() < _until:
+                return None
+            _EOD_MISS.pop(sym, None)
     try:
         client = _nse_client()
         dates_tried = []
@@ -769,6 +784,14 @@ def eod_close_from_bhavcopy(symbol: str) -> Optional[float]:
         # in this lookup. Either way, this makes the next occurrence
         # diagnosable from logs alone instead of requiring another guess.
         logger.info("eod_close_from_bhavcopy(%s): not found in any of %s", sym, dates_tried)
+        if _EOD_MISS_TTL_S > 0 and any(n for _d, n in dates_tried):
+            _EOD_MISS[sym] = time.time() + _EOD_MISS_TTL_S
+            if len(_EOD_MISS) > 2000:  # bounded: drop the expired, then the oldest
+                _now = time.time()
+                for _k in [k for k, v in _EOD_MISS.items() if v <= _now]:
+                    _EOD_MISS.pop(_k, None)
+                while len(_EOD_MISS) > 2000:
+                    _EOD_MISS.pop(next(iter(_EOD_MISS)))
     except Exception as e:
         logger.warning("eod_close_from_bhavcopy failed for %s: %s", sym, e)
     return None

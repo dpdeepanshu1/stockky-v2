@@ -378,6 +378,15 @@ def get_tokens_bulk(symbols: List[str], wait_s: Optional[float] = None) -> Dict[
     return out
 
 
+def is_listed(symbol: str) -> Optional[bool]:
+    """group 188: True when `symbol` is an NSE equity in the scrip master (EQ or the -BE fallback), False when it is
+    not, None while no master is loaded yet. Never loads or waits - callers on hot paths use it to skip lookups."""
+    if not _token_map and not _be_map:
+        return None
+    c = _clean(symbol)
+    return c in _token_map or c in _be_map
+
+
 def get_all_symbols() -> Dict[str, str]:
     """Returns the FULL {clean_symbol: token} map for every NSE-EQ symbol
     in the scrip master (~2000 symbols) — not scoped to any pre-selected

@@ -219,11 +219,15 @@ class TestMultiTfAnalysisChecks:
         assert "6m return" in result["reject_reason"]
 
     def test_insufficient_weighted_bullish_score_rejects(self):
-        # Every period comes back empty -> all tf_returns None -> score 0.
-        client = _RoutedAsyncClient(get_router=_history_router({}))
+        # Every horizon present but flat -> a real "weak momentum" answer, score 0.
+        # (group 186: with every period EMPTY the answer is "incomplete history" instead -
+        # see tests/test_group186_tf_sanity_incomplete_history.py.)
+        flat = {tf: [_c(100, open_=100), _c(100, open_=100)] for tf in _PERIOD_OF}
+        client = _RoutedAsyncClient(get_router=_history_router(flat))
         result = run(cd._multi_tf_analysis(client, "TCS"))
         assert "Weighted bullish score" in result["reject_reason"]
         assert result["bullish_count"] == 0.0
+        assert not result.get("data_incomplete")
 
     def test_overextended_52w_rejects(self):
         by_tf = _happy_by_tf()

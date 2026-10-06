@@ -6,6 +6,8 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-06 (group 199)  GET /quote asks AngelOne REST first for symbols outside the live feed (market-data-service).
+  Item 1. The group 198 report shows STEAMHOUSE / SGRL / KENNAMET / ELEVATE / ROSSTECH all have `-EQ` rows (SME theory wrong) and all price, but the four outside the 489-symbol feed took 5-20 s on `/quote` (Yahoo first), long enough for real-trade-service's ReadTimeout; `/quotes/bulk` (AngelOne REST) recovered them. New `_angelone_rest_quote_first` in `_get_quote_inner` before Yahoo: one token, 6 s cap, `angelone_client.get_quote(max_wait=)` fail-closed on a busy bucket; any miss falls through to the unchanged Yahoo path; `QUOTE_ANGELONE_FIRST=0` turns it off. No change to the pause logic or the universe. Tests: `tests/test_group199_quote_angelone_first.py` (27); market-data 935 passed. Not live-tested. Doc: `docs/GROUP199_QUOTE_ANGELONE_FIRST.md`.
 - 2026-10-06 (group 198)  diagnostic for symbols that never price (scripts only, no service change).
   Item 3 of the open list. The pause (group 160/183b) and the "no price" cache (group 161) already exist; what the repo cannot say is why STEAMHOUSE / SGRL / KENNAMET have no price (SME series, wrong ticker, or failing sources; the bhavcopy keeps only EQ/BE/BZ). New `scripts/diagnose_never_priced.sh` + `.py` print each name's AngelOne series rows, timed `/quote` and `/last-close` answers, the log lines in three services, and whether it is in the scan universe / movers. Details in `docs/GROUP198_NEVER_PRICED_DIAGNOSTIC.md`. Nothing to rebuild.
 - 2026-10-06 (group 197)  force_refresh=true now really rebuilds the scan universe (api-gateway).

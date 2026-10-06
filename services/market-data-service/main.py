@@ -2066,6 +2066,96 @@ def _failed_quote_payload(sym: str, source: str = "failed") -> dict:
     return _sanitize_for_json(result)
 
 
+# ── group199 (item 1): symbols outside the live feed price from the AngelOne REST quote first ────────
+# STEAMHOUSE, SGRL, KENNAMET and ROSSTECH are real NSE -EQ stocks, but they are not in the 489-symbol live
+# feed, so GET /quote sent them straight to Yahoo (yfinance, 1 mo of daily bars) and the answer took 5-20 s on
+# the 2026-10-06 VM (ELEVATE, which is in the feed, answered in 0 ms). real-trade-service reads /quote with a
+# short timeout, so those names timed out and only /quotes/bulk (AngelOne REST) recovered them. Here the same
+# AngelOne REST quote that /quotes/bulk uses is tried first, for one token, with a short cap on the rate-limit
+# wait and on the call itself. Any miss (not configured, cooldown, no scrip-master token, empty answer, error,
+# timeout, called from inside an event loop) returns None and the old path runs unchanged. QUOTE_ANGELONE_FIRST=0
+# turns it off. The AngelOne quote has no ATR, so `atr` stays None (merges keep the prior real value).
+def _quote_angelone_first_cfg() -> tuple:
+    on = ((os.getenv("QUOTE_ANGELONE_FIRST") or "").strip() or "1").lower() not in ("0", "false", "off", "no")
+    try:
+        tmo = float((os.getenv("QUOTE_ANGELONE_FIRST_TIMEOUT_S") or "").strip() or 6.0)
+    except ValueError:
+        tmo = 6.0
+    if not (tmo == tmo and 0.5 <= tmo <= 30.0):
+        tmo = 6.0
+    return on, tmo
+
+
+def _angelone_rest_quote_first(sym: str) -> Optional[dict]:
+    """One-token AngelOne REST quote as a /quote-shaped dict, or None. Never raises."""
+    try:
+        on, tmo = _quote_angelone_first_cfg()
+        if not on:
+            return None
+        if str(sym).startswith("^") or str(sym).upper().startswith("NIFTY"):
+            return None
+        from angelone_client import get_session
+        session = get_session()
+        if not session.is_configured():
+            return None
+        try:
+            from rate_limiter import in_cooldown as _rl_cd
+            if _rl_cd("angelone_quote"):
+                return None
+        except Exception:  # noqa: BLE001
+            pass
+        base = _waterfall_equity_base(sym)
+        if not base:
+            return None
+        import angelone_scrip_master as scrip_master
+        token = scrip_master.get_token(base)
+        if not token:
+            return None
+        try:
+            asyncio.get_running_loop()
+            return None   # called from inside an event loop: asyncio.run() would fail, use the old path
+        except RuntimeError:
+            pass
+
+        async def _go():
+            return await asyncio.wait_for(session.get_quote("NSE", token, max_wait=min(2.0, tmo)), timeout=tmo)
+
+        q = asyncio.run(_go())
+        if not isinstance(q, dict) or not q:
+            return None
+        price = _safe(q.get("ltp"))
+        if price is None or price <= 0:
+            return None
+        prev = _safe(q.get("close"))
+        change_pct = None
+        if prev and prev > 0:
+            change_pct = round(((price - prev) / prev) * 100, 2)
+        vol = None
+        try:
+            v = q.get("tradeVolume")
+            vol = int(float(v)) if v not in (None, "") and float(v) >= 0 else None
+        except (TypeError, ValueError):
+            vol = None
+        day_high = _safe(q.get("high"))
+        day_low = _safe(q.get("low"))
+        return {
+            "symbol": base,
+            "name": base,
+            "price": float(price),
+            "cmp": float(price),
+            "previous_close": prev if prev and prev > 0 else None,
+            "day_change_pct": change_pct,
+            "day_high": day_high if day_high and day_high > 0 else None,
+            "day_low": day_low if day_low and day_low > 0 else None,
+            "volume": vol,
+            "source": "angelone_rest",
+            "fetched_at": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.debug("angelone-first quote %s: %s", sym, e)
+        return None
+
+
 @app.get("/quote/{symbol}", response_model=QuoteResponse)
 def get_quote(symbol: str):
     """Quote route. The waterfall lives in _get_quote_inner; this wrapper keeps the group161
@@ -2174,6 +2264,16 @@ def _get_quote_inner(symbol: str):
         fb_neg = _fallback_get(cache_key)
         if not (fb_neg and isinstance(fb_neg, dict) and fb_neg.get("price") is not None):
             return _failed_quote_payload(sym, "negative_cache")
+
+    # group199: not in the live feed and nothing fresh cached - ask AngelOne REST (one token, short cap) before
+    # Yahoo, which took 5-20 s for these names. A miss falls through to the unchanged path below.
+    ao_first = _angelone_rest_quote_first(sym)
+    if ao_first:
+        result = _sanitize_for_json(_pad_quote_response(sym, ao_first))
+        result["source"] = "angelone_rest"
+        _cache_set(cache_key, result, ttl=12)
+        _fallback_set(cache_key, result)
+        return result
 
     # ── Primary: Yahoo clean OHLCV ──────────────────────────────────────────
     yahoo_full = None

@@ -299,12 +299,18 @@ class AngelOneSession:
             "X-MACAddress":      "00:00:00:00:00:00",
         }
 
-    async def get_quote(self, exchange: str, symbol_token: str) -> dict:
-        """Fetch live quote for one symbol token."""
+    async def get_quote(self, exchange: str, symbol_token: str, max_wait: float = 20.0) -> dict:
+        """Fetch live quote for one symbol token. A `max_wait` below the 20 s default makes this fail CLOSED
+        (group199): if the angelone_quote bucket has no token within `max_wait` the call returns {} without
+        sending anything, so GET /quote can fall back to Yahoo instead of adding load to a busy bucket."""
         if _rl_in_cooldown("angelone_quote"):
             return {}
         await self.ensure_session()
-        _rl_acquire("angelone_quote", weight=1)
+        if max_wait < 20.0:
+            if not _rl_try_acquire("angelone_quote", weight=1, max_wait=max_wait):
+                return {}
+        else:
+            _rl_acquire("angelone_quote", weight=1)
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.post(
                 f"{_BASE}/rest/secure/angelbroking/market/v1/quote/",

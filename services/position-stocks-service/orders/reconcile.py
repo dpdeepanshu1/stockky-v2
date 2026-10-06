@@ -880,6 +880,10 @@ def _apply_entry_correction(db: Session, pos: ScalpPosition, row: dict) -> bool:
         try:
             new_target = round(real_entry_price * (1 + pos.adaptive_target_pct / 100.0), 2)
             new_stop = round(real_entry_price * (1 - pos.adaptive_stop_pct / 100.0), 2)
+            # group 217: a stop already ratcheted up (breakeven / trailing) must never be pulled back down
+            # by a late fill-price correction.
+            if pos.stop_moved_to_breakeven and pos.stop_price and new_stop < pos.stop_price:
+                new_stop = pos.stop_price
             dhan_client.modify_super_order(
                 db, order_id=pos.dhan_super_order_id,
                 order_leg="TARGET_LEG", target_price=new_target,

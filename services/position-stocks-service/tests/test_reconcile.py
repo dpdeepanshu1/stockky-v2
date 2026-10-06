@@ -823,6 +823,24 @@ class TestRunExitReconciliation:
         reconcile.run_exit_reconciliation(db)
         assert p.capital_risked == pytest.approx(990.0) and available(db) == pytest.approx(LEDGER_AVAILABLE + 10.0)
 
+    def test_group217_late_fill_correction_never_lowers_a_ratcheted_stop(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, qty=10, super_id="SO1")
+        p.stop_price, p.stop_moved_to_breakeven = 100.5, True            # already trailed / breakeven-moved
+        db.commit()
+        b.super_orders = [super_row("SO1", avg=99.0, target=("PENDING", 102.0), stop=("PENDING", 100.5))]
+        reconcile.run_exit_reconciliation(db)
+        mods = b.of("modify_super_order")
+        assert mods[1] == {"order_id": "SO1", "order_leg": "STOP_LOSS_LEG", "stop_loss_price": 100.5}
+        assert p.stop_price == 100.5                                      # 99.0 * 0.99 = 98.01 was NOT applied
+
+    def test_group217_unratcheted_stop_is_still_rearmed_down_as_before(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, qty=10, super_id="SO1")
+        b.super_orders = [super_row("SO1", avg=99.0, target=("PENDING", 102.0), stop=("PENDING", 99.0))]
+        reconcile.run_exit_reconciliation(db)
+        assert p.stop_price == 98.01
+
     def test_rearm_failure_keeps_the_correction_and_is_not_fatal(self, env):
         db, b, _ = env
         p = mkpos(db, entry=100.0, qty=10, super_id="SO1")

@@ -52,8 +52,8 @@ class TestConfigDefaults:
         assert vals["NO_FOLLOWTHROUGH_EXIT_ENABLED"] is True
         assert vals["NO_FOLLOWTHROUGH_EXIT_MINUTES"] == 20.0 and vals["NO_FOLLOWTHROUGH_MIN_GAIN_PCT"] == 0.5
         assert vals["BREAKEVEN_TRIGGER_MAX_PCT"] == 1.0
-        assert vals["ENTRY_MAX_SLIPPAGE_PCT"] == 0.5 and vals["ENTRY_MAX_TICK_AGE_S"] == 45.0
-        assert vals["MAX_DAY_GAIN_PCT"] == 7.0 and vals["ENTRY_FILL_SLIPPAGE_ALERT_PCT"] == 1.0
+        assert vals["ENTRY_MAX_SLIPPAGE_PCT"] == 0.25 and vals["ENTRY_MAX_TICK_AGE_S"] == 45.0
+        assert vals["MAX_DAY_GAIN_PCT"] == 7.0 and vals["ENTRY_FILL_SLIPPAGE_ALERT_PCT"] == 0.5
         assert vals["DISABLED_SCAN_WINDOWS"] == frozenset({1, 15})
 
     def test_env_can_turn_the_new_behaviour_back_off(self):
@@ -64,7 +64,7 @@ class TestConfigDefaults:
 
     def test_blank_env_values_fall_back_to_defaults(self):
         vals = dict(zip(self.NAMES, self._run(DISABLED_SCAN_WINDOWS="  ", ENTRY_MAX_SLIPPAGE_PCT="")))
-        assert vals["DISABLED_SCAN_WINDOWS"] == frozenset({1, 15}) and vals["ENTRY_MAX_SLIPPAGE_PCT"] == 0.5
+        assert vals["DISABLED_SCAN_WINDOWS"] == frozenset({1, 15}) and vals["ENTRY_MAX_SLIPPAGE_PCT"] == 0.25
 
     @pytest.mark.parametrize("raw,expected", [("1,15", {1, 15}), (" 5 , 60 ", {5, 60}), ("", set()),
                                               (None, set()), ("none", set()), ("5,x,,60", {5, 60})])

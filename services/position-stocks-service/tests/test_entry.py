@@ -970,6 +970,22 @@ class TestScalpReviewGuards:
         self.live([(3, 98.0)])
         assert entry._price_guard_reject("ABC", 100.0) is None
 
+    # group216: the shipped default is 0.25% (was 0.5%) - behaviour at the new boundary
+    def test_group216_default_tolerance_rejects_030_percent_and_passes_020(self, env):
+        self.mp.setattr(config, "ENTRY_MAX_SLIPPAGE_PCT", 0.25)
+        self.live([(3, 100.30)])
+        r = entry._price_guard_reject("ABC", 100.0)
+        assert r.startswith("ENTRY_SLIPPAGE:") and "max 0.25%" in r
+        self.live([(3, 100.20)])
+        assert entry._price_guard_reject("ABC", 100.0) is None
+        self.live([(3, 100.25)])
+        assert entry._price_guard_reject("ABC", 100.0) is None        # exactly at tolerance passes
+
+    def test_group216_old_tolerance_restored_by_env_value(self, env):
+        self.mp.setattr(config, "ENTRY_MAX_SLIPPAGE_PCT", 0.5)
+        self.live([(3, 100.30)])
+        assert entry._price_guard_reject("ABC", 100.0) is None
+
     def test_slippage_check_can_be_disabled(self, env):
         self.mp.setattr(config, "ENTRY_MAX_SLIPPAGE_PCT", 0.0)
         self.live([(3, 150.0)])
@@ -1052,3 +1068,46 @@ class TestScalpReviewGuards:
         b.ticks["ABC"] = [188.0, 190.0] * 6                  # buffer says "at the high"
         self.mp.setattr(ws_client, "get_day_range", lambda s: (100.0, 200.0))
         assert entry._range_gate_reject("ABC", 190.0) is None   # real range position 0.90 < 0.92
+
+
+# ── group 218 (review item 5): entry cost gate ───────────────────────────────
+class TestCostGate:
+    """Fixture levels: target 1.0%, stop 2.0%. cand(ltp=500) sizes to 40 shares (value 20,000, edge 200)."""
+
+    def test_default_rates_let_the_normal_entry_through(self, env):
+        db, b, _ = env
+        assert entry.attempt_entry(db, cand(ltp=500.0)) is not None and len(b.of("place_super_order")) == 1
+
+    def test_flat_brokerage_makes_the_gate_skip_cleanly(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(config, "BROKERAGE_PER_ORDER", 20.0)
+        # cost = 40 brokerage + 7.44 gst + 7.00 other levies + 20 allowance = 74.44; edge 200 -> ratio 2.69 < 3
+        assert entry.attempt_entry(db, cand(ltp=500.0)) is None
+        assert_clean_skip(env, "ABC", "COST_GATE:edge_to_cost=2.69<3.00 edge=Rs200.00 cost=Rs74.44")
+        assert "qty=40" in last_log(db).reason and "value=Rs20000.00" in last_log(db).reason
+        assert b.of("get_security_id") != []          # rejected after sizing, before any order / budget use
+        assert db.query(models.SharedOrderBudget).count() == 0 or db.query(models.SharedOrderBudget).one().orders_placed_today == 0
+
+    def test_gate_off_lets_the_same_entry_through(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(config, "BROKERAGE_PER_ORDER", 20.0)
+        monkeypatch.setattr(config, "SCALP_COST_GATE_ENABLED", False)
+        assert entry.attempt_entry(db, cand(ltp=500.0)) is not None
+
+    def test_the_forced_one_share_first_live_order_is_not_gated(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(config, "BROKERAGE_PER_ORDER", 20.0)
+        monkeypatch.setattr(config, "FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE", True)
+        g = gate_of(db)
+        g.first_live_order_done = False
+        db.commit()
+        pos = entry.attempt_entry(db, cand(ltp=500.0))
+        assert pos is not None and pos.quantity == 1 and gate_of(db).first_live_order_done is True
+
+    def test_a_skipped_symbol_is_released_so_a_later_candidate_can_trade(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(config, "BROKERAGE_PER_ORDER", 20.0)
+        assert entry.attempt_entry(db, cand("ABC", ltp=500.0)) is None
+        monkeypatch.setattr(config, "BROKERAGE_PER_ORDER", 0.0)
+        assert entry.attempt_entry(db, cand("ABC", ltp=500.0)) is not None
+

@@ -501,6 +501,44 @@ BREAKEVEN_STOP_BUFFER_TICKS = int(_get_float("BREAKEVEN_STOP_BUFFER_TICKS", 2))
 # ScalpGateState.breakeven_stop_enabled toggle, OFF by default.)
 BREAKEVEN_TRIGGER_MAX_PCT = _get_float("BREAKEVEN_TRIGGER_MAX_PCT", 1.0)
 
+# ── Entry cost gate (2026-10-07, group 218) ──────────────────────────────────
+# real-trade-service has had an edge-vs-transaction-cost gate since 2026-09-18 (its cost_model.py, Gate 5.6); this
+# service had none, so a scalp whose target barely covered its own costs was bought anyway. orders/cost_gate.py is a
+# standalone INTRADAY copy of that estimate (services do not share code at runtime). The statutory rates below use the
+# SAME env names as real-trade-service, so one value in .env applies to both. Defaults assume Dhan's Rs 0 brokerage
+# plan, exactly as real-trade-service does - set BROKERAGE_PER_ORDER from a real contract note if that is not true.
+#   SCALP_COST_GATE_ENABLED            0 turns the gate off
+#   SCALP_MIN_EDGE_TO_COST_RATIO       expected Rs edge at the TARGET must be at least this multiple of round-trip cost
+#   SCALP_COST_SLIPPAGE_ALLOWANCE_PCT  extra round-trip cost (% of trade value) for spread / slippage, on top of the levies
+SCALP_COST_GATE_ENABLED = _get_bool("SCALP_COST_GATE_ENABLED", True)
+SCALP_MIN_EDGE_TO_COST_RATIO = _get_float("SCALP_MIN_EDGE_TO_COST_RATIO", 3.0)
+SCALP_COST_SLIPPAGE_ALLOWANCE_PCT = _get_float("SCALP_COST_SLIPPAGE_ALLOWANCE_PCT", 0.10)
+BROKERAGE_PER_ORDER = _get_float("BROKERAGE_PER_ORDER", 0.0)              # flat Rs per executed leg
+STT_INTRADAY_SELL_PCT = _get_float("STT_INTRADAY_SELL_PCT", 0.025)         # SELL leg only
+EXCHANGE_TXN_PCT = _get_float("EXCHANGE_TXN_PCT", 0.00325)                 # both legs
+SEBI_TURNOVER_PCT = _get_float("SEBI_TURNOVER_PCT", 0.0001)                # both legs
+GST_PCT = _get_float("GST_PCT", 18.0)                                      # on brokerage + exchange + SEBI
+STAMP_DUTY_BUY_PCT_INTRADAY = _get_float("STAMP_DUTY_BUY_PCT_INTRADAY", 0.003)  # BUY leg only
+
+# ── Trailing stop (2026-10-07, group 217) ────────────────────────────────────
+# Until now a scalp's bracket was fixed: the target (about 1.4-3.5%) or the stop, plus a one-time breakeven move
+# that is OFF by default. A winner that ran +1.5% and fell back gave it all up. orders/trailing.py ratchets the
+# Super Order's STOP_LOSS_LEG up behind the peak price. It only ever raises the stop, never lowers it, and never
+# touches the target. Env switch (no DB toggle, so no schema change): TRAILING_STOP_ENABLED=0 turns it off.
+#   TRAIL_ACTIVATE_PCT           peak gain vs entry needed before the trail starts
+#   TRAIL_DISTANCE_STOP_FRACTION trail distance = this fraction of the position's own adaptive stop %...
+#   TRAIL_MIN_DISTANCE_PCT       ...but never tighter than this % below the peak
+#   TRAIL_MIN_STEP_PCT           only modify the leg when the new stop is at least this % of entry above the old one
+#   TRAIL_MIN_INTERVAL_S         per-position minimum seconds between modify attempts
+#   TRAIL_RETRY_BACKOFF_S        per-position wait after a rejected modify
+TRAILING_STOP_ENABLED = _get_bool("TRAILING_STOP_ENABLED", True)
+TRAIL_ACTIVATE_PCT = _get_float("TRAIL_ACTIVATE_PCT", 1.0)
+TRAIL_DISTANCE_STOP_FRACTION = _get_float("TRAIL_DISTANCE_STOP_FRACTION", 0.6)
+TRAIL_MIN_DISTANCE_PCT = _get_float("TRAIL_MIN_DISTANCE_PCT", 0.4)
+TRAIL_MIN_STEP_PCT = _get_float("TRAIL_MIN_STEP_PCT", 0.15)
+TRAIL_MIN_INTERVAL_S = _get_float("TRAIL_MIN_INTERVAL_S", 20.0)
+TRAIL_RETRY_BACKOFF_S = _get_float("TRAIL_RETRY_BACKOFF_S", 60.0)
+
 # this session: user asked for Trade History to only retain "today" /
 # "last 3 days" and for the ledger to actually only store that much —
 # orders/reconcile.py::run_retention_cleanup() deletes CLOSED positions
@@ -536,14 +574,17 @@ MIN_TICKS_FOR_RANGE_GATE = _get_int("MIN_TICKS_FOR_RANGE_GATE", 10)
 # more than ENTRY_MAX_SLIPPAGE_PCT above the signal price, or when the last
 # tick is older than ENTRY_MAX_TICK_AGE_S (current price unknown). 0 disables
 # each check. Both fail open when there is no tick at all.
-ENTRY_MAX_SLIPPAGE_PCT = _get_float("ENTRY_MAX_SLIPPAGE_PCT", 0.5)
+# 2026-10-07 (group216): default 0.5 -> 0.25. The adaptive stop is only 0.8-2.0%, so a 0.5% tolerance let one entry
+# give away up to ~60% of the tightest stop before the trade started. Set ENTRY_MAX_SLIPPAGE_PCT=0.5 to restore.
+ENTRY_MAX_SLIPPAGE_PCT = _get_float("ENTRY_MAX_SLIPPAGE_PCT", 0.25)
 ENTRY_MAX_TICK_AGE_S = _get_float("ENTRY_MAX_TICK_AGE_S", 45.0)
 # Reject stocks already up more than this % on the day vs the exchange's
 # previous close (mode-3 feed). 0 disables. Fails open when no previous close.
 MAX_DAY_GAIN_PCT = _get_float("MAX_DAY_GAIN_PCT", 7.0)
 # Log + Telegram alert when the real entry fill differs from the signal price
 # by more than this % (stale tick, wrong order matched). 0 disables.
-ENTRY_FILL_SLIPPAGE_ALERT_PCT = _get_float("ENTRY_FILL_SLIPPAGE_ALERT_PCT", 1.0)
+# group216: alert default 1.0 -> 0.5 so a fill that cost more than half the tightest stop is visible. 0 disables.
+ENTRY_FILL_SLIPPAGE_ALERT_PCT = _get_float("ENTRY_FILL_SLIPPAGE_ALERT_PCT", 0.5)
 
 
 def _parse_int_set(raw) -> frozenset:

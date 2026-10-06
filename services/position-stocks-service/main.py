@@ -156,7 +156,7 @@ from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition
-from orders import breakeven, eod_squareoff, overnight_stop, reconcile
+from orders import breakeven, eod_squareoff, overnight_stop, reconcile, trailing
 from orders import adaptive
 from orders import excursion, review_stats, trade_stats
 from orders.entry import (
@@ -404,6 +404,14 @@ async def _fast_reconcile_loop() -> None:
                         logger.info("position-stocks: breakeven-stop moved %d stop(s)", n_breakeven)
                 except Exception as e:
                     logger.error("position-stocks: breakeven-stop error: %s", e, exc_info=True)
+                try:
+                    # group 217: ratchet the stop up behind the peak (orders/trailing.py). Env switch
+                    # TRAILING_STOP_ENABLED; runs after excursion tracking so max_price_seen is current.
+                    n_trail = await asyncio.to_thread(trailing.run_trailing_stop, db)
+                    if n_trail:
+                        logger.info("position-stocks: trailing-stop raised %d stop(s)", n_trail)
+                except Exception as e:
+                    logger.error("position-stocks: trailing-stop error: %s", e, exc_info=True)
                 try:
                     gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
                     today = ist_today_str()

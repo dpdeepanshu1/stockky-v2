@@ -20,6 +20,7 @@ Safety checks (in order):
   7. Dhan security_id resolution
   8. Quantity computation (position_value / current_ltp, min 1)
   9. FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE → force qty=1 on first-ever order
+     (group 218: otherwise the cost gate, orders/cost_gate.py, runs on the final quantity)
   10. Super Order placement (or plain MARKET fallback)
   11. DB record write
   12. Candidate log write
@@ -38,7 +39,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import entry_pause
+from orders import cost_gate, entry_pause
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility
 from screening.engine import Candidate
@@ -472,6 +473,16 @@ def attempt_entry(
             "once you've confirmed a clean fill.", quantity,
         )
         quantity = 1
+    else:
+        # group 218 (review item 5): skip an entry whose target cannot pay for its own round-trip costs. Checked with
+        # the quantity that will really trade; the forced 1-share first live order above is a deliberate probe and
+        # is not gated. See orders/cost_gate.py (off with SCALP_COST_GATE_ENABLED=0).
+        _cost_reject = cost_gate.reject_reason(candidate.current_ltp, quantity, levels.target_pct)
+        if _cost_reject:
+            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            shared_symbol_lock.release(db, candidate.symbol)
+            _log_candidate(db, candidate, "SKIPPED", f"COST_GATE:{_cost_reject}", quality=quality)
+            return None
 
     # BUG FIX (this session): quantity is floored to at least 1 share above
     # (and may be forced to exactly 1 by the first-live-order override) —
